@@ -7,7 +7,7 @@ A Rust CLI (and eventually an MCP server) that makes Claude Code's plugin ecosys
 ## Install (Phase 1)
 
 ```sh
-git clone https://github.com/aaronbassett/tome.git
+git clone https://github.com/devrelaicom/tome.git
 cd tome
 cargo install --path .
 ```

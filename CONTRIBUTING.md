@@ -13,7 +13,7 @@ Read these once:
 
 ```sh
 # 1. Clone
-git clone https://github.com/aaronbassett/tome.git
+git clone https://github.com/devrelaicom/tome.git
 cd tome
 
 # 2. Install local hooks
@@ -67,4 +67,4 @@ If you spot a security issue (credential leak, path traversal, etc.), do not fil
 
 ## Code of Conduct
 
-This project follows the [Contributor Covenant](./CODE_OF_CONDUCT.md). Be kind, be specific, be in good faith.
+This project follows the [Contributor Covenant](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). Be kind, be specific, be in good faith.

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ManifestInvalid;
 
-pub const SCHEMA_URI: &str = "https://github.com/aaronbassett/tome/blob/main/specs/001-phase-1-foundations/contracts/catalog-manifest.schema.toml";
+pub const SCHEMA_URI: &str = "https://github.com/devrelaicom/tome/blob/main/specs/001-phase-1-foundations/contracts/catalog-manifest.schema.toml";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
