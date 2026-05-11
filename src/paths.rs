@@ -1,10 +1,11 @@
-//! XDG-aware path resolution. `directories` picks the right base on macOS and
-//! Linux; `cache_dir_for(url)` content-addresses each catalog's cache by
-//! sha256(url) so identical URLs land in the same directory (FR-015).
+//! XDG-aware path resolution. We honour `XDG_CONFIG_HOME` and `XDG_DATA_HOME`
+//! across both macOS and Linux (rather than `directories`'s macOS-specific
+//! `~/Library/...` fallback) — the spec is explicit about the XDG layout and
+//! tests rely on it being controllable via the env vars. `cache_dir_for(url)`
+//! content-addresses each catalog's cache by sha256(url) (FR-015).
 
 use std::path::PathBuf;
 
-use directories::ProjectDirs;
 use sha2::{Digest, Sha256};
 
 use crate::error::TomeError;
@@ -19,18 +20,22 @@ pub struct Paths {
 
 impl Paths {
     pub fn resolve() -> Result<Self, TomeError> {
-        // qualifier="", organization="", application="tome" gives us the
-        // unscoped XDG layout the spec asks for on Linux and the same on macOS
-        // (where `directories` maps to the equivalent Application Support
-        // location only when `qualifier` is non-empty — here we stay XDG).
-        let dirs = ProjectDirs::from("", "", "tome").ok_or_else(|| {
+        let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
             TomeError::Io(std::io::Error::other(
-                "could not determine an XDG-compatible home directory",
+                "HOME is not set — cannot resolve config and data directories",
             ))
         })?;
-        let config_dir = dirs.config_dir().to_path_buf();
+        let xdg_config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join(".config"));
+        let xdg_data = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join(".local/share"));
+        let config_dir = xdg_config.join("tome");
         let config_file = config_dir.join("config.toml");
-        let data_dir = dirs.data_dir().to_path_buf();
+        let data_dir = xdg_data.join("tome");
         let catalogs_dir = data_dir.join("catalogs");
         Ok(Self {
             config_dir,

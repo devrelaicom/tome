@@ -1,0 +1,15 @@
+name = "sample-experts"
+description = "Sample catalog used by Tome integration tests"
+version = "0.1.0"
+
+[owner]
+name = "Tome Test Harness"
+email = "tests@tome.invalid"
+
+[[plugins]]
+name = "midnight-compact-expert"
+source = "./plugins/midnight-compact-expert"
+
+[[plugins]]
+name = "midnight-dapp-expert"
+source = "./plugins/midnight-dapp-expert"
