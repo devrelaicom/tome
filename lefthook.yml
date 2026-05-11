@@ -1,0 +1,19 @@
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      run: cargo fmt --check
+    clippy:
+      run: cargo clippy --all-targets --all-features -- -D warnings
+    typos:
+      run: typos
+
+commit-msg:
+  commands:
+    conventional:
+      run: cog verify --file {1}
+
+pre-push:
+  commands:
+    test:
+      run: cargo test --workspace

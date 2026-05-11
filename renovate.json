@@ -1,0 +1,32 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommitsDisabled"
+  ],
+  "commitMessagePrefix": "chore(deps):",
+  "schedule": ["before 4am on monday"],
+  "rangeStrategy": "bump",
+  "packageRules": [
+    {
+      "description": "Auto-merge patch updates of dev tooling and CI actions",
+      "matchUpdateTypes": ["patch"],
+      "matchManagers": ["github-actions", "cargo"],
+      "automerge": true
+    },
+    {
+      "description": "Group clap and serde families",
+      "matchPackagePatterns": ["^clap"],
+      "groupName": "clap"
+    },
+    {
+      "matchPackagePatterns": ["^serde"],
+      "groupName": "serde"
+    },
+    {
+      "matchPackagePatterns": ["^tracing"],
+      "groupName": "tracing"
+    }
+  ],
+  "dependencyDashboard": true
+}
