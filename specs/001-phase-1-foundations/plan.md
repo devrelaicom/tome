@@ -157,11 +157,9 @@ tome/                                # repo root
 
 ## Complexity Tracking
 
-No constitution violations to justify. Plan is fully within the principles and operational constraints.
-
 | Violation | Why Needed | Simpler Alternative Rejected Because |
 |---|---|---|
-| *(none)* | — | — |
+| Single Phase 1 PR exceeds the constitution's ~400-line / 2-module PR-size soft cap (constitution §Development Workflow → PRs) | Phase 1 is the *bootstrap*: it creates the repository structure, the CI matrix, the closed error enum, the manifest parser, and the five catalog subcommands that everything else builds on. Splitting Phase 1 into ≤2-module PRs would either (a) merge half-implementations to `main` (e.g. an `error` module without any caller, a `cli` module that dispatches to `unimplemented!()`) which breaks the constitution's "CI Gates Every Merge" intent of every merge being shippable, or (b) require a long-lived integration branch which contradicts trunk-based development. The phase structure inside this PR (Setup → Foundational → US1 → US2 → US3 → Polish) keeps the diff reviewable in checkpointed slices even though it merges in one drop. **The soft cap re-engages from Phase 2 onward**: every subsequent phase's PR will obey the ~400-line / 2-module rule. | Per-phase PRs to `main`: rejected because the early phases ship no user-visible behaviour and would land partial scaffolding on `main`. Long-lived integration branch: rejected because it inverts trunk-based development. |
 
 ## Phase 0 — Research
 
