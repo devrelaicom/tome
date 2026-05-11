@@ -395,7 +395,7 @@ manage credentials.
 
 - `0` — success
 - `1` — internal / unexpected error (last-resort fallback only; classified
-  failures always use 3–7)
+  failures always use 3–8)
 - `2` — usage error (bad CLI args)
 - `3` — catalog not found
 - `4` — catalog already exists (on `add`)
@@ -403,6 +403,10 @@ manage credentials.
 - `6` — Git operation failed
 - `7` — I/O / filesystem error (permission denied, disk full, missing parent
   directory after recovery attempt, etc.)
+- `8` — interrupted by user (SIGINT during a long-running operation such as a
+  Git clone or fetch). Child processes are reaped and the affected catalog's
+  cache is left atomically — either in its pre-operation state or in its
+  fully-updated state, never partially populated.
 
 Code `1` is reserved for genuine programmer-facing surprises — panics caught at
 the top level, invariants violated. Any failure that has a name in the table
@@ -441,7 +445,8 @@ Phase 1 is done when:
 | Async runtime | not yet; sync only until MCP server lands |
 | CLI output | human-readable stdout by default, `--json` for structured output |
 | Interactive prompts | must have non-interactive flag equivalents (e.g. `--force`); error rather than hang when stdin is not a TTY |
-| Exit code `1` | reserved for internal/unexpected errors; named failure classes always use 3–7 (added 2026-05-11 per constitution review) |
+| Exit code `1` | reserved for internal/unexpected errors; named failure classes always use 3–8 (added 2026-05-11 per constitution review) |
+| Exit code `8` (SIGINT) | added per Rust-lens review; long-running external operations must be cancellable and exit with code 8, with no orphaned children and atomic cache state (added 2026-05-11) |
 | Credential scrubbing | required on all Git stderr surfacing and tracing instrumentation (added 2026-05-11 per constitution review) |
 | Cache directory ownership | Tome-owned; `git reset --hard` on update is not a destructive operation under §CLI conventions (added 2026-05-11 per constitution review) |
 | `tome catalog update` partial failure | fail fast on first error; no attempt-all mode (added 2026-05-11 per constitution review) |
