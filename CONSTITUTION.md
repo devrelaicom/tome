@@ -35,7 +35,7 @@ Every commit follows `type(scope): subject`. Enforced by `cocogitto` in the `com
 No change lands on `main` without green CI: fmt, clippy `-D warnings`, build, and test on stable and MSRV, plus weekly security checks (`cargo-audit`, `cargo-deny`). Maintainers walk each PR diff end-to-end before merging — small batches, no rubber-stamping. Automation (Renovate, trivial bumps) follows the same rules: green CI and a deliberate merge, not an auto-merge.
 
 ### XI. Documentation Is Part of the Change
-A change isn't done until its documentation is. README, CONTRIBUTING, command help text, and the changelog are updated in the same PR that changes the behaviour. Comments explain *why*, not *what*. The reader knows Rust; assume that.
+A change isn't done until its documentation is. README, command help text, and the changelog are updated in the same PR that changes the behaviour. Comments explain *why*, not *what*. The reader knows Rust; assume that.
 
 ### XII. Inherit, Don't Reimplement
 Where the host system already does the job, shell out. Git is the canonical example: every dev machine has it, and `libgit2` is megabytes of binary bloat for capability we don't otherwise need. Same rule applies to credential management — we inherit whatever the user's `git` is configured for and never store, prompt for, or manage credentials ourselves.
@@ -89,6 +89,6 @@ This constitution supersedes ad-hoc practice. Where it conflicts with PRD detail
 
 **Complexity budget.** Any PR that introduces a new dependency, a new top-level module, or a new public CLI surface includes a one-paragraph justification. "It seemed nice" is not justification.
 
-**Runtime guidance.** Day-to-day conventions (naming, error message tone, help-text style) live in `CONTRIBUTING.md`. When `CONTRIBUTING.md` and this constitution disagree, the constitution wins and `CONTRIBUTING.md` gets fixed.
+**Runtime guidance.** Day-to-day conventions (naming, error message tone, help-text style) are documented separately from this constitution. When that documentation and this constitution disagree, the constitution wins and the runtime guidance gets fixed.
 
-**Version**: 1.0.0 | **Ratified**: 2026-05-11 | **Last Amended**: 2026-05-11
+**Version**: 1.0.1 | **Ratified**: 2026-05-11 | **Last Amended**: 2026-05-11

@@ -1,0 +1,70 @@
+# tome-catalog.toml — canonical Phase 1 schema
+#
+# This file is the authoritative schema for a Tome catalog manifest. It is a
+# real TOML file: copy it as a starting point for a new catalog, then fill in
+# your own values. Comments document each field's contract.
+#
+# Strict parsing: any field name not listed below — at any nesting level —
+# will be rejected by `tome catalog add`. Adding a new field requires a
+# version bump in this schema (separate from the catalog's own `version`).
+
+# ============================================================================
+# Catalog identity
+# ============================================================================
+
+# Display name. Required, non-empty. Used as the default for `--name` on
+# `tome catalog add`. Must be unique within a developer's registry.
+name = "midnight-experts"
+
+# Human-readable description. Required, non-empty. Shown by `tome catalog list`
+# and `tome catalog show`.
+description = "Expert plugins for working with the Midnight privacy chain"
+
+# Catalog version. Required, semver-valid (`MAJOR.MINOR.PATCH`).
+# Bumps follow the catalog author's discretion; Tome does not yet enforce
+# semver semantics across versions.
+version = "0.1.0"
+
+# ============================================================================
+# Owner contact (required)
+# ============================================================================
+
+[owner]
+# Owner / maintainer display name. Required.
+name = "Midnight Labs"
+# Owner contact email. Required. Syntactically validated (single `@`,
+# non-empty local, dotted domain). Not verified for deliverability.
+email = "plugins@midnight.network"
+
+# ============================================================================
+# Plugins (zero or more entries)
+# ============================================================================
+
+# Each plugin is one [[plugins]] entry. Plugin order in the manifest is
+# preserved through `tome catalog show`.
+
+[[plugins]]
+# Plugin display name. Required, non-empty, unique within the catalog.
+# This is the name a future `tome install <name>` will use to refer to
+# the plugin.
+name = "midnight-compact-expert"
+# Plugin source location. Required.
+#
+# In Phase 1, this MUST be a normalised relative path inside the catalog
+# repository, written with `/` separators (POSIX style). The following
+# values are rejected at parse time:
+#
+#   - absolute paths (e.g. `/etc/passwd`)
+#   - parent-directory traversal (e.g. `../escape`)
+#   - URL schemes (e.g. `https://example.com/x`, `git@github.com:owner/repo`)
+#   - Windows-style drive prefixes (e.g. `C:\plugins\foo`)
+#   - any value that, after symlink resolution against the catalog root,
+#     escapes the catalog root
+#
+# Other source kinds (Git URLs, registry pointers, submodules) are
+# deferred to a later phase.
+source = "./plugins/midnight-compact-expert"
+
+[[plugins]]
+name = "midnight-dapp-expert"
+source = "./plugins/midnight-dapp-expert"

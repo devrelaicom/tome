@@ -1,0 +1,13 @@
+[default]
+extend-ignore-identifiers-re = []
+
+[default.extend-words]
+# "mis" appears as a prefix in hyphenated words like "mis-detected" in design docs.
+mis = "mis"
+
+[files]
+extend-exclude = [
+    "CHANGELOG.md",
+    "target/",
+    "specs/**/contracts/*.toml",
+]

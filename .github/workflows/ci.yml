@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.toolchain }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        toolchain: [stable, msrv]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        shell: bash
+        run: |
+          version=$(grep '^rust-version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain == 'msrv' && steps.msrv.outputs.version || 'stable' }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.os }}-${{ matrix.toolchain }}
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo build
+        run: cargo build --all-targets --all-features
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: Release binary size check (< 10 MB stripped)
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+        shell: bash
+        run: |
+          cargo build --release
+          size=$(stat -c%s target/release/tome)
+          limit=10485760
+          echo "release binary: $size bytes (limit: $limit)"
+          if [ "$size" -ge "$limit" ]; then
+            echo "::error::Release binary exceeds the 10 MB limit (SC-010)"
+            exit 1
+          fi
