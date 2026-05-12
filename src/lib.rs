@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod embedding;
 pub mod error;
 pub mod index;
 pub mod logging;
