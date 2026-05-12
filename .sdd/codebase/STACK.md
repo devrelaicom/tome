@@ -2,7 +2,7 @@
 
 > **Purpose**: Document what executes in this codebase - languages, runtimes, frameworks, and critical dependencies.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-11
+> **Last Updated**: 2026-05-12 (Phase 2 foundational close)
 
 ## Languages & Runtimes
 
@@ -36,6 +36,25 @@ Phase 1 is a CLI application, not a web framework-based project.
 | `time` | 0.3 | Timestamp formatting and parsing | Logging and manifest timestamps |
 | `serde_json` | 1.x | JSON serialisation (NDJSON output) | `--json` mode formatting for stdout |
 
+### Phase 2 — added in the foundational phase (no user-facing CLI yet)
+
+| Package | Version | Purpose | Usage Scope |
+|---------|---------|---------|-------------|
+| `rusqlite` | 0.32 (`bundled`) | Embedded SQLite (statically linked, no system dep) | `src/index/*` — the local skill index database |
+| `sqlite-vec` | vendored (v0.1.9) | KNN vector search extension for SQLite | `vendor/sqlite-vec/` compiled by `build.rs`; loaded via `sqlite3_auto_extension` |
+| `serde_yaml` | 0.9 | Lenient YAML frontmatter parsing for third-party `SKILL.md` | `src/plugin/frontmatter.rs` |
+| `fastembed` | 4.x | ONNX-backed text embedding + reranking | `src/embedding/fastembed.rs` — loads BGE models from `${XDG_DATA_HOME}/tome/models/` |
+| `reqwest` | 0.12 (`blocking`, `rustls-tls`, no defaults) | Synchronous HTTPS for model downloads | `src/embedding/download.rs` |
+| `indicatif` | 0.17 | Progress bars + spinners (TTY-aware) | `src/presentation/progress.rs` |
+| `comfy-table` | 7.x | Table rendering for human-mode list/show output | `src/presentation/tables.rs` |
+| `owo-colors` | 4.x | Terminal colours with native `NO_COLOR` support | `src/presentation/colour.rs` |
+| `inquire` | 0.7 (`crossterm`, no defaults) | Interactive Select/MultiSelect/Confirm prompts | `src/presentation/prompt.rs` |
+| `cc` (build-dep) | 1.x | C compiler driver for the vendored sqlite-vec amalgamation | `build.rs` only |
+
+ONNX Runtime (`ort`) is a transitive dependency through `fastembed`; Tome does
+not link it directly. `src/embedding/runtime.rs` is a placeholder that becomes
+load-bearing only if a direct dependency is added.
+
 ## Package Managers & Build Tools
 
 | Tool | Version | Purpose |
@@ -55,10 +74,10 @@ Phase 1 is a CLI application, not a web framework-based project.
 
 ## Not Used (Explicitly Excluded)
 
-- **Async runtime**: No `tokio`, `async-std`, or similar. Phase 1 is synchronous; async deferred to Phase 2 (MCP server).
+- **Async runtime**: No `tokio`, `async-std`, or similar. Phase 2 remains synchronous (`reqwest::blocking`, `rusqlite`, `fastembed`); the MCP server is the future forcing function.
 - **Git library**: No `libgit2`, `git2`, or vendored Git. `std::process::Command` shells out to system `git` (constitution principle XII).
-- **HTTP client**: Not needed in Phase 1. Future HTTP integration (e.g., remote catalog sources) deferred to Phase 2.
-- **Database**: No SQLite, PostgreSQL, or embedded database in Phase 1. Phase 2 will introduce `sqlite-vec` and `fastembed-rs` for embeddings.
+- **Direct ONNX Runtime dep**: `ort` is reached transitively through `fastembed` only; no direct linkage from Tome code.
+- **Custom npm/cargo registry overrides**: All packages resolve from public registries.
 
 ---
 

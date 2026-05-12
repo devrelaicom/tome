@@ -122,7 +122,7 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 - [X] T054 [P] Implement `src/embedding/runtime.rs` — `ort::Environment` lazy initialiser with CPU EP only; map init failures to `InferenceRuntimeInitFailure` (use devs:rust-dev agent)
 - [X] T055 Implement `src/embedding/fastembed.rs` — `FastembedEmbedder` and `FastembedReranker` wrapping `fastembed`'s text embedder + reranker, loading models from `models_dir()`; map missing files to `ModelMissing`, load failures to `ModelCorrupt`, runtime failures to `EmbeddingGenerationFailure` / `RerankingFailure` (use devs:rust-dev agent)
 - [X] T056 [P] Implement `src/embedding/stub.rs` under `#[cfg(test)]` — `StubEmbedder` returning SHA-256-derived deterministic 384-dim vectors; `StubReranker` identity; `ReverseStubReranker` reverses order. Provide a `make_test_pair()` constructor for use in tests (use devs:rust-dev agent)
-- [ ] T057 [P] Add `tests/model_download.rs` — point `MODEL_REGISTRY` (via `#[cfg(test)]` override or a small fixture trait) at a local HTTP server serving a synthetic file; assert success path, checksum-mismatch path, partial-rename safety, interrupt safety (use devs:rust-dev agent)
+- [X] T057 [P] Add `tests/model_download.rs` — point `MODEL_REGISTRY` (via `#[cfg(test)]` override or a small fixture trait) at a local HTTP server serving a synthetic file; assert success path, checksum-mismatch path, partial-rename safety, interrupt safety (use devs:rust-dev agent)
 - [X] T058 [P] Add `tests/embedding_stub.rs` — assert determinism (same input → identical vector), distinguishability (different inputs → cosine < 0.99), 384-dim length (use devs:rust-dev agent)
 - [X] T059 [GIT] Commit: feat(embedding): add registry, download, runtime, fastembed impl, and test stub
 
@@ -134,10 +134,10 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Phase 2 closing
 
-- [ ] T063 Run `cargo test --workspace` — all foundational tests pass. Run `cargo clippy --all-targets --all-features -- -D warnings` — green
-- [ ] T064 Run `/sdd:map incremental` to refresh `.sdd/codebase/*.md` against Phase 2 foundational code
-- [ ] T065 Review `retro/P2.md`, capture what worked / didn't / workarounds, then extract critical universal learnings to `CLAUDE.md` (conservative)
-- [ ] T066 [GIT] Commit: docs: refresh codebase docs and finalise Phase 2 foundational retro
+- [X] T063 Run `cargo test --workspace` — all foundational tests pass. Run `cargo clippy --all-targets --all-features -- -D warnings` — green
+- [X] T064 Run `/sdd:map incremental` to refresh `.sdd/codebase/*.md` against Phase 2 foundational code
+- [X] T065 Review `retro/P2.md`, capture what worked / didn't / workarounds, then extract critical universal learnings to `CLAUDE.md` (conservative)
+- [X] T066 [GIT] Commit: docs: refresh codebase docs and finalise Phase 2 foundational retro
 
 ### Phase 2 Completion
 
