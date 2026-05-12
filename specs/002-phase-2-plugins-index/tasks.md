@@ -31,20 +31,20 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Phase Start
 
-- [ ] T001 [GIT] Verify on branch `002-phase-2-plugins-index` and working tree is clean (`git branch --show-current && git status --porcelain`)
-- [ ] T002 [GIT] Pull origin and rebase if needed (`git fetch origin && git rebase origin/main` — abort and report on conflict)
+- [x] T001 [GIT] Verify on branch `002-phase-2-plugins-index` and working tree is clean (`git branch --show-current && git status --porcelain`)
+- [x] T002 [GIT] Pull origin and rebase if needed (`git fetch origin && git rebase origin/main` — abort and report on conflict)
 
 ### Setup
 
-- [ ] T003 Add Phase 2 direct dependencies to `Cargo.toml`: `rusqlite = { version = "0.31", features = ["bundled"] }`, `fastembed = "4"`, `ort = { version = "2", default-features = false, features = ["copy-dylibs"] }`, `indicatif = "0.17"`, `comfy-table = "7"`, `owo-colors = "4"`, `inquire = "0.7"`, `reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }` (use devs:rust-dev agent)
-- [ ] T004 Tune release profile in `Cargo.toml`: `lto = "thin"`, `codegen-units = 1`, `panic = "abort"`, `strip = "symbols"`, `opt-level = 3` (use devs:rust-dev agent)
-- [ ] T005 [P] Create `vendor/sqlite-vec/` directory and vendor pinned `sqlite-vec.c`, `sqlite-vec.h`, and `LICENSE` from the upstream release commit identified in research §R1
-- [ ] T006 Create `build.rs` to compile `vendor/sqlite-vec/sqlite-vec.c` against the rusqlite-bundled SQLite headers and expose it for static link (use devs:rust-dev agent)
-- [ ] T007 [P] Update `deny.toml` to enumerate every new transitive licence per plan.md §Operational Constraints; ensure no GPL-family appears under `cargo deny check`
-- [ ] T008 [P] Extend `_typos.toml` with Phase 2 vocabulary (rusqlite, sqlite-vec, fastembed, onnx, embedder, reranker, bge) so typos lint stays green
-- [ ] T009 Extend `.github/workflows/ci.yml` with a binary-size assertion step on Linux: `cargo build --release --locked` then fail when `target/release/tome` exceeds 10 MB (use devs:rust-dev agent for YAML)
-- [ ] T010 Run `cargo build --locked` and confirm the new deps compile cleanly; run `cargo deny check` and confirm green
-- [ ] T011 [GIT] Commit: chore(deps): add Phase 2 dependencies, vendor sqlite-vec, tune release profile
+- [x] T003 Add Phase 2 direct dependencies to `Cargo.toml`: `rusqlite = { version = "0.31", features = ["bundled"] }`, `fastembed = "4"`, `ort = { version = "2", default-features = false, features = ["copy-dylibs"] }`, `indicatif = "0.17"`, `comfy-table = "7"`, `owo-colors = "4"`, `inquire = "0.7"`, `reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }` (use devs:rust-dev agent)
+- [x] T004 Tune release profile in `Cargo.toml`: `lto = "thin"`, `codegen-units = 1`, `panic = "abort"`, `strip = "symbols"`, `opt-level = 3` (use devs:rust-dev agent)
+- [x] T005 [P] Create `vendor/sqlite-vec/` directory and vendor pinned `sqlite-vec.c`, `sqlite-vec.h`, and `LICENSE` from the upstream release commit identified in research §R1
+- [x] T006 Create `build.rs` to compile `vendor/sqlite-vec/sqlite-vec.c` against the rusqlite-bundled SQLite headers and expose it for static link (use devs:rust-dev agent)
+- [x] T007 [P] Update `deny.toml` to enumerate every new transitive licence per plan.md §Operational Constraints; ensure no GPL-family appears under `cargo deny check`
+- [x] T008 [P] Extend `_typos.toml` with Phase 2 vocabulary (rusqlite, sqlite-vec, fastembed, onnx, embedder, reranker, bge) so typos lint stays green
+- [x] T009 Extend `.github/workflows/ci.yml` with a binary-size assertion step on Linux: `cargo build --release --locked` then fail when `target/release/tome` exceeds 10 MB (use devs:rust-dev agent for YAML)
+- [x] T010 Run `cargo build --locked` and confirm the new deps compile cleanly; run `cargo deny check` and confirm green
+- [x] T011 [GIT] Commit: chore(deps): add Phase 2 dependencies, vendor sqlite-vec, tune release profile
 
 ### Phase 1 Completion
 
