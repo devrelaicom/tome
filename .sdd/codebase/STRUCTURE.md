@@ -51,7 +51,7 @@ tome/
 ├── Cargo.toml                     # Rust package manifest, dependencies, profiles
 ├── Cargo.lock                     # Locked dependency versions
 ├── .gitignore                     # Git exclusions
-├── .lefthook.yml                  # Local git hooks (fmt, clippy, typos, cog verify)
+├── .githooks/                     # Versioned git hooks (fmt, clippy, typos, cog verify, cargo test)
 ├── README.md                      # Project overview and quick start
 ├── CONSTITUTION.md                # Project values and architectural constraints
 ├── PRDs/

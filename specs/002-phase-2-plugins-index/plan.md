@@ -84,7 +84,7 @@ The most consequential design decisions for this plan are: (1) binary-size engin
 | VI | KISS / YAGNI | ✓ | One embedder, one reranker, one DB file, one model directory. No pluggable backends, no async, no workspace split. Reranker on by default (PRD decision); `--no-rerank` is debug-only. Single global index — workspaces deferred to Phase 3. Reuse Phase 1's `tempfile::persist` pattern verbatim. |
 | VII | Modular by Boundary | ✓ | New modules organised by capability: `src/index/` (db open, schema, migrations, vector ops), `src/embedding/` (model registry, embedder, reranker, stub trait), `src/plugin/` (manifest parser, SKILL.md frontmatter, lifecycle), `src/commands/plugin.rs`, `src/commands/query.rs`, `src/commands/models.rs`, `src/commands/reindex.rs`, `src/commands/status.rs`. Each module's public surface is enumerated; no cross-module backdoors. `thiserror` inside modules; `anyhow` at the application boundary. |
 | VIII | Test What Matters | ✓ | Integration tests per CLI command. No mocks of the filesystem, the DB engine, or Git. The embedder/reranker is the lone exception — gated behind a `#[cfg(test)]` trait to keep CI fast and deterministic; one manual end-to-end with the real model verifies SC-001/SC-002 outside CI. This deviation is justified in Complexity Tracking. |
-| IX | Conventional Commits | ✓ | Unchanged. `cocogitto` in lefthook `commit-msg` already gates Phase 1 commits and will gate Phase 2. |
+| IX | Conventional Commits | ✓ | Unchanged. `cocogitto` in `.githooks/commit-msg` already gates Phase 1 commits and will gate Phase 2. |
 | X | CI Gates Every Merge | ✓ | `ci.yml` extends to install build deps for `ort` on Ubuntu (libstdc++ static link via `ort`'s default; document if anything is needed beyond default). Binary-size CI step extended to assert ≤ 10 MB. `security.yml` unchanged. Renovate continues; new deps inherit the policy. |
 | XI | Documentation Is Part of the Change | ✓ | `quickstart.md` updated for Phase 2 commands. README gets a Phase 2 section. Command help-text for every new subcommand. CHANGELOG entries. Constitution-relevant note about FR-013a (lenient parsing of third-party inputs) is recorded in research and CHANGELOG, not in the constitution itself — the constitution principle stays as written; FR-013a is the operational boundary for "declarative input." |
 | XII | Inherit, Don't Reimplement | ✓ | SQLite — we inherit the world's most-deployed embedded DB rather than write our own. Static linkage means we keep the inheritance property (no system SQLite version drift) without sacrificing it on user installs. `sqlite-vec` is a thin extension — far less code than reimplementing HNSW or IVF. `fastembed-rs` wraps `ort` rather than us writing tokenizer + ONNX glue. Git remains shelled out. Where the host does the job, we shell out; where it doesn't, we statically link a minimal upstream rather than reimplement. |
@@ -156,7 +156,7 @@ tome/                                # repo root
 │       ├── sqlite-vec.h
 │       └── LICENSE
 ├── rust-toolchain.toml
-├── lefthook.yml
+├── .githooks/           # versioned git hooks (pre-commit, commit-msg, pre-push)
 ├── deny.toml                        # extended: new transitive licences enumerated
 ├── rustfmt.toml
 ├── clippy.toml

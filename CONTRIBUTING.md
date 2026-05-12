@@ -16,8 +16,8 @@ Read these once:
 git clone https://github.com/devrelaicom/tome.git
 cd tome
 
-# 2. Install local hooks
-lefthook install
+# 2. Wire up the versioned git hooks (one-time, per clone)
+git config core.hooksPath .githooks
 
 # 3. Verify the toolchain
 cargo fmt --check

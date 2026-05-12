@@ -1,0 +1,26 @@
+#!/bin/sh
+# Tome — pre-commit hook
+#
+# Runs the three fast quality gates the constitution requires before a commit
+# lands: cargo fmt --check, cargo clippy -D warnings, and typos. Each gate
+# prints its own diagnostics on failure; this script's only job is to fan out
+# and roll up the exit codes.
+#
+# To bypass for a known reason, use `git commit --no-verify` and EXPLAIN WHY
+# in the commit message body. Routine bypasses are a smell.
+
+set -e
+
+# Run in parallel where harmless. fmt and typos are fast; clippy is the
+# expensive one. Sequential is simpler and easier to read in CI-on-laptop
+# scenarios, so we keep it sequential — total wall time is dominated by
+# clippy anyway.
+
+echo "▶ cargo fmt --check"
+cargo fmt --check
+
+echo "▶ typos"
+typos
+
+echo "▶ cargo clippy --all-targets --all-features -- -D warnings"
+cargo clippy --all-targets --all-features -- -D warnings

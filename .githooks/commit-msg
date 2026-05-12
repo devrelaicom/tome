@@ -1,0 +1,11 @@
+#!/bin/sh
+# Tome — commit-msg hook
+#
+# Conventional Commits enforcement via cocogitto. The hook receives the path
+# to the commit message file as its first argument; we hand that to `cog
+# verify`. Format: `type(scope): subject`. The constitution mandates this
+# (principle IX) and the changelog generator depends on it.
+
+set -e
+
+exec cog verify --file "$1"

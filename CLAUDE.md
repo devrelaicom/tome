@@ -61,7 +61,7 @@ This file gives Claude Code persistent context about the Tome project. Keep it t
 
 ## Conventions
 
-- **Commits**: Conventional Commits. Enforced locally by `cocogitto` (`cog verify`) in the lefthook `commit-msg` hook. Format: `type(scope): subject`.
+- **Commits**: Conventional Commits. Enforced locally by `cocogitto` (`cog verify`) in the `commit-msg` hook (versioned under `.githooks/`). Format: `type(scope): subject`.
 - **Branching**: trunk-based; short-lived branches off `main`.
 - **PRs**: small batches — ~400 lines or 2 modules max as a soft cap.
 - **Comments**: explain *why*, not *what*. Reader knows Rust.
@@ -76,12 +76,12 @@ cargo build                                      # debug build
 cargo build --release                            # release build (used by CI binary-size check)
 cargo run -- catalog list                        # run a subcommand from source
 
-# Quality gates (also enforced by lefthook pre-commit)
+# Quality gates (also enforced by the .githooks/pre-commit hook)
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 typos
 
-# Tests (lefthook pre-push runs the full suite)
+# Tests (.githooks/pre-push runs the full suite)
 cargo test                                       # all tests (uses stub embedder — fast, no model files)
 cargo test --test catalog_add                    # one integration test file
 cargo test catalog_add::                         # one test by path
@@ -96,10 +96,10 @@ cargo deny check
 # Conventional Commits
 cog verify --file <commit-msg-file>
 
-# Lefthook
-lefthook install                                 # one-time, sets up git hooks
-lefthook run pre-commit                          # run the pre-commit chain manually
-lefthook run pre-push                            # run the pre-push chain manually
+# Git hooks (versioned under .githooks/; no external manager)
+git config core.hooksPath .githooks              # one-time, per clone
+.githooks/pre-commit                              # run the pre-commit chain manually
+.githooks/pre-push < /dev/null                    # run pre-push manually (drain empty stdin)
 
 # MSRV verification (CI uses dtolnay/rust-toolchain @ rust-version from Cargo.toml)
 cargo +<MSRV> build

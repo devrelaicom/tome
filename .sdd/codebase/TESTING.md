@@ -325,7 +325,7 @@ typos
 cargo test --workspace
 ```
 
-The `lefthook` configuration runs these automatically. If any fails, the push is blocked and the output explains why.
+The hook scripts in `.githooks/` run these automatically once `git config core.hooksPath .githooks` has been set in the clone. If any fails, the push is blocked and the output explains why.
 
 ### CI Validation
 
