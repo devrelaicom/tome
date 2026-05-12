@@ -90,3 +90,86 @@ fn ordering_url_then_token_both_applied() {
     assert!(!out.contains("s3cret"), "bearer leaked: {}", out);
     assert!(out.contains("https://gh.example/path"));
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2: model-download surfaces (T060/T061).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn aws_signed_query_string_is_redacted() {
+    // Typical S3 presigned URL — sha-flavoured signature + access key id +
+    // session token in the query string. All three must be scrubbed.
+    let signature = "a".repeat(64); // SHA-256 hex
+    let credential = "AKIAIOSFODNN7EXAMPLE/20260512/us-east-1/s3/aws4_request";
+    let session_token = "FwoGZXIvYXdzEXAMPLETOKEN";
+    let url = format!(
+        "fetching https://bucket.s3.amazonaws.com/model.onnx?\
+         X-Amz-Algorithm=AWS4-HMAC-SHA256&\
+         X-Amz-Credential={credential}&\
+         X-Amz-Date=20260512T000000Z&\
+         X-Amz-Expires=900&\
+         X-Amz-Signature={signature}&\
+         X-Amz-Security-Token={session_token}"
+    );
+    let out = scrub_to_string(url.as_bytes());
+
+    assert!(!out.contains(&signature), "signature leaked: {out}");
+    assert!(!out.contains(credential), "credential leaked: {out}");
+    assert!(!out.contains(session_token), "session token leaked: {out}");
+    // Innocuous bits stay so the operator can still see what was being fetched.
+    assert!(
+        out.contains("https://bucket.s3.amazonaws.com/model.onnx"),
+        "host/path was over-scrubbed: {out}"
+    );
+}
+
+#[test]
+fn generic_signature_query_param_is_redacted() {
+    // Hugging Face presigned URLs use a plain `signature=` param.
+    let sig = "deadbeef".repeat(8);
+    let input =
+        format!("GET https://cdn-lfs.huggingface.co/repos/foo?signature={sig}&expires=12345");
+    let out = scrub_to_string(input.as_bytes());
+    assert!(!out.contains(&sig), "HF signature leaked: {out}");
+    // Expiry timestamps are not sensitive and stay visible.
+    assert!(
+        out.contains("expires=12345"),
+        "expires field over-scrubbed: {out}"
+    );
+}
+
+#[test]
+fn reqwest_style_error_with_url_credentials_is_redacted() {
+    // Approximates what `reqwest::Error::Display` produces for a failed
+    // request against a userinfo-bearing URL.
+    let input = "HTTP get failed: error sending request for url \
+                 (https://user:supersecret@cdn.example/bucket/model.onnx): \
+                 dns error: failed to lookup address";
+    let out = scrub_to_string(input.as_bytes());
+    assert!(!out.contains("supersecret"), "userinfo leaked: {out}");
+    assert!(!out.contains("user:"), "userinfo prefix leaked: {out}");
+    assert!(
+        out.contains("https://cdn.example/bucket/model.onnx"),
+        "host/path was over-scrubbed: {out}"
+    );
+    assert!(
+        out.contains("dns error"),
+        "diagnostic suffix was over-scrubbed: {out}"
+    );
+}
+
+#[test]
+fn signed_url_keys_in_colon_form_also_redact() {
+    // Some loggers pretty-print query strings as colon-separated KV pairs
+    // (e.g. tracing field rendering). Make sure that form is also caught.
+    let input = "X-Amz-Signature: deadbeef0123456789, X-Amz-Credential: AKIASOMETHING";
+    let out = scrub_to_string(input.as_bytes());
+    assert!(
+        !out.contains("deadbeef"),
+        "colon-form signature leaked: {out}"
+    );
+    assert!(
+        !out.contains("AKIASOMETHING"),
+        "colon-form credential leaked: {out}"
+    );
+}

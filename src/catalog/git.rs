@@ -54,9 +54,15 @@ pub fn scrub_credentials(input: &[u8]) -> Vec<u8> {
     // The optional `(?:...\s+)?` permits "Authorization: Bearer <token>" to
     // match as one unit — otherwise the keyword "Bearer" would split the
     // match and leave the actual token leaking after the replacement.
+    //
+    // The signed-URL alternatives (`x-amz-signature`, `x-amz-credential`,
+    // `x-amz-security-token`, plain `signature`) cover the presigned-URL
+    // query-string form that model-host CDNs serve (AWS S3, R2). These
+    // arrive via `?key=value&key2=value2` so the existing `=` separator
+    // already matches; we just teach the key alternation to recognise them.
     let kv_secret = KV_SECRET.get_or_init(|| {
         Regex::new(
-            r"(?i)\b(?P<key>token|password|api[-_]?key|bearer|authorization)(?P<sep>\s*[:=]\s*)(?:(?:token|password|api[-_]?key|bearer|authorization)\s+)?\S+",
+            r"(?i)\b(?P<key>token|password|api[-_]?key|bearer|authorization|signature|x-amz-signature|x-amz-credential|x-amz-security-token)(?P<sep>\s*[:=]\s*)(?:(?:token|password|api[-_]?key|bearer|authorization)\s+)?[^\s&]+",
         )
         .expect("valid regex")
     });
