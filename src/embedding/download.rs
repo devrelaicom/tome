@@ -60,21 +60,27 @@ pub fn download_model(entry: &ModelEntry, model_root: &Path) -> Result<ModelMani
     }
     std::fs::create_dir_all(&partial_dir).map_err(TomeError::Io)?;
 
-    let result = stream_to_partial(entry, &partial_dir.join(primary_filename));
-
-    match result {
-        Ok(observed_hash) => {
-            verify_checksum(entry, &observed_hash)?;
-            if final_dir.exists() {
-                std::fs::remove_dir_all(&final_dir).map_err(TomeError::Io)?;
-            }
-            std::fs::rename(&partial_dir, &final_dir).map_err(TomeError::Io)?;
-            let manifest = write_manifest(entry, &final_dir)?;
-            Ok(manifest)
+    // Run the full pipeline inside a single closure so a failure at any
+    // step (stream, verify, rename, manifest write) is followed by partial
+    // cleanup. Without this, a checksum mismatch — which is detected
+    // *after* `stream_to_partial` returns Ok — would leak the .partial dir.
+    let pipeline = || -> Result<ModelManifest, TomeError> {
+        let observed_hash = stream_to_partial(entry, &partial_dir.join(primary_filename))?;
+        verify_checksum(entry, &observed_hash)?;
+        if final_dir.exists() {
+            std::fs::remove_dir_all(&final_dir).map_err(TomeError::Io)?;
         }
+        std::fs::rename(&partial_dir, &final_dir).map_err(TomeError::Io)?;
+        write_manifest(entry, &final_dir)
+    };
+
+    match pipeline() {
+        Ok(manifest) => Ok(manifest),
         Err(err) => {
-            // Clean up the partial directory whether we were cancelled or
-            // hit a real failure. Best effort.
+            // Best effort: the partial dir may already have been renamed
+            // (e.g. if `write_manifest` failed) — in that case the remove
+            // is a no-op and the user is left with a renamed dir + missing
+            // manifest, which `tome status` flags as Corrupt on next open.
             let _ = std::fs::remove_dir_all(&partial_dir);
             Err(err)
         }
