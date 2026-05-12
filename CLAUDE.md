@@ -12,7 +12,8 @@ This file gives Claude Code persistent context about the Tome project. Keep it t
 - **Constitution:** [`CONSTITUTION.md`](./CONSTITUTION.md) (v1.0.1)
 - **Active spec:** [`specs/002-phase-2-plugins-index/spec.md`](./specs/002-phase-2-plugins-index/spec.md)
 - **Active plan:** [`specs/002-phase-2-plugins-index/plan.md`](./specs/002-phase-2-plugins-index/plan.md)
-- **Codebase docs:** [`.sdd/codebase/`](./.sdd/codebase/) (refreshed 2026-05-11 against Phase 1 source)
+- **Codebase docs:** [`.sdd/codebase/`](./.sdd/codebase/) — STACK.md + STRUCTURE.md refreshed 2026-05-12 against Phase 2 foundational source; the other docs are Phase-1 in tone and queued for an incremental refresh once US1 lands.
+- **Phase 2 foundational status:** complete. Modules added: `src/plugin/` (parsers), `src/index/` (SQLite + sqlite-vec), `src/embedding/` (registry / download / fastembed / stub), `src/presentation/` (tables / progress / colour / prompt). No user-facing CLI wired into `cli.rs` yet — that begins in user-stories phase.
 
 ## Active Technologies
 
@@ -185,6 +186,7 @@ tests/
 
 ## Recent Changes
 
+- 2026-05-12: Closed Phase 2 foundational — landed slices 1–7 across PRs #2–#10. T057 (model-download integration test with hand-rolled `TcpListener` HTTP fixture) is in slice 7 rather than slice 5 where it was originally scheduled. The cleanup bug it caught (partial-dir leaking on checksum mismatch because cleanup only ran on `stream_to_partial` errors, not later pipeline errors) is fixed by wrapping the full post-stream pipeline in a closure. Codebase docs (`.sdd/codebase/STACK.md`, `STRUCTURE.md`) refreshed; retro at `specs/002-phase-2-plugins-index/retro/P2.md` extended with workarounds, package gotchas, patterns, and "for next time" entries.
 - 2026-05-12: Generated Phase 2 `/sdd:plan` artefacts on `002-phase-2-plugins-index` — plan.md, research.md (15 R-decisions including binary-size strategy, SQLite concurrency model, schema migration, frontmatter strictness boundary), data-model.md, contracts/* (plugin-commands, query, models-commands, reindex, status, catalog-extensions, version-output, exit-codes, index-schema.sql), quickstart.md. Constitution gates: PASS with one justified deviation (`#[cfg(test)]` stub for the embedder/reranker traits — keeps CI fast and bounded; principle VIII boundary case).
 - 2026-05-11: Generated Phase 2 `/sdd:specify` artefacts — spec (7 user stories, 60 FRs, 5 NFRs, 15 SCs) and refreshed `.sdd/codebase/*` against the Phase 1 source. Rust-lens review folded in 3 blockers + 12 majors before validation passed.
 - 2026-05-11: Ratified CONSTITUTION.md v1.0.0; later patched to v1.0.1.

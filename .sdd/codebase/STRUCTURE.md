@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-11
+> **Last Updated**: 2026-05-12 (Phase 2 foundational close)
 
 ## Directory Layout
 
@@ -214,6 +214,108 @@ No files in Phase 1 are auto-generated.
 - Technology choices → STACK.md
 - Code style rules → CONVENTIONS.md
 - Test patterns → TESTING.md
+
+---
+
+## Phase 2 additions — foundational (no user-facing CLI yet)
+
+Phase 2 added four new modules under `src/`, one vendored C library under
+`vendor/`, and seven integration-test files under `tests/`. None are wired
+into `src/cli.rs` yet — user-stories phase does that.
+
+### `src/plugin/` — third-party metadata parsers
+
+```
+src/plugin/
+├── mod.rs              # PluginRecord, PluginStatus, re-exports
+├── identity.rs         # PluginId: <catalog>/<plugin> address + FromStr
+├── manifest.rs         # plugin.json (lenient, serde_json; FR-013a)
+├── frontmatter.rs      # SKILL.md YAML header (lenient + FR-011/FR-012)
+└── components.rs       # ComponentCounts over skills/agents/commands/hooks/.mcp.json
+```
+
+**Responsibility**: read-only parsing of plugin metadata produced by
+upstream tooling (Claude Code plugins). Strictness boundary: lenient parsing
+of all third-party inputs; unknown fields are ignored without warning
+(FR-013a). Two failure modes for `frontmatter.rs`: delimiter failure is
+fatal (caller maps to exit 23), YAML-body failure is per-skill skip-and-warn
+(FR-013c).
+
+### `src/index/` — SQLite + sqlite-vec local skill index
+
+```
+src/index/
+├── mod.rs              # Re-exports
+├── schema.rs           # CREATE_STATEMENTS, bootstrap, MetaSeed
+├── migrations.rs       # Forward-only migration framework + apply_pending
+├── vec_ext.rs          # sqlite-vec auto-extension registrar
+├── db.rs               # open(): paths → conn → PRAGMAs → bootstrap/migrate → verify
+├── lock.rs             # Advisory write lock via File::try_lock (per-fd, OS-level)
+├── meta.rs             # Typed MetaKey + read/write + DriftStatus + detect_drift
+├── integrity.rs        # PRAGMA integrity_check wrapper
+├── skills.rs           # CRUD + content_hash + enable_plugin_atomic (FR-004)
+└── query.rs            # KNN over skill_embeddings joined with skills.enabled = 1
+```
+
+**Concurrency model** (research §R2): WAL + 5 s `busy_timeout` + a Tome-owned
+advisory lockfile at `${XDG_DATA_HOME}/tome/index.lock`. Read-only commands
+(`query`, `plugin list`, `plugin show`, `status`) do not take the lockfile;
+mutating commands do. Contention surfaces as `TomeError::IndexBusy` (exit
+50) within milliseconds.
+
+### `src/embedding/` — embedder, reranker, model registry
+
+```
+src/embedding/
+├── mod.rs              # Embedder + Reranker traits, Scored
+├── registry.rs         # MODEL_REGISTRY const + ModelManifest (strict serde)
+├── download.rs         # Atomic, SIGINT-aware reqwest::blocking downloader
+├── runtime.rs          # No-op placeholder (ort is transitive only)
+├── fastembed.rs        # FastembedEmbedder + FastembedReranker
+└── stub.rs             # Deterministic SHA-derived embedder + identity/reverse reranker
+```
+
+**Boundary trait pattern**: `Embedder` and `Reranker` are the seam between
+Tome's deterministic core and the ONNX-backed external system (constitution
+principle VIII). The stub is unconditional + `#[doc(hidden)]` so integration
+tests can use it without a Cargo feature gate; LTO strips it from release
+binaries that don't reference it.
+
+### `src/presentation/` — table + progress + colour + prompt wrappers
+
+```
+src/presentation/
+├── mod.rs
+├── tables.rs           # comfy-table helpers, NO_COLOR / non-TTY plain fallback
+├── progress.rs         # indicatif wrappers, auto-suppress on non-TTY stderr
+├── colour.rs           # owo-colors + NO_COLOR env + --no-color flag
+└── prompt.rs           # inquire wrappers; refuse on non-TTY (NotATerminal)
+```
+
+### `vendor/sqlite-vec/` — compiled-in C extension
+
+```
+vendor/sqlite-vec/
+├── sqlite-vec.c        # Pinned amalgamation (v0.1.9)
+├── sqlite-vec.h
+└── LICENSE
+```
+
+`build.rs` compiles the amalgamation against `rusqlite`'s bundled SQLite
+headers and links it statically. Loaded into every `Connection` at runtime
+via `sqlite3_auto_extension` from `src/index/vec_ext.rs`.
+
+### Phase 2 integration tests
+
+| File | Tests |
+|------|-------|
+| `tests/frontmatter.rs` | Table-driven matrix over the SKILL.md parser (delimiter / YAML-body failure split + FR-011 / FR-012 fallbacks). |
+| `tests/index_schema_bootstrap.rs` | Fresh DB bootstrap, meta seeding, vec extension reachability, schema-too-new refusal. |
+| `tests/index_lock.rs` | Advisory lock contention + release; pre-existing lockfile is reusable. |
+| `tests/embedding_stub.rs` | Stub determinism, distinguishability (cosine < 0.99), 384-dim length, L2 normalisation. |
+| `tests/model_download.rs` | Hand-rolled `TcpListener` HTTP server fixture; happy path, checksum mismatch, HTTP 404, placeholder-checksum refusal. |
+| `tests/paths_phase2.rs` | Phase 2 path resolvers (index_db, index_lock, models_dir, model_path). |
+| `tests/scrubbing.rs` (extended) | Phase 1 cases + AWS/HF signed URL keys + reqwest error chain redaction. |
 
 ---
 
