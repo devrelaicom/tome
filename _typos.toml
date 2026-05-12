@@ -1,9 +1,16 @@
 [default]
-extend-ignore-identifiers-re = []
+# Crate names and identifiers that look like typos but are correct upstream names.
+extend-ignore-identifiers-re = [
+    "flate2",
+]
 
 [default.extend-words]
 # "mis" appears as a prefix in hyphenated words like "mis-detected" in design docs.
 mis = "mis"
+# Phase 2 vocabulary and crate names that the typos lint mis-flags.
+flate2 = "flate2"
+INSER = "INSER"
+INSERTs = "INSERTs"
 
 [files]
 extend-exclude = [

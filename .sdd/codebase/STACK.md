@@ -1,77 +1,75 @@
-# Stack — Tome
+# Technology Stack
 
-This document records the *intended* technology stack derived from the Phase 1 PRD and constitution. No source code has been written yet; this file will be expanded once the first commit of Rust source lands.
+> **Purpose**: Document what executes in this codebase - languages, runtimes, frameworks, and critical dependencies.
+> **Generated**: 2026-05-11
+> **Last Updated**: 2026-05-11
 
-## Languages
+## Languages & Runtimes
 
-- **Rust** (stable channel) — the sole implementation language.
-  - **Edition**: latest stable; pinned in `Cargo.toml`.
-  - **MSRV**: the current stable release at project start, pinned in `Cargo.toml` and verified in CI.
-  - **Toolchain pinning**: `rust-toolchain.toml` pins the stable channel and the `rustfmt` and `clippy` components.
+| Language | Version | Purpose |
+|----------|---------|---------|
+| Rust | stable (MSRV: 1.93) | Primary implementation language; synchronous (no async runtime in Phase 1) |
 
-## Runtime
+## Frameworks
 
-- **Synchronous**. No async runtime in Phase 1. `tokio` is deliberately not a dependency; it is pulled in only when async genuinely appears (expected with the MCP server in a later phase).
+Phase 1 is a CLI application, not a web framework-based project.
 
-## Build / packaging
+| Framework | Version | Purpose |
+|-----------|---------|---------|
+| clap | 4.x | CLI argument parsing and help/version generation |
 
-- **Cargo** workspace-of-one. Single binary crate `tome`. Workspace splitting is deferred until justified by code size.
-- **`cargo install --path .`** is the Phase 1 install path. Cross-platform release tooling is deferred.
+## Critical Dependencies
 
-## Direct dependencies (Phase 1)
+| Package | Version | Purpose | Usage Scope |
+|---------|---------|---------|-------------|
+| `serde` + `serde_derive` | 1.x | Configuration and manifest (de)serialisation | All TOML parsing for `config.toml` and `tome-catalog.toml` |
+| `toml` | 0.8 | TOML format support | Manifest and config file parsing |
+| `thiserror` | 2.x | Typed error enums | Closed `TomeError` enum in `src/error.rs` (all fallible operations) |
+| `anyhow` | 1.x | Error context chaining | Application-level error wrapping at boundaries |
+| `tracing` + `tracing-subscriber` | 0.1, 0.3 | Structured logging to stderr | Diagnostic output orthogonal to `--json` stdout |
+| `sha2` | 0.10 | Content-addressed cache naming | URL hashing for `cache_dir_for()` in `src/paths.rs` |
+| `regex` | 1.x | Credential scrubbing patterns | Git stderr sanitisation in `src/catalog/git.rs` (4 regex patterns) |
+| `ctrlc` | 3.x | Signal handling (SIGINT) | Global cancellation handler with exit code 8 |
+| `tempfile` | 3.x | Atomic file writes | Registry and per-catalog cache mutations |
+| `hex` | 0.4 | Hex encoding for SHA256 digests | Cache directory naming alongside sha2 |
+| `semver` | 1.x | Semantic version parsing | Catalog manifest version field validation |
+| `time` | 0.3 | Timestamp formatting and parsing | Logging and manifest timestamps |
+| `serde_json` | 1.x | JSON serialisation (NDJSON output) | `--json` mode formatting for stdout |
 
-| Crate | Purpose |
-|---|---|
-| `clap` (`derive` feature) | CLI argument parsing |
-| `serde` + `serde_derive` | Configuration and manifest (de)serialisation |
-| `toml` | Configuration and manifest format |
-| `anyhow` | Application-level error handling |
-| `thiserror` | Typed errors for library-shaped modules |
-| `tracing` + `tracing-subscriber` | Structured logging |
-| `directories` | XDG / platform-aware paths |
-| `sha2` | URL hashing for cache directory naming |
+## Package Managers & Build Tools
 
-Constraints from the constitution (§Operational Constraints):
+| Tool | Version | Purpose |
+|------|---------|---------|
+| Cargo | (bundled with Rust) | Workspace management and builds |
+| rustfmt | (pinned in rust-toolchain.toml) | Code formatting |
+| clippy | (pinned in rust-toolchain.toml) | Linting with `-D warnings` |
 
-- Each new dependency must justify itself.
-- The release binary must remain under 10 MB stripped.
-- Licences are constrained by `cargo-deny`: allow `MIT`, `Apache-2.0`, `MIT-0`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Unicode-DFS-2016`, `Zlib`; deny GPL / AGPL / LGPL family.
+## Runtime Environment
 
-## External tools (run by Tome at runtime)
+| Environment | Details |
+|-------------|---------|
+| OS Targets | Linux (ubuntu-latest) and macOS (macos-latest) — CI verified on both |
+| Deployment | Single binary (`target/release/tome`); installed via `cargo install --path .` |
+| Binary Size | < 10 MB stripped (enforced by CI; see `.github/workflows/ci.yml`) |
+| Output | Human-readable (default) or NDJSON (`--json`); logging to stderr only (orthogonal to stdout) |
 
-- **`git`** — shelled out via `std::process::Command` for clone, checkout, fetch, and reset operations. `libgit2` is explicitly rejected (constitution principle XII).
+## Not Used (Explicitly Excluded)
 
-## Quality tooling
+- **Async runtime**: No `tokio`, `async-std`, or similar. Phase 1 is synchronous; async deferred to Phase 2 (MCP server).
+- **Git library**: No `libgit2`, `git2`, or vendored Git. `std::process::Command` shells out to system `git` (constitution principle XII).
+- **HTTP client**: Not needed in Phase 1. Future HTTP integration (e.g., remote catalog sources) deferred to Phase 2.
+- **Database**: No SQLite, PostgreSQL, or embedded database in Phase 1. Phase 2 will introduce `sqlite-vec` and `fastembed-rs` for embeddings.
 
-- **`cargo fmt`** (rustfmt) — formatting.
-- **`cargo clippy`** with `-D warnings` — lints promoted to errors.
-- **`typos`** — typo detection in source and docs.
-- **`cocogitto`** (`cog`) — Conventional Commits validation.
-- **`cargo-audit`** — RustSec advisory database checks (weekly + PR).
-- **`cargo-deny`** — licence allowlist, advisory, source allowlist, duplicate-version warnings.
-- **`cargo-llvm-cov`** + Codecov — coverage (nice-to-have, not Phase 1 blocking).
+---
 
-## Local automation
+## What Does NOT Belong Here
 
-- **Lefthook** — pre-commit (fmt, clippy, typos in parallel), commit-msg (cocogitto), pre-push (`cargo test --workspace`).
+- Directory structure → STRUCTURE.md
+- System design patterns → ARCHITECTURE.md
+- External service integrations → INTEGRATIONS.md
+- Dev tools (linting, formatting) → CONVENTIONS.md
+- Test frameworks → TESTING.md
 
-## CI
+---
 
-- **GitHub Actions** with two workflows:
-  - `ci.yml` — runs on every PR and push to `main`. Matrix `{macos-latest, ubuntu-latest} × {stable, MSRV}`. Steps: checkout, `dtolnay/rust-toolchain`, `Swatinem/rust-cache`, fmt check, clippy, build, test.
-  - `security.yml` — runs weekly and on PR. Steps: `cargo-audit`, `cargo-deny check`.
-- **Renovate** (configured via `renovate.json`) — auto-PR for patch updates, weekly schedule for minor/major.
-
-## Persistence
-
-- **Configuration**: `${XDG_CONFIG_HOME:-~/.config}/tome/config.toml`. TOML, strictly parsed.
-- **Catalog cache**: `${XDG_DATA_HOME:-~/.local/share}/tome/catalogs/<sha256-of-source-url>/`. Tool-owned.
-
-## Licensing
-
-- **MIT OR Apache-2.0** dual licence (`LICENSE-MIT` + `LICENSE-APACHE` at repo root).
-
-## Notes
-
-- This is a greenfield project. The above is the *plan*, not an observation. Once `cargo new` runs and the first commit lands, this file should be re-derived from `Cargo.toml`, `Cargo.lock`, and CI configuration.
-- The Phase 2 PRD will introduce additional dependencies (vector store, embedding model). Those choices must be justified in writing per the constitution's binary-size and dependency constraints.
+*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1 source code.*

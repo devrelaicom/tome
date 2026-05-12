@@ -6,38 +6,58 @@ This file gives Claude Code persistent context about the Tome project. Keep it t
 
 **Tome** is a Rust CLI (and eventually MCP server) that makes Claude Code's plugin ecosystem work across other agentic coding harnesses (Cursor, Codex, Gemini CLI, OpenCode, …).
 
-- **Current phase:** Phase 1 — project foundations and catalog management.
-- **PRD:** [`PRDs/phase-1.md`](./PRDs/phase-1.md)
-- **Constitution:** [`CONSTITUTION.md`](./CONSTITUTION.md) (v1.0.0, ratified 2026-05-11)
-- **Active spec:** [`specs/001-phase-1-foundations/spec.md`](./specs/001-phase-1-foundations/spec.md)
-- **Active plan:** [`specs/001-phase-1-foundations/plan.md`](./specs/001-phase-1-foundations/plan.md)
+- **Current phase:** Phase 2 — plugin enable/disable and local skill index.
+- **Phase 1 PRD (shipped):** [`PRDs/phase-1.md`](./PRDs/phase-1.md)
+- **Phase 2 PRD (in progress):** [`PRDs/phase-2.md`](./PRDs/phase-2.md)
+- **Constitution:** [`CONSTITUTION.md`](./CONSTITUTION.md) (v1.0.1)
+- **Active spec:** [`specs/002-phase-2-plugins-index/spec.md`](./specs/002-phase-2-plugins-index/spec.md)
+- **Active plan:** [`specs/002-phase-2-plugins-index/plan.md`](./specs/002-phase-2-plugins-index/plan.md)
+- **Codebase docs:** [`.sdd/codebase/`](./.sdd/codebase/) (refreshed 2026-05-11 against Phase 1 source)
 
 ## Active Technologies
 
-- **Language**: Rust stable (MSRV pinned at `cargo init` time, verified in CI).
-- **CLI**: `clap` (derive feature) — provides `--help` / `--version` / global flags.
-- **Config / manifest**: `serde` + `serde_derive`, `toml` — every struct uses `#[serde(deny_unknown_fields)]`.
+### Phase 1 (shipped, unchanged)
+
+- **Language**: Rust stable, MSRV pinned at `rust-version = "1.93"` (verified in CI).
+- **CLI**: `clap` (derive feature) — `--help` / `--version` / global flags.
+- **Config / manifest**: `serde` + `serde_derive`, `toml` — Tome-owned structs use `#[serde(deny_unknown_fields)]`.
 - **Errors**: `thiserror` for the closed `TomeError` enum (drives exit codes); `anyhow` for application-level context chaining.
 - **Logging**: `tracing` + `tracing-subscriber` (stderr only; orthogonal to `--json`).
 - **Paths**: `directories` (XDG-aware).
-- **Hashing**: `sha2` (cache directory naming).
-- **Atomic writes**: `tempfile` (registry + per-catalog cache atomicity).
+- **Hashing**: `sha2`, `hex` (cache directory naming, model checksums, content hashes).
+- **Atomic writes**: `tempfile` (registry, catalog cache, models dir atomicity).
 - **Signal handling**: `ctrlc` (SIGINT cancellation; exits with code 8).
-- **Colour / NO_COLOR**: `anstream` + `anstyle` (already transitive via clap 4).
+- **Colour / NO_COLOR**: `anstream` + `anstyle` (transitive via clap 4).
 - **Regex**: `regex` (credential scrubbing in `src/catalog/git.rs`).
+- **Time**: `time` (RFC 3339 timestamps).
+- **Semver**: `semver`.
 
-**Not used**: `tokio`, `libgit2`/`git2`, `atty`, `colored`, `lazy_static`, `once_cell` (covered by std `OnceLock`).
+### Phase 2 additions
+
+- **Embedded database**: `rusqlite` with the `bundled` feature — statically linked SQLite, no system dep.
+- **Vector search**: `sqlite-vec` C extension vendored under `vendor/sqlite-vec/`, compiled in via `build.rs`.
+- **Inference**: `fastembed-rs` wrapping `ort` (ONNX Runtime). CPU execution provider only; CUDA / CoreML / DirectML disabled.
+- **Models** (downloaded at runtime; not bundled): `bge-small-en-v1.5` INT8 (~45 MB, MIT), `bge-reranker-base` INT8 (~280 MB, MIT). Stored under `${XDG_DATA_HOME}/tome/models/`.
+- **Progress / spinners**: `indicatif`.
+- **Tables**: `comfy-table`.
+- **Colours**: `owo-colors` (native `NO_COLOR`).
+- **Prompts**: `inquire` (Select / MultiSelect / Confirm; refuses on non-TTY).
+- **HTTP**: `reqwest` with `blocking` + `rustls-tls`, `default-features = false`.
+
+**Strictness boundary** (FR-013a): `#[serde(deny_unknown_fields)]` applies to Tome-owned inputs (config, model `manifest.json`, index `meta` rows). Third-party inputs (`plugin.json`, `SKILL.md` YAML frontmatter) parse leniently — forward-compat with upstream additions.
+
+**Not used**: `tokio`, `libgit2`/`git2`, `atty`, `colored`, `lazy_static`, `once_cell` (std `OnceLock` covers it). Phase 2 stays synchronous.
 
 ## Architectural Constraints (from the constitution)
 
-- **Sync only.** No async runtime in Phase 1.
-- **Inherit `git`.** Shell out to system `git` via `std::process::Command`; never vendor a Git library.
-- **Closed error set.** `TomeError` has no `Other`/`Unknown` arm. New error categories require editing the spec, PRD, and enum together.
-- **Strict TOML.** Every deserialised struct carries `#[serde(deny_unknown_fields)]`; enforced by a test in `tests/manifest_strictness.rs`.
-- **Atomic writes.** Registry mutations and cache mutations are atomic; verified by interruption-injection tests.
-- **Credential scrubbing at the boundary.** Captured `git` stderr passes through `git::scrub_credentials` before reaching `tracing`, `anyhow::Error`, or any display path.
-- **10 MB binary cap.** Dependencies that push the stripped release binary over 10 MB require a written justification.
-- **Licence allowlist.** `MIT`, `Apache-2.0`, `MIT-0`, `BSD-{2,3}-Clause`, `ISC`, `Unicode-DFS-2016`, `Zlib`. GPL / AGPL / LGPL banned. Enforced by `cargo-deny`.
+- **Sync only.** No async runtime. `reqwest::blocking`, `rusqlite`, and `fastembed-rs` are all sync. The MCP server is the future forcing function for async.
+- **Inherit `git`.** Shell out to system `git`. Never vendor a Git library.
+- **Closed error set.** `TomeError` has no `Other`/`Unknown` arm. Every Phase 2 failure class has its own enumerated variant and exit code (see `specs/002-phase-2-plugins-index/contracts/exit-codes.md`).
+- **Strictness boundary.** Tome-owned declarative inputs are strict (`#[serde(deny_unknown_fields)]`); third-party inputs (`plugin.json`, SKILL.md frontmatter) are lenient — see spec FR-013a. The strict-on-Tome-owned principle is enforced by `tests/manifest_strictness.rs`.
+- **Atomic writes.** Registry, cache, models directory, and index DB mutations are atomic. SQLite WAL + a Tome-owned advisory lockfile (`index.lock`) provide the index concurrency contract (FR-040).
+- **Credential scrubbing at the boundary.** `git::scrub_credentials` extends to model download URLs and `reqwest` error chains.
+- **10 MB binary cap.** Hard ceiling. CI asserts `du -sh target/release/tome` on Linux. `ort` (CPU-only static) is the load-bearing dep; profile is `lto = "thin"`, `panic = "abort"`, `strip = "symbols"`. If breached, the plan revises — the cap is non-waivable (NFR-001).
+- **Licence allowlist.** Unchanged. Every Phase 2 dep verified inside the allowlist. `cargo-deny` enforces. Downloaded models (BGE family, MIT) are surfaced in `tome models list`.
 
 ## Conventions
 
@@ -45,7 +65,7 @@ This file gives Claude Code persistent context about the Tome project. Keep it t
 - **Branching**: trunk-based; short-lived branches off `main`.
 - **PRs**: small batches — ~400 lines or 2 modules max as a soft cap.
 - **Comments**: explain *why*, not *what*. Reader knows Rust.
-- **Modules**: capability-organised (`catalog`, `config`, `paths`, `error`, `output`, `logging`).
+- **Modules**: capability-organised. Phase 1: `catalog`, `config`, `paths`, `error`, `output`, `logging`. Phase 2 adds: `plugin` (manifest/frontmatter/lifecycle), `index` (db/schema/migrations/vec-ext/skills/query/meta/integrity/lock), `embedding` (fastembed wrapper + stub + registry + download + runtime), `presentation` (wraps comfy-table / indicatif / owo-colors / inquire).
 - **Errors**: `thiserror` inside modules; `anyhow` at the application boundary.
 
 ## Common Commands
@@ -62,9 +82,12 @@ cargo clippy --all-targets --all-features -- -D warnings
 typos
 
 # Tests (lefthook pre-push runs the full suite)
-cargo test                                       # all tests
+cargo test                                       # all tests (uses stub embedder — fast, no model files)
 cargo test --test catalog_add                    # one integration test file
 cargo test catalog_add::                         # one test by path
+cargo test --test query                          # Phase 2 query tests
+cargo test --test concurrency                    # two-process index contention
+cargo test --test atomicity                      # interrupt-injection tests
 
 # Security and dependency hygiene
 cargo audit
@@ -82,40 +105,92 @@ lefthook run pre-push                            # run the pre-push chain manual
 cargo +<MSRV> build
 ```
 
-## File Structure (planned)
+## File Structure
 
 ```
 src/
-├── main.rs              # entry: parse → dispatch → map errors → exit
-├── cli.rs               # clap derive defs (global --json, --force, -v/-vv)
-├── commands/catalog.rs  # tome catalog {add,remove,list,update,show}
-├── catalog/
-│   ├── manifest.rs      # tome-catalog.toml schema + parsing + path validation
-│   ├── store.rs         # registry persistence (atomic writes), cache layout
-│   └── git.rs           # git shell-outs + credential scrubber + signal handling
-├── config.rs            # config.toml schema + load/save
-├── paths.rs             # XDG-aware paths
-├── output.rs            # human/--json formatter, NO_COLOR, TTY detection
-├── logging.rs           # tracing-subscriber wiring (stderr-only)
-└── error.rs             # closed TomeError enum + ExitCode mapping
+├── main.rs                   # entry: parse → dispatch → map errors → exit
+├── lib.rs                    # re-exports
+├── cli.rs                    # clap derive defs + global flags
+├── error.rs                  # closed TomeError enum + ExitCode mapping
+├── config.rs                 # config.toml (strict)
+├── paths.rs                  # XDG paths (Phase 1) + index_db, models_dir, index_lock (Phase 2)
+├── output.rs                 # human/--json formatter, NO_COLOR, TTY detection
+├── logging.rs                # tracing-subscriber wiring
+├── catalog/                  # Phase 1
+│   ├── manifest.rs           # tome-catalog.toml (strict)
+│   ├── store.rs              # registry persistence (atomic) — Phase 2 hooks cascade
+│   └── git.rs                # git shell-outs + scrub_credentials
+├── commands/
+│   ├── catalog.rs            # tome catalog {add,remove,list,update,show}
+│   ├── plugin.rs             # NEW — enable/disable/list/show/interactive
+│   ├── query.rs              # NEW
+│   ├── models.rs             # NEW — download/list/remove
+│   ├── reindex.rs            # NEW
+│   └── status.rs             # NEW
+├── plugin/                   # NEW
+│   ├── manifest.rs           # plugin.json (lenient)
+│   ├── frontmatter.rs        # SKILL.md frontmatter (lenient + fallbacks)
+│   ├── components.rs         # skills/agents/commands/hooks/.mcp.json walks
+│   ├── identity.rs           # <catalog>/<plugin> address parsing
+│   └── lifecycle.rs          # enable/disable orchestrator (atomic per plugin)
+├── index/                    # NEW
+│   ├── db.rs                 # rusqlite open, WAL, busy_timeout
+│   ├── schema.rs             # CREATE TABLE statements (mirror of contracts/index-schema.sql)
+│   ├── migrations.rs         # forward-only migrations under advisory lock
+│   ├── vec_ext.rs            # sqlite-vec extension load (build.rs compiled)
+│   ├── skills.rs             # CRUD on skills table; content-hash diff
+│   ├── query.rs              # KNN search + reranker invocation
+│   ├── meta.rs               # drift detection
+│   ├── integrity.rs          # PRAGMA integrity_check
+│   └── lock.rs               # advisory lockfile
+├── embedding/                # NEW
+│   ├── mod.rs                # Embedder + Reranker traits
+│   ├── fastembed.rs          # fastembed-rs impl
+│   ├── stub.rs               # #[cfg(test)] deterministic stub
+│   ├── registry.rs           # MODEL_REGISTRY (pinned URLs + checksums)
+│   ├── download.rs           # reqwest::blocking + SHA-256 + atomic persist
+│   └── runtime.rs            # ort Environment, CPU EP only
+└── presentation/             # NEW
+    ├── tables.rs             # comfy-table helpers
+    ├── progress.rs           # indicatif wrappers (TTY-aware)
+    ├── colour.rs             # owo-colors + NO_COLOR
+    └── prompt.rs             # inquire wrappers (refuse on non-TTY)
+
+vendor/
+└── sqlite-vec/               # NEW — pinned C source + LICENSE; compiled via build.rs
 
 tests/
-├── catalog_*.rs         # one per subcommand
-├── manifest_strictness.rs
-├── path_validation.rs
-├── exit_codes.rs
-├── scrubbing.rs
-├── atomicity.rs
-└── fixtures/sample-catalog/
+├── catalog_*.rs              # Phase 1 (catalog_remove extended for cascade)
+├── manifest_strictness.rs    # Phase 1 (extended: model manifest is strict)
+├── path_validation.rs        # Phase 1
+├── exit_codes.rs             # extended for the 18 Phase 2 codes
+├── scrubbing.rs              # extended for model URL scrubbing
+├── atomicity.rs              # extended for enable / model download interrupts
+├── plugin_{enable,disable,list,show,interactive}.rs   # NEW
+├── query.rs                  # NEW
+├── models_{download,list,remove}.rs                   # NEW
+├── reindex.rs                # NEW
+├── status.rs                 # NEW
+├── catalog_update_reindex.rs # NEW
+├── catalog_remove_cascade.rs # NEW
+├── concurrency.rs            # NEW — two-process index contention
+├── schema_migrations.rs      # NEW
+├── version_output.rs         # NEW
+├── frontmatter.rs            # NEW — table-driven parser cases
+└── fixtures/
+    ├── sample-catalog/       # Phase 1
+    └── sample-plugin/        # NEW
 ```
 
 ## Recent Changes
 
-- 2026-05-11: Ratified CONSTITUTION.md v1.0.0.
-- 2026-05-11: Wrote Phase 1 PRD amendments resolving the constitution-review report (added exit code 7 for IO; tightened strict parsing rules; credential scrubbing required; cache ownership and SHA-pin behaviour documented).
-- 2026-05-11: Generated `/sdd:specify` artefacts on branch `001-phase-1-foundations` — spec, requirements checklist (PASS), STACK.md.
-- 2026-05-11: Generated `/sdd:plan` artefacts — plan.md, research.md, data-model.md, contracts/*, quickstart.md. Constitution gates: PASS, zero violations to justify.
-- 2026-05-11: Added exit code 8 (SIGINT interrupted) after Rust-lens review of the spec; spec FRs and SCs amended for atomicity, signal handling, UTF-8 output, log/--json orthogonality, --help/--version, and the closed-and-exhaustive error set.
+- 2026-05-12: Generated Phase 2 `/sdd:plan` artefacts on `002-phase-2-plugins-index` — plan.md, research.md (15 R-decisions including binary-size strategy, SQLite concurrency model, schema migration, frontmatter strictness boundary), data-model.md, contracts/* (plugin-commands, query, models-commands, reindex, status, catalog-extensions, version-output, exit-codes, index-schema.sql), quickstart.md. Constitution gates: PASS with one justified deviation (`#[cfg(test)]` stub for the embedder/reranker traits — keeps CI fast and bounded; principle VIII boundary case).
+- 2026-05-11: Generated Phase 2 `/sdd:specify` artefacts — spec (7 user stories, 60 FRs, 5 NFRs, 15 SCs) and refreshed `.sdd/codebase/*` against the Phase 1 source. Rust-lens review folded in 3 blockers + 12 majors before validation passed.
+- 2026-05-11: Ratified CONSTITUTION.md v1.0.0; later patched to v1.0.1.
+- 2026-05-11: Wrote Phase 1 PRD amendments resolving the constitution-review report.
+- 2026-05-11: Generated `/sdd:specify` and `/sdd:plan` artefacts on `001-phase-1-foundations`. Constitution gates: PASS, zero violations.
+- 2026-05-11: Added exit code 8 (SIGINT interrupted) after Rust-lens review of the Phase 1 spec.
 
 <!-- MANUAL ADDITIONS START -->
 <!-- Notes that should not be touched by automation go here. -->
