@@ -61,9 +61,9 @@ Tokens, SSH keys, credential-helper output, and anything Git emits that looks cr
 
 ## Development Workflow
 
-**Local setup.** Clone, run `lefthook install`, run `cargo build`. A new contributor should be able to submit a green PR within 10 minutes of `git clone`. If that ceases to be true, fix the setup, not the rule.
+**Local setup.** Clone, run `git config core.hooksPath .githooks`, run `cargo build`. A new contributor should be able to submit a green PR within 10 minutes of `git clone`. If that ceases to be true, fix the setup, not the rule.
 
-**Pre-commit (lefthook).** Parallel: `cargo fmt --check`, `cargo clippy -D warnings`, `typos`. Fast feedback before the commit lands.
+**Pre-commit.** `cargo fmt --check`, `typos`, `cargo clippy -D warnings`. Fast feedback before the commit lands. Implemented as a versioned shell script under `.githooks/pre-commit`; no external hooks manager (principle XII).
 
 **Commit-msg.** `cog verify` enforces Conventional Commits.
 
@@ -91,4 +91,4 @@ This constitution supersedes ad-hoc practice. Where it conflicts with PRD detail
 
 **Runtime guidance.** Day-to-day conventions (naming, error message tone, help-text style) are documented separately from this constitution. When that documentation and this constitution disagree, the constitution wins and the runtime guidance gets fixed.
 
-**Version**: 1.0.1 | **Ratified**: 2026-05-11 | **Last Amended**: 2026-05-11
+**Version**: 1.1.0 | **Ratified**: 2026-05-11 | **Last Amended**: 2026-05-12

@@ -22,7 +22,7 @@
 | MSRV | Rust 1.93 | Declared in `Cargo.toml`; enforced in CI |
 | Lints | `-D warnings` | All clippy warnings are errors in pre-commit and CI |
 | Allow blocks | Justified comments required | `#[allow(dead_code)] // tests use subset of these` |
-| Formatting | Automatic via rustfmt | Run before commit via lefthook |
+| Formatting | Automatic via rustfmt | Run before commit via the `.githooks/pre-commit` hook |
 | Typos | Spell-checked | Run in pre-commit hook |
 
 ## Naming Conventions
@@ -225,7 +225,7 @@ Logs never contain user paths, credentials, or sensitive query details — all a
 
 **Format:** `type(scope): description`
 
-Enforced by `cog verify` in the `commit-msg` lefthook.
+Enforced by `cog verify` in the `commit-msg` hook (versioned under `.githooks/`).
 
 | Type | Usage | Example |
 |------|-------|---------|
@@ -245,20 +245,18 @@ Enforced by `cog verify` in the `commit-msg` lefthook.
 - **Merge frequently.** Small batches; PRs under ~400 lines.
 - **No rebasing onto main.** Rebase locally before pushing, then merge as-is to main.
 
-### Pre-commit Hooks (lefthook)
+### Git Hooks (`.githooks/`)
 
-Parallel execution:
+Versioned under `.githooks/`. No external hooks manager. Opt-in once per clone with `git config core.hooksPath .githooks`.
+
+**`.githooks/pre-commit`** runs sequentially:
 - `cargo fmt --check` — format check
-- `cargo clippy --all-targets --all-features -- -D warnings` — linting
 - `typos` — spell check
+- `cargo clippy --all-targets --all-features -- -D warnings` — linting
 
-### Commit-msg Hook
+**`.githooks/commit-msg`** runs `cog verify --file "$1"` — enforces conventional-commit format.
 
-`cog verify --file {1}` — enforces conventional-commit format.
-
-### Pre-push Hook
-
-`cargo test --workspace` — full test suite before pushing.
+**`.githooks/pre-push`** drains the refspec stdin git provides, then runs `cargo test --workspace` — full test suite before pushing.
 
 ## Development Workflow
 
@@ -267,7 +265,7 @@ Parallel execution:
 ```sh
 git clone https://github.com/devrelaicom/tome.git
 cd tome
-lefthook install     # One-time setup
+git config core.hooksPath .githooks    # One-time, wires up the hooks above
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test

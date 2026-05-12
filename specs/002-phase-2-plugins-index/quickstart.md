@@ -22,7 +22,7 @@ cargo build --release                              # release build (used by CI b
 
 ### Quality gates
 
-Run before pushing — lefthook will run these automatically:
+Run before pushing — the `.githooks/pre-commit` hook will run these automatically once `git config core.hooksPath .githooks` is in place:
 
 ```sh
 cargo fmt --check
@@ -42,7 +42,7 @@ du -h target/release/tome   # MUST be ≤ 10 MB; CI fails the build otherwise
 ### Conventional commits
 
 ```sh
-cog verify --file <commit-msg-file>   # invoked by lefthook commit-msg hook
+cog verify --file <commit-msg-file>   # invoked by .githooks/commit-msg
 ```
 
 ---

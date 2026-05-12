@@ -80,13 +80,13 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Presentation primitives
 
-- [ ] T024 Create `src/presentation/mod.rs` declaring `pub mod tables; pub mod progress; pub mod colour; pub mod prompt;` (use devs:rust-dev agent)
-- [ ] T025 [P] Implement `src/presentation/tables.rs` — `comfy-table` helpers with `NO_COLOR` / non-TTY plain-text fallback (use devs:rust-dev agent)
-- [ ] T026 [P] Implement `src/presentation/progress.rs` — `indicatif` wrappers that auto-suppress when stderr is not a TTY (FR-042/FR-043/FR-046) (use devs:rust-dev agent)
-- [ ] T027 [P] Implement `src/presentation/colour.rs` — `owo-colors` integration, `NO_COLOR` env + `--no-color` flag, auto-disable on non-TTY stdout (FR-045/FR-046) (use devs:rust-dev agent)
-- [ ] T028 [P] Implement `src/presentation/prompt.rs` — `inquire::Select/MultiSelect/Confirm` wrappers; entry assertion that stdout AND stdin are both terminals, otherwise return `TomeError::NotATerminal` (FR-051) (use devs:rust-dev agent)
-- [ ] T029 Wire `presentation` module into `src/lib.rs` re-exports (use devs:rust-dev agent)
-- [ ] T030 [GIT] Commit: feat(presentation): add comfy-table / indicatif / owo-colors / inquire wrappers
+- [x] T024 Create `src/presentation/mod.rs` declaring `pub mod tables; pub mod progress; pub mod colour; pub mod prompt;` (use devs:rust-dev agent)
+- [x] T025 [P] Implement `src/presentation/tables.rs` — `comfy-table` helpers with `NO_COLOR` / non-TTY plain-text fallback (use devs:rust-dev agent)
+- [x] T026 [P] Implement `src/presentation/progress.rs` — `indicatif` wrappers that auto-suppress when stderr is not a TTY (FR-042/FR-043/FR-046) (use devs:rust-dev agent)
+- [x] T027 [P] Implement `src/presentation/colour.rs` — `owo-colors` integration, `NO_COLOR` env + `--no-color` flag, auto-disable on non-TTY stdout (FR-045/FR-046) (use devs:rust-dev agent)
+- [x] T028 [P] Implement `src/presentation/prompt.rs` — `inquire::Select/MultiSelect/Confirm` wrappers; entry assertion that stdout AND stdin are both terminals, otherwise return `TomeError::NotATerminal` (FR-051) (use devs:rust-dev agent)
+- [x] T029 Wire `presentation` module into `src/lib.rs` re-exports (use devs:rust-dev agent)
+- [x] T030 [GIT] Commit: feat(presentation): add comfy-table / indicatif / owo-colors / inquire wrappers
 
 ### Plugin metadata parsers (third-party; lenient)
 

@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Hooks** — replaced `lefthook` with three versioned scripts under
+  `.githooks/` wired through git's `core.hooksPath` config. The set of
+  gates (fmt, typos, clippy, cog verify, cargo test) is unchanged; the
+  delivery mechanism is now one less moving part. Bootstrap is `git
+  config core.hooksPath .githooks` (one-time, per clone). Constitution
+  bumped to v1.1.0 to reflect the workflow change. See
+  `specs/002-phase-2-plugins-index/retro/P2.md` for the diagnosis that
+  drove this migration.
+
 ### Added
 
 User-visible
@@ -27,8 +38,9 @@ User-visible
 
 Project-level
 - Initial project scaffold: Cargo crate, dual MIT/Apache licence,
-  lefthook (`fmt`, `clippy -D warnings`, `typos`, `cog verify`,
-  `cargo test`), GitHub Actions CI matrix
+  versioned git hooks under `.githooks/` (`fmt`, `clippy -D warnings`,
+  `typos`, `cog verify`, `cargo test`) wired via `core.hooksPath` with no
+  external manager, GitHub Actions CI matrix
   (`{ubuntu,macos} × {stable,MSRV}`), security workflow (`cargo audit`,
   `cargo deny`), 10 MB stripped-binary CI gate, `deny.toml` with the
   constitution's licence allowlist, `renovate.json`.
