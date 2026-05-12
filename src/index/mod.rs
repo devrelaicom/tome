@@ -9,10 +9,22 @@
 //! Spec: data-model.md §5–9, contracts/index-schema.sql, research §R3.
 
 pub mod db;
+pub mod integrity;
+pub mod lock;
+pub mod meta;
 pub mod migrations;
+pub mod query;
 pub mod schema;
+pub mod skills;
 pub mod vec_ext;
 
 pub use db::{OpenOptions, open};
+pub use lock::{LockGuard, acquire as acquire_lock};
+pub use meta::{DriftStatus, MetaKey, ModelIdent, detect_drift};
 pub use migrations::{MIGRATIONS, Migration, apply_pending, current_schema_version};
+pub use query::{Candidate, QueryFilters, knn};
 pub use schema::{CREATE_STATEMENTS, MetaSeed, SCHEMA_VERSION, bootstrap};
+pub use skills::{
+    EnableSummary, PendingSkill, SkillRecord, content_hash, delete_by_plugin, embedding_text,
+    enable_plugin_atomic, find as find_skill, list_for_plugin, mark_all_disabled_for_plugin,
+};
