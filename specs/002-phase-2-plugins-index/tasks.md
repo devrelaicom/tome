@@ -63,20 +63,20 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Phase Start
 
-- [ ] T016 [GIT] Verify working tree is clean before starting Phase 2 (`git status --porcelain`)
-- [ ] T017 Create `specs/002-phase-2-plugins-index/retro/P2.md` from the standard retro template
+- [x] T016 [GIT] Verify working tree is clean before starting Phase 2 (`git status --porcelain`)
+- [x] T017 Create `specs/002-phase-2-plugins-index/retro/P2.md` from the standard retro template
 
 ### Error surface
 
-- [ ] T018 Extend `src/error.rs` `TomeError` enum with the 18 Phase 2 variants enumerated in `contracts/exit-codes.md`; update `impl ExitCode for TomeError` to map each to its dedicated exit code (use devs:rust-dev agent)
-- [ ] T019 [P] Extend `tests/exit_codes.rs` with one case per new variant: construct each `TomeError`, assert its exit-code value matches `contracts/exit-codes.md` (use devs:rust-dev agent)
-- [ ] T020 [GIT] Commit: feat(error): enumerate Phase 2 error variants and exit codes
+- [x] T018 Extend `src/error.rs` `TomeError` enum with the 18 Phase 2 variants enumerated in `contracts/exit-codes.md`; update `impl ExitCode for TomeError` to map each to its dedicated exit code (use devs:rust-dev agent)
+- [x] T019 [P] Extend `tests/exit_codes.rs` with one case per new variant: construct each `TomeError`, assert its exit-code value matches `contracts/exit-codes.md` (use devs:rust-dev agent)
+- [x] T020 [GIT] Commit: feat(error): enumerate Phase 2 error variants and exit codes
 
 ### Paths
 
-- [ ] T021 Extend `src/paths.rs` with `index_db_path()`, `index_lock_path()`, `models_dir()`, and `model_path(name)` — all under `${XDG_DATA_HOME}/tome/` per spec FR-021 (use devs:rust-dev agent)
-- [ ] T022 [P] Extend `tests/path_validation.rs` (or new `tests/paths_phase2.rs`) with table-driven cases for the new path resolvers (use devs:rust-dev agent)
-- [ ] T023 [GIT] Commit: feat(paths): add index database, lock, and models directory paths
+- [x] T021 Extend `src/paths.rs` with `index_db_path()`, `index_lock_path()`, `models_dir()`, and `model_path(name)` — all under `${XDG_DATA_HOME}/tome/` per spec FR-021 (use devs:rust-dev agent)
+- [x] T022 [P] Extend `tests/path_validation.rs` (or new `tests/paths_phase2.rs`) with table-driven cases for the new path resolvers (use devs:rust-dev agent)
+- [x] T023 [GIT] Commit: feat(paths): add index database, lock, and models directory paths
 
 ### Presentation primitives
 
