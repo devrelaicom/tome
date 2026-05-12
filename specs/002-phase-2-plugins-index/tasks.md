@@ -128,9 +128,9 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Credential-scrubbing extension
 
-- [ ] T060 [P] Extend `src/catalog/git.rs::scrub_credentials` (or move to a shared `src/scrub.rs`) so it also runs over `reqwest` error chains and any URL surfaced by `embedding::download` (use devs:rust-dev agent)
-- [ ] T061 [P] Extend `tests/scrubbing.rs` with cases for signed-URL query strings and `https://user:token@host/` model URLs (use devs:rust-dev agent)
-- [ ] T062 [GIT] Commit: feat(scrub): extend credential scrubber to model download surfaces
+- [X] T060 [P] Extend `src/catalog/git.rs::scrub_credentials` (or move to a shared `src/scrub.rs`) so it also runs over `reqwest` error chains and any URL surfaced by `embedding::download` (use devs:rust-dev agent)
+- [X] T061 [P] Extend `tests/scrubbing.rs` with cases for signed-URL query strings and `https://user:token@host/` model URLs (use devs:rust-dev agent)
+- [X] T062 [GIT] Commit: feat(scrub): extend credential scrubber to model download surfaces
 
 ### Phase 2 closing
 

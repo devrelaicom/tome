@@ -82,14 +82,19 @@ pub fn download_model(entry: &ModelEntry, model_root: &Path) -> Result<ModelMani
 }
 
 fn stream_to_partial(entry: &ModelEntry, dest: &Path) -> Result<String, TomeError> {
-    let mut response = reqwest::blocking::get(entry.source_url)
-        .map_err(|e| TomeError::Io(std::io::Error::other(format!("HTTP get failed: {e}"))))?;
+    // `reqwest::Error::Display` reproduces the failing URL verbatim, which
+    // can include presigned-URL query parameters carrying credentials. Run
+    // both the error message and the (non-error) status-line message
+    // through the credential scrubber before they reach `TomeError`.
+    let mut response = reqwest::blocking::get(entry.source_url).map_err(|e| {
+        TomeError::Io(std::io::Error::other(scrub_for_diag(&format!(
+            "HTTP get failed: {e}"
+        ))))
+    })?;
 
     if !response.status().is_success() {
-        return Err(TomeError::Io(std::io::Error::other(format!(
-            "HTTP {} fetching {}",
-            response.status(),
-            entry.source_url
+        return Err(TomeError::Io(std::io::Error::other(scrub_for_diag(
+            &format!("HTTP {} fetching {}", response.status(), entry.source_url),
         ))));
     }
 
@@ -159,3 +164,10 @@ fn write_manifest(entry: &ModelEntry, final_dir: &Path) -> Result<ModelManifest,
 // Bring `Read::read` into scope so the explicit byte loop above compiles
 // against `reqwest::blocking::Response`'s `Read` impl.
 use std::io::Read;
+
+/// Wrap a diagnostic string through the credential scrubber so presigned
+/// URL query strings, `Authorization: Bearer` headers, and the like are
+/// redacted before the message lands in `TomeError`.
+fn scrub_for_diag(text: &str) -> String {
+    git::scrub_to_string(text.as_bytes())
+}
