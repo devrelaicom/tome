@@ -90,13 +90,13 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Plugin metadata parsers (third-party; lenient)
 
-- [ ] T031 Create `src/plugin/mod.rs` declaring submodules and `pub use` re-exports for `PluginId`, `PluginRecord`, `PluginManifest`, `SkillFrontmatter`, `ComponentCounts` (use devs:rust-dev agent)
-- [ ] T032 [P] Implement `src/plugin/identity.rs` — `PluginId` struct + `FromStr` / `Display`; reject empty parts, embedded slashes, `..`, absolute paths (use devs:rust-dev agent)
-- [ ] T033 [P] Implement `src/plugin/manifest.rs` — lenient `plugin.json` parse via `serde_json` (no `deny_unknown_fields`); name required, others optional with sensible defaults (use devs:rust-dev agent)
-- [ ] T034 [P] Add `serde_yaml` (or `serde_yml`) to `Cargo.toml` and implement `src/plugin/frontmatter.rs` — lenient YAML frontmatter parse with FR-011 / FR-012 fallbacks (directory name; first 500 chars of body); distinguish header-delimiter parse failure (returns `SkillFrontmatterParseError`) from YAML-body invalid (returns sentinel for caller to log and skip per FR-013c) (use devs:rust-dev agent)
-- [ ] T035 [P] Implement `src/plugin/components.rs` — walk `skills/`, `agents/`, `commands/`, `hooks/`, `.mcp.json` and return `ComponentCounts` (use devs:rust-dev agent)
-- [ ] T036 [P] Implement `tests/frontmatter.rs` — table-driven cases: valid + extra fields, missing name, missing description, both missing, malformed delimiters, malformed YAML body (use devs:rust-dev agent)
-- [ ] T037 [GIT] Commit: feat(plugin): add identity, manifest, frontmatter, and component parsers
+- [X] T031 Create `src/plugin/mod.rs` declaring submodules and `pub use` re-exports for `PluginId`, `PluginRecord`, `PluginManifest`, `SkillFrontmatter`, `ComponentCounts` (use devs:rust-dev agent)
+- [X] T032 [P] Implement `src/plugin/identity.rs` — `PluginId` struct + `FromStr` / `Display`; reject empty parts, embedded slashes, `..`, absolute paths (use devs:rust-dev agent)
+- [X] T033 [P] Implement `src/plugin/manifest.rs` — lenient `plugin.json` parse via `serde_json` (no `deny_unknown_fields`); name required, others optional with sensible defaults (use devs:rust-dev agent)
+- [X] T034 [P] Add `serde_yaml` (or `serde_yml`) to `Cargo.toml` and implement `src/plugin/frontmatter.rs` — lenient YAML frontmatter parse with FR-011 / FR-012 fallbacks (directory name; first 500 chars of body); distinguish header-delimiter parse failure (returns `SkillFrontmatterParseError`) from YAML-body invalid (returns sentinel for caller to log and skip per FR-013c) (use devs:rust-dev agent)
+- [X] T035 [P] Implement `src/plugin/components.rs` — walk `skills/`, `agents/`, `commands/`, `hooks/`, `.mcp.json` and return `ComponentCounts` (use devs:rust-dev agent)
+- [X] T036 [P] Implement `tests/frontmatter.rs` — table-driven cases: valid + extra fields, missing name, missing description, both missing, malformed delimiters, malformed YAML body (use devs:rust-dev agent)
+- [X] T037 [GIT] Commit: feat(plugin): add identity, manifest, frontmatter, and component parsers
 
 ### Index database core
 
