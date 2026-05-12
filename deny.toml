@@ -17,9 +17,40 @@ allow = [
 ]
 confidence-threshold = 0.93
 
+# Per-crate licence exceptions for Phase 2 transitives.
+#
+# We accept these exceptions narrowly (per crate) rather than adding the
+# licences to the constitution's general allowlist:
+#
+#   webpki-roots (CDLA-Permissive-2.0) — Mozilla's licence for bundled CA
+#     root certificates. Permissive; widely used in the Rust TLS ecosystem.
+#     Pulled in via reqwest/rustls-tls and via ort-sys/ureq.
+#
+#   option-ext (MPL-2.0) — file-level weak copyleft. MPL-2.0 affects only
+#     modifications to the MPL-licensed files themselves; our own source
+#     stays MIT OR Apache-2.0. Pulled in via fastembed → hf-hub → dirs.
+#
+#   libfuzzer-sys (NCSA, alongside MIT/Apache-2.0) — LLVM-derived; pulled
+#     in via fastembed → image → ravif → rav1e. NCSA is permissive and
+#     compatible with our distribution model.
+exceptions = [
+    { allow = ["CDLA-Permissive-2.0"], name = "webpki-roots" },
+    { allow = ["MPL-2.0"], name = "option-ext" },
+    { allow = ["NCSA"], name = "libfuzzer-sys" },
+]
+
 [advisories]
 version = 2
 yanked = "warn"
+# Transitives with no safe upgrade as of 2026-05-12. Tracked for re-evaluation
+# whenever the upstream chains move:
+#   - number_prefix  → indicatif (no migration available)
+#   - paste          → tokenizers → fastembed (dtolnay archived; no drop-in)
+ignore = [
+    "RUSTSEC-2025-0119", # number_prefix unmaintained (via indicatif)
+    "RUSTSEC-2024-0436", # paste unmaintained (via fastembed/tokenizers)
+    "RUSTSEC-2025-0057", # fxhash unmaintained (via inquire)
+]
 
 [sources]
 unknown-registry = "deny"

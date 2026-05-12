@@ -9,3 +9,7 @@
 
 # direnv
 .envrc.local
+
+# tool-harness state (not project artefacts)
+.claude/scheduled_tasks.lock
+.midnight-expert/settings.local.json
