@@ -17,4 +17,5 @@ extend-exclude = [
     "CHANGELOG.md",
     "target/",
     "specs/**/contracts/*.toml",
+    "vendor/",
 ]

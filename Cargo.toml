@@ -11,6 +11,7 @@ categories = ["command-line-utilities", "development-tools"]
 keywords = ["claude-code", "plugins", "ai", "cli"]
 
 [dependencies]
+# Phase 1 — unchanged
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
@@ -27,7 +28,34 @@ regex = "1"
 semver = "1"
 time = { version = "0.3", features = ["serde-human-readable", "formatting", "parsing"] }
 
+# Phase 2 — embedded database + vector search (statically linked; no system deps)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Phase 2 — third-party plugin frontmatter (lenient YAML; FR-013a)
+serde_yaml = "0.9"
+
+# Phase 2 — inference. Default features pull a pre-built ONNX Runtime at build
+# time (CPU EP). If that becomes brittle, switch to default-features = false +
+# ["ort-load-dynamic"] and have developers `brew install onnxruntime`.
+fastembed = "4"
+
+# Phase 2 — model downloads (HTTPS only via rustls; no system OpenSSL)
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+
+# Phase 2 — presentation primitives
+indicatif = "0.17"
+comfy-table = "7"
+owo-colors = "4"
+inquire = { version = "0.7", default-features = false, features = ["crossterm"] }
+
+[build-dependencies]
+# Compile vendored sqlite-vec amalgamation against rusqlite's bundled SQLite.
+cc = "1"
+
 [profile.release]
+# Phase 1 baseline + Phase 2 binary-size tuning (NFR-001).
 strip = "symbols"
 lto = "thin"
 codegen-units = 1
+panic = "abort"
+opt-level = 3

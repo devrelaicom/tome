@@ -54,11 +54,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
         shell: bash
         run: |
-          cargo build --release
+          cargo build --release --locked
           size=$(stat -c%s target/release/tome)
           limit=10485760
-          echo "release binary: $size bytes (limit: $limit)"
+          mb=$(python3 -c "print(f'{$size / 1048576:.2f}')")
+          echo "release binary: ${mb} MB ($size bytes, limit ${limit})"
           if [ "$size" -ge "$limit" ]; then
-            echo "::error::Release binary exceeds the 10 MB limit (SC-010)"
+            echo "::error::Release binary ${mb} MB exceeds the 10 MB limit (NFR-001)"
             exit 1
           fi
