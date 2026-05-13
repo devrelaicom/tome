@@ -45,6 +45,8 @@ tests/
 ├── models_remove.rs               # CLI binary: `tome models remove` (Phase 6)
 ├── query.rs                       # Library API: embed + KNN query path (Phase 3)
 ├── reindex.rs                     # Library + CLI: `tome reindex` (Phase 7)
+├── status.rs                      # Library API: `assemble_report` (Phase 8)
+├── version_output.rs              # Compile-time content tests (Phase 8)
 ├── atomicity_enable.rs            # Failure-injection: enable rollback (Phase 3)
 ├── exit_codes.rs                  # Unit: exhaustiveness check on TomeError
 ├── error_messages.rs              # Unit: error message format correctness
@@ -70,25 +72,41 @@ tests/
 | Category | Location | Style |
 |----------|----------|-------|
 | Unit tests | `tests/{test_name}.rs` | Test one concept (parser, error path, validator) |
-| Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/reindex.rs`, `tests/catalog_update_reindex.rs` | Exercise library API with `StubEmbedder`, bypassing `Paths::resolve` + `FastembedEmbedder::load` |
+| Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/reindex.rs`, `tests/catalog_update_reindex.rs`, `tests/status.rs` | Exercise library API with `StubEmbedder`, bypassing `Paths::resolve` + `FastembedEmbedder::load` |
 | Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs`, `tests/plugin_disable.rs`, `tests/models_*.rs`, `tests/reindex.rs` (parse-error tests) | Spawn `tome` binary as subprocess; used when no embedders are loaded |
 | Integration tests (PTY-driven) | `tests/plugin_interactive.rs` | Scripted pty session with `rexpect`; driven via real terminal I/O |
+| Compile-time content tests | `tests/version_output.rs` | Read `MODEL_REGISTRY` at compile time; assert output matches pinned models (Phase 8) |
 | Shared helpers | `tests/common/mod.rs` | Fixture builders, ToolEnv, lifecycle helpers, `paths_for`, sparse-file fixtures (Phase 6) |
 | Test fixtures | `tests/fixtures/` | Real git repos and sample plugin catalogs |
 
 ## Test Patterns
 
-### Library API Integration Test Pattern (Phase 3–7)
+### Library API Integration Test Pattern (Phase 3–8)
 
-Tests for `plugin::lifecycle`, `index::query`, `commands::reindex`, and `commands::catalog::update` drive the library API directly with a `StubEmbedder`. This avoids loading real ONNX models in CI.
+Tests for `plugin::lifecycle`, `index::query`, `commands::reindex`, `commands::catalog::update`, and `commands::status` drive the library API directly with a `StubEmbedder`. This avoids loading real ONNX models in CI.
 
 Pattern:
 1. **Build fixture** — copy sample plugin catalog to temp dir, initialize git
 2. **Build paths** — plain-data `Paths` rooted at TempDir via `lifecycle_paths(root)` (no env mutation)
 3. **Fabricate models** — write `ModelManifest` JSON so `ensure_models_present` passes
 4. **Construct lifecycle deps** — include stub embedder, seed values
-5. **Call library function** — e.g., `lifecycle::enable(&id, &deps)?` or `run_with_deps(...)`
-6. **Assert outcome** — check return value, side effects (database rows, metadata)
+5. **Call library function** — e.g., `lifecycle::enable(&id, &deps)?` or `assemble_report(&paths, false)?`
+6. **Assert outcome** — check return value, side effects (database rows, metadata, report fields)
+
+**Phase 8 addition:** Status report is testable via `assemble_report(&paths, verify)` (library API); the `run()` wrapper adds `std::process::exit(1)` for non-Ok cases. Tests call `assemble_report` directly:
+
+```rust
+#[test]
+fn status_reports_healthy_when_models_ok() {
+    let paths = lifecycle_paths(tmp.path());
+    fabricate_models(&paths);
+    // ... setup index with valid data ...
+
+    let report = assemble_report(&paths, false).expect("status should succeed");
+    assert_eq!(report.overall, OverallHealth::Ok);
+    assert_eq!(report.embedder.state, "ok");
+}
+```
 
 **Phase 7 addition:** Commands that batch-reindex (`tome catalog update` via `reindex_catalog_plugins`, `tome reindex` via `run_with_deps`) now expose library entry points:
 
@@ -131,9 +149,9 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
 }
 ```
 
-### CLI-Binary Integration Test Pattern (Phase 3–7)
+### CLI-Binary Integration Test Pattern (Phase 3–8)
 
-Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`, `plugin disable`, `models list`, `models remove`) spawn the real binary.
+Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`, `plugin disable`, `models list`, `models remove`, `status` read-only report) spawn the real binary.
 
 Pattern:
 1. **Build fixture** — copy plugin catalog to temp dir, initialize git
@@ -142,6 +160,25 @@ Pattern:
 4. **Run binary** — invoke `tome` binary as a subprocess with isolated env
 5. **Assert exit code** — check `.status.code()` matches expected
 6. **Assert output** — parse stdout (human or `--json`) and validate content
+
+**Phase 8 addition:** `status` can be tested via CLI binary without embedders (it's read-only). Example from `tests/status.rs`:
+
+```rust
+#[test]
+fn status_exit_zero_when_healthy() {
+    let env = ToolEnv::new();
+    setup_models(&env);
+    // ... populate index via library API ...
+
+    let out = env.cmd()
+        .args(["status"])
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Embedder"));
+}
+```
 
 **Phase 7 parse-error tests:** `tests/reindex.rs` includes 3 CLI-binary tests that cover parse errors and early exits without needing an embedder (unknown catalog → exit 3, malformed id → exit 2, empty install → exit 0). The heavy-state embed paths use the `run_with_deps` library entry point.
 
@@ -207,6 +244,53 @@ fn interactive_disable_via_scripted_session_exits_zero_and_flips_state() {
 }
 ```
 
+### Compile-Time Content Test Pattern (Phase 8)
+
+For output that's parameterized by compile-time constants (e.g., `--version` including `MODEL_REGISTRY` identities), read the constant at compile time and assert the output matches.
+
+**Why:** Model bumps automatically update the assertion without manual intervention.
+
+Example from `tests/version_output.rs`:
+
+```rust
+#[test]
+fn version_output_includes_embedder_and_reranker() {
+    // Read MODEL_REGISTRY at compile time
+    let embedder = MODEL_REGISTRY.iter().find(|e| e.kind == ModelKind::Embedder).unwrap();
+    let reranker = MODEL_REGISTRY.iter().find(|e| e.kind == ModelKind::Reranker).unwrap();
+    
+    // Expected output is computed from pinned models
+    let expected_embedder = format!("embedder: {} {}", embedder.name, embedder.version);
+    let expected_reranker = format!("reranker: {} {}", reranker.name, reranker.version);
+
+    // Spawn the binary
+    let out = Command::new(env!("CARGO_BIN_EXE_tome"))
+        .arg("--version")
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains(&expected_embedder));
+    assert!(stdout.contains(&expected_reranker));
+}
+
+#[test]
+fn version_json_format() {
+    let embedder = MODEL_REGISTRY.iter().find(|e| e.kind == ModelKind::Embedder).unwrap();
+    
+    let out = Command::new(env!("CARGO_BIN_EXE_tome"))
+        .args(["--version", "--json"])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["embedder"]["name"].as_str(), Some(embedder.name));
+}
+```
+
+This pattern is reusable for any future output that depends on constants.
+
 ### Unit Test Pattern
 
 For parsers, validators, and error paths:
@@ -258,6 +342,29 @@ fn exhaustive_match_compile_check() {
 If a new `TomeError` variant is added, this test fails to compile until updated. This is intentional — it enforces that exit codes are documented for every error type.
 
 ## Test Fixtures and Helpers
+
+### Phase 8 Library-Bypass Pattern
+
+When a command's `run()` has side effects that prevent test usage (e.g., `std::process::exit` for health checks), expose a library-API function for pure logic.
+
+**Example:** `commands::status` separates concerns:
+
+```rust
+/// Library API: testable, pure, returns StatusReport
+pub fn assemble_report(paths: &Paths, verify: bool) -> Result<StatusReport, TomeError> { ... }
+
+/// CLI API: wraps assemble_report, adds std::process::exit(1) for non-Ok cases
+pub fn run(args: StatusArgs, mode: Mode) -> Result<(), TomeError> {
+    let report = assemble_report(&paths, args.verify)?;
+    emit(&report, mode)?;
+    if !matches!(report.overall, OverallHealth::Ok) {
+        std::process::exit(1);  // Non-recoverable state
+    }
+    Ok(())
+}
+```
+
+Tests call `assemble_report` directly; only integration tests using the CLI binary exercise the exit semantics. This pattern is the firm shape for any future introspection command with exit-code semantics tied to report content.
 
 ### Phase 7 Library Entry Point Pattern
 
@@ -497,6 +604,8 @@ When tests run:
 | `models_remove.rs` | CLI-binary | `tome models remove <model>` — deletion, confirmation, cascade cleanup (Phase 6) |
 | `query.rs` | Library API | KNN query + optional reranking — self-similarity, filtering, candidate pool, drift detection |
 | `reindex.rs` | Library + CLI | `tome reindex [<scope>]` — library-API scope variants (All, Catalog, Plugin) via `run_with_deps`, CLI parse-error paths, empty install (Phase 7) |
+| `status.rs` | Library API | `assemble_report` — subsystem health checks (embedder, reranker, index, drift), overall classification (Ok/Degraded/Unhealthy) (Phase 8) |
+| `version_output.rs` | Compile-time content | `--version` output includes embedder/reranker identities; `--json` format (Phase 8) |
 | `atomicity_enable.rs` | Library API | Failure-injection: `StubEmbedder::with_force_fail_after(n)` → rollback guarantee (FR-004) |
 
 ### Unit Tests (by concern)
@@ -549,11 +658,11 @@ pub fn with_force_fail_after(n: usize) -> Self {
 
 The counter is shared between clones via `Arc<AtomicUsize>` so the closure adaptation inside `enable_plugin_atomic` (which captures by reference) observes the same call count. Used in `atomicity_enable.rs` to inject mid-pipeline embedder failures and verify rollback (FR-004).
 
-## Test Organization by Concern (Phase 3–7)
+## Test Organization by Concern (Phase 3–8)
 
 ### No Environment Mutation in Library API Tests
 
-**Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`, `catalog_update_reindex.rs`, `reindex.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
+**Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`, `catalog_update_reindex.rs`, `reindex.rs`, `status.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
 
 **CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse-error tests) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
 
@@ -566,6 +675,15 @@ Two parallel path builders are deliberately kept in lock-step:
 2. **Integration test helper:** `tests/common/mod.rs::lifecycle_paths` (for library API integration tests)
 
 If one changes, the other must change too — enforced via manual code review.
+
+### Phase 8: Library-Bypass Pattern as Standard
+
+Commands with side effects that prevent test usage (e.g., `std::process::exit` for health checks) now expose a library-API function for pure logic. The CLI `run()` wraps it and adds the exit semantics.
+
+- Library API (`assemble_report`) — testable, no exit side effects
+- CLI API (`run`) — adds `std::process::exit` for the appropriate status code
+
+This is documented as the precedent for future introspection commands.
 
 ### Phase 7: Library Entry Points as the Standard
 
@@ -607,11 +725,12 @@ No automatic coverage threshold enforced, but the test corpus is organized to be
 
 - **Every error class is tested** — each `TomeError` variant appears in `exit_codes.rs` and often in command-specific tests
 - **Bad-input corpus is explicit** — each parser/validator has a separate test file documenting what shapes are rejected
-- **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/disable/list/show`, `plugin` interactive, `models download/list/remove`, `reindex`) has dedicated tests
-- **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable and cheap-reenable (FR-006), fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback; `catalog_update_reindex.rs` and `reindex.rs` cover batch reindex logic
+- **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/disable/list/show`, `plugin` interactive, `models download/list/remove`, `reindex`, `status`) has dedicated tests
+- **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable and cheap-reenable (FR-006), fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback; `catalog_update_reindex.rs` and `reindex.rs` cover batch reindex logic; `status.rs` covers health assessment
 - **Idempotency tested** — `plugin_repeated.rs` covers enable-of-enabled and disable-of-disabled (FR-008, exit 21)
 - **Interactive flow tested end-to-end** — `plugin_interactive.rs` covers catalog selector, plugin browser, action prompts, navigation, non-TTY refusal
-- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift, sparse fixtures (Phase 6), batch reindex cheapness (Phase 7)
+- **Compile-time content validated** — `version_output.rs` ensures `--version` output is synchronized with `MODEL_REGISTRY`
+- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift, sparse fixtures (Phase 6), batch reindex cheapness (Phase 7), health classification (Phase 8)
 
 ## Specimen Tests (Quality Corpus)
 
@@ -728,7 +847,7 @@ Green on all 4 combinations is required before merge.
 4. Add test case verifying unknown field with similar name is rejected
 5. Run `cargo test manifest_strictness` to verify
 
-### Testing a New Plugin Command (Phase 3–7)
+### Testing a New Plugin Command (Phase 3–8)
 
 For library API tests (no embedder loading):
 1. Add module under `src/commands/plugin/`
@@ -768,6 +887,29 @@ For CLI tests (no embedder loading):
 5. Run `cargo test models_*` to verify
 
 Do not exercise the full network-download path in CI (would hit real `MODEL_REGISTRY` URLs). Test library-level download pipeline separately; CLI tests cover skip paths and JSON envelope.
+
+### Testing a New Status/Health Command (Phase 8)
+
+For library API tests (testable logic):
+1. Create integration test file `tests/{command}.rs` (library API)
+2. Use `lifecycle_paths`, `fabricate_models`, setup representative state
+3. Call the library-API function directly: `assemble_report(&paths, verify)?`
+4. Assert report fields, classification, and side effects
+5. Run `cargo test {command}` to verify
+
+For compile-time content tests:
+1. If output is parameterized by constants (e.g., `MODEL_REGISTRY`), create a compile-time content test
+2. Read constants at compile time
+3. Compute expected output from constants
+4. Spawn the binary and assert output matches
+5. Model bumps automatically update assertions
+
+For CLI exit-code tests:
+1. Reuse the library API test scaffolding
+2. Use `ToolEnv`, `paths_for`, `write_config_for_cli`
+3. Spawn the binary with representative state
+4. Assert exit code (0 for Ok, 1 for Degraded/Unhealthy)
+5. Assert human + JSON output correctness
 
 ### Testing a New Batch Reindex Command (Phase 7)
 

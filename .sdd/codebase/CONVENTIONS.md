@@ -32,8 +32,9 @@
 | Type | Convention | Example |
 |------|------------|---------|
 | Modules | snake_case | `src/catalog/git.rs`, `src/commands/catalog/add.rs` |
-| Subcommands | snake_case, grouped by capability | `src/commands/plugin/{enable,list,show,disable}.rs`, `src/commands/models/{download,list,remove}.rs` |
-| Tests | descriptive, lowercase | `tests/catalog_add.rs`, `tests/plugin_enable.rs`, `tests/atomicity_enable.rs` |
+| Single-purpose commands | snake_case, flat | `src/commands/status.rs`, `src/commands/query.rs`, `src/commands/reindex.rs` |
+| Multi-subcommand groups | snake_case dir + subcommand files | `src/commands/plugin/{enable,disable,list,show,interactive}.rs`, `src/commands/models/{download,list,remove}.rs` |
+| Tests | descriptive, lowercase | `tests/catalog_add.rs`, `tests/plugin_enable.rs`, `tests/status.rs` |
 | Test fixtures | descriptive | `tests/fixtures/sample-catalog/`, `tests/fixtures/sample-plugin-catalog/` |
 | Capabilities | feature-named | `catalog`, `config`, `paths`, `error`, `plugin`, `index`, `embedding` |
 
@@ -85,7 +86,7 @@ This enforces the Unix principle: every failure class has a stable, documented e
 | 8 | `Interrupted` | User pressed Ctrl+C; in-flight git processes killed |
 | 30 | `ModelMissing` | Required embedding model not present |
 
-*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2–7 exit codes.*
+*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2–8 exit codes.*
 
 ### Error Message Style
 
@@ -155,7 +156,8 @@ src/
 │   │   ├── list.rs           # `tome models list`
 │   │   └── remove.rs         # `tome models remove <model>`
 │   ├── query.rs              # `tome query <text>` (Phase 3)
-│   └── reindex.rs            # `tome reindex [<scope>]` + library entry point (Phase 7)
+│   ├── reindex.rs            # `tome reindex [<scope>]` + library entry point (Phase 7)
+│   └── status.rs             # `tome status [--verify]` — single-file, read-only (Phase 8)
 ├── catalog/                  # Catalog manifest + storage + git operations
 │   ├── mod.rs
 │   ├── manifest.rs           # Parser + validator (strict TOML)
@@ -217,6 +219,8 @@ tests/
 ├── models_remove.rs          # CLI-binary tests for `tome models remove` (Phase 6)
 ├── query.rs                  # Library API tests for query path (embed + KNN)
 ├── reindex.rs                # Library + CLI tests for `tome reindex` (Phase 7)
+├── status.rs                 # Library API tests for `assemble_report`; CLI-only for run() (Phase 8)
+├── version_output.rs         # Compile-time content tests for `--version` output (Phase 8)
 ├── atomicity_enable.rs       # Failure-injection tests for enable rollback (FR-004)
 ├── exit_codes.rs             # Exhaustiveness check: every TomeError → exit code
 ├── error_messages.rs         # Error message correctness
@@ -229,45 +233,72 @@ tests/
     └── sample-plugin-catalog/
 ```
 
-### CLI Module Pattern (Phase 3–7)
+### CLI Module Pattern (Phase 3–8)
 
-Each subcommand group lives under `src/commands/{group}/` with one file per subcommand:
+**Multi-subcommand groups** live under `src/commands/{group}/` with one file per subcommand:
 
 - **`src/commands/{group}/mod.rs`**: Dispatcher enum, cross-subcommand helpers (public via `pub(crate)`)
 - **`src/commands/{group}/{subcommand}.rs`**: Subcommand logic; public function signature is `pub fn run(args, mode) -> Result<(), TomeError>`
 
 Cross-module reach via `super::*` within a group is acceptable; cross-group via re-export is preferred.
 
-The pattern is now consistent across:
+The pattern is consistent across:
 - `plugin` (enable, disable, list, show, interactive)
 - `models` (download, list, remove)
 - `catalog` (add, remove, list, update/reindex, show)
-- Standalone `reindex.rs` (explicit reindex subcommand)
 
-**Phase 7 addition:** Commands that load embedders (`plugin enable`, `models download`, `catalog update`) now expose a second public entry point `pub fn run_with_deps(...)` that accepts a pre-configured `LifecycleDeps`. This allows tests to drive the library API with `StubEmbedder` without loading real ONNX models in CI.
+**Single-purpose commands** (Phase 8 addition) stay as flat `src/commands/<name>.rs`:
+
+- `src/commands/query.rs` — search subcommand (Phase 3)
+- `src/commands/reindex.rs` — explicit reindex subcommand (Phase 7)
+- `src/commands/status.rs` — health report subcommand (Phase 8)
+
+Each single-file command may expose library entry points for testability (see "Library Entry Points" below).
+
+**Phase 7 addition:** Commands that load embedders (`plugin enable`, `models download`, `catalog update`, `reindex`) now expose a second public entry point `pub fn run_with_deps(...)` that accepts a pre-configured `LifecycleDeps`. This allows tests to drive the library API with `StubEmbedder` without loading real ONNX models in CI.
 
 Examples:
 - `src/commands/reindex.rs::pub fn run_with_deps(scope, plugins, deps, force, mode)` — used by `tests/reindex.rs` library tests
 - `src/commands/catalog/update.rs::pub fn reindex_catalog_plugins(catalog, enabled, deps)` — used by `tests/catalog_update_reindex.rs` library tests
 
-**Phase 5 `disable` handler:** Mirrors `enable::run` in shape. Handles confirmation prompt (TTY gating via `output::stdin_is_tty() && output::stdout_is_tty()`, `--force` short-circuit, non-TTY refusal), calls library API `lifecycle::disable`, surfaces outcome. No embedder loaded; library API handles all atomic state changes and locking (FR-005, FR-007, FR-051).
+**Phase 8 addition:** Commands with side effects that prevent test usage (e.g., `std::process::exit` for degraded health) expose a library-API function for pure logic (`assemble_report`), leaving the CLI `run()` for exit semantics. Example from `src/commands/status.rs`:
 
-Example from `src/commands/plugin/disable.rs`:
 ```rust
-pub fn run(args: PluginDisableArgs, mode: Mode) -> Result<(), TomeError> {
-    let id = PluginId::from_str(&args.id)?;
-    let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file)?;
-    let _ = resolve_plugin_dir(&id, &config)?;  // Fail fast on bad address
-    
-    if !args.force && !(output::stdin_is_tty() && output::stdout_is_tty()) {
-        return Err(TomeError::NotATerminal);
+/// Library-API entry point: testable, no std::process::exit
+pub fn assemble_report(paths: &Paths, verify: bool) -> Result<StatusReport, TomeError> { ... }
+
+/// CLI entry point: adds std::process::exit(1) for non-Ok cases
+pub fn run(args: StatusArgs, mode: Mode) -> Result<(), TomeError> {
+    let report = assemble_report(&paths, args.verify)?;
+    emit(&report, mode)?;
+    if !matches!(report.overall, OverallHealth::Ok) {
+        std::process::exit(1);  // Non-recoverable health state
     }
-    
-    let outcome = lifecycle::disable(&id, &deps)?;
-    // Present outcome
+    Ok(())
 }
 ```
+
+Tests call `assemble_report` directly; the `run` wrapper is for CLI dispatch only.
+
+### --version Pre-Parse Hook (Phase 8)
+
+The `--version` flag requires special handling:
+
+1. **Problem:** Clap's auto-handler can't include embedder/reranker identities in the output, nor can it honour the `--json` flag.
+2. **Solution:** Set `disable_version_flag = true` on the `Cli` derive in `src/cli.rs`, then intercept in `main.rs` before clap parsing:
+
+```rust
+let raw: Vec<String> = std::env::args().collect();
+if raw.iter().skip(1).any(|a| a == "--version" || a == "-V") {
+    let json = raw.iter().any(|a| a == "--json");
+    commands::status::print_version(json);
+    std::process::exit(0);
+}
+
+let cli = Cli::parse();  // Now --version won't be seen by clap
+```
+
+**Pattern:** This pre-parse hook pattern applies to any flag that needs to short-circuit clap's default behavior. For now, only `--version` uses it.
 
 ### Interactive CLI Pattern (Phase 4)
 
@@ -418,6 +449,19 @@ let status = Command::new("git")
 **Why:** Every developer machine has `git`. Shelling out avoids a large binary dependency and lets us inherit the user's configured credentials, SSH keys, and GPG signing.
 
 Signal handling: `ctrlc::set_handler` flips `CANCELLED` atomic bool. Operations check `was_cancelled()` and kill spawned processes before returning `TomeError::Interrupted` (exit code 8).
+
+### Helper Promotion as Deliberate Process (Phase 8)
+
+When a helper function is used by multiple independent modules (usually 4+ callers), it's promoted from `pub(crate)` to `pub` to mark it as an intentional public API surface. Recent promotions:
+
+- `ModelState` (enum) — used by `status.rs`, `models.rs`, tests
+- `cheap_state(...)` — used by `models::list`, `status.rs`, tests
+- `read_manifest(...)` — used by `plugin::show`, `plugin::enable`, `plugin_enable.rs` tests
+- `primary_file_path(...)` — used by multiple model-related functions
+- `human_mb(...)` — formatting helper for model sizes
+- `registry_seeds()` / `embedder_entry()` / `reranker_entry()` — used by `status.rs`, tests
+
+**Policy:** Promotion is intentional — the type system tells us "this internal helper is now a public API surface". Document it via the function's doc comment and in this guide.
 
 ### Comment Policy
 

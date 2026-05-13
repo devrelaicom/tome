@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13
+> **Last Updated**: 2026-05-13 (Phase 8 incremental)
 
 ## Overview
 
@@ -131,12 +131,22 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Atomic model persist** | `.partial/` → final rename | `src/embedding/download.rs::download_model`, step 4 |
 | **Re-verification** | New `embedding::download::sha256_file()` helper | `src/embedding/download.rs::sha256_file`, invoked by `tome models list --verify` (Phase 6) |
 | **Virtual table constraints** | `sqlite-vec` does not support `INSERT OR REPLACE`; uses `DELETE`-then-`INSERT` | `src/index/skills.rs::upsert_skill` (Phase 7, lines 282–294) |
+| **Health check** | `tome status [--verify]` re-verifies installed models without re-downloading | `src/commands/status.rs::check_model()` (Phase 8, PR #29) |
 
 **Model Registry** (Phase 3 update):
 - `bge-small-en-v1.5` INT8: SHA-256 `51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431`, 66.5 MB, MIT
 - `bge-reranker-base` INT8: SHA-256 `46a1bb4cf46ff1e300d27589d620141fbf04fc0eaf8e7bb6dea5e044475ff387`, 279.3 MB, MIT (sourced from `onnx-community` mirror)
 
 Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads enforce both hash and size; drift surfaces as `ModelChecksumMismatch` (exit 32) rather than silently installing whatever upstream serves. The `--verify` flag in `tome models list` (Phase 6) allows users to audit installed models against pinned checksums without re-downloading.
+
+**Phase 8 Status Command** (`src/commands/status.rs`, PR #29):
+- `tome status` is a supported pre-flight health check before filing bug reports
+- Read-only: never acquires the advisory lock (FR-056), works even when a writer is running
+- Classifies health as Healthy, Degraded, or Unhealthy based on model state + index integrity + drift detection
+- Embedder drift or index corruption → Unhealthy (exit 1); reranker drift only → Degraded (exit 1); all Ok → Healthy (exit 0)
+- `--verify` flag rehashes models via `sha256_file()` against registry-pinned SHA-256s (no re-download)
+- `--json` output includes model names/versions, index state, and drift diagnostics
+- No secrets exposed; model identities are public constants from `MODEL_REGISTRY`
 
 ### Encryption
 
@@ -178,6 +188,11 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 4. `tests/exit_codes.rs` assertions
 
 No generic "Other" or "Unknown" variant. Every path maps to a named category.
+
+**Phase 8 Status Exit Semantics** (`src/commands/status.rs::run`, PR #29):
+- Exit 0: Overall health is Ok
+- Exit 1: Overall health is Degraded (reranker drift only) or Unhealthy (embedder drift, model corrupt, index corrupt)
+- Non-zero cases emit `std::process::exit(1)` directly after reporting, bypassing `TomeError` propagation
 
 ### Error Messaging
 
@@ -368,6 +383,27 @@ New dependencies that grow the binary significantly require written justificatio
 
 **Implementation**: Scrubbing happens at the capture point (Git stderr → `scrub_to_string`, HTTP errors → `scrub_for_diag`), ensuring no downstream path leaks credentials.
 
+### Version Output (Phase 8)
+
+| Feature | Mechanism | Purpose |
+|---------|-----------|---------|
+| **Pre-parse hook** | Env args scanned before clap dispatch | Allows `--version` to include model identities before CLI setup |
+| **Embedder identity** | Emitted from `MODEL_REGISTRY` | Public constant, reproducibility set when filing bugs |
+| **Reranker identity** | Emitted from `MODEL_REGISTRY` | Public constant, reproducibility set when filing bugs |
+| **`--json` support** | Structured output per `contracts/version-output.md` | Automation-friendly serialization |
+| **No secrets exposed** | Model names/versions are public registry entries | Safe to emit to stdout |
+
+**Implementation** (`src/main.rs:13–16`, `src/commands/status.rs::print_version`):
+```rust
+// Pre-parse: scan for --version / -V before clap dispatch
+let raw: Vec<String> = std::env::args().collect();
+if raw.iter().skip(1).any(|a| a == "--version" || a == "-V") {
+    let json = raw.iter().any(|a| a == "--json");
+    commands::status::print_version(json);
+    std::process::exit(0);
+}
+```
+
 ### Colour & Accessibility
 
 | Feature | Implementation |
@@ -387,6 +423,7 @@ New dependencies that grow the binary significantly require written justificatio
 | Index database | Advisory lockfile `index.lock` (Phase 2) | `src/index/lock.rs` |
 | Catalog cache | Per-catalog atomic swap — no cross-catalog lock |
 | Global state | None (sync-only, CLI is per-invocation) |
+| Status command | No lock (read-only, non-invasive health check) | Designed per FR-056 |
 
 **Rationale**: Phase 1 is synchronous and single-process. Concurrent invocations are safe because:
 - Registry writes are atomic (rename)
@@ -394,6 +431,8 @@ New dependencies that grow the binary significantly require written justificatio
 - Concurrent readers see either the old state or the new state
 
 Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coordinate concurrent access across harness instances.
+
+**Phase 8 Status Lock-Free** (PR #29): `tome status` never acquires the advisory lock. This allows it to run as a pre-flight health check even when another writer is holding the lock, supporting its use as a non-invasive doctor command.
 
 **Future consideration**: Phase 2 MCP server concurrency model is locked down in spec (FR-040); Phase 3 testing against real BGE models is pending (SC-001/SC-002, T088).
 
@@ -412,6 +451,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | **Exit codes** | Every `TomeError` variant maps to documented code | `tests/exit_codes.rs` |
 | **TTY enforcement** | Non-TTY refusal at interactive flow entry and confirmation prompts; pointer messages | `tests/plugin_interactive.rs`, `tests/plugin_disable.rs` |
 | **Integration** | Real Git repos, real fixtures, real filesystems | `tests/catalog_*.rs`, `tests/models_*.rs`, `tests/plugin_*.rs` |
+| **Status health check** | Report assembly, drift detection, overall classification | `tests/status.rs` (Phase 8) |
 
 **Success criteria**:
 - SC-005: 100% of malformed inputs rejected with helpful errors

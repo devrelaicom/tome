@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13
+> **Last Updated**: 2026-05-13 (Phase 8 incremental)
 
 ## Technical Debt
 
@@ -77,6 +77,7 @@ Code areas that are brittle or risky to modify:
 | `src/presentation/prompt.rs::require_terminal()` | TTY check runs on both stdin and stdout; must catch non-TTY in both dimensions to prevent prompt corruption via piped output | Always call `require_terminal()` at flow entry before any prompt; test with `Command::new()` (no pty) to verify short-circuit |
 | `src/commands/plugin/{enable,disable,interactive}.rs` | Non-TTY pointer-message-then-error pattern appears at 3 sites (`enable`, `disable`, `interactive`) | Pattern consolidation would yield cleaner code; worth folding in when 4th occurrence appears |
 | `src/index/skills.rs::upsert_skill` | `sqlite-vec` virtual tables do NOT support `INSERT OR REPLACE` or `ON CONFLICT` (Phase 7, PR #25 latent bug fix). Uses `DELETE`-then-`INSERT` which is idempotent | Verify this pattern on any future upsert-like operation involving virtual tables; do not attempt `INSERT OR REPLACE` on `skill_embeddings` |
+| `src/main.rs::--version pre-parse` | Early arg scanning before clap dispatch is custom; any change to pre-parse logic could break `--version` routing | Test both `tome --version` and `tome -V` in CLI integration tests; verify `--json` flag is also detected; check that non-matching args pass through to clap normally |
 
 ## Deprecated Code
 
@@ -86,7 +87,7 @@ Code marked for removal:
 |------|-------------------|----------------|-------------|
 | (none) | — | — | — |
 
-All Phase 1, Phase 2, Phase 4, Phase 5, Phase 6, and Phase 7 code is current; no legacy to remove yet.
+All Phase 1, Phase 2, Phase 4, Phase 5, Phase 6, Phase 7, and Phase 8 code is current; no legacy to remove yet.
 
 ## Performance Concerns
 
@@ -140,6 +141,7 @@ Areas that could benefit from enhancement:
 | Model download progress (TD-010) | Indeterminate spinner during download | Byte-progress bar with estimated completion | Better UX for large models |
 | Non-TTY pointer pattern consolidation | `require_terminal()` check + pointer message duplicated in 3 command modules | Extract to shared helper | Cleaner code |
 | Per-plugin reindex progress (Phase 7) | No per-skill progress or summary until completion | Stream progress per skill or plugin | Visibility into long multi-plugin reindex operations |
+| Status command caching | Report is fully recomputed on every invocation | Cache computed parts (index metadata, drift) per query | Faster repeated health checks |
 
 ## Monitoring Gaps
 
@@ -159,6 +161,7 @@ Intentional design decisions with known limitations:
 | Decision | Area | Rationale | Consequence | Notes |
 |----------|------|-----------|-------------|-------|
 | **Per-plugin atomicity** (Phase 7) | `src/index/skills.rs::reindex_plugin_atomic` | Simpler transaction model; each plugin reindex commits independently | Multi-plugin `tome catalog update` or `tome reindex` may leave earlier plugins committed if interrupted between plugins | Safe state always (no partial rows); index is always valid. By design, not a bug. Advisory lock per-plugin at entry to reindex, released at commit. |
+| **Status lock-free** (Phase 8) | `src/commands/status.rs::run` (no advisory lock taken) | Allows health check to run even when a writer is running; supports use as a non-invasive doctor command (FR-056) | Status report is a point-in-time snapshot; may be stale if another process is concurrently writing | Acceptable trade-off for pre-flight non-blocking diagnosis. Caller should understand the snapshot may be moments old. |
 
 ## Risk Summary by Phase
 
@@ -279,12 +282,35 @@ Intentional design decisions with known limitations:
 **Design constraints**:
 - Per-plugin atomicity is intentional: multi-plugin reindex may leave earlier plugins committed if interrupted between plugins (always valid state, by design)
 
+### Phase 8 (Complete)
+
+**Completed (US6, Slice 1)**:
+- ✓ `tome status [--verify] [--json]` read-only health check command (FR-056)
+- ✓ Extended `tome --version` / `tome -V` to include embedder + reranker identities (reproducibility set)
+- ✓ Pre-parse hook in `main.rs` for early `--version` interception before clap dispatch
+- ✓ Model re-verification via `--verify` flag (uses existing `sha256_file` helper, no re-download)
+- ✓ Drift detection + classification (Ok, Degraded, Unhealthy) to guide bug reporting
+- ✓ No new credentials, external endpoints, or file I/O patterns
+
+**Security posture**:
+- Status is lock-free (FR-056) — non-invasive pre-flight check even when writer is running
+- Embedder drift → Unhealthy (vectors are invalid); reranker drift → Degraded (queries still serve)
+- Version output includes only public model registry constants; no secrets exposed
+- Pre-parse hook is minimal and self-contained; only scans for `--version` / `-V` flags before clap setup
+
+**Design tradeoffs**:
+- Status report is a point-in-time snapshot; may be stale if another process is concurrently writing (acceptable for diagnosis purposes)
+- Exit code 1 for both Degraded and Unhealthy (caller must check `--json` for detailed classification)
+
+**Integration test coverage** (Phase 8):
+- `tests/status.rs` verifies report assembly, drift detection scenarios, and JSON/human output formats
+
 ---
 
 ## Concern Severity Guide
 
 | Level | Definition | Response Time |
-|-------|------------|---------------|
+|-------|------------|----------------|
 | Critical | Production impact, security breach, data loss | Immediate (within sprint) |
 | High | Degraded functionality, significant risk, blocking future phases | This sprint |
 | Medium | Developer experience, minor risk, addressable when working in area | Next sprint |
