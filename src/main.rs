@@ -5,6 +5,17 @@ use tome::cli::{Cli, Command};
 use tome::{commands, logging, output};
 
 fn main() {
+    // `--version` is handled before clap dispatch so the output can include
+    // embedder + reranker identities (per `contracts/version-output.md`) and
+    // honour the global `--json` flag. Clap's auto `--version` is disabled on
+    // the `Cli` derive to avoid intercepting first.
+    let raw: Vec<String> = std::env::args().collect();
+    if raw.iter().skip(1).any(|a| a == "--version" || a == "-V") {
+        let json = raw.iter().any(|a| a == "--json");
+        commands::status::print_version(json);
+        std::process::exit(0);
+    }
+
     let cli = Cli::parse();
     logging::init(cli.verbosity());
     git::install_signal_handler();
@@ -19,6 +30,7 @@ fn main() {
         Command::Models(cmd) => commands::models::run(cmd, mode),
         Command::Query(args) => commands::query::run(args, mode),
         Command::Reindex(args) => commands::reindex::run(args, mode),
+        Command::Status(args) => commands::status::run(args, mode),
     };
 
     match result {

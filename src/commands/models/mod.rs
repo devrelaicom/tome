@@ -32,7 +32,7 @@ pub fn run(cmd: ModelsCommand, mode: Mode) -> Result<(), TomeError> {
 
 /// On-disk classification of a registered model's install state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ModelState {
+pub enum ModelState {
     /// Manifest + every declared file exists with the recorded size.
     Ok,
     /// No manifest on disk.
@@ -47,7 +47,7 @@ pub(crate) enum ModelState {
 }
 
 impl ModelState {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ModelState::Ok => "ok",
             ModelState::Missing => "missing",
@@ -60,7 +60,7 @@ impl ModelState {
 /// Read a model's `manifest.json` from disk. Returns `Ok(Some(_))` when the
 /// manifest exists and parses; `Ok(None)` when missing; `Err` on a strict
 /// parse failure (manifest is Tome-owned, so unknown fields are rejected).
-pub(crate) fn read_manifest(
+pub fn read_manifest(
     paths: &Paths,
     entry: &ModelEntry,
 ) -> Result<Option<ModelManifest>, TomeError> {
@@ -80,7 +80,7 @@ pub(crate) fn read_manifest(
 
 /// Cheap install-state check: existence + size match. Returns the
 /// derived state plus the manifest if one was read.
-pub(crate) fn cheap_state(
+pub fn cheap_state(
     paths: &Paths,
     entry: &ModelEntry,
 ) -> Result<(ModelState, Option<ModelManifest>), TomeError> {
@@ -116,10 +116,7 @@ pub(crate) fn cheap_state(
 /// `entry.files`, by convention the `.onnx` weight). Returns `None` when the
 /// registry entry declares no files (no current entries do, but the guard
 /// keeps the call site total).
-pub(crate) fn primary_file_path(
-    paths: &Paths,
-    entry: &ModelEntry,
-) -> Result<Option<PathBuf>, TomeError> {
+pub fn primary_file_path(paths: &Paths, entry: &ModelEntry) -> Result<Option<PathBuf>, TomeError> {
     let Some(primary) = entry.files.first() else {
         return Ok(None);
     };
@@ -129,7 +126,7 @@ pub(crate) fn primary_file_path(
 /// Render `bytes` as a human-readable MiB string with no fractional digits.
 /// Inline mirror of `commands::plugin::human_mb`; duplicated to keep module
 /// boundaries clean. Worth promoting if a third caller appears.
-pub(crate) fn human_mb(bytes: u64) -> String {
+pub fn human_mb(bytes: u64) -> String {
     let mb = (bytes as f64 / 1_048_576.0).round() as u64;
     format!("{mb} MB")
 }

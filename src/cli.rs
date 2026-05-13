@@ -6,7 +6,15 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "tome", version, about, long_about = None)]
+#[command(
+    name = "tome",
+    about,
+    long_about = None,
+    // `--version` is intercepted by a pre-parse hook in `main.rs` so the
+    // output can include embedder + reranker identities and honour
+    // `--json`. clap's auto handler can't do either, hence the override.
+    disable_version_flag = true,
+)]
 pub struct Cli {
     /// Emit machine-readable JSON on stdout instead of human text.
     #[arg(long, global = true)]
@@ -38,6 +46,18 @@ pub enum Command {
     /// `tome catalog update` schedule. Use for embedder upgrades or
     /// integrity recovery. See `contracts/reindex.md`.
     Reindex(ReindexArgs),
+    /// Report the health of every Phase 2 subsystem (models, index, drift).
+    /// Exit 0 when everything is healthy; exit 1 on degraded or unhealthy.
+    Status(StatusArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct StatusArgs {
+    /// Rehash each installed model's primary file against its pinned
+    /// SHA-256. Slower (several seconds for the reranker), but catches
+    /// silent on-disk corruption.
+    #[arg(long)]
+    pub verify: bool,
 }
 
 #[derive(Debug, clap::Args)]

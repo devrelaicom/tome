@@ -1,0 +1,397 @@
+//! `tome status [--verify] [--json]`.
+//!
+//! Per-subsystem health check. See `contracts/status.md`. Read-only. Never
+//! acquires the advisory lock; never triggers a model download.
+//!
+//! Exit semantics:
+//!
+//! * Overall health == Ok → exit 0
+//! * Overall health == Degraded (reranker-only drift) → exit 1
+//! * Overall health == Unhealthy (anything else) → exit 1
+//!
+//! The non-zero cases are NOT propagated as `TomeError` variants — that
+//! would prevent the report from rendering. Instead, `run` emits the report
+//! and then calls `std::process::exit(1)` for non-Ok cases. Library-API
+//! tests bypass `run` and call `assemble_report` directly.
+
+use std::io::Write;
+
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+use crate::cli::StatusArgs;
+use crate::embedding::download::sha256_file;
+use crate::embedding::registry::ModelEntry;
+use crate::error::TomeError;
+use crate::index::meta::{DriftStatus, ModelIdent, detect_drift};
+use crate::index::{self, OpenOptions, integrity};
+use crate::output::{Mode, write_json};
+use crate::paths::Paths;
+use crate::presentation::colour;
+
+use crate::commands::models::{ModelState, cheap_state};
+use crate::commands::plugin::{embedder_entry, registry_seeds, reranker_entry};
+
+pub fn run(args: StatusArgs, mode: Mode) -> Result<(), TomeError> {
+    let paths = Paths::resolve()?;
+    let report = assemble_report(&paths, args.verify)?;
+    emit(&report, mode)?;
+    if !matches!(report.overall, OverallHealth::Ok) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+// ---- Status data model (mirrors data-model.md §11) -------------------------
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OverallHealth {
+    Ok,
+    Degraded,
+    Unhealthy,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ModelHealth {
+    pub name: String,
+    pub version: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct IndexHealth {
+    pub present: bool,
+    pub schema_version: Option<u32>,
+    pub plugins_enabled: u32,
+    pub skills_indexed: u32,
+    pub size_bytes: u64,
+    pub integrity_ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StatusReport {
+    pub tome: String,
+    pub embedder: ModelHealth,
+    pub reranker: ModelHealth,
+    pub index: IndexHealth,
+    pub drift: DriftStatus,
+    pub overall: OverallHealth,
+}
+
+// ---- Assembly --------------------------------------------------------------
+
+/// Build a `StatusReport` from the on-disk state. Read-only; does not take
+/// the advisory lock. With `verify = true`, each model's primary artefact is
+/// rehashed against its pinned SHA-256.
+///
+/// This is the library-API entry point that tests should call directly —
+/// the surrounding `run()` adds the `std::process::exit(1)` semantics that
+/// terminate the test runner.
+pub fn assemble_report(paths: &Paths, verify: bool) -> Result<StatusReport, TomeError> {
+    let tome = env!("CARGO_PKG_VERSION").to_owned();
+    let embedder_entry = embedder_entry();
+    let reranker_entry = reranker_entry();
+
+    let embedder = check_model(paths, embedder_entry, verify)?;
+    let reranker = check_model(paths, reranker_entry, verify)?;
+
+    let index = check_index(paths)?;
+    let drift = check_drift(paths, embedder_entry, reranker_entry)?;
+
+    let overall = classify(&embedder, &reranker, &index, &drift);
+
+    Ok(StatusReport {
+        tome,
+        embedder,
+        reranker,
+        index,
+        drift,
+        overall,
+    })
+}
+
+fn check_model(paths: &Paths, entry: &ModelEntry, verify: bool) -> Result<ModelHealth, TomeError> {
+    let (mut state, _manifest) = cheap_state(paths, entry)?;
+    if verify && matches!(state, ModelState::Ok) {
+        let dir = paths.model_path(entry.name)?;
+        if let Some(primary) = entry.files.first() {
+            let actual = sha256_file(&dir.join(primary))?;
+            if actual.eq_ignore_ascii_case(entry.sha256) {
+                // ok
+            } else {
+                state = ModelState::ChecksumMismatched;
+            }
+        }
+    }
+    Ok(ModelHealth {
+        name: entry.name.to_owned(),
+        version: entry.version.to_owned(),
+        state: state.as_str().to_owned(),
+    })
+}
+
+fn check_index(paths: &Paths) -> Result<IndexHealth, TomeError> {
+    if !paths.index_db.is_file() {
+        return Ok(IndexHealth {
+            present: false,
+            schema_version: None,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            size_bytes: 0,
+            integrity_ok: false,
+        });
+    }
+    let size_bytes = std::fs::metadata(&paths.index_db)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    let (embedder_seed, reranker_seed) = registry_seeds();
+    let conn = index::open(
+        &paths.index_db,
+        &OpenOptions {
+            embedder: embedder_seed,
+            reranker: reranker_seed,
+        },
+    )?;
+
+    let schema_version = match index::current_schema_version(&conn) {
+        Ok(Some(v)) => Some(v),
+        Ok(None) => Some(index::SCHEMA_VERSION),
+        Err(_) => None,
+    };
+
+    let integrity_ok = integrity::check(&conn).is_ok();
+
+    let plugins_enabled: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT plugin) FROM skills WHERE enabled = 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let skills_indexed: i64 = conn
+        .query_row("SELECT COUNT(*) FROM skills WHERE enabled = 1", [], |r| {
+            r.get(0)
+        })
+        .unwrap_or(0);
+
+    Ok(IndexHealth {
+        present: true,
+        schema_version,
+        plugins_enabled: u32::try_from(plugins_enabled).unwrap_or(u32::MAX),
+        skills_indexed: u32::try_from(skills_indexed).unwrap_or(u32::MAX),
+        size_bytes,
+        integrity_ok,
+    })
+}
+
+fn check_drift(
+    paths: &Paths,
+    embedder_entry: &ModelEntry,
+    reranker_entry: &ModelEntry,
+) -> Result<DriftStatus, TomeError> {
+    if !paths.index_db.is_file() {
+        return Ok(DriftStatus::None);
+    }
+    let (embedder_seed, reranker_seed) = registry_seeds();
+    let conn = index::open(
+        &paths.index_db,
+        &OpenOptions {
+            embedder: embedder_seed,
+            reranker: reranker_seed,
+        },
+    )?;
+    let embedder = ModelIdent {
+        name: embedder_entry.name.to_owned(),
+        version: embedder_entry.version.to_owned(),
+    };
+    let reranker = ModelIdent {
+        name: reranker_entry.name.to_owned(),
+        version: reranker_entry.version.to_owned(),
+    };
+    detect_drift(&conn, &embedder, &reranker)
+}
+
+fn classify(
+    embedder: &ModelHealth,
+    reranker: &ModelHealth,
+    index: &IndexHealth,
+    drift: &DriftStatus,
+) -> OverallHealth {
+    if embedder.state != "ok" || !index.integrity_ok && index.present {
+        return OverallHealth::Unhealthy;
+    }
+    if matches!(
+        drift,
+        DriftStatus::EmbedderNameDrift { .. } | DriftStatus::EmbedderVersionDrift { .. }
+    ) {
+        return OverallHealth::Unhealthy;
+    }
+    if reranker.state != "ok" {
+        // A reranker that's missing or corrupt still allows the embedder /
+        // index to serve queries (degraded by skipping the rerank step).
+        return OverallHealth::Degraded;
+    }
+    if matches!(drift, DriftStatus::RerankerDrift { .. }) {
+        return OverallHealth::Degraded;
+    }
+    OverallHealth::Ok
+}
+
+// ---- Output ----------------------------------------------------------------
+
+fn emit(report: &StatusReport, mode: Mode) -> Result<(), TomeError> {
+    match mode {
+        Mode::Human => emit_human(report),
+        Mode::Json => write_json(report),
+    }
+}
+
+fn emit_human(report: &StatusReport) -> Result<(), TomeError> {
+    let mut out = std::io::stdout().lock();
+    let glyph_ok = if crate::output::stdout_is_tty() {
+        format!("{} ok", colour::success("✓"))
+    } else {
+        "[ok]".to_owned()
+    };
+    let glyph_fail = if crate::output::stdout_is_tty() {
+        format!("{} {}", colour::error("✗"), "fail")
+    } else {
+        "[fail]".to_owned()
+    };
+    let model_glyph = |state: &str| -> String {
+        if state == "ok" {
+            glyph_ok.clone()
+        } else {
+            format!("{glyph_fail} ({state})")
+        }
+    };
+
+    writeln!(out, "Tome:               {}", report.tome)?;
+    writeln!(
+        out,
+        "Embedder:           {} ({})  {}",
+        report.embedder.name,
+        report.embedder.version,
+        model_glyph(&report.embedder.state),
+    )?;
+    writeln!(
+        out,
+        "Reranker:           {} ({})  {}",
+        report.reranker.name,
+        report.reranker.version,
+        model_glyph(&report.reranker.state),
+    )?;
+
+    if report.index.present {
+        writeln!(
+            out,
+            "Index database:     {} ({} plugins enabled, {} skills indexed, {})",
+            if report.index.integrity_ok {
+                glyph_ok.as_str()
+            } else {
+                glyph_fail.as_str()
+            },
+            report.index.plugins_enabled,
+            report.index.skills_indexed,
+            human_size(report.index.size_bytes),
+        )?;
+        if let Some(v) = report.index.schema_version {
+            writeln!(out, "Schema version:     {v}")?;
+        }
+    } else {
+        writeln!(out, "Index database:     not yet bootstrapped")?;
+    }
+
+    writeln!(
+        out,
+        "Drift:              {}",
+        drift_description(&report.drift)
+    )?;
+    let overall_glyph = match report.overall {
+        OverallHealth::Ok => format!("{} healthy", glyph_ok),
+        OverallHealth::Degraded => format!("{} degraded", colour::warning("⚠")),
+        OverallHealth::Unhealthy => format!("{} unhealthy", colour::error("✗")),
+    };
+    writeln!(out, "Overall:            {}", overall_glyph)?;
+    Ok(())
+}
+
+fn drift_description(drift: &DriftStatus) -> String {
+    match drift {
+        DriftStatus::None => "none".to_owned(),
+        DriftStatus::EmbedderNameDrift { stored, configured } => format!(
+            "embedder name drift (stored: {stored}, configured: {configured}) — run `tome reindex --force`"
+        ),
+        DriftStatus::EmbedderVersionDrift { stored, configured } => format!(
+            "embedder version drift (stored: {stored}, configured: {configured}) — run `tome reindex --force`"
+        ),
+        DriftStatus::RerankerDrift { stored, configured } => format!(
+            "reranker drift (stored: {stored}, configured: {configured}) — queries still serve; consider `tome reindex --force` for consistency"
+        ),
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let kib = bytes as f64 / 1024.0;
+    if kib < 1024.0 {
+        return format!("{:.1} KiB", kib);
+    }
+    let mib = kib / 1024.0;
+    format!("{:.1} MiB", mib)
+}
+
+// ---- --version handling ----------------------------------------------------
+
+/// Print the extended `--version` output. Invoked by a pre-parse hook in
+/// `main.rs` so it can short-circuit before clap dispatch. Returns `()` —
+/// the caller exits with code 0 directly.
+///
+/// When `json` is true, emits the structured form per
+/// `contracts/version-output.md`. Otherwise emits the three-line plain text.
+pub fn print_version(json: bool) {
+    let embedder = embedder_entry();
+    let reranker = reranker_entry();
+    let tome = env!("CARGO_PKG_VERSION");
+    if json {
+        #[derive(Serialize)]
+        struct VersionRecord<'a> {
+            tome: &'a str,
+            embedder: ModelSerial<'a>,
+            reranker: ModelSerial<'a>,
+        }
+        #[derive(Serialize)]
+        struct ModelSerial<'a> {
+            name: &'a str,
+            version: &'a str,
+        }
+        let rec = VersionRecord {
+            tome,
+            embedder: ModelSerial {
+                name: embedder.name,
+                version: embedder.version,
+            },
+            reranker: ModelSerial {
+                name: reranker.name,
+                version: reranker.version,
+            },
+        };
+        let body = serde_json::to_string(&rec).unwrap_or_else(|_| "{}".to_owned());
+        println!("{body}");
+    } else {
+        println!("tome {tome}");
+        println!("embedder: {} {}", embedder.name, embedder.version);
+        println!("reranker: {} {}", reranker.name, reranker.version);
+    }
+}
+
+// Suppress unused-import on Sha256/Digest if rustc decides to inline the
+// hash path. Keeps the build robust to refactors of `sha256_file`.
+#[allow(dead_code)]
+fn _force_sha_use() -> Sha256 {
+    Sha256::new()
+}
