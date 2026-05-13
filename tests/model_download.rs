@@ -17,11 +17,15 @@
 //! 3. **HTTP 404** — the server returns a non-2xx status; download fails
 //!    with `Io` and the `.partial/` directory is removed.
 //!
-//! Interrupt safety (FR-053) is not exercised here: the cancellation flag is
-//! global process state and the download body executes inside a single
-//! `reqwest::blocking::get` call. The design is documented in
-//! `src/embedding/download.rs`; a higher-level integration test once
-//! `tome models download` is wired covers the end-to-end SIGINT flow.
+//! Interrupt safety (FR-053) is exercised indirectly by the
+//! `mid_stream_connection_drop_*` test added in Phase 10 / T196: the
+//! cleanup path that fires on a `reqwest` connection-drop is the same
+//! path that fires on a SIGINT-triggered `TomeError::Interrupted` —
+//! both propagate out of `stream_to_partial` and trigger
+//! `download_model`'s pipeline-error cleanup closure. SIGINT itself
+//! flips the global `crate::catalog::git::CANCELLED` static; the test
+//! discipline keeps that static unmanipulated (P3 retro), so we
+//! validate the cleanup path via the equivalent failure mode.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -164,6 +168,83 @@ fn http_error_status_aborts_and_cleans_partial_dir() {
 
     let partial = root.path().join("test-model.partial");
     assert!(!partial.exists(), "partial dir leaked after HTTP 404");
+}
+
+/// Slow-trickle server: writes the HTTP 200 header + Content-Length larger
+/// than the actual body, sends a single chunk, then closes the socket
+/// without sending the rest. The client should fail mid-stream — either
+/// with a `reqwest` read error or with the `Content-Length` mismatch
+/// surfacing as an EOF. Either way the partial dir must be cleaned up.
+fn spawn_trickle_then_drop_server(prefix: Vec<u8>, claimed_total: usize) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+    let addr = listener.local_addr().expect("local_addr");
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut sink = [0u8; 4096];
+            let _ = stream.read(&mut sink);
+            // Header advertises a total length that we will not honour: the
+            // client expects `claimed_total` bytes but we only deliver
+            // `prefix.len()` before dropping the connection.
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {claimed_total}\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(header.as_bytes());
+            let _ = stream.write_all(&prefix);
+            let _ = stream.flush();
+            // Drop the stream WITHOUT writing the rest. The client will see
+            // an EOF / connection reset partway through the body.
+        }
+    });
+    format!("http://{addr}/model.onnx")
+}
+
+#[test]
+fn mid_stream_connection_drop_aborts_and_cleans_partial_dir() {
+    // Phase 10 / T196 — covers FR-020a / FR-053 partial-dir cleanup on a
+    // mid-stream failure. SIGINT cancellation runs through the same
+    // pipeline-error path (the `was_cancelled()` check at the top of
+    // each read loop returns `TomeError::Interrupted`, which propagates
+    // out of `stream_to_partial` and triggers the cleanup closure
+    // exactly as a `reqwest` connection-drop error does). The two
+    // cleanup paths are unified at `download_model`'s `pipeline`
+    // closure, so a mid-stream connection drop is a faithful proxy for
+    // the SIGINT case — and it doesn't need to flip the global
+    // `CANCELLED` static (which the test discipline keeps unmanipulated;
+    // see P3 retro).
+    let prefix = vec![0xAB; 1024]; // 1 KB of bytes sent…
+    let url = spawn_trickle_then_drop_server(prefix, 8 * 1024); // …of 8 KB advertised.
+    let entry = entry_for(
+        url,
+        "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+        8 * 1024,
+    );
+    let root = TempDir::new().expect("tempdir");
+
+    let err = download_model(entry, root.path()).expect_err("mid-stream drop must abort");
+    // The most likely error is `Io` (reqwest's connection-reset translation)
+    // but a `ModelChecksumMismatch` is also acceptable IF the server's
+    // short body happens to pass the read loop before EOF: in either case
+    // the cleanup invariant is the only load-bearing assertion.
+    assert!(
+        matches!(
+            err,
+            TomeError::Io(_) | TomeError::ModelChecksumMismatch { .. }
+        ),
+        "expected Io or ModelChecksumMismatch on mid-stream abort, got {err:?}",
+    );
+
+    let partial = root.path().join("test-model.partial");
+    assert!(
+        !partial.exists(),
+        "partial dir leaked after mid-stream connection drop: {}",
+        partial.display(),
+    );
+    let final_dir = root.path().join("test-model");
+    assert!(
+        !final_dir.exists(),
+        "final dir created despite mid-stream abort: {}",
+        final_dir.display(),
+    );
 }
 
 #[test]

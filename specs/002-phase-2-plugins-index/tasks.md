@@ -442,9 +442,9 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 - [X] T193 [P] Add `tests/concurrency.rs` — two-process scenarios: reader during writer succeeds; second writer fails fast with `IndexBusy` (exit 50); reader during a long enable does not block on the writer (use devs:rust-dev agent)
 - [X] T194 [P] Add `tests/schema_migrations.rs` — injected v0→v1 boundary: a partial migration crash leaves the DB at v0; a clean migration moves it to v1; a v2-stamped DB run against this v1-only tool exits with `SchemaTooNew` (exit 52) (use devs:rust-dev agent)
-- [ ] T195 [P] Extend `tests/exit_codes.rs` to cover every code path that produces a Phase 2 exit code end-to-end (one CLI invocation per code), not just the unit-level enum→code mapping (use devs:rust-dev agent)
-- [ ] T196 [P] Extend `tests/atomicity.rs` with the model-download interrupt scenario (FR-020a) using a slow / cancellable HTTP fixture (use devs:rust-dev agent)
-- [ ] T197 [GIT] Commit: test: concurrency, schema migration, exit-code coverage, atomicity edges
+- [X] T195 [P] Extend `tests/exit_codes.rs` to cover every code path that produces a Phase 2 exit code end-to-end (one CLI invocation per code), not just the unit-level enum→code mapping (use devs:rust-dev agent)
+- [X] T196 [P] Extend `tests/atomicity.rs` with the model-download interrupt scenario (FR-020a) using a slow / cancellable HTTP fixture (use devs:rust-dev agent)
+- [X] T197 [GIT] Commit: test: concurrency, schema migration, exit-code coverage, atomicity edges
 
 ### Documentation
 
