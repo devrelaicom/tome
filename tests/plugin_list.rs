@@ -20,7 +20,7 @@ mod common;
 use std::path::Path;
 
 use common::{
-    ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models,
+    ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models, paths_for,
     sample_plugin_catalog_fixture, stub_embedder_seed, stub_reranker_seed, write_config_for_cli,
 };
 use serde_json::Value;
@@ -29,23 +29,6 @@ use tome::embedding::stub::StubEmbedder;
 use tome::paths::Paths;
 use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
-
-/// Compute the `Paths` that `tome::paths::Paths::resolve()` would produce
-/// when run inside `env`. Keeps the lifecycle library and the spawned CLI
-/// binary pointing at the same on-disk locations without mutating process
-/// env vars (which would race other tests).
-fn paths_for(env: &ToolEnv) -> Paths {
-    let home = env.home_path();
-    Paths {
-        config_dir: home.join(".config/tome"),
-        config_file: home.join(".config/tome/config.toml"),
-        data_dir: home.join(".local/share/tome"),
-        catalogs_dir: home.join(".local/share/tome/catalogs"),
-        index_db: home.join(".local/share/tome/index.db"),
-        index_lock: home.join(".local/share/tome/index.lock"),
-        models_dir: home.join(".local/share/tome/models"),
-    }
-}
 
 /// End-to-end setup: register the sample-plugin-catalog under `catalog_name`
 /// in the supplied env's config and pre-enable `plugin-alpha`.

@@ -253,10 +253,10 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Tests
 
-- [ ] T116 [P] [US3] Add `tests/plugin_disable.rs` — disable enabled plugin, assert rows present but `enabled=0`, assert `tome query` no longer surfaces them, assert non-interactive without `--force` exits 54, assert `--force` bypasses prompt (use devs:rust-dev agent)
-- [ ] T117 [P] [US3] Add a cheap re-enable test (in the same file or `tests/plugin_enable.rs`) — disable, re-enable unchanged content, instrument the stub embedder to count calls, assert zero new embed calls (use devs:rust-dev agent)
-- [ ] T118 [P] [US3] Add a `tests/plugin_repeated.rs` case asserting exit 21 on enable-of-enabled and disable-of-disabled (FR-008) (use devs:rust-dev agent)
-- [ ] T119 [GIT] Commit: test: cover disable, cheap re-enable, and repeated-state idempotency
+- [X] T116 [P] [US3] Add `tests/plugin_disable.rs` — disable enabled plugin, assert rows present but `enabled=0`, assert `tome query` no longer surfaces them, assert non-interactive without `--force` exits 54, assert `--force` bypasses prompt (use devs:rust-dev agent)
+- [X] T117 [P] [US3] Add a cheap re-enable test (in the same file or `tests/plugin_enable.rs`) — disable, re-enable unchanged content, instrument the stub embedder to count calls, assert zero new embed calls (use devs:rust-dev agent)
+- [X] T118 [P] [US3] Add a `tests/plugin_repeated.rs` case asserting exit 21 on enable-of-enabled and disable-of-disabled (FR-008) (use devs:rust-dev agent)
+- [X] T119 [GIT] Commit: test: cover disable, cheap re-enable, and repeated-state idempotency
 
 ### Closing
 
