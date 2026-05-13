@@ -2,9 +2,9 @@
 
 A Rust CLI (and eventually an MCP server) that makes Claude Code's plugin ecosystem work across other agentic coding harnesses — Cursor, Codex, Gemini CLI, OpenCode, and friends.
 
-> **Status: pre-release, Phase 1.** Tome currently manages **catalogs** — Git-hosted collections of plugins. Installing plugins from catalogs into specific harnesses is part of Phase 2.
+> **Status: pre-release, Phase 2.** Tome manages **catalogs** (Git-hosted plugin collections) and now also **plugins** — enable them locally, build a semantic skill index, and search it. Installing plugins into specific harnesses is still ahead.
 
-## Install (Phase 1)
+## Install
 
 ```sh
 git clone https://github.com/devrelaicom/tome.git
@@ -12,29 +12,47 @@ cd tome
 cargo install --path .
 ```
 
-Requires Rust ≥ 1.93 and a system `git` on the executable path.
+Requires Rust ≥ 1.93 and a system `git` on the executable path. On first plugin enable, Tome downloads two ONNX models (`bge-small-en-v1.5` + `bge-reranker-base`, ~325 MB total, MIT) into `${XDG_DATA_HOME}/tome/models/`.
 
 ## Quick example
 
 ```sh
-# Register a public catalog
+# Catalogs (Phase 1)
 tome catalog add midnight/midnight-experts
+tome catalog list
+tome catalog update
 
-# See what's in it
-tome catalog show midnight-experts
+# Plugins (Phase 2)
+tome plugin enable midnight-experts/compact-expert
+tome plugin list
+tome plugin show midnight-experts/compact-expert
 
-# Keep it fresh
-tome catalog update midnight-experts
+# Or browse interactively
+tome plugin              # catalog → plugin → action
 
-# Or, scriptably
-tome catalog list --json | jq -r '.name'
+# Semantic search across enabled plugins
+tome query "how do I write a compact circuit"
+tome query "deploy a contract" --top-k 5 --json
+
+# Health check and maintenance
+tome status                              # ok / degraded / unhealthy + per-subsystem detail
+tome models list                         # what's installed; --verify rehashes against pinned SHA-256
+tome reindex midnight-experts            # rebuild the index for one catalog (or omit scope for all)
 ```
+
+## Where things live
+
+- **Config** — `${XDG_CONFIG_HOME}/tome/config.toml` (catalog registry, 0600 on Unix)
+- **Catalogs** — `${XDG_DATA_HOME}/tome/catalogs/<sha>/` (one git clone per registered catalog)
+- **Models** — `${XDG_DATA_HOME}/tome/models/<name>/` (ONNX weights + `manifest.json` with pinned SHA-256)
+- **Skill index** — `${XDG_DATA_HOME}/tome/index.db` (SQLite + `sqlite-vec`)
+- **Advisory lock** — `${XDG_DATA_HOME}/tome/index.lock` (held during writes; readers do not block)
 
 ## Documentation
 
 - **What Tome will do in each phase:** [`PRDs/`](./PRDs/)
 - **Project principles:** [`CONSTITUTION.md`](./CONSTITUTION.md)
-- **Active feature specification:** [`specs/001-phase-1-foundations/`](./specs/001-phase-1-foundations/)
+- **Phase 2 specification:** [`specs/002-phase-2-plugins-index/`](./specs/002-phase-2-plugins-index/)
 - **Contributor on-ramp:** [`CONTRIBUTING.md`](./CONTRIBUTING.md)
 
 ## Licence
