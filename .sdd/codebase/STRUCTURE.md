@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Story 6 — health diagnostics)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Story 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade)
 
 ## Directory Layout
 
@@ -23,7 +23,7 @@ tome/
 │   │   ├── catalog/               # `tome catalog <subcommand>`
 │   │   │   ├── mod.rs             # Subcommand dispatcher
 │   │   │   ├── add.rs             # Register a catalog
-│   │   │   ├── remove.rs          # Unregister a catalog
+│   │   │   ├── remove.rs          # Unregister a catalog (Phase 9: reads enabled plugins, cascades on --force)
 │   │   │   ├── list.rs            # List registered catalogs
 │   │   │   ├── update.rs          # Refresh catalogs (Phase 7: wires reindex per enabled plugin)
 │   │   │   ├── show.rs            # Inspect catalog manifest
@@ -53,7 +53,7 @@ tome/
 │   │   ├── manifest.rs            # plugin.json (lenient, serde_json; FR-013a)
 │   │   ├── frontmatter.rs         # SKILL.md YAML header (lenient + FR-011/FR-012 fallbacks)
 │   │   ├── components.rs          # ComponentCounts over skills/agents/commands/hooks/.mcp.json
-│   │   └── lifecycle.rs           # enable / disable / reindex orchestrator, resolve_plugin_dir (Phase 3/7)
+│   │   └── lifecycle.rs           # enable / disable / reindex_plugin / cascade_disable_for_catalog orchestrator, resolve_plugin_dir (Phase 3/7/9)
 │   ├── index/                     # SQLite + sqlite-vec local skill index (Phase 2/7)
 │   │   ├── mod.rs                 # Re-exports (Phase 7: exports reindex_plugin_atomic)
 │   │   ├── schema.rs              # CREATE TABLE statements, MetaSeed
@@ -85,6 +85,7 @@ tome/
 │   ├── catalog_list.rs            # test: list catalogs
 │   ├── catalog_update.rs          # test: refresh catalogs
 │   ├── catalog_show.rs            # test: show catalog manifest
+│   ├── catalog_remove_cascade.rs  # test: cascade-disable on removal (Phase 9)
 │   ├── exit_codes.rs              # test: verify all TomeError variants map to expected codes
 │   ├── manifest_strictness.rs     # test: verify #[serde(deny_unknown_fields)]
 │   ├── path_validation.rs         # test: plugin source path validation
@@ -149,7 +150,7 @@ tome/
 │       │   ├── query.md
 │       │   ├── models-commands.md
 │       │   ├── reindex.md         # Explicit reindex CLI (Phase 7)
-│       │   ├── catalog-extensions.md # Reindex cascade (Phase 7)
+│       │   ├── catalog-extensions.md # Reindex cascade (Phase 7) + Remove cascade (Phase 9)
 │       │   ├── status.md          # Health diagnostics (Phase 8)
 │       │   ├── exit-codes.md
 │       │   └── ...
@@ -183,8 +184,8 @@ tome/
 | `src/paths.rs` | XDG-aware path resolution and cache key computation. | `Paths`, `Paths::resolve()`, `Paths::cache_dir_for()`, `Paths::model_path()`. |
 | `src/logging.rs` | Initialize `tracing-subscriber` (stderr-only, orthogonal to `--json`). | `Verbosity`, `init()`. |
 | `src/output.rs` | Format output as human text or JSON; TTY detection. | `Mode`, `write_json()`, `write_error()`, `stdout_is_tty()`. |
-| `src/plugin/` | Plugin metadata parsers, lifecycle orchestrator (enable/disable/reindex). | `PluginId`, `PluginRecord`, `PluginStatus`, `lifecycle::enable/disable/reindex_plugin`, `lifecycle::auto_disable_orphan`, `lifecycle::resolve_plugin_dir`. |
-| `src/index/` | SQLite skills DB, KNN search, drift detection, atomic mutations. | `open()`, `acquire_lock()`, `enable_plugin_atomic()`, `reindex_plugin_atomic()`, `knn()`, `MetaSeed`. |
+| `src/plugin/` | Plugin metadata parsers, lifecycle orchestrator (enable/disable/reindex/cascade). | `PluginId`, `PluginRecord`, `PluginStatus`, `lifecycle::enable/disable/reindex_plugin/cascade_disable_for_catalog`, `lifecycle::auto_disable_orphan`, `lifecycle::resolve_plugin_dir`. |
+| `src/index/` | SQLite skills DB, KNN search, drift detection, atomic mutations. | `open()`, `acquire_lock()`, `enable_plugin_atomic()`, `reindex_plugin_atomic()`, `delete_by_plugin()`, `knn()`, `MetaSeed`. |
 | `src/embedding/` | Model registry, download, embedder/reranker traits. | `Embedder`, `Reranker`, `Scored`, `FastembedEmbedder`, `FastembedReranker`, `MODEL_REGISTRY`. |
 | `src/presentation/` | Table, progress, colour, prompt wrappers. | `tables::*`, `progress::*`, `colour::*`, `prompt::*`. |
 
@@ -194,6 +195,7 @@ tome/
 |------|---------|-------|
 | `tests/catalog_add.rs` | Test `tome catalog add` with various source formats, error cases. | Happy path, already-exists, manifest errors. |
 | `tests/catalog_remove.rs` | Test `tome catalog remove` with confirmation, `--force`. | Interactive, non-TTY, confirmed. |
+| `tests/catalog_remove_cascade.rs` | Test `tome catalog remove` cascade semantics (Phase 9). | Refuse when enabled plugins exist, cascade on `--force`, no-enabled case. |
 | `tests/catalog_list.rs` | Test `tome catalog list` in human and `--json` modes. | Empty, single, multiple catalogs. |
 | `tests/catalog_update.rs` | Test `tome catalog update` (single, all, pinned commit). | Happy path, first-failure stop, pinned ref. |
 | `tests/catalog_show.rs` | Test `tome catalog show` manifest contents. | Human and JSON output. |
@@ -265,7 +267,7 @@ src/commands/
 ├── catalog/
 │   ├── mod.rs       # Dispatcher
 │   ├── add.rs       # Register a catalog
-│   ├── remove.rs    # Unregister
+│   ├── remove.rs    # Unregister (Phase 9: reads enabled plugins, cascades on --force)
 │   ├── list.rs      # Show all catalogs
 │   ├── update.rs    # Refresh (Phase 7: lazy embedder, per-plugin reindex, auto-disable orphans)
 │   ├── show.rs      # Show one catalog's manifest
@@ -330,14 +332,15 @@ src/plugin/
 ├── manifest.rs       # plugin.json (lenient parsing)
 ├── frontmatter.rs    # SKILL.md YAML header (lenient + fallbacks)
 ├── components.rs     # ComponentCounts walk
-└── lifecycle.rs      # enable / disable / reindex_plugin orchestrator + resolve_plugin_dir + auto_disable_orphan (Phase 7)
+└── lifecycle.rs      # enable / disable / reindex_plugin / cascade_disable_for_catalog orchestrator + resolve_plugin_dir + auto_disable_orphan (Phase 3/7/9)
 ```
 
 **Responsibility** (library-shaped, no CLI):
 - Read-only parsing of plugin metadata (manifest.json, SKILL.md frontmatter).
-- Orchestrate enable/disable/reindex: compose index + embedding + manifest parsing into atomic operations.
+- Orchestrate enable/disable/reindex/cascade: compose index + embedding + manifest parsing into atomic operations.
 - Resolve plugin directories (manifest-first, with fallback).
 - De-index orphaned plugins on catalog refresh.
+- Cascade-disable all enabled plugins for a catalog before removal.
 
 **Public Interface**:
 - `PluginId`, `PluginRecord`, `PluginStatus` — types.
@@ -345,12 +348,13 @@ src/plugin/
 - `lifecycle::disable(id, paths, config, seeds) -> Result<DisableOutcome>` — full disable flow.
 - `lifecycle::reindex_plugin(id, deps, force) -> Result<ReindexOutcome>` — full reindex flow (Phase 7).
 - `lifecycle::auto_disable_orphan(id, deps) -> Result<u32>` — de-index orphaned plugin (Phase 7).
+- `lifecycle::cascade_disable_for_catalog(paths, catalog, plugins, embedder_seed, reranker_seed) -> Result<u32>` — cascade-disable per catalog (Phase 9).
 - `lifecycle::resolve_plugin_dir(id, config) -> Result<PathBuf>` — directory resolution.
 - `manifest::parse_plugin_manifest()`, `frontmatter::parse_skill_frontmatter()` — parsers.
 - `components::count_components()` — component walk.
 
 **What It Cannot Do**:
-- Know about CLI argument structures (those live in `commands/plugin/`).
+- Know about CLI argument structures (those live in `commands/plugin/` or `commands/catalog/`).
 - Format output (that's `commands/plugin/` and `presentation/`'s job).
 - Prompt the user for downloads (that's `commands/plugin/enable.rs`'s responsibility; the library receives `allow_model_download` boolean).
 - Orchestrate interactive browse (that's `commands/plugin/interactive.rs`'s responsibility).
@@ -359,7 +363,7 @@ src/plugin/
 
 ```
 src/index/
-├── mod.rs              # Re-exports (Phase 7: exports reindex_plugin_atomic)
+├── mod.rs              # Re-exports (Phase 7: exports reindex_plugin_atomic; Phase 9: exports delete_by_plugin)
 ├── schema.rs           # CREATE TABLE + MetaSeed
 ├── migrations.rs       # Forward-only migration framework
 ├── vec_ext.rs          # sqlite-vec extension loader
@@ -367,7 +371,7 @@ src/index/
 ├── lock.rs             # Advisory write lock
 ├── meta.rs             # Metadata read/write + drift detection
 ├── integrity.rs        # PRAGMA integrity_check
-├── skills.rs           # CRUD + content_hash + enable_plugin_atomic + reindex_plugin_atomic (Phase 7; ~510 lines)
+├── skills.rs           # CRUD + content_hash + enable_plugin_atomic + reindex_plugin_atomic + delete_by_plugin (Phase 7/9; ~510 lines)
 └── query.rs            # KNN search + filters
 ```
 
@@ -375,6 +379,7 @@ src/index/
 - Maintain SQLite skills DB with vector embeddings.
 - Support atomic multi-skill inserts (enable).
 - Support atomic per-plugin reindex with smart re-embedding (Phase 7).
+- Support atomic per-plugin row deletion (cascade).
 - Support atomic enable-flag updates (disable).
 - Provide KNN search over enabled skills.
 - Detect embedder/reranker drift.
@@ -385,6 +390,7 @@ src/index/
 - `acquire_lock(path) -> Result<Lock>` — write lock (filesystem level, OS FD-based).
 - `enable_plugin_atomic(&mut conn, pending, embed_fn) -> Result<EnableSummary>` — insert skills under one transaction.
 - `reindex_plugin_atomic(&mut conn, catalog, plugin, pending, force, embed_fn) -> Result<ReindexSummary>` — diff on-disk vs index, re-embed modified/added, delete removed (Phase 7).
+- `delete_by_plugin(conn, catalog, plugin) -> Result<u32>` — delete all skill rows for a plugin pair, return count (Phase 9).
 - `mark_all_disabled_for_plugin(conn, catalog, plugin) -> Result<u32>` — flip enabled flag.
 - `query::knn(conn, vec, k, filters) -> Result<Vec<Candidate>>` — KNN search.
 - `meta::detect_drift(conn) -> Result<DriftStatus>` — drift detection.
@@ -441,7 +447,7 @@ src/embedding/
 | New manifest validation rule | `src/catalog/manifest.rs::validate_semantic()` | Validate plugin version semver |
 | New Git operation | `src/catalog/git.rs` as a `Git` method | `pub fn fetch_tags(&self, url: &str) -> Result<Vec<String>>` |
 | New plugin metadata field | `src/plugin/manifest.rs` + `frontmatter.rs` | Add `homepage` URL to `PluginManifest` |
-| New lifecycle step | `src/plugin/lifecycle.rs` (private fn inside `enable`/`disable`/`reindex_plugin`) | Add model pre-validation before lock |
+| New lifecycle step | `src/plugin/lifecycle.rs` (private fn inside `enable`/`disable`/`reindex_plugin`/`cascade_disable_for_catalog`) | Add model pre-validation before lock |
 | New index operation | `src/index/skills.rs` | `pub fn update_skill_embedding()` for selective re-embedding |
 | New KNN filter | `src/index/query.rs` + `QueryFilters` | Add `--min-version` filter |
 | New model kind | `src/embedding/mod.rs` (`ModelKind` enum) + `registry.rs` | Add reranker v2 variant |
@@ -454,6 +460,7 @@ src/embedding/
 | Test for models command | `tests/models_{download,list,remove}.rs` | Test `--verify`, `--force`, on-disk state handling |
 | Test for reindex scope | `tests/reindex.rs` + library API | Test All / Catalog / Plugin scope variants with StubEmbedder |
 | Test for status report | `tests/status.rs` + library API | Test health classification, drift detection, overall health |
+| Test for cascade behavior | `tests/catalog_remove_cascade.rs` + library API | Test refuse/cascade/no-enabled cases with StubEmbedder |
 | Test shared helper | `tests/common/mod.rs` | Add `fabricate_*` factory functions |
 
 ## Naming Conventions
@@ -462,11 +469,11 @@ src/embedding/
 |----------|-----------|----------|
 | **Struct/Enum** | PascalCase | `CatalogManifest`, `CatalogEntry`, `TomeError`, `PluginId`, `EnableOutcome`, `DisableOutcome`, `ReindexOutcome`, `Candidate`, `ModelState`, `StatusReport`, `OverallHealth` |
 | **Trait** | PascalCase | `Embedder`, `Reranker`, `Git` |
-| **Function/Method** | snake_case | `parse_and_validate()`, `install_signal_handler()`, `enable_plugin_atomic()`, `reindex_plugin_atomic()`, `resolve_plugin_dir()`, `assemble_report()` |
+| **Function/Method** | snake_case | `parse_and_validate()`, `install_signal_handler()`, `enable_plugin_atomic()`, `reindex_plugin_atomic()`, `resolve_plugin_dir()`, `cascade_disable_for_catalog()`, `assemble_report()` |
 | **Constant** | SCREAMING_SNAKE_CASE | `MODEL_REGISTRY`, `SCHEMA_URI`, `HANDLER_INSTALLED` |
 | **Module** | snake_case directory names | `src/catalog/`, `src/commands/`, `src/plugin/`, `src/index/` |
 | **Test** | `#[test]` with descriptive name | `#[test] fn unknown_field_is_rejected()` |
-| **Integration test file** | Matches the feature being tested | `tests/plugin_enable.rs` tests `tome plugin enable`; `tests/reindex.rs` tests `tome reindex`; `tests/status.rs` tests `tome status` |
+| **Integration test file** | Matches the feature being tested | `tests/plugin_enable.rs` tests `tome plugin enable`; `tests/reindex.rs` tests `tome reindex`; `tests/status.rs` tests `tome status`; `tests/catalog_remove_cascade.rs` tests cascade disable (Phase 9) |
 | **Interactive loop level** | Private enum in interactive.rs | `LoopExit::Continue`, `LoopExit::Back`, `LoopExit::Quit` |
 | **Reindex scope** | PublicEnum in commands/reindex.rs | `Scope::All`, `Scope::Catalog`, `Scope::Plugin` |
 | **Model state classification** | PublicEnum in commands/models/mod.rs | `ModelState::Ok`, `ModelState::Missing`, `ModelState::Corrupt`, `ModelState::ChecksumMismatched` |
@@ -481,15 +488,16 @@ src/embedding/
 | `tests/catalog_add.rs` | Integration tests directly import from `tome::*` and test the library. |
 | `tests/reindex.rs` | Library-API tests via `commands::reindex::run_with_deps()` with `StubEmbedder`. |
 | `tests/status.rs` | Library-API tests via `commands::status::assemble_report()`. |
+| `tests/catalog_remove_cascade.rs` | Library-API tests for cascade via `lifecycle::cascade_disable_for_catalog()` with `StubEmbedder` (Phase 9). |
 
 ## Module Stability Guarantees
 
-- **Stable Public API**: `catalog::git`, `catalog::manifest`, `catalog::store`, `config`, `error`, `output`, `paths`, `cli`, `plugin`, `index`, `embedding`, `presentation`, `commands::status::assemble_report`.
+- **Stable Public API**: `catalog::git`, `catalog::manifest`, `catalog::store`, `config`, `error`, `output`, `paths`, `cli`, `plugin`, `index`, `embedding`, `presentation`, `commands::status::assemble_report`, `commands::reindex::run_with_deps`.
 - **Internal**: Submodule organization within `commands/` is flexible; subcommand `run()` signatures (and `run_interactive()` for bare `plugin`, `run_with_deps()` for `reindex` tests, `assemble_report()` for `status` tests) are the public contract.
 
 ## Generated Files
 
-No files in Phase 1–8 are auto-generated.
+No files in Phase 1–9 are auto-generated.
 
 ---
 
@@ -502,53 +510,26 @@ No files in Phase 1–8 are auto-generated.
 
 ---
 
-## Phase 8 additions — User Story 6 (health diagnostics)
+## Phase 9 additions — User Story 7 (catalog remove cascade)
 
-Phase 8 landed slice 1 in PR #29 and slice 2 in PR #30. Slice 1 (PR #29) added
-`src/commands/status.rs` (~330 lines, new top-level command with both CLI and
-library entry points). The health model mirrors data-model.md §11:
-`StatusReport { tome, embedder, reranker, index, drift, overall }` where
-`OverallHealth` is `{Ok, Degraded, Unhealthy}`. Classification rules: embedder
-missing/corrupt OR index integrity fail OR embedder drift → Unhealthy. Reranker
-missing/corrupt OR reranker drift → Degraded (new — was silent warn before).
-Otherwise Ok. The command is read-only by design: opens index with `readonly=true`,
-never acquires advisory lock, never downloads models. `pub fn assemble_report()`
-bypasses the `std::process::exit(1)` exit side-effect for library tests. Slice 2
-(PR #30) added 10 tests in `tests/status.rs` + 4 in `tests/version_output.rs`
-covering library-API and CLI binary paths. The pre-parse hook in `main.rs`
-intercepts `--version` / `-V` BEFORE clap dispatch so the extended output can
-include MODEL_REGISTRY identities (embedder name + version, reranker name +
-version) and honour the global `--json` flag. `pub fn print_version()` wraps the
-generation; the model identities are compile-time consts that auto-update when
-MODEL_REGISTRY is bumped (no code changes needed). Test total 195 → 205+ across
-30 suites.
-
-### Key architectural patterns (Phase 8):
-
-**Health Report Data Model**: `StatusReport` mirrors data-model.md §11 and mirrors
-the structure of each subsystem: `tome`, `embedder`, `reranker`, `index`, `drift`.
-Each subsystem has its own `ModelHealth` or `IndexHealth` classifier; the
-`overall` field is a final `OverallHealth` enum. Classification is stateless — no
-side-effects, no mutation.
-
-**Read-Only Command**: `status` never acquires the advisory lock, never downloads
-models, never triggers reindex. Opens the index with `OpenOptions { readonly: true }`.
-Verifiable via `--verify` flag (re-hashes models via `sha256_file`, slow but
-thorough). Cheap state check by default (manifest + file existence + size).
-
-**Library Test Entry Point**: `assemble_report(paths, verify) -> Result<StatusReport>`
-is the pure function; tests call it directly to verify classification logic without
-exiting. CLI `run()` emits the report and exits 0 on Ok, 1 on Degraded/Unhealthy.
-
-**Drift Classification Refinement**: Reranker drift now triggers `Degraded` (was
-silent warn), not `Unhealthy`. Embedder drift still triggers `Unhealthy` (hard
-fail for consistency with `query`).
-
-**Version Output Override**: Pre-parse hook in `main.rs` intercepts `--version` / `-V`
-before clap so the extended output includes embedder + reranker identities from
-`MODEL_REGISTRY` (compile-time consts) and honours `--json`. The model names +
-versions are unchanging per release; bumping a model in `MODEL_REGISTRY` auto-bumps
-both --version output and stored meta identities (no code changes).
+Phase 9 User Story 7 landed across PR #32. The change extends `tome catalog remove`
+with cascade-disable semantics when enabled plugins exist in the catalog. Pre-check
+reads enabled plugins via `enabled_plugins_for_catalog()` (cheap, no lock); if found
+and `--force` not set, returns exit 53 (`CatalogHasEnabledPlugins`) with the list
+of qualified plugin names. On `--force`, calls `lifecycle::cascade_disable_for_catalog(paths,
+catalog, plugins, embedder_seed, reranker_seed)` to drop all skill rows under a single
+advisory lock. The cascade function acquires lock once, opens index once, calls
+`delete_by_plugin()` per plugin on the same connection, then releases (single-lock-per-batch
+pattern, different from per-plugin operations to match the contract). Unlike per-plugin
+enable/disable/reindex, does not take a `LifecycleDeps` — the cascade is pure deletion
+without embedder reference. Returns total dropped skill rows. CLI side (`src/commands/catalog/remove.rs`)
+handles the prompt, `--force` flag, and error handling; forms the JSON `cascade` array
+with per-plugin records (first record gets the total, rest get 0, per contract).
+Test coverage via `tests/catalog_remove_cascade.rs` (3 cases: refuse, cascade, no-enabled)
+driven by CLI binary + StubEmbedder library API, matching the Phase 5/7 pattern.
+Index operations are now: `enable_plugin_atomic()`, `reindex_plugin_atomic()`,
+`mark_all_disabled_for_plugin()`, `delete_by_plugin()`. Test total 205+ → 208+ across 31 suites.
+No new dependencies. One new error variant: `CatalogHasEnabledPlugins` (exit 53).
 
 ---
 

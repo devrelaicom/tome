@@ -6,6 +6,7 @@
 > **Updated**: 2026-05-13 (Phase 6 slice 1–2 — explicit model management CLI; no new external integrations)
 > **Updated**: 2026-05-13 (Phase 7 slices 1–3 — reindex library + `tome catalog update` cascade + `tome reindex` CLI; no new external integrations)
 > **Updated**: 2026-05-13 (Phase 8 slices 1–2 — `tome status [--verify]` health check + version pre-parse hook; no new external integrations)
+> **Updated**: 2026-05-13 (Phase 9 slice 1 — `tome catalog remove` Phase 2 extensions; cascade-disable orchestrator; no new external integrations)
 
 ## Databases & Data Stores
 
@@ -18,7 +19,7 @@
 ### Connection Patterns
 
 - **Statically linked**: `rusqlite` with `bundled` feature — no system SQLite dependency, no version mismatch risk.
-- **Concurrency model**: Single advisory lockfile (`index.lock`) ensures Phase 3–8 foreground operations are serialised; WAL mode allows readers during writes (future MCP server consideration).
+- **Concurrency model**: Single advisory lockfile (`index.lock`) ensures Phase 3–9 foreground operations are serialised; WAL mode allows readers during writes (future MCP server consideration).
 - **ORM/Query builder**: Direct SQL via `rusqlite` — prepared statements, parameterised queries.
 - **Migration approach**: Forward-only migrations under advisory lock in `src/index/migrations.rs`; drift detection in `src/index/meta.rs`.
 
@@ -32,7 +33,7 @@
 
 ## Authentication & Authorization
 
-Phase 1–8 has no explicit application-layer authentication.
+Phase 1–9 has no explicit application-layer authentication.
 
 - **Git operations**: Inherit system SSH keys and HTTP credential helpers (if configured in `~/.gitconfig`).
 - **Hugging Face model downloads**: No API key required; public `https://huggingface.co/` URLs are freely accessible (MODEL_REGISTRY pinned to MIT-licensed BGE variants).
@@ -45,7 +46,7 @@ Phase 1–8 has no explicit application-layer authentication.
 
 ### First-Party APIs
 
-None in Phase 1–8. Future phases may include:
+None in Phase 1–9. Future phases may include:
 - Remote catalog registries (HTTP/HTTPS URLs in catalog sources)
 - Plugin resolver APIs (not specified)
 
@@ -70,7 +71,7 @@ None in Phase 1–8. Future phases may include:
 
 ## Message Queues & Event Systems
 
-None in Phase 1–8. Deferred to Phase 6+ (MCP server event streaming).
+None in Phase 1–9. Deferred to Phase 6+ (MCP server event streaming).
 
 ---
 
@@ -81,14 +82,14 @@ None in Phase 1–8. Deferred to Phase 6+ (MCP server event streaming).
 | Filesystem (XDG) | Catalog Git working trees | Explicit `tome catalog remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/catalogs/` — git-based, refreshed on `tome catalog update` |
 | Filesystem (XDG) | Downloaded model artefacts | Explicit `tome models remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/models/` — one dir per model with manifest + ONNX files; Phase 6 adds explicit user-facing commands |
 
-No TTL-based eviction. Phase 1–8 uses explicit user commands for cleanup (principle VI: KISS).
+No TTL-based eviction. Phase 1–9 uses explicit user commands for cleanup (principle VI: KISS).
 
 ---
 
 ## Monitoring & Observability
 
 | Service | Purpose | Configuration |
-|---------|---------|---------------|
+|---------|---------|-----------------|
 | Structured logging (via `tracing`) | Diagnostic tracing to stderr | `RUST_LOG` or `TOME_LOG` environment variables; independent of `--json` stdout mode |
 | Exit codes | Scriptable error handling | 18+ enumerated codes (0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 30, 31, 32); documented in `specs/002-phase-2-plugins-index/contracts/exit-codes.md`; Phase 8 adds exit 1 for degraded/unhealthy status |
 | Status checks | Per-subsystem health via `tome status` | Phase 8 — health report includes models, index, drift state; lazy validation with `--verify` flag |
@@ -99,13 +100,13 @@ No TTL-based eviction. Phase 1–8 uses explicit user commands for cleanup (prin
 
 | Service | Purpose | Configuration |
 |---------|---------|---------------|
-| XDG-compliant filesystem | Configuration, catalogs, models, index | `${XDG_CONFIG_HOME}`, `${XDG_DATA_HOME}` (principle XII: inherit, don't reimplement); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]` |
+| XDG-compliant filesystem | Configuration, catalogs, models, index | `${XDG_CONFIG_HOME}`, `${XDG_DATA_HOME}` (principle XII: inherit, don't reimplement); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]`; Phase 9 extends catalog removal with cascade-disable index cleanup |
 
 ---
 
 ## Email & Notifications
 
-None in Phase 1–8.
+None in Phase 1–9.
 
 ---
 
@@ -118,7 +119,7 @@ None in Phase 1–8.
 | `XDG_DATA_HOME` | No (defaults to `~/.local/share`) | Override data directory (models, catalogs, index.db) | `/opt/var` | — |
 | `TOME_LOG` | No | Custom log filter (overrides `RUST_LOG`) | `debug`, `info`, `tome=trace` | — |
 | `RUST_LOG` | No | Standard Rust log filter | `info`, `warn` | — |
-| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR`; phase 8: status report respects `NO_COLOR` |
+| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR`; phase 8: status report respects `NO_COLOR`; phase 9: cascade-disable output respects `NO_COLOR` |
 | `CLICOLOR` | No | Disable coloured output (alternate) | `0` to disable | — |
 
 ---
@@ -177,4 +178,4 @@ None in Phase 1–8.
 
 ---
 
-*This document maps external service dependencies and failure modes. Updated for Phase 8 slices 1–2 with status health check and version pre-parse hook — no new external integrations.*
+*This document maps external service dependencies and failure modes. Updated for Phase 9 slice 1 with `tome catalog remove` Phase 2 extensions including cascade-disable orchestrator — no new external integrations.*

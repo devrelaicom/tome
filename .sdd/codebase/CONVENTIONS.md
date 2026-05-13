@@ -86,7 +86,7 @@ This enforces the Unix principle: every failure class has a stable, documented e
 | 8 | `Interrupted` | User pressed Ctrl+C; in-flight git processes killed |
 | 30 | `ModelMissing` | Required embedding model not present |
 
-*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2–8 exit codes.*
+*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2–9 exit codes.*
 
 ### Error Message Style
 
@@ -205,6 +205,7 @@ tests/
 ├── catalog_add.rs            # Integration tests for `tome catalog add`
 ├── catalog_list.rs           # Integration tests for `tome catalog list`
 ├── catalog_remove.rs         # Integration tests for `tome catalog remove`
+├── catalog_remove_cascade.rs # Integration tests for cascade disable (Phase 9)
 ├── catalog_show.rs           # Integration tests for `tome catalog show`
 ├── catalog_update.rs         # Integration tests for `tome catalog update`
 ├── catalog_update_reindex.rs # Library API tests for catalog update reindex path (Phase 7)
@@ -354,6 +355,56 @@ match result {
 
 **Idempotency:** Both `enable` (Phase 3) and `disable` (Phase 5) detect when a plugin is already in the requested state and return `TomeError::PluginAlreadyInState` (exit code 21) per FR-008.
 
+### Batch Operations: Locking Patterns (Phase 7–9)
+
+Two complementary locking patterns coexist. Choose based on operation semantics:
+
+**Pattern 1: Per-Item Atomicity (Phase 7, `tome catalog update`)**
+
+Each item in a batch acquires its own advisory lock, operates independently, then releases:
+
+```rust
+for id in enabled {
+    let outcome = lifecycle::reindex_plugin(&id, deps)?;  // lock per plugin
+    summary.aggregate(outcome);
+}
+```
+
+**When to use:** Batch operations where each item is semantically independent, and a failure partway through should surface progress on earlier items (N independent operations).
+
+**Pattern 2: Single-Lock-Per-Batch (Phase 9, `cascade_disable_for_catalog`)**
+
+Acquire the lock once, mutate everything, release once:
+
+```rust
+pub fn cascade_disable_for_catalog(
+    paths: &Paths,
+    catalog: &str,
+    plugins: &[String],
+    embedder_seed: MetaSeed,
+    reranker_seed: MetaSeed,
+) -> Result<u32, TomeError> {
+    let lock = acquire_lock(&paths.index_lock)?;
+    let result = (|| -> Result<u32, TomeError> {
+        let conn = index::open(...)?;
+        for plugin in plugins {
+            let dropped = delete_by_plugin(&conn, catalog, plugin)?;
+            total = total.saturating_add(dropped);
+        }
+        Ok(total)
+    })();
+    
+    match result {
+        Ok(total) => { lock.release()?; Ok(total) }
+        Err(e) => { drop(lock); Err(e) }
+    }
+}
+```
+
+**When to use:** Batch operations that are semantically a single user action ("destroy this catalog"), where the entire operation succeeds or fails atomically. All items participate in one transaction.
+
+**Rationale:** The operation's semantic contract determines the locking pattern. `catalog remove --force` is "delete this catalog's plugins" (all-or-nothing atomicity); `catalog update` is "refresh N independent catalogs" (per-item independence).
+
 ### Batch Reindex Operations (Phase 7)
 
 **Per-plugin atomicity:** Each `lifecycle::reindex_plugin` call acquires its own advisory lock. The spec doesn't require cross-plugin atomicity for `tome catalog update` or `tome reindex`. This is documented to set the precedent for future batch ops.
@@ -395,6 +446,22 @@ Then conditionally emit human or JSON output. Applied to:
 - `models::remove`
 - `catalog::update` ("Reindexed plugins" block emits only NDJSON when `--json`)
 - `reindex`
+
+### Optional JSON Array Pattern (Phase 9)
+
+When a JSON envelope may include an optional field that is sometimes empty (e.g., cascade array in `catalog remove --json`), use the `#[serde(skip_serializing_if = "Vec::is_empty")]` attribute:
+
+```rust
+#[derive(Serialize)]
+pub struct RemovedRecord {
+    pub name: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cascade: Vec<CascadeRecord>,
+}
+```
+
+This keeps the JSON compact when the array is empty (normal `catalog remove` with no enabled plugins) and includes it when non-empty (cascade case with `--force`). Applied to:
+- `src/commands/catalog/remove.rs::RemovedRecord::cascade`
 
 ### Warnings as Vec<String>
 
