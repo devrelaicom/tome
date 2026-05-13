@@ -7,11 +7,10 @@
 //! `${XDG_DATA_HOME}/tome/models/<name>/manifest.json` after a successful
 //! verified download (FR-013a, data-model §7).
 //!
-//! Note: the pinned SHA-256 + size_bytes values below are placeholders to
-//! be replaced when the first end-to-end model-download integration test
-//! lands (slice 5 follow-up). CI verifies the pinned values match the
-//! upstream artefacts; downloads against a placeholder hash will fail
-//! with `ModelChecksumMismatch` until the values are updated.
+//! The pinned SHA-256 + size_bytes values below are real upstream artefact
+//! digests, fetched and verified at the start of Phase 3 (slice 1) against
+//! the canonical Hugging Face URLs. Downloads enforce both the pinned hash
+//! and pinned size; any drift surfaces as `ModelChecksumMismatch`.
 //!
 //! Spec: data-model.md §7, research §R5.
 
@@ -53,27 +52,30 @@ pub struct ModelManifest {
     pub installed_at: OffsetDateTime,
 }
 
-/// Embedder + reranker the rest of Tome assumes are pinned. Slice-5 follow-up
-/// (T057 integration test) replaces the placeholder hash + size with verified
-/// values from the upstream Hugging Face artefact.
+/// Embedder + reranker the rest of Tome assumes are pinned. Hashes and sizes
+/// are real upstream digests verified at the start of Phase 3 slice 1.
 pub const MODEL_REGISTRY: &[ModelEntry] = &[
     ModelEntry {
         name: "bge-small-en-v1.5",
         version: "1.5",
         kind: ModelKind::Embedder,
         source_url: "https://huggingface.co/qdrant/bge-small-en-v1.5-onnx-Q/resolve/main/model_optimized.onnx",
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
-        size_bytes: 0,
+        sha256: "51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431",
+        size_bytes: 66_465_124,
         licence: "MIT",
         files: &["model.onnx", "tokenizer.json"],
     },
+    // Source moved: BAAI/bge-reranker-base no longer hosts a quantised ONNX
+    // (only fp32 model.onnx remains upstream). The onnx-community group is
+    // the canonical HF mirror for ONNX-quantised variants of community
+    // models; weight (~280 MB INT8) matches the spec target.
     ModelEntry {
         name: "bge-reranker-base",
         version: "base",
         kind: ModelKind::Reranker,
-        source_url: "https://huggingface.co/BAAI/bge-reranker-base/resolve/main/onnx/model_quantized.onnx",
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
-        size_bytes: 0,
+        source_url: "https://huggingface.co/onnx-community/bge-reranker-base-ONNX/resolve/main/onnx/model_quantized.onnx",
+        sha256: "46a1bb4cf46ff1e300d27589d620141fbf04fc0eaf8e7bb6dea5e044475ff387",
+        size_bytes: 279_252_659,
         licence: "MIT",
         files: &["model.onnx", "tokenizer.json"],
     },
