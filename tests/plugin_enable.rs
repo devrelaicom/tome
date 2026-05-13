@@ -179,6 +179,72 @@ fn enable_is_idempotent_rejecting_re_enable_with_plugin_already_in_state() {
 }
 
 #[test]
+fn enable_resolves_nested_plugin_source_from_catalog_manifest() {
+    // Regression: prior to making the resolver manifest-first, the lifecycle
+    // joined `entry.path` with `id.plugin` literally. A catalog declaring
+    // `plugins[].source = "./vendor/wrapped-alpha"` therefore failed with
+    // `PluginNotFound` because lifecycle looked under
+    // `<catalog>/alpha-plugin` instead of `<catalog>/vendor/wrapped-alpha`,
+    // while `tome plugin list` (which already walks tome-catalog.toml) saw
+    // the plugin and succeeded. Both surfaces now go through the manifest.
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    fabricate_models(&paths);
+
+    let catalog_root = tmp.path().join("catalog");
+    let plugin_dir = catalog_root.join("vendor/wrapped-alpha");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin/plugin.json"),
+        r#"{"name":"alpha-plugin","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let skill_dir = plugin_dir.join("skills/alpha-skill");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: alpha\ndescription: an alpha skill\n---\nbody",
+    )
+    .unwrap();
+
+    // Catalog manifest declares the plugin under a nested vendor path.
+    // `parse_and_validate` canonicalises `source` against `catalog_root`, so
+    // the directory above must exist before this point — it does.
+    let toml = r#"name = "nested-test"
+description = "Regression fixture for the manifest-driven resolver"
+version = "0.1.0"
+
+[owner]
+name = "Tome Test"
+email = "tests@tome.invalid"
+
+[[plugins]]
+name = "alpha-plugin"
+source = "./vendor/wrapped-alpha"
+"#;
+    std::fs::write(catalog_root.join("tome-catalog.toml"), toml).unwrap();
+
+    let config = config_with_catalog("nested-test", &catalog_root);
+
+    let embedder = StubEmbedder::new();
+    let deps = LifecycleDeps {
+        paths: &paths,
+        config: &config,
+        embedder: &embedder,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+        allow_model_download: false,
+    };
+    let id: PluginId = "nested-test/alpha-plugin".parse().unwrap();
+
+    let outcome = lifecycle::enable(&id, &deps)
+        .expect("enable should resolve the plugin via the catalog manifest");
+    assert_eq!(outcome.summary.total_skills, 1);
+    assert_eq!(outcome.summary.newly_embedded, 1);
+}
+
+#[test]
 fn enable_returns_model_missing_when_no_models_on_disk_and_download_disallowed() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());

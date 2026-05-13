@@ -176,12 +176,36 @@ pub fn disable(
 // -------------------------------------------------------------------------
 
 /// Resolve `<catalog>/<plugin>` against the registry and on-disk cache.
-fn resolve_plugin_dir(id: &PluginId, config: &Config) -> Result<PathBuf, TomeError> {
+///
+/// Authoritative source is the catalog's `tome-catalog.toml`:
+/// `entry.path.join(&plugins[].source)` for the entry whose `name` matches
+/// `id.plugin`. The lookup is intentionally manifest-first so that catalogs
+/// declaring nested layouts (e.g. `source = "./plugins/foo"`) work uniformly
+/// across `enable`, `show`, and `list` (see also FR-008 and `query.md`).
+///
+/// When `tome-catalog.toml` is absent or unparsable the resolver falls back
+/// to the flat layout `entry.path.join(&id.plugin)` — this preserves
+/// back-compat for library callers that construct catalog roots without a
+/// manifest (the `lifecycle.rs` in-module tests, hand-rolled fixtures, and
+/// the "I cloned a plugin into a bare directory" recovery path).
+pub fn resolve_plugin_dir(id: &PluginId, config: &Config) -> Result<PathBuf, TomeError> {
     let entry = config
         .catalogs
         .get(&id.catalog)
         .ok_or_else(|| TomeError::CatalogNotFound(id.catalog.clone()))?;
-    let plugin_dir = entry.path.join(&id.plugin);
+
+    let plugin_dir = match crate::catalog::manifest::read_catalog_manifest(&entry.path) {
+        Some(manifest) => {
+            let decl = manifest
+                .plugins
+                .iter()
+                .find(|p| p.name == id.plugin)
+                .ok_or_else(|| TomeError::PluginNotFound(id.to_string()))?;
+            entry.path.join(&decl.source)
+        }
+        None => entry.path.join(&id.plugin),
+    };
+
     if !plugin_dir.is_dir() {
         return Err(TomeError::PluginNotFound(id.to_string()));
     }
