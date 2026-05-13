@@ -34,6 +34,22 @@ pub enum Command {
     Models(ModelsCommand),
     /// Search enabled skills across every catalog.
     Query(QueryArgs),
+    /// Force re-embedding of one or many skills outside the
+    /// `tome catalog update` schedule. Use for embedder upgrades or
+    /// integrity recovery. See `contracts/reindex.md`.
+    Reindex(ReindexArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ReindexArgs {
+    /// Scope. Omit to reindex every enabled plugin across every catalog;
+    /// pass `<catalog>` to scope to one catalog; pass `<catalog>/<plugin>`
+    /// to scope to one plugin.
+    pub scope: Option<String>,
+    /// Re-embed every in-scope skill regardless of `content_hash`. Used for
+    /// embedder upgrades (FR-016 recovery path) and integrity recovery.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Subcommand)]

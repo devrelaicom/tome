@@ -18,6 +18,7 @@ fn main() {
         },
         Command::Models(cmd) => commands::models::run(cmd, mode),
         Command::Query(args) => commands::query::run(args, mode),
+        Command::Reindex(args) => commands::reindex::run(args, mode),
     };
 
     match result {
