@@ -26,6 +26,6 @@ pub use query::{Candidate, QueryFilters, knn};
 pub use schema::{CREATE_STATEMENTS, MetaSeed, SCHEMA_VERSION, bootstrap};
 pub use skills::{
     EnableSummary, PendingSkill, ReindexSummary, SkillRecord, content_hash, delete_by_plugin,
-    embedding_text, enable_plugin_atomic, find as find_skill, list_for_plugin,
-    mark_all_disabled_for_plugin, reindex_plugin_atomic,
+    embedding_text, enable_plugin_atomic, enabled_plugins_for_catalog, find as find_skill,
+    list_for_plugin, mark_all_disabled_for_plugin, reindex_plugin_atomic,
 };

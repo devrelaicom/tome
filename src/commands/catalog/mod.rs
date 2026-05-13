@@ -5,7 +5,7 @@ mod list;
 mod remove;
 mod show;
 mod source;
-mod update;
+pub mod update;
 
 use crate::cli::CatalogCommand;
 use crate::error::TomeError;
