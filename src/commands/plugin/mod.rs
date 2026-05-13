@@ -93,6 +93,17 @@ pub(crate) fn embedder_entry() -> &'static ModelEntry {
         .expect("MODEL_REGISTRY must declare exactly one embedder")
 }
 
+/// Pick the reranker entry from the registry. Companion to
+/// [`embedder_entry`]. Both `enable` and `query` need this — keeping them in
+/// one place avoids `MODEL_REGISTRY` scanning drift between sites.
+pub(crate) fn reranker_entry() -> &'static ModelEntry {
+    use crate::embedding::registry::ModelKind;
+    MODEL_REGISTRY
+        .iter()
+        .find(|e| matches!(e.kind, ModelKind::Reranker))
+        .expect("MODEL_REGISTRY must declare exactly one reranker")
+}
+
 /// Render `bytes` as a human-readable MiB string with no fractional digits.
 /// Inline helper so we avoid pulling in `humansize` or similar (T074 says
 /// no new dependencies).

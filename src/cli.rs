@@ -28,6 +28,8 @@ pub enum Command {
     /// Manage plugins from registered catalogs.
     #[command(subcommand)]
     Plugin(PluginCommand),
+    /// Search enabled skills across every catalog.
+    Query(QueryArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -121,6 +123,39 @@ pub struct PluginListArgs {
 pub struct PluginShowArgs {
     /// The plugin to inspect, as `<catalog>/<plugin>`.
     pub id: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct QueryArgs {
+    /// The query text to search for. Embedded as-is — no name/description
+    /// composition is applied (cf. FR-014, query.md step 3).
+    pub text: String,
+
+    /// Cap on returned results (post-rerank when reranking).
+    #[arg(long = "top-k", default_value_t = 10)]
+    pub top_k: u32,
+
+    /// Restrict the search to a single catalog.
+    #[arg(long)]
+    pub catalog: Option<String>,
+
+    /// Restrict the search to a single plugin (across all enabled catalogs
+    /// unless `--catalog` is also set).
+    #[arg(long)]
+    pub plugin: Option<String>,
+
+    /// Skip the reranker stage; scores are cosine similarity.
+    #[arg(long = "no-rerank")]
+    pub no_rerank: bool,
+
+    /// Apply the score threshold and exit non-zero on empty result.
+    #[arg(long)]
+    pub strict: bool,
+
+    /// Minimum score to retain a result (only enforced with `--strict`).
+    /// Default is 0.0 with the reranker on, 0.5 with `--no-rerank`.
+    #[arg(long = "min-score")]
+    pub min_score: Option<f32>,
 }
 
 impl Cli {
