@@ -31,6 +31,7 @@ tests/
 ├── catalog_add.rs                 # Integration: `tome catalog add` command
 ├── catalog_list.rs                # Integration: `tome catalog list` command
 ├── catalog_remove.rs              # Integration: `tome catalog remove` command
+├── catalog_remove_cascade.rs      # Integration: cascade disable (Phase 9)
 ├── catalog_show.rs                # Integration: `tome catalog show` command
 ├── catalog_update.rs              # Integration: `tome catalog update` command
 ├── catalog_update_reindex.rs      # Library API: catalog update reindex path (Phase 7)
@@ -73,7 +74,7 @@ tests/
 |----------|----------|-------|
 | Unit tests | `tests/{test_name}.rs` | Test one concept (parser, error path, validator) |
 | Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/reindex.rs`, `tests/catalog_update_reindex.rs`, `tests/status.rs` | Exercise library API with `StubEmbedder`, bypassing `Paths::resolve` + `FastembedEmbedder::load` |
-| Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs`, `tests/plugin_disable.rs`, `tests/models_*.rs`, `tests/reindex.rs` (parse-error tests) | Spawn `tome` binary as subprocess; used when no embedders are loaded |
+| Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs`, `tests/plugin_disable.rs`, `tests/models_*.rs`, `tests/reindex.rs` (parse-error tests), `tests/catalog_remove_cascade.rs` | Spawn `tome` binary as subprocess; used when no embedders are loaded |
 | Integration tests (PTY-driven) | `tests/plugin_interactive.rs` | Scripted pty session with `rexpect`; driven via real terminal I/O |
 | Compile-time content tests | `tests/version_output.rs` | Read `MODEL_REGISTRY` at compile time; assert output matches pinned models (Phase 8) |
 | Shared helpers | `tests/common/mod.rs` | Fixture builders, ToolEnv, lifecycle helpers, `paths_for`, sparse-file fixtures (Phase 6) |
@@ -149,9 +150,9 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
 }
 ```
 
-### CLI-Binary Integration Test Pattern (Phase 3–8)
+### CLI-Binary Integration Test Pattern (Phase 3–9)
 
-Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`, `plugin disable`, `models list`, `models remove`, `status` read-only report) spawn the real binary.
+Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`, `plugin disable`, `models list`, `models remove`, `status` read-only report, `catalog remove --force`) spawn the real binary.
 
 Pattern:
 1. **Build fixture** — copy plugin catalog to temp dir, initialize git
@@ -160,6 +161,40 @@ Pattern:
 4. **Run binary** — invoke `tome` binary as a subprocess with isolated env
 5. **Assert exit code** — check `.status.code()` matches expected
 6. **Assert output** — parse stdout (human or `--json`) and validate content
+
+**Phase 9 addition:** `catalog remove --force` cascade path uses the CLI binary. The enable phase uses library API (`StubEmbedder`) to avoid loading real models, but the entire remove flow — including the cascade delete via `cascade_disable_for_catalog` — runs through the CLI binary since it's pure deletion with no embedder construction.
+
+Example from `tests/catalog_remove_cascade.rs`:
+
+```rust
+#[test]
+fn force_cascades_disable_and_removes_catalog() {
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    fabricate_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    write_config_for_cli(&paths, &config);
+    let embedder = StubEmbedder::new();
+    enable_alpha(&paths, &config, &embedder);
+
+    let out = env
+        .cmd()
+        .args(["--json", "catalog", "remove", "sample-plugin-catalog", "--force"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // JSON record includes the cascade array.
+    let v: Value = serde_json::from_slice(&out.stdout).expect("parse JSON");
+    let cascade = v["removed"]["cascade"].as_array().expect("cascade array");
+    assert!(!cascade.is_empty());
+    assert_eq!(cascade[0]["plugin"], "sample-plugin-catalog/plugin-alpha");
+}
+```
 
 **Phase 8 addition:** `status` can be tested via CLI binary without embedders (it's read-only). Example from `tests/status.rs`:
 
@@ -400,6 +435,14 @@ fn reindex_all_visits_every_enabled_plugin() {
 
 This is now the established pattern for testing CLI subcommands that need an embedder. Heavy-state paths use the library entry point with `StubEmbedder`; light/error paths use the CLI binary.
 
+### Phase 9 Test Scope (feat + tests combined)
+
+**Boundary:** When a feature implementation + its tests totals < ~250 lines AND the feature does not require extensive code review beyond what the tests themselves provide, combine feature + test slices in one PR. Otherwise, split feature from tests.
+
+**Example:** Phase 9 `cascade_disable_for_catalog` + its tests in `tests/catalog_remove_cascade.rs` combined to ~220 lines total. The cascade is pure deletion; the tests are straightforward CLI-binary (no embedder); review burden is light.
+
+**Pattern:** Enable via library API + `StubEmbedder` in the test setup (avoids real model files); remove flow via CLI binary (pure deletion, no embedder construction).
+
 ### Phase 6 Sparse-File Fixture Pattern
 
 **Purpose:** Create realistic-size test artefacts without disk I/O cost.
@@ -436,7 +479,7 @@ Related helper: `fabricate_all_installed_models(paths: &Paths)` — convenience 
 
 ### Phase 5 Lifecycle Helpers (`tests/common/mod.rs`)
 
-**`paths_for(env: &ToolEnv) -> Paths`** — **Promoted in Phase 5 to common/mod.rs.** Resolves `ToolEnv` to the same `Paths` that the spawned CLI would resolve. Previously duplicated across `plugin_list.rs`, `plugin_show.rs`, `plugin_interactive.rs`, and now used by `plugin_disable.rs`, `plugin_repeated.rs`, all `models_*.rs` tests, and `reindex.rs` (Phase 7) — consolidated at the 4th caller.
+**`paths_for(env: &ToolEnv) -> Paths`** — **Promoted in Phase 5 to common/mod.rs.** Resolves `ToolEnv` to the same `Paths` that the spawned CLI would resolve. Previously duplicated across `plugin_list.rs`, `plugin_show.rs`, `plugin_interactive.rs`, and now used by `plugin_disable.rs`, `plugin_repeated.rs`, all `models_*.rs` tests, `catalog_remove_cascade.rs` (Phase 9), and `reindex.rs` (Phase 7) — consolidated at the 4th caller.
 
 ```rust
 pub fn paths_for(env: &ToolEnv) -> Paths {
@@ -493,7 +536,7 @@ pub fn fabricate_models(paths: &Paths) {
 
 **`stub_embedder_seed()` / `stub_reranker_seed()`** — Return `MetaSeed` values matching the deterministic stub embedder/reranker. Used to construct `LifecycleDeps` and open the index.
 
-**`write_config_for_cli(paths: &Paths, config: &Config)`** — Write the supplied `Config` to `paths.config_file` as TOML so a child `tome` binary process can read it. Used by `plugin list` / `plugin show` / `plugin disable` / `models_*` / `reindex` tests that bypass `catalog add`.
+**`write_config_for_cli(paths: &Paths, config: &Config)`** — Write the supplied `Config` to `paths.config_file` as TOML so a child `tome` binary process can read it. Used by `plugin list` / `plugin show` / `plugin disable` / `models_*` / `reindex` / `catalog_remove_cascade` tests that bypass `catalog add`.
 
 ### Phase 4 Interactive Helpers (PTY pattern)
 
@@ -590,6 +633,7 @@ When tests run:
 | `catalog_add.rs` | CLI-binary | `tome catalog add <source>` — happy path, name override, duplicates, missing manifest, credential scrubbing |
 | `catalog_list.rs` | CLI-binary | `tome catalog list` — empty registry, multiple catalogs, `--json` output |
 | `catalog_remove.rs` | CLI-binary | `tome catalog remove <name>` — confirmation prompt, `--force` flag, nonexistent catalog |
+| `catalog_remove_cascade.rs` | CLI-binary | `tome catalog remove --force` with enabled plugins — refuse without force, cascade delete + JSON array (Phase 9) |
 | `catalog_show.rs` | CLI-binary | `tome catalog show <name>` — metadata display, plugin list, JSON format |
 | `catalog_update.rs` | CLI-binary | `tome catalog update [name]` — full sync, selective sync, failure handling |
 | `catalog_update_reindex.rs` | Library API | Catalog update reindex library path — cheap-skip on unchanged skills, embedder call-count assertions (Phase 7) |
@@ -658,13 +702,13 @@ pub fn with_force_fail_after(n: usize) -> Self {
 
 The counter is shared between clones via `Arc<AtomicUsize>` so the closure adaptation inside `enable_plugin_atomic` (which captures by reference) observes the same call count. Used in `atomicity_enable.rs` to inject mid-pipeline embedder failures and verify rollback (FR-004).
 
-## Test Organization by Concern (Phase 3–8)
+## Test Organization by Concern (Phase 3–9)
 
 ### No Environment Mutation in Library API Tests
 
 **Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`, `catalog_update_reindex.rs`, `reindex.rs`, `status.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
 
-**CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse-error tests) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
+**CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse-error tests, `catalog_remove_cascade.rs`) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
 
 **PTY-driven tests** (`plugin_interactive.rs`) mutate `env` only inside the pty spawning (via `Command::env`), not the parent process.
 
@@ -675,6 +719,14 @@ Two parallel path builders are deliberately kept in lock-step:
 2. **Integration test helper:** `tests/common/mod.rs::lifecycle_paths` (for library API integration tests)
 
 If one changes, the other must change too — enforced via manual code review.
+
+### Phase 9: Feature + Tests Combined (Optional)
+
+When a feature implementation + its tests totals < ~250 lines AND the tests do not require specialized review, combine feature and tests in one PR slice. Otherwise, follow the default strategy of splitting feature slice from tests slice.
+
+**Rationale:** Avoids artificial slice separation when the feature is inherently small and test burden is light.
+
+**Example:** Phase 9 `cascade_disable_for_catalog` + `tests/catalog_remove_cascade.rs` combined. The cascade is pure deletion (~40 lines) and the test is straightforward CLI-binary (~140 lines); no complex mocking or extended testing required.
 
 ### Phase 8: Library-Bypass Pattern as Standard
 
@@ -704,7 +756,7 @@ Usable by future tests for any large binary fixture (models, datasets, archives)
 
 ### Phase 5: Standard Helpers Promoted
 
-`paths_for(env: &ToolEnv) -> Paths` was promoted to `tests/common/mod.rs` in Phase 5 after its 4th caller (`plugin_repeated.rs`). All CLI-binary tests now import it from common; consolidation complete. Phase 6 `models_*.rs` tests also use it, and Phase 7 `reindex.rs` extends the pattern, cementing it as the standard.
+`paths_for(env: &ToolEnv) -> Paths` was promoted to `tests/common/mod.rs` in Phase 5 after its 4th caller (`plugin_repeated.rs`). All CLI-binary tests now import it from common; consolidation complete. Phase 6 `models_*.rs` tests also use it, Phase 7 `reindex.rs` extends the pattern, and Phase 9 `catalog_remove_cascade.rs` consolidates it further, cementing it as the standard.
 
 ### YAML Frontmatter Quirk (Documented for Test Authors)
 
@@ -729,8 +781,9 @@ No automatic coverage threshold enforced, but the test corpus is organized to be
 - **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable and cheap-reenable (FR-006), fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback; `catalog_update_reindex.rs` and `reindex.rs` cover batch reindex logic; `status.rs` covers health assessment
 - **Idempotency tested** — `plugin_repeated.rs` covers enable-of-enabled and disable-of-disabled (FR-008, exit 21)
 - **Interactive flow tested end-to-end** — `plugin_interactive.rs` covers catalog selector, plugin browser, action prompts, navigation, non-TTY refusal
+- **Cascade operations tested** — `catalog_remove_cascade.rs` covers refuse-on-enabled, cascade disable, JSON array envelope (Phase 9)
 - **Compile-time content validated** — `version_output.rs` ensures `--version` output is synchronized with `MODEL_REGISTRY`
-- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift, sparse fixtures (Phase 6), batch reindex cheapness (Phase 7), health classification (Phase 8)
+- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift, sparse fixtures (Phase 6), batch reindex cheapness (Phase 7), health classification (Phase 8), cascade atomicity (Phase 9)
 
 ## Specimen Tests (Quality Corpus)
 
@@ -847,7 +900,7 @@ Green on all 4 combinations is required before merge.
 4. Add test case verifying unknown field with similar name is rejected
 5. Run `cargo test manifest_strictness` to verify
 
-### Testing a New Plugin Command (Phase 3–8)
+### Testing a New Plugin Command (Phase 3–9)
 
 For library API tests (no embedder loading):
 1. Add module under `src/commands/plugin/`
@@ -929,6 +982,23 @@ For CLI tests (parse/error paths):
 5. Run `cargo test {command}` to verify
 
 Do not exercise the full embed path in CLI tests (would load real `FastembedEmbedder`). Parse errors and early exits use the CLI binary; heavy logic uses the library entry point.
+
+### Testing a New Cascade Command (Phase 9)
+
+For commands that batch-delete across multiple items (e.g., `catalog remove --force` cascade):
+
+1. **Library API setup:** Pre-enable multiple plugins via `lifecycle::enable` + `StubEmbedder` to populate the index
+2. **CLI binary test:** Drive the cascade via the CLI binary (no embedder construction needed for deletion)
+3. **Isolation:** Use `ToolEnv`, `paths_for`, `write_config_for_cli`
+4. **JSON validation:** If the cascade is exposed in `--json`, assert the optional array field structure:
+   - Empty cascade case: field omitted (via `#[serde(skip_serializing_if = "Vec::is_empty")]`)
+   - Non-empty cascade case: field present with one entry per deleted item
+5. **State assertions:** Verify database rows are dropped and side effects complete
+
+Example pattern from `tests/catalog_remove_cascade.rs`:
+- Enable plugins via library API + `StubEmbedder` (setup only)
+- Run CLI `catalog remove --force` (the cascade itself)
+- Assert exit code, JSON envelope structure, and post-operation database state
 
 ### Testing Idempotency (Phase 5)
 

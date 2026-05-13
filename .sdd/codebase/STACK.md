@@ -6,16 +6,17 @@
 > **Updated**: 2026-05-13 (Phase 6 User Story 4 slice 1 — `tome models download | list | remove` CLI; slice 2 adds 9 integration tests)
 > **Updated**: 2026-05-13 (Phase 7 User Story 5 slices 1–3 — `reindex_plugin_atomic` + `tome catalog update` cascade + `tome reindex` CLI; no new dependencies)
 > **Updated**: 2026-05-13 (Phase 8 User Story 6 slices 1–2 — `tome status [--verify]` + version pre-parse hook; 14 new tests; no new dependencies)
+> **Updated**: 2026-05-13 (Phase 9 User Story 7 — `tome catalog remove` Phase 2 extensions; cascade-disable orchestrator; no new dependencies)
 
 ## Languages & Runtimes
 
 | Language | Version | Purpose |
 |----------|---------|---------|
-| Rust | stable (MSRV: 1.93) | Primary implementation language; synchronous (no async runtime in Phase 1–8) |
+| Rust | stable (MSRV: 1.93) | Primary implementation language; synchronous (no async runtime in Phase 1–9) |
 
 ## Frameworks
 
-Phase 1–8 is a CLI application, not a web framework-based project.
+Phase 1–9 is a CLI application, not a web framework-based project.
 
 | Framework | Version | Purpose |
 |-----------|---------|---------|
@@ -154,6 +155,18 @@ Phase 8 slice 2 adds version pre-parse hook in `src/main.rs`:
 
 **No new production dependencies** in Phase 8 — all pieces reuse Phase 1–7 infrastructure (status logic combines existing model/index/meta logic; version printing is a thin wrapper over embedder registry entries). Test count: 223 → 237 across 33 → 35 suites.
 
+### Phase 9 — user-story slice 1 (catalog remove Phase 2 extensions)
+
+Phase 9 slice 1 implements `tome catalog remove` Phase 2 extensions per `contracts/catalog-extensions.md`:
+- `src/plugin/lifecycle.rs::cascade_disable_for_catalog(paths, catalog, plugins, embedder_seed, reranker_seed)` — new library helper for atomic cascade-disable within one advisory-lock window; no Embedder required (pure deletion logic).
+- Extended `src/commands/catalog/remove.rs` with pre-check (`enabled_plugins_for_catalog` query) and conditional cascade dispatch.
+- Refuse path: enabled plugins + no `--force` → exit 53 (`CatalogHasEnabledPlugins`; pre-existing error variant).
+- Cascade path: `--force` + enabled plugins → `cascade_disable_for_catalog` → drop each plugin's index rows in one lock window → proceed with Phase 1 flow.
+- New `tests/catalog_remove_cascade.rs` — 3 CLI binary tests driven by library-API enable + StubEmbedder setup.
+- JSON output extended with `cascade` array documenting plugins disabled and skills dropped per `contracts/catalog-extensions.md` shape.
+
+**No new production dependencies** in Phase 9 — cascade logic reuses existing `delete_by_plugin` database helper and advisory-lock infrastructure. Test count: 237 → 240 across 35 → 36 suites.
+
 ## Package Managers & Build Tools
 
 | Tool | Version | Purpose |
@@ -174,7 +187,7 @@ Phase 8 slice 2 adds version pre-parse hook in `src/main.rs`:
 
 ## Not Used (Explicitly Excluded)
 
-- **Async runtime**: No `tokio`, `async-std`, or similar. Phase 1–8 remains synchronous (`reqwest::blocking`, `rusqlite`, `fastembed`); the MCP server is the future forcing function.
+- **Async runtime**: No `tokio`, `async-std`, or similar. Phase 1–9 remains synchronous (`reqwest::blocking`, `rusqlite`, `fastembed`); the MCP server is the future forcing function.
 - **Git library**: No `libgit2`, `git2`, or vendored Git. `std::process::Command` shells out to system `git` (constitution principle XII).
 - **Direct ONNX Runtime dep**: `ort` is reached transitively through `fastembed` only; no direct linkage from Tome code.
 - **Custom npm/cargo registry overrides**: All packages resolve from public registries.
@@ -192,4 +205,4 @@ Phase 8 slice 2 adds version pre-parse hook in `src/main.rs`:
 
 ---
 
-*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–8 source code.*
+*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 source code.*

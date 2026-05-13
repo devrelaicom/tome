@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 8 incremental)
+> **Last Updated**: 2026-05-13 (Phase 9 incremental)
 
 ## Overview
 
@@ -179,6 +179,7 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 | 31 | ModelCorrupt | Model metadata invalid or placeholder checksum | 2 | — |
 | 32 | ModelChecksumMismatch | SHA-256 or size mismatch on download | 2 | — |
 | 33 | ModelRegistrationParseError | Model manifest.json invalid | 2 | — |
+| 53 | CatalogHasEnabledPlugins | Catalog has enabled plugins; remove with `--force` to cascade disable | 9 | FR-045 |
 | 54 | NotATerminal | Interactive command run without terminal (stdin/stdout not TTY) | 4 | FR-051 |
 
 **Enforcement**: Closed enum `TomeError` in `src/error.rs`. Adding a variant forces edits to:
@@ -289,6 +290,7 @@ pub fn require_terminal() -> Result<(), TomeError> {
 | **Model manifest write** | Atomic write via temp + rename | `src/embedding/download.rs::write_manifest` |
 | **Index database enable** | Per-plugin transaction (all-or-nothing skill upsert) | `src/index/skills.rs::enable_plugin_atomic` |
 | **Index database reindex** | Per-plugin transaction (snapshot diff → add/modify/remove/unchanged) | `src/index/skills.rs::reindex_plugin_atomic` (Phase 7) |
+| **Catalog cascade disable** | Single lock acquisition for multi-plugin batch disable (Phase 9) | `src/plugin/lifecycle.rs::cascade_disable_for_catalog` + `src/index/skills.rs::delete_by_plugin` |
 | **Temp file cleanup** | RAII via `tempfile::NamedTempFile` + `TempDir` | Rust Drop trait |
 
 **Mechanism**:
@@ -302,6 +304,8 @@ pub fn require_terminal() -> Result<(), TomeError> {
 - Test coverage: `tests/atomicity.rs` with concurrent writes and simulated interruption
 
 **Note on per-plugin atomicity** (Phase 7): When reindexing multiple plugins (e.g., via `tome catalog update`), each plugin's reindex runs in its own transaction. A SIGINT between plugins leaves earlier plugins committed and later plugins unchanged. This is intentional (see CONCERNS.md for design rationale); the index is always in a valid state with no partial rows. The per-plugin boundary is where atomicity breaks for multi-plugin operations.
+
+**Phase 9 catalog cascade disable** (PR #32): When removing a catalog with `--force`, all enabled plugins are cascade-disabled under a single advisory-lock acquisition. Each plugin's deletion runs as its own transaction, so a SIGINT between plugins leaves earlier plugins' rows dropped and later plugins' rows intact. The index remains consistent (no partial rows), and the operation is atomic at the lock-window boundary. See CONCERNS.md for trade-off notes.
 
 ## Dependency Management
 
@@ -434,6 +438,8 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 
 **Phase 8 Status Lock-Free** (PR #29): `tome status` never acquires the advisory lock. This allows it to run as a pre-flight health check even when another writer is holding the lock, supporting its use as a non-invasive doctor command.
 
+**Phase 9 Cascade Disable** (PR #32): The pre-check that queries `enabled_plugins_for_catalog` runs WITHOUT the lock. This is intentional — readers don't block writers, and the only risk is a TOCTOU where another process enables a plugin between the check and the cascade. In that case the cascade simply drops the additional plugin's rows too (still correct), or the user re-runs after seeing the refuse error. The cascade itself runs under a single lock acquisition; each plugin's deletion is its own transaction.
+
 **Future consideration**: Phase 2 MCP server concurrency model is locked down in spec (FR-040); Phase 3 testing against real BGE models is pending (SC-001/SC-002, T088).
 
 ## Security Testing
@@ -452,6 +458,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | **TTY enforcement** | Non-TTY refusal at interactive flow entry and confirmation prompts; pointer messages | `tests/plugin_interactive.rs`, `tests/plugin_disable.rs` |
 | **Integration** | Real Git repos, real fixtures, real filesystems | `tests/catalog_*.rs`, `tests/models_*.rs`, `tests/plugin_*.rs` |
 | **Status health check** | Report assembly, drift detection, overall classification | `tests/status.rs` (Phase 8) |
+| **Catalog cascade** | Enabled-plugin detection, per-plugin deletion under lock, error handling | `tests/catalog_remove.rs` (Phase 9) |
 
 **Success criteria**:
 - SC-005: 100% of malformed inputs rejected with helpful errors

@@ -401,24 +401,24 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Phase Start
 
-- [ ] T178 [GIT] Verify working tree is clean before starting Phase 9
-- [ ] T179 [US7] Create `retro/P9.md`
+- [X] T178 [GIT] Verify working tree is clean before starting Phase 9
+- [X] T179 [US7] Create `retro/P9.md`
 
 ### Implementation
 
-- [ ] T180 [US7] Extend `src/commands/catalog.rs::remove` with a pre-check that queries `skills` for `enabled = 1 AND catalog = ?`. On non-empty + no `--force`, exit 53 listing the enabled plugins. On `--force`, run a cascade inside the index lockfile: disable each enabled plugin, delete its skill rows, then proceed with the Phase 1 catalog-remove logic (use devs:rust-dev agent)
-- [ ] T181 [GIT] Commit: feat(catalog): refuse remove on enabled plugins; cascade with --force
+- [X] T180 [US7] Extend `src/commands/catalog.rs::remove` with a pre-check that queries `skills` for `enabled = 1 AND catalog = ?`. On non-empty + no `--force`, exit 53 listing the enabled plugins. On `--force`, run a cascade inside the index lockfile: disable each enabled plugin, delete its skill rows, then proceed with the Phase 1 catalog-remove logic (use devs:rust-dev agent)
+- [X] T181 [GIT] Commit: feat(catalog): refuse remove on enabled plugins; cascade with --force
 
 ### Tests
 
-- [ ] T182 [P] [US7] Add `tests/catalog_remove_cascade.rs` — refuse case exits 53 with named-plugin message; `--force` cascade exits 0, drops rows, removes the catalog cleanly; no-enabled-plugins case behaves identically to Phase 1 (use devs:rust-dev agent)
-- [ ] T183 [GIT] Commit: test: cover catalog remove cascade
+- [X] T182 [P] [US7] Add `tests/catalog_remove_cascade.rs` — refuse case exits 53 with named-plugin message; `--force` cascade exits 0, drops rows, removes the catalog cleanly; no-enabled-plugins case behaves identically to Phase 1 (use devs:rust-dev agent)
+- [X] T183 [GIT] Commit: test: cover catalog remove cascade
 
 ### Closing
 
-- [ ] T184 [US7] Run `/sdd:map incremental`
-- [ ] T185 [US7] Review `retro/P9.md`
-- [ ] T186 [GIT] Commit: docs: Phase 9 codebase refresh + retro
+- [X] T184 [US7] Run `/sdd:map incremental`
+- [X] T185 [US7] Review `retro/P9.md`
+- [X] T186 [GIT] Commit: docs: Phase 9 codebase refresh + retro
 
 ### Phase 9 Completion
 

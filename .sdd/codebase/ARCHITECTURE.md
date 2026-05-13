@@ -2,7 +2,7 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Stories 6 — health diagnostics)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Stories 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade)
 
 ## Architecture Overview
 
@@ -23,6 +23,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 | **Per-Plugin Atomic Reindex** | `lifecycle::reindex_plugin` mirrors `lifecycle::enable` atomicity: each plugin's reindex is one SQLite transaction under one advisory lock. Batch operations (`tome catalog update`, `tome reindex`) loop per-plugin, committing each before moving to the next. SIGINT between plugins leaves earlier plugins committed (per-plugin boundary). |
 | **Lazy Embedder Loading** | Heavy embedder (~345 MB ONNX) is loaded only when reindexing will actually call it. `tome catalog update` and `tome reindex` defer load until the first enabled plugin is encountered; a sync with zero enabled plugins never touches model files. |
 | **Health Diagnostics (Read-Only)** | `status` command reads subsystem state without mutation: models via manifest checks, index via read-only connection + `PRAGMA integrity_check`, drift via stored identity comparison. Never acquires advisory lock, never downloads models. Exits 0 on Ok, 1 on Degraded/Unhealthy. |
+| **Single-Lock-Per-Batch Cascade** | `lifecycle::cascade_disable_for_catalog` acquires the advisory lock once, disables + drops all enabled plugins for a catalog, then releases. Different from per-plugin operations; chosen to match the contract in `specs/002-phase-2-plugins-index/contracts/catalog-extensions.md` §"tome catalog remove". |
 
 ## Core Components
 
@@ -50,6 +51,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   - Config is persisted at `~/.config/tome/config.toml` atomically.
   - Git operations capture stderr and pass it through credential scrubbing before error display.
 - **Phase 7 Change**: `tome catalog update` now reindexes enabled plugins in each catalog after a Git refresh. Per-plugin atomicity: each `lifecycle::reindex_plugin` call owns its own lock. Auto-disable cascade on `PluginNotFound` / `PluginManifestParseError` via `lifecycle::auto_disable_orphan()`.
+- **Phase 9 Change**: `tome catalog remove` now refuses with exit 53 (`CatalogHasEnabledPlugins`) if enabled plugins exist, unless `--force` is passed. On `--force`, calls `lifecycle::cascade_disable_for_catalog()` to drop all enabled plugin rows in one lock window, then proceeds with Phase 1 removal logic.
 
 ### Plugin Metadata & Lifecycle (`src/plugin/`, `src/commands/plugin/`)
 
@@ -62,6 +64,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   - `lifecycle::disable()`: check not-disabled (exit 32) → acquire lock → flip enabled=0 for all (catalog, plugin) rows → release lock. Cheap re-enable follows since embeddings are retained.
   - `lifecycle::reindex_plugin()`: walk on-disk skills → acquire lock → diff against index → re-embed modified (or all if force=true) → delete orphaned rows → release lock. Mirrors enable atomicity (Phase 7).
   - `lifecycle::auto_disable_orphan()`: called by `tome catalog update` when a plugin is not found post-refresh; de-indexes all rows for the plugin and emits a warning.
+  - `lifecycle::cascade_disable_for_catalog()` (Phase 9): acquires lock once, calls `delete_by_plugin()` per plugin in the catalog, then releases. Returns total dropped skill rows. Used by `tome catalog remove --force` to cascade-disable all enabled plugins before removing the catalog. Unlike per-plugin operations, does not take a `LifecycleDeps` — the cascade is pure deletion without embedder reference.
   - Frontmatter parse: delimiter error is fatal (exit 23); YAML-body error skips one skill + warn (FR-013c).
   - Models: embedder + reranker required by enable and query; optional download in `enable` (CLI owns the TTY prompt; `lifecycle::allow_model_download` is the decision).
 
@@ -229,6 +232,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   - `enable_plugin_atomic()`: walk PendingSkill vec, embed each, insert under one transaction, return EnableSummary (total / newly_embedded counts).
   - `reindex_plugin_atomic()`: diff on-disk pending skills against index, re-embed modified/added, delete removed, return ReindexSummary (added / modified / removed / unchanged counts). Mirrors enable atomicity.
   - `mark_all_disabled_for_plugin()`: flip `enabled = 0` for all rows matching `(catalog, plugin)`.
+  - `delete_by_plugin()` (Phase 9): delete all skill rows for a `(catalog, plugin)` pair. Used by `cascade_disable_for_catalog()` to drop enabled plugins before catalog removal.
   - `knn(query_vec, k, filters)`: search by `enabled = 1`, apply optional catalog/plugin filters, return top k candidates by cosine distance.
 
 ### Embedding & Model Registry (`src/embedding/`)
@@ -305,6 +309,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   - Phase 1: `Internal`, `Usage`, `CatalogNotFound`, `CatalogAlreadyExists`, `ManifestInvalid`, `GitFailed`, `Io`, `Interrupted`.
   - Phase 2: `IndexIntegrityCheckFailure`, `IndexBusy`, `ModelMissing`, `PluginNotFound`, `SkillFrontmatterParseError`.
   - Phase 3: `PluginAlreadyInState`, `QueryNoResultsStrict`, drift checks (exit 41/42).
+  - Phase 9: `CatalogHasEnabledPlugins` (exit 53) — used when `tome catalog remove` finds enabled plugins and `--force` is not passed.
 - **Compile-Time Enforcement**: The `TomeError::exit_code()` method is exhaustive; adding a variant forces edits to `tests/exit_codes.rs`, the spec, and the PRD.
 
 ## Data Flow
@@ -365,6 +370,47 @@ lifecycle::disable(id, paths, config, embedder_seed, reranker_seed)
   → return DisableOutcome (skills_retained count)
        ↓
 format output (human: ✓ disabled N records / JSON: NDJSON record)
+       ↓
+exit(0)
+```
+
+### Catalog Remove Cascade: `tome catalog remove <name> --force`
+
+```
+CLI parse (--json, -v, name, --force)
+       ↓
+dispatch to catalog::remove::run()
+       ↓
+load config, paths
+       ↓
+check catalog exists (exit 15 if not)
+       ↓
+pre-check: read enabled plugins in this catalog (cheap, no lock)
+       ↓
+if enabled_plugins.len() > 0 and not --force:
+  → return CatalogHasEnabledPlugins (exit 53) + plugins list
+       ↓
+if not --force:
+  → check TTY (non-TTY → return Usage error)
+  → prompt for confirmation (default "no"; abort → Ok(()), no state change)
+       ↓
+if !enabled_plugins.is_empty():
+  → call lifecycle::cascade_disable_for_catalog(paths, catalog, plugins, seeds)
+       ↓
+    lifecycle::cascade_disable_for_catalog():
+      → acquire lock (once per batch)
+      → open index
+      → for each plugin:
+          → call delete_by_plugin(conn, catalog, plugin)
+          → sum dropped rows
+      → release lock
+      → log info + return total
+       ↓
+delete config entry (atomic)
+       ↓
+delete cache directory (best-effort)
+       ↓
+format output (human or JSON with cascade array if present)
        ↓
 exit(0)
 ```
@@ -629,6 +675,7 @@ exit(0)
 9. **Models commands mirror plugin commands layout**: `commands/models/` follows the same per-subcommand-file + group-dispatcher pattern as `commands/plugin/`. Library-side work (download, SHA-256) lives in `embedding/download.rs` and `embedding/registry.rs`; CLI-side work (prompts, progress, tables) lives in `commands/models/{download,list,remove}.rs`.
 10. **Reindex commands and lifecycle**: `commands/reindex.rs` owns scope parsing and emission; `plugin::lifecycle::reindex_plugin` and `index::skills::reindex_plugin_atomic` own the orchestration and transaction. Lazy embedder loading is a `commands/` responsibility. `run_with_deps` in `commands/reindex.rs` is a library test entry point (no embedder construction).
 11. **Status is read-only by design**: `commands/status.rs` never mutates state, never acquires advisory lock, never downloads models. It opens the index with `readonly=true` and reads compiled-time model registry identities. Library function `assemble_report` is testable; CLI-side `run` exits 1 on Degraded/Unhealthy via `std::process::exit()` rather than `TomeError`.
+12. **Catalog remove cascade pattern** (Phase 9): `commands/catalog/remove.rs` handles the CLI logic (prompt, force flag, error handling); `plugin::lifecycle::cascade_disable_for_catalog()` is the library function that owns the single-lock-per-batch mutation pattern. Unlike per-plugin operations, the cascade does not take a `LifecycleDeps` — it only needs paths, catalog name, plugin list, and model seeds for metadata seeding.
 
 ## Key Interfaces & Contracts
 
@@ -684,6 +731,7 @@ exit(0)
 - Index mutations: SQLite WAL + advisory lockfile (`index.lock`). Mutating operations acquire the lock; read-only operations do not.
 - Model persistence: Download to temp, verify checksum, rename.
 - Reindex mutations: SQLite WAL + per-plugin advisory lock. Each `lifecycle::reindex_plugin` call acquires and releases the lock independently. Per-plugin atomicity: SIGINT between plugins leaves earlier plugins committed.
+- Catalog remove cascade: SQLite WAL + single advisory lock. `lifecycle::cascade_disable_for_catalog()` acquires lock once, drops all plugins for the catalog in one transaction, then releases (Phase 9).
 
 **POSIX Atomicity**: On single filesystem, rename is atomic; readers either see the old or new version, never partial state.
 
@@ -698,7 +746,7 @@ exit(0)
 | **Credential Scrubbing** | Regex rules applied to all captured git and reqwest output before display or error propagation. | `src/catalog/git.rs::scrub_credentials()`, `src/embedding/download.rs` |
 | **Error Mapping** | Every `Result<_, TomeError>` eventually reaches `main()`, which maps to exit code. | `src/error.rs`, `src/main.rs` |
 | **Logging & Verbosity** | Global tracing subscriber initialized once; orthogonal to `--json` mode. | `src/logging.rs`, `src/main.rs` |
-| **TTY Detection** | Used by interactive commands (removal confirmation, model download prompt, interactive browse, reindex scope confirmation), progress spinners, and output formatting. | `src/output.rs::stdin_is_tty()`, `stdout_is_tty()`, `src/presentation/prompt.rs`, `src/presentation/progress.rs`, `src/commands/plugin/interactive.rs`, `src/commands/models/remove.rs` |
+| **TTY Detection** | Used by interactive commands (removal confirmation, model download prompt, interactive browse, reindex scope confirmation), progress spinners, and output formatting. | `src/output.rs::stdin_is_tty()`, `stdout_is_tty()`, `src/presentation/prompt.rs`, `src/presentation/progress.rs`, `src/commands/plugin/interactive.rs`, `src/commands/models/remove.rs`, `src/commands/catalog/remove.rs` |
 | **Model Presence** | Two-stage check: manifest.json exists on disk AND parses. Applied before `enable` and `query`. | `src/plugin/mod.rs::model_manifest_ok()`, `src/embedding/download.rs` |
 | **Path Validation** | Plugin sources in `tome-catalog.toml` are validated relative to catalog root (no `..`, no escape). Plugin source in `lifecycle::resolve_plugin_dir` is manifest-declared or flat-layout fallback. | `src/catalog/manifest.rs::validate_source()`, `src/plugin/lifecycle.rs::resolve_plugin_dir()` |
 | **Drift Detection** | Embedder and reranker identity (name + version) stored in index meta; compared at query time. Embedder drift → hard fail (exit 41/42); reranker drift → warn. | `src/index/meta.rs`, `src/commands/query.rs::check_drift()` |

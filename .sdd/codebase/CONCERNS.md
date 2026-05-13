@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 8 incremental)
+> **Last Updated**: 2026-05-13 (Phase 9 incremental)
 
 ## Technical Debt
 
@@ -78,6 +78,7 @@ Code areas that are brittle or risky to modify:
 | `src/commands/plugin/{enable,disable,interactive}.rs` | Non-TTY pointer-message-then-error pattern appears at 3 sites (`enable`, `disable`, `interactive`) | Pattern consolidation would yield cleaner code; worth folding in when 4th occurrence appears |
 | `src/index/skills.rs::upsert_skill` | `sqlite-vec` virtual tables do NOT support `INSERT OR REPLACE` or `ON CONFLICT` (Phase 7, PR #25 latent bug fix). Uses `DELETE`-then-`INSERT` which is idempotent | Verify this pattern on any future upsert-like operation involving virtual tables; do not attempt `INSERT OR REPLACE` on `skill_embeddings` |
 | `src/main.rs::--version pre-parse` | Early arg scanning before clap dispatch is custom; any change to pre-parse logic could break `--version` routing | Test both `tome --version` and `tome -V` in CLI integration tests; verify `--json` flag is also detected; check that non-matching args pass through to clap normally |
+| `src/plugin/lifecycle.rs::cascade_disable_for_catalog` | Single lock acquisition per cascade; each plugin's deletion is its own transaction. TOCTOU window between pre-check (without lock) and cascade (under lock): another process may enable a plugin between check and delete, causing its rows to be dropped too | This is intentional (readers never block writers). The pre-check reports a stale but valid list; the cascade acts on what's actually there and is correct either way. Document the TOCTOU window and its benign semantics |
 
 ## Deprecated Code
 
@@ -87,7 +88,7 @@ Code marked for removal:
 |------|-------------------|----------------|-------------|
 | (none) | — | — | — |
 
-All Phase 1, Phase 2, Phase 4, Phase 5, Phase 6, Phase 7, and Phase 8 code is current; no legacy to remove yet.
+All Phase 1, Phase 2, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, and Phase 9 code is current; no legacy to remove yet.
 
 ## Performance Concerns
 
@@ -162,6 +163,7 @@ Intentional design decisions with known limitations:
 |----------|------|-----------|-------------|-------|
 | **Per-plugin atomicity** (Phase 7) | `src/index/skills.rs::reindex_plugin_atomic` | Simpler transaction model; each plugin reindex commits independently | Multi-plugin `tome catalog update` or `tome reindex` may leave earlier plugins committed if interrupted between plugins | Safe state always (no partial rows); index is always valid. By design, not a bug. Advisory lock per-plugin at entry to reindex, released at commit. |
 | **Status lock-free** (Phase 8) | `src/commands/status.rs::run` (no advisory lock taken) | Allows health check to run even when a writer is running; supports use as a non-invasive doctor command (FR-056) | Status report is a point-in-time snapshot; may be stale if another process is concurrently writing | Acceptable trade-off for pre-flight non-blocking diagnosis. Caller should understand the snapshot may be moments old. |
+| **Cascade disable under single lock** (Phase 9) | `src/plugin/lifecycle.rs::cascade_disable_for_catalog` | Batch operation atomicity: all plugins disabled and rows dropped within one lock window; simpler than per-plugin acquisitions (Phase 7 pattern) | Each plugin's deletion is its own transaction (not atomic across plugins), so SIGINT between plugins leaves earlier plugins dropped + later plugins intact. Index is always valid; partial state is well-defined | By design. Index WAL + transaction isolation ensures each deletion is durable and correct. Pre-check (enabled-plugin query) runs WITHOUT lock, accepting TOCTOU risk of stale enabled list — acceptable because cascade acts on actual state (still correct) and reader-never-blocks-writer is the locking principle. |
 
 ## Risk Summary by Phase
 
@@ -304,6 +306,28 @@ Intentional design decisions with known limitations:
 
 **Integration test coverage** (Phase 8):
 - `tests/status.rs` verifies report assembly, drift detection scenarios, and JSON/human output formats
+
+### Phase 9 (Complete)
+
+**Completed (US7, Slice 1)**:
+- ✓ `tome catalog remove --force` cascade disable + row drop for enabled plugins (FR-045, contracts/catalog-extensions.md)
+- ✓ Pre-check query `enabled_plugins_for_catalog` runs without lock (readers don't block writers)
+- ✓ Cascade itself runs under single lock acquisition; each plugin's deletion is its own transaction
+- ✓ New error exit 53 (`CatalogHasEnabledPlugins`) with qualified plugin ids in message (catalog/plugin names are public)
+- ✓ Helper `cascade_disable_for_catalog` in `src/plugin/lifecycle.rs` + integration test coverage
+
+**Security posture**:
+- No new credentials, external endpoints, or attack surface
+- Cascade atomicity is at the lock-window level (all plugins disabled within one lock); each plugin's deletion is durable and correct
+- TOCTOU window between pre-check (without lock) and cascade (under lock) is intentional — readers never block writers, and cascade acts on actual state (still correct)
+- Index remains in consistent state on interruption; partial drops are well-defined
+
+**Design tradeoffs**:
+- Per-plugin deletion atomicity (not across-plugin atomicity) — simpler than taking per-plugin locks; SIGINT between plugins leaves earlier plugins dropped + later plugins intact (safe, by design)
+- Pre-check without lock accepts stale enabled list but cascade acts on fresh state — acceptable because "another process enabled a plugin between check and delete" still results in correct drop (the additional plugin's rows are removed too) or user re-runs
+
+**Integration test coverage** (Phase 9):
+- `tests/catalog_remove.rs` verifies enabled-plugin detection, `--force` flag, cascade semantics, and error exit code
 
 ---
 
