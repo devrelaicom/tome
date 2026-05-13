@@ -1,6 +1,11 @@
 //! Atomic registry persistence. Writes go through `tempfile::NamedTempFile`
 //! in the same directory as the target file, then rename — POSIX-atomic on a
 //! single filesystem (FR-017b).
+//!
+//! On Unix the persisted file is chmod 0o600 — `config.toml` holds catalog
+//! source URLs, which are not secrets today but can carry user-supplied
+//! tokens via the user-typed `tome catalog add` source. The umask-default
+//! 0644 would let any local user read those URLs.
 
 use std::io::Write;
 use std::path::Path;
@@ -38,7 +43,8 @@ pub fn save(config_file: &Path, config: &Config) -> Result<(), TomeError> {
 }
 
 /// Write `bytes` to `target` atomically: write to a same-directory temp file,
-/// fsync, then rename. The rename is the only step visible to readers.
+/// fsync, set chmod 0o600 (Unix only), then rename. The rename is the only
+/// step visible to readers.
 pub fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), TomeError> {
     let parent = target
         .parent()
@@ -47,6 +53,12 @@ pub fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), TomeError> {
     let mut tmp = NamedTempFile::new_in(parent).map_err(TomeError::Io)?;
     tmp.write_all(bytes).map_err(TomeError::Io)?;
     tmp.as_file().sync_all().map_err(TomeError::Io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(tmp.path(), perms).map_err(TomeError::Io)?;
+    }
     tmp.persist(target).map_err(|e| TomeError::Io(e.error))?;
     Ok(())
 }

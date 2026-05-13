@@ -75,9 +75,15 @@ pub fn run(args: CatalogAddArgs, mode: Mode) -> Result<(), TomeError> {
     // path matches `paths.cache_dir_for(url)` exactly.
     persist_clone(&clone_dest, &cache_dir)?;
 
+    // Scrub credentials before persisting to `config.toml`: a user-supplied
+    // URL of the form `https://user:token@host/repo` must not leave its
+    // userinfo on disk (the resolved `url` is the same string the user
+    // typed, modulo `source::resolve` normalisation; nothing else along
+    // this path strips them).
+    let scrubbed_url = scrub_to_string(url.as_bytes());
     let entry = CatalogEntry {
         name: display_name.clone(),
-        url: url.clone(),
+        url: scrubbed_url,
         ref_: clone_ref.unwrap_or("main").to_string(),
         path: cache_dir.clone(),
         last_synced: OffsetDateTime::now_utc(),
