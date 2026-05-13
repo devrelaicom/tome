@@ -448,10 +448,10 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Documentation
 
-- [ ] T198 [P] Update `README.md` with a Phase 2 section: enable / disable / query examples, model management, status, where things live on disk (use devs:rust-dev agent)
-- [ ] T199 [P] Update `CHANGELOG.md` with the Phase 2 entry, listing user-visible additions and the new exit-code range (use devs:rust-dev agent)
-- [ ] T200 [P] Refresh `CLAUDE.md` "Recent Changes" with the Phase 10 polish entry; verify "Active Technologies" still reflects shipped reality
-- [ ] T201 [GIT] Commit: docs: Phase 2 README, CHANGELOG, CLAUDE.md updates
+- [X] T198 [P] Update `README.md` with a Phase 2 section: enable / disable / query examples, model management, status, where things live on disk (use devs:rust-dev agent)
+- [X] T199 [P] Update `CHANGELOG.md` with the Phase 2 entry, listing user-visible additions and the new exit-code range (use devs:rust-dev agent)
+- [X] T200 [P] Refresh `CLAUDE.md` "Recent Changes" with the Phase 10 polish entry; verify "Active Technologies" still reflects shipped reality
+- [X] T201 [GIT] Commit: docs: Phase 2 README, CHANGELOG, CLAUDE.md updates
 
 ### Performance verification
 
