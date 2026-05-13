@@ -249,3 +249,22 @@ pub fn write_config_for_cli(paths: &Paths, config: &Config) {
     let body = toml::to_string_pretty(config).expect("serialise config");
     std::fs::write(&paths.config_file, body).expect("write config.toml");
 }
+
+/// Mirror of [`Paths::resolve`] that derives the layout from a [`ToolEnv`]'s
+/// isolated `$HOME` instead of touching real env vars. Lets the lifecycle
+/// library API and the spawned CLI binary share an on-disk layout without
+/// `Command::env` mutating process state. Originally duplicated across
+/// `plugin_list.rs`, `plugin_show.rs`, and `plugin_interactive.rs`; promoted
+/// here at the 4th caller (`plugin_disable.rs`) per the P4 retro plan.
+pub fn paths_for(env: &ToolEnv) -> Paths {
+    let home = env.home_path();
+    Paths {
+        config_dir: home.join(".config/tome"),
+        config_file: home.join(".config/tome/config.toml"),
+        data_dir: home.join(".local/share/tome"),
+        catalogs_dir: home.join(".local/share/tome/catalogs"),
+        index_db: home.join(".local/share/tome/index.db"),
+        index_lock: home.join(".local/share/tome/index.lock"),
+        models_dir: home.join(".local/share/tome/models"),
+    }
+}

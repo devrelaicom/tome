@@ -245,6 +245,69 @@ source = "./vendor/wrapped-alpha"
 }
 
 #[test]
+fn cheap_reenable_after_disable_invokes_embedder_zero_times() {
+    // FR-006: re-enable of a plugin whose skill content is unchanged must
+    // skip the embedder and merely flip `enabled = 1`. The hash comparison
+    // in `index::skills::enable_plugin_atomic` is the load-bearing branch.
+    // We instrument the stub embedder via `call_count()` to assert that the
+    // closure was not invoked a second time.
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    fabricate_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+
+    let embedder = StubEmbedder::new();
+    let deps = LifecycleDeps {
+        paths: &paths,
+        config: &config,
+        embedder: &embedder,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+        allow_model_download: false,
+    };
+    let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
+
+    let first = lifecycle::enable(&id, &deps).expect("first enable");
+    // Four skills land (skill-malformed-yaml-body is skipped). All freshly
+    // embedded — the embedder closure ran 4 times.
+    assert_eq!(first.summary.total_skills, 4);
+    assert_eq!(first.summary.newly_embedded, 4);
+    let calls_after_first_enable = embedder.call_count();
+    assert_eq!(
+        calls_after_first_enable, 4,
+        "first enable must invoke embedder once per skill",
+    );
+
+    // Disable, then re-enable with the same StubEmbedder so the call counter
+    // persists across the round-trip.
+    lifecycle::disable(
+        &id,
+        &paths,
+        &config,
+        stub_embedder_seed(),
+        stub_reranker_seed(),
+    )
+    .expect("disable");
+
+    let second = lifecycle::enable(&id, &deps).expect("cheap re-enable");
+    // Cheap path: same 4 skills surface, but `newly_embedded` collapses to 0
+    // and the embedder closure is not invoked.
+    assert_eq!(second.summary.total_skills, 4);
+    assert_eq!(
+        second.summary.newly_embedded, 0,
+        "cheap re-enable must report zero newly-embedded skills",
+    );
+    assert_eq!(
+        embedder.call_count(),
+        calls_after_first_enable,
+        "cheap re-enable must not invoke the embedder",
+    );
+}
+
+#[test]
 fn enable_returns_model_missing_when_no_models_on_disk_and_download_disallowed() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());

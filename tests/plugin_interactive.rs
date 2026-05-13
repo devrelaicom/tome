@@ -38,8 +38,8 @@ use std::process::Command;
 use std::time::Duration;
 
 use common::{
-    ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models, stub_embedder_seed,
-    stub_reranker_seed, write_config_for_cli,
+    ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models, paths_for,
+    stub_embedder_seed, stub_reranker_seed, write_config_for_cli,
 };
 use rexpect::session::{PtySession, spawn_command};
 use tempfile::TempDir;
@@ -47,22 +47,6 @@ use tome::embedding::stub::StubEmbedder;
 use tome::paths::Paths;
 use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
-
-/// Mirror of the `Paths` resolution `tome::paths::Paths::resolve()` produces
-/// inside `env`. Lets the lifecycle library API and the spawned CLI binary
-/// share an on-disk layout without mutating process env vars.
-fn paths_for(env: &ToolEnv) -> Paths {
-    let home = env.home_path();
-    Paths {
-        config_dir: home.join(".config/tome"),
-        config_file: home.join(".config/tome/config.toml"),
-        data_dir: home.join(".local/share/tome"),
-        catalogs_dir: home.join(".local/share/tome/catalogs"),
-        index_db: home.join(".local/share/tome/index.db"),
-        index_lock: home.join(".local/share/tome/index.lock"),
-        models_dir: home.join(".local/share/tome/models"),
-    }
-}
 
 /// Common setup: isolated env, sample-plugin-catalog copied in, config.toml
 /// written, fabricated model manifests, and `plugin-alpha` pre-enabled via
