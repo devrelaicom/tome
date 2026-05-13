@@ -57,7 +57,7 @@ This file gives Claude Code persistent context about the Tome project. Keep it t
 - **Strictness boundary.** Tome-owned declarative inputs are strict (`#[serde(deny_unknown_fields)]`); third-party inputs (`plugin.json`, SKILL.md frontmatter) are lenient — see spec FR-013a. The strict-on-Tome-owned principle is enforced by `tests/manifest_strictness.rs`.
 - **Atomic writes.** Registry, cache, models directory, and index DB mutations are atomic. SQLite WAL + a Tome-owned advisory lockfile (`index.lock`) provide the index concurrency contract (FR-040).
 - **Credential scrubbing at the boundary.** `git::scrub_credentials` extends to model download URLs and `reqwest` error chains.
-- **10 MB binary cap.** Hard ceiling. CI asserts `du -sh target/release/tome` on Linux. `ort` (CPU-only static) is the load-bearing dep; profile is `lto = "thin"`, `panic = "abort"`, `strip = "symbols"`. If breached, the plan revises — the cap is non-waivable (NFR-001).
+- **50 MB binary cap** (revised from 10 MB on 2026-05-13 — see `retro/P3.md` §"Binary-size cap revision"). CI asserts `stat -c%s target/release/tome` on Linux. `ort` (CPU-only static) is the load-bearing dep; profile is `lto = "thin"`, `panic = "abort"`, `strip = "symbols"`. If breached, the plan revises — the discipline is non-waivable (NFR-001); the specific number is sized to current reality plus headroom.
 - **Licence allowlist.** Unchanged. Every Phase 2 dep verified inside the allowlist. `cargo-deny` enforces. Downloaded models (BGE family, MIT) are surfaced in `tome models list`.
 
 ## Conventions

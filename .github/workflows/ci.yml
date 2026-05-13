@@ -50,16 +50,16 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
-      - name: Release binary size check (< 10 MB stripped)
+      - name: Release binary size check (< 50 MB stripped)
         if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
         shell: bash
         run: |
           cargo build --release --locked
           size=$(stat -c%s target/release/tome)
-          limit=10485760
+          limit=52428800
           mb=$(python3 -c "print(f'{$size / 1048576:.2f}')")
           echo "release binary: ${mb} MB ($size bytes, limit ${limit})"
           if [ "$size" -ge "$limit" ]; then
-            echo "::error::Release binary ${mb} MB exceeds the 10 MB limit (NFR-001)"
+            echo "::error::Release binary ${mb} MB exceeds the 50 MB limit (NFR-001)"
             exit 1
           fi

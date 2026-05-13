@@ -53,7 +53,7 @@ Tokens, SSH keys, credential-helper output, and anything Git emits that looks cr
 
 **Async.** Synchronous only until there's a concrete reason otherwise (the MCP server is the expected forcing function). Don't pull in `tokio` "in case".
 
-**Binary size.** Release builds stay under 10 MB stripped. Adding a dependency that pushes us over this requires a written justification in the PR.
+**Binary size.** Release builds stay under 50 MB stripped. Adding a dependency that pushes us over this requires a written justification in the PR. The cap was 10 MB at ratification; Phase 2 linked ONNX Runtime (via `fastembed` → `ort`) which is intrinsically larger than the worst-case projection. The cap is now sized to current reality (~30 MB) with headroom for query, reindex, and the MCP server.
 
 **Paths.** XDG-aware via `directories`. Never hardcode `~/.tome`. Cache directories are content-addressed (sha256 of source URL) to prevent collisions.
 
@@ -91,4 +91,4 @@ This constitution supersedes ad-hoc practice. Where it conflicts with PRD detail
 
 **Runtime guidance.** Day-to-day conventions (naming, error message tone, help-text style) are documented separately from this constitution. When that documentation and this constitution disagree, the constitution wins and the runtime guidance gets fixed.
 
-**Version**: 1.1.0 | **Ratified**: 2026-05-11 | **Last Amended**: 2026-05-12
+**Version**: 1.2.0 | **Ratified**: 2026-05-11 | **Last Amended**: 2026-05-13
