@@ -211,12 +211,12 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 - [X] T098 [US2] Implement the interactive flow in `src/commands/plugin.rs` (`fn run_interactive()`): catalog selector → plugin browser → plugin view → action prompt. Use `presentation::prompt` wrappers; refuse on non-TTY with `NotATerminal` per FR-051. Loop with Back/Quit handling at every level (use devs:rust-dev agent)
 - [X] T099 [US2] Wire the no-subcommand form into `src/cli.rs` so `tome plugin` (bare) dispatches to `run_interactive` (use devs:rust-dev agent)
-- [ ] T100 [GIT] Commit: feat(plugin): add interactive catalog/plugin browse flow
+- [X] T100 [GIT] Commit: feat(plugin): add interactive catalog/plugin browse flow
 
 ### Tests
 
-- [ ] T101 [P] [US2] Add `tests/plugin_interactive.rs` — drive a scripted session (select catalog → select plugin → enable → back → back → quit); assert the plugin ends up enabled in the DB and the process exited 0 (use devs:rust-dev agent)
-- [ ] T102 [P] [US2] Add a non-TTY case asserting bare `tome plugin` exits 54 (`NotATerminal`) with the documented pointer message (use devs:rust-dev agent)
+- [X] T101 [P] [US2] Add `tests/plugin_interactive.rs` — drive a scripted session (select catalog → select plugin → enable → back → back → quit); assert the plugin ends up enabled in the DB and the process exited 0 (use devs:rust-dev agent)
+- [X] T102 [P] [US2] Add a non-TTY case asserting bare `tome plugin` exits 54 (`NotATerminal`) with the documented pointer message (use devs:rust-dev agent)
 - [ ] T103 [GIT] Commit: test: cover interactive plugin flow including non-TTY refusal
 
 ### Closing
