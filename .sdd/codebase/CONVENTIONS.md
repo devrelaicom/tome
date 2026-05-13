@@ -85,7 +85,7 @@ This enforces the Unix principle: every failure class has a stable, documented e
 | 8 | `Interrupted` | User pressed Ctrl+C; in-flight git processes killed |
 | 30 | `ModelMissing` | Required embedding model not present |
 
-*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2 exit codes.*
+*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2–4 exit codes.*
 
 ### Error Message Style
 
@@ -133,11 +133,12 @@ src/
 │   │   ├── show.rs      // `tome catalog show <name>`
 │   │   ├── update.rs    // `tome catalog update [name]`
 │   │   └── source.rs    // Git fetch / update orchestrator
-│   ├── plugin/          // `tome plugin` subcommands (Phase 3)
+│   ├── plugin/          // `tome plugin` subcommands (Phase 3–4)
 │   │   ├── mod.rs       // Dispatcher; cross-subcommand helpers
 │   │   ├── enable.rs    // `tome plugin enable <catalog>/<plugin>` (CLI side)
 │   │   ├── list.rs      // `tome plugin list [catalog]`
 │   │   ├── show.rs      // `tome plugin show <catalog>/<plugin>`
+│   │   ├── interactive.rs // `tome plugin` (bare, interactive browse) (Phase 4)
 │   │   └── disable.rs   // `tome plugin disable <catalog>/<plugin>` (future)
 │   └── query.rs         // `tome query <text>` (Phase 3)
 ├── catalog/             // Catalog manifest + storage + git operations
@@ -192,6 +193,7 @@ tests/
 ├── plugin_enable.rs     // Library API tests for `plugin::lifecycle::enable`
 ├── plugin_list.rs       // CLI-binary tests for `tome plugin list`
 ├── plugin_show.rs       // CLI-binary tests for `tome plugin show`
+├── plugin_interactive.rs // PTY-driven tests for `tome plugin` interactive
 ├── query.rs             // Library API tests for query path (embed + KNN)
 ├── atomicity_enable.rs  // Failure-injection tests for enable rollback (FR-004)
 ├── exit_codes.rs        // Exhaustiveness check: every TomeError → exit code
@@ -205,7 +207,7 @@ tests/
     └── sample-plugin-catalog/
 ```
 
-### CLI Module Pattern (Phase 3)
+### CLI Module Pattern (Phase 3–4)
 
 Each subcommand group lives under `src/commands/{group}/` with one file per subcommand:
 
@@ -224,7 +226,26 @@ pub fn run(args: PluginEnableArgs, mode: Mode) -> Result<(), TomeError> {
 }
 ```
 
-### Plugin Lifecycle Pattern (Phase 3)
+### Interactive CLI Pattern (Phase 4)
+
+The `tome plugin` interactive flow (no subcommand) is implemented in `src/commands/plugin/interactive.rs`:
+
+- **TTY gating:** Check `output::stdin_is_tty() && output::stdout_is_tty()` before constructing prompts (FR-051)
+- **Multi-level loop structure:** Catalog selector → plugin browser → plugin view/action prompts
+- **Navigation:** Back and Quit at each level return to parent with clean redraw
+- **Prompt library:** `inquire` (Select, MultiSelect, Confirm) — refuses on non-TTY
+- **Action menu:** Shown status (Enabled/Disabled) and allows [Enable/Disable, Back] per current state
+- **Post-action redraw:** After `enable` or `disable`, redraw the plugin view with updated status and fresh action menu
+
+Testing pattern (PTY-driven via `rexpect`):
+1. Pre-enable plugins via library API (avoids loading `FastembedEmbedder` in CLI child)
+2. Spawn `tome plugin` under pty with `NO_COLOR=1` for reliable prompt matching
+3. Script interaction via `send_flush()`, `press_enter()`, `press_down()`
+4. Assert final state via database queries and exit code
+
+See `tests/plugin_interactive.rs` for full test cases and helper functions.
+
+### Plugin Lifecycle Pattern (Phase 3–4)
 
 **Library API design:** The `plugin::lifecycle` module is testable without loading real ONNX models. It takes:
 - A plugin ID (`<catalog>/<plugin>`)

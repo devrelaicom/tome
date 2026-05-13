@@ -217,13 +217,13 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 - [X] T101 [P] [US2] Add `tests/plugin_interactive.rs` — drive a scripted session (select catalog → select plugin → enable → back → back → quit); assert the plugin ends up enabled in the DB and the process exited 0 (use devs:rust-dev agent)
 - [X] T102 [P] [US2] Add a non-TTY case asserting bare `tome plugin` exits 54 (`NotATerminal`) with the documented pointer message (use devs:rust-dev agent)
-- [ ] T103 [GIT] Commit: test: cover interactive plugin flow including non-TTY refusal
+- [X] T103 [GIT] Commit: test: cover interactive plugin flow including non-TTY refusal
 
 ### Closing
 
-- [ ] T104 [US2] Run `/sdd:map incremental` and update CLAUDE.md if needed
-- [ ] T105 [US2] Review `retro/P4.md`; extract critical learnings (conservative)
-- [ ] T106 [GIT] Commit: docs: Phase 4 codebase refresh + retro
+- [X] T104 [US2] Run `/sdd:map incremental` and update CLAUDE.md if needed
+- [X] T105 [US2] Review `retro/P4.md`; extract critical learnings (conservative)
+- [X] T106 [GIT] Commit: docs: Phase 4 codebase refresh + retro
 
 ### Phase 4 Completion
 

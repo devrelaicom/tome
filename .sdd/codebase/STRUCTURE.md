@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1 — plugin enable/disable, query)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse)
 
 ## Directory Layout
 
@@ -28,11 +28,12 @@ tome/
 │   │   │   ├── update.rs          # Refresh catalogs
 │   │   │   ├── show.rs            # Inspect catalog manifest
 │   │   │   └── source.rs          # URL resolution (owner/repo → GitHub URL)
-│   │   ├── plugin/                # `tome plugin <subcommand>` (Phase 3)
+│   │   ├── plugin/                # `tome plugin <subcommand>` + interactive (Phase 3–4)
 │   │   │   ├── mod.rs             # Dispatcher + shared helpers
 │   │   │   ├── enable.rs          # Enable a plugin (embed + index)
 │   │   │   ├── list.rs            # List plugins (all or for one catalog)
-│   │   │   └── show.rs            # Show one plugin's metadata + state
+│   │   │   ├── show.rs            # Show one plugin's metadata + state
+│   │   │   └── interactive.rs     # Bare `tome plugin` (no subcommand) interactive browse (Phase 4)
 │   │   └── query.rs               # `tome query <text>` — KNN search (Phase 3)
 │   ├── config.rs                  # Config and CatalogEntry structures (serde + toml)
 │   ├── paths.rs                   # XDG-aware path resolution, cache key computation
@@ -91,6 +92,7 @@ tome/
 │   ├── plugin_enable.rs           # test: plugin enable flow (Phase 3)
 │   ├── plugin_list.rs             # test: plugin list (Phase 3)
 │   ├── plugin_show.rs             # test: plugin show (Phase 3)
+│   ├── plugin_interactive.rs      # test: bare `tome plugin` interactive browse via pty (Phase 4)
 │   ├── query.rs                   # test: query (KNN + optional rerank) (Phase 3)
 │   ├── concurrency.rs             # test: two-process index contention (Phase 2)
 │   ├── schema_migrations.rs       # test: schema migrations (Phase 2)
@@ -153,7 +155,7 @@ tome/
 |-----------|---------|-------------------|
 | `src/main.rs` | Binary entry point; parses CLI, installs signal handler, dispatches, handles errors. | — (entry point, not a module) |
 | `src/lib.rs` | Library surface; aggregates `catalog`, `cli`, `commands`, `config`, `error`, `logging`, `output`, `paths`, `plugin`, `index`, `embedding`, `presentation`. | Public for integration tests. |
-| `src/cli.rs` | clap derive definitions for global flags (`--json`, `-v`/`-vv`) and subcommands. | `Cli`, `Command`, `CatalogCommand`, `PluginCommand`, `QueryArgs`, arg structs. |
+| `src/cli.rs` | clap derive definitions for global flags (`--json`, `-v`/`-vv`) and subcommands. | `Cli`, `Command`, `CatalogCommand`, `PluginCommand`, `PluginArgs`, arg structs. |
 | `src/error.rs` | Closed `TomeError` enum; exit code and category mapping; error variants. | `TomeError`, `ManifestInvalid`, `PluginState`, etc. (consumed by all). |
 | `src/catalog/` | Catalog management: manifest parsing, Git operations, atomic registry persistence. | `CatalogManifest`, `Git`, `store::load/save/write_atomic`. |
 | `src/commands/` | Command handlers; implement `tome catalog/plugin/query <subcommand>`. | Per-subcommand `run(args, mode)` functions. |
@@ -190,6 +192,7 @@ tome/
 | `tests/plugin_enable.rs` | Plugin enable flow (Phase 3). | Happy path, idempotency rejection, frontmatter errors, fallback warnings. |
 | `tests/plugin_list.rs` | Plugin list (Phase 3). | Single/multiple catalogs, filtering, human/JSON output. |
 | `tests/plugin_show.rs` | Plugin show (Phase 3). | Metadata display, status, component counts, index aggregate. |
+| `tests/plugin_interactive.rs` | Interactive browse flow via pty harness (Phase 4). | Catalog selection, plugin selection, enable/disable actions, Esc/Ctrl-C, non-TTY refusal. |
 | `tests/query.rs` | Query KNN + optional rerank (Phase 3). | Happy path, filtering, reranking, threshold filtering. |
 | `tests/concurrency.rs` | Two-process index contention (Phase 2). | Concurrent enable/list, lockfile contention. |
 | `tests/schema_migrations.rs` | Schema migrations (Phase 2). | Forward-only migration, idempotency. |
@@ -239,11 +242,12 @@ src/commands/
 │   ├── update.rs    # Refresh
 │   ├── show.rs      # Show one catalog's manifest
 │   └── source.rs    # URL resolution helper
-├── plugin/          # (Phase 3)
+├── plugin/          # (Phase 3–4)
 │   ├── mod.rs       # Dispatcher + shared helpers (model checking, index opening)
 │   ├── enable.rs    # Enable a plugin
 │   ├── list.rs      # List plugins
-│   └── show.rs      # Show one plugin
+│   ├── show.rs      # Show one plugin
+│   └── interactive.rs # Bare `tome plugin` interactive browse (Phase 4; ~515 lines)
 └── query.rs         # (Phase 3) Query/search
 ```
 
@@ -252,6 +256,11 @@ src/commands/
 **Signature Pattern** (all subcommands):
 ```rust
 pub fn run(args: SomeArgs, mode: output::Mode) -> Result<(), TomeError>
+```
+
+**Interactive Pattern** (Phase 4):
+```rust
+pub fn run_interactive(mode: output::Mode) -> Result<(), TomeError>
 ```
 
 **What It Cannot Do**:
@@ -288,6 +297,7 @@ src/plugin/
 - Know about CLI argument structures (those live in `commands/plugin/`).
 - Format output (that's `commands/plugin/` and `presentation/`'s job).
 - Prompt the user for downloads (that's `commands/plugin/enable.rs`'s responsibility; the library receives `allow_model_download` boolean).
+- Orchestrate interactive browse (that's `commands/plugin/interactive.rs`'s responsibility).
 
 ### Index Module: `src/index/`
 
@@ -362,7 +372,7 @@ src/embedding/
 | If you're adding... | Put it in... | Example |
 |---------------------|--------------|---------|
 | New catalog subcommand | `src/commands/catalog/{name}.rs` + add to dispatcher in `mod.rs` | `src/commands/catalog/verify.rs` (verify manifest syntax) |
-| New plugin subcommand | `src/commands/plugin/{name}.rs` + add to dispatcher in `mod.rs` | `src/commands/plugin/disable.rs` (Phase 3.2) |
+| New plugin subcommand | `src/commands/plugin/{name}.rs` + add to dispatcher in `mod.rs` | `src/commands/plugin/disable.rs` (non-interactive disable; Phase 4 Slice 1a has `lifecycle::disable` ready) |
 | New top-level command | `src/commands/{name}.rs` + add to dispatcher in `src/commands/mod.rs` | `src/commands/models.rs` (list installed models) |
 | New CLI global flag | `src/cli.rs` in `struct Cli` | `#[arg(long, global = true)] pub verify: bool,` |
 | New error type | `src/error.rs` in `TomeError` enum | Add variant + exit code + test in `tests/exit_codes.rs` |
@@ -373,8 +383,10 @@ src/embedding/
 | New index operation | `src/index/skills.rs` | `pub fn update_skill_embedding()` for selective re-embedding |
 | New KNN filter | `src/index/query.rs` + `QueryFilters` | Add `--min-version` filter |
 | New model kind | `src/embedding/mod.rs` (`ModelKind` enum) + `registry.rs` | Add reranker v2 variant |
+| New interactive sub-flow | `src/commands/plugin/interactive.rs` (extend existing loop levels) | Add a cascade to `plugin_loop` for plugin tags/categories |
 | Test for a command | `tests/{command_area}_{action}.rs` | `tests/plugin_disable.rs` |
 | Test for error scenario | `tests/error_messages.rs` or new file | Document the error text clearly |
+| Test for interactive flow | `tests/plugin_interactive.rs` + `rexpect` pty harness | Additional test cases for specific user paths |
 
 ## Naming Conventions
 
@@ -387,6 +399,7 @@ src/embedding/
 | **Module** | snake_case directory names | `src/catalog/`, `src/commands/`, `src/plugin/`, `src/index/` |
 | **Test** | `#[test]` with descriptive name | `#[test] fn unknown_field_is_rejected()` |
 | **Integration test file** | Matches the feature being tested | `tests/plugin_enable.rs` tests `tome plugin enable` |
+| **Interactive loop level** | Private enum in interactive.rs | `LoopExit::Continue`, `LoopExit::Back`, `LoopExit::Quit` |
 
 ## Entry Points
 
@@ -399,11 +412,11 @@ src/embedding/
 ## Module Stability Guarantees
 
 - **Stable Public API**: `catalog::git`, `catalog::manifest`, `catalog::store`, `config`, `error`, `output`, `paths`, `cli`, `plugin`, `index`, `embedding`, `presentation`.
-- **Internal**: Submodule organization within `commands/` is flexible; subcommand `run()` signatures are the public contract.
+- **Internal**: Submodule organization within `commands/` is flexible; subcommand `run()` signatures (and `run_interactive()` for bare `plugin`) are the public contract.
 
 ## Generated Files
 
-No files in Phase 1–3 are auto-generated.
+No files in Phase 1–4 are auto-generated.
 
 ---
 
@@ -533,6 +546,27 @@ Key flows:
 - **List**: load config, index → walk catalogs (or single if `--catalog`) → join with index state → render table/NDJSON.
 - **Show**: parse id → resolve plugin dir → load manifest → load index state → render plugin card.
 - **Query**: parse text + filters → embed → KNN (candidate_k = top_k×4 if reranking) → optional rerank → optional --strict threshold → render results.
+
+---
+
+## Phase 4 additions — User Story 2 (interactive browse)
+
+Phase 4 slice 1a (merged) wired `lifecycle::disable` into a module-private
+call site; slice 1b (merged) added `src/commands/plugin/interactive.rs`
+(~515 lines) implementing a three-level loop pattern (catalog → plugin →
+action). Test coverage via `tests/plugin_interactive.rs` (~288 lines) using
+`rexpect` pty harness.
+
+**Three-level loop pattern**:
+- **`catalog_loop()`**: Display catalog selector; user picks one or Quit.
+- **`plugin_loop(catalog_name)`**: Browse plugins in the selected catalog; user picks one or Back.
+- **`view_loop(id, plugin_manifest)`**: Display plugin view; user selects action (Enable, Disable, Back).
+
+**Control flow**: Each loop level uses a private `LoopExit` enum (Continue, Back, Quit).
+
+**Error semantics**: Clean exit (OK) on quit/cancel (Esc/Ctrl-C) — always exit 0 per contract. Enable/disable errors propagate verbatim (same codes as non-interactive).
+
+**TTY enforcement**: Non-TTY invocation surfaces as exit code 98 (NotATerminal).
 
 ---
 
