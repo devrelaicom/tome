@@ -85,7 +85,7 @@ This enforces the Unix principle: every failure class has a stable, documented e
 | 8 | `Interrupted` | User pressed Ctrl+C; in-flight git processes killed |
 | 30 | `ModelMissing` | Required embedding model not present |
 
-*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2–4 exit codes.*
+*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2–5 exit codes.*
 
 ### Error Message Style
 
@@ -133,13 +133,13 @@ src/
 │   │   ├── show.rs      // `tome catalog show <name>`
 │   │   ├── update.rs    // `tome catalog update [name]`
 │   │   └── source.rs    // Git fetch / update orchestrator
-│   ├── plugin/          // `tome plugin` subcommands (Phase 3–4)
+│   ├── plugin/          // `tome plugin` subcommands (Phase 3–5)
 │   │   ├── mod.rs       // Dispatcher; cross-subcommand helpers
 │   │   ├── enable.rs    // `tome plugin enable <catalog>/<plugin>` (CLI side)
+│   │   ├── disable.rs   // `tome plugin disable <catalog>/<plugin>` (Phase 5)
 │   │   ├── list.rs      // `tome plugin list [catalog]`
 │   │   ├── show.rs      // `tome plugin show <catalog>/<plugin>`
-│   │   ├── interactive.rs // `tome plugin` (bare, interactive browse) (Phase 4)
-│   │   └── disable.rs   // `tome plugin disable <catalog>/<plugin>` (future)
+│   │   └── interactive.rs // `tome plugin` (bare, interactive browse) (Phase 4)
 │   └── query.rs         // `tome query <text>` (Phase 3)
 ├── catalog/             // Catalog manifest + storage + git operations
 │   ├── mod.rs
@@ -184,16 +184,18 @@ src/
     └── prompt.rs        // inquire wrappers (refuse on non-TTY)
 
 tests/
-├── common/mod.rs        // Fixture builder, ToolEnv, lifecycle helpers
+├── common/mod.rs        // Fixture builder, ToolEnv, lifecycle helpers, paths_for (Phase 5)
 ├── catalog_add.rs       // Integration tests for `tome catalog add`
 ├── catalog_list.rs      // Integration tests for `tome catalog list`
 ├── catalog_remove.rs    // Integration tests for `tome catalog remove`
 ├── catalog_show.rs      // Integration tests for `tome catalog show`
 ├── catalog_update.rs    // Integration tests for `tome catalog update`
 ├── plugin_enable.rs     // Library API tests for `plugin::lifecycle::enable`
+├── plugin_disable.rs    // CLI-binary tests for `tome plugin disable` (Phase 5)
 ├── plugin_list.rs       // CLI-binary tests for `tome plugin list`
 ├── plugin_show.rs       // CLI-binary tests for `tome plugin show`
 ├── plugin_interactive.rs // PTY-driven tests for `tome plugin` interactive
+├── plugin_repeated.rs   // FR-008: enable/disable idempotency edge case (Phase 5)
 ├── query.rs             // Library API tests for query path (embed + KNN)
 ├── atomicity_enable.rs  // Failure-injection tests for enable rollback (FR-004)
 ├── exit_codes.rs        // Exhaustiveness check: every TomeError → exit code
@@ -207,7 +209,7 @@ tests/
     └── sample-plugin-catalog/
 ```
 
-### CLI Module Pattern (Phase 3–4)
+### CLI Module Pattern (Phase 3–5)
 
 Each subcommand group lives under `src/commands/{group}/` with one file per subcommand:
 
@@ -216,13 +218,22 @@ Each subcommand group lives under `src/commands/{group}/` with one file per subc
 
 Cross-module reach via `super::*` within a group is acceptable; cross-group via re-export is preferred.
 
-Example from `src/commands/plugin/enable.rs`:
-```rust
-use super::{embedder_entry, human_mb, missing_models, registry_seeds, resolve_plugin_dir};
+**Phase 5 `disable` handler:** Mirrors `enable::run` in shape. Handles confirmation prompt (TTY gating via `output::stdin_is_tty() && output::stdout_is_tty()`, `--force` short-circuit, non-TTY refusal), calls library API `lifecycle::disable`, surfaces outcome. No embedder loaded; library API handles all atomic state changes and locking (FR-005, FR-007, FR-051).
 
-pub fn run(args: PluginEnableArgs, mode: Mode) -> Result<(), TomeError> {
-    // Uses helpers from plugin/mod.rs, constructs lifecycle::LifecycleDeps,
-    // calls library API directly, surfaces outcome.
+Example from `src/commands/plugin/disable.rs`:
+```rust
+pub fn run(args: PluginDisableArgs, mode: Mode) -> Result<(), TomeError> {
+    let id = PluginId::from_str(&args.id)?;
+    let paths = Paths::resolve()?;
+    let config = store::load(&paths.config_file)?;
+    let _ = resolve_plugin_dir(&id, &config)?;  // Fail fast on bad address
+    
+    if !args.force && !(output::stdin_is_tty() && output::stdout_is_tty()) {
+        return Err(TomeError::NotATerminal);
+    }
+    
+    let outcome = lifecycle::disable(&id, &deps)?;
+    // Present outcome
 }
 ```
 
@@ -245,13 +256,13 @@ Testing pattern (PTY-driven via `rexpect`):
 
 See `tests/plugin_interactive.rs` for full test cases and helper functions.
 
-### Plugin Lifecycle Pattern (Phase 3–4)
+### Plugin Lifecycle Pattern (Phase 3–5)
 
 **Library API design:** The `plugin::lifecycle` module is testable without loading real ONNX models. It takes:
 - A plugin ID (`<catalog>/<plugin>`)
 - A `LifecycleDeps` struct holding references to paths, config, and an `Embedder` trait object
 
-CLI callers construct a real `FastembedEmbedder`; tests construct a deterministic `StubEmbedder`.
+CLI callers construct a real `FastembedEmbedder` (in `enable` only); tests construct a deterministic `StubEmbedder`.
 
 **Closure-injected embedder:** Inside `index::skills::enable_plugin_atomic`, the function accepts:
 ```rust
@@ -277,6 +288,8 @@ match result {
     }
 }
 ```
+
+**Idempotency:** Both `enable` (Phase 3) and `disable` (Phase 5) detect when a plugin is already in the requested state and return `TomeError::PluginAlreadyInState` (exit code 21) per FR-008.
 
 ### Banner Skipped in JSON Mode
 

@@ -2,7 +2,7 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand)
 
 ## Architecture Overview
 
@@ -31,6 +31,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 - **Dependents**: `commands/` modules (receive parsed args).
 - **Pipeline Entry**: `main()` parses CLI → installs signal handler → dispatches to handler → maps result to exit code.
 - **Phase 4 Change**: `PluginArgs` now wraps an `Option<PluginCommand>` to allow bare `tome plugin` with no subcommand. Routes to `commands::plugin::run_interactive()` when the command is `None`.
+- **Phase 5 Change**: `PluginCommand` now includes `Disable(PluginDisableArgs { id: String, force: bool })` variant.
 
 ### Catalog Management (`src/catalog/`, `src/commands/catalog/`)
 
@@ -51,9 +52,24 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 - **Dependents**: Commands.
 - **Key Patterns**:
   - `lifecycle::enable()`: parse manifest (exit 22) → check already-enabled (exit 31) → ensure models present (exit 30 unless allow_model_download) → acquire lock → walk skills → collect PendingSkill → embed + insert under one transaction (atomic per FR-004) → release lock.
-  - `lifecycle::disable()`: check not-disabled (exit 32) → acquire lock → flip enabled=0 for all (catalog, plugin) rows → release lock.
+  - `lifecycle::disable()`: check not-disabled (exit 32) → acquire lock → flip enabled=0 for all (catalog, plugin) rows → release lock. Cheap re-enable follows since embeddings are retained.
   - Frontmatter parse: delimiter error is fatal (exit 23); YAML-body error skips one skill + warn (FR-013c).
   - Models: embedder + reranker required by enable and query; optional download in `enable` (CLI owns the TTY prompt; `lifecycle::allow_model_download` is the decision).
+
+### Plugin Disable Subcommand (`src/commands/plugin/disable.rs`)
+
+- **Purpose**: Thin CLI wrapper over `plugin::lifecycle::disable`; owns confirmation-prompt UX (`--force` short-circuit, non-TTY refusal with pointer message).
+- **Location**: `src/commands/plugin/disable.rs` (~108 lines).
+- **Public Interface**: `pub fn run(args: PluginDisableArgs, mode: output::Mode) -> Result<(), TomeError>`.
+- **Flow**:
+  1. Parse `PluginId` from args.
+  2. Load config, verify plugin exists (fail fast before prompt).
+  3. If not `--force`, check TTY (non-TTY → emit pointer line to stderr, return `NotATerminal` exit 54).
+  4. TTY: prompt with default "no" per spec. User decline → clean exit Ok(()) + optional stderr note.
+  5. User accept or `--force`: call `lifecycle::disable()` (returns `DisableOutcome`).
+  6. Emit human or JSON output.
+- **Error Semantics**: Same exit codes as `lifecycle::disable` (exit 32 if already disabled). Non-TTY without `--force` → exit 54 (`NotATerminal`).
+- **Pattern**: Mirrors `enable.rs` in structure (validate → prompt → call library → emit). No embedder construction — index-only UPDATE. Cheap re-enable tested via `tests/plugin_enable.rs::cheap_reenable_after_disable_invokes_embedder_zero_times`.
 
 ### Interactive Browse Flow (`src/commands/plugin/interactive.rs`)
 
@@ -252,14 +268,19 @@ parse PluginId, load config, paths
        ↓
 resolve plugin directory
        ↓
-(optional: confirm prompt if interactive)
+check plugin exists (fail-fast before prompt)
+       ↓
+if not --force:
+  → check TTY (non-TTY → emit pointer, return NotATerminal exit 54)
+  → confirm prompt (default "no"; abort → Ok(()), no state change)
        ↓
 lifecycle::disable(id, paths, config, embedder_seed, reranker_seed)
   → acquire lock
   → mark_all_disabled_for_plugin() [flip enabled=0]
   → release lock
+  → return DisableOutcome (skills_retained count)
        ↓
-format output
+format output (human: ✓ disabled N records / JSON: NDJSON record)
        ↓
 exit(0)
 ```
