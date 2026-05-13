@@ -281,14 +281,14 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Phase Start
 
-- [ ] T127 [GIT] Verify working tree is clean before starting Phase 6
-- [ ] T128 [US4] Create `retro/P6.md`
+- [X] T127 [GIT] Verify working tree is clean before starting Phase 6
+- [X] T128 [US4] Create `retro/P6.md`
 
 ### Implementation
 
-- [ ] T129 [P] [US4] Implement `src/commands/models.rs` with `download` / `list` / `remove` subcommand handlers wired to `embedding::download`, `embedding::registry`, and a small reader for `manifest.json`. Apply `--verify` to switch list from cheap (existence + size) to full SHA-256. Render via `presentation::tables` (use devs:rust-dev agent)
-- [ ] T130 [US4] Wire `models` into `src/cli.rs` derive enum; ensure the subcommand carries `--force` (download, remove) and `--verify` (list) consistently with Phase 1 flag naming (use devs:rust-dev agent)
-- [ ] T131 [GIT] Commit: feat(models): add download / list / remove subcommands
+- [X] T129 [P] [US4] Implement `src/commands/models.rs` with `download` / `list` / `remove` subcommand handlers wired to `embedding::download`, `embedding::registry`, and a small reader for `manifest.json`. Apply `--verify` to switch list from cheap (existence + size) to full SHA-256. Render via `presentation::tables` (use devs:rust-dev agent)
+- [X] T130 [US4] Wire `models` into `src/cli.rs` derive enum; ensure the subcommand carries `--force` (download, remove) and `--verify` (list) consistently with Phase 1 flag naming (use devs:rust-dev agent)
+- [X] T131 [GIT] Commit: feat(models): add download / list / remove subcommands
 
 ### Tests
 
