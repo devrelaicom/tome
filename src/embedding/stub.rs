@@ -21,6 +21,9 @@
 //! `#[doc(hidden)]` markers keep it off the public API surface. See the plan's
 //! complexity-tracking justification (principle VIII boundary case).
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use sha2::{Digest, Sha256};
 
 use crate::embedding::{Embedder, Reranker, Scored};
@@ -31,18 +34,59 @@ const VECTOR_DIM: usize = 384;
 
 /// Deterministic embedder. Two clones of `StubEmbedder` produce identical
 /// vectors for identical input.
+///
+/// Optionally configured to fail mid-pipeline after `n` successful calls
+/// (T084 — exercises FR-004 atomicity by interrupting the enable loop). The
+/// failure counter is shared between clones via an `Arc<AtomicUsize>` so the
+/// closure adaptation inside `enable_plugin_atomic` (which captures by
+/// reference) observes the same call count.
 #[doc(hidden)]
 #[derive(Debug, Clone, Default)]
-pub struct StubEmbedder;
+pub struct StubEmbedder {
+    /// `Some(n)` means: succeed for the first `n` `embed` calls, then start
+    /// returning [`TomeError::EmbeddingGenerationFailure`]. `None` (the
+    /// default) means "never inject a failure".
+    force_fail_after: Option<usize>,
+    /// Shared counter so observers across clones see the same call total.
+    call_count: Arc<AtomicUsize>,
+}
 
 impl StubEmbedder {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Construct a stub embedder that returns `Ok` for the first `n` calls
+    /// and `Err(TomeError::EmbeddingGenerationFailure { .. })` thereafter.
+    /// The transition is the simulation hook for FR-004 atomicity tests.
+    pub fn with_force_fail_after(n: usize) -> Self {
+        Self {
+            force_fail_after: Some(n),
+            call_count: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Number of `embed` calls observed so far. Useful in tests that want to
+    /// assert the failure injection actually fired (and not, say, that the
+    /// enable bailed out before any embedding work began).
+    pub fn call_count(&self) -> usize {
+        self.call_count.load(Ordering::SeqCst)
     }
 }
 
 impl Embedder for StubEmbedder {
     fn embed(&self, text: &str) -> Result<Vec<f32>, TomeError> {
+        if let Some(limit) = self.force_fail_after {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count >= limit {
+                return Err(TomeError::EmbeddingGenerationFailure {
+                    input_desc: "stub-forced-failure".to_owned(),
+                    detail: format!("forced failure after {limit} successful call(s)"),
+                });
+            }
+        } else {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(deterministic_vector(text))
     }
 
@@ -135,7 +179,7 @@ impl Reranker for ReverseStubReranker {
 /// integration tests.
 #[doc(hidden)]
 pub fn make_test_pair() -> (StubEmbedder, StubReranker) {
-    (StubEmbedder, StubReranker)
+    (StubEmbedder::new(), StubReranker)
 }
 
 fn deterministic_vector(text: &str) -> Vec<f32> {

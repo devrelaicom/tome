@@ -1,0 +1,12 @@
+{
+  "name": "plugin-alpha",
+  "version": "1.2.3",
+  "description": "Alpha plugin used by Phase 3 integration tests.",
+  "author": {
+    "name": "Tome Test Harness",
+    "email": "tests@tome.invalid"
+  },
+  "keywords": ["test", "phase-3"],
+  "homepage": "https://example.invalid/plugin-alpha",
+  "unknown_extra_field": true
+}

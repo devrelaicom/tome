@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tempfile::TempDir;
+use time::OffsetDateTime;
+use tome::config::{CatalogEntry, Config};
+use tome::embedding::registry::{MODEL_REGISTRY, ModelManifest};
+use tome::index::MetaSeed;
+use tome::paths::Paths;
 
 /// Build a self-contained Git fixture catalog from the on-disk
 /// `tests/fixtures/sample-catalog/` skeleton. Returns the temp dir handle
@@ -138,4 +143,109 @@ fn tome_bin() -> PathBuf {
     // Cargo points `CARGO_BIN_EXE_<name>` at the freshly-built binary for
     // the package; integration tests get this for free.
     PathBuf::from(env!("CARGO_BIN_EXE_tome"))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 (US1) lifecycle helpers.
+//
+// These mirror the in-module test scaffolding from `src/plugin/lifecycle.rs`
+// so integration tests can drive the lifecycle library API directly without
+// spawning the CLI binary (which loads the real ONNX models).
+// ---------------------------------------------------------------------------
+
+/// Path to the `tests/fixtures/sample-plugin-catalog/` skeleton on disk.
+/// Tests that need a catalog of plugins copy this into a temp dir.
+pub fn sample_plugin_catalog_fixture() -> PathBuf {
+    fixture_path("sample-plugin-catalog")
+}
+
+/// Copy `sample-plugin-catalog` into the supplied TempDir and return the
+/// catalog root path (the directory containing `tome-catalog.toml`).
+pub fn copy_sample_plugin_catalog(into: &TempDir, name: &str) -> PathBuf {
+    let dst = into.path().join(name);
+    copy_dir(&sample_plugin_catalog_fixture(), &dst).expect("copy sample-plugin-catalog");
+    dst
+}
+
+/// Build a `Paths` rooted entirely under `root`. Mirrors the helper used by
+/// `lifecycle::tests::test_paths` so integration tests never have to touch
+/// `$HOME` or environment variables.
+pub fn lifecycle_paths(root: &Path) -> Paths {
+    Paths {
+        config_dir: root.join("config"),
+        config_file: root.join("config/config.toml"),
+        data_dir: root.join("data"),
+        catalogs_dir: root.join("data/catalogs"),
+        index_db: root.join("data/index.db"),
+        index_lock: root.join("data/index.lock"),
+        models_dir: root.join("data/models"),
+    }
+}
+
+/// `MetaSeed` matching the deterministic stub embedder.
+pub fn stub_embedder_seed() -> MetaSeed {
+    MetaSeed {
+        name: "stub-embedder".into(),
+        version: "0".into(),
+    }
+}
+
+/// `MetaSeed` matching the deterministic stub reranker.
+pub fn stub_reranker_seed() -> MetaSeed {
+    MetaSeed {
+        name: "stub-reranker".into(),
+        version: "0".into(),
+    }
+}
+
+/// Fabricate `manifest.json` for every entry in `MODEL_REGISTRY` so the
+/// model-presence gate in `lifecycle::enable` is satisfied without a real
+/// download. Mirrors `src/plugin/lifecycle.rs::tests::fabricate_models`.
+pub fn fabricate_models(paths: &Paths) {
+    for entry in MODEL_REGISTRY {
+        let dir = paths.models_dir.join(entry.name);
+        std::fs::create_dir_all(&dir).expect("create model dir");
+        let manifest = ModelManifest {
+            name: entry.name.to_owned(),
+            version: entry.version.to_owned(),
+            kind: entry.kind,
+            source_url: entry.source_url.to_owned(),
+            sha256: entry.sha256.to_owned(),
+            size_bytes: entry.size_bytes,
+            licence: entry.licence.to_owned(),
+            files: entry.files.iter().map(|s| (*s).to_owned()).collect(),
+            installed_at: OffsetDateTime::now_utc(),
+        };
+        let body = serde_json::to_vec_pretty(&manifest).expect("serialise manifest");
+        std::fs::write(dir.join("manifest.json"), body).expect("write manifest");
+    }
+}
+
+/// Construct a minimal `Config` containing one catalog whose on-disk cache
+/// lives at `catalog_root`. The catalog `name` is recorded both as the
+/// `BTreeMap` key and the inner `CatalogEntry.name` so lookups via the CLI
+/// surface match the lifecycle library API.
+pub fn config_with_catalog(catalog_name: &str, catalog_root: &Path) -> Config {
+    use std::collections::BTreeMap;
+    let mut catalogs = BTreeMap::new();
+    catalogs.insert(
+        catalog_name.to_owned(),
+        CatalogEntry {
+            name: catalog_name.to_owned(),
+            url: format!("file://{}", catalog_root.display()),
+            ref_: "main".into(),
+            path: catalog_root.to_path_buf(),
+            last_synced: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+        },
+    );
+    Config { catalogs }
+}
+
+/// Write the supplied [`Config`] to `paths.config_file` as TOML so a child
+/// `tome` binary process can read it. Used by `plugin list` / `plugin show`
+/// integration tests that bypass `catalog add` (no git fixture needed).
+pub fn write_config_for_cli(paths: &Paths, config: &Config) {
+    std::fs::create_dir_all(&paths.config_dir).expect("create config dir");
+    let body = toml::to_string_pretty(config).expect("serialise config");
+    std::fs::write(&paths.config_file, body).expect("write config.toml");
 }

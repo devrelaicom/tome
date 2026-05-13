@@ -171,13 +171,13 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Tests
 
-- [ ] T080 [P] [US1] Add `tests/plugin_enable.rs` — enable a fixture plugin against a `TempDir` data dir, assert skill rows present with `enabled=1`, assert content_hash recorded, assert atomicity (interrupt → rolled back), assert idempotency exit 21 on second enable (use devs:rust-dev agent)
-- [ ] T081 [P] [US1] Add `tests/plugin_list.rs` — list reports plugin status / version / skill count for a registered catalog with one enabled and one disabled plugin (use devs:rust-dev agent)
-- [ ] T082 [P] [US1] Add `tests/plugin_show.rs` — show reports plugin metadata + component counts; tolerates third-party plugin.json with extra fields (lenient FR-013a) (use devs:rust-dev agent)
-- [ ] T083 [P] [US1] Add `tests/query.rs` — enable fixture plugin, run query, assert top-1 result matches expected skill (stub embedder is deterministic); assert `--json` output structure; assert `--no-rerank` flips the banner / scoring field; assert filter flags work (use devs:rust-dev agent)
-- [ ] T084 [P] [US1] Add `tests/atomicity_enable.rs` (or extend `tests/atomicity.rs`) — inject mid-pipeline failure via the stub embedder's `force_fail_after(n)` mode; assert no skill rows for that plugin after the failure (use devs:rust-dev agent)
-- [ ] T085 [P] [US1] Add a `tests/fixtures/sample-plugin/` directory with `.claude-plugin/plugin.json` + `skills/skill-a/SKILL.md` + `skills/skill-b/SKILL.md`, varied frontmatter (good, missing name, missing description, extra fields) (use devs:rust-dev agent)
-- [ ] T086 [GIT] Commit: test: cover plugin enable, list, show, query, and atomicity
+- [X] T080 [P] [US1] Add `tests/plugin_enable.rs` — enable a fixture plugin against a `TempDir` data dir, assert skill rows present with `enabled=1`, assert content_hash recorded, assert atomicity (interrupt → rolled back), assert idempotency exit 21 on second enable (use devs:rust-dev agent)
+- [X] T081 [P] [US1] Add `tests/plugin_list.rs` — list reports plugin status / version / skill count for a registered catalog with one enabled and one disabled plugin (use devs:rust-dev agent)
+- [X] T082 [P] [US1] Add `tests/plugin_show.rs` — show reports plugin metadata + component counts; tolerates third-party plugin.json with extra fields (lenient FR-013a) (use devs:rust-dev agent)
+- [X] T083 [P] [US1] Add `tests/query.rs` — enable fixture plugin, run query, assert top-1 result matches expected skill (stub embedder is deterministic); assert `--json` output structure; assert `--no-rerank` flips the banner / scoring field; assert filter flags work (use devs:rust-dev agent)
+- [X] T084 [P] [US1] Add `tests/atomicity_enable.rs` (or extend `tests/atomicity.rs`) — inject mid-pipeline failure via the stub embedder's `force_fail_after(n)` mode; assert no skill rows for that plugin after the failure (use devs:rust-dev agent)
+- [X] T085 [P] [US1] Add a `tests/fixtures/sample-plugin/` directory with `.claude-plugin/plugin.json` + `skills/skill-a/SKILL.md` + `skills/skill-b/SKILL.md`, varied frontmatter (good, missing name, missing description, extra fields) (use devs:rust-dev agent)
+- [X] T086 [GIT] Commit: test: cover plugin enable, list, show, query, and atomicity
 
 ### Closing
 

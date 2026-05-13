@@ -26,7 +26,6 @@ pub fn run(cmd: PluginCommand, mode: Mode) -> Result<(), TomeError> {
 
 use crate::embedding::registry::{MODEL_REGISTRY, ModelEntry, ModelManifest};
 use crate::paths::Paths;
-use std::path::Path;
 
 /// Returns `Ok(true)` iff a parseable `manifest.json` for `entry` exists
 /// under `paths.models_dir`. Mirror of the private helper in
@@ -146,23 +145,10 @@ pub(crate) fn human_relative(then_rfc3339: &str) -> String {
     format!("{days}d ago")
 }
 
-/// Resolve a plugin directory from `<catalog>/<plugin>`, mirroring the
-/// lifecycle helper. Returns `(plugin_dir, catalog_entry_path)`. Errors map
-/// to `CatalogNotFound` / `PluginNotFound`.
-pub(crate) fn resolve_plugin_dir(
-    id: &crate::plugin::PluginId,
-    config: &crate::config::Config,
-) -> Result<std::path::PathBuf, TomeError> {
-    let entry = config
-        .catalogs
-        .get(&id.catalog)
-        .ok_or_else(|| TomeError::CatalogNotFound(id.catalog.clone()))?;
-    let plugin_dir = entry.path.join(&id.plugin);
-    if !plugin_dir.is_dir() {
-        return Err(TomeError::PluginNotFound(id.to_string()));
-    }
-    Ok(plugin_dir)
-}
+/// Resolve a plugin directory from `<catalog>/<plugin>`. Single source of
+/// truth lives in [`crate::plugin::lifecycle::resolve_plugin_dir`] — re-exported
+/// here so the CLI handlers don't reach across module boundaries for it.
+pub(crate) use crate::plugin::lifecycle::resolve_plugin_dir;
 
 /// Open the index DB read-only-ish using the registry-derived seeds. We
 /// re-use [`crate::index::open`] which is idempotent on a re-open.
@@ -208,18 +194,7 @@ pub(crate) fn aggregate_for_plugin(
     })
 }
 
-/// Look up the catalog's tome-catalog.toml and return the parsed manifest.
-/// `Ok(None)` when the catalog cache is absent or unreadable — callers
-/// surface this as "no plugins" rather than a hard error.
-pub(crate) fn read_catalog_manifest(
-    catalog_path: &Path,
-) -> Option<crate::catalog::manifest::CatalogManifest> {
-    let manifest_path = catalog_path.join("tome-catalog.toml");
-    let bytes = std::fs::read(&manifest_path).ok()?;
-    crate::catalog::manifest::CatalogManifest::parse_and_validate(
-        &manifest_path,
-        catalog_path,
-        &bytes,
-    )
-    .ok()
-}
+/// Re-export of the catalog-manifest reader. Lives in `catalog::manifest`
+/// next to the parser; surfaced here so the CLI handlers can keep using a
+/// short path without crossing module boundaries.
+pub(crate) use crate::catalog::manifest::read_catalog_manifest;

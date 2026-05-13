@@ -37,6 +37,16 @@ pub struct PluginDeclaration {
     pub source: String,
 }
 
+/// Look up a catalog's `tome-catalog.toml` and return the parsed manifest.
+/// Returns `None` when the file is absent, unreadable, or fails strict
+/// validation — callers fall back to flat layout or surface `PluginNotFound`,
+/// matching `tome plugin list`'s lenient handling of broken catalog state.
+pub fn read_catalog_manifest(catalog_path: &Path) -> Option<CatalogManifest> {
+    let manifest_path = catalog_path.join("tome-catalog.toml");
+    let bytes = std::fs::read(&manifest_path).ok()?;
+    CatalogManifest::parse_and_validate(&manifest_path, catalog_path, &bytes).ok()
+}
+
 impl CatalogManifest {
     /// Parse + validate a `tome-catalog.toml`. `manifest_path` is the path of
     /// the file (used in error messages); `catalog_root` is its parent (used
