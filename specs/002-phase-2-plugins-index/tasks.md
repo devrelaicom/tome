@@ -422,10 +422,10 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Phase 9 Completion
 
-- [ ] T187 [GIT] Push branch
-- [ ] T188 [GIT] Update PR body
-- [ ] T189 [GIT] Verify CI green
-- [ ] T190 [GIT] Report PR ready status
+- [X] T187 [GIT] Push branch
+- [X] T188 [GIT] Update PR body
+- [X] T189 [GIT] Verify CI green
+- [X] T190 [GIT] Report PR ready status
 
 ---
 

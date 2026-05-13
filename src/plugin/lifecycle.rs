@@ -240,8 +240,10 @@ pub fn reindex_plugin(
 
 /// Cascade-disable every plugin in `plugins` under one advisory-lock
 /// acquisition. Drops each plugin's rows from `skills` + `skill_embeddings`
-/// using the same connection inside the same lock window. Returns the total
-/// number of dropped `skills` rows summed across plugins.
+/// using the same connection inside the same lock window. Returns one
+/// `(plugin_name, rows_dropped)` pair per input plugin, preserving input
+/// order — empty plugins still get a `0` entry so the caller can join
+/// against its own list of plugins to emit per-plugin telemetry.
 ///
 /// Used by `tome catalog remove --force`. The single-lock-per-cascade
 /// semantics match `contracts/catalog-extensions.md` §"tome catalog remove".
@@ -255,12 +257,12 @@ pub fn cascade_disable_for_catalog(
     plugins: &[String],
     embedder_seed: MetaSeed,
     reranker_seed: MetaSeed,
-) -> Result<u32, TomeError> {
+) -> Result<Vec<(String, u32)>, TomeError> {
     if plugins.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
     let lock = acquire_lock(&paths.index_lock)?;
-    let result = (|| -> Result<u32, TomeError> {
+    let result = (|| -> Result<Vec<(String, u32)>, TomeError> {
         let conn = index::open(
             &paths.index_db,
             &OpenOptions {
@@ -268,24 +270,25 @@ pub fn cascade_disable_for_catalog(
                 reranker: reranker_seed,
             },
         )?;
-        let mut total: u32 = 0;
+        let mut breakdown: Vec<(String, u32)> = Vec::with_capacity(plugins.len());
         for plugin in plugins {
             let dropped = delete_by_plugin(&conn, catalog, plugin)?;
-            total = total.saturating_add(dropped);
+            breakdown.push((plugin.clone(), dropped));
         }
-        Ok(total)
+        Ok(breakdown)
     })();
 
     match result {
-        Ok(total) => {
+        Ok(breakdown) => {
             lock.release()?;
+            let total: u32 = breakdown.iter().map(|(_, n)| *n).sum();
             info!(
                 catalog,
                 plugins_disabled = plugins.len(),
                 rows_dropped = total,
                 "catalog cascade disable completed",
             );
-            Ok(total)
+            Ok(breakdown)
         }
         Err(e) => {
             drop(lock);
