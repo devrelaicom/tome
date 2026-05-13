@@ -52,6 +52,12 @@ inquire = { version = "0.7", default-features = false, features = ["crossterm"] 
 # Compile vendored sqlite-vec amalgamation against rusqlite's bundled SQLite.
 cc = "1"
 
+[dev-dependencies]
+# Drive the interactive `tome plugin` browse flow through a real pty.
+# Unix-only by design; our CI matrix is macOS + Ubuntu so this is fine.
+# Not compiled into the release binary — no impact on the 50 MB size cap.
+rexpect = "0.7"
+
 [profile.release]
 # Phase 1 baseline + Phase 2 binary-size tuning (NFR-001).
 strip = "symbols"
