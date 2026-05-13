@@ -28,11 +28,32 @@ jobs:
           version=$(grep '^rust-version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      # Defeat the repo-local `rust-toolchain.toml` (which pins channel =
+      # "stable" for local dev). In CI, the matrix is the source of truth
+      # for which toolchain to test against; leaving the file in place
+      # silently routes the MSRV job through stable AND races with the
+      # rustup proxy on the first `cargo fmt` call (signature: "error:
+      # unexpected argument 'fmt' found"). Removing it in CI defangs both.
+      - name: Defeat rust-toolchain.toml in CI
+        shell: bash
+        run: rm -f rust-toolchain.toml
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.toolchain == 'msrv' && steps.msrv.outputs.version || 'stable' }}
           components: rustfmt, clippy
+
+      # Sanity-check materialisation of the toolchain. Forces rustup to
+      # fully resolve the proxy for the matrix toolchain before any cargo
+      # subcommand runs, eliminating the race that produced the "unexpected
+      # argument 'fmt' found" flake on macOS runners.
+      - name: Confirm active toolchain
+        shell: bash
+        run: |
+          rustup show active-toolchain
+          cargo --version
+          rustc --version
 
       - uses: Swatinem/rust-cache@v2
         with:
