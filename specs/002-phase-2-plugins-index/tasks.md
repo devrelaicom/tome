@@ -165,9 +165,9 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 - [X] T074 [US1] Wire the model-presence prompt into lifecycle: if embedder / reranker is missing, prompt via `presentation::prompt` when TTY (download with progress, then proceed); exit `ModelMissing` when non-TTY (FR-024 / FR-025) (use devs:rust-dev agent)
 - [X] T075 [US1] Create `src/commands/plugin.rs` with `enable`, `list`, `show` subcommand handlers. Wire CLI parsing via `clap` derive in `src/cli.rs`. Output via `presentation::tables` for human form, JSON via `output::Json`. Apply structured errors per `contracts/plugin-commands.md` (use devs:rust-dev agent)
 - [X] T076 [GIT] Commit: feat(plugin): add lifecycle enable/disable + plugin CLI surface (enable/list/show)
-- [ ] T077 [P] [US1] Create `src/commands/query.rs` with the `query` subcommand. Read DB read-only; load embedder; embed query; KNN via `index::query`; rerank via `embedding::fastembed` unless `--no-rerank`; apply `--strict` + `--min-score` per contract; render via `presentation::tables`. Map drift to exit 41 / 42 (use devs:rust-dev agent)
-- [ ] T078 [US1] Wire `query` into `src/cli.rs` derive enum (use devs:rust-dev agent)
-- [ ] T079 [GIT] Commit: feat(query): add tome query with reranker + strict mode
+- [X] T077 [P] [US1] Create `src/commands/query.rs` with the `query` subcommand. Read DB read-only; load embedder; embed query; KNN via `index::query`; rerank via `embedding::fastembed` unless `--no-rerank`; apply `--strict` + `--min-score` per contract; render via `presentation::tables`. Map drift to exit 41 / 42 (use devs:rust-dev agent)
+- [X] T078 [US1] Wire `query` into `src/cli.rs` derive enum (use devs:rust-dev agent)
+- [X] T079 [GIT] Commit: feat(query): add tome query with reranker + strict mode
 
 ### Tests
 

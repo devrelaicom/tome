@@ -13,6 +13,7 @@ fn main() {
     let result = match cli.command {
         Command::Catalog(cmd) => commands::catalog::run(cmd, mode),
         Command::Plugin(cmd) => commands::plugin::run(cmd, mode),
+        Command::Query(args) => commands::query::run(args, mode),
     };
 
     match result {
