@@ -2,11 +2,11 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands)
 
 ## Architecture Overview
 
-Tome is a synchronous Rust CLI following a classic **parse → dispatch → execute → map-errors → exit** pipeline. The codebase is organized around a **capability-driven** modular architecture where each module owns a distinct responsibility (catalog management, Git operations, configuration, logging, path resolution, output formatting, plugin metadata parsing, skill indexing, model embedding, and interactive presentation). Error handling is centralized in a closed `TomeError` enum that enforces exhaustive exit-code mapping at compile time. Signal handling (SIGINT) is global and atomic, allowing long-running operations (git clone, model download, embedding) to be cancelled gracefully with a well-defined exit code.
+Tome is a synchronous Rust CLI following a classic **parse → dispatch → execute → map-errors → exit** pipeline. The codebase is organized around a **capability-driven** modular architecture where each module owns a distinct responsibility (catalog management, Git operations, configuration, logging, path resolution, output formatting, plugin metadata parsing, skill indexing, model embedding, model lifecycle management, and interactive presentation). Error handling is centralized in a closed `TomeError` enum that enforces exhaustive exit-code mapping at compile time. Signal handling (SIGINT) is global and atomic, allowing long-running operations (git clone, model download, embedding) to be cancelled gracefully with a well-defined exit code.
 
 ## Architecture Pattern
 
@@ -32,6 +32,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 - **Pipeline Entry**: `main()` parses CLI → installs signal handler → dispatches to handler → maps result to exit code.
 - **Phase 4 Change**: `PluginArgs` now wraps an `Option<PluginCommand>` to allow bare `tome plugin` with no subcommand. Routes to `commands::plugin::run_interactive()` when the command is `None`.
 - **Phase 5 Change**: `PluginCommand` now includes `Disable(PluginDisableArgs { id: String, force: bool })` variant.
+- **Phase 6 Change**: `ModelsCommand` enum added with `Download`, `List`, `Remove` variants; routes via `Command::Models(ModelsCommand)` to `commands::models::run()`.
 
 ### Catalog Management (`src/catalog/`, `src/commands/catalog/`)
 
@@ -88,6 +89,18 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   - Enable/disable errors propagate verbatim (same exit codes as non-interactive subcommands).
   - User cancellation (Esc / Ctrl-C from `inquire` prompts) surfaces as `TomeError::Interrupted`, which is trapped and translated to `Ok(())` per the contract ("always exits 0 on clean exit").
 - **TTY Enforcement** (FR-051): Non-TTY invocation via `presentation::prompt::select()` will refuse with `NotATerminal`, propagating as exit code 98 (FR-022a).
+
+### Model Lifecycle Management (`src/commands/models/`)
+
+- **Purpose**: Provide user-facing CLI for managing downloaded model artefacts (download, list, remove).
+- **Location**: `src/commands/models/` (dispatch + per-subcommand handlers).
+- **Dependencies**: `embedding::registry` (MODEL_REGISTRY, ModelEntry), `embedding::download` (download_model, sha256_file), `paths` (models_dir), `presentation` (tables, progress, prompts).
+- **Dependents**: CLI main dispatcher.
+- **Subcommands** (Phase 6, User Story 4):
+  - **`download`** (`src/commands/models/download.rs`): Iterate MODEL_REGISTRY, skip if manifest exists and valid unless `--force`, atomic download via `embedding::download::download_model` with indicatif spinner. Emits human or NDJSON per mode.
+  - **`list`** (`src/commands/models/list.rs`): Cheap path = check manifest + file existence + size; `--verify` flag rehashes via `embedding::download::sha256_file`. Renders ModelState (Ok / Missing / Corrupt / ChecksumMismatched) as table (human) or NDJSON (JSON).
+  - **`remove`** (`src/commands/models/remove.rs`): Check model is not in use by any enabled plugin, check model exists (exit 30 if missing), confirm prompt with `--force` short-circuit, non-TTY without `--force` → exit 54 with pointer message. Deletes manifest first, then directory.
+- **Shared Pattern**: Mirrors `plugin/` module layout (per-subcommand file under group `mod.rs` that dispatches). Owns user-facing UX (prompts, spinners, table rendering). Calls library functions (`embedding::download`, `embedding::registry`) for the actual work.
 
 ### Skill Query & Search (`src/index/query.rs`, `src/commands/query.rs`)
 
@@ -166,6 +179,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   - Atomic downloads: write to temp, verify checksum, rename.
   - SIGINT-aware: polls `git::was_cancelled()`.
   - Credential scrubbing on `reqwest` errors.
+  - **Phase 6 addition**: `pub fn sha256_file(path) -> Result<String, TomeError>` streaming SHA-256 helper for `models list --verify`.
 
 ### Presentation Layer (`src/presentation/`)
 
@@ -212,6 +226,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   - `Mode::Human`: Friendly multiline text, colours enabled (auto-disabled on non-TTY or NO_COLOR env var).
   - `Mode::Json`: One JSON object per line (NDJSON); always valid for piping.
 - **Error Handling**: Error records include category, exit code, and message; always written to stderr.
+- **Phase 6 Change**: Relaxed `write_json` to accept `T: Serialize + ?Sized` for JSON serialization flexibility.
 
 ### Error Handling (`src/error.rs`)
 
@@ -324,6 +339,42 @@ Esc / Ctrl-C at any level:
   → exit(0)
 ```
 
+### Model Lifecycle Flow: `tome models download | list | remove`
+
+```
+CLI parse (--json, -v, subcommand-specific args)
+       ↓
+dispatch to models::{download,list,remove}::run()
+
+Download subcommand:
+  → iterate MODEL_REGISTRY
+  → for each model:
+      → check if manifest exists && is valid
+      → if missing or --force:
+          → show indicatif spinner
+          → call embedding::download::download_model()
+          → emit human line or NDJSON record
+  → exit(0)
+
+List subcommand:
+  → iterate MODEL_REGISTRY
+  → for each model:
+      → cheap check: manifest exists + files exist + correct sizes
+      → if --verify: stream SHA-256 via sha256_file()
+      → compute ModelState (Ok / Missing / Corrupt / ChecksumMismatched)
+  → render comfy-table (human) or NDJSON (JSON)
+  → exit(0)
+
+Remove subcommand:
+  → parse model name
+  → check model exists (exit 30 if missing)
+  → check no enabled plugins use it
+  → if not --force: check TTY, prompt (non-TTY → exit 54 with pointer)
+  → delete manifest, then directory
+  → emit human line or NDJSON record
+  → exit(0)
+```
+
 ### Query Flow: `tome query <text>`
 
 ```
@@ -365,7 +416,7 @@ exit(0)
 | Layer | Responsibility | Can Access | Cannot Access |
 |-------|----------------|------------|---------------|
 | **CLI** (`src/main.rs`, `src/cli.rs`) | Parse args, install signal handler, dispatch, map errors to exit codes. | Commands, logging, output. | Catalog, config, paths (indirectly via commands). |
-| **Commands** (`src/commands/`) | Orchestrate catalog/plugin/query operations; call library logic and format output. | Lifecycle, catalog, config, paths, error, output, embedding, index, presentation. | Logging (by design; logging is orthogonal). |
+| **Commands** (`src/commands/`) | Orchestrate catalog/plugin/query/models operations; call library logic and format output. | Lifecycle, catalog, config, paths, error, output, embedding, index, presentation. | Logging (by design; logging is orthogonal). |
 | **Plugin Lifecycle** (`src/plugin/lifecycle.rs`) | Enable/disable orchestrator; compose metadata parsers, index, and embedding. | Plugin metadata (manifest, frontmatter), index (open, lock, enable_plugin_atomic), embedding (embedder trait, model registry), catalog (manifest reader). | Commands (reverse dependency only). |
 | **Index** (`src/index/`) | SQLite operations, schema, KNN, drift detection, advisory locks. | rusqlite, sqlite-vec, index schema. | Commands, embedding, plugin (reverse dependency only). |
 | **Embedding** (`src/embedding/`) | Model registry, download, trait implementations (fastembed wrapper, stub). | reqwest, ort, fastembed-rs, serde. | Commands, index (reverse dependency only). |
@@ -390,6 +441,7 @@ exit(0)
 6. **Config types, not logic, in `config.rs`**: `config.rs` defines only data structures; I/O is in `store.rs`.
 7. **Plugin-dir resolution is centralized**: `plugin::lifecycle::resolve_plugin_dir` is the single source of truth; re-exported to CLI handlers via `commands/plugin/mod.rs` to avoid cross-boundary imports.
 8. **Interactive flow is command-layer only**: `commands/plugin/interactive.rs` uses presentation layer (prompts, tables), command handlers (enable, disable), and lifecycle/config APIs. It is test-driven via `rexpect` pty harness (`tests/plugin_interactive.rs`) rather than unit-test injection.
+9. **Models commands mirror plugin commands layout**: `commands/models/` follows the same per-subcommand-file + group-dispatcher pattern as `commands/plugin/`. Library-side work (download, SHA-256) lives in `embedding/download.rs` and `embedding/registry.rs`; CLI-side work (prompts, progress, tables) lives in `commands/models/{download,list,remove}.rs`.
 
 ## Key Interfaces & Contracts
 
@@ -413,6 +465,7 @@ exit(0)
 | `Candidate` + `Scored` | KNN result and scored result records. | `src/embedding/mod.rs` |
 | `output::Mode` | Enum selecting human or JSON formatting. | `src/output.rs` |
 | `LoopExit` | Private enum in `interactive.rs` encoding Back/Quit/Continue state. | `src/commands/plugin/interactive.rs` |
+| `ModelState` | Classification of a registered model's on-disk install state (Ok / Missing / Corrupt / ChecksumMismatched). | `src/commands/models/mod.rs` |
 
 ## Signal Handling & Cancellation
 
@@ -453,7 +506,7 @@ exit(0)
 | **Credential Scrubbing** | Regex rules applied to all captured git and reqwest output before display or error propagation. | `src/catalog/git.rs::scrub_credentials()`, `src/embedding/download.rs` |
 | **Error Mapping** | Every `Result<_, TomeError>` eventually reaches `main()`, which maps to exit code. | `src/error.rs`, `src/main.rs` |
 | **Logging & Verbosity** | Global tracing subscriber initialized once; orthogonal to `--json` mode. | `src/logging.rs`, `src/main.rs` |
-| **TTY Detection** | Used by interactive commands (removal confirmation, model download prompt, interactive browse), progress spinners, and output formatting. | `src/output.rs::stdin_is_tty()`, `stdout_is_tty()`, `src/presentation/prompt.rs`, `src/presentation/progress.rs`, `src/commands/plugin/interactive.rs` |
+| **TTY Detection** | Used by interactive commands (removal confirmation, model download prompt, interactive browse), progress spinners, and output formatting. | `src/output.rs::stdin_is_tty()`, `stdout_is_tty()`, `src/presentation/prompt.rs`, `src/presentation/progress.rs`, `src/commands/plugin/interactive.rs`, `src/commands/models/remove.rs` |
 | **Model Presence** | Two-stage check: manifest.json exists on disk AND parses. Applied before `enable` and `query`. | `src/plugin/mod.rs::model_manifest_ok()`, `src/embedding/download.rs` |
 | **Path Validation** | Plugin sources in `tome-catalog.toml` are validated relative to catalog root (no `..`, no escape). Plugin source in `lifecycle::resolve_plugin_dir` is manifest-declared or flat-layout fallback. | `src/catalog/manifest.rs::validate_source()`, `src/plugin/lifecycle.rs::resolve_plugin_dir()` |
 | **Drift Detection** | Embedder and reranker identity (name + version) stored in index meta; compared at query time. Embedder drift → hard fail (exit 41/42); reranker drift → warn. | `src/index/meta.rs`, `src/commands/query.rs::check_drift()` |

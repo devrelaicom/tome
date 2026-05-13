@@ -3,6 +3,7 @@
 > **Purpose**: Document all external services, APIs, databases, and third-party integrations.
 > **Generated**: 2026-05-11
 > **Last Updated**: 2026-05-13 (Phase 5 slice 2 — `tome plugin disable` subcommand; no new external service integrations)
+> **Updated**: 2026-05-13 (Phase 6 slice 1–2 — explicit model management CLI; no new external integrations)
 
 ## Databases & Data Stores
 
@@ -15,21 +16,21 @@
 ### Connection Patterns
 
 - **Statically linked**: `rusqlite` with `bundled` feature — no system SQLite dependency, no version mismatch risk.
-- **Concurrency model**: Single advisory lockfile (`index.lock`) ensures Phase 3–5 foreground operations are serialised; WAL mode allows readers during writes (future MCP server consideration).
+- **Concurrency model**: Single advisory lockfile (`index.lock`) ensures Phase 3–6 foreground operations are serialised; WAL mode allows readers during writes (future MCP server consideration).
 - **ORM/Query builder**: Direct SQL via `rusqlite` — prepared statements, parameterised queries.
 - **Migration approach**: Forward-only migrations under advisory lock in `src/index/migrations.rs`; drift detection in `src/index/meta.rs`.
 
 ### Cache Structure
 
 - **Catalog cache**: Each remote catalog source is content-addressed by `sha256(url)` in `${XDG_DATA_HOME}/tome/catalogs/<sha256>/` — Git working tree, refreshed on `tome catalog update`.
-- **Model cache**: Downloaded model ONNX artefacts stored in `${XDG_DATA_HOME}/tome/models/<model-name>/` with per-model `manifest.json` (strict JSON, `#[serde(deny_unknown_fields)]`).
+- **Model cache**: Downloaded model ONNX artefacts stored in `${XDG_DATA_HOME}/tome/models/<model-name>/` with per-model `manifest.json` (strict JSON, `#[serde(deny_unknown_fields)]`); managed explicitly via `tome models {download,list,remove}` (Phase 6).
 - **Atomic writes**: `tempfile` crate (rename-based) prevents corruption on SIGINT; `.partial/` directories ensure no half-extracted state visible to concurrent processes.
 
 ---
 
 ## Authentication & Authorization
 
-Phase 1–5 has no explicit application-layer authentication.
+Phase 1–6 has no explicit application-layer authentication.
 
 - **Git operations**: Inherit system SSH keys and HTTP credential helpers (if configured in `~/.gitconfig`).
 - **Hugging Face model downloads**: No API key required; public `https://huggingface.co/` URLs are freely accessible (MODEL_REGISTRY pinned to MIT-licensed BGE variants).
@@ -42,7 +43,7 @@ Phase 1–5 has no explicit application-layer authentication.
 
 ### First-Party APIs
 
-None in Phase 1–5. Future phases may include:
+None in Phase 1–6. Future phases may include:
 - Remote catalog registries (HTTP/HTTPS URLs in catalog sources)
 - Plugin resolver APIs (not specified)
 
@@ -60,12 +61,13 @@ None in Phase 1–5. Future phases may include:
 - **Integrity**: Pinned SHA-256 + size_bytes verified post-download (no checksum endpoint; hashes are real upstream digests verified at Phase 3 slice 1 start)
 - **Network**: HTTPS only via `rustls-tls` (no system OpenSSL)
 - **Failure mode**: Network error → `TomeError::Io` (exit 7); checksum mismatch → `TomeError::ModelChecksumMismatch` (exit 32); corrupted registry → `TomeError::ModelCorrupt` (exit 31)
+- **Explicit management**: Phase 6 wires `tome models {download,list,remove}` to let users explicitly manage artefacts; `tome models list --verify` invokes SHA-256 per-file validation via `embedding::download::sha256_file()`
 
 ---
 
 ## Message Queues & Event Systems
 
-None in Phase 1–5. Deferred to Phase 6+ (MCP server event streaming).
+None in Phase 1–6. Deferred to Phase 6+ (MCP server event streaming).
 
 ---
 
@@ -74,9 +76,9 @@ None in Phase 1–5. Deferred to Phase 6+ (MCP server event streaming).
 | Service | Purpose | TTL / Eviction | Configuration |
 |---------|---------|----------------|---------------|
 | Filesystem (XDG) | Catalog Git working trees | Explicit `tome catalog remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/catalogs/` — git-based, refreshed on `tome catalog update` |
-| Filesystem (XDG) | Downloaded model artefacts | Explicit `tome models remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/models/` — one dir per model with manifest + ONNX files |
+| Filesystem (XDG) | Downloaded model artefacts | Explicit `tome models remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/models/` — one dir per model with manifest + ONNX files; Phase 6 adds explicit user-facing commands |
 
-No TTL-based eviction. Phase 1–5 uses explicit user commands for cleanup (principle VI: KISS).
+No TTL-based eviction. Phase 1–6 uses explicit user commands for cleanup (principle VI: KISS).
 
 ---
 
@@ -93,13 +95,13 @@ No TTL-based eviction. Phase 1–5 uses explicit user commands for cleanup (prin
 
 | Service | Purpose | Configuration |
 |---------|---------|---------------|
-| XDG-compliant filesystem | Configuration, catalogs, models | `${XDG_CONFIG_HOME}`, `${XDG_DATA_HOME}` (principle XII: inherit, don't reimplement) |
+| XDG-compliant filesystem | Configuration, catalogs, models | `${XDG_CONFIG_HOME}`, `${XDG_DATA_HOME}` (principle XII: inherit, don't reimplement); Phase 6 adds explicit model lifecycle commands |
 
 ---
 
 ## Email & Notifications
 
-None in Phase 1–5.
+None in Phase 1–6.
 
 ---
 
@@ -112,7 +114,7 @@ None in Phase 1–5.
 | `XDG_DATA_HOME` | No (defaults to `~/.local/share`) | Override data directory (models, catalogs, index.db) | `/opt/var` | — |
 | `TOME_LOG` | No | Custom log filter (overrides `RUST_LOG`) | `debug`, `info`, `tome=trace` | — |
 | `RUST_LOG` | No | Standard Rust log filter | `info`, `warn` | — |
-| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR` |
+| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR` |
 | `CLICOLOR` | No | Disable coloured output (alternate) | `0` to disable | — |
 
 ---
@@ -171,4 +173,4 @@ None in Phase 1–5.
 
 ---
 
-*This document maps external service dependencies and failure modes. Updated for Phase 5 slice 2 with `tome plugin disable` subcommand — no new external integrations.*
+*This document maps external service dependencies and failure modes. Updated for Phase 6 slices 1–2 with explicit model management CLI — no new external integrations.*
