@@ -161,6 +161,31 @@ pub fn list_for_plugin(
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect list: {e}")))
 }
 
+/// Distinct enabled plugin names for one catalog, sorted alphabetically.
+/// Used by `tome catalog update` to drive the per-catalog reindex pass and
+/// by `tome reindex <catalog>` to scope the explicit form.
+pub fn enabled_plugins_for_catalog(
+    conn: &Connection,
+    catalog: &str,
+) -> Result<Vec<String>, TomeError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT plugin FROM skills
+             WHERE catalog = ?1 AND enabled = 1
+             ORDER BY plugin",
+        )
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("prepare enabled plugins: {e}"))
+        })?;
+    let rows = stmt
+        .query_map(params![catalog], |row| row.get::<_, String>(0))
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("query enabled plugins: {e}"))
+        })?;
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect enabled plugins: {e}")))
+}
+
 /// Flip every row for `(catalog, plugin)` to `enabled = 0`. Embeddings are
 /// retained so a subsequent re-enable is cheap (FR-005, FR-006).
 pub fn mark_all_disabled_for_plugin(
