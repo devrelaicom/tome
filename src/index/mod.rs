@@ -25,6 +25,7 @@ pub use migrations::{MIGRATIONS, Migration, apply_pending, current_schema_versio
 pub use query::{Candidate, QueryFilters, knn};
 pub use schema::{CREATE_STATEMENTS, MetaSeed, SCHEMA_VERSION, bootstrap};
 pub use skills::{
-    EnableSummary, PendingSkill, SkillRecord, content_hash, delete_by_plugin, embedding_text,
-    enable_plugin_atomic, find as find_skill, list_for_plugin, mark_all_disabled_for_plugin,
+    EnableSummary, PendingSkill, ReindexSummary, SkillRecord, content_hash, delete_by_plugin,
+    embedding_text, enable_plugin_atomic, find as find_skill, list_for_plugin,
+    mark_all_disabled_for_plugin, reindex_plugin_atomic,
 };
