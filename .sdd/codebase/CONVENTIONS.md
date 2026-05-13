@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and common patterns.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-11
+> **Last Updated**: 2026-05-13
 
 ## Code Style
 
@@ -32,21 +32,22 @@
 | Type | Convention | Example |
 |------|------------|---------|
 | Modules | snake_case | `src/catalog/git.rs`, `src/commands/catalog/add.rs` |
-| Tests | descriptive, lowercase | `tests/catalog_add.rs`, `tests/exit_codes.rs` |
-| Test fixtures | descriptive | `tests/fixtures/sample-catalog/` |
-| Capabilities | feature-named | `catalog`, `config`, `paths`, `error`, `logging`, `output` |
+| Subcommands | snake_case, grouped by capability | `src/commands/plugin/{enable,list,show,disable}.rs` |
+| Tests | descriptive, lowercase | `tests/catalog_add.rs`, `tests/plugin_enable.rs`, `tests/atomicity_enable.rs` |
+| Test fixtures | descriptive | `tests/fixtures/sample-catalog/`, `tests/fixtures/sample-plugin-catalog/` |
+| Capabilities | feature-named | `catalog`, `config`, `paths`, `error`, `plugin`, `index`, `embedding` |
 
 ### Code Elements
 
 | Type | Convention | Example |
 |------|------------|---------|
-| Variables | snake_case | `manifest_path`, `catalog_root` |
-| Constants | SCREAMING_SNAKE_CASE | `SCHEMA_URI`, `CANCELLED` |
-| Functions | snake_case, verb prefix | `parse_and_validate()`, `scrub_credentials()` |
-| Structs | PascalCase | `CatalogManifest`, `ManifestInvalid`, `ToolEnv` |
-| Enums | PascalCase | `TomeError`, `Command`, `Mode` |
-| Error variants | DescriptiveCase | `CatalogNotFound`, `ManifestInvalid`, `GitFailed` |
-| Public module traits | PascalCase | Exported via stable public surface |
+| Variables | snake_case | `manifest_path`, `catalog_root`, `plugin_dir` |
+| Constants | SCREAMING_SNAKE_CASE | `SCHEMA_URI`, `CANCELLED`, `VECTOR_DIM` |
+| Functions | snake_case, verb prefix | `parse_and_validate()`, `scrub_credentials()`, `embed()` |
+| Structs | PascalCase | `CatalogManifest`, `PluginId`, `EnableOutcome` |
+| Enums | PascalCase | `TomeError`, `Command`, `Mode`, `ModelKind` |
+| Error variants | DescriptiveCase | `CatalogNotFound`, `ManifestInvalid`, `PluginAlreadyInState` |
+| Public module traits | PascalCase | `Embedder`, `Reranker`, exported via stable public surface |
 
 ## Error Handling
 
@@ -82,6 +83,9 @@ This enforces the Unix principle: every failure class has a stable, documented e
 | 6 | `GitFailed` | Git command failed (e.g. network error, bad ref) |
 | 7 | `Io` | File I/O error (permission, disk full, etc.) |
 | 8 | `Interrupted` | User pressed Ctrl+C; in-flight git processes killed |
+| 30 | `ModelMissing` | Required embedding model not present |
+
+*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2 exit codes.*
 
 ### Error Message Style
 
@@ -120,15 +124,22 @@ src/
 ├── cli.rs               // clap derive definitions (global --json, -v/-vv)
 ├── lib.rs               // Library surface (for integration tests)
 ├── commands/            // Command implementations
-│   ├── mod.rs
-│   └── catalog/         // `tome catalog` subcommands
-│       ├── mod.rs
-│       ├── add.rs
-│       ├── remove.rs
-│       ├── list.rs
-│       ├── show.rs
-│       ├── update.rs
-│       └── source.rs
+│   ├── mod.rs           // Dispatcher and common helpers
+│   ├── catalog/         // `tome catalog` subcommands
+│   │   ├── mod.rs       // Dispatcher; cross-subcommand helpers
+│   │   ├── add.rs       // `tome catalog add <source>`
+│   │   ├── remove.rs    // `tome catalog remove <name>`
+│   │   ├── list.rs      // `tome catalog list`
+│   │   ├── show.rs      // `tome catalog show <name>`
+│   │   ├── update.rs    // `tome catalog update [name]`
+│   │   └── source.rs    // Git fetch / update orchestrator
+│   ├── plugin/          // `tome plugin` subcommands (Phase 3)
+│   │   ├── mod.rs       // Dispatcher; cross-subcommand helpers
+│   │   ├── enable.rs    // `tome plugin enable <catalog>/<plugin>` (CLI side)
+│   │   ├── list.rs      // `tome plugin list [catalog]`
+│   │   ├── show.rs      // `tome plugin show <catalog>/<plugin>`
+│   │   └── disable.rs   // `tome plugin disable <catalog>/<plugin>` (future)
+│   └── query.rs         // `tome query <text>` (Phase 3)
 ├── catalog/             // Catalog manifest + storage + git operations
 │   ├── mod.rs
 │   ├── manifest.rs      // Parser + validator (strict TOML)
@@ -138,24 +149,142 @@ src/
 ├── error.rs             // Closed TomeError enum + ManifestInvalid
 ├── output.rs            // Human/--json formatter, NO_COLOR, TTY detection
 ├── logging.rs           // tracing-subscriber wiring (stderr-only)
-└── paths.rs             // XDG-aware paths
+├── paths.rs             // XDG-aware paths (Phase 1 + Phase 2 index/models dirs)
+├── plugin/              // Plugin discovery, manifest parsing, lifecycle (Phase 2)
+│   ├── mod.rs
+│   ├── manifest.rs      // `plugin.json` parser (lenient)
+│   ├── frontmatter.rs   // SKILL.md YAML frontmatter parser (lenient + fallbacks)
+│   ├── components.rs    // Skills/agents/commands/hooks walk
+│   ├── identity.rs      // `<catalog>/<plugin>` address parsing and resolution
+│   └── lifecycle.rs     // Enable/disable orchestrator (library API, testable)
+├── index/               // SQLite-backed skill index + vector search (Phase 2)
+│   ├── mod.rs
+│   ├── db.rs            // rusqlite open, WAL, busy_timeout
+│   ├── schema.rs        // CREATE TABLE statements
+│   ├── migrations.rs    // Forward-only migrations under advisory lock
+│   ├── vec_ext.rs       // sqlite-vec extension load
+│   ├── skills.rs        // CRUD on skills table; content-hash diff
+│   ├── query.rs         // KNN search + reranker invocation
+│   ├── meta.rs          // Drift detection (model ident mismatch)
+│   ├── integrity.rs     // PRAGMA integrity_check
+│   └── lock.rs          // Advisory lockfile (WAL + Tome-owned file)
+├── embedding/           // Embedding model management + inference (Phase 2)
+│   ├── mod.rs           // Embedder and Reranker traits
+│   ├── fastembed.rs     // fastembed-rs impl (ONNX Runtime, CPU-only)
+│   ├── stub.rs          // Deterministic stub (tests only, compiled out)
+│   ├── registry.rs      // MODEL_REGISTRY with pinned URLs + checksums
+│   ├── download.rs      // reqwest::blocking + SHA-256 + atomic persist
+│   └── runtime.rs       // ort Environment setup
+└── presentation/        // CLI output / progress / colours / prompts (Phase 2)
+    ├── mod.rs
+    ├── tables.rs        // comfy-table helpers
+    ├── progress.rs      // indicatif wrappers (TTY-aware)
+    ├── colour.rs        // owo-colors + NO_COLOR
+    └── prompt.rs        // inquire wrappers (refuse on non-TTY)
 
 tests/
-├── common/mod.rs        // Fixture builder, ToolEnv, helpers
+├── common/mod.rs        // Fixture builder, ToolEnv, lifecycle helpers
 ├── catalog_add.rs       // Integration tests for `tome catalog add`
 ├── catalog_list.rs      // Integration tests for `tome catalog list`
 ├── catalog_remove.rs    // Integration tests for `tome catalog remove`
 ├── catalog_show.rs      // Integration tests for `tome catalog show`
 ├── catalog_update.rs    // Integration tests for `tome catalog update`
+├── plugin_enable.rs     // Library API tests for `plugin::lifecycle::enable`
+├── plugin_list.rs       // CLI-binary tests for `tome plugin list`
+├── plugin_show.rs       // CLI-binary tests for `tome plugin show`
+├── query.rs             // Library API tests for query path (embed + KNN)
+├── atomicity_enable.rs  // Failure-injection tests for enable rollback (FR-004)
 ├── exit_codes.rs        // Exhaustiveness check: every TomeError → exit code
 ├── error_messages.rs    // Error message correctness
 ├── manifest_strictness.rs  // TOML deny_unknown_fields enforcement + corpus
 ├── path_validation.rs    // Path escape/traversal validation
 ├── scrubbing.rs         // Credential scrubbing regex coverage
 ├── atomicity.rs         // Registry/cache write atomicity under interruption
-└── fixtures/            // Real Git repos (file:// sources for tests)
-    └── sample-catalog/
+└── fixtures/            // Real Git repos + sample plugin catalogs
+    ├── sample-catalog/
+    └── sample-plugin-catalog/
 ```
+
+### CLI Module Pattern (Phase 3)
+
+Each subcommand group lives under `src/commands/{group}/` with one file per subcommand:
+
+- **`src/commands/{group}/mod.rs`**: Dispatcher enum, cross-subcommand helpers (public via `pub(crate)`)
+- **`src/commands/{group}/{subcommand}.rs`**: Subcommand logic; public function signature is `pub fn run(args, mode) -> Result<(), TomeError>`
+
+Cross-module reach via `super::*` within a group is acceptable; cross-group via re-export is preferred.
+
+Example from `src/commands/plugin/enable.rs`:
+```rust
+use super::{embedder_entry, human_mb, missing_models, registry_seeds, resolve_plugin_dir};
+
+pub fn run(args: PluginEnableArgs, mode: Mode) -> Result<(), TomeError> {
+    // Uses helpers from plugin/mod.rs, constructs lifecycle::LifecycleDeps,
+    // calls library API directly, surfaces outcome.
+}
+```
+
+### Plugin Lifecycle Pattern (Phase 3)
+
+**Library API design:** The `plugin::lifecycle` module is testable without loading real ONNX models. It takes:
+- A plugin ID (`<catalog>/<plugin>`)
+- A `LifecycleDeps` struct holding references to paths, config, and an `Embedder` trait object
+
+CLI callers construct a real `FastembedEmbedder`; tests construct a deterministic `StubEmbedder`.
+
+**Closure-injected embedder:** Inside `index::skills::enable_plugin_atomic`, the function accepts:
+```rust
+F: FnMut(&str) -> Result<Vec<f32>, TomeError>
+```
+
+not a trait object. Callers adapt `&dyn Embedder` at the call site via a closure.
+
+**Lock + Result release pattern:** Outer function owns the lock; helper functions own SQL:
+
+```rust
+let lock = acquire_lock(&deps.paths.index_lock)?;
+let result = enable_locked(id, &plugin_dir, &plugin_version, deps);
+
+match result {
+    Ok((summary, warnings)) => {
+        lock.release()?;  // Explicitly release; surface unlock errors
+        Ok(EnableOutcome { ... })
+    }
+    Err(e) => {
+        drop(lock);  // Drop releases best-effort; suppress error
+        Err(e)
+    }
+}
+```
+
+### Banner Skipped in JSON Mode
+
+NDJSON consumers expect structured records on stdout and nothing on stderr unless an error occurs. Established in `commands::plugin::enable` and `commands::query`:
+
+```rust
+if mode == Mode::Human {
+    writeln!(out, "Enabling {}…", id)?;
+}
+```
+
+Then conditionally emit human or JSON output.
+
+### Warnings as Vec<String>
+
+Outcome structs carry `warnings: Vec<String>` (not a structured warning enum) so the CLI layer prints them on stderr:
+
+```rust
+pub struct EnableOutcome {
+    pub plugin: PluginId,
+    pub summary: EnableSummary,
+    pub duration: Duration,
+    pub warnings: Vec<String>,  // FR-011 / FR-012 / FR-013c notices
+}
+```
+
+### Resolver Invariant
+
+Anything resolving `<catalog>/<plugin>` goes through `lifecycle::resolve_plugin_dir`. There is exactly one such function; duplicates have been consolidated.
 
 ### TOML Deserialization (Strict)
 
@@ -174,6 +303,8 @@ pub struct CatalogManifest {
 This is enforced by `tests/manifest_strictness.rs`, which parses the source and asserts that every `Deserialize`-deriving struct has the attribute. Violation causes compile failure in that test.
 
 **Why:** Silent acceptance of unknown fields hides user typos (e.g. `plugin_source` instead of `plugins[].source`). By rejecting unknown fields at parse time, we force the user to read the schema and understand the correct structure.
+
+**Exceptions (Strictness Boundary, FR-013a):** Third-party inputs (`plugin.json`, `SKILL.md` YAML frontmatter) parse leniently with `#[serde(default)]` fallbacks — forward-compat with upstream additions.
 
 ### Process Execution (Git)
 

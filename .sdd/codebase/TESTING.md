@@ -2,7 +2,7 @@
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-11
+> **Last Updated**: 2026-05-13
 
 ## Test Framework
 
@@ -16,8 +16,8 @@
 | Command | Purpose | Scope |
 |---------|---------|-------|
 | `cargo test` | Run all unit + integration tests | All tests in `src/` and `tests/` |
-| `cargo test --test catalog_add` | Run one integration test file | File `tests/catalog_add.rs` |
-| `cargo test catalog_add::` | Run tests matching pattern | All tests in `catalog_add` module |
+| `cargo test --test plugin_enable` | Run one integration test file | File `tests/plugin_enable.rs` |
+| `cargo test plugin_enable::` | Run tests matching pattern | All tests in `plugin_enable` module |
 | `cargo test -- --nocapture` | Run with stdout/stderr visible | Useful for debugging output |
 | `cargo test -- --test-threads=1` | Run tests sequentially | For debugging race conditions |
 
@@ -33,6 +33,11 @@ tests/
 ├── catalog_remove.rs          # Integration: `tome catalog remove` command
 ├── catalog_show.rs            # Integration: `tome catalog show` command
 ├── catalog_update.rs          # Integration: `tome catalog update` command
+├── plugin_enable.rs           # Library API: `plugin::lifecycle::enable` (Phase 3)
+├── plugin_list.rs             # CLI binary: `tome plugin list` (Phase 3)
+├── plugin_show.rs             # CLI binary: `tome plugin show` (Phase 3)
+├── query.rs                   # Library API: embed + KNN query path (Phase 3)
+├── atomicity_enable.rs        # Failure-injection: enable rollback (Phase 3)
 ├── exit_codes.rs              # Unit: exhaustiveness check on TomeError
 ├── error_messages.rs          # Unit: error message format correctness
 ├── manifest_strictness.rs     # Unit: TOML deny_unknown_fields enforcement
@@ -40,10 +45,14 @@ tests/
 ├── scrubbing.rs               # Unit: credential scrubbing regex
 ├── atomicity.rs               # Integration: write atomicity under interruption
 └── fixtures/
-    └── sample-catalog/        # Real Git repo (used as file:// source)
+    ├── sample-catalog/        # Real Git repo (used as file:// source)
+    │   ├── tome-catalog.toml
+    │   ├── plugin-a/
+    │   └── plugin-b/
+    └── sample-plugin-catalog/  # Phase 3 plugin catalog with sample plugins
         ├── tome-catalog.toml
-        ├── plugin-a/
-        └── plugin-b/
+        ├── plugin-alpha/       # Plugin with multiple skills
+        └── plugin-beta/        # Plugin for query test coverage
 ```
 
 ### Test File Location
@@ -53,44 +62,68 @@ tests/
 | Category | Location | Style |
 |----------|----------|-------|
 | Unit tests | `tests/{test_name}.rs` | Test one concept (parser, error path, validator) |
-| Integration tests | `tests/catalog_{cmd}.rs` | Test CLI command against real fixtures |
-| Shared helpers | `tests/common/mod.rs` | Fixture builders, ToolEnv, command runners |
-| Test fixtures | `tests/fixtures/` | Real git repos and TOML files |
+| Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/atomicity_enable.rs` | Exercise library API (`tome::plugin::lifecycle::*`) with `StubEmbedder` |
+| Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs` | Spawn `tome` binary as subprocess; used when no embedders are loaded |
+| Shared helpers | `tests/common/mod.rs` | Fixture builders, ToolEnv, lifecycle helpers, CLI invocation |
+| Test fixtures | `tests/fixtures/` | Real git repos and sample plugin catalogs |
 
 ## Test Patterns
 
-### Integration Test Pattern
+### Library API Integration Test Pattern (Phase 3)
 
-Each test in `tests/catalog_*.rs` follows this flow:
+Tests for `plugin::lifecycle` and `index::query` drive the library API directly with a `StubEmbedder`:
 
-1. **Build fixture** — copy sample catalog to temp dir, run `git init && git add && git commit`
-2. **Create isolated environment** — temp `$HOME`, `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`
-3. **Run binary** — invoke `tome` binary as a subprocess with isolated env
-4. **Assert exit code** — check `.status.code()` matches expected (0, 2, 3, etc.)
-5. **Assert output** — parse stdout (human or `--json`) and validate content
-6. **Assert side effects** — inspect `config.toml`, cache layout, registry state
+1. **Build fixture** — copy sample plugin catalog to temp dir, initialize git
+2. **Build paths** — plain-data `Paths` rooted at TempDir (no env mutation)
+3. **Fabricate models** — write `ModelManifest` JSON so `ensure_models_present` passes
+4. **Construct lifecycle deps** — include stub embedder, seed values
+5. **Call library function** — e.g., `lifecycle::enable(&id, &deps)?`
+6. **Assert outcome** — check return value, side effects (database rows, metadata)
 
-Example from `tests/catalog_add.rs`:
+Example from `tests/plugin_enable.rs`:
 ```rust
 #[test]
-fn happy_path_human_mode() {
-    let fix = Fixture::build_sample();
-    let env = ToolEnv::new();
+fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    fabricate_models(&paths);
 
-    let out = env
-        .cmd()
-        .args(["catalog", "add", &fix.url])
-        .output()
-        .expect("spawn");
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
 
-    assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("Added catalog `sample-experts`"));
+    let embedder = StubEmbedder::new();
+    let deps = LifecycleDeps {
+        paths: &paths,
+        config: &config,
+        embedder: &embedder,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+        allow_model_download: false,
+    };
+    let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
 
-    let config_text = std::fs::read_to_string(env.config_file()).expect("config written");
-    assert!(config_text.contains("[catalogs.sample-experts]"));
+    let outcome = lifecycle::enable(&id, &deps).expect("enable should succeed");
+
+    assert_eq!(outcome.summary.total_skills, 4);
+    // ... assertions on outcome + database state
 }
 ```
+
+**Why library API tests:** The `tome plugin enable` CLI command path loads `FastembedEmbedder` (real ONNX model files). The stub embedder is deterministic and lets tests run without any model artefacts.
+
+### CLI-Binary Integration Test Pattern (Phase 3)
+
+Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`) spawn the real binary:
+
+1. **Build fixture** — copy plugin catalog to temp dir, initialize git
+2. **Create isolated environment** — temp `$HOME`, `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`
+3. **Write config** — use `write_config_for_cli` helper to bypass git fixture setup
+4. **Run binary** — invoke `tome` binary as a subprocess with isolated env
+5. **Assert exit code** — check `.status.code()` matches expected
+6. **Assert output** — parse stdout (human or `--json`) and validate content
+
+Used when embedders are not involved or interaction with the real binary is essential.
 
 ### Unit Test Pattern
 
@@ -144,6 +177,48 @@ If a new `TomeError` variant is added, this test fails to compile until updated.
 
 ## Test Fixtures and Helpers
 
+### Phase 3 Lifecycle Helpers (`tests/common/mod.rs`)
+
+Added in Phase 3 to support library API tests:
+
+**`lifecycle_paths(root: &Path) -> Paths`** — Build a `Paths` rooted entirely under `root`. Mirrors the in-module helper so integration tests never touch `$HOME` or environment variables.
+
+```rust
+pub fn lifecycle_paths(root: &Path) -> Paths {
+    Paths {
+        config_dir: root.join("config"),
+        config_file: root.join("config/config.toml"),
+        data_dir: root.join("data"),
+        catalogs_dir: root.join("data/catalogs"),
+        index_db: root.join("data/index.db"),
+        index_lock: root.join("data/index.lock"),
+        models_dir: root.join("data/models"),
+    }
+}
+```
+
+**`fabricate_models(paths: &Paths)`** — Write `ModelManifest` JSON for every entry in `MODEL_REGISTRY` so the model-presence gate in `lifecycle::enable` is satisfied without a real download. Mirrors the in-module helper.
+
+```rust
+pub fn fabricate_models(paths: &Paths) {
+    for entry in MODEL_REGISTRY {
+        let dir = paths.models_dir.join(entry.name);
+        std::fs::create_dir_all(&dir).expect("create model dir");
+        let manifest = ModelManifest { /* ... */ };
+        let body = serde_json::to_vec_pretty(&manifest).expect("serialise manifest");
+        std::fs::write(dir.join("manifest.json"), body).expect("write manifest");
+    }
+}
+```
+
+**`copy_sample_plugin_catalog(into: &TempDir, name: &str) -> PathBuf`** — Copy the fixture skeleton and return the catalog root path.
+
+**`config_with_catalog(catalog_name: &str, catalog_root: &Path) -> Config`** — Build a minimal `Config` with one catalog entry. The name is recorded both as the `BTreeMap` key and the inner `CatalogEntry.name`.
+
+**`stub_embedder_seed()` / `stub_reranker_seed()`** — Return `MetaSeed` values matching the deterministic stub embedder/reranker. Used to construct `LifecycleDeps` and open the index.
+
+**`write_config_for_cli(paths: &Paths, config: &Config)`** — Write the supplied `Config` to `paths.config_file` as TOML so a child `tome` binary process can read it. Used by `plugin list` / `plugin show` tests that bypass `catalog add`.
+
 ### Fixture Builder (`tests/common/mod.rs`)
 
 ```rust
@@ -176,21 +251,40 @@ impl ToolEnv {
     pub fn cmd(&self) -> Command { /* return pre-configured tome binary invocation */ }
     pub fn config_file(&self) -> PathBuf { /* .config/tome/config.toml */ }
     pub fn catalogs_dir(&self) -> PathBuf { /* .local/share/tome/catalogs */ }
+    pub fn data_dir(&self) -> PathBuf { /* .local/share/tome */ }
 }
 ```
 
-**Why:** Tests don't pollute the host's real config or cache. Each test has its own XDG layout.
+**Why:** Tests don't pollute the host's real config or cache. Each test has its own XDG layout. The `cmd()` method pre-configures the binary invocation with isolated env vars.
 
 ### Test Data
 
-Test fixtures are **real Git repos** checked into `tests/fixtures/sample-catalog/`:
+Test fixtures are **real Git repos** checked into `tests/fixtures/`:
 
+**`tests/fixtures/sample-catalog/`** — Phase 1 catalog fixture:
 ```
 tests/fixtures/sample-catalog/
 ├── .git/              # Real Git repository
 ├── tome-catalog.toml  # Valid manifest
 ├── plugin-a/          # Real plugin directories (with .keep files)
 └── plugin-b/
+```
+
+**`tests/fixtures/sample-plugin-catalog/`** — Phase 3 plugin catalog fixture:
+```
+tests/fixtures/sample-plugin-catalog/
+├── .git/              # Real Git repository
+├── tome-catalog.toml  # Valid manifest
+├── plugin-alpha/      # Plugin with multiple SKILL.md files
+│   ├── plugin.json
+│   ├── SKILL.md (skill-a)
+│   ├── SKILL.md (skill-b, name fallback)
+│   ├── SKILL.md (skill-c, description fallback)
+│   ├── SKILL.md (skill-d, extra frontmatter fields)
+│   └── SKILL.md (skill-malformed-yaml-body, FR-013c skipped)
+└── plugin-beta/       # Plugin for query test coverage
+    ├── plugin.json
+    └── SKILL.md files
 ```
 
 When tests run:
@@ -205,13 +299,18 @@ When tests run:
 
 ### Integration Tests (by command)
 
-| Test File | Command | Coverage |
-|-----------|---------|----------|
-| `catalog_add.rs` | `tome catalog add <source>` | Happy path, name override, duplicates, missing manifest, credential scrubbing |
-| `catalog_list.rs` | `tome catalog list` | Empty registry, multiple catalogs, `--json` output |
-| `catalog_remove.rs` | `tome catalog remove <name>` | Confirmation prompt, `--force` flag, nonexistent catalog |
-| `catalog_show.rs` | `tome catalog show <name>` | Metadata display, plugin list, JSON format |
-| `catalog_update.rs` | `tome catalog update [name]` | Full sync, selective sync, failure handling |
+| Test File | Type | Coverage |
+|-----------|------|----------|
+| `catalog_add.rs` | CLI-binary | `tome catalog add <source>` — happy path, name override, duplicates, missing manifest, credential scrubbing |
+| `catalog_list.rs` | CLI-binary | `tome catalog list` — empty registry, multiple catalogs, `--json` output |
+| `catalog_remove.rs` | CLI-binary | `tome catalog remove <name>` — confirmation prompt, `--force` flag, nonexistent catalog |
+| `catalog_show.rs` | CLI-binary | `tome catalog show <name>` — metadata display, plugin list, JSON format |
+| `catalog_update.rs` | CLI-binary | `tome catalog update [name]` — full sync, selective sync, failure handling |
+| `plugin_enable.rs` | Library API | `plugin::lifecycle::enable` — skill row insertion, content hash, fallbacks, atomicity (FR-004), idempotency, warnings |
+| `plugin_list.rs` | CLI-binary | `tome plugin list [catalog]` — filtering by catalog, empty list, JSON format |
+| `plugin_show.rs` | CLI-binary | `tome plugin show <catalog>/<plugin>` — skill details, metadata, JSON format |
+| `query.rs` | Library API | KNN query + optional reranking — self-similarity, filtering, candidate pool, drift detection |
+| `atomicity_enable.rs` | Library API | Failure-injection: `StubEmbedder::with_force_fail_after(n)` → rollback guarantee (FR-004) |
 
 ### Unit Tests (by concern)
 
@@ -223,6 +322,69 @@ When tests run:
 | `path_validation.rs` | Relative paths only; no absolute paths, no `..`, no escape outside catalog root |
 | `scrubbing.rs` | Credential scrubbing regex: URL logins, SSH hosts, tokens, API keys, long hex |
 | `atomicity.rs` | Interrupted writes (SIGINT during clone) leave registry/cache in consistent state |
+
+## Deterministic Stub Embedder (Phase 3)
+
+**Location:** `src/embedding/stub.rs` (compiled into release binary; LTO eliminates it when unused)
+
+**Properties:**
+- **Determinism** — the same input always produces the same 384-element vector
+- **Distinguishability** — different inputs produce vectors whose cosine similarity is `< 0.99`
+- **Send + Sync** — safe to share across threads; uses `Arc<AtomicUsize>` for call-count tracking
+
+**Construction:** Hash input with SHA-256, tile across 384-element vector, normalize to `[-1.0, 1.0]`, then L2-normalise.
+
+**Failure Injection:**
+
+```rust
+pub fn with_force_fail_after(n: usize) -> Self {
+    Self {
+        force_fail_after: Some(n),
+        call_count: Arc::new(AtomicUsize::new(0)),
+    }
+}
+```
+
+The counter is shared between clones via `Arc<AtomicUsize>` so the closure adaptation inside `enable_plugin_atomic` (which captures by reference) observes the same call count. Used in `atomicity_enable.rs` to inject mid-pipeline embedder failures and verify rollback (FR-004).
+
+## Test Organization by Concern (Phase 3)
+
+### No Environment Mutation in Library API Tests
+
+**Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
+
+**CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
+
+### Test Scaffolding Lock-Step
+
+Two parallel path builders are deliberately kept in lock-step:
+1. **In-module helper:** `src/plugin/lifecycle.rs::tests::test_paths` (for unit tests within the module)
+2. **Integration test helper:** `tests/common/mod.rs::lifecycle_paths` (for library API integration tests)
+
+If one changes, the other must change too — enforced via manual code review.
+
+### YAML Frontmatter Quirk (Documented for Test Authors)
+
+A leading colon (`: not valid yaml here`) is the most reliable way to provoke `InvalidYaml` inside otherwise-valid `---` delimiters:
+
+```rust
+let bad_frontmatter = r#"---
+: not valid yaml here
+---
+"#;
+```
+
+This pattern is used in `tests/` when testing YAML parse error paths.
+
+## Coverage Strategy
+
+No automatic coverage threshold enforced, but the test corpus is organized to be **exhaustive** per the spec:
+
+- **Every error class is tested** — each `TomeError` variant appears in `exit_codes.rs` and often in command-specific tests
+- **Bad-input corpus is explicit** — each parser/validator has a separate test file documenting what shapes are rejected
+- **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/list/show`) has dedicated tests
+- **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable, fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback
+- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift
 
 ## Specimen Tests (Quality Corpus)
 
@@ -246,16 +408,7 @@ email = "n@e.co"
 #[test] fn unknown_owner_field_rejected() { ... }
 #[test] fn unknown_plugin_field_rejected() { ... }
 #[test] fn missing_name_rejected() { ... }
-#[test] fn missing_description_rejected() { ... }
-#[test] fn missing_version_rejected() { ... }
-#[test] fn missing_owner_rejected() { ... }
-#[test] fn missing_owner_email_rejected() { ... }
-#[test] fn non_semver_version_rejected() { ... }
-#[test] fn non_email_owner_email_rejected() { ... }
-#[test] fn missing_plugin_name_rejected() { ... }
-#[test] fn missing_plugin_source_rejected() { ... }
-#[test] fn duplicate_plugin_name_rejected() { ... }
-#[test] fn malformed_toml_rejected_as_toml_parse() { ... }
+// ... one test per error variant
 ```
 
 **One test per error variant** — ensures every documented failure is actually rejected and surfaces the correct `ManifestInvalid` type.
@@ -275,15 +428,6 @@ Plugin sources must be:
 - No parent traversal (no `../../escape`)
 - Normalized (no extra `/./` or duplicate `/`)
 - Resolved within catalog root (escape attempts rejected)
-
-## Coverage Strategy
-
-No automatic coverage threshold enforced, but the test corpus is organized to be **exhaustive** per the spec:
-
-- **Every error class is tested** — each `TomeError` variant appears in `exit_codes.rs` and often in command-specific tests
-- **Bad-input corpus is explicit** — each parser/validator has a separate test file documenting what shapes are rejected
-- **Integration tests hit all CLI paths** — every subcommand (`add`, `list`, `remove`, `show`, `update`) has dedicated tests
-- **Edge cases are tested** — atomicity under interruption, credential scrubbing, path escapes, TOML strictness
 
 ## CI Integration
 
@@ -357,14 +501,35 @@ Green on all 4 combinations is required before merge.
 4. Add test case verifying unknown field with similar name is rejected
 5. Run `cargo test manifest_strictness` to verify
 
-### Testing a New CLI Command
+### Testing a New Plugin Command (Phase 3)
 
-1. Add subcommand to `src/cli.rs` (clap derive)
-2. Add module under `src/commands/`
-3. Create integration test file `tests/catalog_*.rs`
-4. In test: build fixture, invoke binary, assert exit code + output
-5. Check side effects: config file, cache layout, registry state
-6. Run full test suite: `cargo test`
+For library API tests (no embedder loading):
+1. Add module under `src/commands/plugin/`
+2. Create integration test file `tests/plugin_*.rs` (library API)
+3. Use `lifecycle_paths`, `fabricate_models`, `StubEmbedder`
+4. Call library API directly: `lifecycle::enable`, `lifecycle::disable`, etc.
+5. Assert outcome and database state
+6. Run `cargo test plugin_*` to verify
+
+For CLI tests (no embedder loading):
+1. Reuse the library API test scaffolding
+2. Create integration test file `tests/plugin_*.rs` (CLI binary)
+3. Use `ToolEnv`, `write_config_for_cli`
+4. Spawn the binary, assert exit code + output
+5. Run `cargo test plugin_*` to verify
+
+For commands that load embedders (Phase 4+):
+- CLI-only; no library API test needed
+- Follow the `plugin list` / `plugin show` pattern
+
+### Testing Query / Search (Phase 3)
+
+1. Build fixture plugin catalog with multiple skills
+2. Enable plugins via `lifecycle::enable` (stub embedder)
+3. Open index via `index::open` with same stub seeds
+4. Call `index::query::knn` with query vector
+5. Assert hits, distances, optional reranking
+6. Use `embedding_text(name, description)` to predict top-1 for self-similarity tests
 
 ---
 
