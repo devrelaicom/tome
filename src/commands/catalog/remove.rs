@@ -75,27 +75,18 @@ pub fn run(args: CatalogRemoveArgs, mode: Mode) -> Result<(), TomeError> {
     let mut cascade_records: Vec<CascadeRecord> = Vec::new();
     if !enabled_plugins.is_empty() {
         let (embedder_seed, reranker_seed) = registry_seeds();
-        let dropped_total = cascade_disable_for_catalog(
+        let breakdown = cascade_disable_for_catalog(
             &paths,
             &args.name,
             &enabled_plugins,
             embedder_seed,
             reranker_seed,
         )?;
-        cascade_records.reserve(enabled_plugins.len());
-        for plugin in &enabled_plugins {
+        cascade_records.reserve(breakdown.len());
+        for (plugin, dropped) in &breakdown {
             cascade_records.push(CascadeRecord {
                 plugin: format!("{}/{}", args.name, plugin),
-                // We don't have a per-plugin breakdown from the helper —
-                // we only have the total. The contract's JSON shape
-                // expects per-plugin entries. For now we report the
-                // total only on the first record and 0 on the rest.
-                // Tests assert on the array length + the catalog total.
-                skills_dropped: if plugin == &enabled_plugins[0] {
-                    dropped_total
-                } else {
-                    0
-                },
+                skills_dropped: *dropped,
             });
         }
         if mode == Mode::Human {

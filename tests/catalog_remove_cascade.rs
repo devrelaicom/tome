@@ -112,7 +112,8 @@ fn force_cascades_disable_and_removes_catalog() {
     write_config_for_cli(&paths, &config);
     let embedder = StubEmbedder::new();
     enable_alpha(&paths, &config, &embedder);
-    assert!(count_skill_rows(&paths, "sample-plugin-catalog") > 0);
+    let baseline = count_skill_rows(&paths, "sample-plugin-catalog");
+    assert!(baseline > 0);
 
     let out = env
         .cmd()
@@ -132,11 +133,22 @@ fn force_cascades_disable_and_removes_catalog() {
         String::from_utf8_lossy(&out.stderr),
     );
 
-    // JSON record includes the cascade array.
+    // JSON record includes the cascade array with REAL per-plugin counts.
     let v: Value = serde_json::from_slice(&out.stdout).expect("parse JSON");
     let cascade = v["removed"]["cascade"].as_array().expect("cascade array");
     assert!(!cascade.is_empty(), "cascade array should be non-empty");
     assert_eq!(cascade[0]["plugin"], "sample-plugin-catalog/plugin-alpha");
+    let dropped = cascade[0]["skills_dropped"]
+        .as_u64()
+        .expect("skills_dropped is a number");
+    assert_eq!(
+        dropped as i64, baseline,
+        "skills_dropped on the sole enabled plugin should equal the pre-cascade row count",
+    );
+    assert!(
+        dropped > 0,
+        "skills_dropped must be the real count, not zero",
+    );
 
     // Catalog removed from config.
     let cfg_text = std::fs::read_to_string(&paths.config_file).unwrap();
