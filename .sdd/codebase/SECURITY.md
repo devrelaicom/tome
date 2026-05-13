@@ -2,19 +2,20 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-11
+> **Last Updated**: 2026-05-13
 
 ## Overview
 
-Tome is a Rust CLI for managing plugin catalogs. As a synchronous, file-based tool without user authentication, security focuses on:
-1. Preventing path traversal and directory-escape attacks via plugin source paths
-2. Scrubbing credentials from captured Git output at the boundary
-3. Atomic writes to prevent partial state corruption
-4. Signal handling for clean interruption
-5. Dependency-allowlist enforcement and weekly vulnerability scanning
-6. Binary-size constraints to limit attack surface
+Tome is a Rust CLI for managing plugin catalogs and embeddings. As a synchronous, file-based tool without user authentication, security focuses on:
+1. Preventing path traversal and directory-escape attacks via plugin source paths and plugin identities
+2. Integrity verification for downloaded model artefacts (SHA-256 checksums)
+3. Scrubbing credentials from captured Git output and HTTP errors at the boundary
+4. Atomic writes to prevent partial state corruption
+5. Signal handling for clean interruption
+6. Dependency-allowlist enforcement and weekly vulnerability scanning
+7. Binary-size constraints to limit attack surface
 
-Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md`.
+Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md` (Phase 1) and `specs/002-phase-2-plugins-index/spec.md` (Phase 2+).
 
 ## Authentication & Authorization
 
@@ -31,10 +32,11 @@ Security controls are enforced in code, tests, and CI—documented in `CONSTITUT
 |---------|----------------|----------|
 | **Scrubbing at boundary** | Regex-based pattern detector (R-8) | `src/catalog/git.rs::scrub_credentials` |
 | **Never log secrets** | All `git` stderr passed through scrubber | `src/catalog/git.rs::scrub_to_string` |
+| **HTTP error scrubbing** | `reqwest::Error` details scrubbed before surfacing | `src/embedding/download.rs::scrub_for_diag` |
 | **No credential storage** | Inherit user's Git config entirely | Constitution XII |
 | **No credential prompting** | Only system Git handles auth | Constitution XII, FR-026 |
 
-The credential scrubber applies four ordered regex patterns to every byte stream from `git`:
+The credential scrubber applies four ordered regex patterns to every byte stream from `git` and HTTP operations:
 1. URL-embedded credentials: `https?://[^/@\s]+@` → `https://` (drops `user:token@`)
 2. SSH login info: `git@[^\s:]+:` → `git@<host>:` (preserves host, scrubs login)
 3. Key-value pairs: `(token|password|api[-_]?key|bearer|authorization)\s*[:=]\s*\S+` → `<scrubbed>`
@@ -44,7 +46,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 
 ## Input Validation
 
-### Plugin Source Path Validation
+### Plugin Source Path Validation (Catalog)
 
 | Layer | Validation | Rules |
 |-------|-----------|-------|
@@ -69,21 +71,41 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 - `./plugins/../escape` → rejected (embedded `..`)
 - Symlinks outside catalog → rejected (semantic escape via canonicalize)
 
+### Plugin Identity Validation
+
+| Layer | Validation | Rules |
+|-------|-----------|-------|
+| **Parse barrier** | `PluginId::from_str` boundary | `src/plugin/identity.rs::validate_segment` |
+| **Rejection criteria** | Seven strict checks | No `..`, no `.`, no `/`, no `\`, no leading `.`, no empty |
+| **Testing** | Shape validation test | `tests/plugin_*.rs` integration suites |
+
+**Validation Algorithm** (`src/plugin/identity.rs`, lines 48–66):
+1. **Reject empty segments**: `segment.is_empty()`
+2. **Reject embedded slashes**: `segment.contains('/')`
+3. **Reject parent/current traversal**: `segment == ".."` or `segment == "."`
+4. **Reject leading dot**: `segment.starts_with('.')`
+5. **Reject absolute paths**: `segment.starts_with('/')` or `segment.starts_with('\\')` (Unix and Windows)
+
+**Purpose**: Ensure plugin identities (`<catalog>/<plugin>`) are safe to compose into filesystem paths and cannot escape intended directory bounds.
+
 ### Manifest Strictness
 
 | Rule | Implementation | Enforcement |
 |------|----------------|-------------|
-| **Unknown fields banned** | `#[serde(deny_unknown_fields)]` on all Deserialize structs | `src/catalog/manifest.rs`, `src/config.rs` |
-| **Compile-time check** | Every Deserialize struct preceded by attribute | Verified by structural grep test |
+| **Unknown fields banned** | `#[serde(deny_unknown_fields)]` on all Tome-owned Deserialize structs | `src/catalog/manifest.rs`, `src/config.rs`, `src/embedding/registry.rs::ModelManifest` |
+| **Compile-time check** | Every Tome-owned Deserialize struct preceded by attribute | Verified by structural grep test |
 | **Test enforcement** | `tests/manifest_strictness.rs` — assertion on 100% coverage | Test fails if any struct lacks attribute |
-| **Coverage** | All deserialization targets: `CatalogManifest`, `Owner`, `PluginDeclaration`, `Config`, `CatalogEntry` | Mandatory, no exceptions |
+| **Lenient third-party inputs** | `plugin.json` and `SKILL.md` frontmatter parsed without `deny_unknown_fields` (FR-013a) | Forward-compatible with upstream schema additions |
+| **Coverage** | Strict targets: `CatalogManifest`, `Owner`, `PluginDeclaration`, `Config`, `CatalogEntry`, `ModelManifest`, `ModelKind` | Mandatory, no exceptions |
 
-**Semantic validation** (manifest.rs):
+**Semantic validation** (manifest.rs, registry.rs):
 - `name`, `description` must be non-empty (trimmed)
 - `version` must parse as semver
 - `owner.email` must contain exactly one `@`, non-empty local and domain, domain has `.`
 - `plugins[].name` must be unique within catalog
 - `plugins[].source` must pass 6-step path validation (above)
+- Model `sha256` must not be placeholder (all-zero string)
+- Model `size_bytes` must match pinned registry value on download completion
 
 ## Data Protection
 
@@ -92,33 +114,58 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | Data Type | Protection | Storage |
 |-----------|-----------|---------|
 | Git credentials | Inherited from system Git config | Credential helper, not Tome |
+| Model artefacts | SHA-256 verification on download | `~/.local/share/tome/models/<name>/` |
 | Configuration file | Atomic writes, permissive POSIX defaults | `~/.config/tome/config.toml` |
 | Catalog cache | Atomic refresh, tool-owned | `~/.cache/tome/<sha256-of-url>/` |
 | Git stderr output | Scrubbed before tracing/display | `src/catalog/git.rs::scrub_credentials` |
+| HTTP error output | Scrubbed before surfacing | `src/embedding/download.rs::scrub_for_diag` |
+
+### Integrity & Verification
+
+| Component | Mechanism | Enforcement |
+|-----------|-----------|-------------|
+| **Model downloads** | SHA-256 checksum + size_bytes pin | `src/embedding/download.rs::download_model` (exit 32 on mismatch) |
+| **Registry pinning** | Compile-time constant `MODEL_REGISTRY` | `src/embedding/registry.rs::MODEL_REGISTRY` (verified real at Phase 3 slice 1) |
+| **Placeholder detection** | `has_placeholder_checksum()` guard | `src/embedding/download.rs::download_model` (exit 31 if placeholder) |
+| **Atomic model persist** | `.partial/` → final rename | `src/embedding/download.rs::download_model`, step 4 |
+
+**Model Registry** (Phase 3 update):
+- `bge-small-en-v1.5` INT8: SHA-256 `51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431`, 66.5 MB, MIT
+- `bge-reranker-base` INT8: SHA-256 `46a1bb4cf46ff1e300d27589d620141fbf04fc0eaf8e7bb6dea5e044475ff387`, 279.3 MB, MIT (sourced from `onnx-community` mirror)
+
+Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads enforce both hash and size; drift surfaces as `ModelChecksumMismatch` (exit 32) rather than silently installing whatever upstream serves.
 
 ### Encryption
 
 | Type | Status |
 |------|--------|
 | At rest | Not implemented (cache is local, untrusted) |
-| In transit | Inherited from system Git (TLS/SSH) |
+| In transit | Inherited from system Git (TLS/SSH) and `reqwest` (TLS 1.2+) |
 | Application-level | No application-managed secrets |
 
 ## Error Reporting & Exit Codes
 
 ### Closed Error Set
 
-| Exit Code | Category | Meaning | Specification |
-|-----------|----------|---------|----------------|
-| 0 | Success | Operation completed successfully | — |
-| 1 | Internal | Programmer error, panic caught | FR-022 |
-| 2 | Usage | Invalid command-line arguments | FR-022 |
-| 3 | CatalogNotFound | Catalog not registered | FR-022 |
-| 4 | CatalogAlreadyExists | Catalog already registered | FR-022 |
-| 5 | ManifestInvalid | Manifest parse or validation failed | FR-022 |
-| 6 | GitFailed | Git operation failed (clone, fetch, reset) | FR-022 |
-| 7 | Io | Filesystem or I/O error | FR-022, PRD amendment §2.2 |
-| 8 | Interrupted | User interrupted (Ctrl-C) | FR-026a |
+| Exit Code | Category | Meaning | Phase | Specification |
+|-----------|----------|---------|-------|----------------|
+| 0 | Success | Operation completed successfully | — | — |
+| 1 | Internal | Programmer error, panic caught | All | FR-022 |
+| 2 | Usage | Invalid command-line arguments | All | FR-022 |
+| 3 | CatalogNotFound | Catalog not registered | 1 | FR-022 |
+| 4 | CatalogAlreadyExists | Catalog already registered | 1 | FR-022 |
+| 5 | ManifestInvalid | Manifest parse or validation failed | 1 | FR-022 |
+| 6 | GitFailed | Git operation failed (clone, fetch, reset) | 1 | FR-022 |
+| 7 | Io | Filesystem or I/O error | All | FR-022 |
+| 8 | Interrupted | User interrupted (Ctrl-C) | All | FR-026a |
+| 20 | PluginNotFound | Plugin not found under any registered catalog | 2 | — |
+| 21 | PluginAlreadyInState | Plugin already in target state (enabled/disabled) | 2 | — |
+| 22 | PluginManifestParseError | `plugin.json` parse or validation failed | 2 | FR-013b |
+| 23 | SkillFrontmatterParseError | `SKILL.md` frontmatter parse failed | 2 | — |
+| 30 | ModelMissing | Model files not found on disk | 2 | — |
+| 31 | ModelCorrupt | Model metadata invalid or placeholder checksum | 2 | — |
+| 32 | ModelChecksumMismatch | SHA-256 or size mismatch on download | 2 | — |
+| 33 | ModelRegistrationParseError | Model manifest.json invalid | 2 | — |
 
 **Enforcement**: Closed enum `TomeError` in `src/error.rs`. Adding a variant forces edits to:
 1. `TomeError` enum
@@ -133,13 +180,13 @@ No generic "Other" or "Unknown" variant. Every path maps to a named category.
 | Requirement | Implementation | Location |
 |-------------|----------------|----------|
 | **Name what failed** | Error variant includes resource name | `TomeError::CatalogNotFound(String)` |
-| **Name where it failed** | File paths in `ManifestInvalid` variants | `TomeError::ManifestInvalid(ManifestInvalid)` |
-| **Suggest next action** | Schema URI in unknown-field errors | `ManifestInvalid::UnknownField { expected_schema_uri }` |
-| **Surface upstream errors** | Git stderr passed through scrubber | `TomeError::GitFailed { detail: String }` |
+| **Name where it failed** | File paths in error variants | `TomeError::ModelChecksumMismatch { model, expected, got }` |
+| **Suggest next action** | Remediation in error message | `ModelChecksumMismatch` suggests `--force` retry |
+| **Surface upstream errors** | Git and HTTP stderr passed through scrubber | `TomeError::GitFailed`, HTTP errors in `Io` with scrubbed detail |
 
-Example error (path traversal):
+Example error (model checksum):
 ```
-`plugins[].source = "../escape"` in /path/to/tome-catalog.toml contains `..` — must be a normalised relative path
+model `bge-small-en-v1.5` SHA-256 mismatch: expected 51f1bd0..., got a1b2c3...; run `tome models download --force` to retry
 ```
 
 ## Signal Handling & Cancellation
@@ -152,6 +199,7 @@ Example error (path traversal):
 | **Cancellation flag** | Global `AtomicBool` with `SeqCst` ordering | `src/catalog/git.rs::CANCELLED` |
 | **Child cleanup** | `Child::kill()` on flag flip | `src/catalog/git.rs::Git::run` |
 | **Cache integrity** | Atomic write via temp-dir RAII | `src/catalog/store.rs::write_atomic` |
+| **Model download safety** | `.partial/` cleanup on cancellation | `src/embedding/download.rs::download_model` (lines 77–87) |
 | **Exit code** | 8 (documented, non-zero) | `TomeError::Interrupted` |
 
 **Guarantees** (FR-026a, SC-011):
@@ -159,23 +207,26 @@ Example error (path traversal):
 - On cancellation, child process is killed and control returns to main
 - No orphaned child processes
 - Per-catalog cache atomicity is preserved (temp dir dropped via RAII)
+- Model download `.partial/` directory cleaned up on interruption
 
 **Test**: `tests/atomicity.rs` and signal-handling verification in integration tests.
 
 ## Atomic Writes
 
-### Registry & Cache Persistence
+### Registry, Cache, and Model Persistence
 
 | Operation | Atomicity Guarantee | Implementation |
 |-----------|-------------------|-----------------|
 | **Registry write** | Atomic replace via temp + rename | `src/catalog/store.rs::write_atomic` |
-| **Cache refresh** | Atomic temp dir swap per catalog | `src/catalog/store.rs::clone_and_validate` |
+| **Catalog cache refresh** | Atomic temp dir swap per catalog | `src/catalog/store.rs::clone_and_validate` |
+| **Model download persist** | Atomic `.partial/` → final dir rename | `src/embedding/download.rs::download_model`, step 4 |
+| **Model manifest write** | Atomic write via temp + rename | `src/embedding/download.rs::write_manifest` |
 | **Temp file cleanup** | RAII via `tempfile::NamedTempFile` + `TempDir` | Rust Drop trait |
 
 **Mechanism**:
-1. Write to a temporary file in the same directory as the target
+1. Write to a temporary file/directory in the same directory as the target
 2. Rename (POSIX `rename(2)` is atomic on same filesystem)
-3. On error, temp file is cleaned up; target is unchanged
+3. On error, temp file/directory is cleaned up; target is unchanged
 
 **Guarantees** (FR-017a, FR-017b, SC-012):
 - A partial or interrupted write leaves the on-disk file in either pre-state or post-state, never partial
@@ -204,8 +255,8 @@ Example error (path traversal):
 |------|-----------|---|--------------|
 | `cargo-audit` | Weekly + on every PR | Installed and run via CI | Fails workflow on vulnerability |
 | `cargo-deny` | Weekly + on every PR | `deny.toml` (see above) | Fails workflow on disallowed licence |
-| MSRV verification | On every PR | `rust-version` in Cargo.toml | Tested on pinned MSRV |
-| Binary size check | On release builds | 10 MB stripped limit | Fails if exceeded |
+| MSRV verification | On every PR | `rust-version` in Cargo.toml (pinned at 1.93) | Tested on pinned MSRV |
+| Binary size check | On release builds | 50 MB stripped limit (Constitution amendment) | Fails if exceeded |
 
 **Workflow**: `.github/workflows/security.yml`
 - Runs on: PR, push to main, weekly schedule (Mondays 04:17 UTC)
@@ -220,21 +271,11 @@ Example error (path traversal):
 | **Renovate** | Automated proposal on updates; human review required before merge |
 | **MSRV compatibility** | Dependency MSRV constraints propagate to project MSRV |
 
-**Current dependencies** (Phase 1):
-- `clap` 4 (CLI parsing) — already used for colour
-- `serde`, `serde_json` (serialization)
-- `toml` (manifest format)
-- `anyhow`, `thiserror` (error handling)
-- `tracing`, `tracing-subscriber` (logging)
-- `sha2`, `hex` (cache naming)
-- `tempfile` (atomic writes, test fixtures)
-- `ctrlc` (signal handling)
-- `regex` (credential scrubbing)
-- `semver` (version validation)
-- `time` (timestamp serialization)
-- `directories` (XDG-aware paths)
+**Current dependencies**:
+- Phase 1: `clap` (CLI), `serde`/`toml` (config), `thiserror`/`anyhow` (errors), `tracing` (logging), `sha2`/`hex` (hashing), `tempfile` (atomicity), `ctrlc` (signals), `regex` (scrubbing), `semver` (versions), `time` (timestamps), `directories` (paths)
+- Phase 2: `rusqlite` (bundled SQLite), `sqlite-vec` (vendored vector extension), `fastembed-rs` (inference), `reqwest` (HTTP), `indicatif` (progress), `comfy-table` (tables), `owo-colors` (colour), `inquire` (prompts)
 
-All fall within permissive licences.
+All fall within permissive licences. Phase 2 deps licensed: `fastembed-rs` (MIT), `ort` (MIT, transitive via fastembed), BGE models (MIT).
 
 ## Binary Size & Deployment
 
@@ -242,15 +283,17 @@ All fall within permissive licences.
 
 | Metric | Limit | Current | Status |
 |--------|-------|---------|--------|
-| Stripped release binary | 10 MB | ~2.7 MB | ✓ Well within budget |
+| Stripped release binary | 50 MB | ~29.56 MB (Phase 3 slice 1b) | ✓ Within budget |
 | Binary size growth | Must justify | N/A | Checked on every release build (CI) |
+
+**Amendment** (CONSTITUTION.md v1.2.0): Original 10 MB cap at Phase 1 ratification. Phase 2 integration of ONNX Runtime (via `fastembed` → `ort`) measured ~29.56 MB on Linux. The worst-case projection in Phase 2 research (§Binary size budget) underestimated `ort`'s impact. Current cap of 50 MB is sized to Phase 3 reality with 20.4 MB headroom for query, reindex, and the MCP server. Discipline holds; only the number changed. Justification is recorded in the research doc and decision log.
 
 **Enforcement**: CI job `Release binary size check` in `.github/workflows/ci.yml`:
 ```bash
 cargo build --release
 size=$(stat -c%s target/release/tome)
-if [ "$size" -ge 10485760 ]; then
-  echo "::error::Release binary exceeds the 10 MB limit (SC-010)"
+if [ "$size" -ge 52428800 ]; then  # 50 MB
+  echo "::error::Release binary exceeds the 50 MB limit"
   exit 1
 fi
 ```
@@ -267,7 +310,7 @@ New dependencies that grow the binary significantly require written justificatio
 | Structured (`--json`) | Stdout | All error `detail` strings passed through `scrub_credentials` |
 | Diagnostic logs | Stderr (always) | All tracing records passed through `scrub_credentials` |
 
-**Implementation**: Scrubbing happens at the capture point (Git stderr → `scrub_to_string`), ensuring no downstream path leaks credentials.
+**Implementation**: Scrubbing happens at the capture point (Git stderr → `scrub_to_string`, HTTP errors → `scrub_for_diag`), ensuring no downstream path leaks credentials.
 
 ### Colour & Accessibility
 
@@ -285,6 +328,7 @@ New dependencies that grow the binary significantly require written justificatio
 | Resource | Locking Strategy |
 |----------|-----------------|
 | Registry file | Atomic rename (not mutex) — no advisory lock |
+| Index database | Advisory lockfile `index.lock` (Phase 2) | `src/index/lock.rs` |
 | Catalog cache | Per-catalog atomic swap — no cross-catalog lock |
 | Global state | None (sync-only, CLI is per-invocation) |
 
@@ -293,7 +337,9 @@ New dependencies that grow the binary significantly require written justificatio
 - Cache writes are atomic per catalog
 - Concurrent readers see either the old state or the new state
 
-**Future consideration**: Phase 2 MCP server will need to introduce mutex-based locking or advisory file locks if concurrent harness access becomes possible.
+Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coordinate concurrent access across harness instances.
+
+**Future consideration**: Phase 2 MCP server concurrency model is locked down in spec (FR-040); Phase 3 testing against real BGE models is pending (SC-001/SC-002, T088).
 
 ## Security Testing
 
@@ -302,11 +348,13 @@ New dependencies that grow the binary significantly require written justificatio
 | Category | Coverage | Files |
 |----------|----------|-------|
 | **Path validation** | Exhaustive negative corpus (URLs, absolutes, `..`, escapes, symlinks) | `tests/path_validation.rs` (11 cases) |
+| **Plugin identity** | Shape validation (no `/`, no `..`, no leading `.`) | `tests/plugin_*.rs` integration suites |
 | **Scrubbing** | All four regex rules + ordering + edge cases | `tests/scrubbing.rs` (8 cases) |
-| **Strictness** | Every `Deserialize` struct has `deny_unknown_fields` | `tests/manifest_strictness.rs` (2 assertions) |
+| **Strictness** | Every Tome-owned Deserialize struct has `deny_unknown_fields` | `tests/manifest_strictness.rs` (2 assertions) |
+| **Model integrity** | SHA-256 verification, placeholder detection, atomic persist | `tests/models_download.rs` |
 | **Atomicity** | Concurrent writes, partial writes, interruption | `tests/atomicity.rs` (4 cases) |
 | **Exit codes** | Every `TomeError` variant maps to documented code | `tests/exit_codes.rs` |
-| **Integration** | Real Git repos, real fixtures, real filesystems | `tests/catalog_*.rs` (5 files) |
+| **Integration** | Real Git repos, real fixtures, real filesystems | `tests/catalog_*.rs`, `tests/models_*.rs`, `tests/plugin_*.rs` |
 
 **Success criteria**:
 - SC-005: 100% of malformed inputs rejected with helpful errors
@@ -318,7 +366,9 @@ New dependencies that grow the binary significantly require written justificatio
 
 | Concern | Phase | Note |
 |---------|-------|------|
-| Advisory locking for concurrent access | Phase 2 | MCP server needs robust concurrency model |
+| Real BGE model testing (SC-001/SC-002) | Phase 3 | T088 — requires developer-machine pass |
+| Model-download byte-progress callback | Phase 3 | Currently wrapped in indeterminate spinner; follow-up before polish pass |
+| User-declines-model-download exit code | Phase 3+ | Currently reuses 8 (user-initiated abort); worth locking down in future iteration |
 | Encryption at rest for sensitive caches | Phase 3+ | Deferred until use case demands it |
 | Audit logging | Phase 3+ | Not required in Phase 1 (single-user CLI) |
 | Rate limiting | Not applicable | CLI tool, not a service |

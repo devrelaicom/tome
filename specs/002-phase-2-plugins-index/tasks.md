@@ -181,11 +181,11 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Closing
 
-- [ ] T087 [US1] Run `cargo test` — full suite green
-- [ ] T088 [US1] Manually verify SC-001 / SC-002 against the real `bge-small-en-v1.5` / `bge-reranker-base` models on a developer machine; record numbers in `retro/P3.md`
-- [ ] T089 [US1] Run `/sdd:map incremental` to refresh codebase docs for Phase 3 changes
-- [ ] T090 [US1] Review `retro/P3.md`; extract any universal learnings to `CLAUDE.md` (conservative)
-- [ ] T091 [GIT] Commit: docs: codebase refresh + finalise Phase 3 retro
+- [X] T087 [US1] Run `cargo test` — full suite green (187/187 across 25 suites)
+- [ ] T088 [US1] Manually verify SC-001 / SC-002 against the real `bge-small-en-v1.5` / `bge-reranker-base` models on a developer machine; record numbers in `retro/P3.md` (template added; awaits developer-machine pass)
+- [X] T089 [US1] Run `/sdd:map incremental` to refresh codebase docs for Phase 3 changes
+- [X] T090 [US1] Review `retro/P3.md`; extract any universal learnings to `CLAUDE.md` (conservative)
+- [X] T091 [GIT] Commit: docs: codebase refresh + finalise Phase 3 retro
 
 ### Phase 3 Completion
 
