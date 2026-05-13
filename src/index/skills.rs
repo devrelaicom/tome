@@ -55,6 +55,23 @@ pub struct EnableSummary {
     pub newly_embedded: u32,
 }
 
+/// Outcome summary of an atomic reindex. Mirrors the contract's
+/// Added / Modified / Removed / Unchanged breakdown so the catalog-update
+/// summary table and the `tome reindex` JSON record can both consume it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReindexSummary {
+    /// On-disk now, not in the index before — embedded and inserted.
+    pub added: u32,
+    /// On-disk and in the index, content_hash changed (or `force = true`)
+    /// — re-embedded and the row updated in place.
+    pub modified: u32,
+    /// In the index but no longer on-disk — row + embedding dropped.
+    pub removed: u32,
+    /// On-disk and in the index, content_hash unchanged, `force = false`
+    /// — no embedder call.
+    pub unchanged: u32,
+}
+
 /// The text composition Tome hashes and embeds. By construction two skills
 /// with the same `(name, description)` produce the same hash, which is the
 /// condition under which FR-006 / FR-032 perform a no-op refresh.
@@ -236,12 +253,20 @@ fn upsert_skill(
         )
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("look up skill id: {e}")))?;
 
+    // vec0 virtual tables do not support `INSERT OR REPLACE` or `ON CONFLICT`,
+    // so we DELETE-then-INSERT. The DELETE is a no-op when there's no prior
+    // row, so this is correct for both first-time inserts and re-embeds.
+    tx.execute(
+        "DELETE FROM skill_embeddings WHERE skill_id = ?1",
+        params![id],
+    )
+    .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("drop prior embedding: {e}")))?;
     let bytes = embedding_to_bytes(embedding);
     tx.execute(
-        "INSERT OR REPLACE INTO skill_embeddings (skill_id, embedding) VALUES (?1, ?2)",
+        "INSERT INTO skill_embeddings (skill_id, embedding) VALUES (?1, ?2)",
         params![id, bytes],
     )
-    .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("upsert embedding: {e}")))?;
+    .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("insert embedding: {e}")))?;
 
     Ok(id)
 }
@@ -330,4 +355,132 @@ where
         total_skills,
         newly_embedded,
     })
+}
+
+/// Atomically reconcile the index for one plugin against an on-disk snapshot.
+///
+/// `pending` is the snapshot of skills currently visible under
+/// `<plugin_dir>/skills/*/SKILL.md`. Existing rows for `(catalog, plugin)` are
+/// classified against this snapshot:
+///
+/// * **Added** — in `pending` but no row for `(catalog, plugin, name)` exists.
+///   Embed and INSERT.
+/// * **Modified** — row exists, `content_hash` differs (or `force = true`).
+///   Re-embed and UPDATE in place. `enabled` is forced back to 1 — reindexing
+///   a disabled-but-stored row brings it back into the active set.
+/// * **Unchanged** — row exists, `content_hash` matches, `force = false`.
+///   No embedder call; `plugin_version`, `path`, and `indexed_at` are still
+///   refreshed so observers see that the reindex visited the row.
+/// * **Removed** — row exists for some `name` not in `pending`. DELETE the
+///   row and its embedding.
+///
+/// All four classes commit inside one SQLite transaction so a SIGINT or
+/// embedder failure leaves the index unchanged.
+///
+/// `enabled` is intentionally forced to 1 for Added/Modified/Unchanged rows.
+/// The contract for `tome reindex` says reindex never changes a plugin's
+/// `enabled` flag, but reindex is only called when the plugin IS enabled —
+/// the catalog-update path filters to `enabled = 1` rows before invoking,
+/// and the explicit CLI path requires the plugin be enabled to be in scope.
+/// Forcing `enabled = 1` here is therefore a no-op in practice and protects
+/// against a corrupted-but-recoverable index where a row's `enabled` bit
+/// was flipped out of band.
+pub fn reindex_plugin_atomic<F>(
+    conn: &mut Connection,
+    catalog: &str,
+    plugin: &str,
+    pending: &[PendingSkill],
+    force: bool,
+    mut embed: F,
+) -> Result<ReindexSummary, TomeError>
+where
+    F: FnMut(&str) -> Result<Vec<f32>, TomeError>,
+{
+    let tx = conn
+        .transaction()
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("begin reindex tx: {e}")))?;
+
+    let now = now_rfc3339();
+    let mut summary = ReindexSummary::default();
+
+    // Snapshot existing rows once per call. We'll diff against `pending`
+    // below and use the leftover set for the Removed branch.
+    let mut existing: std::collections::HashMap<String, (i64, String)> =
+        std::collections::HashMap::new();
+    {
+        let mut stmt = tx
+            .prepare(
+                "SELECT id, name, content_hash FROM skills
+                 WHERE catalog = ?1 AND plugin = ?2",
+            )
+            .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("prepare existing: {e}")))?;
+        let rows = stmt
+            .query_map(params![catalog, plugin], |row| {
+                let id: i64 = row.get(0)?;
+                let name: String = row.get(1)?;
+                let hash: String = row.get(2)?;
+                Ok((name, (id, hash)))
+            })
+            .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query existing: {e}")))?;
+        for row in rows {
+            let (name, value) = row.map_err(|e| {
+                TomeError::IndexIntegrityCheckFailure(format!("collect existing: {e}"))
+            })?;
+            existing.insert(name, value);
+        }
+    }
+
+    // Pass 1 — Added / Modified / Unchanged.
+    for skill in pending {
+        let hash = content_hash(&skill.name, &skill.description);
+
+        match existing.remove(&skill.name) {
+            Some((id, stored_hash)) if stored_hash == hash && !force => {
+                // Unchanged: touch metadata only.
+                tx.execute(
+                    "UPDATE skills SET enabled = 1, plugin_version = ?2, path = ?3,
+                                       indexed_at = ?4
+                     WHERE id = ?1",
+                    params![id, skill.plugin_version, skill.path, now],
+                )
+                .map_err(|e| {
+                    TomeError::IndexIntegrityCheckFailure(format!(
+                        "touch unchanged skill {}/{}: {e}",
+                        skill.plugin, skill.name
+                    ))
+                })?;
+                summary.unchanged = summary.unchanged.saturating_add(1);
+            }
+            Some(_) => {
+                // Modified (or force=true rewriting an unchanged row).
+                let embedding = embed(&embedding_text(&skill.name, &skill.description))?;
+                upsert_skill(&tx, skill, &hash, &embedding, &now)?;
+                summary.modified = summary.modified.saturating_add(1);
+            }
+            None => {
+                // Added.
+                let embedding = embed(&embedding_text(&skill.name, &skill.description))?;
+                upsert_skill(&tx, skill, &hash, &embedding, &now)?;
+                summary.added = summary.added.saturating_add(1);
+            }
+        }
+    }
+
+    // Pass 2 — Removed: anything still left in `existing` is on-index but
+    // not on-disk. Drop the row + its embedding.
+    for (_name, (id, _hash)) in existing {
+        tx.execute(
+            "DELETE FROM skill_embeddings WHERE skill_id = ?1",
+            params![id],
+        )
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("delete embedding: {e}")))?;
+        tx.execute("DELETE FROM skills WHERE id = ?1", params![id])
+            .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("delete skill: {e}")))?;
+        summary.removed = summary.removed.saturating_add(1);
+    }
+
+    tx.commit()
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("commit reindex tx: {e}")))?;
+
+    Ok(summary)
 }

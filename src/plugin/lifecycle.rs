@@ -29,7 +29,8 @@ use crate::embedding::{Embedder, ModelKind};
 use crate::error::{PluginState, TomeError};
 use crate::index::skills::{EnableSummary, PendingSkill};
 use crate::index::{
-    self, MetaSeed, OpenOptions, acquire_lock, enable_plugin_atomic, mark_all_disabled_for_plugin,
+    self, MetaSeed, OpenOptions, ReindexSummary, acquire_lock, delete_by_plugin,
+    enable_plugin_atomic, mark_all_disabled_for_plugin, reindex_plugin_atomic,
 };
 use crate::paths::Paths;
 use crate::plugin::frontmatter::{FrontmatterError, parse_skill_frontmatter};
@@ -54,6 +55,17 @@ pub struct DisableOutcome {
     pub plugin: PluginId,
     pub skills_retained: u32,
     pub duration: Duration,
+}
+
+/// Result of a successful reindex of one plugin.
+#[derive(Debug, Clone)]
+pub struct ReindexOutcome {
+    pub plugin: PluginId,
+    pub summary: ReindexSummary,
+    pub duration: Duration,
+    /// Same shape as `EnableOutcome::warnings` — FR-011 / FR-012 / FR-013c
+    /// notices accumulated while walking the on-disk skills.
+    pub warnings: Vec<String>,
 }
 
 /// Inputs to [`enable`]. Kept as a single struct so the CLI wrapper that
@@ -163,6 +175,88 @@ pub fn disable(
                 skills_retained,
                 duration: started.elapsed(),
             })
+        }
+        Err(e) => {
+            drop(lock);
+            Err(e)
+        }
+    }
+}
+
+/// Reindex one plugin: walk its on-disk skills, diff against the index,
+/// re-embed only the modified ones (unless `force` is set), delete rows
+/// for skills no longer on disk.
+///
+/// Drives the contracts at `contracts/reindex.md` and the per-plugin
+/// branch of `contracts/catalog-extensions.md` §"tome catalog update". Both
+/// consumers run inside the advisory lock; this function acquires it.
+///
+/// Pre-condition: the plugin is enabled. The caller is responsible for
+/// filtering to enabled plugins before invoking — neither `catalog update`
+/// nor `tome reindex` reindexes disabled rows.
+pub fn reindex_plugin(
+    id: &PluginId,
+    deps: &LifecycleDeps<'_>,
+    force: bool,
+) -> Result<ReindexOutcome, TomeError> {
+    let started = Instant::now();
+    let plugin_dir = resolve_plugin_dir(id, deps.config)?;
+
+    let manifest_path = manifest_path_for(&plugin_dir);
+    let manifest = parse_plugin_manifest(&manifest_path)?;
+    let plugin_version = manifest
+        .version
+        .clone()
+        .unwrap_or_else(|| "0.0.0".to_string());
+
+    let lock = acquire_lock(&deps.paths.index_lock)?;
+    let result = reindex_locked(id, &plugin_dir, &plugin_version, deps, force);
+
+    match result {
+        Ok((summary, warnings)) => {
+            lock.release()?;
+            info!(
+                plugin = %id,
+                added = summary.added,
+                modified = summary.modified,
+                removed = summary.removed,
+                unchanged = summary.unchanged,
+                force,
+                "plugin reindex completed",
+            );
+            Ok(ReindexOutcome {
+                plugin: id.clone(),
+                summary,
+                duration: started.elapsed(),
+                warnings,
+            })
+        }
+        Err(e) => {
+            drop(lock);
+            Err(e)
+        }
+    }
+}
+
+/// De-index every row for a plugin whose `plugin.json` is gone post-refresh
+/// (FR-033). Returns the number of dropped `skills` rows. The caller is
+/// responsible for emitting the loud-warning stderr line.
+///
+/// Used by `tome catalog update`. NOT used by `tome reindex` — reindex on a
+/// missing plugin reports `PluginNotFound` (exit 20), not a silent cascade.
+pub fn auto_disable_orphan(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<u32, TomeError> {
+    let lock = acquire_lock(&deps.paths.index_lock)?;
+    let result = auto_disable_locked(id, deps);
+
+    match result {
+        Ok(dropped) => {
+            lock.release()?;
+            warn!(
+                plugin = %id,
+                dropped,
+                "plugin auto-disabled (manifest missing or unparsable)",
+            );
+            Ok(dropped)
         }
         Err(e) => {
             drop(lock);
@@ -314,6 +408,62 @@ fn disable_locked(
 
     let affected = mark_all_disabled_for_plugin(&conn, &id.catalog, &id.plugin)?;
     Ok(affected)
+}
+
+/// Held under the advisory lock. Runs the on-disk walk, then dispatches
+/// to `reindex_plugin_atomic`. The embedder closure peeks the SIGINT flag
+/// per skill so a cancellation aborts the transaction.
+fn reindex_locked(
+    id: &PluginId,
+    plugin_dir: &Path,
+    plugin_version: &str,
+    deps: &LifecycleDeps<'_>,
+    force: bool,
+) -> Result<(ReindexSummary, Vec<String>), TomeError> {
+    if was_cancelled() {
+        return Err(TomeError::Interrupted);
+    }
+
+    let mut conn = index::open(
+        &deps.paths.index_db,
+        &OpenOptions {
+            embedder: deps.embedder_seed.clone(),
+            reranker: deps.reranker_seed.clone(),
+        },
+    )?;
+
+    let mut warnings: Vec<String> = Vec::new();
+    let pending = collect_pending_skills(id, plugin_dir, plugin_version, &mut warnings)?;
+
+    let embedder = deps.embedder;
+    let summary = reindex_plugin_atomic(
+        &mut conn,
+        &id.catalog,
+        &id.plugin,
+        &pending,
+        force,
+        |text| {
+            if was_cancelled() {
+                return Err(TomeError::Interrupted);
+            }
+            embedder.embed(text)
+        },
+    )?;
+
+    Ok((summary, warnings))
+}
+
+/// Held under the advisory lock. Drops every `(catalog, plugin)` row + its
+/// embeddings. Idempotent — zero rows is fine.
+fn auto_disable_locked(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<u32, TomeError> {
+    let conn = index::open(
+        &deps.paths.index_db,
+        &OpenOptions {
+            embedder: deps.embedder_seed.clone(),
+            reranker: deps.reranker_seed.clone(),
+        },
+    )?;
+    delete_by_plugin(&conn, &id.catalog, &id.plugin)
 }
 
 /// Walk `<plugin_dir>/skills/*/SKILL.md`. Errors per-file are funnelled:
@@ -921,4 +1071,342 @@ mod tests {
     // Unit-testing it here would require flipping `catalog::git::CANCELLED`
     // and remembering to flip it back across every other test, which is
     // racy under cargo's parallel runner. Skipped intentionally.
+
+    // ---- reindex: helpers --------------------------------------------------
+
+    /// Per-skill snapshot used by the reindex tests to assert on `name`,
+    /// `content_hash`, `enabled`, and presence of an embedding row.
+    fn snapshot_skills(paths: &Paths, catalog: &str, plugin: &str) -> Vec<(String, String, bool)> {
+        let conn = index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: stub_seed(),
+                reranker: stub_reranker_seed(),
+            },
+        )
+        .expect("open index");
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, content_hash, enabled FROM skills
+                 WHERE catalog = ?1 AND plugin = ?2
+                 ORDER BY name",
+            )
+            .expect("prepare snapshot");
+        let rows = stmt
+            .query_map(rusqlite::params![catalog, plugin], |row| {
+                let name: String = row.get(0)?;
+                let hash: String = row.get(1)?;
+                let enabled: i64 = row.get(2)?;
+                Ok((name, hash, enabled != 0))
+            })
+            .expect("query snapshot");
+        rows.collect::<Result<Vec<_>, _>>().expect("collect")
+    }
+
+    /// Replace one SKILL.md on disk so a subsequent reindex sees a different
+    /// description (and therefore a different content_hash).
+    fn rewrite_skill(plugin_dir: &Path, skill_dir_name: &str, new_contents: &str) {
+        let path = plugin_dir
+            .join("skills")
+            .join(skill_dir_name)
+            .join("SKILL.md");
+        fs::write(path, new_contents).expect("rewrite SKILL.md");
+    }
+
+    /// Delete one skill from disk so a subsequent reindex classifies it as
+    /// Removed.
+    fn remove_skill(plugin_dir: &Path, skill_dir_name: &str) {
+        fs::remove_dir_all(plugin_dir.join("skills").join(skill_dir_name))
+            .expect("remove skill dir");
+    }
+
+    /// Add one new skill on disk so a subsequent reindex classifies it as
+    /// Added.
+    fn add_skill(plugin_dir: &Path, skill_dir_name: &str, contents: &str) {
+        let skill_dir = plugin_dir.join("skills").join(skill_dir_name);
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        fs::write(skill_dir.join("SKILL.md"), contents).expect("write SKILL.md");
+    }
+
+    fn enable_and_count_embed_calls(
+        id: &PluginId,
+        paths: &Paths,
+        config: &Config,
+    ) -> (StubEmbedder, usize) {
+        let embedder = StubEmbedder::new();
+        let deps = make_deps(paths, config, &embedder, false);
+        enable(id, &deps).expect("initial enable");
+        let baseline = embedder.call_count();
+        (embedder, baseline)
+    }
+
+    // ---- reindex: unchanged scope --------------------------------------------
+
+    #[test]
+    fn reindex_when_nothing_changed_skips_embedder() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(tmp.path());
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        fabricate_models(&paths);
+
+        let catalog_root = tmp.path().join("catalog");
+        let config = config_with_catalog("acme", &catalog_root);
+        write_plugin(
+            &catalog_root,
+            "plug",
+            Some("1.0.0"),
+            &[
+                ("alpha", &good_skill_md("alpha", "first")),
+                ("beta", &good_skill_md("beta", "second")),
+            ],
+        );
+        let id: PluginId = "acme/plug".parse().unwrap();
+        let (embedder, baseline) = enable_and_count_embed_calls(&id, &paths, &config);
+        assert_eq!(baseline, 2, "initial enable embeds both skills");
+
+        let deps = make_deps(&paths, &config, &embedder, false);
+        let outcome = reindex_plugin(&id, &deps, false).expect("reindex unchanged");
+        assert_eq!(outcome.summary.added, 0);
+        assert_eq!(outcome.summary.modified, 0);
+        assert_eq!(outcome.summary.removed, 0);
+        assert_eq!(outcome.summary.unchanged, 2);
+        assert_eq!(
+            embedder.call_count(),
+            baseline,
+            "no embed call should fire when nothing changed",
+        );
+    }
+
+    // ---- reindex: modified ---------------------------------------------------
+
+    #[test]
+    fn reindex_re_embeds_only_the_modified_skill() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(tmp.path());
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        fabricate_models(&paths);
+
+        let catalog_root = tmp.path().join("catalog");
+        let config = config_with_catalog("acme", &catalog_root);
+        let plugin_dir = write_plugin(
+            &catalog_root,
+            "plug",
+            Some("1.0.0"),
+            &[
+                ("alpha", &good_skill_md("alpha", "first")),
+                ("beta", &good_skill_md("beta", "second")),
+            ],
+        );
+        let id: PluginId = "acme/plug".parse().unwrap();
+        let (embedder, baseline) = enable_and_count_embed_calls(&id, &paths, &config);
+
+        // Mutate beta's description; alpha untouched.
+        rewrite_skill(
+            &plugin_dir,
+            "beta",
+            &good_skill_md("beta", "updated second"),
+        );
+
+        let deps = make_deps(&paths, &config, &embedder, false);
+        let outcome = reindex_plugin(&id, &deps, false).expect("reindex modified");
+        assert_eq!(outcome.summary.modified, 1);
+        assert_eq!(outcome.summary.unchanged, 1);
+        assert_eq!(outcome.summary.added, 0);
+        assert_eq!(outcome.summary.removed, 0);
+        assert_eq!(
+            embedder.call_count() - baseline,
+            1,
+            "exactly one embed call for the modified skill",
+        );
+
+        let snap = snapshot_skills(&paths, "acme", "plug");
+        let beta = snap.iter().find(|(n, _, _)| n == "beta").unwrap();
+        assert_eq!(
+            beta.1,
+            crate::index::skills::content_hash("beta", "updated second")
+        );
+    }
+
+    // ---- reindex: added ------------------------------------------------------
+
+    #[test]
+    fn reindex_inserts_new_skill_and_embeds_only_it() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(tmp.path());
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        fabricate_models(&paths);
+
+        let catalog_root = tmp.path().join("catalog");
+        let config = config_with_catalog("acme", &catalog_root);
+        let plugin_dir = write_plugin(
+            &catalog_root,
+            "plug",
+            Some("1.0.0"),
+            &[("alpha", &good_skill_md("alpha", "first"))],
+        );
+        let id: PluginId = "acme/plug".parse().unwrap();
+        let (embedder, baseline) = enable_and_count_embed_calls(&id, &paths, &config);
+
+        add_skill(&plugin_dir, "gamma", &good_skill_md("gamma", "third"));
+
+        let deps = make_deps(&paths, &config, &embedder, false);
+        let outcome = reindex_plugin(&id, &deps, false).expect("reindex added");
+        assert_eq!(outcome.summary.added, 1);
+        assert_eq!(outcome.summary.unchanged, 1);
+        assert_eq!(embedder.call_count() - baseline, 1);
+
+        let snap = snapshot_skills(&paths, "acme", "plug");
+        assert!(snap.iter().any(|(n, _, _)| n == "gamma"));
+    }
+
+    // ---- reindex: removed ----------------------------------------------------
+
+    #[test]
+    fn reindex_deletes_row_for_removed_skill_no_embed_call() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(tmp.path());
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        fabricate_models(&paths);
+
+        let catalog_root = tmp.path().join("catalog");
+        let config = config_with_catalog("acme", &catalog_root);
+        let plugin_dir = write_plugin(
+            &catalog_root,
+            "plug",
+            Some("1.0.0"),
+            &[
+                ("alpha", &good_skill_md("alpha", "first")),
+                ("beta", &good_skill_md("beta", "second")),
+            ],
+        );
+        let id: PluginId = "acme/plug".parse().unwrap();
+        let (embedder, baseline) = enable_and_count_embed_calls(&id, &paths, &config);
+
+        remove_skill(&plugin_dir, "beta");
+
+        let deps = make_deps(&paths, &config, &embedder, false);
+        let outcome = reindex_plugin(&id, &deps, false).expect("reindex removed");
+        assert_eq!(outcome.summary.removed, 1);
+        assert_eq!(outcome.summary.unchanged, 1);
+        assert_eq!(outcome.summary.modified, 0);
+        assert_eq!(outcome.summary.added, 0);
+        assert_eq!(embedder.call_count(), baseline, "no embed on removal");
+
+        let snap = snapshot_skills(&paths, "acme", "plug");
+        assert_eq!(snap.len(), 1, "beta row dropped");
+        assert!(snap.iter().all(|(n, _, _)| n != "beta"));
+    }
+
+    // ---- reindex: --force ----------------------------------------------------
+
+    #[test]
+    fn reindex_force_re_embeds_unchanged_skills_too() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(tmp.path());
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        fabricate_models(&paths);
+
+        let catalog_root = tmp.path().join("catalog");
+        let config = config_with_catalog("acme", &catalog_root);
+        write_plugin(
+            &catalog_root,
+            "plug",
+            Some("1.0.0"),
+            &[
+                ("alpha", &good_skill_md("alpha", "first")),
+                ("beta", &good_skill_md("beta", "second")),
+            ],
+        );
+        let id: PluginId = "acme/plug".parse().unwrap();
+        let (embedder, baseline) = enable_and_count_embed_calls(&id, &paths, &config);
+
+        let deps = make_deps(&paths, &config, &embedder, false);
+        let outcome = reindex_plugin(&id, &deps, true).expect("force reindex");
+        // Force classifies everything-with-existing-row as modified.
+        assert_eq!(outcome.summary.modified, 2);
+        assert_eq!(outcome.summary.unchanged, 0);
+        assert_eq!(
+            embedder.call_count() - baseline,
+            2,
+            "force re-embeds every existing skill",
+        );
+    }
+
+    // ---- reindex: errors -----------------------------------------------------
+
+    #[test]
+    fn reindex_unknown_catalog_returns_catalog_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(tmp.path());
+        fabricate_models(&paths);
+        let config = Config::default();
+        let embedder = StubEmbedder::new();
+        let deps = make_deps(&paths, &config, &embedder, false);
+        let id: PluginId = "ghost/plug".parse().unwrap();
+        let err = reindex_plugin(&id, &deps, false).expect_err("unknown catalog");
+        assert!(matches!(err, TomeError::CatalogNotFound(c) if c == "ghost"));
+    }
+
+    #[test]
+    fn reindex_unknown_plugin_returns_plugin_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(tmp.path());
+        fabricate_models(&paths);
+        let catalog_root = tmp.path().join("catalog");
+        fs::create_dir_all(&catalog_root).unwrap();
+        let config = config_with_catalog("acme", &catalog_root);
+        let embedder = StubEmbedder::new();
+        let deps = make_deps(&paths, &config, &embedder, false);
+        let id: PluginId = "acme/ghost".parse().unwrap();
+        let err = reindex_plugin(&id, &deps, false).expect_err("unknown plugin");
+        assert!(matches!(err, TomeError::PluginNotFound(s) if s == "acme/ghost"));
+    }
+
+    // ---- auto_disable_orphan -------------------------------------------------
+
+    #[test]
+    fn auto_disable_orphan_drops_all_rows_for_plugin() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(tmp.path());
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        fabricate_models(&paths);
+
+        let catalog_root = tmp.path().join("catalog");
+        let config = config_with_catalog("acme", &catalog_root);
+        write_plugin(
+            &catalog_root,
+            "plug",
+            Some("1.0.0"),
+            &[
+                ("alpha", &good_skill_md("alpha", "first")),
+                ("beta", &good_skill_md("beta", "second")),
+            ],
+        );
+        let id: PluginId = "acme/plug".parse().unwrap();
+        let embedder = StubEmbedder::new();
+        let deps = make_deps(&paths, &config, &embedder, false);
+        enable(&id, &deps).expect("initial enable");
+        assert_eq!(count_rows(&paths, "acme", "plug"), (2, 2));
+
+        let dropped = auto_disable_orphan(&id, &deps).expect("orphan disable");
+        assert_eq!(dropped, 2);
+        assert_eq!(count_rows(&paths, "acme", "plug"), (0, 0));
+    }
+
+    #[test]
+    fn auto_disable_orphan_is_idempotent_when_no_rows() {
+        let tmp = TempDir::new().unwrap();
+        let paths = test_paths(tmp.path());
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        fabricate_models(&paths);
+
+        let catalog_root = tmp.path().join("catalog");
+        let config = config_with_catalog("acme", &catalog_root);
+        let id: PluginId = "acme/ghost".parse().unwrap();
+        let embedder = StubEmbedder::new();
+        let deps = make_deps(&paths, &config, &embedder, false);
+
+        let dropped = auto_disable_orphan(&id, &deps).expect("orphan disable on empty");
+        assert_eq!(dropped, 0);
+    }
 }
