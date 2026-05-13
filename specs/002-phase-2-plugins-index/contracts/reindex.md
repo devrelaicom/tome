@@ -32,12 +32,12 @@ Forces re-embedding of every skill in scope regardless of `content_hash`. Used f
 
 ```
 Reindexing midnight-experts (12 plugins, 156 skills)…
-[#####################################] 156/156 skills · 41.2s
 Re-embedded:  4
 Unchanged:  152
+Duration:    41.2s
 ```
 
-Progress bar suppressed when stderr is not a TTY.
+`tome reindex` renders the per-plugin work without a determinate progress bar — `lifecycle::reindex_plugin` runs per-skill work inside a single SQLite transaction and does not currently surface a per-skill callback to drive `indicatif`. A determinate bar is a candidate for the post-v0.2.0 polish pass (companion to TD-010 for model downloads).
 
 ## Output (`--json`)
 

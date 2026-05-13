@@ -13,10 +13,10 @@ tome query <text>
 ## Behaviour
 
 1. Open the index DB read-only. Run schema-version check (exit 52 on too-new). Check embedder/reranker drift against `meta` (exit 41 / 42 on embedder drift; reranker drift is allowed — see below).
-2. Load the embedder; if missing → exit 30 (`ModelMissing`) or download prompt (TTY only).
+2. Load the embedder; if missing → exit 30 (`ModelMissing`) with a message pointing the user at `tome plugin enable` or `tome models download`. `tome query` **does not** prompt for model downloads, including on a TTY: surfacing a multi-MB download behind a search-style command is hostile UX, and the two pre-flight commands are the documented install paths.
 3. Embed `<text>` (FR-014's composition does not apply here — query text is embedded as-is).
 4. Pull top-K candidates from `skill_embeddings` joined with `skills WHERE enabled = 1` (and the optional catalog/plugin filters). K defaults to 10 (FR-027); when reranking is on, the candidate pool is expanded (typically 4× top-K) before reranking and trimmed back after.
-5. If `--no-rerank`: skip the reranker stage. Scores are cosine similarity; prepend a one-line banner in human output: `(reranker disabled — showing embedding similarity)`.
+5. If `--no-rerank`: skip the reranker stage. Scores are cosine similarity; print a one-line banner to **stderr**: `(reranker disabled — showing embedding similarity)`. Stderr keeps stdout byte-stable across reranking modes so downstream pipes that consume the table or JSON output don't have to peel off the banner.
 6. Otherwise: rerank with `bge-reranker-base`. Scores are raw logits.
 7. If `--strict`: drop results below `--min-score`. If no results remain → exit 40 (`QueryNoResultsStrict`). Without `--strict`, return the top-K regardless of score.
 8. Render.
@@ -63,7 +63,13 @@ If `meta.reranker_name` or `meta.reranker_version` disagrees with the configured
 
 ## Embedder drift handling
 
-If `meta.embedder_name` disagrees → exit 41. If `meta.embedder_version` disagrees → exit 42. Message in both: "Stored vectors were produced by a different embedder. Run `tome reindex --force` to rebuild."
+If `meta.embedder_name` disagrees → exit 41. If `meta.embedder_version` disagrees → exit 42. The error message identifies the stored vs. configured embedder and points the user at the recovery command, e.g.:
+
+```
+stored vectors were produced by embedder `bge-small-en-v1.5`; currently configured embedder is `bge-base-en-v1.5`. Run `tome reindex --force` to rebuild the index.
+```
+
+The name-vs-version split keeps the exit codes useful for tooling without losing the actionable detail in the message.
 
 ## TTY behaviour
 

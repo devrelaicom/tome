@@ -23,11 +23,13 @@ Reports the health of every Phase 2 subsystem independently. Per FR-056 this is 
 Tome:               0.2.0
 Embedder:           bge-small-en-v1.5 (1.5)   ✓ ok
 Reranker:           bge-reranker-base (base)  ✓ ok
-Index database:     ✓ ok (12 plugins enabled, 156 skills indexed, 4.2 MB)
+Index database:     ✓ ok (12 plugins enabled, 156 skills indexed, 4.2 MiB)
 Schema version:     1
 Drift:              none
 Overall:            ✓ healthy
 ```
+
+Sizes use binary suffixes (`KiB` / `MiB` / `GiB`) for consistency with `du -h` and `cargo`.
 
 In a non-TTY context: no colour, no Unicode glyphs (use ASCII `[ok]` / `[fail]` markers instead).
 
@@ -66,5 +68,5 @@ The structured output identifies the failing subsystem so callers can react prog
 
 - Status NEVER triggers a model download. If models are missing it reports Missing and exits non-zero.
 - Status NEVER initiates a write. The integrity check is read-only.
-- Status NEVER takes the advisory lock. If a writer holds it, the report includes a `"writer_pid"` field.
+- Status NEVER takes the advisory lock. A concurrent writer does not block status — the report renders the current on-disk state. (A future revision may surface the writer's PID; the current implementation does not, because PID discovery requires either parsing the lockfile contents or a sidecar that no other Phase 2 path needs.)
 - `tome status --verify` is the supported pre-flight before filing a bug report. Users are nudged toward it from every error message that can be recovered with `tome status`.
