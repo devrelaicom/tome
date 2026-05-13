@@ -204,13 +204,13 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Phase Start
 
-- [ ] T096 [GIT] Verify working tree is clean before starting Phase 4
-- [ ] T097 [US2] Create `retro/P4.md`
+- [X] T096 [GIT] Verify working tree is clean before starting Phase 4
+- [X] T097 [US2] Create `retro/P4.md`
 
 ### Implementation
 
-- [ ] T098 [US2] Implement the interactive flow in `src/commands/plugin.rs` (`fn run_interactive()`): catalog selector → plugin browser → plugin view → action prompt. Use `presentation::prompt` wrappers; refuse on non-TTY with `NotATerminal` per FR-051. Loop with Back/Quit handling at every level (use devs:rust-dev agent)
-- [ ] T099 [US2] Wire the no-subcommand form into `src/cli.rs` so `tome plugin` (bare) dispatches to `run_interactive` (use devs:rust-dev agent)
+- [X] T098 [US2] Implement the interactive flow in `src/commands/plugin.rs` (`fn run_interactive()`): catalog selector → plugin browser → plugin view → action prompt. Use `presentation::prompt` wrappers; refuse on non-TTY with `NotATerminal` per FR-051. Loop with Back/Quit handling at every level (use devs:rust-dev agent)
+- [X] T099 [US2] Wire the no-subcommand form into `src/cli.rs` so `tome plugin` (bare) dispatches to `run_interactive` (use devs:rust-dev agent)
 - [ ] T100 [GIT] Commit: feat(plugin): add interactive catalog/plugin browse flow
 
 ### Tests

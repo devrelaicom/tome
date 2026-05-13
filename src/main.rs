@@ -12,7 +12,10 @@ fn main() {
     let mode = cli.mode();
     let result = match cli.command {
         Command::Catalog(cmd) => commands::catalog::run(cmd, mode),
-        Command::Plugin(cmd) => commands::plugin::run(cmd, mode),
+        Command::Plugin(args) => match args.command {
+            Some(cmd) => commands::plugin::run(cmd, mode),
+            None => commands::plugin::run_interactive(mode),
+        },
         Command::Query(args) => commands::query::run(args, mode),
     };
 
