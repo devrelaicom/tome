@@ -21,7 +21,7 @@ Items to address when working in the area:
 
 | ID | Area | Description | Impact | Effort | Mitigation |
 |----|------|-------------|--------|--------|-----------|
-| TD-010 | `src/embedding/download.rs` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner in both `plugin enable` and `models download`; enhancement for polish pass |
+| TD-010 | `src/embedding/download.rs` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner in both `plugin enable` and `models download`; enhancement for polish pass. Also applies to `tome reindex` progress visibility (Phase 7) |
 | TD-020 | Error categorisation | All Phase 1 + Phase 2 codes are enumerated; no catch-all variants | Debuggability | Low | Current approach is sound; closed set enforces completeness |
 | TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low | — |
 
@@ -76,6 +76,7 @@ Code areas that are brittle or risky to modify:
 | `src/embedding/download.rs::download_model` | HTTP stream and checksum verification are separate; cleanup closure ensures both failure paths clean `.partial/` (lines 77–87) | Pipeline closure must wrap full download→verify→rename chain; any new step must be inside closure to maintain atomicity guarantee |
 | `src/presentation/prompt.rs::require_terminal()` | TTY check runs on both stdin and stdout; must catch non-TTY in both dimensions to prevent prompt corruption via piped output | Always call `require_terminal()` at flow entry before any prompt; test with `Command::new()` (no pty) to verify short-circuit |
 | `src/commands/plugin/{enable,disable,interactive}.rs` | Non-TTY pointer-message-then-error pattern appears at 3 sites (`enable`, `disable`, `interactive`) | Pattern consolidation would yield cleaner code; worth folding in when 4th occurrence appears |
+| `src/index/skills.rs::upsert_skill` | `sqlite-vec` virtual tables do NOT support `INSERT OR REPLACE` or `ON CONFLICT` (Phase 7, PR #25 latent bug fix). Uses `DELETE`-then-`INSERT` which is idempotent | Verify this pattern on any future upsert-like operation involving virtual tables; do not attempt `INSERT OR REPLACE` on `skill_embeddings` |
 
 ## Deprecated Code
 
@@ -85,7 +86,7 @@ Code marked for removal:
 |------|-------------------|----------------|-------------|
 | (none) | — | — | — |
 
-All Phase 1, Phase 2, Phase 4, Phase 5, and Phase 6 code is current; no legacy to remove yet.
+All Phase 1, Phase 2, Phase 4, Phase 5, Phase 6, and Phase 7 code is current; no legacy to remove yet.
 
 ## Performance Concerns
 
@@ -95,7 +96,7 @@ Known performance issues:
 |----|------|-------------|--------|-----------|
 | PERF-001 | Catalog refresh | Each `git fetch` is sequential; large catalogs block the command | Slow UX for multiple catalogs | Phase 1 spec requires sequential; parallelize in Phase 2 with async |
 | PERF-010 | Cache validation | Manifest is re-parsed on every `show` command; no caching layer | Negligible impact (small files) | Cache not needed in Phase 1; revisit if Phase 2 manifests grow large |
-| PERF-020 | Model download progress | Download wrapped in indeterminate spinner, not byte-progress bar | Poor visibility on large files | Enhancement for Phase 3 polish (TD-010) |
+| PERF-020 | Model download progress | Download wrapped in indeterminate spinner, not byte-progress bar | Poor visibility on large files | Enhancement for Phase 3 polish (TD-010). Phase 7 `tome reindex` also lacks per-skill progress visibility |
 
 ## TODO Items
 
@@ -114,6 +115,7 @@ Dependencies that may need attention:
 | `clap` | 4.x | Actively maintained; track for 5.x breaking changes | Monitor releases; plan migration before major version bump | Stable |
 | `serde` | 1.x | Stable; ecosystem standard | None | Stable |
 | `rusqlite` | 0.31.x (Phase 2) | Bundled SQLite; monitor for platform-specific build issues | Test across CI matrix | Stable |
+| `sqlite-vec` | vendored (Phase 2) | Custom C extension vendored under `vendor/sqlite-vec/`; compiled in via `build.rs` | Compiled as part of build; no separate update cadence | Pinned |
 | `fastembed-rs` | (Phase 2) | Wraps ONNX Runtime; size-critical dependency | Monitor for updates; test binary size on bump | Active |
 | `ort` (transitive) | (Phase 2) | ONNX Runtime via fastembed; intrinsically large (~25 MB contribution) | Size budget already accounted for; no waivable constraint | Locked by use case |
 | `tempfile` | 3.x | Actively maintained; used for critical atomicity | Upgrade within 3.x when available; test after upgrade | Stable |
@@ -137,6 +139,7 @@ Areas that could benefit from enhancement:
 | Symlink security testing | Unix-only symlink escape test | Windows junction/hardlink escape tests | Cross-platform parity |
 | Model download progress (TD-010) | Indeterminate spinner during download | Byte-progress bar with estimated completion | Better UX for large models |
 | Non-TTY pointer pattern consolidation | `require_terminal()` check + pointer message duplicated in 3 command modules | Extract to shared helper | Cleaner code |
+| Per-plugin reindex progress (Phase 7) | No per-skill progress or summary until completion | Stream progress per skill or plugin | Visibility into long multi-plugin reindex operations |
 
 ## Monitoring Gaps
 
@@ -148,6 +151,14 @@ Areas lacking proper observability:
 | Index database health | No validation of persisted state on startup (Phase 2) | Corrupted index undetected until query | Low (atomicity guarantees + integrity_check PRAGMA should prevent corruption) |
 | Model download errors | Network failures not distinguished from checksum failures | Harder to diagnose transient vs. persistent issues | Low (both map to Io/ModelChecksumMismatch; rare in practice) |
 | Catalog size statistics | No cache size tracking | Can't warn on large catalogs | Low (Phase 2 may add quota management) |
+
+## Design Tradeoffs
+
+Intentional design decisions with known limitations:
+
+| Decision | Area | Rationale | Consequence | Notes |
+|----------|------|-----------|-------------|-------|
+| **Per-plugin atomicity** (Phase 7) | `src/index/skills.rs::reindex_plugin_atomic` | Simpler transaction model; each plugin reindex commits independently | Multi-plugin `tome catalog update` or `tome reindex` may leave earlier plugins committed if interrupted between plugins | Safe state always (no partial rows); index is always valid. By design, not a bug. Advisory lock per-plugin at entry to reindex, released at commit. |
 
 ## Risk Summary by Phase
 
@@ -249,6 +260,24 @@ Areas lacking proper observability:
 
 **Ongoing**:
 - TD-010: Both `plugin enable` and `models download` now ship indeterminate spinners; refactor to byte-progress callback deferred to polish pass
+
+### Phase 7 (Complete)
+
+**Completed (US5, Slice 1–3)**:
+- ✓ `src/index/skills.rs::reindex_plugin_atomic` + `auto_disable_orphan` for multi-plugin index reconciliation
+- ✓ `tome catalog update` wired to lazy `FastembedEmbedder` load and per-plugin reindex
+- ✓ `tome reindex` CLI subcommand with same lazy-load pattern
+- ✓ Fixed latent `sqlite-vec` virtual table bug: `upsert_skill` now uses `DELETE`-then-`INSERT` instead of unsupported `INSERT OR REPLACE` (PR #25)
+- ✓ No new credentials, attack surface, or external integrations
+
+**Security posture**:
+- Index reindex under per-plugin transaction (atomic within plugin, but multiple plugins commit independently)
+- Auto-disable on `PluginNotFound` / `PluginManifestParseError` drops rows + emits loud-warning stderr
+- Lazy embedder loading ensures zero-enabled-plugin install never touches ONNX models
+- Virtual table constraint now explicitly documented in SECURITY.md and CONCERNS.md
+
+**Design constraints**:
+- Per-plugin atomicity is intentional: multi-plugin reindex may leave earlier plugins committed if interrupted between plugins (always valid state, by design)
 
 ---
 

@@ -27,38 +27,40 @@
 
 ```
 tests/
-├── common/mod.rs              # Shared fixtures and helpers
-├── catalog_add.rs             # Integration: `tome catalog add` command
-├── catalog_list.rs            # Integration: `tome catalog list` command
-├── catalog_remove.rs          # Integration: `tome catalog remove` command
-├── catalog_show.rs            # Integration: `tome catalog show` command
-├── catalog_update.rs          # Integration: `tome catalog update` command
-├── plugin_enable.rs           # Library API: `plugin::lifecycle::enable` (Phase 3)
-├── plugin_disable.rs          # CLI binary: `tome plugin disable` (Phase 5)
-├── plugin_list.rs             # CLI binary: `tome plugin list` (Phase 3)
-├── plugin_show.rs             # CLI binary: `tome plugin show` (Phase 3)
-├── plugin_interactive.rs      # PTY-driven: `tome plugin` interactive browse (Phase 4)
-├── plugin_repeated.rs         # FR-008: enable/disable idempotency edge case (Phase 5)
-├── models_download.rs         # CLI binary: `tome models download` (Phase 6)
-├── models_list.rs             # CLI binary: `tome models list` (Phase 6)
-├── models_remove.rs           # CLI binary: `tome models remove` (Phase 6)
-├── query.rs                   # Library API: embed + KNN query path (Phase 3)
-├── atomicity_enable.rs        # Failure-injection: enable rollback (Phase 3)
-├── exit_codes.rs              # Unit: exhaustiveness check on TomeError
-├── error_messages.rs          # Unit: error message format correctness
-├── manifest_strictness.rs     # Unit: TOML deny_unknown_fields enforcement
-├── path_validation.rs         # Unit: path escape/traversal validation
-├── scrubbing.rs               # Unit: credential scrubbing regex
-├── atomicity.rs               # Integration: write atomicity under interruption
+├── common/mod.rs                  # Shared fixtures and helpers
+├── catalog_add.rs                 # Integration: `tome catalog add` command
+├── catalog_list.rs                # Integration: `tome catalog list` command
+├── catalog_remove.rs              # Integration: `tome catalog remove` command
+├── catalog_show.rs                # Integration: `tome catalog show` command
+├── catalog_update.rs              # Integration: `tome catalog update` command
+├── catalog_update_reindex.rs      # Library API: catalog update reindex path (Phase 7)
+├── plugin_enable.rs               # Library API: `plugin::lifecycle::enable` (Phase 3)
+├── plugin_disable.rs              # CLI binary: `tome plugin disable` (Phase 5)
+├── plugin_list.rs                 # CLI binary: `tome plugin list` (Phase 3)
+├── plugin_show.rs                 # CLI binary: `tome plugin show` (Phase 3)
+├── plugin_interactive.rs          # PTY-driven: `tome plugin` interactive browse (Phase 4)
+├── plugin_repeated.rs             # FR-008: enable/disable idempotency edge case (Phase 5)
+├── models_download.rs             # CLI binary: `tome models download` (Phase 6)
+├── models_list.rs                 # CLI binary: `tome models list` (Phase 6)
+├── models_remove.rs               # CLI binary: `tome models remove` (Phase 6)
+├── query.rs                       # Library API: embed + KNN query path (Phase 3)
+├── reindex.rs                     # Library + CLI: `tome reindex` (Phase 7)
+├── atomicity_enable.rs            # Failure-injection: enable rollback (Phase 3)
+├── exit_codes.rs                  # Unit: exhaustiveness check on TomeError
+├── error_messages.rs              # Unit: error message format correctness
+├── manifest_strictness.rs         # Unit: TOML deny_unknown_fields enforcement
+├── path_validation.rs             # Unit: path escape/traversal validation
+├── scrubbing.rs                   # Unit: credential scrubbing regex
+├── atomicity.rs                   # Integration: write atomicity under interruption
 └── fixtures/
-    ├── sample-catalog/        # Real Git repo (used as file:// source)
+    ├── sample-catalog/            # Real Git repo (used as file:// source)
     │   ├── tome-catalog.toml
     │   ├── plugin-a/
     │   └── plugin-b/
-    └── sample-plugin-catalog/  # Phase 3 plugin catalog with sample plugins
+    └── sample-plugin-catalog/     # Phase 3 plugin catalog with sample plugins
         ├── tome-catalog.toml
-        ├── plugin-alpha/       # Plugin with multiple skills
-        └── plugin-beta/        # Plugin for query test coverage
+        ├── plugin-alpha/          # Plugin with multiple skills
+        └── plugin-beta/           # Plugin for query test coverage
 ```
 
 ### Test File Location
@@ -68,24 +70,36 @@ tests/
 | Category | Location | Style |
 |----------|----------|-------|
 | Unit tests | `tests/{test_name}.rs` | Test one concept (parser, error path, validator) |
-| Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/atomicity_enable.rs` | Exercise library API (`tome::plugin::lifecycle::*`) with `StubEmbedder` |
-| Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs`, `tests/plugin_disable.rs`, `tests/models_*.rs` | Spawn `tome` binary as subprocess; used when no embedders are loaded |
+| Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/reindex.rs`, `tests/catalog_update_reindex.rs` | Exercise library API with `StubEmbedder`, bypassing `Paths::resolve` + `FastembedEmbedder::load` |
+| Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs`, `tests/plugin_disable.rs`, `tests/models_*.rs`, `tests/reindex.rs` (parse-error tests) | Spawn `tome` binary as subprocess; used when no embedders are loaded |
 | Integration tests (PTY-driven) | `tests/plugin_interactive.rs` | Scripted pty session with `rexpect`; driven via real terminal I/O |
-| Shared helpers | `tests/common/mod.rs` | Fixture builders, ToolEnv, lifecycle helpers, `paths_for` (Phase 5) |
+| Shared helpers | `tests/common/mod.rs` | Fixture builders, ToolEnv, lifecycle helpers, `paths_for`, sparse-file fixtures (Phase 6) |
 | Test fixtures | `tests/fixtures/` | Real git repos and sample plugin catalogs |
 
 ## Test Patterns
 
-### Library API Integration Test Pattern (Phase 3)
+### Library API Integration Test Pattern (Phase 3–7)
 
-Tests for `plugin::lifecycle` and `index::query` drive the library API directly with a `StubEmbedder`:
+Tests for `plugin::lifecycle`, `index::query`, `commands::reindex`, and `commands::catalog::update` drive the library API directly with a `StubEmbedder`. This avoids loading real ONNX models in CI.
 
+Pattern:
 1. **Build fixture** — copy sample plugin catalog to temp dir, initialize git
-2. **Build paths** — plain-data `Paths` rooted at TempDir (no env mutation)
+2. **Build paths** — plain-data `Paths` rooted at TempDir via `lifecycle_paths(root)` (no env mutation)
 3. **Fabricate models** — write `ModelManifest` JSON so `ensure_models_present` passes
 4. **Construct lifecycle deps** — include stub embedder, seed values
-5. **Call library function** — e.g., `lifecycle::enable(&id, &deps)?`
+5. **Call library function** — e.g., `lifecycle::enable(&id, &deps)?` or `run_with_deps(...)`
 6. **Assert outcome** — check return value, side effects (database rows, metadata)
+
+**Phase 7 addition:** Commands that batch-reindex (`tome catalog update` via `reindex_catalog_plugins`, `tome reindex` via `run_with_deps`) now expose library entry points:
+
+```rust
+// From tests/catalog_update_reindex.rs
+let outcome = reindex_catalog_plugins(&name, &enabled, &deps)?;
+assert_eq!(embedder.call_count(), expected);
+
+// From tests/reindex.rs
+let agg = run_with_deps(Scope::All, &plugins, &deps, false, Mode::Json)?;
+```
 
 Example from `tests/plugin_enable.rs`:
 ```rust
@@ -117,12 +131,11 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
 }
 ```
 
-**Why library API tests:** The `tome plugin enable` CLI command path loads `FastembedEmbedder` (real ONNX model files). The stub embedder is deterministic and lets tests run without any model artefacts.
+### CLI-Binary Integration Test Pattern (Phase 3–7)
 
-### CLI-Binary Integration Test Pattern (Phase 3–6)
+Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`, `plugin disable`, `models list`, `models remove`) spawn the real binary.
 
-Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`, `plugin disable`, `models list`, `models remove`) spawn the real binary:
-
+Pattern:
 1. **Build fixture** — copy plugin catalog to temp dir, initialize git
 2. **Create isolated environment** — temp `$HOME`, `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`
 3. **Write config** — use `write_config_for_cli` helper to bypass git fixture setup
@@ -130,10 +143,7 @@ Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`
 5. **Assert exit code** — check `.status.code()` matches expected
 6. **Assert output** — parse stdout (human or `--json`) and validate content
 
-**Phase 6 models-download pattern:** The `tome models download` CLI uses `MODEL_REGISTRY` with real upstream URLs and cannot be driven from CI. Test coverage:
-- **Library-level:** `tests/model_download.rs` covers the download pipeline (success, checksum mismatch, HTTP 404) via library API
-- **CLI skip path:** `tests/models_download.rs` covers idempotent skip when models are already installed (via `fabricate_all_installed_models`)
-- **CLI full path:** Not exercised in CI (would download 66 MB embedder + 280 MB reranker)
+**Phase 7 parse-error tests:** `tests/reindex.rs` includes 3 CLI-binary tests that cover parse errors and early exits without needing an embedder (unknown catalog → exit 3, malformed id → exit 2, empty install → exit 0). The heavy-state embed paths use the `run_with_deps` library entry point.
 
 Used when embedders are not involved or interaction with the real binary is essential.
 
@@ -249,6 +259,40 @@ If a new `TomeError` variant is added, this test fails to compile until updated.
 
 ## Test Fixtures and Helpers
 
+### Phase 7 Library Entry Point Pattern
+
+**Purpose:** Test subcommands that load embedders without pulling real model files into CI.
+
+**Key:** Commands expose `pub fn run_with_deps(...)` entry points that accept a pre-configured `LifecycleDeps`.
+
+**Functions:**
+- `src/commands/reindex.rs::pub fn run_with_deps(scope, plugins, deps, force, mode)` — used by `tests/reindex.rs` library tests
+- `src/commands/catalog/update.rs::pub fn reindex_catalog_plugins(catalog, enabled, deps)` — used by `tests/catalog_update_reindex.rs` library tests
+
+**Usage pattern:**
+```rust
+#[test]
+fn reindex_all_visits_every_enabled_plugin() {
+    let embedder = StubEmbedder::new();
+    let deps = LifecycleDeps {
+        paths: &paths,
+        config: &config,
+        embedder: &embedder,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+        allow_model_download: false,
+    };
+    
+    // Call library entry point; no FastembedEmbedder loaded
+    let agg = run_with_deps(Scope::All, &plugins, &deps, false, Mode::Json)?;
+    
+    // Assert via call_count() — embedder invoked (or not)
+    assert!(embedder.call_count() > 0);
+}
+```
+
+This is now the established pattern for testing CLI subcommands that need an embedder. Heavy-state paths use the library entry point with `StubEmbedder`; light/error paths use the CLI binary.
+
 ### Phase 6 Sparse-File Fixture Pattern
 
 **Purpose:** Create realistic-size test artefacts without disk I/O cost.
@@ -285,7 +329,7 @@ Related helper: `fabricate_all_installed_models(paths: &Paths)` — convenience 
 
 ### Phase 5 Lifecycle Helpers (`tests/common/mod.rs`)
 
-**`paths_for(env: &ToolEnv) -> Paths`** — **Promoted in Phase 5 to common/mod.rs.** Resolves `ToolEnv` to the same `Paths` that the spawned CLI would resolve. Previously duplicated across `plugin_list.rs`, `plugin_show.rs`, `plugin_interactive.rs`, and now used by `plugin_disable.rs`, `plugin_repeated.rs`, and all `models_*.rs` tests — consolidated at the 4th caller.
+**`paths_for(env: &ToolEnv) -> Paths`** — **Promoted in Phase 5 to common/mod.rs.** Resolves `ToolEnv` to the same `Paths` that the spawned CLI would resolve. Previously duplicated across `plugin_list.rs`, `plugin_show.rs`, `plugin_interactive.rs`, and now used by `plugin_disable.rs`, `plugin_repeated.rs`, all `models_*.rs` tests, and `reindex.rs` (Phase 7) — consolidated at the 4th caller.
 
 ```rust
 pub fn paths_for(env: &ToolEnv) -> Paths {
@@ -342,7 +386,7 @@ pub fn fabricate_models(paths: &Paths) {
 
 **`stub_embedder_seed()` / `stub_reranker_seed()`** — Return `MetaSeed` values matching the deterministic stub embedder/reranker. Used to construct `LifecycleDeps` and open the index.
 
-**`write_config_for_cli(paths: &Paths, config: &Config)`** — Write the supplied `Config` to `paths.config_file` as TOML so a child `tome` binary process can read it. Used by `plugin list` / `plugin show` / `plugin disable` / `models_*` tests that bypass `catalog add`.
+**`write_config_for_cli(paths: &Paths, config: &Config)`** — Write the supplied `Config` to `paths.config_file` as TOML so a child `tome` binary process can read it. Used by `plugin list` / `plugin show` / `plugin disable` / `models_*` / `reindex` tests that bypass `catalog add`.
 
 ### Phase 4 Interactive Helpers (PTY pattern)
 
@@ -441,6 +485,7 @@ When tests run:
 | `catalog_remove.rs` | CLI-binary | `tome catalog remove <name>` — confirmation prompt, `--force` flag, nonexistent catalog |
 | `catalog_show.rs` | CLI-binary | `tome catalog show <name>` — metadata display, plugin list, JSON format |
 | `catalog_update.rs` | CLI-binary | `tome catalog update [name]` — full sync, selective sync, failure handling |
+| `catalog_update_reindex.rs` | Library API | Catalog update reindex library path — cheap-skip on unchanged skills, embedder call-count assertions (Phase 7) |
 | `plugin_enable.rs` | Library API | `plugin::lifecycle::enable` — skill row insertion, content hash, fallbacks, atomicity (FR-004), idempotency, warnings, cheap-reenable (FR-006) |
 | `plugin_disable.rs` | CLI-binary | `tome plugin disable <catalog>/<plugin>` — TTY gating, `--force` short-circuit, non-TTY refusal (FR-007, FR-051) |
 | `plugin_list.rs` | CLI-binary | `tome plugin list [catalog]` — filtering by catalog, empty list, JSON format |
@@ -451,6 +496,7 @@ When tests run:
 | `models_list.rs` | CLI-binary | `tome models list` — state enumeration (missing/ok/checksum_mismatched), `--verify` flag, JSON format (Phase 6) |
 | `models_remove.rs` | CLI-binary | `tome models remove <model>` — deletion, confirmation, cascade cleanup (Phase 6) |
 | `query.rs` | Library API | KNN query + optional reranking — self-similarity, filtering, candidate pool, drift detection |
+| `reindex.rs` | Library + CLI | `tome reindex [<scope>]` — library-API scope variants (All, Catalog, Plugin) via `run_with_deps`, CLI parse-error paths, empty install (Phase 7) |
 | `atomicity_enable.rs` | Library API | Failure-injection: `StubEmbedder::with_force_fail_after(n)` → rollback guarantee (FR-004) |
 
 ### Unit Tests (by concern)
@@ -464,7 +510,7 @@ When tests run:
 | `scrubbing.rs` | Credential scrubbing regex: URL logins, SSH hosts, tokens, API keys, long hex |
 | `atomicity.rs` | Interrupted writes (SIGINT during clone) leave registry/cache in consistent state |
 
-## Deterministic Stub Embedder (Phase 3–5)
+## Deterministic Stub Embedder (Phase 3–7)
 
 **Location:** `src/embedding/stub.rs` (compiled into release binary; LTO eliminates it when unused)
 
@@ -503,13 +549,13 @@ pub fn with_force_fail_after(n: usize) -> Self {
 
 The counter is shared between clones via `Arc<AtomicUsize>` so the closure adaptation inside `enable_plugin_atomic` (which captures by reference) observes the same call count. Used in `atomicity_enable.rs` to inject mid-pipeline embedder failures and verify rollback (FR-004).
 
-## Test Organization by Concern (Phase 3–6)
+## Test Organization by Concern (Phase 3–7)
 
 ### No Environment Mutation in Library API Tests
 
-**Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
+**Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`, `catalog_update_reindex.rs`, `reindex.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
 
-**CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
+**CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse-error tests) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
 
 **PTY-driven tests** (`plugin_interactive.rs`) mutate `env` only inside the pty spawning (via `Command::env`), not the parent process.
 
@@ -521,6 +567,15 @@ Two parallel path builders are deliberately kept in lock-step:
 
 If one changes, the other must change too — enforced via manual code review.
 
+### Phase 7: Library Entry Points as the Standard
+
+The library entry point pattern (`run_with_deps`, `reindex_catalog_plugins`) is now the established way to test CLI subcommands that need an embedder. This keeps models out of CI while still exercising the core logic.
+
+- Heavy-state paths (logic that involves embedder invocations) → library entry point + `StubEmbedder`
+- Light/error paths (parse, early exit, validation) → CLI binary
+
+This is documented to be the precedent for future batch operations and subcommands.
+
 ### Phase 6: Sparse-File Fixtures (Universal Pattern)
 
 The sparse-file fixture pattern is reusable for any test needing realistic-size artefacts without I/O. Phase 6 models tests established:
@@ -531,7 +586,7 @@ Usable by future tests for any large binary fixture (models, datasets, archives)
 
 ### Phase 5: Standard Helpers Promoted
 
-`paths_for(env: &ToolEnv) -> Paths` was promoted to `tests/common/mod.rs` in Phase 5 after its 4th caller (`plugin_repeated.rs`). All CLI-binary tests now import it from common; consolidation complete. Phase 6 `models_*.rs` tests also use it, cementing the pattern.
+`paths_for(env: &ToolEnv) -> Paths` was promoted to `tests/common/mod.rs` in Phase 5 after its 4th caller (`plugin_repeated.rs`). All CLI-binary tests now import it from common; consolidation complete. Phase 6 `models_*.rs` tests also use it, and Phase 7 `reindex.rs` extends the pattern, cementing it as the standard.
 
 ### YAML Frontmatter Quirk (Documented for Test Authors)
 
@@ -552,11 +607,11 @@ No automatic coverage threshold enforced, but the test corpus is organized to be
 
 - **Every error class is tested** — each `TomeError` variant appears in `exit_codes.rs` and often in command-specific tests
 - **Bad-input corpus is explicit** — each parser/validator has a separate test file documenting what shapes are rejected
-- **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/disable/list/show`, `plugin` interactive, `models download/list/remove`) has dedicated tests
-- **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable and cheap-reenable (FR-006), fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback
+- **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/disable/list/show`, `plugin` interactive, `models download/list/remove`, `reindex`) has dedicated tests
+- **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable and cheap-reenable (FR-006), fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback; `catalog_update_reindex.rs` and `reindex.rs` cover batch reindex logic
 - **Idempotency tested** — `plugin_repeated.rs` covers enable-of-enabled and disable-of-disabled (FR-008, exit 21)
 - **Interactive flow tested end-to-end** — `plugin_interactive.rs` covers catalog selector, plugin browser, action prompts, navigation, non-TTY refusal
-- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift, sparse fixtures (Phase 6)
+- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift, sparse fixtures (Phase 6), batch reindex cheapness (Phase 7)
 
 ## Specimen Tests (Quality Corpus)
 
@@ -673,7 +728,7 @@ Green on all 4 combinations is required before merge.
 4. Add test case verifying unknown field with similar name is rejected
 5. Run `cargo test manifest_strictness` to verify
 
-### Testing a New Plugin Command (Phase 3–5)
+### Testing a New Plugin Command (Phase 3–7)
 
 For library API tests (no embedder loading):
 1. Add module under `src/commands/plugin/`
@@ -713,6 +768,25 @@ For CLI tests (no embedder loading):
 5. Run `cargo test models_*` to verify
 
 Do not exercise the full network-download path in CI (would hit real `MODEL_REGISTRY` URLs). Test library-level download pipeline separately; CLI tests cover skip paths and JSON envelope.
+
+### Testing a New Batch Reindex Command (Phase 7)
+
+For library API tests (heavy-state paths):
+1. Create integration test file `tests/{command}_reindex.rs` (library API)
+2. Use `lifecycle_paths`, `fabricate_models`, `StubEmbedder`
+3. Expose a `pub fn run_with_deps(...)` entry point in the command module
+4. Call the library entry point, passing `LifecycleDeps` with `StubEmbedder`
+5. Assert embedder call-count to verify the cheap-skip invariant
+6. Run `cargo test {command}_reindex` to verify
+
+For CLI tests (parse/error paths):
+1. Reuse the library API test scaffolding
+2. Create integration test file `tests/{command}.rs` or extend existing (CLI binary)
+3. Use `ToolEnv`, `paths_for`, `write_config_for_cli`
+4. Spawn the binary with invalid scopes or empty install, assert exit codes
+5. Run `cargo test {command}` to verify
+
+Do not exercise the full embed path in CLI tests (would load real `FastembedEmbedder`). Parse errors and early exits use the CLI binary; heavy logic uses the library entry point.
 
 ### Testing Idempotency (Phase 5)
 
@@ -770,6 +844,33 @@ let out = env.cmd()
     .unwrap();
 
 // Assertions: reranker shows checksum_mismatched state
+```
+
+### Testing Batch Reindex Cheapness (Phase 7)
+
+Verify that batch reindex operations skip unchanged skills:
+
+1. Create `StubEmbedder` instance
+2. Enable multiple plugins via `lifecycle::enable` — embedder invoked N times
+3. Note the call count after initial setup
+4. Modify one skill (change content) via direct database update (or fixture rebuild)
+5. Call `reindex_catalog_plugins` or `run_with_deps(Scope::Catalog(...), ...)` — reindex only changed skills
+6. Assert `embedder.call_count()` increased by ≤1 (only the changed skill)
+
+Example (from `catalog_update_reindex.rs` and `reindex.rs`):
+```rust
+let embedder = StubEmbedder::new();
+enable_alpha(&paths, &config, &embedder);  // call_count = N
+let baseline = embedder.call_count();
+
+// Modify one skill in the database
+modify_skill_content(&paths, "skill-id", "new content");
+
+// Reindex the catalog
+let outcome = reindex_catalog_plugins("sample-plugin-catalog", &enabled, &deps)?;
+
+// Only the changed skill should re-embed
+assert_eq!(embedder.call_count() - baseline, 1);
 ```
 
 ---

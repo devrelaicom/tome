@@ -4,6 +4,7 @@
 > **Generated**: 2026-05-11
 > **Last Updated**: 2026-05-13 (Phase 5 slice 2 — `tome plugin disable` subcommand; no new external service integrations)
 > **Updated**: 2026-05-13 (Phase 6 slice 1–2 — explicit model management CLI; no new external integrations)
+> **Updated**: 2026-05-13 (Phase 7 slices 1–3 — reindex library + `tome catalog update` cascade + `tome reindex` CLI; no new external integrations)
 
 ## Databases & Data Stores
 
@@ -16,7 +17,7 @@
 ### Connection Patterns
 
 - **Statically linked**: `rusqlite` with `bundled` feature — no system SQLite dependency, no version mismatch risk.
-- **Concurrency model**: Single advisory lockfile (`index.lock`) ensures Phase 3–6 foreground operations are serialised; WAL mode allows readers during writes (future MCP server consideration).
+- **Concurrency model**: Single advisory lockfile (`index.lock`) ensures Phase 3–7 foreground operations are serialised; WAL mode allows readers during writes (future MCP server consideration).
 - **ORM/Query builder**: Direct SQL via `rusqlite` — prepared statements, parameterised queries.
 - **Migration approach**: Forward-only migrations under advisory lock in `src/index/migrations.rs`; drift detection in `src/index/meta.rs`.
 
@@ -30,7 +31,7 @@
 
 ## Authentication & Authorization
 
-Phase 1–6 has no explicit application-layer authentication.
+Phase 1–7 has no explicit application-layer authentication.
 
 - **Git operations**: Inherit system SSH keys and HTTP credential helpers (if configured in `~/.gitconfig`).
 - **Hugging Face model downloads**: No API key required; public `https://huggingface.co/` URLs are freely accessible (MODEL_REGISTRY pinned to MIT-licensed BGE variants).
@@ -43,7 +44,7 @@ Phase 1–6 has no explicit application-layer authentication.
 
 ### First-Party APIs
 
-None in Phase 1–6. Future phases may include:
+None in Phase 1–7. Future phases may include:
 - Remote catalog registries (HTTP/HTTPS URLs in catalog sources)
 - Plugin resolver APIs (not specified)
 
@@ -67,7 +68,7 @@ None in Phase 1–6. Future phases may include:
 
 ## Message Queues & Event Systems
 
-None in Phase 1–6. Deferred to Phase 6+ (MCP server event streaming).
+None in Phase 1–7. Deferred to Phase 6+ (MCP server event streaming).
 
 ---
 
@@ -78,7 +79,7 @@ None in Phase 1–6. Deferred to Phase 6+ (MCP server event streaming).
 | Filesystem (XDG) | Catalog Git working trees | Explicit `tome catalog remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/catalogs/` — git-based, refreshed on `tome catalog update` |
 | Filesystem (XDG) | Downloaded model artefacts | Explicit `tome models remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/models/` — one dir per model with manifest + ONNX files; Phase 6 adds explicit user-facing commands |
 
-No TTL-based eviction. Phase 1–6 uses explicit user commands for cleanup (principle VI: KISS).
+No TTL-based eviction. Phase 1–7 uses explicit user commands for cleanup (principle VI: KISS).
 
 ---
 
@@ -101,7 +102,7 @@ No TTL-based eviction. Phase 1–6 uses explicit user commands for cleanup (prin
 
 ## Email & Notifications
 
-None in Phase 1–6.
+None in Phase 1–7.
 
 ---
 
@@ -173,4 +174,4 @@ None in Phase 1–6.
 
 ---
 
-*This document maps external service dependencies and failure modes. Updated for Phase 6 slices 1–2 with explicit model management CLI — no new external integrations.*
+*This document maps external service dependencies and failure modes. Updated for Phase 7 slices 1–3 with reindex library + catalog update integration + CLI subcommand — no new external integrations.*

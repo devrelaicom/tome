@@ -2,11 +2,11 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI)
 
 ## Architecture Overview
 
-Tome is a synchronous Rust CLI following a classic **parse → dispatch → execute → map-errors → exit** pipeline. The codebase is organized around a **capability-driven** modular architecture where each module owns a distinct responsibility (catalog management, Git operations, configuration, logging, path resolution, output formatting, plugin metadata parsing, skill indexing, model embedding, model lifecycle management, and interactive presentation). Error handling is centralized in a closed `TomeError` enum that enforces exhaustive exit-code mapping at compile time. Signal handling (SIGINT) is global and atomic, allowing long-running operations (git clone, model download, embedding) to be cancelled gracefully with a well-defined exit code.
+Tome is a synchronous Rust CLI following a classic **parse → dispatch → execute → map-errors → exit** pipeline. The codebase is organized around a **capability-driven** modular architecture where each module owns a distinct responsibility (catalog management, Git operations, configuration, logging, path resolution, output formatting, plugin metadata parsing, skill indexing, model embedding, model lifecycle management, index reconciliation, and interactive presentation). Error handling is centralized in a closed `TomeError` enum that enforces exhaustive exit-code mapping at compile time. Signal handling (SIGINT) is global and atomic, allowing long-running operations (git clone, model download, embedding, reindexing) to be cancelled gracefully with a well-defined exit code.
 
 ## Architecture Pattern
 
@@ -20,6 +20,8 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 | **Trait-based Embedding Abstraction** | `Embedder` and `Reranker` are seam interfaces; `FastembedEmbedder` wraps `fastembed-rs`, and a deterministic `StubEmbedder` (unit-test only) provides testability without model files. |
 | **Plugin-Dir Resolution: Manifest-First** | `lifecycle::resolve_plugin_dir` reads `tome-catalog.toml`, looks up `id.plugin` in the declared `plugins[].name`, joins with the source; falls back to flat `entry.path.join(&id.plugin)` for backward compat when manifest is absent. Single shared function across `enable`, `disable`, `list`, `show` fixes inconsistency. |
 | **Interactive Three-Level Loop Pattern** | Bare `tome plugin` (no subcommand) enters an interactive flow: `catalog_loop` → `plugin_loop` → `view_loop`, each with a `LoopExit` enum to handle Back/Quit unwinds and error propagation (Phase 4, User Story 2). |
+| **Per-Plugin Atomic Reindex** | `lifecycle::reindex_plugin` mirrors `lifecycle::enable` atomicity: each plugin's reindex is one SQLite transaction under one advisory lock. Batch operations (`tome catalog update`, `tome reindex`) loop per-plugin, committing each before moving to the next. SIGINT between plugins leaves earlier plugins committed (per-plugin boundary). |
+| **Lazy Embedder Loading** | Heavy embedder (~345 MB ONNX) is loaded only when reindexing will actually call it. `tome catalog update` and `tome reindex` defer load until the first enabled plugin is encountered; a sync with zero enabled plugins never touches model files. |
 
 ## Core Components
 
@@ -33,6 +35,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 - **Phase 4 Change**: `PluginArgs` now wraps an `Option<PluginCommand>` to allow bare `tome plugin` with no subcommand. Routes to `commands::plugin::run_interactive()` when the command is `None`.
 - **Phase 5 Change**: `PluginCommand` now includes `Disable(PluginDisableArgs { id: String, force: bool })` variant.
 - **Phase 6 Change**: `ModelsCommand` enum added with `Download`, `List`, `Remove` variants; routes via `Command::Models(ModelsCommand)` to `commands::models::run()`.
+- **Phase 7 Change**: `ReindexArgs` and `ReindexCommand` added for `tome reindex [<scope>] [--force]`; routes via `Command::Reindex(ReindexArgs)` to `commands::reindex::run()`.
 
 ### Catalog Management (`src/catalog/`, `src/commands/catalog/`)
 
@@ -44,16 +47,19 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   - Catalogs are cached at `~/.local/share/tome/catalogs/<sha256(url)>/`.
   - Config is persisted at `~/.config/tome/config.toml` atomically.
   - Git operations capture stderr and pass it through credential scrubbing before error display.
+- **Phase 7 Change**: `tome catalog update` now reindexes enabled plugins in each catalog after a Git refresh. Per-plugin atomicity: each `lifecycle::reindex_plugin` call owns its own lock. Auto-disable cascade on `PluginNotFound` / `PluginManifestParseError` via `lifecycle::auto_disable_orphan()`.
 
 ### Plugin Metadata & Lifecycle (`src/plugin/`, `src/commands/plugin/`)
 
-- **Purpose**: Parse plugin manifests and SKILL.md frontmatter (lenient), manage plugin enable/disable state, orchestrate skill embedding and indexing.
+- **Purpose**: Parse plugin manifests and SKILL.md frontmatter (lenient), manage plugin enable/disable/reindex state, orchestrate skill embedding and indexing.
 - **Location**: `src/plugin/` (metadata parsers, lifecycle orchestrator), `src/commands/plugin/` (CLI handlers + interactive flow).
-- **Dependencies**: `catalog::manifest` (read_catalog_manifest), `index::` (open DB, acquire lock, enable_plugin_atomic), `embedding::` (embedder + reranker, model registry, download).
+- **Dependencies**: `catalog::manifest` (read_catalog_manifest), `index::` (open DB, acquire lock, enable_plugin_atomic, reindex_plugin_atomic), `embedding::` (embedder + reranker, model registry, download).
 - **Dependents**: Commands.
 - **Key Patterns**:
   - `lifecycle::enable()`: parse manifest (exit 22) → check already-enabled (exit 31) → ensure models present (exit 30 unless allow_model_download) → acquire lock → walk skills → collect PendingSkill → embed + insert under one transaction (atomic per FR-004) → release lock.
   - `lifecycle::disable()`: check not-disabled (exit 32) → acquire lock → flip enabled=0 for all (catalog, plugin) rows → release lock. Cheap re-enable follows since embeddings are retained.
+  - `lifecycle::reindex_plugin()`: walk on-disk skills → acquire lock → diff against index → re-embed modified (or all if force=true) → delete orphaned rows → release lock. Mirrors enable atomicity (Phase 7).
+  - `lifecycle::auto_disable_orphan()`: called by `tome catalog update` when a plugin is not found post-refresh; de-indexes all rows for the plugin and emits a warning.
   - Frontmatter parse: delimiter error is fatal (exit 23); YAML-body error skips one skill + warn (FR-013c).
   - Models: embedder + reranker required by enable and query; optional download in `enable` (CLI owns the TTY prompt; `lifecycle::allow_model_download` is the decision).
 
@@ -101,6 +107,36 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   - **`list`** (`src/commands/models/list.rs`): Cheap path = check manifest + file existence + size; `--verify` flag rehashes via `embedding::download::sha256_file`. Renders ModelState (Ok / Missing / Corrupt / ChecksumMismatched) as table (human) or NDJSON (JSON).
   - **`remove`** (`src/commands/models/remove.rs`): Check model is not in use by any enabled plugin, check model exists (exit 30 if missing), confirm prompt with `--force` short-circuit, non-TTY without `--force` → exit 54 with pointer message. Deletes manifest first, then directory.
 - **Shared Pattern**: Mirrors `plugin/` module layout (per-subcommand file under group `mod.rs` that dispatches). Owns user-facing UX (prompts, spinners, table rendering). Calls library functions (`embedding::download`, `embedding::registry`) for the actual work.
+
+### Index Reconciliation & Reindex (`src/commands/reindex.rs`, `src/plugin/lifecycle.rs`, `src/index/skills.rs`)
+
+- **Purpose**: Re-embed and reconcile on-disk plugin skills against the index; driven by embedder upgrades (FR-016 recovery) and integrity recovery.
+- **Location**: `src/commands/reindex.rs` (CLI + scope resolution), `src/plugin/lifecycle.rs` (orchestrator), `src/index/skills.rs` (atomic reindex transaction).
+- **Scope Grammar**:
+  - Omitted: every enabled plugin across every registered catalog.
+  - `<catalog>`: every enabled plugin in one catalog.
+  - `<catalog>/<plugin>`: exactly one plugin.
+- **Flow** (`tome reindex [<scope>] [--force]`):
+  1. Parse and validate scope (catalog/plugin names must exist in config).
+  2. Resolve target plugins (read enabled plugins from index per scope).
+  3. Load embedder once (lazy pattern; skip if no enabled plugins in scope).
+  4. For each target plugin:
+     - Call `lifecycle::reindex_plugin(id, deps, force)`.
+     - Each call acquires lock → diffs on-disk vs index → re-embeds if hash changed or force=true → deletes orphans → releases lock.
+     - Per-plugin atomicity: SIGINT between plugins leaves earlier plugins committed.
+  5. Emit aggregate record (human: summary line; JSON: NDJSON record).
+- **Reindex Algorithm** (`reindex_plugin_atomic` in `index/skills.rs`, ~110 lines):
+  - **Pass 1** — Walk pending (on-disk) skills:
+    - Unchanged (content_hash match, force=false): touch metadata only (UPDATE).
+    - Modified (hash mismatch or force=true): re-embed, upsert skill + embedding.
+    - Added (new on-disk): embed, insert skill + embedding.
+  - **Pass 2** — Walk leftover indexed rows (no longer on-disk):
+    - Remove: delete skill row + embedding.
+  - All under one SQLite transaction. On SIGINT, transaction rolls back.
+- **Content-Hash Smart Re-Embedding** (FR-032): When a skill's `(name, description)` text composition is identical to what was indexed, Tome skips the embedder call and reuses the vector. Hash is `SHA256(name + "\n\n" + description)`.
+- **Sqlite-Vec Virtual Table Workaround**: `skill_embeddings` is a `vec0` virtual table that does not support `INSERT OR REPLACE`. Upsert logic: DELETE-then-INSERT per skill ID. The DELETE is a no-op on first insert.
+- **Cascade on Catalog Refresh** (Phase 7): `tome catalog update` wires `lifecycle::reindex_plugin` per enabled plugin after a Git refresh. If plugin is not found post-refresh, `lifecycle::auto_disable_orphan()` de-indexes all rows and emits a loud warning (FR-033).
+- **Library Test Entry Point** (Phase 7): `src/commands/reindex::run_with_deps(scope, plugins, deps, force, mode)` allows tests to drive the reindex logic with `StubEmbedder`, keeping the CLI binary's `FastembedEmbedder` out of CI.
 
 ### Skill Query & Search (`src/index/query.rs`, `src/commands/query.rs`)
 
@@ -152,13 +188,15 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 
 - **Purpose**: Maintain a local SQLite skills index with vector embeddings, enable/disable state tracking, drift detection, and KNN search.
 - **Location**: `src/index/`.
-- **Concurrency**: WAL mode + 5s `busy_timeout` + optional advisory lockfile (`${XDG_DATA_HOME}/tome/index.lock`). Read-only operations (`query`, `plugin list/show`, `status`) do not take the lock; mutating operations (`plugin enable/disable`) do. Contention surfaces as `TomeError::IndexBusy` (exit 50) within milliseconds.
+- **Concurrency**: WAL mode + 5s `busy_timeout` + optional advisory lockfile (`${XDG_DATA_HOME}/tome/index.lock`). Read-only operations (`query`, `plugin list/show`, `status`) do not take the lock; mutating operations (`plugin enable/disable/reindex`) do. Contention surfaces as `TomeError::IndexBusy` (exit 50) within milliseconds.
 - **Schema**:
   - `meta`: embedder + reranker identity + drift flags.
   - `skills`: `(catalog, plugin, name, description, path, plugin_version, embedding, enabled, indexed_at)` + content-hash column for smart re-embedding.
+  - `skill_embeddings`: virtual `vec0` table (sqlite-vec); does not support `INSERT OR REPLACE`.
   - Vectors are L2-normalized 384-dim floats.
 - **Key Operations**:
   - `enable_plugin_atomic()`: walk PendingSkill vec, embed each, insert under one transaction, return EnableSummary (total / newly_embedded counts).
+  - `reindex_plugin_atomic()`: diff on-disk pending skills against index, re-embed modified/added, delete removed, return ReindexSummary (added / modified / removed / unchanged counts). Mirrors enable atomicity.
   - `mark_all_disabled_for_plugin()`: flip `enabled = 0` for all rows matching `(catalog, plugin)`.
   - `knn(query_vec, k, filters)`: search by `enabled = 1`, apply optional catalog/plugin filters, return top k candidates by cosine distance.
 
@@ -300,6 +338,70 @@ format output (human: ✓ disabled N records / JSON: NDJSON record)
 exit(0)
 ```
 
+### Index Reconciliation Flow: `tome reindex [<scope>] [--force]`
+
+```
+CLI parse (scope, --force flag)
+       ↓
+dispatch to reindex::run()
+       ↓
+parse and validate scope (All / Catalog / Plugin)
+       ↓
+resolve targets: read enabled plugins from index per scope
+       ↓
+if scope is Plugin, cross-check plugin exists in index (fail fast exit 20)
+       ↓
+for each target plugin:
+  → call lifecycle::reindex_plugin(id, deps, force)
+       ↓
+     lifecycle::reindex_plugin():
+       → parse plugin.json (exit 22 on error)
+       → acquire advisory lock
+       → walk on-disk skills → collect PendingSkill
+       → reindex_plugin_atomic():
+           ✓ Unchanged (hash match, force=false): touch metadata
+           ✓ Modified (hash mismatch or force=true): re-embed
+           ✓ Added (new on-disk): embed
+           ✓ Removed (orphaned index rows): delete
+           All under one transaction
+       → release lock
+       → return ReindexOutcome (ReindexSummary + warnings)
+       ↓
+aggregate outcomes (one per plugin)
+       ↓
+format output (human: summary line / JSON: NDJSON record)
+       ↓
+exit(0)
+```
+
+### Catalog Update with Reindex: `tome catalog update [<name>]`
+
+```
+CLI parse (--json, -v, name)
+       ↓
+dispatch to catalog::update::run()
+       ↓
+load config, paths
+       ↓
+for each target catalog (all or named):
+  → refresh_one() — Git clone/pull, update config
+       ↓
+  if refresh happened (not SHA-pinned):
+    → read enabled plugins in catalog from index
+    → if none: skip reindex, continue
+    → lazy load embedder (only after first enabled plugin found)
+    → for each enabled plugin:
+        → lifecycle::reindex_plugin(id, deps, force=false)
+           [same as explicit `tome reindex` flow]
+    → catch PluginNotFound / PluginManifestParseError:
+        → lifecycle::auto_disable_orphan(id)
+        → emit loud warning (FR-033)
+       ↓
+emit human or JSON output (summary table per catalog)
+       ↓
+exit(0)
+```
+
 ### Interactive Browse Flow: `tome plugin` (no subcommand)
 
 ```
@@ -416,8 +518,8 @@ exit(0)
 | Layer | Responsibility | Can Access | Cannot Access |
 |-------|----------------|------------|---------------|
 | **CLI** (`src/main.rs`, `src/cli.rs`) | Parse args, install signal handler, dispatch, map errors to exit codes. | Commands, logging, output. | Catalog, config, paths (indirectly via commands). |
-| **Commands** (`src/commands/`) | Orchestrate catalog/plugin/query/models operations; call library logic and format output. | Lifecycle, catalog, config, paths, error, output, embedding, index, presentation. | Logging (by design; logging is orthogonal). |
-| **Plugin Lifecycle** (`src/plugin/lifecycle.rs`) | Enable/disable orchestrator; compose metadata parsers, index, and embedding. | Plugin metadata (manifest, frontmatter), index (open, lock, enable_plugin_atomic), embedding (embedder trait, model registry), catalog (manifest reader). | Commands (reverse dependency only). |
+| **Commands** (`src/commands/`) | Orchestrate catalog/plugin/query/models/reindex operations; call library logic and format output. | Lifecycle, catalog, config, paths, error, output, embedding, index, presentation. | Logging (by design; logging is orthogonal). |
+| **Plugin Lifecycle** (`src/plugin/lifecycle.rs`) | Enable/disable/reindex orchestrator; compose metadata parsers, index, and embedding. | Plugin metadata (manifest, frontmatter), index (open, lock, enable_plugin_atomic, reindex_plugin_atomic), embedding (embedder trait, model registry), catalog (manifest reader). | Commands (reverse dependency only). |
 | **Index** (`src/index/`) | SQLite operations, schema, KNN, drift detection, advisory locks. | rusqlite, sqlite-vec, index schema. | Commands, embedding, plugin (reverse dependency only). |
 | **Embedding** (`src/embedding/`) | Model registry, download, trait implementations (fastembed wrapper, stub). | reqwest, ort, fastembed-rs, serde. | Commands, index (reverse dependency only). |
 | **Catalog** (`src/catalog/`) | Git operations, manifest parsing, atomic persistence. | Git (process spawning), manifest (parsing), store (writes), config (types). | Commands (reverse dependency only). |
@@ -434,7 +536,7 @@ exit(0)
 ## Dependency Rules
 
 1. **No cycles**: The dependency graph is a DAG. `main.rs` → `cli.rs` → `commands/` → `{plugin, index, embedding, catalog, config, paths, output, presentation, error}`.
-2. **Library shapes**: `plugin::lifecycle` and `index::` are library-shaped (no CLI); they return structured outcomes (`EnableOutcome`, `DisableOutcome`, `Candidate` vec, `Scored` vec) that `commands/` layers format for output.
+2. **Library shapes**: `plugin::lifecycle` and `index::` are library-shaped (no CLI); they return structured outcomes (`EnableOutcome`, `DisableOutcome`, `ReindexOutcome`, `Candidate` vec, `Scored` vec) that `commands/` layers format for output.
 3. **Trait seams**: `Embedder` and `Reranker` traits decouple the library from model implementations; tests inject `StubEmbedder`.
 4. **Error type at the root**: `error.rs` has no internal dependencies; all modules depend on it (or types it wraps).
 5. **Orthogonal logging**: `logging.rs` is initialized at startup and orthogonal to `--json` mode. No module imports `logging`; the global subscriber is set up once in `main()`.
@@ -442,6 +544,7 @@ exit(0)
 7. **Plugin-dir resolution is centralized**: `plugin::lifecycle::resolve_plugin_dir` is the single source of truth; re-exported to CLI handlers via `commands/plugin/mod.rs` to avoid cross-boundary imports.
 8. **Interactive flow is command-layer only**: `commands/plugin/interactive.rs` uses presentation layer (prompts, tables), command handlers (enable, disable), and lifecycle/config APIs. It is test-driven via `rexpect` pty harness (`tests/plugin_interactive.rs`) rather than unit-test injection.
 9. **Models commands mirror plugin commands layout**: `commands/models/` follows the same per-subcommand-file + group-dispatcher pattern as `commands/plugin/`. Library-side work (download, SHA-256) lives in `embedding/download.rs` and `embedding/registry.rs`; CLI-side work (prompts, progress, tables) lives in `commands/models/{download,list,remove}.rs`.
+10. **Reindex commands and lifecycle**: `commands/reindex.rs` owns scope parsing and emission; `plugin::lifecycle::reindex_plugin` and `index::skills::reindex_plugin_atomic` own the orchestration and transaction. Lazy embedder loading is a `commands/` responsibility. `run_with_deps` in `commands/reindex.rs` is a library test entry point (no embedder construction).
 
 ## Key Interfaces & Contracts
 
@@ -460,12 +563,14 @@ exit(0)
 | `Embedder` + `Reranker` | Trait interfaces for embedding and reranking. | `src/embedding/mod.rs` |
 | `FastembedEmbedder` + `FastembedReranker` | ONNX-backed implementations via `fastembed-rs` and `ort`. | `src/embedding/fastembed.rs` |
 | `StubEmbedder` | Deterministic test double; produces SHA-derived vectors. | `src/embedding/stub.rs` (test-only by default, LTO-stripped from release). |
-| `EnableOutcome` + `DisableOutcome` | Structured results of plugin lifecycle operations. | `src/plugin/lifecycle.rs` |
-| `LifecycleDeps` | Dependency injection struct for `lifecycle::enable/disable`. | `src/plugin/lifecycle.rs` |
+| `EnableOutcome` + `DisableOutcome` + `ReindexOutcome` | Structured results of plugin lifecycle operations. | `src/plugin/lifecycle.rs` |
+| `LifecycleDeps` | Dependency injection struct for `lifecycle::enable/disable/reindex_plugin`. | `src/plugin/lifecycle.rs` |
 | `Candidate` + `Scored` | KNN result and scored result records. | `src/embedding/mod.rs` |
+| `ReindexSummary` | Outcome breakdown of one `reindex_plugin_atomic` call (added / modified / removed / unchanged). | `src/index/skills.rs` |
 | `output::Mode` | Enum selecting human or JSON formatting. | `src/output.rs` |
 | `LoopExit` | Private enum in `interactive.rs` encoding Back/Quit/Continue state. | `src/commands/plugin/interactive.rs` |
 | `ModelState` | Classification of a registered model's on-disk install state (Ok / Missing / Corrupt / ChecksumMismatched). | `src/commands/models/mod.rs` |
+| `Scope` | Reindex scope (All / Catalog / Plugin); used by `commands/reindex.rs` and tests. | `src/commands/reindex.rs` |
 
 ## Signal Handling & Cancellation
 
@@ -473,14 +578,14 @@ exit(0)
 
 **Installation**: Once in `main.rs` via `git::install_signal_handler()` (idempotent).
 
-**Polling**: Commands check `git::was_cancelled()` periodically or after long-running operations (git clone, skill walk, embedding loop, model download).
+**Polling**: Commands check `git::was_cancelled()` periodically or after long-running operations (git clone, skill walk, embedding loop, model download, reindex loop).
 
 **Exit Code**: 8 (`TomeError::Interrupted`).
 
 **Invariants**:
 - In-flight child processes are killed.
 - Atomic writes ensure partial state is not left on disk.
-- Index transactions are rolled back on interruption (via `was_cancelled()` checks inside `enable_locked`).
+- Index transactions are rolled back on interruption (via `was_cancelled()` checks inside `enable_locked`, `reindex_locked`).
 - Tests can reset the flag via `git::reset_cancellation_for_tests()`.
 
 ## Atomic Writes & Concurrency
@@ -492,6 +597,7 @@ exit(0)
 - Cache mutations: Temp dir cloned into, then atomically renamed to final location.
 - Index mutations: SQLite WAL + advisory lockfile (`index.lock`). Mutating operations acquire the lock; read-only operations do not.
 - Model persistence: Download to temp, verify checksum, rename.
+- Reindex mutations: SQLite WAL + per-plugin advisory lock. Each `lifecycle::reindex_plugin` call acquires and releases the lock independently. Per-plugin atomicity: SIGINT between plugins leaves earlier plugins committed.
 
 **POSIX Atomicity**: On single filesystem, rename is atomic; readers either see the old or new version, never partial state.
 
@@ -506,10 +612,11 @@ exit(0)
 | **Credential Scrubbing** | Regex rules applied to all captured git and reqwest output before display or error propagation. | `src/catalog/git.rs::scrub_credentials()`, `src/embedding/download.rs` |
 | **Error Mapping** | Every `Result<_, TomeError>` eventually reaches `main()`, which maps to exit code. | `src/error.rs`, `src/main.rs` |
 | **Logging & Verbosity** | Global tracing subscriber initialized once; orthogonal to `--json` mode. | `src/logging.rs`, `src/main.rs` |
-| **TTY Detection** | Used by interactive commands (removal confirmation, model download prompt, interactive browse), progress spinners, and output formatting. | `src/output.rs::stdin_is_tty()`, `stdout_is_tty()`, `src/presentation/prompt.rs`, `src/presentation/progress.rs`, `src/commands/plugin/interactive.rs`, `src/commands/models/remove.rs` |
+| **TTY Detection** | Used by interactive commands (removal confirmation, model download prompt, interactive browse, reindex scope confirmation), progress spinners, and output formatting. | `src/output.rs::stdin_is_tty()`, `stdout_is_tty()`, `src/presentation/prompt.rs`, `src/presentation/progress.rs`, `src/commands/plugin/interactive.rs`, `src/commands/models/remove.rs` |
 | **Model Presence** | Two-stage check: manifest.json exists on disk AND parses. Applied before `enable` and `query`. | `src/plugin/mod.rs::model_manifest_ok()`, `src/embedding/download.rs` |
 | **Path Validation** | Plugin sources in `tome-catalog.toml` are validated relative to catalog root (no `..`, no escape). Plugin source in `lifecycle::resolve_plugin_dir` is manifest-declared or flat-layout fallback. | `src/catalog/manifest.rs::validate_source()`, `src/plugin/lifecycle.rs::resolve_plugin_dir()` |
 | **Drift Detection** | Embedder and reranker identity (name + version) stored in index meta; compared at query time. Embedder drift → hard fail (exit 41/42); reranker drift → warn. | `src/index/meta.rs`, `src/commands/query.rs::check_drift()` |
+| **Content-Hash Smart Re-Embedding** | Skill text (name + "\n\n" + description) is hashed; hash is compared at reindex time. Unchanged hash → skip embedder, reuse vector. Used by both `enable` (first-time, always embed) and `reindex` (smart fast-path). | `src/index/skills.rs::content_hash()`, `reindex_plugin_atomic()` |
 
 ---
 

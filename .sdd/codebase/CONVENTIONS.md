@@ -85,7 +85,7 @@ This enforces the Unix principle: every failure class has a stable, documented e
 | 8 | `Interrupted` | User pressed Ctrl+C; in-flight git processes killed |
 | 30 | `ModelMissing` | Required embedding model not present |
 
-*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2–5 exit codes.*
+*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2–7 exit codes.*
 
 ### Error Message Style
 
@@ -120,104 +120,116 @@ Four-layer scrubbing strategy (in order):
 
 ```rust
 src/
-├── main.rs              // CLI entry point: parse → dispatch → handle errors → exit
-├── cli.rs               // clap derive definitions (global --json, -v/-vv)
-├── lib.rs               // Library surface (for integration tests)
-├── commands/            // Command implementations
-│   ├── mod.rs           // Dispatcher and common helpers
-│   ├── catalog/         // `tome catalog` subcommands
-│   │   ├── mod.rs       // Dispatcher; cross-subcommand helpers
-│   │   ├── add.rs       // `tome catalog add <source>`
-│   │   ├── remove.rs    // `tome catalog remove <name>`
-│   │   ├── list.rs      // `tome catalog list`
-│   │   ├── show.rs      // `tome catalog show <name>`
-│   │   ├── update.rs    // `tome catalog update [name]`
-│   │   └── source.rs    // Git fetch / update orchestrator
-│   ├── plugin/          // `tome plugin` subcommands (Phase 3–5)
-│   │   ├── mod.rs       // Dispatcher; cross-subcommand helpers
-│   │   ├── enable.rs    // `tome plugin enable <catalog>/<plugin>` (CLI side)
-│   │   ├── disable.rs   // `tome plugin disable <catalog>/<plugin>` (Phase 5)
-│   │   ├── list.rs      // `tome plugin list [catalog]`
-│   │   ├── show.rs      // `tome plugin show <catalog>/<plugin>`
-│   │   └── interactive.rs // `tome plugin` (bare, interactive browse) (Phase 4)
-│   ├── models/          // `tome models` subcommands (Phase 6)
-│   │   ├── mod.rs       // Dispatcher; cross-subcommand helpers
-│   │   ├── download.rs  // `tome models download [model]` (CLI side)
-│   │   ├── list.rs      // `tome models list`
-│   │   └── remove.rs    // `tome models remove <model>`
-│   └── query.rs         // `tome query <text>` (Phase 3)
-├── catalog/             // Catalog manifest + storage + git operations
+├── main.rs                   # entry: parse → dispatch → map errors → exit
+├── lib.rs                    # re-exports
+├── cli.rs                    # clap derive defs + global flags
+├── error.rs                  # closed TomeError enum + ExitCode mapping
+├── config.rs                 # config.toml (strict)
+├── paths.rs                  # XDG paths (Phase 1) + index_db, models_dir, index_lock (Phase 2)
+├── output.rs                 # human/--json formatter, NO_COLOR, TTY detection
+├── logging.rs                # tracing-subscriber wiring
+├── catalog/                  # Phase 1
+│   ├── manifest.rs           # tome-catalog.toml (strict)
+│   ├── store.rs              # registry persistence (atomic) — Phase 2 hooks cascade
+│   └── git.rs                # git shell-outs + scrub_credentials
+├── commands/
+│   ├── mod.rs                # Dispatcher and common helpers
+│   ├── catalog/              # `tome catalog` subcommands
+│   │   ├── mod.rs            # Dispatcher; cross-subcommand helpers
+│   │   ├── add.rs            # `tome catalog add <source>`
+│   │   ├── remove.rs         # `tome catalog remove <name>`
+│   │   ├── list.rs           # `tome catalog list`
+│   │   ├── show.rs           # `tome catalog show <name>`
+│   │   ├── update.rs         # `tome catalog update [name]` + reindex library entry point (Phase 7)
+│   │   └── source.rs         # Git fetch / update orchestrator
+│   ├── plugin/               # `tome plugin` subcommands (Phase 3–5)
+│   │   ├── mod.rs            # Dispatcher; cross-subcommand helpers
+│   │   ├── enable.rs         # `tome plugin enable <catalog>/<plugin>` (CLI side)
+│   │   ├── disable.rs        # `tome plugin disable <catalog>/<plugin>` (Phase 5)
+│   │   ├── list.rs           # `tome plugin list [catalog]`
+│   │   ├── show.rs           # `tome plugin show <catalog>/<plugin>`
+│   │   └── interactive.rs    # `tome plugin` (bare, interactive browse) (Phase 4)
+│   ├── models/               # `tome models` subcommands (Phase 6)
+│   │   ├── mod.rs            # Dispatcher; cross-subcommand helpers
+│   │   ├── download.rs       # `tome models download [model]` (CLI side)
+│   │   ├── list.rs           # `tome models list`
+│   │   └── remove.rs         # `tome models remove <model>`
+│   ├── query.rs              # `tome query <text>` (Phase 3)
+│   └── reindex.rs            # `tome reindex [<scope>]` + library entry point (Phase 7)
+├── catalog/                  # Catalog manifest + storage + git operations
 │   ├── mod.rs
-│   ├── manifest.rs      // Parser + validator (strict TOML)
-│   ├── store.rs         // Registry persistence (atomic writes)
-│   └── git.rs           // Git shell-outs + credential scrubbing + signal handling
-├── config.rs            // config.toml schema + load/save
-├── error.rs             // Closed TomeError enum + ManifestInvalid
-├── output.rs            // Human/--json formatter, NO_COLOR, TTY detection
-├── logging.rs           // tracing-subscriber wiring (stderr-only)
-├── paths.rs             // XDG-aware paths (Phase 1 + Phase 2 index/models dirs)
-├── plugin/              // Plugin discovery, manifest parsing, lifecycle (Phase 2)
+│   ├── manifest.rs           # Parser + validator (strict TOML)
+│   ├── store.rs              # Registry persistence (atomic writes)
+│   └── git.rs                # Git shell-outs + credential scrubbing + signal handling
+├── config.rs                 # config.toml schema + load/save
+├── error.rs                  # Closed TomeError enum + ManifestInvalid
+├── output.rs                 # Human/--json formatter, NO_COLOR, TTY detection
+├── logging.rs                # tracing-subscriber wiring (stderr-only)
+├── paths.rs                  # XDG-aware paths (Phase 1 + Phase 2 index/models dirs)
+├── plugin/                   # Plugin discovery, manifest parsing, lifecycle (Phase 2)
 │   ├── mod.rs
-│   ├── manifest.rs      // `plugin.json` parser (lenient)
-│   ├── frontmatter.rs   // SKILL.md YAML frontmatter parser (lenient + fallbacks)
-│   ├── components.rs    // Skills/agents/commands/hooks walk
-│   ├── identity.rs      // `<catalog>/<plugin>` address parsing and resolution
-│   └── lifecycle.rs     // Enable/disable orchestrator (library API, testable)
-├── index/               // SQLite-backed skill index + vector search (Phase 2)
+│   ├── manifest.rs           # `plugin.json` parser (lenient)
+│   ├── frontmatter.rs        # SKILL.md YAML frontmatter parser (lenient + fallbacks)
+│   ├── components.rs         # Skills/agents/commands/hooks walk
+│   ├── identity.rs           # `<catalog>/<plugin>` address parsing and resolution
+│   └── lifecycle.rs          # Enable/disable orchestrator (library API, testable)
+├── index/                    # SQLite-backed skill index + vector search (Phase 2)
 │   ├── mod.rs
-│   ├── db.rs            // rusqlite open, WAL, busy_timeout
-│   ├── schema.rs        // CREATE TABLE statements
-│   ├── migrations.rs    // Forward-only migrations under advisory lock
-│   ├── vec_ext.rs       // sqlite-vec extension load
-│   ├── skills.rs        // CRUD on skills table; content-hash diff
-│   ├── query.rs         // KNN search + reranker invocation
-│   ├── meta.rs          // Drift detection (model ident mismatch)
-│   ├── integrity.rs     // PRAGMA integrity_check
-│   └── lock.rs          // Advisory lockfile (WAL + Tome-owned file)
-├── embedding/           // Embedding model management + inference (Phase 2)
-│   ├── mod.rs           // Embedder and Reranker traits
-│   ├── fastembed.rs     // fastembed-rs impl (ONNX Runtime, CPU-only)
-│   ├── stub.rs          // Deterministic stub (tests only, compiled out)
-│   ├── registry.rs      // MODEL_REGISTRY with pinned URLs + checksums
-│   ├── download.rs      // reqwest::blocking + SHA-256 + atomic persist
-│   └── runtime.rs       // ort Environment setup
-└── presentation/        // CLI output / progress / colours / prompts (Phase 2)
+│   ├── db.rs                 # rusqlite open, WAL, busy_timeout
+│   ├── schema.rs             # CREATE TABLE statements
+│   ├── migrations.rs         # Forward-only migrations under advisory lock
+│   ├── vec_ext.rs            # sqlite-vec extension load
+│   ├── skills.rs             # CRUD on skills table; content-hash diff
+│   ├── query.rs              # KNN search + reranker invocation
+│   ├── meta.rs               # Drift detection (model ident mismatch)
+│   ├── integrity.rs          # PRAGMA integrity_check
+│   └── lock.rs               # Advisory lockfile (WAL + Tome-owned file)
+├── embedding/                # Embedding model management + inference (Phase 2)
+│   ├── mod.rs                # Embedder and Reranker traits
+│   ├── fastembed.rs          # fastembed-rs impl (ONNX Runtime, CPU-only)
+│   ├── stub.rs               # Deterministic stub (tests only, compiled out)
+│   ├── registry.rs           # MODEL_REGISTRY with pinned URLs + checksums
+│   ├── download.rs           # reqwest::blocking + SHA-256 + atomic persist
+│   └── runtime.rs            # ort Environment setup
+└── presentation/             # CLI output / progress / colours / prompts (Phase 2)
     ├── mod.rs
-    ├── tables.rs        // comfy-table helpers
-    ├── progress.rs      // indicatif wrappers (TTY-aware)
-    ├── colour.rs        // owo-colors + NO_COLOR
-    └── prompt.rs        // inquire wrappers (refuse on non-TTY)
+    ├── tables.rs             # comfy-table helpers
+    ├── progress.rs           # indicatif wrappers (TTY-aware)
+    ├── colour.rs             # owo-colors + NO_COLOR
+    └── prompt.rs             # inquire wrappers (refuse on non-TTY)
 
 tests/
-├── common/mod.rs        // Fixture builder, ToolEnv, lifecycle helpers, paths_for (Phase 5)
-├── catalog_add.rs       // Integration tests for `tome catalog add`
-├── catalog_list.rs      // Integration tests for `tome catalog list`
-├── catalog_remove.rs    // Integration tests for `tome catalog remove`
-├── catalog_show.rs      // Integration tests for `tome catalog show`
-├── catalog_update.rs    // Integration tests for `tome catalog update`
-├── plugin_enable.rs     // Library API tests for `plugin::lifecycle::enable`
-├── plugin_disable.rs    // CLI-binary tests for `tome plugin disable` (Phase 5)
-├── plugin_list.rs       // CLI-binary tests for `tome plugin list`
-├── plugin_show.rs       // CLI-binary tests for `tome plugin show`
-├── plugin_interactive.rs // PTY-driven tests for `tome plugin` interactive
-├── plugin_repeated.rs   // FR-008: enable/disable idempotency edge case (Phase 5)
-├── models_download.rs   // CLI-binary tests for `tome models download` (Phase 6)
-├── models_list.rs       // CLI-binary tests for `tome models list` (Phase 6)
-├── models_remove.rs     // CLI-binary tests for `tome models remove` (Phase 6)
-├── query.rs             // Library API tests for query path (embed + KNN)
-├── atomicity_enable.rs  // Failure-injection tests for enable rollback (FR-004)
-├── exit_codes.rs        // Exhaustiveness check: every TomeError → exit code
-├── error_messages.rs    // Error message correctness
-├── manifest_strictness.rs  // TOML deny_unknown_fields enforcement + corpus
-├── path_validation.rs    // Path escape/traversal validation
-├── scrubbing.rs         // Credential scrubbing regex coverage
-├── atomicity.rs         // Registry/cache write atomicity under interruption
-└── fixtures/            // Real Git repos + sample plugin catalogs
+├── common/mod.rs             # Fixture builder, ToolEnv, lifecycle helpers, paths_for (Phase 5)
+├── catalog_add.rs            # Integration tests for `tome catalog add`
+├── catalog_list.rs           # Integration tests for `tome catalog list`
+├── catalog_remove.rs         # Integration tests for `tome catalog remove`
+├── catalog_show.rs           # Integration tests for `tome catalog show`
+├── catalog_update.rs         # Integration tests for `tome catalog update`
+├── catalog_update_reindex.rs # Library API tests for catalog update reindex path (Phase 7)
+├── plugin_enable.rs          # Library API tests for `plugin::lifecycle::enable`
+├── plugin_disable.rs         # CLI-binary tests for `tome plugin disable` (Phase 5)
+├── plugin_list.rs            # CLI-binary tests for `tome plugin list`
+├── plugin_show.rs            # CLI-binary tests for `tome plugin show`
+├── plugin_interactive.rs     # PTY-driven tests for `tome plugin` interactive
+├── plugin_repeated.rs        # FR-008: enable/disable idempotency edge case (Phase 5)
+├── models_download.rs        # CLI-binary tests for `tome models download` (Phase 6)
+├── models_list.rs            # CLI-binary tests for `tome models list` (Phase 6)
+├── models_remove.rs          # CLI-binary tests for `tome models remove` (Phase 6)
+├── query.rs                  # Library API tests for query path (embed + KNN)
+├── reindex.rs                # Library + CLI tests for `tome reindex` (Phase 7)
+├── atomicity_enable.rs       # Failure-injection tests for enable rollback (FR-004)
+├── exit_codes.rs             # Exhaustiveness check: every TomeError → exit code
+├── error_messages.rs         # Error message correctness
+├── manifest_strictness.rs    # TOML deny_unknown_fields enforcement + corpus
+├── path_validation.rs        # Path escape/traversal validation
+├── scrubbing.rs              # Credential scrubbing regex coverage
+├── atomicity.rs              # Registry/cache write atomicity under interruption
+└── fixtures/                 # Real Git repos + sample plugin catalogs
     ├── sample-catalog/
     └── sample-plugin-catalog/
 ```
 
-### CLI Module Pattern (Phase 3–6)
+### CLI Module Pattern (Phase 3–7)
 
 Each subcommand group lives under `src/commands/{group}/` with one file per subcommand:
 
@@ -226,19 +238,17 @@ Each subcommand group lives under `src/commands/{group}/` with one file per subc
 
 Cross-module reach via `super::*` within a group is acceptable; cross-group via re-export is preferred.
 
-**Phase 6 `models` handler:** Follows the same pattern as `plugin`. Each subcommand (`download`, `list`, `remove`) has a dedicated file with a `run(args, mode)` signature. Banner skipped in JSON mode (established precedent: enable, disable, plugin-interactive actions, models-download, models-list, models-remove).
+The pattern is now consistent across:
+- `plugin` (enable, disable, list, show, interactive)
+- `models` (download, list, remove)
+- `catalog` (add, remove, list, update/reindex, show)
+- Standalone `reindex.rs` (explicit reindex subcommand)
 
-Example from `src/commands/models/download.rs`:
-```rust
-pub fn run(args: ModelsDownloadArgs, mode: Mode) -> Result<(), TomeError> {
-    let paths = Paths::resolve()?;
-    // ... logic
-    if mode == Mode::Human {
-        writeln!(out, "Downloading model …")?;
-    }
-    // ... return JSON or human output
-}
-```
+**Phase 7 addition:** Commands that load embedders (`plugin enable`, `models download`, `catalog update`) now expose a second public entry point `pub fn run_with_deps(...)` that accepts a pre-configured `LifecycleDeps`. This allows tests to drive the library API with `StubEmbedder` without loading real ONNX models in CI.
+
+Examples:
+- `src/commands/reindex.rs::pub fn run_with_deps(scope, plugins, deps, force, mode)` — used by `tests/reindex.rs` library tests
+- `src/commands/catalog/update.rs::pub fn reindex_catalog_plugins(catalog, enabled, deps)` — used by `tests/catalog_update_reindex.rs` library tests
 
 **Phase 5 `disable` handler:** Mirrors `enable::run` in shape. Handles confirmation prompt (TTY gating via `output::stdin_is_tty() && output::stdout_is_tty()`, `--force` short-circuit, non-TTY refusal), calls library API `lifecycle::disable`, surfaces outcome. No embedder loaded; library API handles all atomic state changes and locking (FR-005, FR-007, FR-051).
 
@@ -313,9 +323,32 @@ match result {
 
 **Idempotency:** Both `enable` (Phase 3) and `disable` (Phase 5) detect when a plugin is already in the requested state and return `TomeError::PluginAlreadyInState` (exit code 21) per FR-008.
 
+### Batch Reindex Operations (Phase 7)
+
+**Per-plugin atomicity:** Each `lifecycle::reindex_plugin` call acquires its own advisory lock. The spec doesn't require cross-plugin atomicity for `tome catalog update` or `tome reindex`. This is documented to set the precedent for future batch ops.
+
+**Example from `src/commands/catalog/update.rs`:**
+```rust
+pub fn reindex_catalog_plugins(
+    catalog_name: &str,
+    enabled: &[PluginId],
+    deps: &LifecycleDeps,
+) -> Result<ReindexSummary, TomeError> {
+    let mut summary = ReindexSummary::default();
+    
+    for id in enabled {
+        // Each call acquires lock independently
+        let outcome = lifecycle::reindex_plugin(&id, deps)?;
+        summary.aggregate(outcome);
+    }
+    
+    Ok(summary)
+}
+```
+
 ### Banner Skipped in JSON Mode
 
-NDJSON consumers expect structured records on stdout and nothing on stderr unless an error occurs. Established in `commands::plugin::enable` and `commands::query`, and reinforced in `commands::models::*`:
+NDJSON consumers expect structured records on stdout and nothing on stderr unless an error occurs. Established in `commands::plugin::enable` and extended across all NDJSON producers:
 
 ```rust
 if mode == Mode::Human {
@@ -323,7 +356,14 @@ if mode == Mode::Human {
 }
 ```
 
-Then conditionally emit human or JSON output.
+Then conditionally emit human or JSON output. Applied to:
+- `plugin::enable`
+- `plugin::disable`
+- `models::download`
+- `models::list`
+- `models::remove`
+- `catalog::update` ("Reindexed plugins" block emits only NDJSON when `--json`)
+- `reindex`
 
 ### Warnings as Vec<String>
 

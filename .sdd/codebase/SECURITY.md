@@ -130,6 +130,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Placeholder detection** | `has_placeholder_checksum()` guard | `src/embedding/download.rs::download_model` (exit 31 if placeholder) |
 | **Atomic model persist** | `.partial/` → final rename | `src/embedding/download.rs::download_model`, step 4 |
 | **Re-verification** | New `embedding::download::sha256_file()` helper | `src/embedding/download.rs::sha256_file`, invoked by `tome models list --verify` (Phase 6) |
+| **Virtual table constraints** | `sqlite-vec` does not support `INSERT OR REPLACE`; uses `DELETE`-then-`INSERT` | `src/index/skills.rs::upsert_skill` (Phase 7, lines 282–294) |
 
 **Model Registry** (Phase 3 update):
 - `bge-small-en-v1.5` INT8: SHA-256 `51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431`, 66.5 MB, MIT
@@ -263,7 +264,7 @@ pub fn require_terminal() -> Result<(), TomeError> {
 
 ## Atomic Writes
 
-### Registry, Cache, and Model Persistence
+### Registry, Cache, Model, and Index Persistence
 
 | Operation | Atomicity Guarantee | Implementation |
 |-----------|-------------------|-----------------|
@@ -271,6 +272,8 @@ pub fn require_terminal() -> Result<(), TomeError> {
 | **Catalog cache refresh** | Atomic temp dir swap per catalog | `src/catalog/store.rs::clone_and_validate` |
 | **Model download persist** | Atomic `.partial/` → final dir rename | `src/embedding/download.rs::download_model`, step 4 |
 | **Model manifest write** | Atomic write via temp + rename | `src/embedding/download.rs::write_manifest` |
+| **Index database enable** | Per-plugin transaction (all-or-nothing skill upsert) | `src/index/skills.rs::enable_plugin_atomic` |
+| **Index database reindex** | Per-plugin transaction (snapshot diff → add/modify/remove/unchanged) | `src/index/skills.rs::reindex_plugin_atomic` (Phase 7) |
 | **Temp file cleanup** | RAII via `tempfile::NamedTempFile` + `TempDir` | Rust Drop trait |
 
 **Mechanism**:
@@ -282,6 +285,8 @@ pub fn require_terminal() -> Result<(), TomeError> {
 - A partial or interrupted write leaves the on-disk file in either pre-state or post-state, never partial
 - Multiple concurrent invocations see either the old version or the new version, never a mixture
 - Test coverage: `tests/atomicity.rs` with concurrent writes and simulated interruption
+
+**Note on per-plugin atomicity** (Phase 7): When reindexing multiple plugins (e.g., via `tome catalog update`), each plugin's reindex runs in its own transaction. A SIGINT between plugins leaves earlier plugins committed and later plugins unchanged. This is intentional (see CONCERNS.md for design rationale); the index is always in a valid state with no partial rows. The per-plugin boundary is where atomicity breaks for multi-plugin operations.
 
 ## Dependency Management
 
@@ -420,7 +425,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | Concern | Phase | Note |
 |---------|-------|------|
 | Real BGE model testing (SC-001/SC-002) | Phase 3 | T088 — requires developer-machine pass |
-| Model-download byte-progress callback | Phase 3 onward | Currently wrapped in indeterminate spinner; both `plugin enable` and `models download` would benefit from byte-progress refactor |
+| Model-download byte-progress callback | Phase 3 onward | Currently wrapped in indeterminate spinner; both `plugin enable` and `models download` would benefit from byte-progress refactor (TD-010) |
 | User-declines-model-download exit code | Phase 3+ | Currently reuses 8 (user-initiated abort); worth locking down in future iteration |
 | Encryption at rest for sensitive caches | Phase 3+ | Deferred until use case demands it |
 | Audit logging | Phase 3+ | Not required in Phase 1 (single-user CLI) |
