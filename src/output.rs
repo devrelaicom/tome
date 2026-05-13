@@ -35,7 +35,7 @@ pub fn stdin_is_tty() -> bool {
 
 /// Serialise `value` as one JSON record per line on stdout (NDJSON). Caller
 /// chooses whether to invoke this in a loop (`list`) or once (`show`).
-pub fn write_json<T: Serialize>(value: &T) -> Result<(), TomeError> {
+pub fn write_json<T: Serialize + ?Sized>(value: &T) -> Result<(), TomeError> {
     let mut out = std::io::stdout().lock();
     serde_json::to_writer(&mut out, value)
         .map_err(|e| TomeError::Internal(anyhow::Error::new(e)))?;

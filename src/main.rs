@@ -16,6 +16,7 @@ fn main() {
             Some(cmd) => commands::plugin::run(cmd, mode),
             None => commands::plugin::run_interactive(mode),
         },
+        Command::Models(cmd) => commands::models::run(cmd, mode),
         Command::Query(args) => commands::query::run(args, mode),
     };
 

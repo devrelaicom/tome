@@ -171,6 +171,27 @@ fn write_manifest(entry: &ModelEntry, final_dir: &Path) -> Result<ModelManifest,
 // against `reqwest::blocking::Response`'s `Read` impl.
 use std::io::Read;
 
+/// Streaming SHA-256 of `path`'s contents. Used by `tome models list --verify`
+/// and tests that need to confirm an on-disk artefact's integrity. Reads in
+/// fixed-size chunks so a several-hundred-MB model rehash stays bounded in
+/// memory.
+pub fn sha256_file(path: &Path) -> Result<String, TomeError> {
+    let mut file = File::open(path).map_err(TomeError::Io)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
+    loop {
+        if git::was_cancelled() {
+            return Err(TomeError::Interrupted);
+        }
+        let n = file.read(&mut buf).map_err(TomeError::Io)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 /// Wrap a diagnostic string through the credential scrubber so presigned
 /// URL query strings, `Authorization: Bearer` headers, and the like are
 /// redacted before the message lands in `TomeError`.

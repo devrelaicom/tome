@@ -29,8 +29,48 @@ pub enum Command {
     /// drop into the interactive catalog → plugin → action browse flow
     /// (FR-050; refuses on non-TTY per FR-051).
     Plugin(PluginArgs),
+    /// Manage on-disk embedding / reranker model artefacts.
+    #[command(subcommand)]
+    Models(ModelsCommand),
     /// Search enabled skills across every catalog.
     Query(QueryArgs),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ModelsCommand {
+    /// Download every registered model that is missing. `--force` re-downloads
+    /// even when the on-disk manifest already records a complete install.
+    Download(ModelsDownloadArgs),
+    /// List every registered model with its on-disk state. `--verify` rehashes
+    /// each installed model against its pinned SHA-256.
+    List(ModelsListArgs),
+    /// Remove an installed model directory and its manifest.
+    Remove(ModelsRemoveArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ModelsDownloadArgs {
+    /// Re-download even when the on-disk manifest records a complete install.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ModelsListArgs {
+    /// Rehash each installed file's contents against its pinned SHA-256.
+    /// Slower (several seconds for the reranker) but catches silent
+    /// on-disk corruption.
+    #[arg(long)]
+    pub verify: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ModelsRemoveArgs {
+    /// The registered model name (e.g. `bge-small-en-v1.5`).
+    pub name: String,
+    /// Skip the confirmation prompt. Required when stdin is not a TTY.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Subcommand)]
