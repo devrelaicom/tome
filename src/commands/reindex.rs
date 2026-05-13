@@ -19,7 +19,6 @@ use serde::Serialize;
 use crate::catalog::store;
 use crate::cli::ReindexArgs;
 use crate::config::Config;
-use crate::embedding::Embedder;
 use crate::embedding::fastembed::FastembedEmbedder;
 use crate::error::TomeError;
 use crate::index::skills::ReindexSummary;
@@ -296,8 +295,3 @@ pub fn run_with_deps(
     emit(&scope, &aggregate, mode)?;
     Ok(aggregate)
 }
-
-// Suppress unused-import warning for `Embedder` when `FastembedEmbedder`
-// inference isn't picked up by clippy's import-only inspector.
-#[allow(dead_code)]
-fn _force_embedder_use(_: &dyn Embedder) {}

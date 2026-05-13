@@ -5,7 +5,6 @@ use std::io::Write;
 
 use serde::Serialize;
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 use crate::catalog::git::{self, Git};
 use crate::catalog::manifest::CatalogManifest;
@@ -469,6 +468,5 @@ fn emit_pinned(mode: Mode, name: &str, ref_: &str) -> Result<(), TomeError> {
             crate::output::write_json(&env)?;
         }
     }
-    let _ = Rfc3339; // silence unused-import in this fn
     Ok(())
 }

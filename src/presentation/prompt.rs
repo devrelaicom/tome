@@ -14,7 +14,6 @@ use inquire::{Confirm, MultiSelect, Select};
 
 use crate::error::TomeError;
 use crate::output;
-use crate::presentation::progress;
 
 /// Hard-require both ends of the user interaction to be a terminal. Used at
 /// the entry of every prompt function below and at the entry of the
@@ -74,7 +73,6 @@ fn prompt_error_to_tome(err: inquire::InquireError) -> TomeError {
 /// `inquire` repaints stdout/stderr and races with `indicatif`'s ticker; the
 /// `indicatif` recipe is to wrap an interactive read in `pb.suspend(|| …)`.
 pub fn suspend_progress<R>(pb: &indicatif::ProgressBar, f: impl FnOnce() -> R) -> R {
-    let _ = &progress::stderr_is_tty; // keep the import live for downstream callers
     pb.suspend(f)
 }
 
