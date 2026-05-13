@@ -21,8 +21,10 @@ tome plugin enable <catalog>/<plugin>
 2. Read `${catalog cache}/<plugin>/.claude-plugin/plugin.json`. Parse leniently. If syntactically invalid or missing required identity → exit 22 (`PluginManifestParseError`).
 3. If the plugin is already enabled in the index → exit 21 (`PluginAlreadyInState`).
 4. Check that the embedder and reranker models are installed; if either is missing:
-   - TTY (stdout AND stderr): prompt to download with size + licence shown. Default yes.
-   - Non-TTY: exit 30 (`ModelMissing`) with a message pointing at `tome models download`.
+   - **TTY** (stdin AND stdout): prompt to download with size + licence shown. Default yes. Decline → exit 8 (`Interrupted`).
+   - **Non-TTY**: exit 30 (`ModelMissing`) with a message pointing at `tome models download`.
+
+   The TTY predicate is `stdin AND stdout` because the load-bearing condition is "can `inquire` actually render a prompt and read the answer". `--force` is not an enable concept; the decline path treats user refusal as an interrupt (rather than success) so callers can distinguish "user said no" from "models were already installed".
 5. Acquire the index advisory lock. On contention → exit 50 (`IndexBusy`).
 6. Open a SQLite transaction.
 7. Walk `${plugin path}/skills/*/SKILL.md`. For each:
@@ -73,15 +75,18 @@ tome plugin disable <catalog>/<plugin>
 
 1. Resolve the plugin (same as enable; exit 20 on unknown).
 2. If the plugin is already disabled → exit 21.
-3. Unless `--force`, prompt for confirmation (`Disable <id>? [y/N]`, default no). In a non-TTY context without `--force` → exit 54 (`NotATerminal`).
+3. Unless `--force`, prompt for confirmation (`Disable <id>? [y/N]`, default no). Decline → exit 0 (no state change is not an error). In a non-TTY context without `--force` → exit 54 (`NotATerminal`).
 4. Acquire the index lock. On contention → exit 50.
 5. `UPDATE skills SET enabled = 0 WHERE catalog = ? AND plugin = ?` inside one transaction.
 6. Release the lock. Report.
 
+`plugin disable` and `plugin enable` differ on the decline exit code: enable returns 8 (`Interrupted`) because the user aborted a multi-step download flow midway; disable returns 0 because the prompt is the entire flow and "user said no" is the same outcome as "command was never run". Both conventions are deliberate.
+
 ### Output (human)
 
 ```
-Disabled midnight-experts/compact-expert (12 skill records retained).
+Disabling midnight-experts/compact-expert…
+✓ disabled midnight-experts/compact-expert (12 skill records retained)
 ```
 
 ### Output (`--json`)
@@ -142,7 +147,7 @@ Rich plugin view (the same content as the interactive flow's step 3).
 Plugin:       midnight-experts/compact-expert
 Version:      1.2.0
 Status:       ✓ enabled (last indexed 2 hours ago)
-Last updated: 3 days ago — Alice <alice@example.com>
+Last updated: — — Alice <alice@example.com>  (upstream git-log timestamp not yet surfaced)
 Description:  An expert on writing Compact smart contracts on Midnight.
 
 Component breakdown:
@@ -155,7 +160,7 @@ Component breakdown:
   MCP servers      0
 ```
 
-Status colours per `tome plugin list`. Last-updated thresholds: green ≤ 7d, yellow ≤ 30d, red older.
+Status colours per `tome plugin list`. The `Last updated:` line is wired to display the upstream git-log timestamp and author, but the git-log integration is a documented follow-up — for v0.2.0 the date and "X ago" cells render as `—` and only the author lands. Last-updated colour thresholds (green ≤ 7d, yellow ≤ 30d, red older) apply once the integration ships.
 
 ### Output (`--json`)
 

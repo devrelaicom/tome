@@ -7,13 +7,14 @@ Every code listed here corresponds to exactly one variant of the closed `TomeErr
 | Code | Meaning |
 |---|---|
 | 0 | Success |
+| 1 | Internal error (a class of failure that should not be reachable in well-formed input; e.g. serialising a struct Tome itself built) |
 | 2 | Usage error (clap parse failure or unknown subcommand) |
 | 3 | Catalog not found |
 | 4 | Catalog already exists |
 | 5 | Manifest invalid (Phase 1 catalog manifest) |
 | 6 | Git operation failed |
 | 7 | I/O error (read/write under tome's data or config dirs) |
-| 8 | Interrupted (SIGINT during a long-running operation) |
+| 8 | Interrupted (SIGINT during a long-running operation, OR a TTY model-download prompt declined during `tome plugin enable`) |
 
 ## Phase 2 codes
 
@@ -49,4 +50,4 @@ Every code listed here corresponds to exactly one variant of the closed `TomeErr
 
 ## Verification
 
-`tests/exit_codes.rs` asserts every variant maps to its documented integer. The `TomeError` enum is `#[non_exhaustive]` on the consumer side but exhaustively matched in `impl ExitCode for TomeError`, so adding a new variant without updating the mapping is a compile error.
+`tests/exit_codes.rs` asserts every variant maps to its documented integer. The closed-set guarantee comes from the exhaustive `match` in `impl TomeError::exit_code` (and `category`): adding a new variant without updating those arms is a compile error. The enum is not marked `#[non_exhaustive]` — closure is enforced by the test plus the exhaustive match, not by an attribute.

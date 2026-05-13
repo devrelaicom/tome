@@ -21,7 +21,7 @@ After a successful Git operation against a catalog, for every plugin in that cat
 
 Steps 1–4 run inside one SQLite transaction per plugin inside the advisory lockfile boundary.
 
-### Output (human, summary appended after Phase 1 sync output)
+### Output (human, single-line-per-plugin reindex summary appended after the Phase 1 sync output)
 
 ```
 Refreshed catalogs:
@@ -29,35 +29,32 @@ Refreshed catalogs:
   another-catalog         (up-to-date)
 
 Reindexed plugins:
-  Plugin                              Added  Modified  Removed
-  ──────────────────────────────────  ─────  ────────  ───────
-  midnight-experts/compact-expert       0        2        0
-  midnight-experts/ledger-helper        1        0        0
+  midnight-experts/compact-expert: added 0 · modified 2 · removed 0 · unchanged 10
+  midnight-experts/ledger-helper:  added 1 · modified 0 · removed 0 · unchanged 7
 
 Warnings:
   midnight-experts/broken-plugin: plugin.json malformed — disabled and de-indexed
 ```
 
+The reindex summary is rendered as one line per plugin rather than a multi-column comfy-table — the human format mirrors the JSON's `plugin_change` envelopes (one envelope per plugin) and keeps cheap-skip output compact.
+
 ### Output (`--json`)
 
-The Phase 1 catalog-update JSON is extended with a `plugin_changes` array:
+`tome catalog update --json` emits **NDJSON** — one JSON object per line. There are three envelope types, written in this order:
+
+1. One `{"refreshed": ...}` or `{"pinned": ...}` envelope per catalog (Phase 1 behaviour, preserved).
+2. One `{"plugin_change": ...}` envelope per reindexed plugin (Phase 2 extension).
+3. `auto_disabled` plugins emit a `{"plugin_change": ...}` envelope with an `auto_disabled_reason` field rather than a separate top-level array — the reindex summary fields are set to zero.
+
+Example (three lines, each a self-contained JSON object):
 
 ```json
-{
-  "catalogs_refreshed": [...],
-  "plugin_changes": [
-    {
-      "plugin": "midnight-experts/compact-expert",
-      "skills_added": 0,
-      "skills_modified": 2,
-      "skills_removed": 0
-    }
-  ],
-  "auto_disabled": [
-    { "plugin": "midnight-experts/broken-plugin", "reason": "plugin.json malformed" }
-  ]
-}
+{"refreshed":{"catalog":"midnight-experts","commits":3}}
+{"plugin_change":{"plugin":"midnight-experts/compact-expert","skills_added":0,"skills_modified":2,"skills_removed":0,"skills_unchanged":10}}
+{"plugin_change":{"plugin":"midnight-experts/broken-plugin","auto_disabled_reason":"plugin.json malformed","skills_added":0,"skills_modified":0,"skills_removed":0,"skills_unchanged":0}}
 ```
+
+The NDJSON shape is consistent with `tome plugin list` and `tome models download` — Tome's JSON-output convention for batch operations is one envelope per logical record rather than one aggregate object.
 
 ### Errors
 
@@ -98,25 +95,32 @@ Before any Phase 1 removal logic runs:
 
 ```
 Cascading disable of 2 enabled plugins:
-  ✓ midnight-experts/compact-expert (12 skill rows dropped)
-  ✓ midnight-experts/ledger-helper (8 skill rows dropped)
-Removing catalog midnight-experts… done.
+  ✓ midnight-experts/compact-expert
+  ✓ midnight-experts/ledger-helper
+Removed catalog `midnight-experts` (cache cleared at /home/alice/.local/share/tome/catalogs/midnight-experts).
 ```
+
+`✓` is rendered on TTY only; non-TTY contexts omit the glyph.
 
 ### Output (`--json`, cascade case)
 
-Phase 1 catalog-remove JSON extended with a `cascade` array:
+The Phase 1 catalog-remove JSON envelope is preserved and extended with a `cascade` array. The Phase 1 envelope shape (`removed` carries the full record rather than a boolean) is retained because it carries more useful detail than a bare flag:
 
 ```json
 {
-  "catalog": "midnight-experts",
-  "removed": true,
-  "cascade": [
-    { "plugin": "midnight-experts/compact-expert", "skills_dropped": 12 },
-    { "plugin": "midnight-experts/ledger-helper", "skills_dropped": 8 }
-  ]
+  "removed": {
+    "name": "midnight-experts",
+    "url": "https://github.com/midnight-network/midnight-experts.git",
+    "cache_path": "/home/alice/.local/share/tome/catalogs/midnight-experts",
+    "cascade": [
+      { "plugin": "midnight-experts/compact-expert", "skills_dropped": 12 },
+      { "plugin": "midnight-experts/ledger-helper", "skills_dropped": 8 }
+    ]
+  }
 }
 ```
+
+`cascade` is `skip_serializing_if = "Vec::is_empty"` — a no-cascade remove (catalog had no enabled plugins) emits the Phase 1 envelope unchanged. Each `skills_dropped` value is the real per-plugin row count; the array preserves the input order.
 
 ### Errors
 

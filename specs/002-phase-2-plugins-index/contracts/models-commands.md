@@ -28,12 +28,14 @@ For each known model in `MODEL_REGISTRY` (currently `bge-small-en-v1.5` and `bge
 
 ```
 bge-small-en-v1.5 (1.5) — 45.0 MB
-[################################] 100% downloaded · 8.2s
+⠋ downloading…    8.2s
+✓ downloaded
 bge-reranker-base (base) — 280.0 MB
-[################################] 100% downloaded · 41.8s
+⠋ downloading…   41.8s
+✓ downloaded
 ```
 
-Progress is rendered by `indicatif`; suppressed when stderr is not a TTY.
+The model-download progress is rendered as an `indicatif` **indeterminate spinner**, not a byte-progress bar — `embedding::download::download_model` does not currently expose a byte-progress callback, so the CLI cannot drive a determinate bar. The byte-progress refactor is tracked as TD-010 in `.sdd/codebase/CONCERNS.md` and is a candidate for a post-v0.2.0 polish pass. The spinner is suppressed when stderr is not a TTY.
 
 ### Output (`--json`)
 
@@ -84,10 +86,12 @@ tome models list
 
 For each model in `MODEL_REGISTRY`:
 
-- `state = Ok` when manifest + files + sizes are consistent.
-- `state = Missing` when no manifest.
-- `state = Corrupt` when files referenced by manifest are missing or have wrong sizes.
-- `state = ChecksumMismatched` when (and only when) `--verify` is passed and the SHA-256 disagrees.
+- `state = "ok"` when manifest + files + sizes are consistent.
+- `state = "missing"` when no manifest.
+- `state = "corrupt"` when files referenced by manifest are missing or have wrong sizes.
+- `state = "checksum_mismatched"` when (and only when) `--verify` is passed and the SHA-256 disagrees.
+
+The JSON `state` field is the lowercased / snake-case form shown above (`"checksum_mismatched"`, not `"ChecksumMismatched"`).
 
 Without `--verify`, the check is cheap (existence + size). With `--verify`, the check rehashes; this can take several seconds for the reranker.
 
