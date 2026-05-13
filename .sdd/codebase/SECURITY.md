@@ -12,10 +12,11 @@ Tome is a Rust CLI for managing plugin catalogs and embeddings. As a synchronous
 3. Scrubbing credentials from captured Git output and HTTP errors at the boundary
 4. Atomic writes to prevent partial state corruption
 5. Signal handling for clean interruption
-6. Dependency-allowlist enforcement and weekly vulnerability scanning
-7. Binary-size constraints to limit attack surface
+6. TTY enforcement on interactive flows to prevent prompt injection and non-interactive misuse
+7. Dependency-allowlist enforcement and weekly vulnerability scanning
+8. Binary-size constraints to limit attack surface
 
-Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md` (Phase 1) and `specs/002-phase-2-plugins-index/spec.md` (Phase 2+).
+Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md` (Phase 1), `specs/002-phase-2-plugins-index/spec.md` (Phase 2), and `specs/002-phase-2-plugins-index/contracts/plugin-commands.md` (Phase 4).
 
 ## Authentication & Authorization
 
@@ -157,7 +158,7 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 | 5 | ManifestInvalid | Manifest parse or validation failed | 1 | FR-022 |
 | 6 | GitFailed | Git operation failed (clone, fetch, reset) | 1 | FR-022 |
 | 7 | Io | Filesystem or I/O error | All | FR-022 |
-| 8 | Interrupted | User interrupted (Ctrl-C) | All | FR-026a |
+| 8 | Interrupted | User interrupted (Ctrl-C or Ctrl-D in prompt) | All | FR-026a |
 | 20 | PluginNotFound | Plugin not found under any registered catalog | 2 | — |
 | 21 | PluginAlreadyInState | Plugin already in target state (enabled/disabled) | 2 | — |
 | 22 | PluginManifestParseError | `plugin.json` parse or validation failed | 2 | FR-013b |
@@ -166,6 +167,7 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 | 31 | ModelCorrupt | Model metadata invalid or placeholder checksum | 2 | — |
 | 32 | ModelChecksumMismatch | SHA-256 or size mismatch on download | 2 | — |
 | 33 | ModelRegistrationParseError | Model manifest.json invalid | 2 | — |
+| 54 | NotATerminal | Interactive command run without terminal (stdin/stdout not TTY) | 4 | FR-051 |
 
 **Enforcement**: Closed enum `TomeError` in `src/error.rs`. Adding a variant forces edits to:
 1. `TomeError` enum
@@ -189,6 +191,39 @@ Example error (model checksum):
 model `bge-small-en-v1.5` SHA-256 mismatch: expected 51f1bd0..., got a1b2c3...; run `tome models download --force` to retry
 ```
 
+## Interactive Flows & Terminal Enforcement
+
+### TTY Requirement (Phase 4)
+
+| Control | Implementation | Exit Code |
+|---------|----------------|-----------|
+| **TTY check** | `presentation::prompt::require_terminal()` checks both stdin and stdout | 54 (NotATerminal) |
+| **Flow entry** | `tome plugin` (no subcommand) enforces TTY before any prompt (FR-051) | Exit 54 if no TTY |
+| **Prompt functions** | Every `select()`, `multiselect()`, `confirm()` repeats the check | Exit 54 per call |
+| **Reason** | `inquire` library writes prompt and reads echo on stdout; piped/redirected stdout causes mangled prompts and mismatched inputs | Security + UX |
+
+**Implementation** (`src/presentation/prompt.rs::require_terminal()`):
+```rust
+pub fn require_terminal() -> Result<(), TomeError> {
+    if output::stdin_is_tty() && output::stdout_is_tty() {
+        Ok(())
+    } else {
+        Err(TomeError::NotATerminal)
+    }
+}
+```
+
+**Non-interactive alternatives** (FR-052):
+- `tome plugin enable|disable|show` — CLI flags / positional args, no prompt
+- `tome plugin list` — non-interactive listing with filters
+- Model download within enable: refused with pointer to `--force` flag if no TTY
+
+**Guarantee** (FR-051):
+- Interactive flows will not execute in non-TTY contexts (CI, pipes, background)
+- Exit code 54 is a clear signal that the caller needs an interactive context or a non-interactive alternative
+
+**Test coverage**: `tests/plugin_interactive.rs::bare_plugin_without_a_terminal_exits_54_with_pointer_message()` verifies non-TTY refusal.
+
 ## Signal Handling & Cancellation
 
 ### SIGINT Handling
@@ -208,6 +243,11 @@ model `bge-small-en-v1.5` SHA-256 mismatch: expected 51f1bd0..., got a1b2c3...; 
 - No orphaned child processes
 - Per-catalog cache atomicity is preserved (temp dir dropped via RAII)
 - Model download `.partial/` directory cleaned up on interruption
+
+**Interactive cancellation** (Phase 4):
+- `inquire` library converts Ctrl-C / Ctrl-D to `InquireError::OperationCanceled` or `OperationInterrupted`
+- `src/presentation/prompt.rs::prompt_error_to_tome` maps both to `TomeError::Interrupted` (exit 8)
+- Semantically: user-initiated interruption is indistinguishable from system SIGINT (both exit 8)
 
 **Test**: `tests/atomicity.rs` and signal-handling verification in integration tests.
 
@@ -274,8 +314,9 @@ model `bge-small-en-v1.5` SHA-256 mismatch: expected 51f1bd0..., got a1b2c3...; 
 **Current dependencies**:
 - Phase 1: `clap` (CLI), `serde`/`toml` (config), `thiserror`/`anyhow` (errors), `tracing` (logging), `sha2`/`hex` (hashing), `tempfile` (atomicity), `ctrlc` (signals), `regex` (scrubbing), `semver` (versions), `time` (timestamps), `directories` (paths)
 - Phase 2: `rusqlite` (bundled SQLite), `sqlite-vec` (vendored vector extension), `fastembed-rs` (inference), `reqwest` (HTTP), `indicatif` (progress), `comfy-table` (tables), `owo-colors` (colour), `inquire` (prompts)
+- Phase 4: No new dependencies (interactive flow uses existing `inquire`)
 
-All fall within permissive licences. Phase 2 deps licensed: `fastembed-rs` (MIT), `ort` (MIT, transitive via fastembed), BGE models (MIT).
+All fall within permissive licences. Phase 2 deps licensed: `fastembed-rs` (MIT), `ort` (MIT, transitive via fastembed), BGE models (MIT). Phase 4 deps: `inquire` (MIT).
 
 ## Binary Size & Deployment
 
@@ -354,6 +395,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | **Model integrity** | SHA-256 verification, placeholder detection, atomic persist | `tests/models_download.rs` |
 | **Atomicity** | Concurrent writes, partial writes, interruption | `tests/atomicity.rs` (4 cases) |
 | **Exit codes** | Every `TomeError` variant maps to documented code | `tests/exit_codes.rs` |
+| **TTY enforcement** | Non-TTY refusal at interactive flow entry; prompt functions short-circuit | `tests/plugin_interactive.rs` (2 cases) |
 | **Integration** | Real Git repos, real fixtures, real filesystems | `tests/catalog_*.rs`, `tests/models_*.rs`, `tests/plugin_*.rs` |
 
 **Success criteria**:
@@ -361,6 +403,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 - SC-006: No credential material observable in any output
 - SC-011: Interruption leaves no orphaned processes
 - SC-012: Mid-write interruption leaves recoverable state
+- SC-051: Interactive flows refuse to run in non-TTY contexts
 
 ## Known Gaps & Future Work
 

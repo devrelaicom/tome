@@ -36,6 +36,7 @@ tests/
 ├── plugin_enable.rs           # Library API: `plugin::lifecycle::enable` (Phase 3)
 ├── plugin_list.rs             # CLI binary: `tome plugin list` (Phase 3)
 ├── plugin_show.rs             # CLI binary: `tome plugin show` (Phase 3)
+├── plugin_interactive.rs      # PTY-driven: `tome plugin` interactive browse (Phase 4)
 ├── query.rs                   # Library API: embed + KNN query path (Phase 3)
 ├── atomicity_enable.rs        # Failure-injection: enable rollback (Phase 3)
 ├── exit_codes.rs              # Unit: exhaustiveness check on TomeError
@@ -64,6 +65,7 @@ tests/
 | Unit tests | `tests/{test_name}.rs` | Test one concept (parser, error path, validator) |
 | Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/atomicity_enable.rs` | Exercise library API (`tome::plugin::lifecycle::*`) with `StubEmbedder` |
 | Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs` | Spawn `tome` binary as subprocess; used when no embedders are loaded |
+| Integration tests (PTY-driven) | `tests/plugin_interactive.rs` | Scripted pty session with `rexpect`; driven via real terminal I/O |
 | Shared helpers | `tests/common/mod.rs` | Fixture builders, ToolEnv, lifecycle helpers, CLI invocation |
 | Test fixtures | `tests/fixtures/` | Real git repos and sample plugin catalogs |
 
@@ -124,6 +126,66 @@ Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`
 6. **Assert output** — parse stdout (human or `--json`) and validate content
 
 Used when embedders are not involved or interaction with the real binary is essential.
+
+### PTY-Driven Integration Test Pattern (Phase 4)
+
+Tests for interactive flows (`tome plugin` with no subcommand) use `rexpect` to drive a real pty session:
+
+1. **Pre-enable plugins** — use library API (`lifecycle::enable` + `StubEmbedder`) to populate the index
+2. **Spawn binary under pty** — `rexpect::spawn_command()` with timeout
+3. **Script the interaction** — use `send_flush()`, `press_enter()`, `press_down()` helpers
+4. **Match prompts** — `sess.exp_string("Pick a catalog")` finds prompt text
+5. **Assert terminal state** — exit code, final stdout/stderr, post-interaction side effects (database rows)
+
+**Terminal I/O Contract:**
+- `rexpect::PtySession::send(bytes)` does NOT flush; single-byte writes (Enter, arrow keys) hang indefinitely
+  - Use explicit `sess.flush()` after each write, or wrap via helper `send_flush(sess, bytes)`
+- Enter key is `\r` (0x0D carriage return), not `\n`, under crossterm raw mode
+- Down arrow is ANSI escape `\x1b[B`
+- `rexpect::PtySession::process()` is private; use `.process().wait()` to collect exit status
+- `rexpect::process::WaitStatus` re-exports `nix::sys::wait::WaitStatus`
+
+**Environment setup for prompts:**
+- Set `NO_COLOR=1` to strip ANSI cursor-positioning noise from inquire prompts
+- After `NO_COLOR`, prompt text matches exactly and substring matching with `exp_string` is reliable
+- Do not exercise the bare-CLI enable path in CI (it loads `FastembedEmbedder`, ~345 MB ONNX models)
+  - Instead, pre-enable plugins via library API, then drive disable/navigate the interactive flow from the CLI
+
+Example from `tests/plugin_interactive.rs`:
+```rust
+#[test]
+fn interactive_disable_via_scripted_session_exits_zero_and_flips_state() {
+    let (env, _fixture_tmp, paths) = setup_pre_enabled("sample-plugin-catalog");
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tome"));
+    cmd.arg("plugin")
+        .env("HOME", env.home_path())
+        .env("NO_COLOR", "1")
+        .env_remove("TOME_LOG");
+
+    let mut sess = spawn_command(cmd, Some(30_000)).expect("spawn under pty");
+
+    // Level 1 — catalog selector
+    sess.exp_string("Pick a catalog").expect("catalog prompt");
+    press_enter(&mut sess);
+
+    // Level 2 — plugin browser
+    sess.exp_string("Pick a plugin").expect("plugin prompt");
+    press_enter(&mut sess);
+
+    // Level 3 — plugin view + action
+    sess.exp_string("Plugin:").expect("view header");
+    sess.exp_string("Action").expect("action prompt");
+    press_enter(&mut sess);
+
+    // Confirm + exit assertions
+    sess.exp_string("Disable sample-plugin-catalog/plugin-alpha?").expect("confirm");
+    send_flush(&mut sess, "y\r");
+    sess.exp_eof().expect("clean EOF");
+    let status = sess.process().wait().expect("collect status");
+    assert!(matches!(status, WaitStatus::Exited(_, 0)));
+}
+```
 
 ### Unit Test Pattern
 
@@ -219,6 +281,18 @@ pub fn fabricate_models(paths: &Paths) {
 
 **`write_config_for_cli(paths: &Paths, config: &Config)`** — Write the supplied `Config` to `paths.config_file` as TOML so a child `tome` binary process can read it. Used by `plugin list` / `plugin show` tests that bypass `catalog add`.
 
+### Phase 4 Interactive Helpers (PTY pattern)
+
+**Helper functions in `tests/plugin_interactive.rs`:**
+
+**`send_flush(sess: &mut PtySession, bytes: &str)`** — Send bytes to pty and flush explicitly. Workaround for `rexpect::PtySession::send` not flushing; required for single-byte writes to be visible to the child.
+
+**`press_enter(sess: &mut PtySession)`** — Send `\r` (carriage return) and flush. Equivalent to pressing Enter in raw mode.
+
+**`press_down(sess: &mut PtySession)`** — Send ANSI escape `\x1b[B` (down arrow) and flush.
+
+**`paths_for(env: &ToolEnv) -> Paths`** — Duplicated across `plugin_list.rs`, `plugin_show.rs`, `plugin_interactive.rs`. Resolves `ToolEnv` to the same `Paths` that the spawned CLI would resolve. A triage item: promote to `tests/common/mod.rs` after 4th caller.
+
 ### Fixture Builder (`tests/common/mod.rs`)
 
 ```rust
@@ -309,6 +383,7 @@ When tests run:
 | `plugin_enable.rs` | Library API | `plugin::lifecycle::enable` — skill row insertion, content hash, fallbacks, atomicity (FR-004), idempotency, warnings |
 | `plugin_list.rs` | CLI-binary | `tome plugin list [catalog]` — filtering by catalog, empty list, JSON format |
 | `plugin_show.rs` | CLI-binary | `tome plugin show <catalog>/<plugin>` — skill details, metadata, JSON format |
+| `plugin_interactive.rs` | PTY-driven | `tome plugin` interactive flow — catalog selector, plugin browser, plugin view, action prompts, navigation (Back, Quit), non-TTY refusal (FR-050, FR-051) |
 | `query.rs` | Library API | KNN query + optional reranking — self-similarity, filtering, candidate pool, drift detection |
 | `atomicity_enable.rs` | Library API | Failure-injection: `StubEmbedder::with_force_fail_after(n)` → rollback guarantee (FR-004) |
 
@@ -347,13 +422,15 @@ pub fn with_force_fail_after(n: usize) -> Self {
 
 The counter is shared between clones via `Arc<AtomicUsize>` so the closure adaptation inside `enable_plugin_atomic` (which captures by reference) observes the same call count. Used in `atomicity_enable.rs` to inject mid-pipeline embedder failures and verify rollback (FR-004).
 
-## Test Organization by Concern (Phase 3)
+## Test Organization by Concern (Phase 3–4)
 
 ### No Environment Mutation in Library API Tests
 
 **Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
 
 **CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
+
+**PTY-driven tests** (`plugin_interactive.rs`) mutate `env` only inside the pty spawning (via `Command::env`), not the parent process.
 
 ### Test Scaffolding Lock-Step
 
@@ -362,6 +439,8 @@ Two parallel path builders are deliberately kept in lock-step:
 2. **Integration test helper:** `tests/common/mod.rs::lifecycle_paths` (for library API integration tests)
 
 If one changes, the other must change too — enforced via manual code review.
+
+**Known duplication:** `paths_for(env: &ToolEnv) -> Paths` appears in `plugin_list.rs`, `plugin_show.rs`, and `plugin_interactive.rs` (3 copies). Planned refactor: promote to `tests/common/mod.rs` when a 4th caller needs it.
 
 ### YAML Frontmatter Quirk (Documented for Test Authors)
 
@@ -382,8 +461,9 @@ No automatic coverage threshold enforced, but the test corpus is organized to be
 
 - **Every error class is tested** — each `TomeError` variant appears in `exit_codes.rs` and often in command-specific tests
 - **Bad-input corpus is explicit** — each parser/validator has a separate test file documenting what shapes are rejected
-- **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/list/show`) has dedicated tests
+- **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/list/show`, `plugin` interactive) has dedicated tests
 - **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable, fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback
+- **Interactive flow tested end-to-end** — `plugin_interactive.rs` covers catalog selector, plugin browser, action prompts, navigation, non-TTY refusal
 - **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift
 
 ## Specimen Tests (Quality Corpus)
@@ -501,7 +581,7 @@ Green on all 4 combinations is required before merge.
 4. Add test case verifying unknown field with similar name is rejected
 5. Run `cargo test manifest_strictness` to verify
 
-### Testing a New Plugin Command (Phase 3)
+### Testing a New Plugin Command (Phase 3–4)
 
 For library API tests (no embedder loading):
 1. Add module under `src/commands/plugin/`
@@ -517,6 +597,15 @@ For CLI tests (no embedder loading):
 3. Use `ToolEnv`, `write_config_for_cli`
 4. Spawn the binary, assert exit code + output
 5. Run `cargo test plugin_*` to verify
+
+For interactive flows (PTY-driven):
+1. Create integration test file `tests/plugin_*.rs` (PTY)
+2. Pre-enable fixtures via library API (avoid loading embedders in CLI)
+3. Spawn binary under pty via `rexpect::spawn_command()`
+4. Use `send_flush()`, `press_enter()`, `press_down()` helpers
+5. Match prompts via `sess.exp_string()`
+6. Assert final state via database queries and exit code
+7. Set `NO_COLOR=1` to make prompt matching reliable
 
 For commands that load embedders (Phase 4+):
 - CLI-only; no library API test needed

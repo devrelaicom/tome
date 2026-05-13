@@ -2,21 +2,21 @@
 
 > **Purpose**: Document what executes in this codebase - languages, runtimes, frameworks, and critical dependencies.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 user-stories slice 1 — plugin enable/disable/list/show, query commands)
+> **Last Updated**: 2026-05-14 (Phase 4 user-story slice 1 — interactive `tome plugin` browse flow with pty testing)
 
 ## Languages & Runtimes
 
 | Language | Version | Purpose |
 |----------|---------|---------|
-| Rust | stable (MSRV: 1.93) | Primary implementation language; synchronous (no async runtime in Phase 1–3) |
+| Rust | stable (MSRV: 1.93) | Primary implementation language; synchronous (no async runtime in Phase 1–4) |
 
 ## Frameworks
 
-Phase 1–3 is a CLI application, not a web framework-based project.
+Phase 1–4 is a CLI application, not a web framework-based project.
 
 | Framework | Version | Purpose |
 |-----------|---------|---------|
-| clap | 4.x | CLI argument parsing and help/version generation |
+| clap | 4.x | CLI argument parsing and help/version generation; bare `tome plugin` (no subcommand) now dispatches to interactive flow via `Option<PluginCommand>` derive pattern |
 
 ## Critical Dependencies
 
@@ -48,7 +48,7 @@ Phase 1–3 is a CLI application, not a web framework-based project.
 | `indicatif` | 0.17 | Progress bars + spinners (TTY-aware) | `src/presentation/progress.rs` — download/reindex progress; refuses on non-TTY |
 | `comfy-table` | 7.x | Table rendering for human-mode list/show output | `src/presentation/tables.rs` — `tome plugin list`, `tome models list`, query results |
 | `owo-colors` | 4.x | Terminal colours with native `NO_COLOR` support | `src/presentation/colour.rs` — colourised output respecting `NO_COLOR` environment variable (principle I) |
-| `inquire` | 0.7 (`crossterm`, no defaults) | Interactive Select/MultiSelect/Confirm prompts | `src/presentation/prompt.rs` — interactive plugin enable/disable; refuses on non-TTY (principle III) |
+| `inquire` | 0.7 (`crossterm`, no defaults) | Interactive Select/MultiSelect/Confirm prompts | `src/presentation/prompt.rs` — interactive plugin enable/disable; bare `tome plugin` browse flow (phase 4); refuses on non-TTY (principle III) |
 | `cc` (build-dep) | 1.x | C compiler driver for the vendored sqlite-vec amalgamation | `build.rs` only |
 
 ONNX Runtime (`ort`) is a transitive dependency through `fastembed`; Tome does
@@ -64,6 +64,19 @@ Phase 3 wires the Phase 2 foundational pieces into user-facing CLI surfaces:
 - Test helper `StubEmbedder::with_force_fail_after(n)` added to `src/embedding/stub.rs` for atomicity testing
 
 No new production dependencies in Phase 3 slice 1 — all pieces are Phase 2 additions wired through Phase 1 plumbing.
+
+### Phase 4 — user-story slice 1 (interactive browse flow)
+
+Phase 4 slice 1 ships the bare `tome plugin` interactive CLI surface:
+- `src/commands/plugin/interactive.rs::run_interactive` orchestrates catalog → plugin → action flow
+- Uses `inquire` `Select`, `Confirm`, and terminal detection (existing production dep, no new additions)
+- Test-driven via `rexpect` pty harness in `tests/plugin_interactive.rs` (dev-only, Unix-only)
+
+| Package | Version | Purpose | Usage Scope | Phase 4 |
+|---------|---------|---------|-------------|---------|
+| `rexpect` | 0.7 | Unix pty harness for interactive CLI testing | `tests/plugin_interactive.rs` only; drives the interactive flow through a real pseudoterminal | dev-dep; no runtime impact |
+
+No new production dependencies in Phase 4 slice 1 — `rexpect` is test-only and does not compile into the release binary.
 
 ## Package Managers & Build Tools
 
@@ -85,7 +98,7 @@ No new production dependencies in Phase 3 slice 1 — all pieces are Phase 2 add
 
 ## Not Used (Explicitly Excluded)
 
-- **Async runtime**: No `tokio`, `async-std`, or similar. Phase 1–3 remains synchronous (`reqwest::blocking`, `rusqlite`, `fastembed`); the MCP server is the future forcing function.
+- **Async runtime**: No `tokio`, `async-std`, or similar. Phase 1–4 remains synchronous (`reqwest::blocking`, `rusqlite`, `fastembed`); the MCP server is the future forcing function.
 - **Git library**: No `libgit2`, `git2`, or vendored Git. `std::process::Command` shells out to system `git` (constitution principle XII).
 - **Direct ONNX Runtime dep**: `ort` is reached transitively through `fastembed` only; no direct linkage from Tome code.
 - **Custom npm/cargo registry overrides**: All packages resolve from public registries.
@@ -103,4 +116,4 @@ No new production dependencies in Phase 3 slice 1 — all pieces are Phase 2 add
 
 ---
 
-*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–3 source code.*
+*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–4 source code.*

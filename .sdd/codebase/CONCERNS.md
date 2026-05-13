@@ -23,6 +23,7 @@ Items to address when working in the area:
 |----|------|-------------|--------|--------|-----------|
 | TD-010 | `src/embedding/download.rs` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner; enhancement for polish pass |
 | TD-020 | Error categorisation | All Phase 1 + Phase 2 codes are enumerated; no catch-all variants | Debuggability | Low | Current approach is sound; closed set enforces completeness |
+| TD-030 | Code duplication (Phase 4) | `paths_for(&ToolEnv) -> Paths` duplicated in 3 integration test files (`plugin_list.rs`, `plugin_show.rs`, `plugin_interactive.rs`) | Test maintainability | Low | Promote to `tests/common/mod.rs` when a 4th caller appears (likely Phase 5 `plugin_disable.rs`) |
 
 ### Low Priority
 
@@ -30,7 +31,6 @@ Nice-to-have improvements:
 
 | ID | Area | Description | Impact | Effort |
 |----|------|-------------|--------|--------|
-| TD-030 | Module organisation | `src/commands/` could be collapsed further in Phase 3 | Code clarity | Low |
 | TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low |
 
 ## Security Concerns
@@ -40,19 +40,19 @@ Nice-to-have improvements:
 | ID | Area | Description | Risk Level | Mitigation | Status |
 |----|------|-------------|------------|-----------|--------|
 | SEC-001 | Phase 2 BGE testing (T088) | Vector search correctness not yet measured against real BGE models (bge-small-en-v1.5, bge-reranker-base) | High | Complete developer-machine pass with real models; validate SC-001 / SC-002 | Pending Phase 3 |
-| SEC-002 | Phase 3 model-download UX | User declines model-download prompt (e.g., in `tome plugin enable`) → returns exit 8 (reused from Interrupted); no dedicated exit code | Medium | Lock down user-decline vs. system-interrupt distinction in future iteration | Design debt |
 
 ### Medium Risk
 
 | ID | Area | Description | Risk Level | Mitigation | Status |
 |----|------|-------------|------------|-----------|--------|
+| SEC-002 | Phase 3+ model-download UX | User declines model-download prompt (e.g., in `tome plugin enable`) → returns exit 8 (reused from Interrupted); no dedicated exit code | Medium | Lock down user-decline vs. system-interrupt distinction in future iteration | Design debt |
 | SEC-010 | Credential scrubber (Phase 1) | Regex-based scrubbing is pattern-based, not semantic; exotic credential formats may leak (e.g., GitLab private tokens with special delimiters) | Medium | Current rules (R-8) cover common patterns. Add integration tests against real Git helper output. Monitor GitHub issues | Ongoing |
-| SEC-011 | Plugin identity validation (Phase 2) | Shape validation prevents directory traversal (`..`, `.`, `/`, etc.), but doesn't constrain character set; Unicode or non-ASCII plugin names are accepted | Low | Lenient on purpose (forward-compat); real-world risk is low. Monitor for exploit reports | Documented |
 
 ### Low Risk
 
 | ID | Area | Description | Risk Level | Mitigation | Status |
 |----|------|-------------|------------|-----------|--------|
+| SEC-011 | Plugin identity validation (Phase 2) | Shape validation prevents directory traversal (`..`, `.`, `/`, etc.), but doesn't constrain character set; Unicode or non-ASCII plugin names are accepted | Low | Lenient on purpose (forward-compat); real-world risk is low. Monitor for exploit reports | Documented |
 | SEC-020 | MSRV drift | Dependency updates may require MSRV bump; current MSRV is pinned (1.93) but not validated in a separate CI job | Low | MSRV CI job exists and passes; keep Renovate PRs reviewed for MSRV compatibility | CI gate in place |
 
 ## Known Bugs
@@ -73,6 +73,7 @@ Code areas that are brittle or risky to modify:
 | `src/catalog/manifest.rs::validate_source` | Path canonicalization behavior differs across platforms (symlinks, case sensitivity); one test failure can indicate subtle cross-platform issue | Test on both Linux and macOS (CI covers both); `tests/path_validation.rs` has Unix-specific symlink tests |
 | `src/catalog/store.rs::write_atomic` | Atomic rename only works on same filesystem; moving across mounts silently falls back to non-atomic copy | Document assumption in code; consider detecting mount boundary and erroring explicitly |
 | `src/embedding/download.rs::download_model` | HTTP stream and checksum verification are separate; cleanup closure ensures both failure paths clean `.partial/` (lines 77–87) | Pipeline closure must wrap full download→verify→rename chain; any new step must be inside closure to maintain atomicity guarantee |
+| `src/presentation/prompt.rs::require_terminal()` | TTY check runs on both stdin and stdout; must catch non-TTY in both dimensions to prevent prompt corruption via piped output | Always call `require_terminal()` at flow entry before any prompt; test with `Command::new()` (no pty) to verify short-circuit |
 
 ## Deprecated Code
 
@@ -82,7 +83,7 @@ Code marked for removal:
 |------|-------------------|----------------|-------------|
 | (none) | — | — | — |
 
-All Phase 1 and Phase 2 foundational code is current; no legacy to remove yet.
+All Phase 1, Phase 2, and Phase 4 code is current; no legacy to remove yet.
 
 ## Performance Concerns
 
@@ -118,6 +119,7 @@ Dependencies that may need attention:
 | `regex` | 1.x | Actively maintained; no known security issues | None | Stable |
 | `reqwest` | 0.11.x (Phase 2) | HTTP client; used for model downloads | Monitor for TLS/security updates | Active |
 | `indicatif` | (Phase 2) | Progress bar library; non-critical | Routine updates | Stable |
+| `inquire` | (Phase 4) | Interactive prompts library; used only in non-TTY-refusable flows | Monitor for prompt-injection or TTY-related bugs; keep up to date | Stable |
 
 **No unmaintained or vulnerable dependencies detected.** `cargo-audit` weekly + PR checks.
 
@@ -132,6 +134,7 @@ Areas that could benefit from enhancement:
 | Cancellation messaging | Silent on Ctrl-C (clean, but terse) | Optional verbose exit message for debugging | Better UX in automation contexts |
 | Symlink security testing | Unix-only symlink escape test | Windows junction/hardlink escape tests | Cross-platform parity |
 | Model download progress (TD-010) | Indeterminate spinner during download | Byte-progress bar with estimated completion | Better UX for large models |
+| `presentation::tables` module exports | `Cell` + `CellAlignment` imported directly by consumers from `comfy_table` | Re-export from `presentation::tables` for convenience | Cleaner API |
 
 ## Monitoring Gaps
 
@@ -193,6 +196,25 @@ Areas lacking proper observability:
 - SEC-001: BGE model testing still pending (T088)
 - SEC-002: User-decline vs. interrupt exit code (design debt)
 - TD-010: Model download progress UX (polish pass)
+
+### Phase 4 (Complete)
+
+**Completed (US2)**:
+- ✓ Interactive `tome plugin` browse flow with catalog/plugin/action selectors
+- ✓ TTY enforcement at flow entry via `require_terminal()` — exit 54 if no TTY (FR-051)
+- ✓ Prompt functions (`select`, `multiselect`, `confirm`) with non-TTY short-circuits
+- ✓ Post-action redraw and navigation (Back, Quit)
+- ✓ Non-TTY refusal test (`plugin_interactive.rs::bare_plugin_without_a_terminal_exits_54_with_pointer_message`)
+- ✓ Scripted pty test covering full navigation tree (T101)
+
+**Key security additions**:
+- Interactive flows refuse to run in non-TTY contexts (exit 54), preventing prompt-injection and mangled input
+- User cancellation via Ctrl-C/Ctrl-D surfaces as exit 8 (Interrupted), semantically aligned with system SIGINT
+- Dependency: `inquire` (MIT) — stable, actively maintained
+
+**Known design debts** (minor):
+- User-declines-model-download prompt reuses exit 8 (same as system interrupt); future phases may lock down distinction (SEC-002)
+- Test code duplicates `paths_for()` helper in 3 files; promote to `tests/common/mod.rs` when 4th caller appears (TD-030)
 
 ---
 

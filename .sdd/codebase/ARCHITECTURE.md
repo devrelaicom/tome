@@ -2,7 +2,7 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1 — plugin enable/disable, query)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse)
 
 ## Architecture Overview
 
@@ -19,6 +19,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 | **Credential Scrubbing at Boundary** | All captured `git` and `reqwest` output passes through credential scrubbing before reaching logging, error display, or structured output. |
 | **Trait-based Embedding Abstraction** | `Embedder` and `Reranker` are seam interfaces; `FastembedEmbedder` wraps `fastembed-rs`, and a deterministic `StubEmbedder` (unit-test only) provides testability without model files. |
 | **Plugin-Dir Resolution: Manifest-First** | `lifecycle::resolve_plugin_dir` reads `tome-catalog.toml`, looks up `id.plugin` in the declared `plugins[].name`, joins with the source; falls back to flat `entry.path.join(&id.plugin)` for backward compat when manifest is absent. Single shared function across `enable`, `disable`, `list`, `show` fixes inconsistency. |
+| **Interactive Three-Level Loop Pattern** | Bare `tome plugin` (no subcommand) enters an interactive flow: `catalog_loop` → `plugin_loop` → `view_loop`, each with a `LoopExit` enum to handle Back/Quit unwinds and error propagation (Phase 4, User Story 2). |
 
 ## Core Components
 
@@ -29,6 +30,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 - **Dependencies**: `clap` (argument parsing), `catalog::git` (signal handler installation).
 - **Dependents**: `commands/` modules (receive parsed args).
 - **Pipeline Entry**: `main()` parses CLI → installs signal handler → dispatches to handler → maps result to exit code.
+- **Phase 4 Change**: `PluginArgs` now wraps an `Option<PluginCommand>` to allow bare `tome plugin` with no subcommand. Routes to `commands::plugin::run_interactive()` when the command is `None`.
 
 ### Catalog Management (`src/catalog/`, `src/commands/catalog/`)
 
@@ -44,7 +46,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 ### Plugin Metadata & Lifecycle (`src/plugin/`, `src/commands/plugin/`)
 
 - **Purpose**: Parse plugin manifests and SKILL.md frontmatter (lenient), manage plugin enable/disable state, orchestrate skill embedding and indexing.
-- **Location**: `src/plugin/` (metadata parsers, lifecycle orchestrator), `src/commands/plugin/` (CLI handlers).
+- **Location**: `src/plugin/` (metadata parsers, lifecycle orchestrator), `src/commands/plugin/` (CLI handlers + interactive flow).
 - **Dependencies**: `catalog::manifest` (read_catalog_manifest), `index::` (open DB, acquire lock, enable_plugin_atomic), `embedding::` (embedder + reranker, model registry, download).
 - **Dependents**: Commands.
 - **Key Patterns**:
@@ -52,6 +54,24 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   - `lifecycle::disable()`: check not-disabled (exit 32) → acquire lock → flip enabled=0 for all (catalog, plugin) rows → release lock.
   - Frontmatter parse: delimiter error is fatal (exit 23); YAML-body error skips one skill + warn (FR-013c).
   - Models: embedder + reranker required by enable and query; optional download in `enable` (CLI owns the TTY prompt; `lifecycle::allow_model_download` is the decision).
+
+### Interactive Browse Flow (`src/commands/plugin/interactive.rs`)
+
+- **Purpose**: Bare `tome plugin` (no subcommand) — provide an interactive catalog → plugin → action browse loop (Phase 4, User Story 2).
+- **Location**: `src/commands/plugin/interactive.rs` (~515 lines).
+- **Public Interface**: `pub fn run_interactive(mode: output::Mode) -> Result<(), TomeError>`.
+- **Loop Architecture** (three levels):
+  1. **`catalog_loop()`**: Display catalog selector; user picks one or Quit.
+  2. **`plugin_loop(catalog_name)`**: Browse plugins in the selected catalog; user picks one or Back.
+  3. **`view_loop(id, plugin_manifest)`**: Display plugin view (mirrors `plugin show`); user selects action: Enable, Disable, or Back.
+- **Control Flow**: Each loop level uses a private `LoopExit` enum to encode:
+  - `Continue` → advance to next level.
+  - `Back` → unwind to previous level.
+  - `Quit` → clean exit with `Ok(())` (exit 0).
+- **Error Handling**:
+  - Enable/disable errors propagate verbatim (same exit codes as non-interactive subcommands).
+  - User cancellation (Esc / Ctrl-C from `inquire` prompts) surfaces as `TomeError::Interrupted`, which is trapped and translated to `Ok(())` per the contract ("always exits 0 on clean exit").
+- **TTY Enforcement** (FR-051): Non-TTY invocation via `presentation::prompt::select()` will refuse with `NotATerminal`, propagating as exit code 98 (FR-022a).
 
 ### Skill Query & Search (`src/index/query.rs`, `src/commands/query.rs`)
 
@@ -244,6 +264,45 @@ format output
 exit(0)
 ```
 
+### Interactive Browse Flow: `tome plugin` (no subcommand)
+
+```
+CLI parse (bare Command::Plugin with option=None)
+       ↓
+dispatch to plugin::run_interactive()
+       ↓
+check TTY (inquire will refuse non-TTY as NotATerminal)
+       ↓
+catalog_loop():
+  → present Select over catalog names + Quit option
+  → user picks catalog or Quit
+  → Quit → return Ok(()) → exit(0)
+  → catalog picked → call plugin_loop(catalog_name)
+       ↓
+plugin_loop(catalog_name):
+  → load index, walk (catalog, plugin) pairs
+  → present Select over plugin names + Back option
+  → user picks plugin or Back
+  → Back → return to catalog_loop
+  → plugin picked → call view_loop(id, manifest)
+       ↓
+view_loop(id, manifest):
+  → render plugin view (as in `plugin show`)
+  → present Select: [Enable | Disable | Back]
+  → Enable → call enable::run(id)
+         → on success, redraw plugin view (loop within view)
+         → on error, propagate (exit with non-zero code)
+  → Disable → confirm prompt, call lifecycle::disable()
+         → on success, redraw plugin view
+         → on error, propagate
+  → Back → return to plugin_loop
+       ↓
+Esc / Ctrl-C at any level:
+  → inquire surfaces as TomeError::Interrupted
+  → trap and convert to Ok(())
+  → exit(0)
+```
+
 ### Query Flow: `tome query <text>`
 
 ```
@@ -309,6 +368,7 @@ exit(0)
 5. **Orthogonal logging**: `logging.rs` is initialized at startup and orthogonal to `--json` mode. No module imports `logging`; the global subscriber is set up once in `main()`.
 6. **Config types, not logic, in `config.rs`**: `config.rs` defines only data structures; I/O is in `store.rs`.
 7. **Plugin-dir resolution is centralized**: `plugin::lifecycle::resolve_plugin_dir` is the single source of truth; re-exported to CLI handlers via `commands/plugin/mod.rs` to avoid cross-boundary imports.
+8. **Interactive flow is command-layer only**: `commands/plugin/interactive.rs` uses presentation layer (prompts, tables), command handlers (enable, disable), and lifecycle/config APIs. It is test-driven via `rexpect` pty harness (`tests/plugin_interactive.rs`) rather than unit-test injection.
 
 ## Key Interfaces & Contracts
 
@@ -331,6 +391,7 @@ exit(0)
 | `LifecycleDeps` | Dependency injection struct for `lifecycle::enable/disable`. | `src/plugin/lifecycle.rs` |
 | `Candidate` + `Scored` | KNN result and scored result records. | `src/embedding/mod.rs` |
 | `output::Mode` | Enum selecting human or JSON formatting. | `src/output.rs` |
+| `LoopExit` | Private enum in `interactive.rs` encoding Back/Quit/Continue state. | `src/commands/plugin/interactive.rs` |
 
 ## Signal Handling & Cancellation
 
@@ -371,7 +432,7 @@ exit(0)
 | **Credential Scrubbing** | Regex rules applied to all captured git and reqwest output before display or error propagation. | `src/catalog/git.rs::scrub_credentials()`, `src/embedding/download.rs` |
 | **Error Mapping** | Every `Result<_, TomeError>` eventually reaches `main()`, which maps to exit code. | `src/error.rs`, `src/main.rs` |
 | **Logging & Verbosity** | Global tracing subscriber initialized once; orthogonal to `--json` mode. | `src/logging.rs`, `src/main.rs` |
-| **TTY Detection** | Used by interactive commands (removal confirmation, model download prompt), progress spinners, and output formatting. | `src/output.rs::stdin_is_tty()`, `stdout_is_tty()`, `src/presentation/prompt.rs`, `src/presentation/progress.rs` |
+| **TTY Detection** | Used by interactive commands (removal confirmation, model download prompt, interactive browse), progress spinners, and output formatting. | `src/output.rs::stdin_is_tty()`, `stdout_is_tty()`, `src/presentation/prompt.rs`, `src/presentation/progress.rs`, `src/commands/plugin/interactive.rs` |
 | **Model Presence** | Two-stage check: manifest.json exists on disk AND parses. Applied before `enable` and `query`. | `src/plugin/mod.rs::model_manifest_ok()`, `src/embedding/download.rs` |
 | **Path Validation** | Plugin sources in `tome-catalog.toml` are validated relative to catalog root (no `..`, no escape). Plugin source in `lifecycle::resolve_plugin_dir` is manifest-declared or flat-layout fallback. | `src/catalog/manifest.rs::validate_source()`, `src/plugin/lifecycle.rs::resolve_plugin_dir()` |
 | **Drift Detection** | Embedder and reranker identity (name + version) stored in index meta; compared at query time. Embedder drift → hard fail (exit 41/42); reranker drift → warn. | `src/index/meta.rs`, `src/commands/query.rs::check_drift()` |
