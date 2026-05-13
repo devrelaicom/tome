@@ -238,6 +238,62 @@ pub fn reindex_plugin(
     }
 }
 
+/// Cascade-disable every plugin in `plugins` under one advisory-lock
+/// acquisition. Drops each plugin's rows from `skills` + `skill_embeddings`
+/// using the same connection inside the same lock window. Returns the total
+/// number of dropped `skills` rows summed across plugins.
+///
+/// Used by `tome catalog remove --force`. The single-lock-per-cascade
+/// semantics match `contracts/catalog-extensions.md` §"tome catalog remove".
+///
+/// Unlike `auto_disable_orphan`, this function does NOT require an
+/// `Embedder` — the cascade is pure deletion. The seeds are still required
+/// because `index::open` validates them against the on-disk `meta` rows.
+pub fn cascade_disable_for_catalog(
+    paths: &Paths,
+    catalog: &str,
+    plugins: &[String],
+    embedder_seed: MetaSeed,
+    reranker_seed: MetaSeed,
+) -> Result<u32, TomeError> {
+    if plugins.is_empty() {
+        return Ok(0);
+    }
+    let lock = acquire_lock(&paths.index_lock)?;
+    let result = (|| -> Result<u32, TomeError> {
+        let conn = index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: embedder_seed,
+                reranker: reranker_seed,
+            },
+        )?;
+        let mut total: u32 = 0;
+        for plugin in plugins {
+            let dropped = delete_by_plugin(&conn, catalog, plugin)?;
+            total = total.saturating_add(dropped);
+        }
+        Ok(total)
+    })();
+
+    match result {
+        Ok(total) => {
+            lock.release()?;
+            info!(
+                catalog,
+                plugins_disabled = plugins.len(),
+                rows_dropped = total,
+                "catalog cascade disable completed",
+            );
+            Ok(total)
+        }
+        Err(e) => {
+            drop(lock);
+            Err(e)
+        }
+    }
+}
+
 /// De-index every row for a plugin whose `plugin.json` is gone post-refresh
 /// (FR-033). Returns the number of dropped `skills` rows. The caller is
 /// responsible for emitting the loud-warning stderr line.
