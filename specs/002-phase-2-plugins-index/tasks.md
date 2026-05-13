@@ -292,10 +292,10 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Tests
 
-- [ ] T132 [P] [US4] Add `tests/models_download.rs` — local HTTP server fixture (e.g., `hyper` or `tiny_http` already in dev-deps if not, add as dev-dep); assert success path, checksum mismatch (exit 32), partial-rename safety on simulated interrupt (FR-020a), idempotent re-run without `--force` is a no-op (use devs:rust-dev agent)
-- [ ] T133 [P] [US4] Add `tests/models_list.rs` — list with no models installed shows missing for both; list with one installed cleanly reports ok; list with `--verify` against a tampered file reports `ChecksumMismatched` (use devs:rust-dev agent)
-- [ ] T134 [P] [US4] Add `tests/models_remove.rs` — remove with confirmation prompt; `--force` bypass; non-TTY without `--force` exits 54; remove of missing model exits 30 (use devs:rust-dev agent)
-- [ ] T135 [GIT] Commit: test: cover models download/list/remove and error paths
+- [X] T132 [P] [US4] Add `tests/models_download.rs` — local HTTP server fixture (e.g., `hyper` or `tiny_http` already in dev-deps if not, add as dev-dep); assert success path, checksum mismatch (exit 32), partial-rename safety on simulated interrupt (FR-020a), idempotent re-run without `--force` is a no-op (use devs:rust-dev agent)
+- [X] T133 [P] [US4] Add `tests/models_list.rs` — list with no models installed shows missing for both; list with one installed cleanly reports ok; list with `--verify` against a tampered file reports `ChecksumMismatched` (use devs:rust-dev agent)
+- [X] T134 [P] [US4] Add `tests/models_remove.rs` — remove with confirmation prompt; `--force` bypass; non-TTY without `--force` exits 54; remove of missing model exits 30 (use devs:rust-dev agent)
+- [X] T135 [GIT] Commit: test: cover models download/list/remove and error paths
 
 ### Closing
 
