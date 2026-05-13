@@ -320,30 +320,30 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Phase Start
 
-- [ ] T143 [GIT] Verify working tree is clean before starting Phase 7
-- [ ] T144 [US5] Create `retro/P7.md`
+- [X] T143 [GIT] Verify working tree is clean before starting Phase 7
+- [X] T144 [US5] Create `retro/P7.md`
 
 ### Implementation
 
-- [ ] T145 [US5] Extend `src/commands/catalog.rs::update` to call `plugin::lifecycle::reindex_changed(plugin_id, conn, embedder)` for every enabled plugin in each refreshed catalog, accumulating a summary. Detect removed-upstream plugins and auto-disable them per FR-033 (use devs:rust-dev agent)
-- [ ] T146 [P] [US5] Add `reindex_changed` and `reindex_force` to `src/plugin/lifecycle.rs` — diff content hashes, re-embed only modified skills; force-mode re-embeds the whole scope (use devs:rust-dev agent)
-- [ ] T147 [GIT] Commit: feat(catalog): re-embed changed skills on update; auto-disable orphaned plugins
-- [ ] T148 [P] [US5] Implement `src/commands/reindex.rs` with the `reindex [scope]` subcommand wired to lifecycle functions; honour `--force`; render summary; map errors per contract (use devs:rust-dev agent)
-- [ ] T149 [US5] Wire `reindex` into `src/cli.rs` (use devs:rust-dev agent)
-- [ ] T150 [GIT] Commit: feat(reindex): add explicit reindex subcommand
+- [X] T145 [US5] Extend `src/commands/catalog.rs::update` to call `plugin::lifecycle::reindex_changed(plugin_id, conn, embedder)` for every enabled plugin in each refreshed catalog, accumulating a summary. Detect removed-upstream plugins and auto-disable them per FR-033 (use devs:rust-dev agent)
+- [X] T146 [P] [US5] Add `reindex_changed` and `reindex_force` to `src/plugin/lifecycle.rs` — diff content hashes, re-embed only modified skills; force-mode re-embeds the whole scope (use devs:rust-dev agent)
+- [X] T147 [GIT] Commit: feat(catalog): re-embed changed skills on update; auto-disable orphaned plugins
+- [X] T148 [P] [US5] Implement `src/commands/reindex.rs` with the `reindex [scope]` subcommand wired to lifecycle functions; honour `--force`; render summary; map errors per contract (use devs:rust-dev agent)
+- [X] T149 [US5] Wire `reindex` into `src/cli.rs` (use devs:rust-dev agent)
+- [X] T150 [GIT] Commit: feat(reindex): add explicit reindex subcommand
 
 ### Tests
 
-- [ ] T151 [P] [US5] Add `tests/catalog_update_reindex.rs` — fixture catalog with one enabled plugin; mutate one SKILL.md upstream, refresh; assert only the modified skill was re-embedded (stub-embedder call count); assert summary table fields; assert no spurious work when nothing changed (use devs:rust-dev agent)
-- [ ] T152 [P] [US5] Add a removed-upstream case in the same file — delete a plugin upstream, refresh, assert auto-disable + row deletion + loud-warning stderr line (use devs:rust-dev agent)
-- [ ] T153 [P] [US5] Add `tests/reindex.rs` — `tome reindex` (no scope) hits every enabled plugin; `tome reindex <catalog>` scopes; `tome reindex --force` re-embeds even unchanged skills (use devs:rust-dev agent)
-- [ ] T154 [GIT] Commit: test: cover catalog update reindex and explicit reindex
+- [X] T151 [P] [US5] Add `tests/catalog_update_reindex.rs` — fixture catalog with one enabled plugin; mutate one SKILL.md upstream, refresh; assert only the modified skill was re-embedded (stub-embedder call count); assert summary table fields; assert no spurious work when nothing changed (use devs:rust-dev agent)
+- [X] T152 [P] [US5] Add a removed-upstream case in the same file — delete a plugin upstream, refresh, assert auto-disable + row deletion + loud-warning stderr line (use devs:rust-dev agent)
+- [X] T153 [P] [US5] Add `tests/reindex.rs` — `tome reindex` (no scope) hits every enabled plugin; `tome reindex <catalog>` scopes; `tome reindex --force` re-embeds even unchanged skills (use devs:rust-dev agent)
+- [X] T154 [GIT] Commit: test: cover catalog update reindex and explicit reindex
 
 ### Closing
 
-- [ ] T155 [US5] Run `/sdd:map incremental`
-- [ ] T156 [US5] Review `retro/P7.md`
-- [ ] T157 [GIT] Commit: docs: Phase 7 codebase refresh + retro
+- [X] T155 [US5] Run `/sdd:map incremental`
+- [X] T156 [US5] Review `retro/P7.md`
+- [X] T157 [GIT] Commit: docs: Phase 7 codebase refresh + retro
 
 ### Phase 7 Completion
 
