@@ -66,7 +66,7 @@ pub(crate) fn missing_models(paths: &Paths) -> Vec<&'static ModelEntry> {
 
 /// `MetaSeed` values matching the `MODEL_REGISTRY` embedder / reranker.
 /// Wrapping access keeps the CLI from hard-coding indices.
-pub(crate) fn registry_seeds() -> (crate::index::MetaSeed, crate::index::MetaSeed) {
+pub fn registry_seeds() -> (crate::index::MetaSeed, crate::index::MetaSeed) {
     use crate::embedding::registry::ModelKind;
     let mut embedder = None;
     let mut reranker = None;
