@@ -163,6 +163,70 @@ fn missing_manifest_exits_5() {
 }
 
 #[test]
+fn successful_add_persists_scrubbed_url_in_config() {
+    // file:// URLs with embedded userinfo clone fine — git silently ignores
+    // the userinfo for local transports. The scrub must still strip the
+    // credentials before they land in config.toml or on stdout.
+    let fix = Fixture::build_sample();
+    let env = ToolEnv::new();
+    let url_with_creds = fix.url.replacen("file://", "file://alice:supersecret@", 1);
+
+    let out = env
+        .cmd()
+        .args(["catalog", "add", &url_with_creds])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "expected exit 0, got {:?}, stderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("supersecret") && !stdout.contains("alice:"),
+        "credentials leaked on stdout: {stdout}",
+    );
+    let config_text = std::fs::read_to_string(env.config_file()).expect("config written");
+    assert!(
+        !config_text.contains("supersecret") && !config_text.contains("alice:"),
+        "credentials leaked into config.toml:\n{config_text}",
+    );
+    // The catalog itself is still registered.
+    assert!(
+        config_text.contains("[catalogs.sample-experts]"),
+        "expected sample-experts to be registered, got:\n{config_text}",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn config_toml_is_chmod_0600_on_unix() {
+    use std::os::unix::fs::PermissionsExt;
+    let fix = Fixture::build_sample();
+    let env = ToolEnv::new();
+    let out = env
+        .cmd()
+        .args(["catalog", "add", &fix.url])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let perms = std::fs::metadata(env.config_file()).unwrap().permissions();
+    // Only the low 9 mode bits are meaningful here.
+    assert_eq!(
+        perms.mode() & 0o777,
+        0o600,
+        "config.toml should be 0600, got {:o}",
+        perms.mode() & 0o777,
+    );
+}
+
+#[test]
 fn git_failure_with_credential_url_is_scrubbed() {
     let env = ToolEnv::new();
     // URL with embedded credentials pointing at nothing. Git will fail; we

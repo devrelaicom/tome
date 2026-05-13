@@ -25,6 +25,15 @@ fn http_url_with_userinfo_is_stripped() {
 }
 
 #[test]
+fn file_url_with_userinfo_is_stripped() {
+    // `file://user:secret@/path` is unusual but git accepts it (silently
+    // ignoring the userinfo). The scrub must still strip it before the
+    // URL is persisted to `config.toml` or echoed on stdout.
+    check("file://alice:supersecret@/tmp/repo", "file:///tmp/repo");
+    check("ssh://bob:hunter2@host/path", "ssh://host/path");
+}
+
+#[test]
 fn ssh_url_host_preserved_login_removed() {
     let out = scrub_to_string(b"failed: git@github.com:owner/repo.git is not reachable");
     assert!(out.contains("git@<host>:owner/repo"), "got: {}", out);

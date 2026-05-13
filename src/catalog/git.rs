@@ -47,8 +47,14 @@ pub fn scrub_credentials(input: &[u8]) -> Vec<u8> {
     static KV_SECRET: OnceLock<Regex> = OnceLock::new();
     static LONG_HEX: OnceLock<Regex> = OnceLock::new();
 
-    let url_login = URL_LOGIN
-        .get_or_init(|| Regex::new(r"(?P<scheme>https?://)[^/@\s]+@").expect("valid regex"));
+    // Match any URI scheme (RFC 3986 §3.1) followed by `userinfo@`. Covers
+    // `https://`, `http://`, `git://`, `ssh://`, and — relevant for
+    // `tome catalog add file://user:token@/path` — `file://`. Tools like
+    // `git` silently ignore userinfo for local transports, but the user
+    // typed it and we promised not to persist it.
+    let url_login = URL_LOGIN.get_or_init(|| {
+        Regex::new(r"(?P<scheme>[a-z][a-z0-9+.-]*://)[^/@\s]+@").expect("valid regex")
+    });
     let ssh_login =
         SSH_LOGIN.get_or_init(|| Regex::new(r"(?P<at>\bgit@)[^\s:]+:").expect("valid regex"));
     // The optional `(?:...\s+)?` permits "Authorization: Bearer <token>" to
