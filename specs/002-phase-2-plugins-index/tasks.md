@@ -156,12 +156,12 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Phase Start
 
-- [ ] T071 [GIT] Verify working tree is clean before starting Phase 3
-- [ ] T072 [US1] Create `specs/002-phase-2-plugins-index/retro/P3.md` from the standard retro template
+- [X] T071 [GIT] Verify working tree is clean before starting Phase 3
+- [X] T072 [US1] Create `specs/002-phase-2-plugins-index/retro/P3.md` from the standard retro template
 
 ### Implementation
 
-- [ ] T073 [P] [US1] Create `src/plugin/lifecycle.rs` — `enable(plugin_id, conn, embedder) -> Result<EnableSummary>` and `disable(plugin_id, conn) -> Result<DisableSummary>` per `contracts/plugin-commands.md`. Enable is atomic per plugin (one transaction wrapping embed-and-insert per FR-004); skill-header parse failures (delimiters) abort with `SkillFrontmatterParseError`, malformed YAML body skips the skill with a warning per FR-013c (use devs:rust-dev agent)
+- [X] T073 [P] [US1] Create `src/plugin/lifecycle.rs` — `enable(plugin_id, conn, embedder) -> Result<EnableSummary>` and `disable(plugin_id, conn) -> Result<DisableSummary>` per `contracts/plugin-commands.md`. Enable is atomic per plugin (one transaction wrapping embed-and-insert per FR-004); skill-header parse failures (delimiters) abort with `SkillFrontmatterParseError`, malformed YAML body skips the skill with a warning per FR-013c (use devs:rust-dev agent)
 - [ ] T074 [US1] Wire the model-presence prompt into lifecycle: if embedder / reranker is missing, prompt via `presentation::prompt` when TTY (download with progress, then proceed); exit `ModelMissing` when non-TTY (FR-024 / FR-025) (use devs:rust-dev agent)
 - [ ] T075 [US1] Create `src/commands/plugin.rs` with `enable`, `list`, `show` subcommand handlers. Wire CLI parsing via `clap` derive in `src/cli.rs`. Output via `presentation::tables` for human form, JSON via `output::Json`. Apply structured errors per `contracts/plugin-commands.md` (use devs:rust-dev agent)
 - [ ] T076 [GIT] Commit: feat(plugin): add lifecycle enable/disable + plugin CLI surface (enable/list/show)

@@ -8,11 +8,13 @@
 pub mod components;
 pub mod frontmatter;
 pub mod identity;
+pub mod lifecycle;
 pub mod manifest;
 
 pub use components::ComponentCounts;
 pub use frontmatter::{FrontmatterError, ParsedSkill, SkillFrontmatter};
 pub use identity::{PluginId, PluginIdParseError, SegmentRejection};
+pub use lifecycle::{DisableOutcome, EnableOutcome, LifecycleDeps, disable, enable};
 pub use manifest::{PluginAuthor, PluginManifest, manifest_path_for, parse_plugin_manifest};
 
 use time::OffsetDateTime;
