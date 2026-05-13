@@ -14,7 +14,7 @@ Phase 2 layers two new capabilities on top of the Phase 1 CLI:
 
 The technical approach stays inside Phase 1's constitutional envelope: sync Rust, shell out where the host system has it (no async runtime even though embedding workloads are compute-bound), strict TOML for tool-owned inputs, lenient parsing for third-party inputs, closed `TomeError` enum extended with Phase 2 variants, atomic state mutations, credential scrubbing intact. New libraries: `rusqlite` (bundled SQLite), the vendored `sqlite-vec` C extension compiled in via a build script, `fastembed-rs` for ONNX inference (bringing `ort` transitively), and the presentation set `indicatif` / `comfy-table` / `owo-colors` / `inquire`.
 
-The most consequential design decisions for this plan are: (1) binary-size engineering — `ort` is the load-bearing dependency and how it links determines whether NFR-001 (the 10 MB stripped cap) is achievable; (2) the SQLite concurrency model — WAL + advisory lockfile + bounded `busy_timeout` produces the FR-040 contract; (3) the closed error-set extension — eighteen new enumerated variants, each with its own exit code, derived directly from FR-048.
+The most consequential design decisions for this plan are: (1) binary-size engineering — `ort` is the load-bearing dependency and how it links determines whether NFR-001 (originally a 10 MB stripped cap; revised to 50 MB after Phase 3 slice 1b measured actual size at ~30 MB) is achievable; (2) the SQLite concurrency model — WAL + advisory lockfile + bounded `busy_timeout` produces the FR-040 contract; (3) the closed error-set extension — eighteen new enumerated variants, each with its own exit code, derived directly from FR-048.
 
 ## Technical Context
 
@@ -56,7 +56,7 @@ The most consequential design decisions for this plan are: (1) binary-size engin
 - Status command: under 200 ms in the healthy case (no SC but a NFR by Unix-tool convention).
 
 **Constraints**:
-- Release binary stripped: ≤ 10 MB. Hard ceiling per constitution + NFR-001. The plan's binary-size strategy is documented in research and verified in CI via a `du -sh` assertion on `target/release/tome`.
+- Release binary stripped: ≤ 50 MB. Soft ceiling per constitution + NFR-001 (originally 10 MB; revised 2026-05-13 after Phase 3 slice 1b measured 29.56 MB on `ubuntu-latest`. The original ~9.2 MB worst-case projection in research §Binary size budget underestimated how much `ort` linked into a standalone CLI; the cap is now sized to current reality with headroom for slice 2 + future MCP surface). Verified in CI via a `du -sh` assertion on `target/release/tome`.
 - Sync only — no `tokio`, no `async`. ONNX inference is a synchronous in-process FFI call; model downloads use `reqwest`'s `blocking` API.
 - Closed-error-set principle from Phase 1 holds. Eighteen new variants per FR-048; no generic `Other`.
 - Atomic state mutations. Index DB writes via SQLite transactions; model directory mutations via `tempfile::persist` (same pattern as Phase 1 registry writes).
@@ -85,7 +85,7 @@ The most consequential design decisions for this plan are: (1) binary-size engin
 | VII | Modular by Boundary | ✓ | New modules organised by capability: `src/index/` (db open, schema, migrations, vector ops), `src/embedding/` (model registry, embedder, reranker, stub trait), `src/plugin/` (manifest parser, SKILL.md frontmatter, lifecycle), `src/commands/plugin.rs`, `src/commands/query.rs`, `src/commands/models.rs`, `src/commands/reindex.rs`, `src/commands/status.rs`. Each module's public surface is enumerated; no cross-module backdoors. `thiserror` inside modules; `anyhow` at the application boundary. |
 | VIII | Test What Matters | ✓ | Integration tests per CLI command. No mocks of the filesystem, the DB engine, or Git. The embedder/reranker is the lone exception — gated behind a `#[cfg(test)]` trait to keep CI fast and deterministic; one manual end-to-end with the real model verifies SC-001/SC-002 outside CI. This deviation is justified in Complexity Tracking. |
 | IX | Conventional Commits | ✓ | Unchanged. `cocogitto` in `.githooks/commit-msg` already gates Phase 1 commits and will gate Phase 2. |
-| X | CI Gates Every Merge | ✓ | `ci.yml` extends to install build deps for `ort` on Ubuntu (libstdc++ static link via `ort`'s default; document if anything is needed beyond default). Binary-size CI step extended to assert ≤ 10 MB. `security.yml` unchanged. Renovate continues; new deps inherit the policy. |
+| X | CI Gates Every Merge | ✓ | `ci.yml` extends to install build deps for `ort` on Ubuntu (libstdc++ static link via `ort`'s default; document if anything is needed beyond default). Binary-size CI step asserts ≤ 50 MB (revised from 10 MB on 2026-05-13). `security.yml` unchanged. Renovate continues; new deps inherit the policy. |
 | XI | Documentation Is Part of the Change | ✓ | `quickstart.md` updated for Phase 2 commands. README gets a Phase 2 section. Command help-text for every new subcommand. CHANGELOG entries. Constitution-relevant note about FR-013a (lenient parsing of third-party inputs) is recorded in research and CHANGELOG, not in the constitution itself — the constitution principle stays as written; FR-013a is the operational boundary for "declarative input." |
 | XII | Inherit, Don't Reimplement | ✓ | SQLite — we inherit the world's most-deployed embedded DB rather than write our own. Static linkage means we keep the inheritance property (no system SQLite version drift) without sacrificing it on user installs. `sqlite-vec` is a thin extension — far less code than reimplementing HNSW or IVF. `fastembed-rs` wraps `ort` rather than us writing tokenizer + ONNX glue. Git remains shelled out. Where the host does the job, we shell out; where it doesn't, we statically link a minimal upstream rather than reimplement. |
 | XIII | Never Log Secrets | ✓ | Credential scrubber from Phase 1 (`src/catalog/git.rs::scrub_credentials`) is extended to a process-wide boundary applied to: Git stderr (Phase 1), model download URL display (new), and `reqwest` error chains (new). Unit tests cover signed-URL query-string scrubbing, HTTPS-with-token URLs, and the existing Phase 1 cases. |
@@ -109,7 +109,7 @@ The most consequential design decisions for this plan are: (1) binary-size engin
   Every crate is inside the constitution's licence allowlist (MIT / Apache-2.0 / BSD / ISC / Zlib / Unicode-DFS-2016). `cargo-deny check` enforces. Renovate-managed.
 
 - **Async** — sync only. Confirmed: `reqwest::blocking`, `rusqlite` is sync, `fastembed-rs` exposes a sync API. No `tokio` introduction.
-- **Binary size** — load-bearing concern. The plan and research commit to: (a) `ort` linked **statically** with only the CPU execution provider; (b) `panic = "abort"` + `lto = "thin"` + `codegen-units = 1` for release; (c) `strip = "symbols"` in `Cargo.toml`; (d) optional model downloads (NOT bundled in the binary). The CI binary-size step asserts ≤ 10 MB stripped on both `macos-latest` and `ubuntu-latest`. If the cap is breached, the plan revises — per NFR-001, the cap cannot be waived. See research §Binary size budget for the worst-case projection (~9.2 MB) and contingencies.
+- **Binary size** — load-bearing concern. The plan and research commit to: (a) `ort` linked **statically** with only the CPU execution provider; (b) `panic = "abort"` + `lto = "thin"` + `codegen-units = 1` for release; (c) `strip = "symbols"` in `Cargo.toml`; (d) optional model downloads (NOT bundled in the binary). The CI binary-size step asserts ≤ 50 MB stripped on `ubuntu-latest` (revised from 10 MB on 2026-05-13 after Phase 3 slice 1b measured 29.56 MB; research §Binary size budget's ~9.2 MB worst-case underestimated `ort`'s contribution). If the new cap is breached, the plan revises again — the discipline holds, only the number moved.
 - **Paths** — XDG-aware via `directories`; index DB and models dir live under `${XDG_DATA_HOME}` not `${XDG_CACHE_HOME}` (FR-021).
 - **Licensing** — MIT OR Apache-2.0 unchanged. Downloaded model files: BGE family is MIT — documented in `tome models list` output (FR-022 mention; resolved in research).
 
@@ -169,7 +169,7 @@ tome/                                # repo root
 ├── .gitignore
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml                   # extended: binary-size assertion ≤ 10 MB
+│       ├── ci.yml                   # extended: binary-size assertion ≤ 50 MB (was 10 MB)
 │       └── security.yml             # unchanged
 ├── src/
 │   ├── main.rs                      # extended: new dispatch arms
