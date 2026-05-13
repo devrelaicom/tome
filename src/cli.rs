@@ -25,6 +25,9 @@ pub enum Command {
     /// Manage registered catalogs.
     #[command(subcommand)]
     Catalog(CatalogCommand),
+    /// Manage plugins from registered catalogs.
+    #[command(subcommand)]
+    Plugin(PluginCommand),
 }
 
 #[derive(Debug, Subcommand)]
@@ -81,6 +84,43 @@ pub struct CatalogUpdateArgs {
 pub struct CatalogShowArgs {
     /// The catalog display name to inspect.
     pub name: String,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PluginCommand {
+    /// Enable a plugin: index its skills and start surfacing them in queries.
+    Enable(PluginEnableArgs),
+    /// List plugins discoverable across every registered catalog.
+    List(PluginListArgs),
+    /// Show one plugin's metadata, component counts, and index status.
+    Show(PluginShowArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct PluginEnableArgs {
+    /// The plugin to enable, as `<catalog>/<plugin>`.
+    pub id: String,
+    /// Skip the model-download confirmation prompt. Required to enable a
+    /// plugin from a non-interactive context (e.g. CI) when models are
+    /// not yet installed.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct PluginListArgs {
+    /// Restrict the listing to one catalog.
+    #[arg(long)]
+    pub catalog: Option<String>,
+    /// Hide disabled and unindexable plugins.
+    #[arg(long = "enabled-only")]
+    pub enabled_only: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct PluginShowArgs {
+    /// The plugin to inspect, as `<catalog>/<plugin>`.
+    pub id: String,
 }
 
 impl Cli {
