@@ -113,13 +113,7 @@ pub(crate) fn reranker_entry() -> &'static ModelEntry {
         .expect("MODEL_REGISTRY must declare exactly one reranker")
 }
 
-/// Render `bytes` as a human-readable MiB string with no fractional digits.
-/// Inline helper so we avoid pulling in `humansize` or similar (T074 says
-/// no new dependencies).
-pub(crate) fn human_mb(bytes: u64) -> String {
-    let mb = (bytes as f64 / 1_048_576.0).round() as u64;
-    format!("{mb} MB")
-}
+pub(crate) use crate::presentation::format::human_mb;
 
 /// Human-relative duration from `then` to "now", bucketed as:
 /// * < 60s   → "just now"

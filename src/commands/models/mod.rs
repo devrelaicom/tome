@@ -123,10 +123,4 @@ pub fn primary_file_path(paths: &Paths, entry: &ModelEntry) -> Result<Option<Pat
     Ok(Some(paths.model_path(entry.name)?.join(primary)))
 }
 
-/// Render `bytes` as a human-readable MiB string with no fractional digits.
-/// Inline mirror of `commands::plugin::human_mb`; duplicated to keep module
-/// boundaries clean. Worth promoting if a third caller appears.
-pub fn human_mb(bytes: u64) -> String {
-    let mb = (bytes as f64 / 1_048_576.0).round() as u64;
-    format!("{mb} MB")
-}
+pub use crate::presentation::format::human_mb;

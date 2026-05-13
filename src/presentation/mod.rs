@@ -17,6 +17,7 @@
 //! contingency ladder in research §R1) is a one-file change.
 
 pub mod colour;
+pub mod format;
 pub mod progress;
 pub mod prompt;
 pub mod tables;

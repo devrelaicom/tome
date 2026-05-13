@@ -17,7 +17,6 @@
 use std::io::Write;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::cli::StatusArgs;
 use crate::embedding::download::sha256_file;
@@ -161,20 +160,34 @@ fn check_index(paths: &Paths) -> Result<IndexHealth, TomeError> {
         Err(_) => None,
     };
 
-    let integrity_ok = integrity::check(&conn).is_ok();
+    let mut integrity_ok = integrity::check(&conn).is_ok();
 
-    let plugins_enabled: i64 = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT plugin) FROM skills WHERE enabled = 1",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    let skills_indexed: i64 = conn
-        .query_row("SELECT COUNT(*) FROM skills WHERE enabled = 1", [], |r| {
+    // A query_row failure here is rare (the schema bootstrap created the
+    // table), but if it happens it indicates a corrupt index. Treat that
+    // as an integrity failure rather than reporting `(0, 0)` which would
+    // look like an empty install. The numeric fields stay at 0 because
+    // we genuinely don't know.
+    let plugins_enabled: i64 = match conn.query_row(
+        "SELECT COUNT(DISTINCT plugin) FROM skills WHERE enabled = 1",
+        [],
+        |r| r.get(0),
+    ) {
+        Ok(n) => n,
+        Err(_) => {
+            integrity_ok = false;
+            0
+        }
+    };
+    let skills_indexed: i64 =
+        match conn.query_row("SELECT COUNT(*) FROM skills WHERE enabled = 1", [], |r| {
             r.get(0)
-        })
-        .unwrap_or(0);
+        }) {
+            Ok(n) => n,
+            Err(_) => {
+                integrity_ok = false;
+                0
+            }
+        };
 
     Ok(IndexHealth {
         present: true,
@@ -219,7 +232,7 @@ fn classify(
     index: &IndexHealth,
     drift: &DriftStatus,
 ) -> OverallHealth {
-    if embedder.state != "ok" || !index.integrity_ok && index.present {
+    if embedder.state != "ok" || (!index.integrity_ok && index.present) {
         return OverallHealth::Unhealthy;
     }
     if matches!(
@@ -387,11 +400,4 @@ pub fn print_version(json: bool) {
         println!("embedder: {} {}", embedder.name, embedder.version);
         println!("reranker: {} {}", reranker.name, reranker.version);
     }
-}
-
-// Suppress unused-import on Sha256/Digest if rustc decides to inline the
-// hash path. Keeps the build robust to refactors of `sha256_file`.
-#[allow(dead_code)]
-fn _force_sha_use() -> Sha256 {
-    Sha256::new()
 }
