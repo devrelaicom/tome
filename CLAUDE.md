@@ -6,15 +6,16 @@ This file gives Claude Code persistent context about the Tome project. Keep it t
 
 **Tome** is a Rust CLI (and eventually MCP server) that makes Claude Code's plugin ecosystem work across other agentic coding harnesses (Cursor, Codex, Gemini CLI, OpenCode, …).
 
-- **Current phase:** Phase 2, User Story 2 — closing. Interactive `tome plugin` browse flow shipped (PRs #16–#17). Closeout in PR #18.
+- **Current phase:** Phase 2, User Story 3 — closing. `tome plugin disable` + cheap re-enable verification shipped (PRs #19–#20). Closeout in PR #21.
 - **Phase 1 PRD (shipped):** [`PRDs/phase-1.md`](./PRDs/phase-1.md)
 - **Phase 2 PRD (in progress):** [`PRDs/phase-2.md`](./PRDs/phase-2.md)
 - **Constitution:** [`CONSTITUTION.md`](./CONSTITUTION.md) (v1.2.0 — binary size cap revised 10 MB → 50 MB on 2026-05-13)
 - **Active spec:** [`specs/002-phase-2-plugins-index/spec.md`](./specs/002-phase-2-plugins-index/spec.md)
 - **Active plan:** [`specs/002-phase-2-plugins-index/plan.md`](./specs/002-phase-2-plugins-index/plan.md)
-- **Codebase docs:** [`.sdd/codebase/`](./.sdd/codebase/) — all 8 documents refreshed 2026-05-13 against US2-complete source via `/sdd:map incremental`.
+- **Codebase docs:** [`.sdd/codebase/`](./.sdd/codebase/) — all 8 documents refreshed 2026-05-13 against US3-complete source via `/sdd:map incremental`.
 - **US1 status:** `tome plugin enable | list | show` + `tome query` ship end-to-end. Manual SC-001 / SC-002 against real BGE models still pending — see `retro/P3.md` § "T088 manual verification".
-- **US2 status:** Bare `tome plugin` drops into an interactive catalog → plugin → action flow (`run_interactive`) with Back/Quit at every level; non-TTY exits 54 (`NotATerminal`) per FR-051. Tested via `rexpect` pty harness. 189 tests pass across 26 suites.
+- **US2 status:** Bare `tome plugin` drops into an interactive catalog → plugin → action flow (`run_interactive`) with Back/Quit at every level; non-TTY exits 54 (`NotATerminal`) per FR-051. Tested via `rexpect` pty harness.
+- **US3 status:** `tome plugin disable <id>` ships with `--force` short-circuit; non-TTY without `--force` exits 54 (`NotATerminal`) with a documented pointer message. Cheap re-enable (FR-006) verified — `enable_plugin_atomic` skips the embedder when `content_hash` matches. 195 tests pass across 28 suites.
 
 ## Active Technologies
 
@@ -128,6 +129,7 @@ src/
 │   ├── plugin/               # NEW — enable/disable/list/show; bare `tome plugin` → interactive
 │   │   ├── mod.rs            # dispatch + shared helpers (aggregate_for_plugin, open_index_for_read, …)
 │   │   ├── enable.rs         # `tome plugin enable`
+│   │   ├── disable.rs        # `tome plugin disable` — confirm prompt + `--force`; non-TTY → exit 54
 │   │   ├── list.rs           # `tome plugin list`
 │   │   ├── show.rs           # `tome plugin show`
 │   │   └── interactive.rs    # bare `tome plugin` — three-level loop + LoopExit
@@ -174,7 +176,7 @@ tests/
 ├── exit_codes.rs             # extended for the 18 Phase 2 codes
 ├── scrubbing.rs              # extended for model URL scrubbing
 ├── atomicity.rs              # extended for enable / model download interrupts
-├── plugin_{enable,disable,list,show,interactive}.rs   # NEW (interactive uses `rexpect` pty harness)
+├── plugin_{enable,disable,list,show,interactive,repeated}.rs   # NEW (interactive uses `rexpect`; disable + repeated drive CLI binary)
 ├── query.rs                  # NEW
 ├── models_{download,list,remove}.rs                   # NEW
 ├── reindex.rs                # NEW
@@ -192,6 +194,7 @@ tests/
 
 ## Recent Changes
 
+- 2026-05-13: Closed Phase 5 / User Story 3 across PRs #19–#21. Slice 1 (PR #19) added `src/commands/plugin/disable.rs` as a thin wrapper over the already-shipped `plugin::lifecycle::disable` orchestrator (PR #11) — `PluginCommand::Disable(PluginDisableArgs { id, force })` variant, `--force` short-circuits the confirm prompt, non-TTY without `--force` exits 54 (`NotATerminal`) with the documented pointer message ("Re-run with `--force` to skip the prompt"). Banner skipped in JSON mode (precedent: `enable::run`). Cheap re-enable (FR-006) is already in `index::skills::enable_plugin_atomic` — when `stored_hash == hash` the embedder closure is NOT invoked and the row is updated with `UPDATE skills SET enabled = 1`; T114 was therefore a verification task. Slice 2 (PR #20) added 3 integration tests in `tests/plugin_disable.rs` (CLI binary; disable doesn't construct `FastembedEmbedder`), 2 tests in `tests/plugin_repeated.rs` consolidating FR-008 (enable-of-enabled via library API per handover #10; disable-of-disabled via CLI binary for real `Some(21)` process exit), and `cheap_reenable_after_disable_invokes_embedder_zero_times` in `plugin_enable.rs` using `StubEmbedder::call_count()`. Promoted `paths_for(&ToolEnv) -> Paths` to `tests/common/mod.rs` at the 4th caller — resolves the P4 triage item. Closeout in PR #21 (`/sdd:map incremental` refresh). Test total 189 → 195 across 28 suites. No new dependencies. No new error variants.
 - 2026-05-13: Closed Phase 4 / User Story 2 across PRs #16–#18. Slice 1 (PR #16) added `src/commands/plugin/interactive.rs` (`run_interactive` + three-level `catalog_loop` → `plugin_loop` → `view_loop` with a `LoopExit` enum encoding Back/Quit unwind vs propagated error), wired bare `tome plugin` via `Command::Plugin(PluginArgs { command: Option<PluginCommand> })`, and reuses `presentation::prompt::{select, confirm, require_terminal}` for TTY-gated interaction. Enable delegates to `enable::run`; Disable inlines `lifecycle::disable` + confirm. Slice 2 (PR #17) added `tests/plugin_interactive.rs` driven by a `rexpect = "0.7"` (dev-dep, Unix-only) pty harness — pre-enable via library API + StubEmbedder, then drive the read/write CLI through the pty; the CLI enable path is intentionally not exercised in CI because it loads `FastembedEmbedder` (~345 MB ONNX). Non-TTY case asserts exit 54 (`NotATerminal`) plus the documented pointer message. Closeout in PR #18 (`/sdd:map incremental` refresh + retro extraction). Test total 187 → 189 across 26 suites. New `paths_for(&ToolEnv) -> Paths` helper duplicated across `plugin_list.rs`, `plugin_show.rs`, `plugin_interactive.rs` — promote to `tests/common/mod.rs` at the 4th caller (likely Phase 5 `plugin_disable.rs`).
 - 2026-05-13: Closed Phase 3 / User Story 1 across PRs #11–#15. Slice 1a (`plugin::lifecycle::enable` / `disable` orchestrator + pinned `MODEL_REGISTRY` SHA-256s; reranker URL moved upstream from `BAAI/bge-reranker-base` to `onnx-community/bge-reranker-base-ONNX`), slice 1b (`tome plugin enable | list | show` CLI + T074 prompt UI), slice 2 (`tome query` with reranker + `--strict`), slice 3 (5 new integration-test files + `tests/fixtures/sample-plugin-catalog/` + `StubEmbedder::with_force_fail_after`), and the resolver-bug fix folded into PR #14 (`lifecycle::resolve_plugin_dir` is now manifest-first via `tome-catalog.toml`; falls back to flat join only when the manifest is absent/unparsable). Constitution v1.2.0 — binary size cap revised 10 MB → 50 MB after slice 1b measured 29.56 MB on Linux (research §Binary size budget's ~9.2 MB worst-case projection underestimated `ort`). Test total 156 → 187 across 25 suites. T088 manual SC-001 / SC-002 verification against real BGE models is the only outstanding US1 task and lives in `retro/P3.md` for a developer pass.
 - 2026-05-12: Closed Phase 2 foundational — landed slices 1–7 across PRs #2–#10. T057 (model-download integration test with hand-rolled `TcpListener` HTTP fixture) is in slice 7 rather than slice 5 where it was originally scheduled. The cleanup bug it caught (partial-dir leaking on checksum mismatch because cleanup only ran on `stream_to_partial` errors, not later pipeline errors) is fixed by wrapping the full post-stream pipeline in a closure. Codebase docs (`.sdd/codebase/STACK.md`, `STRUCTURE.md`) refreshed; retro at `specs/002-phase-2-plugins-index/retro/P2.md` extended with workarounds, package gotchas, patterns, and "for next time" entries.

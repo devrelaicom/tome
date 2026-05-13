@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand)
 
 ## Directory Layout
 
@@ -28,9 +28,10 @@ tome/
 │   │   │   ├── update.rs          # Refresh catalogs
 │   │   │   ├── show.rs            # Inspect catalog manifest
 │   │   │   └── source.rs          # URL resolution (owner/repo → GitHub URL)
-│   │   ├── plugin/                # `tome plugin <subcommand>` + interactive (Phase 3–4)
+│   │   ├── plugin/                # `tome plugin <subcommand>` + interactive (Phase 3–5)
 │   │   │   ├── mod.rs             # Dispatcher + shared helpers
 │   │   │   ├── enable.rs          # Enable a plugin (embed + index)
+│   │   │   ├── disable.rs         # Disable a plugin (Phase 5)
 │   │   │   ├── list.rs            # List plugins (all or for one catalog)
 │   │   │   ├── show.rs            # Show one plugin's metadata + state
 │   │   │   └── interactive.rs     # Bare `tome plugin` (no subcommand) interactive browse (Phase 4)
@@ -90,6 +91,8 @@ tome/
 │   ├── model_download.rs          # test: model download + checksum validation (Phase 2)
 │   ├── paths_phase2.rs            # test: Phase 2 path resolvers (Phase 2)
 │   ├── plugin_enable.rs           # test: plugin enable flow (Phase 3)
+│   ├── plugin_disable.rs          # test: plugin disable flow (Phase 5)
+│   ├── plugin_repeated.rs         # test: repeated-state idempotency (Phase 5)
 │   ├── plugin_list.rs             # test: plugin list (Phase 3)
 │   ├── plugin_show.rs             # test: plugin show (Phase 3)
 │   ├── plugin_interactive.rs      # test: bare `tome plugin` interactive browse via pty (Phase 4)
@@ -190,6 +193,8 @@ tome/
 | `tests/model_download.rs` | Model download + checksum validation (Phase 2). | Happy path, checksum mismatch, HTTP 404, placeholder-checksum refusal. |
 | `tests/paths_phase2.rs` | Phase 2 path resolvers (Phase 2). | index_db, index_lock, models_dir, model_path resolution. |
 | `tests/plugin_enable.rs` | Plugin enable flow (Phase 3). | Happy path, idempotency rejection, frontmatter errors, fallback warnings. |
+| `tests/plugin_disable.rs` | Plugin disable flow via CLI (Phase 5). | Happy path, --force flag, non-TTY refusal, confirm prompt, skill records retained. |
+| `tests/plugin_repeated.rs` | Repeated-state idempotency for enable/disable (Phase 5). | Re-enable exit 21, re-disable exit 21. |
 | `tests/plugin_list.rs` | Plugin list (Phase 3). | Single/multiple catalogs, filtering, human/JSON output. |
 | `tests/plugin_show.rs` | Plugin show (Phase 3). | Metadata display, status, component counts, index aggregate. |
 | `tests/plugin_interactive.rs` | Interactive browse flow via pty harness (Phase 4). | Catalog selection, plugin selection, enable/disable actions, Esc/Ctrl-C, non-TTY refusal. |
@@ -242,9 +247,10 @@ src/commands/
 │   ├── update.rs    # Refresh
 │   ├── show.rs      # Show one catalog's manifest
 │   └── source.rs    # URL resolution helper
-├── plugin/          # (Phase 3–4)
+├── plugin/          # (Phase 3–5)
 │   ├── mod.rs       # Dispatcher + shared helpers (model checking, index opening)
 │   ├── enable.rs    # Enable a plugin
+│   ├── disable.rs   # Disable a plugin (Phase 5; ~108 lines)
 │   ├── list.rs      # List plugins
 │   ├── show.rs      # Show one plugin
 │   └── interactive.rs # Bare `tome plugin` interactive browse (Phase 4; ~515 lines)
@@ -372,7 +378,7 @@ src/embedding/
 | If you're adding... | Put it in... | Example |
 |---------------------|--------------|---------|
 | New catalog subcommand | `src/commands/catalog/{name}.rs` + add to dispatcher in `mod.rs` | `src/commands/catalog/verify.rs` (verify manifest syntax) |
-| New plugin subcommand | `src/commands/plugin/{name}.rs` + add to dispatcher in `mod.rs` | `src/commands/plugin/disable.rs` (non-interactive disable; Phase 4 Slice 1a has `lifecycle::disable` ready) |
+| New plugin subcommand | `src/commands/plugin/{name}.rs` + add to dispatcher in `mod.rs` | `src/commands/plugin/verify.rs` (verify plugin integrity) |
 | New top-level command | `src/commands/{name}.rs` + add to dispatcher in `src/commands/mod.rs` | `src/commands/models.rs` (list installed models) |
 | New CLI global flag | `src/cli.rs` in `struct Cli` | `#[arg(long, global = true)] pub verify: bool,` |
 | New error type | `src/error.rs` in `TomeError` enum | Add variant + exit code + test in `tests/exit_codes.rs` |
@@ -416,7 +422,7 @@ src/embedding/
 
 ## Generated Files
 
-No files in Phase 1–4 are auto-generated.
+No files in Phase 1–5 are auto-generated.
 
 ---
 
@@ -567,6 +573,24 @@ action). Test coverage via `tests/plugin_interactive.rs` (~288 lines) using
 **Error semantics**: Clean exit (OK) on quit/cancel (Esc/Ctrl-C) — always exit 0 per contract. Enable/disable errors propagate verbatim (same codes as non-interactive).
 
 **TTY enforcement**: Non-TTY invocation surfaces as exit code 98 (NotATerminal).
+
+---
+
+## Phase 5 additions — User Story 3 (plugin disable subcommand)
+
+Phase 5 added `src/commands/plugin/disable.rs` (~108 lines) — thin CLI
+wrapper over the pre-existing `plugin::lifecycle::disable` orchestrator
+from Phase 4. No changes to library boundaries or module structure. New
+CLI variant: `PluginCommand::Disable(PluginDisableArgs { id, force })`.
+
+**Key pattern**: Mirrors `enable.rs` in structure. Owns confirmation-prompt
+UX (`--force` short-circuit, non-TTY refusal with pointer message to stderr).
+No embedder construction — index-only UPDATE via `mark_all_disabled_for_plugin`.
+
+**Test coverage**: `tests/plugin_disable.rs` (~208 lines) exercises the
+CLI path; `tests/plugin_repeated.rs` consolidates idempotency contract
+(re-disable → exit 21) alongside re-enable. Cheap re-enable verified via
+`tests/plugin_enable.rs::cheap_reenable_after_disable_invokes_embedder_zero_times`.
 
 ---
 

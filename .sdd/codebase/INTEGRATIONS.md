@@ -2,7 +2,7 @@
 
 > **Purpose**: Document all external services, APIs, databases, and third-party integrations.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 4 slice 1 — interactive `tome plugin` browse flow; no new external service integrations)
+> **Last Updated**: 2026-05-13 (Phase 5 slice 2 — `tome plugin disable` subcommand; no new external service integrations)
 
 ## Databases & Data Stores
 
@@ -15,7 +15,7 @@
 ### Connection Patterns
 
 - **Statically linked**: `rusqlite` with `bundled` feature — no system SQLite dependency, no version mismatch risk.
-- **Concurrency model**: Single advisory lockfile (`index.lock`) ensures Phase 3–4 foreground operations are serialised; WAL mode allows readers during writes (future MCP server consideration).
+- **Concurrency model**: Single advisory lockfile (`index.lock`) ensures Phase 3–5 foreground operations are serialised; WAL mode allows readers during writes (future MCP server consideration).
 - **ORM/Query builder**: Direct SQL via `rusqlite` — prepared statements, parameterised queries.
 - **Migration approach**: Forward-only migrations under advisory lock in `src/index/migrations.rs`; drift detection in `src/index/meta.rs`.
 
@@ -29,7 +29,7 @@
 
 ## Authentication & Authorization
 
-Phase 1–4 has no explicit application-layer authentication.
+Phase 1–5 has no explicit application-layer authentication.
 
 - **Git operations**: Inherit system SSH keys and HTTP credential helpers (if configured in `~/.gitconfig`).
 - **Hugging Face model downloads**: No API key required; public `https://huggingface.co/` URLs are freely accessible (MODEL_REGISTRY pinned to MIT-licensed BGE variants).
@@ -42,7 +42,7 @@ Phase 1–4 has no explicit application-layer authentication.
 
 ### First-Party APIs
 
-None in Phase 1–4. Future phases may include:
+None in Phase 1–5. Future phases may include:
 - Remote catalog registries (HTTP/HTTPS URLs in catalog sources)
 - Plugin resolver APIs (not specified)
 
@@ -65,7 +65,7 @@ None in Phase 1–4. Future phases may include:
 
 ## Message Queues & Event Systems
 
-None in Phase 1–4. Deferred to Phase 5+ (MCP server event streaming).
+None in Phase 1–5. Deferred to Phase 6+ (MCP server event streaming).
 
 ---
 
@@ -76,7 +76,7 @@ None in Phase 1–4. Deferred to Phase 5+ (MCP server event streaming).
 | Filesystem (XDG) | Catalog Git working trees | Explicit `tome catalog remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/catalogs/` — git-based, refreshed on `tome catalog update` |
 | Filesystem (XDG) | Downloaded model artefacts | Explicit `tome models remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/models/` — one dir per model with manifest + ONNX files |
 
-No TTL-based eviction. Phase 1–4 uses explicit user commands for cleanup (principle VI: KISS).
+No TTL-based eviction. Phase 1–5 uses explicit user commands for cleanup (principle VI: KISS).
 
 ---
 
@@ -99,7 +99,7 @@ No TTL-based eviction. Phase 1–4 uses explicit user commands for cleanup (prin
 
 ## Email & Notifications
 
-None in Phase 1–4.
+None in Phase 1–5.
 
 ---
 
@@ -112,7 +112,7 @@ None in Phase 1–4.
 | `XDG_DATA_HOME` | No (defaults to `~/.local/share`) | Override data directory (models, catalogs, index.db) | `/opt/var` | — |
 | `TOME_LOG` | No | Custom log filter (overrides `RUST_LOG`) | `debug`, `info`, `tome=trace` | — |
 | `RUST_LOG` | No | Standard Rust log filter | `info`, `warn` | — |
-| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR` |
+| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR` |
 | `CLICOLOR` | No | Disable coloured output (alternate) | `0` to disable | — |
 
 ---
@@ -171,4 +171,4 @@ None in Phase 1–4.
 
 ---
 
-*This document maps external service dependencies and failure modes. Updated for Phase 4 slice 1 with interactive browse flow — no new external integrations.*
+*This document maps external service dependencies and failure modes. Updated for Phase 5 slice 2 with `tome plugin disable` subcommand — no new external integrations.*

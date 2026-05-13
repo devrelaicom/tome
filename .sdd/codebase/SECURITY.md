@@ -16,7 +16,7 @@ Tome is a Rust CLI for managing plugin catalogs and embeddings. As a synchronous
 7. Dependency-allowlist enforcement and weekly vulnerability scanning
 8. Binary-size constraints to limit attack surface
 
-Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md` (Phase 1), `specs/002-phase-2-plugins-index/spec.md` (Phase 2), and `specs/002-phase-2-plugins-index/contracts/plugin-commands.md` (Phase 4).
+Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md` (Phase 1), `specs/002-phase-2-plugins-index/spec.md` (Phase 2), and `specs/002-phase-2-plugins-index/contracts/plugin-commands.md` (Phase 4–5).
 
 ## Authentication & Authorization
 
@@ -218,11 +218,20 @@ pub fn require_terminal() -> Result<(), TomeError> {
 - `tome plugin list` — non-interactive listing with filters
 - Model download within enable: refused with pointer to `--force` flag if no TTY
 
+### TTY Enforcement in Plugin Disable (Phase 5)
+
+| Control | Implementation | Location | Exit Code |
+|---------|----------------|----------|-----------|
+| **Confirmation prompt** | User must approve disable action via TTY prompt; decline returns 0 (no state change) | `src/commands/plugin/disable.rs:52–62` | — |
+| **Non-TTY without flag** | If `--force` not supplied and stdin/stdout not TTY, refuse before prompt | `src/commands/plugin/disable.rs:36–49` | 54 |
+| **Pointer message** | Emit documented message to stderr to guide users to `--force` | `src/commands/plugin/disable.rs:44–47` | — |
+| **Decline semantics** | User declining the prompt is clean exit with no error; state unchanged | `src/commands/plugin/disable.rs:54–61` | 0 |
+
 **Guarantee** (FR-051):
 - Interactive flows will not execute in non-TTY contexts (CI, pipes, background)
-- Exit code 54 is a clear signal that the caller needs an interactive context or a non-interactive alternative
+- Exit code 54 is a clear signal that the caller needs an interactive context or a non-interactive alternative (`--force`)
 
-**Test coverage**: `tests/plugin_interactive.rs::bare_plugin_without_a_terminal_exits_54_with_pointer_message()` verifies non-TTY refusal.
+**Test coverage**: `tests/plugin_disable.rs::disable_without_force_in_non_tty_context_exits_54_with_pointer_message()` verifies non-TTY refusal.
 
 ## Signal Handling & Cancellation
 
@@ -314,9 +323,9 @@ pub fn require_terminal() -> Result<(), TomeError> {
 **Current dependencies**:
 - Phase 1: `clap` (CLI), `serde`/`toml` (config), `thiserror`/`anyhow` (errors), `tracing` (logging), `sha2`/`hex` (hashing), `tempfile` (atomicity), `ctrlc` (signals), `regex` (scrubbing), `semver` (versions), `time` (timestamps), `directories` (paths)
 - Phase 2: `rusqlite` (bundled SQLite), `sqlite-vec` (vendored vector extension), `fastembed-rs` (inference), `reqwest` (HTTP), `indicatif` (progress), `comfy-table` (tables), `owo-colors` (colour), `inquire` (prompts)
-- Phase 4: No new dependencies (interactive flow uses existing `inquire`)
+- Phase 4–5: No new dependencies (interactive flow and disable use existing `inquire`)
 
-All fall within permissive licences. Phase 2 deps licensed: `fastembed-rs` (MIT), `ort` (MIT, transitive via fastembed), BGE models (MIT). Phase 4 deps: `inquire` (MIT).
+All fall within permissive licences. Phase 2 deps licensed: `fastembed-rs` (MIT), `ort` (MIT, transitive via fastembed), BGE models (MIT). Phase 4–5 deps: `inquire` (MIT).
 
 ## Binary Size & Deployment
 
@@ -395,7 +404,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | **Model integrity** | SHA-256 verification, placeholder detection, atomic persist | `tests/models_download.rs` |
 | **Atomicity** | Concurrent writes, partial writes, interruption | `tests/atomicity.rs` (4 cases) |
 | **Exit codes** | Every `TomeError` variant maps to documented code | `tests/exit_codes.rs` |
-| **TTY enforcement** | Non-TTY refusal at interactive flow entry; prompt functions short-circuit | `tests/plugin_interactive.rs` (2 cases) |
+| **TTY enforcement** | Non-TTY refusal at interactive flow entry and confirmation prompts; pointer messages | `tests/plugin_interactive.rs`, `tests/plugin_disable.rs` |
 | **Integration** | Real Git repos, real fixtures, real filesystems | `tests/catalog_*.rs`, `tests/models_*.rs`, `tests/plugin_*.rs` |
 
 **Success criteria**:

@@ -23,7 +23,7 @@ Items to address when working in the area:
 |----|------|-------------|--------|--------|-----------|
 | TD-010 | `src/embedding/download.rs` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner; enhancement for polish pass |
 | TD-020 | Error categorisation | All Phase 1 + Phase 2 codes are enumerated; no catch-all variants | Debuggability | Low | Current approach is sound; closed set enforces completeness |
-| TD-030 | Code duplication (Phase 4) | `paths_for(&ToolEnv) -> Paths` duplicated in 3 integration test files (`plugin_list.rs`, `plugin_show.rs`, `plugin_interactive.rs`) | Test maintainability | Low | Promote to `tests/common/mod.rs` when a 4th caller appears (likely Phase 5 `plugin_disable.rs`) |
+| TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low | — |
 
 ### Low Priority
 
@@ -31,7 +31,7 @@ Nice-to-have improvements:
 
 | ID | Area | Description | Impact | Effort |
 |----|------|-------------|--------|--------|
-| TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low |
+| TD-050 | Presentation module exports | `comfy_table::Cell` + `CellAlignment` imported directly by consumers | API convenience | Low |
 
 ## Security Concerns
 
@@ -46,6 +46,7 @@ Nice-to-have improvements:
 | ID | Area | Description | Risk Level | Mitigation | Status |
 |----|------|-------------|------------|-----------|--------|
 | SEC-002 | Phase 3+ model-download UX | User declines model-download prompt (e.g., in `tome plugin enable`) → returns exit 8 (reused from Interrupted); no dedicated exit code | Medium | Lock down user-decline vs. system-interrupt distinction in future iteration | Design debt |
+| SEC-003 | Phase 5 disable confirmation | User declining disable confirmation returns 0 (no error); semantically different from model-download decline (also 0) and system interrupt (exit 8) | Low | Currently consistent with interactive flow semantics; monitor for UX confusion | Documented |
 | SEC-010 | Credential scrubber (Phase 1) | Regex-based scrubbing is pattern-based, not semantic; exotic credential formats may leak (e.g., GitLab private tokens with special delimiters) | Medium | Current rules (R-8) cover common patterns. Add integration tests against real Git helper output. Monitor GitHub issues | Ongoing |
 
 ### Low Risk
@@ -74,6 +75,7 @@ Code areas that are brittle or risky to modify:
 | `src/catalog/store.rs::write_atomic` | Atomic rename only works on same filesystem; moving across mounts silently falls back to non-atomic copy | Document assumption in code; consider detecting mount boundary and erroring explicitly |
 | `src/embedding/download.rs::download_model` | HTTP stream and checksum verification are separate; cleanup closure ensures both failure paths clean `.partial/` (lines 77–87) | Pipeline closure must wrap full download→verify→rename chain; any new step must be inside closure to maintain atomicity guarantee |
 | `src/presentation/prompt.rs::require_terminal()` | TTY check runs on both stdin and stdout; must catch non-TTY in both dimensions to prevent prompt corruption via piped output | Always call `require_terminal()` at flow entry before any prompt; test with `Command::new()` (no pty) to verify short-circuit |
+| `src/commands/plugin/{enable,disable,interactive}.rs` | Non-TTY pointer-message-then-error pattern appears at 3 sites (`enable`, `disable`, `interactive`) | Pattern consolidation would yield cleaner code; worth folding in when 4th occurrence appears |
 
 ## Deprecated Code
 
@@ -83,7 +85,7 @@ Code marked for removal:
 |------|-------------------|----------------|-------------|
 | (none) | — | — | — |
 
-All Phase 1, Phase 2, and Phase 4 code is current; no legacy to remove yet.
+All Phase 1, Phase 2, Phase 4, and Phase 5 code is current; no legacy to remove yet.
 
 ## Performance Concerns
 
@@ -119,7 +121,7 @@ Dependencies that may need attention:
 | `regex` | 1.x | Actively maintained; no known security issues | None | Stable |
 | `reqwest` | 0.11.x (Phase 2) | HTTP client; used for model downloads | Monitor for TLS/security updates | Active |
 | `indicatif` | (Phase 2) | Progress bar library; non-critical | Routine updates | Stable |
-| `inquire` | (Phase 4) | Interactive prompts library; used only in non-TTY-refusable flows | Monitor for prompt-injection or TTY-related bugs; keep up to date | Stable |
+| `inquire` | (Phase 4+) | Interactive prompts library; used in non-TTY-refusable flows | Monitor for prompt-injection or TTY-related bugs; keep up to date | Stable |
 
 **No unmaintained or vulnerable dependencies detected.** `cargo-audit` weekly + PR checks.
 
@@ -134,7 +136,7 @@ Areas that could benefit from enhancement:
 | Cancellation messaging | Silent on Ctrl-C (clean, but terse) | Optional verbose exit message for debugging | Better UX in automation contexts |
 | Symlink security testing | Unix-only symlink escape test | Windows junction/hardlink escape tests | Cross-platform parity |
 | Model download progress (TD-010) | Indeterminate spinner during download | Byte-progress bar with estimated completion | Better UX for large models |
-| `presentation::tables` module exports | `Cell` + `CellAlignment` imported directly by consumers from `comfy_table` | Re-export from `presentation::tables` for convenience | Cleaner API |
+| Non-TTY pointer pattern consolidation | `require_terminal()` check + pointer message duplicated in 3 command modules | Extract to shared helper | Cleaner code |
 
 ## Monitoring Gaps
 
@@ -210,11 +212,27 @@ Areas lacking proper observability:
 **Key security additions**:
 - Interactive flows refuse to run in non-TTY contexts (exit 54), preventing prompt-injection and mangled input
 - User cancellation via Ctrl-C/Ctrl-D surfaces as exit 8 (Interrupted), semantically aligned with system SIGINT
-- Dependency: `inquire` (MIT) — stable, actively maintained
 
 **Known design debts** (minor):
 - User-declines-model-download prompt reuses exit 8 (same as system interrupt); future phases may lock down distinction (SEC-002)
-- Test code duplicates `paths_for()` helper in 3 files; promote to `tests/common/mod.rs` when 4th caller appears (TD-030)
+
+### Phase 5 (Complete)
+
+**Completed (US3)**:
+- ✓ `tome plugin disable` command with confirmation prompt (FR-005 / FR-007)
+- ✓ Non-TTY refusal with `--force` bypass (FR-051)
+- ✓ Pointer message to stderr guiding users to `--force` flag
+- ✓ Cheap re-enable via retained embeddings (FR-006)
+- ✓ Integration tests covering all flows (`plugin_disable.rs`)
+
+**Key security characteristics**:
+- Disable reads catalog config + writes to index DB under existing advisory lock + transaction discipline
+- No new credential surfaces, no new external endpoints, no new file I/O patterns
+- TTY enforcement is consistent with existing `plugin enable` and interactive flow patterns
+- User declining confirmation is clean exit (0, no state change) — semantically distinct from system interrupt (8)
+
+**Known design debts** (minor):
+- Semantic difference between "user declined disable" (0), "user declined model download" (8), and "system interrupt" (8) not formally pinned; currently acceptable per interactive-flow semantics
 
 ---
 
