@@ -242,14 +242,14 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Phase Start
 
-- [ ] T111 [GIT] Verify working tree is clean before starting Phase 5
-- [ ] T112 [US3] Create `retro/P5.md`
+- [X] T111 [GIT] Verify working tree is clean before starting Phase 5
+- [X] T112 [US3] Create `retro/P5.md`
 
 ### Implementation
 
-- [ ] T113 [US3] Implement the `disable` subcommand handler in `src/commands/plugin.rs`; require confirmation (`presentation::prompt::confirm`) unless `--force`; non-TTY without `--force` → exit 54 per FR-007/FR-051 (use devs:rust-dev agent)
-- [ ] T114 [US3] Extend `plugin::lifecycle::enable` to short-circuit on cheap re-enable: compare stored `content_hash` against newly-computed; flip `enabled=1` without invoking the embedder when all hashes match (FR-006). Already partially handled in T073's design — verify the implementation matches and add the explicit cheap-path test (use devs:rust-dev agent)
-- [ ] T115 [GIT] Commit: feat(plugin): add disable subcommand and cheap re-enable path
+- [X] T113 [US3] Implement the `disable` subcommand handler in `src/commands/plugin.rs`; require confirmation (`presentation::prompt::confirm`) unless `--force`; non-TTY without `--force` → exit 54 per FR-007/FR-051 (use devs:rust-dev agent)
+- [X] T114 [US3] Extend `plugin::lifecycle::enable` to short-circuit on cheap re-enable: compare stored `content_hash` against newly-computed; flip `enabled=1` without invoking the embedder when all hashes match (FR-006). Already partially handled in T073's design — verify the implementation matches and add the explicit cheap-path test (use devs:rust-dev agent)
+- [X] T115 [GIT] Commit: feat(plugin): add disable subcommand and cheap re-enable path
 
 ### Tests
 
