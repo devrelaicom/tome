@@ -39,6 +39,9 @@ tests/
 ├── plugin_show.rs             # CLI binary: `tome plugin show` (Phase 3)
 ├── plugin_interactive.rs      # PTY-driven: `tome plugin` interactive browse (Phase 4)
 ├── plugin_repeated.rs         # FR-008: enable/disable idempotency edge case (Phase 5)
+├── models_download.rs         # CLI binary: `tome models download` (Phase 6)
+├── models_list.rs             # CLI binary: `tome models list` (Phase 6)
+├── models_remove.rs           # CLI binary: `tome models remove` (Phase 6)
 ├── query.rs                   # Library API: embed + KNN query path (Phase 3)
 ├── atomicity_enable.rs        # Failure-injection: enable rollback (Phase 3)
 ├── exit_codes.rs              # Unit: exhaustiveness check on TomeError
@@ -66,7 +69,7 @@ tests/
 |----------|----------|-------|
 | Unit tests | `tests/{test_name}.rs` | Test one concept (parser, error path, validator) |
 | Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/atomicity_enable.rs` | Exercise library API (`tome::plugin::lifecycle::*`) with `StubEmbedder` |
-| Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs`, `tests/plugin_disable.rs` | Spawn `tome` binary as subprocess; used when no embedders are loaded |
+| Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs`, `tests/plugin_disable.rs`, `tests/models_*.rs` | Spawn `tome` binary as subprocess; used when no embedders are loaded |
 | Integration tests (PTY-driven) | `tests/plugin_interactive.rs` | Scripted pty session with `rexpect`; driven via real terminal I/O |
 | Shared helpers | `tests/common/mod.rs` | Fixture builders, ToolEnv, lifecycle helpers, `paths_for` (Phase 5) |
 | Test fixtures | `tests/fixtures/` | Real git repos and sample plugin catalogs |
@@ -116,9 +119,9 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
 
 **Why library API tests:** The `tome plugin enable` CLI command path loads `FastembedEmbedder` (real ONNX model files). The stub embedder is deterministic and lets tests run without any model artefacts.
 
-### CLI-Binary Integration Test Pattern (Phase 3–5)
+### CLI-Binary Integration Test Pattern (Phase 3–6)
 
-Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`, `plugin disable`) spawn the real binary:
+Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`, `plugin disable`, `models list`, `models remove`) spawn the real binary:
 
 1. **Build fixture** — copy plugin catalog to temp dir, initialize git
 2. **Create isolated environment** — temp `$HOME`, `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`
@@ -127,7 +130,10 @@ Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`
 5. **Assert exit code** — check `.status.code()` matches expected
 6. **Assert output** — parse stdout (human or `--json`) and validate content
 
-**Phase 5 disable pattern:** Pre-enable plugins via library API (avoids embedder loading), then spawn CLI `tome plugin disable` with `--force` (skips TTY check) or simulate TTY for confirmation prompts.
+**Phase 6 models-download pattern:** The `tome models download` CLI uses `MODEL_REGISTRY` with real upstream URLs and cannot be driven from CI. Test coverage:
+- **Library-level:** `tests/model_download.rs` covers the download pipeline (success, checksum mismatch, HTTP 404) via library API
+- **CLI skip path:** `tests/models_download.rs` covers idempotent skip when models are already installed (via `fabricate_all_installed_models`)
+- **CLI full path:** Not exercised in CI (would download 66 MB embedder + 280 MB reranker)
 
 Used when embedders are not involved or interaction with the real binary is essential.
 
@@ -243,22 +249,55 @@ If a new `TomeError` variant is added, this test fails to compile until updated.
 
 ## Test Fixtures and Helpers
 
+### Phase 6 Sparse-File Fixture Pattern
+
+**Purpose:** Create realistic-size test artefacts without disk I/O cost.
+
+**Key:** Use `std::fs::File::set_len(n)` to create sparse files filled with zeros at ~no disk cost.
+
+**Function:** `fabricate_installed_model(paths: &Paths, entry: &ModelEntry)` — writes:
+1. `manifest.json` with the real metadata (name, version, size, SHA-256)
+2. One sparse file per `entry.files`, sized to `entry.size_bytes` for the main artefact (e.g., model weights)
+3. Other auxiliary files (tokenizer.json, config.json) as 1-byte sparse files (present + non-empty)
+
+**Properties:**
+- The 280 MB reranker fixture consumes ~zero disk on Linux and macOS
+- All bytes are zero, so SHA-256 intentionally DOES NOT match the registry pinned hash
+- `models list --verify` uses this to flip the state to `checksum_mismatched` (test coverage for mismatch path)
+
+**Usage:**
+```rust
+let paths = paths_for(&env);
+fabricate_all_installed_models(&paths);  // Populate both embedder and reranker
+
+let out = env.cmd()
+    .args(["models", "list", "--verify"])
+    .output()
+    .unwrap();
+// Assertions on output; reranker shows checksum_mismatched
+```
+
+**Reusable for any future test** that needs realistic-size fixtures without I/O. Common patterns:
+- Pre-populate installed models for `models list --verify` tests
+- Mock downloaded models to test skip paths without network access
+
+Related helper: `fabricate_all_installed_models(paths: &Paths)` — convenience for populating the entire `MODEL_REGISTRY` at once.
+
 ### Phase 5 Lifecycle Helpers (`tests/common/mod.rs`)
 
-**`paths_for(env: &ToolEnv) -> Paths`** — **Promoted in Phase 5 to common/mod.rs.** Resolves `ToolEnv` to the same `Paths` that the spawned CLI would resolve. Previously duplicated across `plugin_list.rs`, `plugin_show.rs`, `plugin_interactive.rs`, and now used by `plugin_disable.rs` and `plugin_repeated.rs` — consolidated at the 4th caller.
+**`paths_for(env: &ToolEnv) -> Paths`** — **Promoted in Phase 5 to common/mod.rs.** Resolves `ToolEnv` to the same `Paths` that the spawned CLI would resolve. Previously duplicated across `plugin_list.rs`, `plugin_show.rs`, `plugin_interactive.rs`, and now used by `plugin_disable.rs`, `plugin_repeated.rs`, and all `models_*.rs` tests — consolidated at the 4th caller.
 
 ```rust
 pub fn paths_for(env: &ToolEnv) -> Paths {
-    let xdg_config = env.config_path();
-    let xdg_data = env.data_path();
+    let home = env.home_path();
     Paths {
-        config_dir: xdg_config.clone(),
-        config_file: xdg_config.join("tome").join("config.toml"),
-        data_dir: xdg_data.clone(),
-        catalogs_dir: xdg_data.join("tome").join("catalogs"),
-        index_db: xdg_data.join("tome").join("index.db"),
-        index_lock: xdg_data.join("tome").join("index.lock"),
-        models_dir: xdg_data.join("tome").join("models"),
+        config_dir: home.join(".config/tome"),
+        config_file: home.join(".config/tome/config.toml"),
+        data_dir: home.join(".local/share/tome"),
+        catalogs_dir: home.join(".local/share/tome/catalogs"),
+        index_db: home.join(".local/share/tome/index.db"),
+        index_lock: home.join(".local/share/tome/index.lock"),
+        models_dir: home.join(".local/share/tome/models"),
     }
 }
 ```
@@ -303,7 +342,7 @@ pub fn fabricate_models(paths: &Paths) {
 
 **`stub_embedder_seed()` / `stub_reranker_seed()`** — Return `MetaSeed` values matching the deterministic stub embedder/reranker. Used to construct `LifecycleDeps` and open the index.
 
-**`write_config_for_cli(paths: &Paths, config: &Config)`** — Write the supplied `Config` to `paths.config_file` as TOML so a child `tome` binary process can read it. Used by `plugin list` / `plugin show` / `plugin disable` tests that bypass `catalog add`.
+**`write_config_for_cli(paths: &Paths, config: &Config)`** — Write the supplied `Config` to `paths.config_file` as TOML so a child `tome` binary process can read it. Used by `plugin list` / `plugin show` / `plugin disable` / `models_*` tests that bypass `catalog add`.
 
 ### Phase 4 Interactive Helpers (PTY pattern)
 
@@ -408,6 +447,9 @@ When tests run:
 | `plugin_show.rs` | CLI-binary | `tome plugin show <catalog>/<plugin>` — skill details, metadata, JSON format |
 | `plugin_interactive.rs` | PTY-driven | `tome plugin` interactive flow — catalog selector, plugin browser, plugin view, action prompts, navigation (Back, Quit), non-TTY refusal (FR-050, FR-051) |
 | `plugin_repeated.rs` | Mixed (Library + CLI) | FR-008: enable-of-enabled via library API, disable-of-disabled via CLI binary for exit-21 assertion (Phase 5) |
+| `models_download.rs` | CLI-binary | `tome models download [model]` — idempotent skip when installed, `--verify` checksum, JSON envelope (Phase 6) |
+| `models_list.rs` | CLI-binary | `tome models list` — state enumeration (missing/ok/checksum_mismatched), `--verify` flag, JSON format (Phase 6) |
+| `models_remove.rs` | CLI-binary | `tome models remove <model>` — deletion, confirmation, cascade cleanup (Phase 6) |
 | `query.rs` | Library API | KNN query + optional reranking — self-similarity, filtering, candidate pool, drift detection |
 | `atomicity_enable.rs` | Library API | Failure-injection: `StubEmbedder::with_force_fail_after(n)` → rollback guarantee (FR-004) |
 
@@ -461,13 +503,13 @@ pub fn with_force_fail_after(n: usize) -> Self {
 
 The counter is shared between clones via `Arc<AtomicUsize>` so the closure adaptation inside `enable_plugin_atomic` (which captures by reference) observes the same call count. Used in `atomicity_enable.rs` to inject mid-pipeline embedder failures and verify rollback (FR-004).
 
-## Test Organization by Concern (Phase 3–5)
+## Test Organization by Concern (Phase 3–6)
 
 ### No Environment Mutation in Library API Tests
 
 **Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
 
-**CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
+**CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
 
 **PTY-driven tests** (`plugin_interactive.rs`) mutate `env` only inside the pty spawning (via `Command::env`), not the parent process.
 
@@ -479,9 +521,17 @@ Two parallel path builders are deliberately kept in lock-step:
 
 If one changes, the other must change too — enforced via manual code review.
 
+### Phase 6: Sparse-File Fixtures (Universal Pattern)
+
+The sparse-file fixture pattern is reusable for any test needing realistic-size artefacts without I/O. Phase 6 models tests established:
+- **`fabricate_installed_model(paths, entry)`** — write manifest + sparse files for one model
+- **`fabricate_all_installed_models(paths)`** — populate entire `MODEL_REGISTRY` at once
+
+Usable by future tests for any large binary fixture (models, datasets, archives) where only existence and size matter, not actual content.
+
 ### Phase 5: Standard Helpers Promoted
 
-`paths_for(env: &ToolEnv) -> Paths` was promoted to `tests/common/mod.rs` in Phase 5 after its 4th caller (`plugin_repeated.rs`). All CLI-binary tests now import it from common; consolidation complete.
+`paths_for(env: &ToolEnv) -> Paths` was promoted to `tests/common/mod.rs` in Phase 5 after its 4th caller (`plugin_repeated.rs`). All CLI-binary tests now import it from common; consolidation complete. Phase 6 `models_*.rs` tests also use it, cementing the pattern.
 
 ### YAML Frontmatter Quirk (Documented for Test Authors)
 
@@ -502,11 +552,11 @@ No automatic coverage threshold enforced, but the test corpus is organized to be
 
 - **Every error class is tested** — each `TomeError` variant appears in `exit_codes.rs` and often in command-specific tests
 - **Bad-input corpus is explicit** — each parser/validator has a separate test file documenting what shapes are rejected
-- **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/disable/list/show`, `plugin` interactive) has dedicated tests
+- **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/disable/list/show`, `plugin` interactive, `models download/list/remove`) has dedicated tests
 - **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable and cheap-reenable (FR-006), fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback
 - **Idempotency tested** — `plugin_repeated.rs` covers enable-of-enabled and disable-of-disabled (FR-008, exit 21)
 - **Interactive flow tested end-to-end** — `plugin_interactive.rs` covers catalog selector, plugin browser, action prompts, navigation, non-TTY refusal
-- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift
+- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift, sparse fixtures (Phase 6)
 
 ## Specimen Tests (Quality Corpus)
 
@@ -653,6 +703,17 @@ For commands that load embedders (Phase 4+):
 - CLI-only; no library API test needed
 - Follow the `plugin list` / `plugin show` pattern
 
+### Testing a New Models Command (Phase 6)
+
+For CLI tests (no embedder loading):
+1. Create integration test file `tests/models_*.rs` (CLI binary)
+2. Use `ToolEnv`, `paths_for`, `write_config_for_cli` (Phase 5)
+3. For fixtures with models present, use `fabricate_all_installed_models(paths)` (sparse-file pattern)
+4. Spawn the binary, assert exit code + output
+5. Run `cargo test models_*` to verify
+
+Do not exercise the full network-download path in CI (would hit real `MODEL_REGISTRY` URLs). Test library-level download pipeline separately; CLI tests cover skip paths and JSON envelope.
+
 ### Testing Idempotency (Phase 5)
 
 For two-state operations like enable/disable:
@@ -685,6 +746,30 @@ let count_before = embedder.call_count();
 lifecycle::disable(&id, &deps)?;
 lifecycle::enable(&id, &deps)?;
 assert_eq!(embedder.call_count(), count_before, "embedder should not be called on cheap re-enable");
+```
+
+### Testing Sparse Fixtures (Phase 6, Universal)
+
+For any test needing large binary artefacts without disk I/O:
+
+1. Call `fabricate_installed_model(paths, entry)` for one model, or
+2. Call `fabricate_all_installed_models(paths)` to populate `MODEL_REGISTRY`
+3. Artefacts are now present but zero-filled, so checksums intentionally mismatch
+4. Use `--verify` flag to test mismatch detection path
+5. Files consume ~no disk (sparse), so CI is fast even with 280 MB reranker
+
+Example (from `models_download.rs`):
+```rust
+let paths = paths_for(&env);
+fabricate_all_installed_models(&paths);
+// Reranker is now present but checksummed-mismatched
+
+let out = env.cmd()
+    .args(["models", "list", "--verify", "--json"])
+    .output()
+    .unwrap();
+
+// Assertions: reranker shows checksum_mismatched state
 ```
 
 ---

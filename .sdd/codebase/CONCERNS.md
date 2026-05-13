@@ -21,7 +21,7 @@ Items to address when working in the area:
 
 | ID | Area | Description | Impact | Effort | Mitigation |
 |----|------|-------------|--------|--------|-----------|
-| TD-010 | `src/embedding/download.rs` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner; enhancement for polish pass |
+| TD-010 | `src/embedding/download.rs` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner in both `plugin enable` and `models download`; enhancement for polish pass |
 | TD-020 | Error categorisation | All Phase 1 + Phase 2 codes are enumerated; no catch-all variants | Debuggability | Low | Current approach is sound; closed set enforces completeness |
 | TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low | — |
 
@@ -85,7 +85,7 @@ Code marked for removal:
 |------|-------------------|----------------|-------------|
 | (none) | — | — | — |
 
-All Phase 1, Phase 2, Phase 4, and Phase 5 code is current; no legacy to remove yet.
+All Phase 1, Phase 2, Phase 4, Phase 5, and Phase 6 code is current; no legacy to remove yet.
 
 ## Performance Concerns
 
@@ -233,6 +233,22 @@ Areas lacking proper observability:
 
 **Known design debts** (minor):
 - Semantic difference between "user declined disable" (0), "user declined model download" (8), and "system interrupt" (8) not formally pinned; currently acceptable per interactive-flow semantics
+
+### Phase 6 (Complete)
+
+**Completed (US4, Slice 1)**:
+- ✓ `tome models download | list | remove` CLI surface
+- ✓ Surfaces existing security primitives: pinned MODEL_REGISTRY SHA-256s, atomic-rename + checksum-verify pipeline
+- ✓ New `embedding::download::sha256_file` public helper for re-verifying installed artefacts via `--verify` flag in `models list`
+- ✓ No new attack surface — CLI surfaces already-secured primitives from Phase 2
+
+**Security posture**:
+- Model download uses existing atomicity guarantees and integrity verification
+- `--verify` flag allows users to audit installed models without re-downloading
+- No new credential surfaces, no new external endpoints
+
+**Ongoing**:
+- TD-010: Both `plugin enable` and `models download` now ship indeterminate spinners; refactor to byte-progress callback deferred to polish pass
 
 ---
 

@@ -129,12 +129,13 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Registry pinning** | Compile-time constant `MODEL_REGISTRY` | `src/embedding/registry.rs::MODEL_REGISTRY` (verified real at Phase 3 slice 1) |
 | **Placeholder detection** | `has_placeholder_checksum()` guard | `src/embedding/download.rs::download_model` (exit 31 if placeholder) |
 | **Atomic model persist** | `.partial/` → final rename | `src/embedding/download.rs::download_model`, step 4 |
+| **Re-verification** | New `embedding::download::sha256_file()` helper | `src/embedding/download.rs::sha256_file`, invoked by `tome models list --verify` (Phase 6) |
 
 **Model Registry** (Phase 3 update):
 - `bge-small-en-v1.5` INT8: SHA-256 `51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431`, 66.5 MB, MIT
 - `bge-reranker-base` INT8: SHA-256 `46a1bb4cf46ff1e300d27589d620141fbf04fc0eaf8e7bb6dea5e044475ff387`, 279.3 MB, MIT (sourced from `onnx-community` mirror)
 
-Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads enforce both hash and size; drift surfaces as `ModelChecksumMismatch` (exit 32) rather than silently installing whatever upstream serves.
+Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads enforce both hash and size; drift surfaces as `ModelChecksumMismatch` (exit 32) rather than silently installing whatever upstream serves. The `--verify` flag in `tome models list` (Phase 6) allows users to audit installed models against pinned checksums without re-downloading.
 
 ### Encryption
 
@@ -401,7 +402,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | **Plugin identity** | Shape validation (no `/`, no `..`, no leading `.`) | `tests/plugin_*.rs` integration suites |
 | **Scrubbing** | All four regex rules + ordering + edge cases | `tests/scrubbing.rs` (8 cases) |
 | **Strictness** | Every Tome-owned Deserialize struct has `deny_unknown_fields` | `tests/manifest_strictness.rs` (2 assertions) |
-| **Model integrity** | SHA-256 verification, placeholder detection, atomic persist | `tests/models_download.rs` |
+| **Model integrity** | SHA-256 verification, placeholder detection, atomic persist, re-verification | `tests/models_download.rs`, `tests/models_list.rs` |
 | **Atomicity** | Concurrent writes, partial writes, interruption | `tests/atomicity.rs` (4 cases) |
 | **Exit codes** | Every `TomeError` variant maps to documented code | `tests/exit_codes.rs` |
 | **TTY enforcement** | Non-TTY refusal at interactive flow entry and confirmation prompts; pointer messages | `tests/plugin_interactive.rs`, `tests/plugin_disable.rs` |
@@ -419,7 +420,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | Concern | Phase | Note |
 |---------|-------|------|
 | Real BGE model testing (SC-001/SC-002) | Phase 3 | T088 — requires developer-machine pass |
-| Model-download byte-progress callback | Phase 3 | Currently wrapped in indeterminate spinner; follow-up before polish pass |
+| Model-download byte-progress callback | Phase 3 onward | Currently wrapped in indeterminate spinner; both `plugin enable` and `models download` would benefit from byte-progress refactor |
 | User-declines-model-download exit code | Phase 3+ | Currently reuses 8 (user-initiated abort); worth locking down in future iteration |
 | Encryption at rest for sensitive caches | Phase 3+ | Deferred until use case demands it |
 | Audit logging | Phase 3+ | Not required in Phase 1 (single-user CLI) |

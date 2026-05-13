@@ -3,16 +3,17 @@
 > **Purpose**: Document what executes in this codebase - languages, runtimes, frameworks, and critical dependencies.
 > **Generated**: 2026-05-11
 > **Last Updated**: 2026-05-13 (Phase 5 User Story 2 — `tome plugin disable` subcommand + re-enable verification)
+> **Updated**: 2026-05-13 (Phase 6 User Story 4 slice 1 — `tome models download | list | remove` CLI; slice 2 adds 9 integration tests)
 
 ## Languages & Runtimes
 
 | Language | Version | Purpose |
 |----------|---------|---------|
-| Rust | stable (MSRV: 1.93) | Primary implementation language; synchronous (no async runtime in Phase 1–5) |
+| Rust | stable (MSRV: 1.93) | Primary implementation language; synchronous (no async runtime in Phase 1–6) |
 
 ## Frameworks
 
-Phase 1–5 is a CLI application, not a web framework-based project.
+Phase 1–6 is a CLI application, not a web framework-based project.
 
 | Framework | Version | Purpose |
 |-----------|---------|---------|
@@ -89,6 +90,19 @@ Phase 5 slice 2 adds the `tome plugin disable <id>` subcommand with cheap re-ena
 
 No new production dependencies in Phase 5 slice 2 — all pieces reuse Phase 1–4 infrastructure (`inquire` for confirmation, existing lifecycle plumbing).
 
+### Phase 6 — user-story slice 1 (explicit model management)
+
+Phase 6 slice 1 adds explicit model artefact CLI management:
+- `src/commands/models/download.rs`, `list.rs`, `remove.rs` (~360 lines total) — `tome models {download,list,remove}` subcommands
+- New `ModelsCommand::Download | List | Remove` variants in `src/cli.rs`
+- Dispatch wired in `src/commands/models/mod.rs`
+- Helper `embedding::download::sha256_file(path) -> Result<String, TomeError>` promoted to `pub` for content verification in list
+- Signature relaxation: `output::write_json<T: Serialize + ?Sized>` (adds `?Sized` bound to serialize slice types in JSON output)
+
+No new production dependencies in Phase 6 slice 1 — all pieces reuse Phase 1–5 infrastructure (progress bars, tables, JSON formatting).
+
+Phase 6 slice 2 adds 9 integration tests across `tests/models_{download,list,remove}.rs` using sparse-file pattern for staging 280 MB artefacts at zero disk cost. Helpers `fabricate_installed_model` and `fabricate_all_installed_models` added to `tests/common/mod.rs`. No production code or dependency changes.
+
 ## Package Managers & Build Tools
 
 | Tool | Version | Purpose |
@@ -109,7 +123,7 @@ No new production dependencies in Phase 5 slice 2 — all pieces reuse Phase 1�
 
 ## Not Used (Explicitly Excluded)
 
-- **Async runtime**: No `tokio`, `async-std`, or similar. Phase 1–5 remains synchronous (`reqwest::blocking`, `rusqlite`, `fastembed`); the MCP server is the future forcing function.
+- **Async runtime**: No `tokio`, `async-std`, or similar. Phase 1–6 remains synchronous (`reqwest::blocking`, `rusqlite`, `fastembed`); the MCP server is the future forcing function.
 - **Git library**: No `libgit2`, `git2`, or vendored Git. `std::process::Command` shells out to system `git` (constitution principle XII).
 - **Direct ONNX Runtime dep**: `ort` is reached transitively through `fastembed` only; no direct linkage from Tome code.
 - **Custom npm/cargo registry overrides**: All packages resolve from public registries.
@@ -127,4 +141,4 @@ No new production dependencies in Phase 5 slice 2 — all pieces reuse Phase 1�
 
 ---
 
-*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–5 source code.*
+*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–6 source code.*

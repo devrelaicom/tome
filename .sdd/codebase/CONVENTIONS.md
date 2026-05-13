@@ -32,7 +32,7 @@
 | Type | Convention | Example |
 |------|------------|---------|
 | Modules | snake_case | `src/catalog/git.rs`, `src/commands/catalog/add.rs` |
-| Subcommands | snake_case, grouped by capability | `src/commands/plugin/{enable,list,show,disable}.rs` |
+| Subcommands | snake_case, grouped by capability | `src/commands/plugin/{enable,list,show,disable}.rs`, `src/commands/models/{download,list,remove}.rs` |
 | Tests | descriptive, lowercase | `tests/catalog_add.rs`, `tests/plugin_enable.rs`, `tests/atomicity_enable.rs` |
 | Test fixtures | descriptive | `tests/fixtures/sample-catalog/`, `tests/fixtures/sample-plugin-catalog/` |
 | Capabilities | feature-named | `catalog`, `config`, `paths`, `error`, `plugin`, `index`, `embedding` |
@@ -140,6 +140,11 @@ src/
 │   │   ├── list.rs      // `tome plugin list [catalog]`
 │   │   ├── show.rs      // `tome plugin show <catalog>/<plugin>`
 │   │   └── interactive.rs // `tome plugin` (bare, interactive browse) (Phase 4)
+│   ├── models/          // `tome models` subcommands (Phase 6)
+│   │   ├── mod.rs       // Dispatcher; cross-subcommand helpers
+│   │   ├── download.rs  // `tome models download [model]` (CLI side)
+│   │   ├── list.rs      // `tome models list`
+│   │   └── remove.rs    // `tome models remove <model>`
 │   └── query.rs         // `tome query <text>` (Phase 3)
 ├── catalog/             // Catalog manifest + storage + git operations
 │   ├── mod.rs
@@ -196,6 +201,9 @@ tests/
 ├── plugin_show.rs       // CLI-binary tests for `tome plugin show`
 ├── plugin_interactive.rs // PTY-driven tests for `tome plugin` interactive
 ├── plugin_repeated.rs   // FR-008: enable/disable idempotency edge case (Phase 5)
+├── models_download.rs   // CLI-binary tests for `tome models download` (Phase 6)
+├── models_list.rs       // CLI-binary tests for `tome models list` (Phase 6)
+├── models_remove.rs     // CLI-binary tests for `tome models remove` (Phase 6)
 ├── query.rs             // Library API tests for query path (embed + KNN)
 ├── atomicity_enable.rs  // Failure-injection tests for enable rollback (FR-004)
 ├── exit_codes.rs        // Exhaustiveness check: every TomeError → exit code
@@ -209,7 +217,7 @@ tests/
     └── sample-plugin-catalog/
 ```
 
-### CLI Module Pattern (Phase 3–5)
+### CLI Module Pattern (Phase 3–6)
 
 Each subcommand group lives under `src/commands/{group}/` with one file per subcommand:
 
@@ -217,6 +225,20 @@ Each subcommand group lives under `src/commands/{group}/` with one file per subc
 - **`src/commands/{group}/{subcommand}.rs`**: Subcommand logic; public function signature is `pub fn run(args, mode) -> Result<(), TomeError>`
 
 Cross-module reach via `super::*` within a group is acceptable; cross-group via re-export is preferred.
+
+**Phase 6 `models` handler:** Follows the same pattern as `plugin`. Each subcommand (`download`, `list`, `remove`) has a dedicated file with a `run(args, mode)` signature. Banner skipped in JSON mode (established precedent: enable, disable, plugin-interactive actions, models-download, models-list, models-remove).
+
+Example from `src/commands/models/download.rs`:
+```rust
+pub fn run(args: ModelsDownloadArgs, mode: Mode) -> Result<(), TomeError> {
+    let paths = Paths::resolve()?;
+    // ... logic
+    if mode == Mode::Human {
+        writeln!(out, "Downloading model …")?;
+    }
+    // ... return JSON or human output
+}
+```
 
 **Phase 5 `disable` handler:** Mirrors `enable::run` in shape. Handles confirmation prompt (TTY gating via `output::stdin_is_tty() && output::stdout_is_tty()`, `--force` short-circuit, non-TTY refusal), calls library API `lifecycle::disable`, surfaces outcome. No embedder loaded; library API handles all atomic state changes and locking (FR-005, FR-007, FR-051).
 
@@ -293,7 +315,7 @@ match result {
 
 ### Banner Skipped in JSON Mode
 
-NDJSON consumers expect structured records on stdout and nothing on stderr unless an error occurs. Established in `commands::plugin::enable` and `commands::query`:
+NDJSON consumers expect structured records on stdout and nothing on stderr unless an error occurs. Established in `commands::plugin::enable` and `commands::query`, and reinforced in `commands::models::*`:
 
 ```rust
 if mode == Mode::Human {

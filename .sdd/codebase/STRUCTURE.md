@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands)
 
 ## Directory Layout
 
@@ -28,6 +28,11 @@ tome/
 │   │   │   ├── update.rs          # Refresh catalogs
 │   │   │   ├── show.rs            # Inspect catalog manifest
 │   │   │   └── source.rs          # URL resolution (owner/repo → GitHub URL)
+│   │   ├── models/                # `tome models <subcommand>` (Phase 6)
+│   │   │   ├── mod.rs             # Dispatcher + shared ModelState enum
+│   │   │   ├── download.rs        # Download missing or --force models
+│   │   │   ├── list.rs            # List all models with on-disk state
+│   │   │   └── remove.rs          # Remove a model (delete manifest + dir)
 │   │   ├── plugin/                # `tome plugin <subcommand>` + interactive (Phase 3–5)
 │   │   │   ├── mod.rs             # Dispatcher + shared helpers
 │   │   │   ├── enable.rs          # Enable a plugin (embed + index)
@@ -97,10 +102,15 @@ tome/
 │   ├── plugin_show.rs             # test: plugin show (Phase 3)
 │   ├── plugin_interactive.rs      # test: bare `tome plugin` interactive browse via pty (Phase 4)
 │   ├── query.rs                   # test: query (KNN + optional rerank) (Phase 3)
+│   ├── models_download.rs         # test: models download (Phase 6)
+│   ├── models_list.rs             # test: models list (Phase 6)
+│   ├── models_remove.rs           # test: models remove (Phase 6)
 │   ├── concurrency.rs             # test: two-process index contention (Phase 2)
 │   ├── schema_migrations.rs       # test: schema migrations (Phase 2)
 │   ├── version_output.rs          # test: version output (Phase 2)
 │   ├── catalog_update_reindex.rs  # test: cascade on catalog update (Phase 2)
+│   ├── common/                    # test: shared test fixtures + helpers
+│   │   └── mod.rs                 # paths_for, fabricate_installed_model, etc.
 │   └── fixtures/
 │       ├── sample-catalog/        # Test catalog with valid manifest + plugins (Phase 1)
 │       └── sample-plugin/         # Test plugin with skills (Phase 2)
@@ -158,10 +168,10 @@ tome/
 |-----------|---------|-------------------|
 | `src/main.rs` | Binary entry point; parses CLI, installs signal handler, dispatches, handles errors. | — (entry point, not a module) |
 | `src/lib.rs` | Library surface; aggregates `catalog`, `cli`, `commands`, `config`, `error`, `logging`, `output`, `paths`, `plugin`, `index`, `embedding`, `presentation`. | Public for integration tests. |
-| `src/cli.rs` | clap derive definitions for global flags (`--json`, `-v`/`-vv`) and subcommands. | `Cli`, `Command`, `CatalogCommand`, `PluginCommand`, `PluginArgs`, arg structs. |
+| `src/cli.rs` | clap derive definitions for global flags (`--json`, `-v`/`-vv`) and subcommands. | `Cli`, `Command`, `CatalogCommand`, `ModelsCommand`, `PluginCommand`, `PluginArgs`, arg structs. |
 | `src/error.rs` | Closed `TomeError` enum; exit code and category mapping; error variants. | `TomeError`, `ManifestInvalid`, `PluginState`, etc. (consumed by all). |
 | `src/catalog/` | Catalog management: manifest parsing, Git operations, atomic registry persistence. | `CatalogManifest`, `Git`, `store::load/save/write_atomic`. |
-| `src/commands/` | Command handlers; implement `tome catalog/plugin/query <subcommand>`. | Per-subcommand `run(args, mode)` functions. |
+| `src/commands/` | Command handlers; implement `tome catalog/models/plugin/query <subcommand>`. | Per-subcommand `run(args, mode)` functions. |
 | `src/config.rs` | `Config` and `CatalogEntry` struct definitions. | `Config`, `CatalogEntry`. |
 | `src/paths.rs` | XDG-aware path resolution and cache key computation. | `Paths`, `Paths::resolve()`, `Paths::cache_dir_for()`, `Paths::model_path()`. |
 | `src/logging.rs` | Initialize `tracing-subscriber` (stderr-only, orthogonal to `--json`). | `Verbosity`, `init()`. |
@@ -199,10 +209,14 @@ tome/
 | `tests/plugin_show.rs` | Plugin show (Phase 3). | Metadata display, status, component counts, index aggregate. |
 | `tests/plugin_interactive.rs` | Interactive browse flow via pty harness (Phase 4). | Catalog selection, plugin selection, enable/disable actions, Esc/Ctrl-C, non-TTY refusal. |
 | `tests/query.rs` | Query KNN + optional rerank (Phase 3). | Happy path, filtering, reranking, threshold filtering. |
+| `tests/models_download.rs` | Models download (Phase 6). | Happy path, --force flag, spinner, human/JSON output. |
+| `tests/models_list.rs` | Models list (Phase 6). | Cheap state check, --verify rehash, ModelState classification. |
+| `tests/models_remove.rs` | Models remove (Phase 6). | Happy path, --force flag, non-TTY refusal, usage check, delete sequence. |
 | `tests/concurrency.rs` | Two-process index contention (Phase 2). | Concurrent enable/list, lockfile contention. |
 | `tests/schema_migrations.rs` | Schema migrations (Phase 2). | Forward-only migration, idempotency. |
 | `tests/version_output.rs` | Version output (Phase 2). | Clap-derived version. |
 | `tests/catalog_update_reindex.rs` | Cascade on catalog update (Phase 2). | Skills marked stale when catalog ref changes. |
+| `tests/common/mod.rs` | Shared fixtures (Phase 6). | `paths_for`, `fabricate_installed_model`, `fabricate_all_installed_models`. |
 
 ## Module Boundaries
 
@@ -238,7 +252,7 @@ Each subcommand lives in its own file. All subcommands are dispatched from their
 
 ```
 src/commands/
-├── mod.rs           # Top-level dispatcher (catalog vs plugin vs query)
+├── mod.rs           # Top-level dispatcher (catalog vs models vs plugin vs query)
 ├── catalog/
 │   ├── mod.rs       # Dispatcher
 │   ├── add.rs       # Register a catalog
@@ -247,6 +261,11 @@ src/commands/
 │   ├── update.rs    # Refresh
 │   ├── show.rs      # Show one catalog's manifest
 │   └── source.rs    # URL resolution helper
+├── models/          # (Phase 6) Explicit model management
+│   ├── mod.rs       # Dispatcher + ModelState enum
+│   ├── download.rs  # Download missing models (iterate registry, skip if ok unless --force)
+│   ├── list.rs      # List all models with state (Ok / Missing / Corrupt / ChecksumMismatched)
+│   └── remove.rs    # Remove a model (usage check, confirm, delete manifest + dir)
 ├── plugin/          # (Phase 3–5)
 │   ├── mod.rs       # Dispatcher + shared helpers (model checking, index opening)
 │   ├── enable.rs    # Enable a plugin
@@ -359,6 +378,7 @@ src/embedding/
 - Implement fastembed-backed wrappers (`FastembedEmbedder`, `FastembedReranker`).
 - Provide deterministic test double (`StubEmbedder`).
 - Manage model registry, download, checksum validation.
+- **Phase 6 addition**: Provide streaming `sha256_file()` helper for `models list --verify`.
 
 **Public Interface**:
 - `Embedder { fn embed(&self, text: &str) -> Result<Vec<f32>>; }` — trait.
@@ -368,9 +388,10 @@ src/embedding/
 - `FastembedReranker::load(entry, dir) -> Result<Self>` — load reranker from disk.
 - `MODEL_REGISTRY` — array of `ModelEntry` (embedder + reranker pinned versions).
 - `download::download_model(entry, dir) -> Result<()>` — atomic download with SIGINT awareness.
+- **Phase 6**: `download::sha256_file(path) -> Result<String, TomeError>` — streaming SHA-256 for verification.
 
 **What It Cannot Do**:
-- Know about CLI arguments or prompts (that's `commands/plugin/`'s job).
+- Know about CLI arguments or prompts (that's `commands/plugin/` or `commands/models/`'s job).
 - Manage paths (that's `paths.rs`'s job; commands pass the resolved directory).
 
 ## Where to Add New Code
@@ -378,8 +399,9 @@ src/embedding/
 | If you're adding... | Put it in... | Example |
 |---------------------|--------------|---------|
 | New catalog subcommand | `src/commands/catalog/{name}.rs` + add to dispatcher in `mod.rs` | `src/commands/catalog/verify.rs` (verify manifest syntax) |
+| New models subcommand | `src/commands/models/{name}.rs` + add to dispatcher in `mod.rs` | `src/commands/models/verify.rs` (verify model integrity) |
 | New plugin subcommand | `src/commands/plugin/{name}.rs` + add to dispatcher in `mod.rs` | `src/commands/plugin/verify.rs` (verify plugin integrity) |
-| New top-level command | `src/commands/{name}.rs` + add to dispatcher in `src/commands/mod.rs` | `src/commands/models.rs` (list installed models) |
+| New top-level command | `src/commands/{name}.rs` + add to dispatcher in `src/commands/mod.rs` | `src/commands/status.rs` (show overall system status) |
 | New CLI global flag | `src/cli.rs` in `struct Cli` | `#[arg(long, global = true)] pub verify: bool,` |
 | New error type | `src/error.rs` in `TomeError` enum | Add variant + exit code + test in `tests/exit_codes.rs` |
 | New manifest validation rule | `src/catalog/manifest.rs::validate_semantic()` | Validate plugin version semver |
@@ -390,15 +412,17 @@ src/embedding/
 | New KNN filter | `src/index/query.rs` + `QueryFilters` | Add `--min-version` filter |
 | New model kind | `src/embedding/mod.rs` (`ModelKind` enum) + `registry.rs` | Add reranker v2 variant |
 | New interactive sub-flow | `src/commands/plugin/interactive.rs` (extend existing loop levels) | Add a cascade to `plugin_loop` for plugin tags/categories |
-| Test for a command | `tests/{command_area}_{action}.rs` | `tests/plugin_disable.rs` |
+| Test for a command | `tests/{command_area}_{action}.rs` | `tests/models_download.rs` |
 | Test for error scenario | `tests/error_messages.rs` or new file | Document the error text clearly |
 | Test for interactive flow | `tests/plugin_interactive.rs` + `rexpect` pty harness | Additional test cases for specific user paths |
+| Test for models command | `tests/models_{download,list,remove}.rs` | Test `--verify`, `--force`, on-disk state handling |
+| Test shared helper | `tests/common/mod.rs` | Add `fabricate_*` factory functions |
 
 ## Naming Conventions
 
 | Category | Convention | Examples |
 |----------|-----------|----------|
-| **Struct/Enum** | PascalCase | `CatalogManifest`, `CatalogEntry`, `TomeError`, `PluginId`, `EnableOutcome`, `Candidate` |
+| **Struct/Enum** | PascalCase | `CatalogManifest`, `CatalogEntry`, `TomeError`, `PluginId`, `EnableOutcome`, `Candidate`, `ModelState` |
 | **Trait** | PascalCase | `Embedder`, `Reranker`, `Git` |
 | **Function/Method** | snake_case | `parse_and_validate()`, `install_signal_handler()`, `enable_plugin_atomic()`, `resolve_plugin_dir()` |
 | **Constant** | SCREAMING_SNAKE_CASE | `MODEL_REGISTRY`, `SCHEMA_URI`, `HANDLER_INSTALLED` |
@@ -406,6 +430,7 @@ src/embedding/
 | **Test** | `#[test]` with descriptive name | `#[test] fn unknown_field_is_rejected()` |
 | **Integration test file** | Matches the feature being tested | `tests/plugin_enable.rs` tests `tome plugin enable` |
 | **Interactive loop level** | Private enum in interactive.rs | `LoopExit::Continue`, `LoopExit::Back`, `LoopExit::Quit` |
+| **Model state classification** | PublicEnum in commands/models/mod.rs | `ModelState::Ok`, `ModelState::Missing`, `ModelState::Corrupt`, `ModelState::ChecksumMismatched` |
 
 ## Entry Points
 
@@ -422,7 +447,7 @@ src/embedding/
 
 ## Generated Files
 
-No files in Phase 1–5 are auto-generated.
+No files in Phase 1–6 are auto-generated.
 
 ---
 
@@ -591,6 +616,32 @@ No embedder construction — index-only UPDATE via `mark_all_disabled_for_plugin
 CLI path; `tests/plugin_repeated.rs` consolidates idempotency contract
 (re-disable → exit 21) alongside re-enable. Cheap re-enable verified via
 `tests/plugin_enable.rs::cheap_reenable_after_disable_invokes_embedder_zero_times`.
+
+---
+
+## Phase 6 additions — User Story 4 slice 1 (models commands)
+
+Phase 6 slice 1 (merged) added `src/commands/models/{mod,download,list,remove}.rs`
+(~360 lines total) — explicit user-facing CLI for model artefact management.
+New top-level `Command::Models(ModelsCommand)` enum routes to
+`commands::models::run()`. No new internal dependencies; uses pre-existing
+`embedding::{registry,download}` library functions.
+
+**Module structure**:
+- **`download.rs`**: Iterate MODEL_REGISTRY, skip if manifest exists + valid unless `--force`. Call `embedding::download::download_model()` with indicatif spinner. Emit human or NDJSON per mode.
+- **`list.rs`**: Cheap path = manifest + files exist + correct sizes. Optional `--verify` flag rehashes via new `embedding::download::sha256_file()`. Render ModelState (Ok / Missing / Corrupt / ChecksumMismatched) as table (human) or NDJSON (JSON).
+- **`remove.rs`**: Check model not in use, check exists (exit 30 if missing), confirm with `--force` short-circuit, non-TTY without `--force` → exit 54 with pointer. Delete manifest first, then directory.
+- **`mod.rs`**: Dispatcher, shared ModelState enum, model-in-use helper.
+
+**Library-side additions**:
+- `src/embedding/download.rs`: `pub fn sha256_file(path) -> Result<String, TomeError>` streaming SHA-256 for `models list --verify`.
+- `src/output.rs`: Relaxed `write_json` signature to `T: Serialize + ?Sized` for flexibility.
+
+**Test coverage** (Phase 6 PR #23): `tests/models_{download,list,remove}.rs` (9 tests total), plus `fabricate_installed_model` / `fabricate_all_installed_models` helpers in `tests/common/mod.rs`.
+
+**Architectural pattern**: Mirrors `src/commands/plugin/` layout — per-subcommand
+file under group `mod.rs` that dispatches. Owns user-facing UX (prompts,
+progress, tables); calls library for the work.
 
 ---
 

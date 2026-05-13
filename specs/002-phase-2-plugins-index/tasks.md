@@ -299,9 +299,9 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Closing
 
-- [ ] T136 [US4] Run `/sdd:map incremental`
-- [ ] T137 [US4] Review `retro/P6.md`
-- [ ] T138 [GIT] Commit: docs: Phase 6 codebase refresh + retro
+- [X] T136 [US4] Run `/sdd:map incremental`
+- [X] T137 [US4] Review `retro/P6.md`
+- [X] T138 [GIT] Commit: docs: Phase 6 codebase refresh + retro
 
 ### Phase 6 Completion
 
