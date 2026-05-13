@@ -5,20 +5,21 @@
 > **Last Updated**: 2026-05-13 (Phase 5 User Story 2 — `tome plugin disable` subcommand + re-enable verification)
 > **Updated**: 2026-05-13 (Phase 6 User Story 4 slice 1 — `tome models download | list | remove` CLI; slice 2 adds 9 integration tests)
 > **Updated**: 2026-05-13 (Phase 7 User Story 5 slices 1–3 — `reindex_plugin_atomic` + `tome catalog update` cascade + `tome reindex` CLI; no new dependencies)
+> **Updated**: 2026-05-13 (Phase 8 User Story 6 slices 1–2 — `tome status [--verify]` + version pre-parse hook; 14 new tests; no new dependencies)
 
 ## Languages & Runtimes
 
 | Language | Version | Purpose |
 |----------|---------|---------|
-| Rust | stable (MSRV: 1.93) | Primary implementation language; synchronous (no async runtime in Phase 1–7) |
+| Rust | stable (MSRV: 1.93) | Primary implementation language; synchronous (no async runtime in Phase 1–8) |
 
 ## Frameworks
 
-Phase 1–7 is a CLI application, not a web framework-based project.
+Phase 1–8 is a CLI application, not a web framework-based project.
 
 | Framework | Version | Purpose |
 |-----------|---------|---------|
-| clap | 4.x | CLI argument parsing and help/version generation; bare `tome plugin` (no subcommand) dispatches to interactive flow via `Option<PluginCommand>` derive pattern |
+| clap | 4.x | CLI argument parsing and help generation; bare `tome plugin` (no subcommand) dispatches to interactive flow via `Option<PluginCommand>` derive pattern; `--version` intercepted by pre-parse hook in `main.rs` to honour `--json` and include embedder/reranker identities |
 
 ## Critical Dependencies
 
@@ -133,6 +134,26 @@ Phase 7 slice 3 adds the `tome reindex` CLI subcommand:
 
 **No new production dependencies** across Phase 7 slices 1–3 — all pieces reuse Phase 1–6 infrastructure (lifecycle, reindex logic sits in existing orchestrator; CLI uses existing tables/progress/JSON formatters). Test count: 204 → 213 → 216 → 223 across 33 suites.
 
+### Phase 8 — user-story slices 1–2 (status health check + version pre-parse)
+
+Phase 8 slice 1 ships the `tome status [--verify]` read-only health check subcommand:
+- `src/commands/status.rs` (~330 lines) — per-subsystem diagnostics (models, index, drift detection via `detect_drift` in `src/index/meta.rs`)
+- New `Command::Status(StatusArgs)` and `StatusArgs { verify: bool }` in `src/cli.rs`
+- Dispatch wired in `src/commands/plugin/mod.rs`
+- Helpers `ModelState`, `cheap_state`, `read_manifest`, `primary_file_path`, `human_mb` promoted from `pub(crate)` to `pub` in `src/commands/models/mod.rs` for reuse
+- Lazy drift detection — skipped unless `--verify` is set
+- Exit semantics: 0 when healthy; 1 when degraded (reranker-only) or unhealthy (anything else); report always rendered before exit
+
+Phase 8 slice 2 adds version pre-parse hook in `src/main.rs`:
+- Clap's auto `--version` disabled via `disable_version_flag = true` on `Cli` derive
+- Pre-parse hook detects `--version` / `-V` in `std::env::args()` before clap dispatch
+- Delegates to `commands::status::print_version(json)` to honour `--json` flag and include embedder/reranker identities (per contract `contracts/version-output.md`)
+- Short-circuits to `std::process::exit(0)` after printing
+- Test coverage: `tests/status.rs` (10 tests covering health report variants, JSON mode, exit codes) + `tests/version_output.rs` (4 tests covering flag detection and embedder/reranker output)
+- Helper `registry_seeds` in `src/commands/plugin/mod.rs` promoted from `pub(crate)` to `pub` for test bootstrapping
+
+**No new production dependencies** in Phase 8 — all pieces reuse Phase 1–7 infrastructure (status logic combines existing model/index/meta logic; version printing is a thin wrapper over embedder registry entries). Test count: 223 → 237 across 33 → 35 suites.
+
 ## Package Managers & Build Tools
 
 | Tool | Version | Purpose |
@@ -153,7 +174,7 @@ Phase 7 slice 3 adds the `tome reindex` CLI subcommand:
 
 ## Not Used (Explicitly Excluded)
 
-- **Async runtime**: No `tokio`, `async-std`, or similar. Phase 1–7 remains synchronous (`reqwest::blocking`, `rusqlite`, `fastembed`); the MCP server is the future forcing function.
+- **Async runtime**: No `tokio`, `async-std`, or similar. Phase 1–8 remains synchronous (`reqwest::blocking`, `rusqlite`, `fastembed`); the MCP server is the future forcing function.
 - **Git library**: No `libgit2`, `git2`, or vendored Git. `std::process::Command` shells out to system `git` (constitution principle XII).
 - **Direct ONNX Runtime dep**: `ort` is reached transitively through `fastembed` only; no direct linkage from Tome code.
 - **Custom npm/cargo registry overrides**: All packages resolve from public registries.
@@ -171,4 +192,4 @@ Phase 7 slice 3 adds the `tome reindex` CLI subcommand:
 
 ---
 
-*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–7 source code.*
+*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–8 source code.*

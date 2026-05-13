@@ -362,27 +362,27 @@ Working branch is `002-phase-2-plugins-index` (already created by `/sdd:specify`
 
 ### Phase Start
 
-- [ ] T162 [GIT] Verify working tree is clean before starting Phase 8
-- [ ] T163 [US6] Create `retro/P8.md`
+- [X] T162 [GIT] Verify working tree is clean before starting Phase 8
+- [X] T163 [US6] Create `retro/P8.md`
 
 ### Implementation
 
-- [ ] T164 [P] [US6] Implement `src/commands/status.rs` per `contracts/status.md` — assemble a `StatusReport` from `embedding::registry`, `paths`, `index::integrity`, `index::meta`, and the configured model identities. Render human + JSON. Non-zero exit on `Degraded` / `Unhealthy` (use devs:rust-dev agent)
-- [ ] T165 [US6] Wire `status` into `src/cli.rs` (use devs:rust-dev agent)
-- [ ] T166 [US6] Extend the `clap` `--version` output to print Tome version + embedder name/version + reranker name/version per `contracts/version-output.md`; add a `--json` path that emits the structured form (use devs:rust-dev agent)
-- [ ] T167 [GIT] Commit: feat(status,version): add tome status and extend --version with model identities
+- [X] T164 [P] [US6] Implement `src/commands/status.rs` per `contracts/status.md` — assemble a `StatusReport` from `embedding::registry`, `paths`, `index::integrity`, `index::meta`, and the configured model identities. Render human + JSON. Non-zero exit on `Degraded` / `Unhealthy` (use devs:rust-dev agent)
+- [X] T165 [US6] Wire `status` into `src/cli.rs` (use devs:rust-dev agent)
+- [X] T166 [US6] Extend the `clap` `--version` output to print Tome version + embedder name/version + reranker name/version per `contracts/version-output.md`; add a `--json` path that emits the structured form (use devs:rust-dev agent)
+- [X] T167 [GIT] Commit: feat(status,version): add tome status and extend --version with model identities
 
 ### Tests
 
-- [ ] T168 [P] [US6] Add `tests/status.rs` — healthy / degraded (manually mutate `meta.reranker_name` then assert exit 1 + DriftStatus::RerankerDrift) / unhealthy (delete embedder file, assert ModelStatus::Missing + exit 1) (use devs:rust-dev agent)
-- [ ] T169 [P] [US6] Add `tests/version_output.rs` — assert plain-text and JSON forms include all three identities (use devs:rust-dev agent)
-- [ ] T170 [GIT] Commit: test: cover tome status and --version surface
+- [X] T168 [P] [US6] Add `tests/status.rs` — healthy / degraded (manually mutate `meta.reranker_name` then assert exit 1 + DriftStatus::RerankerDrift) / unhealthy (delete embedder file, assert ModelStatus::Missing + exit 1) (use devs:rust-dev agent)
+- [X] T169 [P] [US6] Add `tests/version_output.rs` — assert plain-text and JSON forms include all three identities (use devs:rust-dev agent)
+- [X] T170 [GIT] Commit: test: cover tome status and --version surface
 
 ### Closing
 
-- [ ] T171 [US6] Run `/sdd:map incremental`
-- [ ] T172 [US6] Review `retro/P8.md`
-- [ ] T173 [GIT] Commit: docs: Phase 8 codebase refresh + retro
+- [X] T171 [US6] Run `/sdd:map incremental`
+- [X] T172 [US6] Review `retro/P8.md`
+- [X] T173 [GIT] Commit: docs: Phase 8 codebase refresh + retro
 
 ### Phase 8 Completion
 

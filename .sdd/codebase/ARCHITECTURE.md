@@ -2,11 +2,11 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Stories 6 — health diagnostics)
 
 ## Architecture Overview
 
-Tome is a synchronous Rust CLI following a classic **parse → dispatch → execute → map-errors → exit** pipeline. The codebase is organized around a **capability-driven** modular architecture where each module owns a distinct responsibility (catalog management, Git operations, configuration, logging, path resolution, output formatting, plugin metadata parsing, skill indexing, model embedding, model lifecycle management, index reconciliation, and interactive presentation). Error handling is centralized in a closed `TomeError` enum that enforces exhaustive exit-code mapping at compile time. Signal handling (SIGINT) is global and atomic, allowing long-running operations (git clone, model download, embedding, reindexing) to be cancelled gracefully with a well-defined exit code.
+Tome is a synchronous Rust CLI following a classic **parse → dispatch → execute → map-errors → exit** pipeline. The codebase is organized around a **capability-driven** modular architecture where each module owns a distinct responsibility (catalog management, Git operations, configuration, logging, path resolution, output formatting, plugin metadata parsing, skill indexing, model embedding, model lifecycle management, index reconciliation, health diagnostics, and interactive presentation). Error handling is centralized in a closed `TomeError` enum that enforces exhaustive exit-code mapping at compile time. Signal handling (SIGINT) is global and atomic, allowing long-running operations (git clone, model download, embedding, reindexing) to be cancelled gracefully with a well-defined exit code.
 
 ## Architecture Pattern
 
@@ -22,6 +22,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 | **Interactive Three-Level Loop Pattern** | Bare `tome plugin` (no subcommand) enters an interactive flow: `catalog_loop` → `plugin_loop` → `view_loop`, each with a `LoopExit` enum to handle Back/Quit unwinds and error propagation (Phase 4, User Story 2). |
 | **Per-Plugin Atomic Reindex** | `lifecycle::reindex_plugin` mirrors `lifecycle::enable` atomicity: each plugin's reindex is one SQLite transaction under one advisory lock. Batch operations (`tome catalog update`, `tome reindex`) loop per-plugin, committing each before moving to the next. SIGINT between plugins leaves earlier plugins committed (per-plugin boundary). |
 | **Lazy Embedder Loading** | Heavy embedder (~345 MB ONNX) is loaded only when reindexing will actually call it. `tome catalog update` and `tome reindex` defer load until the first enabled plugin is encountered; a sync with zero enabled plugins never touches model files. |
+| **Health Diagnostics (Read-Only)** | `status` command reads subsystem state without mutation: models via manifest checks, index via read-only connection + `PRAGMA integrity_check`, drift via stored identity comparison. Never acquires advisory lock, never downloads models. Exits 0 on Ok, 1 on Degraded/Unhealthy. |
 
 ## Core Components
 
@@ -36,6 +37,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 - **Phase 5 Change**: `PluginCommand` now includes `Disable(PluginDisableArgs { id: String, force: bool })` variant.
 - **Phase 6 Change**: `ModelsCommand` enum added with `Download`, `List`, `Remove` variants; routes via `Command::Models(ModelsCommand)` to `commands::models::run()`.
 - **Phase 7 Change**: `ReindexArgs` and `ReindexCommand` added for `tome reindex [<scope>] [--force]`; routes via `Command::Reindex(ReindexArgs)` to `commands::reindex::run()`.
+- **Phase 8 Change**: `StatusArgs` added with `--verify` flag; routes via `Command::Status(StatusArgs)` to `commands::status::run()`. Pre-parse hook intercepts `--version` / `-V` BEFORE clap dispatch so extended output can include MODEL_REGISTRY identities and honour `--json` flag.
 
 ### Catalog Management (`src/catalog/`, `src/commands/catalog/`)
 
@@ -107,6 +109,35 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   - **`list`** (`src/commands/models/list.rs`): Cheap path = check manifest + file existence + size; `--verify` flag rehashes via `embedding::download::sha256_file`. Renders ModelState (Ok / Missing / Corrupt / ChecksumMismatched) as table (human) or NDJSON (JSON).
   - **`remove`** (`src/commands/models/remove.rs`): Check model is not in use by any enabled plugin, check model exists (exit 30 if missing), confirm prompt with `--force` short-circuit, non-TTY without `--force` → exit 54 with pointer message. Deletes manifest first, then directory.
 - **Shared Pattern**: Mirrors `plugin/` module layout (per-subcommand file under group `mod.rs` that dispatches). Owns user-facing UX (prompts, spinners, table rendering). Calls library functions (`embedding::download`, `embedding::registry`) for the actual work.
+
+### Health & Diagnostics (`src/commands/status.rs`)
+
+- **Purpose**: Report per-subsystem health (models, index, drift) in a read-only, non-mutating diagnostic command.
+- **Location**: `src/commands/status.rs` (~330 lines).
+- **Public Interfaces**:
+  - `pub fn run(args: StatusArgs, mode: Mode) -> Result<(), TomeError>` — CLI entry; emits report, exits 0 on Ok, 1 on Degraded/Unhealthy.
+  - `pub fn assemble_report(paths: &Paths, verify: bool) -> Result<StatusReport, TomeError>` — library entry (used by tests); produces report without exit side-effect.
+  - `pub fn print_version(json: bool) -> Result<(), TomeError>` — extended --version output (called by pre-parse hook in main.rs).
+- **Health Model** (`StatusReport`):
+  - `tome: ModelHealth` — embedder model manifest checks + optional SHA-256 verification.
+  - `embedder: ModelHealth` — embedder manifest, size, hash state.
+  - `reranker: ModelHealth` — reranker manifest, size, hash state.
+  - `index: IndexHealth` — `PRAGMA integrity_check` result, enabled plugin count, enabled skill count.
+  - `drift: DriftStatus` — identity mismatch between stored and configured embedder/reranker.
+  - `overall: OverallHealth` — classification (Ok / Degraded / Unhealthy).
+- **Classification Rules**:
+  - **Unhealthy**: embedder missing/corrupt OR index integrity fail OR embedder drift OR reranker drift (new in Phase 8; was silent warn before).
+  - **Degraded**: reranker missing/corrupt.
+  - **Ok**: all subsystems healthy.
+- **Design Invariants**:
+  - Read-only: opens index with `OpenOptions { readonly: true }`, never acquires advisory lock.
+  - No downloads: rejects models if not on-disk (exit 30 if missing); does not prompt or auto-download.
+  - Verifiable: `--verify` flag re-hashes via `embedding::download::sha256_file` (slow but thorough).
+  - Compile-time model identities: MODEL_REGISTRY consts drive both --version output and drift detection; bumping a model version auto-updates both without code changes.
+- **Exit Semantics**:
+  - Exit 0: `overall == Ok`.
+  - Exit 1: `overall == Degraded` or `overall == Unhealthy`.
+  - Non-zero cases call `std::process::exit(1)` after emitting the report (not propagated as `TomeError`).
 
 ### Index Reconciliation & Reindex (`src/commands/reindex.rs`, `src/plugin/lifecycle.rs`, `src/index/skills.rs`)
 
@@ -402,6 +433,58 @@ emit human or JSON output (summary table per catalog)
 exit(0)
 ```
 
+### Health Report Flow: `tome status [--verify]`
+
+```
+CLI parse (--verify flag)
+       ↓
+dispatch to status::run()
+       ↓
+assemble_report(paths, verify=flag):
+  → load registered embedder/reranker from MODEL_REGISTRY
+  → for each model:
+      → cheap_state: check manifest, file, size
+      → if --verify: re-hash via sha256_file (slow)
+      → classify ModelState (Ok / Missing / Corrupt / ChecksumMismatched)
+  → open index read-only (never lock)
+  → run PRAGMA integrity_check
+  → query enabled plugin count, enabled skill count
+  → read stored embedder/reranker ident from index meta
+  → detect_drift: compare (name, version) pairs
+  → classify ModelHealth (Ok / Missing / Corrupt / ChecksumMismatched)
+  → classify IndexHealth (integral / drift / plugin/skill counts)
+  → classify OverallHealth:
+      - Unhealthy: embedder missing OR index fail OR embedder/reranker drift
+      - Degraded: reranker missing
+      - Ok: all healthy
+  → return StatusReport
+       ↓
+emit_report(report, mode):
+  → human: multiline summary with colour
+  → JSON: single NDJSON record
+       ↓
+if overall != Ok:
+  std::process::exit(1)
+else:
+  exit(0)
+```
+
+### Extended Version Output: `tome --version` (or `-V`)
+
+```
+main.rs pre-parse hook:
+  → check `std::env::args` for --version / -V BEFORE clap dispatch
+  → if found:
+       → parse global --json flag from args
+       → call status::print_version(json)
+       → emit three-line human or JSON record:
+           - tome version (from Cargo.toml)
+           - embedder identity (name + version from MODEL_REGISTRY)
+           - reranker identity (name + version from MODEL_REGISTRY)
+       → exit(0)
+       → (clap's auto-version handler never runs)
+```
+
 ### Interactive Browse Flow: `tome plugin` (no subcommand)
 
 ```
@@ -518,7 +601,7 @@ exit(0)
 | Layer | Responsibility | Can Access | Cannot Access |
 |-------|----------------|------------|---------------|
 | **CLI** (`src/main.rs`, `src/cli.rs`) | Parse args, install signal handler, dispatch, map errors to exit codes. | Commands, logging, output. | Catalog, config, paths (indirectly via commands). |
-| **Commands** (`src/commands/`) | Orchestrate catalog/plugin/query/models/reindex operations; call library logic and format output. | Lifecycle, catalog, config, paths, error, output, embedding, index, presentation. | Logging (by design; logging is orthogonal). |
+| **Commands** (`src/commands/`) | Orchestrate catalog/plugin/query/models/reindex/status operations; call library logic and format output. | Lifecycle, catalog, config, paths, error, output, embedding, index, presentation. | Logging (by design; logging is orthogonal). |
 | **Plugin Lifecycle** (`src/plugin/lifecycle.rs`) | Enable/disable/reindex orchestrator; compose metadata parsers, index, and embedding. | Plugin metadata (manifest, frontmatter), index (open, lock, enable_plugin_atomic, reindex_plugin_atomic), embedding (embedder trait, model registry), catalog (manifest reader). | Commands (reverse dependency only). |
 | **Index** (`src/index/`) | SQLite operations, schema, KNN, drift detection, advisory locks. | rusqlite, sqlite-vec, index schema. | Commands, embedding, plugin (reverse dependency only). |
 | **Embedding** (`src/embedding/`) | Model registry, download, trait implementations (fastembed wrapper, stub). | reqwest, ort, fastembed-rs, serde. | Commands, index (reverse dependency only). |
@@ -545,6 +628,7 @@ exit(0)
 8. **Interactive flow is command-layer only**: `commands/plugin/interactive.rs` uses presentation layer (prompts, tables), command handlers (enable, disable), and lifecycle/config APIs. It is test-driven via `rexpect` pty harness (`tests/plugin_interactive.rs`) rather than unit-test injection.
 9. **Models commands mirror plugin commands layout**: `commands/models/` follows the same per-subcommand-file + group-dispatcher pattern as `commands/plugin/`. Library-side work (download, SHA-256) lives in `embedding/download.rs` and `embedding/registry.rs`; CLI-side work (prompts, progress, tables) lives in `commands/models/{download,list,remove}.rs`.
 10. **Reindex commands and lifecycle**: `commands/reindex.rs` owns scope parsing and emission; `plugin::lifecycle::reindex_plugin` and `index::skills::reindex_plugin_atomic` own the orchestration and transaction. Lazy embedder loading is a `commands/` responsibility. `run_with_deps` in `commands/reindex.rs` is a library test entry point (no embedder construction).
+11. **Status is read-only by design**: `commands/status.rs` never mutates state, never acquires advisory lock, never downloads models. It opens the index with `readonly=true` and reads compiled-time model registry identities. Library function `assemble_report` is testable; CLI-side `run` exits 1 on Degraded/Unhealthy via `std::process::exit()` rather than `TomeError`.
 
 ## Key Interfaces & Contracts
 
@@ -571,6 +655,8 @@ exit(0)
 | `LoopExit` | Private enum in `interactive.rs` encoding Back/Quit/Continue state. | `src/commands/plugin/interactive.rs` |
 | `ModelState` | Classification of a registered model's on-disk install state (Ok / Missing / Corrupt / ChecksumMismatched). | `src/commands/models/mod.rs` |
 | `Scope` | Reindex scope (All / Catalog / Plugin); used by `commands/reindex.rs` and tests. | `src/commands/reindex.rs` |
+| `StatusReport` + `OverallHealth` + `ModelHealth` + `IndexHealth` | Health diagnostic data model (Phase 8). | `src/commands/status.rs` |
+| `DriftStatus` | Embedder/reranker identity mismatch detection. | `src/index/meta.rs` |
 
 ## Signal Handling & Cancellation
 
@@ -617,6 +703,8 @@ exit(0)
 | **Path Validation** | Plugin sources in `tome-catalog.toml` are validated relative to catalog root (no `..`, no escape). Plugin source in `lifecycle::resolve_plugin_dir` is manifest-declared or flat-layout fallback. | `src/catalog/manifest.rs::validate_source()`, `src/plugin/lifecycle.rs::resolve_plugin_dir()` |
 | **Drift Detection** | Embedder and reranker identity (name + version) stored in index meta; compared at query time. Embedder drift → hard fail (exit 41/42); reranker drift → warn. | `src/index/meta.rs`, `src/commands/query.rs::check_drift()` |
 | **Content-Hash Smart Re-Embedding** | Skill text (name + "\n\n" + description) is hashed; hash is compared at reindex time. Unchanged hash → skip embedder, reuse vector. Used by both `enable` (first-time, always embed) and `reindex` (smart fast-path). | `src/index/skills.rs::content_hash()`, `reindex_plugin_atomic()` |
+| **Health Classification** | Pre-computed per-subsystem status (embedder, reranker, index, drift) classified into `OverallHealth` enum (Ok / Degraded / Unhealthy). | `src/commands/status.rs::classify_*` helpers |
+| **Version Output Override** | Pre-parse hook in `main.rs` intercepts `--version` / `-V` before clap to include model identities and honour `--json`. | `src/main.rs`, `src/commands/status.rs::print_version` |
 
 ---
 
