@@ -4,6 +4,7 @@
 //! (`enable`, `list`, `show`) over the already-merged `plugin::lifecycle`
 //! library. The `disable` and bare-interactive forms belong to US2.
 
+mod disable;
 mod enable;
 mod interactive;
 mod list;
@@ -16,6 +17,7 @@ use crate::output::Mode;
 pub fn run(cmd: PluginCommand, mode: Mode) -> Result<(), TomeError> {
     match cmd {
         PluginCommand::Enable(args) => enable::run(args, mode),
+        PluginCommand::Disable(args) => disable::run(args, mode),
         PluginCommand::List(args) => list::run(args, mode),
         PluginCommand::Show(args) => show::run(args, mode),
     }

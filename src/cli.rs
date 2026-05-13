@@ -101,6 +101,9 @@ pub struct PluginArgs {
 pub enum PluginCommand {
     /// Enable a plugin: index its skills and start surfacing them in queries.
     Enable(PluginEnableArgs),
+    /// Disable a plugin: hide its skills from queries while retaining the
+    /// embeddings on disk so re-enable is cheap.
+    Disable(PluginDisableArgs),
     /// List plugins discoverable across every registered catalog.
     List(PluginListArgs),
     /// Show one plugin's metadata, component counts, and index status.
@@ -116,6 +119,16 @@ pub struct PluginEnableArgs {
     /// not yet installed.
     #[arg(long)]
     pub yes: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct PluginDisableArgs {
+    /// The plugin to disable, as `<catalog>/<plugin>`.
+    pub id: String,
+    /// Skip the confirmation prompt. Required to disable a plugin from a
+    /// non-interactive context (e.g. CI).
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, clap::Args)]
