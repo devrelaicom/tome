@@ -5,6 +5,7 @@
 //! library. The `disable` and bare-interactive forms belong to US2.
 
 mod enable;
+mod interactive;
 mod list;
 mod show;
 
@@ -18,6 +19,13 @@ pub fn run(cmd: PluginCommand, mode: Mode) -> Result<(), TomeError> {
         PluginCommand::List(args) => list::run(args, mode),
         PluginCommand::Show(args) => show::run(args, mode),
     }
+}
+
+/// Bare `tome plugin` — interactive catalog → plugin → action browse flow.
+/// Spec: `contracts/plugin-commands.md` §"`tome plugin` (no subcommand —
+/// interactive)"; FR-050 / FR-051.
+pub fn run_interactive(mode: Mode) -> Result<(), TomeError> {
+    interactive::run(mode)
 }
 
 // ---------------------------------------------------------------------------

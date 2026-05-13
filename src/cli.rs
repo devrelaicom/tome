@@ -25,9 +25,10 @@ pub enum Command {
     /// Manage registered catalogs.
     #[command(subcommand)]
     Catalog(CatalogCommand),
-    /// Manage plugins from registered catalogs.
-    #[command(subcommand)]
-    Plugin(PluginCommand),
+    /// Manage plugins from registered catalogs. Run with no subcommand to
+    /// drop into the interactive catalog → plugin → action browse flow
+    /// (FR-050; refuses on non-TTY per FR-051).
+    Plugin(PluginArgs),
     /// Search enabled skills across every catalog.
     Query(QueryArgs),
 }
@@ -86,6 +87,14 @@ pub struct CatalogUpdateArgs {
 pub struct CatalogShowArgs {
     /// The catalog display name to inspect.
     pub name: String,
+}
+
+/// Wraps the `plugin` subcommand so the `command` field can be `None` —
+/// allowing bare `tome plugin` to drop into the interactive flow.
+#[derive(Debug, clap::Args)]
+pub struct PluginArgs {
+    #[command(subcommand)]
+    pub command: Option<PluginCommand>,
 }
 
 #[derive(Debug, Subcommand)]
