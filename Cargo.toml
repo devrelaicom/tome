@@ -51,7 +51,11 @@ inquire = { version = "0.7", default-features = false, features = ["crossterm"] 
 # Phase 3 — MCP server. Scoped strictly to `src/mcp/`; the rest of the binary
 # stays synchronous (constitution principle: sync-only outside the MCP module).
 # A structural test (`tests/sync_boundary.rs`) enforces the boundary.
-rmcp = "1"
+rmcp = { version = "1", features = ["transport-io", "schemars"] }
+
+# JSON Schema for MCP tool I/O. rmcp's `schemars` feature re-exports the
+# same crate; our `tools/*.rs` modules use the macro derives directly.
+schemars = "1"
 
 # Phase 3 — async runtime backing the MCP server. Single-threaded `rt` only —
 # the server serves one client at a time and tool calls block on synchronous

@@ -18,8 +18,15 @@ fn main() {
     }
 
     let cli = Cli::parse();
-    logging::init(cli.verbosity());
-    git::install_signal_handler();
+    // Skip the stderr-based CLI tracing subscriber on the MCP path —
+    // `mcp::run` installs its own file-backed JSON subscriber, and the
+    // global `tracing` registry only accepts one. Also skip the
+    // Ctrl-C signal handler: the MCP server uses tokio's async
+    // `signal::ctrl_c()` instead, and the CLI handler would race.
+    if !matches!(cli.command, Command::Mcp(_)) {
+        logging::init(cli.verbosity());
+        git::install_signal_handler();
+    }
 
     let mode = cli.mode();
 
@@ -45,6 +52,7 @@ fn main() {
         Command::Query(args) => commands::query::run(args, &scope, mode),
         Command::Reindex(args) => commands::reindex::run(args, &scope, mode),
         Command::Status(args) => commands::status::run(args, &scope, mode),
+        Command::Mcp(args) => commands::mcp::run(args, &scope, mode),
     };
 
     match result {
