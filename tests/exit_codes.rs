@@ -183,6 +183,62 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
             "catalog_has_enabled_plugins",
         ),
         (TomeError::NotATerminal, 54, "not_a_terminal"),
+        // 60–61 — MCP server (Phase 3)
+        (
+            TomeError::McpStartupFailed {
+                reason: "rmcp handshake rejected".into(),
+            },
+            60,
+            "mcp_startup",
+        ),
+        (
+            TomeError::McpProtocolIo {
+                source: dummy_io_error(),
+            },
+            61,
+            "mcp_io",
+        ),
+        // 70–75 — workspace + schema (Phase 3)
+        (
+            TomeError::WorkspaceMalformed {
+                path: PathBuf::from("/tmp/ws"),
+                reason: "invalid TOML in .tome/config.toml at line 4".into(),
+            },
+            70,
+            "workspace_malformed",
+        ),
+        (
+            TomeError::WorkspaceNotFound {
+                path: PathBuf::from("/tmp/nope"),
+            },
+            71,
+            "workspace_not_found",
+        ),
+        (TomeError::WorkspaceConflict, 72, "workspace_conflict"),
+        (
+            TomeError::SchemaVersionTooNew {
+                on_disk: 99,
+                expected: 1,
+            },
+            73,
+            "schema_too_new",
+        ),
+        (
+            TomeError::SchemaMigrationFailed {
+                from: 0,
+                to: 1,
+                source: anyhow::anyhow!("synthetic migration failure"),
+            },
+            74,
+            "schema_migration",
+        ),
+        (
+            TomeError::DoctorFixNotSafe {
+                subsystem: "catalog_cache".into(),
+            },
+            75,
+            "doctor_fix_unsafe",
+        ),
     ]
 }
 
@@ -255,6 +311,14 @@ fn exhaustive_match_compile_check() {
             TomeError::SchemaTooNew { .. } => 52,
             TomeError::CatalogHasEnabledPlugins { .. } => 53,
             TomeError::NotATerminal => 54,
+            TomeError::McpStartupFailed { .. } => 60,
+            TomeError::McpProtocolIo { .. } => 61,
+            TomeError::WorkspaceMalformed { .. } => 70,
+            TomeError::WorkspaceNotFound { .. } => 71,
+            TomeError::WorkspaceConflict => 72,
+            TomeError::SchemaVersionTooNew { .. } => 73,
+            TomeError::SchemaMigrationFailed { .. } => 74,
+            TomeError::DoctorFixNotSafe { .. } => 75,
         }
     }
 }

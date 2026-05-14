@@ -80,12 +80,12 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Slice F2 — closed-error-set extension
 
-- [ ] T026 Add eight new variants to `TomeError` in `src/error.rs` per contracts/exit-codes-p3.md: `McpStartupFailed`, `McpProtocolIo`, `WorkspaceMalformed`, `WorkspaceNotFound`, `WorkspaceConflict`, `SchemaVersionTooNew`, `SchemaMigrationFailed`, `DoctorFixNotSafe` (use devs:rust-dev agent)
-- [ ] T027 Extend `TomeError::exit_code()` exhaustive match with codes 60 / 61 / 70 / 71 / 72 / 73 / 74 / 75 (use devs:rust-dev agent)
-- [ ] T028 Extend `TomeError::category()` exhaustive match with the eight new category strings per contracts/exit-codes-p3.md (use devs:rust-dev agent)
-- [ ] T029 Extend `tests/exit_codes.rs::build_each_variant` and the exhaustive `_code_for` arm to cover the eight new variants (use devs:rust-dev agent)
-- [ ] T030 Extend `tests/error_messages.rs` with one Display assertion per new variant per contracts/exit-codes-p3.md §Display messages (use devs:rust-dev agent)
-- [ ] T031 [GIT] Commit: feat(error): add Phase 3 TomeError variants and exit codes
+- [X] T026 Add eight new variants to `TomeError` in `src/error.rs` per contracts/exit-codes-p3.md: `McpStartupFailed`, `McpProtocolIo`, `WorkspaceMalformed`, `WorkspaceNotFound`, `WorkspaceConflict`, `SchemaVersionTooNew`, `SchemaMigrationFailed`, `DoctorFixNotSafe` (use devs:rust-dev agent)
+- [X] T027 Extend `TomeError::exit_code()` exhaustive match with codes 60 / 61 / 70 / 71 / 72 / 73 / 74 / 75 (use devs:rust-dev agent)
+- [X] T028 Extend `TomeError::category()` exhaustive match with the eight new category strings per contracts/exit-codes-p3.md (use devs:rust-dev agent)
+- [X] T029 Extend `tests/exit_codes.rs::build_each_variant` and the exhaustive `_code_for` arm to cover the eight new variants (use devs:rust-dev agent)
+- [X] T030 Extend `tests/error_messages.rs` with one Display assertion per new variant per contracts/exit-codes-p3.md §Display messages (use devs:rust-dev agent)
+- [X] T031 [GIT] Commit: feat(error): add Phase 3 TomeError variants and exit codes
 
 ### Slice F3 — workspace resolution
 
