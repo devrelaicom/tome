@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US4 doctor --fix incremental)
+> **Last Updated**: 2026-05-14 (Phase 3 complete: US1–US5 shipped)
 
 ## Overview
 
@@ -22,6 +22,7 @@ Tome is a Rust CLI (and eventually MCP server) for managing plugin catalogs and 
 13. Workspace initialization with secure directory permissions and atomic staging
 14. Catalog cache content-trust via ref-counting and re-use on same URL
 15. Doctor command harness detection without config parsing; network access gated behind `--fix`
+16. Forward-only schema migrations with per-migration transaction atomicity
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md` (Phase 1), `specs/002-phase-2-plugins-index/spec.md` (Phase 2), `specs/002-phase-2-plugins-index/contracts/plugin-commands.md` (Phase 4–5), and `specs/003-phase-3-mcp-workspaces/spec.md` (Phase 3+).
 
@@ -145,6 +146,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **MCP startup pre-flight** | SHA-256 verification of primary embedder file at every startup (FR-110) | `src/mcp/preflight.rs::verify_embedder_artefacts` (Phase 3, F8) |
 | **Workspace initialization** | Atomic staging with permissions lock before content lands | `src/workspace/init.rs` (Phase 3, US2) |
 | **Catalog cache content trust** | Re-use existing clone on URL re-add; delete clone only when no scopes reference the URL | `src/catalog/store.rs::reference_count` (Phase 3, US3) |
+| **Schema migrations** | Forward-only migrations with per-step transaction atomicity under advisory lock | `src/index/migrations.rs::apply_pending` (Phase 3, F7 + US5) |
 
 **Model Registry** (Phase 3 update):
 - `bge-small-en-v1.5` INT8: SHA-256 `51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431`, 66.5 MB, MIT
@@ -204,6 +206,15 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 - No privilege escalation; all operations re-use existing config-derived URLs and paths
 - No destructive repairs (`--fix` never deletes enabled plugins, disabled plugins, or schema rows)
 
+**Phase 3 US5 Forward-Only Schema Migrations** (`src/index/migrations.rs`, `src/index/db.rs::open`):
+- Migration framework shipped with zero registered migrations (Phase 3 Foundational F7)
+- Each migration runs in its own SQLite transaction under advisory lock (`apply_pending`)
+- Forward-only policy: `current > target` → exit 73 (`SchemaVersionTooNew`); `current < target` → apply all steps in order
+- Each migration step is atomic (all-or-nothing within transaction); failure at any step rolls back the transaction
+- Read-only paths gate on `SchemaTooNew` (exit 52 legacy code) before opening, but MCP/CLI write paths gate on new `SchemaVersionTooNew` (exit 73) per Phase 3 contracts
+- No down-migrations; Phase 4+ can add forward-only steps; Tome must always be >= DB schema version
+- Test injection via `#[doc(hidden)] pub static MIGRATIONS_OVERRIDE` (not `#[cfg(test)]`) to allow integration tests to exercise migration path
+
 ### Encryption
 
 | Type | Status |
@@ -237,11 +248,12 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 | 33 | ModelRegistrationParseError | Model manifest.json invalid | 2 | — |
 | 41 | EmbedderNameDrift | Embedder name mismatch (configured vs. on-disk index) | 3 | FR-110 |
 | 42 | EmbedderVersionDrift | Embedder version mismatch (configured vs. on-disk index) | 3 | FR-110 |
+| 52 | SchemaTooNew | Index schema version newer than Tome release (read-only path legacy gate) | 2 | — |
 | 53 | CatalogHasEnabledPlugins | Catalog has enabled plugins; remove with `--force` to cascade disable | 9 | FR-045 |
 | 54 | NotATerminal | Interactive command run without terminal (stdin/stdout not TTY) | 4 | FR-051 |
 | 60 | McpStartupFailed | MCP server startup failed (generic; specific codes 30/32/41/42/73 win) | 3 | — |
-| 73 | SchemaVersionTooNew | Index schema version newer than Tome release (no down-migrations) | 3 | FR-110 |
-| 74 | SchemaMigrationFailed | Schema migration failed; index state undefined (Phase 4+ only) | 3+ | FR-???  |
+| 73 | SchemaVersionTooNew | Index schema version newer than Tome release (write path, Phase 3+) | 3 | FR-110 |
+| 74 | SchemaMigrationFailed | Schema migration failed; index state undefined (Phase 4+ only) | 3+ | schema-migration.md |
 | 75 | DoctorFixNotSafe | `--fix` ran but un-fixable issues remain; developer must take manual action | 3 | doctor.md |
 
 **Enforcement**: Closed enum `TomeError` in `src/error.rs`. Adding a variant forces edits to:
@@ -252,12 +264,11 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 
 No generic "Other" or "Unknown" variant. Every path maps to a named category.
 
-**Phase 3 F7 Schema-Migration Exit Codes** (PR #38):
-- Forward-only migrations framework shipped with zero registered migrations (Phase 3 Foundational F7)
-- `SchemaVersionTooNew` (exit 73) surfaces newer-on-disk schema; `SchemaMigrationFailed` (exit 74) for failed apply steps
+**Phase 3 US5 Schema-Migration Exit Codes** (F7 + US5):
+- `SchemaVersionTooNew` (exit 73) surfaces newer-on-disk schema on write paths; `SchemaMigrationFailed` (exit 74) for failed apply steps
 - Both are Phase 3+ codes; Phase 4+ adds the first real `Migration` rows
 
-**Phase 3 F8 MCP Status Exit Semantics** (`src/mcp/preflight.rs`, PR #38):
+**Phase 3 F8 MCP Status Exit Semantics** (`src/mcp/preflight.rs`):
 - Pre-flight refusal routes through specific Phase 1/2 codes (30/32/41/42) per "Specific-over-generic" principle
 - Generic `McpStartupFailed` (60) used only when no specific variant applies (e.g., index file missing)
 
@@ -371,7 +382,7 @@ pub fn require_terminal() -> Result<(), TomeError> {
 
 ## Atomic Writes
 
-### Registry, Cache, Model, Index, and Workspace Persistence
+### Registry, Cache, Model, Index, Workspace, and Schema Persistence
 
 | Operation | Atomicity Guarantee | Implementation |
 |-----------|-------------------|-----------------|
@@ -382,6 +393,7 @@ pub fn require_terminal() -> Result<(), TomeError> {
 | **Index database enable** | Per-plugin transaction (all-or-nothing skill upsert) | `src/index/skills.rs::enable_plugin_atomic` |
 | **Index database reindex** | Per-plugin transaction (snapshot diff → add/modify/remove/unchanged) | `src/index/skills.rs::reindex_plugin_atomic` (Phase 7) |
 | **Catalog cascade disable** | Single lock acquisition for multi-plugin batch disable (Phase 9) | `src/plugin/lifecycle.rs::cascade_disable_for_catalog` + `src/index/skills.rs::delete_by_plugin` |
+| **Schema migration** | Per-migration transaction under advisory lock (Phase 3 US5) | `src/index/migrations.rs::apply_pending` + `src/index/lock.rs::acquire` |
 | **Workspace initialization** | Atomic staging dir → final `.tome/` rename (Phase 3 US2) | `src/workspace/init.rs::init`, tempfile inside workspace root |
 | **Workspace config write** | Atomic write via temp + rename | `src/workspace/init.rs::init` → `catalog::store::write_atomic` |
 | **Workspace registry append** | Atomic read + rewrite with dedupe | `src/workspace/inventory.rs::append_if_registry_exists` |
@@ -406,6 +418,13 @@ pub fn require_terminal() -> Result<(), TomeError> {
 - On `--force`: existing `.tome/` atomically moved to `.tome.old/` before staging rename
 - Rollback on rename failure: `.tome.old/` restored to `.tome/` if rename-in fails
 - Best-effort cleanup of `.tome.old/` after successful rename; partial cleanup on rollback is tolerated
+
+**Schema migration specifics** (Phase 3 US5):
+- Each migration runs in its own SQLite transaction under advisory lock
+- Failure at any step rolls back the transaction; subsequent migrations do not run
+- Forward-only policy enforced: `apply_pending` will not execute a migration that takes schema to an older version
+- Lock acquired for the entire migration sequence (all steps run under single lock); released after success or rollback
+- Per-step atomicity prevents partial state (each migration either fully succeeds or fully reverts)
 
 **Doctor `--fix` repair atomicity** (Phase 3 US4):
 - Model re-download atomicity: existing model directory removed, `download_model` re-downloads via existing atomic `.partial/` → final rename pattern
@@ -572,7 +591,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 
 ## Schema Migrations
 
-### Forward-Only Policy (Phase 3, F7)
+### Forward-Only Policy (Phase 3, F7 + US5)
 
 | Rule | Enforcement | Implication |
 |------|------------|-------------|
@@ -581,10 +600,11 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | **Fresh bootstrap** | `meta.schema_version` absent → caller runs `schema::bootstrap` | New DBs start at `SCHEMA_VERSION` |
 | **Test injection** | `MIGRATIONS_OVERRIDE` is `#[doc(hidden)] pub static`, not `#[cfg(test)]` | Integration tests outside crate can inject synthetic migrations |
 
-**Implementation** (`src/index/migrations.rs`):
+**Implementation** (`src/index/migrations.rs`, `src/index/db.rs`):
 - `MIGRATIONS: &[Migration] = &[]` — Phase 3 ships with zero migrations (Phase 4+ adds first real steps)
-- `apply_pending(conn, ...) -> Result<u32, TomeError>` — applies all steps in order, each in own transaction
+- `apply_pending(conn, ...) -> Result<u32, TomeError>` — applies all steps in order, each in own transaction under advisory lock
 - `current_schema_version(conn)` — queries `meta.schema_version` row; absent on fresh DB
+- Per-migration atomicity: SQLite transaction wraps each migration step; failure at any point rolls back that transaction
 
 **Safety**: `MIGRATIONS_OVERRIDE` slot is documented as test-only and only read by `apply_pending` (production write path). Injected synthetic table only runs in same lock-guarded write path. Forward-only boundary is enforced; no down-migration path exists. Phase 3 ships with zero migrations + synthetic-fixture e2e test ready for Phase 4.
 
@@ -605,7 +625,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | **Integration** | Real Git repos, real fixtures, real filesystems | `tests/catalog_*.rs`, `tests/models_*.rs`, `tests/plugin_*.rs` |
 | **Status health check** | Report assembly, drift detection, overall classification | `tests/status.rs` (Phase 8) |
 | **Catalog cascade** | Enabled-plugin detection, per-plugin deletion under lock, error handling | `tests/catalog_remove.rs` (Phase 9) |
-| **Schema migrations** | Forward-only boundary, no down-migrations, synthetic injection (Phase 3+) | `tests/schema_migrations.rs` (F7 framework; Phase 4+ adds first real steps) |
+| **Schema migrations** | Forward-only boundary, no down-migrations, synthetic injection (Phase 3 US5) | `tests/schema_migrations.rs` (F7 framework + US5 e2e tests) |
 | **MCP protocol purity** | Tool descriptions contain no fixture identifiers (FR-108) | `tests/mcp_server.rs::descriptions_do_not_enumerate_fixture_identifiers` |
 | **MCP error codes** | Tool responses translate TomeError to structured codes (no domain-error leakage) | `tests/mcp_server.rs::error_translation` (Phase 3 F8) |
 | **Doctor harness detection** | Fixed list only, directory existence only, no config parsing | `src/doctor/harness_detect.rs` unit tests (Phase 3 US4) |

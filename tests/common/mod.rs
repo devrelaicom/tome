@@ -297,6 +297,35 @@ pub fn write_config_for_cli(paths: &Paths, config: &Config) {
     std::fs::write(&paths.config_file, body).expect("write config.toml");
 }
 
+/// Build a minimal index database on disk with `meta.schema_version` stamped
+/// at the supplied value. The DB has *only* the `meta` table (no `skills`,
+/// no `skill_embeddings`) so the schema-migration e2e tests can register
+/// synthetic migrations that create whatever tables they need without
+/// conflicting with the production v1 schema.
+///
+/// `meta` is created with the same shape as production (STRICT, `key TEXT
+/// PRIMARY KEY`). One row is inserted: `('schema_version', '<version>')`.
+/// The connection is dropped before returning so the on-disk file is fully
+/// flushed.
+pub fn write_index_db_with_schema_version(path: &Path, version: u32) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create parent dir");
+    }
+    let conn = rusqlite::Connection::open(path).expect("open synthetic index db");
+    conn.execute_batch(
+        "CREATE TABLE meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        ) STRICT",
+    )
+    .expect("create meta table");
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
+        rusqlite::params![version.to_string()],
+    )
+    .expect("stamp schema_version");
+}
+
 /// Mirror of [`Paths::resolve`] that derives the layout from a [`ToolEnv`]'s
 /// isolated `$HOME` instead of touching real env vars. Lets the lifecycle
 /// library API and the spawned CLI binary share an on-disk layout without

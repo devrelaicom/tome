@@ -2,7 +2,7 @@
 
 > **Purpose**: Document what executes in this codebase - languages, runtimes, frameworks, and critical dependencies.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US4 — doctor command with subsystem checks + harness detection; no new dependencies)
+> **Last Updated**: 2026-05-14 (Phase 3 / US5 — forward schema migrations; no new dependencies)
 
 ## Languages & Runtimes
 
@@ -384,6 +384,23 @@ US4 adds the `tome doctor [--fix]` diagnostic command with subsystem health chec
 
 **No new production dependencies** — all pieces reuse existing model/index/workspace infrastructure + `inquire` for interactive fixes. Test count: 355 → 367 across 49 → 50 suites. Binary size unchanged (22.04 MiB on macOS arm64).
 
+### Phase 3 / User Story 5 — forward schema migrations
+
+US5 extends the schema migration framework with forward migration validation and integration test coverage.
+
+**Changes:**
+- `src/index/migrations.rs` — Foundational F7's framework now exercised via synthetic-fixture e2e tests
+- New integration test file `tests/schema_migration_e2e.rs` — 5 tests covering migration end-to-end:
+  - Fresh database → up-to-date schema (no migration needed)
+  - Synthetic old-version database → forward-migration to current schema
+  - Schema version check gates (write-path SchemaVersionTooNew / read-path SchemaTooNew semantics)
+  - Migration application under advisory lock
+  - `MIGRATIONS_OVERRIDE` injection for synthetic test fixtures
+- Extended `tests/atomicity.rs` — 1 new test validating migration atomicity under SIGINT
+- New helper `tests/common/mod.rs::write_index_db_with_schema_version` — fabricate old-version index DBs for migration testing
+
+**No new production dependencies, no new error variants, no production code changes** — US5 is test-coverage completion for F7 framework. Test count: 367 → 374 across 50 → 51 suites.
+
 ## Package Managers & Build Tools
 
 | Tool | Version | Purpose |
@@ -398,12 +415,13 @@ US4 adds the `tome doctor [--fix]` diagnostic command with subsystem health chec
 |-------------|---------|
 | OS Targets | Linux (ubuntu-latest) and macOS (macos-latest) — CI verified on both |
 | Deployment | Single binary (`target/release/tome`); installed via `cargo install --path .` |
-| Binary Size | < 50 MB stripped (enforced by CI; revised from 10 MB ceiling in CONSTITUTION v1.2.0 after Phase 3 slice 1 measured 29.56 MB on Linux; `ort` CPU-only static linking is the load-bearing constraint; US1 final 22.04 MiB on macOS arm64; US2 maintains same footprint; US3 maintains same footprint; US4 maintains same footprint — no new production dependencies) |
+| Binary Size | < 50 MB stripped (enforced by CI; revised from 10 MB ceiling in CONSTITUTION v1.2.0 after Phase 3 slice 1 measured 29.56 MB on Linux; `ort` CPU-only static linking is the load-bearing constraint; US1 final 22.04 MiB on macOS arm64; US2 maintains same footprint; US3 maintains same footprint; US4 maintains same footprint; US5 maintains same footprint — no new production dependencies) |
 | Output | Human-readable (default) or NDJSON (`--json`); logging to stderr only (orthogonal to `--json` stdout); colours respect `NO_COLOR` and auto-disable on non-TTY |
 | Model runtime | CPU-only ONNX Runtime (via `fastembed`); models downloaded at first use into `${XDG_DATA_HOME}/tome/models/`; fixed registry (compile-time constants) ensures bit-for-bit reproducibility |
 | MCP server runtime | Single-threaded tokio with JSON-lines file logging to `${XDG_STATE_HOME}/tome/mcp.log` (10 MiB rotation cap); stdout reserved for MCP protocol only; stderr for fatal startup errors only |
 | Workspace storage | Atomic `.tome/` directories created via `tempfile::Builder::tempdir_in` (staging + POSIX rename); config persisted to `${WORKSPACE}/.tome/config.toml`; index DB at `${WORKSPACE}/.tome/index.db` per Phase 3 Foundational F1; catalog clones in `${WORKSPACE}/.tome/catalogs/<sha>/` shared across scopes via reference-count tracking in global config + workspace registry (Phase 3 / US3) |
 | Doctor diagnostics | Subsystem health checks (models, index, workspace, drift) with optional repairs via `--fix`; harness detection at 6 known install locations (existence-only probe, no content reads); results in human-readable and `--json` output |
+| Schema migrations | Forward-only migrations under advisory lock with pre-flight schema version gate; integration tests via synthetic-fixture injection in `tests/schema_migration_e2e.rs` (US5) |
 
 ## Not Used (Explicitly Excluded)
 
@@ -425,4 +443,4 @@ US4 adds the `tome doctor [--fix]` diagnostic command with subsystem health chec
 
 ---
 
-*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 + Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 + Phase 3 / US3 + Phase 3 / US4 source code.*
+*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 + Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 + Phase 3 / US3 + Phase 3 / US4 + Phase 3 / US5 source code.*

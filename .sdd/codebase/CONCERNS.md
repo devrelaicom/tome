@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US4 doctor --fix incremental)
+> **Last Updated**: 2026-05-14 (Phase 3 / US5 forward schema migrations shipped)
 
 ## Technical Debt
 
@@ -22,7 +22,7 @@ Items to address when working in the area:
 | ID | Area | Description | Impact | Effort | Mitigation |
 |----|------|-------------|--------|--------|-----------|
 | TD-010 | `src/embedding/download.rs` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner in both `plugin enable` and `models download`; enhancement for polish pass. Also applies to `tome reindex` progress visibility (Phase 7) |
-| TD-011 | `src/index/migrations.rs` (Phase 3 F7) | Schema-migration framework ships with zero registered migrations; exercising tests pending | Testing coverage | Low | Framework landed in Phase 3 Foundational F7 per `contracts/schema-migration.md`. Phase 4+ adds first real `Migration` rows + e2e test via `MIGRATIONS_OVERRIDE` injection |
+| TD-011 | `src/index/migrations.rs` (Phase 3 F7 + US5) | Schema-migration framework implementation complete; zero registered migrations shipped | Testing coverage | Low | Framework landed in Phase 3 Foundational F7 + US5. Phase 4+ adds first real `Migration` rows + e2e test via `MIGRATIONS_OVERRIDE` injection |
 | TD-012 | `src/mcp/preflight.rs` (Phase 3 F8) | MCP startup pre-flight runs SHA-256 over primary embedder (~66 MB) at every startup | Startup latency | Low | Acceptable for long-running server; cold-cache startup may see latency. Consider `--verify` flag on `tome status` to skip SHA-256 on non-suspect runs (similar to Phase 6 pattern). Defer unless profiling shows impact |
 | TD-013 | Phase 3 US1 testing | T088 manual verification still pending: real BGE models + live harness for SC-001/SC-002 coverage | Integration testing | High | Three categories: happy-path search_skills/get_skill returns (T092 partial), MCP protocol purity (T093), latency budget (T094 p50<300ms, p99<600ms), SIGINT graceful shutdown (T095). Tracked in `retro/P3.md` |
 | TD-014 | `src/mcp/state.rs` (Phase 3 F8) | McpState embedder/reranker seed exposure for test integration | Test isolation | Medium | Handlers derive seeds from `state.embedder_entry.name/version`, hard-coded to MODEL_REGISTRY entries. Tests can't bootstrap index with stub seeds + use handlers without tripping drift detection. Refactor `McpState` to carry `embedder_seed` / `reranker_seed` directly. Est. 1 hour, defer to post-US1 |
@@ -89,7 +89,7 @@ Code areas that are brittle or risky to modify:
 | `src/plugin/lifecycle.rs::cascade_disable_for_catalog` | Single lock acquisition per cascade; each plugin's deletion is its own transaction. TOCTOU window between pre-check (without lock) and cascade (under lock): another process may enable a plugin between check and delete, causing its rows to be dropped too | This is intentional (readers never block writers). The pre-check reports a stale but valid list; the cascade acts on what's actually there and is correct either way. Document the TOCTOU window and its benign semantics |
 | `src/catalog/store.rs::reference_count` (Phase 3 US3) | Reference-count read is NOT taken under advisory lock. Two processes racing `tome catalog remove` may both observe empty refs and call `remove_dir_all`; one succeeds, one no-ops. Worse race: process A observes empty, process B adds URL before A deletes clone → dangling reference (recovered by next `update`). | This is intentional (readers never block writers). Design mirrors Phase 9's cascade pre-check. TOCTOU window is documented and benign: clone persists until no references, delete is best-effort, dangling reference is recovered on next `update`. Opt-in workspace registry deduplicates scope set; without it (default), reference-count is global-only and removal deletes clone even if workspace references it. |
 | `src/mcp/log.rs::FileMakeWriter` | Mutex serialises every JSON log emit; LockedFile guard holds lock for duration of write. MCP server is single-threaded, so contention is theoretical. Test harness shares handle across threads → must trust mutex semantics | Test isolation: don't share FileMakeWriter between concurrent test threads; use separate temp log files. Production: single-threaded by design (R-2), so no contention risk |
-| `src/index/migrations.rs::MIGRATIONS_OVERRIDE` | Public static (not `#[cfg(test)]`) so integration tests outside crate can inject synthetic migrations. Widens test-injection surface compared to purely internal mechanism | Documented as test-only via doc comment. Only read by production `apply_pending` (write path already under advisory lock). Injected migrations run in same transaction isolation. Forward-only boundary enforced—no down-migration path exists. Monitor: ensure new tests never accidentally rely on `MIGRATIONS_OVERRIDE` slice being reusable (each test should clear slot after use) |
+| `src/index/migrations.rs::MIGRATIONS_OVERRIDE` + `apply_pending` (Phase 3 US5) | Public static (not `#[cfg(test)]`) so integration tests outside crate can inject synthetic migrations. Per-migration atomicity via SQLite transactions under advisory lock. Forward-only boundary enforced—no down-migration path exists. | Documented as test-only via doc comment. Only read by production `apply_pending` (write path already under advisory lock). Each migration runs in own transaction; failure rolls back that migration + subsequent steps don't run. Test injection: ensure tests clear `MIGRATIONS_OVERRIDE` after use (idempotence expectation). Monitor: no production code should ever manually manipulate `MIGRATIONS_OVERRIDE`. |
 | `src/mcp/preflight.rs::verify_embedder_artefacts` | Runs full SHA-256 over primary embedder (~66 MB) at every startup; no caching or early exit | By design for long-running server correctness (FR-110). Cold-cache startup latency visible to harness. Defer `--verify` skip flag to Phase 4+ unless profiling shows impact (TD-012). In test, use `StubEmbedder` to avoid real hash cost |
 | `src/mcp/tools/{search_skills,get_skill}.rs::tome_to_mcp` | Error translation from TomeError to structured MCP codes must be exhaustive; missing variants leak as generic `internal_error` | Test assertion in `tests/mcp_server.rs` that all tool error paths translate to specific codes; audit on every new TomeError variant. No generic fallback (FR-108) |
 | `src/workspace/init.rs::init` | Staging directory created inside workspace root to ensure same-filesystem rename atomicity (tempfile within the target directory). If workspace root is not on the intended filesystem, stage-rename could silently cross mount boundary (not atomic). Crash between rename-aside and rename-in leaves `.tome.old/` orphan. Rollback logic must restore `.tome/` from `.tome.old/` on final-rename failure. | Atomic staging pattern is sound: create in workspace root to guarantee same filesystem. `.tome.old/` orphans are recorded as TD-016; doctor (future) will clean up. Test interruption scenarios thoroughly before shipping US3 (Phase 10+). Test rollback path on rename failure (pre-existing .tome/` with --force). |
@@ -104,7 +104,7 @@ Code marked for removal:
 |------|-------------------|----------------|-------------|
 | (none) | — | — | — |
 
-All Phase 1, Phase 2, Phase 3 Foundational, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, and Phase 9 code is current; no legacy to remove yet.
+All Phase 1, Phase 2, Phase 3 Foundational, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9, and Phase 3 US1–US5 code is current; no legacy to remove yet.
 
 ## Performance Concerns
 
@@ -185,6 +185,7 @@ Areas lacking proper observability:
 | Workspace registry state | No metrics on registry size or dedupe ratio | Can't detect growth or churn patterns | Low (opt-in registry; steady-state expected to be small) |
 | Catalog cache TOCTOU races | No instrumentation of concurrent `remove` races or dangling reference recovery | Can't detect real-world contention or re-clone frequency | Low (opt-in registry centralizes scope set; default install has only global scope) |
 | Doctor repair outcomes | No metrics on which repairs succeeded/failed or how frequently | Can't track real-world doctor --fix usage or effectiveness | Low (reports include success/failure per repair; log analysis sufficient for early phase) |
+| Schema migration execution | No metrics on migration latency or per-step execution time | Can't diagnose slow migrations or detect regressions | Low (Phase 4+ first real migrations; defer instrumentation until production data available) |
 
 ## Design Tradeoffs
 
@@ -199,7 +200,7 @@ Intentional design decisions with known limitations:
 | **MCP startup SHA-256 verification** (Phase 3 F8) | `src/mcp/preflight.rs::verify_embedder_artefacts` | Long-running server: paying full hash once at startup is right trade-off vs. long-running process correctness | Cold-cache startup latency visible to harness (potential second-range delay for ~66 MB file). Acceptable for daemon; defer `--verify` skip flag to Phase 4+ unless profiling shows impact (TD-012) | Pre-flight gates before MCP protocol handshake, so harness sees startup delay before first RPC. Not user-facing command latency. Consider optional startup flag for repeated local dev testing (mitigates cold-cache cost, trade-off: skip verification). |
 | **No MCP tool description enumeration** (Phase 3 F8, FR-108) | `src/mcp/server.rs` tool descriptions | Tool descriptions must NOT reference specific catalog/plugin/skill identifiers in fixture or test scope | Test `tests/mcp_server.rs::descriptions_do_not_enumerate_fixture_identifiers` fails if wording includes identifiers, preventing accidental info leakage | By design. Descriptions are generic guidance; discovery happens via `search_skills` / `get_skill` at runtime. |
 | **Structured error codes for MCP tools** (Phase 3 F8) | `src/mcp/tools/{search_skills,get_skill}.rs::tome_to_mcp` | Tool errors map to contract-defined structured codes (`unknown_catalog`, `unknown_plugin`, etc.), never exposing internal TomeError variants | MCP harness sees opaque error codes; no domain-error info leakage | By design. Security + clarity: harness cannot infer internal structure or state from error messages. |
-| **Forward-only schema migrations** (Phase 3 F7) | `src/index/migrations.rs` + `TomeError::SchemaVersionTooNew` (exit 73) | Simpler DB evolution: v2.1 patch adds one migration row; older Tome refuses newer DBs. No down-migration complexity | Users on older Tome version cannot open DBs created/modified by newer version | Acceptable: users upgrade Tome regularly. Phase 1 is shipped and stable; Phase 2+ are synchronized. Old-version downgrade is not a supported use case. |
+| **Forward-only schema migrations** (Phase 3 F7 + US5) | `src/index/migrations.rs` + `TomeError::SchemaVersionTooNew` (exit 73) | Simpler DB evolution: v2.1 patch adds one migration row; older Tome refuses newer DBs. No down-migration complexity. Per-migration atomicity via SQLite transactions under advisory lock. | Users on older Tome version cannot open DBs created/modified by newer version. Each migration step atomic; failure rolls back + stops chain. | Acceptable: users upgrade Tome regularly. Phase 1 is shipped and stable; Phase 2+ are synchronized. Old-version downgrade is not a supported use case. Atomicity per-step (not across-step) sufficient for correctness + recovery. |
 | **Workspace staging inside root** (Phase 3 US2) | `src/workspace/init.rs::init` | Ensures same-filesystem rename atomicity; staging directory created via `tempfile::Builder::tempdir_in(&absolute)` | If workspace root spans a mount boundary, the atomic-rename assumption holds true ONLY for files under workspace root (tempfile stays in workspace root). Crash between rename-aside and rename-in leaves `.tome.old/` orphan (recovered by doctor in future phase). Rollback on final-rename failure restores old `.tome/` from `.tome.old/`. | By design. Atomicity is guaranteed for common case (workspace on single mount). TD-016 tracks `.tome.old/` orphan recovery. Test all error paths thoroughly before Phase 10+. |
 | **Doctor harness detection existence-only** (Phase 3 US4, FR-167) | `src/doctor/harness_detect.rs::probe` | Detection is fixed compile-time list of directories; directory-existence check only. No `$HOME` scanning, no config parsing. | Harness list is exclusive; new harnesses require code change + contract sync. Trade-off: precise known list vs. discovery flexibility. | By design for privacy + simplicity. No runtime scanning of user home. Detected-harness list is local-only and privacy-sensitive; never transmitted unless a future feature explicitly adds network transmission (which should include privacy gate per TD-018). |
 | **Doctor `--fix` network gate** (Phase 3 US4) | `src/commands/doctor.rs`, `src/doctor/fixes.rs` | All network access (model re-download, catalog re-clone) gated behind `--fix` flag. Read-only diagnostic is default. | Users get a non-invasive report before deciding to attempt repairs. Trade-off: two invocations (report + fix) vs. automatic repairs. | By design for transparency + user control. Report surfaces suggested fixes; user decides whether to run `--fix`. No privilege escalation (all URLs/paths come from user's config). |
@@ -235,61 +236,36 @@ Intentional design decisions with known limitations:
 2. SEC-001: Real BGE model testing (SC-001/SC-002) — T088 pending developer-machine pass
 3. SEC-002: User-decline exit code distinct from system interrupt (design debt, low priority)
 
-### Phase 3 (Foundational F7–F8 Complete, F1–F6 In Progress, T088 Pending)
+### Phase 3 (All User Stories Complete: US1–US5)
 
-**Completed (Slice 1)**:
-- ✓ Model registry with real checksums (verified at start of Phase 3)
-- ✓ Atomic model download + verification
-- ✓ Plugin enable/disable wired to CLI
-- ✓ Skill metadata parsing (lenient)
-- ✓ Plugin manifest parsing (lenient, FR-013a)
-
-**Foundational F7 Complete (Schema Migrations)**:
-- ✓ Schema migration framework with forward-only policy (zero migrations shipped)
-- ✓ `SchemaVersionTooNew` (exit 73) + `SchemaMigrationFailed` (exit 74) exit codes
-- ✓ `MIGRATIONS_OVERRIDE` test-injection point for e2e tests (Phase 4+)
-
-**Foundational F8 Complete (MCP Server Startup Preflight)**:
+**US1 (MCP Server)**:
 - ✓ MCP server startup pre-flight validation (FR-110)
 - ✓ Embedder SHA-256 verification at startup + drift detection (41/42 codes)
 - ✓ MCP protocol purity: stdout reserved for protocol, errors to stderr (FR-221/FR-222)
 - ✓ Structured JSON-lines logging with 10 MiB rotation cap (`src/mcp/log.rs`)
-- ✓ Schema-version gating with Phase 3 variant (exit 73) on `SchemaVersionTooNew`
-- ✓ Reranker drift detected but not a startup failure (FR-109 defers load until first use)
-- ✓ No domain-error leakage in tool responses (structured codes per `contracts/mcp-tools.md` §2.3)
+- ⚠ T088 manual BGE testing still pending (SC-001/SC-002, happy-path, protocol purity, latency, SIGINT)
 
-**US2 Complete (Workspace Info & Init)**:
+**US2 (Workspace Info & Init)**:
 - ✓ `tome workspace info` read-only query command
 - ✓ `tome workspace init` atomic `.tome/` creation with permission lock (chmod 0700 on staging before content)
 - ✓ Workspace config written atomically via `catalog::store::write_atomic` (chmod 0600 on Unix)
 - ✓ Opt-in workspace registry (`workspaces.txt`) append-only with dedupe by exact path
-- ✓ `--inherit-global` copies only `[catalogs]` block (never enablement state)
-- ✓ Atomic staging-to-final rename ensures no partial `.tome/` on interrupt
-- ✓ `--force` rename-aside path fully reversible (rollback on rename failure)
-- ✓ `.tome.old/` orphan on crash between rename-aside and rename-in (doctor handles cleanup, TD-016)
 
-**US3 Complete (Catalog-Clone Ref-Counting)**:
+**US3 (Catalog-Clone Ref-Counting)**:
 - ✓ Reference-counting across global + workspace scopes (via opt-in registry)
 - ✓ Catalog cache re-used on same URL (no re-fetch); deleted when no references remain
-- ✓ Content-trust trade-off: existing clone protects against URL hijacking; missing `--force` flag for forced re-clone (future enhancement)
-- ✓ TOCTOU documented: no lock on reference-count read (same principle as cascade pre-check); readers never block writers
-- ✓ Dangling reference recovery: next `tome catalog update` re-clones
-- ✓ Without opt-in workspace registry (default): reference-count is global-only; removal deletes clone even if workspace references it (user cost of not opting in)
+- ✓ TOCTOU documented: no lock on reference-count read; readers never block writers
 
-**US4 Complete (Doctor Command)**:
+**US4 (Doctor Command)**:
 - ✓ Read-only diagnostic by default; network access gated entirely behind `--fix` flag
-- ✓ Harness detection via fixed compile-time list (directory existence only, no config parsing, FR-167)
-- ✓ Harness-detected list is local-only and privacy-sensitive; documented for future transmission features (TD-018)
-- ✓ Three auto-fixable repairs: model re-download, catalog re-clone, schema forward-migration (all idempotent)
-- ✓ Four un-fixable repairs surfaced as suggested commands: drift, schema-too-new, manifest-invalid, orphan clones
-- ✓ Exit 0 for Ok, exit 1 for Degraded/Unhealthy, exit 75 for `--fix` with remaining manual fixes
-- ✓ No privilege escalation or destructive operations
+- ✓ Harness detection via fixed compile-time list (directory existence only, FR-167)
+- ✓ Three auto-fixable repairs: model re-download, catalog re-clone, schema forward-migration
 
-**In progress**:
-- T088: Real BGE model testing against SC-001/SC-002 (happy-path query, protocol purity, latency, SIGINT)
-- Query command full implementation
-- Reindex command full implementation
-- US5–US6 MCP tool implementations
+**US5 (Forward Schema Migrations)**:
+- ✓ Schema migration framework with forward-only policy (zero migrations shipped)
+- ✓ Per-migration transaction atomicity under advisory lock
+- ✓ `SchemaVersionTooNew` (exit 73) + `SchemaMigrationFailed` (exit 74) exit codes
+- ✓ `MIGRATIONS_OVERRIDE` test-injection point for e2e tests (Phase 4+)
 
 **Key risks to monitor**:
 - SEC-001: BGE model testing still pending (T088)
@@ -311,167 +287,69 @@ Intentional design decisions with known limitations:
 - ✓ TTY enforcement at flow entry via `require_terminal()` — exit 54 if no TTY (FR-051)
 - ✓ Prompt functions (`select`, `multiselect`, `confirm`) with non-TTY short-circuits
 - ✓ Post-action redraw and navigation (Back, Quit)
-- ✓ Non-TTY refusal test (`plugin_interactive.rs::bare_plugin_without_a_terminal_exits_54_with_pointer_message`)
-- ✓ Scripted pty test covering full navigation tree (T101)
 
 **Key security additions**:
 - Interactive flows refuse to run in non-TTY contexts (exit 54), preventing prompt-injection and mangled input
-- User cancellation via Ctrl-C/Ctrl-D surfaces as exit 8 (Interrupted), semantically aligned with system SIGINT
-
-**Known design debts** (minor):
-- User-declines-model-download prompt reuses exit 8 (same as system interrupt); future phases may lock down distinction (SEC-002)
 
 ### Phase 5 (Complete)
 
 **Completed (US3)**:
 - ✓ `tome plugin disable` command with confirmation prompt (FR-005 / FR-007)
 - ✓ Non-TTY refusal with `--force` bypass (FR-051)
-- ✓ Pointer message to stderr guiding users to `--force` flag
 - ✓ Cheap re-enable via retained embeddings (FR-006)
-- ✓ Integration tests covering all flows (`plugin_disable.rs`)
 
 **Key security characteristics**:
 - Disable reads catalog config + writes to index DB under existing advisory lock + transaction discipline
-- No new credential surfaces, no new external endpoints, no new file I/O patterns
-- TTY enforcement is consistent with existing `plugin enable` and interactive flow patterns
-- User declining confirmation is clean exit (0, no state change) — semantically distinct from system interrupt (8)
-
-**Known design debts** (minor):
-- Semantic difference between "user declined disable" (0), "user declined model download" (8), and "system interrupt" (8) not formally pinned; currently acceptable per interactive-flow semantics
 
 ### Phase 6 (Complete)
 
-**Completed (US4, Slice 1)**:
+**Completed (US4)**:
 - ✓ `tome models download | list | remove` CLI surface
 - ✓ Surfaces existing security primitives: pinned MODEL_REGISTRY SHA-256s, atomic-rename + checksum-verify pipeline
-- ✓ New `embedding::download::sha256_file` public helper for re-verifying installed artefacts via `--verify` flag in `models list`
-- ✓ No new attack surface — CLI surfaces already-secured primitives from Phase 2
-
-**Security posture**:
-- Model download uses existing atomicity guarantees and integrity verification
-- `--verify` flag allows users to audit installed models without re-downloading
-- No new credential surfaces, no new external endpoints
-
-**Ongoing**:
-- TD-010: Both `plugin enable` and `models download` now ship indeterminate spinners; refactor to byte-progress callback deferred to polish pass
+- ✓ New `embedding::download::sha256_file` public helper for re-verifying installed artefacts via `--verify` flag
 
 ### Phase 7 (Complete)
 
-**Completed (US5, Slice 1–3)**:
+**Completed (US5)**:
 - ✓ `src/index/skills.rs::reindex_plugin_atomic` + `auto_disable_orphan` for multi-plugin index reconciliation
-- ✓ `tome catalog update` wired to lazy `FastembedEmbedder` load and per-plugin reindex
-- ✓ `tome reindex` CLI subcommand with same lazy-load pattern
-- ✓ Fixed latent `sqlite-vec` virtual table bug: `upsert_skill` now uses `DELETE`-then-`INSERT` instead of unsupported `INSERT OR REPLACE` (PR #25)
-- ✓ No new credentials, attack surface, or external integrations
-
-**Security posture**:
-- Index reindex under per-plugin transaction (atomic within plugin, but multiple plugins commit independently)
-- Auto-disable on `PluginNotFound` / `PluginManifestParseError` drops rows + emits loud-warning stderr
-- Lazy embedder loading ensures zero-enabled-plugin install never touches ONNX models
-- Virtual table constraint now explicitly documented in SECURITY.md and CONCERNS.md
-
-**Design constraints**:
-- Per-plugin atomicity is intentional: multi-plugin reindex may leave earlier plugins committed if interrupted between plugins (always valid state, by design)
+- ✓ `tome catalog update` + `tome reindex` CLI commands with lazy-embedder loading
+- ✓ Fixed latent `sqlite-vec` virtual table bug: `upsert_skill` now uses `DELETE`-then-`INSERT`
 
 ### Phase 8 (Complete)
 
-**Completed (US6, Slice 1)**:
+**Completed (US6)**:
 - ✓ `tome status [--verify] [--json]` read-only health check command (FR-056)
-- ✓ Extended `tome --version` / `tome -V` to include embedder + reranker identities (reproducibility set)
-- ✓ Pre-parse hook in `main.rs` for early `--version` interception before clap dispatch
-- ✓ Model re-verification via `--verify` flag (uses existing `sha256_file` helper, no re-download)
+- ✓ Extended `tome --version` / `tome -V` to include embedder + reranker identities
 - ✓ Drift detection + classification (Ok, Degraded, Unhealthy) to guide bug reporting
-- ✓ No new credentials, external endpoints, or file I/O patterns
-
-**Security posture**:
-- Status is lock-free (FR-056) — non-invasive pre-flight check even when writer is running
-- Embedder drift → Unhealthy (vectors are invalid); reranker drift → Degraded (queries still serve)
-- Version output includes only public model registry constants; no secrets exposed
-- Pre-parse hook is minimal and self-contained; only scans for `--version` / `-V` flags before clap setup
-
-**Design tradeoffs**:
-- Status report is a point-in-time snapshot; may be stale if another process is concurrently writing (acceptable for diagnosis purposes)
-- Exit code 1 for both Degraded and Unhealthy (caller must check `--json` for detailed classification)
-
-**Integration test coverage** (Phase 8):
-- `tests/status.rs` verifies report assembly, drift detection scenarios, and JSON/human output formats
 
 ### Phase 9 (Complete)
 
-**Completed (US7, Slice 1)**:
-- ✓ `tome catalog remove --force` cascade disable + row drop for enabled plugins (FR-045, contracts/catalog-extensions.md)
+**Completed (US7)**:
+- ✓ `tome catalog remove --force` cascade disable + row drop for enabled plugins (FR-045)
 - ✓ Pre-check query `enabled_plugins_for_catalog` runs without lock (readers don't block writers)
 - ✓ Cascade itself runs under single lock acquisition; each plugin's deletion is its own transaction
-- ✓ New error exit 53 (`CatalogHasEnabledPlugins`) with qualified plugin ids in message (catalog/plugin names are public)
-- ✓ Helper `cascade_disable_for_catalog` in `src/plugin/lifecycle.rs` + integration test coverage
-
-**Security posture**:
-- No new credentials, external endpoints, or attack surface
-- Cascade atomicity is at the lock-window level (all plugins disabled within one lock); each plugin's deletion is durable and correct
-- TOCTOU window between pre-check (without lock) and cascade (under lock) is intentional — readers never block writers, and cascade acts on actual state (still correct)
-- Index remains in consistent state on interruption; partial drops are well-defined
-
-**Design tradeoffs**:
-- Per-plugin deletion atomicity (not across-plugin atomicity) — simpler than taking per-plugin locks; SIGINT between plugins leaves earlier plugins dropped + later plugins intact (safe, by design)
-- Pre-check without lock accepts stale enabled list but cascade acts on fresh state — acceptable because "another process enabled a plugin between check and delete" still results in correct drop (the additional plugin's rows are removed too) or user re-runs
-
-**Integration test coverage** (Phase 9):
-- `tests/catalog_remove.rs` verifies enabled-plugin detection, `--force` flag, cascade semantics, and error exit code
 
 ### Phase 3 US3 (Complete)
 
 **Completed (Catalog Cache Ref-Counting)**:
-- ✓ `src/catalog/store.rs::reference_count` enumerates all scopes (global + workspace registry) that reference a catalog URL
+- ✓ `src/catalog/store.rs::reference_count` enumerates all scopes (global + workspace registry)
 - ✓ Catalog clone persists until no scopes reference the URL; deleted on last removal
 - ✓ Re-adding same URL re-uses existing clone (content-addressed by `sha256(url)`)
-- ✓ Without opt-in workspace registry (default install): reference-count is global-only; removal from global scope deletes clone even if workspace references it
-- ✓ TOCTOU window documented: no lock on reference-count read; two processes may race and both try to delete (benign); dangling reference recovered by next `update`
-- ✓ Cache content-trust trade-off documented: re-add reuses existing clone (protective against URL hijacking); missing `--force` flag for forced re-clone (future enhancement)
-
-**Security posture**:
-- No new credentials, external endpoints, or file I/O patterns
-- Reference-counting logic is idempotent: best-effort deletion is safe; re-clone is guaranteed on next `update`
-- TOCTOU profile mirrors Phase 9's cascade pre-check: readers never block writers; slightly stale state is acceptable
-
-**Design constraints**:
-- Catalog cache operates as an implicit trust anchor: "whatever is on disk is trusted"
-- Without workspace registry opt-in: reference-count is global-only (simpler default); per-workspace catalog refs require explicit registry enrollment
-- Dangling reference (clone deleted while workspace references it) is not a failure; re-clone is transparent on next command
-
-**Integration test coverage** (Phase 3 US3):
-- `tests/catalog_remove.rs` extended for ref-counting semantics (global + workspace, dangling recovery)
 
 ### Phase 3 US4 (Complete)
 
 **Completed (Doctor Command)**:
 - ✓ `tome doctor [--fix] [--json]` read-only diagnostic + optional automatic repairs
-- ✓ Harness detection: fixed compile-time `KNOWN_HARNESSES` list; directory-existence only (no config parsing, FR-167)
-- ✓ Network access gated entirely behind `--fix` flag (read-only report is the default, cost-free)
-- ✓ Three auto-fixable repairs: model re-download (idempotent, config-driven URLs), catalog re-clone (idempotent, config-driven URLs), schema forward-migration (idempotent, transactional)
-- ✓ Four un-fixable repairs surfaced as suggested commands (require user decision): embedder/reranker drift, schema-too-new, manifest-invalid, orphan catalogs
-- ✓ No privilege escalation, no destructive operations (never deletes enabled/disabled plugins or schema rows)
-- ✓ Harness-detected list is local-only and privacy-sensitive; documented for future review when transmission features proposed (TD-018)
-
-**Security posture**:
-- Default behavior is non-invasive diagnostic (no network, no writes, no privilege elevation)
-- Repairs re-use existing infrastructure (atomicity patterns, credential scrubbing, error handling)
-- Error exit 75 (`DoctorFixNotSafe`) communicates "fix ran but developer needs to complete manual steps"
-- No domain-error leakage in suggested fixes (commands are in plain language, URLs are from user config)
-
-**Design constraints**:
-- Harness list is exclusive (known tools only); new harnesses require code change + contract sync (by design for privacy + simplicity)
-- Doctor latency acceptable for diagnostic tool (slower than status because of catalog enumeration + harness probing, but still sub-second)
-
-**Integration test coverage** (Phase 3 US4):
-- `src/doctor/harness_detect.rs` unit tests (fixed list, directory existence only, no false positives)
-- `src/doctor/fixes.rs` repair logic tested via library API (model re-download, catalog re-clone, schema migration)
+- ✓ Harness detection: fixed compile-time `KNOWN_HARNESSES` list; directory-existence only (FR-167)
+- ✓ Three auto-fixable repairs: model re-download, catalog re-clone, schema forward-migration
+- ✓ Four un-fixable repairs surfaced as suggested commands (drift, schema-too-new, manifest-invalid, orphan clones)
 
 ---
 
 ## Concern Severity Guide
 
 | Level | Definition | Response Time |
-|-------|------------|---------------|
+|-------|------------|----------------|
 | Critical | Production impact, security breach, data loss | Immediate (within sprint) |
 | High | Degraded functionality, significant risk, blocking future phases | This sprint |
 | Medium | Developer experience, minor risk, addressable when working in area | Next sprint |

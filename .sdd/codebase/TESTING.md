@@ -1,8 +1,8 @@
 # Testing Strategy
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
-> **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-15
+> **Generated**: 2026-05-14
+> **Last Updated**: 2026-05-14
 
 ## Test Framework
 
@@ -54,15 +54,18 @@ tests/
 ├── mcp_lifecycle.rs               # MCP pre-flight exit codes (Phase 3)
 ├── workspace_info.rs              # Library API: `workspace::info::assemble` (Phase 4 / US2)
 ├── workspace_init.rs              # Library API + CLI: `workspace::init` (Phase 4 / US2)
-├── workspace_commands.rs     # Cross-scope isolation tests (Phase 5 / US3)
-├── catalog_cache_refcount.rs # Reference-counted catalog cleanup (Phase 5 / US3)
+├── workspace_commands.rs          # Cross-scope isolation tests (Phase 5 / US3)
+├── catalog_cache_refcount.rs      # Reference-counted catalog cleanup (Phase 5 / US3)
 ├── atomicity_enable.rs            # Failure-injection: enable rollback (Phase 3)
+├── atomicity.rs                   # Registry/cache write atomicity + schema migration atomicity (Phase 3 / US5)
 ├── exit_codes.rs                  # Unit: exhaustiveness check on TomeError
 ├── error_messages.rs              # Unit: error message format correctness
 ├── manifest_strictness.rs         # Unit: TOML deny_unknown_fields enforcement
 ├── path_validation.rs             # Unit: path escape/traversal validation
 ├── scrubbing.rs                   # Unit: credential scrubbing regex
-├── atomicity.rs                   # Integration: write atomicity under interruption
+├── schema_migrations.rs            # Forward-only migration boundaries (Phase 3 / F7)
+├── schema_migration_e2e.rs        # End-to-end schema migration with synthetic fixtures (Phase 3 / US5)
+├── concurrency.rs                 # Cross-process index lock contention (Phase 3 / US5)
 └── fixtures/
     ├── sample-catalog/            # Real Git repo (used as file:// source)
     │   ├── tome-catalog.toml
@@ -81,7 +84,7 @@ tests/
 | Category | Location | Style |
 |----------|----------|-------|
 | Unit tests | `tests/{test_name}.rs` | Test one concept (parser, error path, validator) |
-| Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/reindex.rs`, `tests/catalog_update_reindex.rs`, `tests/status.rs`, `tests/doctor.rs`, `tests/workspace_info.rs`, `tests/workspace_init.rs` | Exercise library API with `StubEmbedder`, bypassing `Paths::resolve` + `FastembedEmbedder::load` |
+| Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/reindex.rs`, `tests/catalog_update_reindex.rs`, `tests/status.rs`, `tests/doctor.rs`, `tests/workspace_info.rs`, `tests/workspace_init.rs`, `tests/schema_migration_e2e.rs` | Exercise library API with `StubEmbedder`, bypassing `Paths::resolve` + `FastembedEmbedder::load` |
 | Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs`, `tests/plugin_disable.rs`, `tests/models_*.rs`, `tests/reindex.rs` (parse-error tests), `tests/catalog_remove_cascade.rs`, `tests/doctor.rs` (doctor run tests), `tests/workspace_init.rs` (CLI tests) | Spawn `tome` binary as subprocess; used when no embedders are loaded |
 | Integration tests (PTY-driven) | `tests/plugin_interactive.rs` | Scripted pty session with `rexpect`; driven via real terminal I/O |
 | Integration tests (MCP handler-level) | `tests/mcp_server.rs` | Call handler `async fn` directly inside `tokio::runtime::Builder::new_current_thread()` block (Phase 3) |
@@ -92,6 +95,162 @@ tests/
 | In-module unit tests | `src/{module}/log.rs::tests` | Small filesystem operations (rotation, permission, idempotent no-ops) (Phase 3 / F8) |
 
 ## Test Patterns
+
+### Schema Migration Framework E2E Test Pattern (Phase 3 / US5)
+
+Tests for forward-migration framework use **RAII injection guards** to install synthetic migrations via `MIGRATIONS_OVERRIDE`, then verify each migration step in isolation.
+
+**Pattern:** Migrations are tested only via synthetic fixtures; the production `MIGRATIONS` slice ships empty in Phase 3.
+
+```rust
+/// RAII guard that swaps the per-thread `MIGRATIONS_OVERRIDE` for the
+/// duration of a test, then restores `None` on drop. Survives panics.
+struct MigrationsGuard;
+
+impl MigrationsGuard {
+    fn install(migrations: &'static [Migration]) -> Self {
+        MIGRATIONS_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(migrations));
+        Self
+    }
+}
+
+impl Drop for MigrationsGuard {
+    fn drop(&mut self) {
+        MIGRATIONS_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+// Migration step functions must be named `fn` items (not closures)
+// because `Migration.apply` has signature `fn(&Transaction) -> Result<(), TomeError>`
+fn migrate_v0_to_v1_create_marker(tx: &Transaction) -> Result<(), TomeError> {
+    tx.execute_batch("CREATE TABLE v1_marker (id INTEGER PRIMARY KEY) STRICT")
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("v0→v1 apply: {e}")))?;
+    Ok(())
+}
+
+#[test]
+fn forward_migration_v0_to_v1_succeeds() {
+    static MIGRATIONS: &[Migration] = &[Migration {
+        from: 0,
+        to: 1,
+        name: "test_v0_to_v1",
+        apply: migrate_v0_to_v1_create_marker,
+    }];
+    let _guard = MigrationsGuard::install(MIGRATIONS);
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("index.db");
+    write_index_db_with_schema_version(&path, 0);
+
+    let mut conn = rusqlite::Connection::open(&path).expect("open synthetic db");
+    let new_version = apply_pending(&mut conn, 0, 1).expect("migration runs");
+    assert_eq!(new_version, 1, "apply_pending must return the new version");
+
+    // Verify the side effect is visible on disk
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'v1_marker'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    assert!(table_exists, "v1_marker table must exist after migration");
+}
+```
+
+**Key points:**
+1. **Migration step functions are `fn` items** — not closures — because `Migration.apply` requires a function pointer
+2. **Generate-at-setup fixture DBs** — Use `write_index_db_with_schema_version(path, version)` to create minimal SQLite files at the requested version; no committed `.db` binaries
+3. **RAII guard survives panics** — Drop impl executes even on assertion failures, so the next test doesn't inherit a stale override
+4. **Cargo test-thread safety** — Cargo runs each `#[test]` on possibly-different threads; `thread_local!` cell per-thread isolation means no test poisons others
+
+Used in `tests/schema_migration_e2e.rs` to exercise single-step, multi-step, and failure-rollback scenarios.
+
+### Schema Migration Atomicity Pattern (Phase 3 / US5)
+
+Tests that verify rollback of mid-transaction failures use deliberate `Err` returns to model SIGINT interruption. The rollback is identical regardless of whether the failure is user-initiated or external.
+
+```rust
+fn migrate_v1_to_v2_always_fails(tx: &Transaction) -> Result<(), TomeError> {
+    // Create a table inside the transaction
+    tx.execute_batch("CREATE TABLE v2_marker_should_not_exist (id INTEGER) STRICT")
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("{e}")))?;
+    
+    // Deliberate failure — per-transaction rollback follows
+    Err(TomeError::IndexIntegrityCheckFailure("deliberate test failure".into()))
+}
+
+#[test]
+fn mid_sequence_failure_leaves_last_good_intermediate() {
+    static MIGRATIONS: &[Migration] = &[
+        Migration {
+            from: 0,
+            to: 1,
+            name: "test_v0_to_v1_ok",
+            apply: migrate_v0_to_v1_create_marker,
+        },
+        Migration {
+            from: 1,
+            to: 2,
+            name: "test_v1_to_v2_fail",
+            apply: migrate_v1_to_v2_always_fails,
+        },
+    ];
+    let _guard = MigrationsGuard::install(MIGRATIONS);
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("index.db");
+    write_index_db_with_schema_version(&path, 0);
+
+    let mut conn = rusqlite::Connection::open(&path).expect("open synthetic db");
+    let err = apply_pending(&mut conn, 0, 2).expect_err("v1→v2 step must fail");
+    
+    // Verify the first step's table exists (committed) but second's doesn't (rolled back)
+    let v1_exists = conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'v1_marker'",
+        [],
+        |_| Ok(true),
+    ).unwrap_or(false);
+    assert!(v1_exists, "v1_marker table must exist (its step committed)");
+
+    let v2_scratch_exists = conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'v2_marker_should_not_exist'",
+        [],
+        |_| Ok(true),
+    ).unwrap_or(false);
+    assert!(!v2_scratch_exists, "failing migration's writes must roll back");
+}
+```
+
+**Critical:** Do NOT use the global `catalog::git::CANCELLED` static to signal mid-transaction abort. Flipping it would race every other test in the binary (same process). Instead, emit `Err` from the closure. The rollback path is identical either way.
+
+### Doctor Synthetic SuggestedFix Injection (Phase 3 / US4 + US5)
+
+When doctor's `build_suggested_fixes` doesn't emit a particular fix class (e.g., schema migration in Phase 3, where zero migrations are registered), tests can manually append a `SuggestedFix` to the assembled report to exercise the dispatch path.
+
+```rust
+#[test]
+fn doctor_fix_applies_schema_migrations() {
+    // Assemble the report (zero registered migrations → no schema fix suggested)
+    let mut report = assemble_report(&scope, &paths, tmp.path(), false)?;
+    
+    // Inject a synthetic "schema" fix to test the apply path
+    report.suggested_fixes.push(SuggestedFix {
+        subsystem: "schema".to_string(),
+        detail: "forward migration available".to_string(),
+        auto_fixable: true,
+    });
+
+    // Apply the synthetic fix
+    apply_one_fix(&report.suggested_fixes[0].subsystem, &report.suggested_fixes[0].detail, &scope, &paths, tmp.path())?;
+
+    // Verify the schema was migrated
+    let updated = assemble_report(&scope, &paths, tmp.path(), false)?;
+    assert!(updated.schema.version > report.schema.version);
+}
+```
+
+This pattern lets tests exercise all dispatch branches even when framework conditions prevent their normal suggestion. Once real migrations land in Phase 4+, the `build_suggested_fixes` path will emit them naturally.
 
 ### Threaded Concurrency Contention Pattern (Phase 4 / US2)
 
@@ -708,15 +867,12 @@ let out = env.cmd()
     .args(["--workspace", ws.to_str().unwrap(), "catalog", "remove", &catalog_name, "--force"])
     .output()
     .unwrap();
-assert!(out.status.success());
+    assert!(out.status.success());
 
 // Pure deletion means no embedder in the CLI path
 ```
 
 The `paths_for(&env)` helper ensures both API-level and CLI-level calls use the same temp-rooted `Paths`, making it safe to alternate between library and subprocess invocations.
-
-
-
 
 ### In-Module Unit Test Pattern (Phase 3 / F8)
 
@@ -997,6 +1153,8 @@ pub fn fabricate_models(paths: &Paths) {
 
 **`config_with_catalog(catalog_name: &str, catalog_root: &Path) -> Config`** — Build a minimal `Config` with one catalog entry. The name is recorded both as the `BTreeMap` key and the inner `CatalogEntry.name`.
 
+**`write_index_db_with_schema_version(path: &Path, version: u32)`** — Create a minimal SQLite database with the `meta` table and `schema_version` column set to the requested version. Used by schema migration tests (Phase 3 / US5) to set up synthetic fixture databases at specific schema versions without needing real plugin data.
+
 **`stub_embedder_seed()` / `stub_reranker_seed()`** — Return `MetaSeed` values matching the deterministic stub embedder/reranker. Used to construct `LifecycleDeps` and open the index.
 
 **`write_config_for_cli(paths: &Paths, config: &Config)`** — Write the supplied `Config` to `paths.config_file` as TOML so a child `tome` binary process can read it. Used by `plugin list` / `plugin show` / `plugin disable` / `models_*` / `reindex` / `doctor` / `catalog_remove_cascade` tests that bypass `catalog add`.
@@ -1120,6 +1278,7 @@ When tests run:
 | `workspace_info.rs` | Library API | `workspace::info::assemble` — scope classification, model identity, catalog inheritance (Phase 4 / US2) |
 | `workspace_init.rs` | Library API + CLI | `workspace::init` — atomic directory creation, config inheritance, `--inherit-global`, `--force`, concurrent init contention (Phase 4 / US2) |
 | `atomicity_enable.rs` | Library API | Failure-injection: `StubEmbedder::with_force_fail_after(n)` → rollback guarantee (FR-004) |
+| `schema_migration_e2e.rs` | Library API | Forward schema migration framework — synthetic migrations, multi-step, failure-rollback, schema-version-too-new (Phase 3 / US5) |
 
 ### Unit Tests (by concern)
 
@@ -1130,7 +1289,9 @@ When tests run:
 | `manifest_strictness.rs` | TOML deny_unknown_fields enforced on all Deserialize structs; bad-manifest corpus (unknown fields, missing fields, invalid semver, invalid email, path traversal, duplicates) |
 | `path_validation.rs` | Relative paths only; no absolute paths, no `..`, no escape outside catalog root |
 | `scrubbing.rs` | Credential scrubbing regex: URL logins, SSH hosts, tokens, API keys, long hex |
-| `atomicity.rs` | Interrupted writes (SIGINT during clone) leave registry/cache in consistent state |
+| `atomicity.rs` | Interrupted writes (SIGINT during clone) leave registry/cache in consistent state; schema migration transaction rollback on failure (Phase 3 / US5) |
+| `schema_migrations.rs` | Forward-only migration boundaries (no down-migration), schema-version-too-new gate (Phase 3 / F7) |
+| `concurrency.rs` | Cross-process index lock contention (two concurrent tome invocations) (Phase 3 / US5) |
 | In-module tests (`src/doctor/{checks,harness_detect}.rs::tests`) | Health check functions, harness detection logic (Phase 3 / US4) |
 | In-module tests (`src/mcp/log.rs::tests`) | Log rotation policy: skip/rename/overwrite, permission setting, idempotent no-ops |
 
@@ -1177,7 +1338,7 @@ The counter is shared between clones via `Arc<AtomicUsize>` so the closure adapt
 
 ### No Environment Mutation in Library API Tests
 
-**Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`, `catalog_update_reindex.rs`, `reindex.rs`, `status.rs`, `doctor.rs`, `workspace_info.rs`, `workspace_init.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
+**Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`, `catalog_update_reindex.rs`, `reindex.rs`, `status.rs`, `doctor.rs`, `workspace_info.rs`, `workspace_init.rs`, `schema_migration_e2e.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
 
 **CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse-error tests, `catalog_remove_cascade.rs`, `doctor.rs` fix-apply tests, `workspace_init.rs` CLI tests) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
 
@@ -1251,15 +1412,16 @@ No automatic coverage threshold enforced, but the test corpus is organized to be
 - **Every error class is tested** — each `TomeError` variant appears in `exit_codes.rs` and often in command-specific tests
 - **Bad-input corpus is explicit** — each parser/validator has a separate test file documenting what shapes are rejected
 - **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/disable/list/show`, `plugin` interactive, `models download/list/remove`, `reindex`, `status`, `doctor`, `workspace info/init`) has dedicated tests
-- **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable and cheap-reenable (FR-006), fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback; `catalog_update_reindex.rs` and `reindex.rs` cover batch reindex logic; `status.rs` covers health assessment; `doctor.rs` covers diagnostics and repair dispatch; `workspace_info.rs` and `workspace_init.rs` cover workspace discovery and initialization (Phase 4 / US2)
+- **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable and cheap-reenable (FR-006), fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback; `catalog_update_reindex.rs` and `reindex.rs` cover batch reindex logic; `status.rs` covers health assessment; `doctor.rs` covers diagnostics and repair dispatch; `workspace_info.rs` and `workspace_init.rs` cover workspace discovery and initialization (Phase 4 / US2); `schema_migration_e2e.rs` covers forward-migration framework (Phase 3 / US5)
 - **MCP tool handlers tested** — `mcp_server.rs` covers tool router introspection and handler input validation; `mcp_lifecycle.rs` covers pre-flight exit codes
 - **Idempotency tested** — `plugin_repeated.rs` covers enable-of-enabled and disable-of-disabled (FR-008, exit 21)
 - **Interactive flow tested end-to-end** — `plugin_interactive.rs` covers catalog selector, plugin browser, action prompts, navigation, non-TTY refusal
 - **Cascade operations tested** — `catalog_remove_cascade.rs` covers refuse-on-enabled, cascade disable, JSON array envelope (Phase 9)
 - **Doctor diagnostics tested** — `doctor.rs` and `doctor_json.rs` cover health checks, suggested fixes, repair dispatch, JSON shape (Phase 3 / US4)
 - **Workspace operations tested** — `workspace_info.rs` covers scope introspection and model identity reporting; `workspace_init.rs` covers atomic initialization, config inheritance, concurrent contention (Phase 4 / US2)
+- **Schema migration framework tested** — `schema_migration_e2e.rs` covers single-step, multi-step, failure-rollback, schema-version-too-new gate with synthetic fixtures (Phase 3 / US5); `schema_migrations.rs` covers migration boundaries and CLI exit-52 gate (Phase 3 / F7); `atomicity.rs` covers transaction rollback on failure (Phase 3 / US5)
 - **Compile-time content validated** — `version_output.rs` ensures `--version` output is synchronized with `MODEL_REGISTRY`
-- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift, sparse fixtures (Phase 6), batch reindex cheapness (Phase 7), health classification (Phase 8), cascade atomicity (Phase 9), threaded concurrency (Phase 4 / US2), surgical FS mutations for cache breakage (Phase 3 / US4)
+- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift, sparse fixtures (Phase 6), batch reindex cheapness (Phase 7), health classification (Phase 8), cascade atomicity (Phase 9), threaded concurrency (Phase 4 / US2), surgical FS mutations for cache breakage (Phase 3 / US4), cross-process lock contention (Phase 3 / US5)
 
 ## Specimen Tests (Quality Corpus)
 
@@ -1312,7 +1474,7 @@ Plugin sources must be:
 cargo build --release           # Full build (includes dependencies)
 cargo fmt --check              # Format check
 cargo clippy --all-targets -- -D warnings  # Linting
-cargo test --workspace         # Full test suite (310 tests across 44 suites)
+cargo test --workspace         # Full test suite (374 tests across 51 suites)
 cargo audit                     # Security: vulnerable dependencies
 cargo deny check                # License compliance
 ```

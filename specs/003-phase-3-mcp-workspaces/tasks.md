@@ -413,25 +413,25 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Start
 
-- [ ] T192 [GIT] Verify working tree is clean before starting Phase 7 / US5
-- [ ] T193 [US5] Create `retro/P7.md` from the standard retro template
-- [ ] T194 [GIT] Commit: docs(retro): initialise P7 retro
+- [X] T192 [GIT] Verify working tree is clean before starting Phase 7 / US5 — branch `003-phase-3-us5` cut clean from `main` at `cfd0156` after pull-fast-forward to `e291899`.
+- [X] T193 [US5] Create `retro/P7.md` from the standard retro template — commit `eaeb22b`.
+- [X] T194 [GIT] Commit: docs(retro): initialise P7 retro — `eaeb22b`.
 
 ### Slice US5.a — fixtures + tests
 
-- [ ] T195 [US5] Create the fixture builder `tests/common/mod.rs::write_index_db_with_schema_version(path, version)` (use devs:rust-dev agent)
-- [ ] T196 [US5] Generate `tests/fixtures/older-schema.db` recording `meta.schema_version = 0` (use devs:rust-dev agent)
-- [ ] T197 [US5] Generate `tests/fixtures/newer-schema.db` recording `meta.schema_version = 99` (use devs:rust-dev agent)
-- [ ] T198 [US5] Create `tests/schema_migration_e2e.rs` covering the four cases from contracts/schema-migration.md §Testing strategy: forward migration succeeds; multi-step migration succeeds; mid-sequence failure leaves last-good intermediate; newer-on-disk refused with exit 73 (use devs:rust-dev agent)
-- [ ] T199 [US5] Extend `tests/atomicity.rs` with a forward-migration interrupt case — SIGINT mid-transaction leaves the schema-version row unchanged (use devs:rust-dev agent)
-- [ ] T200 [US5] Verify `tome doctor --fix` runs the forward migration end-to-end against a fixture; assert the post-fix re-classification shows healthy (use devs:rust-dev agent)
-- [ ] T201 [GIT] Commit: test(schema): forward-migration e2e + atomicity + doctor --fix interaction
+- [X] T195 [US5] Create the fixture builder `tests/common/mod.rs::write_index_db_with_schema_version(path, version)` — minimal-`meta`-only synthetic DB (no entanglement with full v1 bootstrap). Each migration step's `apply` closure creates whatever tables it needs.
+- [X] T196 [US5] Generate `tests/fixtures/older-schema.db` recording `meta.schema_version = 0` — generate-at-setup via `write_index_db_with_schema_version(path, 0)`; no committed binary `.db` file (consistent with Phase 2's generate-at-setup convention).
+- [X] T197 [US5] Generate `tests/fixtures/newer-schema.db` recording `meta.schema_version = 99` — generate-at-setup via `write_index_db_with_schema_version(path, 99)`; same convention.
+- [X] T198 [US5] Create `tests/schema_migration_e2e.rs` covering the four cases from contracts/schema-migration.md §Testing strategy: forward migration succeeds; multi-step migration succeeds; mid-sequence failure leaves last-good intermediate; newer-on-disk refused with exit 73 — five tests (four from contract + one `MigrationsGuard` Drop-clears-slot sanity check). `MIGRATIONS_OVERRIDE` is the test injection point; `MigrationsGuard` is the RAII swap-and-restore wrapper.
+- [X] T199 [US5] Extend `tests/atomicity.rs` with a forward-migration interrupt case — SIGINT mid-transaction leaves the schema-version row unchanged — modeled as deliberate `Err` from the migration closure (the per-step transaction rollback is identical regardless of the abort source); `catalog::git::CANCELLED` deliberately NOT used (would race every other test in the binary; same discipline as `atomicity_enable.rs`).
+- [X] T200 [US5] Verify `tome doctor --fix` runs the forward migration end-to-end against a fixture; assert the post-fix re-classification shows healthy — `fix_runs_forward_schema_migration_end_to_end` bootstraps a real v1 DB with the production registry seeds, downgrade-stamps to v0, injects a synthetic `subsystem: "schema"` SuggestedFix (Phase 3's `build_suggested_fixes` doesn't emit one because zero migrations are registered), and verifies the marker table created inside the migration is present after `doctor::fixes::apply` + `re_assemble`.
+- [X] T201 [GIT] Commit: test(schema): forward-migration e2e + atomicity + doctor --fix interaction
 
 ### End-of-phase
 
-- [ ] T202 [US5] Run `/sdd:map incremental` to refresh codebase docs against Phase 7 / US5 changes
-- [ ] T203 [US5] Review `retro/P7.md` and extract critical learnings to CLAUDE.md (conservative)
-- [ ] T204 [GIT] Commit: docs(codebase): refresh after Phase 7 / US5
+- [X] T202 [US5] Run `/sdd:map incremental` to refresh codebase docs against Phase 7 / US5 changes — 4 mappers in parallel; all 8 codebase docs refreshed.
+- [X] T203 [US5] Review `retro/P7.md` and extract critical learnings to CLAUDE.md (conservative) — 5 new pattern bullets: RAII `MigrationsGuard` for thread-local injection, generate-at-setup fixture DBs over committed binaries, SIGINT mid-tx modelled as deliberate `Err`, synthetic `SuggestedFix` injection for dispatch-path testing, "framework ships empty, e2e tests live on synthetic fixtures".
+- [X] T204 [GIT] Commit: docs(codebase): refresh after Phase 7 / US5
 
 ### Phase Completion
 
