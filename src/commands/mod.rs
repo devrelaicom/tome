@@ -5,3 +5,4 @@ pub mod plugin;
 pub mod query;
 pub mod reindex;
 pub mod status;
+pub mod workspace;

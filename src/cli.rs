@@ -87,6 +87,23 @@ pub enum Command {
     /// flag is intentionally ignored — the protocol IS the structured
     /// output.
     Mcp(McpArgs),
+    /// Inspect or create per-project workspaces. See
+    /// `contracts/workspace-info.md` and `contracts/workspace-init.md`.
+    Workspace(WorkspaceArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct WorkspaceArgs {
+    #[command(subcommand)]
+    pub command: WorkspaceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceCommand {
+    /// Report the resolved workspace context for the current invocation.
+    /// Read-only; honours `--workspace` / `--global` like every other
+    /// command. Bootstrap-not-yet is informational, not an error.
+    Info,
 }
 
 #[derive(Debug, clap::Args)]

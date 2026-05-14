@@ -6,8 +6,10 @@
 //! (US2), and the opt-in `${state_dir}/workspaces.txt` registry
 //! (research §R-15) all live under this module.
 
+pub mod info;
 pub mod inventory;
 pub mod resolution;
 pub mod scope;
 
+pub use info::{ModelIdentity, ScopeKind, WorkspaceInfo};
 pub use scope::{ResolvedScope, Scope, ScopeSource};
