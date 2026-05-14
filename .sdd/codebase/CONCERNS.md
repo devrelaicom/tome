@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 9 incremental)
+> **Last Updated**: 2026-05-14 (Phase 8–9 + F7–F8 incremental)
 
 ## Technical Debt
 
@@ -22,6 +22,8 @@ Items to address when working in the area:
 | ID | Area | Description | Impact | Effort | Mitigation |
 |----|------|-------------|--------|--------|-----------|
 | TD-010 | `src/embedding/download.rs` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner in both `plugin enable` and `models download`; enhancement for polish pass. Also applies to `tome reindex` progress visibility (Phase 7) |
+| TD-011 | `src/index/migrations.rs` (Phase 3 F7) | Schema-migration framework ships with zero registered migrations; exercising tests pending | Testing coverage | Low | Framework landed in Phase 3 Foundational F7 per `contracts/schema-migration.md`. Phase 4+ adds first real `Migration` rows + e2e test via `MIGRATIONS_OVERRIDE` injection |
+| TD-012 | `src/mcp/preflight.rs` (Phase 3 F8) | MCP startup pre-flight runs SHA-256 over primary embedder (~66 MB) at every startup | Startup latency | Low | Acceptable for long-running server; cold-cache startup may see latency. Consider `--verify` flag on `tome status` to skip SHA-256 on non-suspect runs (similar to Phase 6 pattern). Defer unless profiling shows impact |
 | TD-020 | Error categorisation | All Phase 1 + Phase 2 codes are enumerated; no catch-all variants | Debuggability | Low | Current approach is sound; closed set enforces completeness |
 | TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low | — |
 
@@ -79,6 +81,8 @@ Code areas that are brittle or risky to modify:
 | `src/index/skills.rs::upsert_skill` | `sqlite-vec` virtual tables do NOT support `INSERT OR REPLACE` or `ON CONFLICT` (Phase 7, PR #25 latent bug fix). Uses `DELETE`-then-`INSERT` which is idempotent | Verify this pattern on any future upsert-like operation involving virtual tables; do not attempt `INSERT OR REPLACE` on `skill_embeddings` |
 | `src/main.rs::--version pre-parse` | Early arg scanning before clap dispatch is custom; any change to pre-parse logic could break `--version` routing | Test both `tome --version` and `tome -V` in CLI integration tests; verify `--json` flag is also detected; check that non-matching args pass through to clap normally |
 | `src/plugin/lifecycle.rs::cascade_disable_for_catalog` | Single lock acquisition per cascade; each plugin's deletion is its own transaction. TOCTOU window between pre-check (without lock) and cascade (under lock): another process may enable a plugin between check and delete, causing its rows to be dropped too | This is intentional (readers never block writers). The pre-check reports a stale but valid list; the cascade acts on what's actually there and is correct either way. Document the TOCTOU window and its benign semantics |
+| `src/mcp/log.rs::FileMakeWriter` | Mutex serialises every JSON log emit; LockedFile guard holds lock for duration of write. MCP server is single-threaded, so contention is theoretical. Test harness shares handle across threads → must trust mutex semantics | Test isolation: don't share FileMakeWriter between concurrent test threads; use separate temp log files. Production: single-threaded by design (R-2), so no contention risk |
+| `src/index/migrations.rs::MIGRATIONS_OVERRIDE` | Public static (not `#[cfg(test)]`) so integration tests outside crate can inject synthetic migrations. Widens test-injection surface compared to purely internal mechanism | Documented as test-only via doc comment. Only read by production `apply_pending` (write path already under advisory lock). Injected migrations run in same transaction isolation. Forward-only boundary enforced—no down-migration path exists. Monitor: ensure new tests never accidentally rely on `MIGRATIONS_OVERRIDE` slice being reusable (each test should clear slot after use) |
 
 ## Deprecated Code
 
@@ -88,7 +92,7 @@ Code marked for removal:
 |------|-------------------|----------------|-------------|
 | (none) | — | — | — |
 
-All Phase 1, Phase 2, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, and Phase 9 code is current; no legacy to remove yet.
+All Phase 1, Phase 2, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9, and Phase 3 Foundational code is current; no legacy to remove yet.
 
 ## Performance Concerns
 
@@ -106,7 +110,7 @@ Active TODO comments in codebase:
 
 | Location | TODO | Priority | Status |
 |----------|------|----------|--------|
-| (none found) | — | — | Code is TODOs-clean; all planned work tracked in spec and PRD |
+| (none found) | — | — | Code is TODOs-clean; all planned work tracked in spec and PRs |
 
 ## External Dependency Risks
 
@@ -126,6 +130,9 @@ Dependencies that may need attention:
 | `reqwest` | 0.11.x (Phase 2) | HTTP client; used for model downloads | Monitor for TLS/security updates | Active |
 | `indicatif` | (Phase 2) | Progress bar library; non-critical | Routine updates | Stable |
 | `inquire` | (Phase 4+) | Interactive prompts library; used in non-TTY-refusable flows | Monitor for prompt-injection or TTY-related bugs; keep up to date | Stable |
+| `rmcp` | (Phase 3) | MCP protocol implementation; required for MCP server (US1) | Monitor for spec-alignment updates; test integration with harness | Active |
+| `tokio` | (Phase 3, scoped) | Async runtime; used only in `src/mcp/` (structural test enforces boundary) | Constitution gate: verify tokio stays out of Phase 1–2 code paths; test async boundary quarterly | Active |
+| `tracing-subscriber` | (Phase 3) | Structured logging framework; used in MCP server only | Monitor for JSON formatter updates and file I/O edge cases | Stable |
 
 **No unmaintained or vulnerable dependencies detected.** `cargo-audit` weekly + PR checks.
 
@@ -143,6 +150,7 @@ Areas that could benefit from enhancement:
 | Non-TTY pointer pattern consolidation | `require_terminal()` check + pointer message duplicated in 3 command modules | Extract to shared helper | Cleaner code |
 | Per-plugin reindex progress (Phase 7) | No per-skill progress or summary until completion | Stream progress per skill or plugin | Visibility into long multi-plugin reindex operations |
 | Status command caching | Report is fully recomputed on every invocation | Cache computed parts (index metadata, drift) per query | Faster repeated health checks |
+| MCP startup verbosity | Pre-flight SHA-256 silent unless it fails | Optional `--verbose` startup for diagnosing slow cold-cache initialization | Better observability |
 
 ## Monitoring Gaps
 
@@ -154,6 +162,7 @@ Areas lacking proper observability:
 | Index database health | No validation of persisted state on startup (Phase 2) | Corrupted index undetected until query | Low (atomicity guarantees + integrity_check PRAGMA should prevent corruption) |
 | Model download errors | Network failures not distinguished from checksum failures | Harder to diagnose transient vs. persistent issues | Low (both map to Io/ModelChecksumMismatch; rare in practice) |
 | Catalog size statistics | No cache size tracking | Can't warn on large catalogs | Low (Phase 2 may add quota management) |
+| MCP pre-flight timing | SHA-256 verify of large embedder file not instrumented | Cold-cache startup latency not observable | Low (acceptable trade-off; defer unless profiling shows impact per TD-012) |
 
 ## Design Tradeoffs
 
@@ -164,6 +173,8 @@ Intentional design decisions with known limitations:
 | **Per-plugin atomicity** (Phase 7) | `src/index/skills.rs::reindex_plugin_atomic` | Simpler transaction model; each plugin reindex commits independently | Multi-plugin `tome catalog update` or `tome reindex` may leave earlier plugins committed if interrupted between plugins | Safe state always (no partial rows); index is always valid. By design, not a bug. Advisory lock per-plugin at entry to reindex, released at commit. |
 | **Status lock-free** (Phase 8) | `src/commands/status.rs::run` (no advisory lock taken) | Allows health check to run even when a writer is running; supports use as a non-invasive doctor command (FR-056) | Status report is a point-in-time snapshot; may be stale if another process is concurrently writing | Acceptable trade-off for pre-flight non-blocking diagnosis. Caller should understand the snapshot may be moments old. |
 | **Cascade disable under single lock** (Phase 9) | `src/plugin/lifecycle.rs::cascade_disable_for_catalog` | Batch operation atomicity: all plugins disabled and rows dropped within one lock window; simpler than per-plugin acquisitions (Phase 7 pattern) | Each plugin's deletion is its own transaction (not atomic across plugins), so SIGINT between plugins leaves earlier plugins dropped + later plugins intact. Index is always valid; partial state is well-defined | By design. Index WAL + transaction isolation ensures each deletion is durable and correct. Pre-check (enabled-plugin query) runs WITHOUT lock, accepting TOCTOU risk of stale enabled list — acceptable because cascade acts on actual state (still correct) and reader-never-blocks-writer is the locking principle. |
+| **MCP startup SHA-256 verification** (Phase 3 F8) | `src/mcp/preflight.rs::verify_embedder_artefacts` | Long-running server: paying full hash once at startup is right trade-off vs. long-running process correctness | Cold-cache startup latency visible to harness (potential second-range delay for ~66 MB file). Acceptable for daemon; defer `--verify` skip flag to Phase 4+ unless profiling shows impact (TD-012) | Pre-flight gates before MCP protocol handshake, so harness sees startup delay before first RPC. Not user-facing command latency. Consider optional startup flag for repeated local dev testing (mitigates cold-cache cost, trade-off: skip verification). |
+| **Forward-only schema migrations** (Phase 3 F7) | `src/index/migrations.rs` + `TomeError::SchemaVersionTooNew` (exit 73) | Simpler DB evolution: v2.1 patch adds one migration row; older Tome refuses newer DBs. No down-migration complexity | Users on older Tome version cannot open DBs created/modified by newer version | Acceptable: users upgrade Tome regularly. Phase 1 is shipped and stable; Phase 2+ are synchronized. Old-version downgrade is not a supported use case. |
 
 ## Risk Summary by Phase
 
@@ -196,7 +207,7 @@ Intentional design decisions with known limitations:
 2. SEC-001: Real BGE model testing (SC-001/SC-002) — T088 pending developer-machine pass
 3. SEC-002: User-decline exit code distinct from system interrupt (design debt, low priority)
 
-### Phase 3 (Slice 1 Complete, Slice 2+ In Progress)
+### Phase 3 (Slice 1 Complete, Slice 2+ In Progress, Foundational F7–F8 Complete)
 
 **Completed (Slice 1)**:
 - ✓ Model registry with real checksums (verified at start of Phase 3)
@@ -204,6 +215,19 @@ Intentional design decisions with known limitations:
 - ✓ Plugin enable/disable wired to CLI
 - ✓ Skill metadata parsing (lenient)
 - ✓ Plugin manifest parsing (lenient, FR-013a)
+
+**Foundational F7 Complete**:
+- ✓ Schema migration framework with forward-only policy (zero migrations shipped)
+- ✓ `SchemaVersionTooNew` (exit 73) + `SchemaMigrationFailed` (exit 74) exit codes
+- ✓ `MIGRATIONS_OVERRIDE` test-injection point for e2e tests (Phase 4+)
+
+**Foundational F8 Complete**:
+- ✓ MCP server startup pre-flight validation (FR-110)
+- ✓ Embedder SHA-256 verification at startup + drift detection
+- ✓ MCP protocol purity: stdout reserved for protocol, errors to stderr (FR-221/FR-222)
+- ✓ Structured JSON-lines logging with 10 MiB rotation cap
+- ✓ `EmbedderNameDrift` (exit 41) + `EmbedderVersionDrift` (exit 42) specific codes
+- ✓ Reranker drift detected but not a startup failure (FR-109 defers load until first use)
 
 **In progress**:
 - T088: Real BGE model testing against SC-001/SC-002
@@ -214,6 +238,8 @@ Intentional design decisions with known limitations:
 - SEC-001: BGE model testing still pending (T088)
 - SEC-002: User-decline vs. interrupt exit code (design debt)
 - TD-010: Model download progress UX (polish pass)
+- TD-011: Schema migration e2e tests pending (Phase 4+)
+- TD-012: MCP startup SHA-256 latency on cold cache (acceptable; defer unless profiling shows impact)
 
 ### Phase 4 (Complete)
 

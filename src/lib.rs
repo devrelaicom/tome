@@ -10,6 +10,7 @@ pub mod embedding;
 pub mod error;
 pub mod index;
 pub mod logging;
+pub mod mcp;
 pub mod output;
 pub mod paths;
 pub mod plugin;

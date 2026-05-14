@@ -7,7 +7,10 @@
 //! 3. Apply the connection-level PRAGMAs (`journal_mode = WAL`,
 //!    `synchronous = NORMAL`, `foreign_keys = ON`, `busy_timeout = 5000`).
 //! 4. If the schema is absent, run [`schema::bootstrap`]. If older, apply
-//!    pending [`migrations`]. If newer, refuse with [`TomeError::SchemaTooNew`].
+//!    pending [`migrations`]. If newer, the migration framework refuses
+//!    with [`TomeError::SchemaVersionTooNew`] (exit 73). The legacy
+//!    [`open_read_only`] gate continues to emit [`TomeError::SchemaTooNew`]
+//!    (exit 52) for the read path — see its docstring for the rationale.
 //! 5. Verify the vec extension is reachable on this connection.
 //!
 //! Concurrency note: this slice does not acquire the advisory lockfile yet.
@@ -53,7 +56,7 @@ pub fn open(db_path: &Path, opts: &OpenOptions) -> Result<Connection, TomeError>
             schema::bootstrap(&mut conn, &opts.embedder, &opts.reranker)?;
         }
         Some(stored) => {
-            migrations::apply_pending(&mut conn, stored)?;
+            migrations::apply_pending(&mut conn, stored, schema::SCHEMA_VERSION)?;
         }
     }
 

@@ -122,34 +122,27 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Slice F7 — populate `apply_pending` migration framework
 
-- [ ] T053 Populate `apply_pending(conn: &mut Connection, current: u32, target: u32) -> Result<u32, TomeError>` in `src/index/migrations.rs` per contracts/schema-migration.md §Algorithm (use devs:rust-dev agent)
-- [ ] T054 Define `Migration { from, to, name, apply }` struct and `const MIGRATIONS: &[Migration] = &[]` (empty) in `src/index/migrations.rs` (use devs:rust-dev agent)
-- [ ] T055 Add `#[cfg(test)] thread_local!` `MIGRATIONS_OVERRIDE` injection point per contracts/schema-migration.md §Registration (use devs:rust-dev agent)
-- [ ] T056 Wire `apply_pending` into `index::open` after the schema version is read (use devs:rust-dev agent)
-- [ ] T057 Add tracing info events at migration start, commit, and failure per contracts/schema-migration.md §Logging (use devs:rust-dev agent)
-- [ ] T058 [GIT] Commit: feat(index): populate apply_pending migration framework
+- [X] T053 Populate `apply_pending(conn: &mut Connection, current: u32, target: u32) -> Result<u32, TomeError>` in `src/index/migrations.rs` per contracts/schema-migration.md §Algorithm (use devs:rust-dev agent) — new shape returns `Result<u32, TomeError>`; refuses newer-on-disk with `SchemaVersionTooNew` (exit 73) per the Phase 3 contract; wraps step failures in `SchemaMigrationFailed` (exit 74); keeps the "no migration registered" defensive guard as `IndexIntegrityCheckFailure` (exit 51) because that's a "DB in unknown state" signal rather than a registered-migration failure.
+- [X] T054 Define `Migration { from, to, name, apply }` struct and `const MIGRATIONS: &[Migration] = &[]` (empty) in `src/index/migrations.rs` (use devs:rust-dev agent) — `apply: fn(&Transaction) -> Result<(), TomeError>` (function pointer) replaces the Phase 2 `sql: &'static str`; the registry stays empty.
+- [X] T055 Add `#[cfg(test)] thread_local!` `MIGRATIONS_OVERRIDE` injection point per contracts/schema-migration.md §Registration (use devs:rust-dev agent) — **deviated from `#[cfg(test)]`**: integration tests under `tests/` consume the library without `cfg(test)` visibility, so `MIGRATIONS_OVERRIDE` is `#[doc(hidden)] pub static`. Phase 7's `tests/schema_migration_e2e.rs` reads it via `tome::index::migrations::MIGRATIONS_OVERRIDE`.
+- [X] T056 Wire `apply_pending` into `index::open` after the schema version is read (use devs:rust-dev agent) — call site now passes `schema::SCHEMA_VERSION` as the target and discards the returned `u32`. Doc comment on `db.rs::open` updated to note that the write path now emits `SchemaVersionTooNew` (73) while `open_read_only` continues emitting the legacy `SchemaTooNew` (52) — both name the same condition but historically route through different exit codes; tests rely on both.
+- [X] T057 Add tracing info events at migration start, commit, and failure per contracts/schema-migration.md §Logging (use devs:rust-dev agent) — `target: "tome::index::migrations"`; `migrating` + `migration committed` at `info`; failures at `error` with the scrubbed source attached.
+- [X] T058 [GIT] Commit: feat(index): populate apply_pending migration framework
 
 ### Slice F8 — MCP file log appender plumbing
 
-- [ ] T059 [P] Create `src/mcp/mod.rs` exposing `pub fn run(scope: &ResolvedScope, paths: &Paths) -> Result<(), TomeError>` as a sync entry point (use devs:rust-dev agent)
-- [ ] T060 [P] Create `src/mcp/runtime.rs::build_runtime() -> Result<Runtime, TomeError>` constructing a single-threaded `tokio::runtime::Runtime` with the feature set from research §R-2 (use devs:rust-dev agent)
-- [ ] T061 [P] Create `src/mcp/log.rs` implementing a JSON-lines file appender at `paths.mcp_log`, with size-based rotation at startup per contracts/log-format.md §Rotation policy (use devs:rust-dev agent)
-- [ ] T062 [P] Add a `tracing-subscriber` registry construction helper in `src/mcp/log.rs` that wires the file appender + a stderr `fatal!`-only appender; honours `TOME_LOG` / `RUST_LOG` (use devs:rust-dev agent)
-- [ ] T063 Add `src/mcp/preflight.rs::run(scope: &ResolvedScope, paths: &Paths) -> Result<EmbedderHandle, TomeError>` implementing the FR-110 pre-flight checks; returns the loaded embedder (use devs:rust-dev agent)
-- [ ] T064 [GIT] Commit: feat(mcp): file logging and runtime/preflight scaffolding (sync boundary respected)
+- [X] T059 [P] Create `src/mcp/mod.rs` exposing `pub fn run(scope: &ResolvedScope, paths: &Paths) -> Result<(), TomeError>` as a sync entry point (use devs:rust-dev agent) — sync entry point stub returns `McpStartupFailed { reason: "mcp server scaffolding only; US1 wires the server loop" }`; US1's T076 fills in the runtime build / subscriber install / preflight / serve sequence.
+- [X] T060 [P] Create `src/mcp/runtime.rs::build_runtime() -> Result<Runtime, TomeError>` constructing a single-threaded `tokio::runtime::Runtime` with the feature set from research §R-2 (use devs:rust-dev agent) — `Builder::new_current_thread().enable_io().enable_time().build()`; surfaces tokio build failures as `McpStartupFailed`.
+- [X] T061 [P] Create `src/mcp/log.rs` implementing a JSON-lines file appender at `paths.mcp_log`, with size-based rotation at startup per contracts/log-format.md §Rotation policy (use devs:rust-dev agent) — `rotate_if_oversized` (10 MiB cap, atomic rename to `.log.1`, idempotent on missing files) + `open_appender` (one-shot rotate + create-or-append open) + `FileMakeWriter` wrapping `Mutex<File>` + `LockedFile<'a>` adapter forwarding `Write` to `&File` (the blanket impl). 4 unit tests cover under-cap skip, oversize-renames, pre-existing-.1-overwrite, absent-current no-op.
+- [X] T062 [P] Add a `tracing-subscriber` registry construction helper in `src/mcp/log.rs` that wires the file appender + a stderr `fatal!`-only appender; honours `TOME_LOG` / `RUST_LOG` (use devs:rust-dev agent) — `init_subscriber(File)` returns `Result<(), TomeError>` via `try_init` so existing global subscribers (CLI logging path) don't blow it up; JSON layer wraps the file, stderr layer carries `LevelFilter::ERROR` only per FR-222; `EnvFilter` defaults to `info` and reads `TOME_LOG` → `RUST_LOG`. Added the `json` feature to `tracing-subscriber` in `Cargo.toml`.
+- [X] T063 Add `src/mcp/preflight.rs::run(scope: &ResolvedScope, paths: &Paths) -> Result<EmbedderHandle, TomeError>` implementing the FR-110 pre-flight checks; returns the loaded embedder (use devs:rust-dev agent) — six-step pipeline per `contracts/mcp-server.md` §"Behaviour": pick registry entries, open index read-only (file-missing → `McpStartupFailed { reason: "index_missing" }` 60), re-gate schema version with `SchemaVersionTooNew` (73 — wins over the legacy `SchemaTooNew` 52 for MCP startup), `detect_drift` for embedder name/version drift (41/42; reranker drift is ignored at startup per FR-109), verify embedder files exist + SHA-256 the primary, eager-load `FastembedEmbedder`. Reranker is **not** loaded; FR-109 defers it to the first `search_skills` call.
+- [X] T064 [GIT] Commit: feat(mcp): file logging and runtime/preflight scaffolding (sync boundary respected) — binary size held at 20.94 MiB on macOS arm64 (vs 20.91 MiB baseline pre-F8); LTO still drops un-referenced rmcp until US1 wires the server. 297/297 tests pass (4 new unit tests in `mcp::log`). `tests/sync_boundary.rs` continues to pass — the path-component exemption for `mcp/` covers every new file under `src/mcp/`.
 
 ### End-of-phase
 
-- [ ] T065 Run `/sdd:map incremental` to refresh codebase docs against Phase 2 Foundational changes
-- [ ] T066 Review `retro/P2.md` and extract critical learnings to CLAUDE.md (conservative — pattern-level only)
-- [ ] T067 [GIT] Commit: docs(codebase): refresh after Phase 3 Foundational
-
-### Phase Completion
-
-- [ ] T068 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T069 [GIT] Update PR with Phase 2 summary
-- [ ] T070 [GIT] Verify all CI checks pass
-- [ ] T071 [GIT] Report PR ready status
+- [X] T065 Run `/sdd:map incremental` to refresh codebase docs against Phase 2 Foundational changes — 4 mapper agents in parallel; all 8 docs refreshed (STACK 256 / INTEGRATIONS 201 / ARCHITECTURE 841 / STRUCTURE 590 / CONVENTIONS 665 / TESTING 1164 / SECURITY 541 / CONCERNS 380 lines).
+- [X] T066 Review `retro/P2.md` and extract critical learnings to CLAUDE.md (conservative — pattern-level only) — three new conventions: field-method coexistence (F1), specific-over-generic exit codes (F8), test injection via `#[doc(hidden)] pub static` (F7).
+- [X] T067 [GIT] Commit: docs(codebase): refresh after Phase 3 Foundational
 
 **Checkpoint**: Foundation ready — user story implementation can now begin in priority order.
 
