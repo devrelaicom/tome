@@ -7,16 +7,17 @@
 > **Updated**: 2026-05-13 (Phase 7 User Story 5 slices 1–3 — `reindex_plugin_atomic` + `tome catalog update` cascade + `tome reindex` CLI; no new dependencies)
 > **Updated**: 2026-05-13 (Phase 8 User Story 6 slices 1–2 — `tome status [--verify]` + version pre-parse hook; 14 new tests; no new dependencies)
 > **Updated**: 2026-05-13 (Phase 9 User Story 7 — `tome catalog remove` Phase 2 extensions; cascade-disable orchestrator; no new dependencies)
+> **Updated**: 2026-05-14 (Foundational F7–F8 — `src/index/migrations.rs` rewritten + `src/mcp/` module scaffolding; `tracing-subscriber` `json` feature enabled)
 
 ## Languages & Runtimes
 
 | Language | Version | Purpose |
 |----------|---------|---------|
-| Rust | stable (MSRV: 1.93) | Primary implementation language; synchronous (no async runtime in Phase 1–9) |
+| Rust | stable (MSRV: 1.93) | Primary implementation language; synchronous (no async runtime in Phase 1–9; Phase 3 Foundational F8 introduces single-threaded tokio in `src/mcp/` only) |
 
 ## Frameworks
 
-Phase 1–9 is a CLI application, not a web framework-based project.
+Phase 1–9 is a CLI application, not a web framework-based project. Phase 3 Foundational F8 introduces MCP server scaffolding scoped to `src/mcp/`.
 
 | Framework | Version | Purpose |
 |-----------|---------|---------|
@@ -28,9 +29,9 @@ Phase 1–9 is a CLI application, not a web framework-based project.
 |---------|---------|---------|-------------|
 | `serde` + `serde_derive` | 1.x | Configuration and manifest (de)serialisation | All TOML parsing for `config.toml` and `tome-catalog.toml`; Tome-owned structs use `#[serde(deny_unknown_fields)]` (FR-013a boundary) |
 | `toml` | 0.8 | TOML format support | Manifest and config file parsing |
-| `thiserror` | 2.x | Typed error enums | Closed `TomeError` enum in `src/error.rs` (all fallible operations); 18+ enumerated failure variants with dedicated exit codes |
+| `thiserror` | 2.x | Typed error enums | Closed `TomeError` enum in `src/error.rs` (all fallible operations); 18+ enumerated failure variants with dedicated exit codes (codes 70–75 added in Phase 3 Foundational for workspace/schema; code 73 now used by write-path migration handler) |
 | `anyhow` | 1.x | Error context chaining | Application-level error wrapping at boundaries |
-| `tracing` + `tracing-subscriber` | 0.1, 0.3 | Structured logging to stderr | Diagnostic output orthogonal to `--json` stdout |
+| `tracing` + `tracing-subscriber` | 0.1, 0.3 | Structured logging to stderr | Diagnostic output orthogonal to `--json` stdout; Phase 3 F8 enables `json` feature for MCP log subscriber (JSON-lines to file via `src/mcp/log.rs` in addition to human-readable stderr) |
 | `sha2` | 0.10 | Content-addressed cache naming and model integrity | URL hashing for `cache_dir_for()` in `src/paths.rs`; model download verification in `src/embedding/download.rs` |
 | `regex` | 1.x | Credential scrubbing patterns | Git stderr sanitisation in `src/catalog/git.rs` (4 regex patterns); extended in Phase 3 to cover model download URLs (principle XIII) |
 | `ctrlc` | 3.x | Signal handling (SIGINT) | Global cancellation handler with exit code 8; SIGINT cancels in-flight git operations and model downloads |
@@ -167,6 +168,52 @@ Phase 9 slice 1 implements `tome catalog remove` Phase 2 extensions per `contrac
 
 **No new production dependencies** in Phase 9 — cascade logic reuses existing `delete_by_plugin` database helper and advisory-lock infrastructure. Test count: 237 → 240 across 35 → 36 suites.
 
+### Phase 3 Foundational — F7 (schema migration framework rewrite)
+
+F7 rewrites `src/index/migrations.rs` with a new framework per `contracts/schema-migration.md`:
+
+**Changes:**
+- `Migration { from, to, name, apply: fn(&Transaction) -> Result<(), TomeError> }` struct replaces Phase 2's `sql: &'static str` model — function pointers allow post-DDL fixups within the same transaction.
+- `apply_pending(conn, current, target) -> Result<u32, TomeError>` new three-arg signature (was `apply_pending(conn, target)`)—callers now provide the current version to distinguish between fresh DB (None) vs forward migration (Some).
+- `MIGRATIONS_OVERRIDE` `thread_local!` — test-only injection point (gated `#[doc(hidden)] pub`, not `#[cfg(test)]`) allowing integration tests to register synthetic migrations without polluting production state.
+- Tracing events at target `tome::index::migrations` now emit lifecycle events.
+- **Schema version checks:** write-path now emits `SchemaVersionTooNew` (exit 73); read-path `open_read_only` retains legacy `SchemaTooNew` (exit 52) for backward compat.
+- **Compile-time constant:** `MIGRATIONS` ships as empty (`const MIGRATIONS: &[Migration] = &[];`) — Phase 4+ adds the first real migration row plus a synthetic-fixture e2e test in `tests/schema_migrations.rs`.
+
+**No new production dependencies** — framework uses only `rusqlite`, `tracing`, and existing `TomeError` infrastructure.
+
+### Phase 3 Foundational — F8 (MCP server scaffolding)
+
+F8 introduces a new `src/mcp/` module with four files implementing MCP server scaffolding per `contracts/mcp-server.md` and the Phase 3 research plan (research §R-2):
+
+**New dependencies (production):**
+| Package | Version | Purpose | Scope |
+|---------|---------|---------|-------|
+| `rmcp` | 1.x | MCP protocol and server handler | `src/mcp/mod.rs` — dispatches to server loop (US1); currently a stub stub returning `McpStartupFailed` |
+| `tokio` | 1.x (`rt`, `macros`, `io-std`, `sync`, `signal`, `time` features) | Async runtime backing MCP server | `src/mcp/runtime.rs` — single-threaded `Builder::new_current_thread` only (no multi-threading for embedded model inference); see research §R-2 |
+
+**Module structure:**
+- `src/mcp/mod.rs` (~42 lines) — sync entry point `run(scope, paths) -> Result<(), TomeError>`; wiring sequence (runtime build, log subscriber install, pre-flight, `rmcp::serve_server` via `runtime.block_on`) lands in US1 (T076).
+- `src/mcp/runtime.rs` (~29 lines) — `build_runtime() -> Result<Runtime, TomeError>` — constructs single-threaded tokio runtime with minimal features per research §R-2; CLI dispatch will hand off via `runtime.block_on(...)`.
+- `src/mcp/log.rs` (~150+ lines) — JSON-lines file appender + size-based rotation + tracing subscriber per `contracts/log-format.md`:
+  - Log file at `${XDG_STATE_HOME}/tome/mcp.log` (per contract).
+  - 10 MiB rotation cap — on startup, if log exceeds threshold, rotates to `mcp.log.1` (atomic rename).
+  - `rotate_if_oversized(current, prev) -> Result<(), TomeError>` — idempotent rotation helper.
+  - `open_appender(paths) -> Result<File, TomeError>` — opens log in append mode, creating parent dirs + file if absent.
+  - Tracing subscriber with JSON formatter (layer 1) writing to file + stderr layer (layer 2) filtered to `error!` only per FR-222 (stderr reserved for fatal startup errors).
+- `src/mcp/preflight.rs` (~TBD lines) — FR-110 startup pre-flight pipeline (schema check → drift detect → SHA-256 verify → eager-load FastembedEmbedder); currently landing in F8 as surfaces only.
+
+**Sync boundary (constitution principle):**
+- Structural test `tests/sync_boundary.rs` enforces — every file under `src/mcp/` is exempt; any other module reaching for `tokio::`, `async fn`, or `.await` will fail the build.
+- Phase 1–9 stays fully synchronous outside `src/mcp/`.
+
+**Feature enablement:**
+- `tracing-subscriber` `json` feature now enabled in `Cargo.toml` (line 22: `features = ["env-filter", "fmt", "json"]`) for MCP log subscriber support.
+
+**No user-facing CLI wired yet** — US1 lands the server loop + tool registration. Test support likely lands with US1 or a dedicated Foundational phase.
+
+**Test count:** No new tests land in F7–F8 — schema migration framework is exercised by synthetic-fixture test in Phase 4+; MCP scaffolding is exercise via library-API call + stub verification in US1.
+
 ## Package Managers & Build Tools
 
 | Tool | Version | Purpose |
@@ -184,10 +231,11 @@ Phase 9 slice 1 implements `tome catalog remove` Phase 2 extensions per `contrac
 | Binary Size | < 50 MB stripped (enforced by CI; revised from 10 MB ceiling in CONSTITUTION v1.2.0 after Phase 3 slice 1 measured 29.56 MB on Linux; `ort` CPU-only static linking is the load-bearing constraint) |
 | Output | Human-readable (default) or NDJSON (`--json`); logging to stderr only (orthogonal to stdout); colours respect `NO_COLOR` and auto-disable on non-TTY |
 | Model runtime | CPU-only ONNX Runtime (via `fastembed`); models downloaded at first use into `${XDG_DATA_HOME}/tome/models/`; fixed registry (compile-time constants) ensures bit-for-bit reproducibility |
+| MCP server runtime | Single-threaded tokio with JSON-lines file logging to `${XDG_STATE_HOME}/tome/mcp.log` (10 MiB rotation cap); stdout reserved for MCP protocol only; stderr for fatal startup errors only |
 
 ## Not Used (Explicitly Excluded)
 
-- **Async runtime**: No `tokio`, `async-std`, or similar. Phase 1–9 remains synchronous (`reqwest::blocking`, `rusqlite`, `fastembed`); the MCP server is the future forcing function.
+- **Async runtime outside `src/mcp/`**: No `tokio`, `async-std`, or similar in Phase 1–9 main binary. Phase 3 Foundational F8 introduces `tokio` strictly scoped to `src/mcp/` with boundary enforcement via `tests/sync_boundary.rs`.
 - **Git library**: No `libgit2`, `git2`, or vendored Git. `std::process::Command` shells out to system `git` (constitution principle XII).
 - **Direct ONNX Runtime dep**: `ort` is reached transitively through `fastembed` only; no direct linkage from Tome code.
 - **Custom npm/cargo registry overrides**: All packages resolve from public registries.
@@ -205,4 +253,4 @@ Phase 9 slice 1 implements `tome catalog remove` Phase 2 extensions per `contrac
 
 ---
 
-*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 source code.*
+*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 + Foundational F7–F8 source code.*

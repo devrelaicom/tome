@@ -140,16 +140,9 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### End-of-phase
 
-- [ ] T065 Run `/sdd:map incremental` to refresh codebase docs against Phase 2 Foundational changes
-- [ ] T066 Review `retro/P2.md` and extract critical learnings to CLAUDE.md (conservative — pattern-level only)
-- [ ] T067 [GIT] Commit: docs(codebase): refresh after Phase 3 Foundational
-
-### Phase Completion
-
-- [ ] T068 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T069 [GIT] Update PR with Phase 2 summary
-- [ ] T070 [GIT] Verify all CI checks pass
-- [ ] T071 [GIT] Report PR ready status
+- [X] T065 Run `/sdd:map incremental` to refresh codebase docs against Phase 2 Foundational changes — 4 mapper agents in parallel; all 8 docs refreshed (STACK 256 / INTEGRATIONS 201 / ARCHITECTURE 841 / STRUCTURE 590 / CONVENTIONS 665 / TESTING 1164 / SECURITY 541 / CONCERNS 380 lines).
+- [X] T066 Review `retro/P2.md` and extract critical learnings to CLAUDE.md (conservative — pattern-level only) — three new conventions: field-method coexistence (F1), specific-over-generic exit codes (F8), test injection via `#[doc(hidden)] pub static` (F7).
+- [X] T067 [GIT] Commit: docs(codebase): refresh after Phase 3 Foundational
 
 **Checkpoint**: Foundation ready — user story implementation can now begin in priority order.
 

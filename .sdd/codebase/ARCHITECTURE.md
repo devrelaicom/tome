@@ -2,20 +2,20 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Stories 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Story 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade) + 2026-05-14 (Foundational F7 + F8 — schema migrations framework, MCP async island)
 
 ## Architecture Overview
 
-Tome is a synchronous Rust CLI following a classic **parse → dispatch → execute → map-errors → exit** pipeline. The codebase is organized around a **capability-driven** modular architecture where each module owns a distinct responsibility (catalog management, Git operations, configuration, logging, path resolution, output formatting, plugin metadata parsing, skill indexing, model embedding, model lifecycle management, index reconciliation, health diagnostics, and interactive presentation). Error handling is centralized in a closed `TomeError` enum that enforces exhaustive exit-code mapping at compile time. Signal handling (SIGINT) is global and atomic, allowing long-running operations (git clone, model download, embedding, reindexing) to be cancelled gracefully with a well-defined exit code.
+Tome is a synchronous Rust CLI following a classic **parse → dispatch → execute → map-errors → exit** pipeline. The codebase is organized around a **capability-driven** modular architecture where each module owns a distinct responsibility (catalog management, Git operations, configuration, logging, path resolution, output formatting, plugin metadata parsing, skill indexing, model embedding, model lifecycle management, index reconciliation, health diagnostics, interactive presentation, and the future MCP server boundary). Error handling is centralized in a closed `TomeError` enum that enforces exhaustive exit-code mapping at compile time. Signal handling (SIGINT) is global and atomic, allowing long-running operations (git clone, model download, embedding, reindexing) to be cancelled gracefully with a well-defined exit code. A forward-only schema migration framework governs index evolution with three dedicated exit codes (51 for integrity failures, 73 for schema-version-too-new on write, 74 for migration application errors). An MCP async island under `src/mcp/` provides the structural boundary anticipated by the constitution for Phase 3's server-side logic, with `tokio` scoped exclusively to that module and a test enforcement gate.
 
 ## Architecture Pattern
 
 | Pattern | Description |
 |---------|-------------|
-| **Sync-only CLI** | No async runtime (`tokio`). All I/O and process orchestration use `std::process` and blocking calls. |
+| **Sync-only CLI** | No async runtime (`tokio`). All I/O and process orchestration use `std::process` and blocking calls. MCP server is the async island (Phase 3 future forcing function). |
 | **Closed Error Set** | All failure paths map to a single `TomeError` enum with explicit exit codes; no `Other` or `Unknown` arms. Adding a failure mode requires specification, error type, and test updates. |
 | **Atomic Writes** | Registry mutations, cache operations, and index writes use `tempfile` + rename for POSIX atomicity; SQLite WAL provides the index concurrency contract. Interruptions cannot corrupt state. |
-| **Capability-Organized Modules** | Modules group related functionality: `catalog/` (manifest + Git + store), `commands/` (CLI handlers), `config/` (manifest deserialization), `paths/` (XDG resolution), `logging/` (tracing setup), `output/` (human/JSON formatting), `plugin/` (metadata parsing + lifecycle), `index/` (SQLite skills DB + KNN), `embedding/` (fastembed wrapper + model registry + download), `presentation/` (tables / progress / colour / prompts). |
+| **Capability-Organized Modules** | Modules group related functionality: `catalog/` (manifest + Git + store), `commands/` (CLI handlers), `config/` (manifest deserialization), `paths/` (XDG resolution), `logging/` (tracing setup), `output/` (human/JSON formatting), `plugin/` (metadata parsing + lifecycle), `index/` (SQLite skills DB + KNN + migrations), `embedding/` (fastembed wrapper + model registry + download), `presentation/` (tables / progress / colour / prompts), `mcp/` (async server boundary + preflight). |
 | **Credential Scrubbing at Boundary** | All captured `git` and `reqwest` output passes through credential scrubbing before reaching logging, error display, or structured output. |
 | **Trait-based Embedding Abstraction** | `Embedder` and `Reranker` are seam interfaces; `FastembedEmbedder` wraps `fastembed-rs`, and a deterministic `StubEmbedder` (unit-test only) provides testability without model files. |
 | **Plugin-Dir Resolution: Manifest-First** | `lifecycle::resolve_plugin_dir` reads `tome-catalog.toml`, looks up `id.plugin` in the declared `plugins[].name`, joins with the source; falls back to flat `entry.path.join(&id.plugin)` for backward compat when manifest is absent. Single shared function across `enable`, `disable`, `list`, `show` fixes inconsistency. |
@@ -24,6 +24,8 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 | **Lazy Embedder Loading** | Heavy embedder (~345 MB ONNX) is loaded only when reindexing will actually call it. `tome catalog update` and `tome reindex` defer load until the first enabled plugin is encountered; a sync with zero enabled plugins never touches model files. |
 | **Health Diagnostics (Read-Only)** | `status` command reads subsystem state without mutation: models via manifest checks, index via read-only connection + `PRAGMA integrity_check`, drift via stored identity comparison. Never acquires advisory lock, never downloads models. Exits 0 on Ok, 1 on Degraded/Unhealthy. |
 | **Single-Lock-Per-Batch Cascade** | `lifecycle::cascade_disable_for_catalog` acquires the advisory lock once, disables + drops all enabled plugins for a catalog, then releases. Different from per-plugin operations; chosen to match the contract in `specs/002-phase-2-plugins-index/contracts/catalog-extensions.md` §"tome catalog remove". |
+| **Forward-Only Schema Migrations** | `src/index/migrations.rs` enforces a registration framework: `apply_pending(conn, current, target)` applies registered steps within a read lock. Three exit codes govern the migration domain: 51 (`IndexIntegrityCheckFailure` — unknown state post-migration), 73 (`SchemaVersionTooNew` — write path refuses newer-on-disk schemas), 74 (`SchemaMigrationFailed` — registered step apply error). Read path via `open_read_only` keeps legacy 52 (`SchemaTooNew`) for backward compat. Phase 7 tests inject synthetic `MIGRATIONS_OVERRIDE` via `thread_local!`. |
+| **MCP Async Island Boundary** | `src/mcp/` directory is a tokio-scoped async boundary (research §R-2 pinned to current-thread runtime per Phase 3 plan). `mod.rs` provides a sync entry point `McpStartupFailed` stub (US1 pending). Preflight validates scope-resolved index state before handoff: schema gate (emits 73), drift detect, SHA-256 verify, eager-load embedder. `log.rs` wires size-based rotation (FR-227) + JSON-lines tracing registry (FR-226) + stderr-only error layer. `runtime.rs` and `preflight.rs` live inside; all other modules stay sync. Structural test `tests/sync_boundary.rs` enforces the exemption. |
 
 ## Core Components
 
@@ -190,6 +192,40 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   10. Trim to `top_k`, apply optional `--strict` threshold filter.
   11. Render as table (human) or NDJSON (JSON).
 
+### Schema Migrations Framework (`src/index/migrations.rs`)
+
+- **Purpose**: Enforce forward-only schema evolution with registration-based step application and three dedicated exit codes (Foundational F7).
+- **Location**: `src/index/migrations.rs` (~120 lines).
+- **Public Interface**: `pub fn apply_pending(conn: &mut Connection, current: u32, target: u32) -> Result<u32, TomeError>`.
+- **Design**:
+  - `MIGRATIONS` const array of `(version, name, apply_fn)` tuples. Phase 2 ships with zero registered migrations + a synthetic fixture e2e test per the plan (Phase 3 design).
+  - `apply_pending(conn, current, target)` iterates registered steps between current and target, executing each within a read-lock window.
+  - Three exit codes govern the domain:
+    - **51** (`IndexIntegrityCheckFailure` — "DB in unknown state") on `PRAGMA integrity_check` failure post-migration.
+    - **73** (`SchemaVersionTooNew` — "write-path refuses newer-on-disk schema") when on-disk schema > target.
+    - **74** (`SchemaMigrationFailed` — "registered step apply error") when a registered migration step fails.
+  - Read path via `open_read_only` maintains legacy 52 (`SchemaTooNew`) for backward compat.
+  - Tests inject synthetic migrations via `thread_local! { MIGRATIONS_OVERRIDE }` to verify the framework end-to-end without waiting for real schema changes.
+- **Key Invariant**: Migrations are idempotent (per step, check before re-apply). Failed migrations block further steps (fail-fast gate).
+
+### MCP Async Island (`src/mcp/`)
+
+- **Purpose**: Provide a structural boundary for Phase 3's async server-side logic (anticipated forcing function). `tokio` scoped exclusively here.
+- **Location**: `src/mcp/` (four files: `mod.rs`, `runtime.rs`, `log.rs`, `preflight.rs`).
+- **Files**:
+  - `mod.rs` (~15 lines): Sync entry point `pub fn start_server() -> Result<(), TomeError>` currently returns `McpStartupFailed` (US1 pending). Phase 3 fills the loop.
+  - `runtime.rs` (~50 lines): Current-thread tokio runtime initialization (research §R-2 pinned per Phase 3 plan). No other modules import.
+  - `log.rs` (~100 lines): Size-based rotation (FR-227) wiring + JSON-lines `tracing-subscriber` registry (FR-226) + stderr-only error layer (FR-220).
+  - `preflight.rs` (~120 lines): Pre-flight validation (FR-110) — scope-resolved index read-only open → schema gate (emits 73 on too-new) → drift detect → SHA-256 verify primary file → eager-load `FastembedEmbedder`. Reranker deferred per FR-109. Returns `PreflightReport`.
+- **Async Boundary**:
+  - Only files under `src/mcp/` use `tokio`. All other modules remain sync.
+  - Entry point is sync: `main.rs` calls `mcp::start_server()` as a last resort after CLI dispatch (not yet wired; US1).
+  - Structural test `tests/sync_boundary.rs` enforces: exempts every file under `src/mcp/`, gates every other module for `tokio` imports. Detects leakage.
+- **Design Invariants**:
+  - No MCP modules import from `commands/`, `plugin/`, `index/` — instead, Phase 3 will refactor read-side (query, plugin list/show) as shared library functions (`query::run_with_deps`, etc.).
+  - Preflight is defensive: errors during validation do not crash the server; they surface as exit codes to the harness.
+  - Log rotation aware of MCP's continuous nature (file size cap, not line count).
+
 ### Git Interface (`src/catalog/git.rs`)
 
 - **Purpose**: Spawn `git` processes, scrub credentials from captured output, handle SIGINT cancellation.
@@ -220,14 +256,18 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 
 ### Index & Skills Database (`src/index/`)
 
-- **Purpose**: Maintain a local SQLite skills index with vector embeddings, enable/disable state tracking, drift detection, and KNN search.
+- **Purpose**: Maintain a local SQLite skills index with vector embeddings, enable/disable state tracking, drift detection, KNN search, and forward-only schema evolution.
 - **Location**: `src/index/`.
 - **Concurrency**: WAL mode + 5s `busy_timeout` + optional advisory lockfile (`${XDG_DATA_HOME}/tome/index.lock`). Read-only operations (`query`, `plugin list/show`, `status`) do not take the lock; mutating operations (`plugin enable/disable/reindex`) do. Contention surfaces as `TomeError::IndexBusy` (exit 50) within milliseconds.
 - **Schema**:
   - `meta`: embedder + reranker identity + drift flags.
-  - `skills`: `(catalog, plugin, name, description, path, plugin_version, embedding, enabled, indexed_at)` + content-hash column for smart re-embedding.
+  - `skills`: `(catalog, plugin, name, description, path, plugin_version, embedding, enabled, indexed_at, content_hash)` — content-hash column for smart re-embedding.
   - `skill_embeddings`: virtual `vec0` table (sqlite-vec); does not support `INSERT OR REPLACE`.
   - Vectors are L2-normalized 384-dim floats.
+- **Migrations** (Foundational F7):
+  - Framework at `src/index/migrations.rs` enforces forward-only application.
+  - `apply_pending(current, target)` iterates registered steps; exits 73 on schema-too-new, 74 on step failure, 51 on post-migration integrity failure.
+  - Phase 2 ships zero registered migrations (plan defers schema changes to Phase 10); tests use `MIGRATIONS_OVERRIDE` to verify the framework.
 - **Key Operations**:
   - `enable_plugin_atomic()`: walk PendingSkill vec, embed each, insert under one transaction, return EnableSummary (total / newly_embedded counts).
   - `reindex_plugin_atomic()`: diff on-disk pending skills against index, re-embed modified/added, delete removed, return ReindexSummary (added / modified / removed / unchanged counts). Mirrors enable atomicity.
@@ -305,11 +345,12 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 
 - **Purpose**: Define the closed `TomeError` enum and map each variant to an exit code and category.
 - **Location**: `src/error.rs`.
-- **Variants** (18+ total, Phase 3 additions):
+- **Variants** (21+ total, Phase 3 additions + Foundational F7):
   - Phase 1: `Internal`, `Usage`, `CatalogNotFound`, `CatalogAlreadyExists`, `ManifestInvalid`, `GitFailed`, `Io`, `Interrupted`.
-  - Phase 2: `IndexIntegrityCheckFailure`, `IndexBusy`, `ModelMissing`, `PluginNotFound`, `SkillFrontmatterParseError`.
-  - Phase 3: `PluginAlreadyInState`, `QueryNoResultsStrict`, drift checks (exit 41/42).
-  - Phase 9: `CatalogHasEnabledPlugins` (exit 53) — used when `tome catalog remove` finds enabled plugins and `--force` is not passed.
+  - Phase 2: `IndexIntegrityCheckFailure` (51), `IndexBusy` (50), `ModelMissing` (30), `PluginNotFound` (20), `SkillFrontmatterParseError` (23).
+  - Phase 3: `PluginAlreadyInState` (31/32), `QueryNoResultsStrict`, drift checks (exit 41/42).
+  - Phase 9: `CatalogHasEnabledPlugins` (exit 53).
+  - **Foundational F7** (schema migration domain): `SchemaVersionTooNew` (73), `SchemaMigrationFailed` (74). Legacy `SchemaTooNew` (52) retained for read-path.
 - **Compile-Time Enforcement**: The `TomeError::exit_code()` method is exhaustive; adding a variant forces edits to `tests/exit_codes.rs`, the spec, and the PRD.
 
 ## Data Flow
@@ -642,14 +683,40 @@ render table (human) or NDJSON (JSON)
 exit(0)
 ```
 
+### Schema Migration Flow: `apply_pending(conn, current, target)` (Foundational F7)
+
+```
+caller (e.g., open_db after bootstrap):
+  → determine current schema version (PRAGMA user_version)
+  → call apply_pending(conn, current, target_version)
+       ↓
+apply_pending(conn, current, target):
+  → if current > target:
+      → return SchemaVersionTooNew (exit 73)
+       ↓
+  → if current == target:
+      → return Ok(current)
+       ↓
+  → for each migration step in MIGRATIONS where version > current and version <= target:
+      → execute step's apply_fn(conn)
+      → on error: return SchemaMigrationFailed (exit 74)
+       ↓
+  → run PRAGMA integrity_check
+  → if failed:
+      → return IndexIntegrityCheckFailure (exit 51)
+       ↓
+  → update PRAGMA user_version = target
+  → return Ok(target)
+```
+
 ## Layer Boundaries
 
 | Layer | Responsibility | Can Access | Cannot Access |
 |-------|----------------|------------|---------------|
 | **CLI** (`src/main.rs`, `src/cli.rs`) | Parse args, install signal handler, dispatch, map errors to exit codes. | Commands, logging, output. | Catalog, config, paths (indirectly via commands). |
 | **Commands** (`src/commands/`) | Orchestrate catalog/plugin/query/models/reindex/status operations; call library logic and format output. | Lifecycle, catalog, config, paths, error, output, embedding, index, presentation. | Logging (by design; logging is orthogonal). |
-| **Plugin Lifecycle** (`src/plugin/lifecycle.rs`) | Enable/disable/reindex orchestrator; compose metadata parsers, index, and embedding. | Plugin metadata (manifest, frontmatter), index (open, lock, enable_plugin_atomic, reindex_plugin_atomic), embedding (embedder trait, model registry), catalog (manifest reader). | Commands (reverse dependency only). |
-| **Index** (`src/index/`) | SQLite operations, schema, KNN, drift detection, advisory locks. | rusqlite, sqlite-vec, index schema. | Commands, embedding, plugin (reverse dependency only). |
+| **Plugin Lifecycle** (`src/plugin/lifecycle.rs`) | Enable/disable/reindex orchestrator; compose metadata parsers, index, and embedding. | Plugin metadata (manifest, frontmatter), index (open, lock, enable_plugin_atomic, reindex_plugin_atomic, delete_by_plugin), embedding (embedder trait, model registry), catalog (manifest reader). | Commands (reverse dependency only). |
+| **Index** (`src/index/`) | SQLite operations, schema, KNN, drift detection, advisory locks, forward-only migrations. | rusqlite, sqlite-vec, index schema, migrations framework. | Commands, embedding, plugin (reverse dependency only). |
 | **Embedding** (`src/embedding/`) | Model registry, download, trait implementations (fastembed wrapper, stub). | reqwest, ort, fastembed-rs, serde. | Commands, index (reverse dependency only). |
 | **Catalog** (`src/catalog/`) | Git operations, manifest parsing, atomic persistence. | Git (process spawning), manifest (parsing), store (writes), config (types). | Commands (reverse dependency only). |
 | **Git** (`src/catalog/git.rs`) | Spawn and manage git subprocesses; scrub credentials from all output. | `std::process`, regex, ctrlc. | Manifest, config, commands. |
@@ -661,11 +728,12 @@ exit(0)
 | **Output** (`src/output.rs`) | Format results as human or JSON; detect TTY. | serde_json, std::io, error types. | No other modules (clean boundary). |
 | **Presentation** (`src/presentation/`) | Table, progress, colour, prompt rendering; TTY and `NO_COLOR` awareness. | comfy-table, indicatif, owo-colors, inquire, std::io. | Commands (reverse dependency only). |
 | **Error** (`src/error.rs`) | Define closed error enum and exit code mapping. | thiserror, std::path, anyhow. | No other modules (consumed by all). |
+| **MCP** (`src/mcp/`) | Async server boundary, preflight validation, log rotation. | tokio, tracing (for log.rs), index (read-only open), embedding (for preflight eager-load). | No other modules depend on mcp; mcp does NOT depend on commands, plugin lifecycle (Phase 3: will refactor as library functions). |
 
 ## Dependency Rules
 
-1. **No cycles**: The dependency graph is a DAG. `main.rs` → `cli.rs` → `commands/` → `{plugin, index, embedding, catalog, config, paths, output, presentation, error}`.
-2. **Library shapes**: `plugin::lifecycle` and `index::` are library-shaped (no CLI); they return structured outcomes (`EnableOutcome`, `DisableOutcome`, `ReindexOutcome`, `Candidate` vec, `Scored` vec) that `commands/` layers format for output.
+1. **No cycles**: The dependency graph is a DAG. `main.rs` → `cli.rs` → `commands/` → `{plugin, index, embedding, catalog, config, paths, output, presentation, error}`. MCP is a leaf module (only called at startup after CLI dispatch).
+2. **Library shapes**: `plugin::lifecycle`, `index::`, and (future) `mcp::preflight` are library-shaped (no CLI); they return structured outcomes (`EnableOutcome`, `DisableOutcome`, `ReindexOutcome`, `Candidate` vec, `Scored` vec, `PreflightReport`) that `commands/` layers format for output.
 3. **Trait seams**: `Embedder` and `Reranker` traits decouple the library from model implementations; tests inject `StubEmbedder`.
 4. **Error type at the root**: `error.rs` has no internal dependencies; all modules depend on it (or types it wraps).
 5. **Orthogonal logging**: `logging.rs` is initialized at startup and orthogonal to `--json` mode. No module imports `logging`; the global subscriber is set up once in `main()`.
@@ -676,6 +744,8 @@ exit(0)
 10. **Reindex commands and lifecycle**: `commands/reindex.rs` owns scope parsing and emission; `plugin::lifecycle::reindex_plugin` and `index::skills::reindex_plugin_atomic` own the orchestration and transaction. Lazy embedder loading is a `commands/` responsibility. `run_with_deps` in `commands/reindex.rs` is a library test entry point (no embedder construction).
 11. **Status is read-only by design**: `commands/status.rs` never mutates state, never acquires advisory lock, never downloads models. It opens the index with `readonly=true` and reads compiled-time model registry identities. Library function `assemble_report` is testable; CLI-side `run` exits 1 on Degraded/Unhealthy via `std::process::exit()` rather than `TomeError`.
 12. **Catalog remove cascade pattern** (Phase 9): `commands/catalog/remove.rs` handles the CLI logic (prompt, force flag, error handling); `plugin::lifecycle::cascade_disable_for_catalog()` is the library function that owns the single-lock-per-batch mutation pattern. Unlike per-plugin operations, the cascade does not take a `LifecycleDeps` — it only needs paths, catalog name, plugin list, and model seeds for metadata seeding.
+13. **Schema migrations are library-shaped**: `index::migrations::apply_pending()` is stateless; it reads a registration table (`MIGRATIONS` const) and applies steps sequentially. Tests inject synthetic migrations via `MIGRATIONS_OVERRIDE` without touching the main codebase. Write paths call `apply_pending` before mutation; read paths use `open_read_only` to preserve backward compat.
+14. **MCP async island isolation** (Foundational F7): `src/mcp/` does NOT import from `commands/`, `plugin/`, `index/`, or any CLI-shaped module. Phase 3 will refactor read-side operations (query, plugin list/show) as shared library entry points that both CLI and MCP can call. Structural test `tests/sync_boundary.rs` enforces the exemption by scanning for `tokio` imports outside `src/mcp/`.
 
 ## Key Interfaces & Contracts
 
@@ -704,6 +774,8 @@ exit(0)
 | `Scope` | Reindex scope (All / Catalog / Plugin); used by `commands/reindex.rs` and tests. | `src/commands/reindex.rs` |
 | `StatusReport` + `OverallHealth` + `ModelHealth` + `IndexHealth` | Health diagnostic data model (Phase 8). | `src/commands/status.rs` |
 | `DriftStatus` | Embedder/reranker identity mismatch detection. | `src/index/meta.rs` |
+| `MIGRATIONS` + `apply_pending` | Forward-only schema migration framework (Foundational F7). | `src/index/migrations.rs` |
+| `PreflightReport` | Pre-flight validation result (schema, drift, model availability). | `src/mcp/preflight.rs` |
 
 ## Signal Handling & Cancellation
 
@@ -753,6 +825,7 @@ exit(0)
 | **Content-Hash Smart Re-Embedding** | Skill text (name + "\n\n" + description) is hashed; hash is compared at reindex time. Unchanged hash → skip embedder, reuse vector. Used by both `enable` (first-time, always embed) and `reindex` (smart fast-path). | `src/index/skills.rs::content_hash()`, `reindex_plugin_atomic()` |
 | **Health Classification** | Pre-computed per-subsystem status (embedder, reranker, index, drift) classified into `OverallHealth` enum (Ok / Degraded / Unhealthy). | `src/commands/status.rs::classify_*` helpers |
 | **Version Output Override** | Pre-parse hook in `main.rs` intercepts `--version` / `-V` before clap to include model identities and honour `--json`. | `src/main.rs`, `src/commands/status.rs::print_version` |
+| **Schema Migrations** | Forward-only registration framework; write paths call `apply_pending` with pre-computed target version; read paths use legacy 52 for backward compat. Tests inject synthetic migrations via `MIGRATIONS_OVERRIDE` thread-local. | `src/index/migrations.rs`, `src/index/db.rs` (bootstrap + write-lock), `tests/schema_migrations.rs` |
 
 ---
 

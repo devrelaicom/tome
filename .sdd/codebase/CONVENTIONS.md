@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and common patterns.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13
+> **Last Updated**: 2026-05-14
 
 ## Code Style
 
@@ -193,6 +193,10 @@ src/
 │   ├── registry.rs           # MODEL_REGISTRY with pinned URLs + checksums
 │   ├── download.rs           # reqwest::blocking + SHA-256 + atomic persist
 │   └── runtime.rs            # ort Environment setup
+├── mcp/                      # MCP server (Phase 3)
+│   ├── mod.rs
+│   ├── log.rs                # JSON-lines file appender + rotation (Phase 3 / F8)
+│   └── ...                   # Additional MCP components (Phase 3+)
 └── presentation/             # CLI output / progress / colours / prompts (Phase 2)
     ├── mod.rs
     ├── tables.rs             # comfy-table helpers
@@ -529,6 +533,33 @@ When a helper function is used by multiple independent modules (usually 4+ calle
 - `registry_seeds()` / `embedder_entry()` / `reranker_entry()` — used by `status.rs`, tests
 
 **Policy:** Promotion is intentional — the type system tells us "this internal helper is now a public API surface". Document it via the function's doc comment and in this guide.
+
+### Test Injection Points (Phase 3 / F7 and F8)
+
+**Reachable from integration tests:** When a test injection point must be reachable from integration tests under `tests/` AND from `#[cfg(test)]` unit tests AND potentially from production code in tightly scoped diagnostic scenarios, gate it with `#[doc(hidden)] pub static` instead of `#[cfg(test)]`. The `#[doc(hidden)]` keeps it out of the published API docs; the `pub` makes it visible across the integration-test crate boundary (which doesn't inherit `cfg(test)`).
+
+Document the test-only intent in a doc comment:
+
+```rust
+/// Test-only injection point. Phase 7's `tests/schema_migration_e2e.rs`
+/// registers a synthetic migration table for a single scenario, then
+/// clears the slot. Production [`apply_pending`] reads through
+/// [`active_migrations`] which falls back to [`MIGRATIONS`].
+///
+/// Public surface intentionally — integration tests live outside the
+/// crate and `#[cfg(test)]` items aren't visible there. Doc-hidden to
+/// keep it out of the published API; the only legitimate caller is a
+/// test.
+#[doc(hidden)]
+pub static MIGRATIONS_OVERRIDE: RefCell<Option<&'static [Migration]>> =
+    const { RefCell::new(None) };
+```
+
+Example usage: `src/index/migrations.rs::MIGRATIONS_OVERRIDE` for schema-migration e2e tests.
+
+**Small filesystem operations in-module:** Unit tests for small file-system operations (file creation, rotation, permissions, idempotent no-ops) live in `#[cfg(test)] mod tests` blocks inside the module under test. These operations (rename, `set_len` for sparse fixtures, metadata reads) are fast and deterministic, making them suitable for in-module unit tests.
+
+Example: `src/mcp/log.rs::tests` module contains 4 unit tests for rotation policy (skip under cap, rename when oversized, overwrite existing prev, noop when absent).
 
 ### Comment Policy
 

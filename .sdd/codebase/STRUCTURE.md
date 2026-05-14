@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Story 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Story 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade) + 2026-05-14 (Foundational F7 + F8 — schema migrations framework, MCP async island)
 
 ## Directory Layout
 
@@ -57,7 +57,7 @@ tome/
 │   ├── index/                     # SQLite + sqlite-vec local skill index (Phase 2/7)
 │   │   ├── mod.rs                 # Re-exports (Phase 7: exports reindex_plugin_atomic)
 │   │   ├── schema.rs              # CREATE TABLE statements, MetaSeed
-│   │   ├── migrations.rs          # Forward-only migration framework + apply_pending
+│   │   ├── migrations.rs          # Forward-only migration framework + apply_pending (Foundational F7; ~120 lines)
 │   │   ├── vec_ext.rs             # sqlite-vec auto-extension registrar
 │   │   ├── db.rs                  # open(): paths → conn → PRAGMAs → bootstrap/migrate → verify
 │   │   ├── lock.rs                # Advisory write lock via File::try_lock (per-fd, OS-level)
@@ -72,12 +72,18 @@ tome/
 │   │   ├── runtime.rs             # No-op placeholder (ort is transitive only)
 │   │   ├── fastembed.rs           # FastembedEmbedder + FastembedReranker (Phase 3)
 │   │   └── stub.rs                # Deterministic SHA-derived embedder + identity reranker
-│   └── presentation/              # Table + progress + colour + prompt wrappers (Phase 2)
-│       ├── mod.rs
-│       ├── tables.rs              # comfy-table helpers, NO_COLOR / non-TTY plain fallback
-│       ├── progress.rs            # indicatif wrappers, auto-suppress on non-TTY stderr
-│       ├── colour.rs              # owo-colors + NO_COLOR env + --no-color flag
-│       └── prompt.rs              # inquire wrappers; refuse on non-TTY (NotATerminal)
+│   ├── presentation/              # Table + progress + colour + prompt wrappers (Phase 2)
+│   │   ├── mod.rs
+│   │   ├── tables.rs              # comfy-table helpers, NO_COLOR / non-TTY plain fallback
+│   │   ├── progress.rs            # indicatif wrappers, auto-suppress on non-TTY stderr
+│   │   ├── colour.rs              # owo-colors + NO_COLOR env + --no-color flag
+│   │   └── prompt.rs              # inquire wrappers; refuse on non-TTY (NotATerminal)
+│   │
+│   └── mcp/                       # MCP async island (Foundational F8; tokio scoped here only)
+│       ├── mod.rs                 # Sync entry point stub (US1 pending; returns McpStartupFailed)
+│       ├── runtime.rs             # Current-thread tokio runtime initialization (~50 lines)
+│       ├── log.rs                 # Size-based rotation (FR-227) + JSON-lines registry (FR-226; ~100 lines)
+│       └── preflight.rs           # Pre-flight validation (FR-110): schema gate, drift detect, SHA-256 verify, eager-load embedder (~120 lines)
 │
 ├── tests/                         # Integration tests
 │   ├── catalog_add.rs             # test: register a catalog
@@ -111,8 +117,9 @@ tome/
 │   ├── reindex.rs                 # test: reindex via library API with StubEmbedder (Phase 7)
 │   ├── status.rs                  # test: health report (Phase 8)
 │   ├── version_output.rs          # test: extended --version output (Phase 8)
+│   ├── sync_boundary.rs           # test: tokio import boundary enforcement (Foundational F8)
+│   ├── schema_migrations.rs       # test: schema migrations framework (Foundational F7)
 │   ├── concurrency.rs             # test: two-process index contention (Phase 2)
-│   ├── schema_migrations.rs       # test: schema migrations (Phase 2)
 │   ├── catalog_update_reindex.rs  # test: cascade on catalog update (Phase 2/7)
 │   ├── common/                    # test: shared test fixtures + helpers
 │   │   └── mod.rs                 # paths_for, fabricate_installed_model, etc.
@@ -177,7 +184,7 @@ tome/
 | `src/main.rs` | Binary entry point; parses CLI, installs signal handler, dispatches, handles errors. Phase 8: pre-parse hook for `--version`. | — (entry point, not a module) |
 | `src/lib.rs` | Library surface; aggregates `catalog`, `cli`, `commands`, `config`, `error`, `logging`, `output`, `paths`, `plugin`, `index`, `embedding`, `presentation`. | Public for integration tests. |
 | `src/cli.rs` | clap derive definitions for global flags (`--json`, `-v`/`-vv`) and subcommands. Phase 8: `StatusArgs` with `--verify` flag, `disable_version_flag = true`. | `Cli`, `Command`, `CatalogCommand`, `ModelsCommand`, `PluginCommand`, `ReindexCommand`, `StatusArgs`, arg structs. |
-| `src/error.rs` | Closed `TomeError` enum; exit code and category mapping; error variants. | `TomeError`, `ManifestInvalid`, `PluginState`, etc. (consumed by all). |
+| `src/error.rs` | Closed `TomeError` enum; exit code and category mapping; error variants. Foundational F7: adds `SchemaVersionTooNew` (73) and `SchemaMigrationFailed` (74) for migration domain. | `TomeError`, `ManifestInvalid`, `PluginState`, etc. (consumed by all). |
 | `src/catalog/` | Catalog management: manifest parsing, Git operations, atomic registry persistence. | `CatalogManifest`, `Git`, `store::load/save/write_atomic`. |
 | `src/commands/` | Command handlers; implement `tome catalog/models/plugin/query/reindex/status <subcommand>`. Phase 8: status command for health diagnostics. | Per-subcommand `run(args, mode)` functions; `reindex::run_with_deps()` and `status::assemble_report()` for library tests. |
 | `src/config.rs` | `Config` and `CatalogEntry` struct definitions. | `Config`, `CatalogEntry`. |
@@ -185,9 +192,10 @@ tome/
 | `src/logging.rs` | Initialize `tracing-subscriber` (stderr-only, orthogonal to `--json`). | `Verbosity`, `init()`. |
 | `src/output.rs` | Format output as human text or JSON; TTY detection. | `Mode`, `write_json()`, `write_error()`, `stdout_is_tty()`. |
 | `src/plugin/` | Plugin metadata parsers, lifecycle orchestrator (enable/disable/reindex/cascade). | `PluginId`, `PluginRecord`, `PluginStatus`, `lifecycle::enable/disable/reindex_plugin/cascade_disable_for_catalog`, `lifecycle::auto_disable_orphan`, `lifecycle::resolve_plugin_dir`. |
-| `src/index/` | SQLite skills DB, KNN search, drift detection, atomic mutations. | `open()`, `acquire_lock()`, `enable_plugin_atomic()`, `reindex_plugin_atomic()`, `delete_by_plugin()`, `knn()`, `MetaSeed`. |
+| `src/index/` | SQLite skills DB, KNN search, drift detection, forward-only migrations, atomic mutations. | `open()`, `acquire_lock()`, `enable_plugin_atomic()`, `reindex_plugin_atomic()`, `delete_by_plugin()`, `knn()`, `migrations::apply_pending()`, `MetaSeed`. |
 | `src/embedding/` | Model registry, download, embedder/reranker traits. | `Embedder`, `Reranker`, `Scored`, `FastembedEmbedder`, `FastembedReranker`, `MODEL_REGISTRY`. |
 | `src/presentation/` | Table, progress, colour, prompt wrappers. | `tables::*`, `progress::*`, `colour::*`, `prompt::*`. |
+| `src/mcp/` | Async server boundary, preflight validation, log rotation (Foundational F8). Phase 3: US1 pending (server fill). | `start_server()` (sync stub), `preflight::PreflightReport` (library shape). |
 
 ### `tests/` - Integration Tests
 
@@ -224,8 +232,9 @@ tome/
 | `tests/reindex.rs` | Reindex via library API with StubEmbedder (Phase 7). | Scope resolution (All / Catalog / Plugin), added/modified/removed/unchanged counts, force flag, orphan handling. |
 | `tests/status.rs` | Health report via library API (Phase 8). | Embedder/reranker/index state, drift detection, overall health classification. |
 | `tests/version_output.rs` | Extended --version output (Phase 8). | Model identities in plain text and JSON forms. |
+| `tests/sync_boundary.rs` | Structural tokio import boundary (Foundational F8). | Scans src/ (except src/mcp/), fails on any `tokio` import outside mcp/. |
+| `tests/schema_migrations.rs` | Schema migrations framework (Foundational F7). | Forward-only boundaries, synthetic fixture e2e test, "no migration registered" guard. |
 | `tests/concurrency.rs` | Two-process index contention (Phase 2). | Concurrent enable/list, lockfile contention. |
-| `tests/schema_migrations.rs` | Schema migrations (Phase 2). | Forward-only migration, idempotency. |
 | `tests/catalog_update_reindex.rs` | Cascade on catalog update (Phase 2/7). | Skills marked stale when catalog ref changes; orphan cascade via auto_disable_orphan. |
 | `tests/common/mod.rs` | Shared fixtures (Phase 6/7). | `paths_for`, `fabricate_installed_model`, `fabricate_all_installed_models`. |
 
@@ -365,7 +374,7 @@ src/plugin/
 src/index/
 ├── mod.rs              # Re-exports (Phase 7: exports reindex_plugin_atomic; Phase 9: exports delete_by_plugin)
 ├── schema.rs           # CREATE TABLE + MetaSeed
-├── migrations.rs       # Forward-only migration framework
+├── migrations.rs       # Forward-only migration framework (Foundational F7; ~120 lines)
 ├── vec_ext.rs          # sqlite-vec extension loader
 ├── db.rs               # open() + PRAGMA setup + bootstrap/migrate
 ├── lock.rs             # Advisory write lock
@@ -384,6 +393,7 @@ src/index/
 - Provide KNN search over enabled skills.
 - Detect embedder/reranker drift.
 - Manage advisory locks for write operations.
+- Enforce forward-only schema evolution (Foundational F7).
 
 **Public Interface**:
 - `open(path, seeds) -> Result<Connection>` — open or bootstrap.
@@ -394,6 +404,7 @@ src/index/
 - `mark_all_disabled_for_plugin(conn, catalog, plugin) -> Result<u32>` — flip enabled flag.
 - `query::knn(conn, vec, k, filters) -> Result<Vec<Candidate>>` — KNN search.
 - `meta::detect_drift(conn) -> Result<DriftStatus>` — drift detection.
+- `migrations::apply_pending(conn, current, target) -> Result<u32>` — forward-only migration application (Foundational F7).
 
 **What It Cannot Do**:
 - Embed text (that's the embedder's job; it receives an `embed_fn` closure).
@@ -434,6 +445,37 @@ src/embedding/
 - Know about CLI arguments or prompts (that's `commands/plugin/` or `commands/models/`'s job).
 - Manage paths (that's `paths.rs`'s job; commands pass the resolved directory).
 
+### MCP Module: `src/mcp/` (Foundational F8)
+
+```
+src/mcp/
+├── mod.rs              # Sync entry point stub (~15 lines; US1 pending)
+├── runtime.rs          # Current-thread tokio runtime (~50 lines)
+├── log.rs              # Size-based rotation + JSON-lines registry (~100 lines)
+└── preflight.rs        # Pre-flight validation (~120 lines)
+```
+
+**Responsibility** (async island):
+- Provide structural boundary for Phase 3's server-side logic.
+- Scope `tokio` exclusively to this module (constitution anticipated forcing function).
+- Validate pre-server conditions (schema gate, drift, SHA-256, embedder load).
+- Manage MCP-specific logging (size-based rotation, JSON-lines, error-only stderr layer).
+
+**Public Interface**:
+- `mod::start_server() -> Result<(), TomeError>` — sync entry point (currently returns `McpStartupFailed` stub until US1 filled).
+- `preflight::PreflightReport` — library-shaped validation result (phase 3 will expand).
+
+**Design Invariants**:
+- **Async Island**: Only files under `src/mcp/` use `tokio`. All other modules remain sync.
+- **Structural Test**: `tests/sync_boundary.rs` enforces — scans src/ (except src/mcp/), fails on any `tokio` import outside mcp/.
+- **No Cross-Module Dependencies**: `mcp/` does NOT import from `commands/`, `plugin/`, or `index/` (reverse deps only). Phase 3 will refactor read-side as shared library functions.
+- **Preflight Defensive**: Errors during validation surface as exit codes (73 for schema-too-new, others via standard error path); does not crash the server.
+
+**What It Cannot Do**:
+- Depend on CLI modules (commands, cli.rs).
+- Format output for users (that's CLI or future MCP spec's job).
+- Manage global logging (orthogonal to CLI's tracing; mcp/log.rs sets up its own subscriber).
+
 ## Where to Add New Code
 
 | If you're adding... | Put it in... | Example |
@@ -454,6 +496,8 @@ src/embedding/
 | New interactive sub-flow | `src/commands/plugin/interactive.rs` (extend existing loop levels) | Add a cascade to `plugin_loop` for plugin tags/categories |
 | New reindex scope | `src/commands/reindex.rs` (`Scope` enum) | Add `Org(String)` for organization-scoped reindex |
 | New health check | `src/commands/status.rs` (extend `OverallHealth`, `classify_*` helpers) | Add memory/disk usage thresholds |
+| New schema migration | `src/index/migrations.rs` (`MIGRATIONS` array) + `src/index/schema.rs` | Register migration step with version tag |
+| New MCP server endpoint | `src/mcp/` (future Phase 3) | New handler function; route via preflight |
 | Test for a command | `tests/{command_area}_{action}.rs` | `tests/models_download.rs` |
 | Test for error scenario | `tests/error_messages.rs` or new file | Document the error text clearly |
 | Test for interactive flow | `tests/plugin_interactive.rs` + `rexpect` pty harness | Additional test cases for specific user paths |
@@ -461,6 +505,7 @@ src/embedding/
 | Test for reindex scope | `tests/reindex.rs` + library API | Test All / Catalog / Plugin scope variants with StubEmbedder |
 | Test for status report | `tests/status.rs` + library API | Test health classification, drift detection, overall health |
 | Test for cascade behavior | `tests/catalog_remove_cascade.rs` + library API | Test refuse/cascade/no-enabled cases with StubEmbedder |
+| Test for schema migration | `tests/schema_migrations.rs` + synthetic fixture | Register temporary migration via `MIGRATIONS_OVERRIDE` |
 | Test shared helper | `tests/common/mod.rs` | Add `fabricate_*` factory functions |
 
 ## Naming Conventions
@@ -469,15 +514,16 @@ src/embedding/
 |----------|-----------|----------|
 | **Struct/Enum** | PascalCase | `CatalogManifest`, `CatalogEntry`, `TomeError`, `PluginId`, `EnableOutcome`, `DisableOutcome`, `ReindexOutcome`, `Candidate`, `ModelState`, `StatusReport`, `OverallHealth` |
 | **Trait** | PascalCase | `Embedder`, `Reranker`, `Git` |
-| **Function/Method** | snake_case | `parse_and_validate()`, `install_signal_handler()`, `enable_plugin_atomic()`, `reindex_plugin_atomic()`, `resolve_plugin_dir()`, `cascade_disable_for_catalog()`, `assemble_report()` |
-| **Constant** | SCREAMING_SNAKE_CASE | `MODEL_REGISTRY`, `SCHEMA_URI`, `HANDLER_INSTALLED` |
-| **Module** | snake_case directory names | `src/catalog/`, `src/commands/`, `src/plugin/`, `src/index/` |
+| **Function/Method** | snake_case | `parse_and_validate()`, `install_signal_handler()`, `enable_plugin_atomic()`, `reindex_plugin_atomic()`, `resolve_plugin_dir()`, `cascade_disable_for_catalog()`, `assemble_report()`, `apply_pending()` |
+| **Constant** | SCREAMING_SNAKE_CASE | `MODEL_REGISTRY`, `SCHEMA_URI`, `HANDLER_INSTALLED`, `MIGRATIONS` |
+| **Module** | snake_case directory names | `src/catalog/`, `src/commands/`, `src/plugin/`, `src/index/`, `src/mcp/` |
 | **Test** | `#[test]` with descriptive name | `#[test] fn unknown_field_is_rejected()` |
-| **Integration test file** | Matches the feature being tested | `tests/plugin_enable.rs` tests `tome plugin enable`; `tests/reindex.rs` tests `tome reindex`; `tests/status.rs` tests `tome status`; `tests/catalog_remove_cascade.rs` tests cascade disable (Phase 9) |
+| **Integration test file** | Matches the feature being tested | `tests/plugin_enable.rs` tests `tome plugin enable`; `tests/reindex.rs` tests `tome reindex`; `tests/status.rs` tests `tome status`; `tests/catalog_remove_cascade.rs` tests cascade disable (Phase 9); `tests/schema_migrations.rs` tests forward-only migrations (Foundational F7) |
 | **Interactive loop level** | Private enum in interactive.rs | `LoopExit::Continue`, `LoopExit::Back`, `LoopExit::Quit` |
 | **Reindex scope** | PublicEnum in commands/reindex.rs | `Scope::All`, `Scope::Catalog`, `Scope::Plugin` |
 | **Model state classification** | PublicEnum in commands/models/mod.rs | `ModelState::Ok`, `ModelState::Missing`, `ModelState::Corrupt`, `ModelState::ChecksumMismatched` |
 | **Health classification** | PublicEnum in commands/status.rs | `OverallHealth::Ok`, `OverallHealth::Degraded`, `OverallHealth::Unhealthy` |
+| **Migration application** | Function in index/migrations.rs | `apply_pending(conn, current, target)` returns Result with exit codes 51/73/74 |
 
 ## Entry Points
 
@@ -492,12 +538,13 @@ src/embedding/
 
 ## Module Stability Guarantees
 
-- **Stable Public API**: `catalog::git`, `catalog::manifest`, `catalog::store`, `config`, `error`, `output`, `paths`, `cli`, `plugin`, `index`, `embedding`, `presentation`, `commands::status::assemble_report`, `commands::reindex::run_with_deps`.
+- **Stable Public API**: `catalog::git`, `catalog::manifest`, `catalog::store`, `config`, `error`, `output`, `paths`, `cli`, `plugin`, `index` (including `migrations::apply_pending`), `embedding`, `presentation`, `commands::status::assemble_report`, `commands::reindex::run_with_deps`.
 - **Internal**: Submodule organization within `commands/` is flexible; subcommand `run()` signatures (and `run_interactive()` for bare `plugin`, `run_with_deps()` for `reindex` tests, `assemble_report()` for `status` tests) are the public contract.
+- **MCP Experimental**: `mcp::start_server()` and `mcp::preflight` are library-shaped but Phase 3 pending (US1); signatures subject to change.
 
 ## Generated Files
 
-No files in Phase 1–9 are auto-generated.
+No files in Phase 1–9 or Foundational are auto-generated.
 
 ---
 
@@ -510,26 +557,33 @@ No files in Phase 1–9 are auto-generated.
 
 ---
 
-## Phase 9 additions — User Story 7 (catalog remove cascade)
+## Foundational F7 additions — Schema Migrations Framework
 
-Phase 9 User Story 7 landed across PR #32. The change extends `tome catalog remove`
-with cascade-disable semantics when enabled plugins exist in the catalog. Pre-check
-reads enabled plugins via `enabled_plugins_for_catalog()` (cheap, no lock); if found
-and `--force` not set, returns exit 53 (`CatalogHasEnabledPlugins`) with the list
-of qualified plugin names. On `--force`, calls `lifecycle::cascade_disable_for_catalog(paths,
-catalog, plugins, embedder_seed, reranker_seed)` to drop all skill rows under a single
-advisory lock. The cascade function acquires lock once, opens index once, calls
-`delete_by_plugin()` per plugin on the same connection, then releases (single-lock-per-batch
-pattern, different from per-plugin operations to match the contract). Unlike per-plugin
-enable/disable/reindex, does not take a `LifecycleDeps` — the cascade is pure deletion
-without embedder reference. Returns total dropped skill rows. CLI side (`src/commands/catalog/remove.rs`)
-handles the prompt, `--force` flag, and error handling; forms the JSON `cascade` array
-with per-plugin records (first record gets the total, rest get 0, per contract).
-Test coverage via `tests/catalog_remove_cascade.rs` (3 cases: refuse, cascade, no-enabled)
-driven by CLI binary + StubEmbedder library API, matching the Phase 5/7 pattern.
-Index operations are now: `enable_plugin_atomic()`, `reindex_plugin_atomic()`,
-`mark_all_disabled_for_plugin()`, `delete_by_plugin()`. Test total 205+ → 208+ across 31 suites.
-No new dependencies. One new error variant: `CatalogHasEnabledPlugins` (exit 53).
+Foundational F7 (commit 26d7984) adds a forward-only schema migration framework to `src/index/migrations.rs`
+(~120 lines). `apply_pending(conn, current, target)` applies registered migration steps between versions,
+enforcing idempotence and fail-fast semantics. Three dedicated exit codes:
+- **51** (`IndexIntegrityCheckFailure` — "DB in unknown state") on `PRAGMA integrity_check` failure post-migration.
+- **73** (`SchemaVersionTooNew` — "write-path refuses newer-on-disk schema") when on-disk schema > target.
+- **74** (`SchemaMigrationFailed` — "registered step apply error") when a registered migration step fails.
+Read-path via `open_read_only()` keeps legacy 52 (`SchemaTooNew`) for backward compat. Phase 2 ships zero registered migrations (per plan, defers to Phase 10); tests use `thread_local! { MIGRATIONS_OVERRIDE }` to verify the framework end-to-end. Structural boundary: `apply_pending` is library-shaped; tests inject synthetic migrations without code changes. Added test file `tests/schema_migrations.rs` (forward-only boundaries, synthetic fixture e2e, "no migration registered" guard).
+
+---
+
+## Foundational F8 additions — MCP Async Island
+
+Foundational F8 (commit 1814e30) adds `src/mcp/` as a structural async boundary: four files
+(`mod.rs`, `runtime.rs`, `log.rs`, `preflight.rs`). The constitution anticipated a forcing function for async in Phase 3;
+F8 establishes the island now with zero active filling (US1 pending). `tokio` is scoped exclusively to `src/mcp/`;
+all other modules remain sync. A new structural test `tests/sync_boundary.rs` enforces this by scanning the
+entire src/ tree (except src/mcp/) and failing if any file imports `tokio`. `mod.rs` provides a sync entry point
+`start_server() -> Result<(), TomeError>` that currently returns `McpStartupFailed` (stub until US1 filled the loop).
+`preflight.rs` implements FR-110 pre-flight: scope-resolved index read-only open → schema gate (emits 73 if too-new) →
+drift detect → SHA-256 verify primary file → eager-load `FastembedEmbedder` (reranker deferred per FR-109).
+Returns `PreflightReport` (library-shaped). `log.rs` wires size-based rotation (FR-227) + JSON-lines `tracing-subscriber`
+registry (FR-226) + stderr-only error layer (FR-220) for the server's continuous lifecycle. `runtime.rs` initializes
+a current-thread tokio runtime (research §R-2 pinned per Phase 3 plan). Design invariant: no MCP module imports from
+`commands/`, `plugin/`, `index/` (reverse deps only). Phase 3 will refactor read-side (query, plugin list/show) as
+shared library entry points (`query::run_with_deps()`, etc.) both CLI and MCP can call.
 
 ---
 

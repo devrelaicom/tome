@@ -2,11 +2,11 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 9 incremental)
+> **Last Updated**: 2026-05-14 (Phase 8–9 + F7–F8 incremental)
 
 ## Overview
 
-Tome is a Rust CLI for managing plugin catalogs and embeddings. As a synchronous, file-based tool without user authentication, security focuses on:
+Tome is a Rust CLI (and eventually MCP server) for managing plugin catalogs and embeddings. As a synchronous, file-based tool without user authentication, security focuses on:
 1. Preventing path traversal and directory-escape attacks via plugin source paths and plugin identities
 2. Integrity verification for downloaded model artefacts (SHA-256 checksums)
 3. Scrubbing credentials from captured Git output and HTTP errors at the boundary
@@ -15,8 +15,10 @@ Tome is a Rust CLI for managing plugin catalogs and embeddings. As a synchronous
 6. TTY enforcement on interactive flows to prevent prompt injection and non-interactive misuse
 7. Dependency-allowlist enforcement and weekly vulnerability scanning
 8. Binary-size constraints to limit attack surface
+9. MCP server protocol purity (stdout reserved for MCP protocol, errors to stderr)
+10. Structured logging with size-based rotation for long-running MCP server
 
-Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md` (Phase 1), `specs/002-phase-2-plugins-index/spec.md` (Phase 2), and `specs/002-phase-2-plugins-index/contracts/plugin-commands.md` (Phase 4–5).
+Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md` (Phase 1), `specs/002-phase-2-plugins-index/spec.md` (Phase 2), `specs/002-phase-2-plugins-index/contracts/plugin-commands.md` (Phase 4–5), and `specs/003-phase-3-mcp-workspaces/spec.md` (Phase 3+).
 
 ## Authentication & Authorization
 
@@ -120,6 +122,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | Catalog cache | Atomic refresh, tool-owned | `~/.cache/tome/<sha256-of-url>/` |
 | Git stderr output | Scrubbed before tracing/display | `src/catalog/git.rs::scrub_credentials` |
 | HTTP error output | Scrubbed before surfacing | `src/embedding/download.rs::scrub_for_diag` |
+| MCP server logs | JSON-lines to file, error-only stderr | `src/mcp/log.rs` (10 MiB cap, rotates to `.1`) |
 
 ### Integrity & Verification
 
@@ -132,6 +135,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Re-verification** | New `embedding::download::sha256_file()` helper | `src/embedding/download.rs::sha256_file`, invoked by `tome models list --verify` (Phase 6) |
 | **Virtual table constraints** | `sqlite-vec` does not support `INSERT OR REPLACE`; uses `DELETE`-then-`INSERT` | `src/index/skills.rs::upsert_skill` (Phase 7, lines 282–294) |
 | **Health check** | `tome status [--verify]` re-verifies installed models without re-downloading | `src/commands/status.rs::check_model()` (Phase 8, PR #29) |
+| **MCP startup pre-flight** | SHA-256 verification of primary embedder file at every startup (FR-110) | `src/mcp/preflight.rs::verify_embedder_artefacts` (Phase 3, F8) |
 
 **Model Registry** (Phase 3 update):
 - `bge-small-en-v1.5` INT8: SHA-256 `51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431`, 66.5 MB, MIT
@@ -147,6 +151,14 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 - `--verify` flag rehashes models via `sha256_file()` against registry-pinned SHA-256s (no re-download)
 - `--json` output includes model names/versions, index state, and drift diagnostics
 - No secrets exposed; model identities are public constants from `MODEL_REGISTRY`
+
+**Phase 3 F8 MCP Pre-flight** (`src/mcp/preflight.rs`):
+- Runs before MCP protocol handshake (startup sanity check per FR-110)
+- Verifies embedder artefacts exist and pass SHA-256 against registry-pinned digests
+- Detects embedder/reranker drift and surfaces as specific exit codes (41/42) per `contracts/exit-codes-p3.md`
+- Surfaces newer-on-disk schema with `SchemaVersionTooNew` (exit 73, Phase 3 dedicated variant)
+- Reranker drift detected but NOT a startup failure (FR-109 defers reranker load until first use; long-running server can re-download on demand)
+- No credential surfaces; model registry is read-only static
 
 ### Encryption
 
@@ -179,8 +191,13 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 | 31 | ModelCorrupt | Model metadata invalid or placeholder checksum | 2 | — |
 | 32 | ModelChecksumMismatch | SHA-256 or size mismatch on download | 2 | — |
 | 33 | ModelRegistrationParseError | Model manifest.json invalid | 2 | — |
+| 41 | EmbedderNameDrift | Embedder name mismatch (configured vs. on-disk index) | 3 | FR-110 |
+| 42 | EmbedderVersionDrift | Embedder version mismatch (configured vs. on-disk index) | 3 | FR-110 |
 | 53 | CatalogHasEnabledPlugins | Catalog has enabled plugins; remove with `--force` to cascade disable | 9 | FR-045 |
 | 54 | NotATerminal | Interactive command run without terminal (stdin/stdout not TTY) | 4 | FR-051 |
+| 60 | McpStartupFailed | MCP server startup failed (generic; specific codes 30/32/41/42/73 win) | 3 | — |
+| 73 | SchemaVersionTooNew | Index schema version newer than Tome release (no down-migrations) | 3 | FR-110 |
+| 74 | SchemaMigrationFailed | Schema migration failed; index state undefined (Phase 4+ only) | 3+ | FR-???  |
 
 **Enforcement**: Closed enum `TomeError` in `src/error.rs`. Adding a variant forces edits to:
 1. `TomeError` enum
@@ -190,10 +207,14 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 
 No generic "Other" or "Unknown" variant. Every path maps to a named category.
 
-**Phase 8 Status Exit Semantics** (`src/commands/status.rs::run`, PR #29):
-- Exit 0: Overall health is Ok
-- Exit 1: Overall health is Degraded (reranker drift only) or Unhealthy (embedder drift, model corrupt, index corrupt)
-- Non-zero cases emit `std::process::exit(1)` directly after reporting, bypassing `TomeError` propagation
+**Phase 3 F7 Schema-Migration Exit Codes** (PR #38):
+- Forward-only migrations framework shipped with zero registered migrations (Phase 3 Foundational F7)
+- `SchemaVersionTooNew` (exit 73) surfaces newer-on-disk schema; `SchemaMigrationFailed` (exit 74) for failed apply steps
+- Both are Phase 3+ codes; Phase 4+ adds the first real `Migration` rows
+
+**Phase 3 F8 MCP Status Exit Semantics** (`src/mcp/preflight.rs`, PR #38):
+- Pre-flight refusal routes through specific Phase 1/2 codes (30/32/41/42) per "Specific-over-generic" principle
+- Generic `McpStartupFailed` (60) used only when no specific variant applies (e.g., index file missing)
 
 ### Error Messaging
 
@@ -348,9 +369,10 @@ pub fn require_terminal() -> Result<(), TomeError> {
 **Current dependencies**:
 - Phase 1: `clap` (CLI), `serde`/`toml` (config), `thiserror`/`anyhow` (errors), `tracing` (logging), `sha2`/`hex` (hashing), `tempfile` (atomicity), `ctrlc` (signals), `regex` (scrubbing), `semver` (versions), `time` (timestamps), `directories` (paths)
 - Phase 2: `rusqlite` (bundled SQLite), `sqlite-vec` (vendored vector extension), `fastembed-rs` (inference), `reqwest` (HTTP), `indicatif` (progress), `comfy-table` (tables), `owo-colors` (colour), `inquire` (prompts)
+- Phase 3: `rmcp` (MCP protocol), `tokio` (async, scoped to `src/mcp/` only), `tracing-subscriber` (structured logging)
 - Phase 4–5: No new dependencies (interactive flow and disable use existing `inquire`)
 
-All fall within permissive licences. Phase 2 deps licensed: `fastembed-rs` (MIT), `ort` (MIT, transitive via fastembed), BGE models (MIT). Phase 4–5 deps: `inquire` (MIT).
+All fall within permissive licences. Phase 2 deps licensed: `fastembed-rs` (MIT), `ort` (MIT, transitive via fastembed), BGE models (MIT). Phase 4–5 deps: `inquire` (MIT). Phase 3 MCP deps: `rmcp` (MIT), `tokio` (MIT).
 
 ## Binary Size & Deployment
 
@@ -408,6 +430,22 @@ if raw.iter().skip(1).any(|a| a == "--version" || a == "-V") {
 }
 ```
 
+### MCP Protocol Purity (Phase 3, F8)
+
+| Channel | Permitted Content | Restriction | Implementation |
+|---------|-------------------|-------------|-----------------|
+| **Stdout (MCP protocol)** | MCP JSON-RPC messages only | No diagnostic output, no logs (FR-221) | `src/mcp/server.rs` routes only protocol messages to stdout |
+| **Stderr (errors)** | Fatal startup errors only | Info/debug/trace suppressed (FR-222) | `src/mcp/log.rs::init_subscriber` filters stderr layer to `error!` only |
+| **Log file** | Structured JSON-lines | Full tracing with configurable filter | `src/mcp/log.rs::open_appender`, `${XDG_STATE_HOME}/tome/mcp.log` (10 MiB cap, rotates to `.1`) |
+
+**Rationale**: MCP harness consumes stdout as the protocol channel; any diagnostic noise corrupts the exchange. Logging redirects to file + error-only stderr so users and developers can diagnose issues without breaking the protocol.
+
+**Implementation** (`src/mcp/log.rs`):
+- `FileMakeWriter` + `LockedFile` adapter serialises every JSON log emit through a `Mutex<File>` (atomic per-emit, prevents interleaved writes corrupting JSON-lines framing)
+- `rotate_if_oversized` checks and renames `mcp.log` → `mcp.log.1` on startup if file exceeds 10 MiB
+- On-disk footprint bounded at ~20 MiB total (current + previous log file)
+- Fallible `try_init` so existing subscribers (e.g., from CLI layer) don't crash the process
+
 ### Colour & Accessibility
 
 | Feature | Implementation |
@@ -442,6 +480,24 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 
 **Future consideration**: Phase 2 MCP server concurrency model is locked down in spec (FR-040); Phase 3 testing against real BGE models is pending (SC-001/SC-002, T088).
 
+## Schema Migrations
+
+### Forward-Only Policy (Phase 3, F7)
+
+| Rule | Enforcement | Implication |
+|------|------------|-------------|
+| **No down-migrations** | `current > target` → refuse with exit 73 (`SchemaVersionTooNew`) | Older Tome cannot open newer DBs |
+| **Forward-only apply** | `current < target` → apply every registered step in transaction order | Each step in its own transaction under advisory lock |
+| **Fresh bootstrap** | `meta.schema_version` absent → caller runs `schema::bootstrap` | New DBs start at `SCHEMA_VERSION` |
+| **Test injection** | `MIGRATIONS_OVERRIDE` is `#[doc(hidden)] pub static`, not `#[cfg(test)]` | Integration tests outside crate can inject synthetic migrations |
+
+**Implementation** (`src/index/migrations.rs`):
+- `MIGRATIONS: &[Migration] = &[]` — Phase 3 ships with zero migrations (Phase 4+ adds first real steps)
+- `apply_pending(conn, ...) -> Result<u32, TomeError>` — applies all steps in order, each in own transaction
+- `current_schema_version(conn)` — queries `meta.schema_version` row; absent on fresh DB
+
+**Safety**: `MIGRATIONS_OVERRIDE` slot is documented as test-only and only read by `apply_pending` (production write path). Injected synthetic table only runs in same lock-guarded write path. Forward-only boundary is enforced; no down-migration path exists. Phase 3 ships with zero migrations + synthetic-fixture e2e test ready for Phase 4.
+
 ## Security Testing
 
 ### Test Categories
@@ -459,6 +515,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | **Integration** | Real Git repos, real fixtures, real filesystems | `tests/catalog_*.rs`, `tests/models_*.rs`, `tests/plugin_*.rs` |
 | **Status health check** | Report assembly, drift detection, overall classification | `tests/status.rs` (Phase 8) |
 | **Catalog cascade** | Enabled-plugin detection, per-plugin deletion under lock, error handling | `tests/catalog_remove.rs` (Phase 9) |
+| **Schema migrations** | Forward-only boundary, no down-migrations, synthetic injection (Phase 3+) | `tests/schema_migrations.rs` (F7 framework; Phase 4+ adds first real steps) |
 
 **Success criteria**:
 - SC-005: 100% of malformed inputs rejected with helpful errors
@@ -477,6 +534,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | Encryption at rest for sensitive caches | Phase 3+ | Deferred until use case demands it |
 | Audit logging | Phase 3+ | Not required in Phase 1 (single-user CLI) |
 | Rate limiting | Not applicable | CLI tool, not a service |
+| MCP startup pre-flight performance | Phase 3 F8+ | SHA-256 verify of primary embedder (~66 MB) at every startup acceptable for long-running server; `--verify` flag on `tome status` may reduce cold-cache overhead if profiling shows it matters (TD-012) |
 
 ---
 

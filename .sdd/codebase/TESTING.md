@@ -2,7 +2,7 @@
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13
+> **Last Updated**: 2026-05-14
 
 ## Test Framework
 
@@ -79,6 +79,7 @@ tests/
 | Compile-time content tests | `tests/version_output.rs` | Read `MODEL_REGISTRY` at compile time; assert output matches pinned models (Phase 8) |
 | Shared helpers | `tests/common/mod.rs` | Fixture builders, ToolEnv, lifecycle helpers, `paths_for`, sparse-file fixtures (Phase 6) |
 | Test fixtures | `tests/fixtures/` | Real git repos and sample plugin catalogs |
+| In-module unit tests | `src/{module}/log.rs::tests` | Small filesystem operations (rotation, permission, idempotent no-ops) (Phase 3 / F8) |
 
 ## Test Patterns
 
@@ -325,6 +326,59 @@ fn version_json_format() {
 ```
 
 This pattern is reusable for any future output that depends on constants.
+
+### In-Module Unit Test Pattern (Phase 3 / F8)
+
+For small file-system operations (rename, permission changes, idempotent no-ops), add unit tests in an `#[cfg(test)] mod tests` block inside the module under test. These operations are fast, deterministic, and don't require full integration scaffolding.
+
+Pattern:
+1. **Use `TempDir`** for isolated filesystem
+2. **Create artefacts** via `File::create`, `set_len`, `write`
+3. **Call the function** being tested
+4. **Assert filesystem state** via `metadata`, `exists`, etc.
+
+Example from `src/mcp/log.rs::tests` (4 unit tests for rotation policy):
+
+```rust
+#[test]
+fn rotate_skips_when_under_cap() {
+    let dir = TempDir::new().unwrap();
+    let current = dir.path().join("mcp.log");
+    let prev = dir.path().join("mcp.log.1");
+    let mut f = File::create(&current).unwrap();
+    f.write_all(b"hello\n").unwrap();
+    drop(f);
+
+    rotate_if_oversized(&current, &prev).unwrap();
+    assert!(current.exists(), "small file must stay in place");
+    assert!(!prev.exists(), "rotation must not run below the cap");
+}
+
+#[test]
+fn rotate_renames_when_oversized() {
+    let dir = TempDir::new().unwrap();
+    let current = dir.path().join("mcp.log");
+    let prev = dir.path().join("mcp.log.1");
+    let f = File::create(&current).unwrap();
+    f.set_len(ROTATE_AT_BYTES + 1).unwrap();
+    drop(f);
+
+    rotate_if_oversized(&current, &prev).unwrap();
+    assert!(!current.exists(), "oversized current must be renamed away");
+    assert!(prev.exists(), "rotation must produce a .1");
+}
+```
+
+**Pattern applies to:**
+- Log rotation policy (skip/rename/overwrite)
+- File creation and permission setting
+- Idempotent operations on missing/present artefacts
+- Small database or index operations that don't require a full setup
+
+**Do not use for:**
+- Complex state machines (use integration tests)
+- Operations that touch embedders or the network (use integration tests with library API)
+- Interactive flows (use PTY-driven tests)
 
 ### Unit Test Pattern
 
@@ -836,12 +890,24 @@ Plugin sources must be:
 cargo build --release           # Full build (includes dependencies)
 cargo fmt --check              # Format check
 cargo clippy --all-targets -- -D warnings  # Linting
-cargo test --workspace         # Full test suite
+cargo test --workspace         # Full test suite (297/297 across 42 suites)
 cargo audit                     # Security: vulnerable dependencies
 cargo deny check                # License compliance
 ```
 
 All checks must pass on both platforms (`ubuntu-latest`, `macos-latest`) and both toolchains (`stable`, MSRV `1.93`).
+
+## Test Statistics
+
+**Current:** 297 passed across 42 suites (as of 2026-05-14, end of Phase 3 Foundational F8):
+- Unit tests (src/lib.rs): 66 (includes 4 new in-module tests for `mcp::log::tests` rotation policy)
+- Integration tests (tests/): 231
+
+Breakdown by test file:
+- Library API (heavy-state logic): `plugin_enable.rs`, `query.rs`, `catalog_update_reindex.rs`, `reindex.rs`, `status.rs`, `atomicity_enable.rs`
+- CLI binary (light-state / parse-error paths): `catalog_*.rs`, `plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, and `reindex.rs` parse tests
+- PTY-driven (interactive flows): `plugin_interactive.rs`
+- Unit (parsers, validators, error paths): `exit_codes.rs`, `error_messages.rs`, `manifest_strictness.rs`, `path_validation.rs`, `scrubbing.rs`, `atomicity.rs`, and in-module tests in `src/mcp/log.rs`
 
 ### Required Checks
 
