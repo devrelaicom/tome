@@ -202,9 +202,9 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### End-of-phase
 
-- [ ] T097 [US1] Run `/sdd:map incremental` to refresh codebase docs against Phase 3 / US1 changes
-- [ ] T098 [US1] Review `retro/P3.md` and extract critical learnings to CLAUDE.md (conservative)
-- [ ] T099 [GIT] Commit: docs(codebase): refresh after Phase 3 / US1
+- [X] T097 [US1] Run `/sdd:map incremental` to refresh codebase docs against Phase 3 / US1 changes — 4 mapper agents in parallel; all 8 docs refreshed (STACK 313 / INTEGRATIONS 229 / ARCHITECTURE 1027 / STRUCTURE 640 / CONVENTIONS 721 / TESTING 1269 / SECURITY 558 / CONCERNS 395 lines).
+- [X] T098 [US1] Review `retro/P3.md` and extract critical learnings to CLAUDE.md (conservative) — populated P3.md with US1.a-d learnings; added two new Conventions bullets to CLAUDE.md: silent compute / emit wrapper pattern (T083 query::pipeline) + spawn_blocking for sync work inside async handlers.
+- [X] T099 [GIT] Commit: docs(codebase): refresh after Phase 3 / US1
 
 ### Phase Completion
 

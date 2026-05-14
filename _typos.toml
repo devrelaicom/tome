@@ -2,6 +2,10 @@
 # Crate names and identifiers that look like typos but are correct upstream names.
 extend-ignore-identifiers-re = [
     "flate2",
+    # 7..40-char lowercase hex strings — git SHAs cited in commits / docs.
+    # The typos checker otherwise flags substrings like `ba`, `dca`, `fab`
+    # inside SHAs as misspellings of `by` / `the` / `feb`.
+    "[0-9a-f]{7,40}",
 ]
 
 [default.extend-words]
