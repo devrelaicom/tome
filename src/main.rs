@@ -2,6 +2,7 @@ use clap::Parser;
 
 use tome::catalog::git;
 use tome::cli::{Cli, Command};
+use tome::workspace;
 use tome::{commands, logging, output};
 
 fn main() {
@@ -21,6 +22,23 @@ fn main() {
     git::install_signal_handler();
 
     let mode = cli.mode();
+
+    // Phase 3 / Foundational F3: resolve the active scope before any
+    // command runs. Errors here (workspace conflict, workspace not
+    // found) flow through the same exit-code path as command errors.
+    // The resolved scope is currently only used for its side effect
+    // (early-error + debug-log of the resolution); slice F4 will
+    // thread it through into every command's `run()` signature.
+    let resolved = match workspace::resolution::resolve(&cli.scope) {
+        Ok(r) => r,
+        Err(err) => {
+            let code = err.exit_code();
+            output::write_error(mode, &err);
+            std::process::exit(code);
+        }
+    };
+    let _ = resolved; // consumed by F4
+
     let result = match cli.command {
         Command::Catalog(cmd) => commands::catalog::run(cmd, mode),
         Command::Plugin(args) => match args.command {

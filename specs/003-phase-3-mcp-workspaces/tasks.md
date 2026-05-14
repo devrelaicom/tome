@@ -89,13 +89,13 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Slice F3 — workspace resolution
 
-- [ ] T032 [P] Create `src/workspace/resolution.rs` implementing `resolve(args: &GlobalScopeArgs) -> Result<ResolvedScope, TomeError>` per contracts/workspace-resolution.md (use devs:rust-dev agent)
-- [ ] T033 [P] Add `GlobalScopeArgs { workspace: Option<PathBuf>, global: bool }` to `src/cli.rs` with `global = true` + `conflicts_with = "global"`; wire as global flags accepted on every command (use devs:rust-dev agent)
-- [ ] T034 [P] Create `src/workspace/inventory.rs` reading the opt-in `${state_dir}/workspaces.txt` registry; returns `Vec<PathBuf>` (use devs:rust-dev agent)
-- [ ] T035 Wire `workspace::resolution::resolve` into `src/main.rs` immediately after `Cli::parse()` (and after the pre-parse `--version` hook); pass the `ResolvedScope` into every command's `run()` (signature update across `src/commands/*` is mechanical and lives in slice F4) (use devs:rust-dev agent)
-- [ ] T036 Add debug logging line per contracts/workspace-resolution.md §Debug logging in `src/workspace/resolution.rs` (use devs:rust-dev agent)
-- [ ] T037 Create `tests/workspace_resolution.rs` covering: CWD walk first-hit-wins, env var override, `--workspace` flag override, `--global` flag override, mutually-exclusive flags return exit 72, env-var-points-nowhere returns exit 71, malformed `.tome/config.toml` returns exit 70, nested-workspace-wins (use devs:rust-dev agent)
-- [ ] T038 [GIT] Commit: feat(workspace): resolution algorithm + global CLI flags
+- [X] T032 [P] Create `src/workspace/resolution.rs` implementing `resolve(args: &GlobalScopeArgs) -> Result<ResolvedScope, TomeError>` per contracts/workspace-resolution.md (use devs:rust-dev agent)
+- [X] T033 [P] Add `GlobalScopeArgs { workspace: Option<PathBuf>, global: bool }` to `src/cli.rs` with `global = true` + `conflicts_with = "global"`; wire as global flags accepted on every command (use devs:rust-dev agent) — `conflicts_with` deliberately NOT used; clap's usage-error exit code (2) doesn't match the contract's required exit 72 (`WorkspaceConflict`). The resolver detects both-set and returns the dedicated error.
+- [X] T034 [P] Create `src/workspace/inventory.rs` reading the opt-in `${state_dir}/workspaces.txt` registry; returns `Vec<PathBuf>` (use devs:rust-dev agent)
+- [X] T035 Wire `workspace::resolution::resolve` into `src/main.rs` immediately after `Cli::parse()` (and after the pre-parse `--version` hook); pass the `ResolvedScope` into every command's `run()` (signature update across `src/commands/*` is mechanical and lives in slice F4) (use devs:rust-dev agent) — resolution runs in main.rs; the `ResolvedScope` is computed and held in a `let _ = ` placeholder until F4 threads it through.
+- [X] T036 Add debug logging line per contracts/workspace-resolution.md §Debug logging in `src/workspace/resolution.rs` (use devs:rust-dev agent)
+- [X] T037 Create `tests/workspace_resolution.rs` covering: CWD walk first-hit-wins, env var override, `--workspace` flag override, `--global` flag override, mutually-exclusive flags return exit 72, env-var-points-nowhere returns exit 71, malformed `.tome/config.toml` returns exit 70, nested-workspace-wins (use devs:rust-dev agent) — landed 11 cases; **malformed-config exit 70 deferred to F4's per-command tests** because resolution itself doesn't load config (it's loaded on first command access, where exit 70 emerges).
+- [X] T038 [GIT] Commit: feat(workspace): resolution algorithm + global CLI flags
 
 ### Slice F4 — every command takes Scope (mechanical refactor)
 
