@@ -2,7 +2,7 @@
 
 > **Purpose**: Document all external services, APIs, databases, and third-party integrations.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US5 — forward schema migrations with integration test coverage; no new integrations)
+> **Last Updated**: 2026-05-14 (Phase 3 Polish PRs #51–#58 — final ship as v0.3.0; field-name pinning, hardening, no new integrations)
 
 ## Databases & Data Stores
 
@@ -15,20 +15,22 @@
 ### Connection Patterns
 
 - **Statically linked**: `rusqlite` with `bundled` feature — no system SQLite dependency, no version mismatch risk.
-- **Concurrency model**: Single advisory lockfile (`index.lock` — global or workspace-scoped per Phase 3 Foundational F1) ensures Phase 3–9 foreground operations are serialised; WAL mode allows readers during writes (MCP server uses read-only open per FR-056).
+- **Concurrency model**: Single advisory lockfile (`index.lock` — global or workspace-scoped per Phase 3 Foundational F1) ensures Phase 3–US5 foreground operations are serialised; WAL mode allows readers during writes (MCP server uses read-only open per FR-056); Phase 3 Polish: validator gates (malformed config / unopenable index → `WorkspaceMalformed` exit 70) enforced at every entry path.
 - **ORM/Query builder**: Direct SQL via `rusqlite` — prepared statements, parameterised queries.
-- **Migration approach**: Forward-only migrations under advisory lock in `src/index/migrations.rs` (rewritten in Foundational F7 with function-pointer-based `Migration` struct; US5 adds integration tests via synthetic-fixture injection in `tests/schema_migration_e2e.rs`); drift detection in `src/index/meta.rs`.
+- **Migration approach**: Forward-only migrations under advisory lock in `src/index/migrations.rs` (rewritten in Foundational F7 with function-pointer-based `Migration` struct; Phase 3 / US5 adds integration tests via synthetic-fixture injection in `tests/schema_migration_e2e.rs`); drift detection in `src/index/meta.rs`.
 
 ### Cache Structure
 
-- **Catalog cache**: Each remote catalog source is content-addressed by `sha256(url)` in `${XDG_DATA_HOME}/tome/catalogs/<sha256>/` (global scope) or `${WORKSPACE}/.tome/catalogs/<sha256>/` (workspace scope) — Git working tree, refreshed on `tome catalog update`. Multiple scopes can reference the same URL; the on-disk clone is shared via reference-count tracking — deleted only when no scope still references it (Phase 3 / US3).
-- **Model cache**: Downloaded model ONNX artefacts stored in `${XDG_DATA_HOME}/tome/models/<model-name>/` (global, shared across scopes) with per-model `manifest.json` (strict JSON, `#[serde(deny_unknown_fields)]`); managed explicitly via `tome models {download,list,remove}` (Phase 6).
-- **Atomic writes**: `tempfile` crate (rename-based) prevents corruption on SIGINT; `.partial/` directories ensure no half-extracted state visible to concurrent processes; workspace `init` uses `tempfile::Builder::tempdir_in(workspace_root)` for POSIX-atomic staging-to-final rename (Phase 3 / US2).
+- **Catalog cache**: Each remote catalog source is content-addressed by `sha256(url)` in `${XDG_DATA_HOME}/tome/catalogs/<sha256>/` (global scope) or `${WORKSPACE}/.tome/catalogs/<sha256>/` (workspace scope) — Git working tree, refreshed on `tome catalog update`. Multiple scopes can reference the same URL; the on-disk clone is shared via reference-count tracking — deleted only when no scope still references it (Phase 3 / US3); Phase 3 Polish: orphan clone detection in doctor for cleanup advisory.
+- **Model cache**: Downloaded model ONNX artefacts stored in `${XDG_DATA_HOME}/tome/models/<model-name>/` (global, shared across scopes) with per-model `manifest.json` (strict JSON, `#[serde(deny_unknown_fields)]`); managed explicitly via `tome models {download,list,remove}` (Phase 6); Phase 3 Polish: model state validation (presence, integrity, drift) in doctor with optional repair.
+- **Atomic writes**: `tempfile` crate (rename-based) prevents corruption on SIGINT; `.partial/` directories ensure no half-extracted state visible to concurrent processes; workspace `init` uses `tempfile::Builder::tempdir_in(workspace_root)` for POSIX-atomic staging-to-final rename (Phase 3 / US2); Phase 3 Polish: 0600 permissions on log file (Unix-only) via `OpenOptionsExt::mode`.
 
 ### Workspace Registry (Phase 3 / US2, load-bearing in Phase 3 / US3)
 
 - **File**: `${XDG_DATA_HOME}/tome/workspaces.txt` — opt-in (never created unless explicitly requested)
-- **Format**: Line-delimited absolute paths to workspace roots, one per line; dedupe by exact-path match
+- **Format**: Line-delimited absolute paths to workspace roots, one per line; dedupe by exact-path match and canonicalize
+- **Size cap**: 1 MiB (Phase 3 Polish: hardening validation); entry cap 10k (Phase 3 Polish: hardening validation)
+- **Validation**: No NUL or `..` path traversal sequences allowed (Phase 3 Polish: security hardening); canonicalize before dedupe
 - **Semantics**: Informational in US2; load-bearing in US3 — tracks which workspaces have been initialized via `--inherit-global` or explicit `append_if_registry_exists` call (research §R-15). US3 `catalog remove` consults this file to enumerate all scopes for reference-counting; on a fresh install (absent registry), `remove` behaves as Phase 1–US2 (global scope only, always deletes clone).
 - **Usage**: Client harnesses can read this file to discover initialized workspaces; Tome treats absence as "no workspace scopes" (global scope only)
 
@@ -36,15 +38,15 @@
 
 ## Authentication & Authorization
 
-Phase 1–9 has no explicit application-layer authentication. Phase 3 / US1 MCP server similarly has no auth mechanism — it is stdio-based (embedding in Claude Code harness provides transport-level auth). Phase 3 / US2 adds workspace scoping but no auth model changes. Phase 3 / US3 lifts the single-scope-per-URL restriction but does not introduce per-scope ACLs. Phase 3 / US4 adds doctor diagnostics without new auth surfaces. Phase 3 / US5 is test-coverage completion.
+Phase 1–9 has no explicit application-layer authentication. Phase 3 / US1 MCP server similarly has no auth mechanism — it is stdio-based (embedding in Claude Code harness provides transport-level auth). Phase 3 / US2 adds workspace scoping but no auth model changes. Phase 3 / US3 lifts the single-scope-per-URL restriction but does not introduce per-scope ACLs. Phase 3 / US4 adds doctor diagnostics without new auth surfaces. Phase 3 / US5 is test-coverage completion. Phase 3 Polish enforces no new auth requirements.
 
 - **Git operations**: Inherit system SSH keys and HTTP credential helpers (if configured in `~/.gitconfig`).
 - **Hugging Face model downloads**: No API key required; public `https://huggingface.co/` URLs are freely accessible (MODEL_REGISTRY pinned to MIT-licensed BGE variants).
 - **Plugin manifest ownership**: File system permissions validate catalog ownership (email field in `tome-catalog.toml` is metadata only).
-- **Workspace ownership**: Implicitly owned by the user who runs `tome workspace init`; no explicit permission model (Phase 3 / US2).
-- **Credential scrubbing**: All Git stderr and model download error chains pass through `scrub_credentials()` before logging (principle XIII; extended in Phase 3 to cover HF URLs).
+- **Workspace ownership**: Implicitly owned by the user who runs `tome workspace init`; no explicit permission model (Phase 3 / US2); Phase 3 Polish: init refuses if `.tome` exists as a file (not directory).
+- **Credential scrubbing**: All Git stderr and model download error chains pass through `scrub_credentials()` before logging (principle XIII; extended in Phase 3 to cover HF URLs and MCP log fields — Phase 3 Polish: `workspace_path` and `error_message` fields in logs are scrubbed).
 - **MCP server identity** (Phase 3 / US1): Identified by `server_info { name: "tome", version: "0.x" }` in the MCP handshake; no per-call authentication.
-- **Doctor read-only access** (Phase 3 / US4): Diagnostics are read-only; repairs (`--fix`) require interactive confirmation; no auth model added.
+- **Doctor read-only access** (Phase 3 / US4): Diagnostics are read-only; repairs (`--fix`) require interactive confirmation; no auth model added; Phase 3 Polish: infallible repair signature (returns `usize` fixed count rather than `Result`) with per-subsystem auto-fix decisions.
 
 ---
 
@@ -64,21 +66,22 @@ None in Phase 1–9. Phase 3 / US1 introduces internal library APIs:
 | Hugging Face (`huggingface.co`) | ONNX model downloads (embedder + reranker) | `reqwest::blocking` (direct HTTPS) | `src/embedding/registry.rs` — `MODEL_REGISTRY` (compile-time constants) |
 
 **Details**:
-- **Embedder**: `bge-small-en-v1.5` INT8 (~66 MB) from `qdrant/bge-small-en-v1.5-onnx-Q`
-- **Reranker**: `bge-reranker-base` INT8 (~280 MB) from `onnx-community/bge-reranker-base-ONNX` (source moved in Phase 3 from BAAI — they no longer host quantised ONNX)
-- **Integrity**: Pinned SHA-256 + size_bytes verified post-download (no checksum endpoint; hashes are real upstream digests verified at Phase 3 slice 1 start)
+- **Embedder**: `bge-small-en-v1.5` INT8 (~66 MB) from `BAAI/bge-small-en-v1.5` or quantised variant
+- **Reranker**: `bge-reranker-base` INT8 (~280 MB) from `onnx-community/bge-reranker-base-ONNX` (source moved in Phase 3 slice 1 from BAAI — they no longer host quantised ONNX variants)
+- **Integrity**: Pinned SHA-256 + size_bytes verified post-download (no checksum endpoint; hashes are real upstream digests verified at Phase 3 slice 1 start; Phase 3 Polish: bytes validation added alongside SHA-256)
 - **Network**: HTTPS only via `rustls-tls` (no system OpenSSL)
-- **Failure mode**: Network error → `TomeError::Io` (exit 7); checksum mismatch → `TomeError::ModelChecksumMismatch` (exit 32); corrupted registry → `TomeError::ModelCorrupt` (exit 31)
+- **Failure mode**: Network error → `TomeError::Io` (exit 7); checksum mismatch → `TomeError::ModelChecksumMismatch` (exit 32); corrupted registry → `TomeError::ModelCorrupt` (exit 31); missing model → `TomeError::ModelMissing` (exit 30); embedder drift → `TomeError::EmbedderNameDrift` (exit 41)
 - **Explicit management**: Phase 6 wires `tome models {download,list,remove}` to let users explicitly manage artefacts; `tome models list --verify` invokes SHA-256 per-file validation via `embedding::download::sha256_file()`
 - **Status visibility**: Phase 8 adds `tome status [--verify]` to audit model directory state without triggering downloads; per-model validation only runs when `--verify` is set
-- **Doctor integration** (Phase 3 / US4): `tome doctor` reports model health (presence, SHA-256 integrity, drift detection); `--fix` can download missing or remove corrupt models
+- **Doctor integration** (Phase 3 / US4): `tome doctor` reports model health (presence, SHA-256 integrity, drift detection); `--fix` can download missing or remove corrupt models; Phase 3 Polish: model state re-check after repair via `re_assemble` pattern
 - **Scope**: Models are global (shared across all workspaces and global scope); downloaded to `${XDG_DATA_HOME}/tome/models/` regardless of active scope (Phase 3 / US2)
+- **Extended checks** (Phase 3 Polish): embedder + reranker identity validation in doctor drift detection; specific exit codes for name mismatch (41) vs missing (30)
 
 ---
 
 ## Message Queues & Event Systems
 
-None in Phase 1–9. Phase 3 / US1 MCP server is stdio-based (single request/response at a time); no async event streaming.
+None in Phase 1–9. Phase 3 / US1 MCP server is stdio-based (single request/response at a time); no async event streaming. Phase 3 Polish: explicit SIGTERM handler for graceful shutdown (Unix-only) with 5s timeout before hard shutdown.
 
 ---
 
@@ -86,10 +89,10 @@ None in Phase 1–9. Phase 3 / US1 MCP server is stdio-based (single request/res
 
 | Service | Purpose | TTL / Eviction | Configuration |
 |---------|---------|----------------|-----------------|
-| Filesystem (XDG) | Catalog Git working trees | Explicit `tome catalog remove` (user-managed); persistent; shared across scopes via refcount (Phase 3 / US3) | Global: `${XDG_DATA_HOME}/tome/catalogs/` — git-based, refreshed on `tome catalog update`; Workspace: `${WORKSPACE}/.tome/catalogs/` (Phase 3 Foundational F1); same URL reused across scopes — clone deleted only when all scopes drop it (Phase 3 / US3) |
-| Filesystem (XDG) | Downloaded model artefacts | Explicit `tome models remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/models/` — one dir per model with manifest + ONNX files; Phase 6 adds explicit user-facing commands; shared across all scopes (global) |
+| Filesystem (XDG) | Catalog Git working trees | Explicit `tome catalog remove` (user-managed); persistent; shared across scopes via refcount (Phase 3 / US3) | Global: `${XDG_DATA_HOME}/tome/catalogs/` — git-based, refreshed on `tome catalog update`; Workspace: `${WORKSPACE}/.tome/catalogs/` (Phase 3 Foundational F1); same URL reused across scopes — clone deleted only when all scopes drop it (Phase 3 / US3); Phase 3 Polish: orphan clones (no scope references them) reported by doctor for cleanup advisory |
+| Filesystem (XDG) | Downloaded model artefacts | Explicit `tome models remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/models/` — one dir per model with manifest + ONNX files; Phase 6 adds explicit user-facing commands; shared across all scopes (global); Phase 3 / US4 doctor can remove corrupt models with `--fix` |
 
-No TTL-based eviction. Phase 1–9 uses explicit user commands for cleanup (principle VI: KISS).
+No TTL-based eviction. Phase 1–9 uses explicit user commands for cleanup (principle VI: KISS). Phase 3 Polish: doctor provides advisory cleanup candidates and optional repair.
 
 ---
 
@@ -97,24 +100,24 @@ No TTL-based eviction. Phase 1–9 uses explicit user commands for cleanup (prin
 
 | Service | Purpose | Configuration |
 |---------|---------|-----------------|
-| Structured logging (via `tracing`) | Diagnostic tracing to stderr (CLI) and JSON-lines to file (MCP server) | CLI: `RUST_LOG` or `TOME_LOG` environment variables; independent of `--json` stdout mode. MCP: JSON-lines to `${XDG_STATE_HOME}/tome/mcp.log` per `contracts/log-format.md`; 10 MiB rotation cap; stderr reserved for fatal startup errors only per FR-222 |
-| Exit codes | Scriptable error handling | 18+ enumerated codes (Phase 2: 0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 30, 31, 32); Phase 3 adds codes 60–61 (MCP), 70–75 (workspace/schema including exit 73 for write-path schema version too new); documented in `specs/002-phase-2-plugins-index/contracts/exit-codes.md` and `specs/003-phase-3-mcp-workspaces/contracts/exit-codes-p3.md` |
-| Status checks | Per-subsystem health via `tome status` | Phase 8 — health report includes models, index, drift state; lazy validation with `--verify` flag; Phase 3 / US2 — `tome workspace info` reports scope identity + catalog/plugin/skill counts + embedder identity; no health semantics (informational only) |
-| Doctor diagnostics | Subsystem health assessment + harness discovery | Phase 3 / US4 — `tome doctor [--fix]` reports model/index/workspace/drift health; repairs available with `--fix` + optional `--force` for non-interactive mode; harness probe at 6 known install locations (Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Continue) for ecosystem integration visibility |
+| Structured logging (via `tracing`) | Diagnostic tracing to stderr (CLI) and JSON-lines to file (MCP server) | CLI: `RUST_LOG` or `TOME_LOG` environment variables; independent of `--json` stdout mode. MCP: JSON-lines to `${XDG_STATE_HOME}/tome/mcp.log` per `contracts/log-format.md`; 10 MiB rotation cap with backoff to `mcp.log.1`; stderr reserved for fatal startup errors only per FR-222; Phase 3 Polish: custom `ContractEventFormat` emits contract-pinned field names (`ts`, `level`, `target`, `msg`) instead of tracing defaults; log file 0600 mode (Unix-only) via `OpenOptionsExt::mode`; credential scrubbing on `workspace_path` and `error_message` fields |
+| Exit codes | Scriptable error handling | 21+ enumerated codes: Phase 2 baseline (0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 30, 31, 32) + Phase 3 (60/61 MCP, 70/71/72/73/74/75 workspace/schema); documented in `specs/002-phase-2-plugins-index/contracts/exit-codes.md` and `specs/003-phase-3-mcp-workspaces/contracts/exit-codes-p3.md`; Phase 3 Polish: exit 35 typo (should be 51) fixed in contracts and contract enforcement |
+| Status checks | Per-subsystem health via `tome status` | Phase 8 — health report includes models, index, drift state; lazy validation with `--verify` flag; Phase 3 / US2 — `tome workspace info` reports scope identity + catalog/plugin/skill counts + embedder identity; no health semantics (informational only); Phase 3 Polish: status/doctor consistency (shared `check_model` / `check_index` / `check_drift` helpers promoted to pub) |
+| Doctor diagnostics | Subsystem health assessment + harness discovery | Phase 3 / US4 — `tome doctor [--fix]` reports model/index/workspace/drift health; repairs available with `--fix` + optional `--force` for non-interactive mode; harness probe at 6 known install locations (Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Continue) for ecosystem integration visibility; Phase 3 Polish: orphan clone detection, workspace registry status, schema migration repair, embedder + reranker identity mismatch detection |
 
 ---
 
 ## File Storage
 
 | Service | Purpose | Configuration |
-|---------|---------|---------------|
-| XDG-compliant filesystem | Configuration, catalogs, models, index | Global: `${XDG_CONFIG_HOME}/tome/config.toml`, `${XDG_DATA_HOME}/tome/catalogs/<sha>/`, `${XDG_DATA_HOME}/tome/models/`, `${XDG_DATA_HOME}/tome/index.db`; Workspace: `${WORKSPACE}/.tome/config.toml`, `${WORKSPACE}/.tome/catalogs/<sha>/`, `${WORKSPACE}/.tome/index.db` (Phase 3 Foundational F1); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]`; Phase 9 extends catalog removal with cascade-disable index cleanup; Foundational F8 adds MCP log to `${XDG_STATE_HOME}/tome/mcp.log`; Phase 3 / US1 MCP server operates on same index + models + config per scope; Phase 3 / US2 adds `${XDG_DATA_HOME}/tome/workspaces.txt` opt-in registry; Phase 3 / US3 makes workspaces.txt load-bearing for refcount enumeration; atomic `.tome/` dir creation via tempfile staging (staging dir inside workspace root for POSIX-atomic rename, chmod 0700 before content lands); Phase 3 / US4 doctor uses same subsystem infrastructure (no new files); Phase 3 / US5 validates schema migrations via forward-migration integration tests |
+|---------|---------|-----------------|
+| XDG-compliant filesystem | Configuration, catalogs, models, index | Global: `${XDG_CONFIG_HOME}/tome/config.toml`, `${XDG_DATA_HOME}/tome/catalogs/<sha>/`, `${XDG_DATA_HOME}/tome/models/`, `${XDG_DATA_HOME}/tome/index.db`, `${XDG_STATE_HOME}/tome/mcp.log`; Workspace: `${WORKSPACE}/.tome/config.toml`, `${WORKSPACE}/.tome/catalogs/<sha>/`, `${WORKSPACE}/.tome/index.db` (Phase 3 Foundational F1); opt-in workspace registry at `${XDG_DATA_HOME}/tome/workspaces.txt` (Phase 3 / US2, load-bearing in US3); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]`; Phase 9 extends catalog removal with cascade-disable index cleanup; Foundational F8 adds MCP log to `${XDG_STATE_HOME}/tome/mcp.log` with 10 MiB rotation; Phase 3 / US1 MCP server operates on same index + models + config per scope; Phase 3 / US2 adds `${XDG_DATA_HOME}/tome/workspaces.txt` opt-in registry; Phase 3 / US3 makes workspaces.txt load-bearing for refcount enumeration; atomic `.tome/` dir creation via tempfile staging (staging dir inside workspace root for POSIX-atomic rename, chmod 0700 before content lands); Phase 3 / US4 doctor uses same subsystem infrastructure (no new files); Phase 3 / US5 validates schema migrations via forward-migration integration tests; Phase 3 Polish: workspace init refuses if `.tome` marker is a file (not directory); registry validation (1 MiB cap, 10k entries, no NUL/`..`); mcp.log 0600 (Unix-only); symlink rejection in `get_skill` walk |
 
 ---
 
 ## Email & Notifications
 
-None in Phase 1–9.
+None in Phase 1–9, Phase 3, or Phase 3 Polish.
 
 ---
 
@@ -136,7 +139,7 @@ Phase 3 / US4 adds harness discovery to support ecosystem integration without cr
 - **Scope**: Fixed compile-time list — no dynamic discovery, no unknown harness scanning
 - **Content read**: Existence only — `path.is_dir()` check; no manifest parsing, no config read, no version detection
 - **Report shape**: `HarnessPresence { name, path, present: bool }` per contract `contracts/doctor.md` §Output
-- **Output**: Human-readable banner + full list in `--json` for ecosystem visibility
+- **Output**: Human-readable banner + full list in `--json` for ecosystem visibility; Phase 3 Polish: workspace registry status integrated into doctor report
 - **Update path**: Adding a harness requires code change + contract update (not user-configurable)
 
 **Rationale:**
@@ -157,7 +160,7 @@ Phase 3 / US4 adds harness discovery to support ecosystem integration without cr
 | `XDG_STATE_HOME` | No (defaults to `~/.local/state`) | Override state directory (MCP log) | `/opt/state` | Foundational F8 |
 | `TOME_LOG` | No | Custom log filter (overrides `RUST_LOG`) | `debug`, `info`, `tome=trace` | — |
 | `RUST_LOG` | No | Standard Rust log filter | `info`, `warn` | — |
-| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR`; phase 8: status report respects `NO_COLOR`; phase 9: cascade-disable output respects `NO_COLOR`; phase 3/US1: MCP stdout is protocol-only (no color possible); phase 3/US2: workspace info respects `NO_COLOR`; phase 3/US3: scope-aware commands respect `NO_COLOR`; phase 3/US4: doctor report respects `NO_COLOR`; phase 3/US5: no new presentation changes |
+| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | Phase 3 Polish: consistent coverage across all output surfaces (status, doctor, interactive flows, etc.) |
 | `CLICOLOR` | No | Disable coloured output (alternate) | `0` to disable | — |
 
 ---
@@ -166,12 +169,12 @@ Phase 3 / US4 adds harness discovery to support ecosystem integration without cr
 
 ### Required
 
-- `git` (system binary) — for catalog cloning/updating/checkout
+- `git` (system binary) — for catalog cloning/updating/checkout (inherited from Phase 1 constitution principle XII)
 - `libc` — standard C library (bundled with system)
 
 ### Optional
 
-- **SSH keys** (`~/.ssh/id_*`) — if catalogs use SSH URLs
+- **SSH keys** (`~/.ssh/`) — if catalogs use SSH URLs; no hardcoded support, inherits from git credential helper
 - **Git credential helper** — if catalogs use HTTPS URLs without embedded credentials
 
 ### Not Required
@@ -193,7 +196,7 @@ Phase 3 / US4 adds harness discovery to support ecosystem integration without cr
 | **Resetting** | `git reset --hard HEAD` — discards local changes (on `tome catalog update`) |
 | **Credential flow** | SSH: SSH agent or `~/.ssh/id_*` keys; HTTPS: `git credential` helper or inline auth (if present in URL) |
 | **Signal handling** | SIGINT (Ctrl+C) kills child `git` process; sets exit code 8; no zombie procs (reaps via `std::process::wait()`) |
-| **Error scrubbing** | Captured stderr passed through `scrub_credentials()` before logging — covers URLs, tokens, SSH keys, long hex strings (principle XIII) |
+| **Error scrubbing** | Captured stderr passed through `scrub_credentials()` before logging — covers URLs, tokens, SSH keys, long hex strings (principle XIII); Phase 3 Polish: extended to MCP log field scrubbing |
 
 ---
 
@@ -204,26 +207,26 @@ Phase 3 / US4 adds harness discovery to support ecosystem integration without cr
 | `plugin.json` | Catalog plugin dirs | Lenient (unknown fields ignored) | Third-party plugin metadata (FR-013a boundary) |
 | SKILL.md YAML frontmatter | Upstream plugin repos | Lenient (unknown fields ignored) | Third-party skill/agent/command/hook metadata; parsed by `serde_yaml` without validation |
 | `tome-catalog.toml` | Catalog root | Strict (`deny_unknown_fields`) | Tome-owned manifest; validates all fields |
-| `config.toml` | Global: `${XDG_CONFIG_HOME}/tome/`; Workspace: `${WORKSPACE}/.tome/` (Phase 3 / US2) | Strict (`deny_unknown_fields`) | Tome-owned user config; rejects typos early; Phase 3 / US3 uses per-scope config to enumerate refcount |
+| `config.toml` | Global: `${XDG_CONFIG_HOME}/tome/`; Workspace: `${WORKSPACE}/.tome/` (Phase 3 / US2) | Strict (`deny_unknown_fields`) | Tome-owned user config; rejects typos early; Phase 3 / US3 uses per-scope config to enumerate refcount; Phase 3 Polish: parse errors → `WorkspaceMalformed` exit 70 at every entry path |
 
 ---
 
-## MCP Server Integration (Phase 3 Foundational F8 + Phase 3 / US1)
+## MCP Server Integration (Phase 3 Foundational F8 + Phase 3 / US1, hardened in Phase 3 Polish)
 
-**Status:** Server loop + tool registration landed (US1); live entry point is `tome mcp` CLI command.
+**Status:** Server loop + tool registration landed (US1); live entry point is `tome mcp` CLI command. Phase 3 Polish: contract field pinning, graceful shutdown, signal handling, security hardening.
 
 | Aspect | Details |
 |--------|---------|
 | **Protocol** | `rmcp` (1.x) — Model Context Protocol stdio server per `contracts/mcp-server.md` |
 | **Runtime** | Single-threaded `tokio` (`Builder::new_current_thread`) backing async surfaces in `src/mcp/` (research §R-2); runs on harness' blocking thread (no async in CLI main loop) |
-| **Process model** | Stdio: stdin = MCP protocol messages (from harness), stdout = MCP responses; stderr reserved for fatal startup errors only (FR-222) |
+| **Process model** | Stdio: stdin = MCP protocol messages (from harness), stdout = MCP responses; stderr reserved for fatal startup errors only (FR-222); Phase 3 Polish: explicit SIGTERM handler (Unix-only) with 5s graceful-shutdown timeout before hard shutdown; error! event on hard shutdown |
 | **Tools advertised** | Two: `search_skills` (perform semantic skill search via KNN + optional reranking) and `get_skill` (retrieve single skill detail by ID) |
-| **Logging** | JSON-lines to `${XDG_STATE_HOME}/tome/mcp.log` at application level; rotation at 10 MiB with backoff to `mcp.log.1` per `contracts/log-format.md`; tracing subscriber with `json` feature enabled in Cargo.toml |
-| **Pre-flight** | FR-110 startup pipeline (schema check → drift detect → SHA-256 verify → eager-load FastembedEmbedder) scoped to `src/mcp/preflight.rs`; executed once on server startup |
+| **Logging** | JSON-lines to `${XDG_STATE_HOME}/tome/mcp.log` at application level; rotation at 10 MiB with backoff to `mcp.log.1` per `contracts/log-format.md`; tracing subscriber with `json` feature enabled in Cargo.toml; Phase 3 Polish: custom `ContractEventFormat` emits contract-pinned field names (`ts`, `level`, `target`, `msg`) instead of tracing defaults; log file 0600 mode (Unix-only); credential scrubbing on `workspace_path` and `error_message` fields |
+| **Pre-flight** | FR-110 startup pipeline (schema check → drift detect → SHA-256 verify → eager-load FastembedEmbedder) scoped to `src/mcp/preflight.rs`; executed once on server startup; Phase 3 Polish: malformed workspace config → `WorkspaceMalformed` exit 70; unopenable index → `WorkspaceMalformed` exit 70 |
 | **Tool integration** | Embedder loaded once at startup (pre-flight), shared across tool calls; reranker lazily loaded on first tool call that requires ranking (via `tokio::sync::OnceCell`); no per-call model reloads (FR-005) |
 | **Tool I/O schemas** | Input/output types in `src/mcp/tools/{search_skills,get_skill}.rs` use `#[derive(JsonSchema)]` from `schemars` crate to generate MCP-compliant schemas |
-| **Index access** | Read-only; `src/mcp/tools/get_skill.rs` uses `index::skills::get_one_skill()` library helper; `search_skills.rs` delegates to refactored `commands::query::pipeline()` (silent compute path) |
-| **Error handling** | Fatal startup errors (schema too new, drift, embedder load fail) emitted to stderr + log, exit code 60 (`McpStartupFailed`) or 61 (`McpProtocolIo`); tool errors mapped to MCP error responses |
+| **Index access** | Read-only; `src/mcp/tools/get_skill.rs` uses `index::skills::get_one_skill()` library helper; Phase 3 Polish: symlink rejection hardening in skill walk to prevent hostile catalogs (e.g., symlink-farm payload); `search_skills.rs` delegates to refactored `commands::query::pipeline()` (silent compute path) |
+| **Error handling** | Fatal startup errors (schema too new, drift, embedder load fail) emitted to stderr + log, exit code 60 (`McpStartupFailed`) or 61 (`McpProtocolIo`); tool errors mapped to MCP error responses; Phase 3 Polish: specific-over-generic exit codes (e.g., 30 `ModelMissing` wins over 60 `McpStartupFailed` on embedder absence) |
 | **Sync boundary** | All async/tokio code lives strictly in `src/mcp/`; CLI dispatches to MCP via `mcp::run(scope, paths)` which builds the runtime internally; structural test `tests/sync_boundary.rs` enforces boundary |
 | **CLI entry** | `tome mcp` — new `Command::Mcp(McpArgs)` variant dispatched in `main.rs` before tracing/ctrlc init (special-case dispatch per FR-221) |
 
@@ -237,7 +240,7 @@ Phase 3 / US4 adds harness discovery to support ecosystem integration without cr
 | **Input** | `SearchSkillsInput { query: String, limit: u32, force_strict: bool, ... }` — see `contracts/mcp-tools.md` for full schema |
 | **Output** | `SearchSkillsOutput { skills: Vec<SkillResult>, ... }` — each result includes skill ID, name, catalog, match score, snippet |
 | **Handler** | `pub async fn handle(input, state) -> Result<SearchSkillsOutput, impl Error>` in `src/mcp/tools/search_skills.rs` |
-| **Reuse** | Delegates to `commands::query::pipeline(args, deps)` — the silent compute path (refactored from `run()` to avoid stdout/stderr) |
+| **Reuse** | Delegates to `commands::query::pipeline(args, deps)` — the silent compute path (refactored from `run()` to avoid stdout/stderr); Phase 3 Polish: search input validation refines error categories |
 | **Reranker** | Lazily loaded on first invocation (unless `force_strict=true` disables ranking); shared across subsequent calls |
 
 #### `get_skill`
@@ -248,32 +251,32 @@ Phase 3 / US4 adds harness discovery to support ecosystem integration without cr
 | **Input** | `GetSkillInput { id: String }` — skill ID as `<catalog>/<plugin>/<skill-name>` |
 | **Output** | `GetSkillOutput { skill: Option<SkillDetail>, ... }` — full text, metadata, or `None` if not found |
 | **Handler** | `pub async fn handle(input, state) -> Result<GetSkillOutput, impl Error>` in `src/mcp/tools/get_skill.rs` |
-| **Query** | Read-only index lookup via `index::skills::get_one_skill(id, conn)` library helper |
+| **Query** | Read-only index lookup via `index::skills::get_one_skill(id, conn)` library helper; Phase 3 Polish: symlink rejection hardening (`is_symlink()` check) in skill walk to prevent hostile catalog payload injection |
 
 ---
 
-## Workspace Scope Integration (Phase 3 / US2 + Phase 3 / US3)
+## Workspace Scope Integration (Phase 3 / US2 + Phase 3 / US3, hardened in Phase 3 Polish)
 
-**Status:** Workspace info + init commands landed (US2); scope-aware path resolution per Foundational F1; reference-counted catalog sharing across scopes (US3).
+**Status:** Workspace info + init commands landed (US2); scope-aware path resolution per Foundational F1; reference-counted catalog sharing across scopes (US3). Phase 3 Polish: validator gates, registry validation, init refusal hardening.
 
 | Aspect | Details |
 |--------|---------|
 | **Scope types** | Global (default, uses XDG paths) or Workspace (per `.tome/` directory); resolved via `Paths::resolve()` which walks `cwd` up the tree looking for `.tome/` marker or uses global on failure (research §R-15) |
-| **Path model** | Per-scope `Paths` accessor methods: `Paths::config_file_for(&Scope)`, `Paths::index_db_for(&Scope)`, `Paths::index_lock_for(&Scope)` added in Foundational F1 to support both global + workspace scopes; existing Phase 1 fields retained for backward compat (convention F1); Phase 3 / US3 extends `Paths::cache_dir_for(url)` to respect scope (same URL cached per-scope unless refcount is zero) |
-| **Config location** | Global: `${XDG_CONFIG_HOME}/tome/config.toml`; Workspace: `${WORKSPACE}/.tome/config.toml` (parse errors → `WorkspaceMalformed` exit 70 per US2.a) |
-| **Index location** | Global: `${XDG_DATA_HOME}/tome/index.db`; Workspace: `${WORKSPACE}/.tome/index.db` (same WAL + advisory lock model; read-only on MCP server per FR-056) |
-| **Catalog cache location** | Global: `${XDG_DATA_HOME}/tome/catalogs/<sha>/`; Workspace: `${WORKSPACE}/.tome/catalogs/<sha>/` (Phase 3 / US3 enables sharing — same clone path used when same URL registered in multiple scopes; deleted only when no scope references it via `reference_count` enumeration) |
-| **Reference counting (Phase 3 / US3)** | `catalog::store::reference_count(url, paths) -> Vec<Scope>` enumerates all scopes whose config still references a given URL; `tome catalog remove` consults this to decide whether the on-disk clone can be deleted (happens only when refcount returns empty or just the removed scope); lifts Phase 1 single-scope-per-URL restriction; TOCTOU race possible (worst case: one re-download on next `catalog update`) |
-| **Info command** | `tome workspace info` (US2.a) — read-only scope report via `WorkspaceInfo` wire record; catalog/plugin/skill counts come from config + index; `ScopeSource` enum (flag/global-flag/env/cwd-walk/global-fallback) serialised with snake_case (e.g., `GlobalFlag` → `"global_flag"` in JSON) |
-| **Init command** | `tome workspace init [<path>] [--inherit-global] [--force]` (US2.b) — atomic `.tome/` creation; staging dir inside workspace root (same FS) via `tempfile::Builder::tempdir_in`; POSIX-atomic final rename; `--inherit-global` seeds config with global catalogs (no enablement copy); `--force` replaces existing atomically (aside to `.tome.old/`, best-effort cleanup); pre-check refuses without `--force` (exit 4 / `CatalogAlreadyExists` shared with Phase 1 catalog case) |
-| **Registry file** | `${XDG_DATA_HOME}/tome/workspaces.txt` — opt-in (created on-demand, never mandatory); line-delimited workspace roots; deduped by exact-path match; informational in US2; load-bearing in US3 (referenced by `reference_count` to enumerate workspace configs) |
-| **CLI wiring** | New `Command::Workspace(WorkspaceArgs)` + `WorkspaceCommand::{Info, Init}` variants in `src/cli.rs`; scope resolved once in `commands/workspace/mod.rs` dispatcher and threaded through each subcommand; Phase 3 / US3 routes all scope-aware commands (catalog add/remove/list, plugin enable/disable/list/show, query, models list/remove, reindex, etc.) through global scope resolution + per-command scope dispatch |
+| **Path model** | Per-scope `Paths` accessor methods: `Paths::config_file_for(&Scope)`, `Paths::index_db_for(&Scope)`, `Paths::index_lock_for(&Scope)` added in Foundational F1 to support both global + workspace scopes; existing Phase 1 fields retained for backward compat (convention F1); Phase 3 / US3 extends `Paths::cache_dir_for(url)` to respect scope (same URL cached per-scope unless refcount is zero); Phase 3 Polish: explicit validators for workspace resolution (§Validation 1b/1c) |
+| **Config location** | Global: `${XDG_CONFIG_HOME}/tome/config.toml`; Workspace: `${WORKSPACE}/.tome/config.toml` (parse errors → `WorkspaceMalformed` exit 70 per US2.a; Phase 3 Polish: enforced at every entry path) |
+| **Index location** | Global: `${XDG_DATA_HOME}/tome/index.db`; Workspace: `${WORKSPACE}/.tome/index.db` (same WAL + advisory lock model; read-only on MCP server per FR-056; Phase 3 Polish: unopenable index → `WorkspaceMalformed` exit 70 at entry paths) |
+| **Catalog cache location** | Global: `${XDG_DATA_HOME}/tome/catalogs/<sha>/`; Workspace: `${WORKSPACE}/.tome/catalogs/<sha>/` (Phase 3 / US3 enables sharing — same clone path used when same URL registered in multiple scopes; deleted only when no scope references it via `reference_count` enumeration); Phase 3 Polish: orphan clone detection (no scope references) in doctor report |
+| **Reference counting (Phase 3 / US3)** | `catalog::store::reference_count(url, paths) -> Vec<Scope>` enumerates all scopes whose config still references a given URL; `tome catalog remove` consults this to decide whether the on-disk clone can be deleted (happens only when refcount returns empty or just the removed scope); lifts Phase 1 single-scope-per-URL restriction; TOCTOU race possible (worst case: one re-download on next `catalog update`); Phase 3 Polish: orphan detection advisory in doctor |
+| **Info command** | `tome workspace info` (US2.a) — read-only scope report via `WorkspaceInfo` wire record; catalog/plugin/skill counts come from config + index; `ScopeSource` enum (flag/global-flag/env/cwd-walk/global-fallback) serialised with snake_case (e.g., `GlobalFlag` → `"global_flag"` in JSON); Phase 3 Polish: no new changes to info output |
+| **Init command** | `tome workspace init [<path>] [--inherit-global] [--force]` (US2.b) — atomic `.tome/` creation; staging dir inside workspace root (same FS) via `tempfile::Builder::tempdir_in`; POSIX-atomic final rename; `--inherit-global` seeds config with global catalogs (no enablement copy); `--force` replaces existing atomically (aside to `.tome.old/`, best-effort cleanup); pre-check refuses without `--force` (exit 4 / `CatalogAlreadyExists` shared with Phase 1 catalog case); Phase 3 Polish: init refuses if `.tome` is a file (not directory); propagates pre-cleanup errors |
+| **Registry file** | `${XDG_DATA_HOME}/tome/workspaces.txt` — opt-in (created on-demand, never mandatory); line-delimited workspace roots; deduped by exact-path match; informational in US2; load-bearing in US3 (referenced by `reference_count` to enumerate workspace configs); Phase 3 Polish: validation enforced (1 MiB cap, 10k entries, no NUL/`..` path traversal); canonicalize before dedupe |
+| **CLI wiring** | New `Command::Workspace(WorkspaceArgs)` + `WorkspaceCommand::{Info, Init}` variants in `src/cli.rs`; scope resolved once in `commands/workspace/mod.rs` dispatcher and threaded through each subcommand; Phase 3 / US3 routes all scope-aware commands (catalog add/remove/list, plugin enable/disable/list/show, query, models list/remove, reindex, etc.) through global scope resolution + per-command scope dispatch; Phase 3 Polish: validator gates at entry paths |
 
 ---
 
 ## Schema Migration Integration (Phase 3 / US5)
 
-**Status:** Forward-migration framework landed in Foundational F7; integration test coverage completed in US5.
+**Status:** Forward-migration framework landed in Foundational F7; integration test coverage completed in US5. Phase 3 Polish: no new changes; framework stable.
 
 | Aspect | Details |
 |--------|---------|
@@ -283,6 +286,7 @@ Phase 3 / US4 adds harness discovery to support ecosystem integration without cr
 | **Atomicity** | All migrations run under advisory lock; rollback on apply error (transaction abort); no partial DB state visible to concurrent readers |
 | **Version semantics** | Write-path (enable/reindex/cascade) checks schema version and emits `SchemaVersionTooNew` (exit 73) if DB is newer; read-path (query/info/doctor) retains legacy `SchemaTooNew` (exit 52) for backward compat |
 | **Production migrations** | Compile-time `MIGRATIONS` array ships empty (`const MIGRATIONS: &[Migration] = &[];`); first real migration row + test landing in Phase 4+ |
+| **Doctor integration** | `tome doctor` can repair schema via `--fix`; runs forward-migration under advisory lock; Phase 3 Polish: synthetic `SuggestedFix` injection in tests validates dispatch path |
 
 ---
 
@@ -295,4 +299,4 @@ Phase 3 / US4 adds harness discovery to support ecosystem integration without cr
 
 ---
 
-*This document maps external service dependencies and failure modes. Updated for Phase 3 Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 + Phase 3 / US3 + Phase 3 / US4 + Phase 3 / US5: schema migration framework rewrite + MCP server scaffolding scoped to `src/mcp/` + workspace info/init commands with scope-aware path resolution + opt-in workspace registry file + reference-counted catalog clone sharing across scopes + doctor subsystem checks with harness discovery at 6 known install locations + forward-schema-migration integration test coverage.*
+*This document maps external service dependencies and failure modes in Tome v0.3.0 (Phase 3 complete and shipped). 399 tests pass across 53 suites. Phase 3 Polish PRs #51–#58 hardened security (symlink rejection, log 0600, registry validation, init refusal), pinned MCP log field names to contract, enforced workspace validation gates, and completed ecosystem integration (harness discovery, workspace scoping, reference-counted catalog sharing).*

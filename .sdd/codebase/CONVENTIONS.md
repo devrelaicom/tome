@@ -10,20 +10,21 @@
 
 | Tool | Configuration | Command |
 |------|---------------|---------|
-| rustfmt | `rustfmt.toml` | `cargo fmt --check` |
-| Clippy (linter) | `clippy.toml` | `cargo clippy --all-targets --all-features -- -D warnings` |
-| typos (spell check) | `_typos.toml` | `typos` |
+| rustfmt | `rustfmt.toml` (edition 2024) | `cargo fmt --check` |
+| Clippy | `.clippy.toml` (implied by -D warnings) | `cargo clippy --all-targets --all-features -- -D warnings` |
+| Typos | Implicit (no config file) | `typos` |
+
+All three gates are enforced locally via `.githooks/pre-commit` and in CI. The hook runs them sequentially; use `git commit --no-verify` to bypass with explicit justification in the commit message.
 
 ### Style Rules
 
-| Rule | Convention | Example |
-|------|------------|---------|
-| Edition | Rust 2024 | `edition = "2024"` in `Cargo.toml` |
-| MSRV | Rust 1.93 | Declared in `Cargo.toml`; enforced in CI |
-| Lints | `-D warnings` | All clippy warnings are errors in pre-commit and CI |
-| Allow blocks | Justified comments required | `#[allow(dead_code)] // tests use subset of these` |
-| Formatting | Automatic via rustfmt | Run before commit via the `.githooks/pre-commit` hook |
-| Typos | Spell-checked | Run in pre-commit hook |
+| Rule | Convention |
+|------|------------|
+| Indentation | 4 spaces (Rust default) |
+| Edition | Rust 2024 |
+| MSRV | 1.93 (locked in `Cargo.toml` `rust-version`; verified in CI) |
+| Line length | No hard limit; rustfmt uses defaults |
+| Trailing commas | Automatic via rustfmt |
 
 ## Naming Conventions
 
@@ -31,768 +32,353 @@
 
 | Type | Convention | Example |
 |------|------------|---------|
-| Modules | snake_case | `src/catalog/git.rs`, `src/commands/catalog/add.rs` |
-| Single-purpose commands | snake_case, flat | `src/commands/status.rs`, `src/commands/query.rs`, `src/commands/reindex.rs` |
-| Multi-subcommand groups | snake_case dir + subcommand files | `src/commands/plugin/{enable,disable,list,show,interactive}.rs`, `src/commands/models/{download,list,remove}.rs` |
-| Tests | descriptive, lowercase | `tests/catalog_add.rs`, `tests/plugin_enable.rs`, `tests/status.rs` |
-| Test fixtures | descriptive | `tests/fixtures/sample-catalog/`, `tests/fixtures/sample-plugin-catalog/` |
-| Capabilities | feature-named | `catalog`, `config`, `paths`, `error`, `plugin`, `index`, `embedding` |
+| Modules | snake_case | `src/plugin/lifecycle.rs` |
+| Tests (separate dir) | snake_case + descriptive | `tests/plugin_enable.rs` |
+| Fixtures | lowercase | `tests/fixtures/sample-catalog/` |
+| Capabilities | snake_case subdirs | `src/index/`, `src/embedding/` |
 
 ### Code Elements
 
 | Type | Convention | Example |
 |------|------------|---------|
-| Variables | snake_case | `manifest_path`, `catalog_root`, `plugin_dir` |
-| Constants | SCREAMING_SNAKE_CASE | `SCHEMA_URI`, `CANCELLED`, `VECTOR_DIM` |
-| Functions | snake_case, verb prefix | `parse_and_validate()`, `scrub_credentials()`, `embed()` |
-| Structs | PascalCase | `CatalogManifest`, `PluginId`, `EnableOutcome` |
-| Enums | PascalCase | `TomeError`, `Command`, `Mode`, `ModelKind` |
-| Error variants | DescriptiveCase | `CatalogNotFound`, `ManifestInvalid`, `PluginAlreadyInState` |
-| Public module traits | PascalCase | `Embedder`, `Reranker`, exported via stable public surface |
+| Variables | snake_case | `config_dir`, `embedder_seed` |
+| Constants | SCREAMING_SNAKE_CASE | `GRACEFUL_SHUTDOWN_TIMEOUT`, `MIGRATIONS` |
+| Functions | snake_case, verb prefix for actions | `apply_pending`, `open_read_only` |
+| Structs | PascalCase | `TomeError`, `WorkspaceInfo`, `LifecycleDeps` |
+| Enums | PascalCase, variant singular/context | `Scope::Global`, `Scope::Workspace`, `CatalogCacheState::Missing` |
+| Traits | PascalCase | `Embedder`, `Reranker`, `Serializable` |
+| Module docs | Doc comment on first line explaining role | `//! MCP server state and initialization` |
 
 ## Error Handling
 
-### Error Architecture
+### Closed Error Enum Pattern
 
-**Closed enum pattern:** `TomeError` in `src/error.rs` is an exhaustive enumeration. Every concrete failure class is a variant. Adding a variant requires simultaneous updates to:
-- `src/error.rs` (the enum)
-- The `exit_code()` method (exit code mapping)
-- The `category()` method (JSON error category)
-- `tests/exit_codes.rs` (compile-time exhaustiveness check)
-- The PRD and spec (for documentation)
+Tome uses a **closed enumeration** for all errors: `TomeError` in `src/error.rs` has no `Other`/`Unknown` variant. Every failure class maps to exactly one enumerated variant and a unique exit code. Adding a variant **forces edits** to:
 
-This enforces the Unix principle: every failure class has a stable, documented exit code.
+- `tests/exit_codes.rs` — compiler enforces coverage
+- `specs/*/contracts/exit-codes-*.md` — the spec's authority
+- The PRD — the external contract
 
-### Error Hierarchy
+This design makes exit codes stable and discoverable; trade-off is that new failure modes require a deliberate variant addition.
 
-| Layer | Pattern | Location |
-|-------|---------|----------|
-| Module-level | `thiserror` enum | `src/error.rs` defines `TomeError` and `ManifestInvalid` |
-| Cross-module context | `anyhow::Error` | Application boundary only (main.rs, tests) |
-| Signal handling | `TomeError::Interrupted` | Exit code 8 (caught by `ctrlc` handler) |
+### Error Pattern Examples
 
-### Exit Codes (Stable Contract)
-
-| Code | Variant | Meaning |
-|------|---------|---------|
-| 0 | (success) | Command completed successfully |
-| 1 | `Internal` | Programmer error (panic caught at top level) |
-| 2 | `Usage` | Invalid usage: bad flag or argument |
-| 3 | `CatalogNotFound` | Named catalog not registered |
-| 4 | `CatalogAlreadyExists` | Attempt to register duplicate catalog |
-| 5 | `ManifestInvalid` | Malformed `tome-catalog.toml` or `config.toml` |
-| 6 | `GitFailed` | Git command failed (e.g. network error, bad ref) |
-| 7 | `Io` | File I/O error (permission, disk full, etc.) |
-| 8 | `Interrupted` | User pressed Ctrl+C; in-flight git processes killed |
-| 30 | `ModelMissing` | Required embedding model not present |
-
-*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2–Phase 3 exit codes.*
-
-### Error Message Style
-
-Every error message:
-- **Names the failure** ("catalog `foo` is not registered")
-- **Points to the offending file** (path in error message)
-- **References the schema** when relevant (`SCHEMA_URI` constant points to exact definition)
-- **Suggests action** when recoverable ("try `--force` or check status.github.com")
-- **Scrubs credentials** before display (URL login, SSH host, tokens, API keys)
-
-Example:
-```
-error: manifest invalid: unknown field `plugins_extra` in /path/to/tome-catalog.toml: see https://github.com/.../catalog-manifest.schema.toml
+**Single `#[from]` source per enum variant** (when the source is semantically equivalent):
+```rust
+#[error("io: {0}")]
+Io(#[from] std::io::Error),
 ```
 
-### Credential Scrubbing
+**Tuple variants for rich context**:
+```rust
+#[error("git failed for `{catalog}`: {detail}")]
+GitFailed { catalog: String, detail: String },
+```
 
-`catalog::git::scrub_credentials()` is applied to all captured `git` process output (stderr, stdout) before it reaches:
-- `tracing` logs
-- `anyhow::Error` messages
-- Any display path in `--json` output
+**Nested enum for context-specific variants**:
+```rust
+#[error("plugin `{plugin}` is already {state}")]
+PluginAlreadyInState { plugin: String, state: PluginState },
+```
 
-Four-layer scrubbing strategy (in order):
-1. URL logins: `https://user:pass@host/` → `https://<host>/`
-2. SSH logins: `git@host.com:` → `git@<host>:`
-3. Key-value secrets: `token=<token>` → `token=<scrubbed>`
-4. Long hex blobs: bare ≥40-char hex → `<scrubbed>` (but preserve `name=<hex>`)
+**Display message includes recovery hints**:
+```rust
+#[error("model `{model}` is missing; run `tome models download`")]
+ModelMissing { model: String },
+```
+
+### Error Propagation
+
+- Library functions return `Result<T, TomeError>`.
+- The CLI layer in `src/main.rs` maps `TomeError` to `std::process::exit(code)` via `error::into_exit_code()`.
+- Tests use `expect()` / `unwrap()` on library calls; integration tests check the exit code via `Command::status()`.
+
+### Logging Conventions
+
+Logging uses `tracing` (sync path) + `tracing-subscriber` with JSON output on stderr (Phase 2). MCP async handlers use a file log (`mcp.log`) in JSON-lines format to preserve stdout as the MCP protocol channel (contract FR-221).
+
+| Level | When to Use |
+|-------|-------------|
+| error | Failures that should never happen (logic bugs, disk corruption, signal handler events) |
+| warn | Recoverable issues (model fetch retries, catalog re-clone fallbacks) |
+| info | Important state transitions (schema migration applied, MCP server started) |
+| debug | Development details (query result counts, embedder vector dimensions) |
+| trace | Not used in production; left for future internal diagnostics |
+
+Credential scrubbing (from git URLs, model download URLs, error chains) is applied at the boundary via `catalog::git::scrub_credentials` and `scrub_to_string()`.
 
 ## Common Patterns
 
-### Module Structure (Capability-Organized)
+### Silent Compute + Emit Wrapper
+
+When a CLI command's compute path is reused by a non-CLI surface (MCP, library API), split the implementation:
 
 ```rust
-src/
-├── main.rs                   # entry: parse → dispatch → map errors → exit
-├── lib.rs                    # re-exports
-├── cli.rs                    # clap derive defs + global flags
-├── error.rs                  # closed TomeError enum + ExitCode mapping
-├── config.rs                 # config.toml (strict)
-├── paths.rs                  # XDG paths (Phase 1) + index_db, models_dir, index_lock (Phase 2)
-├── output.rs                 # human/--json formatter, NO_COLOR, TTY detection
-├── logging.rs                # tracing-subscriber wiring
-├── catalog/                  # Phase 1
-│   ├── manifest.rs           # tome-catalog.toml (strict)
-│   ├── store.rs              # registry persistence (atomic) — Phase 2 hooks cascade
-│   └── git.rs                # git shell-outs + scrub_credentials
-├── commands/
-│   ├── mod.rs                # Dispatcher and common helpers
-│   ├── catalog/              # `tome catalog` subcommands
-│   │   ├── mod.rs            # Dispatcher; cross-subcommand helpers
-│   │   ├── add.rs            # `tome catalog add <source>`
-│   │   ├── remove.rs         # `tome catalog remove <name>`
-│   │   ├── list.rs           # `tome catalog list`
-│   │   ├── show.rs           # `tome catalog show <name>`
-│   │   ├── update.rs         # `tome catalog update [name]` + reindex library entry point (Phase 7)
-│   │   └── source.rs         # Git fetch / update orchestrator
-│   ├── plugin/               # `tome plugin` subcommands (Phase 3–5)
-│   │   ├── mod.rs            # Dispatcher; cross-subcommand helpers
-│   │   ├── enable.rs         # `tome plugin enable <catalog>/<plugin>` (CLI side)
-│   │   ├── disable.rs        # `tome plugin disable <catalog>/<plugin>` (Phase 5)
-│   │   ├── list.rs           # `tome plugin list [catalog]`
-│   │   ├── show.rs           # `tome plugin show <catalog>/<plugin>`
-│   │   └── interactive.rs    # `tome plugin` (bare, interactive browse) (Phase 4)
-│   ├── models/               # `tome models` subcommands (Phase 6)
-│   │   ├── mod.rs            # Dispatcher; cross-subcommand helpers
-│   │   ├── download.rs       # `tome models download [model]` (CLI side)
-│   │   ├── list.rs           # `tome models list`
-│   │   └── remove.rs         # `tome models remove <model>`
-│   ├── query.rs              # `tome query <text>` (Phase 3)
-│   ├── reindex.rs            # `tome reindex [<scope>]` + library entry point (Phase 7)
-│   ├── status.rs             # `tome status [--verify]` — single-file, read-only (Phase 8)
-│   ├── doctor.rs             # `tome doctor [--fix]` — health diagnostics + repair (Phase 3 / US4)
-│   └── workspace/            # `tome workspace` subcommands (Phase 4 / US2)
-│       ├── mod.rs            # Dispatcher
-│       ├── info.rs           # `tome workspace info` (Phase 4 / US2)
-│       └── init.rs           # `tome workspace init` (Phase 4 / US2)
-├── catalog/                  # Catalog manifest + storage + git operations
-│   ├── mod.rs
-│   ├── manifest.rs           # Parser + validator (strict TOML)
-│   ├── store.rs              # Registry persistence (atomic writes)
-│   └── git.rs                # Git shell-outs + credential scrubbing + signal handling
-├── config.rs                 # config.toml schema + load/save
-├── error.rs                  # Closed TomeError enum + ManifestInvalid
-├── output.rs                 # Human/--json formatter, NO_COLOR, TTY detection
-├── logging.rs                # tracing-subscriber wiring (stderr-only)
-├── paths.rs                  # XDG-aware paths (Phase 1 + Phase 2 index/models dirs)
-├── plugin/                   # Plugin discovery, manifest parsing, lifecycle (Phase 2)
-│   ├── mod.rs
-│   ├── manifest.rs           # `plugin.json` parser (lenient)
-│   ├── frontmatter.rs        # SKILL.md YAML frontmatter parser (lenient + fallbacks)
-│   ├── components.rs         # Skills/agents/commands/hooks walk
-│   ├── identity.rs           # `<catalog>/<plugin>` address parsing and resolution
-│   └── lifecycle.rs          # Enable/disable orchestrator (library API, testable)
-├── index/                    # SQLite-backed skill index + vector search (Phase 2)
-│   ├── mod.rs
-│   ├── db.rs                 # rusqlite open, WAL, busy_timeout
-│   ├── schema.rs             # CREATE TABLE statements
-│   ├── migrations.rs         # Forward-only migrations under advisory lock
-│   ├── vec_ext.rs            # sqlite-vec extension load
-│   ├── skills.rs             # CRUD on skills table; content-hash diff
-│   ├── query.rs              # KNN search + reranker invocation
-│   ├── meta.rs               # Drift detection (model ident mismatch)
-│   ├── integrity.rs          # PRAGMA integrity_check
-│   └── lock.rs               # Advisory lockfile (WAL + Tome-owned file)
-├── embedding/                # Embedding model management + inference (Phase 2)
-│   ├── mod.rs                # Embedder and Reranker traits
-│   ├── fastembed.rs          # fastembed-rs impl (ONNX Runtime, CPU-only)
-│   ├── stub.rs               # Deterministic stub (tests only, compiled out)
-│   ├── registry.rs           # MODEL_REGISTRY with pinned URLs + checksums
-│   ├── download.rs           # reqwest::blocking + SHA-256 + atomic persist
-│   └── runtime.rs            # ort Environment setup
-├── doctor/                   # Health diagnostics + repair (Phase 3 / US4)
-│   ├── mod.rs                # DoctorReport struct + assemble entry point
-│   ├── checks.rs             # Health check functions (embedder, index, drift)
-│   ├── fixes.rs              # Repair operation dispatch + apply_one
-│   └── harness_detect.rs     # Harness detection (vscode, cursor, etc.)
-├── mcp/                      # MCP server (Phase 3)
-│   ├── mod.rs                # Server entry + lifecycle
-│   ├── server.rs             # rmcp ServerHandler + tool router (Phase 3)
-│   ├── state.rs              # McpState shared across tool handlers
-│   ├── tools/                # Tool implementations (Phase 3)
-│   │   ├── mod.rs            # Tool module docs + submodule re-exports
-│   │   ├── search_skills.rs  # `search_skills` input/output + handler
-│   │   └── get_skill.rs      # `get_skill` input/output + handler
-│   ├── runtime.rs            # tokio::runtime setup + logging
-│   ├── preflight.rs          # MCP startup pre-flight checks (scope, index, schema, drift, models)
-│   └── log.rs                # JSON-lines file appender + rotation (Phase 3 / F8)
-├── workspace/                # Workspace context (Phase 4 / US2)
-│   ├── mod.rs
-│   ├── scope.rs              # Scope enum + ScopeSource (resolution provenance)
-│   ├── resolution.rs         # Workspace discovery algorithm (slice F3)
-│   ├── info.rs               # `tome workspace info` (Phase 4 / US2)
-│   ├── init.rs               # `tome workspace init` (Phase 4 / US2)
-│   └── inventory.rs          # Workspace registry (opt-in workspaces.txt)
-└── presentation/             # CLI output / progress / colours / prompts (Phase 2)
-    ├── mod.rs
-    ├── tables.rs             # comfy-table helpers
-    ├── progress.rs           # indicatif wrappers (TTY-aware)
-    ├── colour.rs             # owo-colors + NO_COLOR
-    └── prompt.rs             # inquire wrappers (refuse on non-TTY)
+// Silent compute — no I/O side-effects, returns structured result
+pub fn pipeline(args, deps) -> Result<Outcome, Error> {
+    // Do the work
+}
 
-tests/
-├── common/mod.rs             # Fixture builder, ToolEnv, lifecycle helpers, paths_for (Phase 5)
-├── catalog_add.rs            # Integration tests for `tome catalog add`
-├── catalog_list.rs           # Integration tests for `tome catalog list`
-├── catalog_remove.rs         # Integration tests for `tome catalog remove`
-├── catalog_remove_cascade.rs # Integration tests for cascade disable (Phase 9)
-├── catalog_show.rs           # Integration tests for `tome catalog show`
-├── catalog_update.rs         # Integration tests for `tome catalog update`
-├── catalog_update_reindex.rs # Library API tests for catalog update reindex path (Phase 7)
-├── plugin_enable.rs          # Library API tests for `plugin::lifecycle::enable`
-├── plugin_disable.rs         # CLI-binary tests for `tome plugin disable` (Phase 5)
-├── plugin_list.rs            # CLI-binary tests for `tome plugin list`
-├── plugin_show.rs            # CLI-binary tests for `tome plugin show`
-├── plugin_interactive.rs     # PTY-driven tests for `tome plugin` interactive
-├── plugin_repeated.rs        # FR-008: enable/disable idempotency edge case (Phase 5)
-├── models_download.rs        # CLI-binary tests for `tome models download` (Phase 6)
-├── models_list.rs            # CLI-binary tests for `tome models list` (Phase 6)
-├── models_remove.rs          # CLI-binary tests for `tome models remove` (Phase 6)
-├── query.rs                  # Library API tests for query path (embed + KNN)
-├── reindex.rs                # Library + CLI tests for `tome reindex` (Phase 7)
-├── status.rs                 # Library API tests for `assemble_report`; CLI-only for run() (Phase 8)
-├── version_output.rs         # Compile-time content tests for `--version` output (Phase 8)
-├── doctor.rs                 # Library API + CLI binary tests for `tome doctor` (Phase 3 / US4)
-├── doctor_json.rs            # JSON envelope shape tests for doctor output (Phase 3 / US4)
-├── mcp_server.rs             # MCP tool router + handler introspection tests (Phase 3)
-├── mcp_lifecycle.rs          # MCP pre-flight exit codes (Phase 3)
-├── workspace_info.rs         # Library API tests for `workspace::info::assemble` (Phase 4 / US2)
-├── workspace_init.rs         # Library API + CLI tests for `workspace::init` (Phase 4 / US2)
-├── workspace_commands.rs     # Cross-scope command isolation (Phase 5 / US3)
-├── catalog_cache_refcount.rs # Reference-counted catalog cleanup (Phase 5 / US3)
-├── atomicity_enable.rs       # Failure-injection tests for enable rollback (FR-004)
-├── atomicity.rs              # Registry/cache write atomicity + schema migration atomicity (Phase 3 / US5)
-├── exit_codes.rs             # Exhaustiveness check: every TomeError → exit code
-├── error_messages.rs         # Error message correctness
-├── manifest_strictness.rs    # TOML deny_unknown_fields enforcement + corpus
-├── path_validation.rs        # Path escape/traversal validation
-├── scrubbing.rs              # Credential scrubbing regex coverage
-├── schema_migrations.rs       # Forward-only migration boundaries (Phase 3 / F7)
-├── schema_migration_e2e.rs   # End-to-end schema migration with synthetic fixtures (Phase 3 / US5)
-├── concurrency.rs            # Cross-process index lock contention (Phase 3 / US5)
-└── fixtures/                 # Real Git repos + sample plugin catalogs
-    ├── sample-catalog/
-    └── sample-plugin-catalog/
+// Emit wrapper — calls pipeline, then emits per mode (human/JSON)
+pub fn run_with_deps(args, deps, mode) -> Result<Outcome, Error> {
+    let outcome = pipeline(args, deps)?;
+    emit(&outcome, mode)?;
+    Ok(outcome)
+}
+
+// CLI calls run_with_deps; tests call pipeline directly
 ```
 
-### CLI Module Pattern (Phase 3–8)
+**Examples**:
+- `commands/query.rs` — `pipeline()` for KNN+rerank, `run_with_deps()` for CLI emit
+- `commands/workspace/info.rs` — `assemble()` for compute, `run()` for emit
+- `commands/status.rs` — `assemble_report()` for compute, `run()` for emit
 
-**Multi-subcommand groups** live under `src/commands/{group}/` with one file per subcommand:
+### Sync Boundary (Phase 3)
 
-- **`src/commands/{group}/mod.rs`**: Dispatcher enum, cross-subcommand helpers (public via `pub(crate)`)
-- **`src/commands/{group}/{subcommand}.rs`**: Subcommand logic; public function signature is `pub fn run(args, mode) -> Result<(), TomeError>`
+Async/await is strictly confined to `src/mcp/` (the MCP server module). Every file under `src/mcp/` may use:
+- `async fn`, `.await`, `tokio::task::spawn_blocking`, `tokio::sync::`
+- The `tokio` runtime is single-threaded (`rt` feature only; no `rt-multi-thread`)
 
-Cross-module reach via `super::*` within a group is acceptable; cross-group via re-export is preferred.
+Every file outside `src/mcp/` is synchronous. **Structural test** `tests/sync_boundary.rs` enforces this: it fails the build if any non-MCP module references `tokio`.
 
-The pattern is consistent across:
-- `plugin` (enable, disable, list, show, interactive)
-- `models` (download, list, remove)
-- `catalog` (add, remove, list, update/reindex, show)
-- `workspace` (info, init) — Phase 4 / US2 addition
+**Rationale**: The MCP server needs async for the protocol handler loop, but the core library (catalog, plugin, index, embedding) stays sync for simplicity and binary size. Tool handlers that need sync work (rusqlite queries, ONNX inference) use `spawn_blocking` to avoid blocking the reactor.
 
-**Single-purpose commands** (Phase 8 addition) stay as flat `src/commands/<name>.rs`:
+### spawn_blocking in MCP Tool Handlers
 
-- `src/commands/query.rs` — search subcommand (Phase 3)
-- `src/commands/reindex.rs` — explicit reindex subcommand (Phase 7)
-- `src/commands/status.rs` — health report subcommand (Phase 8)
-- `src/commands/doctor.rs` — diagnostics + repair subcommand (Phase 3 / US4)
-
-Each single-file command may expose library entry points for testability (see "Library Entry Points" below).
-
-**Phase 7 addition:** Commands that load embedders (`plugin enable`, `models download`, `catalog update`, `reindex`) now expose a second public entry point `pub fn run_with_deps(...)` that accepts a pre-configured `LifecycleDeps`. This allows tests to drive the library API with `StubEmbedder` without loading real ONNX models in CI.
-
-Examples:
-- `src/commands/reindex.rs::pub fn run_with_deps(scope, plugins, deps, force, mode)` — used by `tests/reindex.rs` library tests
-- `src/commands/catalog/update.rs::pub fn reindex_catalog_plugins(catalog, enabled, deps)` — used by `tests/catalog_update_reindex.rs` library tests
-
-**Phase 8 addition:** Commands with side effects that prevent test usage (e.g., `std::process::exit` for degraded health) expose a library-API function for pure logic (`assemble_report`), leaving the CLI `run()` for exit semantics. Example from `src/commands/status.rs`:
+When an MCP tool handler (which is `async fn`) needs to invoke sync code (index queries, embedder inference):
 
 ```rust
-/// Library-API entry point: testable, no std::process::exit
-pub fn assemble_report(paths: &Paths, verify: bool) -> Result<StatusReport, TomeError> { ... }
-
-/// CLI entry point: adds std::process::exit(1) for non-Ok cases
-pub fn run(args: StatusArgs, mode: Mode) -> Result<(), TomeError> {
-    let report = assemble_report(&paths, args.verify)?;
-    emit(&report, mode)?;
-    if !matches!(report.overall, OverallHealth::Ok) {
-        std::process::exit(1);  // Non-recoverable health state
+pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpError> {
+    // Cheap async work (validation, early checks)
+    if input.is_invalid() {
+        return Err(error);
     }
-    Ok(())
+
+    // Heavy sync work → spawn_blocking
+    let outcome = tokio::task::spawn_blocking(move || {
+        // rusqlite, fastembed, etc. work here
+        do_expensive_sync_work()
+    }).await?;
+
+    Ok(output_from(outcome))
 }
 ```
 
-Tests call `assemble_report` directly; the `run` wrapper is for CLI dispatch only.
+The runtime stays responsive; sync inference latency doesn't hold up other protocol messages. See `src/mcp/tools/search_skills.rs` and `src/mcp/tools/get_skill.rs` for examples.
 
-**Phase 3 / US4 addition:** Commands that execute side-effect repairs in response to detected problems expose a separate "assemble diagnoses + fixes" function (`assemble_report` in `doctor::assemble`) that performs zero writes, followed by an explicit "apply repairs" phase. This allows tests to inspect the diagnosis report before invoking the repair code path.
+### Atomic Populated-Directory Landing
 
-Example from `src/commands/doctor.rs`:
-```rust
-/// Library-API entry point: diagnose without applying fixes
-pub fn assemble_report(scope, paths, home, verify) -> Result<DoctorReport, TomeError> { ... }
-
-/// Apply a single suggested fix; used by CLI to iterate through the list
-pub fn apply_one_fix(subsystem, detail, scope, paths, home, verify) -> Result<(), TomeError> { ... }
-
-/// CLI entry point: assemble, optionally apply all, re-assemble
-pub fn run(args: DoctorArgs, mode: Mode) -> Result<(), TomeError> {
-    let mut report = assemble_report(&scope, &paths, &home, args.verify)?;
-    emit_diagnoses(&report, mode)?;
-    
-    if args.fix {
-        for fix in &report.suggested_fixes {
-            apply_one_fix(&fix.subsystem, &fix.detail, ...)?;
-        }
-        // Re-assemble to show updated state
-        report = assemble_report(&scope, &paths, &home, args.verify)?;
-        emit_diagnoses(&report, mode)?;
-    }
-    Ok(())
-}
-```
-
-**Phase 4 / US2 addition:** Commands with non-exit library entry points follow the same pattern. `workspace::info::assemble` is pure compute; `workspace::init` takes a library-only signature. CLI wrappers emit and handle exit semantics.
-
-### --version Pre-Parse Hook (Phase 8)
-
-The `--version` flag requires special handling:
-
-1. **Problem:** Clap's auto-handler can't include embedder/reranker identities in the output, nor can it honour the `--json` flag.
-2. **Solution:** Set `disable_version_flag = true` on the `Cli` derive in `src/cli.rs`, then intercept in `main.rs` before clap parsing:
+When multiple files must appear either completely or not at all (e.g., `.tome/` with `config.toml` + `index.db`), use staging + rename on the **same filesystem**:
 
 ```rust
-let raw: Vec<String> = std::env::args().collect();
-if raw.iter().skip(1).any(|a| a == "--version" || a == "-V") {
-    let json = raw.iter().any(|a| a == "--json");
-    commands::status::print_version(json);
-    std::process::exit(0);
-}
-
-let cli = Cli::parse();  // Now --version won't be seen by clap
-```
-
-**Pattern:** This pre-parse hook pattern applies to any flag that needs to short-circuit clap's default behavior. For now, only `--version` uses it.
-
-### Interactive CLI Pattern (Phase 4)
-
-The `tome plugin` interactive flow (no subcommand) is implemented in `src/commands/plugin/interactive.rs`:
-
-- **TTY gating:** Check `output::stdin_is_tty() && output::stdout_is_tty()` before constructing prompts (FR-051)
-- **Multi-level loop structure:** Catalog selector → plugin browser → plugin view/action prompts
-- **Navigation:** Back and Quit at each level return to parent with clean redraw
-- **Prompt library:** `inquire` (Select, MultiSelect, Confirm) — refuses on non-TTY
-- **Action menu:** Shown status (Enabled/Disabled) and allows [Enable/Disable, Back] per current state
-- **Post-action redraw:** After `enable` or `disable`, redraw the plugin view with updated status and fresh action menu
-
-Testing pattern (PTY-driven via `rexpect`):
-1. Pre-enable plugins via library API (avoids loading `FastembedEmbedder` in CLI child)
-2. Spawn `tome plugin` under pty with `NO_COLOR=1` for reliable prompt matching
-3. Script interaction via `send_flush()`, `press_enter()`, `press_down()`
-4. Assert final state via database queries and exit code
-
-See `tests/plugin_interactive.rs` for full test cases and helper functions.
-
-### Plugin Lifecycle Pattern (Phase 3–5)
-
-**Library API design:** The `plugin::lifecycle` module is testable without loading real ONNX models. It takes:
-- A plugin ID (`<catalog>/<plugin>`)
-- A `LifecycleDeps` struct holding references to paths, config, and an `Embedder` trait object
-
-CLI callers construct a real `FastembedEmbedder` (in `enable` only); tests construct a deterministic `StubEmbedder`.
-
-**Closure-injected embedder:** Inside `index::skills::enable_plugin_atomic`, the function accepts:
-```rust
-F: FnMut(&str) -> Result<Vec<f32>, TomeError>
-```
-
-not a trait object. Callers adapt `&dyn Embedder` at the call site via a closure.
-
-**Lock + Result release pattern:** Outer function owns the lock; helper functions own SQL:
-
-```rust
-let lock = acquire_lock(&deps.paths.index_lock)?;
-let result = enable_locked(id, &plugin_dir, &plugin_version, deps);
-
-match result {
-    Ok((summary, warnings)) => {
-        lock.release()?;  // Explicitly release; surface unlock errors
-        Ok(EnableOutcome { ... })
-    }
-    Err(e) => {
-        drop(lock);  // Drop releases best-effort; suppress error
-        Err(e)
-    }
-}
-```
-
-**Idempotency:** Both `enable` (Phase 3) and `disable` (Phase 5) detect when a plugin is already in the requested state and return `TomeError::PluginAlreadyInState` (exit code 21) per FR-008.
-
-### Atomic Directory Creation Pattern (Phase 4 / US2)
-
-When creating a directory structure that must be atomic (never partially visible), use the `tempfile::Builder::tempdir_in(target_root)` + `TempDir::keep()` + `std::fs::rename` pattern:
-
-1. Create a temp directory **inside the target root** (not in `$TMPDIR`) using `tempfile::Builder::new().prefix(".dot.tmp.").tempdir_in(&absolute)` so the final rename is on the same filesystem (POSIX-atomic)
-2. Write all content into the staging directory
-3. Set permissions (e.g., `0o700` on Unix) on the staging directory before content lands, so the security window starts at creation
-4. Rename the staging directory to the final name via `std::fs::rename`, which is atomic as a single operation
-5. Only on success is the directory visible to readers
-
-This ensures that readers never see a partial `.tome/` directory. Used in `src/workspace/init.rs` for atomic workspace initialization.
-
-Example from `src/workspace/init.rs`:
-```rust
+// 1. Create staging dir **inside the target parent** so rename is atomic
 let staging = tempfile::Builder::new()
     .prefix(".tome.tmp.")
-    .tempdir_in(&absolute)
-    .map_err(TomeError::Io)?;
+    .tempdir_in(&absolute)?;  // Same filesystem
 
-// Write content...
-std::fs::write(staging.path().join("config.toml"), config_bytes)?;
+// 2. Populate the staging dir
+std::fs::write(staging.path().join("config.toml"), config_body)?;
+// ... more writes ...
 
-// Atomic rename (only step visible to readers)
-std::fs::rename(staging.path(), &marker)?;
+// 3. Consume the TempDir guard → drop auto-cleanup
+let staged_path = staging.keep()?;
+
+// 4. Atomic rename (POSIX-atomic when source and target are on same FS)
+std::fs::rename(&staged_path, &target)?;
 ```
 
-### Emit-Only Serialize Records (Phase 4 / US2)
+**Why this design**:
+- Rename is atomic when both paths are on the same filesystem
+- A SIGINT/crash mid-populate leaves the staging dir (which starts with `.tmp.`) unvisited by readers
+- No temporary files spill into `$TMPDIR` on a different filesystem
 
-When an outcome or report struct is emitted as JSON output but never deserialized, omit `#[serde(deny_unknown_fields)]`. These are API output records, and strict field validation is unnecessary.
+See `src/workspace/init.rs` for the full pattern, including rollback semantics (`--force` renames an existing target to `.old` first).
 
-- `WorkspaceInfo` — used only for `--json` emission; uses `#[derive(Serialize)]` without field strictness
-- `InitOutcome` — used only for `--json` emission; uses `#[derive(Serialize)]` without field strictness
-- `ScopeSource` — enum serialized for `--json` output; uses `#[serde(rename_all = "snake_case")]` to match contract values (`"flag" | "global_flag" | "env" | "cwd_walk" | "global_fallback"`)
+### Opt-In Registry File Pattern
 
-**Rationale:** Only Tome-owned **inputs** (config, manifests) need strict deserialization. Output records are emit-only and benefit from permissive forward-compat.
-
-### Silent Compute / Emit Wrapper Pattern (Phase 3 / US1 and Phase 4 / US2)
-
-When a CLI command's compute path is reused by non-CLI surfaces (MCP, library API, direct calls), split into:
-1. **Silent compute function** (`pipeline` or `assemble`) — performs all work, no side effects, returns pure result
-2. **Emit wrapper** (`run_with_deps` or `run`) — calls the compute function, then emits per mode (Human or JSON)
-
-Tests + alternative callers use the compute function; the CLI uses the emit wrapper.
-
-Examples:
-- `query::pipeline(args, deps) -> Result<QueryOutcome>` (silent) + `query::run_with_deps(args, deps, mode) -> Result<()>` (emit)
-- `workspace::info::assemble(scope, paths) -> Result<WorkspaceInfo>` (silent); CLI emits via `run()`
-- `workspace::init(target, inherit, force, paths) -> Result<InitOutcome>` (library signature, no emit); CLI emits via `run()`
-
-### Batch Operations: Locking Patterns (Phase 7–9)
-
-Two complementary locking patterns coexist. Choose based on operation semantics:
-
-**Pattern 1: Per-Item Atomicity (Phase 7, `tome catalog update`)**
-
-Each item in a batch acquires its own advisory lock, operates independently, then releases:
+For "track this for me, but only if I ask" features (e.g., workspace registry at `${state_dir}/workspaces.txt`), use:
 
 ```rust
-for id in enabled {
-    let outcome = lifecycle::reindex_plugin(&id, deps)?;  // lock per plugin
-    summary.aggregate(outcome);
-}
-```
-
-**When to use:** Batch operations where each item is semantically independent, and a failure partway through should surface progress on earlier items (N independent operations).
-
-**Pattern 2: Single-Lock-Per-Batch (Phase 9, `cascade_disable_for_catalog`)**
-
-Acquire the lock once, mutate everything, release once:
-
-```rust
-pub fn cascade_disable_for_catalog(
-    paths: &Paths,
-    catalog: &str,
-    plugins: &[String],
-    embedder_seed: MetaSeed,
-    reranker_seed: MetaSeed,
-) -> Result<u32, TomeError> {
-    let lock = acquire_lock(&paths.index_lock)?;
-    let result = (|| -> Result<u32, TomeError> {
-        let conn = index::open(...)?;
-        for plugin in plugins {
-            let dropped = delete_by_plugin(&conn, catalog, plugin)?;
-            total = total.saturating_add(dropped);
-        }
-        Ok(total)
-    })();
-    
-    match result {
-        Ok(total) => { lock.release()?; Ok(total) }
-        Err(e) => { drop(lock); Err(e) }
+pub fn append_if_registry_exists(path: &Path, item: &str) -> Result<(), TomeError> {
+    if !path.is_file() {
+        return Ok(()); // No-op if file doesn't exist
     }
-}
-```
-
-**When to use:** Batch operations that are semantically a single user action ("destroy this catalog"), where the entire operation succeeds or fails atomically. All items participate in one transaction.
-
-**Rationale:** The operation's semantic contract determines the locking pattern. `catalog remove --force` is "delete this catalog's plugins" (all-or-nothing atomicity); `catalog update` is "refresh N independent catalogs" (per-item independence).
-
-### Reference-Counted Shared Resource Cleanup (Phase 5 / US3)
-
-When multiple scopes (global, workspace) reference the same resource (e.g., a catalog clone by URL), implement reference counting to avoid premature deletion:
-
-**Enumeration:** `catalog::store::reference_count(url, paths) -> Vec<Scope>` walks every known scope (global + workspace registries) and returns the list of scopes that reference the URL.
-
-**Deletion:** `commands::catalog::remove` checks reference count before cleanup. A URL-based cache directory is only deleted when the last referencing scope is removed.
-
-**TOCTOU resilience:** Pre-deletion enumeration (without lock) means a concurrent remove can race. The pattern is documented as benign: one writer wins, the other no-ops safely because the cache directory either exists or doesn't.
-
-**Cache reuse on add:** When adding a catalog with a URL that already has a clone (same URL in a different scope), `catalog::add` detects the existing cache directory via `let reuse_existing = cache_dir.exists()` and uses it instead of re-cloning. The local `reuse_existing` flag controls whether the rollback path deletes the directory on error — we only delete what we created.
-
-Example from `src/commands/catalog/add.rs`:
-```rust
-let reuse_existing = cache_dir.exists();
-let (manifest, _tempdir_guard) = if reuse_existing {
-    // Reuse the existing clone; no git operation
-    (read_manifest(&cache_dir, url)?, None)
-} else {
-    // New clone; tempdir will be renamed into place atomically
-    (create_new_clone(...), Some(tempdir))
-};
-
-// On error, only rollback what we created
-if !reuse_existing && result.is_err() {
-    delete_cache_dir(&cache_dir)?;
-}
-```
-
-### Batch Reindex Operations (Phase 7)
-
-**Per-plugin atomicity:** Each `lifecycle::reindex_plugin` call acquires its own advisory lock. The spec doesn't require cross-plugin atomicity for `tome catalog update` or `tome reindex`. This is documented to set the precedent for future batch ops.
-
-**Example from `src/commands/catalog/update.rs`:**
-```rust
-pub fn reindex_catalog_plugins(
-    catalog_name: &str,
-    enabled: &[PluginId],
-    deps: &LifecycleDeps,
-) -> Result<ReindexSummary, TomeError> {
-    let mut summary = ReindexSummary::default();
-    
-    for id in enabled {
-        // Each call acquires lock independently
-        let outcome = lifecycle::reindex_plugin(&id, deps)?;
-        summary.aggregate(outcome);
-    }
-    
-    Ok(summary)
-}
-```
-
-### Banner Skipped in JSON Mode
-
-NDJSON consumers expect structured records on stdout and nothing on stderr unless an error occurs. Established in `commands::plugin::enable` and extended across all NDJSON producers:
-
-```rust
-if mode == Mode::Human {
-    writeln!(out, "Enabling {}…", id)?;
-}
-```
-
-Then conditionally emit human or JSON output. Applied to:
-- `plugin::enable`
-- `plugin::disable`
-- `models::download`
-- `models::list`
-- `models::remove`
-- `catalog::update` ("Reindexed plugins" block emits only NDJSON when `--json`)
-- `reindex`
-
-### Optional JSON Array Pattern (Phase 9)
-
-When a JSON envelope may include an optional field that is sometimes empty (e.g., cascade array in `catalog remove --json`), use the `#[serde(skip_serializing_if = "Vec::is_empty")]` attribute:
-
-```rust
-#[derive(Serialize)]
-pub struct RemovedRecord {
-    pub name: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub cascade: Vec<CascadeRecord>,
-}
-```
-
-This keeps the JSON compact when the array is empty (normal `catalog remove` with no enabled plugins) and includes it when non-empty (cascade case with `--force`). Applied to:
-- `src/commands/catalog/remove.rs::RemovedRecord::cascade`
-
-### Warnings as Vec<String>
-
-Outcome structs carry `warnings: Vec<String>` (not a structured warning enum) so the CLI layer prints them on stderr:
-
-```rust
-pub struct EnableOutcome {
-    pub plugin: PluginId,
-    pub summary: EnableSummary,
-    pub duration: Duration,
-    pub warnings: Vec<String>,  // FR-011 / FR-012 / FR-013c notices
-}
-```
-
-### Resolver Invariant
-
-Anything resolving `<catalog>/<plugin>` goes through `lifecycle::resolve_plugin_dir`. There is exactly one such function; duplicates have been consolidated.
-
-### TOML Deserialization (Strict)
-
-Every struct that derives `serde::Deserialize` carries `#[serde(deny_unknown_fields)]`:
-
-```rust
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]  // Catch typos, misnamed keys
-pub struct CatalogManifest {
-    pub name: String,
-    pub description: String,
-    // ...
-}
-```
-
-This is enforced by `tests/manifest_strictness.rs`, which parses the source and asserts that every `Deserialize`-deriving struct has the attribute. Violation causes compile failure in that test.
-
-**Why:** Silent acceptance of unknown fields hides user typos (e.g. `plugin_source` instead of `plugins[].source`). By rejecting unknown fields at parse time, we force the user to read the schema and understand the correct structure.
-
-**Exceptions (Strictness Boundary, FR-013a):** Third-party inputs (`plugin.json`, `SKILL.md` YAML frontmatter) parse leniently with `#[serde(default)]` fallbacks — forward-compat with upstream additions.
-
-**Emit-only records (Phase 4 / US2):** Output-only structs (`WorkspaceInfo`, `InitOutcome`) omit the strictness attribute. These are never deserialized; they are emit-only. Their forward-compat is naturally permissive.
-
-### Process Execution (Git)
-
-All `git` commands are invoked via `std::process::Command` (no `libgit2`):
-
-```rust
-let status = Command::new("git")
-    .args(&["clone", url, path])
-    .current_dir(work_dir)
-    .env("GIT_AUTHOR_NAME", "Tome Test")
-    .status()
-    .map_err(|e| TomeError::GitFailed { catalog, detail: e.to_string() })?;
-```
-
-**Why:** Every developer machine has `git`. Shelling out avoids a large binary dependency and lets us inherit the user's configured credentials, SSH keys, and GPG signing.
-
-Signal handling: `ctrlc::set_handler` flips `CANCELLED` atomic bool. Operations check `was_cancelled()` and kill spawned processes before returning `TomeError::Interrupted` (exit code 8).
-
-### Helper Promotion as Deliberate Process (Phase 8)
-
-When a helper function is used by multiple independent modules (usually 4+ callers), it's promoted from `pub(crate)` to `pub` to mark it as an intentional public API surface. Recent promotions:
-
-- `ModelState` (enum) — used by `status.rs`, `models.rs`, tests
-- `cheap_state(...)` — used by `models::list`, `status.rs`, tests
-- `read_manifest(...)` — used by `plugin::show`, `plugin::enable`, `plugin_enable.rs` tests
-- `primary_file_path(...)` — used by multiple model-related functions
-- `human_mb(...)` — formatting helper for model sizes
-- `registry_seeds()` / `embedder_entry()` / `reranker_entry()` — used by `status.rs`, tests
-- `check_model(...)` / `check_index(...)` / `check_drift(...)` — used by `status.rs`, `doctor.rs`, tests
-
-**Policy:** Promotion is intentional — the type system tells us "this internal helper is now a public API surface". Document it via the function's doc comment and in this guide.
-
-**Phase 3 / US4 addition:** Shared health-check functions in `src/commands/status.rs` (`check_model`, `check_index`, `check_drift`) are promoted to `pub` so `src/commands/doctor.rs` can reuse them without duplication. Document in module-level docs: "Single source of truth for health checks — both status and doctor commands use these helpers."
-
-### Home Parameter as Test-Isolation Hook (Phase 3 / US4)
-
-When functions perform harness detection or read environment state that tests need to control (e.g., detecting VSCode, Cursor, or other integration environments), accept a `home: &Path` parameter instead of reading from the environment. This allows tests to pass synthetic home directories without mutating `$HOME`.
-
-Pattern:
-```rust
-pub fn assemble_report(scope: &ResolvedScope, paths: &Paths, home: &Path, verify: bool) -> Result<DoctorReport, TomeError> {
-    // Read harness info from `home` (no env mutation)
-    let harness = detect_harness(home)?;
-    // ... check health ...
-    Ok(report)
-}
-```
-
-Tests construct isolated home directories and pass them:
-```rust
-let tmp = TempDir::new().unwrap();
-let report = assemble_report(&scope, &paths, tmp.path(), false)?;
-```
-
-CLI resolves from environment:
-```rust
-let home = std::env::var("HOME").ok().map(PathBuf::from).unwrap_or(...);
-let report = assemble_report(&scope, &paths, &home, args.verify)?;
-```
-
-**Benefit:** No global environment pollution; tests stay isolated and fast.
-
-### Subsystem-String Routing for Fix Dispatch (Phase 3 / US4)
-
-When a command dispatches repairs based on detected problems, use string-keyed dispatch on the `SuggestedFix.subsystem` field. This allows extensibility without changing the enum.
-
-Pattern:
-```rust
-#[derive(Serialize)]
-pub struct SuggestedFix {
-    pub subsystem: String,  // "embedder", "reranker", "catalog:name", "schema"
-    pub detail: String,
-    // ...
-}
-
-pub fn apply_one_fix(subsystem: &str, detail: &str, scope, paths, home) -> Result<(), TomeError> {
-    match subsystem {
-        "embedder" => { /* handle embedder fix */ }
-        "reranker" => { /* handle reranker fix */ }
-        s if s.starts_with("catalog:") => {
-            let catalog_name = &s[8..];  // strip "catalog:" prefix
-            /* handle catalog-specific fix */
-        }
-        "schema" => { /* handle schema migration */ }
-        _ => Err(TomeError::Internal("unknown fix type".into()))
-    }
-}
-```
-
-**Benefits:**
-- Extensible: new subsystems don't require enum changes
-- Composable: catalog name is embedded in the key
-- Forward-compatible: unknown keys can log a warning instead of panicking
-
-### Re-Assemble Pattern for Post-Fix State (Phase 3 / US4)
-
-When a command applies zero-write repairs and needs to show updated state, re-run the diagnose function (which performs only health checks, no mutations) instead of manually updating the report struct.
-
-Pattern:
-```rust
-pub fn run(args: DoctorArgs, mode: Mode) -> Result<(), TomeError> {
-    let mut report = assemble_report(&scope, &paths, &home, args.verify)?;
-    emit_diagnoses(&report, mode)?;
-    
-    if args.fix {
-        for fix in &report.suggested_fixes {
-            apply_one_fix(&fix.subsystem, &fix.detail, ...)?;
-        }
-        
-        // Re-assemble to show updated state
-        // (no need to manually mutate `report`)
-        report = assemble_report(&scope, &paths, &home, args.verify)?;
-        emit_diagnoses(&report, mode)?;
+    // File exists → append (deduped by exact-match)
+    let mut existing = std::fs::read_to_string(path)?;
+    if !existing.lines().any(|line| line == item) {
+        existing.push_str("\n");
+        existing.push_str(item);
+        std::fs::write(path, existing)?;
     }
     Ok(())
 }
 ```
 
-**Benefit:** The diagnose logic is the single source of truth. Re-running it ensures the displayed state is current and accurate.
+The user must touch the registry file **once** to opt in; subsequent operations append. No special initialization.
 
-### Test Injection Points (Phase 3 / F7–F8 and Phase 3 / US5)
+See `src/workspace/inventory.rs`.
 
-**Reachable from integration tests:** When a test injection point must be reachable from integration tests under `tests/` AND from `#[cfg(test)]` unit tests AND potentially from production code in tightly scoped diagnostic scenarios, gate it with `#[doc(hidden)] pub static` instead of `#[cfg(test)]`. The `#[doc(hidden)]` keeps it out of the published API docs; the `pub` makes it visible across the integration-test crate boundary (which doesn't inherit `cfg(test)`).
+### Content-Addressed Shared Resource Reference Counting
 
-Document the test-only intent in a doc comment:
+When a resource is shared across scopes (e.g., on-disk catalog clones at `catalogs/<sha256>/`), use ad-hoc enumeration instead of unconditional deletion:
 
 ```rust
-/// Test-only injection point. Phase 7's `tests/schema_migration_e2e.rs`
-/// registers a synthetic migration table for a single scenario, then
-/// clears the slot. Production [`apply_pending`] reads through
-/// [`active_migrations`] which falls back to [`MIGRATIONS`].
-///
-/// Public surface intentionally — integration tests live outside the
-/// crate and `#[cfg(test)]` items aren't visible there. Doc-hidden to
-/// keep it out of the published API; the only legitimate caller is a
-/// test.
+pub fn reference_count(url: &str, paths: &Paths) -> Result<Vec<Scope>, TomeError> {
+    let mut scopes = Vec::new();
+    
+    // Global config
+    if global_config_refs_url(url, paths)? {
+        scopes.push(Scope::Global);
+    }
+    
+    // Each workspace in the opt-in registry
+    for ws_root in scopes_from_registry(paths)? {
+        if workspace_config_refs_url(url, paths, ws_root)? {
+            scopes.push(Scope::Workspace(ws_root));
+        }
+    }
+    
+    Ok(scopes)
+}
+
+// Then in catalog::remove:
+let refs = reference_count(&entry.url, &paths)?;
+if refs.is_empty() {
+    fs::remove_dir_all(&entry.path)?; // Safe to delete
+}
+```
+
+**TOCTOU profile**: The enumeration is not locked. A concurrent remove + add race benignly (one wins; the other may leave a dangling reference recoverable by re-fetching). Same profile as Phase 2's `cascade_disable_for_catalog` pre-check.
+
+See `src/catalog/store.rs` for the full implementation.
+
+### Reuse Closed-Set Variants Over Promoting New Ones
+
+When a new failure mode maps semantically onto an existing `TomeError` variant + exit code, prefer reuse:
+
+```rust
+// New failure: workspace already initialised
+// Existing variant: CatalogAlreadyExists (code 4)
+// Decision: reuse
+
+return Err(TomeError::CatalogAlreadyExists(format!(
+    "workspace at {}",
+    marker.display()
+)));
+```
+
+**Cost**: The Display message may be slightly off (e.g., "catalog `workspace at /path/.tome` is already registered"). **Benefit**: Zero variants added, zero exit-code churn, zero JSON envelope shape change.
+
+Promote a new variant only if a specific failure mode needs to be distinguished from the existing one. Examples:
+- Phase 3 added `WorkspaceMalformed` (70) because workspace-specific errors (malformed config, unopenable index) differ from catalog errors
+- Phase 3 added `SchemaVersionTooNew` (73) because it's a distinct refusal from all prior database errors
+
+See the `TomeError` enum and the P3/P4 retros for examples.
+
+### home: &Path Test Isolation Hook
+
+When a library function would otherwise read `$HOME` directly, accept it as a parameter:
+
+```rust
+pub fn assemble_report(
+    scope: &ResolvedScope,
+    paths: &Paths,
+    home: &Path,  // ← Parameter, not env
+    verify: bool,
+) -> Result<DoctorReport, TomeError> {
+    // Harness detection: probe six well-known dirs under home
+    let harness_dirs = vec![
+        home.join(".claude"),
+        home.join(".cursor"),
+        // ...
+    ];
+    // ...
+}
+```
+
+**Tests** pass a `TempDir`-rooted path; **production** passes `std::env::var("HOME")`. Drops the dependency on `serial_test` for env-isolated tests.
+
+See `src/doctor/harness_detect.rs`.
+
+### Subsystem String Routing for Tagged Repair Lists
+
+When a dispatch list needs per-item routing (e.g., suggested fixes by subsystem), encode the key as a string field:
+
+```rust
+pub struct SuggestedFix {
+    pub auto_fixable: bool,
+    pub subsystem: String,  // "embedder" / "reranker" / "catalog:name" / "schema"
+    pub description: String,
+}
+
+// Dispatch in doctor::fixes::apply:
+for fix in report.suggested_fixes.iter() {
+    if fix.subsystem == "embedder" {
+        // Repair embedder
+    } else if let Some(catalog_name) = fix.subsystem.strip_prefix("catalog:") {
+        // Repair catalog_name
+    } else if fix.subsystem == "schema" {
+        // Forward-migrate schema
+    }
+}
+```
+
+**Trade-off**: Less type-safe than an enum, but simpler for wire serialization and per-instance data extraction (e.g., `.strip_prefix("catalog:")`). Flat if-else dispatch ladder works up to ~6 arms.
+
+See `src/doctor/mod.rs`.
+
+### re_assemble Post-Mutation Pattern
+
+When an "apply" function mutates per-field state in place (e.g., `fixes::apply_one` updates `report.embedder` / `report.catalogs` after repairs), expose a sibling `re_assemble` that recomputes derived state without re-running expensive checks:
+
+```rust
+pub fn apply(report: &mut DoctorReport, paths: &Paths, scope: &Scope) -> Result<(), TomeError> {
+    for fix in report.suggested_fixes.clone() {
+        apply_one(report, fix, paths, scope)?;
+        // Expensive FS work inside apply_one
+    }
+    Ok(())
+}
+
+pub fn re_assemble(report: &mut DoctorReport) {
+    // Rebuild suggested_fixes + overall from the updated embedder/catalogs/etc.
+    // WITHOUT re-probing catalogs, re-running integrity_check, etc.
+    report.suggested_fixes = build_suggested_fixes(report);
+    report.overall = classify(report);
+}
+
+// Caller:
+doctor::fixes::apply(&mut report, paths, scope)?;
+doctor::fixes::re_assemble(&mut report);
+```
+
+Halves the FS cost on repeat reads. See `src/doctor/fixes.rs`.
+
+### Test-Only Injection via #[doc(hidden)] pub static
+
+Integration tests (under `tests/`) run outside the crate and don't see `#[cfg(test)]` items. For test-only injection points, use `#[doc(hidden)] pub static`:
+
+```rust
+// src/index/migrations.rs
 #[doc(hidden)]
 pub static MIGRATIONS_OVERRIDE: RefCell<Option<&'static [Migration]>> =
     const { RefCell::new(None) };
+
+// tests/schema_migration_e2e.rs
+#[test]
+fn synthetic_migration_succeeds() {
+    static MIGRATIONS: &[Migration] = &[/* synthetic */];
+    let _guard = MigrationsGuard::install(MIGRATIONS);
+    // Test body
+}
 ```
 
-Example usage: `src/index/migrations.rs::MIGRATIONS_OVERRIDE` for schema-migration e2e tests.
+The `#[doc(hidden)]` keeps it out of the published API; the doc comment explains it's test-only.
 
-**RAII migration override guard (Phase 3 / US5):** When using `MIGRATIONS_OVERRIDE` in integration tests, wrap the installation with an RAII guard that restores `None` on drop. The guard survives panics (try/finally semantics) so a failed test assertion never poisons subsequent tests on the same thread:
+### RAII MigrationsGuard for Thread-Local Injection
+
+Pair a `thread_local!` injection point with a guard struct in the test file:
 
 ```rust
 struct MigrationsGuard;
@@ -811,163 +397,150 @@ impl Drop for MigrationsGuard {
 }
 
 #[test]
-fn test_migration_scenario() {
-    static MIGRATIONS: &[Migration] = &[...];
-    let _guard = MigrationsGuard::install(MIGRATIONS);
-    // test runs; guard restores None on exit (even on panic)
+fn test_migration() {
+    let _guard = MigrationsGuard::install(&[/* ... */]);
+    // Use MIGRATIONS_OVERRIDE; guard clears it on drop
 }
 ```
 
-**Small filesystem operations in-module:** Unit tests for small file-system operations (file creation, rotation, permissions, idempotent no-ops) live in `#[cfg(test)] mod tests` blocks inside the module under test. These operations (rename, `set_len` for sparse fixtures, metadata reads) are fast and deterministic, making them suitable for in-module unit tests.
+Survives panics; no manual teardown; no cross-test leakage. See `tests/schema_migration_e2e.rs`.
 
-Example: `src/mcp/log.rs::tests` module contains 4 unit tests for rotation policy (skip under cap, rename when oversized, overwrite existing prev, noop when absent).
+### Emit-Only Serialize Records
 
-### MCP Tool Definitions (Phase 3 / F2)
+Wire-shape types (e.g., `WorkspaceInfo`, `InitOutcome`, `DoctorReport`) are never deserialized — they exist to render `--json` for stdout. Omit `#[serde(deny_unknown_fields)]` (the strictness boundary applies only to Tome-owned **inputs**). Pin the wire format with a JSON serialization test instead:
 
-**rmcp macro visibility:** The `#[tool_router(vis = "pub")]` attribute on the tool router makes the macro-generated `tool_router()` function visible to integration tests (`tests/mcp_server.rs`) so test code can introspect the advertised tool list and descriptions. The visibility argument is parsed via `darling` and documented by `rmcp-macros`.
-
-**Tool handler signatures:** Each MCP tool handler in `src/mcp/tools/{search_skills,get_skill}` exposes:
-- `Input` / `Output` types derived from `Deserialize`, `Serialize`, and `JsonSchema` (for `rmcp`'s tool advertisement)
-- A `pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpError>` function
-
-The `#[tool]` macro in `src/mcp/server.rs` delegates to these free functions, keeping per-tool logic modular. The `#[tool_handler]` attribute on the `ServerHandler` impl routes `list_tools` / `call_tool` through the generated router.
-
-**Description as doc comment:** The `#[tool]` macro's `description` argument accepts only string literals, BUT the macro falls back to doc comments on the handler method (preferred for long descriptions). This allows descriptions ≤350 chars to be code comments and automatically picked up by rmcp-macros.
-
-**Domain-specific error codes via JSON `data`:** MCP error envelopes carry the contract's structured codes (`unknown_catalog`, `plugin_without_catalog`, `unknown_skill`, etc.) inside `ErrorData.data` as `{"code": "...", ...}`. The JSON-RPC numeric code (`INTERNAL_ERROR` / `INVALID_PARAMS`) is generic; the application-level code is the precise identifier.
-
-Example from `src/mcp/tools/search_skills.rs`:
 ```rust
-return Err(McpError::invalid_params(
-    "plugin requires catalog",
-    Some(json!({ "code": "plugin_without_catalog" })),
-));
+#[test]
+fn workspace_info_json_shape_is_byte_stable() {
+    let info = WorkspaceInfo { /* ... */ };
+    let json = serde_json::to_string(&info).unwrap();
+    assert_eq!(json, expected_json);  // Field order, null vs absent, etc.
+}
 ```
 
-### MCP Async Patterns (Phase 3 / F1–F2)
+See `tests/workspace_info.rs` for examples.
 
-**Single-threaded tokio runtime:** The MCP server runs `tokio::runtime::Builder::new_current_thread()` to avoid a pool of background threads. All I/O-bound operations (index reads, model loading) are sync and block the event loop, so a thread pool would not help.
+### Library/CLI Test Boundary
 
-**`spawn_blocking` for sync I/O inside async handlers:** Every MCP tool handler that touches rusqlite or fastembed wraps the call in `tokio::task::spawn_blocking` to keep the event loop responsive while the expensive operation completes. This is an async boundary — a utility for structured concurrency without changing the architecture (still single-threaded, not CPU-parallel).
+Tests are split into **library API** (test state via `StubEmbedder` / `StubReranker`) and **CLI binary** (real process invocation via `Command`):
 
-Example from `src/mcp/tools/search_skills.rs`:
-```rust
-let reranker_arc = state
-    .reranker
-    .get_or_try_init(|| async move {
-        tokio::task::spawn_blocking(move || {
-            FastembedReranker::load(reranker_entry, &reranker_dir)
-        })
-        .await
-        .map_err(|e| TomeError::McpStartupFailed { ... })?
-        .map(|r| Arc::new(r) as Arc<dyn Reranker>)
-    })
-    .await
-    .map_err(tome_to_mcp)?
-    .clone();
-```
+- **Heavy-state paths** (enable plugin, download model, reindex) → library API + `StubEmbedder`; exercising the full embedder path is deferred to manual verification or integration tests with real models.
+- **Light/error paths** (list, show, disable, remove with `--force`) → CLI binary; no embedder load needed.
+- **Interactive paths** (bare `tome plugin`, non-TTY refusals) → CLI binary via `rexpect` (pty harness).
 
-**MCP-local async boundary:** Async lives strictly inside `src/mcp/`; the rest of Tome stays synchronous. This is enforced by a structural test (see `tests/mcp_lifecycle.rs`).
+**Rationale**: The full `FastembedEmbedder` loads multi-MB ONNX models; CI is fast when we use `StubEmbedder` for correctness and defer real-model testing to manual passes. See PR #3 (Phase 3 / User Story 1) for the established split.
 
-### Comment Policy
+## Import Ordering
 
-- **Explain why, not what.** The reader knows Rust.
-- **Document boundaries.** Module docstrings explain public contract.
-- **Cite the spec.** Cross-reference FR/SC/R numbers where the requirement originates.
-- **Flag subtle moves.** Regex patterns, error message classification logic, path normalization.
+Standard import order in Rust modules:
+
+1. Standard library (`std::`, `core::`)
+2. External crates (alphabetical)
+3. Internal crate modules
+4. Relative imports
+5. Type-only imports (`use X as Y` for disambiguation)
 
 Example:
 ```rust
-//! The closed `TomeError` enum is the single source of truth for exit codes.
-//! Adding a variant here forces edits to `tests/exit_codes.rs`, FR-022 in the
-//! spec, and the PRD's exit-code table — the compiler enforces the chain.
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use tempfile::TempDir;
+
+use crate::config::Config;
+use crate::paths::Paths;
+
+use super::store;
+use super::manifest::CatalogManifest;
 ```
 
-### Logging
+## Comments & Documentation
 
-`tracing` + `tracing-subscriber` write to stderr only, orthogonal to `--json` stdout.
+| Type | When to Use | Format |
+|------|-------------|--------|
+| Module docs | Top of every `mod.rs` or single-file module | `//! Explanation of module purpose` |
+| Doc comments | Public APIs, complex types, important fields | `/// Explanation` or `/** Explanation */` |
+| Inline comments | Complex logic, why not what | `// Explanation` |
+| TODO | Planned work with context | `// TODO: <issue>: description` |
+| FIXME | Known issues needing attention | `// FIXME: description` |
 
-| Directive | Effect |
-|-----------|--------|
-| No flag | silent (warnings and above if `RUST_LOG` is set) |
-| `-v` | info level |
-| `-vv` | debug level |
-| `TOME_LOG` env var | overrides `-v` count |
+**Doc comment convention**: Explain the *why*. Readers understand Rust syntax; explain design decisions, contract guarantees, and invariants.
 
-Logs never contain user paths, credentials, or sensitive query details — all are scrubbed before `tracing::error!()` or similar.
+Example:
+```rust
+/// Atomic landing of `.tome/` via staging + rename on the same filesystem.
+/// 
+/// A SIGINT/crash mid-populate leaves a staging dir starting with `.tmp.`
+/// unvisited by readers. The final rename is POSIX-atomic when both paths
+/// are on the same FS, so `.tome/` either appears complete or doesn't appear.
+pub fn init(target_root: &Path, /* ... */) -> Result<InitOutcome, TomeError> {
+    // ...
+}
+```
 
 ## Git Conventions
 
 ### Commit Messages
 
-**Format:** `type(scope): description`
-
-Enforced by `cog verify` in the `commit-msg` hook (versioned under `.githooks/`).
+Format: `type(scope): description`
 
 | Type | Usage | Example |
 |------|-------|---------|
-| feat | New feature or capability | `feat(catalog): add --ref pinning` |
-| fix | Bug fix | `fix(git): scrub URL credentials` |
-| docs | Documentation-only | `docs(readme): update installation` |
-| style | Formatting or whitespace | `style: wrap long lines` |
-| refactor | Code restructure (no user change) | `refactor(manifest): extract validator` |
-| test | Test-only changes | `test(exit_codes): add coverage` |
-| chore | Dependency or tooling | `chore(deps): bump clap to 4.6` |
+| feat | New feature | `feat(workspace): add tome workspace init` |
+| fix | Bug fix | `fix(doctor): embedder drift detection was inverted` |
+| refactor | Code restructure | `refactor(query): extract silent compute path` |
+| test | Adding/improving tests | `test(migrations): add e2e coverage for forward schema steps` |
+| docs | Documentation updates | `docs: refresh CONVENTIONS.md for Phase 3 patterns` |
+| chore | Maintenance | `chore: bump tokio to 1.40` |
 
-**Why Conventional Commits:** Powers changelog automation and lets reviewers triage diffs by intent.
+Enforced locally by `.githooks/pre-commit` hook running `cog verify` (Cocogitto).
 
-### Branching
+**Soft cap**: ~400 lines per commit or 2 modules max. Small PRs are easier to review.
 
-- **Trunk-based.** Short-lived feature branches off `main`.
-- **Merge frequently.** Small batches; PRs under ~400 lines.
-- **No rebasing onto main.** Rebase locally before pushing, then merge as-is to main.
+**Commit body**: Explain *why* the change is needed, not *what* changed (that's in the diff). Reference issue numbers, contracts, design rationale.
 
-### Git Hooks (`.githooks/`)
+Example:
+```
+feat(doctor): suggest fixes for broken catalog caches
 
-Versioned under `.githooks/`. No external hooks manager. Opt-in once per clone with `git config core.hooksPath .githooks`.
+The doctor now emits SuggestedFix records for catalogs in Missing or
+NotARepo states. The fix applies a re-clone via Git::clone_shallow under
+the advisory lock.
 
-**`.githooks/pre-commit`** runs sequentially:
-- `cargo fmt --check` — format check
-- `typos` — spell check
-- `cargo clippy --all-targets --all-features -- -D warnings` — linting
-
-**`.githooks/commit-msg`** runs `cog verify --file "$1"` — enforces conventional-commit format.
-
-**`.githooks/pre-push`** drains the refspec stdin git provides, then runs `cargo test --workspace` — full test suite before pushing.
-
-## Development Workflow
-
-### Local Setup
-
-```sh
-git clone https://github.com/devrelaicom/tome.git
-cd tome
-git config core.hooksPath .githooks    # One-time, wires up the hooks above
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+Closes US4.a per contracts/doctor.md §Repair classes.
+Ref: specs/003-phase-3-mcp-workspaces/research.md §R-13 (repair dispatch)
 ```
 
-All three quality gates must pass before a PR is ready.
+### Branch Naming
 
-### CI Matrix
+Short-lived feature branches off `main`:
+- `feature/something-descriptive`
+- `fix/issue-number-description`
+- `docs/topic`
 
-- **Platforms:** `macos-latest`, `ubuntu-latest`
-- **Toolchains:** Rust `stable`, Rust `1.93` (MSRV)
-- **Required checks:** fmt, clippy, build, test
-- **Weekly:** `cargo-audit` + `cargo-deny check`
+Delete after merge.
 
-Green CI on all combinations is required before merge.
+### PRs
+
+- One user story slice per PR (or one foundational slice).
+- If a commit + tests fit in ~250 lines AND nothing needs deeper review than tests provide, combine into one commit.
+- Use PR descriptions to link specs, contracts, and prior art.
+- Request review from 1–2 domain experts per PR (Rust-lens, security, contracts, etc. as needed).
+
+## Architectural Constraints
+
+From `CONSTITUTION.md`:
+
+- **Sync only** outside `src/mcp/`. No async/tokio outside the MCP module.
+- **Closed error set**. No `Other`/`Unknown` variant in `TomeError`.
+- **Strictness boundary**. Tome-owned config/manifest files use `#[serde(deny_unknown_fields)]`; third-party inputs (`plugin.json`, `SKILL.md` frontmatter) parse leniently.
+- **Atomic writes**. All multi-file operations use staging + rename or SQLite transactions.
+- **Credential scrubbing at the boundary**. Git URLs, model download URLs, error chains are scrubbed before logging/display.
+- **50 MB binary cap** (revised from 10 MB on 2026-05-13). Profile is `lto = "thin"`, `panic = "abort"`, `strip = "symbols"`. Non-waivable (NFR-001).
+
+See `CONSTITUTION.md` for the full rationale.
 
 ---
 
-## What Does NOT Belong Here
-
-- Test strategies → `TESTING.md`
-- Security practices → `SECURITY.md`
-- Architecture patterns → `ARCHITECTURE.md`
-- Technology choices → `STACK.md`
-
----
-
-*This document defines HOW to write code. Update when conventions change, in the same PR that changes the code.*
+*This document defines HOW to write code. Update when conventions change. Last refreshed 2026-05-14 against Phase 3 polish complete source.*

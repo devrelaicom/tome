@@ -2,17 +2,17 @@
 
 > **Purpose**: Document what executes in this codebase - languages, runtimes, frameworks, and critical dependencies.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US5 — forward schema migrations; no new dependencies)
+> **Last Updated**: 2026-05-14 (Phase 3 Polish PRs #51–#58 — final ship as v0.3.0; 399 tests across 53 suites; no new dependencies)
 
 ## Languages & Runtimes
 
 | Language | Version | Purpose |
 |----------|---------|---------|
-| Rust | stable (MSRV: 1.93) | Primary implementation language; synchronous (no async runtime in Phase 1–9; Phase 3 Foundational F8 introduces single-threaded tokio in `src/mcp/` only) |
+| Rust | stable (MSRV: 1.93) | Primary implementation language; synchronous outside `src/mcp/`; Phase 3 / US1 introduces single-threaded tokio in `src/mcp/` only |
 
 ## Frameworks
 
-Phase 1–9 is a CLI application, not a web framework-based project. Phase 3 Foundational F8 introduces MCP server scaffolding scoped to `src/mcp/`.
+Phase 1–9 is a CLI application, not a web framework-based project. Phase 3 Foundational F8 introduces MCP server scaffolding scoped to `src/mcp/`, wired in Phase 3 / US1.
 
 | Framework | Version | Purpose |
 |-----------|---------|---------|
@@ -22,384 +22,51 @@ Phase 1–9 is a CLI application, not a web framework-based project. Phase 3 Fou
 
 | Package | Version | Purpose | Usage Scope |
 |---------|---------|---------|-------------|
-| `serde` + `serde_derive` | 1.x | Configuration and manifest (de)serialisation | All TOML parsing for `config.toml` and `tome-catalog.toml`; Tome-owned structs use `#[serde(deny_unknown_fields)]` (FR-013a boundary) |
-| `toml` | 0.8 | TOML format support | Manifest and config file parsing |
-| `thiserror` | 2.x | Typed error enums | Closed `TomeError` enum in `src/error.rs` (all fallible operations); 18+ enumerated failure variants with dedicated exit codes (codes 70–75 added in Phase 3 Foundational for workspace/schema; code 73 now used by write-path migration handler) |
+| `serde` + `serde_derive` | 1.x | Configuration and manifest (de)serialisation | All TOML parsing for `config.toml` and `tome-catalog.toml`; Tome-owned structs use `#[serde(deny_unknown_fields)]` (FR-013a boundary); emit-only types in Phase 3 / US2 (`WorkspaceInfo`, `InitOutcome`) carry `Serialize` only |
+| `toml` | 0.8 | TOML format support | Manifest and config file parsing; workspace init config generation |
+| `thiserror` | 2.x | Typed error enums | Closed `TomeError` enum in `src/error.rs` (all fallible operations); 18+ enumerated failure variants with dedicated exit codes; Phase 3 adds codes 60–61 (MCP) and 70–75 (workspace/schema) |
 | `anyhow` | 1.x | Error context chaining | Application-level error wrapping at boundaries |
-| `tracing` + `tracing-subscriber` | 0.1, 0.3 | Structured logging to stderr | Diagnostic output orthogonal to `--json` stdout; Phase 3 F8 enables `json` feature for MCP log subscriber (JSON-lines to file via `src/mcp/log.rs` in addition to human-readable stderr) |
-| `sha2` | 0.10 | Content-addressed cache naming and model integrity | URL hashing for `cache_dir_for()` in `src/paths.rs`; model download verification in `src/embedding/download.rs` |
-| `regex` | 1.x | Credential scrubbing patterns | Git stderr sanitisation in `src/catalog/git.rs` (4 regex patterns); extended in Phase 3 to cover model download URLs (principle XIII) |
-| `ctrlc` | 3.x | Signal handling (SIGINT) | Global cancellation handler with exit code 8; SIGINT cancels in-flight git operations and model downloads |
+| `tracing` + `tracing-subscriber` | 0.1, 0.3 | Structured logging to stderr | Diagnostic output orthogonal to `--json` stdout; Phase 3 F8 enables `json` feature for MCP log subscriber (JSON-lines to file via `src/mcp/log.rs`); custom `ContractEventFormat` in Phase 3 Polish renders contract-pinned field names (`ts`, `level`, `target`, `msg`) instead of defaults |
+| `sha2` | 0.10 | Content-addressed cache naming and model integrity | URL hashing for `cache_dir_for()` in `src/paths.rs`; model download verification in `src/embedding/download.rs`; workspace registry deduplication |
+| `regex` | 1.x | Credential scrubbing patterns | Git stderr sanitisation in `src/catalog/git.rs` (4 regex patterns); extended in Phase 3 to cover model download URLs and MCP log field scrubbing (principle XIII) |
+| `ctrlc` | 3.x | Signal handling (SIGINT) | Global cancellation handler with exit code 8; SIGINT cancels in-flight git operations and model downloads; Phase 3 Polish: explicit SIGTERM handler for MCP server (Unix-only) with 5s graceful-shutdown timeout |
 | `tempfile` | 3.x | Atomic file writes | Registry, per-catalog cache, models directory, manifest mutations, and workspace init staging dir (atomicity boundary: rename-based); `tempfile::Builder::tempdir_in` for same-filesystem POSIX-atomic rename in `src/workspace/init.rs` (Phase 3 / US2) |
 | `hex` | 0.4 | Hex encoding for SHA256 digests | Cache directory naming alongside sha2; model checksum comparison in `src/embedding/download.rs` |
 | `semver` | 1.x | Semantic version parsing | Catalog manifest version field validation |
 | `time` | 0.3 | Timestamp formatting and parsing | Logging and manifest timestamps; RFC 3339 serialisation for `ModelManifest.installed_at` |
-| `serde_json` | 1.x | JSON serialisation (NDJSON output) | `--json` mode formatting for stdout; `ModelManifest` serialisation to `manifest.json`; `WorkspaceInfo` and `InitOutcome` serialisation in Phase 3 / US2 |
+| `serde_json` | 1.x | JSON serialisation (NDJSON output) | `--json` mode formatting for stdout; `ModelManifest` serialisation to `manifest.json`; `WorkspaceInfo` and `InitOutcome` serialisation in Phase 3 / US2; `--json` byte-stability tests pin wire format |
 
 ### Phase 2 — foundational (no user-facing CLI wired until Phase 3)
 
 | Package | Version | Purpose | Usage Scope |
 |---------|---------|---------|-------------|
-| `rusqlite` | 0.32 (`bundled`) | Embedded SQLite (statically linked, no system dep) | `src/index/*` — the local skill index database; WAL mode + advisory lockfile (FR-040) |
-| `sqlite-vec` | vendored (v0.1.9) | KNN vector search extension for SQLite | `vendor/sqlite-vec/` compiled by `build.rs`; loaded via `sqlite3_auto_extension` in `src/index/vec_ext.rs` |
+| `rusqlite` | 0.32 (`bundled`) | Embedded SQLite (statically linked, no system dep) | `src/index/*` — the local skill index database; WAL mode + advisory lockfile (FR-040); workspace-scoped index in Phase 3 Foundational F1 |
+| `sqlite-vec` | vendored (v0.1.9) | KNN vector search extension for SQLite | `vendor/sqlite-vec/` compiled by `build.rs`; loaded via `sqlite3_auto_extension` in `src/index/vec_ext.rs`; symlink rejection hardening in Phase 3 Polish |
 | `serde_yaml` | 0.9 | Lenient YAML frontmatter parsing for third-party `SKILL.md` | `src/plugin/frontmatter.rs` — parses upstream metadata leniently (FR-013a boundary; does not validate unknown fields) |
-| `fastembed` | 4.x | ONNX-backed text embedding + reranking | `src/embedding/fastembed.rs` — loads BGE models from `${XDG_DATA_HOME}/tome/models/` at runtime; CPU execution provider only |
-| `reqwest` | 0.12 (`blocking`, `rustls-tls`, no defaults) | Synchronous HTTPS for model downloads | `src/embedding/download.rs` — downloads `MODEL_REGISTRY` entries with SHA-256 verification and atomicity |
+| `fastembed` | 4.x | ONNX-backed text embedding + reranking | `src/embedding/fastembed.rs` — loads BGE models from `${XDG_DATA_HOME}/tome/models/` at runtime; CPU execution provider only; Phase 3 Polish: eager-load at MCP startup via pre-flight pipeline (FR-110) |
+| `reqwest` | 0.12 (`blocking`, `rustls-tls`, no defaults) | Synchronous HTTPS for model downloads | `src/embedding/download.rs` — downloads `MODEL_REGISTRY` entries with SHA-256 verification and atomicity; credential scrubbing on error chains |
 | `indicatif` | 0.17 | Progress bars + spinners (TTY-aware) | `src/presentation/progress.rs` — download/reindex progress; refuses on non-TTY |
-| `comfy-table` | 7.x | Table rendering for human-mode list/show output | `src/presentation/tables.rs` — `tome plugin list`, `tome models list`, query results |
-| `owo-colors` | 4.x | Terminal colours with native `NO_COLOR` support | `src/presentation/colour.rs` — colourised output respecting `NO_COLOR` environment variable (principle I) |
-| `inquire` | 0.7 (`crossterm`, no defaults) | Interactive Select/MultiSelect/Confirm prompts | `src/presentation/prompt.rs` — interactive plugin enable/disable/list/show; bare `tome plugin` browse flow; `--force` flag can skip confirmation in disable; refuses on non-TTY (principle III) |
+| `comfy-table` | 7.x | Table rendering for human-mode list/show output | `src/presentation/tables.rs` — `tome plugin list`, `tome models list`, query results, doctor reports |
+| `owo-colors` | 4.x | Terminal colours with native `NO_COLOR` support | `src/presentation/colour.rs` — colourised output respecting `NO_COLOR` environment variable (principle I); Phase 3 Polish: all outputs respect `NO_COLOR` consistently |
+| `inquire` | 0.7 (`crossterm`, no defaults) | Interactive Select/MultiSelect/Confirm prompts | `src/presentation/prompt.rs` — interactive plugin enable/disable/list/show; bare `tome plugin` browse flow; doctor repair confirmation; `--force` flag can skip confirmation; refuses on non-TTY (principle III) |
 | `cc` (build-dep) | 1.x | C compiler driver for the vendored sqlite-vec amalgamation | `build.rs` only |
 
-ONNX Runtime (`ort`) is a transitive dependency through `fastembed`; Tome does
-not link it directly. `src/embedding/runtime.rs` is a stub placeholder (Phase 2 foundational),
-becoming load-bearing only if a direct dependency is added.
+ONNX Runtime (`ort`) is a transitive dependency through `fastembed`; Tome does not link it directly. `src/embedding/runtime.rs` is a stub placeholder becoming load-bearing only if a direct dependency is added.
 
-### Phase 3 — user-stories (slice 1 landed)
+### Phase 3 — MCP server + workspaces + diagnostics (Phase 3 Foundational F7–F8 + Phase 3 / US1–US5)
 
-Phase 3 wires the Phase 2 foundational pieces into user-facing CLI surfaces:
-- `tome plugin enable | disable | list | show` — lifecycle orchestrator in `src/plugin/lifecycle.rs`
-- `tome query` — KNN search with optional reranking in `src/commands/query.rs`
-- Model registry now carries real upstream SHA-256 digests and file sizes (no longer all-zero placeholders)
-- Test helper `StubEmbedder::with_force_fail_after(n)` added to `src/embedding/stub.rs` for atomicity testing
+Phase 3 introduces two new direct dependencies scoped to specific module boundaries:
 
-No new production dependencies in Phase 3 slice 1 — all pieces are Phase 2 additions wired through Phase 1 plumbing.
+| Package | Version | Purpose | Usage Scope | Notes |
+|---------|---------|---------|-------------|-------|
+| `rmcp` | 1.x (`transport-io`, `schemars` features) | MCP protocol and stdio server | `src/mcp/mod.rs`, `src/mcp/server.rs` — dispatches to server loop and tool handler registration; transport-io feature enables stdin/stdout channel per FR-221 | Phase 3 / US1; binary +1.10 MiB on macOS arm64 (22.04 MiB total, under 50 MB cap) |
+| `tokio` | 1.x (`rt`, `macros`, `io-std`, `sync`, `signal`, `time` features) | Async runtime backing MCP server | `src/mcp/runtime.rs`, `src/mcp/mod.rs` — single-threaded `Builder::new_current_thread` only (no multi-threading for embedded model inference; research §R-2); structurally scoped via `tests/sync_boundary.rs` | Phase 3 / Foundational F8; no CLI async outside `src/mcp/` |
+| `schemars` | 1.x | JSON Schema derivation for MCP tool I/O | `src/mcp/tools/{search_skills,get_skill}.rs` — `#[derive(JsonSchema)]` on input/output types per `contracts/mcp-tools.md`; contract-compliant schema generation for tool registration | Phase 3 / US1; also re-exported by rmcp's `schemars` feature |
 
-### Phase 4 — user-story slice 1 (interactive browse flow)
+**Feature enablement in existing dependencies:**
+- `tracing-subscriber` gained `json` feature (line 22 in Cargo.toml) for MCP log subscriber support
 
-Phase 4 slice 1 ships the bare `tome plugin` interactive CLI surface:
-- `src/commands/plugin/interactive.rs::run_interactive` orchestrates catalog → plugin → action flow
-- Uses `inquire` `Select`, `Confirm`, and terminal detection (existing production dep, no new additions)
-- Test-driven via `rexpect` pty harness in `tests/plugin_interactive.rs` (dev-only, Unix-only)
-
-| Package | Version | Purpose | Usage Scope | Phase 4 |
-|---------|---------|---------|-------------|---------|
-| `rexpect` | 0.7 | Unix pty harness for interactive CLI testing | `tests/plugin_interactive.rs` only; drives the interactive flow through a real pseudoterminal | dev-dep; no runtime impact |
-
-No new production dependencies in Phase 4 slice 1 — `rexpect` is test-only and does not compile into the release binary.
-
-### Phase 5 — user-story slice 2 (disable subcommand + verification)
-
-Phase 5 slice 2 adds the `tome plugin disable <id>` subcommand with cheap re-enable verification:
-- `src/commands/plugin/disable.rs` (~108 lines) — CLI wrapper over `plugin::lifecycle::disable`
-- New `PluginCommand::Disable(PluginDisableArgs { id, force })` variant in `src/cli.rs`
-- Dispatch wired in `src/commands/plugin/mod.rs`
-- Confirmation UX reuses existing `inquire` (Phase 2); `--force` flag short-circuits the prompt
-- Test coverage: `tests/plugin_disable.rs` (~190 lines, CLI binary); `tests/plugin_repeated.rs` (~120 lines, library + CLI hybrid) for enable/disable/enable cycle
-
-No new production dependencies in Phase 5 slice 2 — all pieces reuse Phase 1–4 infrastructure (`inquire` for confirmation, existing lifecycle plumbing).
-
-### Phase 6 — user-story slice 1 (explicit model management)
-
-Phase 6 slice 1 adds explicit model artefact CLI management:
-- `src/commands/models/download.rs`, `list.rs`, `remove.rs` (~360 lines total) — `tome models {download,list,remove}` subcommands
-- New `ModelsCommand::Download | List | Remove` variants in `src/cli.rs`
-- Dispatch wired in `src/commands/models/mod.rs`
-- Helper `embedding::download::sha256_file(path) -> Result<String, TomeError>` promoted to `pub` for content verification in list
-- Signature relaxation: `output::write_json<T: Serialize + ?Sized>` (adds `?Sized` bound to serialize slice types in JSON output)
-
-No new production dependencies in Phase 6 slice 1 — all pieces reuse Phase 1–5 infrastructure (progress bars, tables, JSON formatting).
-
-Phase 6 slice 2 adds 9 integration tests across `tests/models_{download,list,remove}.rs` using sparse-file pattern for staging 280 MB artefacts at zero disk cost. Helpers `fabricate_installed_model` and `fabricate_all_installed_models` added to `tests/common/mod.rs`. No production code or dependency changes.
-
-### Phase 7 — user-story slices 1–3 (reindex: library orchestrator, catalog integration, CLI)
-
-Phase 7 slice 1 introduces the reindex library orchestrator:
-- `reindex_plugin_atomic(id, deps, force)` in `src/index/skills.rs` — mirrors `enable_plugin_atomic`, atomically re-embeds skills with `ReindexSummary` outcome (added/modified/removed/unchanged breakdown).
-- `ReindexOutcome`, `pub fn reindex_plugin(id, deps, force)`, `pub fn auto_disable_orphan(id, deps)` in `src/plugin/lifecycle.rs`.
-- **Bugfix**: `upsert_skill` latent issue — `sqlite-vec` virtual table does NOT support `INSERT OR REPLACE`. Switched to `DELETE`-then-`INSERT` pattern.
-- 9 new unit tests in `src/index/` and `src/plugin/`.
-
-Phase 7 slice 2 wires reindex into `tome catalog update`:
-- `pub fn enabled_plugins_for_catalog(catalog, conn)` in `src/index/skills.rs` — filters enabled plugins for a given catalog.
-- `pub fn reindex_catalog_plugins(catalog, deps)` in `src/commands/catalog/update.rs` with `CatalogReindexOutcome` + `PluginChange` struct.
-- `commands/catalog` module promoted to `pub mod` for downstream access.
-- Lazy `FastembedEmbedder` loading — only instantiated when an enabled plugin exists in a refreshed catalog.
-- Auto-disable cascades on `PluginNotFound` / `PluginManifestParseError`.
-- 3 new integration tests via library API.
-
-Phase 7 slice 3 adds the `tome reindex` CLI subcommand:
-- `pub fn run(args: ReindexArgs, mode: Mode)` in `src/commands/reindex.rs` (new file).
-- Scope grammar: omitted (all enabled plugins) | `<catalog>` (all enabled in one catalog) | `<catalog>/<plugin>` (exactly one plugin).
-- `--force` flag for FR-016 recovery (re-embed unchanged skills).
-- `Command::Reindex(ReindexArgs)` variant in `src/cli.rs`.
-- `commands/reindex` module added to `src/commands/mod.rs`.
-- Lazy `FastembedEmbedder` — only loaded if reindex scope contains enabled plugins.
-- `Scope` enum, `ReindexAggregate` outcome (duration, skills processed, outcome categories).
-- `pub fn run_with_deps` for library-API testing (mirrors `enable_plugin_with_deps`).
-- 7 new tests: 4 library-API (scope parsing, resolve targets, aggregate output) + 3 CLI binary error paths (invalid scope, no plugins in scope, bad flags).
-
-**No new production dependencies** across Phase 7 slices 1–3 — all pieces reuse Phase 1–6 infrastructure (lifecycle, reindex logic sits in existing orchestrator; CLI uses existing tables/progress/JSON formatters). Test count: 204 → 213 → 216 → 223 across 33 suites.
-
-### Phase 8 — user-story slices 1–2 (status health check + version pre-parse)
-
-Phase 8 slice 1 ships the `tome status [--verify]` read-only health check subcommand:
-- `src/commands/status.rs` (~330 lines) — per-subsystem diagnostics (models, index, drift detection via `detect_drift` in `src/index/meta.rs`)
-- New `Command::Status(StatusArgs)` and `StatusArgs { verify: bool }` in `src/cli.rs`
-- Dispatch wired in `src/commands/plugin/mod.rs`
-- Helpers `ModelState`, `cheap_state`, `read_manifest`, `primary_file_path`, `human_mb` promoted from `pub(crate)` to `pub` in `src/commands/models/mod.rs` for reuse
-- Lazy drift detection — skipped unless `--verify` is set
-- Exit semantics: 0 when healthy; 1 when degraded (reranker-only) or unhealthy (anything else); report always rendered before exit
-
-Phase 8 slice 2 adds version pre-parse hook in `src/main.rs`:
-- Clap's auto `--version` disabled via `disable_version_flag = true` on `Cli` derive
-- Pre-parse hook detects `--version` / `-V` in `std::env::args()` before clap dispatch
-- Delegates to `commands::status::print_version(json)` to honour `--json` flag and include embedder/reranker identities (per contract `contracts/version-output.md`)
-- Short-circuits to `std::process::exit(0)` after printing
-- Test coverage: `tests/status.rs` (10 tests covering health report variants, JSON mode, exit codes) + `tests/version_output.rs` (4 tests covering flag detection and embedder/reranker output)
-- Helper `registry_seeds` in `src/commands/plugin/mod.rs` promoted from `pub(crate)` to `pub` for test bootstrapping
-
-**No new production dependencies** in Phase 8 — all pieces reuse Phase 1–7 infrastructure (status logic combines existing model/index/meta logic; version printing is a thin wrapper over embedder registry entries). Test count: 223 → 237 across 33 → 35 suites.
-
-### Phase 9 — user-story slice 1 (catalog remove Phase 2 extensions)
-
-Phase 9 slice 1 implements `tome catalog remove` Phase 2 extensions per `contracts/catalog-extensions.md`:
-- `src/plugin/lifecycle.rs::cascade_disable_for_catalog(paths, catalog, plugins, embedder_seed, reranker_seed)` — new library helper for atomic cascade-disable within one advisory-lock window; no Embedder required (pure deletion logic).
-- Extended `src/commands/catalog/remove.rs` with pre-check (`enabled_plugins_for_catalog` query) and conditional cascade dispatch.
-- Refuse path: enabled plugins + no `--force` → exit 53 (`CatalogHasEnabledPlugins`; pre-existing error variant).
-- Cascade path: `--force` + enabled plugins → `cascade_disable_for_catalog` → drop each plugin's index rows in one lock window → proceed with Phase 1 flow.
-- New `tests/catalog_remove_cascade.rs` — 3 CLI binary tests driven by library-API enable + StubEmbedder setup.
-- JSON output extended with `cascade` array documenting plugins disabled and skills dropped per `contracts/catalog-extensions.md` shape.
-
-**No new production dependencies** in Phase 9 — cascade logic reuses existing `delete_by_plugin` database helper and advisory-lock infrastructure. Test count: 237 → 240 across 35 → 36 suites.
-
-### Phase 3 Foundational — F7 (schema migration framework rewrite)
-
-F7 rewrites `src/index/migrations.rs` with a new framework per `contracts/schema-migration.md`:
-
-**Changes:**
-- `Migration { from, to, name, apply: fn(&Transaction) -> Result<(), TomeError> }` struct replaces Phase 2's `sql: &'static str` model — function pointers allow post-DDL fixups within the same transaction.
-- `apply_pending(conn, current, target) -> Result<u32, TomeError>` new three-arg signature (was `apply_pending(conn, target)`)—callers now provide the current version to distinguish between fresh DB (None) vs forward migration (Some).
-- `MIGRATIONS_OVERRIDE` `thread_local!` — test-only injection point (gated `#[doc(hidden)] pub`, not `#[cfg(test)]`) allowing integration tests to register synthetic migrations without polluting production state.
-- Tracing events at target `tome::index::migrations` now emit lifecycle events.
-- **Schema version checks:** write-path now emits `SchemaVersionTooNew` (exit 73); read-path `open_read_only` retains legacy `SchemaTooNew` (exit 52) for backward compat.
-- **Compile-time constant:** `MIGRATIONS` ships as empty (`const MIGRATIONS: &[Migration] = &[];`) — Phase 4+ adds the first real migration row plus a synthetic-fixture e2e test in `tests/schema_migrations.rs`.
-
-**No new production dependencies** — framework uses only `rusqlite`, `tracing`, and existing `TomeError` infrastructure.
-
-### Phase 3 Foundational — F8 (MCP server scaffolding)
-
-F8 introduces a new `src/mcp/` module with four files implementing MCP server scaffolding per `contracts/mcp-server.md` and the Phase 3 research plan (research §R-2):
-
-**New dependencies (production):**
-| Package | Version | Purpose | Scope |
-|---------|---------|---------|-------|
-| `rmcp` | 1.x | MCP protocol and server handler | `src/mcp/mod.rs` — dispatches to server loop (US1); currently a stub stub returning `McpStartupFailed` |
-| `tokio` | 1.x (`rt`, `macros`, `io-std`, `sync`, `signal`, `time` features) | Async runtime backing MCP server | `src/mcp/runtime.rs` — single-threaded `Builder::new_current_thread` only (no multi-threading for embedded model inference); see research §R-2 |
-
-**Module structure:**
-- `src/mcp/mod.rs` (~42 lines) — sync entry point `run(scope, paths) -> Result<(), TomeError>`; wiring sequence (runtime build, log subscriber install, pre-flight, `rmcp::serve_server` via `runtime.block_on`) lands in US1 (T076).
-- `src/mcp/runtime.rs` (~29 lines) — `build_runtime() -> Result<Runtime, TomeError>` — constructs single-threaded tokio runtime with minimal features per research §R-2; CLI dispatch will hand off via `runtime.block_on(...)`.
-- `src/mcp/log.rs` (~150+ lines) — JSON-lines file appender + size-based rotation + tracing subscriber per `contracts/log-format.md`:
-  - Log file at `${XDG_STATE_HOME}/tome/mcp.log` (per contract).
-  - 10 MiB rotation cap — on startup, if log exceeds threshold, rotates to `mcp.log.1` (atomic rename).
-  - `rotate_if_oversized(current, prev) -> Result<(), TomeError>` — idempotent rotation helper.
-  - `open_appender(paths) -> Result<File, TomeError>` — opens log in append mode, creating parent dirs + file if absent.
-  - Tracing subscriber with JSON formatter (layer 1) writing to file + stderr layer (layer 2) filtered to `error!` only per FR-222 (stderr reserved for fatal startup errors).
-- `src/mcp/preflight.rs` (~TBD lines) — FR-110 startup pre-flight pipeline (schema check → drift detect → SHA-256 verify → eager-load FastembedEmbedder); currently landing in F8 as surfaces only.
-
-**Sync boundary (constitution principle):**
-- Structural test `tests/sync_boundary.rs` enforces — every file under `src/mcp/` is exempt; any other module reaching for `tokio::`, `async fn`, or `.await` will fail the build.
-- Phase 1–9 stays fully synchronous outside `src/mcp/`.
-
-**Feature enablement:**
-- `tracing-subscriber` `json` feature now enabled in `Cargo.toml` (line 22: `features = ["env-filter", "fmt", "json"]`) for MCP log subscriber support.
-
-**No user-facing CLI wired yet** — US1 lands the server loop + tool registration. Test support likely lands with US1 or a dedicated Foundational phase.
-
-**Test count:** No new tests land in F7–F8 — schema migration framework is exercised by synthetic-fixture test in Phase 4+; MCP scaffolding is exercise via library-API call + stub verification in US1.
-
-### Phase 3 / User Story 1 (MCP server end-to-end)
-
-US1 implements the live MCP server entry point per `contracts/mcp-server.md`:
-
-**New direct dependencies (production):**
-
-| Package | Version | Purpose | Scope |
-|---------|---------|---------|-------|
-| `schemars` | 1.x | JSON Schema derivation for MCP tool I/O | `src/mcp/tools/{search_skills,get_skill}.rs` — `#[derive(JsonSchema)]` on input/output types per `contracts/mcp-tools.md` |
-
-**Feature expansion in existing dependencies:**
-
-| Package | Feature | Purpose |
-|---------|---------|---------|
-| `rmcp` | `transport-io` | Stdio transport for the MCP server (stdin/stdout protocol channel per FR-221) |
-| `rmcp` | `schemars` | Re-export of `schemars` crate (we use it directly via our own dep) |
-
-**New module structure (F8 scaffolding → US1 wiring):**
-
-- `src/mcp/mod.rs` — expanded `run()` now orchestrates the full startup sequence: log open → runtime build → pre-flight → server init → `rmcp::serve_server` → graceful shutdown or SIGINT handler
-- `src/mcp/server.rs` (~150 lines) — `#[tool_router]` + `#[tool_handler]` derive macros on `struct Server { state: Arc<McpState> }` implementing `rmcp::ServerHandler`
-  - Two registered tools: `search_skills` and `get_skill` (per US1-S1, US1-S2)
-  - `server_info()` reports name + version + tool capabilities
-  - Each tool delegates to `mcp::tools::{search_skills,get_skill}::handle` for per-tool logic modularization
-- `src/mcp/state.rs` (~50 lines) — `pub struct McpState { embedder, reranker, scope, paths, embedder_entry, reranker_entry }`
-  - Embedder eagerly loaded at startup (pre-flight phase); reranker lazily loaded on first tool call that requires ranking (via `tokio::sync::OnceCell`)
-  - Shared via `Arc<McpState>` across all tool handlers
-- `src/mcp/tools/mod.rs` — module dispatcher
-- `src/mcp/tools/search_skills.rs` (~120 lines) — input schema `SearchSkillsInput { query, ..., force_strict: bool }`, output schema `SearchSkillsOutput { skills: Vec<SkillResult> }`
-  - Handler: `pub async fn handle(input, state) -> Result<SearchSkillsOutput, impl Error>`
-  - Reuses `commands::query::pipeline(args, deps)` library entry point (extracted during refactor; returns `QueryOutcome` without stdout/stderr emit step)
-  - Lazy reranker load on `.await` at call boundary
-- `src/mcp/tools/get_skill.rs` (~80 lines) — input schema `GetSkillInput { id: String }`, output schema `GetSkillOutput { skill: Option<SkillDetail> }`
-  - Handler: `pub async fn handle(input, state) -> Result<GetSkillOutput, impl Error>`
-  - Index read-only query via library `index::skills::get_one_skill(id, conn)` helper
-- `src/commands/query.rs` — refactored `pub fn pipeline(args, deps) -> Result<QueryOutcome, TomeError>` as the silent compute path (no stdout/stderr emit); original `pub fn run()` delegates to it and adds the emit step
-
-**Stdio channel contract (FR-221, FR-222):**
-- stdout = MCP protocol messages only (no diagnostic output)
-- stderr = fatal startup errors only (after pre-flight completes, stderr is silent)
-- File log at `${XDG_STATE_HOME}/tome/mcp.log` in JSON-lines format per `contracts/log-format.md`
-
-**Binary size impact:**
-- Foundational F8 added `rmcp` + `tokio` feature-gated: estimated +2.5 MiB (research estimate)
-- US1 actual (macOS arm64): 20.94 MiB → 22.04 MiB (+1.10 MiB over F8, final binary 22.04 MiB total under 50 MiB cap)
-
-**CLI entry point:**
-- `src/cli.rs` — new `Command::Mcp(McpArgs)` variant; `args` struct is empty (MCP takes no subcommands; scope/paths are resolved globally)
-- `src/main.rs` — special-case dispatch: `Command::Mcp(_)` skips tracing/ctrlc init and goes straight to `commands::mcp::run(args, scope, mode)` which calls `mcp::run(scope, paths)`
-- `src/commands/mcp.rs` — thin wrapper dispatching to `mcp::run`; `--json` flag is a no-op for MCP (the protocol IS the output format per FR-221)
-
-**Test coverage:**
-- US1 tests land in parallel with feature implementation; library-API entry points (`search_skills::handle`, `get_skill::handle`, `preflight::run`) exercised via stubs; CLI binary tests deferred pending integration test harness
-
-**No breaking changes** to Phase 1–9 code outside `src/mcp/`. `src/mcp/` is fully exempt from the sync-only boundary enforced by `tests/sync_boundary.rs`.
-
-### Phase 3 / User Story 2 — workspace info + init commands
-
-US2 adds scope-aware workspace creation and introspection per `contracts/workspace-info.md` and `contracts/workspace-init.md`:
-
-**US2.a — `tome workspace info` (read-only scope report)**
-
-- `src/workspace/info.rs` — `WorkspaceInfo` + `ScopeKind` + `ModelIdentity` emit-only types per data-model §4
-  - `ScopeKind` enum: `Global` / `Workspace` — serialised in `--json` as lowercase strings
-  - `ModelIdentity` struct: `{ name: String, version: String }` — wire format for embedder/reranker identities (absent fields render as `None`)
-  - `WorkspaceInfo` struct: carries scope kind, path, source, catalog/plugin/skill counts, schema version, embedder identity
-- `src/commands/workspace/info.rs` — emit-wrapper. `pub fn assemble(scope, paths) -> Result<WorkspaceInfo, TomeError>` is the pure-compute library-API entry point
-  - Catalog count from config TOML (Tome-owned, strict — parse errors surface as `WorkspaceMalformed` / exit 70)
-  - Index facts from read-only SQLite handle; absent fields collapse to zero counts + `None` schema/embedder
-  - `ScopeSource` gains `Serialize` with `#[serde(rename_all = "snake_case")]` for contract-compliant JSON (flags like `GlobalFlag` render as `global_flag`)
-- CLI wiring: `Command::Workspace(WorkspaceArgs)` + `WorkspaceCommand::Info` variants in `src/cli.rs`
-- 8 new tests in `tests/workspace_info.rs`: zero-state global, populated global, workspace with config-only, JSON byte-stability, malformed config → exit 70, CLI binary smoke tests
-
-**No new production dependencies** in US2.a — all pieces reuse Phase 1–Phase 3/US1 infrastructure (serde, paths, index library APIs).
-
-**US2.b — `tome workspace init` (atomic `.tome/` creation)**
-
-- `src/workspace/init.rs` — `pub fn init(target_root, inherit_global, force, paths) -> Result<InitOutcome, TomeError>` orchestrator
-  - Validates path existence → builds staging dir inside workspace root (same FS = atomic POSIX rename per research §R-15)
-  - Writes `config.toml` via existing `catalog::store::write_atomic`
-  - `--inherit-global` seeds workspace config with global catalog table (enablement never copied — lives in index DB, not config)
-  - `--force` renames existing `.tome/` to `.tome.old/` before new dir lands; rollback restores the aside on staging-to-final rename failure
-  - `staging dir chmod 0700` (Unix) before content lands — secret-keeping window starts at directory creation
-  - Staging dir via `tempfile::Builder::tempdir_in(workspace_root)` ensures same-filesystem, allowing POSIX-atomic final rename
-- `src/workspace/inventory.rs::append_if_registry_exists` — opt-in workspace registration helper
-  - Silently no-ops when `workspaces.txt` absent (user hasn't requested tracking)
-  - Dedupe by exact-path match against canonical workspace root
-- `src/commands/workspace/init.rs` — thin CLI wrapper. Default path resolves to `std::env::current_dir()` per contract
-- `WorkspaceCommand::Init(WorkspaceInitArgs)` variant lands in `src/cli.rs`
-- 12 new tests in `tests/workspace_init.rs`: happy path, `--inherit-global` seeds catalogs, pre-existing refusal (exit 4 / `CatalogAlreadyExists`), `--force` atomicity, missing/file-not-dir paths → exit 7, registry append with dedupe, concurrent init contention cleanup, CLI binary smoke tests
-
-**Error reuse:**
-- `CatalogAlreadyExists` (code 4) shared with Phase 1 catalog case — exit code + JSON envelope are what harnesses key off; dedicated variant deferred until a specific failure mode needs distinction
-
-**Atomicity guarantee:**
-- Staging dir inside workspace root ensures POSIX-atomic rename on final step (same FS)
-- SIGINT or crash between staging and rename leaves either no `.toe/` or complete `.tome/`, never partial
-- Orphaned `.tome.old/` dirs can accumulate if crash between aside and cleanup (out of scope for US2, flagged as doctor candidate)
-
-**No new production dependencies** in US2.b — all pieces reuse Phase 1–3 infrastructure (serde_json, tempfile, paths, catalog store). Test count: 318 → 330 across 44 → 46 suites.
-
-### Phase 3 / User Story 3 — scope-aware command dispatch + reference-counted catalog cleanup
-
-US3 enables catalog sharing across scopes (global + workspace) with automatic reference-counted clone cleanup.
-
-**US3.a — per-command scope honouring**
-
-- `src/commands/` all dispatch methods now accept resolved `ResolvedScope` (threaded from `main.rs`)
-- Commands operate on scope-specific paths: config/index/lock/catalog cache all scope-aware via `Paths` methods (pattern established in Foundational F1)
-- No new dependencies
-
-**US3.b — reference-counted catalog clone cleanup**
-
-- `src/catalog/store.rs::reference_count(url, paths) -> Vec<Scope>` — new library helper
-  - Enumerates every scope (global + each workspace from `paths.workspace_registry`) whose config still references the given URL
-  - Reads global `config.toml` (Tome-owned, strict)
-  - For each workspace in `${XDG_DATA_HOME}/tome/workspaces.txt`, reads `${WORKSPACE}/.tome/config.toml` (lenient on I/O errors; malformed config skipped)
-  - URL equality is exact-string match; callers pass scrubbed URL
-  - **Concurrency:** no lock held during read (same TOCTOU profile as Phase 2 `cascade_disable_for_catalog` pre-check; worst case: one extra clone re-download on next `catalog update`)
-- `src/commands/catalog/remove.rs` — extended with post-write refcount check
-  - After persisting the config (catalog dropped from resolved scope), calls `reference_count` to check remaining refs
-  - On-disk clone at `paths.cache_dir_for(url)` deleted only if no other scope references it
-  - Cascade-disable path also respects refcount (falls through same cleanup logic)
-  - Phase 1 single-scope-per-URL restriction lifted
-- Test coverage: `tests/workspace_commands.rs` (9 new tests in cross-product scope-isolation suite) + `tests/catalog_cache_refcount.rs` (5 new refcount-specific tests) + extended `tests/catalog_remove_cascade.rs` (1 new workspace variant)
-
-**No new production dependencies** in US3 — reference-count logic reuses existing `load`/`save` catalog store infrastructure and inventory registry scanning.
-
-**Note on `${XDG_DATA_HOME}/tome/workspaces.txt` (Phase 3 / US2 artifact, now load-bearing):**
-- Created opt-in by `workspace init`; never required to exist (silent no-op on absence)
-- US3 removes the Phase 1 single-scope-per-URL restriction by consulting this registry in the refcount path
-- On a fresh install (registry absent), `catalog remove` behaves as Phase 1–US2 (global scope only, always deletes the clone)
-
-Test count: 330 → 355 across 46 → 49 suites.
-
-### Phase 3 / User Story 4 — doctor subsystem checks + harness discovery
-
-US4 adds the `tome doctor [--fix]` diagnostic command with subsystem health checks and optional repairs:
-
-**New module structure:**
-
-- `src/doctor/mod.rs` — orchestrator entry point
-- `src/doctor/report.rs` (~200 lines) — output type definitions per `contracts/doctor.md`:
-  - `DoctorReport { subsystems: Vec<SubsystemReport>, harnesses: Vec<HarnessPresence>, summary: ... }`
-  - `SubsystemReport { name, status: SubsystemStatus, details: Option<...> }`
-  - `HarnessPresence { name, path, present: bool }` — minimal existence probe (no content reads; directory presence only per FR-167)
-- `src/doctor/checks.rs` (~200 lines) — per-subsystem diagnostic pipelines
-  - Reuses `commands::status::check_model` / `check_index` / `check_drift` promoted to `pub` in `src/commands/status.rs`
-  - Models: presence, integrity via SHA-256, drift detection (embedder/reranker identity validation)
-  - Index: presence, schema version, WAL mode state, integrity check, drift
-  - Workspace: manifest parse + counts
-  - Reuses existing index/models query infrastructure; no new DB traversals
-- `src/doctor/fixes.rs` (~150 lines) — repair operations per `contracts/doctor.md` repair classes:
-  - Models: download missing, remove corrupt (via SHA-256 mismatch)
-  - Index: recreate missing, auto-disable orphans (reuses Phase 7/9 logic)
-  - Atomicity: each repair is a single advisory-lock window (or N lock windows per-plugin for auto-disable cascade)
-  - `--fix` flag execution with interactive confirmation (unless `--force` also passed)
-- `src/doctor/harness_detect.rs` (~90 lines) — compile-time `KNOWN_HARNESSES` probe at startup:
-  - Probes 6 harnesses: Claude Code (`.claude`), Codex (`.codex`), Cursor (`.cursor`), Gemini CLI (`.gemini`), OpenCode (`.opencode`), Continue (`.continue`)
-  - Existence-only probe (per research §R-7, FR-167) — no config file reads, no schema coupling
-  - Results report in `--json` output and banner; harnesses not in the list deliberately not discovered (no `$HOME` scan)
-  - Probed in `pub fn probe(home: &Path) -> Vec<HarnessPresence>` — tests via `tempfile` mock homes
-
-**CLI wiring:**
-- `Command::Doctor(DoctorArgs)` variant in `src/cli.rs` with `fix: bool, force: bool` flags
-- `src/commands/doctor.rs` (~180 lines) — dispatch + emit wrapper; `pub fn assemble(scope, paths) -> Result<DoctorReport, TomeError>` is the library-API entry point (mirrors `status::assemble_report` pattern)
-- Interactive repair confirmation via reused `inquire` prompt (existing `presentation::prompt` infrastructure)
-- Exit code: 0 if all healthy; 1 if any issue detected (deviates from status' degraded/unhealthy semantics; doctor is a single unified pass)
-
-**Test coverage:**
-- 15 new integration tests in `tests/doctor.rs`: subsystem health scenarios (all-ok, missing embedder, corrupt index, etc.), harness detection (mock homes), `--fix` repair atomicity (via library API + StubEmbedder), JSON shape validation, CLI binary smoke tests
-- 7 new unit tests: harness probe with empty/populated homes, probe ignores files
-
-**No new production dependencies** — all pieces reuse existing model/index/workspace infrastructure + `inquire` for interactive fixes. Test count: 355 → 367 across 49 → 50 suites. Binary size unchanged (22.04 MiB on macOS arm64).
-
-### Phase 3 / User Story 5 — forward schema migrations
-
-US5 extends the schema migration framework with forward migration validation and integration test coverage.
-
-**Changes:**
-- `src/index/migrations.rs` — Foundational F7's framework now exercised via synthetic-fixture e2e tests
-- New integration test file `tests/schema_migration_e2e.rs` — 5 tests covering migration end-to-end:
-  - Fresh database → up-to-date schema (no migration needed)
-  - Synthetic old-version database → forward-migration to current schema
-  - Schema version check gates (write-path SchemaVersionTooNew / read-path SchemaTooNew semantics)
-  - Migration application under advisory lock
-  - `MIGRATIONS_OVERRIDE` injection for synthetic test fixtures
-- Extended `tests/atomicity.rs` — 1 new test validating migration atomicity under SIGINT
-- New helper `tests/common/mod.rs::write_index_db_with_schema_version` — fabricate old-version index DBs for migration testing
-
-**No new production dependencies, no new error variants, no production code changes** — US5 is test-coverage completion for F7 framework. Test count: 367 → 374 across 50 → 51 suites.
+**No new dependencies in Phase 3 / US2–US5**, US2 Polish PRs, or Phase 3 Polish PRs #51–#58. All functionality reuses Phase 1–3/US1 infrastructure.
 
 ## Package Managers & Build Tools
 
@@ -415,21 +82,22 @@ US5 extends the schema migration framework with forward migration validation and
 |-------------|---------|
 | OS Targets | Linux (ubuntu-latest) and macOS (macos-latest) — CI verified on both |
 | Deployment | Single binary (`target/release/tome`); installed via `cargo install --path .` |
-| Binary Size | < 50 MB stripped (enforced by CI; revised from 10 MB ceiling in CONSTITUTION v1.2.0 after Phase 3 slice 1 measured 29.56 MB on Linux; `ort` CPU-only static linking is the load-bearing constraint; US1 final 22.04 MiB on macOS arm64; US2 maintains same footprint; US3 maintains same footprint; US4 maintains same footprint; US5 maintains same footprint — no new production dependencies) |
-| Output | Human-readable (default) or NDJSON (`--json`); logging to stderr only (orthogonal to `--json` stdout); colours respect `NO_COLOR` and auto-disable on non-TTY |
+| Binary Size | < 50 MB stripped on release builds (enforced by CI; revised from 10 MB ceiling in CONSTITUTION v1.2.0 after Phase 3 slice 1 measured 29.56 MB; `ort` CPU-only static linking is the load-bearing constraint; Phase 3 / US1 actual: 22.04 MiB on macOS arm64; Phase 3 Polish: maintains 22.04 MiB footprint; no growth from PRs #51–#58) |
+| Output | Human-readable (default) or NDJSON (`--json`); logging to stderr only (orthogonal to `--json` stdout); colours respect `NO_COLOR` and auto-disable on non-TTY (Phase 3 Polish: consistent `NO_COLOR` coverage across all surfaces) |
 | Model runtime | CPU-only ONNX Runtime (via `fastembed`); models downloaded at first use into `${XDG_DATA_HOME}/tome/models/`; fixed registry (compile-time constants) ensures bit-for-bit reproducibility |
-| MCP server runtime | Single-threaded tokio with JSON-lines file logging to `${XDG_STATE_HOME}/tome/mcp.log` (10 MiB rotation cap); stdout reserved for MCP protocol only; stderr for fatal startup errors only |
-| Workspace storage | Atomic `.tome/` directories created via `tempfile::Builder::tempdir_in` (staging + POSIX rename); config persisted to `${WORKSPACE}/.tome/config.toml`; index DB at `${WORKSPACE}/.tome/index.db` per Phase 3 Foundational F1; catalog clones in `${WORKSPACE}/.tome/catalogs/<sha>/` shared across scopes via reference-count tracking in global config + workspace registry (Phase 3 / US3) |
-| Doctor diagnostics | Subsystem health checks (models, index, workspace, drift) with optional repairs via `--fix`; harness detection at 6 known install locations (existence-only probe, no content reads); results in human-readable and `--json` output |
-| Schema migrations | Forward-only migrations under advisory lock with pre-flight schema version gate; integration tests via synthetic-fixture injection in `tests/schema_migration_e2e.rs` (US5) |
+| MCP server runtime | Single-threaded tokio with JSON-lines file logging to `${XDG_STATE_HOME}/tome/mcp.log` (10 MiB rotation cap); stdout reserved for MCP protocol only; stderr for fatal startup errors only (FR-222); Phase 3 Polish: custom `ContractEventFormat` emits contract-pinned field names (`ts`, `level`, `target`, `msg`) instead of defaults; explicit SIGTERM handler with 5s graceful-shutdown timeout (Unix-only) |
+| Workspace storage | Atomic `.tome/` directories created via `tempfile::Builder::tempdir_in` (staging + POSIX rename); chmod 0700 on Unix before content lands (Phase 3 / US2); config persisted to `${WORKSPACE}/.tome/config.toml`; index DB at `${WORKSPACE}/.tome/index.db`; catalog clones in `${WORKSPACE}/.tome/catalogs/<sha>/` shared across scopes via reference-count tracking (Phase 3 / US3); Phase 3 Polish: symlink rejection hardening in `get_skill` skill walk |
+| Doctor diagnostics | Subsystem health checks (models, index, workspace, drift) with optional repairs via `--fix`; harness detection at 6 known install locations (existence-only probe, no content reads); results in human-readable and `--json` output; Phase 3 Polish: orphan catalog cache detection, workspace registry status reporting, schema migration repair integration |
+| Schema migrations | Forward-only migrations under advisory lock with pre-flight schema version gate; integration tests via synthetic-fixture injection in `tests/schema_migration_e2e.rs` (Phase 3 / US5) |
 
 ## Not Used (Explicitly Excluded)
 
-- **Async runtime outside `src/mcp/`**: No `tokio`, `async-std`, or similar in Phase 1–9 main binary. Phase 3 Foundational F8 introduces `tokio` strictly scoped to `src/mcp/` with boundary enforcement via `tests/sync_boundary.rs`.
+- **Async runtime outside `src/mcp/`**: No `tokio`, `async-std`, or similar in Phase 1–9 main binary or any module outside `src/mcp/`. Structural test `tests/sync_boundary.rs` enforces the boundary.
 - **Git library**: No `libgit2`, `git2`, or vendored Git. `std::process::Command` shells out to system `git` (constitution principle XII).
 - **Direct ONNX Runtime dep**: `ort` is reached transitively through `fastembed` only; no direct linkage from Tome code.
 - **Custom npm/cargo registry overrides**: All packages resolve from public registries.
 - **Async database drivers** (e.g., `sqlx`): `rusqlite` is synchronous, suitable for a CLI with no concurrent connections (FR-040).
+- **Serialization frameworks beyond serde**: No `protobuf`, `msgpack`, or other serialization deps; serde + serde_json cover all needs.
 
 ---
 
@@ -443,4 +111,4 @@ US5 extends the schema migration framework with forward migration validation and
 
 ---
 
-*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 + Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 + Phase 3 / US3 + Phase 3 / US4 + Phase 3 / US5 source code.*
+*This document captures what executes in Tome v0.3.0 (Phase 3 complete). 399 tests pass across 53 suites; binary size 22.04 MiB on macOS arm64 (under 50 MB cap). Phase 3 Polish PRs #51–#58 closed with contract reconciliation, field-name pinning for MCP logs, security hardening (symlink rejection, registry validation, log 0600), and final documentation refresh.*
