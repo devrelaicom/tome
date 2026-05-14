@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and common patterns.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14
+> **Last Updated**: 2026-05-15
 
 ## Code Style
 
@@ -158,6 +158,7 @@ src/
 │   ├── query.rs              # `tome query <text>` (Phase 3)
 │   ├── reindex.rs            # `tome reindex [<scope>]` + library entry point (Phase 7)
 │   ├── status.rs             # `tome status [--verify]` — single-file, read-only (Phase 8)
+│   ├── doctor.rs             # `tome doctor [--fix]` — health diagnostics + repair (Phase 3 / US4)
 │   └── workspace/            # `tome workspace` subcommands (Phase 4 / US2)
 │       ├── mod.rs            # Dispatcher
 │       ├── info.rs           # `tome workspace info` (Phase 4 / US2)
@@ -197,6 +198,11 @@ src/
 │   ├── registry.rs           # MODEL_REGISTRY with pinned URLs + checksums
 │   ├── download.rs           # reqwest::blocking + SHA-256 + atomic persist
 │   └── runtime.rs            # ort Environment setup
+├── doctor/                   # Health diagnostics + repair (Phase 3 / US4)
+│   ├── mod.rs                # DoctorReport struct + assemble entry point
+│   ├── checks.rs             # Health check functions (embedder, index, drift)
+│   ├── fixes.rs              # Repair operation dispatch + apply_one
+│   └── harness_detect.rs     # Harness detection (vscode, cursor, etc.)
 ├── mcp/                      # MCP server (Phase 3)
 │   ├── mod.rs                # Server entry + lifecycle
 │   ├── server.rs             # rmcp ServerHandler + tool router (Phase 3)
@@ -244,6 +250,8 @@ tests/
 ├── reindex.rs                # Library + CLI tests for `tome reindex` (Phase 7)
 ├── status.rs                 # Library API tests for `assemble_report`; CLI-only for run() (Phase 8)
 ├── version_output.rs         # Compile-time content tests for `--version` output (Phase 8)
+├── doctor.rs                 # Library API + CLI binary tests for `tome doctor` (Phase 3 / US4)
+├── doctor_json.rs            # JSON envelope shape tests for doctor output (Phase 3 / US4)
 ├── mcp_server.rs             # MCP tool router + handler introspection tests (Phase 3)
 ├── mcp_lifecycle.rs          # MCP pre-flight exit codes (Phase 3)
 ├── workspace_info.rs         # Library API tests for `workspace::info::assemble` (Phase 4 / US2)
@@ -282,6 +290,7 @@ The pattern is consistent across:
 - `src/commands/query.rs` — search subcommand (Phase 3)
 - `src/commands/reindex.rs` — explicit reindex subcommand (Phase 7)
 - `src/commands/status.rs` — health report subcommand (Phase 8)
+- `src/commands/doctor.rs` — diagnostics + repair subcommand (Phase 3 / US4)
 
 Each single-file command may expose library entry points for testability (see "Library Entry Points" below).
 
@@ -309,6 +318,33 @@ pub fn run(args: StatusArgs, mode: Mode) -> Result<(), TomeError> {
 ```
 
 Tests call `assemble_report` directly; the `run` wrapper is for CLI dispatch only.
+
+**Phase 3 / US4 addition:** Commands that execute side-effect repairs in response to detected problems expose a separate "assemble diagnoses + fixes" function (`assemble_report` in `doctor::assemble`) that performs zero writes, followed by an explicit "apply repairs" phase. This allows tests to inspect the diagnosis report before invoking the repair code path.
+
+Example from `src/commands/doctor.rs`:
+```rust
+/// Library-API entry point: diagnose without applying fixes
+pub fn assemble_report(scope, paths, home, verify) -> Result<DoctorReport, TomeError> { ... }
+
+/// Apply a single suggested fix; used by CLI to iterate through the list
+pub fn apply_one_fix(subsystem, detail, scope, paths, home, verify) -> Result<(), TomeError> { ... }
+
+/// CLI entry point: assemble, optionally apply all, re-assemble
+pub fn run(args: DoctorArgs, mode: Mode) -> Result<(), TomeError> {
+    let mut report = assemble_report(&scope, &paths, &home, args.verify)?;
+    emit_diagnoses(&report, mode)?;
+    
+    if args.fix {
+        for fix in &report.suggested_fixes {
+            apply_one_fix(&fix.subsystem, &fix.detail, ...)?;
+        }
+        // Re-assemble to show updated state
+        report = assemble_report(&scope, &paths, &home, args.verify)?;
+        emit_diagnoses(&report, mode)?;
+    }
+    Ok(())
+}
+```
 
 **Phase 4 / US2 addition:** Commands with non-exit library entry points follow the same pattern. `workspace::info::assemble` is pure compute; `workspace::init` takes a library-only signature. CLI wrappers emit and handle exit semantics.
 
@@ -638,8 +674,97 @@ When a helper function is used by multiple independent modules (usually 4+ calle
 - `primary_file_path(...)` — used by multiple model-related functions
 - `human_mb(...)` — formatting helper for model sizes
 - `registry_seeds()` / `embedder_entry()` / `reranker_entry()` — used by `status.rs`, tests
+- `check_model(...)` / `check_index(...)` / `check_drift(...)` — used by `status.rs`, `doctor.rs`, tests
 
 **Policy:** Promotion is intentional — the type system tells us "this internal helper is now a public API surface". Document it via the function's doc comment and in this guide.
+
+**Phase 3 / US4 addition:** Shared health-check functions in `src/commands/status.rs` (`check_model`, `check_index`, `check_drift`) are promoted to `pub` so `src/commands/doctor.rs` can reuse them without duplication. Document in module-level docs: "Single source of truth for health checks — both status and doctor commands use these helpers."
+
+### Home Parameter as Test-Isolation Hook (Phase 3 / US4)
+
+When functions perform harness detection or read environment state that tests need to control (e.g., detecting VSCode, Cursor, or other integration environments), accept a `home: &Path` parameter instead of reading from the environment. This allows tests to pass synthetic home directories without mutating `$HOME`.
+
+Pattern:
+```rust
+pub fn assemble_report(scope: &ResolvedScope, paths: &Paths, home: &Path, verify: bool) -> Result<DoctorReport, TomeError> {
+    // Read harness info from `home` (no env mutation)
+    let harness = detect_harness(home)?;
+    // ... check health ...
+    Ok(report)
+}
+```
+
+Tests construct isolated home directories and pass them:
+```rust
+let tmp = TempDir::new().unwrap();
+let report = assemble_report(&scope, &paths, tmp.path(), false)?;
+```
+
+CLI resolves from environment:
+```rust
+let home = std::env::var("HOME").ok().map(PathBuf::from).unwrap_or(...);
+let report = assemble_report(&scope, &paths, &home, args.verify)?;
+```
+
+**Benefit:** No global environment pollution; tests stay isolated and fast.
+
+### Subsystem-String Routing for Fix Dispatch (Phase 3 / US4)
+
+When a command dispatches repairs based on detected problems, use string-keyed dispatch on the `SuggestedFix.subsystem` field. This allows extensibility without changing the enum.
+
+Pattern:
+```rust
+#[derive(Serialize)]
+pub struct SuggestedFix {
+    pub subsystem: String,  // "embedder", "reranker", "catalog:name", "schema"
+    pub detail: String,
+    // ...
+}
+
+pub fn apply_one_fix(subsystem: &str, detail: &str, scope, paths, home) -> Result<(), TomeError> {
+    match subsystem {
+        "embedder" => { /* handle embedder fix */ }
+        "reranker" => { /* handle reranker fix */ }
+        s if s.starts_with("catalog:") => {
+            let catalog_name = &s[8..];  // strip "catalog:" prefix
+            /* handle catalog-specific fix */
+        }
+        "schema" => { /* handle schema migration */ }
+        _ => Err(TomeError::Internal("unknown fix type".into()))
+    }
+}
+```
+
+**Benefits:**
+- Extensible: new subsystems don't require enum changes
+- Composable: catalog name is embedded in the key
+- Forward-compatible: unknown keys can log a warning instead of panicking
+
+### Re-Assemble Pattern for Post-Fix State (Phase 3 / US4)
+
+When a command applies zero-write repairs and needs to show updated state, re-run the diagnose function (which performs only health checks, no mutations) instead of manually updating the report struct.
+
+Pattern:
+```rust
+pub fn run(args: DoctorArgs, mode: Mode) -> Result<(), TomeError> {
+    let mut report = assemble_report(&scope, &paths, &home, args.verify)?;
+    emit_diagnoses(&report, mode)?;
+    
+    if args.fix {
+        for fix in &report.suggested_fixes {
+            apply_one_fix(&fix.subsystem, &fix.detail, ...)?;
+        }
+        
+        // Re-assemble to show updated state
+        // (no need to manually mutate `report`)
+        report = assemble_report(&scope, &paths, &home, args.verify)?;
+        emit_diagnoses(&report, mode)?;
+    }
+    Ok(())
+}
+```
+
+**Benefit:** The diagnose logic is the single source of truth. Re-running it ensures the displayed state is current and accurate.
 
 ### Test Injection Points (Phase 3 / F7 and F8)
 

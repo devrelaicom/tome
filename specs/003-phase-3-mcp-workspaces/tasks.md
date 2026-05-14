@@ -349,46 +349,46 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Start
 
-- [ ] T160 [GIT] Verify working tree is clean before starting Phase 6 / US4
-- [ ] T161 [US4] Create `retro/P6.md` from the standard retro template
-- [ ] T162 [GIT] Commit: docs(retro): initialise P6 retro
+- [X] T160 [GIT] Verify working tree is clean before starting Phase 6 / US4.
+- [X] T161 [US4] Create `retro/P6.md` from the standard retro template.
+- [X] T162 [GIT] Commit: docs(retro): initialise P6 retro — `18d66f4`.
 
 ### Slice US4.a — report assembly + checks
 
-- [ ] T163 [P] [US4] Create `src/doctor/mod.rs` exposing the module surface and re-exports (use devs:rust-dev agent)
-- [ ] T164 [P] [US4] Create `src/doctor/report.rs` defining `DoctorReport`, `CatalogCacheHealth`, `CatalogCacheState`, `HarnessPresence`, `DoctorClassification`, `SuggestedFix` per data-model.md §5 (use devs:rust-dev agent)
-- [ ] T165 [P] [US4] Create `src/doctor/checks.rs` with one function per subsystem: `check_models`, `check_index`, `check_drift`, `check_catalogs`, `check_harnesses`, each returning a finding plus a suggested-fix list (use devs:rust-dev agent)
-- [ ] T166 [P] [US4] Create `src/doctor/harness_detect.rs` per research §R-7 — probes for `~/.claude/`, `~/.codex/`, `~/.cursor/`, `~/.gemini/`, `~/.opencode/`, `~/.continue/` (use devs:rust-dev agent)
-- [ ] T167 [US4] Implement `pub fn assemble_report(scope: &ResolvedScope, paths: &Paths, verify: bool) -> Result<DoctorReport, TomeError>` in `src/doctor/mod.rs` per the library-bypass pattern from Phase 8 (mirrors `commands::status::assemble_report`) (use devs:rust-dev agent)
-- [ ] T168 [US4] Implement classification: `Unhealthy` if embedder missing/corrupt OR index integrity fail OR embedder drift OR schema-too-new; `Degraded` if reranker missing/corrupt OR reranker drift OR catalog cache broken OR orphan clone; else `Ok` (use devs:rust-dev agent)
-- [ ] T169 [US4] Add unit tests in `src/doctor/checks.rs` for each per-subsystem check function against mutated fixture state (use devs:rust-dev agent)
-- [ ] T170 [GIT] Commit: feat(doctor): report assembly + per-subsystem checks (library API)
+- [X] T163 [P] [US4] Create `src/doctor/mod.rs` exposing the module surface and re-exports.
+- [X] T164 [P] [US4] Create `src/doctor/report.rs` defining `DoctorReport`, `CatalogCacheHealth`, `CatalogCacheState`, `HarnessPresence`, `DoctorClassification`, `SuggestedFix` per data-model.md §5.
+- [X] T165 [P] [US4] Create `src/doctor/checks.rs` — only `check_catalogs` is doctor-specific; the model / index / drift checks were promoted from `commands::status` (private → `pub`) and reused. Unit tests in `checks.rs` cover the four catalog cache states.
+- [X] T166 [P] [US4] Create `src/doctor/harness_detect.rs` per research §R-7 — probes the six well-known dirs. Three unit tests covering empty/mixed/file-not-dir.
+- [X] T167 [US4] Implement `pub fn assemble_report(scope, paths, home, verify) -> Result<DoctorReport, TomeError>` — deviated from the proposed signature: added `home` parameter so tests can isolate `$HOME` without env mutation.
+- [X] T168 [US4] Implement classification per contract: Unhealthy if embedder missing/corrupt OR index integrity fail OR embedder drift; Degraded if reranker missing/corrupt OR reranker drift OR any catalog cache state != Ok; else Ok.
+- [X] T169 [US4] Add unit tests for each per-subsystem check function — 7 lib unit tests total (4 in `checks.rs`, 3 in `harness_detect.rs`).
+- [X] T170 [GIT] Commit: feat(doctor): report assembly + per-subsystem checks (library API) — `b120e74`.
 
 ### Slice US4.b — `--fix` + CLI surface
 
-- [ ] T171 [US4] Create `src/doctor/fixes.rs::apply(report: &mut DoctorReport, paths: &Paths) -> Result<(), TomeError>` performing the three safe repair classes per contracts/doctor.md §`--fix` semantics (use devs:rust-dev agent)
-- [ ] T172 [US4] Implement re-download repair via `embedding::download::download_model` (use devs:rust-dev agent)
-- [ ] T173 [US4] Implement re-clone repair via `catalog::git::Git::clone` against the recorded URL and pinned ref (use devs:rust-dev agent)
-- [ ] T174 [US4] Implement forward-migration repair via `index::migrations::apply_pending` under the resolved scope's advisory lock (use devs:rust-dev agent)
-- [ ] T175 [US4] Implement `--fix` re-classification — after each repair, re-run the affected `check_*` function and update the in-place report (use devs:rust-dev agent)
-- [ ] T176 [US4] Implement the `DoctorFixNotSafe` exit-75 return path when `--fix` was passed but the report ends with un-fixable issues remaining (use devs:rust-dev agent)
-- [ ] T177 [US4] Create `src/commands/doctor.rs::run(args: DoctorArgs, scope: &ResolvedScope, paths: &Paths, mode: Mode) -> Result<(), TomeError>` (use devs:rust-dev agent)
-- [ ] T178 [US4] Wire `Command::Doctor(DoctorArgs)` in `src/cli.rs` and dispatch in `src/main.rs` (use devs:rust-dev agent)
-- [ ] T179 [US4] Implement human form rendering in `src/doctor/mod.rs::emit_human` per contracts/doctor.md §Output (human) (use devs:rust-dev agent)
-- [ ] T180 [US4] Implement `--json` form rendering per contracts/doctor.md §Output (`--json`) (use devs:rust-dev agent)
-- [ ] T181 [GIT] Commit: feat(doctor): --fix repairs + CLI surface
+- [X] T171 [US4] Create `src/doctor/fixes.rs::apply(&mut DoctorReport, paths, scope)` performing the three safe repair classes per contracts/doctor.md §`--fix` semantics.
+- [X] T172 [US4] Implement re-download repair via `embedding::download::download_model` — clears the existing model dir first so corrupted state doesn't block the atomic rename.
+- [X] T173 [US4] Implement re-clone repair via `Git::clone_shallow` against the recorded URL and pinned ref — best-effort `remove_dir_all` of the broken cache before the clone, since `clone_shallow` requires a non-existent destination.
+- [X] T174 [US4] Implement forward-migration repair via `index::migrations::apply_pending` under the resolved scope's advisory lock.
+- [X] T175 [US4] Implement `--fix` re-classification — `re_assemble(&mut DoctorReport)` rebuilds `suggested_fixes` + `overall` without re-running catalog + harness probes (those already ran inline in `apply_one`).
+- [X] T176 [US4] Implement the `DoctorFixNotSafe` exit-75 return path — `has_remaining_manual_fixes(&report)` predicate + the CLI wrapper returns the variant with the first un-fixable subsystem name.
+- [X] T177 [US4] Create `src/commands/doctor.rs::run` — thin emit + exit-code wrapper over `assemble_report`.
+- [X] T178 [US4] Wire `Command::Doctor(DoctorArgs)` in `src/cli.rs` and dispatch in `src/main.rs`.
+- [X] T179 [US4] Implement human form rendering — lives in `commands::doctor::emit_human` (not `doctor::mod::emit_human` as proposed) so the library API stays emit-free. TTY glyph + ASCII-fallback idiom matches status.
+- [X] T180 [US4] Implement `--json` form rendering — goes through `output::write_json` against the `DoctorReport` struct directly; field order is the contract.
+- [X] T181 [GIT] Commit: feat(doctor): --fix repairs + CLI surface — `b526cef`.
 
 ### Slice US4.c — integration tests + closeout
 
-- [ ] T182 [US4] Create `tests/doctor.rs` covering: healthy report exits 0; every failure class (missing model, corrupt model, missing catalog cache, broken catalog cache, schema-older, schema-newer, embedder drift, reranker drift, orphan clone) is detected and classified; `--fix` repairs the three safe classes and re-runs as healthy; `--fix` with un-fixable issues returns exit 75; harness detection finds well-known directories; `--global` from inside a workspace reports global state (use devs:rust-dev agent)
-- [ ] T183 [US4] Create `tests/doctor_json.rs` covering the JSON envelope shape end-to-end per data-model.md §5 (use devs:rust-dev agent)
-- [ ] T184 [GIT] Commit: test(doctor): subsystem coverage + --fix repair classes
+- [X] T182 [US4] Create `tests/doctor.rs` covering: healthy → exit 0, missing models → unhealthy/exit 1, broken catalog cache → degraded, missing catalog cache → degraded, manifest-invalid → not-auto-fixable, `--fix` repairs broken catalog cache + re-classifies Ok, `has_remaining_manual_fixes` detects unfixable, harness detection finds existing dirs, `--global` scope reports global, CLI exits 1/0/75 per contract — 12 tests. Some scenarios (corrupt model files, schema-too-new, schema-older migration, real model re-download) are intentionally NOT covered end-to-end here: corrupt-model coverage stays at `cheap_state` (Phase 2); schema-too-new/older paths land in US5 (Phase 7); real model fetch would download real BGE weights from huggingface — too heavy for CI.
+- [X] T183 [US4] Create `tests/doctor_json.rs` covering the JSON envelope shape per data-model.md §5 — 3 tests (healthy shape pinned + broken-catalog suggested_fixes entry + missing-models unhealthy overall).
+- [X] T184 [GIT] Commit: test(doctor): subsystem coverage + --fix repair classes + JSON shape — `f3bf09b`.
 
 ### End-of-phase
 
-- [ ] T185 [US4] Run `/sdd:map incremental` to refresh codebase docs against Phase 6 / US4 changes
-- [ ] T186 [US4] Review `retro/P6.md` and extract critical learnings to CLAUDE.md (conservative)
-- [ ] T187 [GIT] Commit: docs(codebase): refresh after Phase 6 / US4
+- [X] T185 [US4] Run `/sdd:map incremental` to refresh codebase docs against Phase 6 / US4 changes.
+- [X] T186 [US4] Review `retro/P6.md` and extract critical learnings to CLAUDE.md (conservative).
+- [X] T187 [GIT] Commit: docs(codebase): refresh after Phase 6 / US4.
 
 ### Phase Completion
 

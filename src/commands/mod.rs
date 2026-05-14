@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod doctor;
 pub mod mcp;
 pub mod models;
 pub mod plugin;

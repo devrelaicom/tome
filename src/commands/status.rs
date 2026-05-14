@@ -115,7 +115,11 @@ pub fn assemble_report(
     })
 }
 
-fn check_model(paths: &Paths, entry: &ModelEntry, verify: bool) -> Result<ModelHealth, TomeError> {
+pub fn check_model(
+    paths: &Paths,
+    entry: &ModelEntry,
+    verify: bool,
+) -> Result<ModelHealth, TomeError> {
     let (mut state, _manifest) = cheap_state(paths, entry)?;
     if verify && matches!(state, ModelState::Ok) {
         let dir = paths.model_path(entry.name)?;
@@ -135,7 +139,7 @@ fn check_model(paths: &Paths, entry: &ModelEntry, verify: bool) -> Result<ModelH
     })
 }
 
-fn check_index(paths: &Paths, scope: &Scope) -> Result<IndexHealth, TomeError> {
+pub fn check_index(paths: &Paths, scope: &Scope) -> Result<IndexHealth, TomeError> {
     let index_db = paths.index_db_for(scope);
     if !index_db.is_file() {
         return Ok(IndexHealth {
@@ -199,7 +203,7 @@ fn check_index(paths: &Paths, scope: &Scope) -> Result<IndexHealth, TomeError> {
     })
 }
 
-fn check_drift(
+pub fn check_drift(
     paths: &Paths,
     scope: &Scope,
     embedder_entry: &ModelEntry,

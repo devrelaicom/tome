@@ -2,7 +2,7 @@
 
 > **Purpose**: Document what executes in this codebase - languages, runtimes, frameworks, and critical dependencies.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US3 — reference-counted catalog clones across scopes; no new dependencies)
+> **Last Updated**: 2026-05-14 (Phase 3 / US4 — doctor command with subsystem checks + harness detection; no new dependencies)
 
 ## Languages & Runtimes
 
@@ -344,6 +344,46 @@ US3 enables catalog sharing across scopes (global + workspace) with automatic re
 
 Test count: 330 → 355 across 46 → 49 suites.
 
+### Phase 3 / User Story 4 — doctor subsystem checks + harness discovery
+
+US4 adds the `tome doctor [--fix]` diagnostic command with subsystem health checks and optional repairs:
+
+**New module structure:**
+
+- `src/doctor/mod.rs` — orchestrator entry point
+- `src/doctor/report.rs` (~200 lines) — output type definitions per `contracts/doctor.md`:
+  - `DoctorReport { subsystems: Vec<SubsystemReport>, harnesses: Vec<HarnessPresence>, summary: ... }`
+  - `SubsystemReport { name, status: SubsystemStatus, details: Option<...> }`
+  - `HarnessPresence { name, path, present: bool }` — minimal existence probe (no content reads; directory presence only per FR-167)
+- `src/doctor/checks.rs` (~200 lines) — per-subsystem diagnostic pipelines
+  - Reuses `commands::status::check_model` / `check_index` / `check_drift` promoted to `pub` in `src/commands/status.rs`
+  - Models: presence, integrity via SHA-256, drift detection (embedder/reranker identity validation)
+  - Index: presence, schema version, WAL mode state, integrity check, drift
+  - Workspace: manifest parse + counts
+  - Reuses existing index/models query infrastructure; no new DB traversals
+- `src/doctor/fixes.rs` (~150 lines) — repair operations per `contracts/doctor.md` repair classes:
+  - Models: download missing, remove corrupt (via SHA-256 mismatch)
+  - Index: recreate missing, auto-disable orphans (reuses Phase 7/9 logic)
+  - Atomicity: each repair is a single advisory-lock window (or N lock windows per-plugin for auto-disable cascade)
+  - `--fix` flag execution with interactive confirmation (unless `--force` also passed)
+- `src/doctor/harness_detect.rs` (~90 lines) — compile-time `KNOWN_HARNESSES` probe at startup:
+  - Probes 6 harnesses: Claude Code (`.claude`), Codex (`.codex`), Cursor (`.cursor`), Gemini CLI (`.gemini`), OpenCode (`.opencode`), Continue (`.continue`)
+  - Existence-only probe (per research §R-7, FR-167) — no config file reads, no schema coupling
+  - Results report in `--json` output and banner; harnesses not in the list deliberately not discovered (no `$HOME` scan)
+  - Probed in `pub fn probe(home: &Path) -> Vec<HarnessPresence>` — tests via `tempfile` mock homes
+
+**CLI wiring:**
+- `Command::Doctor(DoctorArgs)` variant in `src/cli.rs` with `fix: bool, force: bool` flags
+- `src/commands/doctor.rs` (~180 lines) — dispatch + emit wrapper; `pub fn assemble(scope, paths) -> Result<DoctorReport, TomeError>` is the library-API entry point (mirrors `status::assemble_report` pattern)
+- Interactive repair confirmation via reused `inquire` prompt (existing `presentation::prompt` infrastructure)
+- Exit code: 0 if all healthy; 1 if any issue detected (deviates from status' degraded/unhealthy semantics; doctor is a single unified pass)
+
+**Test coverage:**
+- 15 new integration tests in `tests/doctor.rs`: subsystem health scenarios (all-ok, missing embedder, corrupt index, etc.), harness detection (mock homes), `--fix` repair atomicity (via library API + StubEmbedder), JSON shape validation, CLI binary smoke tests
+- 7 new unit tests: harness probe with empty/populated homes, probe ignores files
+
+**No new production dependencies** — all pieces reuse existing model/index/workspace infrastructure + `inquire` for interactive fixes. Test count: 355 → 367 across 49 → 50 suites. Binary size unchanged (22.04 MiB on macOS arm64).
+
 ## Package Managers & Build Tools
 
 | Tool | Version | Purpose |
@@ -358,11 +398,12 @@ Test count: 330 → 355 across 46 → 49 suites.
 |-------------|---------|
 | OS Targets | Linux (ubuntu-latest) and macOS (macos-latest) — CI verified on both |
 | Deployment | Single binary (`target/release/tome`); installed via `cargo install --path .` |
-| Binary Size | < 50 MB stripped (enforced by CI; revised from 10 MB ceiling in CONSTITUTION v1.2.0 after Phase 3 slice 1 measured 29.56 MB on Linux; `ort` CPU-only static linking is the load-bearing constraint; US1 final 22.04 MiB on macOS arm64; US2 maintains same footprint; US3 maintains same footprint — no new production dependencies) |
-| Output | Human-readable (default) or NDJSON (`--json`); logging to stderr only (orthogonal to stdout); colours respect `NO_COLOR` and auto-disable on non-TTY |
+| Binary Size | < 50 MB stripped (enforced by CI; revised from 10 MB ceiling in CONSTITUTION v1.2.0 after Phase 3 slice 1 measured 29.56 MB on Linux; `ort` CPU-only static linking is the load-bearing constraint; US1 final 22.04 MiB on macOS arm64; US2 maintains same footprint; US3 maintains same footprint; US4 maintains same footprint — no new production dependencies) |
+| Output | Human-readable (default) or NDJSON (`--json`); logging to stderr only (orthogonal to `--json` stdout); colours respect `NO_COLOR` and auto-disable on non-TTY |
 | Model runtime | CPU-only ONNX Runtime (via `fastembed`); models downloaded at first use into `${XDG_DATA_HOME}/tome/models/`; fixed registry (compile-time constants) ensures bit-for-bit reproducibility |
 | MCP server runtime | Single-threaded tokio with JSON-lines file logging to `${XDG_STATE_HOME}/tome/mcp.log` (10 MiB rotation cap); stdout reserved for MCP protocol only; stderr for fatal startup errors only |
 | Workspace storage | Atomic `.tome/` directories created via `tempfile::Builder::tempdir_in` (staging + POSIX rename); config persisted to `${WORKSPACE}/.tome/config.toml`; index DB at `${WORKSPACE}/.tome/index.db` per Phase 3 Foundational F1; catalog clones in `${WORKSPACE}/.tome/catalogs/<sha>/` shared across scopes via reference-count tracking in global config + workspace registry (Phase 3 / US3) |
+| Doctor diagnostics | Subsystem health checks (models, index, workspace, drift) with optional repairs via `--fix`; harness detection at 6 known install locations (existence-only probe, no content reads); results in human-readable and `--json` output |
 
 ## Not Used (Explicitly Excluded)
 
@@ -384,4 +425,4 @@ Test count: 330 → 355 across 46 → 49 suites.
 
 ---
 
-*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 + Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 + Phase 3 / US3 source code.*
+*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 + Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 + Phase 3 / US3 + Phase 3 / US4 source code.*

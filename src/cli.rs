@@ -90,6 +90,26 @@ pub enum Command {
     /// Inspect or create per-project workspaces. See
     /// `contracts/workspace-info.md` and `contracts/workspace-init.md`.
     Workspace(WorkspaceArgs),
+    /// Comprehensive diagnostic. Reports every subsystem (workspace,
+    /// models, index, drift, catalog caches, harnesses), classifies
+    /// overall health, and lists suggested fixes. With `--fix`,
+    /// applies the three safe repair classes (re-download models,
+    /// re-clone broken catalog caches, forward-migrate the schema).
+    Doctor(DoctorArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct DoctorArgs {
+    /// Apply the three safe automatic repairs (re-download missing or
+    /// corrupt models, re-clone broken catalog caches, forward-migrate
+    /// the index schema). Destructive repairs are never automatic.
+    #[arg(long)]
+    pub fix: bool,
+    /// Rehash each installed model's primary file against its pinned
+    /// SHA-256. Slower than the default but catches silent on-disk
+    /// corruption.
+    #[arg(long)]
+    pub verify: bool,
 }
 
 #[derive(Debug, clap::Args)]

@@ -2,7 +2,7 @@
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14
+> **Last Updated**: 2026-05-15
 
 ## Test Framework
 
@@ -48,6 +48,8 @@ tests/
 ├── reindex.rs                     # Library + CLI: `tome reindex` (Phase 7)
 ├── status.rs                      # Library API: `assemble_report` (Phase 8)
 ├── version_output.rs              # Compile-time content tests (Phase 8)
+├── doctor.rs                      # Library API + CLI: `tome doctor` health diagnostics (Phase 3 / US4)
+├── doctor_json.rs                 # JSON envelope shape tests for doctor output (Phase 3 / US4)
 ├── mcp_server.rs                  # MCP tool router + handler introspection (Phase 3)
 ├── mcp_lifecycle.rs               # MCP pre-flight exit codes (Phase 3)
 ├── workspace_info.rs              # Library API: `workspace::info::assemble` (Phase 4 / US2)
@@ -79,8 +81,8 @@ tests/
 | Category | Location | Style |
 |----------|----------|-------|
 | Unit tests | `tests/{test_name}.rs` | Test one concept (parser, error path, validator) |
-| Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/reindex.rs`, `tests/catalog_update_reindex.rs`, `tests/status.rs`, `tests/workspace_info.rs`, `tests/workspace_init.rs` | Exercise library API with `StubEmbedder`, bypassing `Paths::resolve` + `FastembedEmbedder::load` |
-| Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs`, `tests/plugin_disable.rs`, `tests/models_*.rs`, `tests/reindex.rs` (parse-error tests), `tests/catalog_remove_cascade.rs`, `tests/workspace_init.rs` (CLI tests) | Spawn `tome` binary as subprocess; used when no embedders are loaded |
+| Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/reindex.rs`, `tests/catalog_update_reindex.rs`, `tests/status.rs`, `tests/doctor.rs`, `tests/workspace_info.rs`, `tests/workspace_init.rs` | Exercise library API with `StubEmbedder`, bypassing `Paths::resolve` + `FastembedEmbedder::load` |
+| Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs`, `tests/plugin_disable.rs`, `tests/models_*.rs`, `tests/reindex.rs` (parse-error tests), `tests/catalog_remove_cascade.rs`, `tests/doctor.rs` (doctor run tests), `tests/workspace_init.rs` (CLI tests) | Spawn `tome` binary as subprocess; used when no embedders are loaded |
 | Integration tests (PTY-driven) | `tests/plugin_interactive.rs` | Scripted pty session with `rexpect`; driven via real terminal I/O |
 | Integration tests (MCP handler-level) | `tests/mcp_server.rs` | Call handler `async fn` directly inside `tokio::runtime::Builder::new_current_thread()` block (Phase 3) |
 | Integration tests (MCP lifecycle) | `tests/mcp_lifecycle.rs` | CLI-binary tests for MCP pre-flight exit codes (Phase 3) |
@@ -237,7 +239,7 @@ This pattern allows tests to exercise the full handler pipeline without spawning
 
 ### Library API Integration Test Pattern (Phase 3–8)
 
-Tests for `plugin::lifecycle`, `index::query`, `commands::reindex`, `commands::catalog::update`, and `commands::status` drive the library API directly with a `StubEmbedder`. This avoids loading real ONNX models in CI.
+Tests for `plugin::lifecycle`, `index::query`, `commands::reindex`, `commands::catalog::update`, `commands::status`, and `commands::doctor` drive the library API directly with a `StubEmbedder`. This avoids loading real ONNX models in CI.
 
 Pattern:
 1. **Build fixture** — copy sample plugin catalog to temp dir, initialize git
@@ -259,6 +261,22 @@ fn status_reports_healthy_when_models_ok() {
     let report = assemble_report(&paths, false).expect("status should succeed");
     assert_eq!(report.overall, OverallHealth::Ok);
     assert_eq!(report.embedder.state, "ok");
+}
+```
+
+**Phase 3 / US4 addition:** Doctor health diagnostics are testable via `assemble_report(scope, paths, home, verify)` (library API); the `run()` wrapper optionally applies suggested fixes and re-assembles. Tests call `assemble_report` directly and optionally `apply_one_fix` for individual repair paths:
+
+```rust
+#[test]
+fn doctor_diagnoses_missing_embedder() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    
+    // Do NOT fabricate models — missing embedder condition
+    let report = assemble_report(&ResolvedScope::global(), &paths, tmp.path(), false)
+        .expect("doctor should diagnose");
+    
+    assert!(report.suggested_fixes.iter().any(|f| f.subsystem == "embedder"));
 }
 ```
 
@@ -305,7 +323,7 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
 
 ### CLI-Binary Integration Test Pattern (Phase 3–9)
 
-Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`, `plugin disable`, `models list`, `models remove`, `status` read-only report, `catalog remove --force`) spawn the real binary.
+Tests for commands that don't load embedders (e.g., `plugin list`, `plugin show`, `plugin disable`, `models list`, `models remove`, `status` read-only report, `catalog remove --force`, `doctor` diagnostics) spawn the real binary.
 
 Pattern:
 1. **Build fixture** — copy plugin catalog to temp dir, initialize git
@@ -373,6 +391,84 @@ fn status_exit_zero_when_healthy() {
 **Phase 4 / US2 CLI tests:** `tests/workspace_init.rs` includes 2 CLI-binary smoke tests that verify default workspace resolution and exit-code propagation.
 
 Used when embedders are not involved or interaction with the real binary is essential.
+
+### Doctor Health Diagnostics Test Pattern (Phase 3 / US4)
+
+Tests for health diagnostics and repair (`tome doctor`) split into library-API (diagnose) and CLI-binary (apply fixes) sections. The doctor never loads embedders; diagnostics are pure state inspection.
+
+**Library API pattern:** Call `assemble_report(scope, paths, home, verify)` to inspect health without side effects.
+
+```rust
+#[test]
+fn doctor_detects_missing_embedder() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    
+    // Do NOT fabricate models — missing embedder condition
+    let report = assemble_report(&ResolvedScope::global(), &paths, tmp.path(), false)
+        .expect("assemble should succeed");
+    
+    // Check suggested_fixes list
+    assert!(report.suggested_fixes.iter().any(|f| {
+        f.subsystem == "embedder"
+    }));
+}
+```
+
+**CLI binary pattern:** Set up a healthy baseline, run `tome doctor --fix`, verify side effects via subsequent CLI checks.
+
+```rust
+#[test]
+fn doctor_fix_applies_repairs_and_shows_updated_state() {
+    let env = ToolEnv::new();
+    setup_healthy_baseline(&env);
+    
+    // Run doctor with --fix
+    let out = env.cmd()
+        .args(["doctor", "--fix"])
+        .output()
+        .unwrap();
+    
+    assert!(out.status.success());
+    // Verify the output shows "Healthy" or similar post-fix
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Healthy") || stdout.contains("Ok"));
+}
+```
+
+**Surgical filesystem mutations for cache breakage testing:** Doctor cache validation tests intentionally break catalog caches on disk to verify doctor detects and suggests fixes. Use surgical mutations rather than mocks:
+
+```rust
+#[test]
+fn doctor_detects_broken_catalog_cache() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    setup_healthy_baseline(&env);
+    
+    // Register a catalog via CLI binary so it has a cache
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample");
+    env.cmd()
+        .args(["catalog", "add", &format!("file://{}", catalog_root.display()), "--name", "test"])
+        .output()
+        .unwrap();
+    
+    // Surgical mutation: remove the .git directory from the cache
+    // (simulates a corrupted or partially-deleted cache clone)
+    let cache_path = cache_dir_for(&env, &catalog_root);
+    std::fs::remove_dir_all(cache_path.join(".git"))
+        .expect("remove .git from cache");
+    
+    // Doctor should detect the broken cache
+    let report = assemble_report(&ResolvedScope::global(), &paths, env.home_path(), false)
+        .expect("diagnose");
+    
+    assert!(report.suggested_fixes.iter().any(|f| {
+        f.subsystem.starts_with("catalog:") && f.detail.contains("cache")
+    }));
+}
+```
+
+This pattern is faster and more deterministic than mocking layers, and directly tests the code paths that matter in production.
 
 ### PTY-Driven Integration Test Pattern (Phase 4)
 
@@ -792,43 +888,61 @@ This is now the established pattern for testing CLI subcommands that need an emb
 
 **Pattern:** Enable via library API + `StubEmbedder` in the test setup (avoids real model files); remove flow via CLI binary (pure deletion, no embedder construction).
 
-### Phase 6 Sparse-File Fixture Pattern
+### Phase 6 Sparse-File Fixture Pattern and Fabricator Selection (Phase 3 / US4)
 
 **Purpose:** Create realistic-size test artefacts without disk I/O cost.
 
 **Key:** Use `std::fs::File::set_len(n)` to create sparse files filled with zeros at ~no disk cost.
 
-**Function:** `fabricate_installed_model(paths: &Paths, entry: &ModelEntry)` — writes:
-1. `manifest.json` with the real metadata (name, version, size, SHA-256)
-2. One sparse file per `entry.files`, sized to `entry.size_bytes` for the main artefact (e.g., model weights)
-3. Other auxiliary files (tokenizer.json, config.json) as 1-byte sparse files (present + non-empty)
+Two fabricators are available with different trade-offs:
 
-**Properties:**
-- The 280 MB reranker fixture consumes ~zero disk on Linux and macOS
-- All bytes are zero, so SHA-256 intentionally DOES NOT match the registry pinned hash
-- `models list --verify` uses this to flip the state to `checksum_mismatched` (test coverage for mismatch path)
+**`fabricate_models(paths: &Paths)`** — **Lightweight, manifest-only.** Writes only `ModelManifest` JSON for each model in `MODEL_REGISTRY`. Used when:
+- Testing logic that checks model presence without loading them (e.g., early exits, validation checks)
+- Testing doctor diagnostics that detect missing models
+- Keeping test setup minimal and fast
+- Does NOT create actual model files on disk
 
-**Usage:**
+Example: `doctor` tests that diagnose missing embedder use `fabricate_models` to satisfy the "model manifest exists" gate, then omit files to trigger the "model files missing" diagnostic:
+
 ```rust
-let paths = paths_for(&env);
-fabricate_all_installed_models(&paths);  // Populate both embedder and reranker
-
-let out = env.cmd()
-    .args(["models", "list", "--verify"])
-    .output()
-    .unwrap();
-// Assertions on output; reranker shows checksum_mismatched
+#[test]
+fn doctor_detects_missing_embedder_files() {
+    let paths = lifecycle_paths(tmp.path());
+    fabricate_models(&paths);  // Just manifests, no files
+    
+    let report = assemble_report(&scope, &paths, tmp.path(), false)?;
+    assert!(report.suggested_fixes.iter().any(|f| f.subsystem == "embedder"));
+}
 ```
 
-**Reusable for any future test** that needs realistic-size fixtures without I/O. Common patterns:
-- Pre-populate installed models for `models list --verify` tests
-- Mock downloaded models to test skip paths without network access
+**`fabricate_all_installed_models(paths: &Paths)`** — **Complete, with sparse files.** Writes manifest JSON + sparse-file placeholders for every model in `MODEL_REGISTRY`. Used when:
+- Testing `models list` with checksum verification (sparse files are zero-filled, hashes mismatch intentionally)
+- Testing health checks that expect models to exist and are fully readable
+- Testing `--verify` workflows that re-hash models
+- Simulating a "healthy but suspect" baseline (models present, checksums wrong)
 
-Related helper: `fabricate_all_installed_models(paths: &Paths)` — convenience for populating the entire `MODEL_REGISTRY` at once.
+Example: `status` tests that verify healthy state use `fabricate_all_installed_models`:
+
+```rust
+#[test]
+fn status_reports_healthy_when_models_present() {
+    let paths = lifecycle_paths(tmp.path());
+    fabricate_all_installed_models(&paths);  // Manifest + sparse files
+    
+    let report = assemble_report(&paths, false)?;
+    assert_eq!(report.overall, OverallHealth::Ok);
+}
+```
+
+**Summary:**
+| Fabricator | Manifests | Sparse Files | Use Case |
+|-----------|-----------|-------------|----------|
+| `fabricate_models` | ✓ | ✗ | Doctor diagnosis (detect missing), early-exit paths, lightweight setup |
+| `fabricate_all_installed_models` | ✓ | ✓ | Health checks, checksum verification, realistic baseline |
 
 ### Phase 5 Lifecycle Helpers (`tests/common/mod.rs`)
 
-**`paths_for(env: &ToolEnv) -> Paths`** — **Promoted in Phase 5 to common/mod.rs.** Resolves `ToolEnv` to the same `Paths` that the spawned CLI would resolve. Previously duplicated across `plugin_list.rs`, `plugin_show.rs`, `plugin_interactive.rs`, and now used by `plugin_disable.rs`, `plugin_repeated.rs`, all `models_*.rs` tests, `catalog_remove_cascade.rs` (Phase 9), and `reindex.rs` (Phase 7) — consolidated at the 4th caller.
+**`paths_for(env: &ToolEnv) -> Paths`** — **Promoted in Phase 5 to common/mod.rs.** Resolves `ToolEnv` to the same `Paths` that the spawned CLI would resolve. Previously duplicated across `plugin_list.rs`, `plugin_show.rs`, `plugin_interactive.rs`, and now used by `plugin_disable.rs`, `plugin_repeated.rs`, all `models_*.rs` tests, `catalog_remove_cascade.rs` (Phase 9), `doctor.rs` (Phase 3 / US4), and `reindex.rs` (Phase 7) — consolidated at the 4th caller.
 
 ```rust
 pub fn paths_for(env: &ToolEnv) -> Paths {
@@ -885,7 +999,7 @@ pub fn fabricate_models(paths: &Paths) {
 
 **`stub_embedder_seed()` / `stub_reranker_seed()`** — Return `MetaSeed` values matching the deterministic stub embedder/reranker. Used to construct `LifecycleDeps` and open the index.
 
-**`write_config_for_cli(paths: &Paths, config: &Config)`** — Write the supplied `Config` to `paths.config_file` as TOML so a child `tome` binary process can read it. Used by `plugin list` / `plugin show` / `plugin disable` / `models_*` / `reindex` / `catalog_remove_cascade` tests that bypass `catalog add`.
+**`write_config_for_cli(paths: &Paths, config: &Config)`** — Write the supplied `Config` to `paths.config_file` as TOML so a child `tome` binary process can read it. Used by `plugin list` / `plugin show` / `plugin disable` / `models_*` / `reindex` / `doctor` / `catalog_remove_cascade` tests that bypass `catalog add`.
 
 ### Phase 4 Interactive Helpers (PTY pattern)
 
@@ -999,6 +1113,8 @@ When tests run:
 | `reindex.rs` | Library + CLI | `tome reindex [<scope>]` — library-API scope variants (All, Catalog, Plugin) via `run_with_deps`, CLI parse-error paths, empty install (Phase 7) |
 | `status.rs` | Library API | `assemble_report` — subsystem health checks (embedder, reranker, index, drift), overall classification (Ok/Degraded/Unhealthy) (Phase 8) |
 | `version_output.rs` | Compile-time content | `--version` output includes embedder/reranker identities; `--json` format (Phase 8) |
+| `doctor.rs` | Library API + CLI | `assemble_report` — health diagnostics (embedder, index, cache, schema); library path for diagnose; CLI path for apply-fixes with re-assemble (Phase 3 / US4) |
+| `doctor_json.rs` | JSON envelope | Doctor JSON output shape — `suggested_fixes` structure, `subsystem` keys, `detail` field, optional fields (Phase 3 / US4) |
 | `mcp_server.rs` | Handler-level Library | MCP tool router introspection (tool list, descriptions); handler input-validation (error codes, bounds checks) (Phase 3) |
 | `mcp_lifecycle.rs` | CLI-binary | MCP pre-flight exit codes (workspace conflict, missing index, schema version, missing models) (Phase 3) |
 | `workspace_info.rs` | Library API | `workspace::info::assemble` — scope classification, model identity, catalog inheritance (Phase 4 / US2) |
@@ -1015,6 +1131,7 @@ When tests run:
 | `path_validation.rs` | Relative paths only; no absolute paths, no `..`, no escape outside catalog root |
 | `scrubbing.rs` | Credential scrubbing regex: URL logins, SSH hosts, tokens, API keys, long hex |
 | `atomicity.rs` | Interrupted writes (SIGINT during clone) leave registry/cache in consistent state |
+| In-module tests (`src/doctor/{checks,harness_detect}.rs::tests`) | Health check functions, harness detection logic (Phase 3 / US4) |
 | In-module tests (`src/mcp/log.rs::tests`) | Log rotation policy: skip/rename/overwrite, permission setting, idempotent no-ops |
 
 ## Deterministic Stub Embedder (Phase 3–7)
@@ -1060,9 +1177,9 @@ The counter is shared between clones via `Arc<AtomicUsize>` so the closure adapt
 
 ### No Environment Mutation in Library API Tests
 
-**Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`, `catalog_update_reindex.rs`, `reindex.rs`, `status.rs`, `workspace_info.rs`, `workspace_init.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
+**Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`, `catalog_update_reindex.rs`, `reindex.rs`, `status.rs`, `doctor.rs`, `workspace_info.rs`, `workspace_init.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
 
-**CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse-error tests, `catalog_remove_cascade.rs`, `workspace_init.rs` CLI tests) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
+**CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse-error tests, `catalog_remove_cascade.rs`, `doctor.rs` fix-apply tests, `workspace_init.rs` CLI tests) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
 
 **PTY-driven tests** (`plugin_interactive.rs`) mutate `env` only inside the pty spawning (via `Command::env`), not the parent process.
 
@@ -1112,7 +1229,7 @@ Usable by future tests for any large binary fixture (models, datasets, archives)
 
 ### Phase 5: Standard Helpers Promoted
 
-`paths_for(env: &ToolEnv) -> Paths` was promoted to `tests/common/mod.rs` in Phase 5 after its 4th caller (`plugin_repeated.rs`). All CLI-binary tests now import it from common; consolidation complete. Phase 6 `models_*.rs` tests also use it, Phase 7 `reindex.rs` extends the pattern, and Phase 9 `catalog_remove_cascade.rs` consolidates it further, cementing it as the standard.
+`paths_for(env: &ToolEnv) -> Paths` was promoted to `tests/common/mod.rs` in Phase 5 after its 4th caller (`plugin_repeated.rs`). All CLI-binary tests now import it from common; consolidation complete. Phase 6 `models_*.rs` tests also use it, Phase 7 `reindex.rs` extends the pattern, Phase 3 / US4 `doctor.rs` consolidates it further, and Phase 9 `catalog_remove_cascade.rs` cements it as the standard.
 
 ### YAML Frontmatter Quirk (Documented for Test Authors)
 
@@ -1133,15 +1250,16 @@ No automatic coverage threshold enforced, but the test corpus is organized to be
 
 - **Every error class is tested** — each `TomeError` variant appears in `exit_codes.rs` and often in command-specific tests
 - **Bad-input corpus is explicit** — each parser/validator has a separate test file documenting what shapes are rejected
-- **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/disable/list/show`, `plugin` interactive, `models download/list/remove`, `reindex`, `status`, `workspace info/init`) has dedicated tests
-- **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable and cheap-reenable (FR-006), fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback; `catalog_update_reindex.rs` and `reindex.rs` cover batch reindex logic; `status.rs` covers health assessment; `workspace_info.rs` and `workspace_init.rs` cover workspace discovery and initialization (Phase 4 / US2)
+- **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/disable/list/show`, `plugin` interactive, `models download/list/remove`, `reindex`, `status`, `doctor`, `workspace info/init`) has dedicated tests
+- **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable and cheap-reenable (FR-006), fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback; `catalog_update_reindex.rs` and `reindex.rs` cover batch reindex logic; `status.rs` covers health assessment; `doctor.rs` covers diagnostics and repair dispatch; `workspace_info.rs` and `workspace_init.rs` cover workspace discovery and initialization (Phase 4 / US2)
 - **MCP tool handlers tested** — `mcp_server.rs` covers tool router introspection and handler input validation; `mcp_lifecycle.rs` covers pre-flight exit codes
 - **Idempotency tested** — `plugin_repeated.rs` covers enable-of-enabled and disable-of-disabled (FR-008, exit 21)
 - **Interactive flow tested end-to-end** — `plugin_interactive.rs` covers catalog selector, plugin browser, action prompts, navigation, non-TTY refusal
 - **Cascade operations tested** — `catalog_remove_cascade.rs` covers refuse-on-enabled, cascade disable, JSON array envelope (Phase 9)
+- **Doctor diagnostics tested** — `doctor.rs` and `doctor_json.rs` cover health checks, suggested fixes, repair dispatch, JSON shape (Phase 3 / US4)
 - **Workspace operations tested** — `workspace_info.rs` covers scope introspection and model identity reporting; `workspace_init.rs` covers atomic initialization, config inheritance, concurrent contention (Phase 4 / US2)
 - **Compile-time content validated** — `version_output.rs` ensures `--version` output is synchronized with `MODEL_REGISTRY`
-- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift, sparse fixtures (Phase 6), batch reindex cheapness (Phase 7), health classification (Phase 8), cascade atomicity (Phase 9), threaded concurrency (Phase 4 / US2)
+- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift, sparse fixtures (Phase 6), batch reindex cheapness (Phase 7), health classification (Phase 8), cascade atomicity (Phase 9), threaded concurrency (Phase 4 / US2), surgical FS mutations for cache breakage (Phase 3 / US4)
 
 ## Specimen Tests (Quality Corpus)
 
@@ -1194,316 +1312,7 @@ Plugin sources must be:
 cargo build --release           # Full build (includes dependencies)
 cargo fmt --check              # Format check
 cargo clippy --all-targets -- -D warnings  # Linting
-cargo test --workspace         # Full test suite (330 tests across 46 suites)
+cargo test --workspace         # Full test suite (310 tests across 44 suites)
 cargo audit                     # Security: vulnerable dependencies
 cargo deny check                # License compliance
 ```
-
-All checks must pass on both platforms (`ubuntu-latest`, `macos-latest`) and both toolchains (`stable`, MSRV `1.93`).
-
-## Test Statistics
-
-**Current:** 330 passed across 46 suites (as of 2026-05-14, end of Phase 3 / US2 Foundational):
-- Unit tests (src/lib.rs): 66 (includes 4 new in-module tests for `mcp::log::tests` rotation policy)
-- Integration tests (tests/): 264
-
-Breakdown by test file:
-- Library API (heavy-state logic): `plugin_enable.rs`, `query.rs`, `catalog_update_reindex.rs`, `reindex.rs`, `status.rs`, `workspace_info.rs`, `workspace_init.rs`, `atomicity_enable.rs`
-- CLI binary (light-state / parse-error paths): `catalog_*.rs`, `plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse tests, `mcp_lifecycle.rs`, `workspace_init.rs` CLI tests
-- Handler-level (MCP introspection): `mcp_server.rs` (8 tests)
-- PTY-driven (interactive flows): `plugin_interactive.rs`
-- Unit (parsers, validators, error paths): `exit_codes.rs`, `error_messages.rs`, `manifest_strictness.rs`, `path_validation.rs`, `scrubbing.rs`, `atomicity.rs`, and in-module tests in `src/mcp/log.rs`
-
-### Required Checks
-
-| Check | Blocking | Trigger |
-|-------|----------|---------|
-| Format (cargo fmt) | Yes (pre-commit) | Every commit |
-| Clippy (linting) | Yes (pre-commit) | Every commit |
-| Build | Yes (CI) | Every push |
-| Test | Yes (pre-push, CI) | Every push |
-| Audit | Yes (weekly + PR) | Weekly cron + vulnerability reports |
-| Deny (licenses) | Yes (weekly + PR) | Weekly cron + dependency changes |
-
-## Test Execution Checklist
-
-### Before Pushing
-
-```sh
-# Pre-commit (parallel)
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-typos
-
-# Pre-push (sequential)
-cargo test --workspace
-```
-
-The hook scripts in `.githooks/` run these automatically once `git config core.hooksPath .githooks` has been set in the clone. If any fails, the push is blocked and the output explains why.
-
-### CI Validation
-
-After push, CI runs:
-1. Format check
-2. Clippy (all targets, all features, `-D warnings`)
-3. Build (release mode, binary size check)
-4. Tests (on stable + MSRV, on ubuntu + macos)
-5. Security (cargo-audit, cargo-deny)
-
-Green on all 4 combinations is required before merge.
-
-## Common Test Scenarios
-
-### Testing a New Exit Code
-
-1. Add variant to `TomeError` enum in `src/error.rs`
-2. Implement `exit_code()` match arm
-3. Implement `category()` match arm
-4. Add entry to `build_each_variant()` in `tests/exit_codes.rs`
-5. Add exhaustive-match arm in same file
-6. File compiles and tests pass → done
-
-### Testing a New TOML Field
-
-1. Add field to struct in `src/catalog/manifest.rs` or `src/config.rs`
-2. Add `#[serde(deny_unknown_fields)]` (already required)
-3. Add test case to `tests/manifest_strictness.rs` verifying field is accepted
-4. Add test case verifying unknown field with similar name is rejected
-5. Run `cargo test manifest_strictness` to verify
-
-### Testing a New Plugin Command (Phase 3–9)
-
-For library API tests (no embedder loading):
-1. Add module under `src/commands/plugin/`
-2. Create integration test file `tests/plugin_*.rs` (library API)
-3. Use `lifecycle_paths`, `fabricate_models`, `StubEmbedder`
-4. Call library API directly: `lifecycle::enable`, `lifecycle::disable`, etc.
-5. Assert outcome and database state
-6. Run `cargo test plugin_*` to verify
-
-For CLI tests (no embedder loading):
-1. Reuse the library API test scaffolding
-2. Create integration test file `tests/plugin_*.rs` (CLI binary)
-3. Use `ToolEnv`, `paths_for`, `write_config_for_cli` (Phase 5)
-4. Spawn the binary, assert exit code + output
-5. Run `cargo test plugin_*` to verify
-
-For interactive flows (PTY-driven):
-1. Create integration test file `tests/plugin_*.rs` (PTY)
-2. Pre-enable fixtures via library API (avoid loading embedders in CLI)
-3. Spawn binary under pty via `rexpect::spawn_command()`
-4. Use `send_flush()`, `press_enter()`, `press_down()` helpers
-5. Match prompts via `sess.exp_string()`
-6. Assert final state via database queries and exit code
-7. Set `NO_COLOR=1` to make prompt matching reliable
-
-For commands that load embedders (Phase 4+):
-- CLI-only; no library API test needed
-- Follow the `plugin list` / `plugin show` pattern
-
-### Testing a New Models Command (Phase 6)
-
-For CLI tests (no embedder loading):
-1. Create integration test file `tests/models_*.rs` (CLI binary)
-2. Use `ToolEnv`, `paths_for`, `write_config_for_cli` (Phase 5)
-3. For fixtures with models present, use `fabricate_all_installed_models(paths)` (sparse-file pattern)
-4. Spawn the binary, assert exit code + output
-5. Run `cargo test models_*` to verify
-
-Do not exercise the full network-download path in CI (would hit real `MODEL_REGISTRY` URLs). Test library-level download pipeline separately; CLI tests cover skip paths and JSON envelope.
-
-### Testing a New Status/Health Command (Phase 8)
-
-For library API tests (testable logic):
-1. Create integration test file `tests/{command}.rs` (library API)
-2. Use `lifecycle_paths`, `fabricate_models`, setup representative state
-3. Call the library-API function directly: `assemble_report(&paths, verify)?`
-4. Assert report fields, classification, and side effects
-5. Run `cargo test {command}` to verify
-
-For compile-time content tests:
-1. If output is parameterized by constants (e.g., `MODEL_REGISTRY`), create a compile-time content test
-2. Read constants at compile time
-3. Compute expected output from constants
-4. Spawn the binary and assert output matches
-5. Model bumps automatically update assertions
-
-For CLI exit-code tests:
-1. Reuse the library API test scaffolding
-2. Use `ToolEnv`, `paths_for`, `write_config_for_cli`
-3. Spawn the binary with representative state
-4. Assert exit code (0 for Ok, 1 for Degraded/Unhealthy)
-5. Assert human + JSON output correctness
-
-### Testing a New Batch Reindex Command (Phase 7)
-
-For library API tests (heavy-state paths):
-1. Create integration test file `tests/{command}_reindex.rs` (library API)
-2. Use `lifecycle_paths`, `fabricate_models`, `StubEmbedder`
-3. Expose a `pub fn run_with_deps(...)` entry point in the command module
-4. Call the library entry point, passing `LifecycleDeps` with `StubEmbedder`
-5. Assert embedder call-count to verify the cheap-skip invariant
-6. Run `cargo test {command}_reindex` to verify
-
-For CLI tests (parse/error paths):
-1. Reuse the library API test scaffolding
-2. Create integration test file `tests/{command}.rs` or extend existing (CLI binary)
-3. Use `ToolEnv`, `paths_for`, `write_config_for_cli`
-4. Spawn the binary with invalid scopes or empty install, assert exit codes
-5. Run `cargo test {command}` to verify
-
-Do not exercise the full embed path in CLI tests (would load real `FastembedEmbedder`). Parse errors and early exits use the CLI binary; heavy logic uses the library entry point.
-
-### Testing a New Cascade Command (Phase 9)
-
-For commands that batch-delete across multiple items (e.g., `catalog remove --force` cascade):
-
-1. **Library API setup:** Pre-enable multiple plugins via `lifecycle::enable` + `StubEmbedder` to populate the index
-2. **CLI binary test:** Drive the cascade via the CLI binary (no embedder construction needed for deletion)
-3. **Isolation:** Use `ToolEnv`, `paths_for`, `write_config_for_cli`
-4. **JSON validation:** If the cascade is exposed in `--json`, assert the optional array field structure:
-   - Empty cascade case: field omitted (via `#[serde(skip_serializing_if = "Vec::is_empty")]`)
-   - Non-empty cascade case: field present with one entry per deleted item
-5. **State assertions:** Verify database rows are dropped and side effects complete
-
-Example pattern from `tests/catalog_remove_cascade.rs`:
-- Enable plugins via library API + `StubEmbedder` (setup only)
-- Run CLI `catalog remove --force` (the cascade itself)
-- Assert exit code, JSON envelope structure, and post-operation database state
-
-### Testing a New MCP Tool Handler (Phase 3)
-
-For handler-level tests (introspection + validation):
-1. Create integration test file `tests/mcp_{command}.rs` (handler-level library)
-2. Build minimal `McpState` with `StubEmbedder`, `StubReranker`, isolated paths
-3. Build tokio runtime via `tokio::runtime::Builder::new_current_thread().enable_all()`
-4. Call handler `async fn` directly: `search_skills::handle(state, input).await`
-5. Assert output, error codes, and structured JSON `data` field
-6. For router introspection, use `Server::tool_router().list_all()` to assert tool list and descriptions
-7. Run `cargo test mcp_*` to verify
-
-For pre-flight exit-code tests:
-1. Create CLI-binary test file `tests/mcp_lifecycle.rs`
-2. Use `ToolEnv`, `paths_for`, `fabricate_all_installed_models`
-3. Set up conditions that trigger pre-flight failures (missing index, schema mismatch, missing models)
-4. Spawn the binary with `mcp` subcommand, assert exit code
-5. Run `cargo test mcp_lifecycle` to verify
-
-### Testing Workspace Commands (Phase 4 / US2)
-
-For library API tests (introspection and initialization logic):
-1. Create integration test file `tests/workspace_*.rs` (library API)
-2. Use `lifecycle_paths` to build paths, optional global config seed
-3. Call library API: `workspace::info::assemble(&scope, &paths)?` or `workspace::init(root, inherit, force, &paths)?`
-4. Assert outcome fields (scope_kind, catalogs, workspace path, config)
-5. Assert side effects (directory creation, config inheritance)
-6. Run `cargo test workspace_*` to verify
-
-For CLI tests (smoke tests):
-1. Reuse the library API test scaffolding
-2. Use `ToolEnv`, `paths_for`
-3. Spawn the binary with `workspace info` or `workspace init`, assert exit code + output
-4. Run `cargo test workspace_*` to verify
-
-For concurrent contention tests (workspace init):
-1. Use `std::sync::Barrier::new(2)` to synchronize two threads
-2. Have both threads attempt the same operation (e.g., init)
-3. Assert that one succeeds and one fails appropriately
-4. Verify that atomicity held even under thread contention
-
-### Testing Idempotency (Phase 5)
-
-For two-state operations like enable/disable:
-1. **Library API path:** Use `lifecycle::enable(&id, &deps)` twice; assert `TomeError::PluginAlreadyInState` on the second call
-2. **CLI binary path:** Spawn `tome plugin disable <id> --force` twice; assert exit code 21 on the second call
-3. **Mixed pattern:** Use library API for the first state transition, then CLI for the idempotent attempt (see `tests/plugin_repeated.rs` for example)
-
-### Testing Query / Search (Phase 3)
-
-1. Build fixture plugin catalog with multiple skills
-2. Enable plugins via `lifecycle::enable` (stub embedder)
-3. Open index via `index::open` with same stub seeds
-4. Call `index::query::knn` with query vector
-5. Assert hits, distances, optional reranking
-6. Use `embedding_text(name, description)` to predict top-1 for self-similarity tests
-
-### Testing Cheap Re-enable (Phase 5, FR-006)
-
-Verify that re-enabling a plugin whose skill content is unchanged skips the embedder:
-
-1. Create `StubEmbedder` instance
-2. Call `lifecycle::enable(&id, &deps)` — embedder invoked, `call_count()` > 0
-3. Call `lifecycle::disable(&id, &deps)` — library API (no embedder)
-4. Call `lifecycle::enable(&id, &deps)` again — content hash matches, embedder NOT invoked
-5. Assert `embedder.call_count()` unchanged from step 2
-
-Example (from `plugin_enable.rs`):
-```rust
-let count_before = embedder.call_count();
-lifecycle::disable(&id, &deps)?;
-lifecycle::enable(&id, &deps)?;
-assert_eq!(embedder.call_count(), count_before, "embedder should not be called on cheap re-enable");
-```
-
-### Testing Sparse Fixtures (Phase 6, Universal)
-
-For any test needing large binary artefacts without disk I/O:
-
-1. Call `fabricate_installed_model(paths, entry)` for one model, or
-2. Call `fabricate_all_installed_models(paths)` to populate `MODEL_REGISTRY`
-3. Artefacts are now present but zero-filled, so checksums intentionally mismatch
-4. Use `--verify` flag to test mismatch detection path
-5. Files consume ~no disk (sparse), so CI is fast even with 280 MB reranker
-
-Example (from `models_download.rs`):
-```rust
-let paths = paths_for(&env);
-fabricate_all_installed_models(&paths);
-// Reranker is now present but checksummed-mismatched
-
-let out = env.cmd()
-    .args(["models", "list", "--verify", "--json"])
-    .output()
-    .unwrap();
-
-// Assertions: reranker shows checksum_mismatched state
-```
-
-### Testing Batch Reindex Cheapness (Phase 7)
-
-Verify that batch reindex operations skip unchanged skills:
-
-1. Create `StubEmbedder` instance
-2. Enable multiple plugins via `lifecycle::enable` — embedder invoked N times
-3. Note the call count after initial setup
-4. Modify one skill (change content) via direct database update (or fixture rebuild)
-5. Call `reindex_catalog_plugins` or `run_with_deps(Scope::Catalog(...), ...)` — reindex only changed skills
-6. Assert `embedder.call_count()` increased by ≤1 (only the changed skill)
-
-Example (from `catalog_update_reindex.rs` and `reindex.rs`):
-```rust
-let embedder = StubEmbedder::new();
-enable_alpha(&paths, &config, &embedder);  // call_count = N
-let baseline = embedder.call_count();
-
-// Modify one skill in the database
-modify_skill_content(&paths, "skill-id", "new content");
-
-// Reindex the catalog
-let outcome = reindex_catalog_plugins("sample-plugin-catalog", &enabled, &deps)?;
-
-// Only the changed skill should re-embed
-assert_eq!(embedder.call_count() - baseline, 1);
-```
-
----
-
-## What Does NOT Belong Here
-
-- Code style rules → `CONVENTIONS.md`
-- Security testing → `SECURITY.md`
-- Architecture patterns → `ARCHITECTURE.md`
-
----
-
-*This document describes HOW to test. Update when testing strategy changes, in the same PR that changes the code.*

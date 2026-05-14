@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US3 catalog-clone ref-counting incremental)
+> **Last Updated**: 2026-05-14 (Phase 3 / US4 doctor --fix incremental)
 
 ## Overview
 
@@ -21,6 +21,7 @@ Tome is a Rust CLI (and eventually MCP server) for managing plugin catalogs and 
 12. No domain-error leakage in MCP tool responses (structured codes only)
 13. Workspace initialization with secure directory permissions and atomic staging
 14. Catalog cache content-trust via ref-counting and re-use on same URL
+15. Doctor command harness detection without config parsing; network access gated behind `--fix`
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md` (Phase 1), `specs/002-phase-2-plugins-index/spec.md` (Phase 2), `specs/002-phase-2-plugins-index/contracts/plugin-commands.md` (Phase 4–5), and `specs/003-phase-3-mcp-workspaces/spec.md` (Phase 3+).
 
@@ -128,6 +129,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | HTTP error output | Scrubbed before surfacing | `src/embedding/download.rs::scrub_for_diag` |
 | MCP server logs | JSON-lines to file, error-only stderr | `src/mcp/log.rs` (10 MiB cap, rotates to `.1`) |
 | Workspace registry | Opt-in, deduplicated list | `${XDG_STATE_HOME}/tome/workspaces.txt` (not created unless user explicitly uses it) |
+| Harness detection list | Local-only, never transmitted; indexed by directory existence | `src/doctor/harness_detect.rs::probe` (Phase 3 US4) |
 
 ### Integrity & Verification
 
@@ -185,6 +187,23 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 - On `--force` rename failure: rollback existing `.tome/` from `.tome.old/` (if crash between rename-aside and rename-in, leaves `.tome.old/` orphan for doctor to report)
 - Best-effort cleanup of `.tome.old/` after successful rename; partial cleanup on rollback failure is tolerated
 
+**Phase 3 US4 Doctor Command** (`src/commands/doctor.rs`, `src/doctor/`):
+- Read-only diagnostic by default; network access gated entirely behind `--fix` flag
+- Harness detection via fixed compile-time list (`KNOWN_HARNESSES`; `src/doctor/harness_detect.rs::probe`)
+- Harness detection is **directory existence only** (FR-167) — no config parsing, no content reads
+- Detected-harness list is local-only (never transmitted) and privacy-sensitive; report includes it but `--fix` never sends it anywhere
+- Three automatic repairs when `--fix` is invoked:
+  - **Model re-download**: clears existing directory, downloads fresh via existing `embedding::download::download_model` (idempotent, recoverable via URLs in config)
+  - **Catalog re-clone**: removes broken cache, re-clones via existing `catalog::git::Git::clone_shallow` (idempotent, recoverable via URLs in config)
+  - **Schema forward-migration**: applies pending migrations via `index::migrations::apply_pending` under advisory lock (idempotent, reversible via Phase 4+ down-migrations if added)
+- Four un-fixable repairs surfaced as suggested commands (not auto-applied):
+  - Embedder/reranker drift (requires explicit `tome reindex --force`)
+  - Schema newer than Tome release (requires Tome upgrade)
+  - Catalog manifest parse failure (requires manual investigation)
+  - Orphan catalog cache (user decides whether to delete)
+- No privilege escalation; all operations re-use existing config-derived URLs and paths
+- No destructive repairs (`--fix` never deletes enabled plugins, disabled plugins, or schema rows)
+
 ### Encryption
 
 | Type | Status |
@@ -223,6 +242,7 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 | 60 | McpStartupFailed | MCP server startup failed (generic; specific codes 30/32/41/42/73 win) | 3 | — |
 | 73 | SchemaVersionTooNew | Index schema version newer than Tome release (no down-migrations) | 3 | FR-110 |
 | 74 | SchemaMigrationFailed | Schema migration failed; index state undefined (Phase 4+ only) | 3+ | FR-???  |
+| 75 | DoctorFixNotSafe | `--fix` ran but un-fixable issues remain; developer must take manual action | 3 | doctor.md |
 
 **Enforcement**: Closed enum `TomeError` in `src/error.rs`. Adding a variant forces edits to:
 1. `TomeError` enum
@@ -243,6 +263,11 @@ No generic "Other" or "Unknown" variant. Every path maps to a named category.
 
 **Phase 3 US2 Workspace Init Exit Codes** (`src/workspace/init.rs`):
 - Exit 4 `CatalogAlreadyExists` reused for workspace-already-initialized case (message clarified: "workspace at <path>"); message context distinguishes from catalog-add case
+
+**Phase 3 US4 Doctor Exit Codes** (`src/commands/doctor.rs`, `contracts/doctor.md`):
+- Exit 0: Overall classification is Ok
+- Exit 1: Overall classification is Degraded or Unhealthy
+- Exit 75 (`DoctorFixNotSafe`): `--fix` was passed and repairs ran, but un-fixable issues remain (communicates "fix did something, but the work isn't done")
 
 ### Error Messaging
 
@@ -360,6 +385,7 @@ pub fn require_terminal() -> Result<(), TomeError> {
 | **Workspace initialization** | Atomic staging dir → final `.tome/` rename (Phase 3 US2) | `src/workspace/init.rs::init`, tempfile inside workspace root |
 | **Workspace config write** | Atomic write via temp + rename | `src/workspace/init.rs::init` → `catalog::store::write_atomic` |
 | **Workspace registry append** | Atomic read + rewrite with dedupe | `src/workspace/inventory.rs::append_if_registry_exists` |
+| **Doctor --fix repairs** | Per-operation atomicity (model re-download, catalog re-clone, migration apply) | `src/doctor/fixes.rs` (Phase 3 US4) |
 | **Temp file cleanup** | RAII via `tempfile::NamedTempFile` + `TempDir` | Rust Drop trait |
 
 **Mechanism**:
@@ -380,6 +406,11 @@ pub fn require_terminal() -> Result<(), TomeError> {
 - On `--force`: existing `.tome/` atomically moved to `.tome.old/` before staging rename
 - Rollback on rename failure: `.tome.old/` restored to `.tome/` if rename-in fails
 - Best-effort cleanup of `.tome.old/` after successful rename; partial cleanup on rollback is tolerated
+
+**Doctor `--fix` repair atomicity** (Phase 3 US4):
+- Model re-download atomicity: existing model directory removed, `download_model` re-downloads via existing atomic `.partial/` → final rename pattern
+- Catalog re-clone atomicity: broken cache directory removed, `Git::clone_shallow` re-clones into clean destination
+- Schema migration atomicity: forward-only `apply_pending` runs each migration in its own transaction under advisory lock
 
 **Note on per-plugin atomicity** (Phase 7): When reindexing multiple plugins (e.g., via `tome catalog update`), each plugin's reindex runs in its own transaction. A SIGINT between plugins leaves earlier plugins committed and later plugins unchanged. This is intentional (see CONCERNS.md for design rationale); the index is always in a valid state with no partial rows. The per-plugin boundary is where atomicity breaks for multi-plugin operations.
 
@@ -577,6 +608,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | **Schema migrations** | Forward-only boundary, no down-migrations, synthetic injection (Phase 3+) | `tests/schema_migrations.rs` (F7 framework; Phase 4+ adds first real steps) |
 | **MCP protocol purity** | Tool descriptions contain no fixture identifiers (FR-108) | `tests/mcp_server.rs::descriptions_do_not_enumerate_fixture_identifiers` |
 | **MCP error codes** | Tool responses translate TomeError to structured codes (no domain-error leakage) | `tests/mcp_server.rs::error_translation` (Phase 3 F8) |
+| **Doctor harness detection** | Fixed list only, directory existence only, no config parsing | `src/doctor/harness_detect.rs` unit tests (Phase 3 US4) |
 
 **Success criteria**:
 - SC-005: 100% of malformed inputs rejected with helpful errors
