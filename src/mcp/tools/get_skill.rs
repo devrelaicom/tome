@@ -274,13 +274,16 @@ fn walk_dir(dir: &Path, exclude: &Path, out: &mut Vec<String>) -> std::io::Resul
 
 /// Build the `internal_error` envelope plus an error log event.
 fn internal(input: &Input, started: Instant, msg: String, code: &str) -> McpError {
+    // FR-M-LOG-1: scrub error chains before logging — reqwest / git
+    // error messages can carry signed URLs.
+    let scrubbed = crate::catalog::git::scrub_to_string(msg.as_bytes());
     error!(
         target: "tome::mcp::tools::get_skill",
         catalog = input.catalog,
         plugin = input.plugin,
         name = input.name,
         error_code = code,
-        error_message = %msg,
+        error_message = %scrubbed,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "tool error",
     );

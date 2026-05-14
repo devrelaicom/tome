@@ -45,12 +45,16 @@ pub fn run(scope: &ResolvedScope, paths: &Paths) -> Result<EmbedderHandle, TomeE
 
     let db_path = paths.index_db_for(&scope.scope);
     if !db_path.is_file() {
-        // Specific-over-generic: no Phase 2 variant names "index file
-        // missing on a read-only open" directly, so the residual
-        // `McpStartupFailed` (60) carries the structured reason.
-        return Err(TomeError::McpStartupFailed {
-            reason: "index_missing".into(),
-        });
+        // FR-M-MCP-4 / exit-codes-p3.md §"Specific-over-generic
+        // preference": an absent index DB is a Phase 2 integrity-class
+        // failure (exit 35), not a generic Phase 3 MCP-startup residual
+        // (exit 60). Surfacing the specific code lets harnesses
+        // distinguish "user hasn't enabled any plugins yet" from "MCP
+        // wiring itself failed".
+        return Err(TomeError::IndexIntegrityCheckFailure(format!(
+            "index database not found at {} — enable at least one plugin first",
+            db_path.display()
+        )));
     }
 
     // `open_read_only` already gates on schema-too-new — but it routes

@@ -9,16 +9,27 @@
 //!
 //! Covered here (US1.a):
 //! - `--workspace` + `--global` → exit 72 (`WorkspaceConflict`).
-//! - missing index DB → exit 60 (`McpStartupFailed { reason: "index_missing" }`).
+//! - missing index DB → exit 51 (`IndexIntegrityCheckFailure`,
+//!   specific-over-generic over the residual `McpStartupFailed` 60).
+//!   (The `exit-codes-p3.md` contract names the right variant but mis-
+//!   types the number as 35; the closed-enum mapping in `src/error.rs`
+//!   is the authority — 35 is `VectorExtensionInitFailure`.
+//!   Contract reconciliation: PR-H.)
 //! - schema-too-new → exit 73 (`SchemaVersionTooNew`).
 //! - missing embedder file → exit 30 (`ModelMissing`).
 //!
-//! Deferred to later slices (need a populated index + working embedder
-//! load, which require either real ONNX models or a stub injection
-//! point that does not exist on the MCP read path yet):
-//! - "startup ok" + graceful SIGINT shutdown → exit 8 (covered in T095 / US1.d).
-//! - embedder identity mismatch (drift) → exit 41 (covered in US1.b).
-//! - "index integrity check fails" → exit 35 / 51 (covered in US1.d).
+//! Deferred to T088 manual SC-001 / SC-002 verification (need a
+//! populated index + working embedder load, which require either real
+//! ONNX models or a stub injection point that does not exist on the
+//! MCP read path yet):
+//! - "startup ok" + graceful SIGINT/SIGTERM shutdown → exit 8 (T095).
+//! - embedder identity mismatch (drift) → exit 41 (no integration
+//!   coverage; drift CLASSIFICATION is exercised at library-API level
+//!   in `tests/doctor.rs::embedder_name_drift_classifies_unhealthy`,
+//!   but the MCP preflight refusal still needs T088).
+//! - "index integrity check fails" → exit 35 (no integration coverage
+//!   yet; the missing-file path is exercised by
+//!   `mcp_preflight_index_missing_exits_35` below).
 
 mod common;
 
@@ -86,12 +97,16 @@ fn mcp_workspace_and_global_returns_72() {
 }
 
 #[test]
-fn mcp_missing_index_returns_60() {
+fn mcp_preflight_index_missing_exits_51() {
     // Fresh install: no index DB on disk. Pre-flight should fail with
-    // `McpStartupFailed { reason: "index_missing" }` (60). Models are
-    // also missing in this scenario, but the contract walks them in
-    // order: scope → index → schema → drift → models. Index is the
-    // first to trip.
+    // `IndexIntegrityCheckFailure` (51) — specific-over-generic over
+    // the residual `McpStartupFailed` (60) per
+    // `contracts/exit-codes-p3.md` §"Specific-over-generic preference".
+    // (The contract names "35" but the closed-enum mapping is 51 —
+    // 35 is `VectorExtensionInitFailure`. Contract is the typo source;
+    // reconciliation in PR-H.) Models are also missing in this
+    // scenario, but the contract walks them in order: scope → index →
+    // schema → drift → models. Index is the first to trip.
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     // Ensure data dir exists but NO index.db. Models dir not needed for
@@ -114,8 +129,8 @@ fn mcp_missing_index_returns_60() {
 
     assert_eq!(
         out.status.code(),
-        Some(60),
-        "expected exit 60 McpStartupFailed(index_missing), got {:?}\nstderr:\n{}",
+        Some(51),
+        "expected exit 51 IndexIntegrityCheckFailure(index_missing), got {:?}\nstderr:\n{}",
         out.status.code(),
         String::from_utf8_lossy(&out.stderr),
     );
