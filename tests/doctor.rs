@@ -16,8 +16,12 @@ mod common;
 use std::path::Path;
 
 use common::{Fixture, ToolEnv, fabricate_all_installed_models, paths_for};
+use rusqlite::Transaction;
 use tempfile::TempDir;
-use tome::doctor::{self, CatalogCacheState, DoctorClassification};
+use tome::doctor::{self, CatalogCacheState, DoctorClassification, SuggestedFix};
+use tome::error::TomeError;
+use tome::index::Migration;
+use tome::index::migrations::MIGRATIONS_OVERRIDE;
 use tome::workspace::{ResolvedScope, ScopeSource};
 
 fn global_scope() -> ResolvedScope {
@@ -318,6 +322,118 @@ fn cli_doctor_fix_with_manifest_invalid_exits_75() {
         Some(75),
         "expected exit 75 for unfixable manifest; stderr={}",
         String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+// ---- --fix schema migration (Phase 3 / US5) ----------------------------
+
+/// RAII guard that installs `MIGRATIONS_OVERRIDE` for the duration of the
+/// test, then clears it on drop. Survives panics so a failing assertion
+/// never poisons subsequent tests on the same thread.
+struct MigrationsGuard;
+impl MigrationsGuard {
+    fn install(m: &'static [Migration]) -> Self {
+        MIGRATIONS_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(m));
+        Self
+    }
+}
+impl Drop for MigrationsGuard {
+    fn drop(&mut self) {
+        MIGRATIONS_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// No-op `apply` that creates a marker table — the test asserts on its
+/// presence to prove the migration ran end-to-end through `doctor::fixes::apply`
+/// → `repair_schema` → `index::open` → `apply_pending`.
+fn doctor_fix_marker_v0_to_v1(tx: &Transaction) -> Result<(), TomeError> {
+    tx.execute_batch("CREATE TABLE doctor_fix_marker (id INTEGER PRIMARY KEY) STRICT")
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("doctor v0→v1: {e}")))?;
+    Ok(())
+}
+
+#[test]
+fn fix_runs_forward_schema_migration_end_to_end() {
+    // Real v1 bootstrap so the index has the full schema, then downgrade-
+    // stamp to v0. The synthetic migration creates a marker table whose
+    // presence proves the migration actually ran via the doctor pipeline.
+    static MIGRATIONS: &[Migration] = &[Migration {
+        from: 0,
+        to: 1,
+        name: "doctor_fix_v0_to_v1",
+        apply: doctor_fix_marker_v0_to_v1,
+    }];
+    let _guard = MigrationsGuard::install(MIGRATIONS);
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    fabricate_all_installed_models(&paths);
+    let home = empty_home();
+
+    // Bootstrap the index at SCHEMA_VERSION (= 1) using the production
+    // registry seeds (matches what `commands::status::check_drift` reads
+    // from the configured side, so no drift is reported). Then
+    // downgrade-stamp the schema_version row to 0.
+    {
+        let (embedder, reranker) = tome::commands::plugin::registry_seeds();
+        let conn = tome::index::open(
+            &paths.index_db,
+            &tome::index::OpenOptions { embedder, reranker },
+        )
+        .expect("bootstrap v1 index");
+        conn.execute(
+            "UPDATE meta SET value = '0' WHERE key = 'schema_version'",
+            [],
+        )
+        .expect("downgrade stamp");
+    }
+
+    // Assemble; the "schema needs forward migration" suggested fix is not
+    // currently emitted by build_suggested_fixes (Phase 3 ships zero
+    // production migrations), so inject one manually to exercise the
+    // `repair_schema` dispatch path.
+    let mut report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+    report.suggested_fixes.push(SuggestedFix {
+        subsystem: "schema".to_owned(),
+        diagnosis: "schema needs forward migration from v0 to v1".to_owned(),
+        command: "tome doctor --fix".to_owned(),
+        auto_fixable: true,
+    });
+
+    let attempts =
+        doctor::fixes::apply(&mut report, &paths, &tome::workspace::Scope::Global).unwrap();
+    assert!(attempts >= 1, "expected at least one repair attempt");
+    doctor::fixes::re_assemble(&mut report);
+
+    assert_eq!(
+        report.index.schema_version,
+        Some(1),
+        "schema_version must be bumped to 1 by the migration",
+    );
+    assert!(
+        report.index.integrity_ok,
+        "post-migration index must report integrity_ok",
+    );
+    assert_eq!(
+        report.overall,
+        DoctorClassification::Ok,
+        "post-fix classification must be Ok; report = {report:#?}",
+    );
+
+    // Prove the migration's apply closure was actually invoked (and not
+    // just the no-op `apply_pending(1, 1)` path inside `repair_schema`).
+    let conn = rusqlite::Connection::open(&paths.index_db).unwrap();
+    let marker_exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'doctor_fix_marker'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    assert!(
+        marker_exists,
+        "doctor_fix_marker table must exist (proves migration ran through doctor pipeline)",
     );
 }
 
