@@ -1,8 +1,12 @@
 # `tome doctor` — Command Contract
 
 ```
-tome doctor [--fix] [--json]
+tome doctor [--fix] [--verify] [--json]
 ```
+
+- `--fix` runs the three safe automatic repairs (model re-download, catalog re-clone, schema forward-migration).
+- `--verify` re-hashes the primary model artefacts (embedder + reranker) against the registry SHA-256s. Without `--verify`, doctor uses the cheap manifest+size probe (same as `tome status`).
+- `--json` emits the structured report instead of the human renderer.
 
 Read-only-by-default diagnostic command. Reports model state, index state, catalog-cache integrity, workspace context, and locally-installed agentic-coding harnesses. With `--fix`, performs the three safe automatic repairs (re-download missing/corrupt models, re-clone broken catalog caches, run pending forward DB migrations). Destructive repairs are never automatic; they are surfaced as suggested commands the developer must run.
 

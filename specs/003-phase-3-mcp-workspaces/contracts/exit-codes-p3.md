@@ -19,7 +19,7 @@ Phase 3 extends the closed `TomeError` enum with eight new variants per spec FR-
 
 When the MCP pre-flight finds a Phase 1/2 condition with its own code, exit with that code, not `McpStartupFailed`:
 
-- Index DB missing or unreadable mid-session → exit `35` (`IndexIntegrityCheckFailure`), not 60.
+- Index DB missing or unreadable mid-session → exit `51` (`IndexIntegrityCheckFailure`), not 60. (An earlier draft of this contract mis-typed the number as 35; 35 is `VectorExtensionInitFailure` in the Phase 2 closed enum. The variant name is canonical; the number comes from `src/error.rs::exit_code`.)
 - Required model missing → exit `30` (`ModelMissing`), not 60.
 - Model checksum mismatch → exit `32` (`ModelChecksumMismatch`), not 60.
 - Embedder drift → exit `41` (`EmbedderNameDrift`) or `42` (`EmbedderVersionDrift`), not 60.

@@ -4,7 +4,98 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] — 2026-05-14
+
+### Phase 3 additions
+
+User-visible
+
+- `tome mcp` — Model Context Protocol stdio server. Advertises two
+  tools (`search_skills`, `get_skill`) so an agentic-coding harness can
+  query the local skill index over the MCP protocol. Single-threaded
+  tokio runtime; sync work via `spawn_blocking`. Stdout is reserved for
+  protocol traffic; diagnostics land in `${XDG_STATE_HOME}/tome/mcp.log`
+  (JSON-lines, 10 MiB rotation cap). Graceful shutdown on SIGINT,
+  SIGTERM, or stdin close with a 5 s timeout for in-flight calls.
+- `tome workspace info | init` — per-project workspaces. `init`
+  atomically lands `.tome/` (sibling staging directory + rename;
+  SIGINT-safe). `init --inherit-global` seeds the new workspace's
+  catalogs from the global config (enablement not copied — lives in
+  the index DB). `init --force` renames an existing `.tome/` aside.
+  `info` is a read-only diagnostic.
+- `tome doctor [--fix] [--verify] [--json]` — broad health check.
+  Reports models, index integrity, catalog-cache state, workspace
+  registry, drift, and locally-installed harnesses. `--fix` runs the
+  three safe automatic repairs (model re-download, catalog re-clone,
+  schema forward-migration). Exit 0 on healthy, 1 on degraded /
+  unhealthy, 75 when `--fix` ran but un-fixable issues remain.
+- Global `--workspace <PATH>` / `--global` flags on every command.
+  Resolution priority: flag → `TOME_WORKSPACE` env → CWD walk →
+  global fallback.
+- Workspace registry — opt-in. Touch
+  `${XDG_STATE_HOME}/tome/workspaces.txt` once to start tracking;
+  `init` appends each new workspace. Used by the catalog refcount
+  algorithm to keep a shared on-disk clone alive while any scope
+  still references it.
+
+Architecture / framework
+
+- Per-scope `Paths::*_for(&Scope)` accessors. Every Phase 1 / Phase 2
+  command now honours the resolved scope end-to-end.
+- Content-addressed catalog clone refcount. Two scopes adding the same
+  URL share one on-disk clone; removal only deletes when the last
+  referencing scope drops the entry.
+- Forward-only schema migration framework. Ships with zero registered
+  migrations; per-step transactional atomicity; refuses newer-on-disk
+  schemas with `SchemaVersionTooNew` (73). The first real migration
+  lands in Phase 4+; e2e rails are tested via `MIGRATIONS_OVERRIDE`
+  thread_local injection against synthetic fixtures.
+
+New exit codes
+
+- 60 `McpStartupFailed` — residual MCP startup failure.
+- 61 `McpProtocolIo` — MCP transport-layer failure.
+- 70 `WorkspaceMalformed` — workspace exists but config or index is
+  unparsable.
+- 71 `WorkspaceNotFound` — `--workspace <path>` or `TOME_WORKSPACE`
+  names a path with no `.tome/` marker.
+- 72 `WorkspaceConflict` — both `--workspace` and `--global` set.
+- 73 `SchemaVersionTooNew` — on-disk schema is newer than this Tome
+  supports.
+- 74 `SchemaMigrationFailed` — a registered migration's apply step
+  returned an error.
+- 75 `DoctorFixNotSafe` — `tome doctor --fix` ran but un-fixable
+  issues remain.
+
+New dependencies
+
+- `rmcp` (Model Context Protocol SDK). Scoped to `src/mcp/`.
+- `tokio` (single-threaded runtime, signal handling). Scoped to
+  `src/mcp/`. The sync-boundary discipline is structurally enforced
+  by `tests/sync_boundary.rs`.
+- `schemars` (JSON schemas for the MCP tool input/output types).
+
+Security hardening
+
+- `mcp.log` created with mode 0600 on Unix (workspace paths + scrubbed
+  error chains; default umask would leave it world-readable on a
+  shared machine).
+- `get_skill` rejects symlinks in the resources list (defence against
+  a hostile catalog author committing
+  `skills/foo/credentials -> ~/.ssh/id_rsa`).
+- Workspace registry validation: 1 MiB size cap, 10k entry cap, reject
+  NUL bytes and `..` components.
+- Workspace init refuses to overwrite a non-directory `.tome` marker.
+
+### Removed / breaking
+
+- None. Phase 1 / Phase 2 surfaces are unchanged.
+
 ## [Unreleased]
+
+_Future work tracked in `specs/`._
+
+## [0.2.0] (pre-Phase-3 baseline)
 
 ### Phase 2 additions
 

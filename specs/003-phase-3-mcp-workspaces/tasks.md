@@ -208,10 +208,10 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Completion
 
-- [ ] T100 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T101 [GIT] Update PR with US1 summary
-- [ ] T102 [GIT] Verify all CI checks pass
-- [ ] T103 [GIT] Report PR ready status
+- [X] T100 [GIT] Push branch to origin (ensure pre-push hooks pass)
+- [X] T101 [GIT] Update PR with US1 summary
+- [X] T102 [GIT] Verify all CI checks pass
+- [X] T103 [GIT] Report PR ready status
 
 **Checkpoint**: US1 is fully functional and independently testable. Stop and validate against a real harness before continuing to US2.
 
@@ -262,10 +262,10 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Completion
 
-- [ ] T124 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T125 [GIT] Update PR with US2 summary
-- [ ] T126 [GIT] Verify all CI checks pass
-- [ ] T127 [GIT] Report PR ready status
+- [X] T124 [GIT] Push branch to origin (ensure pre-push hooks pass)
+- [X] T125 [GIT] Update PR with US2 summary
+- [X] T126 [GIT] Verify all CI checks pass
+- [X] T127 [GIT] Report PR ready status
 
 **Checkpoint**: Workspaces exist as a creatable, inspectable concept. US1 + US2 both work; US1 still operates on the resolved scope.
 
@@ -327,10 +327,10 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Completion
 
-- [ ] T156 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T157 [GIT] Update PR with US3 summary
-- [ ] T158 [GIT] Verify all CI checks pass
-- [ ] T159 [GIT] Report PR ready status
+- [X] T156 [GIT] Push branch to origin (ensure pre-push hooks pass)
+- [X] T157 [GIT] Update PR with US3 summary
+- [X] T158 [GIT] Verify all CI checks pass
+- [X] T159 [GIT] Report PR ready status
 
 **Checkpoint**: Workspaces are first-class. Every Phase 1/2 command honours the resolved scope. US1/2/3 work end-to-end.
 
@@ -392,10 +392,10 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Completion
 
-- [ ] T188 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T189 [GIT] Update PR with US4 summary
-- [ ] T190 [GIT] Verify all CI checks pass
-- [ ] T191 [GIT] Report PR ready status
+- [X] T188 [GIT] Push branch to origin (ensure pre-push hooks pass)
+- [X] T189 [GIT] Update PR with US4 summary
+- [X] T190 [GIT] Verify all CI checks pass
+- [X] T191 [GIT] Report PR ready status
 
 **Checkpoint**: Doctor reports every subsystem and repairs the safe classes. US1/2/3/4 all work end-to-end.
 
@@ -435,10 +435,10 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Completion
 
-- [ ] T205 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T206 [GIT] Update PR with US5 summary
-- [ ] T207 [GIT] Verify all CI checks pass
-- [ ] T208 [GIT] Report PR ready status
+- [X] T205 [GIT] Push branch to origin (ensure pre-push hooks pass)
+- [X] T206 [GIT] Update PR with US5 summary
+- [X] T207 [GIT] Verify all CI checks pass
+- [X] T208 [GIT] Report PR ready status
 
 **Checkpoint**: All five user stories shipped. Phase 3 feature work complete.
 
@@ -450,49 +450,49 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Start
 
-- [ ] T209 [GIT] Verify working tree is clean before starting Phase 8 / Polish
-- [ ] T210 Create `retro/P8.md` from the standard retro template
-- [ ] T211 [GIT] Commit: docs(retro): initialise P8 polish retro
+- [X] T209 [GIT] Verify working tree is clean before starting Phase 8 / Polish
+- [X] T210 Create `retro/P8.md` from the standard retro template
+- [X] T211 [GIT] Commit: docs(retro): initialise P8 polish retro
 
 ### Multi-agent review
 
-- [ ] T212 Dispatch four reviewers in parallel against the Phase 3 source: contract audit (`review-compact` against contracts/), Rust-lens code review (`devs:code-reviewer`), test audit (custom prompt covering coverage gaps and test-quality), security audit (`midnight-cq:cq-reviewer` equivalent). Collate findings into `review/findings.md` and triage in `review/disposition.md`
-- [ ] T213 Triage findings per the P10 mapping table: blockers → dedicated PR; majors → dedicated PR; minors → folded into this phase; nits → wontfix unless trivial-while-nearby
-- [ ] T214 [GIT] Commit: docs(review): Phase 3 review findings + disposition
+- [X] T212 Dispatch four reviewers in parallel against the Phase 3 source: contract audit (`review-compact` against contracts/), Rust-lens code review (`devs:code-reviewer`), test audit (custom prompt covering coverage gaps and test-quality), security audit (`midnight-cq:cq-reviewer` equivalent). Collate findings into `review/findings.md` and triage in `review/disposition.md`
+- [X] T213 Triage findings per the P10 mapping table: blockers → dedicated PR; majors → dedicated PR; minors → folded into this phase; nits → wontfix unless trivial-while-nearby
+- [X] T214 [GIT] Commit: docs(review): Phase 3 review findings + disposition
 
 ### Reviewer-flagged fixups (placeholders — final list depends on T212-T213)
 
-- [ ] T215 Apply any blocker-class fixups identified in T212. Slice as needed; conventional commit per fix (use devs:rust-dev agent)
-- [ ] T216 Apply any major-class fixups identified in T212 (use devs:rust-dev agent)
-- [ ] T217 [GIT] Commit: fix: reviewer-flagged Phase 3 fixups (squash multiple commits if appropriate per the slice)
+- [X] T215 Apply any blocker-class fixups identified in T212. Slice as needed; conventional commit per fix (use devs:rust-dev agent)
+- [X] T216 Apply any major-class fixups identified in T212 (use devs:rust-dev agent)
+- [X] T217 [GIT] Commit: fix: reviewer-flagged Phase 3 fixups (squash multiple commits if appropriate per the slice)
 
 ### Deferred coverage items
 
-- [ ] T218 Extend `tests/error_messages.rs` with Display assertions for the remaining Phase 2 `TomeError` variants flagged in P10 retro (10 variants) (use devs:rust-dev agent)
-- [ ] T219 Add `ModelManifest` strictness grep guard to `tests/manifest_strictness.rs` covering `src/embedding/registry.rs` (P10 deferred item) (use devs:rust-dev agent)
-- [ ] T220 Add CLI-binary JSON-envelope schema test for `tome catalog update --json` per P10 deferred item (use devs:rust-dev agent)
-- [ ] T221 [GIT] Commit: test: close P10 deferred coverage items
+- [X] T218 Extend `tests/error_messages.rs` with Display assertions for the remaining Phase 2 `TomeError` variants flagged in P10 retro (10 variants) (use devs:rust-dev agent)
+- [X] T219 Add `ModelManifest` strictness grep guard to `tests/manifest_strictness.rs` covering `src/embedding/registry.rs` (P10 deferred item) (use devs:rust-dev agent)
+- [X] T220 Add CLI-binary JSON-envelope schema test for `tome catalog update --json` per P10 deferred item (use devs:rust-dev agent)
+- [X] T221 [GIT] Commit: test: close P10 deferred coverage items
 
 ### Documentation
 
-- [ ] T222 Update `README.md` with a Phase 3 section covering `tome mcp`, workspaces, and `tome doctor` (use devs:rust-dev agent)
-- [ ] T223 Update `CHANGELOG.md` with the Phase 3 entry naming all new commands, the eight new exit codes, and the two new dependencies (use devs:rust-dev agent)
-- [ ] T224 Verify every Phase 3 command's `--help` text is accurate against the contracts; update inline doc strings on the `#[arg(...)]` and `#[command(...)]` attributes as needed (use devs:rust-dev agent)
-- [ ] T225 Bump `Cargo.toml` version to `0.3.0` (use devs:rust-dev agent)
-- [ ] T226 [GIT] Commit: docs: README + CHANGELOG + help text for v0.3.0
+- [X] T222 Update `README.md` with a Phase 3 section covering `tome mcp`, workspaces, and `tome doctor` (use devs:rust-dev agent)
+- [X] T223 Update `CHANGELOG.md` with the Phase 3 entry naming all new commands, the eight new exit codes, and the two new dependencies (use devs:rust-dev agent)
+- [X] T224 Verify every Phase 3 command's `--help` text is accurate against the contracts; update inline doc strings on the `#[arg(...)]` and `#[command(...)]` attributes as needed (use devs:rust-dev agent)
+- [X] T225 Bump `Cargo.toml` version to `0.3.0` (use devs:rust-dev agent)
+- [X] T226 [GIT] Commit: docs: README + CHANGELOG + help text for v0.3.0
 
 ### Final mapping
 
-- [ ] T227 Run `/sdd:map incremental` to refresh codebase docs against the full Phase 3 surface
-- [ ] T228 Review `retro/P8.md` and extract critical learnings to CLAUDE.md (conservative)
-- [ ] T229 [GIT] Commit: docs(codebase): final refresh for Phase 3
+- [X] T227 Run `/sdd:map incremental` to refresh codebase docs against the full Phase 3 surface
+- [X] T228 Review `retro/P8.md` and extract critical learnings to CLAUDE.md (conservative)
+- [X] T229 [GIT] Commit: docs(codebase): final refresh for Phase 3
 
 ### Phase Completion
 
-- [ ] T230 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T231 [GIT] Update PR with Polish summary + manual SC-101 validation note (SC-101 requires a real harness; document the run in the PR body)
-- [ ] T232 [GIT] Verify all CI checks pass
-- [ ] T233 [GIT] Report PR ready status
+- [X] T230 [GIT] Push branch to origin (ensure pre-push hooks pass)
+- [X] T231 [GIT] Update PR with Polish summary + manual SC-101 validation note (SC-101 requires a real harness; document the run in the PR body)
+- [X] T232 [GIT] Verify all CI checks pass
+- [X] T233 [GIT] Report PR ready status
 
 ---
 
