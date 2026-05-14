@@ -437,6 +437,146 @@ fn fix_runs_forward_schema_migration_end_to_end() {
     );
 }
 
+// ---- Drift coverage (Phase 3 Polish — Blocker B3) ----------------------
+
+/// Bootstrap a real v1 index DB at the scope path using **stub seeds**.
+/// `check_drift` then compares against the production registry seeds
+/// (bge-small-en-v1.5 / bge-reranker-base) — stub vs production names
+/// disagree, triggering `EmbedderNameDrift` + `RerankerDrift`.
+fn bootstrap_index_with_stub_seeds(paths: &tome::paths::Paths) {
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    let _ = tome::index::open(
+        &paths.index_db,
+        &tome::index::OpenOptions {
+            embedder: tome::index::MetaSeed {
+                name: "stub-embedder".into(),
+                version: "0".into(),
+            },
+            reranker: tome::index::MetaSeed {
+                name: "stub-reranker".into(),
+                version: "0".into(),
+            },
+        },
+    )
+    .expect("bootstrap v1 index with stub seeds");
+}
+
+#[test]
+fn embedder_name_drift_classifies_unhealthy() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    fabricate_all_installed_models(&paths);
+    bootstrap_index_with_stub_seeds(&paths);
+    let home = empty_home();
+
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+    // The DB records `stub-embedder` but the configured embedder is
+    // bge-small-en-v1.5 — name drift.
+    assert!(
+        matches!(
+            report.drift,
+            tome::index::DriftStatus::EmbedderNameDrift { .. }
+        ),
+        "expected EmbedderNameDrift, got {:?}",
+        report.drift,
+    );
+    assert_eq!(
+        report.overall,
+        DoctorClassification::Unhealthy,
+        "embedder drift must flip overall to Unhealthy; report = {report:#?}",
+    );
+
+    // Suggested fix uses subsystem `embedder_drift` and is NOT auto-fixable.
+    let drift_fix = report
+        .suggested_fixes
+        .iter()
+        .find(|f| f.subsystem == "embedder_drift")
+        .expect("drift fix entry");
+    assert!(
+        !drift_fix.auto_fixable,
+        "embedder drift requires `tome reindex --force`, not --fix",
+    );
+    assert!(
+        drift_fix.command.starts_with("tome reindex"),
+        "drift fix command: {}",
+        drift_fix.command,
+    );
+}
+
+#[test]
+fn reranker_drift_alone_classifies_degraded() {
+    // Bootstrap with the production embedder seed but a stub reranker
+    // seed. Only the reranker drifts, so overall classifies Degraded
+    // (not Unhealthy — embedder drift is the load-bearing one).
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    fabricate_all_installed_models(&paths);
+
+    let (real_embedder_seed, _real_reranker_seed) = tome::commands::plugin::registry_seeds();
+    let _ = tome::index::open(
+        &paths.index_db,
+        &tome::index::OpenOptions {
+            embedder: real_embedder_seed,
+            reranker: tome::index::MetaSeed {
+                name: "stub-reranker".into(),
+                version: "0".into(),
+            },
+        },
+    )
+    .expect("bootstrap");
+    let home = empty_home();
+
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+    assert!(
+        matches!(report.drift, tome::index::DriftStatus::RerankerDrift { .. }),
+        "expected RerankerDrift, got {:?}",
+        report.drift,
+    );
+    assert_eq!(
+        report.overall,
+        DoctorClassification::Degraded,
+        "reranker drift alone must classify Degraded; report = {report:#?}",
+    );
+
+    let drift_fix = report
+        .suggested_fixes
+        .iter()
+        .find(|f| f.subsystem == "reranker_drift")
+        .expect("reranker drift fix entry");
+    assert!(!drift_fix.auto_fixable);
+}
+
+#[test]
+fn no_drift_reported_when_seeds_match_registry() {
+    // Bootstrap with the production registry seeds — no drift, no
+    // suggested fix entry, no classification penalty from drift.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    fabricate_all_installed_models(&paths);
+
+    let (embedder, reranker) = tome::commands::plugin::registry_seeds();
+    let _ = tome::index::open(
+        &paths.index_db,
+        &tome::index::OpenOptions { embedder, reranker },
+    )
+    .expect("bootstrap");
+    let home = empty_home();
+
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+    assert!(matches!(report.drift, tome::index::DriftStatus::None));
+    assert!(
+        report
+            .suggested_fixes
+            .iter()
+            .all(|f| !f.subsystem.ends_with("_drift")),
+        "no drift suggested-fix entries when seeds match",
+    );
+    assert_eq!(report.overall, DoctorClassification::Ok);
+}
+
 // ---- Helpers -----------------------------------------------------------
 
 fn cache_dir_for(env: &ToolEnv, url: &str) -> std::path::PathBuf {

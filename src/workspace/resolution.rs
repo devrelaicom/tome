@@ -93,6 +93,14 @@ pub fn resolve(args: &GlobalScopeArgs) -> Result<ResolvedScope, TomeError> {
 /// canonicalisable, and contains a `.tome/` subdir. Returns the scope
 /// with the canonicalised absolute path on success, `WorkspaceNotFound`
 /// otherwise. Used for both `--workspace` and `TOME_WORKSPACE`.
+///
+/// Also enforces contract `workspace-resolution.md` §Validation 1b/1c:
+/// a workspace whose `.tome/config.toml` is unparsable, or whose
+/// `.tome/index.db` exists but cannot be opened, exits with
+/// `WorkspaceMalformed` (70). The check runs once at the resolution
+/// boundary — every downstream command sees a usable workspace or a
+/// clean 70 exit pointing at `tome --global doctor` as the escape
+/// hatch.
 fn validate_workspace_path(raw: &PathBuf) -> Result<ResolvedScope, TomeError> {
     let absolute = std::fs::canonicalize(raw)
         .map_err(|_| TomeError::WorkspaceNotFound { path: raw.clone() })?;
@@ -100,6 +108,7 @@ fn validate_workspace_path(raw: &PathBuf) -> Result<ResolvedScope, TomeError> {
     if !marker.is_dir() {
         return Err(TomeError::WorkspaceNotFound { path: absolute });
     }
+    validate_workspace_contents(&absolute)?;
     Ok(ResolvedScope {
         scope: Scope::Workspace(absolute),
         // `source` is filled in by the caller — callers know whether the
@@ -110,17 +119,57 @@ fn validate_workspace_path(raw: &PathBuf) -> Result<ResolvedScope, TomeError> {
     })
 }
 
+/// Enforce contract `workspace-resolution.md` §Validation 1b/1c:
+///
+/// - `.tome/config.toml` must be readable as a valid `Config`. Absent is
+///   allowed (a freshly-bootstrapped workspace has no config until the
+///   first `catalog add`); unparsable → `WorkspaceMalformed` (70).
+/// - `.tome/index.db` may or may not exist. If it exists as a file, it
+///   must open read-only (Phase 2 PRAGMA + integrity rules); failure
+///   → `WorkspaceMalformed` (70) with reason `"index database
+///   malformed"`.
+///
+/// Escape hatch: `tome --global doctor` bypasses workspace resolution
+/// and produces a diagnostic against the global scope.
+fn validate_workspace_contents(absolute: &std::path::Path) -> Result<(), TomeError> {
+    let config_path = absolute.join(".tome/config.toml");
+    if config_path.exists()
+        && let Err(e) = crate::catalog::store::load(&config_path)
+    {
+        return Err(TomeError::WorkspaceMalformed {
+            path: absolute.to_path_buf(),
+            reason: format!("config.toml: {e}"),
+        });
+    }
+    let index_path = absolute.join(".tome/index.db");
+    if index_path.is_file()
+        && let Err(e) = crate::index::open_read_only(&index_path)
+    {
+        return Err(TomeError::WorkspaceMalformed {
+            path: absolute.to_path_buf(),
+            reason: format!("index database malformed: {e}"),
+        });
+    }
+    Ok(())
+}
+
 /// Walk from `current_dir()` toward `/`, returning the first parent
 /// directory whose `.tome/` subdir exists (canonicalised so symlinks
 /// resolve once). Stops at the filesystem root. Non-`NotFound`
 /// `io::Error` does NOT propagate; the walk falls through and logs.
+///
+/// Once a marker is found, [`validate_workspace_contents`] runs against
+/// it. A malformed CWD-walked workspace yields `WorkspaceMalformed`
+/// (70) — same contract gate as explicit `--workspace` / `TOME_WORKSPACE`.
 fn walk_cwd_for_marker() -> Result<Option<PathBuf>, TomeError> {
     let mut here = std::env::current_dir().map_err(TomeError::Io)?;
     loop {
         let marker = here.join(".tome");
         match marker.try_exists() {
             Ok(true) => {
-                return Ok(Some(here.canonicalize().map_err(TomeError::Io)?));
+                let absolute = here.canonicalize().map_err(TomeError::Io)?;
+                validate_workspace_contents(&absolute)?;
+                return Ok(Some(absolute));
             }
             Ok(false) => {}
             Err(e) => {
