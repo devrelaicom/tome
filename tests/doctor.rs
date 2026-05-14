@@ -163,6 +163,92 @@ fn assemble_with_manifest_invalid_is_not_auto_fixable() {
     );
 }
 
+// ---- Phase 3 Polish PR-E — orphan clones + workspace registry --------
+
+#[test]
+fn assemble_reports_orphan_clone_in_catalogs_list() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    fabricate_all_installed_models(&paths);
+    let home = empty_home();
+
+    // Plant a fake catalog clone at `catalogs_dir/<sha>` with `.git/`
+    // and a minimal tome-catalog.toml. No config.toml references it —
+    // it's an orphan.
+    let orphan_cache = paths.catalogs_dir.join("orphan-cache");
+    std::fs::create_dir_all(orphan_cache.join(".git")).unwrap();
+    std::fs::write(
+        orphan_cache.join("tome-catalog.toml"),
+        "[catalog]\nname = \"orphan\"\nversion = \"0.1.0\"\n[[plugins]]\nname = \"x\"\nsource = \"./x\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    // The minimal source dir mentioned by the manifest.
+    std::fs::create_dir_all(orphan_cache.join("x")).unwrap();
+
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+    let orphan = report
+        .catalogs
+        .iter()
+        .find(|c| c.state == CatalogCacheState::Orphan)
+        .expect("orphan entry in report.catalogs");
+    assert_eq!(orphan.cache_path, orphan_cache);
+
+    // Orphan does NOT trip Degraded — informational per contract.
+    assert_eq!(report.overall, DoctorClassification::Ok);
+
+    let orphan_fix = report
+        .suggested_fixes
+        .iter()
+        .find(|f| f.subsystem.starts_with("catalog:"))
+        .expect("orphan suggested fix");
+    assert!(
+        !orphan_fix.auto_fixable,
+        "orphan removal is NOT auto-fixable per contract",
+    );
+    assert!(
+        orphan_fix.command.starts_with("rm -rf"),
+        "orphan fix command names the path: {}",
+        orphan_fix.command,
+    );
+}
+
+#[test]
+fn workspace_registry_status_reports_absent_by_default() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    fabricate_all_installed_models(&paths);
+    let home = empty_home();
+
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+    assert!(!report.workspace_registry.present);
+    assert_eq!(report.workspace_registry.tracked, 0);
+}
+
+#[test]
+fn workspace_registry_status_reports_present_count_after_opt_in() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.state_dir).unwrap();
+    fabricate_all_installed_models(&paths);
+    let home = empty_home();
+
+    // Opt in by touching the file with two valid absolute paths.
+    let temp_a = TempDir::new().unwrap();
+    let temp_b = TempDir::new().unwrap();
+    std::fs::write(
+        &paths.workspace_registry,
+        format!("{}\n{}\n", temp_a.path().display(), temp_b.path().display(),),
+    )
+    .unwrap();
+
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+    assert!(report.workspace_registry.present);
+    assert_eq!(report.workspace_registry.tracked, 2);
+}
+
 // ---- --fix repairs -----------------------------------------------------
 
 #[test]
@@ -184,8 +270,7 @@ fn fix_repairs_broken_catalog_cache_and_re_classifies_ok() {
     let mut report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
     assert_eq!(report.overall, DoctorClassification::Degraded);
 
-    let attempts =
-        doctor::fixes::apply(&mut report, &paths, &tome::workspace::Scope::Global).unwrap();
+    let attempts = doctor::fixes::apply(&mut report, &paths, &tome::workspace::Scope::Global);
     assert!(attempts >= 1);
     doctor::fixes::re_assemble(&mut report);
 
@@ -215,7 +300,7 @@ fn has_remaining_manual_fixes_detects_unfixable_after_fix_pass() {
     std::fs::write(cache_dir.join("tome-catalog.toml"), "garbage\n").unwrap();
 
     let mut report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
-    doctor::fixes::apply(&mut report, &paths, &tome::workspace::Scope::Global).unwrap();
+    doctor::fixes::apply(&mut report, &paths, &tome::workspace::Scope::Global);
     doctor::fixes::re_assemble(&mut report);
 
     assert!(doctor::fixes::has_remaining_manual_fixes(&report));
@@ -401,8 +486,7 @@ fn fix_runs_forward_schema_migration_end_to_end() {
         auto_fixable: true,
     });
 
-    let attempts =
-        doctor::fixes::apply(&mut report, &paths, &tome::workspace::Scope::Global).unwrap();
+    let attempts = doctor::fixes::apply(&mut report, &paths, &tome::workspace::Scope::Global);
     assert!(attempts >= 1, "expected at least one repair attempt");
     doctor::fixes::re_assemble(&mut report);
 

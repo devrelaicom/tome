@@ -39,23 +39,94 @@ use crate::workspace::Scope;
 /// catalogs.
 pub fn check_catalogs(paths: &Paths, scope: &Scope) -> Result<Vec<CatalogCacheHealth>, TomeError> {
     let config_path = paths.config_file_for(scope);
-    if !config_path.is_file() {
-        return Ok(Vec::new());
-    }
-    let config = catalog_store::load(&config_path)?;
+    let config = if config_path.is_file() {
+        Some(catalog_store::load(&config_path)?)
+    } else {
+        None
+    };
 
-    let mut out = Vec::with_capacity(config.catalogs.len());
-    for entry in config.catalogs.values() {
-        let cache_path = entry.path.clone();
-        let state = classify_clone(&cache_path);
-        out.push(CatalogCacheHealth {
-            name: entry.name.clone(),
-            url: entry.url.clone(),
-            cache_path,
-            state,
-        });
+    let mut out = Vec::with_capacity(config.as_ref().map_or(0, |c| c.catalogs.len()));
+
+    // Step 1: classify every catalog the resolved scope's config names.
+    let mut referenced_paths: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+    if let Some(cfg) = config.as_ref() {
+        for entry in cfg.catalogs.values() {
+            let cache_path = entry.path.clone();
+            referenced_paths.insert(cache_path.clone());
+            let state = classify_clone(&cache_path);
+            out.push(CatalogCacheHealth {
+                name: entry.name.clone(),
+                url: entry.url.clone(),
+                cache_path,
+                state,
+            });
+        }
     }
+
+    // Step 2: enumerate on-disk clones at `paths.catalogs_dir` and
+    // surface any directory NOT referenced by the resolved config as
+    // `Orphan`. Per `catalog-extensions-p3.md` §"Doctor reporting"
+    // bullet 4: cache exists but no config references it. The URL is
+    // unknown at the doctor level (we'd need to parse the manifest to
+    // recover the original source URL); leaving it empty keeps the
+    // JSON wire shape simple — the user only needs the cache path
+    // to act on it.
+    if paths.catalogs_dir.is_dir() {
+        let entries = match std::fs::read_dir(&paths.catalogs_dir) {
+            Ok(it) => it,
+            Err(_) => return Ok(out),
+        };
+        for de in entries.flatten() {
+            let p = de.path();
+            if !p.is_dir() {
+                continue;
+            }
+            if referenced_paths.contains(&p) {
+                continue;
+            }
+            // Only orphans we can confidently classify (a directory
+            // with `.git/` + parsable manifest is a real abandoned
+            // catalog clone). A half-broken directory shows up as
+            // `Missing` / `NotARepo` / `ManifestInvalid` on the
+            // referenced-catalog path; unreferenced half-broken dirs
+            // are unactionable noise and we skip them.
+            let manifest = p.join("tome-catalog.toml");
+            if !p.join(".git").is_dir() || !manifest.is_file() {
+                continue;
+            }
+            // Unknown URL (we don't re-parse just to recover the
+            // source); the user has the path which is what they need
+            // to remove it.
+            out.push(CatalogCacheHealth {
+                name: p
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "<unknown>".to_owned()),
+                url: String::new(),
+                cache_path: p,
+                state: crate::doctor::report::CatalogCacheState::Orphan,
+            });
+        }
+    }
+
     Ok(out)
+}
+
+/// FR-M-DOC-2 / `catalog-extensions-p3.md` §"Doctor reporting": read
+/// the opt-in workspace-registry file and return a presence + count
+/// summary. Same lenient semantics as
+/// `catalog::store::reference_count` — every malformed or absent line
+/// counts as zero, never as an error.
+pub fn check_workspace_registry(paths: &Paths) -> crate::doctor::report::WorkspaceRegistryStatus {
+    let present = paths.workspace_registry.is_file();
+    let tracked: u32 = if present {
+        u32::try_from(crate::workspace::inventory::read_registry(&paths.workspace_registry).len())
+            .unwrap_or(u32::MAX)
+    } else {
+        0
+    };
+    crate::doctor::report::WorkspaceRegistryStatus { present, tracked }
 }
 
 /// Classify a single clone path. Pure FS reads — no network, no git

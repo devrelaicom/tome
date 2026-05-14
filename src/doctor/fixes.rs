@@ -42,7 +42,13 @@ use crate::workspace::Scope;
 ///
 /// Returns the number of attempted repairs (succeeded or failed). The
 /// caller re-classifies + re-emits.
-pub fn apply(report: &mut DoctorReport, paths: &Paths, scope: &Scope) -> Result<usize, TomeError> {
+///
+/// FR-M-DOC-4: the signature is infallible by design — every per-fix
+/// failure is downgraded to a `warn!` and reflected in the post-pass
+/// report's residual `suggested_fixes`. Returning `Result` was
+/// misleading and tempted future callers to add `?` to `apply_one`,
+/// which would silently break the "continue on failure" contract.
+pub fn apply(report: &mut DoctorReport, paths: &Paths, scope: &Scope) -> usize {
     let mut attempts = 0;
 
     // Snapshot the auto-fixable suggestions before mutating the report,
@@ -57,8 +63,7 @@ pub fn apply(report: &mut DoctorReport, paths: &Paths, scope: &Scope) -> Result<
 
     for fix in fixes {
         attempts += 1;
-        let result = apply_one(&fix, report, paths, scope);
-        if let Err(e) = result {
+        if let Err(e) = apply_one(&fix, report, paths, scope) {
             warn!(
                 subsystem = %fix.subsystem,
                 error = %e,
@@ -67,7 +72,7 @@ pub fn apply(report: &mut DoctorReport, paths: &Paths, scope: &Scope) -> Result<
         }
     }
 
-    Ok(attempts)
+    attempts
 }
 
 fn apply_one(

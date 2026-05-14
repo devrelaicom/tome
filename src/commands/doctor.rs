@@ -25,7 +25,7 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     let mut report = doctor::assemble_report(scope, &paths, &home, args.verify)?;
 
     if args.fix {
-        let _attempts = doctor::fixes::apply(&mut report, &paths, &scope.scope)?;
+        let _attempts = doctor::fixes::apply(&mut report, &paths, &scope.scope);
         doctor::fixes::re_assemble(&mut report);
     }
 
@@ -169,8 +169,12 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         writeln!(out, "  (none registered in this scope)")?;
     } else {
         for c in &report.catalogs {
+            // Orphan clones render with the info glyph (not the failure
+            // glyph) since they're informational per
+            // `catalog-extensions-p3.md` §"Doctor reporting".
             let glyph = match c.state {
                 doctor::CatalogCacheState::Ok => ok.clone(),
+                doctor::CatalogCacheState::Orphan => info.clone(),
                 _ => fail.clone(),
             };
             let suffix = match c.state {
@@ -178,9 +182,24 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
                 doctor::CatalogCacheState::Missing => " missing".into(),
                 doctor::CatalogCacheState::NotARepo => " not a git repo".into(),
                 doctor::CatalogCacheState::ManifestInvalid => " manifest invalid".into(),
+                doctor::CatalogCacheState::Orphan => {
+                    format!(" orphan at {}", c.cache_path.display())
+                }
             };
             writeln!(out, "  {:30}     {}{}", c.name, glyph, suffix)?;
         }
+    }
+    writeln!(out)?;
+
+    // FR-M-DOC-2: workspace-registry status line.
+    if report.workspace_registry.present {
+        writeln!(
+            out,
+            "Workspace registry: opt-in (file present, {} tracked)",
+            report.workspace_registry.tracked,
+        )?;
+    } else {
+        writeln!(out, "Workspace registry: opt-in (file absent)")?;
     }
     writeln!(out)?;
 
