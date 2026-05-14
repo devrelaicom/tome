@@ -45,6 +45,15 @@ pub enum CatalogCacheState {
     /// Cache + `.git/` present but `tome-catalog.toml` is missing or
     /// unparsable.
     ManifestInvalid,
+    /// Cache directory exists, is a valid catalog clone, but no
+    /// `config.toml` in the resolved scope references its URL. Created
+    /// when a `tome catalog remove` left a sibling-scope reference
+    /// behind, or when a registry edit dropped the entry without
+    /// removing the clone. The orphan record is informational —
+    /// `auto_fixable` is `false`; the user removes it by hand once
+    /// they've verified nothing else needs the clone. Contract
+    /// `catalog-extensions-p3.md` §"Doctor reporting" bullet 4.
+    Orphan,
 }
 
 impl CatalogCacheState {
@@ -54,8 +63,20 @@ impl CatalogCacheState {
             CatalogCacheState::Missing => "missing",
             CatalogCacheState::NotARepo => "not_a_repo",
             CatalogCacheState::ManifestInvalid => "manifest_invalid",
+            CatalogCacheState::Orphan => "orphan",
         }
     }
+}
+
+/// Workspace-registry status block. Contract
+/// `catalog-extensions-p3.md` §"Doctor reporting" calls for one line
+/// summarising the opt-in registry file. `present = false` is the
+/// default fresh-install state; `present = true` means the file is
+/// opt-in-touched and `tracked` is the count of registered workspaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkspaceRegistryStatus {
+    pub present: bool,
+    pub tracked: u32,
 }
 
 /// One probed agentic-coding harness. The well-known harness names are a
@@ -90,6 +111,9 @@ pub struct DoctorReport {
     pub index: IndexHealth,
     pub drift: DriftStatus,
     pub catalogs: Vec<CatalogCacheHealth>,
+    /// FR-M-DOC-2 / `catalog-extensions-p3.md` §"Doctor reporting":
+    /// status of the opt-in workspace registry file (presence + count).
+    pub workspace_registry: WorkspaceRegistryStatus,
     pub harnesses: Vec<HarnessPresence>,
     pub overall: DoctorClassification,
     pub suggested_fixes: Vec<SuggestedFix>,

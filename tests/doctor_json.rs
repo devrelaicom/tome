@@ -33,6 +33,7 @@ fn doctor_json_shape_is_pinned_on_healthy_install() {
         "index",
         "drift",
         "catalogs",
+        "workspace_registry",
         "harnesses",
         "overall",
         "suggested_fixes",

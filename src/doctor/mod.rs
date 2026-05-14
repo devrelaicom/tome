@@ -53,6 +53,7 @@ pub fn assemble_report(
     let index = check_index(paths, &scope.scope)?;
     let drift = check_drift(paths, &scope.scope, embedder_e, reranker_e)?;
     let catalogs = checks::check_catalogs(paths, &scope.scope)?;
+    let workspace_registry = checks::check_workspace_registry(paths);
     let harnesses = harness_detect::probe(home);
 
     let suggested_fixes = build_suggested_fixes(&embedder, &reranker, &index, &drift, &catalogs);
@@ -66,6 +67,7 @@ pub fn assemble_report(
         index,
         drift,
         catalogs,
+        workspace_registry,
         harnesses,
         overall,
         suggested_fixes,
@@ -127,10 +129,17 @@ fn classify(
     if matches!(drift, DriftStatus::RerankerDrift { .. }) {
         return DoctorClassification::Degraded;
     }
-    if catalogs
-        .iter()
-        .any(|c| !matches!(c.state, CatalogCacheState::Ok))
-    {
+    // Orphan clones are informational per contract — they don't trip
+    // Degraded. Only the "broken" cache states do (Missing / NotARepo /
+    // ManifestInvalid).
+    if catalogs.iter().any(|c| {
+        matches!(
+            c.state,
+            CatalogCacheState::Missing
+                | CatalogCacheState::NotARepo
+                | CatalogCacheState::ManifestInvalid
+        )
+    }) {
         return DoctorClassification::Degraded;
     }
     DoctorClassification::Ok
@@ -143,7 +152,7 @@ fn classify(
 fn build_suggested_fixes(
     embedder: &crate::commands::status::ModelHealth,
     reranker: &crate::commands::status::ModelHealth,
-    _index: &crate::commands::status::IndexHealth,
+    index: &crate::commands::status::IndexHealth,
     drift: &DriftStatus,
     catalogs: &[CatalogCacheHealth],
 ) -> Vec<SuggestedFix> {
@@ -158,6 +167,26 @@ fn build_suggested_fixes(
         if let Some(fix) = catalog_fix(c) {
             out.push(fix);
         }
+    }
+    // FR-M-DOC-5: when the on-disk schema is older than the compiled
+    // SCHEMA_VERSION, emit an auto-fixable "schema" SuggestedFix so
+    // `doctor::fixes::repair_schema` actually fires under `--fix`.
+    // Phase 3 ships zero registered migrations (the framework is in
+    // place; the first migration lands in Phase 4+); this branch is
+    // unreachable until that first migration lands but is required
+    // wiring so the repair-class isn't dead code.
+    if let Some(v) = index.schema_version
+        && v < crate::index::SCHEMA_VERSION
+    {
+        out.push(SuggestedFix {
+            subsystem: "schema".to_owned(),
+            diagnosis: format!(
+                "schema needs forward migration from v{v} to v{compiled}",
+                compiled = crate::index::SCHEMA_VERSION,
+            ),
+            command: "tome doctor --fix".to_owned(),
+            auto_fixable: true,
+        });
     }
     match drift {
         DriftStatus::EmbedderNameDrift { stored, configured }
@@ -230,6 +259,15 @@ fn catalog_fix(c: &CatalogCacheHealth) -> Option<SuggestedFix> {
             subsystem,
             diagnosis: "catalog manifest is missing or invalid".to_owned(),
             command: format!("tome catalog show {}", c.name),
+            auto_fixable: false,
+        }),
+        CatalogCacheState::Orphan => Some(SuggestedFix {
+            subsystem,
+            diagnosis: format!(
+                "cache directory at {} is not referenced by any registered catalog",
+                c.cache_path.display()
+            ),
+            command: format!("rm -rf {}", c.cache_path.display()),
             auto_fixable: false,
         }),
         CatalogCacheState::Ok => None,
