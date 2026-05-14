@@ -12,17 +12,27 @@
 //! filtered to `error!` only (FR-222 — stderr is reserved for fatal
 //! startup errors).
 
+use std::fmt as stdfmt;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+use serde_json::{Map, Number, Value};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+use tracing::Event;
+use tracing::Subscriber;
+use tracing::field::{Field, Visit};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::LevelFilter;
 use tracing_subscriber::fmt;
+use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::writer::MakeWriter;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::error::TomeError;
@@ -103,6 +113,105 @@ impl<'a> MakeWriter<'a> for FileMakeWriter {
     }
 }
 
+/// Custom JSON-lines event formatter that emits the contract-pinned
+/// field names (`ts`, `level`, `target`, `msg`). `tracing-subscriber`'s
+/// default `.json()` formatter uses `timestamp` and `message` — a
+/// silent divergence from `contracts/log-format.md` §File format. Every
+/// `tail -F | jq` filter in the contract depends on these exact names,
+/// so the formatter renders them directly via `serde_json` rather than
+/// relying on `tracing-subscriber`'s reserved field names.
+///
+/// Output shape per line:
+///
+/// ```json
+/// {"ts":"2026-05-14T12:34:55.823Z","level":"info","target":"tome::mcp::server","msg":"startup ok",…}
+/// ```
+///
+/// All event-level structured fields flatten in alongside the required
+/// four. Field-name collisions with the four required names (an event
+/// recording a field literally named `ts` / `level` / `target` / `msg`)
+/// are NOT possible in our codebase by inspection; reserve the names
+/// for the framework.
+pub struct ContractEventFormat;
+
+impl<S, N> FormatEvent<S, N> for ContractEventFormat
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        _ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> stdfmt::Result {
+        let meta = event.metadata();
+        let mut out = Map::new();
+
+        let ts = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+        out.insert("ts".to_owned(), Value::String(ts));
+        out.insert(
+            "level".to_owned(),
+            Value::String(meta.level().to_string().to_lowercase()),
+        );
+        out.insert("target".to_owned(), Value::String(meta.target().to_owned()));
+
+        let mut visitor = JsonFieldVisitor::default();
+        event.record(&mut visitor);
+
+        // tracing routes the macro message through a reserved field
+        // named `message`; lift it to `msg` per contract.
+        if let Some(msg) = visitor.fields.remove("message") {
+            out.insert("msg".to_owned(), msg);
+        }
+        for (k, v) in visitor.fields {
+            out.insert(k, v);
+        }
+
+        let line = serde_json::to_string(&out).map_err(|_| stdfmt::Error)?;
+        writeln!(writer, "{line}")
+    }
+}
+
+/// `tracing::Field` visitor that collects every event field into a
+/// `serde_json::Map`. Numeric / boolean / string fields land typed;
+/// everything else (including `?` and `%` formatted values) becomes a
+/// JSON string via the value's `Debug` impl.
+#[derive(Default)]
+struct JsonFieldVisitor {
+    fields: Map<String, Value>,
+}
+
+impl Visit for JsonFieldVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn stdfmt::Debug) {
+        self.fields
+            .insert(field.name().to_owned(), Value::String(format!("{value:?}")));
+    }
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.fields
+            .insert(field.name().to_owned(), Value::String(value.to_owned()));
+    }
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.fields
+            .insert(field.name().to_owned(), Value::Number(value.into()));
+    }
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.fields
+            .insert(field.name().to_owned(), Value::Number(value.into()));
+    }
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.fields
+            .insert(field.name().to_owned(), Value::Bool(value));
+    }
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        let n = Number::from_f64(value).unwrap_or_else(|| Number::from(0));
+        self.fields
+            .insert(field.name().to_owned(), Value::Number(n));
+    }
+}
+
 /// Build the MCP tracing subscriber. Wires the JSON file layer (filtered
 /// by `TOME_LOG` / `RUST_LOG`, default `info`) and a stderr layer
 /// restricted to `error!`-and-above so fatal startup diagnostics survive
@@ -118,11 +227,8 @@ pub fn init_subscriber(file: File) -> Result<(), TomeError> {
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
     let file_layer = fmt::layer()
-        .json()
-        .with_writer(FileMakeWriter::new(file))
-        .with_target(true)
-        .with_current_span(false)
-        .with_span_list(false);
+        .event_format(ContractEventFormat)
+        .with_writer(FileMakeWriter::new(file));
 
     let stderr_layer = fmt::layer()
         .with_writer(std::io::stderr)
