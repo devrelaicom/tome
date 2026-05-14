@@ -258,11 +258,28 @@ fn read_skill_and_resources(skill_path: &Path) -> Result<(String, Vec<String>), 
     Ok((parsed.body, resources))
 }
 
+/// FR-S-02: walk the skill's directory tree and collect every file
+/// path, but **reject symlinks** outright. A hostile catalog author can
+/// commit `skills/foo/credentials -> ~/.ssh/id_rsa`; without this guard
+/// the agent client receives that path as a "skill resource" and the
+/// file-reading tool will follow the symlink. The defence in depth is
+/// `entry.file_type()` (which uses `lstat` and does NOT follow
+/// symlinks) plus an explicit `is_symlink()` skip.
+///
+/// Returned-but-not-followed symlinks could still be sniffed by an
+/// agent if the agent's file tool resolves them — Tome can't prevent
+/// that, but we can at least not enumerate them ourselves.
 fn walk_dir(dir: &Path, exclude: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            // Skip silently — `resources` is informational. We don't
+            // log here (would flood under hostile-catalog scenarios)
+            // but the symlink is invisible to the agent client.
+            continue;
+        }
         if ft.is_dir() {
             walk_dir(&path, exclude, out)?;
         } else if path != exclude {

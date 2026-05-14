@@ -64,11 +64,33 @@ pub fn open_appender(paths: &Paths) -> Result<File, TomeError> {
         std::fs::create_dir_all(parent).map_err(TomeError::Io)?;
     }
 
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&paths.mcp_log)
-        .map_err(TomeError::Io)
+    // FR-S-01: the MCP log carries workspace paths + scrubbed error
+    // chains; on a shared machine the default umask-0644 lets every
+    // local user read the file. Match the discipline Phase 2 / PR #36
+    // applied to `config.toml` and the workspace registry: chmod 0600
+    // explicitly. On Unix the `mode(0o600)` `OpenOptions` extension
+    // takes effect at creation; this is a no-op on Windows (ACL model
+    // not covered by this PR).
+    let mut opts = OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(&paths.mcp_log).map_err(TomeError::Io)?;
+
+    // If the file already existed with a more-permissive mode (e.g.
+    // pre-fix install), tighten it now. `set_permissions` is a no-op
+    // on Windows.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(&paths.mcp_log, perms);
+    }
+
+    Ok(file)
 }
 
 /// `tracing-subscriber`-compatible writer that serialises every emit

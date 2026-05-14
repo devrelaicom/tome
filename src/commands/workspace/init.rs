@@ -11,9 +11,14 @@ use crate::paths::Paths;
 use crate::workspace::{self, InitOutcome};
 
 pub fn run(args: WorkspaceInitArgs, paths: &Paths, mode: Mode) -> Result<(), TomeError> {
-    let target = args
-        .path
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    // FR-m-WKS-3: surface a real error when CWD is unreadable
+    // (deleted while the user types the command). Previous behaviour
+    // fell back to `PathBuf::default()`, which produced a confusing
+    // `` `` does not exist `` error.
+    let target = match args.path {
+        Some(p) => p,
+        None => std::env::current_dir().map_err(TomeError::Io)?,
+    };
     let outcome = workspace::init(&target, args.inherit_global, args.force, paths)?;
     emit(&outcome, args.inherit_global, mode)
 }

@@ -67,7 +67,26 @@ pub fn init(
     }
     let absolute = std::fs::canonicalize(target_root).map_err(TomeError::Io)?;
     let marker = absolute.join(".tome");
-    let marker_exists = marker.is_dir() || marker.exists();
+
+    // FR-S-04: distinguish "no marker" from "marker exists but is not
+    // a directory" (regular file, symlink, FIFO, etc). A non-directory
+    // entry at `.tome` is anomalous — `--force` would rename it to
+    // `.tome.old`, leaving doctor confused; without `--force` we
+    // already refuse via the marker-exists branch but with a generic
+    // "workspace already initialised" error. Surface the specific
+    // shape so the user knows what's there.
+    let marker_lstat = std::fs::symlink_metadata(&marker);
+    let marker_exists = marker_lstat.is_ok();
+    let marker_is_dir = marker_lstat.as_ref().is_ok_and(|m| m.is_dir());
+    if marker_exists && !marker_is_dir {
+        return Err(TomeError::WorkspaceMalformed {
+            path: absolute.clone(),
+            reason: format!(
+                "`.tome` exists but is not a directory ({})",
+                describe_file_type(marker_lstat.as_ref().unwrap()),
+            ),
+        });
+    }
     if marker_exists && !force {
         return Err(TomeError::CatalogAlreadyExists(format!(
             "workspace at {}",
@@ -104,12 +123,20 @@ pub fn init(
 
     // 5. Move an existing `.tome/` aside if `--force` allowed us this
     //    far. The aside path is deterministic so doctor can find
-    //    orphans later. We best-effort-remove any pre-existing
-    //    `.tome.old/` from a prior crash so the rename below
-    //    doesn't fail with EEXIST.
+    //    orphans later. Pre-cleanup of `.tome.old/` propagates its
+    //    error (FR-M-WKS-2) — a previous `.tome.old/` that can't be
+    //    removed (EACCES, disk-full) would otherwise cause the next
+    //    rename to fail with EEXIST and a confusing error chain.
     let aside = absolute.join(".tome.old");
     if marker_exists {
-        let _ = std::fs::remove_dir_all(&aside);
+        if aside.exists()
+            && let Err(e) = std::fs::remove_dir_all(&aside)
+        {
+            return Err(TomeError::Io(std::io::Error::other(format!(
+                "cannot remove pre-existing `.tome.old/` at {}: {e}",
+                aside.display()
+            ))));
+        }
         std::fs::rename(&marker, &aside).map_err(TomeError::Io)?;
     }
 
@@ -146,6 +173,24 @@ pub fn init(
         config_path: marker.join("config.toml"),
         index_bootstrapped: false,
     })
+}
+
+/// Render a one-word description of a non-directory file type for the
+/// FR-S-04 error message. Defensive — every branch of `FileType` on
+/// Unix is named; on Windows we collapse to "non-directory".
+fn describe_file_type(meta: &std::fs::Metadata) -> &'static str {
+    let ft = meta.file_type();
+    if ft.is_file() {
+        "regular file"
+    } else if ft.is_symlink() {
+        "symlink"
+    } else if ft.is_dir() {
+        // Caller already gated on `is_dir() = false`; this arm is
+        // unreachable but stays for defensiveness.
+        "directory"
+    } else {
+        "non-directory"
+    }
 }
 
 fn build_initial_config(inherit: bool, paths: &Paths) -> Result<(Config, bool), TomeError> {
