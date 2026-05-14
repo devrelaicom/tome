@@ -157,6 +157,36 @@ pub fn run_with_deps(
     deps: QueryDeps<'_>,
     mode: Mode,
 ) -> Result<QueryOutcome, TomeError> {
+    let outcome = pipeline(&args, &deps)?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match mode {
+        Mode::Human => emit_human(
+            &outcome.results,
+            outcome.scoring.as_str(),
+            outcome.reranker_drift.as_deref(),
+            home.as_deref(),
+        )?,
+        Mode::Json => emit_json(
+            &outcome.results,
+            outcome.scoring.as_str(),
+            outcome.threshold_passed,
+            outcome.reranker_drift.as_deref(),
+        )?,
+    }
+    Ok(outcome)
+}
+
+/// The silent compute path. Runs filter validation → drift check →
+/// embed → KNN → optional rerank → trim → threshold check, and
+/// returns the [`QueryOutcome`] without emitting any stdout/stderr.
+///
+/// Phase 3 / US1.b uses this from the MCP `search_skills` handler:
+/// the protocol channel is sacred (FR-221) so the CLI emit step
+/// would corrupt the transport.
+///
+/// CLI callers go through [`run_with_deps`] which calls this then
+/// emits per `mode`.
+pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, TomeError> {
     let text = args.text.trim();
     if text.is_empty() {
         return Err(TomeError::Usage("query text is empty".into()));
@@ -164,7 +194,7 @@ pub fn run_with_deps(
 
     // Validate filter flags before any model / DB work — these are cheap
     // catalog-manifest reads and fail fast on typos.
-    validate_filters(&args, deps.config)?;
+    validate_filters(args, deps.config)?;
 
     let conn = open_index_for_read(deps.paths, deps.scope)?;
 
@@ -240,23 +270,6 @@ pub fn run_with_deps(
     } else {
         ScoringMode::Similarity
     };
-
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-
-    match mode {
-        Mode::Human => emit_human(
-            &trimmed,
-            scoring.as_str(),
-            reranker_drift.as_deref(),
-            home.as_deref(),
-        )?,
-        Mode::Json => emit_json(
-            &trimmed,
-            scoring.as_str(),
-            threshold_passed,
-            reranker_drift.as_deref(),
-        )?,
-    }
 
     Ok(QueryOutcome {
         results: trimmed,
