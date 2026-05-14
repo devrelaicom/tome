@@ -429,9 +429,9 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### End-of-phase
 
-- [ ] T202 [US5] Run `/sdd:map incremental` to refresh codebase docs against Phase 7 / US5 changes
-- [ ] T203 [US5] Review `retro/P7.md` and extract critical learnings to CLAUDE.md (conservative)
-- [ ] T204 [GIT] Commit: docs(codebase): refresh after Phase 7 / US5
+- [X] T202 [US5] Run `/sdd:map incremental` to refresh codebase docs against Phase 7 / US5 changes — 4 mappers in parallel; all 8 codebase docs refreshed.
+- [X] T203 [US5] Review `retro/P7.md` and extract critical learnings to CLAUDE.md (conservative) — 5 new pattern bullets: RAII `MigrationsGuard` for thread-local injection, generate-at-setup fixture DBs over committed binaries, SIGINT mid-tx modelled as deliberate `Err`, synthetic `SuggestedFix` injection for dispatch-path testing, "framework ships empty, e2e tests live on synthetic fixtures".
+- [X] T204 [GIT] Commit: docs(codebase): refresh after Phase 7 / US5
 
 ### Phase Completion
 

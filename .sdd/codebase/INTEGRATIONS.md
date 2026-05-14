@@ -2,7 +2,7 @@
 
 > **Purpose**: Document all external services, APIs, databases, and third-party integrations.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US4 — doctor command with harness detection at 6 known install directories; probe by existence only, no content reads)
+> **Last Updated**: 2026-05-14 (Phase 3 / US5 — forward schema migrations with integration test coverage; no new integrations)
 
 ## Databases & Data Stores
 
@@ -17,7 +17,7 @@
 - **Statically linked**: `rusqlite` with `bundled` feature — no system SQLite dependency, no version mismatch risk.
 - **Concurrency model**: Single advisory lockfile (`index.lock` — global or workspace-scoped per Phase 3 Foundational F1) ensures Phase 3–9 foreground operations are serialised; WAL mode allows readers during writes (MCP server uses read-only open per FR-056).
 - **ORM/Query builder**: Direct SQL via `rusqlite` — prepared statements, parameterised queries.
-- **Migration approach**: Forward-only migrations under advisory lock in `src/index/migrations.rs` (rewritten in Foundational F7 with function-pointer-based `Migration` struct; see STACK.md Foundational F7 section); drift detection in `src/index/meta.rs`.
+- **Migration approach**: Forward-only migrations under advisory lock in `src/index/migrations.rs` (rewritten in Foundational F7 with function-pointer-based `Migration` struct; US5 adds integration tests via synthetic-fixture injection in `tests/schema_migration_e2e.rs`); drift detection in `src/index/meta.rs`.
 
 ### Cache Structure
 
@@ -36,7 +36,7 @@
 
 ## Authentication & Authorization
 
-Phase 1–9 has no explicit application-layer authentication. Phase 3 / US1 MCP server similarly has no auth mechanism — it is stdio-based (embedding in Claude Code harness provides transport-level auth). Phase 3 / US2 adds workspace scoping but no auth model changes. Phase 3 / US3 lifts the single-scope-per-URL restriction but does not introduce per-scope ACLs. Phase 3 / US4 adds doctor diagnostics without new auth surfaces.
+Phase 1–9 has no explicit application-layer authentication. Phase 3 / US1 MCP server similarly has no auth mechanism — it is stdio-based (embedding in Claude Code harness provides transport-level auth). Phase 3 / US2 adds workspace scoping but no auth model changes. Phase 3 / US3 lifts the single-scope-per-URL restriction but does not introduce per-scope ACLs. Phase 3 / US4 adds doctor diagnostics without new auth surfaces. Phase 3 / US5 is test-coverage completion.
 
 - **Git operations**: Inherit system SSH keys and HTTP credential helpers (if configured in `~/.gitconfig`).
 - **Hugging Face model downloads**: No API key required; public `https://huggingface.co/` URLs are freely accessible (MODEL_REGISTRY pinned to MIT-licensed BGE variants).
@@ -108,7 +108,7 @@ No TTL-based eviction. Phase 1–9 uses explicit user commands for cleanup (prin
 
 | Service | Purpose | Configuration |
 |---------|---------|---------------|
-| XDG-compliant filesystem | Configuration, catalogs, models, index | Global: `${XDG_CONFIG_HOME}/tome/config.toml`, `${XDG_DATA_HOME}/tome/catalogs/<sha>/`, `${XDG_DATA_HOME}/tome/models/`, `${XDG_DATA_HOME}/tome/index.db`; Workspace: `${WORKSPACE}/.tome/config.toml`, `${WORKSPACE}/.tome/catalogs/<sha>/`, `${WORKSPACE}/.tome/index.db` (Phase 3 Foundational F1); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]`; Phase 9 extends catalog removal with cascade-disable index cleanup; Foundational F8 adds MCP log to `${XDG_STATE_HOME}/tome/mcp.log`; Phase 3 / US1 MCP server operates on same index + models + config per scope; Phase 3 / US2 adds `${XDG_DATA_HOME}/tome/workspaces.txt` opt-in registry; Phase 3 / US3 makes workspaces.txt load-bearing for refcount enumeration; atomic `.tome/` dir creation via tempfile staging (staging dir inside workspace root for POSIX-atomic rename, chmod 0700 before content lands); Phase 3 / US4 doctor uses same subsystem infrastructure (no new files) |
+| XDG-compliant filesystem | Configuration, catalogs, models, index | Global: `${XDG_CONFIG_HOME}/tome/config.toml`, `${XDG_DATA_HOME}/tome/catalogs/<sha>/`, `${XDG_DATA_HOME}/tome/models/`, `${XDG_DATA_HOME}/tome/index.db`; Workspace: `${WORKSPACE}/.tome/config.toml`, `${WORKSPACE}/.tome/catalogs/<sha>/`, `${WORKSPACE}/.tome/index.db` (Phase 3 Foundational F1); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]`; Phase 9 extends catalog removal with cascade-disable index cleanup; Foundational F8 adds MCP log to `${XDG_STATE_HOME}/tome/mcp.log`; Phase 3 / US1 MCP server operates on same index + models + config per scope; Phase 3 / US2 adds `${XDG_DATA_HOME}/tome/workspaces.txt` opt-in registry; Phase 3 / US3 makes workspaces.txt load-bearing for refcount enumeration; atomic `.tome/` dir creation via tempfile staging (staging dir inside workspace root for POSIX-atomic rename, chmod 0700 before content lands); Phase 3 / US4 doctor uses same subsystem infrastructure (no new files); Phase 3 / US5 validates schema migrations via forward-migration integration tests |
 
 ---
 
@@ -157,7 +157,7 @@ Phase 3 / US4 adds harness discovery to support ecosystem integration without cr
 | `XDG_STATE_HOME` | No (defaults to `~/.local/state`) | Override state directory (MCP log) | `/opt/state` | Foundational F8 |
 | `TOME_LOG` | No | Custom log filter (overrides `RUST_LOG`) | `debug`, `info`, `tome=trace` | — |
 | `RUST_LOG` | No | Standard Rust log filter | `info`, `warn` | — |
-| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR`; phase 8: status report respects `NO_COLOR`; phase 9: cascade-disable output respects `NO_COLOR`; phase 3/US1: MCP stdout is protocol-only (no color possible); phase 3/US2: workspace info respects `NO_COLOR`; phase 3/US3: scope-aware commands respect `NO_COLOR`; phase 3/US4: doctor report respects `NO_COLOR` |
+| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR`; phase 8: status report respects `NO_COLOR`; phase 9: cascade-disable output respects `NO_COLOR`; phase 3/US1: MCP stdout is protocol-only (no color possible); phase 3/US2: workspace info respects `NO_COLOR`; phase 3/US3: scope-aware commands respect `NO_COLOR`; phase 3/US4: doctor report respects `NO_COLOR`; phase 3/US5: no new presentation changes |
 | `CLICOLOR` | No | Disable coloured output (alternate) | `0` to disable | — |
 
 ---
@@ -271,6 +271,21 @@ Phase 3 / US4 adds harness discovery to support ecosystem integration without cr
 
 ---
 
+## Schema Migration Integration (Phase 3 / US5)
+
+**Status:** Forward-migration framework landed in Foundational F7; integration test coverage completed in US5.
+
+| Aspect | Details |
+|--------|---------|
+| **Framework** | `src/index/migrations.rs` — `Migration { from, to, name, apply: fn(&Transaction) -> Result<(), TomeError> }` struct with function-pointer-based apply hooks; `apply_pending(conn, current, target)` three-arg signature (current version tracks fresh vs. existing DB); `MIGRATIONS_OVERRIDE` test-injection point for synthetic fixtures |
+| **Test coverage** | `tests/schema_migration_e2e.rs` — 5 integration tests covering fresh-DB bootstrap, forward-migration from old schema, migration atomicity, schema-version gates (write-path SchemaVersionTooNew / read-path SchemaTooNew); extended `tests/atomicity.rs` with 1 test for migration interruption safety |
+| **Test fixtures** | `tests/common/mod.rs::write_index_db_with_schema_version` helper fabricates old-version index DBs for migration testing (synthetic `MIGRATIONS_OVERRIDE` injection) |
+| **Atomicity** | All migrations run under advisory lock; rollback on apply error (transaction abort); no partial DB state visible to concurrent readers |
+| **Version semantics** | Write-path (enable/reindex/cascade) checks schema version and emits `SchemaVersionTooNew` (exit 73) if DB is newer; read-path (query/info/doctor) retains legacy `SchemaTooNew` (exit 52) for backward compat |
+| **Production migrations** | Compile-time `MIGRATIONS` array ships empty (`const MIGRATIONS: &[Migration] = &[];`); first real migration row + test landing in Phase 4+ |
+
+---
+
 ## What Does NOT Belong Here
 
 - Internal code architecture → ARCHITECTURE.md
@@ -280,4 +295,4 @@ Phase 3 / US4 adds harness discovery to support ecosystem integration without cr
 
 ---
 
-*This document maps external service dependencies and failure modes. Updated for Phase 3 Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 + Phase 3 / US3 + Phase 3 / US4: schema migration framework rewrite + MCP server scaffolding scoped to `src/mcp/` + workspace info/init commands with scope-aware path resolution + opt-in workspace registry file + reference-counted catalog clone sharing across scopes + doctor subsystem checks with harness discovery at 6 known install locations.*
+*This document maps external service dependencies and failure modes. Updated for Phase 3 Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 + Phase 3 / US3 + Phase 3 / US4 + Phase 3 / US5: schema migration framework rewrite + MCP server scaffolding scoped to `src/mcp/` + workspace info/init commands with scope-aware path resolution + opt-in workspace registry file + reference-counted catalog clone sharing across scopes + doctor subsystem checks with harness discovery at 6 known install locations + forward-schema-migration integration test coverage.*

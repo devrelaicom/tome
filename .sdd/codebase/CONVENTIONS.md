@@ -1,8 +1,8 @@
 # Coding Conventions
 
 > **Purpose**: Document code style, naming conventions, error handling, and common patterns.
-> **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-15
+> **Generated**: 2026-05-14
+> **Last Updated**: 2026-05-14
 
 ## Code Style
 
@@ -86,7 +86,7 @@ This enforces the Unix principle: every failure class has a stable, documented e
 | 8 | `Interrupted` | User pressed Ctrl+C; in-flight git processes killed |
 | 30 | `ModelMissing` | Required embedding model not present |
 
-*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2–9 exit codes.*
+*See `tests/exit_codes.rs` for the exhaustive listing of all Phase 2–Phase 3 exit codes.*
 
 ### Error Message Style
 
@@ -259,12 +259,15 @@ tests/
 ├── workspace_commands.rs     # Cross-scope command isolation (Phase 5 / US3)
 ├── catalog_cache_refcount.rs # Reference-counted catalog cleanup (Phase 5 / US3)
 ├── atomicity_enable.rs       # Failure-injection tests for enable rollback (FR-004)
+├── atomicity.rs              # Registry/cache write atomicity + schema migration atomicity (Phase 3 / US5)
 ├── exit_codes.rs             # Exhaustiveness check: every TomeError → exit code
 ├── error_messages.rs         # Error message correctness
 ├── manifest_strictness.rs    # TOML deny_unknown_fields enforcement + corpus
 ├── path_validation.rs        # Path escape/traversal validation
 ├── scrubbing.rs              # Credential scrubbing regex coverage
-├── atomicity.rs              # Registry/cache write atomicity under interruption
+├── schema_migrations.rs       # Forward-only migration boundaries (Phase 3 / F7)
+├── schema_migration_e2e.rs   # End-to-end schema migration with synthetic fixtures (Phase 3 / US5)
+├── concurrency.rs            # Cross-process index lock contention (Phase 3 / US5)
 └── fixtures/                 # Real Git repos + sample plugin catalogs
     ├── sample-catalog/
     └── sample-plugin-catalog/
@@ -766,7 +769,7 @@ pub fn run(args: DoctorArgs, mode: Mode) -> Result<(), TomeError> {
 
 **Benefit:** The diagnose logic is the single source of truth. Re-running it ensures the displayed state is current and accurate.
 
-### Test Injection Points (Phase 3 / F7 and F8)
+### Test Injection Points (Phase 3 / F7–F8 and Phase 3 / US5)
 
 **Reachable from integration tests:** When a test injection point must be reachable from integration tests under `tests/` AND from `#[cfg(test)]` unit tests AND potentially from production code in tightly scoped diagnostic scenarios, gate it with `#[doc(hidden)] pub static` instead of `#[cfg(test)]`. The `#[doc(hidden)]` keeps it out of the published API docs; the `pub` makes it visible across the integration-test crate boundary (which doesn't inherit `cfg(test)`).
 
@@ -788,6 +791,32 @@ pub static MIGRATIONS_OVERRIDE: RefCell<Option<&'static [Migration]>> =
 ```
 
 Example usage: `src/index/migrations.rs::MIGRATIONS_OVERRIDE` for schema-migration e2e tests.
+
+**RAII migration override guard (Phase 3 / US5):** When using `MIGRATIONS_OVERRIDE` in integration tests, wrap the installation with an RAII guard that restores `None` on drop. The guard survives panics (try/finally semantics) so a failed test assertion never poisons subsequent tests on the same thread:
+
+```rust
+struct MigrationsGuard;
+
+impl MigrationsGuard {
+    fn install(migrations: &'static [Migration]) -> Self {
+        MIGRATIONS_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(migrations));
+        Self
+    }
+}
+
+impl Drop for MigrationsGuard {
+    fn drop(&mut self) {
+        MIGRATIONS_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[test]
+fn test_migration_scenario() {
+    static MIGRATIONS: &[Migration] = &[...];
+    let _guard = MigrationsGuard::install(MIGRATIONS);
+    // test runs; guard restores None on exit (even on panic)
+}
+```
 
 **Small filesystem operations in-module:** Unit tests for small file-system operations (file creation, rotation, permissions, idempotent no-ops) live in `#[cfg(test)] mod tests` blocks inside the module under test. These operations (rename, `set_len` for sparse fixtures, metadata reads) are fast and deterministic, making them suitable for in-module unit tests.
 
