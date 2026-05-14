@@ -202,12 +202,16 @@ fn schema_too_new_is_refused() {
         .expect("bump version");
     }
 
+    // Phase 3 / F7: the migration framework's refusal variant is
+    // `SchemaVersionTooNew` (exit 73). The Phase 2 `SchemaTooNew` (exit
+    // 52) still lives in the closed enum and is emitted by the read-only
+    // open gate — see `open_read_only`'s docstring.
     let err = open(&path, &opts).expect_err("re-open must refuse newer schema");
     match err {
-        TomeError::SchemaTooNew { on_disk, compiled } => {
+        TomeError::SchemaVersionTooNew { on_disk, expected } => {
             assert_eq!(on_disk, SCHEMA_VERSION + 1);
-            assert_eq!(compiled, SCHEMA_VERSION);
+            assert_eq!(expected, SCHEMA_VERSION);
         }
-        other => panic!("expected SchemaTooNew, got {other:?}"),
+        other => panic!("expected SchemaVersionTooNew, got {other:?}"),
     }
 }

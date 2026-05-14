@@ -122,12 +122,12 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Slice F7 — populate `apply_pending` migration framework
 
-- [ ] T053 Populate `apply_pending(conn: &mut Connection, current: u32, target: u32) -> Result<u32, TomeError>` in `src/index/migrations.rs` per contracts/schema-migration.md §Algorithm (use devs:rust-dev agent)
-- [ ] T054 Define `Migration { from, to, name, apply }` struct and `const MIGRATIONS: &[Migration] = &[]` (empty) in `src/index/migrations.rs` (use devs:rust-dev agent)
-- [ ] T055 Add `#[cfg(test)] thread_local!` `MIGRATIONS_OVERRIDE` injection point per contracts/schema-migration.md §Registration (use devs:rust-dev agent)
-- [ ] T056 Wire `apply_pending` into `index::open` after the schema version is read (use devs:rust-dev agent)
-- [ ] T057 Add tracing info events at migration start, commit, and failure per contracts/schema-migration.md §Logging (use devs:rust-dev agent)
-- [ ] T058 [GIT] Commit: feat(index): populate apply_pending migration framework
+- [X] T053 Populate `apply_pending(conn: &mut Connection, current: u32, target: u32) -> Result<u32, TomeError>` in `src/index/migrations.rs` per contracts/schema-migration.md §Algorithm (use devs:rust-dev agent) — new shape returns `Result<u32, TomeError>`; refuses newer-on-disk with `SchemaVersionTooNew` (exit 73) per the Phase 3 contract; wraps step failures in `SchemaMigrationFailed` (exit 74); keeps the "no migration registered" defensive guard as `IndexIntegrityCheckFailure` (exit 51) because that's a "DB in unknown state" signal rather than a registered-migration failure.
+- [X] T054 Define `Migration { from, to, name, apply }` struct and `const MIGRATIONS: &[Migration] = &[]` (empty) in `src/index/migrations.rs` (use devs:rust-dev agent) — `apply: fn(&Transaction) -> Result<(), TomeError>` (function pointer) replaces the Phase 2 `sql: &'static str`; the registry stays empty.
+- [X] T055 Add `#[cfg(test)] thread_local!` `MIGRATIONS_OVERRIDE` injection point per contracts/schema-migration.md §Registration (use devs:rust-dev agent) — **deviated from `#[cfg(test)]`**: integration tests under `tests/` consume the library without `cfg(test)` visibility, so `MIGRATIONS_OVERRIDE` is `#[doc(hidden)] pub static`. Phase 7's `tests/schema_migration_e2e.rs` reads it via `tome::index::migrations::MIGRATIONS_OVERRIDE`.
+- [X] T056 Wire `apply_pending` into `index::open` after the schema version is read (use devs:rust-dev agent) — call site now passes `schema::SCHEMA_VERSION` as the target and discards the returned `u32`. Doc comment on `db.rs::open` updated to note that the write path now emits `SchemaVersionTooNew` (73) while `open_read_only` continues emitting the legacy `SchemaTooNew` (52) — both name the same condition but historically route through different exit codes; tests rely on both.
+- [X] T057 Add tracing info events at migration start, commit, and failure per contracts/schema-migration.md §Logging (use devs:rust-dev agent) — `target: "tome::index::migrations"`; `migrating` + `migration committed` at `info`; failures at `error` with the scrubbed source attached.
+- [X] T058 [GIT] Commit: feat(index): populate apply_pending migration framework
 
 ### Slice F8 — MCP file log appender plumbing
 
