@@ -236,6 +236,141 @@ fn nested_workspace_wins_over_outer() {
     assert_eq!(r.source, ScopeSource::CwdWalk);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3 Polish — Blocker B2: resolver enforces §Validation 1b/1c.
+// ---------------------------------------------------------------------------
+
+/// Bootstrap a workspace with a `.tome/` marker plus an unparsable
+/// `.tome/config.toml`. Used to exercise the §Validation 1b refusal.
+fn workspace_with_broken_config(tmp: &TempDir, name: &str) -> PathBuf {
+    let root = tmp.path().join(name);
+    std::fs::create_dir_all(root.join(".tome")).expect("mkdir .tome");
+    std::fs::write(root.join(".tome/config.toml"), "not = = valid toml\n").expect("write config");
+    std::fs::canonicalize(&root).expect("canonicalise")
+}
+
+#[test]
+fn explicit_workspace_with_malformed_config_returns_70() {
+    let env = ResolveEnv::new();
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace_with_broken_config(&tmp, "broken-cfg-flag");
+    env.chdir(tmp.path());
+
+    let args = GlobalScopeArgs {
+        workspace: Some(ws.clone()),
+        global: false,
+    };
+    let err = resolve(&args).expect_err("expected WorkspaceMalformed");
+    match err {
+        TomeError::WorkspaceMalformed { path, reason } => {
+            assert_eq!(path, ws);
+            assert!(
+                reason.contains("config.toml"),
+                "reason should name the offending file: {reason}",
+            );
+        }
+        other => panic!("expected WorkspaceMalformed, got {other:?}"),
+    }
+    let err2 = resolve(&GlobalScopeArgs {
+        workspace: Some(ws),
+        global: false,
+    })
+    .unwrap_err();
+    assert_eq!(err2.exit_code(), 70);
+}
+
+#[test]
+fn env_var_with_malformed_config_returns_70() {
+    let env = ResolveEnv::new();
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace_with_broken_config(&tmp, "broken-cfg-env");
+    env.set_env(ws.to_str().unwrap());
+    env.chdir(tmp.path());
+
+    let err = resolve(&args_default()).expect_err("expected WorkspaceMalformed");
+    assert!(matches!(err, TomeError::WorkspaceMalformed { .. }));
+    assert_eq!(err.exit_code(), 70);
+}
+
+#[test]
+fn cwd_walk_with_malformed_config_returns_70() {
+    let env = ResolveEnv::new();
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace_with_broken_config(&tmp, "broken-cfg-cwd");
+    env.chdir(&ws);
+
+    let err = resolve(&args_default()).expect_err("expected WorkspaceMalformed");
+    match err {
+        TomeError::WorkspaceMalformed { path, reason } => {
+            assert_eq!(path, ws);
+            assert!(reason.contains("config.toml"), "reason: {reason}");
+        }
+        other => panic!("expected WorkspaceMalformed, got {other:?}"),
+    }
+}
+
+#[test]
+fn workspace_with_unopenable_index_returns_70() {
+    let env = ResolveEnv::new();
+    let tmp = TempDir::new().unwrap();
+    let ws = make_workspace(&tmp, "broken-index");
+    // Plant garbage at index.db — open_read_only must reject.
+    std::fs::write(ws.join(".tome/index.db"), b"not a sqlite file").expect("write index");
+    env.chdir(tmp.path());
+
+    let args = GlobalScopeArgs {
+        workspace: Some(ws.clone()),
+        global: false,
+    };
+    let err = resolve(&args).expect_err("expected WorkspaceMalformed");
+    match err {
+        TomeError::WorkspaceMalformed { path, reason } => {
+            assert_eq!(path, ws);
+            assert!(
+                reason.contains("index database malformed"),
+                "reason should name the malformed index: {reason}",
+            );
+        }
+        other => panic!("expected WorkspaceMalformed, got {other:?}"),
+    }
+}
+
+#[test]
+fn workspace_with_no_config_is_allowed() {
+    // Fresh `workspace init` leaves only the `.tome/` marker — no
+    // config.toml until the first `catalog add`. The resolver must
+    // accept this and let downstream commands operate normally.
+    let env = ResolveEnv::new();
+    let tmp = TempDir::new().unwrap();
+    let ws = make_workspace(&tmp, "fresh-init");
+    env.chdir(tmp.path());
+
+    let r = resolve(&GlobalScopeArgs {
+        workspace: Some(ws.clone()),
+        global: false,
+    })
+    .expect("resolve");
+    assert_eq!(r.scope, Scope::Workspace(ws));
+}
+
+#[test]
+fn workspace_with_no_index_is_allowed() {
+    // A workspace with config but no index.db (nothing enabled yet)
+    // must resolve OK; the index file appears on first `plugin enable`.
+    let env = ResolveEnv::new();
+    let tmp = TempDir::new().unwrap();
+    let ws = make_workspace(&tmp, "no-index");
+    std::fs::write(ws.join(".tome/config.toml"), "[catalogs]\n").expect("write config");
+    env.chdir(tmp.path());
+
+    let r = resolve(&GlobalScopeArgs {
+        workspace: Some(ws.clone()),
+        global: false,
+    })
+    .expect("resolve");
+    assert_eq!(r.scope, Scope::Workspace(ws));
+}
+
 #[test]
 fn empty_env_var_is_treated_as_unset() {
     let env = ResolveEnv::new();
