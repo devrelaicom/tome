@@ -225,14 +225,17 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         })
         .collect();
 
+    // FR-M-LOG-5: contract names `filter` as a nested JSON object.
+    // tracing flattens fields, so emit two named slots (`filter_catalog`,
+    // `filter_plugin`). Closer to a structured shape than `?FilterLog`'s
+    // Rust-Debug string; consumers can re-nest in jq via
+    // `{filter: {catalog, plugin}}`.
     info!(
         target: "tome::mcp::tools::search_skills",
         query_len = input.query.len(),
         top_k = input.top_k,
-        filter = ?FilterLog {
-            catalog: input.catalog.as_deref(),
-            plugin: input.plugin.as_deref(),
-        },
+        filter_catalog = input.catalog.as_deref(),
+        filter_plugin = input.plugin.as_deref(),
         matches = matches.len(),
         elapsed_ms = started.elapsed().as_millis() as u64,
         "call",
@@ -256,10 +259,17 @@ fn split_id(id: &str) -> (&str, &str) {
 /// no specific mapping applies.
 fn tome_to_mcp(e: TomeError) -> McpError {
     let msg = e.to_string();
+    // FR-M-LOG-1 / log-format.md §Scrubbing: error chains may carry
+    // signed URLs from reqwest or git output. Pass through
+    // `scrub_credentials::scrub_to_string` before logging. The
+    // user-facing McpError still gets the raw msg — the contract
+    // doesn't ask us to scrub the protocol payload (that channel is
+    // already authenticated to the harness).
+    let scrubbed = crate::catalog::git::scrub_to_string(msg.as_bytes());
     error!(
         target: "tome::mcp::tools::search_skills",
         error_code = e.category(),
-        error_message = %msg,
+        error_message = %scrubbed,
         "tool error",
     );
     match &e {
@@ -277,16 +287,4 @@ fn tome_to_mcp(e: TomeError) -> McpError {
         ),
         _ => McpError::internal_error(msg, Some(json!({ "code": e.category() }))),
     }
-}
-
-/// Local payload type for the `filter` log field. `tracing` doesn't
-/// know how to render `Input` directly, but a small struct keyed to the
-/// contract's shape works fine through `Debug`. Fields are accessed by
-/// the `tracing` derived `Debug` impl, which clippy's dead-code
-/// analysis doesn't see — hence the explicit allow.
-#[derive(Debug)]
-#[allow(dead_code)]
-struct FilterLog<'a> {
-    catalog: Option<&'a str>,
-    plugin: Option<&'a str>,
 }
