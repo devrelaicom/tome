@@ -115,10 +115,10 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Slice F6 — `query::run_with_deps` library entry point (folded P10 deferral)
 
-- [ ] T049 Add `pub fn run_with_deps(args: QueryArgs, deps: QueryDeps, mode: Mode) -> Result<QueryOutcome, TomeError>` in `src/commands/query.rs` accepting injected `Embedder` and `Reranker` traits, mirroring `reindex::run_with_deps` shape (use devs:rust-dev agent)
-- [ ] T050 Refactor `commands::query::run` to call `run_with_deps` after constructing real `FastembedEmbedder` + `FastembedReranker` (use devs:rust-dev agent)
-- [ ] T051 Extend `tests/query.rs` to exercise the library API directly via `run_with_deps` + `StubEmbedder` (use devs:rust-dev agent)
-- [ ] T052 [GIT] Commit: refactor(query): expose run_with_deps for library testing
+- [X] T049 Add `pub fn run_with_deps(args: QueryArgs, deps: QueryDeps, mode: Mode) -> Result<QueryOutcome, TomeError>` in `src/commands/query.rs` accepting injected `Embedder` and `Reranker` traits, mirroring `reindex::run_with_deps` shape (use devs:rust-dev agent) — `QueryDeps` carries `paths`, `scope`, `config`, `embedder`, `reranker` (`Option`), plus `embedder_seed` / `reranker_seed` (so drift detection compares against the caller's identity, not the BGE registry constants).
+- [X] T050 Refactor `commands::query::run` to call `run_with_deps` after constructing real `FastembedEmbedder` + `FastembedReranker` (use devs:rust-dev agent)
+- [X] T051 Extend `tests/query.rs` to exercise the library API directly via `run_with_deps` + `StubEmbedder` (use devs:rust-dev agent) — 6 new tests cover scoring modes (Similarity / Reranked), empty-text rejection, `--strict` no-results error, pre-rerank filter narrowing, and `CatalogNotFound` on unknown filter.
+- [X] T052 [GIT] Commit: refactor(query): expose run_with_deps for library testing
 
 ### Slice F7 — populate `apply_pending` migration framework
 

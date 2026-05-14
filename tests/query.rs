@@ -19,13 +19,18 @@ use common::{
     stub_embedder_seed, stub_reranker_seed,
 };
 use tempfile::TempDir;
+use tome::cli::QueryArgs;
+use tome::commands::query::{QueryDeps, ScoringMode, run_with_deps};
+use tome::config::Config;
 use tome::embedding::stub::{ReverseStubReranker, StubEmbedder, StubReranker};
 use tome::embedding::{Embedder, Reranker};
 use tome::index::query::{Candidate, QueryFilters};
 use tome::index::skills::embedding_text;
 use tome::index::{self, OpenOptions, knn};
+use tome::output::Mode;
 use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
+use tome::workspace::Scope;
 
 /// Bootstrap helper: copy the sample-plugin-catalog fixture into a TempDir,
 /// enable both plugins via the lifecycle API, return everything the tests
@@ -34,6 +39,10 @@ use tome::plugin::lifecycle::{self, LifecycleDeps};
 struct QueryEnv {
     _tmp: TempDir,
     paths: tome::paths::Paths,
+    /// The catalog config used to bootstrap the env. Kept so library-API
+    /// tests (`run_with_deps`) can pass it as `QueryDeps.config` without
+    /// re-reading from disk.
+    config: Config,
 }
 
 fn build_query_env() -> QueryEnv {
@@ -62,7 +71,11 @@ fn build_query_env() -> QueryEnv {
         lifecycle::enable(&id, &deps).expect("enable plugin for query env");
     }
 
-    QueryEnv { _tmp: tmp, paths }
+    QueryEnv {
+        _tmp: tmp,
+        paths,
+        config,
+    }
 }
 
 fn open_conn(env: &QueryEnv) -> rusqlite::Connection {
@@ -232,4 +245,187 @@ fn knn_rejects_query_vector_of_wrong_length() {
         matches!(err, tome::error::TomeError::IndexIntegrityCheckFailure(_)),
         "expected IndexIntegrityCheckFailure, got {err:?}",
     );
+}
+
+// ---- run_with_deps library API (Phase 3 slice F6) -------------------------
+
+/// Construct a `QueryArgs` with sensible defaults for the test path. JSON
+/// mode keeps stdout structured but we discard it (no assertion against
+/// the emitted bytes); the assertion target is the `QueryOutcome` return
+/// value.
+fn args_for(text: &str, top_k: u32) -> QueryArgs {
+    QueryArgs {
+        text: text.to_owned(),
+        top_k,
+        catalog: None,
+        plugin: None,
+        no_rerank: true,
+        strict: false,
+        min_score: None,
+    }
+}
+
+#[test]
+fn run_with_deps_returns_scored_results_without_reranker() {
+    let env = build_query_env();
+    let embedder = StubEmbedder::new();
+
+    let target_name = "skill-a";
+    let target_description = "Well-formed skill that documents how to make alpha widgets shine.";
+    let query_text = embedding_text(target_name, target_description);
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope::Global,
+        config: &env.config,
+        embedder: &embedder,
+        reranker: None,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let outcome = run_with_deps(args_for(&query_text, 5), deps, Mode::Json).expect("run_with_deps");
+
+    assert_eq!(outcome.scoring, ScoringMode::Similarity);
+    assert!(outcome.reranker_drift.is_none());
+    assert!(
+        !outcome.results.is_empty(),
+        "expected at least one scored result",
+    );
+    let top = &outcome.results[0];
+    assert_eq!(top.candidate.name, target_name);
+    assert_eq!(top.candidate.plugin, "plugin-alpha");
+    // Self-similarity → score should be ~1.0 (1.0 − 0 distance).
+    assert!(
+        (top.score - 1.0).abs() < 1e-3,
+        "top-1 score should be ~1.0, got {}",
+        top.score,
+    );
+}
+
+#[test]
+fn run_with_deps_uses_reranker_when_provided() {
+    let env = build_query_env();
+    let embedder = StubEmbedder::new();
+    let reranker = ReverseStubReranker::new();
+
+    let mut args = args_for("alpha widget", 5);
+    args.no_rerank = false; // exercise the rerank branch
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope::Global,
+        config: &env.config,
+        embedder: &embedder,
+        reranker: Some(&reranker),
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let outcome = run_with_deps(args, deps, Mode::Json).expect("run_with_deps with reranker");
+
+    assert_eq!(outcome.scoring, ScoringMode::Reranked);
+    assert!(!outcome.results.is_empty());
+}
+
+#[test]
+fn run_with_deps_rejects_empty_query_text() {
+    let env = build_query_env();
+    let embedder = StubEmbedder::new();
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope::Global,
+        config: &env.config,
+        embedder: &embedder,
+        reranker: None,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let err =
+        run_with_deps(args_for("   ", 5), deps, Mode::Json).expect_err("empty query must error");
+    assert!(matches!(err, tome::error::TomeError::Usage(_)));
+}
+
+#[test]
+fn run_with_deps_strict_returns_query_no_results_on_empty_match() {
+    let env = build_query_env();
+    let embedder = StubEmbedder::new();
+
+    // Cosine-similarity scoring with --strict + a hard threshold above
+    // the max possible 1.0 score guarantees zero rows pass.
+    let mut args = args_for("any query string", 5);
+    args.strict = true;
+    args.min_score = Some(2.0);
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope::Global,
+        config: &env.config,
+        embedder: &embedder,
+        reranker: None,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let err = run_with_deps(args, deps, Mode::Json).expect_err("strict must surface no-results");
+    assert!(matches!(
+        err,
+        tome::error::TomeError::QueryNoResultsStrict { .. }
+    ));
+}
+
+#[test]
+fn run_with_deps_filters_applied_pre_rerank() {
+    let env = build_query_env();
+    let embedder = StubEmbedder::new();
+    let reranker = StubReranker::new();
+
+    let mut args = args_for("anything", 10);
+    args.no_rerank = false;
+    args.catalog = Some("sample-plugin-catalog".to_owned());
+    args.plugin = Some("plugin-beta".to_owned());
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope::Global,
+        config: &env.config,
+        embedder: &embedder,
+        reranker: Some(&reranker),
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let outcome = run_with_deps(args, deps, Mode::Json).expect("run_with_deps");
+    assert!(
+        !outcome.results.is_empty(),
+        "filter must not erase all hits"
+    );
+    for hit in &outcome.results {
+        assert_eq!(hit.candidate.plugin, "plugin-beta");
+        assert_eq!(hit.candidate.catalog, "sample-plugin-catalog");
+    }
+}
+
+#[test]
+fn run_with_deps_unknown_catalog_filter_returns_catalog_not_found() {
+    let env = build_query_env();
+    let embedder = StubEmbedder::new();
+
+    let mut args = args_for("anything", 5);
+    args.catalog = Some("does-not-exist".to_owned());
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope::Global,
+        config: &env.config,
+        embedder: &embedder,
+        reranker: None,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let err = run_with_deps(args, deps, Mode::Json).expect_err("unknown catalog must error");
+    assert!(matches!(err, tome::error::TomeError::CatalogNotFound(_)));
 }
