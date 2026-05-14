@@ -13,21 +13,22 @@ mod show;
 use crate::cli::PluginCommand;
 use crate::error::TomeError;
 use crate::output::Mode;
+use crate::workspace::ResolvedScope;
 
-pub fn run(cmd: PluginCommand, mode: Mode) -> Result<(), TomeError> {
+pub fn run(cmd: PluginCommand, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     match cmd {
-        PluginCommand::Enable(args) => enable::run(args, mode),
-        PluginCommand::Disable(args) => disable::run(args, mode),
-        PluginCommand::List(args) => list::run(args, mode),
-        PluginCommand::Show(args) => show::run(args, mode),
+        PluginCommand::Enable(args) => enable::run(args, scope, mode),
+        PluginCommand::Disable(args) => disable::run(args, scope, mode),
+        PluginCommand::List(args) => list::run(args, scope, mode),
+        PluginCommand::Show(args) => show::run(args, scope, mode),
     }
 }
 
 /// Bare `tome plugin` — interactive catalog → plugin → action browse flow.
 /// Spec: `contracts/plugin-commands.md` §"`tome plugin` (no subcommand —
 /// interactive)"; FR-050 / FR-051.
-pub fn run_interactive(mode: Mode) -> Result<(), TomeError> {
-    interactive::run(mode)
+pub fn run_interactive(scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+    interactive::run(scope, mode)
 }
 
 // ---------------------------------------------------------------------------
@@ -156,12 +157,35 @@ pub(crate) use crate::plugin::lifecycle::resolve_plugin_dir;
 
 /// Open the index DB read-only-ish using the registry-derived seeds. We
 /// re-use [`crate::index::open`] which is idempotent on a re-open.
-pub(crate) fn open_index_for_read(paths: &Paths) -> Result<rusqlite::Connection, TomeError> {
-    let (embedder, reranker) = registry_seeds();
-    crate::index::open(
-        &paths.index_db,
-        &crate::index::OpenOptions { embedder, reranker },
-    )
+pub(crate) fn open_index_for_read(
+    paths: &Paths,
+    scope: &crate::workspace::Scope,
+) -> Result<rusqlite::Connection, TomeError> {
+    // Phase 3 slice F5: read paths use the dedicated read-only handle
+    // when possible. The bootstrap / migration / WAL pragmas in
+    // `index::open` only matter for writers; consumers of this helper
+    // (`tome plugin list`, `tome plugin show`, `tome query`, the
+    // interactive flow) never mutate state, so a read-only handle is
+    // correct *and* immune to the writer's lockfile by SQLite's MVCC
+    // contract.
+    //
+    // Edge case: on a fresh install the DB file doesn't exist yet.
+    // `open_read_only` (using `SQLITE_OPEN_READ_ONLY`) refuses to
+    // create one. Phase 2's read paths got the file-on-first-touch
+    // bootstrap for free because they used the write-capable
+    // `index::open`. Preserve that behaviour: when the file is
+    // missing, fall through to the bootstrap path once (which creates
+    // an empty DB + meta seeds), then re-open read-only. Subsequent
+    // reads take the fast path. The bootstrap connection is dropped
+    // immediately — the read-only handle is what the caller actually
+    // queries.
+    let db_path = paths.index_db_for(scope);
+    if !db_path.is_file() {
+        let (embedder, reranker) = registry_seeds();
+        let _bootstrap =
+            crate::index::open(&db_path, &crate::index::OpenOptions { embedder, reranker })?;
+    }
+    crate::index::open_read_only(&db_path)
 }
 
 /// Per-plugin index aggregate used by `list` and `show`. None of the fields

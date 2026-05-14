@@ -171,6 +171,7 @@ pub fn copy_sample_plugin_catalog(into: &TempDir, name: &str) -> PathBuf {
 /// `lifecycle::tests::test_paths` so integration tests never have to touch
 /// `$HOME` or environment variables.
 pub fn lifecycle_paths(root: &Path) -> Paths {
+    let state = root.join("state");
     Paths {
         config_dir: root.join("config"),
         config_file: root.join("config/config.toml"),
@@ -179,6 +180,10 @@ pub fn lifecycle_paths(root: &Path) -> Paths {
         index_db: root.join("data/index.db"),
         index_lock: root.join("data/index.lock"),
         models_dir: root.join("data/models"),
+        state_dir: state.clone(),
+        mcp_log: state.join("mcp.log"),
+        mcp_log_prev: state.join("mcp.log.1"),
+        workspace_registry: state.join("workspaces.txt"),
     }
 }
 
@@ -300,6 +305,7 @@ pub fn write_config_for_cli(paths: &Paths, config: &Config) {
 /// here at the 4th caller (`plugin_disable.rs`) per the P4 retro plan.
 pub fn paths_for(env: &ToolEnv) -> Paths {
     let home = env.home_path();
+    let state = home.join(".local/state/tome");
     Paths {
         config_dir: home.join(".config/tome"),
         config_file: home.join(".config/tome/config.toml"),
@@ -308,5 +314,9 @@ pub fn paths_for(env: &ToolEnv) -> Paths {
         index_db: home.join(".local/share/tome/index.db"),
         index_lock: home.join(".local/share/tome/index.lock"),
         models_dir: home.join(".local/share/tome/models"),
+        state_dir: state.clone(),
+        mcp_log: state.join("mcp.log"),
+        mcp_log_prev: state.join("mcp.log.1"),
+        workspace_registry: state.join("workspaces.txt"),
     }
 }

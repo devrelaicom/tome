@@ -2,6 +2,7 @@ use clap::Parser;
 
 use tome::catalog::git;
 use tome::cli::{Cli, Command};
+use tome::workspace;
 use tome::{commands, logging, output};
 
 fn main() {
@@ -21,16 +22,29 @@ fn main() {
     git::install_signal_handler();
 
     let mode = cli.mode();
+
+    // Phase 3 / Foundational F3: resolve the active scope before any
+    // command runs. Errors here (workspace conflict, workspace not
+    // found) flow through the same exit-code path as command errors.
+    let scope = match workspace::resolution::resolve(&cli.scope) {
+        Ok(r) => r,
+        Err(err) => {
+            let code = err.exit_code();
+            output::write_error(mode, &err);
+            std::process::exit(code);
+        }
+    };
+
     let result = match cli.command {
-        Command::Catalog(cmd) => commands::catalog::run(cmd, mode),
+        Command::Catalog(cmd) => commands::catalog::run(cmd, &scope, mode),
         Command::Plugin(args) => match args.command {
-            Some(cmd) => commands::plugin::run(cmd, mode),
-            None => commands::plugin::run_interactive(mode),
+            Some(cmd) => commands::plugin::run(cmd, &scope, mode),
+            None => commands::plugin::run_interactive(&scope, mode),
         },
-        Command::Models(cmd) => commands::models::run(cmd, mode),
-        Command::Query(args) => commands::query::run(args, mode),
-        Command::Reindex(args) => commands::reindex::run(args, mode),
-        Command::Status(args) => commands::status::run(args, mode),
+        Command::Models(cmd) => commands::models::run(cmd, &scope, mode),
+        Command::Query(args) => commands::query::run(args, &scope, mode),
+        Command::Reindex(args) => commands::reindex::run(args, &scope, mode),
+        Command::Status(args) => commands::status::run(args, &scope, mode),
     };
 
     match result {

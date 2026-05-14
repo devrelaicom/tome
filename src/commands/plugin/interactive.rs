@@ -54,13 +54,14 @@ use crate::plugin::lifecycle;
 use crate::plugin::manifest::{manifest_path_for, parse_plugin_manifest};
 use crate::plugin::{PluginId, PluginRecord};
 use crate::presentation::{colour, prompt};
+use crate::workspace::ResolvedScope;
 
 use super::{
     aggregate_for_plugin, human_relative, open_index_for_read, read_catalog_manifest,
     registry_seeds, resolve_plugin_dir,
 };
 
-pub fn run(mode: Mode) -> Result<(), TomeError> {
+pub fn run(scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     if mode == Mode::Json {
         return Err(TomeError::Usage(
             "--json is not valid for the bare `tome plugin` interactive flow; \
@@ -85,7 +86,7 @@ pub fn run(mode: Mode) -> Result<(), TomeError> {
     }
 
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file)?;
+    let config = store::load(&paths.config_file_for(&scope.scope))?;
 
     if config.catalogs.is_empty() {
         let mut out = std::io::stdout().lock();
@@ -96,7 +97,7 @@ pub fn run(mode: Mode) -> Result<(), TomeError> {
         return Ok(());
     }
 
-    catalog_loop(&paths, &config)
+    catalog_loop(&paths, scope, &config)
 }
 
 // ---------------------------------------------------------------------------
@@ -126,9 +127,9 @@ impl From<TomeError> for LoopExit {
 
 type LoopFlow = Result<(), LoopExit>;
 
-fn catalog_loop(paths: &Paths, config: &Config) -> Result<(), TomeError> {
+fn catalog_loop(paths: &Paths, scope: &ResolvedScope, config: &Config) -> Result<(), TomeError> {
     loop {
-        let menu = build_catalog_menu(paths, config)?;
+        let menu = build_catalog_menu(paths, scope, config)?;
         let pick = match prompt_select("Pick a catalog", menu) {
             Ok(v) => v,
             Err(InteractiveExit::Quit) => return Ok(()),
@@ -136,7 +137,7 @@ fn catalog_loop(paths: &Paths, config: &Config) -> Result<(), TomeError> {
         };
         match pick {
             CatalogChoice::Quit => return Ok(()),
-            CatalogChoice::Catalog { name, .. } => match plugin_loop(paths, config, &name) {
+            CatalogChoice::Catalog { name, .. } => match plugin_loop(paths, scope, config, &name) {
                 Ok(()) => continue,
                 Err(LoopExit::Quit) => return Ok(()),
                 Err(LoopExit::Err(e)) => return Err(e),
@@ -145,11 +146,16 @@ fn catalog_loop(paths: &Paths, config: &Config) -> Result<(), TomeError> {
     }
 }
 
-fn plugin_loop(paths: &Paths, config: &Config, catalog_name: &str) -> LoopFlow {
+fn plugin_loop(
+    paths: &Paths,
+    scope: &ResolvedScope,
+    config: &Config,
+    catalog_name: &str,
+) -> LoopFlow {
     loop {
         // Menu construction errors bubble up — same exit-code surface as
         // `tome plugin list`.
-        let menu = build_plugin_menu(paths, config, catalog_name)?;
+        let menu = build_plugin_menu(paths, scope, config, catalog_name)?;
         let pick = match prompt_select(&format!("Pick a plugin in `{catalog_name}`"), menu) {
             Ok(v) => v,
             Err(InteractiveExit::Quit) => return Err(LoopExit::Quit),
@@ -157,16 +163,16 @@ fn plugin_loop(paths: &Paths, config: &Config, catalog_name: &str) -> LoopFlow {
         };
         match pick {
             PluginChoice::Back => return Ok(()),
-            PluginChoice::Plugin { id, .. } => view_loop(paths, config, &id)?,
+            PluginChoice::Plugin { id, .. } => view_loop(paths, scope, config, &id)?,
         }
     }
 }
 
-fn view_loop(paths: &Paths, config: &Config, id: &PluginId) -> LoopFlow {
+fn view_loop(paths: &Paths, scope: &ResolvedScope, config: &Config, id: &PluginId) -> LoopFlow {
     loop {
         // Render the plugin view and capture the resolved status so the
         // action menu can offer the right verb without re-querying.
-        let status = render_plugin_view(paths, config, id)?;
+        let status = render_plugin_view(paths, scope, config, id)?;
 
         let actions = build_action_menu(status);
         let pick = match prompt_select("Action", actions) {
@@ -179,10 +185,10 @@ fn view_loop(paths: &Paths, config: &Config, id: &PluginId) -> LoopFlow {
             // Errors propagate per contract — same exit codes as the
             // non-interactive forms. The `?` runs From<TomeError>.
             ActionChoice::Enable => {
-                run_enable_action(id)?;
+                run_enable_action(scope, id)?;
             }
             ActionChoice::Disable => {
-                run_disable_action(paths, config, id)?;
+                run_disable_action(paths, scope, config, id)?;
             }
         }
         // After a successful enable / disable, fall through and redraw.
@@ -219,8 +225,12 @@ impl fmt::Display for CatalogChoice {
     }
 }
 
-fn build_catalog_menu(paths: &Paths, config: &Config) -> Result<Vec<CatalogChoice>, TomeError> {
-    let conn = open_index_for_read(paths)?;
+fn build_catalog_menu(
+    paths: &Paths,
+    scope: &ResolvedScope,
+    config: &Config,
+) -> Result<Vec<CatalogChoice>, TomeError> {
+    let conn = open_index_for_read(paths, &scope.scope)?;
     let mut out: Vec<CatalogChoice> = Vec::with_capacity(config.catalogs.len() + 1);
     for (catalog_name, entry) in &config.catalogs {
         let manifest = read_catalog_manifest(&entry.path);
@@ -279,6 +289,7 @@ impl fmt::Display for PluginChoice {
 
 fn build_plugin_menu(
     paths: &Paths,
+    scope: &ResolvedScope,
     config: &Config,
     catalog_name: &str,
 ) -> Result<Vec<PluginChoice>, TomeError> {
@@ -287,7 +298,7 @@ fn build_plugin_menu(
         .get(catalog_name)
         .ok_or_else(|| TomeError::CatalogNotFound(catalog_name.to_owned()))?;
     let manifest = read_catalog_manifest(&entry.path);
-    let conn = open_index_for_read(paths)?;
+    let conn = open_index_for_read(paths, &scope.scope)?;
 
     let mut out: Vec<PluginChoice> = Vec::new();
     if let Some(manifest) = manifest {
@@ -361,13 +372,14 @@ fn build_action_menu(status: PluginStatus) -> Vec<ActionChoice> {
 /// re-querying the index.
 fn render_plugin_view(
     paths: &Paths,
+    scope: &ResolvedScope,
     config: &Config,
     id: &PluginId,
 ) -> Result<PluginStatus, TomeError> {
     let plugin_dir = resolve_plugin_dir(id, config)?;
     let manifest = parse_plugin_manifest(&manifest_path_for(&plugin_dir));
     let component_counts = count_components(&plugin_dir);
-    let conn = open_index_for_read(paths)?;
+    let conn = open_index_for_read(paths, &scope.scope)?;
     let agg = aggregate_for_plugin(&conn, &id.catalog, &id.plugin)?;
 
     let status = match &manifest {
@@ -450,7 +462,7 @@ fn write_plugin_view(record: &PluginRecord, last_indexed: Option<&str>) -> Resul
 // Action handlers
 // ---------------------------------------------------------------------------
 
-fn run_enable_action(id: &PluginId) -> Result<(), TomeError> {
+fn run_enable_action(scope: &ResolvedScope, id: &PluginId) -> Result<(), TomeError> {
     // Delegate to the existing CLI handler for parity with the
     // non-interactive form: this gives us the model-download prompt, the
     // banner, the spinner, the warnings, and the final summary line for
@@ -460,6 +472,7 @@ fn run_enable_action(id: &PluginId) -> Result<(), TomeError> {
             id: id.to_string(),
             yes: false,
         },
+        scope,
         Mode::Human,
     )
 }
@@ -468,7 +481,12 @@ fn run_enable_action(id: &PluginId) -> Result<(), TomeError> {
 /// per the contract: "On Disable: prompt to confirm, then run `plugin
 /// disable --force` equivalent"). Errors from disable propagate per
 /// contract — same exit codes as the (future) non-interactive form.
-fn run_disable_action(paths: &Paths, config: &Config, id: &PluginId) -> LoopFlow {
+fn run_disable_action(
+    paths: &Paths,
+    scope: &ResolvedScope,
+    config: &Config,
+    id: &PluginId,
+) -> LoopFlow {
     let confirmed = match prompt::confirm(&format!("Disable {id}?"), false) {
         Ok(v) => v,
         Err(TomeError::Interrupted) | Err(TomeError::NotATerminal) => {
@@ -482,7 +500,14 @@ fn run_disable_action(paths: &Paths, config: &Config, id: &PluginId) -> LoopFlow
     }
 
     let (embedder_seed, reranker_seed) = registry_seeds();
-    let outcome = lifecycle::disable(id, paths, config, embedder_seed, reranker_seed)?;
+    let outcome = lifecycle::disable(
+        id,
+        paths,
+        &scope.scope,
+        config,
+        embedder_seed,
+        reranker_seed,
+    )?;
     let mut out = std::io::stdout().lock();
     let _ = writeln!(
         out,

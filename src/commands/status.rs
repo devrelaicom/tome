@@ -23,17 +23,18 @@ use crate::embedding::download::sha256_file;
 use crate::embedding::registry::ModelEntry;
 use crate::error::TomeError;
 use crate::index::meta::{DriftStatus, ModelIdent, detect_drift};
-use crate::index::{self, OpenOptions, integrity};
+use crate::index::{self, integrity};
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
 use crate::presentation::colour;
+use crate::workspace::{ResolvedScope, Scope};
 
 use crate::commands::models::{ModelState, cheap_state};
-use crate::commands::plugin::{embedder_entry, registry_seeds, reranker_entry};
+use crate::commands::plugin::{embedder_entry, reranker_entry};
 
-pub fn run(args: StatusArgs, mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: StatusArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    let report = assemble_report(&paths, args.verify)?;
+    let report = assemble_report(&paths, &scope.scope, args.verify)?;
     emit(&report, mode)?;
     if !matches!(report.overall, OverallHealth::Ok) {
         std::process::exit(1);
@@ -87,7 +88,11 @@ pub struct StatusReport {
 /// This is the library-API entry point that tests should call directly —
 /// the surrounding `run()` adds the `std::process::exit(1)` semantics that
 /// terminate the test runner.
-pub fn assemble_report(paths: &Paths, verify: bool) -> Result<StatusReport, TomeError> {
+pub fn assemble_report(
+    paths: &Paths,
+    scope: &Scope,
+    verify: bool,
+) -> Result<StatusReport, TomeError> {
     let tome = env!("CARGO_PKG_VERSION").to_owned();
     let embedder_entry = embedder_entry();
     let reranker_entry = reranker_entry();
@@ -95,8 +100,8 @@ pub fn assemble_report(paths: &Paths, verify: bool) -> Result<StatusReport, Tome
     let embedder = check_model(paths, embedder_entry, verify)?;
     let reranker = check_model(paths, reranker_entry, verify)?;
 
-    let index = check_index(paths)?;
-    let drift = check_drift(paths, embedder_entry, reranker_entry)?;
+    let index = check_index(paths, scope)?;
+    let drift = check_drift(paths, scope, embedder_entry, reranker_entry)?;
 
     let overall = classify(&embedder, &reranker, &index, &drift);
 
@@ -130,8 +135,9 @@ fn check_model(paths: &Paths, entry: &ModelEntry, verify: bool) -> Result<ModelH
     })
 }
 
-fn check_index(paths: &Paths) -> Result<IndexHealth, TomeError> {
-    if !paths.index_db.is_file() {
+fn check_index(paths: &Paths, scope: &Scope) -> Result<IndexHealth, TomeError> {
+    let index_db = paths.index_db_for(scope);
+    if !index_db.is_file() {
         return Ok(IndexHealth {
             present: false,
             schema_version: None,
@@ -141,18 +147,12 @@ fn check_index(paths: &Paths) -> Result<IndexHealth, TomeError> {
             integrity_ok: false,
         });
     }
-    let size_bytes = std::fs::metadata(&paths.index_db)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let size_bytes = std::fs::metadata(&index_db).map(|m| m.len()).unwrap_or(0);
 
-    let (embedder_seed, reranker_seed) = registry_seeds();
-    let conn = index::open(
-        &paths.index_db,
-        &OpenOptions {
-            embedder: embedder_seed,
-            reranker: reranker_seed,
-        },
-    )?;
+    // Phase 3 slice F5: `status` never writes; use the read-only open
+    // path so a concurrent writer can't be racing us through the WAL
+    // pragmas and the bootstrap re-application that `index::open` does.
+    let conn = index::open_read_only(&index_db)?;
 
     let schema_version = match index::current_schema_version(&conn) {
         Ok(Some(v)) => Some(v),
@@ -201,20 +201,15 @@ fn check_index(paths: &Paths) -> Result<IndexHealth, TomeError> {
 
 fn check_drift(
     paths: &Paths,
+    scope: &Scope,
     embedder_entry: &ModelEntry,
     reranker_entry: &ModelEntry,
 ) -> Result<DriftStatus, TomeError> {
-    if !paths.index_db.is_file() {
+    let index_db = paths.index_db_for(scope);
+    if !index_db.is_file() {
         return Ok(DriftStatus::None);
     }
-    let (embedder_seed, reranker_seed) = registry_seeds();
-    let conn = index::open(
-        &paths.index_db,
-        &OpenOptions {
-            embedder: embedder_seed,
-            reranker: reranker_seed,
-        },
-    )?;
+    let conn = index::open_read_only(&index_db)?;
     let embedder = ModelIdent {
         name: embedder_entry.name.to_owned(),
         version: embedder_entry.version.to_owned(),

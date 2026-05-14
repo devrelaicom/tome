@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use tome::error::ManifestInvalid;
+use tome::error::{ManifestInvalid, TomeError};
 
 fn dummy_file() -> PathBuf {
     PathBuf::from("/tmp/catalog/tome-catalog.toml")
@@ -162,4 +162,97 @@ fn toml_parse_names_file_and_message() {
     let m = err.to_string();
     assert!(m.contains("/tmp/catalog/tome-catalog.toml"));
     assert!(m.contains("expected `=` at line 3"));
+}
+
+// ---- Phase 3 TomeError Display assertions ---------------------------------
+// One per new variant, per contracts/exit-codes-p3.md §Display messages.
+// We only check that the salient substrings make it into the output —
+// thiserror's exact whitespace is not load-bearing.
+
+#[test]
+fn mcp_startup_failed_names_reason() {
+    let err = TomeError::McpStartupFailed {
+        reason: "rmcp handshake rejected".into(),
+    };
+    let m = err.to_string();
+    assert!(m.contains("MCP server failed to start"), "{m}");
+    assert!(m.contains("rmcp handshake rejected"), "{m}");
+}
+
+#[test]
+fn mcp_protocol_io_names_source() {
+    let err = TomeError::McpProtocolIo {
+        source: std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe"),
+    };
+    let m = err.to_string();
+    assert!(m.contains("MCP protocol I/O error"), "{m}");
+    assert!(m.contains("broken pipe"), "{m}");
+}
+
+#[test]
+fn workspace_malformed_names_path_reason_and_hint() {
+    let err = TomeError::WorkspaceMalformed {
+        path: PathBuf::from("/tmp/ws"),
+        reason: "invalid TOML in .tome/config.toml at line 4".into(),
+    };
+    let m = err.to_string();
+    assert!(m.contains("/tmp/ws"), "{m}");
+    assert!(m.contains("invalid TOML"), "{m}");
+    assert!(m.contains("`tome doctor`"), "{m}");
+}
+
+#[test]
+fn workspace_not_found_names_path_and_init_hint() {
+    let err = TomeError::WorkspaceNotFound {
+        path: PathBuf::from("/tmp/nope"),
+    };
+    let m = err.to_string();
+    assert!(m.contains("/tmp/nope"), "{m}");
+    assert!(m.contains(".tome/"), "{m}");
+    assert!(m.contains("tome workspace init"), "{m}");
+}
+
+#[test]
+fn workspace_conflict_names_both_flags() {
+    let err = TomeError::WorkspaceConflict;
+    let m = err.to_string();
+    assert!(m.contains("--workspace"), "{m}");
+    assert!(m.contains("--global"), "{m}");
+}
+
+#[test]
+fn schema_version_too_new_names_versions_and_hint() {
+    let err = TomeError::SchemaVersionTooNew {
+        on_disk: 99,
+        expected: 1,
+    };
+    let m = err.to_string();
+    assert!(m.contains("v99"), "{m}");
+    assert!(m.contains("v1"), "{m}");
+    assert!(m.contains("upgrade Tome"), "{m}");
+}
+
+#[test]
+fn schema_migration_failed_names_versions_and_source() {
+    let err = TomeError::SchemaMigrationFailed {
+        from: 0,
+        to: 1,
+        source: anyhow::anyhow!("intermediate page header bad"),
+    };
+    let m = err.to_string();
+    assert!(m.contains("v0"), "{m}");
+    assert!(m.contains("v1"), "{m}");
+    assert!(m.contains("intermediate page header bad"), "{m}");
+    assert!(m.contains("hint"), "{m}");
+}
+
+#[test]
+fn doctor_fix_not_safe_names_subsystem_and_hint() {
+    let err = TomeError::DoctorFixNotSafe {
+        subsystem: "catalog_cache".into(),
+    };
+    let m = err.to_string();
+    assert!(m.contains("catalog_cache"), "{m}");
+    assert!(m.contains("auto-fix"), "{m}");
+    assert!(m.contains("suggested fixes"), "{m}");
 }

@@ -14,3 +14,4 @@ pub mod output;
 pub mod paths;
 pub mod plugin;
 pub mod presentation;
+pub mod workspace;

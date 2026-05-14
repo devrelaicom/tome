@@ -1,7 +1,10 @@
-//! `clap` derive definitions. Globals (`--json`, `-v`/`-vv`) live on the
-//! top-level `Cli`; `--force` is per-subcommand but keeps the same name
-//! everywhere (FR-021). `--help` and `--version` are auto-supplied by clap
+//! `clap` derive definitions. Globals (`--json`, `-v`/`-vv`, plus the
+//! Phase 3 `--workspace` / `--global`) live on the top-level `Cli`;
+//! `--force` is per-subcommand but keeps the same name everywhere
+//! (FR-021). `--help` and `--version` are auto-supplied by clap
 //! (FR-021a).
+
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
@@ -24,8 +27,35 @@ pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
 
+    #[command(flatten)]
+    pub scope: GlobalScopeArgs,
+
     #[command(subcommand)]
     pub command: Command,
+}
+
+/// The two mutually-exclusive scope flags. Flattened into `Cli` so they
+/// appear at the top level **and** on every subcommand (clap's
+/// `global = true`).
+///
+/// We deliberately do NOT use clap's `conflicts_with` to enforce the
+/// mutual exclusivity: clap rejects with its usage-error code (2),
+/// whereas the Phase 3 contract requires exit `72`
+/// (`WorkspaceConflict`) so harnesses can distinguish a workspace
+/// conflict from a generic CLI typo. The resolver in
+/// `workspace::resolution::resolve` checks both fields explicitly.
+#[derive(Debug, Default, clap::Args)]
+pub struct GlobalScopeArgs {
+    /// Use the workspace rooted at this path. Mutually exclusive with
+    /// `--global`. Must point at an existing directory containing a
+    /// `.tome/` subdir; otherwise exits 71 (`WorkspaceNotFound`).
+    #[arg(long, global = true, value_name = "PATH")]
+    pub workspace: Option<PathBuf>,
+
+    /// Use global state, ignoring any workspace context. Mutually
+    /// exclusive with `--workspace`.
+    #[arg(long, global = true)]
+    pub global: bool,
 }
 
 #[derive(Debug, Subcommand)]

@@ -18,22 +18,23 @@ use crate::plugin::components::count_components;
 use crate::plugin::manifest::{manifest_path_for, parse_plugin_manifest};
 use crate::plugin::{PluginId, PluginRecord, PluginStatus};
 use crate::presentation::{colour, tables};
+use crate::workspace::ResolvedScope;
 
 use super::{aggregate_for_plugin, human_relative, open_index_for_read, resolve_plugin_dir};
 
-pub fn run(args: PluginShowArgs, mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let id = PluginId::from_str(&args.id)
         .map_err(|e| TomeError::Usage(format!("invalid plugin id `{}`: {e}", args.id)))?;
 
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file)?;
+    let config = store::load(&paths.config_file_for(&scope.scope))?;
     let plugin_dir = resolve_plugin_dir(&id, &config)?;
 
     // Strict failure here: the contract says exit 22 on a malformed manifest.
     let manifest = parse_plugin_manifest(&manifest_path_for(&plugin_dir))?;
     let component_counts = count_components(&plugin_dir);
 
-    let conn = open_index_for_read(&paths)?;
+    let conn = open_index_for_read(&paths, &scope.scope)?;
     let agg = aggregate_for_plugin(&conn, &id.catalog, &id.plugin)?;
 
     let status = if agg.total == 0 {

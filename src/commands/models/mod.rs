@@ -17,8 +17,15 @@ use crate::embedding::registry::{ModelEntry, ModelManifest};
 use crate::error::TomeError;
 use crate::output::Mode;
 use crate::paths::Paths;
+use crate::workspace::ResolvedScope;
 
-pub fn run(cmd: ModelsCommand, mode: Mode) -> Result<(), TomeError> {
+pub fn run(cmd: ModelsCommand, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+    // Models live under `data_dir` and are deliberately shared across
+    // workspace + global scopes (FR-021: no per-scope models). The scope
+    // is threaded for signature uniformity with the rest of the
+    // commands; download / list / remove behaviour is independent of
+    // it.
+    let _ = scope;
     match cmd {
         ModelsCommand::Download(args) => download::run(args, mode),
         ModelsCommand::List(args) => list::run(args, mode),

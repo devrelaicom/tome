@@ -12,10 +12,11 @@ use crate::cli::CatalogShowArgs;
 use crate::error::TomeError;
 use crate::output::Mode;
 use crate::paths::Paths;
+use crate::workspace::ResolvedScope;
 
-pub fn run(args: CatalogShowArgs, mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: CatalogShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file)?;
+    let config = store::load(&paths.config_file_for(&scope.scope))?;
     let entry = config
         .catalogs
         .get(&args.name)

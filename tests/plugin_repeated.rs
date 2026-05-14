@@ -40,6 +40,7 @@ fn enable_of_already_enabled_returns_plugin_already_in_state_via_library() {
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
         paths: &paths,
+        scope: &tome::workspace::Scope::Global,
         config: &config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
@@ -75,6 +76,7 @@ fn disable_of_already_disabled_via_cli_exits_21() {
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
         paths: &paths,
+        scope: &tome::workspace::Scope::Global,
         config: &cli_config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),

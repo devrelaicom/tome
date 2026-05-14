@@ -20,14 +20,15 @@ use crate::output::{self, Mode};
 use crate::paths::Paths;
 use crate::plugin::PluginId;
 use crate::plugin::lifecycle::{self, DisableOutcome};
+use crate::workspace::ResolvedScope;
 
 use super::{registry_seeds, resolve_plugin_dir};
 
-pub fn run(args: PluginDisableArgs, mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let id = PluginId::from_str(&args.id)
         .map_err(|e| TomeError::Usage(format!("invalid plugin id `{}`: {e}", args.id)))?;
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file)?;
+    let config = store::load(&paths.config_file_for(&scope.scope))?;
 
     // Surface CatalogNotFound / PluginNotFound before any prompt — typo on
     // the address shouldn't waste the user's "y" keystroke.
@@ -70,7 +71,14 @@ pub fn run(args: PluginDisableArgs, mode: Mode) -> Result<(), TomeError> {
         writeln!(out, "Disabling {}…", id)?;
     }
 
-    let outcome = lifecycle::disable(&id, &paths, &config, embedder_seed, reranker_seed)?;
+    let outcome = lifecycle::disable(
+        &id,
+        &paths,
+        &scope.scope,
+        &config,
+        embedder_seed,
+        reranker_seed,
+    )?;
 
     match mode {
         Mode::Human => emit_human(&id, &outcome),

@@ -39,6 +39,7 @@ fn setup(env: &ToolEnv, fixture_tmp: &TempDir) -> Paths {
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
         paths: &paths,
+        scope: &tome::workspace::Scope::Global,
         config: &lib_config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),

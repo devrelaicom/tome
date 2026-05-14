@@ -3,6 +3,7 @@
 //! in the spec, and the PRD's exit-code table — the compiler enforces the chain.
 //!
 //! Phase 2 contracts: `specs/002-phase-2-plugins-index/contracts/exit-codes.md`.
+//! Phase 3 contracts: `specs/003-phase-3-mcp-workspaces/contracts/exit-codes-p3.md`.
 
 use std::path::PathBuf;
 
@@ -132,6 +133,50 @@ pub enum TomeError {
     NotATerminal,
 
     // -----------------------------------------------------------------------
+    // Phase 3 — MCP server (codes 60–61).
+    // -----------------------------------------------------------------------
+    #[error("MCP server failed to start: {reason}")]
+    McpStartupFailed { reason: String },
+
+    #[error("MCP protocol I/O error: {source}")]
+    McpProtocolIo { source: std::io::Error },
+
+    // -----------------------------------------------------------------------
+    // Phase 3 — workspace + schema (codes 70–75).
+    // -----------------------------------------------------------------------
+    #[error("workspace malformed at {}: {reason}\nhint: run `tome doctor` for a full diagnosis", path.display())]
+    WorkspaceMalformed { path: PathBuf, reason: String },
+
+    #[error(
+        "workspace not found: {} does not contain a .tome/ marker\nhint: run `tome workspace init {}` to create one",
+        path.display(),
+        path.display()
+    )]
+    WorkspaceNotFound { path: PathBuf },
+
+    #[error("workspace conflict: --workspace and --global cannot be combined")]
+    WorkspaceConflict,
+
+    #[error(
+        "schema version too new: on-disk schema is v{on_disk}, this Tome supports up to v{expected}\nhint: upgrade Tome to a version that supports schema v{on_disk}"
+    )]
+    SchemaVersionTooNew { on_disk: u32, expected: u32 },
+
+    #[error(
+        "schema migration v{from} → v{to} failed: {source}\nhint: file the error against your installed Tome version"
+    )]
+    SchemaMigrationFailed {
+        from: u32,
+        to: u32,
+        source: anyhow::Error,
+    },
+
+    #[error(
+        "doctor: subsystem `{subsystem}` cannot be auto-fixed\nhint: see the report's `suggested fixes` section for the manual command"
+    )]
+    DoctorFixNotSafe { subsystem: String },
+
+    // -----------------------------------------------------------------------
     // Internal — last-resort variant for panics caught at top level, etc.
     // No named failure above may collapse into this — that would defeat the
     // closed-set guarantee.
@@ -195,6 +240,16 @@ impl TomeError {
             Self::SchemaTooNew { .. } => 52,
             Self::CatalogHasEnabledPlugins { .. } => 53,
             Self::NotATerminal => 54,
+            // 60–61 — MCP server (Phase 3)
+            Self::McpStartupFailed { .. } => 60,
+            Self::McpProtocolIo { .. } => 61,
+            // 70–75 — workspace + schema (Phase 3)
+            Self::WorkspaceMalformed { .. } => 70,
+            Self::WorkspaceNotFound { .. } => 71,
+            Self::WorkspaceConflict => 72,
+            Self::SchemaVersionTooNew { .. } => 73,
+            Self::SchemaMigrationFailed { .. } => 74,
+            Self::DoctorFixNotSafe { .. } => 75,
         }
     }
 
@@ -230,6 +285,14 @@ impl TomeError {
             Self::SchemaTooNew { .. } => "schema_too_new",
             Self::CatalogHasEnabledPlugins { .. } => "catalog_has_enabled_plugins",
             Self::NotATerminal => "not_a_terminal",
+            Self::McpStartupFailed { .. } => "mcp_startup",
+            Self::McpProtocolIo { .. } => "mcp_io",
+            Self::WorkspaceMalformed { .. } => "workspace_malformed",
+            Self::WorkspaceNotFound { .. } => "workspace_not_found",
+            Self::WorkspaceConflict => "workspace_conflict",
+            Self::SchemaVersionTooNew { .. } => "schema_too_new",
+            Self::SchemaMigrationFailed { .. } => "schema_migration",
+            Self::DoctorFixNotSafe { .. } => "doctor_fix_unsafe",
         }
     }
 }

@@ -15,11 +15,13 @@ use crate::config::CatalogEntry;
 use crate::error::TomeError;
 use crate::output::Mode;
 use crate::paths::Paths;
+use crate::workspace::ResolvedScope;
 
 use super::source;
 
-pub fn run(args: CatalogAddArgs, mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: CatalogAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
+    let config_file = paths.config_file_for(&scope.scope);
     let url = source::resolve(&args.source)?;
     let cache_dir = paths.cache_dir_for(&url);
 
@@ -30,7 +32,7 @@ pub fn run(args: CatalogAddArgs, mode: Mode) -> Result<(), TomeError> {
         )));
     }
 
-    let mut config = store::load(&paths.config_file)?;
+    let mut config = store::load(&config_file)?;
 
     // Clone into a sibling tempdir of the final cache directory so the
     // atomic rename never crosses filesystem boundaries (FR-017a). The
@@ -89,7 +91,7 @@ pub fn run(args: CatalogAddArgs, mode: Mode) -> Result<(), TomeError> {
         last_synced: OffsetDateTime::now_utc(),
     };
     config.catalogs.insert(display_name.clone(), entry.clone());
-    if let Err(e) = store::save(&paths.config_file, &config) {
+    if let Err(e) = store::save(&config_file, &config) {
         // Roll back the cache directory if the registry write fails.
         let _ = std::fs::remove_dir_all(&cache_dir);
         return Err(e);

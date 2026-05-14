@@ -20,12 +20,14 @@ use crate::paths::Paths;
 use crate::plugin::PluginId;
 use crate::plugin::lifecycle::{self, LifecycleDeps};
 use crate::presentation::colour;
+use crate::workspace::{ResolvedScope, Scope};
 
 use crate::commands::plugin::{embedder_entry, registry_seeds};
 
-pub fn run(args: CatalogUpdateArgs, mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    let mut config = store::load(&paths.config_file)?;
+    let config_file = paths.config_file_for(&scope.scope);
+    let mut config = store::load(&config_file)?;
 
     let names: Vec<String> = match args.name {
         Some(name) => {
@@ -43,7 +45,7 @@ pub fn run(args: CatalogUpdateArgs, mode: Mode) -> Result<(), TomeError> {
     let mut embedder: Option<FastembedEmbedder> = None;
 
     for name in names {
-        let refreshed = refresh_one(&paths.config_file, &mut config, &name, mode)?;
+        let refreshed = refresh_one(&config_file, &mut config, &name, mode)?;
         if !refreshed {
             // SHA-pinned catalogs (no git op happened). Skip the reindex
             // pass; pinned catalogs are intentionally frozen.
@@ -54,7 +56,7 @@ pub fn run(args: CatalogUpdateArgs, mode: Mode) -> Result<(), TomeError> {
         // this catalog. The index open is cheap (idempotent bootstrap) but
         // a sync that involves no enabled plugins must not load the
         // embedder.
-        let enabled = read_enabled_plugins(&paths, &name)?;
+        let enabled = read_enabled_plugins(&paths, &scope.scope, &name)?;
         if enabled.is_empty() {
             continue;
         }
@@ -65,6 +67,7 @@ pub fn run(args: CatalogUpdateArgs, mode: Mode) -> Result<(), TomeError> {
         let (embedder_seed, reranker_seed) = registry_seeds();
         let deps = LifecycleDeps {
             paths: &paths,
+            scope: &scope.scope,
             config: &config,
             embedder: embedder_ref,
             embedder_seed,
@@ -105,10 +108,14 @@ fn load_embedder(paths: &Paths) -> Result<FastembedEmbedder, TomeError> {
     FastembedEmbedder::load(entry, &dir)
 }
 
-fn read_enabled_plugins(paths: &Paths, catalog: &str) -> Result<Vec<String>, TomeError> {
+fn read_enabled_plugins(
+    paths: &Paths,
+    scope: &Scope,
+    catalog: &str,
+) -> Result<Vec<String>, TomeError> {
     let (embedder_seed, reranker_seed) = registry_seeds();
     let conn = index::open(
-        &paths.index_db,
+        &paths.index_db_for(scope),
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,

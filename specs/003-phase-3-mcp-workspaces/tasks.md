@@ -48,10 +48,10 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Completion
 
-- [ ] T011 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T012 [GIT] Create PR to main with Phase 1 summary
-- [ ] T013 [GIT] Verify all CI checks pass
-- [ ] T014 [GIT] Report PR ready status
+- [X] T011 [GIT] Push branch to origin (ensure pre-push hooks pass)
+- [X] T012 [GIT] Create PR to main with Phase 1 summary — PR #43.
+- [X] T013 [GIT] Verify all CI checks pass — 6/6 green after CI fix at commit `945db1f` (Swatinem/rust-cache `cache-bin: false`).
+- [X] T014 [GIT] Report PR ready status — squash-merged as commit `65291e9` on main.
 
 ---
 
@@ -63,62 +63,62 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Start
 
-- [ ] T015 [GIT] Verify working tree is clean before starting Phase 2
-- [ ] T016 Create `specs/003-phase-3-mcp-workspaces/retro/P2.md` from the standard retro template
-- [ ] T017 [GIT] Commit: docs(retro): initialise Phase 3 / P2 retro
+- [X] T015 [GIT] Verify working tree is clean before starting Phase 2
+- [X] T016 Create `specs/003-phase-3-mcp-workspaces/retro/P2.md` from the standard retro template
+- [X] T017 [GIT] Commit: docs(retro): initialise Phase 3 / P2 retro
 
 ### Slice F1 — `Scope` type + paths refactor
 
-- [ ] T018 Create `src/workspace/mod.rs` exposing the module surface (use devs:rust-dev agent)
-- [ ] T019 [P] Create `src/workspace/scope.rs` with `Scope`, `ScopeSource`, `ResolvedScope` per data-model.md §1 (use devs:rust-dev agent)
-- [ ] T020 [P] Add `state_dir`, `mcp_log`, `mcp_log_prev`, `workspace_registry` fields to `Paths` in `src/paths.rs` and resolve via `directories::ProjectDirs::state_dir()` with XDG fallback per research §R-6 (use devs:rust-dev agent)
-- [ ] T021 [P] Rename `Paths.config_file` → `Paths.global_config_file`, `Paths.index_db` → `Paths.global_index_db`, `Paths.index_lock` → `Paths.global_index_lock` in `src/paths.rs` (mechanical rename, all call sites updated in slice F4) (use devs:rust-dev agent)
-- [ ] T022 [P] Add `Paths::config_file(&Scope)`, `Paths::index_db(&Scope)`, `Paths::index_lock(&Scope)`, `Paths::workspace_marker_dir(&Path)` accessor methods in `src/paths.rs` (use devs:rust-dev agent)
-- [ ] T023 Add `lib.rs` re-export for `workspace::{Scope, ScopeSource, ResolvedScope}` (use devs:rust-dev agent)
-- [ ] T024 Add `tests/paths_phase3.rs` covering `state_dir` resolution under set / unset `XDG_STATE_HOME`, and `Paths::index_db(&Scope::Workspace(path))` returning `path/.tome/index.db` (use devs:rust-dev agent)
-- [ ] T025 [GIT] Commit: feat(workspace): introduce Scope type and per-scope Paths accessors
+- [X] T018 Create `src/workspace/mod.rs` exposing the module surface (use devs:rust-dev agent)
+- [X] T019 [P] Create `src/workspace/scope.rs` with `Scope`, `ScopeSource`, `ResolvedScope` per data-model.md §1 (use devs:rust-dev agent)
+- [X] T020 [P] Add `state_dir`, `mcp_log`, `mcp_log_prev`, `workspace_registry` fields to `Paths` in `src/paths.rs` and resolve via `directories::ProjectDirs::state_dir()` with XDG fallback per research §R-6 (use devs:rust-dev agent) — used the existing raw-env-var + HOME-fallback pattern instead of adding `directories` as a single-call dependency.
+- [ ] T021 [P] Rename `Paths.config_file` → `Paths.global_config_file`, `Paths.index_db` → `Paths.global_index_db`, `Paths.index_lock` → `Paths.global_index_lock` in `src/paths.rs` (mechanical rename, all call sites updated in slice F4) (use devs:rust-dev agent) — **DEFERRED to slice F4** so the working tree stays compiling across slice boundaries; F4 will rename + sweep call sites in one commit.
+- [X] T022 [P] Add `Paths::config_file(&Scope)`, `Paths::index_db(&Scope)`, `Paths::index_lock(&Scope)`, `Paths::workspace_marker_dir(&Path)` accessor methods in `src/paths.rs` (use devs:rust-dev agent) — landed as `config_file_for`, `index_db_for`, `index_lock_for`, `workspace_marker_dir` (the `_for` suffix avoids the field-name collision until F4 renames the fields and drops the suffix).
+- [X] T023 Add `lib.rs` re-export for `workspace::{Scope, ScopeSource, ResolvedScope}` (use devs:rust-dev agent)
+- [X] T024 Add `tests/paths_phase3.rs` covering `state_dir` resolution under set / unset `XDG_STATE_HOME`, and `Paths::index_db(&Scope::Workspace(path))` returning `path/.tome/index.db` (use devs:rust-dev agent)
+- [X] T025 [GIT] Commit: feat(workspace): introduce Scope type and per-scope Paths accessors
 
 ### Slice F2 — closed-error-set extension
 
-- [ ] T026 Add eight new variants to `TomeError` in `src/error.rs` per contracts/exit-codes-p3.md: `McpStartupFailed`, `McpProtocolIo`, `WorkspaceMalformed`, `WorkspaceNotFound`, `WorkspaceConflict`, `SchemaVersionTooNew`, `SchemaMigrationFailed`, `DoctorFixNotSafe` (use devs:rust-dev agent)
-- [ ] T027 Extend `TomeError::exit_code()` exhaustive match with codes 60 / 61 / 70 / 71 / 72 / 73 / 74 / 75 (use devs:rust-dev agent)
-- [ ] T028 Extend `TomeError::category()` exhaustive match with the eight new category strings per contracts/exit-codes-p3.md (use devs:rust-dev agent)
-- [ ] T029 Extend `tests/exit_codes.rs::build_each_variant` and the exhaustive `_code_for` arm to cover the eight new variants (use devs:rust-dev agent)
-- [ ] T030 Extend `tests/error_messages.rs` with one Display assertion per new variant per contracts/exit-codes-p3.md §Display messages (use devs:rust-dev agent)
-- [ ] T031 [GIT] Commit: feat(error): add Phase 3 TomeError variants and exit codes
+- [X] T026 Add eight new variants to `TomeError` in `src/error.rs` per contracts/exit-codes-p3.md: `McpStartupFailed`, `McpProtocolIo`, `WorkspaceMalformed`, `WorkspaceNotFound`, `WorkspaceConflict`, `SchemaVersionTooNew`, `SchemaMigrationFailed`, `DoctorFixNotSafe` (use devs:rust-dev agent)
+- [X] T027 Extend `TomeError::exit_code()` exhaustive match with codes 60 / 61 / 70 / 71 / 72 / 73 / 74 / 75 (use devs:rust-dev agent)
+- [X] T028 Extend `TomeError::category()` exhaustive match with the eight new category strings per contracts/exit-codes-p3.md (use devs:rust-dev agent)
+- [X] T029 Extend `tests/exit_codes.rs::build_each_variant` and the exhaustive `_code_for` arm to cover the eight new variants (use devs:rust-dev agent)
+- [X] T030 Extend `tests/error_messages.rs` with one Display assertion per new variant per contracts/exit-codes-p3.md §Display messages (use devs:rust-dev agent)
+- [X] T031 [GIT] Commit: feat(error): add Phase 3 TomeError variants and exit codes
 
 ### Slice F3 — workspace resolution
 
-- [ ] T032 [P] Create `src/workspace/resolution.rs` implementing `resolve(args: &GlobalScopeArgs) -> Result<ResolvedScope, TomeError>` per contracts/workspace-resolution.md (use devs:rust-dev agent)
-- [ ] T033 [P] Add `GlobalScopeArgs { workspace: Option<PathBuf>, global: bool }` to `src/cli.rs` with `global = true` + `conflicts_with = "global"`; wire as global flags accepted on every command (use devs:rust-dev agent)
-- [ ] T034 [P] Create `src/workspace/inventory.rs` reading the opt-in `${state_dir}/workspaces.txt` registry; returns `Vec<PathBuf>` (use devs:rust-dev agent)
-- [ ] T035 Wire `workspace::resolution::resolve` into `src/main.rs` immediately after `Cli::parse()` (and after the pre-parse `--version` hook); pass the `ResolvedScope` into every command's `run()` (signature update across `src/commands/*` is mechanical and lives in slice F4) (use devs:rust-dev agent)
-- [ ] T036 Add debug logging line per contracts/workspace-resolution.md §Debug logging in `src/workspace/resolution.rs` (use devs:rust-dev agent)
-- [ ] T037 Create `tests/workspace_resolution.rs` covering: CWD walk first-hit-wins, env var override, `--workspace` flag override, `--global` flag override, mutually-exclusive flags return exit 72, env-var-points-nowhere returns exit 71, malformed `.tome/config.toml` returns exit 70, nested-workspace-wins (use devs:rust-dev agent)
-- [ ] T038 [GIT] Commit: feat(workspace): resolution algorithm + global CLI flags
+- [X] T032 [P] Create `src/workspace/resolution.rs` implementing `resolve(args: &GlobalScopeArgs) -> Result<ResolvedScope, TomeError>` per contracts/workspace-resolution.md (use devs:rust-dev agent)
+- [X] T033 [P] Add `GlobalScopeArgs { workspace: Option<PathBuf>, global: bool }` to `src/cli.rs` with `global = true` + `conflicts_with = "global"`; wire as global flags accepted on every command (use devs:rust-dev agent) — `conflicts_with` deliberately NOT used; clap's usage-error exit code (2) doesn't match the contract's required exit 72 (`WorkspaceConflict`). The resolver detects both-set and returns the dedicated error.
+- [X] T034 [P] Create `src/workspace/inventory.rs` reading the opt-in `${state_dir}/workspaces.txt` registry; returns `Vec<PathBuf>` (use devs:rust-dev agent)
+- [X] T035 Wire `workspace::resolution::resolve` into `src/main.rs` immediately after `Cli::parse()` (and after the pre-parse `--version` hook); pass the `ResolvedScope` into every command's `run()` (signature update across `src/commands/*` is mechanical and lives in slice F4) (use devs:rust-dev agent) — resolution runs in main.rs; the `ResolvedScope` is computed and held in a `let _ = ` placeholder until F4 threads it through.
+- [X] T036 Add debug logging line per contracts/workspace-resolution.md §Debug logging in `src/workspace/resolution.rs` (use devs:rust-dev agent)
+- [X] T037 Create `tests/workspace_resolution.rs` covering: CWD walk first-hit-wins, env var override, `--workspace` flag override, `--global` flag override, mutually-exclusive flags return exit 72, env-var-points-nowhere returns exit 71, malformed `.tome/config.toml` returns exit 70, nested-workspace-wins (use devs:rust-dev agent) — landed 11 cases; **malformed-config exit 70 deferred to F4's per-command tests** because resolution itself doesn't load config (it's loaded on first command access, where exit 70 emerges).
+- [X] T038 [GIT] Commit: feat(workspace): resolution algorithm + global CLI flags
 
 ### Slice F4 — every command takes Scope (mechanical refactor)
 
-- [ ] T039 Update every command's `run()` signature in `src/commands/{catalog,plugin,models,query,reindex,status}/**.rs` to take `&ResolvedScope` (use devs:rust-dev agent)
-- [ ] T040 Update `src/config.rs` to expose `load_for_scope(paths: &Paths, scope: &Scope)` and `save_for_scope(paths: &Paths, scope: &Scope, config: &Config)` (use devs:rust-dev agent)
-- [ ] T041 Update `src/catalog/store.rs` to honour `Scope` on every load / save call site (use devs:rust-dev agent)
-- [ ] T042 Update `src/index/db.rs::open` and `src/index/lock.rs::acquire_lock` to take per-scope paths (use devs:rust-dev agent)
-- [ ] T043 Verify every existing test in `tests/` still passes against the refactored signatures (no behaviour change — only signature plumbing; the workspace-specific tests come in US3) (use devs:rust-dev agent)
-- [ ] T044 [GIT] Commit: refactor(commands): plumb ResolvedScope through every command surface
+- [X] T039 Update every command's `run()` signature in `src/commands/{catalog,plugin,models,query,reindex,status}/**.rs` to take `&ResolvedScope` (use devs:rust-dev agent)
+- [X] T040 Update `src/config.rs` to expose `load_for_scope(paths: &Paths, scope: &Scope)` and `save_for_scope(paths: &Paths, scope: &Scope, config: &Config)` (use devs:rust-dev agent) — **skipped**: `config.rs` is purely declarative (`Config` / `CatalogEntry` structs). Actual load/save lives in `catalog::store` and already takes a `&Path`; commands now call `store::load(&paths.config_file_for(&scope))`. No new helper layer needed; the indirection would only obscure the call site.
+- [X] T041 Update `src/catalog/store.rs` to honour `Scope` on every load / save call site (use devs:rust-dev agent) — landed at the call sites in `src/commands/catalog/{add,remove,list,show,update}.rs` and friends; the store module itself stays scope-agnostic (it takes `&Path`).
+- [X] T042 Update `src/index/db.rs::open` and `src/index/lock.rs::acquire_lock` to take per-scope paths (use devs:rust-dev agent) — both already take `&Path`; the per-scope path is now derived at the call site via `paths.index_db_for(&scope)` / `paths.index_lock_for(&scope)`. Plumbed through `LifecycleDeps.scope`, `lifecycle::disable`, `lifecycle::cascade_disable_for_catalog`, and the read paths in `commands::plugin::mod::open_index_for_read`.
+- [X] T043 Verify every existing test in `tests/` still passes against the refactored signatures (no behaviour change — only signature plumbing; the workspace-specific tests come in US3) (use devs:rust-dev agent) — 286/286 pass across 42 suites; library-API consumers (`assemble_report`, `lifecycle::disable`, `LifecycleDeps` constructions across 12 test files) updated mechanically with `Scope::Global` to preserve historical behaviour.
+- [X] T044 [GIT] Commit: refactor(commands): plumb ResolvedScope through every command surface
 
 ### Slice F5 — read-only DB open refactor (folded P10 deferral)
 
-- [ ] T045 Add `index::open_read_only(paths: &Paths, scope: &Scope) -> Result<Connection, TomeError>` using `OpenFlags::SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX` in `src/index/db.rs` (use devs:rust-dev agent)
-- [ ] T046 Update read sites — `commands::plugin::open_index_for_read`, `commands::query::run`, `commands::plugin::list::run`, `commands::plugin::show::run`, `commands::status::assemble_report` — to use `open_read_only` (use devs:rust-dev agent)
-- [ ] T047 Add a unit test in `tests/index_lock.rs` confirming a read-only handle does not block a writer holding the lock and does not race with it (use devs:rust-dev agent)
-- [ ] T048 [GIT] Commit: refactor(index): plumb read-only open across read paths
+- [X] T045 Add `index::open_read_only(paths: &Paths, scope: &Scope) -> Result<Connection, TomeError>` using `OpenFlags::SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX` in `src/index/db.rs` (use devs:rust-dev agent) — landed as `open_read_only(db_path: &Path)` (consistent with the existing `open(db_path)` signature; callers compute the per-scope path via `paths.index_db_for(&scope)`). Includes the schema-too-new gate so reads of a future-version DB still exit 52.
+- [X] T046 Update read sites — `commands::plugin::open_index_for_read`, `commands::query::run`, `commands::plugin::list::run`, `commands::plugin::show::run`, `commands::status::assemble_report` — to use `open_read_only` (use devs:rust-dev agent) — covered via the shared `open_index_for_read` helper (list / show / interactive / query) + direct call sites in `status::check_index` and `status::check_drift`. `open_index_for_read` bootstraps the DB on first touch when missing (preserves Phase 2's fresh-install behaviour), then re-opens read-only.
+- [X] T047 Add a unit test in `tests/index_lock.rs` confirming a read-only handle does not block a writer holding the lock and does not race with it (use devs:rust-dev agent)
+- [X] T048 [GIT] Commit: refactor(index): plumb read-only open across read paths
 
 ### Slice F6 — `query::run_with_deps` library entry point (folded P10 deferral)
 
-- [ ] T049 Add `pub fn run_with_deps(args: QueryArgs, deps: QueryDeps, mode: Mode) -> Result<QueryOutcome, TomeError>` in `src/commands/query.rs` accepting injected `Embedder` and `Reranker` traits, mirroring `reindex::run_with_deps` shape (use devs:rust-dev agent)
-- [ ] T050 Refactor `commands::query::run` to call `run_with_deps` after constructing real `FastembedEmbedder` + `FastembedReranker` (use devs:rust-dev agent)
-- [ ] T051 Extend `tests/query.rs` to exercise the library API directly via `run_with_deps` + `StubEmbedder` (use devs:rust-dev agent)
-- [ ] T052 [GIT] Commit: refactor(query): expose run_with_deps for library testing
+- [X] T049 Add `pub fn run_with_deps(args: QueryArgs, deps: QueryDeps, mode: Mode) -> Result<QueryOutcome, TomeError>` in `src/commands/query.rs` accepting injected `Embedder` and `Reranker` traits, mirroring `reindex::run_with_deps` shape (use devs:rust-dev agent) — `QueryDeps` carries `paths`, `scope`, `config`, `embedder`, `reranker` (`Option`), plus `embedder_seed` / `reranker_seed` (so drift detection compares against the caller's identity, not the BGE registry constants).
+- [X] T050 Refactor `commands::query::run` to call `run_with_deps` after constructing real `FastembedEmbedder` + `FastembedReranker` (use devs:rust-dev agent)
+- [X] T051 Extend `tests/query.rs` to exercise the library API directly via `run_with_deps` + `StubEmbedder` (use devs:rust-dev agent) — 6 new tests cover scoring modes (Similarity / Reranked), empty-text rejection, `--strict` no-results error, pre-rerank filter narrowing, and `CatalogNotFound` on unknown filter.
+- [X] T052 [GIT] Commit: refactor(query): expose run_with_deps for library testing
 
 ### Slice F7 — populate `apply_pending` migration framework
 

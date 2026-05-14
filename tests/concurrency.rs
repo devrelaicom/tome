@@ -32,6 +32,7 @@ fn enable_alpha(
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
     let deps = LifecycleDeps {
         paths,
+        scope: &tome::workspace::Scope::Global,
         config,
         embedder,
         embedder_seed: stub_embedder_seed(),

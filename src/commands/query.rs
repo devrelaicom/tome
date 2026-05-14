@@ -24,12 +24,15 @@ use crate::embedding::{Embedder, Reranker, Scored};
 use crate::error::TomeError;
 use crate::index::meta::{self, DriftStatus, ModelIdent};
 use crate::index::query::{QueryFilters, knn};
+use crate::index::schema::MetaSeed;
 use crate::output::{self, Mode};
 use crate::paths::Paths;
 use crate::presentation::{colour, progress, tables};
+use crate::workspace::{ResolvedScope, Scope};
 
 use super::plugin::{
-    embedder_entry, missing_models, open_index_for_read, read_catalog_manifest, reranker_entry,
+    embedder_entry, missing_models, open_index_for_read, read_catalog_manifest, registry_seeds,
+    reranker_entry,
 };
 
 /// Either the reranker's raw logit ("reranked") or 1.0 − cosine distance
@@ -38,28 +41,61 @@ use super::plugin::{
 const SCORING_RERANKED: &str = "reranked";
 const SCORING_SIMILARITY: &str = "embedding-similarity";
 
-pub fn run(args: QueryArgs, mode: Mode) -> Result<(), TomeError> {
-    let text = args.text.trim();
-    if text.is_empty() {
-        return Err(TomeError::Usage("query text is empty".into()));
+/// Inputs to [`run_with_deps`] — pre-built handles + scope context the
+/// caller has already paid for. Mirrors `LifecycleDeps` from the lifecycle
+/// module so tests can inject `StubEmbedder` / `StubReranker` instead of
+/// loading the multi-MB `FastembedEmbedder` / `FastembedReranker`.
+pub struct QueryDeps<'a> {
+    pub paths: &'a Paths,
+    pub scope: &'a Scope,
+    pub config: &'a Config,
+    pub embedder: &'a dyn Embedder,
+    pub reranker: Option<&'a dyn Reranker>,
+    /// Identity recorded by the embedder/reranker the caller loaded.
+    /// Drift detection compares this against the on-disk `meta` rows; in
+    /// the CLI path it comes from `registry_seeds()`, but tests can pass
+    /// stub seeds to keep `StubEmbedder` consistent with the bootstrap.
+    pub embedder_seed: MetaSeed,
+    pub reranker_seed: MetaSeed,
+}
+
+/// Result of one `run_with_deps` invocation. Returned for the test path;
+/// the CLI path also emits to stdout/stderr per `mode` as a side effect
+/// before returning.
+#[derive(Debug, Clone)]
+pub struct QueryOutcome {
+    pub results: Vec<Scored>,
+    pub scoring: ScoringMode,
+    /// Whether every returned row meets `min_score` (or the default for
+    /// the scoring mode in use). Always `true` after `--strict` filtering.
+    pub threshold_passed: bool,
+    pub reranker_drift: Option<String>,
+}
+
+/// Scoring source for a `QueryOutcome`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoringMode {
+    Reranked,
+    Similarity,
+}
+
+impl ScoringMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            ScoringMode::Reranked => SCORING_RERANKED,
+            ScoringMode::Similarity => SCORING_SIMILARITY,
+        }
     }
+}
 
+pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file)?;
-
-    // Validate filter flags before any model / DB work — these are cheap
-    // catalog-manifest reads and fail fast on typos.
-    validate_filters(&args, &config)?;
-
-    let conn = open_index_for_read(&paths)?;
-
-    // Drift detection. Embedder drift hard-fails (vectors are stale);
-    // reranker drift only degrades quality, so we keep the value and
-    // surface it as a warning later.
-    let reranker_drift = check_drift(&conn)?;
+    let config = store::load(&paths.config_file_for(&scope.scope))?;
 
     // Model presence — embedder always required, reranker required unless
-    // `--no-rerank`.
+    // `--no-rerank`. We check before constructing the heavy
+    // `FastembedEmbedder` so a missing-model error doesn't pay the load
+    // cost first.
     let embedder_meta = embedder_entry();
     let missing = missing_models(&paths);
     if missing.iter().any(|e| e.name == embedder_meta.name) {
@@ -82,7 +118,7 @@ pub fn run(args: QueryArgs, mode: Mode) -> Result<(), TomeError> {
         pb.finish_and_clear();
         result?
     };
-    let reranker = if args.no_rerank {
+    let reranker_loaded: Option<FastembedReranker> = if args.no_rerank {
         None
     } else {
         let pb = progress::spinner(format!("loading reranker ({})", reranker_meta.name));
@@ -90,14 +126,62 @@ pub fn run(args: QueryArgs, mode: Mode) -> Result<(), TomeError> {
         pb.finish_and_clear();
         Some(result?)
     };
+    let reranker: Option<&dyn Reranker> = reranker_loaded.as_ref().map(|r| r as &dyn Reranker);
+
+    let (embedder_seed, reranker_seed) = registry_seeds();
+    let deps = QueryDeps {
+        paths: &paths,
+        scope: &scope.scope,
+        config: &config,
+        embedder: &embedder,
+        reranker,
+        embedder_seed,
+        reranker_seed,
+    };
+
+    run_with_deps(args, deps, mode).map(|_| ())
+}
+
+/// Library entry point. Accepts pre-built embedder/reranker handles; runs
+/// the full pipeline (filter validation → drift check → KNN → rerank →
+/// threshold → emit) and returns the structured outcome.
+///
+/// The CLI path constructs `FastembedEmbedder` + `FastembedReranker` and
+/// hands them in. Tests pass `StubEmbedder` / `StubReranker` along with
+/// the matching `MetaSeed`s — keeping drift detection consistent without
+/// requiring on-disk ONNX models.
+///
+/// Phase 3 / Foundational slice F6 — closes the Phase 10 deferred item.
+pub fn run_with_deps(
+    args: QueryArgs,
+    deps: QueryDeps<'_>,
+    mode: Mode,
+) -> Result<QueryOutcome, TomeError> {
+    let text = args.text.trim();
+    if text.is_empty() {
+        return Err(TomeError::Usage("query text is empty".into()));
+    }
+
+    // Validate filter flags before any model / DB work — these are cheap
+    // catalog-manifest reads and fail fast on typos.
+    validate_filters(&args, deps.config)?;
+
+    let conn = open_index_for_read(deps.paths, deps.scope)?;
+
+    // Drift detection. Embedder drift hard-fails (vectors are stale);
+    // reranker drift only degrades quality, so we keep the value and
+    // surface it as a warning later. The seeds carried in `deps` are the
+    // identities the *caller* has loaded — drift fires when they disagree
+    // with the on-disk `meta` rows.
+    let reranker_drift = check_drift(&conn, &deps.embedder_seed, &deps.reranker_seed)?;
 
     // Embed the query text as-is — FR-014's name/description composition
     // applies only to skill ingestion.
-    let query_vec = embedder.embed(text)?;
+    let query_vec = deps.embedder.embed(text)?;
 
     // Pull candidates. Reranking benefits from a wider pool — 4× per the
     // contract — and we trim back after.
-    let candidate_k: u32 = if reranker.is_some() {
+    let candidate_k: u32 = if deps.reranker.is_some() {
         args.top_k.saturating_mul(4).max(args.top_k)
     } else {
         args.top_k
@@ -110,7 +194,7 @@ pub fn run(args: QueryArgs, mode: Mode) -> Result<(), TomeError> {
 
     // Score + sort. With a reranker, scores come from the cross-encoder;
     // without, we treat 1.0 − distance as cosine similarity.
-    let scored: Vec<Scored> = match &reranker {
+    let scored: Vec<Scored> = match deps.reranker {
         Some(r) => r.rerank(text, candidates)?,
         None => {
             let mut s: Vec<Scored> = candidates
@@ -134,7 +218,11 @@ pub fn run(args: QueryArgs, mode: Mode) -> Result<(), TomeError> {
 
     // Default threshold depends on the scoring mode. The contract distinguishes
     // reranker logits (default 0.0) from cosine similarity (default 0.5).
-    let default_threshold = if reranker.is_some() { 0.0_f32 } else { 0.5_f32 };
+    let default_threshold = if deps.reranker.is_some() {
+        0.0_f32
+    } else {
+        0.5_f32
+    };
     let threshold = args.min_score.unwrap_or(default_threshold);
 
     if args.strict {
@@ -147,10 +235,10 @@ pub fn run(args: QueryArgs, mode: Mode) -> Result<(), TomeError> {
     // Even without `--strict`, the JSON `threshold_passed` field reflects
     // whether every returned row meets the (possibly default) threshold.
     let threshold_passed = trimmed.iter().all(|s| s.score >= threshold);
-    let scoring = if reranker.is_some() {
-        SCORING_RERANKED
+    let scoring = if deps.reranker.is_some() {
+        ScoringMode::Reranked
     } else {
-        SCORING_SIMILARITY
+        ScoringMode::Similarity
     };
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -158,17 +246,24 @@ pub fn run(args: QueryArgs, mode: Mode) -> Result<(), TomeError> {
     match mode {
         Mode::Human => emit_human(
             &trimmed,
-            scoring,
+            scoring.as_str(),
             reranker_drift.as_deref(),
             home.as_deref(),
-        ),
+        )?,
         Mode::Json => emit_json(
             &trimmed,
-            scoring,
+            scoring.as_str(),
             threshold_passed,
             reranker_drift.as_deref(),
-        ),
+        )?,
     }
+
+    Ok(QueryOutcome {
+        results: trimmed,
+        scoring,
+        threshold_passed,
+        reranker_drift,
+    })
 }
 
 /// Validate `--catalog` / `--plugin` against the on-disk catalog manifests.
@@ -214,16 +309,22 @@ fn validate_filters(args: &QueryArgs, config: &Config) -> Result<(), TomeError> 
 
 /// Run drift detection. Embedder drift converts to a hard error; reranker
 /// drift returns `Ok(Some(label))` for the caller to surface.
-fn check_drift(conn: &rusqlite::Connection) -> Result<Option<String>, TomeError> {
-    let e = embedder_entry();
-    let r = reranker_entry();
+///
+/// The configured identities come from the deps (`run_with_deps`) so
+/// tests using `StubEmbedder` / `StubReranker` can pass their own seeds
+/// and not trip false drift against the BGE registry constants.
+fn check_drift(
+    conn: &rusqlite::Connection,
+    embedder_seed: &MetaSeed,
+    reranker_seed: &MetaSeed,
+) -> Result<Option<String>, TomeError> {
     let embedder_ident = ModelIdent {
-        name: e.name.to_owned(),
-        version: e.version.to_owned(),
+        name: embedder_seed.name.clone(),
+        version: embedder_seed.version.clone(),
     };
     let reranker_ident = ModelIdent {
-        name: r.name.to_owned(),
-        version: r.version.to_owned(),
+        name: reranker_seed.name.clone(),
+        version: reranker_seed.version.clone(),
     };
     match meta::detect_drift(conn, &embedder_ident, &reranker_ident)? {
         DriftStatus::None => Ok(None),
