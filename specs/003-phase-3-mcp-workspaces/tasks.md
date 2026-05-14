@@ -48,10 +48,10 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Completion
 
-- [ ] T011 [GIT] Push branch to origin (ensure pre-push hooks pass)
-- [ ] T012 [GIT] Create PR to main with Phase 1 summary
-- [ ] T013 [GIT] Verify all CI checks pass
-- [ ] T014 [GIT] Report PR ready status
+- [X] T011 [GIT] Push branch to origin (ensure pre-push hooks pass)
+- [X] T012 [GIT] Create PR to main with Phase 1 summary — PR #43.
+- [X] T013 [GIT] Verify all CI checks pass — 6/6 green after CI fix at commit `945db1f` (Swatinem/rust-cache `cache-bin: false`).
+- [X] T014 [GIT] Report PR ready status — squash-merged as commit `65291e9` on main.
 
 ---
 
@@ -63,9 +63,9 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Start
 
-- [ ] T015 [GIT] Verify working tree is clean before starting Phase 2
-- [ ] T016 Create `specs/003-phase-3-mcp-workspaces/retro/P2.md` from the standard retro template
-- [ ] T017 [GIT] Commit: docs(retro): initialise Phase 3 / P2 retro
+- [X] T015 [GIT] Verify working tree is clean before starting Phase 2
+- [X] T016 Create `specs/003-phase-3-mcp-workspaces/retro/P2.md` from the standard retro template
+- [X] T017 [GIT] Commit: docs(retro): initialise Phase 3 / P2 retro
 
 ### Slice F1 — `Scope` type + paths refactor
 
