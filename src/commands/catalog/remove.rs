@@ -24,12 +24,14 @@ use crate::output;
 use crate::output::Mode;
 use crate::paths::Paths;
 use crate::plugin::lifecycle::cascade_disable_for_catalog;
+use crate::workspace::{ResolvedScope, Scope};
 
 use crate::commands::plugin::registry_seeds;
 
-pub fn run(args: CatalogRemoveArgs, mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    let mut config = store::load(&paths.config_file)?;
+    let config_file = paths.config_file_for(&scope.scope);
+    let mut config = store::load(&config_file)?;
 
     let entry = config
         .catalogs
@@ -42,7 +44,7 @@ pub fn run(args: CatalogRemoveArgs, mode: Mode) -> Result<(), TomeError> {
     // and runs without the advisory lock — readers don't block writers,
     // and the worst case is we report a stale enabled list that the
     // cascade itself will then act on consistently.
-    let enabled_plugins = read_enabled_plugins(&paths, &args.name)?;
+    let enabled_plugins = read_enabled_plugins(&paths, &scope.scope, &args.name)?;
     if !enabled_plugins.is_empty() && !args.force {
         let plugins_qualified = enabled_plugins
             .iter()
@@ -77,6 +79,7 @@ pub fn run(args: CatalogRemoveArgs, mode: Mode) -> Result<(), TomeError> {
         let (embedder_seed, reranker_seed) = registry_seeds();
         let breakdown = cascade_disable_for_catalog(
             &paths,
+            &scope.scope,
             &args.name,
             &enabled_plugins,
             embedder_seed,
@@ -104,7 +107,7 @@ pub fn run(args: CatalogRemoveArgs, mode: Mode) -> Result<(), TomeError> {
     }
 
     config.catalogs.remove(&args.name);
-    store::save(&paths.config_file, &config)?;
+    store::save(&config_file, &config)?;
 
     if let Err(e) = std::fs::remove_dir_all(&entry.path) {
         warn!(
@@ -121,13 +124,18 @@ pub fn run(args: CatalogRemoveArgs, mode: Mode) -> Result<(), TomeError> {
 /// Read the distinct enabled plugin names for one catalog. Returns an empty
 /// vector when the index database has not been bootstrapped yet (the
 /// `catalog remove` flow must still work on a fresh install).
-fn read_enabled_plugins(paths: &Paths, catalog: &str) -> Result<Vec<String>, TomeError> {
-    if !paths.index_db.is_file() {
+fn read_enabled_plugins(
+    paths: &Paths,
+    scope: &Scope,
+    catalog: &str,
+) -> Result<Vec<String>, TomeError> {
+    let index_db = paths.index_db_for(scope);
+    if !index_db.is_file() {
         return Ok(Vec::new());
     }
     let (embedder_seed, reranker_seed) = registry_seeds();
     let conn = index::open(
-        &paths.index_db,
+        &index_db,
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,

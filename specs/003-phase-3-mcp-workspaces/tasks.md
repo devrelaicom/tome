@@ -99,12 +99,12 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Slice F4 — every command takes Scope (mechanical refactor)
 
-- [ ] T039 Update every command's `run()` signature in `src/commands/{catalog,plugin,models,query,reindex,status}/**.rs` to take `&ResolvedScope` (use devs:rust-dev agent)
-- [ ] T040 Update `src/config.rs` to expose `load_for_scope(paths: &Paths, scope: &Scope)` and `save_for_scope(paths: &Paths, scope: &Scope, config: &Config)` (use devs:rust-dev agent)
-- [ ] T041 Update `src/catalog/store.rs` to honour `Scope` on every load / save call site (use devs:rust-dev agent)
-- [ ] T042 Update `src/index/db.rs::open` and `src/index/lock.rs::acquire_lock` to take per-scope paths (use devs:rust-dev agent)
-- [ ] T043 Verify every existing test in `tests/` still passes against the refactored signatures (no behaviour change — only signature plumbing; the workspace-specific tests come in US3) (use devs:rust-dev agent)
-- [ ] T044 [GIT] Commit: refactor(commands): plumb ResolvedScope through every command surface
+- [X] T039 Update every command's `run()` signature in `src/commands/{catalog,plugin,models,query,reindex,status}/**.rs` to take `&ResolvedScope` (use devs:rust-dev agent)
+- [X] T040 Update `src/config.rs` to expose `load_for_scope(paths: &Paths, scope: &Scope)` and `save_for_scope(paths: &Paths, scope: &Scope, config: &Config)` (use devs:rust-dev agent) — **skipped**: `config.rs` is purely declarative (`Config` / `CatalogEntry` structs). Actual load/save lives in `catalog::store` and already takes a `&Path`; commands now call `store::load(&paths.config_file_for(&scope))`. No new helper layer needed; the indirection would only obscure the call site.
+- [X] T041 Update `src/catalog/store.rs` to honour `Scope` on every load / save call site (use devs:rust-dev agent) — landed at the call sites in `src/commands/catalog/{add,remove,list,show,update}.rs` and friends; the store module itself stays scope-agnostic (it takes `&Path`).
+- [X] T042 Update `src/index/db.rs::open` and `src/index/lock.rs::acquire_lock` to take per-scope paths (use devs:rust-dev agent) — both already take `&Path`; the per-scope path is now derived at the call site via `paths.index_db_for(&scope)` / `paths.index_lock_for(&scope)`. Plumbed through `LifecycleDeps.scope`, `lifecycle::disable`, `lifecycle::cascade_disable_for_catalog`, and the read paths in `commands::plugin::mod::open_index_for_read`.
+- [X] T043 Verify every existing test in `tests/` still passes against the refactored signatures (no behaviour change — only signature plumbing; the workspace-specific tests come in US3) (use devs:rust-dev agent) — 286/286 pass across 42 suites; library-API consumers (`assemble_report`, `lifecycle::disable`, `LifecycleDeps` constructions across 12 test files) updated mechanically with `Scope::Global` to preserve historical behaviour.
+- [X] T044 [GIT] Commit: refactor(commands): plumb ResolvedScope through every command surface
 
 ### Slice F5 — read-only DB open refactor (folded P10 deferral)
 

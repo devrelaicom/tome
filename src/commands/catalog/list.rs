@@ -17,10 +17,11 @@ use crate::config::CatalogEntry;
 use crate::error::TomeError;
 use crate::output::Mode;
 use crate::paths::Paths;
+use crate::workspace::ResolvedScope;
 
-pub fn run(_args: CatalogListArgs, mode: Mode) -> Result<(), TomeError> {
+pub fn run(_args: CatalogListArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file)?;
+    let config = store::load(&paths.config_file_for(&scope.scope))?;
 
     if config.catalogs.is_empty() {
         if mode == Mode::Human {

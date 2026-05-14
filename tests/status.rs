@@ -35,6 +35,7 @@ fn enable_alpha(
     let (embedder_seed, reranker_seed) = registry_seeds();
     let deps = LifecycleDeps {
         paths,
+        scope: &tome::workspace::Scope::Global,
         config,
         embedder,
         embedder_seed,
@@ -59,7 +60,7 @@ fn status_healthy_with_models_and_index() {
     let embedder = StubEmbedder::new();
     enable_alpha(&paths, &config, &embedder);
 
-    let report = assemble_report(&paths, false).expect("assemble");
+    let report = assemble_report(&paths, &tome::workspace::Scope::Global, false).expect("assemble");
     assert_eq!(report.overall, OverallHealth::Ok);
     assert_eq!(report.embedder.state, "ok");
     assert_eq!(report.reranker.state, "ok");
@@ -77,7 +78,7 @@ fn status_healthy_with_no_index_yet() {
     std::fs::create_dir_all(&paths.data_dir).unwrap();
     common::fabricate_all_installed_models(&paths);
 
-    let report = assemble_report(&paths, false).expect("assemble");
+    let report = assemble_report(&paths, &tome::workspace::Scope::Global, false).expect("assemble");
     // No index bootstrapped — but models present, no drift to detect.
     assert!(!report.index.present);
     assert_eq!(report.drift, DriftStatus::None);
@@ -95,7 +96,7 @@ fn status_unhealthy_when_embedder_missing() {
     // report Missing. Embedder Missing trumps reranker Missing in
     // classify(): the overall verdict is Unhealthy.
 
-    let report = assemble_report(&paths, false).expect("assemble");
+    let report = assemble_report(&paths, &tome::workspace::Scope::Global, false).expect("assemble");
     assert_eq!(report.embedder.state, "missing");
     assert_eq!(report.overall, OverallHealth::Unhealthy);
 }
@@ -118,7 +119,7 @@ fn status_degraded_when_only_reranker_missing() {
     let reranker_dir = paths.models_dir.join(reranker_name);
     std::fs::remove_dir_all(&reranker_dir).unwrap();
 
-    let report = assemble_report(&paths, false).expect("assemble");
+    let report = assemble_report(&paths, &tome::workspace::Scope::Global, false).expect("assemble");
     assert_eq!(report.embedder.state, "ok");
     assert_eq!(report.reranker.state, "missing");
     assert_eq!(report.overall, OverallHealth::Degraded);
@@ -152,7 +153,7 @@ fn status_degraded_on_reranker_drift_in_meta() {
     .unwrap();
     write_meta(&conn, MetaKey::RerankerName, "bge-reranker-OLD").unwrap();
 
-    let report = assemble_report(&paths, false).expect("assemble");
+    let report = assemble_report(&paths, &tome::workspace::Scope::Global, false).expect("assemble");
     assert!(
         matches!(report.drift, DriftStatus::RerankerDrift { .. }),
         "expected RerankerDrift, got {:?}",
@@ -186,7 +187,7 @@ fn status_unhealthy_on_embedder_drift() {
     .unwrap();
     write_meta(&conn, MetaKey::EmbedderName, "bge-OLD").unwrap();
 
-    let report = assemble_report(&paths, false).expect("assemble");
+    let report = assemble_report(&paths, &tome::workspace::Scope::Global, false).expect("assemble");
     assert!(
         matches!(report.drift, DriftStatus::EmbedderNameDrift { .. }),
         "expected EmbedderNameDrift, got {:?}",
@@ -208,7 +209,7 @@ fn status_verify_flag_detects_checksum_mismatch() {
     // pinned SHA.
     common::fabricate_all_installed_models(&paths);
 
-    let report = assemble_report(&paths, true).expect("assemble");
+    let report = assemble_report(&paths, &tome::workspace::Scope::Global, true).expect("assemble");
     assert_eq!(
         report.embedder.state, "checksum_mismatched",
         "expected checksum mismatch on the embedder",

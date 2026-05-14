@@ -27,6 +27,7 @@ use crate::index::query::{QueryFilters, knn};
 use crate::output::{self, Mode};
 use crate::paths::Paths;
 use crate::presentation::{colour, progress, tables};
+use crate::workspace::ResolvedScope;
 
 use super::plugin::{
     embedder_entry, missing_models, open_index_for_read, read_catalog_manifest, reranker_entry,
@@ -38,20 +39,20 @@ use super::plugin::{
 const SCORING_RERANKED: &str = "reranked";
 const SCORING_SIMILARITY: &str = "embedding-similarity";
 
-pub fn run(args: QueryArgs, mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let text = args.text.trim();
     if text.is_empty() {
         return Err(TomeError::Usage("query text is empty".into()));
     }
 
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file)?;
+    let config = store::load(&paths.config_file_for(&scope.scope))?;
 
     // Validate filter flags before any model / DB work — these are cheap
     // catalog-manifest reads and fail fast on typos.
     validate_filters(&args, &config)?;
 
-    let conn = open_index_for_read(&paths)?;
+    let conn = open_index_for_read(&paths, &scope.scope)?;
 
     // Drift detection. Embedder drift hard-fails (vectors are stale);
     // reranker drift only degrades quality, so we keep the value and

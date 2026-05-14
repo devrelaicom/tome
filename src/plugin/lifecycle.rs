@@ -73,6 +73,12 @@ pub struct ReindexOutcome {
 /// decision can pass them through unchanged.
 pub struct LifecycleDeps<'a> {
     pub paths: &'a Paths,
+    /// The active workspace scope (Phase 3). Picks per-scope `index.db` +
+    /// `index.lock` via `paths.index_db_for(&scope)` / `index_lock_for`.
+    /// All lifecycle operations are bound to the scope they're invoked
+    /// against — enabling a plugin inside a workspace does not affect
+    /// the global index, and vice versa.
+    pub scope: &'a crate::workspace::Scope,
     pub config: &'a Config,
     pub embedder: &'a dyn Embedder,
     pub embedder_seed: MetaSeed,
@@ -124,7 +130,7 @@ pub fn enable(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<EnableOutcome, 
     ensure_models_present(deps)?;
 
     // Step 5 — advisory lock. Held until step 10.
-    let lock = acquire_lock(&deps.paths.index_lock)?;
+    let lock = acquire_lock(&deps.paths.index_lock_for(deps.scope))?;
 
     // Run the rest under the lock; release explicitly on success, drop on
     // failure (Drop releases best-effort, matching the lock module's docs).
@@ -155,6 +161,7 @@ pub fn enable(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<EnableOutcome, 
 pub fn disable(
     id: &PluginId,
     paths: &Paths,
+    scope: &crate::workspace::Scope,
     config: &Config,
     embedder_seed: MetaSeed,
     reranker_seed: MetaSeed,
@@ -164,8 +171,8 @@ pub fn disable(
     // the index — same exit-code surface as enable.
     let _plugin_dir = resolve_plugin_dir(id, config)?;
 
-    let lock = acquire_lock(&paths.index_lock)?;
-    let outcome = disable_locked(id, paths, embedder_seed, reranker_seed);
+    let lock = acquire_lock(&paths.index_lock_for(scope))?;
+    let outcome = disable_locked(id, paths, scope, embedder_seed, reranker_seed);
 
     match outcome {
         Ok(skills_retained) => {
@@ -209,7 +216,7 @@ pub fn reindex_plugin(
         .clone()
         .unwrap_or_else(|| "0.0.0".to_string());
 
-    let lock = acquire_lock(&deps.paths.index_lock)?;
+    let lock = acquire_lock(&deps.paths.index_lock_for(deps.scope))?;
     let result = reindex_locked(id, &plugin_dir, &plugin_version, deps, force);
 
     match result {
@@ -253,6 +260,7 @@ pub fn reindex_plugin(
 /// because `index::open` validates them against the on-disk `meta` rows.
 pub fn cascade_disable_for_catalog(
     paths: &Paths,
+    scope: &crate::workspace::Scope,
     catalog: &str,
     plugins: &[String],
     embedder_seed: MetaSeed,
@@ -261,10 +269,10 @@ pub fn cascade_disable_for_catalog(
     if plugins.is_empty() {
         return Ok(Vec::new());
     }
-    let lock = acquire_lock(&paths.index_lock)?;
+    let lock = acquire_lock(&paths.index_lock_for(scope))?;
     let result = (|| -> Result<Vec<(String, u32)>, TomeError> {
         let conn = index::open(
-            &paths.index_db,
+            &paths.index_db_for(scope),
             &OpenOptions {
                 embedder: embedder_seed,
                 reranker: reranker_seed,
@@ -304,7 +312,7 @@ pub fn cascade_disable_for_catalog(
 /// Used by `tome catalog update`. NOT used by `tome reindex` — reindex on a
 /// missing plugin reports `PluginNotFound` (exit 20), not a silent cascade.
 pub fn auto_disable_orphan(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<u32, TomeError> {
-    let lock = acquire_lock(&deps.paths.index_lock)?;
+    let lock = acquire_lock(&deps.paths.index_lock_for(deps.scope))?;
     let result = auto_disable_locked(id, deps);
 
     match result {
@@ -369,7 +377,7 @@ pub fn resolve_plugin_dir(id: &PluginId, config: &Config) -> Result<PathBuf, Tom
 /// `(catalog, plugin)` with `enabled = 1`.
 fn any_skill_enabled(deps: &LifecycleDeps<'_>, id: &PluginId) -> Result<bool, TomeError> {
     let conn = index::open(
-        &deps.paths.index_db,
+        &deps.paths.index_db_for(deps.scope),
         &OpenOptions {
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
@@ -398,7 +406,7 @@ fn enable_locked(
     }
 
     let mut conn = index::open(
-        &deps.paths.index_db,
+        &deps.paths.index_db_for(deps.scope),
         &OpenOptions {
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
@@ -435,11 +443,12 @@ fn enable_locked(
 fn disable_locked(
     id: &PluginId,
     paths: &Paths,
+    scope: &crate::workspace::Scope,
     embedder_seed: MetaSeed,
     reranker_seed: MetaSeed,
 ) -> Result<u32, TomeError> {
     let conn = index::open(
-        &paths.index_db,
+        &paths.index_db_for(scope),
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,
@@ -484,7 +493,7 @@ fn reindex_locked(
     }
 
     let mut conn = index::open(
-        &deps.paths.index_db,
+        &deps.paths.index_db_for(deps.scope),
         &OpenOptions {
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
@@ -516,7 +525,7 @@ fn reindex_locked(
 /// embeddings. Idempotent — zero rows is fine.
 fn auto_disable_locked(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<u32, TomeError> {
     let conn = index::open(
-        &deps.paths.index_db,
+        &deps.paths.index_db_for(deps.scope),
         &OpenOptions {
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
@@ -787,6 +796,12 @@ mod tests {
 
     /// Construct a `LifecycleDeps` against the supplied stub. We have to
     /// thread it through carefully because `LifecycleDeps` borrows.
+    /// Static `Scope::Global` reference used by every lifecycle unit
+    /// test. The Phase 3 contract has lifecycle operations bound to a
+    /// scope; tests stay scope-agnostic by using the global scope
+    /// (matches the historical Phase 1/2 behaviour).
+    static TEST_SCOPE: crate::workspace::Scope = crate::workspace::Scope::Global;
+
     fn make_deps<'a>(
         paths: &'a Paths,
         config: &'a Config,
@@ -795,6 +810,7 @@ mod tests {
     ) -> LifecycleDeps<'a> {
         LifecycleDeps {
             paths,
+            scope: &TEST_SCOPE,
             config,
             embedder,
             embedder_seed: stub_seed(),
@@ -1064,8 +1080,15 @@ mod tests {
         let id: PluginId = "acme/plug".parse().unwrap();
         enable(&id, &deps).expect("enable");
 
-        let outcome =
-            disable(&id, &paths, &config, stub_seed(), stub_reranker_seed()).expect("disable");
+        let outcome = disable(
+            &id,
+            &paths,
+            &TEST_SCOPE,
+            &config,
+            stub_seed(),
+            stub_reranker_seed(),
+        )
+        .expect("disable");
         assert_eq!(outcome.skills_retained, 2);
 
         let (total, enabled_sum) = count_rows(&paths, "acme", "plug");
@@ -1093,10 +1116,25 @@ mod tests {
         let deps = make_deps(&paths, &config, &embedder, false);
         let id: PluginId = "acme/plug".parse().unwrap();
         enable(&id, &deps).expect("enable");
-        disable(&id, &paths, &config, stub_seed(), stub_reranker_seed()).expect("disable");
+        disable(
+            &id,
+            &paths,
+            &TEST_SCOPE,
+            &config,
+            stub_seed(),
+            stub_reranker_seed(),
+        )
+        .expect("disable");
 
-        let err = disable(&id, &paths, &config, stub_seed(), stub_reranker_seed())
-            .expect_err("second disable rejected");
+        let err = disable(
+            &id,
+            &paths,
+            &TEST_SCOPE,
+            &config,
+            stub_seed(),
+            stub_reranker_seed(),
+        )
+        .expect_err("second disable rejected");
         match err {
             TomeError::PluginAlreadyInState { state, .. } => {
                 assert_eq!(state, PluginState::Disabled);

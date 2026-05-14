@@ -28,6 +28,7 @@ fn enable_alpha_and_beta(
     let beta: PluginId = "sample-plugin-catalog/plugin-beta".parse().unwrap();
     let deps = LifecycleDeps {
         paths,
+        scope: &tome::workspace::Scope::Global,
         config,
         embedder,
         embedder_seed: stub_embedder_seed(),
@@ -45,6 +46,7 @@ fn build_deps<'a>(
 ) -> LifecycleDeps<'a> {
     LifecycleDeps {
         paths,
+        scope: &tome::workspace::Scope::Global,
         config,
         embedder,
         embedder_seed: stub_embedder_seed(),

@@ -22,14 +22,15 @@ use crate::paths::Paths;
 use crate::plugin::PluginId;
 use crate::plugin::lifecycle::{self, LifecycleDeps};
 use crate::presentation::{colour, progress, prompt};
+use crate::workspace::ResolvedScope;
 
 use super::{embedder_entry, human_mb, missing_models, registry_seeds, resolve_plugin_dir};
 
-pub fn run(args: PluginEnableArgs, mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let id = PluginId::from_str(&args.id)
         .map_err(|e| TomeError::Usage(format!("invalid plugin id `{}`: {e}", args.id)))?;
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file)?;
+    let config = store::load(&paths.config_file_for(&scope.scope))?;
 
     // Pre-check catalog + plugin existence so we can surface the right exit
     // code before doing any model work. Lifecycle re-checks this internally;
@@ -52,6 +53,7 @@ pub fn run(args: PluginEnableArgs, mode: Mode) -> Result<(), TomeError> {
     let (embedder_seed, reranker_seed) = registry_seeds();
     let deps = LifecycleDeps {
         paths: &paths,
+        scope: &scope.scope,
         config: &config,
         embedder: &embedder,
         embedder_seed,

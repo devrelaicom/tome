@@ -21,17 +21,18 @@ use crate::plugin::components::count_components;
 use crate::plugin::manifest::{manifest_path_for, parse_plugin_manifest};
 use crate::plugin::{PluginId, PluginRecord, PluginStatus};
 use crate::presentation::{colour, tables};
+use crate::workspace::ResolvedScope;
 
 use super::{
     IndexAggregate, aggregate_for_plugin, human_relative, open_index_for_read,
     read_catalog_manifest,
 };
 
-pub fn run(args: PluginListArgs, mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: PluginListArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file)?;
+    let config = store::load(&paths.config_file_for(&scope.scope))?;
 
-    let conn = open_index_for_read(&paths)?;
+    let conn = open_index_for_read(&paths, &scope.scope)?;
     let rows = collect_rows(&config, &args, &conn, &paths)?;
 
     let filtered: Vec<Row> = if args.enabled_only {

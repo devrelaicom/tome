@@ -10,13 +10,14 @@ pub mod update;
 use crate::cli::CatalogCommand;
 use crate::error::TomeError;
 use crate::output::Mode;
+use crate::workspace::ResolvedScope;
 
-pub fn run(cmd: CatalogCommand, mode: Mode) -> Result<(), TomeError> {
+pub fn run(cmd: CatalogCommand, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     match cmd {
-        CatalogCommand::Add(args) => add::run(args, mode),
-        CatalogCommand::Remove(args) => remove::run(args, mode),
-        CatalogCommand::List(args) => list::run(args, mode),
-        CatalogCommand::Update(args) => update::run(args, mode),
-        CatalogCommand::Show(args) => show::run(args, mode),
+        CatalogCommand::Add(args) => add::run(args, scope, mode),
+        CatalogCommand::Remove(args) => remove::run(args, scope, mode),
+        CatalogCommand::List(args) => list::run(args, scope, mode),
+        CatalogCommand::Update(args) => update::run(args, scope, mode),
+        CatalogCommand::Show(args) => show::run(args, scope, mode),
     }
 }

@@ -52,6 +52,7 @@ fn build_query_env() -> QueryEnv {
             .unwrap();
         let deps = LifecycleDeps {
             paths: &paths,
+            scope: &tome::workspace::Scope::Global,
             config: &config,
             embedder: &embedder,
             embedder_seed: stub_embedder_seed(),

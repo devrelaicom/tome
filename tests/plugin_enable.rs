@@ -40,6 +40,7 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
         paths: &paths,
+        scope: &tome::workspace::Scope::Global,
         config: &config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
@@ -118,6 +119,7 @@ fn enable_emits_fallback_warnings_for_missing_name_and_description() {
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
         paths: &paths,
+        scope: &tome::workspace::Scope::Global,
         config: &config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
@@ -159,6 +161,7 @@ fn enable_is_idempotent_rejecting_re_enable_with_plugin_already_in_state() {
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
         paths: &paths,
+        scope: &tome::workspace::Scope::Global,
         config: &config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
@@ -230,6 +233,7 @@ source = "./vendor/wrapped-alpha"
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
         paths: &paths,
+        scope: &tome::workspace::Scope::Global,
         config: &config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
@@ -262,6 +266,7 @@ fn cheap_reenable_after_disable_invokes_embedder_zero_times() {
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
         paths: &paths,
+        scope: &tome::workspace::Scope::Global,
         config: &config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
@@ -286,6 +291,7 @@ fn cheap_reenable_after_disable_invokes_embedder_zero_times() {
     lifecycle::disable(
         &id,
         &paths,
+        &tome::workspace::Scope::Global,
         &config,
         stub_embedder_seed(),
         stub_reranker_seed(),
@@ -320,6 +326,7 @@ fn enable_returns_model_missing_when_no_models_on_disk_and_download_disallowed()
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
         paths: &paths,
+        scope: &tome::workspace::Scope::Global,
         config: &config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),

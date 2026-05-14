@@ -28,15 +28,21 @@ use crate::paths::Paths;
 use crate::plugin::PluginId;
 use crate::plugin::lifecycle::{self, LifecycleDeps};
 use crate::presentation::colour;
+use crate::workspace::ResolvedScope;
 
 use crate::commands::plugin::{embedder_entry, registry_seeds};
 
-pub fn run(args: ReindexArgs, mode: Mode) -> Result<(), TomeError> {
-    let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file)?;
+// NOTE: this module's local `Scope` enum is the reindex *target* (all /
+// catalog / plugin). To avoid a name collision with the Phase 3
+// `workspace::Scope`, the workspace scope is always referenced as
+// `&ResolvedScope` (or `&crate::workspace::Scope`) at function boundaries.
 
-    let scope = parse_scope(args.scope.as_deref(), &config, &paths)?;
-    let plugins = resolve_targets(&scope, &paths)?;
+pub fn run(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+    let paths = Paths::resolve()?;
+    let config = store::load(&paths.config_file_for(&ws.scope))?;
+
+    let scope = parse_scope(args.scope.as_deref(), &config, &paths, &ws.scope)?;
+    let plugins = resolve_targets(&scope, &paths, &ws.scope)?;
 
     if plugins.is_empty() {
         // No enabled plugins anywhere in scope: nothing to reindex. Exit 0
@@ -52,6 +58,7 @@ pub fn run(args: ReindexArgs, mode: Mode) -> Result<(), TomeError> {
     let (embedder_seed, reranker_seed) = registry_seeds();
     let deps = LifecycleDeps {
         paths: &paths,
+        scope: &ws.scope,
         config: &config,
         embedder: &embedder,
         embedder_seed,
@@ -82,7 +89,12 @@ impl Scope {
     }
 }
 
-fn parse_scope(raw: Option<&str>, config: &Config, paths: &Paths) -> Result<Scope, TomeError> {
+fn parse_scope(
+    raw: Option<&str>,
+    config: &Config,
+    paths: &Paths,
+    ws_scope: &crate::workspace::Scope,
+) -> Result<Scope, TomeError> {
     let Some(s) = raw else {
         return Ok(Scope::All);
     };
@@ -97,7 +109,7 @@ fn parse_scope(raw: Option<&str>, config: &Config, paths: &Paths) -> Result<Scop
         // also cross-check the index here so a typo on a plugin that has
         // never been enabled exits 20 immediately rather than emerging from
         // the lifecycle's resolver.
-        let enabled = read_enabled_plugins(paths, &id.catalog)?;
+        let enabled = read_enabled_plugins(paths, ws_scope, &id.catalog)?;
         if !enabled.iter().any(|p| p == &id.plugin) {
             return Err(TomeError::PluginNotFound(id.to_string()));
         }
@@ -110,11 +122,15 @@ fn parse_scope(raw: Option<&str>, config: &Config, paths: &Paths) -> Result<Scop
     }
 }
 
-fn resolve_targets(scope: &Scope, paths: &Paths) -> Result<Vec<PluginId>, TomeError> {
+fn resolve_targets(
+    scope: &Scope,
+    paths: &Paths,
+    ws_scope: &crate::workspace::Scope,
+) -> Result<Vec<PluginId>, TomeError> {
     match scope {
         Scope::Plugin(id) => Ok(vec![id.clone()]),
         Scope::Catalog(c) => {
-            let names = read_enabled_plugins(paths, c)?;
+            let names = read_enabled_plugins(paths, ws_scope, c)?;
             Ok(names
                 .into_iter()
                 .map(|p| PluginId {
@@ -129,7 +145,7 @@ fn resolve_targets(scope: &Scope, paths: &Paths) -> Result<Vec<PluginId>, TomeEr
             // catalogs and re-opening the connection.
             let (embedder_seed, reranker_seed) = registry_seeds();
             let conn = index::open(
-                &paths.index_db,
+                &paths.index_db_for(ws_scope),
                 &OpenOptions {
                     embedder: embedder_seed,
                     reranker: reranker_seed,
@@ -163,10 +179,14 @@ fn resolve_targets(scope: &Scope, paths: &Paths) -> Result<Vec<PluginId>, TomeEr
     }
 }
 
-fn read_enabled_plugins(paths: &Paths, catalog: &str) -> Result<Vec<String>, TomeError> {
+fn read_enabled_plugins(
+    paths: &Paths,
+    ws_scope: &crate::workspace::Scope,
+    catalog: &str,
+) -> Result<Vec<String>, TomeError> {
     let (embedder_seed, reranker_seed) = registry_seeds();
     let conn = index::open(
-        &paths.index_db,
+        &paths.index_db_for(ws_scope),
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,
