@@ -2,7 +2,7 @@
 
 > **Purpose**: Document all external services, APIs, databases, and third-party integrations.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US3 — reference-counted catalog clones; workspaces.txt now load-bearing for refcount enumeration)
+> **Last Updated**: 2026-05-14 (Phase 3 / US4 — doctor command with harness detection at 6 known install directories; probe by existence only, no content reads)
 
 ## Databases & Data Stores
 
@@ -36,7 +36,7 @@
 
 ## Authentication & Authorization
 
-Phase 1–9 has no explicit application-layer authentication. Phase 3 / US1 MCP server similarly has no auth mechanism — it is stdio-based (embedding in Claude Code harness provides transport-level auth). Phase 3 / US2 adds workspace scoping but no auth model changes. Phase 3 / US3 lifts the single-scope-per-URL restriction but does not introduce per-scope ACLs.
+Phase 1–9 has no explicit application-layer authentication. Phase 3 / US1 MCP server similarly has no auth mechanism — it is stdio-based (embedding in Claude Code harness provides transport-level auth). Phase 3 / US2 adds workspace scoping but no auth model changes. Phase 3 / US3 lifts the single-scope-per-URL restriction but does not introduce per-scope ACLs. Phase 3 / US4 adds doctor diagnostics without new auth surfaces.
 
 - **Git operations**: Inherit system SSH keys and HTTP credential helpers (if configured in `~/.gitconfig`).
 - **Hugging Face model downloads**: No API key required; public `https://huggingface.co/` URLs are freely accessible (MODEL_REGISTRY pinned to MIT-licensed BGE variants).
@@ -44,6 +44,7 @@ Phase 1–9 has no explicit application-layer authentication. Phase 3 / US1 MCP 
 - **Workspace ownership**: Implicitly owned by the user who runs `tome workspace init`; no explicit permission model (Phase 3 / US2).
 - **Credential scrubbing**: All Git stderr and model download error chains pass through `scrub_credentials()` before logging (principle XIII; extended in Phase 3 to cover HF URLs).
 - **MCP server identity** (Phase 3 / US1): Identified by `server_info { name: "tome", version: "0.x" }` in the MCP handshake; no per-call authentication.
+- **Doctor read-only access** (Phase 3 / US4): Diagnostics are read-only; repairs (`--fix`) require interactive confirmation; no auth model added.
 
 ---
 
@@ -70,6 +71,7 @@ None in Phase 1–9. Phase 3 / US1 introduces internal library APIs:
 - **Failure mode**: Network error → `TomeError::Io` (exit 7); checksum mismatch → `TomeError::ModelChecksumMismatch` (exit 32); corrupted registry → `TomeError::ModelCorrupt` (exit 31)
 - **Explicit management**: Phase 6 wires `tome models {download,list,remove}` to let users explicitly manage artefacts; `tome models list --verify` invokes SHA-256 per-file validation via `embedding::download::sha256_file()`
 - **Status visibility**: Phase 8 adds `tome status [--verify]` to audit model directory state without triggering downloads; per-model validation only runs when `--verify` is set
+- **Doctor integration** (Phase 3 / US4): `tome doctor` reports model health (presence, SHA-256 integrity, drift detection); `--fix` can download missing or remove corrupt models
 - **Scope**: Models are global (shared across all workspaces and global scope); downloaded to `${XDG_DATA_HOME}/tome/models/` regardless of active scope (Phase 3 / US2)
 
 ---
@@ -98,6 +100,7 @@ No TTL-based eviction. Phase 1–9 uses explicit user commands for cleanup (prin
 | Structured logging (via `tracing`) | Diagnostic tracing to stderr (CLI) and JSON-lines to file (MCP server) | CLI: `RUST_LOG` or `TOME_LOG` environment variables; independent of `--json` stdout mode. MCP: JSON-lines to `${XDG_STATE_HOME}/tome/mcp.log` per `contracts/log-format.md`; 10 MiB rotation cap; stderr reserved for fatal startup errors only per FR-222 |
 | Exit codes | Scriptable error handling | 18+ enumerated codes (Phase 2: 0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 30, 31, 32); Phase 3 adds codes 60–61 (MCP), 70–75 (workspace/schema including exit 73 for write-path schema version too new); documented in `specs/002-phase-2-plugins-index/contracts/exit-codes.md` and `specs/003-phase-3-mcp-workspaces/contracts/exit-codes-p3.md` |
 | Status checks | Per-subsystem health via `tome status` | Phase 8 — health report includes models, index, drift state; lazy validation with `--verify` flag; Phase 3 / US2 — `tome workspace info` reports scope identity + catalog/plugin/skill counts + embedder identity; no health semantics (informational only) |
+| Doctor diagnostics | Subsystem health assessment + harness discovery | Phase 3 / US4 — `tome doctor [--fix]` reports model/index/workspace/drift health; repairs available with `--fix` + optional `--force` for non-interactive mode; harness probe at 6 known install locations (Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Continue) for ecosystem integration visibility |
 
 ---
 
@@ -105,13 +108,42 @@ No TTL-based eviction. Phase 1–9 uses explicit user commands for cleanup (prin
 
 | Service | Purpose | Configuration |
 |---------|---------|---------------|
-| XDG-compliant filesystem | Configuration, catalogs, models, index | Global: `${XDG_CONFIG_HOME}/tome/config.toml`, `${XDG_DATA_HOME}/tome/catalogs/<sha>/`, `${XDG_DATA_HOME}/tome/models/`, `${XDG_DATA_HOME}/tome/index.db`; Workspace: `${WORKSPACE}/.tome/config.toml`, `${WORKSPACE}/.tome/catalogs/<sha>/`, `${WORKSPACE}/.tome/index.db` (Phase 3 Foundational F1); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]`; Phase 9 extends catalog removal with cascade-disable index cleanup; Foundational F8 adds MCP log to `${XDG_STATE_HOME}/tome/mcp.log`; Phase 3 / US1 MCP server operates on same index + models + config per scope; Phase 3 / US2 adds `${XDG_DATA_HOME}/tome/workspaces.txt` opt-in registry; Phase 3 / US3 makes workspaces.txt load-bearing for refcount enumeration; atomic `.tome/` dir creation via tempfile staging (staging dir inside workspace root for POSIX-atomic rename, chmod 0700 before content lands) |
+| XDG-compliant filesystem | Configuration, catalogs, models, index | Global: `${XDG_CONFIG_HOME}/tome/config.toml`, `${XDG_DATA_HOME}/tome/catalogs/<sha>/`, `${XDG_DATA_HOME}/tome/models/`, `${XDG_DATA_HOME}/tome/index.db`; Workspace: `${WORKSPACE}/.tome/config.toml`, `${WORKSPACE}/.tome/catalogs/<sha>/`, `${WORKSPACE}/.tome/index.db` (Phase 3 Foundational F1); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]`; Phase 9 extends catalog removal with cascade-disable index cleanup; Foundational F8 adds MCP log to `${XDG_STATE_HOME}/tome/mcp.log`; Phase 3 / US1 MCP server operates on same index + models + config per scope; Phase 3 / US2 adds `${XDG_DATA_HOME}/tome/workspaces.txt` opt-in registry; Phase 3 / US3 makes workspaces.txt load-bearing for refcount enumeration; atomic `.tome/` dir creation via tempfile staging (staging dir inside workspace root for POSIX-atomic rename, chmod 0700 before content lands); Phase 3 / US4 doctor uses same subsystem infrastructure (no new files) |
 
 ---
 
 ## Email & Notifications
 
 None in Phase 1–9.
+
+---
+
+## Agentic Coding Harness Integration (Phase 3 / US4)
+
+Phase 3 / US4 adds harness discovery to support ecosystem integration without creating transitive tool ecosystem dependencies.
+
+| Harness | Install Location | Discovery | Purpose | Probe Details |
+|---------|------------------|-----------|---------|---------------|
+| Claude Code | `~/.claude` | Existence only | First-party harness | Directory presence check in `src/doctor/harness_detect.rs` |
+| Codex | `~/.codex` | Existence only | Third-party harness | Compile-time `KNOWN_HARNESSES` list; no config reads |
+| Cursor | `~/.cursor` | Existence only | Third-party harness | Machine name = `cursor`; dot-dir = `.cursor` |
+| Gemini CLI | `~/.gemini` | Existence only | Third-party harness | Machine name = `gemini`; dot-dir = `.gemini` |
+| OpenCode | `~/.opencode` | Existence only | Third-party harness | Machine name = `opencode`; dot-dir = `.opencode` |
+| Continue | `~/.continue` | Existence only | Third-party harness | Machine name = `continue`; dot-dir = `.continue` |
+
+**Discovery semantics (research §R-7, FR-167):**
+- **Probe timing**: At `tome doctor` startup, scans `$HOME` for each harness directory
+- **Scope**: Fixed compile-time list — no dynamic discovery, no unknown harness scanning
+- **Content read**: Existence only — `path.is_dir()` check; no manifest parsing, no config read, no version detection
+- **Report shape**: `HarnessPresence { name, path, present: bool }` per contract `contracts/doctor.md` §Output
+- **Output**: Human-readable banner + full list in `--json` for ecosystem visibility
+- **Update path**: Adding a harness requires code change + contract update (not user-configurable)
+
+**Rationale:**
+- Decouples Tome from per-harness schemas (avoid schema coupling, principle XIV)
+- Keeps doctor cheap + side-effect-free (no IO beyond existence check)
+- Signals harness availability to the operator without tight coupling
+- Supports future ecosystem discovery without immediate implementation cost
 
 ---
 
@@ -125,7 +157,7 @@ None in Phase 1–9.
 | `XDG_STATE_HOME` | No (defaults to `~/.local/state`) | Override state directory (MCP log) | `/opt/state` | Foundational F8 |
 | `TOME_LOG` | No | Custom log filter (overrides `RUST_LOG`) | `debug`, `info`, `tome=trace` | — |
 | `RUST_LOG` | No | Standard Rust log filter | `info`, `warn` | — |
-| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR`; phase 8: status report respects `NO_COLOR`; phase 9: cascade-disable output respects `NO_COLOR`; phase 3/US1: MCP stdout is protocol-only (no color possible); phase 3/US2: workspace info respects `NO_COLOR`; phase 3/US3: scope-aware commands respect `NO_COLOR` |
+| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR`; phase 8: status report respects `NO_COLOR`; phase 9: cascade-disable output respects `NO_COLOR`; phase 3/US1: MCP stdout is protocol-only (no color possible); phase 3/US2: workspace info respects `NO_COLOR`; phase 3/US3: scope-aware commands respect `NO_COLOR`; phase 3/US4: doctor report respects `NO_COLOR` |
 | `CLICOLOR` | No | Disable coloured output (alternate) | `0` to disable | — |
 
 ---
@@ -248,4 +280,4 @@ None in Phase 1–9.
 
 ---
 
-*This document maps external service dependencies and failure modes. Updated for Phase 3 Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 + Phase 3 / US3: schema migration framework rewrite + MCP server scaffolding scoped to `src/mcp/` + workspace info/init commands with scope-aware path resolution + opt-in workspace registry file + reference-counted catalog clone sharing across scopes.*
+*This document maps external service dependencies and failure modes. Updated for Phase 3 Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 + Phase 3 / US3 + Phase 3 / US4: schema migration framework rewrite + MCP server scaffolding scoped to `src/mcp/` + workspace info/init commands with scope-aware path resolution + opt-in workspace registry file + reference-counted catalog clone sharing across scopes + doctor subsystem checks with harness discovery at 6 known install locations.*

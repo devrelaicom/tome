@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US3 catalog-clone ref-counting incremental)
+> **Last Updated**: 2026-05-14 (Phase 3 / US4 doctor --fix incremental)
 
 ## Technical Debt
 
@@ -29,6 +29,7 @@ Items to address when working in the area:
 | TD-015 | `contracts/mcp-server.md` (Phase 3 F8) | Contract drift on startup failure codes | Documentation | Low | Contract lists exit 35 for "Index DB missing" but production code surfaces exit 60 (`McpStartupFailed { reason: "index_missing" }`). 35 maps to `VectorExtensionInitFailure`; neither fits. 60-with-reason approach is more accurate; amend contract in polish pass |
 | TD-016 | `src/workspace/init.rs` (Phase 3 US2) | `.tome.old/` orphan cleanup on crash between rename-aside and rename-in | Recovery cleanup | Low | If `--force` rename-in fails after moving old `.tome/` to `.tome.old/`, rollback restores the old state. But if a crash occurs between rename-aside and rename-in (before rollback logic), `.tome.old/` is left orphan. Doctor (future Phase, out of scope for US2) should surface and offer cleanup. Currently documented in `contracts/workspace-init.md` §Side effects as a known limitation. |
 | TD-017 | `src/catalog/store.rs::reference_count` (Phase 3 US3) | Catalog cache TOCTOU window between pre-check and `remove_dir_all` | Concurrency safety | Low | Two processes racing `tome catalog remove` may both observe empty refs and both call `remove_dir_all` (benign: one wins, one no-ops). Worse: process A observes empty, process B adds URL before A deletes clone → dangling reference (recovered by `tome catalog update` re-clone). Documented design; same profile as Phase 9 cascade pre-check. No lock taken because readers shouldn't block writers. |
+| TD-018 | `src/doctor/harness_detect.rs` (Phase 3 US4) | Harness-detected list is privacy-sensitive; if a future feature transmits doctor reports, this list leaks which tools are installed | Privacy | Low | Presently local-only (never transmitted); document explicitly. Review at design time if any downstream feature proposes report transmission (e.g., crash reporting, bug-filing UI). Recommend opt-in privacy gate before enabling network transmission. |
 | TD-020 | Error categorisation | All Phase 1 + Phase 2 codes are enumerated; no catch-all variants | Debuggability | Low | Current approach is sound; closed set enforces completeness |
 | TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low | — |
 
@@ -92,6 +93,8 @@ Code areas that are brittle or risky to modify:
 | `src/mcp/preflight.rs::verify_embedder_artefacts` | Runs full SHA-256 over primary embedder (~66 MB) at every startup; no caching or early exit | By design for long-running server correctness (FR-110). Cold-cache startup latency visible to harness. Defer `--verify` skip flag to Phase 4+ unless profiling shows impact (TD-012). In test, use `StubEmbedder` to avoid real hash cost |
 | `src/mcp/tools/{search_skills,get_skill}.rs::tome_to_mcp` | Error translation from TomeError to structured MCP codes must be exhaustive; missing variants leak as generic `internal_error` | Test assertion in `tests/mcp_server.rs` that all tool error paths translate to specific codes; audit on every new TomeError variant. No generic fallback (FR-108) |
 | `src/workspace/init.rs::init` | Staging directory created inside workspace root to ensure same-filesystem rename atomicity (tempfile within the target directory). If workspace root is not on the intended filesystem, stage-rename could silently cross mount boundary (not atomic). Crash between rename-aside and rename-in leaves `.tome.old/` orphan. Rollback logic must restore `.tome/` from `.tome.old/` on final-rename failure. | Atomic staging pattern is sound: create in workspace root to guarantee same filesystem. `.tome.old/` orphans are recorded as TD-016; doctor (future) will clean up. Test interruption scenarios thoroughly before shipping US3 (Phase 10+). Test rollback path on rename failure (pre-existing .tome/` with --force). |
+| `src/doctor/harness_detect.rs::KNOWN_HARNESSES` | Fixed compile-time list of harness directories; adding a harness requires code change + contract sync (JSON enum) | Before adding: verify harness is widely deployed + stable. Update contract in `specs/003-phase-3-mcp-workspaces/contracts/doctor.md`. No runtime discovery — by design to avoid `$HOME` scanning |
+| `src/doctor/fixes.rs` | Three auto-fixable repair classes (model re-download, catalog re-clone, schema forward-migration); each re-uses existing config-derived URLs and atomicity patterns | Each repair failure is logged and doesn't block subsequent repairs. After all repairs run, affected subsystems are re-checked and re-classified. Destructive repairs (drift, schema-too-new, manifest-invalid, orphan clone) are never auto-applied; they surface as suggested commands with `auto_fixable: false`. Monitor for edge cases where a repair might need to handle partially-failed state. |
 
 ## Deprecated Code
 
@@ -108,11 +111,12 @@ All Phase 1, Phase 2, Phase 3 Foundational, Phase 4, Phase 5, Phase 6, Phase 7, 
 Known performance issues:
 
 | ID | Area | Description | Impact | Mitigation |
-|----|------|-------------|--------|-----------|
+|----|------|-------------|--------|------------|
 | PERF-001 | Catalog refresh | Each `git fetch` is sequential; large catalogs block the command | Slow UX for multiple catalogs | Phase 1 spec requires sequential; parallelize in Phase 2 with async |
 | PERF-010 | Cache validation | Manifest is re-parsed on every `show` command; no caching layer | Negligible impact (small files) | Cache not needed in Phase 1; revisit if Phase 2 manifests grow large |
 | PERF-020 | Model download progress | Download wrapped in indeterminate spinner, not byte-progress bar | Poor visibility on large files | Enhancement for Phase 3 polish (TD-010). Phase 7 `tome reindex` also lacks per-skill progress visibility |
 | PERF-030 | MCP pre-flight timing | SHA-256 over ~66 MB primary embedder file on every startup | Visible startup latency in cold cache | Acceptable for daemon; defer `--verify` optimization to Phase 4+ unless profiling shows impact (TD-012) |
+| PERF-040 | Doctor command latency | Catalog enumeration + harness probing on every run (non-cached) | Slower than status; expected for comprehensive diagnosis | By design: status is the narrow fast path (~200 ms); doctor is the broad slower path for troubleshooting |
 
 ## TODO Items
 
@@ -165,6 +169,7 @@ Areas that could benefit from enhancement:
 | McpState test seed isolation (TD-014) | Hard-coded to MODEL_REGISTRY; can't test with stub seeds | Refactor McpState to carry explicit `embedder_seed` / `reranker_seed` | Better test isolation for MCP tool handlers |
 | Workspace doctor command | No doctor or orphan-cleanup facility | Add `tome doctor` command to detect `.tome.old/` orphans and offer cleanup | Recovery aid for crashed `--force` init |
 | Catalog cache `--force` re-add | Not yet implemented; users must manually remove cached clones | Implement `tome catalog add --force` to bypass cache re-use on URL re-add | Users concerned about URL hijacking can force fresh clone |
+| Doctor report transmission | Report currently local-only; no transmission path implemented | If adding a transmission feature (crash reporting, bug-filing), implement privacy gate for harness-detected list | Respect user privacy; harness list is sensitive (leaks installed tools) |
 
 ## Monitoring Gaps
 
@@ -179,6 +184,7 @@ Areas lacking proper observability:
 | MCP pre-flight timing | SHA-256 verify of large embedder file not instrumented | Cold-cache startup latency not observable | Low (acceptable trade-off; defer unless profiling shows impact per TD-012) |
 | Workspace registry state | No metrics on registry size or dedupe ratio | Can't detect growth or churn patterns | Low (opt-in registry; steady-state expected to be small) |
 | Catalog cache TOCTOU races | No instrumentation of concurrent `remove` races or dangling reference recovery | Can't detect real-world contention or re-clone frequency | Low (opt-in registry centralizes scope set; default install has only global scope) |
+| Doctor repair outcomes | No metrics on which repairs succeeded/failed or how frequently | Can't track real-world doctor --fix usage or effectiveness | Low (reports include success/failure per repair; log analysis sufficient for early phase) |
 
 ## Design Tradeoffs
 
@@ -195,6 +201,8 @@ Intentional design decisions with known limitations:
 | **Structured error codes for MCP tools** (Phase 3 F8) | `src/mcp/tools/{search_skills,get_skill}.rs::tome_to_mcp` | Tool errors map to contract-defined structured codes (`unknown_catalog`, `unknown_plugin`, etc.), never exposing internal TomeError variants | MCP harness sees opaque error codes; no domain-error info leakage | By design. Security + clarity: harness cannot infer internal structure or state from error messages. |
 | **Forward-only schema migrations** (Phase 3 F7) | `src/index/migrations.rs` + `TomeError::SchemaVersionTooNew` (exit 73) | Simpler DB evolution: v2.1 patch adds one migration row; older Tome refuses newer DBs. No down-migration complexity | Users on older Tome version cannot open DBs created/modified by newer version | Acceptable: users upgrade Tome regularly. Phase 1 is shipped and stable; Phase 2+ are synchronized. Old-version downgrade is not a supported use case. |
 | **Workspace staging inside root** (Phase 3 US2) | `src/workspace/init.rs::init` | Ensures same-filesystem rename atomicity; staging directory created via `tempfile::Builder::tempdir_in(&absolute)` | If workspace root spans a mount boundary, the atomic-rename assumption holds true ONLY for files under workspace root (tempfile stays in workspace root). Crash between rename-aside and rename-in leaves `.tome.old/` orphan (recovered by doctor in future phase). Rollback on final-rename failure restores old `.tome/` from `.tome.old/`. | By design. Atomicity is guaranteed for common case (workspace on single mount). TD-016 tracks `.tome.old/` orphan recovery. Test all error paths thoroughly before Phase 10+. |
+| **Doctor harness detection existence-only** (Phase 3 US4, FR-167) | `src/doctor/harness_detect.rs::probe` | Detection is fixed compile-time list of directories; directory-existence check only. No `$HOME` scanning, no config parsing. | Harness list is exclusive; new harnesses require code change + contract sync. Trade-off: precise known list vs. discovery flexibility. | By design for privacy + simplicity. No runtime scanning of user home. Detected-harness list is local-only and privacy-sensitive; never transmitted unless a future feature explicitly adds network transmission (which should include privacy gate per TD-018). |
+| **Doctor `--fix` network gate** (Phase 3 US4) | `src/commands/doctor.rs`, `src/doctor/fixes.rs` | All network access (model re-download, catalog re-clone) gated behind `--fix` flag. Read-only diagnostic is default. | Users get a non-invasive report before deciding to attempt repairs. Trade-off: two invocations (report + fix) vs. automatic repairs. | By design for transparency + user control. Report surfaces suggested fixes; user decides whether to run `--fix`. No privilege escalation (all URLs/paths come from user's config). |
 
 ## Risk Summary by Phase
 
@@ -268,11 +276,20 @@ Intentional design decisions with known limitations:
 - ✓ Dangling reference recovery: next `tome catalog update` re-clones
 - ✓ Without opt-in workspace registry (default): reference-count is global-only; removal deletes clone even if workspace references it (user cost of not opting in)
 
+**US4 Complete (Doctor Command)**:
+- ✓ Read-only diagnostic by default; network access gated entirely behind `--fix` flag
+- ✓ Harness detection via fixed compile-time list (directory existence only, no config parsing, FR-167)
+- ✓ Harness-detected list is local-only and privacy-sensitive; documented for future transmission features (TD-018)
+- ✓ Three auto-fixable repairs: model re-download, catalog re-clone, schema forward-migration (all idempotent)
+- ✓ Four un-fixable repairs surfaced as suggested commands: drift, schema-too-new, manifest-invalid, orphan clones
+- ✓ Exit 0 for Ok, exit 1 for Degraded/Unhealthy, exit 75 for `--fix` with remaining manual fixes
+- ✓ No privilege escalation or destructive operations
+
 **In progress**:
 - T088: Real BGE model testing against SC-001/SC-002 (happy-path query, protocol purity, latency, SIGINT)
 - Query command full implementation
 - Reindex command full implementation
-- US4–US5 MCP tool implementations
+- US5–US6 MCP tool implementations
 
 **Key risks to monitor**:
 - SEC-001: BGE model testing still pending (T088)
@@ -285,6 +302,7 @@ Intentional design decisions with known limitations:
 - TD-015: Contract drift on exit codes (60 vs. 35 for index missing; amend contract)
 - TD-016: `.tome.old/` orphan cleanup (doctor, Phase 10+)
 - TD-017: Catalog cache TOCTOU on `reference_count` (documented and benign; same profile as cascade pre-check)
+- TD-018: Harness-detected list privacy gate for future transmission features (review at design time)
 
 ### Phase 4 (Complete)
 
@@ -422,6 +440,31 @@ Intentional design decisions with known limitations:
 
 **Integration test coverage** (Phase 3 US3):
 - `tests/catalog_remove.rs` extended for ref-counting semantics (global + workspace, dangling recovery)
+
+### Phase 3 US4 (Complete)
+
+**Completed (Doctor Command)**:
+- ✓ `tome doctor [--fix] [--json]` read-only diagnostic + optional automatic repairs
+- ✓ Harness detection: fixed compile-time `KNOWN_HARNESSES` list; directory-existence only (no config parsing, FR-167)
+- ✓ Network access gated entirely behind `--fix` flag (read-only report is the default, cost-free)
+- ✓ Three auto-fixable repairs: model re-download (idempotent, config-driven URLs), catalog re-clone (idempotent, config-driven URLs), schema forward-migration (idempotent, transactional)
+- ✓ Four un-fixable repairs surfaced as suggested commands (require user decision): embedder/reranker drift, schema-too-new, manifest-invalid, orphan catalogs
+- ✓ No privilege escalation, no destructive operations (never deletes enabled/disabled plugins or schema rows)
+- ✓ Harness-detected list is local-only and privacy-sensitive; documented for future review when transmission features proposed (TD-018)
+
+**Security posture**:
+- Default behavior is non-invasive diagnostic (no network, no writes, no privilege elevation)
+- Repairs re-use existing infrastructure (atomicity patterns, credential scrubbing, error handling)
+- Error exit 75 (`DoctorFixNotSafe`) communicates "fix ran but developer needs to complete manual steps"
+- No domain-error leakage in suggested fixes (commands are in plain language, URLs are from user config)
+
+**Design constraints**:
+- Harness list is exclusive (known tools only); new harnesses require code change + contract sync (by design for privacy + simplicity)
+- Doctor latency acceptable for diagnostic tool (slower than status because of catalog enumeration + harness probing, but still sub-second)
+
+**Integration test coverage** (Phase 3 US4):
+- `src/doctor/harness_detect.rs` unit tests (fixed list, directory existence only, no false positives)
+- `src/doctor/fixes.rs` repair logic tested via library API (model re-download, catalog re-clone, schema migration)
 
 ---
 

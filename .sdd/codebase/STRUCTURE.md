@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Story 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade) + 2026-05-14 (Foundational F7 + F8 — schema migrations framework, MCP async island) + 2026-05-14 (Phase 3 User Story 1 — MCP server wired) + 2026-05-14 (Phase 3 User Story 2 — workspace context, `tome workspace info/init`) + 2026-05-14 (Phase 3 User Story 3 — per-command scope honouring, reference-counted catalog clone cleanup)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Story 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade) + 2026-05-14 (Foundational F7 + F8 — schema migrations framework, MCP async island) + 2026-05-14 (Phase 3 User Story 1 — MCP server wired) + 2026-05-14 (Phase 3 User Story 2 — workspace context, `tome workspace info/init`) + 2026-05-14 (Phase 3 User Story 3 — per-command scope honouring, reference-counted catalog clone cleanup) + 2026-05-14 (Phase 3 User Story 4 — `tome doctor` diagnostic layer with auto-fix)
 
 ## Directory Layout
 
@@ -47,6 +47,7 @@ tome/
 │   │   ├── query.rs               # `tome query <text>` — KNN search (Phase 3)
 │   │   ├── reindex.rs             # `tome reindex [<scope>] [--force]` — re-embedding (Phase 7; ~280 lines)
 │   │   ├── status.rs              # `tome status [--verify]` — health diagnostics (Phase 8; ~330 lines)
+│   │   ├── doctor.rs              # `tome doctor [--fix] [--verify]` — comprehensive diagnostics + auto-repairs (Phase 3 US4; ~260 lines)
 │   │   └── mcp.rs                 # `tome mcp` — MCP server dispatcher (Phase 3 US1; ~20 lines)
 │   ├── config.rs                  # Config and CatalogEntry structures (serde + toml)
 │   ├── paths.rs                   # XDG-aware path resolution, cache key computation (scope-parametrized accessors Phase 3 US2)
@@ -66,6 +67,12 @@ tome/
 │   │   ├── info.rs                # WorkspaceInfo + ModelIdentity types (emit-only; library assemble function)
 │   │   ├── init.rs                # InitOutcome type + atomic .tome/ creation logic
 │   │   └── inventory.rs           # Optional workspace registry (${state_dir}/workspaces.txt)
+│   ├── doctor/                    # Comprehensive diagnostics + auto-repairs (Phase 3 US4)
+│   │   ├── mod.rs                 # Orchestrator: assemble_report(scope, paths, home, verify) → DoctorReport (~120 lines)
+│   │   ├── report.rs              # DoctorReport, CatalogCacheHealth, HarnessPresence, DoctorClassification, SuggestedFix (~130 lines)
+│   │   ├── checks.rs              # check_catalogs(paths, scope) — enumerates registered catalogs, classifies state (~200 lines)
+│   │   ├── harness_detect.rs      # probe(home) — detects 6 agentic coding harnesses (~100 lines)
+│   │   └── fixes.rs               # apply(&mut report, paths, scope) — safe auto-repairs + re_assemble (~200 lines)
 │   ├── index/                     # SQLite + sqlite-vec local skill index (Phase 2/7)
 │   │   ├── mod.rs                 # Re-exports (Phase 7: exports reindex_plugin_atomic)
 │   │   ├── schema.rs              # CREATE TABLE statements, MetaSeed
@@ -135,6 +142,8 @@ tome/
 │   ├── reindex.rs                 # test: reindex via library API with StubEmbedder (Phase 7)
 │   ├── status.rs                  # test: health report (Phase 8)
 │   ├── version_output.rs          # test: extended --version output (Phase 8)
+│   ├── doctor.rs                  # test: doctor diagnostics + classify logic (Phase 3 US4)
+│   ├── doctor_json.rs             # test: doctor JSON output (Phase 3 US4)
 │   ├── workspace_resolution.rs    # test: workspace scope resolution (Phase 3 US2)
 │   ├── workspace_info.rs          # test: workspace info diagnostics (Phase 3 US2)
 │   ├── workspace_init.rs          # test: atomic workspace init (Phase 3 US2)
@@ -206,17 +215,18 @@ tome/
 | Directory | Purpose | Public Interface |
 |-----------|---------|-------------------|
 | `src/main.rs` | Binary entry point; parses CLI, resolves scope (Phase 3 US2, Phase 3 US3), installs signal handler, dispatches, handles errors. Phase 8: pre-parse hook for `--version`. Phase 3 US1: skips logging/signals for MCP. Phase 3 US2: pre-dispatch workspace resolution. Phase 3 US3: all commands receive scope-resolved `ResolvedScope`. | — (entry point, not a module) |
-| `src/lib.rs` | Library surface; aggregates `catalog`, `cli`, `commands`, `config`, `error`, `logging`, `output`, `paths`, `plugin`, `workspace`, `index`, `embedding`, `presentation`, `mcp`. Phase 3 US2: workspace now public. | Public for integration tests. |
-| `src/cli.rs` | clap derive definitions for global flags (`--json`, `-v`/`-vv`) and subcommands. Phase 8: `StatusArgs` with `--verify` flag, `disable_version_flag = true`. Phase 3 US1: `McpArgs` added. Phase 3 US2: `GlobalScopeArgs` with `--workspace` / `--global` flags, `WorkspaceCommand` enum. Phase 3 US3: all commands routed through scope resolution. | `Cli`, `Command`, `CatalogCommand`, `ModelsCommand`, `PluginCommand`, `ReindexCommand`, `StatusArgs`, `McpArgs`, `WorkspaceArgs`, arg structs. |
-| `src/error.rs` | Closed `TomeError` enum; exit code and category mapping; error variants. Foundational F7: adds `SchemaVersionTooNew` (73) and `SchemaMigrationFailed` (74). Phase 3 US1: adds `McpStartupFailed`, `McpProtocolIo`. Phase 3 US2: adds `WorkspaceNotFound` (71), `WorkspaceMalformed` (75), `WorkspaceConflict` (72). | `TomeError`, `ManifestInvalid`, `PluginState`, etc. (consumed by all). |
+| `src/lib.rs` | Library surface; aggregates `catalog`, `cli`, `commands`, `config`, `error`, `logging`, `output`, `paths`, `plugin`, `workspace`, `doctor`, `index`, `embedding`, `presentation`, `mcp`. Phase 3 US2: workspace now public. Phase 3 US4: doctor now public. | Public for integration tests. |
+| `src/cli.rs` | clap derive definitions for global flags (`--json`, `-v`/`-vv`) and subcommands. Phase 8: `StatusArgs` with `--verify` flag, `disable_version_flag = true`. Phase 3 US1: `McpArgs` added. Phase 3 US2: `GlobalScopeArgs` with `--workspace` / `--global` flags, `WorkspaceCommand` enum. Phase 3 US3: all commands routed through scope resolution. Phase 3 US4: `DoctorArgs` with `--fix` and `--verify` flags. | `Cli`, `Command`, `CatalogCommand`, `ModelsCommand`, `PluginCommand`, `ReindexCommand`, `StatusArgs`, `DoctorArgs`, `McpArgs`, `WorkspaceArgs`, arg structs. |
+| `src/error.rs` | Closed `TomeError` enum; exit code and category mapping; error variants. Foundational F7: adds `SchemaVersionTooNew` (73) and `SchemaMigrationFailed` (74). Phase 3 US1: adds `McpStartupFailed`, `McpProtocolIo`. Phase 3 US2: adds `WorkspaceNotFound` (71), `WorkspaceMalformed` (75), `WorkspaceConflict` (72). Phase 3 US4: adds `DoctorFixNotSafe` (75). | `TomeError`, `ManifestInvalid`, `PluginState`, etc. (consumed by all). |
 | `src/catalog/` | Catalog management: manifest parsing, Git operations, atomic registry persistence. Phase 3 US3: adds reference_count() to walk scope configs and return list of scopes referencing a catalog URL. | `CatalogManifest`, `Git`, `store::load/save/write_atomic`, `store::reference_count`. |
-| `src/commands/` | Command handlers; implement `tome catalog/models/plugin/query/reindex/status/workspace/mcp <subcommand>`. Phase 3 US2: workspace command dispatcher. Phase 3 US3: all handlers receive `ResolvedScope` from pre-dispatch. | Per-subcommand `run(args, scope, mode)` functions; library entry points `reindex::run_with_deps()`, `status::assemble_report()`, `workspace::info::assemble()`, `workspace::init()`, `mcp::run(scope, paths)`. |
+| `src/commands/` | Command handlers; implement `tome catalog/models/plugin/query/reindex/status/doctor/workspace/mcp <subcommand>`. Phase 3 US2: workspace command dispatcher. Phase 3 US3: all handlers receive `ResolvedScope` from pre-dispatch. Phase 3 US4: doctor command + dispatcher. | Per-subcommand `run(args, scope, mode)` functions; library entry points `reindex::run_with_deps()`, `status::assemble_report()`, `doctor::assemble_report()`, `workspace::info::assemble()`, `workspace::init()`, `mcp::run(scope, paths)`. |
 | `src/config.rs` | `Config` and `CatalogEntry` struct definitions. | `Config`, `CatalogEntry`. |
 | `src/paths.rs` | XDG-aware path resolution and cache key computation. Scope-parametrized accessors (Phase 3 US2 deferred to Phase 10 for general refactor). | `Paths`, `Paths::resolve()`, `Paths::cache_dir_for()`, `Paths::model_path()`, `Paths::config_file_for(&Scope)`, `Paths::index_db_for(&Scope)`. |
 | `src/logging.rs` | Initialize `tracing-subscriber` (stderr-only, orthogonal to `--json`). | `Verbosity`, `init()`. |
 | `src/output.rs` | Format output as human text or JSON; TTY detection. | `Mode`, `write_json()`, `write_error()`, `stdout_is_tty()`. |
 | `src/plugin/` | Plugin metadata parsers, lifecycle orchestrator (enable/disable/reindex/cascade). | `PluginId`, `PluginRecord`, `PluginStatus`, `lifecycle::enable/disable/reindex_plugin/cascade_disable_for_catalog`, `lifecycle::auto_disable_orphan`, `lifecycle::resolve_plugin_dir`. |
 | `src/workspace/` | Workspace scope resolution, diagnostics, initialization (Phase 3 US2). | `Scope`, `ResolvedScope`, `ScopeSource`, `ScopeKind`, `WorkspaceInfo`, `ModelIdentity`, `InitOutcome`. |
+| `src/doctor/` | Comprehensive diagnostics + safe auto-repairs (Phase 3 US4). | `DoctorReport`, `DoctorClassification`, `assemble_report()`, `checks::check_catalogs()`, `harness_detect::probe()`, `fixes::apply()`, `fixes::re_assemble()`. |
 | `src/index/` | SQLite skills DB, KNN search, drift detection, forward-only migrations, atomic mutations. | `open()`, `acquire_lock()`, `enable_plugin_atomic()`, `reindex_plugin_atomic()`, `delete_by_plugin()`, `knn()`, `migrations::apply_pending()`, `MetaSeed`. |
 | `src/embedding/` | Model registry, download, embedder/reranker traits. | `Embedder`, `Reranker`, `Scored`, `FastembedEmbedder`, `FastembedReranker`, `MODEL_REGISTRY`. |
 | `src/presentation/` | Table, progress, colour, prompt wrappers. | `tables::*`, `progress::*`, `colour::*`, `prompt::*`. |
@@ -257,6 +267,8 @@ tome/
 | `tests/reindex.rs` | Reindex via library API with StubEmbedder (Phase 7). | Scope resolution (All / Catalog / Plugin), added/modified/removed/unchanged counts, force flag, orphan handling. |
 | `tests/status.rs` | Health report via library API (Phase 8). | Embedder/reranker/index state, drift detection, overall health classification. |
 | `tests/version_output.rs` | Extended --version output (Phase 8). | Model identities in plain text and JSON forms. |
+| `tests/doctor.rs` | Doctor diagnostics classification + library API (Phase 3 US4). | Report assembly, health classification, catalog state, harness detection. |
+| `tests/doctor_json.rs` | Doctor JSON output (Phase 3 US4). | NDJSON serialization, schema structure, all fields present. |
 | `tests/workspace_resolution.rs` | Workspace scope resolution (Phase 3 US2). | --workspace flag, --global flag, env var, CWD walk, fallback, conflict detection. |
 | `tests/workspace_info.rs` | Workspace info diagnostics (Phase 3 US2). | Global scope, workspace scope, bootstrap-not-yet, catalog/plugin/skill counts. |
 | `tests/workspace_init.rs` | Atomic workspace init (Phase 3 US2). | Happy path, --inherit-global flag, --force flag, atomic semantics, rollback. |
@@ -304,7 +316,7 @@ Each subcommand lives in its own file. All subcommands are dispatched from their
 
 ```
 src/commands/
-├── mod.rs           # Top-level dispatcher (catalog vs models vs plugin vs query vs reindex vs status vs workspace vs mcp)
+├── mod.rs           # Top-level dispatcher (catalog vs models vs plugin vs query vs reindex vs status vs doctor vs workspace vs mcp)
 ├── catalog/
 │   ├── mod.rs       # Dispatcher
 │   ├── add.rs       # Register a catalog; reuse cached clone if URL already cached (Phase 3 US3)
@@ -332,6 +344,7 @@ src/commands/
 ├── query.rs         # (Phase 3) Query/search
 ├── reindex.rs       # (Phase 7) Re-embedding (scope parsing, lazy embedder, aggregate output; ~280 lines)
 ├── status.rs        # (Phase 8) Health diagnostics (read-only; ~330 lines)
+├── doctor.rs        # (Phase 3 US4) Comprehensive diagnostics + auto-repairs (~260 lines)
 └── mcp.rs           # (Phase 3 US1) MCP server dispatcher (~20 lines)
 ```
 
@@ -380,10 +393,46 @@ pub fn assemble(scope: &ResolvedScope, paths: &Paths) -> Result<WorkspaceInfo, T
 pub fn init(target: &Path, inherit_global: bool, force: bool, paths: &Paths) -> Result<InitOutcome, TomeError>
 ```
 
+**Library Entry Point** (Phase 3 US4, `doctor.rs`):
+```rust
+pub fn assemble_report(scope: &ResolvedScope, paths: &Paths, home: &Path, verify: bool) -> Result<DoctorReport, TomeError>
+pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError>
+```
+
 **What It Cannot Do**:
 - Directly access `logging` (orthogonal).
 - Modify global state (all state mutations go through library functions).
 - Know about internal index or embedding details (those are opaque through trait interfaces).
+
+### Doctor Module: `src/doctor/` (Phase 3 US4)
+
+```
+src/doctor/
+├── mod.rs            # Orchestrator: assemble_report(scope, paths, home, verify) → DoctorReport (~120 lines)
+├── report.rs         # DoctorReport + emit-only types (~130 lines)
+├── checks.rs         # check_catalogs(paths, scope) — enumerates catalogs, classifies state (~200 lines)
+├── harness_detect.rs # probe(home) — detects harness directories (~100 lines)
+└── fixes.rs          # apply(&mut report, paths, scope) — auto-repairs + re_assemble (~200 lines)
+```
+
+**Responsibility** (library-shaped, no CLI):
+- Assemble comprehensive diagnostic report: models, index, catalogs, harnesses, drift.
+- Classify overall health (Ok / Degraded / Unhealthy).
+- Propose safe automated repairs (re-download, re-clone, schema-migrate).
+- Flag non-automatable issues for manual intervention.
+- Detect 6 well-known agentic coding harnesses (Claude Code, Cursor, Codex, Gemini, OpenCode, Continue).
+
+**Public Interface**:
+- `assemble_report(scope, paths, home, verify) -> Result<DoctorReport, TomeError>` — library entry; produces report without side-effects.
+- `DoctorReport`, `CatalogCacheHealth`, `HarnessPresence`, `DoctorClassification`, `SuggestedFix` — emit-only serializable types.
+- `fixes::apply(&mut report, paths, scope) -> Result<u32, TomeError>` — apply safe repairs, return count.
+- `fixes::re_assemble(&mut report)` — rebuild suggested_fixes + overall after repairs.
+- `fixes::has_remaining_manual_fixes(&report) -> bool` — predicate for exit 75.
+
+**What It Cannot Do**:
+- Know about CLI argument structures (those live in `commands/doctor/`).
+- Format output (that's `commands/doctor/` and `presentation/`'s job).
+- Mutate subsystems during assembly (read-only; repairs are in `fixes::apply` and are explicit).
 
 ### Plugin Module: `src/plugin/`
 
@@ -590,6 +639,8 @@ src/mcp/
 | New plugin metadata field | `src/plugin/manifest.rs` + `frontmatter.rs` | Add `homepage` URL to `PluginManifest` |
 | New lifecycle step | `src/plugin/lifecycle.rs` (private fn inside `enable`/`disable`/`reindex_plugin`/`cascade_disable_for_catalog`) | Add model pre-validation before lock |
 | New workspace scope logic | `src/workspace/resolution.rs` or `src/workspace/scope.rs` | Add workspace discovery strategy |
+| New doctor check | `src/doctor/checks.rs` | `pub fn check_foo(paths, scope) -> Result<FooHealth>` |
+| New doctor repair | `src/doctor/fixes.rs::apply_one` | Match new subsystem key, call repair function |
 | New index operation | `src/index/skills.rs` | `pub fn update_skill_embedding()` for selective re-embedding |
 | New KNN filter | `src/index/query.rs` + `QueryFilters` | Add `--min-version` filter |
 | New model kind | `src/embedding/mod.rs` (`ModelKind` enum) + `registry.rs` | Add reranker v2 variant |
@@ -604,6 +655,7 @@ src/mcp/
 | Test for models command | `tests/models_{download,list,remove}.rs` | Test `--verify`, `--force`, on-disk state handling |
 | Test for reindex scope | `tests/reindex.rs` + library API | Test All / Catalog / Plugin scope variants with StubEmbedder |
 | Test for status report | `tests/status.rs` + library API | Test health classification, drift detection, overall health |
+| Test for doctor diagnostics | `tests/doctor.rs` + library API | Test report assembly, classification, harness detection |
 | Test for cascade behavior | `tests/catalog_remove_cascade.rs` + library API | Test refuse/cascade/no-enabled cases with StubEmbedder |
 | Test for workspace feature | `tests/workspace_{resolution,info,init}.rs` + library API | Test scope resolution, info output, atomic init |
 | Test for schema migration | `tests/schema_migrations.rs` + synthetic fixture | Register temporary migration via `MIGRATIONS_OVERRIDE` |
@@ -616,18 +668,19 @@ src/mcp/
 
 | Category | Convention | Examples |
 |----------|-----------|----------|
-| **Struct/Enum** | PascalCase | `CatalogManifest`, `CatalogEntry`, `TomeError`, `PluginId`, `EnableOutcome`, `DisableOutcome`, `ReindexOutcome`, `Candidate`, `ModelState`, `StatusReport`, `OverallHealth`, `McpState`, `SkillMatch`, `Scope`, `ResolvedScope`, `ScopeKind`, `WorkspaceInfo`, `InitOutcome` |
+| **Struct/Enum** | PascalCase | `CatalogManifest`, `CatalogEntry`, `TomeError`, `PluginId`, `EnableOutcome`, `DisableOutcome`, `ReindexOutcome`, `Candidate`, `ModelState`, `StatusReport`, `OverallHealth`, `McpState`, `SkillMatch`, `Scope`, `ResolvedScope`, `ScopeKind`, `WorkspaceInfo`, `InitOutcome`, `DoctorReport`, `DoctorClassification`, `CatalogCacheHealth` |
 | **Trait** | PascalCase | `Embedder`, `Reranker`, `Git`, `ServerHandler` |
-| **Function/Method** | snake_case | `parse_and_validate()`, `install_signal_handler()`, `enable_plugin_atomic()`, `reindex_plugin_atomic()`, `resolve_plugin_dir()`, `cascade_disable_for_catalog()`, `assemble_report()`, `apply_pending()`, `search_skills()`, `get_skill()`, `resolve()`, `reference_count()` |
+| **Function/Method** | snake_case | `parse_and_validate()`, `install_signal_handler()`, `enable_plugin_atomic()`, `reindex_plugin_atomic()`, `resolve_plugin_dir()`, `cascade_disable_for_catalog()`, `assemble_report()`, `apply_pending()`, `search_skills()`, `get_skill()`, `resolve()`, `reference_count()`, `probe()`, `apply()`, `re_assemble()`, `has_remaining_manual_fixes()` |
 | **Constant** | SCREAMING_SNAKE_CASE | `MODEL_REGISTRY`, `SCHEMA_URI`, `HANDLER_INSTALLED`, `MIGRATIONS` |
-| **Module** | snake_case directory names | `src/catalog/`, `src/commands/`, `src/plugin/`, `src/workspace/`, `src/index/`, `src/mcp/` |
+| **Module** | snake_case directory names | `src/catalog/`, `src/commands/`, `src/plugin/`, `src/workspace/`, `src/doctor/`, `src/index/`, `src/mcp/` |
 | **Test** | `#[test]` with descriptive name | `#[test] fn unknown_field_is_rejected()` |
-| **Integration test file** | Matches the feature being tested | `tests/plugin_enable.rs` tests `tome plugin enable`; `tests/workspace_info.rs` tests `tome workspace info`; `tests/reindex.rs` tests `tome reindex`; `tests/status.rs` tests `tome status`; `tests/catalog_cache_refcount.rs` tests reference-counted cache (Phase 3 US3) |
+| **Integration test file** | Matches the feature being tested | `tests/plugin_enable.rs` tests `tome plugin enable`; `tests/workspace_info.rs` tests `tome workspace info`; `tests/reindex.rs` tests `tome reindex`; `tests/status.rs` tests `tome status`; `tests/doctor.rs` tests `tome doctor` diagnostics; `tests/catalog_cache_refcount.rs` tests reference-counted cache (Phase 3 US3) |
 | **Interactive loop level** | Private enum in interactive.rs | `LoopExit::Continue`, `LoopExit::Back`, `LoopExit::Quit` |
 | **Reindex scope** | PublicEnum in commands/reindex.rs | `Scope::All`, `Scope::Catalog`, `Scope::Plugin` |
 | **Workspace scope** | PublicEnum in workspace/scope.rs | `Scope::Global`, `Scope::Workspace`, `ScopeSource::Flag`, `ScopeSource::Env`, `ScopeSource::CwdWalk` |
 | **Model state classification** | PublicEnum in commands/models/mod.rs | `ModelState::Ok`, `ModelState::Missing`, `ModelState::Corrupt`, `ModelState::ChecksumMismatched` |
 | **Health classification** | PublicEnum in commands/status.rs | `OverallHealth::Ok`, `OverallHealth::Degraded`, `OverallHealth::Unhealthy` |
+| **Doctor classification** | PublicEnum in doctor/report.rs | `DoctorClassification::Ok`, `DoctorClassification::Degraded`, `DoctorClassification::Unhealthy`, `CatalogCacheState::Ok`, etc. |
 | **Migration application** | Function in index/migrations.rs | `apply_pending(conn, current, target)` returns Result with exit codes 51/73/74 |
 | **MCP tool input/output** | Per-tool module | `tools::search_skills::{Input, Output}`, `tools::get_skill::{Input, Output}` |
 
@@ -635,11 +688,12 @@ src/mcp/
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | Binary entry; resolves scope (Phase 3 US2/US3), parses CLI and dispatches to handlers. Phase 8: pre-parse hook for `--version`. Phase 3 US1: skips logging/signals for MCP. Phase 3 US3: all commands routed through scope resolution. |
+| `src/main.rs` | Binary entry; resolves scope (Phase 3 US2/US3), parses CLI and dispatches to handlers. Phase 8: pre-parse hook for `--version`. Phase 3 US1: skips logging/signals for MCP. Phase 3 US2: pre-dispatch workspace resolution. Phase 3 US3: all commands routed through scope resolution. |
 | `src/lib.rs` | Library aggregation; exposes public modules for tests. |
 | `tests/catalog_add.rs` | Integration tests directly import from `tome::*` and test the library. |
 | `tests/reindex.rs` | Library-API tests via `commands::reindex::run_with_deps()` with `StubEmbedder`. |
 | `tests/status.rs` | Library-API tests via `commands::status::assemble_report()`. |
+| `tests/doctor.rs` | Library-API tests via `doctor::assemble_report()` (Phase 3 US4). |
 | `tests/workspace_info.rs` | Library-API tests via `workspace::info::assemble()` (Phase 3 US2). |
 | `tests/workspace_init.rs` | Library-API tests via `workspace::init::init()` (Phase 3 US2). |
 | `tests/catalog_remove_cascade.rs` | Library-API tests for cascade via `lifecycle::cascade_disable_for_catalog()` with `StubEmbedder` (Phase 9). |
@@ -649,13 +703,13 @@ src/mcp/
 
 ## Module Stability Guarantees
 
-- **Stable Public API**: `catalog::git`, `catalog::manifest`, `catalog::store` (including `reference_count`), `config`, `error`, `output`, `paths`, `cli`, `plugin`, `workspace` (Phase 3 US2), `index` (including `migrations::apply_pending`), `embedding`, `presentation`, `commands::status::assemble_report`, `commands::reindex::run_with_deps`, `mcp` (Phase 3 US1).
-- **Internal**: Submodule organization within `commands/` is flexible; subcommand `run()` signatures (and `run_interactive()` for bare `plugin`, `run_with_deps()` for `reindex` tests, `assemble_report()` for `status` tests, `run(scope, paths)` for `mcp`) are the public contract.
+- **Stable Public API**: `catalog::git`, `catalog::manifest`, `catalog::store` (including `reference_count`), `config`, `error`, `output`, `paths`, `cli`, `plugin`, `workspace` (Phase 3 US2), `doctor` (Phase 3 US4), `index` (including `migrations::apply_pending`), `embedding`, `presentation`, `commands::status::assemble_report`, `commands::reindex::run_with_deps`, `mcp` (Phase 3 US1).
+- **Internal**: Submodule organization within `commands/` is flexible; subcommand `run()` signatures (and `run_interactive()` for bare `plugin`, `run_with_deps()` for `reindex` tests, `assemble_report()` for `status` and `doctor` tests, `run(scope, paths)` for `mcp`) are the public contract.
 - **MCP Experimental**: `mcp::run()`, `mcp::server::Server`, `mcp::state::McpState`, `mcp::tools::*` are library-shaped but Phase 3 US1 lands the initial filling (Phase 10 will expand with new tools).
 
 ## Generated Files
 
-No files in Phase 1–9 or Foundational are auto-generated.
+No files in Phase 1–9, Foundational, or Phase 3 US4 are auto-generated.
 
 ---
 
@@ -678,6 +732,17 @@ cached elsewhere (cheap manifest check, skip git clone). `tome catalog remove` c
 config deletion; only deletes cache dir when refcount reaches zero. TOCTOU-benign: concurrent removes race safely
 (one winner, other no-ops; dangling cache is recoverable via `tome catalog update`). Pattern is reusable for
 any future shared-on-disk resource.
+
+## Phase 3 User Story 4 additions — Doctor Diagnostic Layer
+
+Phase 3 US4 adds a comprehensive diagnostic layer (`tome doctor [--fix] [--verify]`). Library: `assemble_report(scope, paths, home, verify)` 
+reads all subsystems (models, index, catalogs, harnesses, drift) without mutation, classifies overall health 
+(Ok / Degraded / Unhealthy), detects problems (missing files, corruption, version mismatches), and proposes 
+safe auto-fixes. CLI: `commands/doctor::run` parses `--fix` and `--verify` flags, resolves `$HOME` for 
+harness probe, calls library, optionally applies repairs, and emits human or JSON. Exit codes: 0 (healthy), 
+1 (unhealthy), 75 (`--fix` attempted but manual fixes remain). Pattern: helper promotion (status checks reused), 
+library + emit-wrapper split with home parameter (testable without env mutation), re-assemble after repairs 
+(avoid re-probing FS). Detects 6 agentic coding harnesses (Claude Code, Cursor, Codex, Gemini CLI, OpenCode, Continue).
 
 ---
 
