@@ -186,11 +186,11 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Slice US1.c — `get_skill` handler
 
-- [ ] T087 [US1] Create `src/mcp/tools/get_skill.rs` with `GetSkillInput` + `GetSkillOutput` types (use devs:rust-dev agent)
-- [ ] T088 [US1] Implement the handler: resolve `(catalog, plugin, name)` against the enabled-skills index; return `unknown_catalog` / `unknown_plugin` / `unknown_skill` per contracts/mcp-tools.md; read SKILL.md; strip frontmatter using `plugin::frontmatter::strip`; walk the skill directory non-recursively collecting siblings; return the triple `{ content, path, resources }` (use devs:rust-dev agent)
-- [ ] T089 [US1] Register the tool with the description from contracts/mcp-tools.md §get_skill (use devs:rust-dev agent)
-- [ ] T090 [US1] Add log events per contracts/log-format.md (use devs:rust-dev agent)
-- [ ] T091 [GIT] Commit: feat(mcp): get_skill tool handler
+- [X] T087 [US1] Create `src/mcp/tools/get_skill.rs` with `GetSkillInput` + `GetSkillOutput` types (use devs:rust-dev agent) — types named `Input` / `Output` (same modular convention as `search_skills`); schemas match the contract: required `catalog` / `plugin` / `name` all non-empty.
+- [X] T088 [US1] Implement the handler: resolve `(catalog, plugin, name)` against the enabled-skills index; return `unknown_catalog` / `unknown_plugin` / `unknown_skill` per contracts/mcp-tools.md; read SKILL.md; strip frontmatter using `plugin::frontmatter::strip`; walk the skill directory non-recursively collecting siblings; return the triple `{ content, path, resources }` (use devs:rust-dev agent) — **deviated from "non-recursively"**: the task description and the contract disagree; `contracts/mcp-tools.md` §get_skill behaviour step 4 explicitly says "Walk the SKILL.md's parent directory **recursively**". Followed the contract — a tiny `walk_dir` recurses into subdirs collecting absolute paths, sorted lexicographically. Frontmatter strip uses `plugin::frontmatter::parse_skill_frontmatter` (the same parser the enable pipeline runs); the returned `body` is verbatim including trailing newlines. The DB lookup runs inside `tokio::task::spawn_blocking` (sync rusqlite). `unknown_plugin` vs `unknown_skill` distinction: `unknown_plugin` when `list_for_plugin(catalog, plugin)` returns zero rows; `unknown_skill` when `find(catalog, plugin, name)` returns `None` but other skills exist for that plugin, OR the row exists but `enabled = 0`.
+- [X] T089 [US1] Register the tool with the description from contracts/mcp-tools.md §get_skill (use devs:rust-dev agent) — description lives as a `///` doc comment on the `#[tool]`-decorated method in `mcp::server.rs` (same pattern as `search_skills`).
+- [X] T090 [US1] Add log events per contracts/log-format.md (use devs:rust-dev agent) — target `tome::mcp::tools::get_skill`, fields `catalog` / `plugin` / `name` / `result` (`"ok"` or one of the contract's error codes) / `body_bytes` / `resource_count` / `elapsed_ms`. Errors at `error` level with the same fields plus `error_code` + scrubbed `error_message`.
+- [X] T091 [GIT] Commit: feat(mcp): get_skill tool handler
 
 ### Slice US1.d — integration tests + closeout
 
