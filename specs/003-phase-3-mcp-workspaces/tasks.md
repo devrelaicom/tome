@@ -32,19 +32,19 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Start
 
-- [ ] T001 [GIT] Verify on main branch and working tree is clean
-- [ ] T002 [GIT] Pull latest changes from origin/main
-- [ ] T003 [GIT] Create feature branch: `003-phase-3-mcp-workspaces`
+- [X] T001 [GIT] Verify on main branch and working tree is clean
+- [X] T002 [GIT] Pull latest changes from origin/main
+- [X] T003 [GIT] Create feature branch: `003-phase-3-mcp-workspaces`
 
 ### Implementation
 
-- [ ] T004 Add `rmcp` dependency to `Cargo.toml` under `[dependencies]` (use devs:rust-dev agent)
-- [ ] T005 Add `tokio` dependency to `Cargo.toml` with features `["rt", "macros", "io-std", "sync", "signal", "time"]` and `default-features = false` (use devs:rust-dev agent)
-- [ ] T006 Extend `deny.toml` with licence rows for `rmcp`, `tokio`, and their direct transitives (use devs:rust-dev agent)
-- [ ] T007 Add `tests/sync_boundary.rs` — structural test that greps `src/` for `async fn`, `.await`, `tokio::`, and `tokio_` outside `src/mcp/`; fails if any match found (use devs:rust-dev agent)
-- [ ] T008 Run `cargo build --release` and confirm stripped binary size is < 50 MB; record the value in a comment at the top of `tests/sync_boundary.rs` (use devs:rust-dev agent)
-- [ ] T009 Update `.gitignore` to include `specs/003-phase-3-mcp-workspaces/scratch/` if any local scratch work is needed (use devs:rust-dev agent)
-- [ ] T010 [GIT] Commit: chore(deps): add rmcp + tokio scoped to src/mcp/
+- [X] T004 Add `rmcp` dependency to `Cargo.toml` under `[dependencies]` (use devs:rust-dev agent)
+- [X] T005 Add `tokio` dependency to `Cargo.toml` with features `["rt", "macros", "io-std", "sync", "signal", "time"]` and `default-features = false` (use devs:rust-dev agent)
+- [X] T006 Extend `deny.toml` with licence rows for `rmcp`, `tokio`, and their direct transitives (use devs:rust-dev agent) — `cargo deny check` passes with no new exceptions; all transitive licences fall under the existing allowlist.
+- [X] T007 Add `tests/sync_boundary.rs` — structural test that greps `src/` for `async fn`, `.await`, `tokio::`, and `tokio_` outside `src/mcp/`; fails if any match found (use devs:rust-dev agent)
+- [X] T008 Run `cargo build --release` and confirm stripped binary size is < 50 MB; record the value in a comment at the top of `tests/sync_boundary.rs` (use devs:rust-dev agent) — baseline 20.91 MiB (21,922,336 bytes) on macOS arm64.
+- [X] T009 Update `.gitignore` to include `specs/003-phase-3-mcp-workspaces/scratch/` if any local scratch work is needed (use devs:rust-dev agent) — generalised to `specs/*/scratch/`.
+- [X] T010 [GIT] Commit: chore(deps): add rmcp + tokio scoped to src/mcp/
 
 ### Phase Completion
 

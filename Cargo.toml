@@ -48,6 +48,17 @@ comfy-table = "7"
 owo-colors = "4"
 inquire = { version = "0.7", default-features = false, features = ["crossterm"] }
 
+# Phase 3 — MCP server. Scoped strictly to `src/mcp/`; the rest of the binary
+# stays synchronous (constitution principle: sync-only outside the MCP module).
+# A structural test (`tests/sync_boundary.rs`) enforces the boundary.
+rmcp = "1"
+
+# Phase 3 — async runtime backing the MCP server. Single-threaded `rt` only —
+# the server serves one client at a time and tool calls block on synchronous
+# embedder/reranker inference; `rt-multi-thread` would add ~500 KB binary
+# weight for no concurrency win. See research §R-2.
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "io-std", "sync", "signal", "time"] }
+
 [build-dependencies]
 # Compile vendored sqlite-vec amalgamation against rusqlite's bundled SQLite.
 cc = "1"
