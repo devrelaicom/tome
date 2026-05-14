@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US2 workspace init incremental)
+> **Last Updated**: 2026-05-14 (Phase 3 / US3 catalog-clone ref-counting incremental)
 
 ## Overview
 
@@ -20,6 +20,7 @@ Tome is a Rust CLI (and eventually MCP server) for managing plugin catalogs and 
 11. MCP startup pre-flight validation with SHA-256 verification and drift detection
 12. No domain-error leakage in MCP tool responses (structured codes only)
 13. Workspace initialization with secure directory permissions and atomic staging
+14. Catalog cache content-trust via ref-counting and re-use on same URL
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md` (Phase 1), `specs/002-phase-2-plugins-index/spec.md` (Phase 2), `specs/002-phase-2-plugins-index/contracts/plugin-commands.md` (Phase 4–5), and `specs/003-phase-3-mcp-workspaces/spec.md` (Phase 3+).
 
@@ -122,7 +123,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | Git credentials | Inherited from system Git config | Credential helper, not Tome |
 | Model artefacts | SHA-256 verification on download | `~/.local/share/tome/models/<name>/` |
 | Configuration file | Atomic writes, chmod 0600 on Unix | `~/.config/tome/config.toml` (global) and `<workspace>/.tome/config.toml` (workspace) |
-| Catalog cache | Atomic refresh, tool-owned | `~/.cache/tome/<sha256-of-url>/` |
+| Catalog cache | Atomic refresh, ref-counted across scopes, re-used on same URL | `~/.cache/tome/<sha256-of-url>/` |
 | Git stderr output | Scrubbed before tracing/display | `src/catalog/git.rs::scrub_credentials` |
 | HTTP error output | Scrubbed before surfacing | `src/embedding/download.rs::scrub_for_diag` |
 | MCP server logs | JSON-lines to file, error-only stderr | `src/mcp/log.rs` (10 MiB cap, rotates to `.1`) |
@@ -141,12 +142,21 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Health check** | `tome status [--verify]` re-verifies installed models without re-downloading | `src/commands/status.rs::check_model()` (Phase 8, PR #29) |
 | **MCP startup pre-flight** | SHA-256 verification of primary embedder file at every startup (FR-110) | `src/mcp/preflight.rs::verify_embedder_artefacts` (Phase 3, F8) |
 | **Workspace initialization** | Atomic staging with permissions lock before content lands | `src/workspace/init.rs` (Phase 3, US2) |
+| **Catalog cache content trust** | Re-use existing clone on URL re-add; delete clone only when no scopes reference the URL | `src/catalog/store.rs::reference_count` (Phase 3, US3) |
 
 **Model Registry** (Phase 3 update):
 - `bge-small-en-v1.5` INT8: SHA-256 `51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431`, 66.5 MB, MIT
 - `bge-reranker-base` INT8: SHA-256 `46a1bb4cf46ff1e300d27589d620141fbf04fc0eaf8e7bb6dea5e044475ff387`, 279.3 MB, MIT (sourced from `onnx-community` mirror)
 
 Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads enforce both hash and size; drift surfaces as `ModelChecksumMismatch` (exit 32) rather than silently installing whatever upstream serves. The `--verify` flag in `tome models list` (Phase 6) allows users to audit installed models against pinned checksums without re-downloading.
+
+**Phase 3 US3 Catalog Cache Content Trust** (`src/catalog/store.rs::reference_count`):
+- Catalog clones are stored in `~/.cache/tome/<sha256(url)>/` and indexed by exact URL string match
+- When a catalog URL is added: if the clone already exists (same URL, content-addressed), it is re-used without re-fetching
+- When a catalog URL is removed from a scope: if it's still referenced by other scopes, the clone persists; if no remaining references, the clone is deleted
+- Reference-counting is global + per-workspace-in-registry; an opt-in workspace registry centralizes the scope set
+- **Content trust trade-off**: Re-adding a known-good URL re-uses the on-disk clone (safe for honest URLs, protective against malicious re-points). If upstream has re-pointed the URL to a malicious repository, an existing clone protects the user (no re-fetch); a fresh clone would re-fetch the new content. The cache acts as an implicit trust anchor: "whatever clone we have is what we trust." Users concerned about URL hijacking should manually remove cached clones via filesystem or use `--force` on re-add (not yet implemented; future enhancement).
+- Without opt-in workspace registry (default install): reference-count is global-only. Removing a catalog from global scope deletes the clone even if a workspace still references it. The workspace config is unchanged; the next `tome catalog update` re-clones. This is the user-visible cost of NOT opting into the registry.
 
 **Phase 8 Status Command** (`src/commands/status.rs`, PR #29):
 - `tome status` is a supported pre-flight health check before filing bug reports
@@ -354,7 +364,7 @@ pub fn require_terminal() -> Result<(), TomeError> {
 
 **Mechanism**:
 1. Write to a temporary file/directory in the same directory as the target
-2. Rename (POSIX `rename(2)` is atomic on same filesystem)
+2. Rename (POSIX `rename(2)` is atomic on a single filesystem)
 3. On error, temp file/directory is cleaned up; target is unchanged
 
 **Guarantees** (FR-017a, FR-017b, SC-012):
@@ -525,6 +535,8 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 
 **Phase 9 Cascade Disable** (PR #32): The pre-check that queries `enabled_plugins_for_catalog` runs WITHOUT the lock. This is intentional — readers don't block writers, and the only risk is a TOCTOU where another process enables a plugin between the check and the cascade. In that case the cascade simply drops the additional plugin's rows too (still correct), or the user re-runs after seeing the refuse error. The cascade itself runs under a single lock acquisition; each plugin's deletion is its own transaction.
 
+**Phase 3 US3 Catalog Cache Reference-Counting** (`src/catalog/store.rs::reference_count`): The reference-count read is **not** taken under any lock. Two processes racing through `tome catalog remove` may both observe an empty list and both call `fs::remove_dir_all`; one succeeds, the other gets `NotFound` and continues. The worse race — process A observes empty, process B `tome catalog add`s the URL before A's `remove_dir_all` — leaves a dangling reference; next `tome catalog update` re-clones. Same TOCTOU profile as the Phase 9 cascade pre-check. Documented in CONCERNS.md.
+
 **Future consideration**: Phase 3 MCP server concurrency model is locked down in spec (FR-040); Phase 3 testing against real BGE models is pending (SC-001/SC-002, T088).
 
 ## Schema Migrations
@@ -585,6 +597,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | Rate limiting | Not applicable | CLI tool, not a service |
 | MCP startup pre-flight performance | Phase 3 F8+ | SHA-256 verify of primary embedder (~66 MB) at every startup acceptable for long-running server; `--verify` flag on `tome status` may reduce cold-cache overhead if profiling shows it matters (TD-012) |
 | McpState seed exposure for testability | Phase 3 F8+ | Test integration uses hard-coded MODEL_REGISTRY entries; custom stub testing requires refactor of `McpState` to carry `embedder_seed` / `reranker_seed` directly (TD-014) |
+| Catalog cache `--force` re-add | Phase 3+ | Not yet implemented; users concerned about URL hijacking can manually remove cached clones or use this future flag (enhancement) |
 
 ---
 

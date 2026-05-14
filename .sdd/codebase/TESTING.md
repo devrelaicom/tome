@@ -52,6 +52,8 @@ tests/
 ├── mcp_lifecycle.rs               # MCP pre-flight exit codes (Phase 3)
 ├── workspace_info.rs              # Library API: `workspace::info::assemble` (Phase 4 / US2)
 ├── workspace_init.rs              # Library API + CLI: `workspace::init` (Phase 4 / US2)
+├── workspace_commands.rs     # Cross-scope isolation tests (Phase 5 / US3)
+├── catalog_cache_refcount.rs # Reference-counted catalog cleanup (Phase 5 / US3)
 ├── atomicity_enable.rs            # Failure-injection: enable rollback (Phase 3)
 ├── exit_codes.rs                  # Unit: exhaustiveness check on TomeError
 ├── error_messages.rs              # Unit: error message format correctness
@@ -478,6 +480,147 @@ fn version_json_format() {
 ```
 
 This pattern is reusable for any future output that depends on constants.
+
+### Cross-Scope Isolation Test Pattern (Phase 5 / US3)
+
+Tests that verify command scope isolation ensure that mutations in one scope (workspace, global, `--workspace` flag) don't leak into another.
+
+Pattern:
+1. **Create multiple scopes** — build isolated temp directories and workspace registries via `make_workspace(env, parent, name)`
+2. **Run commands in each scope** — use CLI binary with `--workspace <path>` or `--global` flags
+3. **Verify isolation** — check that workspace `.tome/config.toml` contains additions ONLY for that workspace; global config untouched
+4. **Cross-product testing** — test all Phase 1/2 commands against the scope matrix (global + workspace registries)
+
+**Helper function:** `make_workspace(env, parent, name) -> PathBuf` spawns `tome workspace init <path>` and returns the canonical workspace path.
+
+Example from `tests/workspace_commands.rs`:
+```rust
+#[test]
+fn catalog_add_workspace_does_not_touch_global() {
+    let fix = Fixture::build_sample();
+    let env = ToolEnv::new();
+    let tmp = TempDir::new().unwrap();
+    let ws = make_workspace(&env, tmp.path(), "project");
+
+    // Add catalog under workspace scope
+    let out = env
+        .cmd()
+        .args([
+            "--workspace",
+            ws.to_str().unwrap(),
+            "catalog",
+            "add",
+            &fix.url,
+        ])
+        .output()
+        .expect("spawn tome");
+    assert!(out.status.success());
+
+    // Workspace config has the catalog
+    let ws_config = ws.join(".tome/config.toml");
+    let ws_body = std::fs::read_to_string(&ws_config).expect("workspace config exists");
+    assert!(ws_body.contains("[catalogs.sample-experts]"));
+
+    // Global config is untouched (either doesn't exist or is empty)
+    let global_config = env.config_file();
+    if global_config.exists() {
+        let global_body = std::fs::read_to_string(&global_config).unwrap();
+        assert!(!global_body.contains("sample-experts"));
+    }
+}
+```
+
+Used to verify that Foundational F1's `ResolvedScope` threading prevents cross-scope mutations.
+
+### Reference-Counted Shared Resource Test Pattern (Phase 5 / US3)
+
+When resources (like catalog clones) can be referenced by multiple scopes, tests verify that deletion only occurs when the last reference is removed.
+
+Pattern:
+1. **Add same resource to multiple scopes** — e.g., same catalog URL in global + workspace registry
+2. **Verify cache reuse** — single on-disk clone is shared; no redundant git operations
+3. **Remove from one scope** — resource persists because other scopes still reference it
+4. **Remove from last scope** — resource is cleaned up only when no references remain
+5. **Race resilience** — concurrent removes resolve benignly (one succeeds, other no-ops)
+
+**Helper function:** `make_workspace_opt_in(env, parent, name) -> PathBuf` pre-creates the workspace registry file (`workspaces.txt`) BEFORE calling `tome workspace init`, ensuring the init's opt-in append path fires. This allows tests to control registry membership for cleanup scenarios.
+
+**Cache location helper:** `cache_dir_for(env, url) -> PathBuf` computes the on-disk cache directory using the same SHA-256 hashing as the tome binary.
+
+Example from `tests/catalog_cache_refcount.rs`:
+```rust
+#[test]
+fn same_url_in_two_scopes_shares_one_on_disk_clone() {
+    let fix = Fixture::build_sample();
+    let env = ToolEnv::new();
+    let tmp = TempDir::new().unwrap();
+    let ws = make_workspace_opt_in(&env, tmp.path(), "project");
+
+    // Add globally first
+    let add_g = env
+        .cmd()
+        .args(["--global", "catalog", "add", &fix.url, "--name", "g"])
+        .output()
+        .unwrap();
+    assert!(add_g.status.success());
+
+    // Add SAME URL into workspace — must succeed, must NOT re-clone
+    let add_w = env
+        .cmd()
+        .args([
+            "--workspace",
+            ws.to_str().unwrap(),
+            "catalog",
+            "add",
+            &fix.url,
+            "--name",
+            "w",
+        ])
+        .output()
+        .unwrap();
+    assert!(add_w.status.success());
+
+    // Exactly one cache directory exists for this URL
+    let cache = cache_dir_for(&env, &fix.url);
+    assert!(cache.is_dir(), "cache should exist at {cache:?}");
+
+    // Both configs reference it
+    let g_body = std::fs::read_to_string(env.config_file()).unwrap();
+    assert!(g_body.contains("[catalogs.g]"));
+    let w_body = std::fs::read_to_string(ws.join(".tome/config.toml")).unwrap();
+    assert!(w_body.contains("[catalogs.w]"));
+}
+```
+
+Tests may also verify the remove path: `catalog remove <name>` from one scope leaves the clone intact if other scopes reference it.
+
+### Bridge Pattern: Mixed CLI Binary + Library API for Cross-Scope Cascade (Phase 5 / US3)
+
+When a scenario requires both real CLI flow (e.g., `catalog add` with git clone) AND library-API calls (e.g., `plugin enable` to avoid real embedders), share the `Paths` between them and alternate invocations.
+
+This pattern works because cascade-disable is pure deletion — no embedder construction required.
+
+Example from `tests/catalog_cache_refcount.rs`:
+```rust
+// Library API: enable a plugin (uses StubEmbedder)
+let embedder = StubEmbedder::new();
+let deps = LifecycleDeps { ... };
+lifecycle::enable(&plugin_id, &deps)?;
+
+// CLI binary: remove the catalog (cascade disables all enabled plugins)
+let out = env.cmd()
+    .args(["--workspace", ws.to_str().unwrap(), "catalog", "remove", &catalog_name, "--force"])
+    .output()
+    .unwrap();
+assert!(out.status.success());
+
+// Pure deletion means no embedder in the CLI path
+```
+
+The `paths_for(&env)` helper ensures both API-level and CLI-level calls use the same temp-rooted `Paths`, making it safe to alternate between library and subprocess invocations.
+
+
+
 
 ### In-Module Unit Test Pattern (Phase 3 / F8)
 

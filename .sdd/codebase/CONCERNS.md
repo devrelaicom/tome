@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US2 workspace init incremental)
+> **Last Updated**: 2026-05-14 (Phase 3 / US3 catalog-clone ref-counting incremental)
 
 ## Technical Debt
 
@@ -28,6 +28,7 @@ Items to address when working in the area:
 | TD-014 | `src/mcp/state.rs` (Phase 3 F8) | McpState embedder/reranker seed exposure for test integration | Test isolation | Medium | Handlers derive seeds from `state.embedder_entry.name/version`, hard-coded to MODEL_REGISTRY entries. Tests can't bootstrap index with stub seeds + use handlers without tripping drift detection. Refactor `McpState` to carry `embedder_seed` / `reranker_seed` directly. Est. 1 hour, defer to post-US1 |
 | TD-015 | `contracts/mcp-server.md` (Phase 3 F8) | Contract drift on startup failure codes | Documentation | Low | Contract lists exit 35 for "Index DB missing" but production code surfaces exit 60 (`McpStartupFailed { reason: "index_missing" }`). 35 maps to `VectorExtensionInitFailure`; neither fits. 60-with-reason approach is more accurate; amend contract in polish pass |
 | TD-016 | `src/workspace/init.rs` (Phase 3 US2) | `.tome.old/` orphan cleanup on crash between rename-aside and rename-in | Recovery cleanup | Low | If `--force` rename-in fails after moving old `.tome/` to `.tome.old/`, rollback restores the old state. But if a crash occurs between rename-aside and rename-in (before rollback logic), `.tome.old/` is left orphan. Doctor (future Phase, out of scope for US2) should surface and offer cleanup. Currently documented in `contracts/workspace-init.md` §Side effects as a known limitation. |
+| TD-017 | `src/catalog/store.rs::reference_count` (Phase 3 US3) | Catalog cache TOCTOU window between pre-check and `remove_dir_all` | Concurrency safety | Low | Two processes racing `tome catalog remove` may both observe empty refs and both call `remove_dir_all` (benign: one wins, one no-ops). Worse: process A observes empty, process B adds URL before A deletes clone → dangling reference (recovered by `tome catalog update` re-clone). Documented design; same profile as Phase 9 cascade pre-check. No lock taken because readers shouldn't block writers. |
 | TD-020 | Error categorisation | All Phase 1 + Phase 2 codes are enumerated; no catch-all variants | Debuggability | Low | Current approach is sound; closed set enforces completeness |
 | TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low | — |
 
@@ -85,6 +86,7 @@ Code areas that are brittle or risky to modify:
 | `src/index/skills.rs::upsert_skill` | `sqlite-vec` virtual tables do NOT support `INSERT OR REPLACE` or `ON CONFLICT` (Phase 7, PR #25 latent bug fix). Uses `DELETE`-then-`INSERT` which is idempotent | Verify this pattern on any future upsert-like operation involving virtual tables; do not attempt `INSERT OR REPLACE` on `skill_embeddings` |
 | `src/main.rs::--version pre-parse` | Early arg scanning before clap dispatch is custom; any change to pre-parse logic could break `--version` routing | Test both `tome --version` and `tome -V` in CLI integration tests; verify `--json` flag is also detected; check that non-matching args pass through to clap normally |
 | `src/plugin/lifecycle.rs::cascade_disable_for_catalog` | Single lock acquisition per cascade; each plugin's deletion is its own transaction. TOCTOU window between pre-check (without lock) and cascade (under lock): another process may enable a plugin between check and delete, causing its rows to be dropped too | This is intentional (readers never block writers). The pre-check reports a stale but valid list; the cascade acts on what's actually there and is correct either way. Document the TOCTOU window and its benign semantics |
+| `src/catalog/store.rs::reference_count` (Phase 3 US3) | Reference-count read is NOT taken under advisory lock. Two processes racing `tome catalog remove` may both observe empty refs and call `remove_dir_all`; one succeeds, one no-ops. Worse race: process A observes empty, process B adds URL before A deletes clone → dangling reference (recovered by next `update`). | This is intentional (readers never block writers). Design mirrors Phase 9's cascade pre-check. TOCTOU window is documented and benign: clone persists until no references, delete is best-effort, dangling reference is recovered on next `update`. Opt-in workspace registry deduplicates scope set; without it (default), reference-count is global-only and removal deletes clone even if workspace references it. |
 | `src/mcp/log.rs::FileMakeWriter` | Mutex serialises every JSON log emit; LockedFile guard holds lock for duration of write. MCP server is single-threaded, so contention is theoretical. Test harness shares handle across threads → must trust mutex semantics | Test isolation: don't share FileMakeWriter between concurrent test threads; use separate temp log files. Production: single-threaded by design (R-2), so no contention risk |
 | `src/index/migrations.rs::MIGRATIONS_OVERRIDE` | Public static (not `#[cfg(test)]`) so integration tests outside crate can inject synthetic migrations. Widens test-injection surface compared to purely internal mechanism | Documented as test-only via doc comment. Only read by production `apply_pending` (write path already under advisory lock). Injected migrations run in same transaction isolation. Forward-only boundary enforced—no down-migration path exists. Monitor: ensure new tests never accidentally rely on `MIGRATIONS_OVERRIDE` slice being reusable (each test should clear slot after use) |
 | `src/mcp/preflight.rs::verify_embedder_artefacts` | Runs full SHA-256 over primary embedder (~66 MB) at every startup; no caching or early exit | By design for long-running server correctness (FR-110). Cold-cache startup latency visible to harness. Defer `--verify` skip flag to Phase 4+ unless profiling shows impact (TD-012). In test, use `StubEmbedder` to avoid real hash cost |
@@ -162,6 +164,7 @@ Areas that could benefit from enhancement:
 | MCP startup verbosity | Pre-flight SHA-256 silent unless it fails | Optional `--verbose` startup for diagnosing slow cold-cache initialization | Better observability |
 | McpState test seed isolation (TD-014) | Hard-coded to MODEL_REGISTRY; can't test with stub seeds | Refactor McpState to carry explicit `embedder_seed` / `reranker_seed` | Better test isolation for MCP tool handlers |
 | Workspace doctor command | No doctor or orphan-cleanup facility | Add `tome doctor` command to detect `.tome.old/` orphans and offer cleanup | Recovery aid for crashed `--force` init |
+| Catalog cache `--force` re-add | Not yet implemented; users must manually remove cached clones | Implement `tome catalog add --force` to bypass cache re-use on URL re-add | Users concerned about URL hijacking can force fresh clone |
 
 ## Monitoring Gaps
 
@@ -175,6 +178,7 @@ Areas lacking proper observability:
 | Catalog size statistics | No cache size tracking | Can't warn on large catalogs | Low (Phase 2 may add quota management) |
 | MCP pre-flight timing | SHA-256 verify of large embedder file not instrumented | Cold-cache startup latency not observable | Low (acceptable trade-off; defer unless profiling shows impact per TD-012) |
 | Workspace registry state | No metrics on registry size or dedupe ratio | Can't detect growth or churn patterns | Low (opt-in registry; steady-state expected to be small) |
+| Catalog cache TOCTOU races | No instrumentation of concurrent `remove` races or dangling reference recovery | Can't detect real-world contention or re-clone frequency | Low (opt-in registry centralizes scope set; default install has only global scope) |
 
 ## Design Tradeoffs
 
@@ -185,6 +189,7 @@ Intentional design decisions with known limitations:
 | **Per-plugin atomicity** (Phase 7) | `src/index/skills.rs::reindex_plugin_atomic` | Simpler transaction model; each plugin reindex commits independently | Multi-plugin `tome catalog update` or `tome reindex` may leave earlier plugins committed if interrupted between plugins | Safe state always (no partial rows); index is always valid. By design, not a bug. Advisory lock per-plugin at entry to reindex, released at commit. |
 | **Status lock-free** (Phase 8) | `src/commands/status.rs::run` (no advisory lock taken) | Allows health check to run even when a writer is running; supports use as a non-invasive doctor command (FR-056) | Status report is a point-in-time snapshot; may be stale if another process is concurrently writing | Acceptable trade-off for pre-flight non-blocking diagnosis. Caller should understand the snapshot may be moments old. |
 | **Cascade disable under single lock** (Phase 9) | `src/plugin/lifecycle.rs::cascade_disable_for_catalog` | Batch operation atomicity: all plugins disabled and rows dropped within one lock window; simpler than per-plugin acquisitions (Phase 7 pattern) | Each plugin's deletion is its own transaction (not atomic across plugins), so SIGINT between plugins leaves earlier plugins dropped + later plugins intact. Index is always valid; partial state is well-defined | By design. Index WAL + transaction isolation ensures each deletion is durable and correct. Pre-check (enabled-plugin query) runs WITHOUT lock, accepting TOCTOU risk of stale enabled list — acceptable because cascade acts on actual state (still correct) and reader-never-blocks-writer is the locking principle. |
+| **Catalog cache ref-counting without lock** (Phase 3 US3) | `src/catalog/store.rs::reference_count` | Allows concurrent `tome catalog remove` without serialization; readers never block writers | Two processes racing may both try to delete the same clone (benign: one wins, one no-ops). Worse race: process A deletes after B adds reference → dangling clone (recovered by next `update`). Default (global-only refs) deletes clone even if workspace still references it; workspace must re-clone. | Intentional. Same TOCTOU profile as Phase 9 cascade pre-check. Opt-in workspace registry centralizes scope set to reduce collision likelihood but doesn't eliminate TOCTOU. Trade-off: no lock contention vs. possible extra re-clone (one round-trip). Benign for catalog operations (not on critical path). |
 | **MCP startup SHA-256 verification** (Phase 3 F8) | `src/mcp/preflight.rs::verify_embedder_artefacts` | Long-running server: paying full hash once at startup is right trade-off vs. long-running process correctness | Cold-cache startup latency visible to harness (potential second-range delay for ~66 MB file). Acceptable for daemon; defer `--verify` skip flag to Phase 4+ unless profiling shows impact (TD-012) | Pre-flight gates before MCP protocol handshake, so harness sees startup delay before first RPC. Not user-facing command latency. Consider optional startup flag for repeated local dev testing (mitigates cold-cache cost, trade-off: skip verification). |
 | **No MCP tool description enumeration** (Phase 3 F8, FR-108) | `src/mcp/server.rs` tool descriptions | Tool descriptions must NOT reference specific catalog/plugin/skill identifiers in fixture or test scope | Test `tests/mcp_server.rs::descriptions_do_not_enumerate_fixture_identifiers` fails if wording includes identifiers, preventing accidental info leakage | By design. Descriptions are generic guidance; discovery happens via `search_skills` / `get_skill` at runtime. |
 | **Structured error codes for MCP tools** (Phase 3 F8) | `src/mcp/tools/{search_skills,get_skill}.rs::tome_to_mcp` | Tool errors map to contract-defined structured codes (`unknown_catalog`, `unknown_plugin`, etc.), never exposing internal TomeError variants | MCP harness sees opaque error codes; no domain-error info leakage | By design. Security + clarity: harness cannot infer internal structure or state from error messages. |
@@ -255,11 +260,19 @@ Intentional design decisions with known limitations:
 - ✓ `--force` rename-aside path fully reversible (rollback on rename failure)
 - ✓ `.tome.old/` orphan on crash between rename-aside and rename-in (doctor handles cleanup, TD-016)
 
+**US3 Complete (Catalog-Clone Ref-Counting)**:
+- ✓ Reference-counting across global + workspace scopes (via opt-in registry)
+- ✓ Catalog cache re-used on same URL (no re-fetch); deleted when no references remain
+- ✓ Content-trust trade-off: existing clone protects against URL hijacking; missing `--force` flag for forced re-clone (future enhancement)
+- ✓ TOCTOU documented: no lock on reference-count read (same principle as cascade pre-check); readers never block writers
+- ✓ Dangling reference recovery: next `tome catalog update` re-clones
+- ✓ Without opt-in workspace registry (default): reference-count is global-only; removal deletes clone even if workspace references it (user cost of not opting in)
+
 **In progress**:
 - T088: Real BGE model testing against SC-001/SC-002 (happy-path query, protocol purity, latency, SIGINT)
 - Query command full implementation
 - Reindex command full implementation
-- US3–US5 MCP tool implementations
+- US4–US5 MCP tool implementations
 
 **Key risks to monitor**:
 - SEC-001: BGE model testing still pending (T088)
@@ -271,6 +284,7 @@ Intentional design decisions with known limitations:
 - TD-014: McpState seed exposure blocks full integration test isolation (est. 1 hour refactor)
 - TD-015: Contract drift on exit codes (60 vs. 35 for index missing; amend contract)
 - TD-016: `.tome.old/` orphan cleanup (doctor, Phase 10+)
+- TD-017: Catalog cache TOCTOU on `reference_count` (documented and benign; same profile as cascade pre-check)
 
 ### Phase 4 (Complete)
 
@@ -385,6 +399,29 @@ Intentional design decisions with known limitations:
 
 **Integration test coverage** (Phase 9):
 - `tests/catalog_remove.rs` verifies enabled-plugin detection, `--force` flag, cascade semantics, and error exit code
+
+### Phase 3 US3 (Complete)
+
+**Completed (Catalog Cache Ref-Counting)**:
+- ✓ `src/catalog/store.rs::reference_count` enumerates all scopes (global + workspace registry) that reference a catalog URL
+- ✓ Catalog clone persists until no scopes reference the URL; deleted on last removal
+- ✓ Re-adding same URL re-uses existing clone (content-addressed by `sha256(url)`)
+- ✓ Without opt-in workspace registry (default install): reference-count is global-only; removal from global scope deletes clone even if workspace references it
+- ✓ TOCTOU window documented: no lock on reference-count read; two processes may race and both try to delete (benign); dangling reference recovered by next `update`
+- ✓ Cache content-trust trade-off documented: re-add reuses existing clone (protective against URL hijacking); missing `--force` flag for forced re-clone (future enhancement)
+
+**Security posture**:
+- No new credentials, external endpoints, or file I/O patterns
+- Reference-counting logic is idempotent: best-effort deletion is safe; re-clone is guaranteed on next `update`
+- TOCTOU profile mirrors Phase 9's cascade pre-check: readers never block writers; slightly stale state is acceptable
+
+**Design constraints**:
+- Catalog cache operates as an implicit trust anchor: "whatever is on disk is trusted"
+- Without workspace registry opt-in: reference-count is global-only (simpler default); per-workspace catalog refs require explicit registry enrollment
+- Dangling reference (clone deleted while workspace references it) is not a failure; re-clone is transparent on next command
+
+**Integration test coverage** (Phase 3 US3):
+- `tests/catalog_remove.rs` extended for ref-counting semantics (global + workspace, dangling recovery)
 
 ---
 

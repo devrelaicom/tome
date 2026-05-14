@@ -2,28 +2,28 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Story 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade) + 2026-05-14 (Foundational F7 + F8 — schema migrations framework, MCP async island) + 2026-05-14 (Phase 3 User Story 1 — MCP server wired) + 2026-05-14 (Phase 3 User Story 2 — workspace context, `tome workspace info/init`)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Story 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade) + 2026-05-14 (Foundational F7 + F8 — schema migrations framework, MCP async island) + 2026-05-14 (Phase 3 User Story 1 — MCP server wired) + 2026-05-14 (Phase 3 User Story 2 — workspace context, `tome workspace info/init`) + 2026-05-14 (Phase 3 User Story 3 — per-command scope honouring, reference-counted catalog clone cleanup)
 
 ## Directory Layout
 
 ```
 tome/
 ├── src/                           # Rust library and binary source
-│   ├── main.rs                    # CLI entry point: parse → dispatch → exit (Phase 8: pre-parse --version hook; Phase 3 US1: skip logging/signals for MCP; Phase 3 US2: pre-dispatch workspace resolution)
+│   ├── main.rs                    # CLI entry point: parse → dispatch → exit (Phase 8: pre-parse --version hook; Phase 3 US1: skip logging/signals for MCP; Phase 3 US2: pre-dispatch workspace resolution; Phase 3 US3: scope resolution gates all commands)
 │   ├── lib.rs                     # Public module surface
-│   ├── cli.rs                     # clap derive definitions (global flags, subcommands; Phase 3 US1: McpArgs; Phase 3 US2: GlobalScopeArgs with --workspace/--global)
+│   ├── cli.rs                     # clap derive definitions (global flags, subcommands; Phase 3 US1: McpArgs; Phase 3 US2: GlobalScopeArgs with --workspace/--global; Phase 3 US3: all commands route through scope resolution)
 │   ├── error.rs                   # Closed TomeError enum + exit code mapping
-│   ├── catalog/                   # Catalog management (Phase 1)
+│   ├── catalog/                   # Catalog management (Phase 1; Phase 3 US3: reference-counted cache)
 │   │   ├── mod.rs                 # Module aggregation
 │   │   ├── git.rs                 # Git shell-outs, signal handling, credential scrubbing
 │   │   ├── manifest.rs            # TOML schema + strict parsing + semantic validation
-│   │   └── store.rs               # Atomic registry and cache persistence
+│   │   └── store.rs               # Atomic registry and cache persistence; reference_count() for shared cache (Phase 3 US3)
 │   ├── commands/                  # CLI command handlers
 │   │   ├── mod.rs                 # Dispatcher: route to subcommand
 │   │   ├── catalog/               # `tome catalog <subcommand>`
 │   │   │   ├── mod.rs             # Subcommand dispatcher
-│   │   │   ├── add.rs             # Register a catalog
-│   │   │   ├── remove.rs          # Unregister a catalog (Phase 9: reads enabled plugins, cascades on --force)
+│   │   │   ├── add.rs             # Register a catalog; reuse cached clone if URL already cached (Phase 3 US3)
+│   │   │   ├── remove.rs          # Unregister a catalog; reference-count cache, delete only if refcount==0 (Phase 3 US3)
 │   │   │   ├── list.rs            # List registered catalogs
 │   │   │   ├── update.rs          # Refresh catalogs (Phase 7: wires reindex per enabled plugin)
 │   │   │   ├── show.rs            # Inspect catalog manifest
@@ -39,7 +39,7 @@ tome/
 │   │   │   ├── disable.rs         # Disable a plugin (Phase 5)
 │   │   │   ├── list.rs            # List plugins (all or for one catalog)
 │   │   │   ├── show.rs            # Show one plugin's metadata + state
-│   │   │   └── interactive.rs     # Bare `tome plugin` (no subcommand) interactive browse (Phase 4)
+│   │   │   └── interactive.rs     # Bare `tome plugin` (no subcommand) interactive browse (Phase 4; Phase 3 US3: receives scope-resolved ResolvedScope)
 │   │   ├── workspace/             # `tome workspace <subcommand>` (Phase 3 US2)
 │   │   │   ├── mod.rs             # Dispatcher (info / init subcommands)
 │   │   │   ├── info.rs            # `tome workspace info` — read-only scope diagnostics
@@ -109,7 +109,7 @@ tome/
 │   ├── catalog_list.rs            # test: list catalogs
 │   ├── catalog_update.rs          # test: refresh catalogs
 │   ├── catalog_show.rs            # test: show catalog manifest
-│   ├── catalog_remove_cascade.rs  # test: cascade-disable on removal (Phase 9)
+│   ├── catalog_remove_cascade.rs  # test: cascade-disable on removal (Phase 9; Phase 3 US3: extends with refcount coverage)
 │   ├── exit_codes.rs              # test: verify all TomeError variants map to expected codes
 │   ├── manifest_strictness.rs     # test: verify #[serde(deny_unknown_fields)]
 │   ├── path_validation.rs         # test: plugin source path validation
@@ -138,6 +138,8 @@ tome/
 │   ├── workspace_resolution.rs    # test: workspace scope resolution (Phase 3 US2)
 │   ├── workspace_info.rs          # test: workspace info diagnostics (Phase 3 US2)
 │   ├── workspace_init.rs          # test: atomic workspace init (Phase 3 US2)
+│   ├── workspace_commands.rs      # test: cross-product scope isolation (Phase 3 US3)
+│   ├── catalog_cache_refcount.rs  # test: reference-counted catalog cache (Phase 3 US3)
 │   ├── sync_boundary.rs           # test: tokio import boundary enforcement (Foundational F8)
 │   ├── schema_migrations.rs       # test: schema migrations framework (Foundational F7)
 │   ├── concurrency.rs             # test: two-process index contention (Phase 2)
@@ -203,14 +205,14 @@ tome/
 
 | Directory | Purpose | Public Interface |
 |-----------|---------|-------------------|
-| `src/main.rs` | Binary entry point; parses CLI, resolves scope (Phase 3 US2), installs signal handler, dispatches, handles errors. Phase 8: pre-parse hook for `--version`. Phase 3 US1: skips logging/signals for MCP. Phase 3 US2: pre-dispatch workspace resolution. | — (entry point, not a module) |
+| `src/main.rs` | Binary entry point; parses CLI, resolves scope (Phase 3 US2, Phase 3 US3), installs signal handler, dispatches, handles errors. Phase 8: pre-parse hook for `--version`. Phase 3 US1: skips logging/signals for MCP. Phase 3 US2: pre-dispatch workspace resolution. Phase 3 US3: all commands receive scope-resolved `ResolvedScope`. | — (entry point, not a module) |
 | `src/lib.rs` | Library surface; aggregates `catalog`, `cli`, `commands`, `config`, `error`, `logging`, `output`, `paths`, `plugin`, `workspace`, `index`, `embedding`, `presentation`, `mcp`. Phase 3 US2: workspace now public. | Public for integration tests. |
-| `src/cli.rs` | clap derive definitions for global flags (`--json`, `-v`/`-vv`) and subcommands. Phase 8: `StatusArgs` with `--verify` flag, `disable_version_flag = true`. Phase 3 US1: `McpArgs` added. Phase 3 US2: `GlobalScopeArgs` with `--workspace` / `--global` flags, `WorkspaceCommand` enum. | `Cli`, `Command`, `CatalogCommand`, `ModelsCommand`, `PluginCommand`, `ReindexCommand`, `StatusArgs`, `McpArgs`, `WorkspaceArgs`, arg structs. |
+| `src/cli.rs` | clap derive definitions for global flags (`--json`, `-v`/`-vv`) and subcommands. Phase 8: `StatusArgs` with `--verify` flag, `disable_version_flag = true`. Phase 3 US1: `McpArgs` added. Phase 3 US2: `GlobalScopeArgs` with `--workspace` / `--global` flags, `WorkspaceCommand` enum. Phase 3 US3: all commands routed through scope resolution. | `Cli`, `Command`, `CatalogCommand`, `ModelsCommand`, `PluginCommand`, `ReindexCommand`, `StatusArgs`, `McpArgs`, `WorkspaceArgs`, arg structs. |
 | `src/error.rs` | Closed `TomeError` enum; exit code and category mapping; error variants. Foundational F7: adds `SchemaVersionTooNew` (73) and `SchemaMigrationFailed` (74). Phase 3 US1: adds `McpStartupFailed`, `McpProtocolIo`. Phase 3 US2: adds `WorkspaceNotFound` (71), `WorkspaceMalformed` (75), `WorkspaceConflict` (72). | `TomeError`, `ManifestInvalid`, `PluginState`, etc. (consumed by all). |
-| `src/catalog/` | Catalog management: manifest parsing, Git operations, atomic registry persistence. | `CatalogManifest`, `Git`, `store::load/save/write_atomic`. |
-| `src/commands/` | Command handlers; implement `tome catalog/models/plugin/query/reindex/status/workspace/mcp <subcommand>`. Phase 3 US2: workspace command dispatcher. All handlers receive `ResolvedScope` from pre-dispatch. | Per-subcommand `run(args, scope, mode)` functions; library entry points `reindex::run_with_deps()`, `status::assemble_report()`, `workspace::info::assemble()`, `workspace::init()`, `mcp::run(scope, paths)`. |
+| `src/catalog/` | Catalog management: manifest parsing, Git operations, atomic registry persistence. Phase 3 US3: adds reference_count() to walk scope configs and return list of scopes referencing a catalog URL. | `CatalogManifest`, `Git`, `store::load/save/write_atomic`, `store::reference_count`. |
+| `src/commands/` | Command handlers; implement `tome catalog/models/plugin/query/reindex/status/workspace/mcp <subcommand>`. Phase 3 US2: workspace command dispatcher. Phase 3 US3: all handlers receive `ResolvedScope` from pre-dispatch. | Per-subcommand `run(args, scope, mode)` functions; library entry points `reindex::run_with_deps()`, `status::assemble_report()`, `workspace::info::assemble()`, `workspace::init()`, `mcp::run(scope, paths)`. |
 | `src/config.rs` | `Config` and `CatalogEntry` struct definitions. | `Config`, `CatalogEntry`. |
-| `src/paths.rs` | XDG-aware path resolution and cache key computation. Scope-parametrized accessors (Phase 3 US2 deferred to Phase 10 general refactor). | `Paths`, `Paths::resolve()`, `Paths::cache_dir_for()`, `Paths::model_path()`, `Paths::config_file_for(&Scope)`, `Paths::index_db_for(&Scope)`. |
+| `src/paths.rs` | XDG-aware path resolution and cache key computation. Scope-parametrized accessors (Phase 3 US2 deferred to Phase 10 for general refactor). | `Paths`, `Paths::resolve()`, `Paths::cache_dir_for()`, `Paths::model_path()`, `Paths::config_file_for(&Scope)`, `Paths::index_db_for(&Scope)`. |
 | `src/logging.rs` | Initialize `tracing-subscriber` (stderr-only, orthogonal to `--json`). | `Verbosity`, `init()`. |
 | `src/output.rs` | Format output as human text or JSON; TTY detection. | `Mode`, `write_json()`, `write_error()`, `stdout_is_tty()`. |
 | `src/plugin/` | Plugin metadata parsers, lifecycle orchestrator (enable/disable/reindex/cascade). | `PluginId`, `PluginRecord`, `PluginStatus`, `lifecycle::enable/disable/reindex_plugin/cascade_disable_for_catalog`, `lifecycle::auto_disable_orphan`, `lifecycle::resolve_plugin_dir`. |
@@ -226,7 +228,7 @@ tome/
 |------|---------|-------|
 | `tests/catalog_add.rs` | Test `tome catalog add` with various source formats, error cases. | Happy path, already-exists, manifest errors. |
 | `tests/catalog_remove.rs` | Test `tome catalog remove` with confirmation, `--force`. | Interactive, non-TTY, confirmed. |
-| `tests/catalog_remove_cascade.rs` | Test `tome catalog remove` cascade semantics (Phase 9). | Refuse when enabled plugins exist, cascade on `--force`, no-enabled case. |
+| `tests/catalog_remove_cascade.rs` | Test `tome catalog remove` cascade semantics (Phase 9); extends with refcount coverage (Phase 3 US3). | Refuse when enabled plugins exist, cascade on `--force`, no-enabled case, cache refcount behaviour. |
 | `tests/catalog_list.rs` | Test `tome catalog list` in human and `--json` modes. | Empty, single, multiple catalogs. |
 | `tests/catalog_update.rs` | Test `tome catalog update` (single, all, pinned commit). | Happy path, first-failure stop, pinned ref. |
 | `tests/catalog_show.rs` | Test `tome catalog show` manifest contents. | Human and JSON output. |
@@ -258,6 +260,8 @@ tome/
 | `tests/workspace_resolution.rs` | Workspace scope resolution (Phase 3 US2). | --workspace flag, --global flag, env var, CWD walk, fallback, conflict detection. |
 | `tests/workspace_info.rs` | Workspace info diagnostics (Phase 3 US2). | Global scope, workspace scope, bootstrap-not-yet, catalog/plugin/skill counts. |
 | `tests/workspace_init.rs` | Atomic workspace init (Phase 3 US2). | Happy path, --inherit-global flag, --force flag, atomic semantics, rollback. |
+| `tests/workspace_commands.rs` | Cross-product scope isolation (Phase 3 US3). | Commands execute on correct scope (global vs workspace), catalog add/remove refcount, independent state. |
+| `tests/catalog_cache_refcount.rs` | Reference-counted catalog cache (Phase 3 US3). | Reuse when URL cached elsewhere, refcount walk, cascade on `remove --force`, orphan cleanup. |
 | `tests/sync_boundary.rs` | Structural tokio import boundary (Foundational F8). | Scans src/ (except src/mcp/), fails on any `tokio` import outside mcp/. |
 | `tests/schema_migrations.rs` | Schema migrations framework (Foundational F7). | Forward-only boundaries, synthetic fixture e2e test, "no migration registered" guard. |
 | `tests/concurrency.rs` | Two-process index contention (Phase 2). | Concurrent enable/list, lockfile contention. |
@@ -276,10 +280,10 @@ src/catalog/
 ├── mod.rs           # Aggregates git, manifest, store
 ├── git.rs           # Git shell-outs + credential scrubbing + signal handling
 ├── manifest.rs      # TOML parsing (strict tome-catalog.toml) + JSON parsing (lenient plugin.json)
-└── store.rs         # Atomic read/write of config.toml
+└── store.rs         # Atomic read/write of config.toml + reference_count() for shared cache (Phase 3 US3)
 ```
 
-**Responsibility**: Manage the lifecycle of a catalog (fetch, parse, validate, persist, refresh).
+**Responsibility**: Manage the lifecycle of a catalog (fetch, parse, validate, persist, refresh). Reference-count shared cache directories across scopes.
 
 **Public Interface**:
 - `git::Git` — facade for git operations.
@@ -287,6 +291,7 @@ src/catalog/
 - `manifest::CatalogManifest::parse_and_validate()` — strict parsing and validation.
 - `manifest::read_catalog_manifest()` — lenient read for plugin/list/show.
 - `store::load()`, `store::save()`, `store::write_atomic()` — atomic persistence.
+- `store::reference_count(url, paths) -> Vec<Scope>` — walk scope configs, return referencing scopes (Phase 3 US3).
 
 **What It Cannot Do**:
 - Know about CLI argument structures (those live in `cli.rs` and `commands/catalog/`).
@@ -302,8 +307,8 @@ src/commands/
 ├── mod.rs           # Top-level dispatcher (catalog vs models vs plugin vs query vs reindex vs status vs workspace vs mcp)
 ├── catalog/
 │   ├── mod.rs       # Dispatcher
-│   ├── add.rs       # Register a catalog
-│   ├── remove.rs    # Unregister (Phase 9: reads enabled plugins, cascades on --force)
+│   ├── add.rs       # Register a catalog; reuse cached clone if URL already cached (Phase 3 US3)
+│   ├── remove.rs    # Unregister (Phase 9: reads enabled plugins, cascades on --force; Phase 3 US3: reference-count cache)
 │   ├── list.rs      # Show all catalogs
 │   ├── update.rs    # Refresh (Phase 7: lazy embedder, per-plugin reindex, auto-disable orphans)
 │   ├── show.rs      # Show one catalog's manifest
@@ -319,7 +324,7 @@ src/commands/
 │   ├── disable.rs   # Disable a plugin (Phase 5; ~108 lines)
 │   ├── list.rs      # List plugins
 │   ├── show.rs      # Show one plugin
-│   └── interactive.rs # Bare `tome plugin` interactive browse (Phase 4; ~515 lines)
+│   └── interactive.rs # Bare `tome plugin` interactive browse (Phase 4; ~515 lines; Phase 3 US3: receives scope-resolved ResolvedScope)
 ├── workspace/       # (Phase 3 US2) Workspace scope management
 │   ├── mod.rs       # Dispatcher (info / init subcommands)
 │   ├── info.rs      # `tome workspace info` — read-only scope diagnostics (~40 lines for emit layer)
@@ -330,7 +335,7 @@ src/commands/
 └── mcp.rs           # (Phase 3 US1) MCP server dispatcher (~20 lines)
 ```
 
-**Responsibility**: Translate CLI arguments into library operations; orchestrate error handling and output formatting. All handlers receive `ResolvedScope` from pre-dispatch.
+**Responsibility**: Translate CLI arguments into library operations; orchestrate error handling and output formatting. All handlers receive `ResolvedScope` from pre-dispatch (Phase 3 US3).
 
 **Signature Pattern** (all subcommands):
 ```rust
@@ -339,7 +344,7 @@ pub fn run(args: SomeArgs, scope: &ResolvedScope, mode: output::Mode) -> Result<
 
 **Interactive Pattern** (Phase 4):
 ```rust
-pub fn run_interactive(mode: output::Mode) -> Result<(), TomeError>
+pub fn run_interactive(scope: &ResolvedScope, mode: output::Mode) -> Result<(), TomeError>
 ```
 
 **MCP Pattern** (Phase 3 US1):
@@ -365,7 +370,7 @@ pub fn run_with_deps(
 
 **Library Entry Point** (Phase 8, `status.rs`):
 ```rust
-pub fn assemble_report(paths: &Paths, verify: bool) -> Result<StatusReport, TomeError>
+pub fn assemble_report(scope: &ResolvedScope, paths: &Paths, verify: bool) -> Result<StatusReport, TomeError>
 pub fn print_version(json: bool) -> Result<(), TomeError>
 ```
 
@@ -604,6 +609,8 @@ src/mcp/
 | Test for schema migration | `tests/schema_migrations.rs` + synthetic fixture | Register temporary migration via `MIGRATIONS_OVERRIDE` |
 | Test for MCP tool | `tests/mcp_server.rs` or per-tool file | Test tool input validation, output schema, handler logic |
 | Test shared helper | `tests/common/mod.rs` | Add `fabricate_*` factory functions |
+| Test for scope isolation | `tests/workspace_commands.rs` or new file (Phase 3 US3) | Test catalog/plugin/index isolation across scopes |
+| Test for catalog cache | `tests/catalog_cache_refcount.rs` (Phase 3 US3) | Test reuse, refcount, cleanup, cascade composition |
 
 ## Naming Conventions
 
@@ -611,11 +618,11 @@ src/mcp/
 |----------|-----------|----------|
 | **Struct/Enum** | PascalCase | `CatalogManifest`, `CatalogEntry`, `TomeError`, `PluginId`, `EnableOutcome`, `DisableOutcome`, `ReindexOutcome`, `Candidate`, `ModelState`, `StatusReport`, `OverallHealth`, `McpState`, `SkillMatch`, `Scope`, `ResolvedScope`, `ScopeKind`, `WorkspaceInfo`, `InitOutcome` |
 | **Trait** | PascalCase | `Embedder`, `Reranker`, `Git`, `ServerHandler` |
-| **Function/Method** | snake_case | `parse_and_validate()`, `install_signal_handler()`, `enable_plugin_atomic()`, `reindex_plugin_atomic()`, `resolve_plugin_dir()`, `cascade_disable_for_catalog()`, `assemble_report()`, `apply_pending()`, `search_skills()`, `get_skill()`, `resolve()` |
+| **Function/Method** | snake_case | `parse_and_validate()`, `install_signal_handler()`, `enable_plugin_atomic()`, `reindex_plugin_atomic()`, `resolve_plugin_dir()`, `cascade_disable_for_catalog()`, `assemble_report()`, `apply_pending()`, `search_skills()`, `get_skill()`, `resolve()`, `reference_count()` |
 | **Constant** | SCREAMING_SNAKE_CASE | `MODEL_REGISTRY`, `SCHEMA_URI`, `HANDLER_INSTALLED`, `MIGRATIONS` |
 | **Module** | snake_case directory names | `src/catalog/`, `src/commands/`, `src/plugin/`, `src/workspace/`, `src/index/`, `src/mcp/` |
 | **Test** | `#[test]` with descriptive name | `#[test] fn unknown_field_is_rejected()` |
-| **Integration test file** | Matches the feature being tested | `tests/plugin_enable.rs` tests `tome plugin enable`; `tests/workspace_info.rs` tests `tome workspace info`; `tests/reindex.rs` tests `tome reindex`; `tests/status.rs` tests `tome status` |
+| **Integration test file** | Matches the feature being tested | `tests/plugin_enable.rs` tests `tome plugin enable`; `tests/workspace_info.rs` tests `tome workspace info`; `tests/reindex.rs` tests `tome reindex`; `tests/status.rs` tests `tome status`; `tests/catalog_cache_refcount.rs` tests reference-counted cache (Phase 3 US3) |
 | **Interactive loop level** | Private enum in interactive.rs | `LoopExit::Continue`, `LoopExit::Back`, `LoopExit::Quit` |
 | **Reindex scope** | PublicEnum in commands/reindex.rs | `Scope::All`, `Scope::Catalog`, `Scope::Plugin` |
 | **Workspace scope** | PublicEnum in workspace/scope.rs | `Scope::Global`, `Scope::Workspace`, `ScopeSource::Flag`, `ScopeSource::Env`, `ScopeSource::CwdWalk` |
@@ -628,7 +635,7 @@ src/mcp/
 
 | File | Purpose |
 |------|---------|
-| `src/main.rs` | Binary entry; resolves scope (Phase 3 US2), parses CLI and dispatches to handlers. Phase 8: pre-parse hook for `--version`. Phase 3 US1: skips logging/signals for MCP. |
+| `src/main.rs` | Binary entry; resolves scope (Phase 3 US2/US3), parses CLI and dispatches to handlers. Phase 8: pre-parse hook for `--version`. Phase 3 US1: skips logging/signals for MCP. Phase 3 US3: all commands routed through scope resolution. |
 | `src/lib.rs` | Library aggregation; exposes public modules for tests. |
 | `tests/catalog_add.rs` | Integration tests directly import from `tome::*` and test the library. |
 | `tests/reindex.rs` | Library-API tests via `commands::reindex::run_with_deps()` with `StubEmbedder`. |
@@ -637,10 +644,12 @@ src/mcp/
 | `tests/workspace_init.rs` | Library-API tests via `workspace::init::init()` (Phase 3 US2). |
 | `tests/catalog_remove_cascade.rs` | Library-API tests for cascade via `lifecycle::cascade_disable_for_catalog()` with `StubEmbedder` (Phase 9). |
 | `tests/mcp_server.rs` | MCP server tool registration and descriptions (Phase 3 US1). |
+| `tests/workspace_commands.rs` | Cross-product scope isolation (Phase 3 US3). |
+| `tests/catalog_cache_refcount.rs` | Reference-counted catalog cache (Phase 3 US3). |
 
 ## Module Stability Guarantees
 
-- **Stable Public API**: `catalog::git`, `catalog::manifest`, `catalog::store`, `config`, `error`, `output`, `paths`, `cli`, `plugin`, `workspace` (Phase 3 US2), `index` (including `migrations::apply_pending`), `embedding`, `presentation`, `commands::status::assemble_report`, `commands::reindex::run_with_deps`, `mcp` (Phase 3 US1).
+- **Stable Public API**: `catalog::git`, `catalog::manifest`, `catalog::store` (including `reference_count`), `config`, `error`, `output`, `paths`, `cli`, `plugin`, `workspace` (Phase 3 US2), `index` (including `migrations::apply_pending`), `embedding`, `presentation`, `commands::status::assemble_report`, `commands::reindex::run_with_deps`, `mcp` (Phase 3 US1).
 - **Internal**: Submodule organization within `commands/` is flexible; subcommand `run()` signatures (and `run_interactive()` for bare `plugin`, `run_with_deps()` for `reindex` tests, `assemble_report()` for `status` tests, `run(scope, paths)` for `mcp`) are the public contract.
 - **MCP Experimental**: `mcp::run()`, `mcp::server::Server`, `mcp::state::McpState`, `mcp::tools::*` are library-shaped but Phase 3 US1 lands the initial filling (Phase 10 will expand with new tools).
 
@@ -659,68 +668,16 @@ No files in Phase 1–9 or Foundational are auto-generated.
 
 ---
 
-## Foundational F7 additions — Schema Migrations Framework
+## Phase 3 User Story 3 additions — Per-Command Scope Honouring & Reference-Counted Catalog Cache
 
-Foundational F7 (commit 26d7984) adds a forward-only schema migration framework to `src/index/migrations.rs`
-(~120 lines). `apply_pending(conn, current, target)` applies registered migration steps between versions,
-enforcing idempotence and fail-fast semantics. Three dedicated exit codes:
-- **51** (`IndexIntegrityCheckFailure` — "DB in unknown state") on `PRAGMA integrity_check` failure post-migration.
-- **73** (`SchemaVersionTooNew` — "write-path refuses newer-on-disk schema") when on-disk schema > target.
-- **74** (`SchemaMigrationFailed` — "registered step apply error") when a registered migration step fails.
-Read-path via `open_read_only()` keeps legacy 52 (`SchemaTooNew`) for backward compat. Phase 2 ships zero registered migrations (per plan, defers to Phase 10); tests use `thread_local! { MIGRATIONS_OVERRIDE }` to verify the framework end-to-end. Structural boundary: `apply_pending` is library-shaped; tests inject synthetic migrations without code changes. Added test file `tests/schema_migrations.rs` (forward-only boundaries, synthetic fixture e2e, "no migration registered" guard).
-
----
-
-## Foundational F8 additions — MCP Async Island
-
-Foundational F8 (commit 1814e30) adds `src/mcp/` as a structural async boundary: four files
-(`mod.rs`, `runtime.rs`, `log.rs`, `preflight.rs`). The constitution anticipated a forcing function for async in Phase 3;
-F8 establishes the island now with zero active filling (US1 pending). `tokio` is scoped exclusively to `src/mcp/`;
-all other modules remain sync. A new structural test `tests/sync_boundary.rs` enforces this by scanning the
-entire src/ tree (except src/mcp/) and failing if any file imports `tokio`. `mod.rs` provides a sync entry point
-`start_server() -> Result<(), TomeError>` that currently returns `McpStartupFailed` (stub until US1 filled the loop).
-`preflight.rs` implements FR-110 pre-flight: scope-resolved index read-only open → schema gate (emits 73 if too-new) →
-drift detect → SHA-256 verify primary file → eager-load `FastembedEmbedder` (reranker deferred per FR-109).
-Returns `PreflightReport` (library-shaped). `log.rs` wires size-based rotation (FR-227) + JSON-lines `tracing-subscriber`
-registry (FR-226) + stderr-only error layer (FR-220) for the server's continuous lifecycle. `runtime.rs` initializes
-a current-thread tokio runtime (research §R-2 pinned per Phase 3 plan). Design invariant: no MCP module imports from
-`commands/`, `plugin/`, `index/` (reverse deps only). Phase 3 will refactor read-side (query, plugin list/show) as
-shared library entry points (`query::run_with_deps()`, etc.) both CLI and MCP can call.
-
----
-
-## Phase 3 User Story 1 additions — MCP Server Wired
-
-Phase 3 US1 fills the async island with the actual MCP server logic. Two new files under `src/mcp/`:
-- `server.rs` (~90 lines): `#[tool_router]` + `#[tool_handler]` macro-driven rmcp `ServerHandler` impl.
-  Registers `search_skills` and `get_skill` tools; delegates to `mcp::tools::{search_skills,get_skill}::handle`.
-- `state.rs` (~30 lines): `McpState` struct carrying `Arc<dyn Embedder>`, `OnceCell<Arc<dyn Reranker>>`, scope, paths, and registry entries.
-  Lazy reranker per FR-109; eager embedder per FR-109 preflight.
-- `tools/mod.rs` (~15 lines): Tool module aggregation.
-- `tools/search_skills.rs` (~150 lines): `Input` / `Output` JsonSchema, input validation per contract, lazy reranker load on first call, dispatch to `commands::query::pipeline`.
-- `tools/get_skill.rs` (~100 lines): `Input` / `Output` JsonSchema, read skill body + resource files, return absolute paths.
-- `commands/mcp.rs` (~20 lines): Thin dispatcher. Skips `--json` at top level (MCP protocol is the structured output).
-- `src/main.rs` change: Special-cases `Command::Mcp(_)` to skip `logging::init` (conflicts with MCP file subscriber) and `ctrlc::install_signal_handler` (tokio's async `ctrl_c()` would race). Routes via `commands::mcp::run(scope, paths)`.
-- `src/cli.rs` change: Adds `Command::Mcp(McpArgs)` variant.
-- Binary size: macOS arm64 20.94 → 22.04 MiB (rmcp now actually referenced).
-
----
-
-## Phase 3 User Story 2 additions — Workspace Context
-
-Phase 3 US2 adds workspace scope resolution and management. New `src/workspace/` module and `src/commands/workspace/` dispatcher:
-- `src/workspace/scope.rs`: `Scope` enum (Global / Workspace), `ResolvedScope`, `ScopeSource` types.
-- `src/workspace/resolution.rs`: `resolve(workspace_flag, global_flag, env_opt, cwd)` algorithm (--workspace, --global, TOME_WORKSPACE env, CWD walk, global fallback).
-- `src/workspace/info.rs`: `WorkspaceInfo`, `ModelIdentity` (emit-only types); `assemble(scope, paths)` library function for read-only scope diagnostics.
-- `src/workspace/init.rs`: `InitOutcome` type; `init(target, inherit_global, force, paths)` library function with atomic `.tome/` creation via `tempfile` + `std::fs::rename`.
-- `src/workspace/inventory.rs`: Optional workspace registry append (`${state_dir}/workspaces.txt`).
-- `src/commands/workspace/mod.rs`: Dispatcher routing `Info` / `Init(args)` to subcommands.
-- `src/commands/workspace/info.rs`: CLI emit layer (~50 lines) calling `workspace::info::assemble()`.
-- `src/commands/workspace/init.rs`: CLI emit layer (~65 lines) calling `workspace::init::init()`.
-- `src/cli.rs` changes: `GlobalScopeArgs` with `--workspace` / `--global` flags, `WorkspaceCommand` enum, `WorkspaceArgs`.
-- `src/main.rs` change: Pre-dispatch `workspace::resolution::resolve()` producing `ResolvedScope` threaded into all command handlers.
-- `src/paths.rs` deferred refactor: Phase 3 US2 uses global paths only; Phase 10 general refactor will add scope-parametrized accessors.
-- New test files: `tests/workspace_resolution.rs`, `tests/workspace_info.rs`, `tests/workspace_init.rs`.
+Phase 3 US3 gates all commands through workspace scope resolution (Phase 3 US2 was the foundation; US3 ensures
+every command receives `ResolvedScope` from pre-dispatch). Catalog cache directories are now reference-counted
+across scopes: `store::reference_count(url, paths)` walks scope configs (global + all workspaces via optional
+`workspaces.txt` registry) to enumerate all references. `tome catalog add` reuses existing cache if URL is already
+cached elsewhere (cheap manifest check, skip git clone). `tome catalog remove` calls `reference_count()` AFTER
+config deletion; only deletes cache dir when refcount reaches zero. TOCTOU-benign: concurrent removes race safely
+(one winner, other no-ops; dangling cache is recoverable via `tome catalog update`). Pattern is reusable for
+any future shared-on-disk resource.
 
 ---
 

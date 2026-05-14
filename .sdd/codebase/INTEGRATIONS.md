@@ -2,7 +2,7 @@
 
 > **Purpose**: Document all external services, APIs, databases, and third-party integrations.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US2 — `tome workspace info` + `tome workspace init` commands; workspace-scoped paths + registry file)
+> **Last Updated**: 2026-05-14 (Phase 3 / US3 — reference-counted catalog clones; workspaces.txt now load-bearing for refcount enumeration)
 
 ## Databases & Data Stores
 
@@ -21,22 +21,22 @@
 
 ### Cache Structure
 
-- **Catalog cache**: Each remote catalog source is content-addressed by `sha256(url)` in `${XDG_DATA_HOME}/tome/catalogs/<sha256>/` (global scope) or `${WORKSPACE}/.tome/catalogs/<sha256>/` (workspace scope) — Git working tree, refreshed on `tome catalog update`.
+- **Catalog cache**: Each remote catalog source is content-addressed by `sha256(url)` in `${XDG_DATA_HOME}/tome/catalogs/<sha256>/` (global scope) or `${WORKSPACE}/.tome/catalogs/<sha256>/` (workspace scope) — Git working tree, refreshed on `tome catalog update`. Multiple scopes can reference the same URL; the on-disk clone is shared via reference-count tracking — deleted only when no scope still references it (Phase 3 / US3).
 - **Model cache**: Downloaded model ONNX artefacts stored in `${XDG_DATA_HOME}/tome/models/<model-name>/` (global, shared across scopes) with per-model `manifest.json` (strict JSON, `#[serde(deny_unknown_fields)]`); managed explicitly via `tome models {download,list,remove}` (Phase 6).
 - **Atomic writes**: `tempfile` crate (rename-based) prevents corruption on SIGINT; `.partial/` directories ensure no half-extracted state visible to concurrent processes; workspace `init` uses `tempfile::Builder::tempdir_in(workspace_root)` for POSIX-atomic staging-to-final rename (Phase 3 / US2).
 
-### Workspace Registry (Phase 3 / US2)
+### Workspace Registry (Phase 3 / US2, load-bearing in Phase 3 / US3)
 
 - **File**: `${XDG_DATA_HOME}/tome/workspaces.txt` — opt-in (never created unless explicitly requested)
 - **Format**: Line-delimited absolute paths to workspace roots, one per line; dedupe by exact-path match
-- **Semantics**: Informational only — tracks which workspaces have been initialized via `--inherit-global` or explicit `append_if_registry_exists` call (research §R-15)
-- **Usage**: Client harnesses can read this file to discover initialized workspaces; Tome never requires it to exist
+- **Semantics**: Informational in US2; load-bearing in US3 — tracks which workspaces have been initialized via `--inherit-global` or explicit `append_if_registry_exists` call (research §R-15). US3 `catalog remove` consults this file to enumerate all scopes for reference-counting; on a fresh install (absent registry), `remove` behaves as Phase 1–US2 (global scope only, always deletes clone).
+- **Usage**: Client harnesses can read this file to discover initialized workspaces; Tome treats absence as "no workspace scopes" (global scope only)
 
 ---
 
 ## Authentication & Authorization
 
-Phase 1–9 has no explicit application-layer authentication. Phase 3 / US1 MCP server similarly has no auth mechanism — it is stdio-based (embedding in Claude Code harness provides transport-level auth). Phase 3 / US2 adds workspace scoping but no auth model changes.
+Phase 1–9 has no explicit application-layer authentication. Phase 3 / US1 MCP server similarly has no auth mechanism — it is stdio-based (embedding in Claude Code harness provides transport-level auth). Phase 3 / US2 adds workspace scoping but no auth model changes. Phase 3 / US3 lifts the single-scope-per-URL restriction but does not introduce per-scope ACLs.
 
 - **Git operations**: Inherit system SSH keys and HTTP credential helpers (if configured in `~/.gitconfig`).
 - **Hugging Face model downloads**: No API key required; public `https://huggingface.co/` URLs are freely accessible (MODEL_REGISTRY pinned to MIT-licensed BGE variants).
@@ -83,8 +83,8 @@ None in Phase 1–9. Phase 3 / US1 MCP server is stdio-based (single request/res
 ## Caching
 
 | Service | Purpose | TTL / Eviction | Configuration |
-|---------|---------|----------------|---------------|
-| Filesystem (XDG) | Catalog Git working trees | Explicit `tome catalog remove` (user-managed); persistent | Global: `${XDG_DATA_HOME}/tome/catalogs/` — git-based, refreshed on `tome catalog update`; Workspace: `${WORKSPACE}/.tome/catalogs/` (Phase 3 Foundational F1) |
+|---------|---------|----------------|-----------------|
+| Filesystem (XDG) | Catalog Git working trees | Explicit `tome catalog remove` (user-managed); persistent; shared across scopes via refcount (Phase 3 / US3) | Global: `${XDG_DATA_HOME}/tome/catalogs/` — git-based, refreshed on `tome catalog update`; Workspace: `${WORKSPACE}/.tome/catalogs/` (Phase 3 Foundational F1); same URL reused across scopes — clone deleted only when all scopes drop it (Phase 3 / US3) |
 | Filesystem (XDG) | Downloaded model artefacts | Explicit `tome models remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/models/` — one dir per model with manifest + ONNX files; Phase 6 adds explicit user-facing commands; shared across all scopes (global) |
 
 No TTL-based eviction. Phase 1–9 uses explicit user commands for cleanup (principle VI: KISS).
@@ -105,7 +105,7 @@ No TTL-based eviction. Phase 1–9 uses explicit user commands for cleanup (prin
 
 | Service | Purpose | Configuration |
 |---------|---------|---------------|
-| XDG-compliant filesystem | Configuration, catalogs, models, index | Global: `${XDG_CONFIG_HOME}/tome/config.toml`, `${XDG_DATA_HOME}/tome/catalogs/<sha>/`, `${XDG_DATA_HOME}/tome/models/`, `${XDG_DATA_HOME}/tome/index.db`; Workspace: `${WORKSPACE}/.tome/config.toml`, `${WORKSPACE}/.tome/catalogs/<sha>/`, `${WORKSPACE}/.tome/index.db` (Phase 3 Foundational F1); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]`; Phase 9 extends catalog removal with cascade-disable index cleanup; Foundational F8 adds MCP log to `${XDG_STATE_HOME}/tome/mcp.log`; Phase 3 / US1 MCP server operates on same index + models + config per scope; Phase 3 / US2 adds `${XDG_DATA_HOME}/tome/workspaces.txt` opt-in registry (research §R-15) and atomic `.tome/` dir creation via tempfile staging (staging dir inside workspace root for POSIX-atomic rename, chmod 0700 before content lands) |
+| XDG-compliant filesystem | Configuration, catalogs, models, index | Global: `${XDG_CONFIG_HOME}/tome/config.toml`, `${XDG_DATA_HOME}/tome/catalogs/<sha>/`, `${XDG_DATA_HOME}/tome/models/`, `${XDG_DATA_HOME}/tome/index.db`; Workspace: `${WORKSPACE}/.tome/config.toml`, `${WORKSPACE}/.tome/catalogs/<sha>/`, `${WORKSPACE}/.tome/index.db` (Phase 3 Foundational F1); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]`; Phase 9 extends catalog removal with cascade-disable index cleanup; Foundational F8 adds MCP log to `${XDG_STATE_HOME}/tome/mcp.log`; Phase 3 / US1 MCP server operates on same index + models + config per scope; Phase 3 / US2 adds `${XDG_DATA_HOME}/tome/workspaces.txt` opt-in registry; Phase 3 / US3 makes workspaces.txt load-bearing for refcount enumeration; atomic `.tome/` dir creation via tempfile staging (staging dir inside workspace root for POSIX-atomic rename, chmod 0700 before content lands) |
 
 ---
 
@@ -121,11 +121,11 @@ None in Phase 1–9.
 |----------|----------|---------|---------|---------------|
 | `HOME` | Yes | Base directory for XDG path resolution | `/Users/aaronbassett` | — |
 | `XDG_CONFIG_HOME` | No (defaults to `~/.config`) | Override config directory | `/opt/etc` | — |
-| `XDG_DATA_HOME` | No (defaults to `~/.local/share`) | Override data directory (models, catalogs, index.db, workspaces.txt) | `/opt/var` | — (US2 adds workspaces.txt location) |
+| `XDG_DATA_HOME` | No (defaults to `~/.local/share`) | Override data directory (models, catalogs, index.db, workspaces.txt) | `/opt/var` | — (US2 adds workspaces.txt location; US3 makes it load-bearing) |
 | `XDG_STATE_HOME` | No (defaults to `~/.local/state`) | Override state directory (MCP log) | `/opt/state` | Foundational F8 |
 | `TOME_LOG` | No | Custom log filter (overrides `RUST_LOG`) | `debug`, `info`, `tome=trace` | — |
 | `RUST_LOG` | No | Standard Rust log filter | `info`, `warn` | — |
-| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR`; phase 8: status report respects `NO_COLOR`; phase 9: cascade-disable output respects `NO_COLOR`; phase 3/US1: MCP stdout is protocol-only (no color possible); phase 3/US2: workspace info respects `NO_COLOR` |
+| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR`; phase 8: status report respects `NO_COLOR`; phase 9: cascade-disable output respects `NO_COLOR`; phase 3/US1: MCP stdout is protocol-only (no color possible); phase 3/US2: workspace info respects `NO_COLOR`; phase 3/US3: scope-aware commands respect `NO_COLOR` |
 | `CLICOLOR` | No | Disable coloured output (alternate) | `0` to disable | — |
 
 ---
@@ -172,7 +172,7 @@ None in Phase 1–9.
 | `plugin.json` | Catalog plugin dirs | Lenient (unknown fields ignored) | Third-party plugin metadata (FR-013a boundary) |
 | SKILL.md YAML frontmatter | Upstream plugin repos | Lenient (unknown fields ignored) | Third-party skill/agent/command/hook metadata; parsed by `serde_yaml` without validation |
 | `tome-catalog.toml` | Catalog root | Strict (`deny_unknown_fields`) | Tome-owned manifest; validates all fields |
-| `config.toml` | Global: `${XDG_CONFIG_HOME}/tome/`; Workspace: `${WORKSPACE}/.tome/` (Phase 3 / US2) | Strict (`deny_unknown_fields`) | Tome-owned user config; rejects typos early |
+| `config.toml` | Global: `${XDG_CONFIG_HOME}/tome/`; Workspace: `${WORKSPACE}/.tome/` (Phase 3 / US2) | Strict (`deny_unknown_fields`) | Tome-owned user config; rejects typos early; Phase 3 / US3 uses per-scope config to enumerate refcount |
 
 ---
 
@@ -220,20 +220,22 @@ None in Phase 1–9.
 
 ---
 
-## Workspace Scope Integration (Phase 3 / US2)
+## Workspace Scope Integration (Phase 3 / US2 + Phase 3 / US3)
 
-**Status:** Workspace info + init commands landed (US2); scope-aware path resolution per Foundational F1.
+**Status:** Workspace info + init commands landed (US2); scope-aware path resolution per Foundational F1; reference-counted catalog sharing across scopes (US3).
 
 | Aspect | Details |
 |--------|---------|
 | **Scope types** | Global (default, uses XDG paths) or Workspace (per `.tome/` directory); resolved via `Paths::resolve()` which walks `cwd` up the tree looking for `.tome/` marker or uses global on failure (research §R-15) |
-| **Path model** | Per-scope `Paths` accessor methods: `Paths::config_file_for(&Scope)`, `Paths::index_db_for(&Scope)`, `Paths::index_lock_for(&Scope)` added in Foundational F1 to support both global + workspace scopes; existing Phase 1 fields retained for backward compat (convention F1) |
+| **Path model** | Per-scope `Paths` accessor methods: `Paths::config_file_for(&Scope)`, `Paths::index_db_for(&Scope)`, `Paths::index_lock_for(&Scope)` added in Foundational F1 to support both global + workspace scopes; existing Phase 1 fields retained for backward compat (convention F1); Phase 3 / US3 extends `Paths::cache_dir_for(url)` to respect scope (same URL cached per-scope unless refcount is zero) |
 | **Config location** | Global: `${XDG_CONFIG_HOME}/tome/config.toml`; Workspace: `${WORKSPACE}/.tome/config.toml` (parse errors → `WorkspaceMalformed` exit 70 per US2.a) |
 | **Index location** | Global: `${XDG_DATA_HOME}/tome/index.db`; Workspace: `${WORKSPACE}/.tome/index.db` (same WAL + advisory lock model; read-only on MCP server per FR-056) |
+| **Catalog cache location** | Global: `${XDG_DATA_HOME}/tome/catalogs/<sha>/`; Workspace: `${WORKSPACE}/.tome/catalogs/<sha>/` (Phase 3 / US3 enables sharing — same clone path used when same URL registered in multiple scopes; deleted only when no scope references it via `reference_count` enumeration) |
+| **Reference counting (Phase 3 / US3)** | `catalog::store::reference_count(url, paths) -> Vec<Scope>` enumerates all scopes whose config still references a given URL; `tome catalog remove` consults this to decide whether the on-disk clone can be deleted (happens only when refcount returns empty or just the removed scope); lifts Phase 1 single-scope-per-URL restriction; TOCTOU race possible (worst case: one re-download on next `catalog update`) |
 | **Info command** | `tome workspace info` (US2.a) — read-only scope report via `WorkspaceInfo` wire record; catalog/plugin/skill counts come from config + index; `ScopeSource` enum (flag/global-flag/env/cwd-walk/global-fallback) serialised with snake_case (e.g., `GlobalFlag` → `"global_flag"` in JSON) |
 | **Init command** | `tome workspace init [<path>] [--inherit-global] [--force]` (US2.b) — atomic `.tome/` creation; staging dir inside workspace root (same FS) via `tempfile::Builder::tempdir_in`; POSIX-atomic final rename; `--inherit-global` seeds config with global catalogs (no enablement copy); `--force` replaces existing atomically (aside to `.tome.old/`, best-effort cleanup); pre-check refuses without `--force` (exit 4 / `CatalogAlreadyExists` shared with Phase 1 catalog case) |
-| **Registry file** | `${XDG_DATA_HOME}/tome/workspaces.txt` — opt-in (created on-demand, never mandatory); line-delimited workspace roots; deduped by exact-path match; informational only (client harnesses can discover initialized workspaces; Tome doesn't require it) |
-| **CLI wiring** | New `Command::Workspace(WorkspaceArgs)` + `WorkspaceCommand::{Info, Init}` variants in `src/cli.rs`; scope resolved once in `commands/workspace/mod.rs` dispatcher and threaded through each subcommand |
+| **Registry file** | `${XDG_DATA_HOME}/tome/workspaces.txt` — opt-in (created on-demand, never mandatory); line-delimited workspace roots; deduped by exact-path match; informational in US2; load-bearing in US3 (referenced by `reference_count` to enumerate workspace configs) |
+| **CLI wiring** | New `Command::Workspace(WorkspaceArgs)` + `WorkspaceCommand::{Info, Init}` variants in `src/cli.rs`; scope resolved once in `commands/workspace/mod.rs` dispatcher and threaded through each subcommand; Phase 3 / US3 routes all scope-aware commands (catalog add/remove/list, plugin enable/disable/list/show, query, models list/remove, reindex, etc.) through global scope resolution + per-command scope dispatch |
 
 ---
 
@@ -246,4 +248,4 @@ None in Phase 1–9.
 
 ---
 
-*This document maps external service dependencies and failure modes. Updated for Phase 3 Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2: schema migration framework rewrite + MCP server scaffolding scoped to `src/mcp/` + workspace info/init commands with scope-aware path resolution and opt-in workspace registry file.*
+*This document maps external service dependencies and failure modes. Updated for Phase 3 Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 + Phase 3 / US3: schema migration framework rewrite + MCP server scaffolding scoped to `src/mcp/` + workspace info/init commands with scope-aware path resolution + opt-in workspace registry file + reference-counted catalog clone sharing across scopes.*
