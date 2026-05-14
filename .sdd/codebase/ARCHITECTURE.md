@@ -2,11 +2,11 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Story 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade) + 2026-05-14 (Foundational F7 + F8 — schema migrations framework, MCP async island) + 2026-05-14 (Phase 3 User Story 1 — MCP server wired)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Story 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade) + 2026-05-14 (Foundational F7 + F8 — schema migrations framework, MCP async island) + 2026-05-14 (Phase 3 User Story 1 — MCP server wired) + 2026-05-14 (Phase 3 User Story 2 — workspace context, `tome workspace info/init`)
 
 ## Architecture Overview
 
-Tome is a **dual-mode Rust application** (CLI + MCP server) organized around a **capability-driven** modular architecture. The CLI follows a classic **parse → dispatch → execute → map-errors → exit** pipeline. The MCP server shares library-shaped logic (embedding, index, plugin metadata) but dispatches via `rmcp::serve_server(stdio())` in an async island under `src/mcp/`. Error handling is centralized in a closed `TomeError` enum that enforces exhaustive exit-code mapping at compile time. Signal handling (SIGINT) is global and atomic for the CLI, async-aware for the MCP server (via `tokio::signal::ctrl_c()`). A forward-only schema migration framework governs index evolution with three dedicated exit codes (51 for integrity failures, 73 for schema-version-too-new on write, 74 for migration application errors). The MCP async island under `src/mcp/` (Phase 3 US1 now filled) provides stdio transport, tool registration via rmcp macros, lazy reranker loading per FR-109, and preflight validation. Two log paths coexist: CLI stderr (tracing-subscriber) and MCP file log (JSON-lines, size-based rotation) — they are mutually exclusive per FR-221 (stdout is the MCP protocol channel).
+Tome is a **dual-mode Rust application** (CLI + MCP server) organized around a **capability-driven** modular architecture. The CLI follows a classic **parse → dispatch → execute → map-errors → exit** pipeline. The MCP server shares library-shaped logic (embedding, index, plugin metadata) but dispatches via `rmcp::serve_server(stdio())` in an async island under `src/mcp/`. Error handling is centralized in a closed `TomeError` enum that enforces exhaustive exit-code mapping at compile time. Signal handling (SIGINT) is global and atomic for the CLI, async-aware for the MCP server (via `tokio::signal::ctrl_c()`). A forward-only schema migration framework governs index evolution with three dedicated exit codes (51 for integrity failures, 73 for schema-version-too-new on write, 74 for migration application errors). The MCP async island under `src/mcp/` (Phase 3 US1 now filled) provides stdio transport, tool registration via rmcp macros, lazy reranker loading per FR-109, and preflight validation. Two log paths coexist: CLI stderr (tracing-subscriber) and MCP file log (JSON-lines, size-based rotation) — they are mutually exclusive per FR-221 (stdout is the MCP protocol channel). **Phase 3 US2** (workspace context) introduces per-project workspaces: a `.tome/` directory marking a workspace root, with scope resolution walking upward from CWD, optional `TOME_WORKSPACE` env var, `--workspace` / `--global` CLI flags, and two new read-only commands `tome workspace info` (scope diagnostics) and `tome workspace init` (atomic `.tome/` creation with optional catalog inheritance).
 
 ## Architecture Pattern
 
@@ -14,9 +14,11 @@ Tome is a **dual-mode Rust application** (CLI + MCP server) organized around a *
 |---------|-------------|
 | **Dual-mode: CLI + MCP** | CLI (sync, ~20 MB binary) and MCP server (async, ~22 MB including rmcp) coexist. CLI dispatch skips logging/signals; MCP is routed differently from other top-level commands (Phase 3 US1). |
 | **Sync CLI, Async MCP** | All CLI code is sync. MCP lives in `src/mcp/` with `tokio` scoped exclusively here. Structural test `tests/sync_boundary.rs` enforces. Shared library functions (`query::pipeline`, `lifecycle::enable`, index CRUD) are sync; both CLI and MCP call them. |
-| **Closed Error Set** | All failure paths map to a single `TomeError` enum with explicit exit codes; no `Other` or `Unknown` arms. Adding a failure mode requires specification, error type, and test updates. Phase 3 US1 adds `McpStartupFailed` and `McpProtocolIo`. |
-| **Atomic Writes** | Registry mutations, cache operations, and index writes use `tempfile` + rename for POSIX atomicity; SQLite WAL provides the index concurrency contract. Interruptions cannot corrupt state. |
-| **Capability-Organized Modules** | Modules group related functionality: `catalog/` (manifest + Git + store), `commands/` (CLI handlers), `config/` (manifest deserialization), `paths/` (XDG resolution), `logging/` (tracing setup), `output/` (human/JSON formatting), `plugin/` (metadata parsing + lifecycle), `index/` (SQLite skills DB + KNN + migrations), `embedding/` (fastembed wrapper + model registry + download), `presentation/` (tables / progress / colour / prompts), `mcp/` (async server boundary + stdio transport + preflight). |
+| **Workspace + Global Scope** | Dual-install model (Phase 3 US2): per-project `.tome/` directory (workspace scope) or global XDG (global scope). `--workspace <path>` or `TOME_WORKSPACE=<path>` or CWD walk override the default (global fallback). Every command honours scope resolution via `ResolvedScope(Scope, ScopeSource)` threaded from pre-dispatch. `tome workspace info/init` are read-only + atomic scope-management commands. |
+| **Scope-Parametrized Paths** | `src/paths.rs::Paths` now has accessor methods like `config_file_for(&Scope)` and `index_db_for(&Scope)` that compute per-scope locations. Workspace uses `${workspace_root}/.tome/` for config and index; global uses `${XDG_CONFIG_HOME}/tome/` and `${XDG_DATA_HOME}/tome/`. Single `Paths` struct parametrized at call sites (Phase 3 US2). |
+| **Closed Error Set** | All failure paths map to a single `TomeError` enum with explicit exit codes; no `Other` or `Unknown` arms. Adding a failure mode requires specification, error type, and test updates. Phase 3 US1 adds `McpStartupFailed` and `McpProtocolIo`. Phase 3 US2 adds `WorkspaceNotFound` (71), `WorkspaceMalformed` (75). |
+| **Atomic Writes** | Registry mutations, cache operations, and index writes use `tempfile` + rename for POSIX atomicity; SQLite WAL provides the index concurrency contract. Interruptions cannot corrupt state. **Workspace init pattern**: `tempfile::Builder::tempdir_in(workspace_root)` creates a sibling `.tome.tmp.XXXX/`, stages all files inside, then `std::fs::rename(staged, .tome)` lands atomically. On failure, `.tome.old/` rollback restores the previous state (Phase 3 US2). |
+| **Capability-Organized Modules** | Modules group related functionality: `catalog/` (manifest + Git + store), `commands/` (CLI handlers), `config/` (manifest deserialization), `paths/` (XDG resolution + scope-parametrized accessors), `logging/` (tracing setup), `output/` (human/JSON formatting), `plugin/` (metadata parsing + lifecycle), `index/` (SQLite skills DB + KNN + migrations), `embedding/` (fastembed wrapper + model registry + download), `presentation/` (tables / progress / colour / prompts), `workspace/` (scope resolution + workspace info/init), `mcp/` (async server boundary + stdio transport + preflight). |
 | **Credential Scrubbing at Boundary** | All captured `git` and `reqwest` output passes through credential scrubbing before reaching logging, error display, or structured output. |
 | **Trait-based Embedding Abstraction** | `Embedder` and `Reranker` are seam interfaces; `FastembedEmbedder` wraps `fastembed-rs`, and a deterministic `StubEmbedder` (unit-test only) provides testability without model files. |
 | **Plugin-Dir Resolution: Manifest-First** | `lifecycle::resolve_plugin_dir` reads `tome-catalog.toml`, looks up `id.plugin` in the declared `plugins[].name`, joins with the source; falls back to flat `entry.path.join(&id.plugin)` for backward compat when manifest is absent. Single shared function across `enable`, `disable`, `list`, `show` fixes inconsistency. |
@@ -41,11 +43,49 @@ Tome is a **dual-mode Rust application** (CLI + MCP server) organized around a *
 - **Dependents**: `commands/` modules (receive parsed args).
 - **Pipeline Entry**: `main()` parses CLI → installs signal handler → dispatches to handler → maps result to exit code.
 - **Phase 3 US1 Change**: Pre-dispatch check for `Command::Mcp(_)`. If MCP, skip `logging::init` (conflicts with MCP file subscriber) and `ctrlc::install_signal_handler` (tokio's async `ctrl_c()` would race). Route directly to `commands::mcp::run(scope, paths)`.
+- **Phase 3 US2 Change**: Global scope flags (`--workspace` / `--global`) added to `GlobalScopeArgs` flattened into `Cli`. Pre-dispatch workspace resolution (`workspace::resolution::resolve()`) produces `ResolvedScope` before any handler invocation. All commands receive `ResolvedScope` in their signature (`run(args, scope, mode)`). Route via `commands::workspace::run()` for `Command::Workspace`.
 - **Phase 4 Change**: `PluginArgs` now wraps an `Option<PluginCommand>` to allow bare `tome plugin` with no subcommand. Routes to `commands::plugin::run_interactive()` when the command is `None`.
 - **Phase 5 Change**: `PluginCommand` now includes `Disable(PluginDisableArgs { id: String, force: bool })` variant.
 - **Phase 6 Change**: `ModelsCommand` enum added with `Download`, `List`, `Remove` variants; routes via `Command::Models(ModelsCommand)` to `commands::models::run()`.
 - **Phase 7 Change**: `ReindexArgs` and `ReindexCommand` added for `tome reindex [<scope>] [--force]`; routes via `Command::Reindex(ReindexArgs)` to `commands::reindex::run()`.
 - **Phase 8 Change**: `StatusArgs` added with `--verify` flag; routes via `Command::Status(StatusArgs)` to `commands::status::run()`. Pre-parse hook intercepts `--version` / `-V` BEFORE clap dispatch so extended output can include MODEL_REGISTRY identities and honour `--json` flag.
+
+### Workspace Context & Scope Resolution (`src/workspace/`, `src/commands/workspace/`, Phase 3 US2)
+
+- **Purpose**: Model per-project workspaces (marked by a `.tome/` directory) distinct from global state; provide scope resolution (CWD walk, env var, CLI flags), workspace diagnostics, and atomic initialization.
+- **Location**: `src/workspace/` (scope types, resolution algorithm, workspace info/init library logic), `src/commands/workspace/` (CLI handlers).
+- **Core Types** (`src/workspace/scope.rs`):
+  - `Scope::Global` — uses global XDG config + data.
+  - `Scope::Workspace(path)` — uses `${path}/.tome/` for config and index. Path is absolute, canonicalised, points to directory containing `.tome/` (not `.tome/` itself).
+  - `ResolvedScope { scope: Scope, source: ScopeSource }` — result of resolution, captures how the scope was chosen (flag, env, CWD walk, global fallback).
+  - `ScopeSource` — `Flag` / `GlobalFlag` / `Env` / `CwdWalk` / `GlobalFallback` (serializes as snake_case per contract).
+- **Resolution Algorithm** (`src/workspace/resolution.rs`):
+  1. Check `--workspace` flag (exit 72 `WorkspaceConflict` if both `--workspace` and `--global` set).
+  2. Check `--global` flag.
+  3. Check `TOME_WORKSPACE` env var.
+  4. Walk CWD upward looking for `.tome/` subdirectory (stops at filesystem root; returns `None` if not found).
+  5. Default to global fallback.
+- **Workspace Info** (`src/workspace/info.rs`, `commands/workspace/info.rs`):
+  - Read-only command; never acquires advisory lock; never bootstraps schema.
+  - Scoped accessor methods on `Paths`: config count, plugin totals/enabled, skill counts, schema version, embedder identity.
+  - Returns `WorkspaceInfo { scope, path, source, catalogs, plugins_total, plugins_enabled, skills_indexed, schema_version, embedder }` (emit-only `Serialize` type).
+  - Library entry point `assemble(scope, paths) -> WorkspaceInfo` reused by tests.
+  - Contract: bootstrap-not-yet (index absent) is informational, not an error. Surfaces as `None` schema + zero counts.
+- **Workspace Init** (`src/workspace/init.rs`, `commands/workspace/init.rs`):
+  - Atomic `.tome/` directory creation at target path (defaults to CWD).
+  - Flags: `--inherit-global` (seed catalogs from global config, not enablement state), `--force` (replace pre-existing `.tome/`).
+  - Atomic pattern: `tempfile::Builder::tempdir_in(target)` creates sibling `.tome.tmp.XXXX/`, stages config + empty index into it, then `std::fs::rename(staged, .tome)` lands atomically. On failure, pre-existing `.tome/` is renamed to `.tome.old/` before staging, then `.tome.old → .tome` restores on rename failure. Cleanup of `.tome.old` is best-effort post-success.
+  - Returns `InitOutcome { workspace, catalogs, config_path, inherited }` (emit-only type).
+  - Library entry point `init(target, inherit_global, force, paths) -> InitOutcome`.
+  - Optional registry appending: only writes to `${state_dir}/workspaces.txt` if file exists (user opt-in, per research §R-15).
+- **Paths Refactoring** (`src/paths.rs`):
+  - New methods: `config_file_for(&Scope)`, `index_db_for(&Scope)`, `index_lock_for(&Scope)`, `models_dir_for(&Scope)` (Phase 3 US2 deferred to Phase 10 for general refactor; Phase 3 US2 uses global-only paths for models).
+  - Workspace scope uses `${workspace}/.tome/config.toml`, `${workspace}/.tome/index.db`, `${workspace}/.tome/index.lock`.
+  - Global scope continues to use XDG paths.
+- **Dispatcher Pattern** (`src/commands/workspace/mod.rs`):
+  - Mirrors `src/commands/plugin/mod.rs` layout: dispatcher routes `WorkspaceCommand::Info | Init(args)` to subcommand handlers.
+  - Signature: `pub fn run(cmd: WorkspaceCommand, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError>`.
+  - Both handlers receive pre-resolved scope.
 
 ### Catalog Management (`src/catalog/`, `src/commands/catalog/`)
 
@@ -348,6 +388,8 @@ Tome is a **dual-mode Rust application** (CLI + MCP server) organized around a *
   - `index_lock`: `${XDG_DATA_HOME}/tome/index.lock`.
   - `models_dir`: `${XDG_DATA_HOME}/tome/models/`.
   - `model_path(name)` / `model_manifest(name)`: resolve model directories and manifest.json files.
+- **Phase 3 US2 additions** (deferred to Phase 10 for general refactoring):
+  - `config_file_for(&Scope)`, `index_db_for(&Scope)`, `index_lock_for(&Scope)`: scope-parametrized accessors.
 
 ### Logging (`src/logging.rs`)
 
@@ -376,22 +418,129 @@ Tome is a **dual-mode Rust application** (CLI + MCP server) organized around a *
   - Phase 2: `IndexIntegrityCheckFailure` (51), `IndexBusy` (50), `ModelMissing` (30), `PluginNotFound` (20), `SkillFrontmatterParseError` (23).
   - Phase 3: `PluginAlreadyInState` (31/32), `QueryNoResultsStrict`, drift checks (exit 41/42).
   - Phase 3 US1: `McpStartupFailed`, `McpProtocolIo` (new for MCP-specific failures).
+  - Phase 3 US2: `WorkspaceNotFound` (71), `WorkspaceMalformed` (75), `WorkspaceConflict` (72).
   - Phase 9: `CatalogHasEnabledPlugins` (exit 53).
   - **Foundational F7** (schema migration domain): `SchemaVersionTooNew` (73), `SchemaMigrationFailed` (74). Legacy `SchemaTooNew` (52) retained for read-path.
 - **Compile-Time Enforcement**: The `TomeError::exit_code()` method is exhaustive; adding a variant forces edits to `tests/exit_codes.rs`, the spec, and the PRD.
 
 ## Data Flow
 
+### Workspace Resolution & Scope Threading
+
+```
+main() pre-dispatch:
+  → parse Cli { scope: GlobalScopeArgs { workspace, global }, … }
+  → call workspace::resolution::resolve(workspace_flag, global_flag, env::var("TOME_WORKSPACE"), cwd)
+       ↓
+       resolution::resolve(workspace_opt, global_opt, env_opt, cwd):
+         → if both workspace_opt and global_opt: return Err(WorkspaceConflict) exit 72
+         → if workspace_opt: verify path exists && contains .tome/ → return Workspace(path), source=Flag
+         → if global_opt: return Global, source=GlobalFlag
+         → if env_opt: verify path exists && contains .tome/ → return Workspace(path), source=Env
+         → walk cwd upward looking for .tome/ → return Workspace(found_path), source=CwdWalk
+         → return Global, source=GlobalFallback
+       ↓
+       ResolvedScope { scope, source } produced
+       ↓
+  → thread ResolvedScope into every command invocation: run(args, scope, mode)
+       ↓
+dispatch to commands::{catalog,plugin,query,models,reindex,status,workspace}::run(args, scope, mode)
+  ↓
+  → each command calls Paths::resolve()
+  → uses scope-parametrized accessors: paths.config_file_for(&scope), paths.index_db_for(&scope), etc.
+  ↓
+  → workspace-scoped config and index accessed
+```
+
+### Workspace Info Flow: `tome workspace info`
+
+```
+CLI parse (--workspace <path> | --global)
+       ↓
+resolution → ResolvedScope
+       ↓
+dispatch to commands::workspace::info::run(scope, paths, mode)
+       ↓
+assemble(scope, paths):
+  → count_catalogs(scope, paths):
+      → load config from scope-specific path
+      → return count
+  → index_facts(scope, paths):
+      → open index read-only (scope-specific path)
+      → query plugin/skill counts, schema version
+      → read embedder identity from meta table
+      → return counts
+  → return WorkspaceInfo { scope, path, source, catalogs, plugins_total, plugins_enabled, skills_indexed, schema_version, embedder }
+       ↓
+emit(info, mode):
+  → human: formatted report
+  → JSON: single NDJSON record
+       ↓
+exit(0)
+```
+
+### Workspace Init Flow: `tome workspace init [<path>] [--inherit-global] [--force]`
+
+```
+CLI parse (path, --inherit-global, --force)
+       ↓
+resolution → ResolvedScope (scope is ignored; init always targets local path)
+       ↓
+dispatch to commands::workspace::init::run(args, paths, mode)
+       ↓
+workspace::init(target_path, inherit_global, force, paths):
+  → canonicalise target path
+  → if --force and .tome exists: rename .tome → .tome.old (best-effort backup)
+       ↓
+  → create tempfile::Builder::tempdir_in(target_path) → staging_dir
+       ↓
+  → stage .tome contents into staging_dir:
+      ↓
+      → create config.toml:
+          ↓
+          if inherit_global:
+            → load global config
+            → copy catalogs section (omit enablement state)
+          else:
+            → create empty [catalogs]
+            ↓
+          → write config to staging_dir/config.toml
+      ↓
+      → create index.db:
+          → call index::open(staging_db_path) → bootstrap schema, meta, …
+       ↓
+  → atomic landing: std::fs::rename(staging_dir, .tome)
+       ↓
+  → if rename fails and .tome.old exists:
+      → restore .tome.old → .tome (rollback)
+       ↓
+  → optional registry append:
+      if ${state_dir}/workspaces.txt exists:
+        → append target_path + "\n"
+       ↓
+  → cleanup .tome.old (best-effort post-success)
+       ↓
+  → return InitOutcome { workspace, catalogs, config_path, inherited }
+       ↓
+emit(outcome, inherit_requested, mode):
+  → human: formatted report + next-steps hint (if no catalogs and !inherit_requested)
+  → JSON: single NDJSON record
+       ↓
+exit(0)
+```
+
 ### Primary User Flow: `tome plugin enable <catalog>/<plugin>`
 
 ```
 CLI parse (--json, -v, args)
        ↓
+resolution → ResolvedScope
+       ↓
 dispatch to plugin::enable::run()
        ↓
 parse PluginId
        ↓
-load config, paths
+load config, paths (via scope)
        ↓
 resolve plugin directory (manifest-first)
        ↓
@@ -419,9 +568,11 @@ exit(0)
 ```
 CLI parse
        ↓
+resolution → ResolvedScope
+       ↓
 dispatch to plugin::disable::run()
        ↓
-parse PluginId, load config, paths
+parse PluginId, load config, paths (via scope)
        ↓
 resolve plugin directory
        ↓
@@ -447,9 +598,11 @@ exit(0)
 ```
 CLI parse (--json, -v, name, --force)
        ↓
+resolution → ResolvedScope
+       ↓
 dispatch to catalog::remove::run()
        ↓
-load config, paths
+load config, paths (via scope)
        ↓
 check catalog exists (exit 15 if not)
        ↓
@@ -488,6 +641,8 @@ exit(0)
 ```
 CLI parse (scope, --force flag)
        ↓
+resolution → ResolvedScope
+       ↓
 dispatch to reindex::run()
        ↓
 parse and validate scope (All / Catalog / Plugin)
@@ -524,9 +679,11 @@ exit(0)
 ```
 CLI parse (--json, -v, name)
        ↓
+resolution → ResolvedScope
+       ↓
 dispatch to catalog::update::run()
        ↓
-load config, paths
+load config, paths (via scope)
        ↓
 for each target catalog (all or named):
   → refresh_one() — Git clone/pull, update config
@@ -552,9 +709,11 @@ exit(0)
 ```
 CLI parse (--verify flag)
        ↓
+resolution → ResolvedScope
+       ↓
 dispatch to status::run()
        ↓
-assemble_report(paths, verify=flag):
+assemble_report(paths, verify=flag, scope):
   → load registered embedder/reranker from MODEL_REGISTRY
   → for each model:
       → cheap_state: check manifest, file, size
@@ -604,6 +763,8 @@ main.rs pre-parse hook:
 ```
 CLI parse (bare Command::Plugin with option=None)
        ↓
+resolution → ResolvedScope
+       ↓
 dispatch to plugin::run_interactive()
        ↓
 check TTY (inquire will refuse non-TTY as NotATerminal)
@@ -643,6 +804,8 @@ Esc / Ctrl-C at any level:
 ```
 CLI parse (--json, -v, subcommand-specific args)
        ↓
+resolution → ResolvedScope
+       ↓
 dispatch to models::{download,list,remove}::run()
 
 Download subcommand:
@@ -678,6 +841,8 @@ Remove subcommand:
 
 ```
 CLI: `tome query <text>` flow
+  ↓
+resolution → ResolvedScope
   ↓
 dispatch to query::run()
   ↓
@@ -731,6 +896,8 @@ main.rs special-cases Command::Mcp(_):
   → skip logging::init (would conflict with MCP's file subscriber)
   → skip ctrlc::install_signal_handler (tokio's async ctrl_c() would race)
 
+resolution → ResolvedScope
+  ↓
 dispatch to commands::mcp::run(args, scope, mode)
   → resolve paths
   → call mcp::run(scope, &paths)
@@ -885,8 +1052,10 @@ apply_pending(conn, current, target):
 
 | Layer | Responsibility | Can Access | Cannot Access |
 |-------|----------------|------------|---------------|
-| **CLI** (`src/main.rs`, `src/cli.rs`) | Parse args, install signal handler (skip for MCP), dispatch, map errors to exit codes. | Commands, logging (skip for MCP), output. | Catalog, config, paths (indirectly via commands). |
-| **Commands** (`src/commands/`) | Orchestrate catalog/plugin/query/models/reindex/status/mcp operations; call library logic and format output. | Lifecycle, catalog, config, paths, error, output, embedding, index, presentation. | Logging (by design; logging is orthogonal). |
+| **CLI** (`src/main.rs`, `src/cli.rs`) | Parse args, install signal handler (skip for MCP), dispatch, map errors to exit codes. Thread ResolvedScope from workspace resolution. | Commands, logging (skip for MCP), output. | Catalog, config, paths (indirectly via commands). |
+| **Workspace Resolution** (`src/workspace/resolution.rs`) | Determine active scope (global / workspace) from flags, env, CWD walk. | Error types, std::env, std::fs, std::path. | Catalog, config, index, commands. |
+| **Workspace Context** (`src/workspace/`) | Scope types, workspace info/init logic (library-shaped). | Config, paths, index (read-only for info). | Commands (reverse dependency only). |
+| **Commands** (`src/commands/`) | Orchestrate catalog/plugin/query/models/reindex/status/workspace/mcp operations; call library logic and format output. Receive ResolvedScope, thread to libraries. | Lifecycle, catalog, config, paths (via scope), error, output, embedding, index, presentation, workspace. | Logging (by design; logging is orthogonal). |
 | **Plugin Lifecycle** (`src/plugin/lifecycle.rs`) | Enable/disable/reindex orchestrator; compose metadata parsers, index, and embedding. | Plugin metadata (manifest, frontmatter), index (open, lock, enable_plugin_atomic, reindex_plugin_atomic, delete_by_plugin), embedding (embedder trait, model registry), catalog (manifest reader). | Commands (reverse dependency only). |
 | **Index** (`src/index/`) | SQLite operations, schema, KNN, drift detection, advisory locks, forward-only migrations. | rusqlite, sqlite-vec, index schema, migrations framework. | Commands, embedding, plugin (reverse dependency only). |
 | **Embedding** (`src/embedding/`) | Model registry, download, trait implementations (fastembed wrapper, stub). | reqwest, ort, fastembed-rs, serde. | Commands, index (reverse dependency only). |
@@ -895,7 +1064,7 @@ apply_pending(conn, current, target):
 | **Manifest** (`src/catalog/manifest.rs`) | Parse and validate TOML (strict) and JSON (lenient); enforce schema constraints. | serde, toml, serde_json, error types. | Git, store, commands. |
 | **Store** (`src/catalog/store.rs`) | Atomic read/write of config files. | tempfile, std::fs, config types. | Git, manifest, commands. |
 | **Config** (`src/config.rs`) | Define and serialize registry and catalog entry structures. | serde, toml, time (timestamps). | Catalog, commands (reverse dependency only). |
-| **Paths** (`src/paths.rs`) | Resolve XDG directories and content-addressed cache keys; resolve index/model paths. | sha2, hex, std::env. | All other modules. |
+| **Paths** (`src/paths.rs`) | Resolve XDG directories and content-addressed cache keys; scope-parametrized accessors. | sha2, hex, std::env. | All other modules. |
 | **Logging** (`src/logging.rs`) | Initialize tracing (CLI only). | tracing, tracing-subscriber. | All modules (orthogonal; no dependencies into logging). |
 | **Output** (`src/output.rs`) | Format results as human or JSON; detect TTY. | serde_json, std::io, error types. | No other modules (clean boundary). |
 | **Presentation** (`src/presentation/`) | Table, progress, colour, prompt rendering; TTY and `NO_COLOR` awareness. | comfy-table, indicatif, owo-colors, inquire, std::io. | Commands (reverse dependency only). |
@@ -904,8 +1073,8 @@ apply_pending(conn, current, target):
 
 ## Dependency Rules
 
-1. **No cycles**: The dependency graph is a DAG. `main.rs` → `cli.rs` → `commands/` → `{plugin, index, embedding, catalog, config, paths, output, presentation, error}`. MCP is routed differently (Phase 3 US1: skips logging/signals, calls `mcp::run` directly).
-2. **Library shapes**: `plugin::lifecycle`, `index::`, `commands::query::pipeline`, and `mcp::` are library-shaped (no CLI); they return structured outcomes (`EnableOutcome`, `DisableOutcome`, `ReindexOutcome`, `Candidate` vec, `Scored` vec, `QueryOutcome`, `PreflightReport`) that `commands/` layers format for output or MCP tools serialize.
+1. **No cycles**: The dependency graph is a DAG. `main.rs` → `cli.rs` → `workspace::resolution` → `commands/` → `{plugin, index, embedding, catalog, config, paths, output, presentation, error}`. MCP is routed differently (Phase 3 US1: skips logging/signals, calls `mcp::run` directly).
+2. **Library shapes**: `plugin::lifecycle`, `index::`, `workspace::`, `commands::query::pipeline`, and `mcp::` are library-shaped (no CLI); they return structured outcomes (`EnableOutcome`, `DisableOutcome`, `ReindexOutcome`, `Candidate` vec, `Scored` vec, `QueryOutcome`, `PreflightReport`, `WorkspaceInfo`, `InitOutcome`) that `commands/` layers format for output or MCP tools serialize.
 3. **Trait seams**: `Embedder` and `Reranker` traits decouple the library from model implementations; tests inject `StubEmbedder`.
 4. **Error type at the root**: `error.rs` has no internal dependencies; all modules depend on it (or types it wraps).
 5. **Orthogonal logging** (CLI only): `logging.rs` is initialized at startup and orthogonal to `--json` mode. No module imports `logging`; the global subscriber is set up once in `main()`. MCP skips this and uses `mcp/log.rs` instead.
@@ -919,19 +1088,21 @@ apply_pending(conn, current, target):
 13. **Schema migrations are library-shaped**: `index::migrations::apply_pending()` is stateless; it reads a registration table (`MIGRATIONS` const) and applies steps sequentially. Tests inject synthetic migrations via `MIGRATIONS_OVERRIDE` without touching the main codebase. Write paths call `apply_pending` before mutation; read paths use `open_read_only` to preserve backward compat.
 14. **MCP async island isolation** (Foundational F7 + Phase 3 US1): `src/mcp/` does NOT import from `commands/` (except `commands::query::pipeline` for reuse), `plugin/` directly, `index/` directly, or any CLI-shaped module. Phase 3 will refactor read-side operations (query, plugin list/show) as shared library entry points that both CLI and MCP can call. Structural test `tests/sync_boundary.rs` enforces by scanning for `tokio` imports outside `src/mcp/`.
 15. **MCP tool dispatch pattern** (Phase 3 US1): `tools/{search_skills,get_skill}::handle` functions are called by rmcp-generated `#[tool_handler]` routes. Input validation against scope config returns rmcp error codes per contract. Output types are `JsonSchema` for tool advertisement. MCP never formats output for humans (JSON-RPC is the structured output).
+16. **Workspace scope threading** (Phase 3 US2): `workspace::resolution::resolve()` is called pre-dispatch (in `main.rs`) and produces `ResolvedScope`. Every command's `run()` signature receives scope + paths as separate parameters. Commands use scope-parametrized path accessors (deferred to Phase 10 general refactor; Phase 3 US2 uses global-only model paths). No command-internal scope resolution.
 
 ## Key Interfaces & Contracts
 
 | Interface | Purpose | Implementation |
 |-----------|---------|-----------------|
 | `TomeError` | Closed enum of all failure modes; exit codes are exhaustive. | `src/error.rs` |
+| `Scope` + `ResolvedScope` | Scope type (Global / Workspace) + resolution provenance. | `src/workspace/scope.rs` |
 | `CatalogManifest` | Schema for `tome-catalog.toml`; enforces strict parsing and semantic validation. | `src/catalog/manifest.rs` |
 | `PluginManifest` | Schema for `plugin.json`; lenient parsing (unknown fields ignored). | `src/plugin/manifest.rs` |
 | `SkillFrontmatter` | Parsed YAML header from `SKILL.md`; fallback logic for name/description. | `src/plugin/frontmatter.rs` |
 | `PluginId` | Address `<catalog>/<plugin>`; `FromStr` implementation. | `src/plugin/identity.rs` |
 | `PluginRecord` + `PluginStatus` | Display record for a plugin + tri-state status. | `src/plugin/mod.rs` |
-| `Config` + `CatalogEntry` | Registry schema; persisted to `~/.config/tome/config.toml`. | `src/config.rs` |
-| `Paths` | XDG-aware path resolution; index DB, lock, model paths. | `src/paths.rs` |
+| `Config` + `CatalogEntry` | Registry schema; persisted to `~/.config/tome/config.toml` or scope-specific location. | `src/config.rs` |
+| `Paths` | XDG-aware path resolution; scope-parametrized accessors (Phase 3 US2 deferred to Phase 10). | `src/paths.rs` |
 | `Git` | Facade for git operations; scrubs credentials from all output. | `src/catalog/git.rs` |
 | `store::write_atomic` | Atomic file write for registry and cache mutations. | `src/catalog/store.rs` |
 | `Embedder` + `Reranker` | Trait interfaces for embedding and reranking. | `src/embedding/mod.rs` |
@@ -944,7 +1115,7 @@ apply_pending(conn, current, target):
 | `output::Mode` | Enum selecting human or JSON formatting. | `src/output.rs` |
 | `LoopExit` | Private enum in `interactive.rs` encoding Back/Quit/Continue state. | `src/commands/plugin/interactive.rs` |
 | `ModelState` | Classification of a registered model's on-disk install state (Ok / Missing / Corrupt / ChecksumMismatched). | `src/commands/models/mod.rs` |
-| `Scope` | Reindex scope (All / Catalog / Plugin); used by `commands/reindex.rs` and tests. | `src/commands/reindex.rs` |
+| `Scope` (reindex scope) | Reindex scope (All / Catalog / Plugin); used by `commands/reindex.rs` and tests. | `src/commands/reindex.rs` |
 | `StatusReport` + `OverallHealth` + `ModelHealth` + `IndexHealth` | Health diagnostic data model (Phase 8). | `src/commands/status.rs` |
 | `DriftStatus` | Embedder/reranker identity mismatch detection. | `src/index/meta.rs` |
 | `MIGRATIONS` + `apply_pending` | Forward-only schema migration framework (Foundational F7). | `src/index/migrations.rs` |
@@ -954,6 +1125,8 @@ apply_pending(conn, current, target):
 | `search_skills::Input` + `search_skills::Output` | Tool schemas for MCP skill search (Phase 3 US1). | `src/mcp/tools/search_skills.rs` |
 | `get_skill::Input` + `get_skill::Output` | Tool schemas for MCP skill fetch (Phase 3 US1). | `src/mcp/tools/get_skill.rs` |
 | `QueryOutcome` | Silent query result (KNN + rerank output) for reuse by CLI + MCP (Phase 3 US1). | `src/commands/query.rs` |
+| `WorkspaceInfo` | Scope diagnostics record (read-only, Phase 3 US2). | `src/workspace/info.rs` |
+| `InitOutcome` | Workspace init result record (Phase 3 US2). | `src/workspace/init.rs` |
 
 ## Signal Handling & Cancellation
 
@@ -986,6 +1159,7 @@ apply_pending(conn, current, target):
 - Model persistence: Download to temp, verify checksum, rename.
 - Reindex mutations: SQLite WAL + per-plugin advisory lock. Each `lifecycle::reindex_plugin` call acquires and releases the lock independently. Per-plugin atomicity: SIGINT between plugins leaves earlier plugins committed.
 - Catalog remove cascade: SQLite WAL + single advisory lock. `lifecycle::cascade_disable_for_catalog()` acquires lock once, drops all plugins for the catalog in one transaction, then releases (Phase 9).
+- **Workspace init**: `tempfile::Builder::tempdir_in(target)` stages `.tome/` contents, then `std::fs::rename(staged, .tome)` lands atomically. Pre-existing `.tome/` renamed to `.tome.old/` before staging; rollback restores on rename failure (Phase 3 US2).
 
 **POSIX Atomicity**: On single filesystem, rename is atomic; readers either see the old or new version, never partial state.
 
@@ -1009,7 +1183,9 @@ apply_pending(conn, current, target):
 | **Health Classification** | Pre-computed per-subsystem status (embedder, reranker, index, drift) classified into `OverallHealth` enum (Ok / Degraded / Unhealthy). | `src/commands/status.rs::classify_*` helpers |
 | **Version Output Override** | Pre-parse hook in `main.rs` intercepts `--version` / `-V` before clap to include model identities and honour `--json`. | `src/main.rs`, `src/commands/status.rs::print_version` |
 | **Schema Migrations** | Forward-only registration framework; write paths call `apply_pending` with pre-computed target version; read paths use legacy 52 for backward compat. Tests inject synthetic migrations via `MIGRATIONS_OVERRIDE` thread-local. | `src/index/migrations.rs`, `src/index/db.rs` (bootstrap + write-lock), `tests/schema_migrations.rs` |
-| **Scope Resolution** | `workspace::ResolvedScope` contains scope type + path (workspace or global). MCP receives pre-resolved scope from parent process. CLI resolves upward from CWD. | `src/workspace.rs`, `src/main.rs` (Phase 3 US1), `src/mcp/mod.rs` |
+| **Scope Resolution** | `workspace::resolution::resolve()` called pre-dispatch in `main.rs`. Produces `ResolvedScope` threaded to all commands. CWD walk, env var, CLI flags, global fallback. | `src/workspace/resolution.rs`, `src/main.rs` (Phase 3 US2), `src/commands/*` (receive scope param) |
+| **Scope-Parametrized Paths** | Commands use `paths.config_file_for(&scope)`, etc. Workspace paths under `.tome/`, global paths under XDG. (Full refactor deferred to Phase 10.) | `src/paths.rs`, `src/commands/*` (Phase 3 US2), `src/workspace/info.rs`, `src/workspace/init.rs` |
+| **Atomic Workspace Init** | Staging via `tempfile::Builder::tempdir_in()`, landing via `std::fs::rename()`. Rollback via `.tome.old/` rename. | `src/workspace/init.rs` |
 | **File vs Protocol Logging** | CLI logs to stderr (tracing); MCP logs to `${XDG_STATE_HOME}/tome/mcp.log` (JSON-lines). Stdout is CLI human/JSON output or MCP JSON-RPC protocol channel. Stderr is CLI tracing or MCP fatal errors. | `src/logging.rs`, `src/mcp/log.rs`, `src/mcp/mod.rs`, `src/main.rs` |
 | **Lazy Reranker** | MCP defers reranker load to first `search_skills` call per FR-109. `OnceCell` ensures idempotent sync. CLI loads on demand in query command. | `src/mcp/state.rs`, `src/mcp/tools/search_skills.rs`, `src/commands/query.rs` |
 

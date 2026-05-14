@@ -230,35 +230,35 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Start
 
-- [ ] T104 [GIT] Verify working tree is clean before starting Phase 4 / US2
-- [ ] T105 [US2] Create `retro/P4.md` from the standard retro template
-- [ ] T106 [GIT] Commit: docs(retro): initialise P4 retro
+- [X] T104 [GIT] Verify working tree is clean before starting Phase 4 / US2 — fresh branch off `main` after PR #46 merged.
+- [X] T105 [US2] Create `retro/P4.md` from the standard retro template — empty shell, slices fill in.
+- [X] T106 [GIT] Commit: docs(retro): initialise P4 retro — `9bffc08`.
 
 ### Slice US2.a — `tome workspace info`
 
-- [ ] T107 [P] [US2] Create `src/commands/workspace/mod.rs` with the `WorkspaceCommand` dispatcher per data-model.md §11 (use devs:rust-dev agent)
-- [ ] T108 [P] [US2] Create `src/commands/workspace/info.rs::run(scope: &ResolvedScope, paths: &Paths, mode: Mode) -> Result<(), TomeError>` per contracts/workspace-info.md (use devs:rust-dev agent)
-- [ ] T109 [US2] Define `WorkspaceInfo` struct in `src/workspace/mod.rs` per data-model.md §4 (or factor out) (use devs:rust-dev agent)
-- [ ] T110 [US2] Wire `Command::Workspace(WorkspaceCommand::Info)` in `src/cli.rs` and `src/main.rs` (use devs:rust-dev agent)
-- [ ] T111 [US2] Create `tests/workspace_info.rs` covering: global scope reports global state; workspace scope reports workspace state; not-yet-bootstrapped DB reported informationally; `--json` output is byte-stable (use devs:rust-dev agent)
-- [ ] T112 [GIT] Commit: feat(workspace): tome workspace info command
+- [X] T107 [P] [US2] Create `src/commands/workspace/mod.rs` with the `WorkspaceCommand` dispatcher per data-model.md §11 — only `Info` variant in this slice; `Init` lands in US2.b.
+- [X] T108 [P] [US2] Create `src/commands/workspace/info.rs::run(scope: &ResolvedScope, paths: &Paths, mode: Mode) -> Result<(), TomeError>` per contracts/workspace-info.md — split into `run` (emit wrapper) + `pub fn assemble` (pure compute) per the silent-compute/emit-wrapper pattern.
+- [X] T109 [US2] Define `WorkspaceInfo` struct in `src/workspace/mod.rs` per data-model.md §4 — placed in `src/workspace/info.rs` and re-exported from `mod.rs` so info-related types stay co-located.
+- [X] T110 [US2] Wire `Command::Workspace(WorkspaceCommand::Info)` in `src/cli.rs` and `src/main.rs` — `Command::Workspace(WorkspaceArgs)` mirrors `Command::Plugin(PluginArgs)`.
+- [X] T111 [US2] Create `tests/workspace_info.rs` covering: global scope reports global state; workspace scope reports workspace state; not-yet-bootstrapped DB reported informationally; `--json` output is byte-stable — 8 tests including malformed-config → exit 70 + two CLI smoke tests.
+- [X] T112 [GIT] Commit: feat(workspace): tome workspace info command — `8a1ed87`.
 
 ### Slice US2.b — `tome workspace init`
 
-- [ ] T113 [US2] Create `src/workspace/init.rs::init(path: &Path, inherit_global: bool, force: bool, paths: &Paths) -> Result<InitOutcome, TomeError>` per contracts/workspace-init.md (use devs:rust-dev agent)
-- [ ] T114 [US2] Create `src/commands/workspace/init.rs::run(args: WorkspaceInitArgs, paths: &Paths, mode: Mode) -> Result<(), TomeError>` (use devs:rust-dev agent)
-- [ ] T115 [US2] Wire `Command::Workspace(WorkspaceCommand::Init)` in `src/cli.rs` (use devs:rust-dev agent)
-- [ ] T116 [US2] Implement atomic `.tome/` creation per contracts/workspace-init.md §Atomicity using `tempfile::TempDir::persist` (use devs:rust-dev agent)
-- [ ] T117 [US2] Implement `--inherit-global` to copy the global config's `[catalogs]` block into the new workspace config; do NOT copy enablement state (enablement lives in the index DB, not config) (use devs:rust-dev agent)
-- [ ] T118 [US2] Implement the opt-in workspace registry append in `src/workspace/inventory.rs::append_if_registry_exists(path)` invoked by init (use devs:rust-dev agent)
-- [ ] T119 [US2] Create `tests/workspace_init.rs` covering: happy path; `--inherit-global` seeds catalogs without enablement; pre-existing `.tome/` without `--force` returns exit 4; `--force` replaces atomically; non-existent `<path>` returns exit 7; concurrent init contention is rejected (use devs:rust-dev agent)
-- [ ] T120 [GIT] Commit: feat(workspace): tome workspace init command
+- [X] T113 [US2] Create `src/workspace/init.rs::init(path: &Path, inherit_global: bool, force: bool, paths: &Paths) -> Result<InitOutcome, TomeError>` per contracts/workspace-init.md — `InitOutcome` is `Serialize`+`Eq` so tests can assert against it directly.
+- [X] T114 [US2] Create `src/commands/workspace/init.rs::run(args: WorkspaceInitArgs, paths: &Paths, mode: Mode) -> Result<(), TomeError>` — thin emit wrapper; the FS atomicity lives in `workspace::init`.
+- [X] T115 [US2] Wire `Command::Workspace(WorkspaceCommand::Init)` in `src/cli.rs` — `WorkspaceInitArgs { path, inherit_global, force }`.
+- [X] T116 [US2] Implement atomic `.tome/` creation per contracts/workspace-init.md §Atomicity using `tempfile::TempDir::persist` — deviated: tempfile 3.27 exposes `TempDir::keep()` + `std::fs::rename`, not `::persist` (which doesn't exist on `TempDir`). Same atomicity guarantee — staging dir lives inside the workspace root so the rename is single-FS POSIX-atomic.
+- [X] T117 [US2] Implement `--inherit-global` to copy the global config's `[catalogs]` block into the new workspace config; do NOT copy enablement state (enablement lives in the index DB, not config) — `catalog::store::load` handles the "global config missing" case by returning `Config::default()`, so the flag composes cleanly on a fresh install.
+- [X] T118 [US2] Implement the opt-in workspace registry append in `src/workspace/inventory.rs::append_if_registry_exists(path)` invoked by init — dedupe via exact-path match; writes via `catalog_store::write_atomic`.
+- [X] T119 [US2] Create `tests/workspace_init.rs` covering: happy path; `--inherit-global` seeds catalogs without enablement; pre-existing `.tome/` without `--force` returns exit 4; `--force` replaces atomically; non-existent `<path>` returns exit 7; concurrent init contention is rejected — 12 tests total inc. CLI smoke + registry opt-in/dedupe.
+- [X] T120 [GIT] Commit: feat(workspace): tome workspace init command — `5664daf`.
 
 ### End-of-phase
 
-- [ ] T121 [US2] Run `/sdd:map incremental` to refresh codebase docs against Phase 4 / US2 changes
-- [ ] T122 [US2] Review `retro/P4.md` and extract critical learnings to CLAUDE.md (conservative)
-- [ ] T123 [GIT] Commit: docs(codebase): refresh after Phase 4 / US2
+- [X] T121 [US2] Run `/sdd:map incremental` to refresh codebase docs against Phase 4 / US2 changes — refreshed STRUCTURE / STACK / CONVENTIONS / TESTING.
+- [X] T122 [US2] Review `retro/P4.md` and extract critical learnings to CLAUDE.md (conservative).
+- [X] T123 [GIT] Commit: docs(codebase): refresh after Phase 4 / US2.
 
 ### Phase Completion
 

@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US1 Foundational F7–F8 incremental)
+> **Last Updated**: 2026-05-14 (Phase 3 / US2 workspace init incremental)
 
 ## Overview
 
@@ -19,6 +19,7 @@ Tome is a Rust CLI (and eventually MCP server) for managing plugin catalogs and 
 10. Structured logging with size-based rotation for long-running MCP server
 11. MCP startup pre-flight validation with SHA-256 verification and drift detection
 12. No domain-error leakage in MCP tool responses (structured codes only)
+13. Workspace initialization with secure directory permissions and atomic staging
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md` (Phase 1), `specs/002-phase-2-plugins-index/spec.md` (Phase 2), `specs/002-phase-2-plugins-index/contracts/plugin-commands.md` (Phase 4–5), and `specs/003-phase-3-mcp-workspaces/spec.md` (Phase 3+).
 
@@ -120,11 +121,12 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 |-----------|-----------|---------|
 | Git credentials | Inherited from system Git config | Credential helper, not Tome |
 | Model artefacts | SHA-256 verification on download | `~/.local/share/tome/models/<name>/` |
-| Configuration file | Atomic writes, permissive POSIX defaults | `~/.config/tome/config.toml` |
+| Configuration file | Atomic writes, chmod 0600 on Unix | `~/.config/tome/config.toml` (global) and `<workspace>/.tome/config.toml` (workspace) |
 | Catalog cache | Atomic refresh, tool-owned | `~/.cache/tome/<sha256-of-url>/` |
 | Git stderr output | Scrubbed before tracing/display | `src/catalog/git.rs::scrub_credentials` |
 | HTTP error output | Scrubbed before surfacing | `src/embedding/download.rs::scrub_for_diag` |
 | MCP server logs | JSON-lines to file, error-only stderr | `src/mcp/log.rs` (10 MiB cap, rotates to `.1`) |
+| Workspace registry | Opt-in, deduplicated list | `${XDG_STATE_HOME}/tome/workspaces.txt` (not created unless user explicitly uses it) |
 
 ### Integrity & Verification
 
@@ -138,6 +140,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Virtual table constraints** | `sqlite-vec` does not support `INSERT OR REPLACE`; uses `DELETE`-then-`INSERT` | `src/index/skills.rs::upsert_skill` (Phase 7, lines 282–294) |
 | **Health check** | `tome status [--verify]` re-verifies installed models without re-downloading | `src/commands/status.rs::check_model()` (Phase 8, PR #29) |
 | **MCP startup pre-flight** | SHA-256 verification of primary embedder file at every startup (FR-110) | `src/mcp/preflight.rs::verify_embedder_artefacts` (Phase 3, F8) |
+| **Workspace initialization** | Atomic staging with permissions lock before content lands | `src/workspace/init.rs` (Phase 3, US2) |
 
 **Model Registry** (Phase 3 update):
 - `bge-small-en-v1.5` INT8: SHA-256 `51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431`, 66.5 MB, MIT
@@ -162,11 +165,21 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 - Reranker drift detected but NOT a startup failure (FR-109 defers reranker load until first use; long-running server can re-download on demand)
 - No credential surfaces; model registry is read-only static
 
+**Phase 3 US2 Workspace Initialization** (`src/workspace/init.rs`):
+- Creates workspace-local `.tome/` directory atomically via staging directory pattern
+- Staging directory chmod 0700 on Unix BEFORE any content is written (permission lock precedes config write)
+- Workspace config.toml written via `catalog::store::write_atomic`, which sets chmod 0600 on Unix
+- Enablement state never inherited; only catalog sources copied via `--inherit-global`
+- Opt-in workspace registry: append-only, deduplicated by exact path match, never created unless user enables it
+- Atomic rename of staging to final `.tome/` ensures readers never see partial state
+- On `--force` rename failure: rollback existing `.tome/` from `.tome.old/` (if crash between rename-aside and rename-in, leaves `.tome.old/` orphan for doctor to report)
+- Best-effort cleanup of `.tome.old/` after successful rename; partial cleanup on rollback failure is tolerated
+
 ### Encryption
 
 | Type | Status |
 |------|--------|
-| At rest | Not implemented (cache is local, untrusted) |
+| At rest | Not implemented (cache is local, untrusted; workspace config contains catalog URLs only) |
 | In transit | Inherited from system Git (TLS/SSH) and `reqwest` (TLS 1.2+) |
 | Application-level | No application-managed secrets |
 
@@ -180,7 +193,7 @@ Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads 
 | 1 | Internal | Programmer error, panic caught | All | FR-022 |
 | 2 | Usage | Invalid command-line arguments | All | FR-022 |
 | 3 | CatalogNotFound | Catalog not registered | 1 | FR-022 |
-| 4 | CatalogAlreadyExists | Catalog already registered | 1 | FR-022 |
+| 4 | CatalogAlreadyExists | Catalog already registered OR workspace already initialized | 1 / 3 | FR-022 / workspace-init.md |
 | 5 | ManifestInvalid | Manifest parse or validation failed | 1 | FR-022 |
 | 6 | GitFailed | Git operation failed (clone, fetch, reset) | 1 | FR-022 |
 | 7 | Io | Filesystem or I/O error | All | FR-022 |
@@ -217,6 +230,9 @@ No generic "Other" or "Unknown" variant. Every path maps to a named category.
 **Phase 3 F8 MCP Status Exit Semantics** (`src/mcp/preflight.rs`, PR #38):
 - Pre-flight refusal routes through specific Phase 1/2 codes (30/32/41/42) per "Specific-over-generic" principle
 - Generic `McpStartupFailed` (60) used only when no specific variant applies (e.g., index file missing)
+
+**Phase 3 US2 Workspace Init Exit Codes** (`src/workspace/init.rs`):
+- Exit 4 `CatalogAlreadyExists` reused for workspace-already-initialized case (message clarified: "workspace at <path>"); message context distinguishes from catalog-add case
 
 ### Error Messaging
 
@@ -311,11 +327,16 @@ pub fn require_terminal() -> Result<(), TomeError> {
 - `src/presentation/prompt.rs::prompt_error_to_tome` maps both to `TomeError::Interrupted` (exit 8)
 - Semantically: user-initiated interruption is indistinguishable from system SIGINT (both exit 8)
 
+**Workspace initialization cancellation** (Phase 3 US2):
+- Staging directory (`.tome.tmp.*`) is cleaned up on cancellation via RAII (`TempDir::drop`)
+- If cancellation occurs between rename-aside and rename-in, rollback restores pre-existing `.tome/` from `.tome.old/`
+- No partial `.tome/` visible to readers (staging rename is the only atomic boundary)
+
 **Test**: `tests/atomicity.rs` and signal-handling verification in integration tests.
 
 ## Atomic Writes
 
-### Registry, Cache, Model, and Index Persistence
+### Registry, Cache, Model, Index, and Workspace Persistence
 
 | Operation | Atomicity Guarantee | Implementation |
 |-----------|-------------------|-----------------|
@@ -326,6 +347,9 @@ pub fn require_terminal() -> Result<(), TomeError> {
 | **Index database enable** | Per-plugin transaction (all-or-nothing skill upsert) | `src/index/skills.rs::enable_plugin_atomic` |
 | **Index database reindex** | Per-plugin transaction (snapshot diff → add/modify/remove/unchanged) | `src/index/skills.rs::reindex_plugin_atomic` (Phase 7) |
 | **Catalog cascade disable** | Single lock acquisition for multi-plugin batch disable (Phase 9) | `src/plugin/lifecycle.rs::cascade_disable_for_catalog` + `src/index/skills.rs::delete_by_plugin` |
+| **Workspace initialization** | Atomic staging dir → final `.tome/` rename (Phase 3 US2) | `src/workspace/init.rs::init`, tempfile inside workspace root |
+| **Workspace config write** | Atomic write via temp + rename | `src/workspace/init.rs::init` → `catalog::store::write_atomic` |
+| **Workspace registry append** | Atomic read + rewrite with dedupe | `src/workspace/inventory.rs::append_if_registry_exists` |
 | **Temp file cleanup** | RAII via `tempfile::NamedTempFile` + `TempDir` | Rust Drop trait |
 
 **Mechanism**:
@@ -337,6 +361,15 @@ pub fn require_terminal() -> Result<(), TomeError> {
 - A partial or interrupted write leaves the on-disk file in either pre-state or post-state, never partial
 - Multiple concurrent invocations see either the old version or the new version, never a mixture
 - Test coverage: `tests/atomicity.rs` with concurrent writes and simulated interruption
+
+**Workspace initialization specifics** (Phase 3 US2):
+- Staging directory created inside workspace root (`tempfile::Builder::tempdir_in`) to ensure same-filesystem rename
+- Permissions locked to 0700 on Unix BEFORE config is written (all-or-nothing atomicity)
+- Config written via `catalog::store::write_atomic` inside staging, which chmod 0600 on Unix
+- Staging rename to `.tome/` is the only visible boundary; readers never see partial directory
+- On `--force`: existing `.tome/` atomically moved to `.tome.old/` before staging rename
+- Rollback on rename failure: `.tome.old/` restored to `.tome/` if rename-in fails
+- Best-effort cleanup of `.tome.old/` after successful rename; partial cleanup on rollback is tolerated
 
 **Note on per-plugin atomicity** (Phase 7): When reindexing multiple plugins (e.g., via `tome catalog update`), each plugin's reindex runs in its own transaction. A SIGINT between plugins leaves earlier plugins committed and later plugins unchanged. This is intentional (see CONCERNS.md for design rationale); the index is always in a valid state with no partial rows. The per-plugin boundary is where atomicity breaks for multi-plugin operations.
 
