@@ -109,11 +109,24 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
     config.catalogs.remove(&args.name);
     store::save(&config_file, &config)?;
 
-    if let Err(e) = std::fs::remove_dir_all(&entry.path) {
-        warn!(
+    // Phase 3 reference-counting: only delete the on-disk clone when no
+    // other scope still references the same URL. The check runs AFTER
+    // the config write per `catalog-extensions-p3.md`, so a crash
+    // between the two steps leaves the clone alive — the user re-adds.
+    let refs = store::reference_count(&entry.url, &paths);
+    if refs.is_empty() {
+        if let Err(e) = std::fs::remove_dir_all(&entry.path) {
+            warn!(
+                cache_path = %entry.path.display(),
+                error = %e,
+                "cache directory could not be removed; registry already updated"
+            );
+        }
+    } else {
+        tracing::debug!(
             cache_path = %entry.path.display(),
-            error = %e,
-            "cache directory could not be removed; registry already updated"
+            still_referenced_by = ?refs,
+            "cache directory retained; still referenced by other scope(s)",
         );
     }
 

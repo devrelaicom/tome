@@ -284,46 +284,46 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Start
 
-- [ ] T128 [GIT] Verify working tree is clean before starting Phase 5 / US3
-- [ ] T129 [US3] Create `retro/P5.md` from the standard retro template
-- [ ] T130 [GIT] Commit: docs(retro): initialise P5 retro
+- [X] T128 [GIT] Verify working tree is clean before starting Phase 5 / US3.
+- [X] T129 [US3] Create `retro/P5.md` from the standard retro template.
+- [X] T130 [GIT] Commit: docs(retro): initialise P5 retro — `c098b8f`.
 
 ### Slice US3.a — per-command semantic refactor
 
-- [ ] T131 [P] [US3] Update `src/commands/catalog/add.rs::run` to write to `paths.config_file(&scope)` rather than the global config file (use devs:rust-dev agent)
-- [ ] T132 [P] [US3] Update `src/commands/catalog/remove.rs::run` to read / mutate the resolved scope's config (use devs:rust-dev agent)
-- [ ] T133 [P] [US3] Update `src/commands/catalog/list.rs::run` to list the resolved scope's catalogs (use devs:rust-dev agent)
-- [ ] T134 [P] [US3] Update `src/commands/catalog/show.rs::run` to read the resolved scope's config (use devs:rust-dev agent)
-- [ ] T135 [P] [US3] Update `src/commands/catalog/update.rs::run` to refresh the resolved scope's catalogs and reindex the resolved scope's enabled plugins (use devs:rust-dev agent)
-- [ ] T136 [P] [US3] Update `src/commands/plugin/{enable,disable,list,show,interactive}.rs` to operate against the resolved scope's index DB (use devs:rust-dev agent)
-- [ ] T137 [P] [US3] Update `src/commands/query.rs` to operate against the resolved scope's index DB (use devs:rust-dev agent)
-- [ ] T138 [P] [US3] Update `src/commands/reindex.rs` to operate against the resolved scope's index DB (use devs:rust-dev agent)
-- [ ] T139 [P] [US3] Update `src/commands/status.rs` to report the resolved scope's state per contracts/workspace-info.md and Phase 2 status contract (use devs:rust-dev agent)
-- [ ] T140 [P] [US3] Update `src/plugin/lifecycle.rs` enable / disable / reindex_plugin / cascade_disable_for_catalog / auto_disable_orphan to accept the resolved scope's `Paths`-derived files (use devs:rust-dev agent)
-- [ ] T141 [US3] Bootstrap-on-first-write: ensure `commands::plugin::enable::run` creates `<workspace>/.tome/index.db` (and its parent) before opening if absent (use devs:rust-dev agent)
-- [ ] T142 [US3] Bootstrap-on-first-write: ensure `commands::catalog::add::run` creates `<workspace>/.tome/config.toml` if absent (workspace exists but config was deleted) (use devs:rust-dev agent)
-- [ ] T143 [GIT] Commit: refactor(commands): every command honours resolved Scope
+- [X] T131 [P] [US3] Update `src/commands/catalog/add.rs::run` to write to `paths.config_file(&scope)` rather than the global config file — already in place from Foundational F1 (`paths.config_file_for(&scope.scope)`).
+- [X] T132 [P] [US3] Update `src/commands/catalog/remove.rs::run` to read / mutate the resolved scope's config — already in place from F1.
+- [X] T133 [P] [US3] Update `src/commands/catalog/list.rs::run` to list the resolved scope's catalogs — already in place from F1.
+- [X] T134 [P] [US3] Update `src/commands/catalog/show.rs::run` to read the resolved scope's config — already in place from F1.
+- [X] T135 [P] [US3] Update `src/commands/catalog/update.rs::run` to refresh the resolved scope's catalogs and reindex the resolved scope's enabled plugins — already in place from F1.
+- [X] T136 [P] [US3] Update `src/commands/plugin/{enable,disable,list,show,interactive}.rs` to operate against the resolved scope's index DB — already in place from F1.
+- [X] T137 [P] [US3] Update `src/commands/query.rs` to operate against the resolved scope's index DB — already in place from F1.
+- [X] T138 [P] [US3] Update `src/commands/reindex.rs` to operate against the resolved scope's index DB — already in place from F1.
+- [X] T139 [P] [US3] Update `src/commands/status.rs` to report the resolved scope's state per contracts/workspace-info.md and Phase 2 status contract — already in place from F1.
+- [X] T140 [P] [US3] Update `src/plugin/lifecycle.rs` enable / disable / reindex_plugin / cascade_disable_for_catalog / auto_disable_orphan to accept the resolved scope's `Paths`-derived files — already in place from F1 (`LifecycleDeps.scope` + `paths.*_for(scope)` accessors).
+- [X] T141 [US3] Bootstrap-on-first-write: ensure `commands::plugin::enable::run` creates `<workspace>/.tome/index.db` (and its parent) before opening if absent — `index::db::open` already creates the parent dir + the SQLite file on first open (Phase 2 path); verified by `plugin_enable_indexes_into_resolved_scope_only` in `tests/workspace_commands.rs`.
+- [X] T142 [US3] Bootstrap-on-first-write: ensure `commands::catalog::add::run` creates `<workspace>/.tome/config.toml` if absent (workspace exists but config was deleted) — `catalog::store::save` already calls `create_dir_all(parent)`; verified by `catalog_add_in_freshly_init_workspace_creates_config_toml`.
+- [X] T143 [GIT] Commit: refactor(commands): every command honours resolved Scope — folded into `1f98f2c test(workspace): cross-product scope-isolation coverage` because there were no production code changes to commit; the integration test IS the verification artefact.
 
 ### Slice US3.b — reference-counted catalog clone cleanup
 
-- [ ] T144 [US3] Implement `catalog::store::reference_count(url: &str, paths: &Paths) -> Vec<Scope>` per contracts/catalog-extensions-p3.md §Reference-counting algorithm; reads the global config plus every workspace path in the inventory registry (use devs:rust-dev agent)
-- [ ] T145 [US3] Update `src/commands/catalog/remove.rs::run` to call `reference_count` after writing the new config; if the result is empty, `fs::remove_dir_all(cache_path)` best-effort (use devs:rust-dev agent)
-- [ ] T146 [US3] Update `src/plugin/lifecycle.rs::cascade_disable_for_catalog` to honour the same reference-count check before returning (the cascade is followed by a remove call that runs the cleanup; document the ordering) (use devs:rust-dev agent)
-- [ ] T147 [US3] Add a doc comment on `reference_count` describing the TOCTOU profile per contracts/catalog-extensions-p3.md §Concurrency (use devs:rust-dev agent)
-- [ ] T148 [GIT] Commit: feat(catalog): reference-counted catalog clone cleanup across scopes
+- [X] T144 [US3] Implement `catalog::store::reference_count(url: &str, paths: &Paths) -> Vec<Scope>` per contracts/catalog-extensions-p3.md §Reference-counting algorithm; reads the global config plus every workspace path in the inventory registry.
+- [X] T145 [US3] Update `src/commands/catalog/remove.rs::run` to call `reference_count` after writing the new config; if the result is empty, `fs::remove_dir_all(cache_path)` best-effort.
+- [X] T146 [US3] Update `src/plugin/lifecycle.rs::cascade_disable_for_catalog` to honour the same reference-count check before returning — no separate update needed; cascade-disable runs inside `commands::catalog::remove::run` which then falls through to the same `reference_count` → conditional `remove_dir_all` block. Ordering is implicit in the flow.
+- [X] T147 [US3] Add a doc comment on `reference_count` describing the TOCTOU profile per contracts/catalog-extensions-p3.md §Concurrency.
+- [X] T148 [GIT] Commit: feat(catalog): reference-counted catalog clone cleanup across scopes — `7b1c907`.
 
 ### Slice US3.c — cross-product integration tests
 
-- [ ] T149 [US3] Create `tests/workspace_commands.rs` covering the cross-product: from inside a workspace without overrides, `catalog add` / `catalog remove` / `plugin enable` / `plugin disable` / `query` / `reindex` / `status` each affect only the workspace; with `--global` they affect only the global state (use devs:rust-dev agent)
-- [ ] T150 [US3] Create `tests/catalog_cache_refcount.rs` covering: adding the same URL in two scopes produces one on-disk clone; removing from one scope leaves the clone; removing from both scopes (and global) removes the clone; concurrent-remove benign race (use devs:rust-dev agent)
-- [ ] T151 [US3] Extend `tests/catalog_remove_cascade.rs` to verify cascade-with-reference-count: catalog removed in scope A cascades only A's plugins, leaves scope B's plugins for the same URL untouched, and does NOT remove the clone if B still references it (use devs:rust-dev agent)
-- [ ] T152 [GIT] Commit: test(workspace): per-command scope honouring + catalog refcount
+- [X] T149 [US3] Create `tests/workspace_commands.rs` covering the cross-product — 9 tests; landed in slice US3.a's commit (`1f98f2c`) since the verification artefact arrives with the verification commit.
+- [X] T150 [US3] Create `tests/catalog_cache_refcount.rs` — 5 tests pinning the contract.
+- [X] T151 [US3] Extend `tests/catalog_remove_cascade.rs` to verify cascade-with-reference-count — 1 new test (`cascade_remove_in_workspace_does_not_remove_shared_clone`).
+- [X] T152 [GIT] Commit: test(workspace): per-command scope honouring + catalog refcount — split into two commits, `1f98f2c` (cross-product) + `bc8c827` (refcount + cascade integration), because they belong to different conceptual slices.
 
 ### End-of-phase
 
-- [ ] T153 [US3] Run `/sdd:map incremental` to refresh codebase docs against Phase 5 / US3 changes
-- [ ] T154 [US3] Review `retro/P5.md` and extract critical learnings to CLAUDE.md (conservative)
-- [ ] T155 [GIT] Commit: docs(codebase): refresh after Phase 5 / US3
+- [X] T153 [US3] Run `/sdd:map incremental` to refresh codebase docs against Phase 5 / US3 changes.
+- [X] T154 [US3] Review `retro/P5.md` and extract critical learnings to CLAUDE.md (conservative).
+- [X] T155 [GIT] Commit: docs(codebase): refresh after Phase 5 / US3.
 
 ### Phase Completion
 

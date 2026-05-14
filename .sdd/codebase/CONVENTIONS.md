@@ -248,6 +248,8 @@ tests/
 ├── mcp_lifecycle.rs          # MCP pre-flight exit codes (Phase 3)
 ├── workspace_info.rs         # Library API tests for `workspace::info::assemble` (Phase 4 / US2)
 ├── workspace_init.rs         # Library API + CLI tests for `workspace::init` (Phase 4 / US2)
+├── workspace_commands.rs     # Cross-scope command isolation (Phase 5 / US3)
+├── catalog_cache_refcount.rs # Reference-counted catalog cleanup (Phase 5 / US3)
 ├── atomicity_enable.rs       # Failure-injection tests for enable rollback (FR-004)
 ├── exit_codes.rs             # Exhaustiveness check: every TomeError → exit code
 ├── error_messages.rs         # Error message correctness
@@ -482,6 +484,35 @@ pub fn cascade_disable_for_catalog(
 **When to use:** Batch operations that are semantically a single user action ("destroy this catalog"), where the entire operation succeeds or fails atomically. All items participate in one transaction.
 
 **Rationale:** The operation's semantic contract determines the locking pattern. `catalog remove --force` is "delete this catalog's plugins" (all-or-nothing atomicity); `catalog update` is "refresh N independent catalogs" (per-item independence).
+
+### Reference-Counted Shared Resource Cleanup (Phase 5 / US3)
+
+When multiple scopes (global, workspace) reference the same resource (e.g., a catalog clone by URL), implement reference counting to avoid premature deletion:
+
+**Enumeration:** `catalog::store::reference_count(url, paths) -> Vec<Scope>` walks every known scope (global + workspace registries) and returns the list of scopes that reference the URL.
+
+**Deletion:** `commands::catalog::remove` checks reference count before cleanup. A URL-based cache directory is only deleted when the last referencing scope is removed.
+
+**TOCTOU resilience:** Pre-deletion enumeration (without lock) means a concurrent remove can race. The pattern is documented as benign: one writer wins, the other no-ops safely because the cache directory either exists or doesn't.
+
+**Cache reuse on add:** When adding a catalog with a URL that already has a clone (same URL in a different scope), `catalog::add` detects the existing cache directory via `let reuse_existing = cache_dir.exists()` and uses it instead of re-cloning. The local `reuse_existing` flag controls whether the rollback path deletes the directory on error — we only delete what we created.
+
+Example from `src/commands/catalog/add.rs`:
+```rust
+let reuse_existing = cache_dir.exists();
+let (manifest, _tempdir_guard) = if reuse_existing {
+    // Reuse the existing clone; no git operation
+    (read_manifest(&cache_dir, url)?, None)
+} else {
+    // New clone; tempdir will be renamed into place atomically
+    (create_new_clone(...), Some(tempdir))
+};
+
+// On error, only rollback what we created
+if !reuse_existing && result.is_err() {
+    delete_cache_dir(&cache_dir)?;
+}
+```
 
 ### Batch Reindex Operations (Phase 7)
 

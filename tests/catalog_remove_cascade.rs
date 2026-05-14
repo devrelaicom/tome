@@ -195,3 +195,179 @@ fn no_enabled_plugins_keeps_phase_1_behaviour() {
     );
     assert_eq!(v["removed"]["name"], "sample-experts");
 }
+
+// ---- Phase 3 / US3.b — cascade + reference-count integration -------------
+
+/// Cascade-remove from a workspace that shares the catalog URL with the
+/// global scope. Workspace's plugins drop; workspace's config loses the
+/// entry; global's config keeps it; the on-disk clone survives because
+/// global still references it.
+#[test]
+fn cascade_remove_in_workspace_does_not_remove_shared_clone() {
+    use common::sample_plugin_catalog_fixture;
+    use sha2::{Digest, Sha256};
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    fabricate_models(&paths);
+
+    // Opt the user into the workspace registry so `reference_count`
+    // can see the workspace.
+    std::fs::create_dir_all(&paths.state_dir).unwrap();
+    std::fs::File::create(&paths.workspace_registry).unwrap();
+
+    // Build a real git fixture from sample-plugin-catalog so the CLI's
+    // `catalog add` succeeds (it needs a cloneable repo).
+    let fix = Fixture::build_from(sample_plugin_catalog_fixture());
+
+    // Add the catalog to GLOBAL first via CLI binary (real clone).
+    let add_g = env
+        .cmd()
+        .args(["--global", "catalog", "add", &fix.url])
+        .output()
+        .unwrap();
+    assert!(
+        add_g.status.success(),
+        "global add failed: {}",
+        String::from_utf8_lossy(&add_g.stderr),
+    );
+
+    // Init a workspace and add the SAME URL into it (reuses cache).
+    let ws_root = env.home_path().join("project");
+    std::fs::create_dir_all(&ws_root).unwrap();
+    let init = env
+        .cmd()
+        .args(["workspace", "init", ws_root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        init.status.success(),
+        "workspace init failed: {}",
+        String::from_utf8_lossy(&init.stderr),
+    );
+    let ws = std::fs::canonicalize(&ws_root).unwrap();
+
+    let add_w = env
+        .cmd()
+        .args([
+            "--workspace",
+            ws.to_str().unwrap(),
+            "catalog",
+            "add",
+            &fix.url,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        add_w.status.success(),
+        "workspace add failed: {}",
+        String::from_utf8_lossy(&add_w.stderr),
+    );
+
+    // Enable plugin-alpha in the WORKSPACE scope via library API +
+    // StubEmbedder. We have to construct LifecycleDeps with the
+    // workspace config the CLI just wrote.
+    let workspace_scope = tome::workspace::Scope::Workspace(ws.clone());
+    let workspace_config_path = ws.join(".tome/config.toml");
+    let workspace_config: tome::config::Config =
+        toml::from_str(&std::fs::read_to_string(&workspace_config_path).unwrap()).unwrap();
+    let embedder = StubEmbedder::new();
+    let deps = LifecycleDeps {
+        paths: &paths,
+        scope: &workspace_scope,
+        config: &workspace_config,
+        embedder: &embedder,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+        allow_model_download: false,
+    };
+    let plugin_id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
+    lifecycle::enable(&plugin_id, &deps).expect("enable in workspace");
+
+    // Compute the cache directory.
+    let cache_dir = {
+        let mut h = Sha256::new();
+        h.update(fix.url.as_bytes());
+        env.catalogs_dir().join(hex::encode(h.finalize()))
+    };
+    assert!(cache_dir.is_dir());
+
+    // Workspace's index has rows for the plugin.
+    let ws_db = paths.index_db_for(&workspace_scope);
+    let pre_rows: i64 = {
+        let conn = index::open(
+            &ws_db,
+            &OpenOptions {
+                embedder: stub_embedder_seed(),
+                reranker: stub_reranker_seed(),
+            },
+        )
+        .unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM skills WHERE catalog = 'sample-plugin-catalog'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(
+        pre_rows > 0,
+        "workspace index should have rows before remove"
+    );
+
+    // Cascade-remove from the workspace.
+    let rm = env
+        .cmd()
+        .args([
+            "--workspace",
+            ws.to_str().unwrap(),
+            "catalog",
+            "remove",
+            "sample-plugin-catalog",
+            "--force",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        rm.status.success(),
+        "cascade remove failed: {}",
+        String::from_utf8_lossy(&rm.stderr),
+    );
+
+    // Workspace config no longer has it.
+    let ws_body = std::fs::read_to_string(&workspace_config_path).unwrap();
+    assert!(!ws_body.contains("sample-plugin-catalog"), "{ws_body}");
+
+    // Workspace index rows for the catalog dropped.
+    let post_rows: i64 = {
+        let conn = index::open(
+            &ws_db,
+            &OpenOptions {
+                embedder: stub_embedder_seed(),
+                reranker: stub_reranker_seed(),
+            },
+        )
+        .unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM skills WHERE catalog = 'sample-plugin-catalog'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(post_rows, 0, "workspace skills should be dropped");
+
+    // Global config STILL references the catalog.
+    let g_body = std::fs::read_to_string(&paths.config_file).unwrap();
+    assert!(
+        g_body.contains("sample-plugin-catalog"),
+        "global config lost the catalog: {g_body}",
+    );
+
+    // Cache directory SURVIVES — global still references it.
+    assert!(
+        cache_dir.is_dir(),
+        "cache directory deleted despite global still referencing the URL",
+    );
+}

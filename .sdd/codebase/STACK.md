@@ -2,7 +2,7 @@
 
 > **Purpose**: Document what executes in this codebase - languages, runtimes, frameworks, and critical dependencies.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US2 — `tome workspace info` + `tome workspace init` commands; no new dependencies)
+> **Last Updated**: 2026-05-14 (Phase 3 / US3 — reference-counted catalog clones across scopes; no new dependencies)
 
 ## Languages & Runtimes
 
@@ -310,6 +310,40 @@ US2 adds scope-aware workspace creation and introspection per `contracts/workspa
 
 **No new production dependencies** in US2.b — all pieces reuse Phase 1–3 infrastructure (serde_json, tempfile, paths, catalog store). Test count: 318 → 330 across 44 → 46 suites.
 
+### Phase 3 / User Story 3 — scope-aware command dispatch + reference-counted catalog cleanup
+
+US3 enables catalog sharing across scopes (global + workspace) with automatic reference-counted clone cleanup.
+
+**US3.a — per-command scope honouring**
+
+- `src/commands/` all dispatch methods now accept resolved `ResolvedScope` (threaded from `main.rs`)
+- Commands operate on scope-specific paths: config/index/lock/catalog cache all scope-aware via `Paths` methods (pattern established in Foundational F1)
+- No new dependencies
+
+**US3.b — reference-counted catalog clone cleanup**
+
+- `src/catalog/store.rs::reference_count(url, paths) -> Vec<Scope>` — new library helper
+  - Enumerates every scope (global + each workspace from `paths.workspace_registry`) whose config still references the given URL
+  - Reads global `config.toml` (Tome-owned, strict)
+  - For each workspace in `${XDG_DATA_HOME}/tome/workspaces.txt`, reads `${WORKSPACE}/.tome/config.toml` (lenient on I/O errors; malformed config skipped)
+  - URL equality is exact-string match; callers pass scrubbed URL
+  - **Concurrency:** no lock held during read (same TOCTOU profile as Phase 2 `cascade_disable_for_catalog` pre-check; worst case: one extra clone re-download on next `catalog update`)
+- `src/commands/catalog/remove.rs` — extended with post-write refcount check
+  - After persisting the config (catalog dropped from resolved scope), calls `reference_count` to check remaining refs
+  - On-disk clone at `paths.cache_dir_for(url)` deleted only if no other scope references it
+  - Cascade-disable path also respects refcount (falls through same cleanup logic)
+  - Phase 1 single-scope-per-URL restriction lifted
+- Test coverage: `tests/workspace_commands.rs` (9 new tests in cross-product scope-isolation suite) + `tests/catalog_cache_refcount.rs` (5 new refcount-specific tests) + extended `tests/catalog_remove_cascade.rs` (1 new workspace variant)
+
+**No new production dependencies** in US3 — reference-count logic reuses existing `load`/`save` catalog store infrastructure and inventory registry scanning.
+
+**Note on `${XDG_DATA_HOME}/tome/workspaces.txt` (Phase 3 / US2 artifact, now load-bearing):**
+- Created opt-in by `workspace init`; never required to exist (silent no-op on absence)
+- US3 removes the Phase 1 single-scope-per-URL restriction by consulting this registry in the refcount path
+- On a fresh install (registry absent), `catalog remove` behaves as Phase 1–US2 (global scope only, always deletes the clone)
+
+Test count: 330 → 355 across 46 → 49 suites.
+
 ## Package Managers & Build Tools
 
 | Tool | Version | Purpose |
@@ -324,11 +358,11 @@ US2 adds scope-aware workspace creation and introspection per `contracts/workspa
 |-------------|---------|
 | OS Targets | Linux (ubuntu-latest) and macOS (macos-latest) — CI verified on both |
 | Deployment | Single binary (`target/release/tome`); installed via `cargo install --path .` |
-| Binary Size | < 50 MB stripped (enforced by CI; revised from 10 MB ceiling in CONSTITUTION v1.2.0 after Phase 3 slice 1 measured 29.56 MB on Linux; `ort` CPU-only static linking is the load-bearing constraint; US1 final 22.04 MiB on macOS arm64; US2 maintains same footprint — no new production dependencies) |
+| Binary Size | < 50 MB stripped (enforced by CI; revised from 10 MB ceiling in CONSTITUTION v1.2.0 after Phase 3 slice 1 measured 29.56 MB on Linux; `ort` CPU-only static linking is the load-bearing constraint; US1 final 22.04 MiB on macOS arm64; US2 maintains same footprint; US3 maintains same footprint — no new production dependencies) |
 | Output | Human-readable (default) or NDJSON (`--json`); logging to stderr only (orthogonal to stdout); colours respect `NO_COLOR` and auto-disable on non-TTY |
 | Model runtime | CPU-only ONNX Runtime (via `fastembed`); models downloaded at first use into `${XDG_DATA_HOME}/tome/models/`; fixed registry (compile-time constants) ensures bit-for-bit reproducibility |
 | MCP server runtime | Single-threaded tokio with JSON-lines file logging to `${XDG_STATE_HOME}/tome/mcp.log` (10 MiB rotation cap); stdout reserved for MCP protocol only; stderr for fatal startup errors only |
-| Workspace storage | Atomic `.tome/` directories created via `tempfile::Builder::tempdir_in` (staging + POSIX rename); config persisted to `${WORKSPACE}/.tome/config.toml`; index DB at `${WORKSPACE}/.tome/index.db` per Phase 3 Foundational F1 |
+| Workspace storage | Atomic `.tome/` directories created via `tempfile::Builder::tempdir_in` (staging + POSIX rename); config persisted to `${WORKSPACE}/.tome/config.toml`; index DB at `${WORKSPACE}/.tome/index.db` per Phase 3 Foundational F1; catalog clones in `${WORKSPACE}/.tome/catalogs/<sha>/` shared across scopes via reference-count tracking in global config + workspace registry (Phase 3 / US3) |
 
 ## Not Used (Explicitly Excluded)
 
@@ -350,4 +384,4 @@ US2 adds scope-aware workspace creation and introspection per `contracts/workspa
 
 ---
 
-*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 + Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 source code.*
+*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 + Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 + Phase 3 / US3 source code.*

@@ -14,6 +14,8 @@ use tempfile::NamedTempFile;
 
 use crate::config::Config;
 use crate::error::TomeError;
+use crate::paths::Paths;
+use crate::workspace::{Scope, inventory};
 
 pub fn load(config_file: &Path) -> Result<Config, TomeError> {
     match std::fs::read_to_string(config_file) {
@@ -40,6 +42,48 @@ pub fn save(config_file: &Path, config: &Config) -> Result<(), TomeError> {
     let text =
         toml::to_string_pretty(config).map_err(|e| TomeError::Internal(anyhow::Error::new(e)))?;
     write_atomic(config_file, text.as_bytes())
+}
+
+/// Enumerate every scope whose `config.toml` currently references the
+/// catalog URL. Used by `tome catalog remove` to decide whether the
+/// on-disk clone at `paths.cache_dir_for(url)` is still needed after the
+/// resolved scope drops it.
+///
+/// Sources walked (contract `catalog-extensions-p3.md` §Reference-counting):
+///
+/// 1. The global `config.toml` (`paths.config_file`).
+/// 2. Every workspace path in `paths.workspace_registry` — opt-in; the
+///    file is absent on a fresh install and reads as an empty list.
+///
+/// URL equality is exact-string match. Callers must pass the same
+/// scrubbed-and-resolved URL the catalog was registered with.
+///
+/// ## Concurrency / TOCTOU
+///
+/// The reference-count read is **not** taken under any lock. Two
+/// processes racing through `catalog remove` may both observe an empty
+/// list and both call `fs::remove_dir_all`; one succeeds, the other
+/// gets `NotFound` and silently continues. The worse race — process A
+/// observes empty, process B adds a new reference, process A removes
+/// the clone — leaves a dangling reference; the next
+/// `tome catalog update` for that scope re-clones. No data loss; one
+/// extra round-trip. Same TOCTOU profile as the Phase 2
+/// `cascade_disable_for_catalog` pre-check.
+pub fn reference_count(url: &str, paths: &Paths) -> Vec<Scope> {
+    let mut refs = Vec::new();
+    if let Ok(global) = load(&paths.config_file)
+        && global.catalogs.values().any(|e| e.url == url)
+    {
+        refs.push(Scope::Global);
+    }
+    for ws in inventory::read_registry(&paths.workspace_registry) {
+        let cfg_path = ws.join(".tome/config.toml");
+        let Ok(cfg) = load(&cfg_path) else { continue };
+        if cfg.catalogs.values().any(|e| e.url == url) {
+            refs.push(Scope::Workspace(ws));
+        }
+    }
+    refs
 }
 
 /// Write `bytes` to `target` atomically: write to a same-directory temp file,
