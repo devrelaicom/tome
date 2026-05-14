@@ -69,14 +69,14 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Slice F1 — `Scope` type + paths refactor
 
-- [ ] T018 Create `src/workspace/mod.rs` exposing the module surface (use devs:rust-dev agent)
-- [ ] T019 [P] Create `src/workspace/scope.rs` with `Scope`, `ScopeSource`, `ResolvedScope` per data-model.md §1 (use devs:rust-dev agent)
-- [ ] T020 [P] Add `state_dir`, `mcp_log`, `mcp_log_prev`, `workspace_registry` fields to `Paths` in `src/paths.rs` and resolve via `directories::ProjectDirs::state_dir()` with XDG fallback per research §R-6 (use devs:rust-dev agent)
-- [ ] T021 [P] Rename `Paths.config_file` → `Paths.global_config_file`, `Paths.index_db` → `Paths.global_index_db`, `Paths.index_lock` → `Paths.global_index_lock` in `src/paths.rs` (mechanical rename, all call sites updated in slice F4) (use devs:rust-dev agent)
-- [ ] T022 [P] Add `Paths::config_file(&Scope)`, `Paths::index_db(&Scope)`, `Paths::index_lock(&Scope)`, `Paths::workspace_marker_dir(&Path)` accessor methods in `src/paths.rs` (use devs:rust-dev agent)
-- [ ] T023 Add `lib.rs` re-export for `workspace::{Scope, ScopeSource, ResolvedScope}` (use devs:rust-dev agent)
-- [ ] T024 Add `tests/paths_phase3.rs` covering `state_dir` resolution under set / unset `XDG_STATE_HOME`, and `Paths::index_db(&Scope::Workspace(path))` returning `path/.tome/index.db` (use devs:rust-dev agent)
-- [ ] T025 [GIT] Commit: feat(workspace): introduce Scope type and per-scope Paths accessors
+- [X] T018 Create `src/workspace/mod.rs` exposing the module surface (use devs:rust-dev agent)
+- [X] T019 [P] Create `src/workspace/scope.rs` with `Scope`, `ScopeSource`, `ResolvedScope` per data-model.md §1 (use devs:rust-dev agent)
+- [X] T020 [P] Add `state_dir`, `mcp_log`, `mcp_log_prev`, `workspace_registry` fields to `Paths` in `src/paths.rs` and resolve via `directories::ProjectDirs::state_dir()` with XDG fallback per research §R-6 (use devs:rust-dev agent) — used the existing raw-env-var + HOME-fallback pattern instead of adding `directories` as a single-call dependency.
+- [ ] T021 [P] Rename `Paths.config_file` → `Paths.global_config_file`, `Paths.index_db` → `Paths.global_index_db`, `Paths.index_lock` → `Paths.global_index_lock` in `src/paths.rs` (mechanical rename, all call sites updated in slice F4) (use devs:rust-dev agent) — **DEFERRED to slice F4** so the working tree stays compiling across slice boundaries; F4 will rename + sweep call sites in one commit.
+- [X] T022 [P] Add `Paths::config_file(&Scope)`, `Paths::index_db(&Scope)`, `Paths::index_lock(&Scope)`, `Paths::workspace_marker_dir(&Path)` accessor methods in `src/paths.rs` (use devs:rust-dev agent) — landed as `config_file_for`, `index_db_for`, `index_lock_for`, `workspace_marker_dir` (the `_for` suffix avoids the field-name collision until F4 renames the fields and drops the suffix).
+- [X] T023 Add `lib.rs` re-export for `workspace::{Scope, ScopeSource, ResolvedScope}` (use devs:rust-dev agent)
+- [X] T024 Add `tests/paths_phase3.rs` covering `state_dir` resolution under set / unset `XDG_STATE_HOME`, and `Paths::index_db(&Scope::Workspace(path))` returning `path/.tome/index.db` (use devs:rust-dev agent)
+- [X] T025 [GIT] Commit: feat(workspace): introduce Scope type and per-scope Paths accessors
 
 ### Slice F2 — closed-error-set extension
 

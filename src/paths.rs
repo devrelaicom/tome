@@ -1,20 +1,31 @@
-//! XDG-aware path resolution. We honour `XDG_CONFIG_HOME` and `XDG_DATA_HOME`
-//! across both macOS and Linux (rather than `directories`'s macOS-specific
-//! `~/Library/...` fallback) — the spec is explicit about the XDG layout and
-//! tests rely on it being controllable via the env vars. `cache_dir_for(url)`
-//! content-addresses each catalog's cache by sha256(url) (FR-015).
+//! XDG-aware path resolution. We honour `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+//! and (Phase 3) `XDG_STATE_HOME` across both macOS and Linux (rather than
+//! `directories`'s macOS-specific `~/Library/...` fallback) — the spec is
+//! explicit about the XDG layout and tests rely on it being controllable
+//! via the env vars. `cache_dir_for(url)` content-addresses each catalog's
+//! cache by sha256(url) (FR-015).
 //!
 //! Phase 2 adds the index database, an advisory write lock, and the models
 //! directory; all live under `data_dir` per spec FR-021 (data dir, NOT cache
 //! dir — OS cache cleaners must never sweep them away). FR-021 explicitly
 //! requires reusing the Phase 1 resolver rather than introducing a parallel
 //! path-resolution rule.
+//!
+//! Phase 3 layers `state_dir` (XDG_STATE_HOME) on top, plus Scope-aware
+//! accessor methods that pick between the global locations carried on this
+//! struct and per-workspace paths derived from `Scope::Workspace(root)`.
+//! Research §R-6 suggests `directories::ProjectDirs::state_dir()` for
+//! `state_dir`; we deviate intentionally and use the same raw-env-var +
+//! HOME-fallback pattern as `config_dir` / `data_dir` so the three
+//! resolvers share an idiom (and so we don't add `directories` as a
+//! single-call dependency).
 
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
 use crate::error::TomeError;
+use crate::workspace::Scope;
 
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -26,6 +37,16 @@ pub struct Paths {
     pub index_db: PathBuf,
     pub index_lock: PathBuf,
     pub models_dir: PathBuf,
+    // Phase 3 — state directory + per-feature files. Distinct from
+    // `data_dir` (which holds artefacts that must persist across cache
+    // cleanups, like the index DB and downloaded models) and from
+    // `config_dir` (which holds user-edited TOML). State here is
+    // ephemeral-but-survives-cache-cleanup: the MCP log + the opt-in
+    // workspace inventory.
+    pub state_dir: PathBuf,
+    pub mcp_log: PathBuf,
+    pub mcp_log_prev: PathBuf,
+    pub workspace_registry: PathBuf,
 }
 
 impl Paths {
@@ -43,6 +64,10 @@ impl Paths {
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
             .unwrap_or_else(|| home.join(".local/share"));
+        let xdg_state = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join(".local/state"));
         let config_dir = xdg_config.join("tome");
         let config_file = config_dir.join("config.toml");
         let data_dir = xdg_data.join("tome");
@@ -50,6 +75,10 @@ impl Paths {
         let index_db = data_dir.join("index.db");
         let index_lock = data_dir.join("index.lock");
         let models_dir = data_dir.join("models");
+        let state_dir = xdg_state.join("tome");
+        let mcp_log = state_dir.join("mcp.log");
+        let mcp_log_prev = state_dir.join("mcp.log.1");
+        let workspace_registry = state_dir.join("workspaces.txt");
         Ok(Self {
             config_dir,
             config_file,
@@ -58,6 +87,10 @@ impl Paths {
             index_db,
             index_lock,
             models_dir,
+            state_dir,
+            mcp_log,
+            mcp_log_prev,
+            workspace_registry,
         })
     }
 
@@ -93,6 +126,52 @@ impl Paths {
     pub fn model_manifest(&self, name: &str) -> Result<PathBuf, TomeError> {
         Ok(self.model_path(name)?.join("manifest.json"))
     }
+
+    // --- Phase 3 Scope-aware accessors -------------------------------------
+    //
+    // These return the correct config / index / lock path for the current
+    // scope. `Scope::Global` reads from the existing struct fields (which
+    // F4 will rename to `global_*`); `Scope::Workspace(root)` derives the
+    // per-workspace path from the root. The Phase 3 task list deliberately
+    // splits the rename + call-site sweep into slice F4; this slice just
+    // adds the methods so other modules can be written against them.
+    //
+    // Naming convention: the methods are intentionally suffixed `_for`
+    // (e.g. `config_file_for`) rather than colliding with the like-named
+    // fields. F4 will rename the fields to `global_*` and the suffix can
+    // be dropped if desirable then.
+
+    /// Config file for the given scope. Global → `paths.config_file`.
+    /// Workspace → `<workspace-root>/.tome/config.toml`.
+    pub fn config_file_for(&self, scope: &Scope) -> PathBuf {
+        match scope {
+            Scope::Global => self.config_file.clone(),
+            Scope::Workspace(root) => root.join(".tome/config.toml"),
+        }
+    }
+
+    /// Index database for the given scope.
+    pub fn index_db_for(&self, scope: &Scope) -> PathBuf {
+        match scope {
+            Scope::Global => self.index_db.clone(),
+            Scope::Workspace(root) => root.join(".tome/index.db"),
+        }
+    }
+
+    /// Advisory write lockfile for the given scope.
+    pub fn index_lock_for(&self, scope: &Scope) -> PathBuf {
+        match scope {
+            Scope::Global => self.index_lock.clone(),
+            Scope::Workspace(root) => root.join(".tome/index.lock"),
+        }
+    }
+
+    /// The `.tome/` marker directory for a workspace rooted at `root`.
+    /// `root` must be absolute; per `Scope::Workspace` invariants the
+    /// caller has already canonicalised it.
+    pub fn workspace_marker_dir(&self, root: &Path) -> PathBuf {
+        root.join(".tome")
+    }
 }
 
 #[cfg(test)]
@@ -101,6 +180,7 @@ mod tests {
 
     fn fixture() -> Paths {
         let data = PathBuf::from("/tmp/d");
+        let state = PathBuf::from("/tmp/s");
         Paths {
             config_dir: PathBuf::from("/tmp/c"),
             config_file: PathBuf::from("/tmp/c/config.toml"),
@@ -109,6 +189,10 @@ mod tests {
             index_db: data.join("index.db"),
             index_lock: data.join("index.lock"),
             models_dir: data.join("models"),
+            state_dir: state.clone(),
+            mcp_log: state.join("mcp.log"),
+            mcp_log_prev: state.join("mcp.log.1"),
+            workspace_registry: state.join("workspaces.txt"),
         }
     }
 
@@ -132,6 +216,16 @@ mod tests {
         assert!(p.index_db.starts_with(&p.data_dir));
         assert!(p.index_lock.starts_with(&p.data_dir));
         assert!(p.models_dir.starts_with(&p.data_dir));
+    }
+
+    #[test]
+    fn phase_3_state_paths_are_under_state_dir() {
+        // FR (Phase 3): MCP log + workspace inventory live under the state
+        // dir, distinct from data_dir.
+        let p = fixture();
+        assert!(p.mcp_log.starts_with(&p.state_dir));
+        assert!(p.mcp_log_prev.starts_with(&p.state_dir));
+        assert!(p.workspace_registry.starts_with(&p.state_dir));
     }
 
     #[test]
@@ -160,5 +254,24 @@ mod tests {
             m,
             p.models_dir.join("bge-reranker-base").join("manifest.json"),
         );
+    }
+
+    #[test]
+    fn scope_global_routes_to_global_fields() {
+        let p = fixture();
+        assert_eq!(p.config_file_for(&Scope::Global), p.config_file);
+        assert_eq!(p.index_db_for(&Scope::Global), p.index_db);
+        assert_eq!(p.index_lock_for(&Scope::Global), p.index_lock);
+    }
+
+    #[test]
+    fn scope_workspace_routes_to_dot_tome_subdir() {
+        let p = fixture();
+        let root = PathBuf::from("/tmp/wk");
+        let ws = Scope::Workspace(root.clone());
+        assert_eq!(p.config_file_for(&ws), root.join(".tome/config.toml"));
+        assert_eq!(p.index_db_for(&ws), root.join(".tome/index.db"));
+        assert_eq!(p.index_lock_for(&ws), root.join(".tome/index.lock"));
+        assert_eq!(p.workspace_marker_dir(&root), root.join(".tome"));
     }
 }

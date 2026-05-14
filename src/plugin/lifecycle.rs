@@ -687,6 +687,7 @@ mod tests {
     /// Build a `Paths` rooted entirely under `root` so tests never touch
     /// `$HOME` or env vars (foundational retro: gotcha #5).
     fn test_paths(root: &Path) -> Paths {
+        let state = root.join("state");
         Paths {
             config_dir: root.join("config"),
             config_file: root.join("config/config.toml"),
@@ -695,6 +696,10 @@ mod tests {
             index_db: root.join("data/index.db"),
             index_lock: root.join("data/index.lock"),
             models_dir: root.join("data/models"),
+            state_dir: state.clone(),
+            mcp_log: state.join("mcp.log"),
+            mcp_log_prev: state.join("mcp.log.1"),
+            workspace_registry: state.join("workspaces.txt"),
         }
     }
 
