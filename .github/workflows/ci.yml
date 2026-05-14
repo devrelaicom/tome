@@ -58,6 +58,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ matrix.os }}-${{ matrix.toolchain }}
+          # Do NOT cache `~/.cargo/bin`. The action's default (`cache-bin:
+          # true`) restores the cargo binary from cache, which on macOS
+          # MSRV ends up pointing back at the rustup proxy and undoes the
+          # dtolnay toolchain install — `cargo fmt` then fails with the
+          # signature "error: unexpected argument 'fmt' found". The cargo
+          # binary itself is cheap to provision; the registry + target
+          # cache are what's expensive, and those are still cached.
+          cache-bin: false
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
