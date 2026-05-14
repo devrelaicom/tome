@@ -1,8 +1,8 @@
-//! Dispatcher for `tome workspace <subcommand>`.
-//!
-//! Slice US2.a of Phase 3 ships `info`. Slice US2.b will add `init`.
+//! Dispatcher for `tome workspace <subcommand>`. Adds `info`
+//! (US2.a, read-only) and `init` (US2.b, atomic creation).
 
 pub mod info;
+mod init;
 
 use crate::cli::WorkspaceCommand;
 use crate::error::TomeError;
@@ -14,5 +14,6 @@ pub fn run(cmd: WorkspaceCommand, scope: &ResolvedScope, mode: Mode) -> Result<(
     let paths = Paths::resolve()?;
     match cmd {
         WorkspaceCommand::Info => info::run(scope, &paths, mode),
+        WorkspaceCommand::Init(args) => init::run(args, &paths, mode),
     }
 }

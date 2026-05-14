@@ -38,3 +38,35 @@ pub fn read_registry(path: &Path) -> Vec<PathBuf> {
         .filter(|p| p.is_absolute())
         .collect()
 }
+
+/// Append `workspace_root` to the registry at `registry_path` IFF the file
+/// exists. Opt-in: a missing registry file means the user hasn't asked Tome
+/// to track workspaces, and init must NOT create the file (contract
+/// `workspace-init.md` §"Side effects on the workspace registry").
+///
+/// Dedupe is by exact string match — `workspace_root` should already be
+/// canonicalised by the caller. Writes go through an atomic same-directory
+/// temp file to avoid leaving a half-written list on crash.
+pub fn append_if_registry_exists(
+    registry_path: &Path,
+    workspace_root: &Path,
+) -> Result<(), crate::error::TomeError> {
+    if !registry_path.is_file() {
+        return Ok(());
+    }
+    let existing = read_registry(registry_path);
+    let candidate = workspace_root.to_path_buf();
+    if existing.iter().any(|p| p == &candidate) {
+        return Ok(());
+    }
+
+    let mut body = String::new();
+    for entry in &existing {
+        body.push_str(&entry.display().to_string());
+        body.push('\n');
+    }
+    body.push_str(&candidate.display().to_string());
+    body.push('\n');
+
+    crate::catalog::store::write_atomic(registry_path, body.as_bytes())
+}
