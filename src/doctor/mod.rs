@@ -11,6 +11,7 @@
 //! `check_index`, `check_drift`) are reused — single source of truth.
 
 pub mod checks;
+pub mod fixes;
 pub mod harness_detect;
 pub mod report;
 
@@ -69,6 +70,29 @@ pub fn assemble_report(
         overall,
         suggested_fixes,
     })
+}
+
+/// `pub(crate)` so `doctor::fixes::re_assemble` can call it after
+/// repairs mutate the per-subsystem fields. Not part of the public API.
+pub(crate) fn classify_pub(
+    embedder: &crate::commands::status::ModelHealth,
+    reranker: &crate::commands::status::ModelHealth,
+    index: &crate::commands::status::IndexHealth,
+    drift: &DriftStatus,
+    catalogs: &[CatalogCacheHealth],
+) -> DoctorClassification {
+    classify(embedder, reranker, index, drift, catalogs)
+}
+
+/// Same `pub(crate)` re-export for `build_suggested_fixes`.
+pub(crate) fn build_suggested_fixes_pub(
+    embedder: &crate::commands::status::ModelHealth,
+    reranker: &crate::commands::status::ModelHealth,
+    index: &crate::commands::status::IndexHealth,
+    drift: &DriftStatus,
+    catalogs: &[CatalogCacheHealth],
+) -> Vec<SuggestedFix> {
+    build_suggested_fixes(embedder, reranker, index, drift, catalogs)
 }
 
 /// Per-classification rules from `contracts/doctor.md` and

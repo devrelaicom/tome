@@ -54,6 +54,7 @@ fn main() {
         Command::Status(args) => commands::status::run(args, &scope, mode),
         Command::Mcp(args) => commands::mcp::run(args, &scope, mode),
         Command::Workspace(args) => commands::workspace::run(args.command, &scope, mode),
+        Command::Doctor(args) => commands::doctor::run(args, &scope, mode),
     };
 
     match result {
