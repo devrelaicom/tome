@@ -79,6 +79,21 @@ pub enum Command {
     /// Report the health of every Phase 2 subsystem (models, index, drift).
     /// Exit 0 when everything is healthy; exit 1 on degraded or unhealthy.
     Status(StatusArgs),
+    /// Run as a stdio MCP server backed by the resolved scope's index.
+    /// stdin / stdout carry the MCP protocol exclusively; diagnostic
+    /// logs go to `${XDG_STATE_HOME}/tome/mcp.log`. Designed to be
+    /// launched by an MCP-compliant harness (Claude Code, Codex, Cursor,
+    /// Gemini CLI, OpenCode, …) as a child process. The global `--json`
+    /// flag is intentionally ignored — the protocol IS the structured
+    /// output.
+    Mcp(McpArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct McpArgs {
+    // No tool-specific flags. `--workspace` / `--global` come from
+    // `GlobalScopeArgs` on the top-level `Cli`. Empty struct keeps the
+    // clap-derive pattern consistent with other commands.
 }
 
 #[derive(Debug, clap::Args)]

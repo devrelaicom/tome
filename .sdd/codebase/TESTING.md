@@ -48,6 +48,8 @@ tests/
 ├── reindex.rs                     # Library + CLI: `tome reindex` (Phase 7)
 ├── status.rs                      # Library API: `assemble_report` (Phase 8)
 ├── version_output.rs              # Compile-time content tests (Phase 8)
+├── mcp_server.rs                  # MCP tool router + handler introspection (Phase 3)
+├── mcp_lifecycle.rs               # MCP pre-flight exit codes (Phase 3)
 ├── atomicity_enable.rs            # Failure-injection: enable rollback (Phase 3)
 ├── exit_codes.rs                  # Unit: exhaustiveness check on TomeError
 ├── error_messages.rs              # Unit: error message format correctness
@@ -76,12 +78,90 @@ tests/
 | Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/reindex.rs`, `tests/catalog_update_reindex.rs`, `tests/status.rs` | Exercise library API with `StubEmbedder`, bypassing `Paths::resolve` + `FastembedEmbedder::load` |
 | Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs`, `tests/plugin_disable.rs`, `tests/models_*.rs`, `tests/reindex.rs` (parse-error tests), `tests/catalog_remove_cascade.rs` | Spawn `tome` binary as subprocess; used when no embedders are loaded |
 | Integration tests (PTY-driven) | `tests/plugin_interactive.rs` | Scripted pty session with `rexpect`; driven via real terminal I/O |
+| Integration tests (MCP handler-level) | `tests/mcp_server.rs` | Call handler `async fn` directly inside `tokio::runtime::Builder::new_current_thread()` block (Phase 3) |
+| Integration tests (MCP lifecycle) | `tests/mcp_lifecycle.rs` | CLI-binary tests for MCP pre-flight exit codes (Phase 3) |
 | Compile-time content tests | `tests/version_output.rs` | Read `MODEL_REGISTRY` at compile time; assert output matches pinned models (Phase 8) |
 | Shared helpers | `tests/common/mod.rs` | Fixture builders, ToolEnv, lifecycle helpers, `paths_for`, sparse-file fixtures (Phase 6) |
 | Test fixtures | `tests/fixtures/` | Real git repos and sample plugin catalogs |
 | In-module unit tests | `src/{module}/log.rs::tests` | Small filesystem operations (rotation, permission, idempotent no-ops) (Phase 3 / F8) |
 
 ## Test Patterns
+
+### MCP Handler-Level Integration Test Pattern (Phase 3 / F2)
+
+Tests for MCP tool handlers call the handler `async fn` directly inside a `tokio::runtime::Builder::new_current_thread()` context, avoiding a full MCP handshake (which would require real BGE models or a complex stub injection point).
+
+Pattern:
+1. **Build minimal state** — `McpState` with `StubEmbedder`, `StubReranker`, paths rooted in temp dir
+2. **Construct tokio runtime** — single-threaded `new_current_thread()` with all features enabled
+3. **Call handler async fn** — e.g., `search_skills::handle(state, input).await`
+4. **Assert output** — check return value, error codes, structured JSON `data` field
+
+**Tool router introspection (FR-108):** The `#[tool_router(vis = "pub")]` macro makes `Server::tool_router()` callable from integration tests. Use it to assert:
+- Exactly the right tools are advertised
+- Descriptions match contract wording
+- No specific catalog/plugin/skill names leak into descriptions
+
+Example from `tests/mcp_server.rs`:
+```rust
+#[test]
+fn router_advertises_exactly_two_tools() {
+    let names: Vec<String> = Server::tool_router()
+        .list_all()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["get_skill".to_string(), "search_skills".to_string()],
+    );
+}
+```
+
+**Error handling tests:** Handlers validate inputs and produce structured error codes:
+- `plugin_without_catalog` when `plugin` is set but `catalog` is not
+- `unknown_catalog` when the catalog is not in scope
+- `unknown_skill` when a skill address is invalid
+- Bounds checks on numeric args (e.g., `top_k` 1..=100)
+
+Example from `tests/mcp_server.rs`:
+```rust
+let input = search_skills::Input {
+    query: "find a tool".into(),
+    top_k: 101,  // Out of bounds
+    catalog: None,
+    plugin: None,
+};
+let result = search_skills::handle(state, input).await;
+assert!(result.is_err());
+let err = result.unwrap_err();
+assert_eq!(err.code, -32602);  // INVALID_PARAMS
+// Check that error.data has structured code:
+let data = err.data.as_ref().and_then(|d| d.get("code"));
+```
+
+### Library API Integration Test Pattern for Async (Phase 3 / US1)
+
+When testing MCP tool handlers that call `spawn_blocking` for sync operations (index reads, model loading), set up the tokio runtime explicitly:
+
+```rust
+#[test]
+fn test_search_skills_with_blocking_operations() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+    
+    let result = rt.block_on(async {
+        let state = build_state(&env);
+        search_skills::handle(state, input).await
+    });
+    
+    assert!(result.is_ok());
+}
+```
+
+This pattern allows tests to exercise the full handler pipeline without spawning an actual MCP server or loading 345 MB ONNX models in CI.
 
 ### Library API Integration Test Pattern (Phase 3–8)
 
@@ -704,6 +784,8 @@ When tests run:
 | `reindex.rs` | Library + CLI | `tome reindex [<scope>]` — library-API scope variants (All, Catalog, Plugin) via `run_with_deps`, CLI parse-error paths, empty install (Phase 7) |
 | `status.rs` | Library API | `assemble_report` — subsystem health checks (embedder, reranker, index, drift), overall classification (Ok/Degraded/Unhealthy) (Phase 8) |
 | `version_output.rs` | Compile-time content | `--version` output includes embedder/reranker identities; `--json` format (Phase 8) |
+| `mcp_server.rs` | Handler-level Library | MCP tool router introspection (tool list, descriptions); handler input-validation (error codes, bounds checks) (Phase 3) |
+| `mcp_lifecycle.rs` | CLI-binary | MCP pre-flight exit codes (workspace conflict, missing index, schema version, missing models) (Phase 3) |
 | `atomicity_enable.rs` | Library API | Failure-injection: `StubEmbedder::with_force_fail_after(n)` → rollback guarantee (FR-004) |
 
 ### Unit Tests (by concern)
@@ -716,6 +798,7 @@ When tests run:
 | `path_validation.rs` | Relative paths only; no absolute paths, no `..`, no escape outside catalog root |
 | `scrubbing.rs` | Credential scrubbing regex: URL logins, SSH hosts, tokens, API keys, long hex |
 | `atomicity.rs` | Interrupted writes (SIGINT during clone) leave registry/cache in consistent state |
+| In-module tests (`src/mcp/log.rs::tests`) | Log rotation policy: skip/rename/overwrite, permission setting, idempotent no-ops |
 
 ## Deterministic Stub Embedder (Phase 3–7)
 
@@ -765,6 +848,8 @@ The counter is shared between clones via `Arc<AtomicUsize>` so the closure adapt
 **CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse-error tests, `catalog_remove_cascade.rs`) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
 
 **PTY-driven tests** (`plugin_interactive.rs`) mutate `env` only inside the pty spawning (via `Command::env`), not the parent process.
+
+**MCP handler-level tests** (`mcp_server.rs`, `mcp_lifecycle.rs`) use isolated `ToolEnv` for CLI binary tests; handler-level tests use `lifecycle_paths` for pure state construction.
 
 ### Test Scaffolding Lock-Step
 
@@ -833,6 +918,7 @@ No automatic coverage threshold enforced, but the test corpus is organized to be
 - **Bad-input corpus is explicit** — each parser/validator has a separate test file documenting what shapes are rejected
 - **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/disable/list/show`, `plugin` interactive, `models download/list/remove`, `reindex`, `status`) has dedicated tests
 - **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable and cheap-reenable (FR-006), fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback; `catalog_update_reindex.rs` and `reindex.rs` cover batch reindex logic; `status.rs` covers health assessment
+- **MCP tool handlers tested** — `mcp_server.rs` covers tool router introspection and handler input validation; `mcp_lifecycle.rs` covers pre-flight exit codes
 - **Idempotency tested** — `plugin_repeated.rs` covers enable-of-enabled and disable-of-disabled (FR-008, exit 21)
 - **Interactive flow tested end-to-end** — `plugin_interactive.rs` covers catalog selector, plugin browser, action prompts, navigation, non-TTY refusal
 - **Cascade operations tested** — `catalog_remove_cascade.rs` covers refuse-on-enabled, cascade disable, JSON array envelope (Phase 9)
@@ -890,7 +976,7 @@ Plugin sources must be:
 cargo build --release           # Full build (includes dependencies)
 cargo fmt --check              # Format check
 cargo clippy --all-targets -- -D warnings  # Linting
-cargo test --workspace         # Full test suite (297/297 across 42 suites)
+cargo test --workspace         # Full test suite (310 tests across 44 suites)
 cargo audit                     # Security: vulnerable dependencies
 cargo deny check                # License compliance
 ```
@@ -899,13 +985,14 @@ All checks must pass on both platforms (`ubuntu-latest`, `macos-latest`) and bot
 
 ## Test Statistics
 
-**Current:** 297 passed across 42 suites (as of 2026-05-14, end of Phase 3 Foundational F8):
+**Current:** 310 passed across 44 suites (as of 2026-05-14, end of Phase 3 Foundational US1):
 - Unit tests (src/lib.rs): 66 (includes 4 new in-module tests for `mcp::log::tests` rotation policy)
-- Integration tests (tests/): 231
+- Integration tests (tests/): 244
 
 Breakdown by test file:
 - Library API (heavy-state logic): `plugin_enable.rs`, `query.rs`, `catalog_update_reindex.rs`, `reindex.rs`, `status.rs`, `atomicity_enable.rs`
-- CLI binary (light-state / parse-error paths): `catalog_*.rs`, `plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, and `reindex.rs` parse tests
+- CLI binary (light-state / parse-error paths): `catalog_*.rs`, `plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse tests, `mcp_lifecycle.rs`
+- Handler-level (MCP introspection): `mcp_server.rs` (8 tests)
 - PTY-driven (interactive flows): `plugin_interactive.rs`
 - Unit (parsers, validators, error paths): `exit_codes.rs`, `error_messages.rs`, `manifest_strictness.rs`, `path_validation.rs`, `scrubbing.rs`, `atomicity.rs`, and in-module tests in `src/mcp/log.rs`
 
@@ -1065,6 +1152,24 @@ Example pattern from `tests/catalog_remove_cascade.rs`:
 - Enable plugins via library API + `StubEmbedder` (setup only)
 - Run CLI `catalog remove --force` (the cascade itself)
 - Assert exit code, JSON envelope structure, and post-operation database state
+
+### Testing a New MCP Tool Handler (Phase 3)
+
+For handler-level tests (introspection + validation):
+1. Create integration test file `tests/mcp_{command}.rs` (handler-level library)
+2. Build minimal `McpState` with `StubEmbedder`, `StubReranker`, isolated paths
+3. Build tokio runtime via `tokio::runtime::Builder::new_current_thread().enable_all()`
+4. Call handler `async fn` directly: `search_skills::handle(state, input).await`
+5. Assert output, error codes, and structured JSON `data` field
+6. For router introspection, use `Server::tool_router().list_all()` to assert tool list and descriptions
+7. Run `cargo test mcp_*` to verify
+
+For pre-flight exit-code tests:
+1. Create CLI-binary test file `tests/mcp_lifecycle.rs`
+2. Use `ToolEnv`, `paths_for`, `fabricate_all_installed_models`
+3. Set up conditions that trigger pre-flight failures (missing index, schema mismatch, missing models)
+4. Spawn the binary with `mcp` subcommand, assert exit code
+5. Run `cargo test mcp_lifecycle` to verify
 
 ### Testing Idempotency (Phase 5)
 

@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 8–9 + F7–F8 incremental)
+> **Last Updated**: 2026-05-14 (Phase 3 / US1 Foundational F7–F8 incremental)
 
 ## Overview
 
@@ -17,6 +17,8 @@ Tome is a Rust CLI (and eventually MCP server) for managing plugin catalogs and 
 8. Binary-size constraints to limit attack surface
 9. MCP server protocol purity (stdout reserved for MCP protocol, errors to stderr)
 10. Structured logging with size-based rotation for long-running MCP server
+11. MCP startup pre-flight validation with SHA-256 verification and drift detection
+12. No domain-error leakage in MCP tool responses (structured codes only)
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md` (Phase 1), `specs/002-phase-2-plugins-index/spec.md` (Phase 2), `specs/002-phase-2-plugins-index/contracts/plugin-commands.md` (Phase 4–5), and `specs/003-phase-3-mcp-workspaces/spec.md` (Phase 3+).
 
@@ -230,6 +232,18 @@ Example error (model checksum):
 model `bge-small-en-v1.5` SHA-256 mismatch: expected 51f1bd0..., got a1b2c3...; run `tome models download --force` to retry
 ```
 
+### MCP Tool Error Codes (Phase 3 F8)
+
+| Context | Error Code | Meaning | Implementation |
+|---------|-----------|---------|-----------------|
+| Catalog validation | `unknown_catalog` | Requested catalog not in enabled scope | `src/mcp/tools/search_skills.rs::tome_to_mcp` |
+| Plugin validation | `unknown_plugin` | Requested plugin not in enabled catalog | `src/mcp/tools/search_skills.rs::tome_to_mcp` |
+| Skill lookup | `unknown_skill` | Skill identifiers mismatch catalog/plugin/skill structure | `src/mcp/tools/get_skill.rs::tome_to_mcp` |
+| Skill file missing | `skill_file_missing` | SKILL.md file absent despite DB record | `src/mcp/tools/get_skill.rs::tome_to_mcp` |
+| Frontmatter parse | `frontmatter_strip_failed` | SKILL.md frontmatter extraction failed | `src/mcp/tools/get_skill.rs::tome_to_mcp` |
+
+**Rationale**: MCP tool errors translate internal `TomeError` variants to contract-defined structured codes (Section 2.3 of `contracts/mcp-tools.md`). No domain-error info leakage—the error codes are opaque to the harness and don't surface internal variant names or diagnostics.
+
 ## Interactive Flows & Terminal Enforcement
 
 ### TTY Requirement (Phase 4)
@@ -369,10 +383,10 @@ pub fn require_terminal() -> Result<(), TomeError> {
 **Current dependencies**:
 - Phase 1: `clap` (CLI), `serde`/`toml` (config), `thiserror`/`anyhow` (errors), `tracing` (logging), `sha2`/`hex` (hashing), `tempfile` (atomicity), `ctrlc` (signals), `regex` (scrubbing), `semver` (versions), `time` (timestamps), `directories` (paths)
 - Phase 2: `rusqlite` (bundled SQLite), `sqlite-vec` (vendored vector extension), `fastembed-rs` (inference), `reqwest` (HTTP), `indicatif` (progress), `comfy-table` (tables), `owo-colors` (colour), `inquire` (prompts)
-- Phase 3: `rmcp` (MCP protocol), `tokio` (async, scoped to `src/mcp/` only), `tracing-subscriber` (structured logging)
+- Phase 3: `rmcp` (MCP protocol), `tokio` (async, scoped to `src/mcp/` only), `tracing-subscriber` (structured logging), `schemars` (JSON schema generation for MCP tools)
 - Phase 4–5: No new dependencies (interactive flow and disable use existing `inquire`)
 
-All fall within permissive licences. Phase 2 deps licensed: `fastembed-rs` (MIT), `ort` (MIT, transitive via fastembed), BGE models (MIT). Phase 4–5 deps: `inquire` (MIT). Phase 3 MCP deps: `rmcp` (MIT), `tokio` (MIT).
+All fall within permissive licences. Phase 2 deps licensed: `fastembed-rs` (MIT), `ort` (MIT, transitive via fastembed), BGE models (MIT). Phase 4–5 deps: `inquire` (MIT). Phase 3 MCP deps: `rmcp` (MIT), `tokio` (MIT), `tracing-subscriber` (MIT), `schemars` (MIT).
 
 ## Binary Size & Deployment
 
@@ -478,7 +492,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 
 **Phase 9 Cascade Disable** (PR #32): The pre-check that queries `enabled_plugins_for_catalog` runs WITHOUT the lock. This is intentional — readers don't block writers, and the only risk is a TOCTOU where another process enables a plugin between the check and the cascade. In that case the cascade simply drops the additional plugin's rows too (still correct), or the user re-runs after seeing the refuse error. The cascade itself runs under a single lock acquisition; each plugin's deletion is its own transaction.
 
-**Future consideration**: Phase 2 MCP server concurrency model is locked down in spec (FR-040); Phase 3 testing against real BGE models is pending (SC-001/SC-002, T088).
+**Future consideration**: Phase 3 MCP server concurrency model is locked down in spec (FR-040); Phase 3 testing against real BGE models is pending (SC-001/SC-002, T088).
 
 ## Schema Migrations
 
@@ -516,6 +530,8 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | **Status health check** | Report assembly, drift detection, overall classification | `tests/status.rs` (Phase 8) |
 | **Catalog cascade** | Enabled-plugin detection, per-plugin deletion under lock, error handling | `tests/catalog_remove.rs` (Phase 9) |
 | **Schema migrations** | Forward-only boundary, no down-migrations, synthetic injection (Phase 3+) | `tests/schema_migrations.rs` (F7 framework; Phase 4+ adds first real steps) |
+| **MCP protocol purity** | Tool descriptions contain no fixture identifiers (FR-108) | `tests/mcp_server.rs::descriptions_do_not_enumerate_fixture_identifiers` |
+| **MCP error codes** | Tool responses translate TomeError to structured codes (no domain-error leakage) | `tests/mcp_server.rs::error_translation` (Phase 3 F8) |
 
 **Success criteria**:
 - SC-005: 100% of malformed inputs rejected with helpful errors
@@ -535,6 +551,7 @@ Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coord
 | Audit logging | Phase 3+ | Not required in Phase 1 (single-user CLI) |
 | Rate limiting | Not applicable | CLI tool, not a service |
 | MCP startup pre-flight performance | Phase 3 F8+ | SHA-256 verify of primary embedder (~66 MB) at every startup acceptable for long-running server; `--verify` flag on `tome status` may reduce cold-cache overhead if profiling shows it matters (TD-012) |
+| McpState seed exposure for testability | Phase 3 F8+ | Test integration uses hard-coded MODEL_REGISTRY entries; custom stub testing requires refactor of `McpState` to carry `embedder_seed` / `reranker_seed` directly (TD-014) |
 
 ---
 

@@ -8,6 +8,7 @@
 > **Updated**: 2026-05-13 (Phase 8 slices 1–2 — `tome status [--verify]` health check + version pre-parse hook; no new external integrations)
 > **Updated**: 2026-05-13 (Phase 9 slice 1 — `tome catalog remove` Phase 2 extensions; cascade-disable orchestrator; no new external integrations)
 > **Updated**: 2026-05-14 (Foundational F7–F8 — schema migration framework + MCP server scaffolding; `src/mcp/` is now the live boundary for `tokio` + `rmcp` deps)
+> **Updated**: 2026-05-14 (Phase 3 / User Story 1 — `tome mcp` CLI command end-to-end; MCP server now the live integration boundary)
 
 ## Databases & Data Stores
 
@@ -20,7 +21,7 @@
 ### Connection Patterns
 
 - **Statically linked**: `rusqlite` with `bundled` feature — no system SQLite dependency, no version mismatch risk.
-- **Concurrency model**: Single advisory lockfile (`index.lock`) ensures Phase 3–9 foreground operations are serialised; WAL mode allows readers during writes (future MCP server consideration).
+- **Concurrency model**: Single advisory lockfile (`index.lock`) ensures Phase 3–9 foreground operations are serialised; WAL mode allows readers during writes (MCP server uses read-only open per FR-056).
 - **ORM/Query builder**: Direct SQL via `rusqlite` — prepared statements, parameterised queries.
 - **Migration approach**: Forward-only migrations under advisory lock in `src/index/migrations.rs` (rewritten in Foundational F7 with function-pointer-based `Migration` struct; see STACK.md Foundational F7 section); drift detection in `src/index/meta.rs`.
 
@@ -34,12 +35,13 @@
 
 ## Authentication & Authorization
 
-Phase 1–9 has no explicit application-layer authentication.
+Phase 1–9 has no explicit application-layer authentication. Phase 3 / US1 MCP server similarly has no auth mechanism — it is stdio-based (embedding in Claude Code harness provides transport-level auth).
 
 - **Git operations**: Inherit system SSH keys and HTTP credential helpers (if configured in `~/.gitconfig`).
 - **Hugging Face model downloads**: No API key required; public `https://huggingface.co/` URLs are freely accessible (MODEL_REGISTRY pinned to MIT-licensed BGE variants).
 - **Plugin manifest ownership**: File system permissions validate catalog ownership (email field in `tome-catalog.toml` is metadata only).
 - **Credential scrubbing**: All Git stderr and model download error chains pass through `scrub_credentials()` before logging (principle XIII; extended in Phase 3 to cover HF URLs).
+- **MCP server identity** (Phase 3 / US1): Identified by `server_info { name: "tome", version: "0.x" }` in the MCP handshake; no per-call authentication.
 
 ---
 
@@ -47,9 +49,8 @@ Phase 1–9 has no explicit application-layer authentication.
 
 ### First-Party APIs
 
-None in Phase 1–9. Future phases may include:
-- Remote catalog registries (HTTP/HTTPS URLs in catalog sources)
-- Plugin resolver APIs (not specified)
+None in Phase 1–9. Phase 3 / US1 introduces internal library APIs:
+- `commands::query::pipeline(args, deps) -> Result<QueryOutcome, TomeError>` — silent compute path reused by MCP `search_skills` tool (refactored from `run()` to avoid stdout/stderr emit)
 
 ### Third-Party APIs
 
@@ -72,7 +73,7 @@ None in Phase 1–9. Future phases may include:
 
 ## Message Queues & Event Systems
 
-None in Phase 1–9. Deferred to Phase 6+ (MCP server event streaming).
+None in Phase 1–9. Phase 3 / US1 MCP server is stdio-based (single request/response at a time); no async event streaming.
 
 ---
 
@@ -101,7 +102,7 @@ No TTL-based eviction. Phase 1–9 uses explicit user commands for cleanup (prin
 
 | Service | Purpose | Configuration |
 |---------|---------|---------------|
-| XDG-compliant filesystem | Configuration, catalogs, models, index | `${XDG_CONFIG_HOME}`, `${XDG_DATA_HOME}`, `${XDG_STATE_HOME}` (principle XII: inherit, don't reimplement); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]`; Phase 9 extends catalog removal with cascade-disable index cleanup; Foundational F8 adds MCP log to `${XDG_STATE_HOME}/tome/mcp.log` |
+| XDG-compliant filesystem | Configuration, catalogs, models, index | `${XDG_CONFIG_HOME}`, `${XDG_DATA_HOME}`, `${XDG_STATE_HOME}` (principle XII: inherit, don't reimplement); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]`; Phase 9 extends catalog removal with cascade-disable index cleanup; Foundational F8 adds MCP log to `${XDG_STATE_HOME}/tome/mcp.log`; Phase 3 / US1 MCP server operates on same index + models + config |
 
 ---
 
@@ -121,7 +122,7 @@ None in Phase 1–9.
 | `XDG_STATE_HOME` | No (defaults to `~/.local/state`) | Override state directory (MCP log) | `/opt/state` | Foundational F8 |
 | `TOME_LOG` | No | Custom log filter (overrides `RUST_LOG`) | `debug`, `info`, `tome=trace` | — |
 | `RUST_LOG` | No | Standard Rust log filter | `info`, `warn` | — |
-| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR`; phase 8: status report respects `NO_COLOR`; phase 9: cascade-disable output respects `NO_COLOR` |
+| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR`; phase 8: status report respects `NO_COLOR`; phase 9: cascade-disable output respects `NO_COLOR`; phase 3/US1: MCP stdout is protocol-only (no color possible) |
 | `CLICOLOR` | No | Disable coloured output (alternate) | `0` to disable | — |
 
 ---
@@ -172,20 +173,47 @@ None in Phase 1–9.
 
 ---
 
-## MCP Server Integration (Phase 3 Foundational F8)
+## MCP Server Integration (Phase 3 Foundational F8 + Phase 3 / US1)
 
-**Status:** Scaffolding complete; server loop + tool registration lands in US1 (T076).
+**Status:** Server loop + tool registration landed (US1); live entry point is `tome mcp` CLI command.
 
 | Aspect | Details |
 |--------|---------|
 | **Protocol** | `rmcp` (1.x) — Model Context Protocol stdio server per `contracts/mcp-server.md` |
-| **Runtime** | Single-threaded `tokio` (`Builder::new_current_thread`) backing async surfaces in `src/mcp/` (research §R-2) |
-| **Process model** | Stdio: stdin = MCP protocol messages, stdout = MCP responses; stderr reserved for fatal startup errors only (FR-222) |
+| **Runtime** | Single-threaded `tokio` (`Builder::new_current_thread`) backing async surfaces in `src/mcp/` (research §R-2); runs on harness' blocking thread (no async in CLI main loop) |
+| **Process model** | Stdio: stdin = MCP protocol messages (from harness), stdout = MCP responses; stderr reserved for fatal startup errors only (FR-222) |
+| **Tools advertised** | Two: `search_skills` (perform semantic skill search via KNN + optional reranking) and `get_skill` (retrieve single skill detail by ID) |
 | **Logging** | JSON-lines to `${XDG_STATE_HOME}/tome/mcp.log` at application level; rotation at 10 MiB with backoff to `mcp.log.1` per `contracts/log-format.md`; tracing subscriber with `json` feature enabled in Cargo.toml |
-| **Pre-flight** | FR-110 startup pipeline (schema check → drift detect → SHA-256 verify → eager-load FastembedEmbedder) scoped to `src/mcp/preflight.rs`; currently landing as surfaces only (implementation lands US1) |
-| **Tool integration** | Embedder + reranker loaded once at startup, shared across tool calls; no per-call model reloads |
-| **Error handling** | Fatal startup errors (schema too new, drift, embedder load fail) emitted to stderr + log, exit code 60 (`McpStartupFailed`) or 61 (`McpProtocolIo`) |
-| **Sync boundary** | All async/tokio code lives strictly in `src/mcp/`; main CLI stays synchronous with boundary enforced by `tests/sync_boundary.rs` (structural test) |
+| **Pre-flight** | FR-110 startup pipeline (schema check → drift detect → SHA-256 verify → eager-load FastembedEmbedder) scoped to `src/mcp/preflight.rs`; executed once on server startup |
+| **Tool integration** | Embedder loaded once at startup (pre-flight), shared across tool calls; reranker lazily loaded on first tool call that requires ranking (via `tokio::sync::OnceCell`); no per-call model reloads (FR-005) |
+| **Tool I/O schemas** | Input/output types in `src/mcp/tools/{search_skills,get_skill}.rs` use `#[derive(JsonSchema)]` from `schemars` crate to generate MCP-compliant schemas |
+| **Index access** | Read-only; `src/mcp/tools/get_skill.rs` uses `index::skills::get_one_skill()` library helper; `search_skills.rs` delegates to refactored `commands::query::pipeline()` (silent compute path) |
+| **Error handling** | Fatal startup errors (schema too new, drift, embedder load fail) emitted to stderr + log, exit code 60 (`McpStartupFailed`) or 61 (`McpProtocolIo`); tool errors mapped to MCP error responses |
+| **Sync boundary** | All async/tokio code lives strictly in `src/mcp/`; CLI dispatches to MCP via `mcp::run(scope, paths)` which builds the runtime internally; structural test `tests/sync_boundary.rs` enforces boundary |
+| **CLI entry** | `tome mcp` — new `Command::Mcp(McpArgs)` variant dispatched in `main.rs` before tracing/ctrlc init (special-case dispatch per FR-221) |
+
+### Tool Details
+
+#### `search_skills`
+
+| Aspect | Details |
+|--------|---------|
+| **Purpose** | Semantic skill search: KNN embedding distance + optional reranking |
+| **Input** | `SearchSkillsInput { query: String, limit: u32, force_strict: bool, ... }` — see `contracts/mcp-tools.md` for full schema |
+| **Output** | `SearchSkillsOutput { skills: Vec<SkillResult>, ... }` — each result includes skill ID, name, catalog, match score, snippet |
+| **Handler** | `pub async fn handle(input, state) -> Result<SearchSkillsOutput, impl Error>` in `src/mcp/tools/search_skills.rs` |
+| **Reuse** | Delegates to `commands::query::pipeline(args, deps)` — the silent compute path (refactored from `run()` to avoid stdout/stderr) |
+| **Reranker** | Lazily loaded on first invocation (unless `force_strict=true` disables ranking); shared across subsequent calls |
+
+#### `get_skill`
+
+| Aspect | Details |
+|--------|---------|
+| **Purpose** | Retrieve single skill full detail by ID |
+| **Input** | `GetSkillInput { id: String }` — skill ID as `<catalog>/<plugin>/<skill-name>` |
+| **Output** | `GetSkillOutput { skill: Option<SkillDetail>, ... }` — full text, metadata, or `None` if not found |
+| **Handler** | `pub async fn handle(input, state) -> Result<GetSkillOutput, impl Error>` in `src/mcp/tools/get_skill.rs` |
+| **Query** | Read-only index lookup via `index::skills::get_one_skill(id, conn)` library helper |
 
 ---
 
@@ -198,4 +226,4 @@ None in Phase 1–9.
 
 ---
 
-*This document maps external service dependencies and failure modes. Updated for Foundational F7–F8: schema migration framework rewrite + MCP server scaffolding scoped to `src/mcp/` with `tokio` + `rmcp` dependencies.*
+*This document maps external service dependencies and failure modes. Updated for Phase 3 Foundational F7–F8 + Phase 3 / US1: schema migration framework rewrite + MCP server scaffolding scoped to `src/mcp/` with `tokio` + `rmcp` dependencies; live MCP server entry point is `tome mcp` CLI command with two tools advertised.*

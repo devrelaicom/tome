@@ -2,30 +2,34 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Story 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade) + 2026-05-14 (Foundational F7 + F8 — schema migrations framework, MCP async island)
+> **Last Updated**: 2026-05-13 (Phase 3 User Story 1) + 2026-05-13 (Phase 4 User Story 2 — interactive browse) + 2026-05-13 (Phase 5 User Story 3 — plugin disable subcommand) + 2026-05-13 (Phase 6 User Story 4 slice 1 — models commands) + 2026-05-13 (Phase 7 User Stories 5–7 — reindex orchestrator, catalog-update cascade, explicit CLI) + 2026-05-13 (Phase 8 User Story 6 — health diagnostics) + 2026-05-14 (Phase 9 User Story 7 — catalog remove cascade) + 2026-05-14 (Foundational F7 + F8 — schema migrations framework, MCP async island) + 2026-05-14 (Phase 3 User Story 1 — MCP server wired)
 
 ## Architecture Overview
 
-Tome is a synchronous Rust CLI following a classic **parse → dispatch → execute → map-errors → exit** pipeline. The codebase is organized around a **capability-driven** modular architecture where each module owns a distinct responsibility (catalog management, Git operations, configuration, logging, path resolution, output formatting, plugin metadata parsing, skill indexing, model embedding, model lifecycle management, index reconciliation, health diagnostics, interactive presentation, and the future MCP server boundary). Error handling is centralized in a closed `TomeError` enum that enforces exhaustive exit-code mapping at compile time. Signal handling (SIGINT) is global and atomic, allowing long-running operations (git clone, model download, embedding, reindexing) to be cancelled gracefully with a well-defined exit code. A forward-only schema migration framework governs index evolution with three dedicated exit codes (51 for integrity failures, 73 for schema-version-too-new on write, 74 for migration application errors). An MCP async island under `src/mcp/` provides the structural boundary anticipated by the constitution for Phase 3's server-side logic, with `tokio` scoped exclusively to that module and a test enforcement gate.
+Tome is a **dual-mode Rust application** (CLI + MCP server) organized around a **capability-driven** modular architecture. The CLI follows a classic **parse → dispatch → execute → map-errors → exit** pipeline. The MCP server shares library-shaped logic (embedding, index, plugin metadata) but dispatches via `rmcp::serve_server(stdio())` in an async island under `src/mcp/`. Error handling is centralized in a closed `TomeError` enum that enforces exhaustive exit-code mapping at compile time. Signal handling (SIGINT) is global and atomic for the CLI, async-aware for the MCP server (via `tokio::signal::ctrl_c()`). A forward-only schema migration framework governs index evolution with three dedicated exit codes (51 for integrity failures, 73 for schema-version-too-new on write, 74 for migration application errors). The MCP async island under `src/mcp/` (Phase 3 US1 now filled) provides stdio transport, tool registration via rmcp macros, lazy reranker loading per FR-109, and preflight validation. Two log paths coexist: CLI stderr (tracing-subscriber) and MCP file log (JSON-lines, size-based rotation) — they are mutually exclusive per FR-221 (stdout is the MCP protocol channel).
 
 ## Architecture Pattern
 
 | Pattern | Description |
 |---------|-------------|
-| **Sync-only CLI** | No async runtime (`tokio`). All I/O and process orchestration use `std::process` and blocking calls. MCP server is the async island (Phase 3 future forcing function). |
-| **Closed Error Set** | All failure paths map to a single `TomeError` enum with explicit exit codes; no `Other` or `Unknown` arms. Adding a failure mode requires specification, error type, and test updates. |
+| **Dual-mode: CLI + MCP** | CLI (sync, ~20 MB binary) and MCP server (async, ~22 MB including rmcp) coexist. CLI dispatch skips logging/signals; MCP is routed differently from other top-level commands (Phase 3 US1). |
+| **Sync CLI, Async MCP** | All CLI code is sync. MCP lives in `src/mcp/` with `tokio` scoped exclusively here. Structural test `tests/sync_boundary.rs` enforces. Shared library functions (`query::pipeline`, `lifecycle::enable`, index CRUD) are sync; both CLI and MCP call them. |
+| **Closed Error Set** | All failure paths map to a single `TomeError` enum with explicit exit codes; no `Other` or `Unknown` arms. Adding a failure mode requires specification, error type, and test updates. Phase 3 US1 adds `McpStartupFailed` and `McpProtocolIo`. |
 | **Atomic Writes** | Registry mutations, cache operations, and index writes use `tempfile` + rename for POSIX atomicity; SQLite WAL provides the index concurrency contract. Interruptions cannot corrupt state. |
-| **Capability-Organized Modules** | Modules group related functionality: `catalog/` (manifest + Git + store), `commands/` (CLI handlers), `config/` (manifest deserialization), `paths/` (XDG resolution), `logging/` (tracing setup), `output/` (human/JSON formatting), `plugin/` (metadata parsing + lifecycle), `index/` (SQLite skills DB + KNN + migrations), `embedding/` (fastembed wrapper + model registry + download), `presentation/` (tables / progress / colour / prompts), `mcp/` (async server boundary + preflight). |
+| **Capability-Organized Modules** | Modules group related functionality: `catalog/` (manifest + Git + store), `commands/` (CLI handlers), `config/` (manifest deserialization), `paths/` (XDG resolution), `logging/` (tracing setup), `output/` (human/JSON formatting), `plugin/` (metadata parsing + lifecycle), `index/` (SQLite skills DB + KNN + migrations), `embedding/` (fastembed wrapper + model registry + download), `presentation/` (tables / progress / colour / prompts), `mcp/` (async server boundary + stdio transport + preflight). |
 | **Credential Scrubbing at Boundary** | All captured `git` and `reqwest` output passes through credential scrubbing before reaching logging, error display, or structured output. |
 | **Trait-based Embedding Abstraction** | `Embedder` and `Reranker` are seam interfaces; `FastembedEmbedder` wraps `fastembed-rs`, and a deterministic `StubEmbedder` (unit-test only) provides testability without model files. |
 | **Plugin-Dir Resolution: Manifest-First** | `lifecycle::resolve_plugin_dir` reads `tome-catalog.toml`, looks up `id.plugin` in the declared `plugins[].name`, joins with the source; falls back to flat `entry.path.join(&id.plugin)` for backward compat when manifest is absent. Single shared function across `enable`, `disable`, `list`, `show` fixes inconsistency. |
 | **Interactive Three-Level Loop Pattern** | Bare `tome plugin` (no subcommand) enters an interactive flow: `catalog_loop` → `plugin_loop` → `view_loop`, each with a `LoopExit` enum to handle Back/Quit unwinds and error propagation (Phase 4, User Story 2). |
 | **Per-Plugin Atomic Reindex** | `lifecycle::reindex_plugin` mirrors `lifecycle::enable` atomicity: each plugin's reindex is one SQLite transaction under one advisory lock. Batch operations (`tome catalog update`, `tome reindex`) loop per-plugin, committing each before moving to the next. SIGINT between plugins leaves earlier plugins committed (per-plugin boundary). |
-| **Lazy Embedder Loading** | Heavy embedder (~345 MB ONNX) is loaded only when reindexing will actually call it. `tome catalog update` and `tome reindex` defer load until the first enabled plugin is encountered; a sync with zero enabled plugins never touches model files. |
+| **Lazy Embedder Loading** | Heavy embedder (~345 MB ONNX) is loaded only when reindexing will actually call it. `tome catalog update` and `tome reindex` defer load until the first enabled plugin is encountered; a sync with zero enabled plugins never touches model files. MCP preflight (FR-110) eager-loads the embedder; reranker is lazy-loaded on first `search_skills` call per FR-109. |
 | **Health Diagnostics (Read-Only)** | `status` command reads subsystem state without mutation: models via manifest checks, index via read-only connection + `PRAGMA integrity_check`, drift via stored identity comparison. Never acquires advisory lock, never downloads models. Exits 0 on Ok, 1 on Degraded/Unhealthy. |
 | **Single-Lock-Per-Batch Cascade** | `lifecycle::cascade_disable_for_catalog` acquires the advisory lock once, disables + drops all enabled plugins for a catalog, then releases. Different from per-plugin operations; chosen to match the contract in `specs/002-phase-2-plugins-index/contracts/catalog-extensions.md` §"tome catalog remove". |
-| **Forward-Only Schema Migrations** | `src/index/migrations.rs` enforces a registration framework: `apply_pending(conn, current, target)` applies registered steps within a read lock. Three exit codes govern the migration domain: 51 (`IndexIntegrityCheckFailure` — unknown state post-migration), 73 (`SchemaVersionTooNew` — write path refuses newer-on-disk schemas), 74 (`SchemaMigrationFailed` — registered step apply error). Read path via `open_read_only` keeps legacy 52 (`SchemaTooNew`) for backward compat. Phase 7 tests inject synthetic `MIGRATIONS_OVERRIDE` via `thread_local!`. |
-| **MCP Async Island Boundary** | `src/mcp/` directory is a tokio-scoped async boundary (research §R-2 pinned to current-thread runtime per Phase 3 plan). `mod.rs` provides a sync entry point `McpStartupFailed` stub (US1 pending). Preflight validates scope-resolved index state before handoff: schema gate (emits 73), drift detect, SHA-256 verify, eager-load embedder. `log.rs` wires size-based rotation (FR-227) + JSON-lines tracing registry (FR-226) + stderr-only error layer. `runtime.rs` and `preflight.rs` live inside; all other modules stay sync. Structural test `tests/sync_boundary.rs` enforces the exemption. |
+| **Forward-Only Schema Migrations** | `src/index/migrations.rs` enforces a registration framework: `apply_pending(conn, current, target)` applies registered steps within a read lock. Three exit codes govern the migration domain: 51 (`IndexIntegrityCheckFailure` — unknown state post-migration), 73 (`SchemaVersionTooNew` — write path refuses newer-on-disk schemas), 74 (`SchemaMigrationFailed` — registered step apply error). Read path via `open_read_only` keeps legacy 52 (`SchemaTooNew`) for backward compat. Phase 2 ships zero registered migrations; Phase 3 tests inject synthetic migrations. |
+| **MCP Async Island Boundary** | `src/mcp/` directory is a tokio-scoped async boundary (research §R-2 pinned to current-thread runtime per Phase 3 plan). Phase 3 US1 fills with actual server loop: `mod::run(scope, paths)` builds runtime, installs file-log subscriber, runs preflight on blocking pool, constructs `McpState`, drives `rmcp::serve_server(stdio())`, and `tokio::select!`s over graceful shutdown vs SIGINT. Preflight validates scope-resolved index state before handoff: schema gate (emits 73), drift detect, SHA-256 verify, eager-load embedder. `log.rs` wires size-based rotation (FR-227) + JSON-lines tracing registry (FR-226) + stderr-only error layer (FR-220). Structural test `tests/sync_boundary.rs` enforces the exemption. |
+| **MCP Tool Registration & Dispatch** | `server.rs` impl `rmcp::ServerHandler` with `#[tool_router]` + `#[tool_handler]` macros. Routes `list_tools` / `call_tool` through the generated `ToolRouter`. Two tools advertised: `search_skills` and `get_skill`. Each tool method delegates to a free function in `mcp::tools::{search_skills,get_skill}::handle` so per-tool logic stays modular. Input/output schemas derived from `Deserialize` / `Serialize` / `JsonSchema`. |
+| **Lazy Reranker in MCP** | `McpState` carries `Arc<dyn Embedder>` (eager, from preflight) and `OnceCell<Arc<dyn Reranker>>` (lazy). First `search_skills` call checks `OnceCell`; if empty, loads reranker synchronously on the blocking pool and stores it. Subsequent calls reuse the cached instance. Per FR-109, embedder is eager but reranker deferred. |
+| **MCP Query Pipeline Reuse** | `search_skills` handler validates input against scope config (rmcp error codes per contract), then dispatches to `commands::query::pipeline()` (extracted as a silent compute path). Reuses all KNN + rerank logic without duplication. Returns `SkillMatch` records with absolute paths and opaque scores. |
 
 ## Core Components
 
@@ -36,6 +40,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 - **Dependencies**: `clap` (argument parsing), `catalog::git` (signal handler installation).
 - **Dependents**: `commands/` modules (receive parsed args).
 - **Pipeline Entry**: `main()` parses CLI → installs signal handler → dispatches to handler → maps result to exit code.
+- **Phase 3 US1 Change**: Pre-dispatch check for `Command::Mcp(_)`. If MCP, skip `logging::init` (conflicts with MCP file subscriber) and `ctrlc::install_signal_handler` (tokio's async `ctrl_c()` would race). Route directly to `commands::mcp::run(scope, paths)`.
 - **Phase 4 Change**: `PluginArgs` now wraps an `Option<PluginCommand>` to allow bare `tome plugin` with no subcommand. Routes to `commands::plugin::run_interactive()` when the command is `None`.
 - **Phase 5 Change**: `PluginCommand` now includes `Disable(PluginDisableArgs { id: String, force: bool })` variant.
 - **Phase 6 Change**: `ModelsCommand` enum added with `Download`, `List`, `Remove` variants; routes via `Command::Models(ModelsCommand)` to `commands::models::run()`.
@@ -144,6 +149,43 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   - Exit 1: `overall == Degraded` or `overall == Unhealthy`.
   - Non-zero cases call `std::process::exit(1)` after emitting the report (not propagated as `TomeError`).
 
+### MCP Server (`src/mcp/`, Phase 3 US1)
+
+- **Purpose**: Provide an async-native stdio MCP server (complementary to the CLI) that shares library-shaped plugin/embedding/index logic.
+- **Location**: `src/mcp/` (six files: `mod.rs`, `server.rs`, `state.rs`, `tools/mod.rs`, `tools/search_skills.rs`, `tools/get_skill.rs`, plus foundational `runtime.rs`, `log.rs`, `preflight.rs`).
+- **Files** (Phase 3 US1):
+  - `mod.rs` (~140 lines): Sync entry point `pub fn run(scope, paths) -> Result<(), TomeError>`. Opens file log appender, builds tokio runtime, runs preflight on blocking pool, constructs `McpState`, drives `rmcp::serve_server(stdio())`, and `tokio::select!`s over graceful shutdown vs SIGINT.
+  - `server.rs` (~90 lines): `rmcp::ServerHandler` impl with `#[tool_router]` + `#[tool_handler]` macros. Routes `list_tools` / `call_tool` through the generated `ToolRouter`. Advertises two tools: `search_skills` and `get_skill`. Each tool method delegates to a free function in `mcp::tools::{search_skills,get_skill}::handle()`.
+  - `state.rs` (~30 lines): `McpState` struct carrying `Arc<dyn Embedder>` (eager), `OnceCell<Arc<dyn Reranker>>` (lazy), `ResolvedScope`, `Paths`, and registry entries. Lazy reranker per FR-109; enables concurrent `search_skills` calls with synchronized first-load.
+  - `tools/mod.rs` (~15 lines): Tool module aggregation.
+  - `tools/search_skills.rs` (~150 lines): Input/output schemas (`#[derive(Deserialize, JsonSchema)]` / `#[derive(Serialize, JsonSchema)]`). `Input`: query text, top_k (1..=100, default 10), optional catalog filter, optional plugin filter. `Output`: `Vec<SkillMatch>` with catalog, plugin, name, description, plugin_version, path (absolute), and opaque score. Handler validates filters against scope config (rmcp error codes per contract), lazy-loads reranker on first call, dispatches to `commands::query::pipeline()` for silent KNN + rerank, returns results.
+  - `tools/get_skill.rs` (~100 lines): Input/output schemas. `Input`: catalog, plugin, skill name (triple). `Output`: skill body (frontmatter stripped) + absolute paths of sibling resource files. Handler reads skill body from disk, enumerates resources in skill directory, returns structured result.
+  - `runtime.rs` (~50 lines): Current-thread tokio runtime initialization. Per research §R-2, single-threaded reactor suitable for I/O-bound work.
+  - `log.rs` (~100 lines): File-log appender wiring. Size-based rotation (FR-227): closes and rotates `${XDG_STATE_HOME}/tome/mcp.log` if exceeds 10 MiB. JSON-lines `tracing-subscriber` registry (FR-226) for structured diagnostics. Stderr-only error layer (FR-220) for fatal startup errors.
+  - `preflight.rs` (~120 lines): Pre-flight validation (FR-110) — scope-resolved index read-only open → schema gate (emits 73 on too-new) → drift detect → SHA-256 verify primary file → eager-load `FastembedEmbedder`. Reranker deferred per FR-109. Returns `PreflightReport` with embedder + reranker identities + handle to eager embedder.
+- **Async Boundary**:
+  - Only files under `src/mcp/` use `tokio`. All other modules remain sync. Shared library functions (index CRUD, plugin lifecycle, embedding) are sync; both CLI and MCP call them.
+  - Entry point is sync: `commands::mcp::run(scope, paths)` calls `mcp::run(scope, paths)` which blocks on `runtime.block_on(async { ... })`.
+  - Structural test `tests/sync_boundary.rs` enforces: exempts every file under `src/mcp/`, gates every other module for `tokio` imports. Detects leakage.
+- **Design Invariants**:
+  - No MCP modules import from `commands/` (except `commands::query::pipeline` for reuse). Query logic is library-shaped; no need to duplicate.
+  - MCP does NOT import from `cli.rs` or other CLI-specific modules. Scope resolution is handled upstream; MCP receives a `ResolvedScope`.
+  - Preflight is defensive: errors during validation do not crash the server; they surface as exit codes to the harness.
+  - Log rotation aware of MCP's continuous nature (file size cap, not line count).
+  - Lazy reranker per FR-109: embedder eager (loaded at startup), reranker deferred (loaded on first `search_skills`). `OnceCell` ensures thread-safe idempotent initialization.
+  - File logging only: stdout is the MCP protocol channel (FR-221), stderr is reserved for fatal startup errors only (FR-222). Diagnostics go to `${XDG_STATE_HOME}/tome/mcp.log`.
+
+### MCP Dispatcher (`src/commands/mcp.rs`, Phase 3 US1)
+
+- **Purpose**: Thin CLI dispatcher for `tome mcp` command. Routes to `mcp::run(scope, paths)`.
+- **Location**: `src/commands/mcp.rs` (~20 lines).
+- **Public Interface**: `pub fn run(_args: McpArgs, scope: &ResolvedScope, _mode: Mode) -> Result<(), TomeError>`.
+- **Flow**:
+  1. Resolve paths.
+  2. Call `mcp::run(scope, &paths)`.
+  3. Return result directly (no output formatting — MCP protocol is the structured output).
+- **Design Note**: Unlike every other command, this one does NOT honour `--json` at the top level. The MCP protocol itself is the structured output; `--json` would muddle the stdio transport channel (FR-221).
+
 ### Index Reconciliation & Reindex (`src/commands/reindex.rs`, `src/plugin/lifecycle.rs`, `src/index/skills.rs`)
 
 - **Purpose**: Re-embed and reconcile on-disk plugin skills against the index; driven by embedder upgrades (FR-016 recovery) and integrity recovery.
@@ -176,9 +218,10 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 
 ### Skill Query & Search (`src/index/query.rs`, `src/commands/query.rs`)
 
-- **Purpose**: Embed the user's query text, perform KNN over enabled skills, optionally rerank, filter, and render results.
+- **Purpose**: Embed the user's query text, perform KNN over enabled skills, optionally rerank, filter, and render results. Reused by both CLI (`tome query`) and MCP (`search_skills`).
 - **Location**: `src/commands/query.rs` (CLI entry and result presentation), `src/index/query.rs` (KNN SQL + filter logic).
 - **Dependencies**: `index::` (open read-only, knn), `embedding::` (embedder + reranker), `catalog::manifest` (filter validation).
+- **Public Entry Point** (Phase 3 US1): `pub fn pipeline(args, deps) -> Result<QueryOutcome, TomeError>` — silent compute path reused by both CLI and MCP. Returns `QueryOutcome` with ranked results; caller handles formatting/output.
 - **Flow**:
   1. Parse query text and filter flags (`--catalog`, `--plugin`, `--no-rerank`, `--min-score`, `--strict`).
   2. Validate filter flags against registered catalogs (cheap manifest reads).
@@ -207,24 +250,6 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
   - Read path via `open_read_only` maintains legacy 52 (`SchemaTooNew`) for backward compat.
   - Tests inject synthetic migrations via `thread_local! { MIGRATIONS_OVERRIDE }` to verify the framework end-to-end without waiting for real schema changes.
 - **Key Invariant**: Migrations are idempotent (per step, check before re-apply). Failed migrations block further steps (fail-fast gate).
-
-### MCP Async Island (`src/mcp/`)
-
-- **Purpose**: Provide a structural boundary for Phase 3's async server-side logic (anticipated forcing function). `tokio` scoped exclusively here.
-- **Location**: `src/mcp/` (four files: `mod.rs`, `runtime.rs`, `log.rs`, `preflight.rs`).
-- **Files**:
-  - `mod.rs` (~15 lines): Sync entry point `pub fn start_server() -> Result<(), TomeError>` currently returns `McpStartupFailed` (US1 pending). Phase 3 fills the loop.
-  - `runtime.rs` (~50 lines): Current-thread tokio runtime initialization (research §R-2 pinned per Phase 3 plan). No other modules import.
-  - `log.rs` (~100 lines): Size-based rotation (FR-227) wiring + JSON-lines `tracing-subscriber` registry (FR-226) + stderr-only error layer (FR-220).
-  - `preflight.rs` (~120 lines): Pre-flight validation (FR-110) — scope-resolved index read-only open → schema gate (emits 73 on too-new) → drift detect → SHA-256 verify primary file → eager-load `FastembedEmbedder`. Reranker deferred per FR-109. Returns `PreflightReport`.
-- **Async Boundary**:
-  - Only files under `src/mcp/` use `tokio`. All other modules remain sync.
-  - Entry point is sync: `main.rs` calls `mcp::start_server()` as a last resort after CLI dispatch (not yet wired; US1).
-  - Structural test `tests/sync_boundary.rs` enforces: exempts every file under `src/mcp/`, gates every other module for `tokio` imports. Detects leakage.
-- **Design Invariants**:
-  - No MCP modules import from `commands/`, `plugin/`, `index/` — instead, Phase 3 will refactor read-side (query, plugin list/show) as shared library functions (`query::run_with_deps`, etc.).
-  - Preflight is defensive: errors during validation do not crash the server; they surface as exit codes to the harness.
-  - Log rotation aware of MCP's continuous nature (file size cap, not line count).
 
 ### Git Interface (`src/catalog/git.rs`)
 
@@ -330,6 +355,7 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 - **Location**: `src/logging.rs`.
 - **Verbosity**: `-v` = info, `-vv` = debug; env vars `TOME_LOG`, `RUST_LOG` supported.
 - **Key Invariant**: Logs go to stderr; primary command output (--json or human) goes to stdout. This keeps structured data uncontaminated by debug output.
+- **Phase 3 US1 Note**: Not initialized for `tome mcp`; MCP manages its own logging via `mcp/log.rs` (file appender + JSON-lines subscriber).
 
 ### Output Formatting (`src/output.rs`)
 
@@ -345,10 +371,11 @@ Tome is a synchronous Rust CLI following a classic **parse → dispatch → exec
 
 - **Purpose**: Define the closed `TomeError` enum and map each variant to an exit code and category.
 - **Location**: `src/error.rs`.
-- **Variants** (21+ total, Phase 3 additions + Foundational F7):
+- **Variants** (24+ total, Phase 3 US1 additions):
   - Phase 1: `Internal`, `Usage`, `CatalogNotFound`, `CatalogAlreadyExists`, `ManifestInvalid`, `GitFailed`, `Io`, `Interrupted`.
   - Phase 2: `IndexIntegrityCheckFailure` (51), `IndexBusy` (50), `ModelMissing` (30), `PluginNotFound` (20), `SkillFrontmatterParseError` (23).
   - Phase 3: `PluginAlreadyInState` (31/32), `QueryNoResultsStrict`, drift checks (exit 41/42).
+  - Phase 3 US1: `McpStartupFailed`, `McpProtocolIo` (new for MCP-specific failures).
   - Phase 9: `CatalogHasEnabledPlugins` (exit 53).
   - **Foundational F7** (schema migration domain): `SchemaVersionTooNew` (73), `SchemaMigrationFailed` (74). Legacy `SchemaTooNew` (52) retained for read-path.
 - **Compile-Time Enforcement**: The `TomeError::exit_code()` method is exhaustive; adding a variant forces edits to `tests/exit_codes.rs`, the spec, and the PRD.
@@ -647,40 +674,185 @@ Remove subcommand:
   → exit(0)
 ```
 
-### Query Flow: `tome query <text>`
+### Query Flow: `tome query <text>` & MCP `search_skills`
 
 ```
-CLI parse (--top-k, --catalog, --plugin, --no-rerank, --strict, --min-score, …)
-       ↓
+CLI: `tome query <text>` flow
+  ↓
 dispatch to query::run()
-       ↓
+  ↓
+parse args (--top-k, --catalog, --plugin, --no-rerank, --strict, --min-score, …)
+  ↓
+call query::pipeline(args, deps)
+
+MCP: `search_skills` tool flow
+  ↓
+SearchSkillsInput validation (query, top_k, catalog, plugin)
+  ↓
+call query::pipeline() [silent, reused logic]
+
+Shared pipeline:
+  ↓
 validate filters (check catalogs exist)
-       ↓
+  ↓
 open index read-only
-       ↓
-check embedder drift (exit 41 if stale)
-       ↓
+  ↓
+check embedder drift (exit 41 if stale; MCP returns rmcp error)
+  ↓
 check reranker drift (warn-only)
-       ↓
+  ↓
 check model presence (embedder required; reranker if not --no-rerank)
-       ↓
-load embedder + reranker (with spinners)
-       ↓
+  ↓
+load embedder + reranker (with spinners on CLI, silent on MCP)
+  ↓
 embed query text
-       ↓
+  ↓
 KNN (candidate_k = top_k×4 if reranking)
-       ↓
+  ↓
 apply filters (--catalog, --plugin)
-       ↓
+  ↓
 optional rerank (cross-encoder logits)
-       ↓
+  ↓
 trim to top_k
-       ↓
+  ↓
 apply --strict threshold filter (or warn)
+  ↓
+CLI: render table (human) or NDJSON (JSON)
+MCP: return SkillMatch array in Output struct
+  ↓
+CLI: exit(0)
+MCP: handler returns Ok(Output)
+```
+
+### MCP Server Startup & Shutdown: `tome mcp`
+
+```
+main.rs special-cases Command::Mcp(_):
+  → skip logging::init (would conflict with MCP's file subscriber)
+  → skip ctrlc::install_signal_handler (tokio's async ctrl_c() would race)
+
+dispatch to commands::mcp::run(args, scope, mode)
+  → resolve paths
+  → call mcp::run(scope, &paths)
        ↓
-render table (human) or NDJSON (JSON)
+mcp::run(scope, paths):
+  → open_appender: create ${XDG_STATE_HOME}/tome/mcp.log, rotate if >10 MiB
+  → init_subscriber: JSON-lines tracing registry + stderr error layer
+  → build_runtime: current-thread tokio runtime
        ↓
-exit(0)
+runtime.block_on(async {
+  → spawn_blocking preflight validation:
+      ↓
+      preflight::run(scope, paths):
+        → open index read-only (scope-resolved)
+        → PRAGMA user_version; check if < target (exit 73 if too-new)
+        → detect_drift: compare stored embedder/reranker vs configured
+        → read models from registry; check on-disk + SHA-256 verify
+        → eager-load FastembedEmbedder (reranker deferred)
+        → return PreflightReport
+  ↓
+  → construct McpState(embedder, lazy-reranker, scope, paths, seeds)
+  ↓
+  → Server::new(state)
+  ↓
+  → rmcp::serve_server(server, stdio())
+       ↓
+       stdio transport connected; tools advertised
+       ↓
+       client sends MCP requests
+       ↓
+       server dispatches via #[tool_handler]
+       ↓
+  → tokio::select! {
+      running.waiting() → graceful shutdown (log, exit 0)
+      ctrl_c() → cancel token, graceful shutdown (log, exit 8)
+    }
+})
+```
+
+### MCP Search Skills Tool: `search_skills` request
+
+```
+Client sends JSON-RPC:
+  {
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "search_skills",
+      "arguments": {
+        "query": "...",
+        "top_k": 10,
+        "catalog": "...",  (optional)
+        "plugin": "..."    (optional, requires catalog)
+      }
+    }
+  }
+  ↓
+server routes via #[tool_handler] → tool_router
+  ↓
+search_skills method invoked
+  ↓
+search_skills::handle(state, input):
+  → validate input (plugin requires catalog, catalog must be known, etc.)
+  → if first call: lazy-load reranker on blocking pool + store in OnceCell
+  → call commands::query::pipeline(args, deps)
+       ↓
+       [see Query Flow above, silent compute]
+  → map QueryOutcome to SkillMatch array
+  → return Ok(Output { matches })
+  ↓
+Server serializes as JSON-RPC response:
+  {
+    "jsonrpc": "2.0",
+    "id": ...,
+    "result": {
+      "matches": [
+        { "catalog": "...", "plugin": "...", "name": "...", ... }
+      ]
+    }
+  }
+```
+
+### MCP Get Skill Tool: `get_skill` request
+
+```
+Client sends JSON-RPC:
+  {
+    "jsonrpc": "2.0",
+    "method": "tools/call",
+    "params": {
+      "name": "get_skill",
+      "arguments": {
+        "catalog": "...",
+        "plugin": "...",
+        "name": "..."
+      }
+    }
+  }
+  ↓
+server routes via #[tool_handler] → tool_router
+  ↓
+get_skill method invoked
+  ↓
+get_skill::handle(state, input):
+  → validate input (catalog/plugin/name exist in scope config, index)
+  → resolve skill directory
+  → read SKILL.md, strip frontmatter, return body
+  → walk skill directory for resource files
+  → compute absolute paths
+  → return Ok(Output { body, resources: [{ path, ... }] })
+  ↓
+Server serializes as JSON-RPC response:
+  {
+    "jsonrpc": "2.0",
+    "id": ...,
+    "result": {
+      "body": "...",
+      "resources": [
+        { "path": "/absolute/path/to/resource", ... }
+      ]
+    }
+  }
 ```
 
 ### Schema Migration Flow: `apply_pending(conn, current, target)` (Foundational F7)
@@ -713,8 +885,8 @@ apply_pending(conn, current, target):
 
 | Layer | Responsibility | Can Access | Cannot Access |
 |-------|----------------|------------|---------------|
-| **CLI** (`src/main.rs`, `src/cli.rs`) | Parse args, install signal handler, dispatch, map errors to exit codes. | Commands, logging, output. | Catalog, config, paths (indirectly via commands). |
-| **Commands** (`src/commands/`) | Orchestrate catalog/plugin/query/models/reindex/status operations; call library logic and format output. | Lifecycle, catalog, config, paths, error, output, embedding, index, presentation. | Logging (by design; logging is orthogonal). |
+| **CLI** (`src/main.rs`, `src/cli.rs`) | Parse args, install signal handler (skip for MCP), dispatch, map errors to exit codes. | Commands, logging (skip for MCP), output. | Catalog, config, paths (indirectly via commands). |
+| **Commands** (`src/commands/`) | Orchestrate catalog/plugin/query/models/reindex/status/mcp operations; call library logic and format output. | Lifecycle, catalog, config, paths, error, output, embedding, index, presentation. | Logging (by design; logging is orthogonal). |
 | **Plugin Lifecycle** (`src/plugin/lifecycle.rs`) | Enable/disable/reindex orchestrator; compose metadata parsers, index, and embedding. | Plugin metadata (manifest, frontmatter), index (open, lock, enable_plugin_atomic, reindex_plugin_atomic, delete_by_plugin), embedding (embedder trait, model registry), catalog (manifest reader). | Commands (reverse dependency only). |
 | **Index** (`src/index/`) | SQLite operations, schema, KNN, drift detection, advisory locks, forward-only migrations. | rusqlite, sqlite-vec, index schema, migrations framework. | Commands, embedding, plugin (reverse dependency only). |
 | **Embedding** (`src/embedding/`) | Model registry, download, trait implementations (fastembed wrapper, stub). | reqwest, ort, fastembed-rs, serde. | Commands, index (reverse dependency only). |
@@ -724,19 +896,19 @@ apply_pending(conn, current, target):
 | **Store** (`src/catalog/store.rs`) | Atomic read/write of config files. | tempfile, std::fs, config types. | Git, manifest, commands. |
 | **Config** (`src/config.rs`) | Define and serialize registry and catalog entry structures. | serde, toml, time (timestamps). | Catalog, commands (reverse dependency only). |
 | **Paths** (`src/paths.rs`) | Resolve XDG directories and content-addressed cache keys; resolve index/model paths. | sha2, hex, std::env. | All other modules. |
-| **Logging** (`src/logging.rs`) | Initialize tracing. | tracing, tracing-subscriber. | All modules (orthogonal; no dependencies into logging). |
+| **Logging** (`src/logging.rs`) | Initialize tracing (CLI only). | tracing, tracing-subscriber. | All modules (orthogonal; no dependencies into logging). |
 | **Output** (`src/output.rs`) | Format results as human or JSON; detect TTY. | serde_json, std::io, error types. | No other modules (clean boundary). |
 | **Presentation** (`src/presentation/`) | Table, progress, colour, prompt rendering; TTY and `NO_COLOR` awareness. | comfy-table, indicatif, owo-colors, inquire, std::io. | Commands (reverse dependency only). |
 | **Error** (`src/error.rs`) | Define closed error enum and exit code mapping. | thiserror, std::path, anyhow. | No other modules (consumed by all). |
-| **MCP** (`src/mcp/`) | Async server boundary, preflight validation, log rotation. | tokio, tracing (for log.rs), index (read-only open), embedding (for preflight eager-load). | No other modules depend on mcp; mcp does NOT depend on commands, plugin lifecycle (Phase 3: will refactor as library functions). |
+| **MCP** (`src/mcp/`) | Async server boundary, stdio transport, tool dispatch, preflight validation, log rotation. | tokio, tracing (for log.rs), index (read-only open), embedding (for preflight eager-load + tools), plugin (for lifecycle; Phase 3 US1 only via `commands::query::pipeline`). | No other modules depend on mcp; mcp does NOT import from commands, cli (except `commands::query::pipeline` reuse). |
 
 ## Dependency Rules
 
-1. **No cycles**: The dependency graph is a DAG. `main.rs` → `cli.rs` → `commands/` → `{plugin, index, embedding, catalog, config, paths, output, presentation, error}`. MCP is a leaf module (only called at startup after CLI dispatch).
-2. **Library shapes**: `plugin::lifecycle`, `index::`, and (future) `mcp::preflight` are library-shaped (no CLI); they return structured outcomes (`EnableOutcome`, `DisableOutcome`, `ReindexOutcome`, `Candidate` vec, `Scored` vec, `PreflightReport`) that `commands/` layers format for output.
+1. **No cycles**: The dependency graph is a DAG. `main.rs` → `cli.rs` → `commands/` → `{plugin, index, embedding, catalog, config, paths, output, presentation, error}`. MCP is routed differently (Phase 3 US1: skips logging/signals, calls `mcp::run` directly).
+2. **Library shapes**: `plugin::lifecycle`, `index::`, `commands::query::pipeline`, and `mcp::` are library-shaped (no CLI); they return structured outcomes (`EnableOutcome`, `DisableOutcome`, `ReindexOutcome`, `Candidate` vec, `Scored` vec, `QueryOutcome`, `PreflightReport`) that `commands/` layers format for output or MCP tools serialize.
 3. **Trait seams**: `Embedder` and `Reranker` traits decouple the library from model implementations; tests inject `StubEmbedder`.
 4. **Error type at the root**: `error.rs` has no internal dependencies; all modules depend on it (or types it wraps).
-5. **Orthogonal logging**: `logging.rs` is initialized at startup and orthogonal to `--json` mode. No module imports `logging`; the global subscriber is set up once in `main()`.
+5. **Orthogonal logging** (CLI only): `logging.rs` is initialized at startup and orthogonal to `--json` mode. No module imports `logging`; the global subscriber is set up once in `main()`. MCP skips this and uses `mcp/log.rs` instead.
 6. **Config types, not logic, in `config.rs`**: `config.rs` defines only data structures; I/O is in `store.rs`.
 7. **Plugin-dir resolution is centralized**: `plugin::lifecycle::resolve_plugin_dir` is the single source of truth; re-exported to CLI handlers via `commands/plugin/mod.rs` to avoid cross-boundary imports.
 8. **Interactive flow is command-layer only**: `commands/plugin/interactive.rs` uses presentation layer (prompts, tables), command handlers (enable, disable), and lifecycle/config APIs. It is test-driven via `rexpect` pty harness (`tests/plugin_interactive.rs`) rather than unit-test injection.
@@ -745,7 +917,8 @@ apply_pending(conn, current, target):
 11. **Status is read-only by design**: `commands/status.rs` never mutates state, never acquires advisory lock, never downloads models. It opens the index with `readonly=true` and reads compiled-time model registry identities. Library function `assemble_report` is testable; CLI-side `run` exits 1 on Degraded/Unhealthy via `std::process::exit()` rather than `TomeError`.
 12. **Catalog remove cascade pattern** (Phase 9): `commands/catalog/remove.rs` handles the CLI logic (prompt, force flag, error handling); `plugin::lifecycle::cascade_disable_for_catalog()` is the library function that owns the single-lock-per-batch mutation pattern. Unlike per-plugin operations, the cascade does not take a `LifecycleDeps` — it only needs paths, catalog name, plugin list, and model seeds for metadata seeding.
 13. **Schema migrations are library-shaped**: `index::migrations::apply_pending()` is stateless; it reads a registration table (`MIGRATIONS` const) and applies steps sequentially. Tests inject synthetic migrations via `MIGRATIONS_OVERRIDE` without touching the main codebase. Write paths call `apply_pending` before mutation; read paths use `open_read_only` to preserve backward compat.
-14. **MCP async island isolation** (Foundational F7): `src/mcp/` does NOT import from `commands/`, `plugin/`, `index/`, or any CLI-shaped module. Phase 3 will refactor read-side operations (query, plugin list/show) as shared library entry points that both CLI and MCP can call. Structural test `tests/sync_boundary.rs` enforces the exemption by scanning for `tokio` imports outside `src/mcp/`.
+14. **MCP async island isolation** (Foundational F7 + Phase 3 US1): `src/mcp/` does NOT import from `commands/` (except `commands::query::pipeline` for reuse), `plugin/` directly, `index/` directly, or any CLI-shaped module. Phase 3 will refactor read-side operations (query, plugin list/show) as shared library entry points that both CLI and MCP can call. Structural test `tests/sync_boundary.rs` enforces by scanning for `tokio` imports outside `src/mcp/`.
+15. **MCP tool dispatch pattern** (Phase 3 US1): `tools/{search_skills,get_skill}::handle` functions are called by rmcp-generated `#[tool_handler]` routes. Input validation against scope config returns rmcp error codes per contract. Output types are `JsonSchema` for tool advertisement. MCP never formats output for humans (JSON-RPC is the structured output).
 
 ## Key Interfaces & Contracts
 
@@ -776,19 +949,28 @@ apply_pending(conn, current, target):
 | `DriftStatus` | Embedder/reranker identity mismatch detection. | `src/index/meta.rs` |
 | `MIGRATIONS` + `apply_pending` | Forward-only schema migration framework (Foundational F7). | `src/index/migrations.rs` |
 | `PreflightReport` | Pre-flight validation result (schema, drift, model availability). | `src/mcp/preflight.rs` |
+| `McpState` | Shared server state: embedder, lazy reranker, scope, paths (Phase 3 US1). | `src/mcp/state.rs` |
+| `Server` + `ServerHandler` | rmcp-based MCP server impl with tool registration (Phase 3 US1). | `src/mcp/server.rs` |
+| `search_skills::Input` + `search_skills::Output` | Tool schemas for MCP skill search (Phase 3 US1). | `src/mcp/tools/search_skills.rs` |
+| `get_skill::Input` + `get_skill::Output` | Tool schemas for MCP skill fetch (Phase 3 US1). | `src/mcp/tools/get_skill.rs` |
+| `QueryOutcome` | Silent query result (KNN + rerank output) for reuse by CLI + MCP (Phase 3 US1). | `src/commands/query.rs` |
 
 ## Signal Handling & Cancellation
 
-**Mechanism**: Global `AtomicBool` flipped by `ctrlc` handler.
+**Mechanism**: Global `AtomicBool` flipped by `ctrlc` handler (CLI) or `tokio::signal::ctrl_c()` (MPC).
 
-**Installation**: Once in `main.rs` via `git::install_signal_handler()` (idempotent).
+**Installation (CLI)**: Once in `main.rs` via `git::install_signal_handler()` (idempotent). Skipped for `tome mcp`.
 
-**Polling**: Commands check `git::was_cancelled()` periodically or after long-running operations (git clone, skill walk, embedding loop, model download, reindex loop).
+**Installation (MCP)**: `tokio::signal::ctrl_c()` drives `tokio::select!` in `mcp::run()`. No global handler.
+
+**Polling (CLI)**: Commands check `git::was_cancelled()` periodically or after long-running operations (git clone, skill walk, embedding loop, model download, reindex loop).
+
+**Polling (MCP)**: Handled by tokio reactor; `tokio::select!` cancels on signal.
 
 **Exit Code**: 8 (`TomeError::Interrupted`).
 
 **Invariants**:
-- In-flight child processes are killed.
+- In-flight child processes are killed (CLI only).
 - Atomic writes ensure partial state is not left on disk.
 - Index transactions are rolled back on interruption (via `was_cancelled()` checks inside `enable_locked`, `reindex_locked`).
 - Tests can reset the flag via `git::reset_cancellation_for_tests()`.
@@ -817,15 +999,19 @@ apply_pending(conn, current, target):
 |---------|----------------|----------|
 | **Credential Scrubbing** | Regex rules applied to all captured git and reqwest output before display or error propagation. | `src/catalog/git.rs::scrub_credentials()`, `src/embedding/download.rs` |
 | **Error Mapping** | Every `Result<_, TomeError>` eventually reaches `main()`, which maps to exit code. | `src/error.rs`, `src/main.rs` |
-| **Logging & Verbosity** | Global tracing subscriber initialized once; orthogonal to `--json` mode. | `src/logging.rs`, `src/main.rs` |
+| **Logging & Verbosity (CLI)** | Global tracing subscriber initialized once; orthogonal to `--json` mode. Skipped for MCP. | `src/logging.rs`, `src/main.rs` |
+| **Logging (MCP)** | File appender + JSON-lines subscriber + stderr error layer. Size-based rotation. | `src/mcp/log.rs`, `src/mcp/mod.rs` |
 | **TTY Detection** | Used by interactive commands (removal confirmation, model download prompt, interactive browse, reindex scope confirmation), progress spinners, and output formatting. | `src/output.rs::stdin_is_tty()`, `stdout_is_tty()`, `src/presentation/prompt.rs`, `src/presentation/progress.rs`, `src/commands/plugin/interactive.rs`, `src/commands/models/remove.rs`, `src/commands/catalog/remove.rs` |
-| **Model Presence** | Two-stage check: manifest.json exists on disk AND parses. Applied before `enable` and `query`. | `src/plugin/mod.rs::model_manifest_ok()`, `src/embedding/download.rs` |
+| **Model Presence** | Two-stage check: manifest.json exists on disk AND parses. Applied before `enable` and `query`. MCP preflight eager-loads embedder only. | `src/plugin/mod.rs::model_manifest_ok()`, `src/embedding/download.rs`, `src/mcp/preflight.rs` |
 | **Path Validation** | Plugin sources in `tome-catalog.toml` are validated relative to catalog root (no `..`, no escape). Plugin source in `lifecycle::resolve_plugin_dir` is manifest-declared or flat-layout fallback. | `src/catalog/manifest.rs::validate_source()`, `src/plugin/lifecycle.rs::resolve_plugin_dir()` |
-| **Drift Detection** | Embedder and reranker identity (name + version) stored in index meta; compared at query time. Embedder drift → hard fail (exit 41/42); reranker drift → warn. | `src/index/meta.rs`, `src/commands/query.rs::check_drift()` |
+| **Drift Detection** | Embedder and reranker identity (name + version) stored in index meta; compared at query time. Embedder drift → hard fail (exit 41/42); reranker drift → warn. MCP preflight also checks. | `src/index/meta.rs`, `src/commands/query.rs::check_drift()`, `src/mcp/preflight.rs` |
 | **Content-Hash Smart Re-Embedding** | Skill text (name + "\n\n" + description) is hashed; hash is compared at reindex time. Unchanged hash → skip embedder, reuse vector. Used by both `enable` (first-time, always embed) and `reindex` (smart fast-path). | `src/index/skills.rs::content_hash()`, `reindex_plugin_atomic()` |
 | **Health Classification** | Pre-computed per-subsystem status (embedder, reranker, index, drift) classified into `OverallHealth` enum (Ok / Degraded / Unhealthy). | `src/commands/status.rs::classify_*` helpers |
 | **Version Output Override** | Pre-parse hook in `main.rs` intercepts `--version` / `-V` before clap to include model identities and honour `--json`. | `src/main.rs`, `src/commands/status.rs::print_version` |
 | **Schema Migrations** | Forward-only registration framework; write paths call `apply_pending` with pre-computed target version; read paths use legacy 52 for backward compat. Tests inject synthetic migrations via `MIGRATIONS_OVERRIDE` thread-local. | `src/index/migrations.rs`, `src/index/db.rs` (bootstrap + write-lock), `tests/schema_migrations.rs` |
+| **Scope Resolution** | `workspace::ResolvedScope` contains scope type + path (workspace or global). MCP receives pre-resolved scope from parent process. CLI resolves upward from CWD. | `src/workspace.rs`, `src/main.rs` (Phase 3 US1), `src/mcp/mod.rs` |
+| **File vs Protocol Logging** | CLI logs to stderr (tracing); MCP logs to `${XDG_STATE_HOME}/tome/mcp.log` (JSON-lines). Stdout is CLI human/JSON output or MCP JSON-RPC protocol channel. Stderr is CLI tracing or MCP fatal errors. | `src/logging.rs`, `src/mcp/log.rs`, `src/mcp/mod.rs`, `src/main.rs` |
+| **Lazy Reranker** | MCP defers reranker load to first `search_skills` call per FR-109. `OnceCell` ensures idempotent sync. CLI loads on demand in query command. | `src/mcp/state.rs`, `src/mcp/tools/search_skills.rs`, `src/commands/query.rs` |
 
 ---
 

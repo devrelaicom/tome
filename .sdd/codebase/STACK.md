@@ -8,6 +8,7 @@
 > **Updated**: 2026-05-13 (Phase 8 User Story 6 slices 1–2 — `tome status [--verify]` + version pre-parse hook; 14 new tests; no new dependencies)
 > **Updated**: 2026-05-13 (Phase 9 User Story 7 — `tome catalog remove` Phase 2 extensions; cascade-disable orchestrator; no new dependencies)
 > **Updated**: 2026-05-14 (Foundational F7–F8 — `src/index/migrations.rs` rewritten + `src/mcp/` module scaffolding; `tracing-subscriber` `json` feature enabled)
+> **Updated**: 2026-05-14 (Phase 3 / User Story 1 — `tome mcp` CLI command end-to-end; `schemars = "1"` direct dep; rmcp features extended to `transport-io` + `schemars`; binary +1.10 MiB)
 
 ## Languages & Runtimes
 
@@ -214,6 +215,62 @@ F8 introduces a new `src/mcp/` module with four files implementing MCP server sc
 
 **Test count:** No new tests land in F7–F8 — schema migration framework is exercised by synthetic-fixture test in Phase 4+; MCP scaffolding is exercise via library-API call + stub verification in US1.
 
+### Phase 3 / User Story 1 (MCP server end-to-end)
+
+US1 implements the live MCP server entry point per `contracts/mcp-server.md`:
+
+**New direct dependencies (production):**
+
+| Package | Version | Purpose | Scope |
+|---------|---------|---------|-------|
+| `schemars` | 1.x | JSON Schema derivation for MCP tool I/O | `src/mcp/tools/{search_skills,get_skill}.rs` — `#[derive(JsonSchema)]` on input/output types per `contracts/mcp-tools.md` |
+
+**Feature expansion in existing dependencies:**
+
+| Package | Feature | Purpose |
+|---------|---------|---------|
+| `rmcp` | `transport-io` | Stdio transport for the MCP server (stdin/stdout protocol channel per FR-221) |
+| `rmcp` | `schemars` | Re-export of `schemars` crate (we use it directly via our own dep) |
+
+**New module structure (F8 scaffolding → US1 wiring):**
+
+- `src/mcp/mod.rs` — expanded `run()` now orchestrates the full startup sequence: log open → runtime build → pre-flight → server init → `rmcp::serve_server` → graceful shutdown or SIGINT handler
+- `src/mcp/server.rs` (~150 lines) — `#[tool_router]` + `#[tool_handler]` derive macros on `struct Server { state: Arc<McpState> }` implementing `rmcp::ServerHandler`
+  - Two registered tools: `search_skills` and `get_skill` (per US1-S1, US1-S2)
+  - `server_info()` reports name + version + tool capabilities
+  - Each tool delegates to `mcp::tools::{search_skills,get_skill}::handle` for per-tool logic modularization
+- `src/mcp/state.rs` (~50 lines) — `pub struct McpState { embedder, reranker, scope, paths, embedder_entry, reranker_entry }`
+  - Embedder eagerly loaded at startup (pre-flight phase); reranker lazily loaded on first tool call that requires ranking (via `tokio::sync::OnceCell`)
+  - Shared via `Arc<McpState>` across all tool handlers
+- `src/mcp/tools/mod.rs` — module dispatcher
+- `src/mcp/tools/search_skills.rs` (~120 lines) — input schema `SearchSkillsInput { query, ..., force_strict: bool }`, output schema `SearchSkillsOutput { skills: Vec<SkillResult> }`
+  - Handler: `pub async fn handle(input, state) -> Result<SearchSkillsOutput, impl Error>`
+  - Reuses `commands::query::pipeline(args, deps)` library entry point (extracted during refactor; returns `QueryOutcome` without stdout/stderr emit step)
+  - Lazy reranker load on `.await` at call boundary
+- `src/mcp/tools/get_skill.rs` (~80 lines) — input schema `GetSkillInput { id: String }`, output schema `GetSkillOutput { skill: Option<SkillDetail> }`
+  - Handler: `pub async fn handle(input, state) -> Result<GetSkillOutput, impl Error>`
+  - Index read-only query via library `index::skills::get_one_skill(id, conn)` helper
+- `src/commands/query.rs` — refactored `pub fn pipeline(args, deps) -> Result<QueryOutcome, TomeError>` as the silent compute path (no stdout/stderr emit); original `pub fn run()` delegates to it and adds the emit step
+
+**Stdio channel contract (FR-221, FR-222):**
+- stdout = MCP protocol messages only (no diagnostic output)
+- stderr = fatal startup errors only (after pre-flight completes, stderr is silent)
+- File log at `${XDG_STATE_HOME}/tome/mcp.log` in JSON-lines format per `contracts/log-format.md`
+
+**Binary size impact:**
+- Foundational F8 added `rmcp` + `tokio` feature-gated: estimated +2.5 MiB (research estimate)
+- US1 actual (macOS arm64): 20.94 MiB → 22.04 MiB (+1.10 MiB over F8, final binary 22.04 MiB total under 50 MiB cap)
+
+**CLI entry point:**
+- `src/cli.rs` — new `Command::Mcp(McpArgs)` variant; `args` struct is empty (MCP takes no subcommands; scope/paths are resolved globally)
+- `src/main.rs` — special-case dispatch: `Command::Mcp(_)` skips tracing/ctrlc init and goes straight to `commands::mcp::run(args, scope, mode)` which calls `mcp::run(scope, paths)`
+- `src/commands/mcp.rs` — thin wrapper dispatching to `mcp::run`; `--json` flag is a no-op for MCP (the protocol IS the output format per FR-221)
+
+**Test coverage:**
+- US1 tests land in parallel with feature implementation; library-API entry points (`search_skills::handle`, `get_skill::handle`, `preflight::run`) exercised via stubs; CLI binary tests deferred pending integration test harness
+
+**No breaking changes** to Phase 1–9 code outside `src/mcp/`. `src/mcp/` is fully exempt from the sync-only boundary enforced by `tests/sync_boundary.rs`.
+
 ## Package Managers & Build Tools
 
 | Tool | Version | Purpose |
@@ -228,7 +285,7 @@ F8 introduces a new `src/mcp/` module with four files implementing MCP server sc
 |-------------|---------|
 | OS Targets | Linux (ubuntu-latest) and macOS (macos-latest) — CI verified on both |
 | Deployment | Single binary (`target/release/tome`); installed via `cargo install --path .` |
-| Binary Size | < 50 MB stripped (enforced by CI; revised from 10 MB ceiling in CONSTITUTION v1.2.0 after Phase 3 slice 1 measured 29.56 MB on Linux; `ort` CPU-only static linking is the load-bearing constraint) |
+| Binary Size | < 50 MB stripped (enforced by CI; revised from 10 MB ceiling in CONSTITUTION v1.2.0 after Phase 3 slice 1 measured 29.56 MB on Linux; `ort` CPU-only static linking is the load-bearing constraint; US1 final 22.04 MiB on macOS arm64) |
 | Output | Human-readable (default) or NDJSON (`--json`); logging to stderr only (orthogonal to stdout); colours respect `NO_COLOR` and auto-disable on non-TTY |
 | Model runtime | CPU-only ONNX Runtime (via `fastembed`); models downloaded at first use into `${XDG_DATA_HOME}/tome/models/`; fixed registry (compile-time constants) ensures bit-for-bit reproducibility |
 | MCP server runtime | Single-threaded tokio with JSON-lines file logging to `${XDG_STATE_HOME}/tome/mcp.log` (10 MiB rotation cap); stdout reserved for MCP protocol only; stderr for fatal startup errors only |
@@ -253,4 +310,4 @@ F8 introduces a new `src/mcp/` module with four files implementing MCP server sc
 
 ---
 
-*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 + Foundational F7–F8 source code.*
+*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 + Foundational F7–F8 + Phase 3 / US1 source code.*

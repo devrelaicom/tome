@@ -194,9 +194,16 @@ src/
 │   ├── download.rs           # reqwest::blocking + SHA-256 + atomic persist
 │   └── runtime.rs            # ort Environment setup
 ├── mcp/                      # MCP server (Phase 3)
-│   ├── mod.rs
-│   ├── log.rs                # JSON-lines file appender + rotation (Phase 3 / F8)
-│   └── ...                   # Additional MCP components (Phase 3+)
+│   ├── mod.rs                # Server entry + lifecycle
+│   ├── server.rs             # rmcp ServerHandler + tool router (Phase 3)
+│   ├── state.rs              # McpState shared across tool handlers
+│   ├── tools/                # Tool implementations (Phase 3)
+│   │   ├── mod.rs            # Tool module docs + submodule re-exports
+│   │   ├── search_skills.rs  # `search_skills` input/output + handler
+│   │   └── get_skill.rs      # `get_skill` input/output + handler
+│   ├── runtime.rs            # tokio::runtime setup + logging
+│   ├── preflight.rs          # MCP startup pre-flight checks (scope, index, schema, drift, models)
+│   └── log.rs                # JSON-lines file appender + rotation (Phase 3 / F8)
 └── presentation/             # CLI output / progress / colours / prompts (Phase 2)
     ├── mod.rs
     ├── tables.rs             # comfy-table helpers
@@ -226,6 +233,8 @@ tests/
 ├── reindex.rs                # Library + CLI tests for `tome reindex` (Phase 7)
 ├── status.rs                 # Library API tests for `assemble_report`; CLI-only for run() (Phase 8)
 ├── version_output.rs         # Compile-time content tests for `--version` output (Phase 8)
+├── mcp_server.rs             # MCP tool router + handler introspection tests (Phase 3)
+├── mcp_lifecycle.rs          # MCP pre-flight exit codes (Phase 3)
 ├── atomicity_enable.rs       # Failure-injection tests for enable rollback (FR-004)
 ├── exit_codes.rs             # Exhaustiveness check: every TomeError → exit code
 ├── error_messages.rs         # Error message correctness
@@ -560,6 +569,53 @@ Example usage: `src/index/migrations.rs::MIGRATIONS_OVERRIDE` for schema-migrati
 **Small filesystem operations in-module:** Unit tests for small file-system operations (file creation, rotation, permissions, idempotent no-ops) live in `#[cfg(test)] mod tests` blocks inside the module under test. These operations (rename, `set_len` for sparse fixtures, metadata reads) are fast and deterministic, making them suitable for in-module unit tests.
 
 Example: `src/mcp/log.rs::tests` module contains 4 unit tests for rotation policy (skip under cap, rename when oversized, overwrite existing prev, noop when absent).
+
+### MCP Tool Definitions (Phase 3 / F2)
+
+**rmcp macro visibility:** The `#[tool_router(vis = "pub")]` attribute on the tool router makes the macro-generated `tool_router()` function visible to integration tests (`tests/mcp_server.rs`) so test code can introspect the advertised tool list and descriptions. The visibility argument is parsed via `darling` and documented by `rmcp-macros`.
+
+**Tool handler signatures:** Each MCP tool handler in `src/mcp/tools/{search_skills,get_skill}` exposes:
+- `Input` / `Output` types derived from `Deserialize`, `Serialize`, and `JsonSchema` (for `rmcp`'s tool advertisement)
+- A `pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpError>` function
+
+The `#[tool]` macro in `src/mcp/server.rs` delegates to these free functions, keeping per-tool logic modular. The `#[tool_handler]` attribute on the `ServerHandler` impl routes `list_tools` / `call_tool` through the generated router.
+
+**Description as doc comment:** The `#[tool]` macro's `description` argument accepts only string literals, BUT the macro falls back to doc comments on the handler method (preferred for long descriptions). This allows descriptions ≤350 chars to be code comments and automatically picked up by rmcp-macros.
+
+**Domain-specific error codes via JSON `data`:** MCP error envelopes carry the contract's structured codes (`unknown_catalog`, `plugin_without_catalog`, `unknown_skill`, etc.) inside `ErrorData.data` as `{"code": "...", ...}`. The JSON-RPC numeric code (`INTERNAL_ERROR` / `INVALID_PARAMS`) is generic; the application-level code is the precise identifier.
+
+Example from `src/mcp/tools/search_skills.rs`:
+```rust
+return Err(McpError::invalid_params(
+    "plugin requires catalog",
+    Some(json!({ "code": "plugin_without_catalog" })),
+));
+```
+
+### MCP Async Patterns (Phase 3 / F1–F2)
+
+**Single-threaded tokio runtime:** The MCP server runs `tokio::runtime::Builder::new_current_thread()` to avoid a pool of background threads. All I/O-bound operations (index reads, model loading) are sync and block the event loop, so a thread pool would not help.
+
+**`spawn_blocking` for sync I/O inside async handlers:** Every MCP tool handler that touches rusqlite or fastembed wraps the call in `tokio::task::spawn_blocking` to keep the event loop responsive while the expensive operation completes. This is an async boundary — a utility for structured concurrency without changing the architecture (still single-threaded, not CPU-parallel).
+
+Example from `src/mcp/tools/search_skills.rs`:
+```rust
+let reranker_arc = state
+    .reranker
+    .get_or_try_init(|| async move {
+        tokio::task::spawn_blocking(move || {
+            FastembedReranker::load(reranker_entry, &reranker_dir)
+        })
+        .await
+        .map_err(|e| TomeError::McpStartupFailed { ... })?
+        .map(|r| Arc::new(r) as Arc<dyn Reranker>)
+    })
+    .await
+    .map_err(tome_to_mcp)?
+    .clone();
+```
+
+**MCP-local async boundary:** Async lives strictly inside `src/mcp/`; the rest of Tome stays synchronous. This is enforced by a structural test (see `tests/mcp_lifecycle.rs`).
 
 ### Comment Policy
 
