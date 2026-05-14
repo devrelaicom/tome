@@ -282,14 +282,27 @@ fn remove_when_registry_absent_falls_back_to_global_only() {
     );
 }
 
-// ---- Concurrent benign race ---------------------------------------------
+// ---- Sequential double-remove ------------------------------------------
 
-/// Both processes observe `reference_count == []` and both call
-/// `fs::remove_dir_all`. One succeeds; the other gets `NotFound` and
-/// continues silently. The test asserts the post-condition: both
-/// commands succeed, the cache directory is gone.
+/// FR-M-MIG-2 rename: the prior name claimed "concurrent" but the body
+/// is sequential. The genuine cross-process race can't be reproduced
+/// deterministically without process control (every retry would land
+/// at a different point in the lock-hold window). The sequential
+/// double-remove pins the documented post-condition: both removes
+/// succeed, the second observes `NotFound` from the first's
+/// `remove_dir_all`, the cache directory is gone, no panic.
+///
+/// Production correctness depends on:
+/// - `reference_count` returning an up-to-date `Vec<Scope>` at each
+///   read (`catalog::store::reference_count`).
+/// - `fs::remove_dir_all` being idempotent over a missing path
+///   (`std::io::ErrorKind::NotFound` is swallowed by the impl).
+///
+/// Two-process race coverage was considered out of scope for Phase 3.
+/// If a Phase 4+ regression suggests it's needed, `tests/concurrency.rs`
+/// is the right home (it already has the two-process scaffolding).
 #[test]
-fn concurrent_remove_of_last_reference_is_benign() {
+fn sequential_double_remove_of_last_reference_is_benign() {
     let fix = Fixture::build_sample();
     let env = ToolEnv::new();
     let tmp = TempDir::new().unwrap();

@@ -52,16 +52,23 @@ fn assert_every_deserialize_has_deny_unknown(path: &str) {
             if f.starts_with("#[") {
                 continue;
             }
-            // First non-attribute line — must be a struct definition.
+            // First non-attribute line — must be a struct or enum
+            // definition. Both can carry `#[serde(deny_unknown_fields)]`;
+            // an enum with an unknown variant is the symmetric attack
+            // (a future tooling version inserting a new variant that
+            // older Tome silently accepts).
             assert!(
-                f.starts_with("pub struct") || f.starts_with("struct"),
-                "in {}, expected a struct after a #[derive(Deserialize)] cluster but found: {}",
+                f.starts_with("pub struct")
+                    || f.starts_with("struct")
+                    || f.starts_with("pub enum")
+                    || f.starts_with("enum"),
+                "in {}, expected a struct or enum after a #[derive(Deserialize)] cluster but found: {}",
                 path,
                 f
             );
             assert!(
                 saw_deny_unknown,
-                "in {}, struct line `{}` derives Deserialize without #[serde(deny_unknown_fields)]",
+                "in {}, item `{}` derives Deserialize without #[serde(deny_unknown_fields)]",
                 path, f
             );
             break;
@@ -77,6 +84,16 @@ fn manifest_module_structs_all_carry_deny_unknown_fields() {
 #[test]
 fn config_module_structs_all_carry_deny_unknown_fields() {
     assert_every_deserialize_has_deny_unknown("src/config.rs");
+}
+
+/// T219 (P10 deferred coverage): `ModelManifest` lives in
+/// `src/embedding/registry.rs` and is a Tome-owned strict input —
+/// every deserialise-eligible struct in that module must carry
+/// `#[serde(deny_unknown_fields)]` so a stray model-installer field
+/// from a future tooling version cannot silently land.
+#[test]
+fn embedding_registry_structs_all_carry_deny_unknown_fields() {
+    assert_every_deserialize_has_deny_unknown("src/embedding/registry.rs");
 }
 
 // ---------------------------------------------------------------------------
