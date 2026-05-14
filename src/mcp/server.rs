@@ -47,7 +47,10 @@ impl Server {
     }
 }
 
-#[tool_router]
+// `vis = "pub"` makes the macro-generated `tool_router()` associated
+// function reachable from integration tests, which inspect the router
+// to assert the tool list and description wording (FR-108).
+#[tool_router(vis = "pub")]
 impl Server {
     /// Find the most relevant skills in the local Tome index for a natural-language task description. Call this proactively before approaching any non-trivial task to discover existing skills you can rely on. Returns a ranked list of candidates with on-disk paths; follow up with `get_skill` to load the skill body and resource files.
     #[tool(name = "search_skills")]
