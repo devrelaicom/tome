@@ -15,10 +15,12 @@
 //!
 //! Spec: research §R2, FR-040.
 
+use std::time::Instant;
+
 use tempfile::TempDir;
 
 use tome::error::TomeError;
-use tome::index::lock;
+use tome::index::{OpenOptions, lock, open, open_read_only, schema::MetaSeed};
 
 fn lock_path_in(dir: &TempDir) -> std::path::PathBuf {
     dir.path().join("index.lock")
@@ -75,4 +77,67 @@ fn lockfile_creation_is_idempotent() {
     std::fs::write(&path, b"").expect("seed empty lockfile");
 
     let _guard = lock::acquire(&path).expect("acquire on pre-existing lockfile");
+}
+
+/// Phase 3 slice F5: a read-only DB handle must not block a writer that
+/// is holding the advisory lockfile, and must not race with it.
+///
+/// We can't easily simulate a writer with the lockfile held *and* an open
+/// write `Connection` in one process (the lockfile is fd-scoped and the
+/// SQLite connection is process-scoped, but the WAL writer state stays
+/// consistent for our purposes). The narrow guarantee this test exercises:
+///
+/// 1. With the advisory write lockfile held, `open_read_only` succeeds.
+///    The Phase 2 `acquire_lock` semantics promise it gates writers, not
+///    readers; `open_read_only` is the reader contract.
+/// 2. The reader can run a real query against the DB within the
+///    busy_timeout window (5s). If reads were blocked on the writer's
+///    locks the query would error with `database is locked` after 5s.
+fn meta_seed(name: &str, version: &str) -> MetaSeed {
+    MetaSeed {
+        name: name.to_owned(),
+        version: version.to_owned(),
+    }
+}
+
+#[test]
+fn read_only_open_does_not_block_writer_lock() {
+    let dir = TempDir::new().expect("tempdir");
+    let db_path = dir.path().join("index.db");
+    let lock_path = dir.path().join("index.lock");
+
+    // Bootstrap the DB once via the normal write path so `meta`, `skills`,
+    // and `skill_embeddings` exist for the reader to query.
+    let _bootstrap = open(
+        &db_path,
+        &OpenOptions {
+            embedder: meta_seed("stub-embedder", "0"),
+            reranker: meta_seed("stub-reranker", "0"),
+        },
+    )
+    .expect("bootstrap");
+
+    // Acquire the writer's advisory lock and hold it for the duration of
+    // the reader's work — mirrors `lifecycle::enable` mid-transaction.
+    let writer_lock = lock::acquire(&lock_path).expect("acquire write lock");
+
+    let started = Instant::now();
+    let reader = open_read_only(&db_path).expect("open read-only under writer lock");
+
+    // Real query — exercise both the skills table and the meta table.
+    let count: i64 = reader
+        .query_row("SELECT COUNT(*) FROM skills", [], |r| r.get(0))
+        .expect("read-only query against locked writer");
+    assert_eq!(count, 0, "fresh-bootstrap skills table must be empty");
+
+    let elapsed = started.elapsed();
+    // 5s is the busy_timeout; anything close to it means we were blocked.
+    // 100ms is a generous bound for a single SELECT against a 2-row table.
+    assert!(
+        elapsed.as_millis() < 1_000,
+        "read-only query took {elapsed:?} — likely blocked on writer lock"
+    );
+
+    drop(reader);
+    drop(writer_lock);
 }

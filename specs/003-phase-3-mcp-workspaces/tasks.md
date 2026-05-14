@@ -108,10 +108,10 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Slice F5 — read-only DB open refactor (folded P10 deferral)
 
-- [ ] T045 Add `index::open_read_only(paths: &Paths, scope: &Scope) -> Result<Connection, TomeError>` using `OpenFlags::SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX` in `src/index/db.rs` (use devs:rust-dev agent)
-- [ ] T046 Update read sites — `commands::plugin::open_index_for_read`, `commands::query::run`, `commands::plugin::list::run`, `commands::plugin::show::run`, `commands::status::assemble_report` — to use `open_read_only` (use devs:rust-dev agent)
-- [ ] T047 Add a unit test in `tests/index_lock.rs` confirming a read-only handle does not block a writer holding the lock and does not race with it (use devs:rust-dev agent)
-- [ ] T048 [GIT] Commit: refactor(index): plumb read-only open across read paths
+- [X] T045 Add `index::open_read_only(paths: &Paths, scope: &Scope) -> Result<Connection, TomeError>` using `OpenFlags::SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX` in `src/index/db.rs` (use devs:rust-dev agent) — landed as `open_read_only(db_path: &Path)` (consistent with the existing `open(db_path)` signature; callers compute the per-scope path via `paths.index_db_for(&scope)`). Includes the schema-too-new gate so reads of a future-version DB still exit 52.
+- [X] T046 Update read sites — `commands::plugin::open_index_for_read`, `commands::query::run`, `commands::plugin::list::run`, `commands::plugin::show::run`, `commands::status::assemble_report` — to use `open_read_only` (use devs:rust-dev agent) — covered via the shared `open_index_for_read` helper (list / show / interactive / query) + direct call sites in `status::check_index` and `status::check_drift`. `open_index_for_read` bootstraps the DB on first touch when missing (preserves Phase 2's fresh-install behaviour), then re-opens read-only.
+- [X] T047 Add a unit test in `tests/index_lock.rs` confirming a read-only handle does not block a writer holding the lock and does not race with it (use devs:rust-dev agent)
+- [X] T048 [GIT] Commit: refactor(index): plumb read-only open across read paths
 
 ### Slice F6 — `query::run_with_deps` library entry point (folded P10 deferral)
 

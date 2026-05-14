@@ -16,7 +16,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::error::TomeError;
 use crate::index::migrations;
@@ -58,6 +58,62 @@ pub fn open(db_path: &Path, opts: &OpenOptions) -> Result<Connection, TomeError>
     }
 
     vec_ext::verify(&conn)?;
+    Ok(conn)
+}
+
+/// Open the index database read-only. Skips schema bootstrap, migration,
+/// and the WAL/synchronous/foreign_keys PRAGMAs (read-only connections
+/// can't write any of them). The caller is responsible for verifying the
+/// file exists — `Connection::open_with_flags` with `SQLITE_OPEN_READ_ONLY`
+/// errors on a missing file rather than creating it.
+///
+/// Designed for the read paths: `tome plugin list`, `tome plugin show`,
+/// `tome query`, `tome status`, and the future `tome doctor`. They never
+/// take the advisory lockfile, so a read-only handle here cannot race
+/// with the writer regardless of the WAL state — SQLite's MVCC model
+/// gives readers a consistent snapshot.
+///
+/// Phase 3 contract: this used to be a Phase 10 deferred improvement;
+/// MCP's read-side reuses the same surface, so it lands in Foundational.
+///
+/// `busy_timeout` is still applied so a brief writer hold doesn't make
+/// the reader fail immediately. `vec_ext::register_globally()` is called
+/// for symmetry with `open` — the query path needs the extension visible
+/// to read from `skill_embeddings`. The signature stays parallel to
+/// `open`: caller computes the per-scope path and hands it in.
+pub fn open_read_only(db_path: &Path) -> Result<Connection, TomeError> {
+    vec_ext::register_globally()?;
+
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!("open read-only {}: {e}", db_path.display(),))
+    })?;
+
+    conn.busy_timeout(Duration::from_millis(5000))
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("set busy_timeout=5000: {e}"))
+        })?;
+
+    vec_ext::verify(&conn)?;
+
+    // Schema-version gate. Writers run this in `apply_pending`; readers
+    // don't need migrations but DO need to refuse a future-version DB —
+    // it would otherwise read garbage columns or fail with cryptic
+    // SQLite errors mid-query. Map the same way `open` does so `tome
+    // status` / `tome query` surface exit 52 (`SchemaTooNew`) instead of
+    // exit 1 / 51 from a downstream failure.
+    if let Some(stored) = migrations::current_schema_version(&conn)?
+        && stored > schema::SCHEMA_VERSION
+    {
+        return Err(TomeError::SchemaTooNew {
+            on_disk: stored,
+            compiled: schema::SCHEMA_VERSION,
+        });
+    }
+
     Ok(conn)
 }
 

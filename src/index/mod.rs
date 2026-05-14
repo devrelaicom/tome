@@ -18,7 +18,7 @@ pub mod schema;
 pub mod skills;
 pub mod vec_ext;
 
-pub use db::{OpenOptions, open};
+pub use db::{OpenOptions, open, open_read_only};
 pub use lock::{LockGuard, acquire as acquire_lock};
 pub use meta::{DriftStatus, MetaKey, ModelIdent, detect_drift};
 pub use migrations::{MIGRATIONS, Migration, apply_pending, current_schema_version};

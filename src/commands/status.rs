@@ -23,14 +23,14 @@ use crate::embedding::download::sha256_file;
 use crate::embedding::registry::ModelEntry;
 use crate::error::TomeError;
 use crate::index::meta::{DriftStatus, ModelIdent, detect_drift};
-use crate::index::{self, OpenOptions, integrity};
+use crate::index::{self, integrity};
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
 use crate::presentation::colour;
 use crate::workspace::{ResolvedScope, Scope};
 
 use crate::commands::models::{ModelState, cheap_state};
-use crate::commands::plugin::{embedder_entry, registry_seeds, reranker_entry};
+use crate::commands::plugin::{embedder_entry, reranker_entry};
 
 pub fn run(args: StatusArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
@@ -149,14 +149,10 @@ fn check_index(paths: &Paths, scope: &Scope) -> Result<IndexHealth, TomeError> {
     }
     let size_bytes = std::fs::metadata(&index_db).map(|m| m.len()).unwrap_or(0);
 
-    let (embedder_seed, reranker_seed) = registry_seeds();
-    let conn = index::open(
-        &index_db,
-        &OpenOptions {
-            embedder: embedder_seed,
-            reranker: reranker_seed,
-        },
-    )?;
+    // Phase 3 slice F5: `status` never writes; use the read-only open
+    // path so a concurrent writer can't be racing us through the WAL
+    // pragmas and the bootstrap re-application that `index::open` does.
+    let conn = index::open_read_only(&index_db)?;
 
     let schema_version = match index::current_schema_version(&conn) {
         Ok(Some(v)) => Some(v),
@@ -213,14 +209,7 @@ fn check_drift(
     if !index_db.is_file() {
         return Ok(DriftStatus::None);
     }
-    let (embedder_seed, reranker_seed) = registry_seeds();
-    let conn = index::open(
-        &index_db,
-        &OpenOptions {
-            embedder: embedder_seed,
-            reranker: reranker_seed,
-        },
-    )?;
+    let conn = index::open_read_only(&index_db)?;
     let embedder = ModelIdent {
         name: embedder_entry.name.to_owned(),
         version: embedder_entry.version.to_owned(),
