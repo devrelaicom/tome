@@ -162,9 +162,9 @@ description: "Phase 3 implementation tasks — MCP server, workspaces, and docto
 
 ### Phase Start
 
-- [ ] T072 [GIT] Verify working tree is clean before starting Phase 3 / US1
-- [ ] T073 [US1] Create `specs/003-phase-3-mcp-workspaces/retro/P3.md` from the standard retro template
-- [ ] T074 [GIT] Commit: docs(retro): initialise P3 retro
+- [X] T072 [GIT] Verify working tree is clean before starting Phase 3 / US1
+- [X] T073 [US1] Create `specs/003-phase-3-mcp-workspaces/retro/P3.md` from the standard retro template
+- [X] T074 [GIT] Commit: docs(retro): initialise P3 retro
 
 ### Slice US1.a — server scaffolding
 
