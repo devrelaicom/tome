@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 / US1 Foundational F7–F8 incremental)
+> **Last Updated**: 2026-05-14 (Phase 3 / US2 workspace init incremental)
 
 ## Technical Debt
 
@@ -27,6 +27,7 @@ Items to address when working in the area:
 | TD-013 | Phase 3 US1 testing | T088 manual verification still pending: real BGE models + live harness for SC-001/SC-002 coverage | Integration testing | High | Three categories: happy-path search_skills/get_skill returns (T092 partial), MCP protocol purity (T093), latency budget (T094 p50<300ms, p99<600ms), SIGINT graceful shutdown (T095). Tracked in `retro/P3.md` |
 | TD-014 | `src/mcp/state.rs` (Phase 3 F8) | McpState embedder/reranker seed exposure for test integration | Test isolation | Medium | Handlers derive seeds from `state.embedder_entry.name/version`, hard-coded to MODEL_REGISTRY entries. Tests can't bootstrap index with stub seeds + use handlers without tripping drift detection. Refactor `McpState` to carry `embedder_seed` / `reranker_seed` directly. Est. 1 hour, defer to post-US1 |
 | TD-015 | `contracts/mcp-server.md` (Phase 3 F8) | Contract drift on startup failure codes | Documentation | Low | Contract lists exit 35 for "Index DB missing" but production code surfaces exit 60 (`McpStartupFailed { reason: "index_missing" }`). 35 maps to `VectorExtensionInitFailure`; neither fits. 60-with-reason approach is more accurate; amend contract in polish pass |
+| TD-016 | `src/workspace/init.rs` (Phase 3 US2) | `.tome.old/` orphan cleanup on crash between rename-aside and rename-in | Recovery cleanup | Low | If `--force` rename-in fails after moving old `.tome/` to `.tome.old/`, rollback restores the old state. But if a crash occurs between rename-aside and rename-in (before rollback logic), `.tome.old/` is left orphan. Doctor (future Phase, out of scope for US2) should surface and offer cleanup. Currently documented in `contracts/workspace-init.md` §Side effects as a known limitation. |
 | TD-020 | Error categorisation | All Phase 1 + Phase 2 codes are enumerated; no catch-all variants | Debuggability | Low | Current approach is sound; closed set enforces completeness |
 | TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low | — |
 
@@ -88,6 +89,7 @@ Code areas that are brittle or risky to modify:
 | `src/index/migrations.rs::MIGRATIONS_OVERRIDE` | Public static (not `#[cfg(test)]`) so integration tests outside crate can inject synthetic migrations. Widens test-injection surface compared to purely internal mechanism | Documented as test-only via doc comment. Only read by production `apply_pending` (write path already under advisory lock). Injected migrations run in same transaction isolation. Forward-only boundary enforced—no down-migration path exists. Monitor: ensure new tests never accidentally rely on `MIGRATIONS_OVERRIDE` slice being reusable (each test should clear slot after use) |
 | `src/mcp/preflight.rs::verify_embedder_artefacts` | Runs full SHA-256 over primary embedder (~66 MB) at every startup; no caching or early exit | By design for long-running server correctness (FR-110). Cold-cache startup latency visible to harness. Defer `--verify` skip flag to Phase 4+ unless profiling shows impact (TD-012). In test, use `StubEmbedder` to avoid real hash cost |
 | `src/mcp/tools/{search_skills,get_skill}.rs::tome_to_mcp` | Error translation from TomeError to structured MCP codes must be exhaustive; missing variants leak as generic `internal_error` | Test assertion in `tests/mcp_server.rs` that all tool error paths translate to specific codes; audit on every new TomeError variant. No generic fallback (FR-108) |
+| `src/workspace/init.rs::init` | Staging directory created inside workspace root to ensure same-filesystem rename atomicity (tempfile within the target directory). If workspace root is not on the intended filesystem, stage-rename could silently cross mount boundary (not atomic). Crash between rename-aside and rename-in leaves `.tome.old/` orphan. Rollback logic must restore `.tome/` from `.tome.old/` on final-rename failure. | Atomic staging pattern is sound: create in workspace root to guarantee same filesystem. `.tome.old/` orphans are recorded as TD-016; doctor (future) will clean up. Test interruption scenarios thoroughly before shipping US3 (Phase 10+). Test rollback path on rename failure (pre-existing .tome/` with --force). |
 
 ## Deprecated Code
 
@@ -159,6 +161,7 @@ Areas that could benefit from enhancement:
 | Status command caching | Report is fully recomputed on every invocation | Cache computed parts (index metadata, drift) per query | Faster repeated health checks |
 | MCP startup verbosity | Pre-flight SHA-256 silent unless it fails | Optional `--verbose` startup for diagnosing slow cold-cache initialization | Better observability |
 | McpState test seed isolation (TD-014) | Hard-coded to MODEL_REGISTRY; can't test with stub seeds | Refactor McpState to carry explicit `embedder_seed` / `reranker_seed` | Better test isolation for MCP tool handlers |
+| Workspace doctor command | No doctor or orphan-cleanup facility | Add `tome doctor` command to detect `.tome.old/` orphans and offer cleanup | Recovery aid for crashed `--force` init |
 
 ## Monitoring Gaps
 
@@ -171,6 +174,7 @@ Areas lacking proper observability:
 | Model download errors | Network failures not distinguished from checksum failures | Harder to diagnose transient vs. persistent issues | Low (both map to Io/ModelChecksumMismatch; rare in practice) |
 | Catalog size statistics | No cache size tracking | Can't warn on large catalogs | Low (Phase 2 may add quota management) |
 | MCP pre-flight timing | SHA-256 verify of large embedder file not instrumented | Cold-cache startup latency not observable | Low (acceptable trade-off; defer unless profiling shows impact per TD-012) |
+| Workspace registry state | No metrics on registry size or dedupe ratio | Can't detect growth or churn patterns | Low (opt-in registry; steady-state expected to be small) |
 
 ## Design Tradeoffs
 
@@ -185,6 +189,7 @@ Intentional design decisions with known limitations:
 | **No MCP tool description enumeration** (Phase 3 F8, FR-108) | `src/mcp/server.rs` tool descriptions | Tool descriptions must NOT reference specific catalog/plugin/skill identifiers in fixture or test scope | Test `tests/mcp_server.rs::descriptions_do_not_enumerate_fixture_identifiers` fails if wording includes identifiers, preventing accidental info leakage | By design. Descriptions are generic guidance; discovery happens via `search_skills` / `get_skill` at runtime. |
 | **Structured error codes for MCP tools** (Phase 3 F8) | `src/mcp/tools/{search_skills,get_skill}.rs::tome_to_mcp` | Tool errors map to contract-defined structured codes (`unknown_catalog`, `unknown_plugin`, etc.), never exposing internal TomeError variants | MCP harness sees opaque error codes; no domain-error info leakage | By design. Security + clarity: harness cannot infer internal structure or state from error messages. |
 | **Forward-only schema migrations** (Phase 3 F7) | `src/index/migrations.rs` + `TomeError::SchemaVersionTooNew` (exit 73) | Simpler DB evolution: v2.1 patch adds one migration row; older Tome refuses newer DBs. No down-migration complexity | Users on older Tome version cannot open DBs created/modified by newer version | Acceptable: users upgrade Tome regularly. Phase 1 is shipped and stable; Phase 2+ are synchronized. Old-version downgrade is not a supported use case. |
+| **Workspace staging inside root** (Phase 3 US2) | `src/workspace/init.rs::init` | Ensures same-filesystem rename atomicity; staging directory created via `tempfile::Builder::tempdir_in(&absolute)` | If workspace root spans a mount boundary, the atomic-rename assumption holds true ONLY for files under workspace root (tempfile stays in workspace root). Crash between rename-aside and rename-in leaves `.tome.old/` orphan (recovered by doctor in future phase). Rollback on final-rename failure restores old `.tome/` from `.tome.old/`. | By design. Atomicity is guaranteed for common case (workspace on single mount). TD-016 tracks `.tome.old/` orphan recovery. Test all error paths thoroughly before Phase 10+. |
 
 ## Risk Summary by Phase
 
@@ -240,11 +245,21 @@ Intentional design decisions with known limitations:
 - ✓ Reranker drift detected but not a startup failure (FR-109 defers load until first use)
 - ✓ No domain-error leakage in tool responses (structured codes per `contracts/mcp-tools.md` §2.3)
 
+**US2 Complete (Workspace Info & Init)**:
+- ✓ `tome workspace info` read-only query command
+- ✓ `tome workspace init` atomic `.tome/` creation with permission lock (chmod 0700 on staging before content)
+- ✓ Workspace config written atomically via `catalog::store::write_atomic` (chmod 0600 on Unix)
+- ✓ Opt-in workspace registry (`workspaces.txt`) append-only with dedupe by exact path
+- ✓ `--inherit-global` copies only `[catalogs]` block (never enablement state)
+- ✓ Atomic staging-to-final rename ensures no partial `.tome/` on interrupt
+- ✓ `--force` rename-aside path fully reversible (rollback on rename failure)
+- ✓ `.tome.old/` orphan on crash between rename-aside and rename-in (doctor handles cleanup, TD-016)
+
 **In progress**:
 - T088: Real BGE model testing against SC-001/SC-002 (happy-path query, protocol purity, latency, SIGINT)
 - Query command full implementation
 - Reindex command full implementation
-- US2–US5 MCP tool implementations
+- US3–US5 MCP tool implementations
 
 **Key risks to monitor**:
 - SEC-001: BGE model testing still pending (T088)
@@ -255,6 +270,7 @@ Intentional design decisions with known limitations:
 - TD-013: Phase 3 US1 manual testing incomplete (T088)
 - TD-014: McpState seed exposure blocks full integration test isolation (est. 1 hour refactor)
 - TD-015: Contract drift on exit codes (60 vs. 35 for index missing; amend contract)
+- TD-016: `.tome.old/` orphan cleanup (doctor, Phase 10+)
 
 ### Phase 4 (Complete)
 
@@ -375,7 +391,7 @@ Intentional design decisions with known limitations:
 ## Concern Severity Guide
 
 | Level | Definition | Response Time |
-|-------|------------|----------------|
+|-------|------------|---------------|
 | Critical | Production impact, security breach, data loss | Immediate (within sprint) |
 | High | Degraded functionality, significant risk, blocking future phases | This sprint |
 | Medium | Developer experience, minor risk, addressable when working in area | Next sprint |

@@ -87,6 +87,43 @@ pub enum Command {
     /// flag is intentionally ignored — the protocol IS the structured
     /// output.
     Mcp(McpArgs),
+    /// Inspect or create per-project workspaces. See
+    /// `contracts/workspace-info.md` and `contracts/workspace-init.md`.
+    Workspace(WorkspaceArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct WorkspaceArgs {
+    #[command(subcommand)]
+    pub command: WorkspaceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkspaceCommand {
+    /// Report the resolved workspace context for the current invocation.
+    /// Read-only; honours `--workspace` / `--global` like every other
+    /// command. Bootstrap-not-yet is informational, not an error.
+    Info,
+    /// Create a `.tome/` workspace at `<path>` (defaults to current
+    /// directory). Atomic — a SIGINT or crash leaves either no `.tome/`
+    /// or a complete one, never a partial.
+    Init(WorkspaceInitArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct WorkspaceInitArgs {
+    /// Workspace root. Defaults to the current directory. Must already
+    /// exist — init does NOT create the parent directory.
+    pub path: Option<PathBuf>,
+    /// Seed the new workspace's `[catalogs]` from the global config.
+    /// Enablement state is NEVER copied — enablement lives in the
+    /// index DB, not the config.
+    #[arg(long = "inherit-global")]
+    pub inherit_global: bool,
+    /// Replace a pre-existing `.tome/` (rename aside, then remove).
+    /// Without `--force`, init refuses on a pre-existing marker.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, clap::Args)]

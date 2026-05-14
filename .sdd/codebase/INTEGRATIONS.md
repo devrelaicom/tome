@@ -2,13 +2,7 @@
 
 > **Purpose**: Document all external services, APIs, databases, and third-party integrations.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 5 slice 2 — `tome plugin disable` subcommand; no new external service integrations)
-> **Updated**: 2026-05-13 (Phase 6 slice 1–2 — explicit model management CLI; no new external integrations)
-> **Updated**: 2026-05-13 (Phase 7 slices 1–3 — reindex library + `tome catalog update` cascade + `tome reindex` CLI; no new external integrations)
-> **Updated**: 2026-05-13 (Phase 8 slices 1–2 — `tome status [--verify]` health check + version pre-parse hook; no new external integrations)
-> **Updated**: 2026-05-13 (Phase 9 slice 1 — `tome catalog remove` Phase 2 extensions; cascade-disable orchestrator; no new external integrations)
-> **Updated**: 2026-05-14 (Foundational F7–F8 — schema migration framework + MCP server scaffolding; `src/mcp/` is now the live boundary for `tokio` + `rmcp` deps)
-> **Updated**: 2026-05-14 (Phase 3 / User Story 1 — `tome mcp` CLI command end-to-end; MCP server now the live integration boundary)
+> **Last Updated**: 2026-05-14 (Phase 3 / US2 — `tome workspace info` + `tome workspace init` commands; workspace-scoped paths + registry file)
 
 ## Databases & Data Stores
 
@@ -16,30 +10,38 @@
 
 | Service | Type | Purpose | Location |
 |---------|------|---------|----------|
-| SQLite 3 | Embedded relational DB | Local skill index — metadata, embeddings, reranker scores | `${XDG_DATA_HOME}/tome/index.db` (WAL mode); schema in `src/index/schema.rs` |
+| SQLite 3 | Embedded relational DB | Local skill index — metadata, embeddings, reranker scores | Global: `${XDG_DATA_HOME}/tome/index.db` (WAL mode); Workspace: `${WORKSPACE}/.tome/index.db` (Phase 3 Foundational F1); schema in `src/index/schema.rs` |
 
 ### Connection Patterns
 
 - **Statically linked**: `rusqlite` with `bundled` feature — no system SQLite dependency, no version mismatch risk.
-- **Concurrency model**: Single advisory lockfile (`index.lock`) ensures Phase 3–9 foreground operations are serialised; WAL mode allows readers during writes (MCP server uses read-only open per FR-056).
+- **Concurrency model**: Single advisory lockfile (`index.lock` — global or workspace-scoped per Phase 3 Foundational F1) ensures Phase 3–9 foreground operations are serialised; WAL mode allows readers during writes (MCP server uses read-only open per FR-056).
 - **ORM/Query builder**: Direct SQL via `rusqlite` — prepared statements, parameterised queries.
 - **Migration approach**: Forward-only migrations under advisory lock in `src/index/migrations.rs` (rewritten in Foundational F7 with function-pointer-based `Migration` struct; see STACK.md Foundational F7 section); drift detection in `src/index/meta.rs`.
 
 ### Cache Structure
 
-- **Catalog cache**: Each remote catalog source is content-addressed by `sha256(url)` in `${XDG_DATA_HOME}/tome/catalogs/<sha256>/` — Git working tree, refreshed on `tome catalog update`.
-- **Model cache**: Downloaded model ONNX artefacts stored in `${XDG_DATA_HOME}/tome/models/<model-name>/` with per-model `manifest.json` (strict JSON, `#[serde(deny_unknown_fields)]`); managed explicitly via `tome models {download,list,remove}` (Phase 6).
-- **Atomic writes**: `tempfile` crate (rename-based) prevents corruption on SIGINT; `.partial/` directories ensure no half-extracted state visible to concurrent processes.
+- **Catalog cache**: Each remote catalog source is content-addressed by `sha256(url)` in `${XDG_DATA_HOME}/tome/catalogs/<sha256>/` (global scope) or `${WORKSPACE}/.tome/catalogs/<sha256>/` (workspace scope) — Git working tree, refreshed on `tome catalog update`.
+- **Model cache**: Downloaded model ONNX artefacts stored in `${XDG_DATA_HOME}/tome/models/<model-name>/` (global, shared across scopes) with per-model `manifest.json` (strict JSON, `#[serde(deny_unknown_fields)]`); managed explicitly via `tome models {download,list,remove}` (Phase 6).
+- **Atomic writes**: `tempfile` crate (rename-based) prevents corruption on SIGINT; `.partial/` directories ensure no half-extracted state visible to concurrent processes; workspace `init` uses `tempfile::Builder::tempdir_in(workspace_root)` for POSIX-atomic staging-to-final rename (Phase 3 / US2).
+
+### Workspace Registry (Phase 3 / US2)
+
+- **File**: `${XDG_DATA_HOME}/tome/workspaces.txt` — opt-in (never created unless explicitly requested)
+- **Format**: Line-delimited absolute paths to workspace roots, one per line; dedupe by exact-path match
+- **Semantics**: Informational only — tracks which workspaces have been initialized via `--inherit-global` or explicit `append_if_registry_exists` call (research §R-15)
+- **Usage**: Client harnesses can read this file to discover initialized workspaces; Tome never requires it to exist
 
 ---
 
 ## Authentication & Authorization
 
-Phase 1–9 has no explicit application-layer authentication. Phase 3 / US1 MCP server similarly has no auth mechanism — it is stdio-based (embedding in Claude Code harness provides transport-level auth).
+Phase 1–9 has no explicit application-layer authentication. Phase 3 / US1 MCP server similarly has no auth mechanism — it is stdio-based (embedding in Claude Code harness provides transport-level auth). Phase 3 / US2 adds workspace scoping but no auth model changes.
 
 - **Git operations**: Inherit system SSH keys and HTTP credential helpers (if configured in `~/.gitconfig`).
 - **Hugging Face model downloads**: No API key required; public `https://huggingface.co/` URLs are freely accessible (MODEL_REGISTRY pinned to MIT-licensed BGE variants).
 - **Plugin manifest ownership**: File system permissions validate catalog ownership (email field in `tome-catalog.toml` is metadata only).
+- **Workspace ownership**: Implicitly owned by the user who runs `tome workspace init`; no explicit permission model (Phase 3 / US2).
 - **Credential scrubbing**: All Git stderr and model download error chains pass through `scrub_credentials()` before logging (principle XIII; extended in Phase 3 to cover HF URLs).
 - **MCP server identity** (Phase 3 / US1): Identified by `server_info { name: "tome", version: "0.x" }` in the MCP handshake; no per-call authentication.
 
@@ -68,6 +70,7 @@ None in Phase 1–9. Phase 3 / US1 introduces internal library APIs:
 - **Failure mode**: Network error → `TomeError::Io` (exit 7); checksum mismatch → `TomeError::ModelChecksumMismatch` (exit 32); corrupted registry → `TomeError::ModelCorrupt` (exit 31)
 - **Explicit management**: Phase 6 wires `tome models {download,list,remove}` to let users explicitly manage artefacts; `tome models list --verify` invokes SHA-256 per-file validation via `embedding::download::sha256_file()`
 - **Status visibility**: Phase 8 adds `tome status [--verify]` to audit model directory state without triggering downloads; per-model validation only runs when `--verify` is set
+- **Scope**: Models are global (shared across all workspaces and global scope); downloaded to `${XDG_DATA_HOME}/tome/models/` regardless of active scope (Phase 3 / US2)
 
 ---
 
@@ -81,8 +84,8 @@ None in Phase 1–9. Phase 3 / US1 MCP server is stdio-based (single request/res
 
 | Service | Purpose | TTL / Eviction | Configuration |
 |---------|---------|----------------|---------------|
-| Filesystem (XDG) | Catalog Git working trees | Explicit `tome catalog remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/catalogs/` — git-based, refreshed on `tome catalog update` |
-| Filesystem (XDG) | Downloaded model artefacts | Explicit `tome models remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/models/` — one dir per model with manifest + ONNX files; Phase 6 adds explicit user-facing commands |
+| Filesystem (XDG) | Catalog Git working trees | Explicit `tome catalog remove` (user-managed); persistent | Global: `${XDG_DATA_HOME}/tome/catalogs/` — git-based, refreshed on `tome catalog update`; Workspace: `${WORKSPACE}/.tome/catalogs/` (Phase 3 Foundational F1) |
+| Filesystem (XDG) | Downloaded model artefacts | Explicit `tome models remove` (user-managed); persistent | `${XDG_DATA_HOME}/tome/models/` — one dir per model with manifest + ONNX files; Phase 6 adds explicit user-facing commands; shared across all scopes (global) |
 
 No TTL-based eviction. Phase 1–9 uses explicit user commands for cleanup (principle VI: KISS).
 
@@ -94,7 +97,7 @@ No TTL-based eviction. Phase 1–9 uses explicit user commands for cleanup (prin
 |---------|---------|-----------------|
 | Structured logging (via `tracing`) | Diagnostic tracing to stderr (CLI) and JSON-lines to file (MCP server) | CLI: `RUST_LOG` or `TOME_LOG` environment variables; independent of `--json` stdout mode. MCP: JSON-lines to `${XDG_STATE_HOME}/tome/mcp.log` per `contracts/log-format.md`; 10 MiB rotation cap; stderr reserved for fatal startup errors only per FR-222 |
 | Exit codes | Scriptable error handling | 18+ enumerated codes (Phase 2: 0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 30, 31, 32); Phase 3 adds codes 60–61 (MCP), 70–75 (workspace/schema including exit 73 for write-path schema version too new); documented in `specs/002-phase-2-plugins-index/contracts/exit-codes.md` and `specs/003-phase-3-mcp-workspaces/contracts/exit-codes-p3.md` |
-| Status checks | Per-subsystem health via `tome status` | Phase 8 — health report includes models, index, drift state; lazy validation with `--verify` flag |
+| Status checks | Per-subsystem health via `tome status` | Phase 8 — health report includes models, index, drift state; lazy validation with `--verify` flag; Phase 3 / US2 — `tome workspace info` reports scope identity + catalog/plugin/skill counts + embedder identity; no health semantics (informational only) |
 
 ---
 
@@ -102,7 +105,7 @@ No TTL-based eviction. Phase 1–9 uses explicit user commands for cleanup (prin
 
 | Service | Purpose | Configuration |
 |---------|---------|---------------|
-| XDG-compliant filesystem | Configuration, catalogs, models, index | `${XDG_CONFIG_HOME}`, `${XDG_DATA_HOME}`, `${XDG_STATE_HOME}` (principle XII: inherit, don't reimplement); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]`; Phase 9 extends catalog removal with cascade-disable index cleanup; Foundational F8 adds MCP log to `${XDG_STATE_HOME}/tome/mcp.log`; Phase 3 / US1 MCP server operates on same index + models + config |
+| XDG-compliant filesystem | Configuration, catalogs, models, index | Global: `${XDG_CONFIG_HOME}/tome/config.toml`, `${XDG_DATA_HOME}/tome/catalogs/<sha>/`, `${XDG_DATA_HOME}/tome/models/`, `${XDG_DATA_HOME}/tome/index.db`; Workspace: `${WORKSPACE}/.tome/config.toml`, `${WORKSPACE}/.tome/catalogs/<sha>/`, `${WORKSPACE}/.tome/index.db` (Phase 3 Foundational F1); Phase 6 adds explicit model lifecycle commands; Phase 8 adds read-only audit via `tome status [--verify]`; Phase 9 extends catalog removal with cascade-disable index cleanup; Foundational F8 adds MCP log to `${XDG_STATE_HOME}/tome/mcp.log`; Phase 3 / US1 MCP server operates on same index + models + config per scope; Phase 3 / US2 adds `${XDG_DATA_HOME}/tome/workspaces.txt` opt-in registry (research §R-15) and atomic `.tome/` dir creation via tempfile staging (staging dir inside workspace root for POSIX-atomic rename, chmod 0700 before content lands) |
 
 ---
 
@@ -118,11 +121,11 @@ None in Phase 1–9.
 |----------|----------|---------|---------|---------------|
 | `HOME` | Yes | Base directory for XDG path resolution | `/Users/aaronbassett` | — |
 | `XDG_CONFIG_HOME` | No (defaults to `~/.config`) | Override config directory | `/opt/etc` | — |
-| `XDG_DATA_HOME` | No (defaults to `~/.local/share`) | Override data directory (models, catalogs, index.db) | `/opt/var` | — |
+| `XDG_DATA_HOME` | No (defaults to `~/.local/share`) | Override data directory (models, catalogs, index.db, workspaces.txt) | `/opt/var` | — (US2 adds workspaces.txt location) |
 | `XDG_STATE_HOME` | No (defaults to `~/.local/state`) | Override state directory (MCP log) | `/opt/state` | Foundational F8 |
 | `TOME_LOG` | No | Custom log filter (overrides `RUST_LOG`) | `debug`, `info`, `tome=trace` | — |
 | `RUST_LOG` | No | Standard Rust log filter | `info`, `warn` | — |
-| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR`; phase 8: status report respects `NO_COLOR`; phase 9: cascade-disable output respects `NO_COLOR`; phase 3/US1: MCP stdout is protocol-only (no color possible) |
+| `NO_COLOR` | No | Disable coloured output (per CLICOLOR spec) | (presence enables) | phase 3: extended to cover presentation layers (`owo-colors` native support, `inquire` respects it); phase 4: interactive browse flow respects `NO_COLOR`; phase 5: disable subcommand respects `NO_COLOR`; phase 6: models commands respect `NO_COLOR`; phase 8: status report respects `NO_COLOR`; phase 9: cascade-disable output respects `NO_COLOR`; phase 3/US1: MCP stdout is protocol-only (no color possible); phase 3/US2: workspace info respects `NO_COLOR` |
 | `CLICOLOR` | No | Disable coloured output (alternate) | `0` to disable | — |
 
 ---
@@ -169,7 +172,7 @@ None in Phase 1–9.
 | `plugin.json` | Catalog plugin dirs | Lenient (unknown fields ignored) | Third-party plugin metadata (FR-013a boundary) |
 | SKILL.md YAML frontmatter | Upstream plugin repos | Lenient (unknown fields ignored) | Third-party skill/agent/command/hook metadata; parsed by `serde_yaml` without validation |
 | `tome-catalog.toml` | Catalog root | Strict (`deny_unknown_fields`) | Tome-owned manifest; validates all fields |
-| `config.toml` | `${XDG_CONFIG_HOME}/tome/` | Strict (`deny_unknown_fields`) | Tome-owned user config; rejects typos early |
+| `config.toml` | Global: `${XDG_CONFIG_HOME}/tome/`; Workspace: `${WORKSPACE}/.tome/` (Phase 3 / US2) | Strict (`deny_unknown_fields`) | Tome-owned user config; rejects typos early |
 
 ---
 
@@ -217,6 +220,23 @@ None in Phase 1–9.
 
 ---
 
+## Workspace Scope Integration (Phase 3 / US2)
+
+**Status:** Workspace info + init commands landed (US2); scope-aware path resolution per Foundational F1.
+
+| Aspect | Details |
+|--------|---------|
+| **Scope types** | Global (default, uses XDG paths) or Workspace (per `.tome/` directory); resolved via `Paths::resolve()` which walks `cwd` up the tree looking for `.tome/` marker or uses global on failure (research §R-15) |
+| **Path model** | Per-scope `Paths` accessor methods: `Paths::config_file_for(&Scope)`, `Paths::index_db_for(&Scope)`, `Paths::index_lock_for(&Scope)` added in Foundational F1 to support both global + workspace scopes; existing Phase 1 fields retained for backward compat (convention F1) |
+| **Config location** | Global: `${XDG_CONFIG_HOME}/tome/config.toml`; Workspace: `${WORKSPACE}/.tome/config.toml` (parse errors → `WorkspaceMalformed` exit 70 per US2.a) |
+| **Index location** | Global: `${XDG_DATA_HOME}/tome/index.db`; Workspace: `${WORKSPACE}/.tome/index.db` (same WAL + advisory lock model; read-only on MCP server per FR-056) |
+| **Info command** | `tome workspace info` (US2.a) — read-only scope report via `WorkspaceInfo` wire record; catalog/plugin/skill counts come from config + index; `ScopeSource` enum (flag/global-flag/env/cwd-walk/global-fallback) serialised with snake_case (e.g., `GlobalFlag` → `"global_flag"` in JSON) |
+| **Init command** | `tome workspace init [<path>] [--inherit-global] [--force]` (US2.b) — atomic `.tome/` creation; staging dir inside workspace root (same FS) via `tempfile::Builder::tempdir_in`; POSIX-atomic final rename; `--inherit-global` seeds config with global catalogs (no enablement copy); `--force` replaces existing atomically (aside to `.tome.old/`, best-effort cleanup); pre-check refuses without `--force` (exit 4 / `CatalogAlreadyExists` shared with Phase 1 catalog case) |
+| **Registry file** | `${XDG_DATA_HOME}/tome/workspaces.txt` — opt-in (created on-demand, never mandatory); line-delimited workspace roots; deduped by exact-path match; informational only (client harnesses can discover initialized workspaces; Tome doesn't require it) |
+| **CLI wiring** | New `Command::Workspace(WorkspaceArgs)` + `WorkspaceCommand::{Info, Init}` variants in `src/cli.rs`; scope resolved once in `commands/workspace/mod.rs` dispatcher and threaded through each subcommand |
+
+---
+
 ## What Does NOT Belong Here
 
 - Internal code architecture → ARCHITECTURE.md
@@ -226,4 +246,4 @@ None in Phase 1–9.
 
 ---
 
-*This document maps external service dependencies and failure modes. Updated for Phase 3 Foundational F7–F8 + Phase 3 / US1: schema migration framework rewrite + MCP server scaffolding scoped to `src/mcp/` with `tokio` + `rmcp` dependencies; live MCP server entry point is `tome mcp` CLI command with two tools advertised.*
+*This document maps external service dependencies and failure modes. Updated for Phase 3 Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2: schema migration framework rewrite + MCP server scaffolding scoped to `src/mcp/` + workspace info/init commands with scope-aware path resolution and opt-in workspace registry file.*

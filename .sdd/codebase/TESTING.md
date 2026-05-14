@@ -50,6 +50,8 @@ tests/
 ├── version_output.rs              # Compile-time content tests (Phase 8)
 ├── mcp_server.rs                  # MCP tool router + handler introspection (Phase 3)
 ├── mcp_lifecycle.rs               # MCP pre-flight exit codes (Phase 3)
+├── workspace_info.rs              # Library API: `workspace::info::assemble` (Phase 4 / US2)
+├── workspace_init.rs              # Library API + CLI: `workspace::init` (Phase 4 / US2)
 ├── atomicity_enable.rs            # Failure-injection: enable rollback (Phase 3)
 ├── exit_codes.rs                  # Unit: exhaustiveness check on TomeError
 ├── error_messages.rs              # Unit: error message format correctness
@@ -75,8 +77,8 @@ tests/
 | Category | Location | Style |
 |----------|----------|-------|
 | Unit tests | `tests/{test_name}.rs` | Test one concept (parser, error path, validator) |
-| Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/reindex.rs`, `tests/catalog_update_reindex.rs`, `tests/status.rs` | Exercise library API with `StubEmbedder`, bypassing `Paths::resolve` + `FastembedEmbedder::load` |
-| Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs`, `tests/plugin_disable.rs`, `tests/models_*.rs`, `tests/reindex.rs` (parse-error tests), `tests/catalog_remove_cascade.rs` | Spawn `tome` binary as subprocess; used when no embedders are loaded |
+| Integration tests (library API) | `tests/plugin_enable.rs`, `tests/query.rs`, `tests/reindex.rs`, `tests/catalog_update_reindex.rs`, `tests/status.rs`, `tests/workspace_info.rs`, `tests/workspace_init.rs` | Exercise library API with `StubEmbedder`, bypassing `Paths::resolve` + `FastembedEmbedder::load` |
+| Integration tests (CLI binary) | `tests/plugin_list.rs`, `tests/plugin_show.rs`, `tests/plugin_disable.rs`, `tests/models_*.rs`, `tests/reindex.rs` (parse-error tests), `tests/catalog_remove_cascade.rs`, `tests/workspace_init.rs` (CLI tests) | Spawn `tome` binary as subprocess; used when no embedders are loaded |
 | Integration tests (PTY-driven) | `tests/plugin_interactive.rs` | Scripted pty session with `rexpect`; driven via real terminal I/O |
 | Integration tests (MCP handler-level) | `tests/mcp_server.rs` | Call handler `async fn` directly inside `tokio::runtime::Builder::new_current_thread()` block (Phase 3) |
 | Integration tests (MCP lifecycle) | `tests/mcp_lifecycle.rs` | CLI-binary tests for MCP pre-flight exit codes (Phase 3) |
@@ -86,6 +88,74 @@ tests/
 | In-module unit tests | `src/{module}/log.rs::tests` | Small filesystem operations (rotation, permission, idempotent no-ops) (Phase 3 / F8) |
 
 ## Test Patterns
+
+### Threaded Concurrency Contention Pattern (Phase 4 / US2)
+
+For tests that exercise cross-thread atomicity (distinct from cross-process), use `std::sync::Barrier::new(2)` to synchronize two threads:
+
+```rust
+#[test]
+fn init_refuses_existing_workspace_without_force_under_concurrent_threads() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    let ws = workspace_root(&tmp, "project");
+
+    // Synchronize two threads
+    let barrier = Arc::new(Barrier::new(2));
+    let b1 = barrier.clone();
+    let b2 = barrier.clone();
+    
+    let ws1 = ws.clone();
+    let paths1 = paths.clone();
+    let handle = std::thread::spawn(move || {
+        b1.wait();  // Wait for both threads to reach this point
+        workspace::init(&ws1, false, false, &paths1)
+    });
+
+    b2.wait();  // Synchronize from main thread
+    let result = workspace::init(&ws, false, false, &paths);
+
+    // Both threads attempt the same init; one should fail
+    assert!(handle.join().unwrap().is_err() || result.is_err());
+}
+```
+
+This pattern is used in `tests/workspace_init.rs` to test concurrent init attempts and verify that atomicity holds even when two threads race.
+
+### Workspace Info / Init Library-API Pattern (Phase 4 / US2)
+
+Tests for workspace introspection and initialization follow the library API pattern:
+
+1. **Build minimal state** — `Paths` rooted in temp dir, optional global config seed
+2. **Call library function** — e.g., `workspace::info::assemble(&scope, &paths)?` or `workspace::init(root, inherit, force, &paths)?`
+3. **Assert outcome fields** — check return value, side effects (directory creation, config inheritance)
+4. **No embedder loading** — workspace operations are scope/config-related, not embedding-related
+
+Example from `tests/workspace_info.rs`:
+```rust
+#[test]
+fn assemble_reports_workspace_scope() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    let ws = workspace_root(&tmp, "project");
+    
+    // Initialize workspace via library API
+    workspace::init(&ws, false, false, &paths).expect("init");
+    
+    // Build a resolved scope pointing at the workspace
+    let scope = ResolvedScope {
+        scope: Scope::Workspace(std::fs::canonicalize(&ws).unwrap()),
+        source: ScopeSource::Flag,
+    };
+    
+    // Assemble the report
+    let info = workspace::info::assemble(&scope, &paths).expect("assemble");
+    
+    // Assert
+    assert_eq!(info.scope_kind, ScopeKind::Workspace);
+    assert_eq!(info.scope_source, ScopeSource::Flag);
+}
+```
 
 ### MCP Handler-Level Integration Test Pattern (Phase 3 / F2)
 
@@ -297,6 +367,8 @@ fn status_exit_zero_when_healthy() {
 ```
 
 **Phase 7 parse-error tests:** `tests/reindex.rs` includes 3 CLI-binary tests that cover parse errors and early exits without needing an embedder (unknown catalog → exit 3, malformed id → exit 2, empty install → exit 0). The heavy-state embed paths use the `run_with_deps` library entry point.
+
+**Phase 4 / US2 CLI tests:** `tests/workspace_init.rs` includes 2 CLI-binary smoke tests that verify default workspace resolution and exit-code propagation.
 
 Used when embedders are not involved or interaction with the real binary is essential.
 
@@ -786,6 +858,8 @@ When tests run:
 | `version_output.rs` | Compile-time content | `--version` output includes embedder/reranker identities; `--json` format (Phase 8) |
 | `mcp_server.rs` | Handler-level Library | MCP tool router introspection (tool list, descriptions); handler input-validation (error codes, bounds checks) (Phase 3) |
 | `mcp_lifecycle.rs` | CLI-binary | MCP pre-flight exit codes (workspace conflict, missing index, schema version, missing models) (Phase 3) |
+| `workspace_info.rs` | Library API | `workspace::info::assemble` — scope classification, model identity, catalog inheritance (Phase 4 / US2) |
+| `workspace_init.rs` | Library API + CLI | `workspace::init` — atomic directory creation, config inheritance, `--inherit-global`, `--force`, concurrent init contention (Phase 4 / US2) |
 | `atomicity_enable.rs` | Library API | Failure-injection: `StubEmbedder::with_force_fail_after(n)` → rollback guarantee (FR-004) |
 
 ### Unit Tests (by concern)
@@ -843,9 +917,9 @@ The counter is shared between clones via `Arc<AtomicUsize>` so the closure adapt
 
 ### No Environment Mutation in Library API Tests
 
-**Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`, `catalog_update_reindex.rs`, `reindex.rs`, `status.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
+**Library API tests** (`plugin_enable.rs`, `query.rs`, `atomicity_enable.rs`, `catalog_update_reindex.rs`, `reindex.rs`, `status.rs`, `workspace_info.rs`, `workspace_init.rs`) never touch `$HOME` or environment variables. They use `lifecycle_paths(root)` to build a plain-data `Paths` structure.
 
-**CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse-error tests, `catalog_remove_cascade.rs`) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
+**CLI-binary tests** (`plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse-error tests, `catalog_remove_cascade.rs`, `workspace_init.rs` CLI tests) are the *only* place env vars get touched, and that happens via `Command::env` on the spawned child.
 
 **PTY-driven tests** (`plugin_interactive.rs`) mutate `env` only inside the pty spawning (via `Command::env`), not the parent process.
 
@@ -916,14 +990,15 @@ No automatic coverage threshold enforced, but the test corpus is organized to be
 
 - **Every error class is tested** — each `TomeError` variant appears in `exit_codes.rs` and often in command-specific tests
 - **Bad-input corpus is explicit** — each parser/validator has a separate test file documenting what shapes are rejected
-- **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/disable/list/show`, `plugin` interactive, `models download/list/remove`, `reindex`, `status`) has dedicated tests
-- **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable and cheap-reenable (FR-006), fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback; `catalog_update_reindex.rs` and `reindex.rs` cover batch reindex logic; `status.rs` covers health assessment
+- **Integration tests hit all CLI paths** — every subcommand (`catalog add/list/remove/show/update`, `plugin enable/disable/list/show`, `plugin` interactive, `models download/list/remove`, `reindex`, `status`, `workspace info/init`) has dedicated tests
+- **Library API tests exercise lifecycle** — `plugin_enable.rs` covers enable and cheap-reenable (FR-006), fallbacks, warnings; `query.rs` covers KNN and reranking; `atomicity_enable.rs` covers rollback; `catalog_update_reindex.rs` and `reindex.rs` cover batch reindex logic; `status.rs` covers health assessment; `workspace_info.rs` and `workspace_init.rs` cover workspace discovery and initialization (Phase 4 / US2)
 - **MCP tool handlers tested** — `mcp_server.rs` covers tool router introspection and handler input validation; `mcp_lifecycle.rs` covers pre-flight exit codes
 - **Idempotency tested** — `plugin_repeated.rs` covers enable-of-enabled and disable-of-disabled (FR-008, exit 21)
 - **Interactive flow tested end-to-end** — `plugin_interactive.rs` covers catalog selector, plugin browser, action prompts, navigation, non-TTY refusal
 - **Cascade operations tested** — `catalog_remove_cascade.rs` covers refuse-on-enabled, cascade disable, JSON array envelope (Phase 9)
+- **Workspace operations tested** — `workspace_info.rs` covers scope introspection and model identity reporting; `workspace_init.rs` covers atomic initialization, config inheritance, concurrent contention (Phase 4 / US2)
 - **Compile-time content validated** — `version_output.rs` ensures `--version` output is synchronized with `MODEL_REGISTRY`
-- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift, sparse fixtures (Phase 6), batch reindex cheapness (Phase 7), health classification (Phase 8), cascade atomicity (Phase 9)
+- **Edge cases are tested** — atomicity under interruption (failure-injection), credential scrubbing, path escapes, TOML strictness, model drift, sparse fixtures (Phase 6), batch reindex cheapness (Phase 7), health classification (Phase 8), cascade atomicity (Phase 9), threaded concurrency (Phase 4 / US2)
 
 ## Specimen Tests (Quality Corpus)
 
@@ -976,7 +1051,7 @@ Plugin sources must be:
 cargo build --release           # Full build (includes dependencies)
 cargo fmt --check              # Format check
 cargo clippy --all-targets -- -D warnings  # Linting
-cargo test --workspace         # Full test suite (310 tests across 44 suites)
+cargo test --workspace         # Full test suite (330 tests across 46 suites)
 cargo audit                     # Security: vulnerable dependencies
 cargo deny check                # License compliance
 ```
@@ -985,13 +1060,13 @@ All checks must pass on both platforms (`ubuntu-latest`, `macos-latest`) and bot
 
 ## Test Statistics
 
-**Current:** 310 passed across 44 suites (as of 2026-05-14, end of Phase 3 Foundational US1):
+**Current:** 330 passed across 46 suites (as of 2026-05-14, end of Phase 3 / US2 Foundational):
 - Unit tests (src/lib.rs): 66 (includes 4 new in-module tests for `mcp::log::tests` rotation policy)
-- Integration tests (tests/): 244
+- Integration tests (tests/): 264
 
 Breakdown by test file:
-- Library API (heavy-state logic): `plugin_enable.rs`, `query.rs`, `catalog_update_reindex.rs`, `reindex.rs`, `status.rs`, `atomicity_enable.rs`
-- CLI binary (light-state / parse-error paths): `catalog_*.rs`, `plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse tests, `mcp_lifecycle.rs`
+- Library API (heavy-state logic): `plugin_enable.rs`, `query.rs`, `catalog_update_reindex.rs`, `reindex.rs`, `status.rs`, `workspace_info.rs`, `workspace_init.rs`, `atomicity_enable.rs`
+- CLI binary (light-state / parse-error paths): `catalog_*.rs`, `plugin_list.rs`, `plugin_show.rs`, `plugin_disable.rs`, `models_*.rs`, `reindex.rs` parse tests, `mcp_lifecycle.rs`, `workspace_init.rs` CLI tests
 - Handler-level (MCP introspection): `mcp_server.rs` (8 tests)
 - PTY-driven (interactive flows): `plugin_interactive.rs`
 - Unit (parsers, validators, error paths): `exit_codes.rs`, `error_messages.rs`, `manifest_strictness.rs`, `path_validation.rs`, `scrubbing.rs`, `atomicity.rs`, and in-module tests in `src/mcp/log.rs`
@@ -1170,6 +1245,28 @@ For pre-flight exit-code tests:
 3. Set up conditions that trigger pre-flight failures (missing index, schema mismatch, missing models)
 4. Spawn the binary with `mcp` subcommand, assert exit code
 5. Run `cargo test mcp_lifecycle` to verify
+
+### Testing Workspace Commands (Phase 4 / US2)
+
+For library API tests (introspection and initialization logic):
+1. Create integration test file `tests/workspace_*.rs` (library API)
+2. Use `lifecycle_paths` to build paths, optional global config seed
+3. Call library API: `workspace::info::assemble(&scope, &paths)?` or `workspace::init(root, inherit, force, &paths)?`
+4. Assert outcome fields (scope_kind, catalogs, workspace path, config)
+5. Assert side effects (directory creation, config inheritance)
+6. Run `cargo test workspace_*` to verify
+
+For CLI tests (smoke tests):
+1. Reuse the library API test scaffolding
+2. Use `ToolEnv`, `paths_for`
+3. Spawn the binary with `workspace info` or `workspace init`, assert exit code + output
+4. Run `cargo test workspace_*` to verify
+
+For concurrent contention tests (workspace init):
+1. Use `std::sync::Barrier::new(2)` to synchronize two threads
+2. Have both threads attempt the same operation (e.g., init)
+3. Assert that one succeeds and one fails appropriately
+4. Verify that atomicity held even under thread contention
 
 ### Testing Idempotency (Phase 5)
 

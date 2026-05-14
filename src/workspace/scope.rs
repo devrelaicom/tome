@@ -12,6 +12,8 @@
 
 use std::path::PathBuf;
 
+use serde::Serialize;
+
 /// Which install-scope a command operates against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
@@ -29,7 +31,12 @@ pub enum Scope {
 ///
 /// The enum is `Copy` because every variant is a unit — `match` arms
 /// elsewhere benefit from cheap pattern duplication.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Serialised in snake_case to match the `source` field values pinned by
+/// `contracts/workspace-info.md`:
+/// `"flag" | "global_flag" | "env" | "cwd_walk" | "global_fallback"`.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum ScopeSource {
     /// `--workspace <path>` on the CLI.
     Flag,

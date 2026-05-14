@@ -2,13 +2,7 @@
 
 > **Purpose**: Document what executes in this codebase - languages, runtimes, frameworks, and critical dependencies.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-13 (Phase 5 User Story 2 — `tome plugin disable` subcommand + re-enable verification)
-> **Updated**: 2026-05-13 (Phase 6 User Story 4 slice 1 — `tome models download | list | remove` CLI; slice 2 adds 9 integration tests)
-> **Updated**: 2026-05-13 (Phase 7 User Story 5 slices 1–3 — `reindex_plugin_atomic` + `tome catalog update` cascade + `tome reindex` CLI; no new dependencies)
-> **Updated**: 2026-05-13 (Phase 8 User Story 6 slices 1–2 — `tome status [--verify]` + version pre-parse hook; 14 new tests; no new dependencies)
-> **Updated**: 2026-05-13 (Phase 9 User Story 7 — `tome catalog remove` Phase 2 extensions; cascade-disable orchestrator; no new dependencies)
-> **Updated**: 2026-05-14 (Foundational F7–F8 — `src/index/migrations.rs` rewritten + `src/mcp/` module scaffolding; `tracing-subscriber` `json` feature enabled)
-> **Updated**: 2026-05-14 (Phase 3 / User Story 1 — `tome mcp` CLI command end-to-end; `schemars = "1"` direct dep; rmcp features extended to `transport-io` + `schemars`; binary +1.10 MiB)
+> **Last Updated**: 2026-05-14 (Phase 3 / US2 — `tome workspace info` + `tome workspace init` commands; no new dependencies)
 
 ## Languages & Runtimes
 
@@ -36,11 +30,11 @@ Phase 1–9 is a CLI application, not a web framework-based project. Phase 3 Fou
 | `sha2` | 0.10 | Content-addressed cache naming and model integrity | URL hashing for `cache_dir_for()` in `src/paths.rs`; model download verification in `src/embedding/download.rs` |
 | `regex` | 1.x | Credential scrubbing patterns | Git stderr sanitisation in `src/catalog/git.rs` (4 regex patterns); extended in Phase 3 to cover model download URLs (principle XIII) |
 | `ctrlc` | 3.x | Signal handling (SIGINT) | Global cancellation handler with exit code 8; SIGINT cancels in-flight git operations and model downloads |
-| `tempfile` | 3.x | Atomic file writes | Registry, per-catalog cache, models directory, and manifest mutations (atomicity boundary: rename-based) |
+| `tempfile` | 3.x | Atomic file writes | Registry, per-catalog cache, models directory, manifest mutations, and workspace init staging dir (atomicity boundary: rename-based); `tempfile::Builder::tempdir_in` for same-filesystem POSIX-atomic rename in `src/workspace/init.rs` (Phase 3 / US2) |
 | `hex` | 0.4 | Hex encoding for SHA256 digests | Cache directory naming alongside sha2; model checksum comparison in `src/embedding/download.rs` |
 | `semver` | 1.x | Semantic version parsing | Catalog manifest version field validation |
 | `time` | 0.3 | Timestamp formatting and parsing | Logging and manifest timestamps; RFC 3339 serialisation for `ModelManifest.installed_at` |
-| `serde_json` | 1.x | JSON serialisation (NDJSON output) | `--json` mode formatting for stdout; `ModelManifest` serialisation to `manifest.json` |
+| `serde_json` | 1.x | JSON serialisation (NDJSON output) | `--json` mode formatting for stdout; `ModelManifest` serialisation to `manifest.json`; `WorkspaceInfo` and `InitOutcome` serialisation in Phase 3 / US2 |
 
 ### Phase 2 — foundational (no user-facing CLI wired until Phase 3)
 
@@ -271,6 +265,51 @@ US1 implements the live MCP server entry point per `contracts/mcp-server.md`:
 
 **No breaking changes** to Phase 1–9 code outside `src/mcp/`. `src/mcp/` is fully exempt from the sync-only boundary enforced by `tests/sync_boundary.rs`.
 
+### Phase 3 / User Story 2 — workspace info + init commands
+
+US2 adds scope-aware workspace creation and introspection per `contracts/workspace-info.md` and `contracts/workspace-init.md`:
+
+**US2.a — `tome workspace info` (read-only scope report)**
+
+- `src/workspace/info.rs` — `WorkspaceInfo` + `ScopeKind` + `ModelIdentity` emit-only types per data-model §4
+  - `ScopeKind` enum: `Global` / `Workspace` — serialised in `--json` as lowercase strings
+  - `ModelIdentity` struct: `{ name: String, version: String }` — wire format for embedder/reranker identities (absent fields render as `None`)
+  - `WorkspaceInfo` struct: carries scope kind, path, source, catalog/plugin/skill counts, schema version, embedder identity
+- `src/commands/workspace/info.rs` — emit-wrapper. `pub fn assemble(scope, paths) -> Result<WorkspaceInfo, TomeError>` is the pure-compute library-API entry point
+  - Catalog count from config TOML (Tome-owned, strict — parse errors surface as `WorkspaceMalformed` / exit 70)
+  - Index facts from read-only SQLite handle; absent fields collapse to zero counts + `None` schema/embedder
+  - `ScopeSource` gains `Serialize` with `#[serde(rename_all = "snake_case")]` for contract-compliant JSON (flags like `GlobalFlag` render as `global_flag`)
+- CLI wiring: `Command::Workspace(WorkspaceArgs)` + `WorkspaceCommand::Info` variants in `src/cli.rs`
+- 8 new tests in `tests/workspace_info.rs`: zero-state global, populated global, workspace with config-only, JSON byte-stability, malformed config → exit 70, CLI binary smoke tests
+
+**No new production dependencies** in US2.a — all pieces reuse Phase 1–Phase 3/US1 infrastructure (serde, paths, index library APIs).
+
+**US2.b — `tome workspace init` (atomic `.tome/` creation)**
+
+- `src/workspace/init.rs` — `pub fn init(target_root, inherit_global, force, paths) -> Result<InitOutcome, TomeError>` orchestrator
+  - Validates path existence → builds staging dir inside workspace root (same FS = atomic POSIX rename per research §R-15)
+  - Writes `config.toml` via existing `catalog::store::write_atomic`
+  - `--inherit-global` seeds workspace config with global catalog table (enablement never copied — lives in index DB, not config)
+  - `--force` renames existing `.tome/` to `.tome.old/` before new dir lands; rollback restores the aside on staging-to-final rename failure
+  - `staging dir chmod 0700` (Unix) before content lands — secret-keeping window starts at directory creation
+  - Staging dir via `tempfile::Builder::tempdir_in(workspace_root)` ensures same-filesystem, allowing POSIX-atomic final rename
+- `src/workspace/inventory.rs::append_if_registry_exists` — opt-in workspace registration helper
+  - Silently no-ops when `workspaces.txt` absent (user hasn't requested tracking)
+  - Dedupe by exact-path match against canonical workspace root
+- `src/commands/workspace/init.rs` — thin CLI wrapper. Default path resolves to `std::env::current_dir()` per contract
+- `WorkspaceCommand::Init(WorkspaceInitArgs)` variant lands in `src/cli.rs`
+- 12 new tests in `tests/workspace_init.rs`: happy path, `--inherit-global` seeds catalogs, pre-existing refusal (exit 4 / `CatalogAlreadyExists`), `--force` atomicity, missing/file-not-dir paths → exit 7, registry append with dedupe, concurrent init contention cleanup, CLI binary smoke tests
+
+**Error reuse:**
+- `CatalogAlreadyExists` (code 4) shared with Phase 1 catalog case — exit code + JSON envelope are what harnesses key off; dedicated variant deferred until a specific failure mode needs distinction
+
+**Atomicity guarantee:**
+- Staging dir inside workspace root ensures POSIX-atomic rename on final step (same FS)
+- SIGINT or crash between staging and rename leaves either no `.toe/` or complete `.tome/`, never partial
+- Orphaned `.tome.old/` dirs can accumulate if crash between aside and cleanup (out of scope for US2, flagged as doctor candidate)
+
+**No new production dependencies** in US2.b — all pieces reuse Phase 1–3 infrastructure (serde_json, tempfile, paths, catalog store). Test count: 318 → 330 across 44 → 46 suites.
+
 ## Package Managers & Build Tools
 
 | Tool | Version | Purpose |
@@ -285,10 +324,11 @@ US1 implements the live MCP server entry point per `contracts/mcp-server.md`:
 |-------------|---------|
 | OS Targets | Linux (ubuntu-latest) and macOS (macos-latest) — CI verified on both |
 | Deployment | Single binary (`target/release/tome`); installed via `cargo install --path .` |
-| Binary Size | < 50 MB stripped (enforced by CI; revised from 10 MB ceiling in CONSTITUTION v1.2.0 after Phase 3 slice 1 measured 29.56 MB on Linux; `ort` CPU-only static linking is the load-bearing constraint; US1 final 22.04 MiB on macOS arm64) |
+| Binary Size | < 50 MB stripped (enforced by CI; revised from 10 MB ceiling in CONSTITUTION v1.2.0 after Phase 3 slice 1 measured 29.56 MB on Linux; `ort` CPU-only static linking is the load-bearing constraint; US1 final 22.04 MiB on macOS arm64; US2 maintains same footprint — no new production dependencies) |
 | Output | Human-readable (default) or NDJSON (`--json`); logging to stderr only (orthogonal to stdout); colours respect `NO_COLOR` and auto-disable on non-TTY |
 | Model runtime | CPU-only ONNX Runtime (via `fastembed`); models downloaded at first use into `${XDG_DATA_HOME}/tome/models/`; fixed registry (compile-time constants) ensures bit-for-bit reproducibility |
 | MCP server runtime | Single-threaded tokio with JSON-lines file logging to `${XDG_STATE_HOME}/tome/mcp.log` (10 MiB rotation cap); stdout reserved for MCP protocol only; stderr for fatal startup errors only |
+| Workspace storage | Atomic `.tome/` directories created via `tempfile::Builder::tempdir_in` (staging + POSIX rename); config persisted to `${WORKSPACE}/.tome/config.toml`; index DB at `${WORKSPACE}/.tome/index.db` per Phase 3 Foundational F1 |
 
 ## Not Used (Explicitly Excluded)
 
@@ -310,4 +350,4 @@ US1 implements the live MCP server entry point per `contracts/mcp-server.md`:
 
 ---
 
-*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 + Foundational F7–F8 + Phase 3 / US1 source code.*
+*This document captures only what executes. It reflects the actual Cargo.toml, Cargo.lock, and Phase 1–9 + Foundational F7–F8 + Phase 3 / US1 + Phase 3 / US2 source code.*

@@ -53,6 +53,7 @@ fn main() {
         Command::Reindex(args) => commands::reindex::run(args, &scope, mode),
         Command::Status(args) => commands::status::run(args, &scope, mode),
         Command::Mcp(args) => commands::mcp::run(args, &scope, mode),
+        Command::Workspace(args) => commands::workspace::run(args.command, &scope, mode),
     };
 
     match result {

@@ -157,7 +157,11 @@ src/
 │   │   └── remove.rs         # `tome models remove <model>`
 │   ├── query.rs              # `tome query <text>` (Phase 3)
 │   ├── reindex.rs            # `tome reindex [<scope>]` + library entry point (Phase 7)
-│   └── status.rs             # `tome status [--verify]` — single-file, read-only (Phase 8)
+│   ├── status.rs             # `tome status [--verify]` — single-file, read-only (Phase 8)
+│   └── workspace/            # `tome workspace` subcommands (Phase 4 / US2)
+│       ├── mod.rs            # Dispatcher
+│       ├── info.rs           # `tome workspace info` (Phase 4 / US2)
+│       └── init.rs           # `tome workspace init` (Phase 4 / US2)
 ├── catalog/                  # Catalog manifest + storage + git operations
 │   ├── mod.rs
 │   ├── manifest.rs           # Parser + validator (strict TOML)
@@ -204,6 +208,13 @@ src/
 │   ├── runtime.rs            # tokio::runtime setup + logging
 │   ├── preflight.rs          # MCP startup pre-flight checks (scope, index, schema, drift, models)
 │   └── log.rs                # JSON-lines file appender + rotation (Phase 3 / F8)
+├── workspace/                # Workspace context (Phase 4 / US2)
+│   ├── mod.rs
+│   ├── scope.rs              # Scope enum + ScopeSource (resolution provenance)
+│   ├── resolution.rs         # Workspace discovery algorithm (slice F3)
+│   ├── info.rs               # `tome workspace info` (Phase 4 / US2)
+│   ├── init.rs               # `tome workspace init` (Phase 4 / US2)
+│   └── inventory.rs          # Workspace registry (opt-in workspaces.txt)
 └── presentation/             # CLI output / progress / colours / prompts (Phase 2)
     ├── mod.rs
     ├── tables.rs             # comfy-table helpers
@@ -235,6 +246,8 @@ tests/
 ├── version_output.rs         # Compile-time content tests for `--version` output (Phase 8)
 ├── mcp_server.rs             # MCP tool router + handler introspection tests (Phase 3)
 ├── mcp_lifecycle.rs          # MCP pre-flight exit codes (Phase 3)
+├── workspace_info.rs         # Library API tests for `workspace::info::assemble` (Phase 4 / US2)
+├── workspace_init.rs         # Library API + CLI tests for `workspace::init` (Phase 4 / US2)
 ├── atomicity_enable.rs       # Failure-injection tests for enable rollback (FR-004)
 ├── exit_codes.rs             # Exhaustiveness check: every TomeError → exit code
 ├── error_messages.rs         # Error message correctness
@@ -260,6 +273,7 @@ The pattern is consistent across:
 - `plugin` (enable, disable, list, show, interactive)
 - `models` (download, list, remove)
 - `catalog` (add, remove, list, update/reindex, show)
+- `workspace` (info, init) — Phase 4 / US2 addition
 
 **Single-purpose commands** (Phase 8 addition) stay as flat `src/commands/<name>.rs`:
 
@@ -293,6 +307,8 @@ pub fn run(args: StatusArgs, mode: Mode) -> Result<(), TomeError> {
 ```
 
 Tests call `assemble_report` directly; the `run` wrapper is for CLI dispatch only.
+
+**Phase 4 / US2 addition:** Commands with non-exit library entry points follow the same pattern. `workspace::info::assemble` is pure compute; `workspace::init` takes a library-only signature. CLI wrappers emit and handle exit semantics.
 
 ### --version Pre-Parse Hook (Phase 8)
 
@@ -367,6 +383,55 @@ match result {
 ```
 
 **Idempotency:** Both `enable` (Phase 3) and `disable` (Phase 5) detect when a plugin is already in the requested state and return `TomeError::PluginAlreadyInState` (exit code 21) per FR-008.
+
+### Atomic Directory Creation Pattern (Phase 4 / US2)
+
+When creating a directory structure that must be atomic (never partially visible), use the `tempfile::Builder::tempdir_in(target_root)` + `TempDir::keep()` + `std::fs::rename` pattern:
+
+1. Create a temp directory **inside the target root** (not in `$TMPDIR`) using `tempfile::Builder::new().prefix(".dot.tmp.").tempdir_in(&absolute)` so the final rename is on the same filesystem (POSIX-atomic)
+2. Write all content into the staging directory
+3. Set permissions (e.g., `0o700` on Unix) on the staging directory before content lands, so the security window starts at creation
+4. Rename the staging directory to the final name via `std::fs::rename`, which is atomic as a single operation
+5. Only on success is the directory visible to readers
+
+This ensures that readers never see a partial `.tome/` directory. Used in `src/workspace/init.rs` for atomic workspace initialization.
+
+Example from `src/workspace/init.rs`:
+```rust
+let staging = tempfile::Builder::new()
+    .prefix(".tome.tmp.")
+    .tempdir_in(&absolute)
+    .map_err(TomeError::Io)?;
+
+// Write content...
+std::fs::write(staging.path().join("config.toml"), config_bytes)?;
+
+// Atomic rename (only step visible to readers)
+std::fs::rename(staging.path(), &marker)?;
+```
+
+### Emit-Only Serialize Records (Phase 4 / US2)
+
+When an outcome or report struct is emitted as JSON output but never deserialized, omit `#[serde(deny_unknown_fields)]`. These are API output records, and strict field validation is unnecessary.
+
+- `WorkspaceInfo` — used only for `--json` emission; uses `#[derive(Serialize)]` without field strictness
+- `InitOutcome` — used only for `--json` emission; uses `#[derive(Serialize)]` without field strictness
+- `ScopeSource` — enum serialized for `--json` output; uses `#[serde(rename_all = "snake_case")]` to match contract values (`"flag" | "global_flag" | "env" | "cwd_walk" | "global_fallback"`)
+
+**Rationale:** Only Tome-owned **inputs** (config, manifests) need strict deserialization. Output records are emit-only and benefit from permissive forward-compat.
+
+### Silent Compute / Emit Wrapper Pattern (Phase 3 / US1 and Phase 4 / US2)
+
+When a CLI command's compute path is reused by non-CLI surfaces (MCP, library API, direct calls), split into:
+1. **Silent compute function** (`pipeline` or `assemble`) — performs all work, no side effects, returns pure result
+2. **Emit wrapper** (`run_with_deps` or `run`) — calls the compute function, then emits per mode (Human or JSON)
+
+Tests + alternative callers use the compute function; the CLI uses the emit wrapper.
+
+Examples:
+- `query::pipeline(args, deps) -> Result<QueryOutcome>` (silent) + `query::run_with_deps(args, deps, mode) -> Result<()>` (emit)
+- `workspace::info::assemble(scope, paths) -> Result<WorkspaceInfo>` (silent); CLI emits via `run()`
+- `workspace::init(target, inherit, force, paths) -> Result<InitOutcome>` (library signature, no emit); CLI emits via `run()`
 
 ### Batch Operations: Locking Patterns (Phase 7–9)
 
@@ -512,6 +577,8 @@ This is enforced by `tests/manifest_strictness.rs`, which parses the source and 
 **Why:** Silent acceptance of unknown fields hides user typos (e.g. `plugin_source` instead of `plugins[].source`). By rejecting unknown fields at parse time, we force the user to read the schema and understand the correct structure.
 
 **Exceptions (Strictness Boundary, FR-013a):** Third-party inputs (`plugin.json`, `SKILL.md` YAML frontmatter) parse leniently with `#[serde(default)]` fallbacks — forward-compat with upstream additions.
+
+**Emit-only records (Phase 4 / US2):** Output-only structs (`WorkspaceInfo`, `InitOutcome`) omit the strictness attribute. These are never deserialized; they are emit-only. Their forward-compat is naturally permissive.
 
 ### Process Execution (Git)
 
