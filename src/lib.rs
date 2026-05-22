@@ -9,6 +9,7 @@ pub mod config;
 pub mod doctor;
 pub mod embedding;
 pub mod error;
+pub mod harness;
 pub mod index;
 pub mod logging;
 pub mod mcp;
