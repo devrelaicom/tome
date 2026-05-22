@@ -641,10 +641,13 @@ fn collect_pending_skills(
 /// `ModelMissing` (exit 30).
 fn ensure_models_present(deps: &LifecycleDeps<'_>) -> Result<(), TomeError> {
     for entry in MODEL_REGISTRY {
-        // Only enforce embedder and reranker — other kinds, if added later,
-        // are not strict requirements of the enable path.
+        // Only enforce embedder and reranker. The summariser is downloaded
+        // on the regen-summary path (US4) — gating enable on its presence
+        // would force every workspace to pull ~400 MB before the first
+        // skill is indexed.
         match entry.kind {
             ModelKind::Embedder | ModelKind::Reranker => {}
+            ModelKind::Summariser => continue,
         }
         if model_manifest_ok(deps.paths, entry)? {
             continue;
@@ -655,7 +658,7 @@ fn ensure_models_present(deps: &LifecycleDeps<'_>) -> Result<(), TomeError> {
             });
         }
         info!(model = entry.name, "downloading model artefact");
-        download_model(entry, &deps.paths.models_dir)?;
+        download_model(entry, &deps.paths.models_dir, None)?;
     }
     Ok(())
 }

@@ -52,7 +52,7 @@ fn status_healthy_with_models_and_index() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
     std::fs::create_dir_all(&paths.root).unwrap();
-    common::fabricate_all_installed_models(&paths);
+    common::fabricate_all_registry_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
@@ -76,7 +76,7 @@ fn status_healthy_with_no_index_yet() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
     std::fs::create_dir_all(&paths.root).unwrap();
-    common::fabricate_all_installed_models(&paths);
+    common::fabricate_all_registry_models(&paths);
 
     let report = assemble_report(&paths, &tome::workspace::Scope::Global, false).expect("assemble");
     // No index bootstrapped — but models present, no drift to detect.
@@ -108,7 +108,7 @@ fn status_degraded_when_only_reranker_missing() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
     std::fs::create_dir_all(&paths.root).unwrap();
-    common::fabricate_all_installed_models(&paths);
+    common::fabricate_all_registry_models(&paths);
 
     // Now remove just the reranker dir.
     let reranker_name = MODEL_REGISTRY
@@ -132,7 +132,7 @@ fn status_degraded_on_reranker_drift_in_meta() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
     std::fs::create_dir_all(&paths.root).unwrap();
-    common::fabricate_all_installed_models(&paths);
+    common::fabricate_all_registry_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
@@ -169,7 +169,7 @@ fn status_unhealthy_on_embedder_drift() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
     std::fs::create_dir_all(&paths.root).unwrap();
-    common::fabricate_all_installed_models(&paths);
+    common::fabricate_all_registry_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
@@ -207,7 +207,7 @@ fn status_verify_flag_detects_checksum_mismatch() {
     // Use the real-sized sparse-file fabricator so the on-disk SHA-256 is
     // an all-zero hash, which by construction does NOT match the registry's
     // pinned SHA.
-    common::fabricate_all_installed_models(&paths);
+    common::fabricate_all_registry_models(&paths);
 
     let report = assemble_report(&paths, &tome::workspace::Scope::Global, true).expect("assemble");
     assert_eq!(
@@ -224,7 +224,7 @@ fn status_cli_exits_0_when_healthy() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    common::fabricate_all_installed_models(&paths);
+    common::fabricate_all_registry_models(&paths);
 
     let out = env.cmd().args(["status"]).output().unwrap();
     assert!(
@@ -248,7 +248,7 @@ fn status_cli_json_emits_structured_record() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    common::fabricate_all_installed_models(&paths);
+    common::fabricate_all_registry_models(&paths);
 
     let out = env.cmd().args(["--json", "status"]).output().unwrap();
     assert!(

@@ -35,7 +35,7 @@ mod common;
 
 use std::io::Write;
 
-use common::{ToolEnv, fabricate_all_installed_models, paths_for};
+use common::{ToolEnv, fabricate_all_registry_models, paths_for};
 use tempfile::TempDir;
 use tome::embedding::registry::{MODEL_REGISTRY, ModelKind};
 use tome::index::{MetaSeed, OpenOptions, SCHEMA_VERSION, open};
@@ -215,7 +215,7 @@ fn mcp_checksum_mismatch_returns_32() {
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
     let _ = open(&paths.index_db, &open_opts()).expect("bootstrap");
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
 
     let mut child = env
         .cmd()

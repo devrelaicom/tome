@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{ToolEnv, fabricate_all_installed_models, fabricate_installed_model, paths_for};
+use common::{ToolEnv, fabricate_all_registry_models, fabricate_installed_models, paths_for};
 use serde_json::Value;
 use tome::embedding::registry::MODEL_REGISTRY;
 
@@ -44,7 +44,7 @@ fn list_with_all_models_installed_reports_ok_under_cheap_check() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
 
     let out = env
         .cmd()
@@ -82,7 +82,7 @@ fn list_with_verify_flips_tampered_artefact_to_checksum_mismatched() {
         .iter()
         .find(|e| matches!(e.kind, tome::embedding::registry::ModelKind::Embedder))
         .expect("registry has an embedder");
-    fabricate_installed_model(&paths, embedder);
+    fabricate_installed_models(&paths, &[embedder]);
 
     let out = env
         .cmd()

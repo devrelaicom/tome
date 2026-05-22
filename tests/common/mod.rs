@@ -207,46 +207,56 @@ pub fn fabricate_models(paths: &Paths) {
     }
 }
 
-/// Fabricate a fully-installed registered model: writes the manifest AND a
-/// sparse artefact file sized to `entry.size_bytes`. Sparse files
-/// (`File::set_len`) take ~no disk space on Linux and macOS, so the 280 MB
-/// reranker fixture is essentially free. Auxiliary files (tokenizer.json etc.)
-/// get a 1-byte sparse file — present + non-empty satisfies the existence
-/// half of `models::cheap_state`. The bytes are all-zero, so the SHA-256 does
-/// NOT match the registry's pinned hash — `models list --verify` uses this
-/// to flip the state to `checksum_mismatched`.
-pub fn fabricate_installed_model(paths: &Paths, entry: &tome::embedding::registry::ModelEntry) {
-    let dir = paths.models_dir.join(entry.name);
-    std::fs::create_dir_all(&dir).expect("create model dir");
-    let manifest = ModelManifest {
-        name: entry.name.to_owned(),
-        version: entry.version.to_owned(),
-        kind: entry.kind,
-        source_url: entry.source_url.to_owned(),
-        sha256: entry.sha256.to_owned(),
-        size_bytes: entry.size_bytes,
-        licence: entry.licence.to_owned(),
-        files: entry.files.iter().map(|s| (*s).to_owned()).collect(),
-        installed_at: OffsetDateTime::now_utc(),
-    };
-    let body = serde_json::to_vec_pretty(&manifest).expect("serialise manifest");
-    std::fs::write(dir.join("manifest.json"), body).expect("write manifest");
+/// Fabricate fully-installed registered models on disk: writes each
+/// entry's `manifest.json` AND a sparse artefact file sized to
+/// `entry.size_bytes`. Sparse files (`File::set_len`) take ~no disk
+/// space on Linux and macOS, so even the ~400 MB summariser fixture
+/// is essentially free. Auxiliary files (tokenizer.json etc.) get a
+/// 1-byte sparse file — present + non-empty satisfies the existence
+/// half of `models::cheap_state`. The bytes are all-zero, so the
+/// SHA-256 does NOT match each registry pin — `models list --verify`
+/// uses this to flip the state to `checksum_mismatched`.
+///
+/// Pass `MODEL_REGISTRY` (or any sub-slice) to fabricate every entry,
+/// or build a one-element slice for a single-model fabrication. The
+/// consolidation from the older `fabricate_installed_model` /
+/// `fabricate_all_registry_models` pair into this single plural
+/// surface is the P6-deferred rename from Phase 3 — research §R-17.
+pub fn fabricate_installed_models(
+    paths: &Paths,
+    entries: &[&tome::embedding::registry::ModelEntry],
+) {
+    for entry in entries {
+        let dir = paths.models_dir.join(entry.name);
+        std::fs::create_dir_all(&dir).expect("create model dir");
+        let manifest = ModelManifest {
+            name: entry.name.to_owned(),
+            version: entry.version.to_owned(),
+            kind: entry.kind,
+            source_url: entry.source_url.to_owned(),
+            sha256: entry.sha256.to_owned(),
+            size_bytes: entry.size_bytes,
+            licence: entry.licence.to_owned(),
+            files: entry.files.iter().map(|s| (*s).to_owned()).collect(),
+            installed_at: OffsetDateTime::now_utc(),
+        };
+        let body = serde_json::to_vec_pretty(&manifest).expect("serialise manifest");
+        std::fs::write(dir.join("manifest.json"), body).expect("write manifest");
 
-    for (i, file) in entry.files.iter().enumerate() {
-        let path = dir.join(file);
-        let f = std::fs::File::create(&path).expect("create artefact file");
-        let len = if i == 0 { entry.size_bytes } else { 1 };
-        f.set_len(len).expect("set_len for sparse artefact");
+        for (i, file) in entry.files.iter().enumerate() {
+            let path = dir.join(file);
+            let f = std::fs::File::create(&path).expect("create artefact file");
+            let len = if i == 0 { entry.size_bytes } else { 1 };
+            f.set_len(len).expect("set_len for sparse artefact");
+        }
     }
 }
 
-/// Fabricate every entry in `MODEL_REGISTRY` as a fully-installed model.
-/// Convenience helper for tests that want "both models present, cheap state
-/// reports Ok" without iterating themselves.
-pub fn fabricate_all_installed_models(paths: &Paths) {
-    for entry in MODEL_REGISTRY {
-        fabricate_installed_model(paths, entry);
-    }
+/// Convenience: fabricate every entry in `MODEL_REGISTRY`. Mirrors the
+/// most common call pattern of the old `fabricate_all_registry_models`.
+pub fn fabricate_all_registry_models(paths: &Paths) {
+    let entries: Vec<&tome::embedding::registry::ModelEntry> = MODEL_REGISTRY.iter().collect();
+    fabricate_installed_models(paths, &entries);
 }
 
 /// Construct a minimal `Config` containing one catalog whose on-disk cache

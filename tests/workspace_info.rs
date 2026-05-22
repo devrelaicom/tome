@@ -71,7 +71,7 @@ fn info_global_with_enabled_plugin_reports_populated_counts() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
     std::fs::create_dir_all(&paths.root).unwrap();
-    common::fabricate_all_installed_models(&paths);
+    common::fabricate_all_registry_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);

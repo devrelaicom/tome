@@ -100,7 +100,7 @@ fn happy_path_writes_file_and_manifest() {
     let entry = entry_for(url, sha256_hex(payload), payload.len() as u64);
     let root = TempDir::new().expect("tempdir");
 
-    let manifest = download_model(entry, root.path()).expect("download should succeed");
+    let manifest = download_model(entry, root.path(), None).expect("download should succeed");
 
     assert_eq!(manifest.name, "test-model");
     assert_eq!(manifest.sha256, entry.sha256);
@@ -129,7 +129,7 @@ fn checksum_mismatch_aborts_and_cleans_partial_dir() {
     let entry = entry_for(url, wrong_hash, payload.len() as u64);
     let root = TempDir::new().expect("tempdir");
 
-    let err = download_model(entry, root.path()).expect_err("hash mismatch must abort");
+    let err = download_model(entry, root.path(), None).expect_err("hash mismatch must abort");
     match err {
         TomeError::ModelChecksumMismatch { model, .. } => {
             assert_eq!(model, "test-model");
@@ -163,7 +163,7 @@ fn http_error_status_aborts_and_cleans_partial_dir() {
     );
     let root = TempDir::new().expect("tempdir");
 
-    let err = download_model(entry, root.path()).expect_err("404 must abort");
+    let err = download_model(entry, root.path(), None).expect_err("404 must abort");
     assert!(matches!(err, TomeError::Io(_)), "expected Io, got {err:?}");
 
     let partial = root.path().join("test-model.partial");
@@ -220,7 +220,7 @@ fn mid_stream_connection_drop_aborts_and_cleans_partial_dir() {
     );
     let root = TempDir::new().expect("tempdir");
 
-    let err = download_model(entry, root.path()).expect_err("mid-stream drop must abort");
+    let err = download_model(entry, root.path(), None).expect_err("mid-stream drop must abort");
     // The most likely error is `Io` (reqwest's connection-reset translation)
     // but a `ModelChecksumMismatch` is also acceptable IF the server's
     // short body happens to pass the read loop before EOF: in either case
@@ -258,7 +258,7 @@ fn placeholder_checksum_is_refused() {
     );
     let root = TempDir::new().expect("tempdir");
 
-    let err = download_model(entry, root.path()).expect_err("placeholder must refuse");
+    let err = download_model(entry, root.path(), None).expect_err("placeholder must refuse");
     match err {
         TomeError::ModelCorrupt { model, detail } => {
             assert_eq!(model, "test-model");

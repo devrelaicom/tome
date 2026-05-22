@@ -75,17 +75,17 @@ pub fn run(args: ModelsDownloadArgs, mode: Mode) -> Result<(), TomeError> {
             )?;
         }
 
-        // `download_model` does not currently surface a byte-progress
-        // callback (CONCERNS.md triage item — Phase 6 ships an indeterminate
-        // spinner, matching `plugin enable`'s precedent). When the refactor
-        // lands this site will switch to `progress::byte_bar(total, …)`.
+        // F6 added a byte-progress hook to `download_model`. This site
+        // still uses the indeterminate spinner — switching to
+        // `progress::byte_bar(total, …)` is a presentation tweak
+        // tracked for US4 polish, not a behaviour change.
         let pb = progress::spinner(format!(
             "downloading {} (~{})",
             entry.name,
             human_mb(entry.size_bytes)
         ));
         let started = Instant::now();
-        let result = download_model(entry, &paths.models_dir);
+        let result = download_model(entry, &paths.models_dir, None);
         pb.finish_and_clear();
         let elapsed = started.elapsed();
         result?;
@@ -127,6 +127,7 @@ fn kind_str(kind: crate::embedding::registry::ModelKind) -> &'static str {
     match kind {
         ModelKind::Embedder => "embedder",
         ModelKind::Reranker => "reranker",
+        ModelKind::Summariser => "summariser",
     }
 }
 

@@ -122,7 +122,7 @@ fn repair_model(entry: &ModelEntry, paths: &Paths) -> Result<(), TomeError> {
     if model_dir.exists() {
         std::fs::remove_dir_all(&model_dir).map_err(TomeError::Io)?;
     }
-    download_model(entry, &paths.models_dir)?;
+    download_model(entry, &paths.models_dir, None)?;
     Ok(())
 }
 

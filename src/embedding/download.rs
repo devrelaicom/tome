@@ -41,7 +41,20 @@ const STREAM_CHUNK_SIZE: usize = 64 * 1024;
 /// The HTTP `entry.source_url` MUST point at the **primary** artefact (the
 /// ONNX model file). Other files in `entry.files` are not downloaded here;
 /// future per-file downloads will reuse this same atomic-rename strategy.
-pub fn download_model(entry: &ModelEntry, model_root: &Path) -> Result<ModelManifest, TomeError> {
+///
+/// `byte_progress` is an optional callback invoked once after every
+/// streamed chunk with `(bytes_so_far, total_bytes)`. `total_bytes` is
+/// the pinned `entry.size_bytes`; the network's `Content-Length` is not
+/// consulted (it can disagree with the registry pin for redirected URLs
+/// and the registry pin is authoritative anyway). Callers that don't
+/// want progress pass `None` and inherit the F2-era spinner-only UX.
+/// Phase 4 / F6 introduces this seam; first byte-progress consumer
+/// lands in US4.a's summariser download surface.
+pub fn download_model(
+    entry: &ModelEntry,
+    model_root: &Path,
+    byte_progress: Option<&dyn Fn(u64, u64)>,
+) -> Result<ModelManifest, TomeError> {
     if entry.has_placeholder_checksum() {
         return Err(TomeError::ModelCorrupt {
             model: entry.name.to_owned(),
@@ -65,7 +78,8 @@ pub fn download_model(entry: &ModelEntry, model_root: &Path) -> Result<ModelMani
     // cleanup. Without this, a checksum mismatch — which is detected
     // *after* `stream_to_partial` returns Ok — would leak the .partial dir.
     let pipeline = || -> Result<ModelManifest, TomeError> {
-        let observed_hash = stream_to_partial(entry, &partial_dir.join(primary_filename))?;
+        let observed_hash =
+            stream_to_partial(entry, &partial_dir.join(primary_filename), byte_progress)?;
         verify_checksum(entry, &observed_hash)?;
         if final_dir.exists() {
             std::fs::remove_dir_all(&final_dir).map_err(TomeError::Io)?;
@@ -87,7 +101,11 @@ pub fn download_model(entry: &ModelEntry, model_root: &Path) -> Result<ModelMani
     }
 }
 
-fn stream_to_partial(entry: &ModelEntry, dest: &Path) -> Result<String, TomeError> {
+fn stream_to_partial(
+    entry: &ModelEntry,
+    dest: &Path,
+    byte_progress: Option<&dyn Fn(u64, u64)>,
+) -> Result<String, TomeError> {
     // `reqwest::Error::Display` reproduces the failing URL verbatim, which
     // can include presigned-URL query parameters carrying credentials. Run
     // both the error message and the (non-error) status-line message
@@ -107,6 +125,8 @@ fn stream_to_partial(entry: &ModelEntry, dest: &Path) -> Result<String, TomeErro
     let mut file = File::create(dest).map_err(TomeError::Io)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
+    let total = entry.size_bytes;
+    let mut written: u64 = 0;
 
     loop {
         if git::was_cancelled() {
@@ -118,6 +138,10 @@ fn stream_to_partial(entry: &ModelEntry, dest: &Path) -> Result<String, TomeErro
         }
         hasher.update(&buf[..n]);
         file.write_all(&buf[..n]).map_err(TomeError::Io)?;
+        written = written.saturating_add(n as u64);
+        if let Some(cb) = byte_progress {
+            cb(written, total);
+        }
     }
 
     file.sync_all().map_err(TomeError::Io)?;

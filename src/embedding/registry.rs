@@ -35,6 +35,10 @@ pub struct ModelEntry {
 pub enum ModelKind {
     Embedder,
     Reranker,
+    /// Phase 4 — Qwen2.5-0.5B-Instruct GGUF, served via `llama-cpp-2`.
+    /// Added in F6 alongside the summariser skeleton; the production
+    /// download path lands in US4.a with the real SHA-256.
+    Summariser,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +82,23 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
         size_bytes: 279_252_659,
         licence: "MIT",
         files: &["model.onnx", "tokenizer.json"],
+    },
+    // Phase 4 — Summariser. The SHA-256 below is the F6 placeholder
+    // (all zeros); US4.a flips it to the real digest after fetching
+    // against the canonical Hugging Face URL. The download path
+    // refuses to install while `has_placeholder_checksum()` returns
+    // true, so a stray invocation surfaces as `ModelCorrupt`
+    // (exit 31) — not silent installation of untrusted bytes.
+    // See `src/summarise/registry.rs` for the named constants.
+    ModelEntry {
+        name: "qwen2.5-0.5b-instruct",
+        version: "0.5b-Q4_K_M",
+        kind: ModelKind::Summariser,
+        source_url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+        size_bytes: 400_000_000,
+        licence: "Apache-2.0",
+        files: &["model.gguf"],
     },
 ];
 
