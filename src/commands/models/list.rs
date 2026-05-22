@@ -107,6 +107,7 @@ impl ListRecord {
         let kind = match entry.kind {
             ModelKind::Embedder => "embedder",
             ModelKind::Reranker => "reranker",
+            ModelKind::Summariser => "summariser",
         };
         let size_bytes = manifest.map(|m| m.size_bytes).unwrap_or(entry.size_bytes);
         let path = paths.model_path(entry.name)?.to_string_lossy().into_owned();

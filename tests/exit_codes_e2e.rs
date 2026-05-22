@@ -48,7 +48,7 @@ mod common;
 use std::fs;
 
 use common::{
-    ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_all_installed_models,
+    ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_all_registry_models,
     paths_for, stub_embedder_seed, stub_reranker_seed, write_config_for_cli,
 };
 use tempfile::TempDir;
@@ -110,7 +110,7 @@ fn models_list_with_corrupt_manifest_exits_33() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     fs::create_dir_all(&paths.root).expect("data dir");
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
 
     let entry = MODEL_REGISTRY.first().expect("at least one model");
     let manifest_path = paths.models_dir.join(entry.name).join("manifest.json");

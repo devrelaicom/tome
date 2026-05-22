@@ -142,16 +142,16 @@ fn ensure_models_or_prompt(
         return Err(TomeError::Interrupted);
     }
 
-    // Download each missing model. We wrap each in an indeterminate spinner
-    // — `download_model` does not currently surface a byte-progress
-    // callback, and we don't want to refactor it in this slice.
+    // Download each missing model. We wrap each in an indeterminate spinner.
+    // F6 added a byte-progress callback to `download_model`; this site keeps
+    // the spinner (matches the precedent for the embedder + reranker).
     for entry in missing {
         let pb = progress::spinner(format!(
             "downloading {} (~{})",
             entry.name,
             human_mb(entry.size_bytes)
         ));
-        let result = download_model(entry, &paths.models_dir);
+        let result = download_model(entry, &paths.models_dir, None);
         pb.finish_and_clear();
         result?;
         info!(model = entry.name, "model artefact installed");

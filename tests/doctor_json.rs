@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{Fixture, ToolEnv, fabricate_all_installed_models, paths_for};
+use common::{Fixture, ToolEnv, fabricate_all_registry_models, paths_for};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -16,7 +16,7 @@ fn doctor_json_shape_is_pinned_on_healthy_install() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
 
     let out = env.cmd().args(["--json", "doctor"]).output().unwrap();
     assert!(out.status.success(), "exit={:?}", out.status.code());
@@ -103,7 +103,7 @@ fn doctor_json_includes_suggested_fix_record_on_broken_catalog() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
 
     let fix = Fixture::build_sample();
     env.cmd()

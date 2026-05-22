@@ -11,7 +11,7 @@
 
 mod common;
 
-use common::{ToolEnv, fabricate_installed_model, paths_for};
+use common::{ToolEnv, fabricate_installed_models, paths_for};
 use tome::embedding::registry::MODEL_REGISTRY;
 
 fn embedder() -> &'static tome::embedding::registry::ModelEntry {
@@ -73,7 +73,7 @@ fn remove_without_force_in_non_tty_exits_54_with_pointer_message() {
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
     let entry = embedder();
-    fabricate_installed_model(&paths, entry);
+    fabricate_installed_models(&paths, &[entry]);
 
     // Subprocess stdin/stdout/stderr are pipes — not TTYs. Without `--force`
     // the handler must short-circuit before the confirm prompt, emit the
@@ -114,7 +114,7 @@ fn remove_with_force_deletes_manifest_and_model_directory() {
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
     let entry = embedder();
-    fabricate_installed_model(&paths, entry);
+    fabricate_installed_models(&paths, &[entry]);
 
     let model_dir = paths.models_dir.join(entry.name);
     assert!(model_dir.is_dir(), "pre-condition: fixture must exist");

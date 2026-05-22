@@ -14,7 +14,7 @@
 
 mod common;
 
-use common::{ToolEnv, fabricate_all_installed_models, paths_for};
+use common::{ToolEnv, fabricate_all_registry_models, paths_for};
 use serde_json::Value;
 
 #[test]
@@ -22,7 +22,7 @@ fn download_with_all_models_already_installed_emits_skipped_records() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
 
     let out = env
         .cmd()
@@ -42,7 +42,11 @@ fn download_with_all_models_already_installed_emits_skipped_records() {
     let models = envelope["models"]
         .as_array()
         .expect("envelope.models must be an array");
-    assert_eq!(models.len(), 2, "two registered models");
+    assert_eq!(
+        models.len(),
+        3,
+        "three registered models (embedder + reranker + summariser)"
+    );
     for m in models {
         assert_eq!(
             m["action"], "skipped",

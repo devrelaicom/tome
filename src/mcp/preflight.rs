@@ -132,6 +132,7 @@ fn pick_kind(kind: ModelKind) -> Result<&'static ModelEntry, TomeError> {
                 match kind {
                     ModelKind::Embedder => "embedder",
                     ModelKind::Reranker => "reranker",
+                    ModelKind::Summariser => "summariser",
                 }
             ),
         })

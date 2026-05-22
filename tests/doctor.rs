@@ -15,7 +15,7 @@ mod common;
 
 use std::path::Path;
 
-use common::{Fixture, ToolEnv, fabricate_all_installed_models, paths_for};
+use common::{Fixture, ToolEnv, fabricate_all_registry_models, paths_for};
 use rusqlite::Transaction;
 use tempfile::TempDir;
 use tome::doctor::{self, CatalogCacheState, DoctorClassification, SuggestedFix};
@@ -62,7 +62,7 @@ fn assemble_with_models_and_no_catalogs_reports_ok() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
     let home = empty_home();
 
     let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
@@ -77,7 +77,7 @@ fn assemble_with_broken_catalog_cache_reports_degraded() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
     let home = empty_home();
 
     // Register a catalog, then remove its `.git/` to simulate corruption.
@@ -116,7 +116,7 @@ fn assemble_with_missing_catalog_cache_reports_degraded() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
     let home = empty_home();
 
     let fix = Fixture::build_sample();
@@ -137,7 +137,7 @@ fn assemble_with_manifest_invalid_is_not_auto_fixable() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
     let home = empty_home();
 
     let fix = Fixture::build_sample();
@@ -170,7 +170,7 @@ fn assemble_reports_orphan_clone_in_catalogs_list() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
     let home = empty_home();
 
     // Plant a fake catalog clone at `catalogs_dir/<sha>` with `.git/`
@@ -218,7 +218,7 @@ fn workspace_registry_status_reports_absent_by_default() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
     let home = empty_home();
 
     let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
@@ -233,7 +233,7 @@ fn workspace_registry_status_reports_present_count_after_opt_in() {
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
     std::fs::create_dir_all(&paths.logs_dir).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
     let home = empty_home();
 
     // Opt in by touching the file with two valid absolute paths.
@@ -257,7 +257,7 @@ fn fix_repairs_broken_catalog_cache_and_re_classifies_ok() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
     let home = empty_home();
 
     let fix = Fixture::build_sample();
@@ -287,7 +287,7 @@ fn has_remaining_manual_fixes_detects_unfixable_after_fix_pass() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
     let home = empty_home();
 
     let fix = Fixture::build_sample();
@@ -314,7 +314,7 @@ fn harness_detection_finds_existing_directories() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
 
     let home = empty_home();
     std::fs::create_dir_all(home.path().join(".claude")).unwrap();
@@ -339,7 +339,7 @@ fn global_scope_overrides_workspace_in_report() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
     let home = empty_home();
 
     // Workspace exists on disk; doctor under --global scope reports
@@ -374,7 +374,7 @@ fn cli_doctor_with_healthy_state_exits_0() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
 
     let out = env.cmd().args(["doctor"]).output().unwrap();
     assert!(
@@ -392,7 +392,7 @@ fn cli_doctor_fix_with_manifest_invalid_exits_75() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
 
     let fix = Fixture::build_sample();
     env.cmd()
@@ -454,7 +454,7 @@ fn fix_runs_forward_schema_migration_end_to_end() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
     let home = empty_home();
 
     // Bootstrap the index at SCHEMA_VERSION (= 1) using the production
@@ -551,7 +551,7 @@ fn embedder_name_drift_classifies_unhealthy() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
     bootstrap_index_with_stub_seeds(&paths);
     let home = empty_home();
 
@@ -597,7 +597,7 @@ fn reranker_drift_alone_classifies_degraded() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
 
     let (real_embedder_seed, _real_reranker_seed) = tome::commands::plugin::registry_seeds();
     let _ = tome::index::open(
@@ -640,7 +640,7 @@ fn no_drift_reported_when_seeds_match_registry() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    fabricate_all_installed_models(&paths);
+    fabricate_all_registry_models(&paths);
 
     let (embedder, reranker) = tome::commands::plugin::registry_seeds();
     let _ = tome::index::open(
