@@ -9,16 +9,23 @@
 //! yourself reaching for `tokio::spawn` from a `commands/` module, stop and
 //! revisit the design instead.
 //!
-//! Phase 3 release-binary baseline (macOS arm64, stripped, lto = "thin",
+//! Phase 4 extends the sync-only boundary to the new `src/summarise/`,
+//! `src/harness/`, `src/settings/`, and `src/util/` modules: `llama-cpp-2`
+//! is a sync API, `toml_edit` is sync, and the harness modules are pure
+//! file-system code. No exemption is added.
+//!
+//! Release-binary baselines (macOS arm64, stripped, lto = "thin",
 //! panic = abort, opt-level = 3):
 //!
-//! - Start of Phase 3 (deps wired, no `src/mcp/` yet): 20.91 MiB
-//!   (21,922,336 bytes) measured on 2026-05-14. Essentially equal to the
-//!   end-of-Phase-2 number (20.91 MiB) — LTO drops the un-referenced
-//!   rmcp + tokio object code until the MCP module imports them.
-//! - End of Phase 3 (post-US1): expected to land closer to the research
-//!   §R-2 projection of ~22.8 MiB on macOS / ~31.5 MiB on Linux. Re-record
-//!   here when the MCP module is feature-complete.
+//! - End of Phase 3 (v0.3.0): 22.04 MiB.
+//! - Start of Phase 4 (deps wired — llama-cpp-2 + toml_edit + serde_json
+//!   `preserve_order` — no `src/summarise/` yet): 22.13 MiB (23,196,656
+//!   bytes) measured 2026-05-22. Essentially unchanged from v0.3.0; LTO
+//!   drops the un-referenced llama.cpp static lib and `toml_edit` object
+//!   code until those modules import them.
+//! - End of Phase 4: projected ~28.4 MiB on macOS arm64, ~34 MB on Linux
+//!   x86_64 (research §R-4). Re-record here once F6 + F7 + US4 wire the
+//!   summariser + harness modules into the binary.
 //!
 //! CI also gates this number via the existing 50 MB release-binary check
 //! (constitution NFR-001).

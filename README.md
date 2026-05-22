@@ -2,7 +2,7 @@
 
 A Rust CLI (and eventually an MCP server) that makes Claude Code's plugin ecosystem work across other agentic coding harnesses — Cursor, Codex, Gemini CLI, OpenCode, and friends.
 
-> **Status: pre-release, Phase 3 (v0.3.0).** Tome manages **catalogs** (Git-hosted plugin collections), **plugins** (enable them locally, build a semantic skill index, search it), **workspaces** (per-project state in `.tome/`), and now ships an **MCP server** so harnesses can query the index over the Model Context Protocol. Installing plugins into specific harnesses is still ahead.
+> **Status: pre-release, Phase 4 in flight (post-v0.3.0).** Tome manages **catalogs** (Git-hosted plugin collections), **plugins** (enable them locally, build a semantic skill index, search it), **workspaces** (per-project state in `.tome/`), and ships an **MCP server** so harnesses can query the index over the Model Context Protocol. Phase 4 is the central-architecture refactor — collapsing per-workspace state into a single `<home>/.tome/` root, introducing named workspaces with project-binding pointers, and wiring rules-file + MCP-config integration into five harnesses (Claude Code, Codex CLI, Gemini CLI, Cursor, OpenCode). Constitution **v1.3.0** lands as part of Phase 4: the v1.2.0 §Paths `directories`-crate citation is replaced by the consolidated `<home>/.tome/` layout.
 
 ## Install
 

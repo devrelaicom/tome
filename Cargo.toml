@@ -15,7 +15,7 @@ keywords = ["claude-code", "plugins", "ai", "cli"]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
@@ -62,6 +62,17 @@ schemars = "1"
 # embedder/reranker inference; `rt-multi-thread` would add ~500 KB binary
 # weight for no concurrency win. See research §R-2.
 tokio = { version = "1", default-features = false, features = ["rt", "macros", "io-std", "sync", "signal", "time"] }
+
+# Phase 4 — summariser inference. Sync API throughout; one process-wide
+# `LlamaBackend` instance held in a `std::sync::OnceLock`. Statically links
+# `llama.cpp` as a C++ static lib (CPU-only — no CUDA/Metal features enabled).
+# Pre-1.0; minor-pinned per research §R-2.
+llama-cpp-2 = "0.1"
+
+# Phase 4 — comment/order-preserving TOML editor. Scoped to harness MCP
+# config read-modify-write paths only; Tome-owned TOML continues to use the
+# `toml` crate via `serde`. Minor-pinned per research §R-5.
+toml_edit = "0.25"
 
 [build-dependencies]
 # Compile vendored sqlite-vec amalgamation against rusqlite's bundled SQLite.

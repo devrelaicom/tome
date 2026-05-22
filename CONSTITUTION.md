@@ -55,7 +55,7 @@ Tokens, SSH keys, credential-helper output, and anything Git emits that looks cr
 
 **Binary size.** Release builds stay under 50 MB stripped. Adding a dependency that pushes us over this requires a written justification in the PR. The cap was 10 MB at ratification; Phase 2 linked ONNX Runtime (via `fastembed` → `ort`) which is intrinsically larger than the worst-case projection. The cap is now sized to current reality (~30 MB) with headroom for query, reindex, and the MCP server.
 
-**Paths.** XDG-aware via `directories`. Never hardcode `~/.tome`. Cache directories are content-addressed (sha256 of source URL) to prevent collisions.
+**Paths.** Tome-owned paths resolve under `<home>/.tome/`. The home directory is resolved via raw environment-variable inspection (`HOME` on Unix; the `std::env::home_dir` standard-library helper is an acceptable alternative since its un-deprecation in Rust 1.85). All Tome state lives under this root; the XDG-style separation of config / data / cache / state is deliberately collapsed into a single tree (rationale: simpler discovery, atomic backup/wipe, parallel evolution with the workspace and project-binding model introduced in Phase 4). Cache directories under the root are content-addressed (sha256 of source URL) to prevent collisions. The v1.2.0 §Paths wording referenced the `directories` crate; that wording was aspirational rather than implemented (Tome's Phase 1 / Phase 2 / Phase 3 code used raw env-var inspection throughout). The v1.3.0 amendment closes that documentation/code mismatch in addition to changing the on-disk layout.
 
 **Licensing.** MIT OR Apache-2.0 dual licence. Both files committed at the repo root. New contributors implicitly licence their contributions under both per the standard Rust convention.
 
@@ -91,4 +91,8 @@ This constitution supersedes ad-hoc practice. Where it conflicts with PRD detail
 
 **Runtime guidance.** Day-to-day conventions (naming, error message tone, help-text style) are documented separately from this constitution. When that documentation and this constitution disagree, the constitution wins and the runtime guidance gets fixed.
 
-**Version**: 1.2.0 | **Ratified**: 2026-05-11 | **Last Amended**: 2026-05-13
+## Amendment log
+
+- **v1.3.0 (2026-05-22)** — Rewrote the `## Operational Constraints` §Paths block to drop the `directories` crate citation and consolidate Tome-owned paths under `<home>/.tome/`. Driven by Phase 4 spec §FR-300 / FR-302 / FR-303 (central-architecture refactor: single home root, single SQLite DB, named workspaces, project-binding pointers) and the v1.2.0 aspirational/implemented mismatch (no Phase 1/2/3 code ever called `directories::ProjectDirs`). MINOR bump — materially expanded guidance in an Operational Constraint. The 24-hour cooling-off period does not apply (Operational Constraints are not NON-NEGOTIABLE principles per §Governance).
+
+**Version**: 1.3.0 | **Ratified**: 2026-05-11 | **Last Amended**: 2026-05-22

@@ -2,11 +2,11 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-14 (Phase 3 complete: US1–US5 shipped)
+> **Last Updated**: 2026-05-14 (Phase 3 complete: US1–US5 shipped; PR #56 security hardening applied)
 
 ## Overview
 
-Tome is a Rust CLI (and eventually MCP server) for managing plugin catalogs and embeddings. As a synchronous, file-based tool without user authentication, security focuses on:
+Tome is a Rust CLI (and MCP server) for managing plugin catalogs and embeddings. As a synchronous, file-based tool without user authentication, security focuses on:
 1. Preventing path traversal and directory-escape attacks via plugin source paths and plugin identities
 2. Integrity verification for downloaded model artefacts (SHA-256 checksums)
 3. Scrubbing credentials from captured Git output and HTTP errors at the boundary
@@ -23,8 +23,12 @@ Tome is a Rust CLI (and eventually MCP server) for managing plugin catalogs and 
 14. Catalog cache content-trust via ref-counting and re-use on same URL
 15. Doctor command harness detection without config parsing; network access gated behind `--fix`
 16. Forward-only schema migrations with per-migration transaction atomicity
+17. Symlink-aware skill-directory walks with explicit rejection (FR-S-02)
+18. Workspace registry validation with size cap, entry limit, NUL rejection, and parent-dir rejection (FR-S-03)
+19. Workspace init refusal of non-directory `.tome` markers (FR-S-04)
+20. Credential scrubbing on MCP log fields and error chains
 
-Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/001-phase-1-foundations/spec.md` (Phase 1), `specs/002-phase-2-plugins-index/spec.md` (Phase 2), `specs/002-phase-2-plugins-index/contracts/plugin-commands.md` (Phase 4–5), and `specs/003-phase-3-mcp-workspaces/spec.md` (Phase 3+).
+Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
 ## Authentication & Authorization
 
@@ -42,13 +46,15 @@ Security controls are enforced in code, tests, and CI—documented in `CONSTITUT
 | **Scrubbing at boundary** | Regex-based pattern detector (R-8) | `src/catalog/git.rs::scrub_credentials` |
 | **Never log secrets** | All `git` stderr passed through scrubber | `src/catalog/git.rs::scrub_to_string` |
 | **HTTP error scrubbing** | `reqwest::Error` details scrubbed before surfacing | `src/embedding/download.rs::scrub_for_diag` |
+| **MCP log scrubbing** | Workspace paths and error messages scrubbed before JSON logging | `src/mcp/mod.rs::workspace_path` (line 100), tool handlers (line 272) |
+| **Model URL scrubbing** | Download URLs with presigned params scrubbed in error chains | `src/embedding/download.rs` (lines 71–73 comment) |
 | **No credential storage** | Inherit user's Git config entirely | Constitution XII |
 | **No credential prompting** | Only system Git handles auth | Constitution XII, FR-026 |
 
 The credential scrubber applies four ordered regex patterns to every byte stream from `git` and HTTP operations:
 1. URL-embedded credentials: `https?://[^/@\s]+@` → `https://` (drops `user:token@`)
 2. SSH login info: `git@[^\s:]+:` → `git@<host>:` (preserves host, scrubs login)
-3. Key-value pairs: `(token|password|api[-_]?key|bearer|authorization)\s*[:=]\s*\S+` → `<scrubbed>`
+3. Key-value pairs: `(token|password|api[-_]?key|bearer|authorization|signature|x-amz-*)\s*[:=]\s*\S+` → `<scrubbed>` (includes AWS presigned-URL params)
 4. Long hex (40+ chars outside safe context): `[0-9a-fA-F]{40,}\b` → `<scrubbed>` (except in `:` or `=` contexts where SHAs are preserved)
 
 **Verification**: Comprehensive test coverage in `tests/scrubbing.rs` covers all four rules with worked examples.
@@ -71,14 +77,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 5. **Validate bounds**: Resolved plugin path must `starts_with` resolved catalog root
 6. **Error on escape**: Return `SourceEscapesRoot` if symlink points outside
 
-**Test Coverage**: Every variant of `ManifestInvalid` has explicit test cases:
-- `https://example.com/repo` → rejected
-- `git@host:owner/repo` → rejected
-- `/etc/passwd` → rejected
-- `C:\plugins` → rejected (Windows drive)
-- `../escape` → rejected (syntactic `..`)
-- `./plugins/../escape` → rejected (embedded `..`)
-- Symlinks outside catalog → rejected (semantic escape via canonicalize)
+**Test Coverage**: Every variant of `ManifestInvalid` has explicit test cases.
 
 ### Plugin Identity Validation
 
@@ -107,14 +106,26 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Lenient third-party inputs** | `plugin.json` and `SKILL.md` frontmatter parsed without `deny_unknown_fields` (FR-013a) | Forward-compatible with upstream schema additions |
 | **Coverage** | Strict targets: `CatalogManifest`, `Owner`, `PluginDeclaration`, `Config`, `CatalogEntry`, `ModelManifest`, `ModelKind` | Mandatory, no exceptions |
 
-**Semantic validation** (manifest.rs, registry.rs):
-- `name`, `description` must be non-empty (trimmed)
-- `version` must parse as semver
-- `owner.email` must contain exactly one `@`, non-empty local and domain, domain has `.`
-- `plugins[].name` must be unique within catalog
-- `plugins[].source` must pass 6-step path validation (above)
-- Model `sha256` must not be placeholder (all-zero string)
-- Model `size_bytes` must match pinned registry value on download completion
+### Workspace Registry Validation (Phase 3 US2)
+
+| Control | Implementation | Enforcement |
+|---------|----------------|-------------|
+| **Size cap** | 1 MiB maximum file size | `src/workspace/inventory.rs::MAX_REGISTRY_BYTES` (line 39) |
+| **Entry cap** | 10,000 maximum entries | `src/workspace/inventory.rs::MAX_REGISTRY_ENTRIES` (line 40) |
+| **NUL rejection** | Lines containing NUL byte silently dropped | `src/workspace/inventory.rs::read_registry` (line 75) |
+| **Parent dir rejection** | Lines containing `..` components silently dropped | `src/workspace/inventory.rs::read_registry` (lines 87–89) |
+| **Absolute path required** | Non-absolute paths silently dropped | `src/workspace/inventory.rs::read_registry` (line 79) |
+| **Deduplication** | By canonicalize equality, not string match | `src/workspace/inventory.rs::append_if_registry_exists` (lines 120–128) |
+
+**Purpose**: Prevent hostile or malformed workspace registry entries from escaping their scope or DoS-ing the reader.
+
+### Workspace Init Marker Validation (Phase 3 US2)
+
+| Control | Implementation | Location |
+|---------|----------------|----------|
+| **Directory-only check** | Reject non-directory `.tome` marker (regular file, symlink, FIFO, etc.) | `src/workspace/init.rs` (lines 78–89) |
+| **Specific error** | Surface exact file type (file/symlink/non-directory) | `src/workspace/init.rs::describe_file_type` (FR-S-04) |
+| **Purpose** | Prevent `--force` from leaving user-created files behind | `src/workspace/init.rs` (lines 71–95 comments) |
 
 ## Data Protection
 
@@ -128,9 +139,27 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | Catalog cache | Atomic refresh, ref-counted across scopes, re-used on same URL | `~/.cache/tome/<sha256-of-url>/` |
 | Git stderr output | Scrubbed before tracing/display | `src/catalog/git.rs::scrub_credentials` |
 | HTTP error output | Scrubbed before surfacing | `src/embedding/download.rs::scrub_for_diag` |
-| MCP server logs | JSON-lines to file, error-only stderr | `src/mcp/log.rs` (10 MiB cap, rotates to `.1`) |
-| Workspace registry | Opt-in, deduplicated list | `${XDG_STATE_HOME}/tome/workspaces.txt` (not created unless user explicitly uses it) |
-| Harness detection list | Local-only, never transmitted; indexed by directory existence | `src/doctor/harness_detect.rs::probe` (Phase 3 US4) |
+| MCP server logs | JSON-lines to file (0600 chmod), error-only stderr | `src/mcp/log.rs` (10 MiB cap, rotates to `.1`) |
+| Workspace paths in logs | Scrubbed via `scrub_to_string` before emission | `src/mcp/mod.rs` (line 100) |
+| Error messages in logs | Scrubbed via `scrub_to_string` before emission | `src/mcp/tools/search_skills.rs` (line 272) |
+| Workspace registry | Opt-in, deduplicated list, validated at read | `${XDG_STATE_HOME}/tome/workspaces.txt` (not created unless user explicitly uses it) |
+| Harness detection list | Local-only, never transmitted; indexed by directory existence | `src/doctor/harness_detect.rs::probe` |
+
+### File Permissions
+
+| File Type | Unix Permissions | Windows | Location |
+|-----------|-----------------|---------|----------|
+| `config.toml` (global) | 0600 | N/A | `src/catalog/store.rs::write_atomic` (lines 100–105) |
+| `config.toml` (workspace) | 0600 | N/A | `src/catalog/store.rs::write_atomic` (lines 100–105) |
+| Workspace `.tome/` directory | 0700 (before content) | N/A | `src/workspace/init.rs` (lines 107–112) |
+| MCP log file | 0600 (creation + tighten if exists) | N/A | `src/mcp/log.rs` (lines 74–91) |
+
+### Symlink Handling
+
+| Context | Control | Implementation | Location |
+|---------|---------|----------------|----------|
+| **Skill directory walk** | Skip symlinks (explicit rejection) | `entry.file_type()` + `is_symlink()` skip | `src/mcp/tools/get_skill.rs::walk_dir` (lines 272–289, FR-S-02) |
+| **Purpose** | Prevent hostile catalog with `skills/foo/creds → ~/.ssh/id_rsa` | Defence in depth: `lstat` (no follow) + explicit skip | `src/mcp/tools/get_skill.rs` (lines 261–267 comment) |
 
 ### Integrity & Verification
 
@@ -140,516 +169,84 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Registry pinning** | Compile-time constant `MODEL_REGISTRY` | `src/embedding/registry.rs::MODEL_REGISTRY` (verified real at Phase 3 slice 1) |
 | **Placeholder detection** | `has_placeholder_checksum()` guard | `src/embedding/download.rs::download_model` (exit 31 if placeholder) |
 | **Atomic model persist** | `.partial/` → final rename | `src/embedding/download.rs::download_model`, step 4 |
-| **Re-verification** | New `embedding::download::sha256_file()` helper | `src/embedding/download.rs::sha256_file`, invoked by `tome models list --verify` (Phase 6) |
-| **Virtual table constraints** | `sqlite-vec` does not support `INSERT OR REPLACE`; uses `DELETE`-then-`INSERT` | `src/index/skills.rs::upsert_skill` (Phase 7, lines 282–294) |
-| **Health check** | `tome status [--verify]` re-verifies installed models without re-downloading | `src/commands/status.rs::check_model()` (Phase 8, PR #29) |
-| **MCP startup pre-flight** | SHA-256 verification of primary embedder file at every startup (FR-110) | `src/mcp/preflight.rs::verify_embedder_artefacts` (Phase 3, F8) |
-| **Workspace initialization** | Atomic staging with permissions lock before content lands | `src/workspace/init.rs` (Phase 3, US2) |
-| **Catalog cache content trust** | Re-use existing clone on URL re-add; delete clone only when no scopes reference the URL | `src/catalog/store.rs::reference_count` (Phase 3, US3) |
-| **Schema migrations** | Forward-only migrations with per-step transaction atomicity under advisory lock | `src/index/migrations.rs::apply_pending` (Phase 3, F7 + US5) |
+| **Re-verification** | New `embedding::download::sha256_file()` helper | `src/embedding/download.rs::sha256_file`, invoked by `tome models list --verify` |
+| **Virtual table constraints** | `sqlite-vec` does not support `INSERT OR REPLACE`; uses `DELETE`-then-`INSERT` | `src/index/skills.rs::upsert_skill` |
+| **Health check** | `tome status [--verify]` re-verifies installed models without re-downloading | `src/commands/status.rs::check_model()` |
+| **MCP startup pre-flight** | SHA-256 verification of primary embedder file at every startup (FR-110) | `src/mcp/preflight.rs::verify_embedder_artefacts` |
+| **Workspace initialization** | Atomic staging with permissions lock before content lands | `src/workspace/init.rs` |
+| **Catalog cache content trust** | Re-use existing clone on URL re-add; delete clone only when no scopes reference the URL | `src/catalog/store.rs::reference_count` |
+| **Schema migrations** | Forward-only migrations with per-step transaction atomicity under advisory lock | `src/index/migrations.rs::apply_pending` |
 
 **Model Registry** (Phase 3 update):
 - `bge-small-en-v1.5` INT8: SHA-256 `51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431`, 66.5 MB, MIT
 - `bge-reranker-base` INT8: SHA-256 `46a1bb4cf46ff1e300d27589d620141fbf04fc0eaf8e7bb6dea5e044475ff387`, 279.3 MB, MIT (sourced from `onnx-community` mirror)
 
-Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads enforce both hash and size; drift surfaces as `ModelChecksumMismatch` (exit 32) rather than silently installing whatever upstream serves. The `--verify` flag in `tome models list` (Phase 6) allows users to audit installed models against pinned checksums without re-downloading.
-
-**Phase 3 US3 Catalog Cache Content Trust** (`src/catalog/store.rs::reference_count`):
-- Catalog clones are stored in `~/.cache/tome/<sha256(url)>/` and indexed by exact URL string match
-- When a catalog URL is added: if the clone already exists (same URL, content-addressed), it is re-used without re-fetching
-- When a catalog URL is removed from a scope: if it's still referenced by other scopes, the clone persists; if no remaining references, the clone is deleted
-- Reference-counting is global + per-workspace-in-registry; an opt-in workspace registry centralizes the scope set
-- **Content trust trade-off**: Re-adding a known-good URL re-uses the on-disk clone (safe for honest URLs, protective against malicious re-points). If upstream has re-pointed the URL to a malicious repository, an existing clone protects the user (no re-fetch); a fresh clone would re-fetch the new content. The cache acts as an implicit trust anchor: "whatever clone we have is what we trust." Users concerned about URL hijacking should manually remove cached clones via filesystem or use `--force` on re-add (not yet implemented; future enhancement).
-- Without opt-in workspace registry (default install): reference-count is global-only. Removing a catalog from global scope deletes the clone even if a workspace still references it. The workspace config is unchanged; the next `tome catalog update` re-clones. This is the user-visible cost of NOT opting into the registry.
-
-**Phase 8 Status Command** (`src/commands/status.rs`, PR #29):
-- `tome status` is a supported pre-flight health check before filing bug reports
-- Read-only: never acquires the advisory lock (FR-056), works even when a writer is running
-- Classifies health as Healthy, Degraded, or Unhealthy based on model state + index integrity + drift detection
-- Embedder drift or index corruption → Unhealthy (exit 1); reranker drift only → Degraded (exit 1); all Ok → Healthy (exit 0)
-- `--verify` flag rehashes models via `sha256_file()` against registry-pinned SHA-256s (no re-download)
-- `--json` output includes model names/versions, index state, and drift diagnostics
-- No secrets exposed; model identities are public constants from `MODEL_REGISTRY`
-
-**Phase 3 F8 MCP Pre-flight** (`src/mcp/preflight.rs`):
-- Runs before MCP protocol handshake (startup sanity check per FR-110)
-- Verifies embedder artefacts exist and pass SHA-256 against registry-pinned digests
-- Detects embedder/reranker drift and surfaces as specific exit codes (41/42) per `contracts/exit-codes-p3.md`
-- Surfaces newer-on-disk schema with `SchemaVersionTooNew` (exit 73, Phase 3 dedicated variant)
-- Reranker drift detected but NOT a startup failure (FR-109 defers reranker load until first use; long-running server can re-download on demand)
-- No credential surfaces; model registry is read-only static
-
-**Phase 3 US2 Workspace Initialization** (`src/workspace/init.rs`):
-- Creates workspace-local `.tome/` directory atomically via staging directory pattern
-- Staging directory chmod 0700 on Unix BEFORE any content is written (permission lock precedes config write)
-- Workspace config.toml written via `catalog::store::write_atomic`, which sets chmod 0600 on Unix
-- Enablement state never inherited; only catalog sources copied via `--inherit-global`
-- Opt-in workspace registry: append-only, deduplicated by exact path match, never created unless user enables it
-- Atomic rename of staging to final `.tome/` ensures readers never see partial state
-- On `--force` rename failure: rollback existing `.tome/` from `.tome.old/` (if crash between rename-aside and rename-in, leaves `.tome.old/` orphan for doctor to report)
-- Best-effort cleanup of `.tome.old/` after successful rename; partial cleanup on rollback failure is tolerated
-
-**Phase 3 US4 Doctor Command** (`src/commands/doctor.rs`, `src/doctor/`):
-- Read-only diagnostic by default; network access gated entirely behind `--fix` flag
-- Harness detection via fixed compile-time list (`KNOWN_HARNESSES`; `src/doctor/harness_detect.rs::probe`)
-- Harness detection is **directory existence only** (FR-167) — no config parsing, no content reads
-- Detected-harness list is local-only (never transmitted) and privacy-sensitive; report includes it but `--fix` never sends it anywhere
-- Three automatic repairs when `--fix` is invoked:
-  - **Model re-download**: clears existing directory, downloads fresh via existing `embedding::download::download_model` (idempotent, recoverable via URLs in config)
-  - **Catalog re-clone**: removes broken cache, re-clones via existing `catalog::git::Git::clone_shallow` (idempotent, recoverable via URLs in config)
-  - **Schema forward-migration**: applies pending migrations via `index::migrations::apply_pending` under advisory lock (idempotent, reversible via Phase 4+ down-migrations if added)
-- Four un-fixable repairs surfaced as suggested commands (not auto-applied):
-  - Embedder/reranker drift (requires explicit `tome reindex --force`)
-  - Schema newer than Tome release (requires Tome upgrade)
-  - Catalog manifest parse failure (requires manual investigation)
-  - Orphan catalog cache (user decides whether to delete)
-- No privilege escalation; all operations re-use existing config-derived URLs and paths
-- No destructive repairs (`--fix` never deletes enabled plugins, disabled plugins, or schema rows)
-
-**Phase 3 US5 Forward-Only Schema Migrations** (`src/index/migrations.rs`, `src/index/db.rs::open`):
-- Migration framework shipped with zero registered migrations (Phase 3 Foundational F7)
-- Each migration runs in its own SQLite transaction under advisory lock (`apply_pending`)
-- Forward-only policy: `current > target` → exit 73 (`SchemaVersionTooNew`); `current < target` → apply all steps in order
-- Each migration step is atomic (all-or-nothing within transaction); failure at any step rolls back the transaction
-- Read-only paths gate on `SchemaTooNew` (exit 52 legacy code) before opening, but MCP/CLI write paths gate on new `SchemaVersionTooNew` (exit 73) per Phase 3 contracts
-- No down-migrations; Phase 4+ can add forward-only steps; Tome must always be >= DB schema version
-- Test injection via `#[doc(hidden)] pub static MIGRATIONS_OVERRIDE` (not `#[cfg(test)]`) to allow integration tests to exercise migration path
-
-### Encryption
-
-| Type | Status |
-|------|--------|
-| At rest | Not implemented (cache is local, untrusted; workspace config contains catalog URLs only) |
-| In transit | Inherited from system Git (TLS/SSH) and `reqwest` (TLS 1.2+) |
-| Application-level | No application-managed secrets |
-
-## Error Reporting & Exit Codes
-
-### Closed Error Set
-
-| Exit Code | Category | Meaning | Phase | Specification |
-|-----------|----------|---------|-------|----------------|
-| 0 | Success | Operation completed successfully | — | — |
-| 1 | Internal | Programmer error, panic caught | All | FR-022 |
-| 2 | Usage | Invalid command-line arguments | All | FR-022 |
-| 3 | CatalogNotFound | Catalog not registered | 1 | FR-022 |
-| 4 | CatalogAlreadyExists | Catalog already registered OR workspace already initialized | 1 / 3 | FR-022 / workspace-init.md |
-| 5 | ManifestInvalid | Manifest parse or validation failed | 1 | FR-022 |
-| 6 | GitFailed | Git operation failed (clone, fetch, reset) | 1 | FR-022 |
-| 7 | Io | Filesystem or I/O error | All | FR-022 |
-| 8 | Interrupted | User interrupted (Ctrl-C or Ctrl-D in prompt) | All | FR-026a |
-| 20 | PluginNotFound | Plugin not found under any registered catalog | 2 | — |
-| 21 | PluginAlreadyInState | Plugin already in target state (enabled/disabled) | 2 | — |
-| 22 | PluginManifestParseError | `plugin.json` parse or validation failed | 2 | FR-013b |
-| 23 | SkillFrontmatterParseError | `SKILL.md` frontmatter parse failed | 2 | — |
-| 30 | ModelMissing | Model files not found on disk | 2 | — |
-| 31 | ModelCorrupt | Model metadata invalid or placeholder checksum | 2 | — |
-| 32 | ModelChecksumMismatch | SHA-256 or size mismatch on download | 2 | — |
-| 33 | ModelRegistrationParseError | Model manifest.json invalid | 2 | — |
-| 41 | EmbedderNameDrift | Embedder name mismatch (configured vs. on-disk index) | 3 | FR-110 |
-| 42 | EmbedderVersionDrift | Embedder version mismatch (configured vs. on-disk index) | 3 | FR-110 |
-| 52 | SchemaTooNew | Index schema version newer than Tome release (read-only path legacy gate) | 2 | — |
-| 53 | CatalogHasEnabledPlugins | Catalog has enabled plugins; remove with `--force` to cascade disable | 9 | FR-045 |
-| 54 | NotATerminal | Interactive command run without terminal (stdin/stdout not TTY) | 4 | FR-051 |
-| 60 | McpStartupFailed | MCP server startup failed (generic; specific codes 30/32/41/42/73 win) | 3 | — |
-| 73 | SchemaVersionTooNew | Index schema version newer than Tome release (write path, Phase 3+) | 3 | FR-110 |
-| 74 | SchemaMigrationFailed | Schema migration failed; index state undefined (Phase 4+ only) | 3+ | schema-migration.md |
-| 75 | DoctorFixNotSafe | `--fix` ran but un-fixable issues remain; developer must take manual action | 3 | doctor.md |
-
-**Enforcement**: Closed enum `TomeError` in `src/error.rs`. Adding a variant forces edits to:
-1. `TomeError` enum
-2. `exit_code()` match arm
-3. `category()` match arm
-4. `tests/exit_codes.rs` assertions
-
-No generic "Other" or "Unknown" variant. Every path maps to a named category.
-
-**Phase 3 US5 Schema-Migration Exit Codes** (F7 + US5):
-- `SchemaVersionTooNew` (exit 73) surfaces newer-on-disk schema on write paths; `SchemaMigrationFailed` (exit 74) for failed apply steps
-- Both are Phase 3+ codes; Phase 4+ adds the first real `Migration` rows
-
-**Phase 3 F8 MCP Status Exit Semantics** (`src/mcp/preflight.rs`):
-- Pre-flight refusal routes through specific Phase 1/2 codes (30/32/41/42) per "Specific-over-generic" principle
-- Generic `McpStartupFailed` (60) used only when no specific variant applies (e.g., index file missing)
-
-**Phase 3 US2 Workspace Init Exit Codes** (`src/workspace/init.rs`):
-- Exit 4 `CatalogAlreadyExists` reused for workspace-already-initialized case (message clarified: "workspace at <path>"); message context distinguishes from catalog-add case
-
-**Phase 3 US4 Doctor Exit Codes** (`src/commands/doctor.rs`, `contracts/doctor.md`):
-- Exit 0: Overall classification is Ok
-- Exit 1: Overall classification is Degraded or Unhealthy
-- Exit 75 (`DoctorFixNotSafe`): `--fix` was passed and repairs ran, but un-fixable issues remain (communicates "fix did something, but the work isn't done")
-
-### Error Messaging
-
-| Requirement | Implementation | Location |
-|-------------|----------------|----------|
-| **Name what failed** | Error variant includes resource name | `TomeError::CatalogNotFound(String)` |
-| **Name where it failed** | File paths in error variants | `TomeError::ModelChecksumMismatch { model, expected, got }` |
-| **Suggest next action** | Remediation in error message | `ModelChecksumMismatch` suggests `--force` retry |
-| **Surface upstream errors** | Git and HTTP stderr passed through scrubber | `TomeError::GitFailed`, HTTP errors in `Io` with scrubbed detail |
-
-Example error (model checksum):
-```
-model `bge-small-en-v1.5` SHA-256 mismatch: expected 51f1bd0..., got a1b2c3...; run `tome models download --force` to retry
-```
-
-### MCP Tool Error Codes (Phase 3 F8)
-
-| Context | Error Code | Meaning | Implementation |
-|---------|-----------|---------|-----------------|
-| Catalog validation | `unknown_catalog` | Requested catalog not in enabled scope | `src/mcp/tools/search_skills.rs::tome_to_mcp` |
-| Plugin validation | `unknown_plugin` | Requested plugin not in enabled catalog | `src/mcp/tools/search_skills.rs::tome_to_mcp` |
-| Skill lookup | `unknown_skill` | Skill identifiers mismatch catalog/plugin/skill structure | `src/mcp/tools/get_skill.rs::tome_to_mcp` |
-| Skill file missing | `skill_file_missing` | SKILL.md file absent despite DB record | `src/mcp/tools/get_skill.rs::tome_to_mcp` |
-| Frontmatter parse | `frontmatter_strip_failed` | SKILL.md frontmatter extraction failed | `src/mcp/tools/get_skill.rs::tome_to_mcp` |
-
-**Rationale**: MCP tool errors translate internal `TomeError` variants to contract-defined structured codes (Section 2.3 of `contracts/mcp-tools.md`). No domain-error info leakage—the error codes are opaque to the harness and don't surface internal variant names or diagnostics.
-
-## Interactive Flows & Terminal Enforcement
-
-### TTY Requirement (Phase 4)
-
-| Control | Implementation | Exit Code |
-|---------|----------------|-----------|
-| **TTY check** | `presentation::prompt::require_terminal()` checks both stdin and stdout | 54 (NotATerminal) |
-| **Flow entry** | `tome plugin` (no subcommand) enforces TTY before any prompt (FR-051) | Exit 54 if no TTY |
-| **Prompt functions** | Every `select()`, `multiselect()`, `confirm()` repeats the check | Exit 54 per call |
-| **Reason** | `inquire` library writes prompt and reads echo on stdout; piped/redirected stdout causes mangled prompts and mismatched inputs | Security + UX |
-
-**Implementation** (`src/presentation/prompt.rs::require_terminal()`):
-```rust
-pub fn require_terminal() -> Result<(), TomeError> {
-    if output::stdin_is_tty() && output::stdout_is_tty() {
-        Ok(())
-    } else {
-        Err(TomeError::NotATerminal)
-    }
-}
-```
-
-**Non-interactive alternatives** (FR-052):
-- `tome plugin enable|disable|show` — CLI flags / positional args, no prompt
-- `tome plugin list` — non-interactive listing with filters
-- Model download within enable: refused with pointer to `--force` flag if no TTY
-
-### TTY Enforcement in Plugin Disable (Phase 5)
-
-| Control | Implementation | Location | Exit Code |
-|---------|----------------|----------|-----------|
-| **Confirmation prompt** | User must approve disable action via TTY prompt; decline returns 0 (no state change) | `src/commands/plugin/disable.rs:52–62` | — |
-| **Non-TTY without flag** | If `--force` not supplied and stdin/stdout not TTY, refuse before prompt | `src/commands/plugin/disable.rs:36–49` | 54 |
-| **Pointer message** | Emit documented message to stderr to guide users to `--force` | `src/commands/plugin/disable.rs:44–47` | — |
-| **Decline semantics** | User declining the prompt is clean exit with no error; state unchanged | `src/commands/plugin/disable.rs:54–61` | 0 |
-
-**Guarantee** (FR-051):
-- Interactive flows will not execute in non-TTY contexts (CI, pipes, background)
-- Exit code 54 is a clear signal that the caller needs an interactive context or a non-interactive alternative (`--force`)
-
-**Test coverage**: `tests/plugin_disable.rs::disable_without_force_in_non_tty_context_exits_54_with_pointer_message()` verifies non-TTY refusal.
-
-## Signal Handling & Cancellation
-
-### SIGINT Handling
-
-| Component | Implementation | Location |
-|-----------|----------------|----------|
-| **Handler install** | One-time `ctrlc::set_handler` | `src/catalog/git.rs::install_signal_handler` |
-| **Cancellation flag** | Global `AtomicBool` with `SeqCst` ordering | `src/catalog/git.rs::CANCELLED` |
-| **Child cleanup** | `Child::kill()` on flag flip | `src/catalog/git.rs::Git::run` |
-| **Cache integrity** | Atomic write via temp-dir RAII | `src/catalog/store.rs::write_atomic` |
-| **Model download safety** | `.partial/` cleanup on cancellation | `src/embedding/download.rs::download_model` (lines 77–87) |
-| **Exit code** | 8 (documented, non-zero) | `TomeError::Interrupted` |
-
-**Guarantees** (FR-026a, SC-011):
-- Long-running Git operations (clone, fetch) are pollable for cancellation
-- On cancellation, child process is killed and control returns to main
-- No orphaned child processes
-- Per-catalog cache atomicity is preserved (temp dir dropped via RAII)
-- Model download `.partial/` directory cleaned up on interruption
-
-**Interactive cancellation** (Phase 4):
-- `inquire` library converts Ctrl-C / Ctrl-D to `InquireError::OperationCanceled` or `OperationInterrupted`
-- `src/presentation/prompt.rs::prompt_error_to_tome` maps both to `TomeError::Interrupted` (exit 8)
-- Semantically: user-initiated interruption is indistinguishable from system SIGINT (both exit 8)
-
-**Workspace initialization cancellation** (Phase 3 US2):
-- Staging directory (`.tome.tmp.*`) is cleaned up on cancellation via RAII (`TempDir::drop`)
-- If cancellation occurs between rename-aside and rename-in, rollback restores pre-existing `.tome/` from `.tome.old/`
-- No partial `.tome/` visible to readers (staging rename is the only atomic boundary)
-
-**Test**: `tests/atomicity.rs` and signal-handling verification in integration tests.
-
-## Atomic Writes
-
-### Registry, Cache, Model, Index, Workspace, and Schema Persistence
-
-| Operation | Atomicity Guarantee | Implementation |
-|-----------|-------------------|-----------------|
-| **Registry write** | Atomic replace via temp + rename | `src/catalog/store.rs::write_atomic` |
-| **Catalog cache refresh** | Atomic temp dir swap per catalog | `src/catalog/store.rs::clone_and_validate` |
-| **Model download persist** | Atomic `.partial/` → final dir rename | `src/embedding/download.rs::download_model`, step 4 |
-| **Model manifest write** | Atomic write via temp + rename | `src/embedding/download.rs::write_manifest` |
-| **Index database enable** | Per-plugin transaction (all-or-nothing skill upsert) | `src/index/skills.rs::enable_plugin_atomic` |
-| **Index database reindex** | Per-plugin transaction (snapshot diff → add/modify/remove/unchanged) | `src/index/skills.rs::reindex_plugin_atomic` (Phase 7) |
-| **Catalog cascade disable** | Single lock acquisition for multi-plugin batch disable (Phase 9) | `src/plugin/lifecycle.rs::cascade_disable_for_catalog` + `src/index/skills.rs::delete_by_plugin` |
-| **Schema migration** | Per-migration transaction under advisory lock (Phase 3 US5) | `src/index/migrations.rs::apply_pending` + `src/index/lock.rs::acquire` |
-| **Workspace initialization** | Atomic staging dir → final `.tome/` rename (Phase 3 US2) | `src/workspace/init.rs::init`, tempfile inside workspace root |
-| **Workspace config write** | Atomic write via temp + rename | `src/workspace/init.rs::init` → `catalog::store::write_atomic` |
-| **Workspace registry append** | Atomic read + rewrite with dedupe | `src/workspace/inventory.rs::append_if_registry_exists` |
-| **Doctor --fix repairs** | Per-operation atomicity (model re-download, catalog re-clone, migration apply) | `src/doctor/fixes.rs` (Phase 3 US4) |
-| **Temp file cleanup** | RAII via `tempfile::NamedTempFile` + `TempDir` | Rust Drop trait |
-
-**Mechanism**:
-1. Write to a temporary file/directory in the same directory as the target
-2. Rename (POSIX `rename(2)` is atomic on a single filesystem)
-3. On error, temp file/directory is cleaned up; target is unchanged
-
-**Guarantees** (FR-017a, FR-017b, SC-012):
-- A partial or interrupted write leaves the on-disk file in either pre-state or post-state, never partial
-- Multiple concurrent invocations see either the old version or the new version, never a mixture
-- Test coverage: `tests/atomicity.rs` with concurrent writes and simulated interruption
-
-**Workspace initialization specifics** (Phase 3 US2):
-- Staging directory created inside workspace root (`tempfile::Builder::tempdir_in`) to ensure same-filesystem rename
-- Permissions locked to 0700 on Unix BEFORE config is written (all-or-nothing atomicity)
-- Config written via `catalog::store::write_atomic` inside staging, which chmod 0600 on Unix
-- Staging rename to `.tome/` is the only visible boundary; readers never see partial directory
-- On `--force`: existing `.tome/` atomically moved to `.tome.old/` before staging rename
-- Rollback on rename failure: `.tome.old/` restored to `.tome/` if rename-in fails
-- Best-effort cleanup of `.tome.old/` after successful rename; partial cleanup on rollback is tolerated
-
-**Schema migration specifics** (Phase 3 US5):
-- Each migration runs in its own SQLite transaction under advisory lock
-- Failure at any step rolls back the transaction; subsequent migrations do not run
-- Forward-only policy enforced: `apply_pending` will not execute a migration that takes schema to an older version
-- Lock acquired for the entire migration sequence (all steps run under single lock); released after success or rollback
-- Per-step atomicity prevents partial state (each migration either fully succeeds or fully reverts)
-
-**Doctor `--fix` repair atomicity** (Phase 3 US4):
-- Model re-download atomicity: existing model directory removed, `download_model` re-downloads via existing atomic `.partial/` → final rename pattern
-- Catalog re-clone atomicity: broken cache directory removed, `Git::clone_shallow` re-clones into clean destination
-- Schema migration atomicity: forward-only `apply_pending` runs each migration in its own transaction under advisory lock
-
-**Note on per-plugin atomicity** (Phase 7): When reindexing multiple plugins (e.g., via `tome catalog update`), each plugin's reindex runs in its own transaction. A SIGINT between plugins leaves earlier plugins committed and later plugins unchanged. This is intentional (see CONCERNS.md for design rationale); the index is always in a valid state with no partial rows. The per-plugin boundary is where atomicity breaks for multi-plugin operations.
-
-**Phase 9 catalog cascade disable** (PR #32): When removing a catalog with `--force`, all enabled plugins are cascade-disabled under a single advisory-lock acquisition. Each plugin's deletion runs as its own transaction, so a SIGINT between plugins leaves earlier plugins' rows dropped and later plugins' rows intact. The index remains consistent (no partial rows), and the operation is atomic at the lock-window boundary. See CONCERNS.md for trade-off notes.
-
-## Dependency Management
-
-### Licence Allowlist
-
-| Category | Allowed Licences |
-|----------|------------------|
-| Permissive | MIT, Apache-2.0, MIT-0, BSD-2-Clause, BSD-3-Clause, ISC, Unicode-DFS-2016, Zlib |
-| Explicitly banned | GPL, AGPL, LGPL (all versions) |
-| Configuration | `deny.toml` — enforced by `cargo-deny` in CI |
-
-**Enforcement**:
-- `deny.toml` in repository root with `licenses.allow` list
-- `cargo-deny check` runs on every PR and weekly
-- GitHub Actions workflow: `.github/workflows/security.yml`
-- Confidence threshold: 0.93 (handles ambiguous license text)
-
-### Vulnerability Scanning
-
-| Tool | Frequency | Configuration | Enforcement |
-|------|-----------|---|--------------|
-| `cargo-audit` | Weekly + on every PR | Installed and run via CI | Fails workflow on vulnerability |
-| `cargo-deny` | Weekly + on every PR | `deny.toml` (see above) | Fails workflow on disallowed licence |
-| MSRV verification | On every PR | `rust-version` in Cargo.toml (pinned at 1.93) | Tested on pinned MSRV |
-| Binary size check | On release builds | 50 MB stripped limit (Constitution amendment) | Fails if exceeded |
-
-**Workflow**: `.github/workflows/security.yml`
-- Runs on: PR, push to main, weekly schedule (Mondays 04:17 UTC)
-- Parallel jobs: `cargo-audit` and `cargo-deny`
-
-### Dependency Updates
-
-| Policy | Implementation |
-|--------|-----------------|
-| **Minimal set** | Only dependencies solving concrete Phase-N problems |
-| **Justified additions** | New deps require written justification in PR |
-| **Renovate** | Automated proposal on updates; human review required before merge |
-| **MSRV compatibility** | Dependency MSRV constraints propagate to project MSRV |
-
-**Current dependencies**:
-- Phase 1: `clap` (CLI), `serde`/`toml` (config), `thiserror`/`anyhow` (errors), `tracing` (logging), `sha2`/`hex` (hashing), `tempfile` (atomicity), `ctrlc` (signals), `regex` (scrubbing), `semver` (versions), `time` (timestamps), `directories` (paths)
-- Phase 2: `rusqlite` (bundled SQLite), `sqlite-vec` (vendored vector extension), `fastembed-rs` (inference), `reqwest` (HTTP), `indicatif` (progress), `comfy-table` (tables), `owo-colors` (colour), `inquire` (prompts)
-- Phase 3: `rmcp` (MCP protocol), `tokio` (async, scoped to `src/mcp/` only), `tracing-subscriber` (structured logging), `schemars` (JSON schema generation for MCP tools)
-- Phase 4–5: No new dependencies (interactive flow and disable use existing `inquire`)
-
-All fall within permissive licences. Phase 2 deps licensed: `fastembed-rs` (MIT), `ort` (MIT, transitive via fastembed), BGE models (MIT). Phase 4–5 deps: `inquire` (MIT). Phase 3 MCP deps: `rmcp` (MIT), `tokio` (MIT), `tracing-subscriber` (MIT), `schemars` (MIT).
-
-## Binary Size & Deployment
-
-### Size Constraint
-
-| Metric | Limit | Current | Status |
-|--------|-------|---------|--------|
-| Stripped release binary | 50 MB | ~29.56 MB (Phase 3 slice 1b) | ✓ Within budget |
-| Binary size growth | Must justify | N/A | Checked on every release build (CI) |
-
-**Amendment** (CONSTITUTION.md v1.2.0): Original 10 MB cap at Phase 1 ratification. Phase 2 integration of ONNX Runtime (via `fastembed` → `ort`) measured ~29.56 MB on Linux. The worst-case projection in Phase 2 research (§Binary size budget) underestimated `ort`'s impact. Current cap of 50 MB is sized to Phase 3 reality with 20.4 MB headroom for query, reindex, and the MCP server. Discipline holds; only the number changed. Justification is recorded in the research doc and decision log.
-
-**Enforcement**: CI job `Release binary size check` in `.github/workflows/ci.yml`:
-```bash
-cargo build --release
-size=$(stat -c%s target/release/tome)
-if [ "$size" -ge 52428800 ]; then  # 50 MB
-  echo "::error::Release binary exceeds the 50 MB limit"
-  exit 1
-fi
-```
-
-New dependencies that grow the binary significantly require written justification and may require architectural reconsideration.
-
-## Output Security
-
-### JSON Output Scrubbing
-
-| Mode | Output Stream | Scrubbing |
-|------|---|---|
-| Human-readable | Stdout | Via `anstream` / `anstyle` (colour only) |
-| Structured (`--json`) | Stdout | All error `detail` strings passed through `scrub_credentials` |
-| Diagnostic logs | Stderr (always) | All tracing records passed through `scrub_credentials` |
-
-**Implementation**: Scrubbing happens at the capture point (Git stderr → `scrub_to_string`, HTTP errors → `scrub_for_diag`), ensuring no downstream path leaks credentials.
-
-### Version Output (Phase 8)
-
-| Feature | Mechanism | Purpose |
-|---------|-----------|---------|
-| **Pre-parse hook** | Env args scanned before clap dispatch | Allows `--version` to include model identities before CLI setup |
-| **Embedder identity** | Emitted from `MODEL_REGISTRY` | Public constant, reproducibility set when filing bugs |
-| **Reranker identity** | Emitted from `MODEL_REGISTRY` | Public constant, reproducibility set when filing bugs |
-| **`--json` support** | Structured output per `contracts/version-output.md` | Automation-friendly serialization |
-| **No secrets exposed** | Model names/versions are public registry entries | Safe to emit to stdout |
-
-**Implementation** (`src/main.rs:13–16`, `src/commands/status.rs::print_version`):
-```rust
-// Pre-parse: scan for --version / -V before clap dispatch
-let raw: Vec<String> = std::env::args().collect();
-if raw.iter().skip(1).any(|a| a == "--version" || a == "-V") {
-    let json = raw.iter().any(|a| a == "--json");
-    commands::status::print_version(json);
-    std::process::exit(0);
-}
-```
-
-### MCP Protocol Purity (Phase 3, F8)
-
-| Channel | Permitted Content | Restriction | Implementation |
-|---------|-------------------|-------------|-----------------|
-| **Stdout (MCP protocol)** | MCP JSON-RPC messages only | No diagnostic output, no logs (FR-221) | `src/mcp/server.rs` routes only protocol messages to stdout |
-| **Stderr (errors)** | Fatal startup errors only | Info/debug/trace suppressed (FR-222) | `src/mcp/log.rs::init_subscriber` filters stderr layer to `error!` only |
-| **Log file** | Structured JSON-lines | Full tracing with configurable filter | `src/mcp/log.rs::open_appender`, `${XDG_STATE_HOME}/tome/mcp.log` (10 MiB cap, rotates to `.1`) |
-
-**Rationale**: MCP harness consumes stdout as the protocol channel; any diagnostic noise corrupts the exchange. Logging redirects to file + error-only stderr so users and developers can diagnose issues without breaking the protocol.
-
-**Implementation** (`src/mcp/log.rs`):
-- `FileMakeWriter` + `LockedFile` adapter serialises every JSON log emit through a `Mutex<File>` (atomic per-emit, prevents interleaved writes corrupting JSON-lines framing)
-- `rotate_if_oversized` checks and renames `mcp.log` → `mcp.log.1` on startup if file exceeds 10 MiB
-- On-disk footprint bounded at ~20 MiB total (current + previous log file)
-- Fallible `try_init` so existing subscribers (e.g., from CLI layer) don't crash the process
-
-### Colour & Accessibility
-
-| Feature | Implementation |
-|---------|-----------------|
-| **NO_COLOR support** | Honoured by `anstream` wrapper |
-| **CLICOLOR=0** | Honoured by `anstream` wrapper |
-| **TTY detection** | `std::io::IsTerminal` (stable in Rust 1.70+) |
-| **Auto-disable** | Colour disabled when stdout is not a terminal |
-
-## Concurrency Model
-
-### Locking & Advisory Locking
-
-| Resource | Locking Strategy |
-|----------|-----------------|
-| Registry file | Atomic rename (not mutex) — no advisory lock |
-| Index database | Advisory lockfile `index.lock` (Phase 2) | `src/index/lock.rs` |
-| Catalog cache | Per-catalog atomic swap — no cross-catalog lock |
-| Global state | None (sync-only, CLI is per-invocation) |
-| Status command | No lock (read-only, non-invasive health check) | Designed per FR-056 |
-
-**Rationale**: Phase 1 is synchronous and single-process. Concurrent invocations are safe because:
-- Registry writes are atomic (rename)
-- Cache writes are atomic per catalog
-- Concurrent readers see either the old state or the new state
-
-Phase 2 introduces index database with WAL + advisory lockfile (FR-040) to coordinate concurrent access across harness instances.
-
-**Phase 8 Status Lock-Free** (PR #29): `tome status` never acquires the advisory lock. This allows it to run as a pre-flight health check even when another writer is holding the lock, supporting its use as a non-invasive doctor command.
-
-**Phase 9 Cascade Disable** (PR #32): The pre-check that queries `enabled_plugins_for_catalog` runs WITHOUT the lock. This is intentional — readers don't block writers, and the only risk is a TOCTOU where another process enables a plugin between the check and the cascade. In that case the cascade simply drops the additional plugin's rows too (still correct), or the user re-runs after seeing the refuse error. The cascade itself runs under a single lock acquisition; each plugin's deletion is its own transaction.
-
-**Phase 3 US3 Catalog Cache Reference-Counting** (`src/catalog/store.rs::reference_count`): The reference-count read is **not** taken under any lock. Two processes racing through `tome catalog remove` may both observe an empty list and both call `fs::remove_dir_all`; one succeeds, the other gets `NotFound` and continues. The worse race — process A observes empty, process B `tome catalog add`s the URL before A's `remove_dir_all` — leaves a dangling reference; next `tome catalog update` re-clones. Same TOCTOU profile as the Phase 9 cascade pre-check. Documented in CONCERNS.md.
-
-**Future consideration**: Phase 3 MCP server concurrency model is locked down in spec (FR-040); Phase 3 testing against real BGE models is pending (SC-001/SC-002, T088).
-
-## Schema Migrations
-
-### Forward-Only Policy (Phase 3, F7 + US5)
-
-| Rule | Enforcement | Implication |
-|------|------------|-------------|
-| **No down-migrations** | `current > target` → refuse with exit 73 (`SchemaVersionTooNew`) | Older Tome cannot open newer DBs |
-| **Forward-only apply** | `current < target` → apply every registered step in transaction order | Each step in its own transaction under advisory lock |
-| **Fresh bootstrap** | `meta.schema_version` absent → caller runs `schema::bootstrap` | New DBs start at `SCHEMA_VERSION` |
-| **Test injection** | `MIGRATIONS_OVERRIDE` is `#[doc(hidden)] pub static`, not `#[cfg(test)]` | Integration tests outside crate can inject synthetic migrations |
-
-**Implementation** (`src/index/migrations.rs`, `src/index/db.rs`):
-- `MIGRATIONS: &[Migration] = &[]` — Phase 3 ships with zero migrations (Phase 4+ adds first real steps)
-- `apply_pending(conn, ...) -> Result<u32, TomeError>` — applies all steps in order, each in own transaction under advisory lock
-- `current_schema_version(conn)` — queries `meta.schema_version` row; absent on fresh DB
-- Per-migration atomicity: SQLite transaction wraps each migration step; failure at any point rolls back that transaction
-
-**Safety**: `MIGRATIONS_OVERRIDE` slot is documented as test-only and only read by `apply_pending` (production write path). Injected synthetic table only runs in same lock-guarded write path. Forward-only boundary is enforced; no down-migration path exists. Phase 3 ships with zero migrations + synthetic-fixture e2e test ready for Phase 4.
+Both checksums are real upstream digests verified at Phase 3 slice 1. Downloads enforce both hash and size; drift surfaces as `ModelChecksumMismatch` (exit 32) rather than silently installing whatever upstream serves.
+
+### Phase 3 Polish Security Hardening (PR #56)
+
+Phase 3 Polish PR #56 applied systematic security hardening across MCP and workspace subsystems:
+
+| Control | Implementation | Location |
+|---------|----------------|----------|
+| **MCP log chmod 0600** | File opened with explicit 0600 mode; existing files tightened on startup | `src/mcp/log.rs::open_appender` (lines 74–91) |
+| **Skill symlink defence** | Directory walk explicitly skips symlinks (silent, no log) | `src/mcp/tools/get_skill.rs::walk_dir` (lines 277–281) |
+| **Workspace registry validation** | Size cap (1 MiB), entry cap (10k), NUL rejection, `..` rejection | `src/workspace/inventory.rs` (lines 39–40, 75, 87–89) |
+| **Workspace init marker check** | Refuse non-directory `.tome` entries with specific error | `src/workspace/init.rs` (lines 78–89) |
+| **Workspace init error propagation** | `--force` pre-cleanup errors propagate (FR-M-WKS-2) | `src/workspace/init.rs` (lines 132–139) |
+| **Registry deduplication** | By `canonicalize` equality, not raw string match | `src/workspace/inventory.rs` (lines 120–128) |
+
+## Signal Handling & Interruption
+
+| Control | Implementation | Location |
+|---------|----------------|----------|
+| **SIGINT handler** | Global `AtomicBool` flipped by `ctrlc` callback | `src/catalog/git.rs` (lines 25–29) |
+| **In-flight cleanup** | Child processes killed on interrupt; `TomeError::Interrupted` returned | `src/catalog/git.rs` (FR-026a) |
+| **MCP graceful shutdown** | SIGINT triggers cancellation token; 5-second timeout for in-flight handlers | `src/mcp/mod.rs` (lines 43–47, contracts/mcp-server.md) |
+| **Error code** | Exit code 8 for interruption (Phase 1) | `src/error.rs` (TomeError::Interrupted) |
+
+## Logging & Observability
+
+### MCP Server Logging
+
+| Component | Destination | Format | Rotation |
+|-----------|-------------|--------|----------|
+| **Structured logs** | `${XDG_STATE_HOME}/tome/mcp.log` | JSON-lines per contract | 10 MiB cap, rotate to `.1` |
+| **File permissions** | 0600 on Unix | N/A on Windows | `src/mcp/log.rs::open_appender` |
+| **Stderr** | Fatal errors only | Human-readable | Filtered to `error!` level (FR-222) |
+| **Scrubbing** | All user-sensitive fields | Via `scrub_to_string` | `src/mcp/mod.rs`, tool handlers |
+
+### Credential Scrubbing in MCP Logs
+
+| Field | Scrubbing | Location |
+|-------|-----------|----------|
+| **workspace** (in startup event) | Scrubbed if Workspace scope via `scrub_to_string` | `src/mcp/mod.rs` (line 100) |
+| **error** (in preflight failure) | Scrubbed via `scrub_to_string` before logging | `src/mcp/mod.rs` (line 88) |
+| **error_message** (in tool error) | Scrubbed via `scrub_to_string` before logging | `src/mcp/tools/search_skills.rs` (line 272) |
+
+## Dependency & Supply Chain Security
+
+| Control | Implementation | Enforcement |
+|---------|----------------|-------------|
+| **Allowlist verification** | Explicit allowlist maintained in governance | `CONSTITUTION.md` (Principle VI) |
+| **Audit scanning** | Weekly `cargo audit` in CI | `.github/workflows/` |
+| **Deny rules** | Forbidden licenses and dep categories in `cargo-deny` | `Cargo.deny` |
+| **MSRV pinning** | Minimum supported Rust version pinned and tested | `Cargo.toml` (rust-version = "1.93") |
+| **Binary size cap** | 50 MB hard cap; currently 22 MiB on macOS arm64 | `CONSTITUTION.md` (NFR-001, revised 2026-05-13) |
+| **LTO + strip** | `lto = "thin"`, `strip = "symbols"`, `panic = "abort"` | `Cargo.toml` (profile settings) |
 
 ## Security Testing
 
-### Test Categories
-
-| Category | Coverage | Files |
-|----------|----------|-------|
-| **Path validation** | Exhaustive negative corpus (URLs, absolutes, `..`, escapes, symlinks) | `tests/path_validation.rs` (11 cases) |
-| **Plugin identity** | Shape validation (no `/`, no `..`, no leading `.`) | `tests/plugin_*.rs` integration suites |
-| **Scrubbing** | All four regex rules + ordering + edge cases | `tests/scrubbing.rs` (8 cases) |
-| **Strictness** | Every Tome-owned Deserialize struct has `deny_unknown_fields` | `tests/manifest_strictness.rs` (2 assertions) |
-| **Model integrity** | SHA-256 verification, placeholder detection, atomic persist, re-verification | `tests/models_download.rs`, `tests/models_list.rs` |
-| **Atomicity** | Concurrent writes, partial writes, interruption | `tests/atomicity.rs` (4 cases) |
-| **Exit codes** | Every `TomeError` variant maps to documented code | `tests/exit_codes.rs` |
-| **TTY enforcement** | Non-TTY refusal at interactive flow entry and confirmation prompts; pointer messages | `tests/plugin_interactive.rs`, `tests/plugin_disable.rs` |
-| **Integration** | Real Git repos, real fixtures, real filesystems | `tests/catalog_*.rs`, `tests/models_*.rs`, `tests/plugin_*.rs` |
-| **Status health check** | Report assembly, drift detection, overall classification | `tests/status.rs` (Phase 8) |
-| **Catalog cascade** | Enabled-plugin detection, per-plugin deletion under lock, error handling | `tests/catalog_remove.rs` (Phase 9) |
-| **Schema migrations** | Forward-only boundary, no down-migrations, synthetic injection (Phase 3 US5) | `tests/schema_migrations.rs` (F7 framework + US5 e2e tests) |
-| **MCP protocol purity** | Tool descriptions contain no fixture identifiers (FR-108) | `tests/mcp_server.rs::descriptions_do_not_enumerate_fixture_identifiers` |
-| **MCP error codes** | Tool responses translate TomeError to structured codes (no domain-error leakage) | `tests/mcp_server.rs::error_translation` (Phase 3 F8) |
-| **Doctor harness detection** | Fixed list only, directory existence only, no config parsing | `src/doctor/harness_detect.rs` unit tests (Phase 3 US4) |
-
-**Success criteria**:
-- SC-005: 100% of malformed inputs rejected with helpful errors
-- SC-006: No credential material observable in any output
-- SC-011: Interruption leaves no orphaned processes
-- SC-012: Mid-write interruption leaves recoverable state
-- SC-051: Interactive flows refuse to run in non-TTY contexts
-
-## Known Gaps & Future Work
-
-| Concern | Phase | Note |
-|---------|-------|------|
-| Real BGE model testing (SC-001/SC-002) | Phase 3 | T088 — requires developer-machine pass |
-| Model-download byte-progress callback | Phase 3 onward | Currently wrapped in indeterminate spinner; both `plugin enable` and `models download` would benefit from byte-progress refactor (TD-010) |
-| User-declines-model-download exit code | Phase 3+ | Currently reuses 8 (user-initiated abort); worth locking down in future iteration |
-| Encryption at rest for sensitive caches | Phase 3+ | Deferred until use case demands it |
-| Audit logging | Phase 3+ | Not required in Phase 1 (single-user CLI) |
-| Rate limiting | Not applicable | CLI tool, not a service |
-| MCP startup pre-flight performance | Phase 3 F8+ | SHA-256 verify of primary embedder (~66 MB) at every startup acceptable for long-running server; `--verify` flag on `tome status` may reduce cold-cache overhead if profiling shows it matters (TD-012) |
-| McpState seed exposure for testability | Phase 3 F8+ | Test integration uses hard-coded MODEL_REGISTRY entries; custom stub testing requires refactor of `McpState` to carry `embedder_seed` / `reranker_seed` directly (TD-014) |
-| Catalog cache `--force` re-add | Phase 3+ | Not yet implemented; users concerned about URL hijacking can manually remove cached clones or use this future flag (enhancement) |
+| Category | Coverage | Location |
+|----------|----------|----------|
+| **Path validation** | 11 negative-case tests (URLs, absolute paths, traversal, symlinks) | `tests/path_validation.rs` |
+| **Credential scrubbing** | 4 pattern rules + integration tests against real Git output | `tests/scrubbing.rs` |
+| **Manifest strictness** | 100% grep assertion on `deny_unknown_fields` | `tests/manifest_strictness.rs` |
+| **Concurrency & atomicity** | Advisory lock + interrupt scenarios | `tests/atomicity.rs`, `tests/concurrency.rs` |
+| **Exit codes** | Closed enumeration; all Phase 1/2/3 codes tested | `tests/exit_codes.rs` |
+| **Security hardening** | File permissions, symlink handling, registry validation | `tests/security_hardening.rs` |
+| **MCP protocol purity** | No error leakage to stdout (FR-108) | `tests/mcp_server.rs` |
+| **Workspace isolation** | Cross-scope catalog enablement + reference-counting | `tests/workspace_commands.rs`, `tests/catalog_cache_refcount.rs` |
 
 ---
 
