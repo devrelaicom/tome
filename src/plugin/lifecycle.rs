@@ -73,11 +73,12 @@ pub struct ReindexOutcome {
 /// decision can pass them through unchanged.
 pub struct LifecycleDeps<'a> {
     pub paths: &'a Paths,
-    /// The active workspace scope (Phase 3). Picks per-scope `index.db` +
-    /// `index.lock` via `paths.index_db_for(&scope)` / `index_lock_for`.
-    /// All lifecycle operations are bound to the scope they're invoked
-    /// against — enabling a plugin inside a workspace does not affect
-    /// the global index, and vice versa.
+    /// The active workspace scope. Carried for future F11 work that
+    /// will route every lifecycle write through the `workspace_skills`
+    /// junction table on the single central index. Until then every
+    /// scope shares one `index.db` + `index.lock`; the parameter is
+    /// retained on the boundary so call sites don't need rewiring when
+    /// F11 lands.
     pub scope: &'a crate::workspace::Scope,
     pub config: &'a Config,
     pub embedder: &'a dyn Embedder,
@@ -130,7 +131,7 @@ pub fn enable(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<EnableOutcome, 
     ensure_models_present(deps)?;
 
     // Step 5 — advisory lock. Held until step 10.
-    let lock = acquire_lock(&deps.paths.index_lock_for(deps.scope))?;
+    let lock = acquire_lock(&deps.paths.index_lock.clone())?;
 
     // Run the rest under the lock; release explicitly on success, drop on
     // failure (Drop releases best-effort, matching the lock module's docs).
@@ -171,7 +172,7 @@ pub fn disable(
     // the index — same exit-code surface as enable.
     let _plugin_dir = resolve_plugin_dir(id, config)?;
 
-    let lock = acquire_lock(&paths.index_lock_for(scope))?;
+    let lock = acquire_lock(&paths.index_lock.clone())?;
     let outcome = disable_locked(id, paths, scope, embedder_seed, reranker_seed);
 
     match outcome {
@@ -216,7 +217,7 @@ pub fn reindex_plugin(
         .clone()
         .unwrap_or_else(|| "0.0.0".to_string());
 
-    let lock = acquire_lock(&deps.paths.index_lock_for(deps.scope))?;
+    let lock = acquire_lock(&deps.paths.index_lock.clone())?;
     let result = reindex_locked(id, &plugin_dir, &plugin_version, deps, force);
 
     match result {
@@ -260,7 +261,7 @@ pub fn reindex_plugin(
 /// because `index::open` validates them against the on-disk `meta` rows.
 pub fn cascade_disable_for_catalog(
     paths: &Paths,
-    scope: &crate::workspace::Scope,
+    _scope: &crate::workspace::Scope,
     catalog: &str,
     plugins: &[String],
     embedder_seed: MetaSeed,
@@ -269,10 +270,10 @@ pub fn cascade_disable_for_catalog(
     if plugins.is_empty() {
         return Ok(Vec::new());
     }
-    let lock = acquire_lock(&paths.index_lock_for(scope))?;
+    let lock = acquire_lock(&paths.index_lock.clone())?;
     let result = (|| -> Result<Vec<(String, u32)>, TomeError> {
         let conn = index::open(
-            &paths.index_db_for(scope),
+            &paths.index_db.clone(),
             &OpenOptions {
                 embedder: embedder_seed,
                 reranker: reranker_seed,
@@ -312,7 +313,7 @@ pub fn cascade_disable_for_catalog(
 /// Used by `tome catalog update`. NOT used by `tome reindex` — reindex on a
 /// missing plugin reports `PluginNotFound` (exit 20), not a silent cascade.
 pub fn auto_disable_orphan(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<u32, TomeError> {
-    let lock = acquire_lock(&deps.paths.index_lock_for(deps.scope))?;
+    let lock = acquire_lock(&deps.paths.index_lock.clone())?;
     let result = auto_disable_locked(id, deps);
 
     match result {
@@ -377,7 +378,7 @@ pub fn resolve_plugin_dir(id: &PluginId, config: &Config) -> Result<PathBuf, Tom
 /// `(catalog, plugin)` with `enabled = 1`.
 fn any_skill_enabled(deps: &LifecycleDeps<'_>, id: &PluginId) -> Result<bool, TomeError> {
     let conn = index::open(
-        &deps.paths.index_db_for(deps.scope),
+        &deps.paths.index_db.clone(),
         &OpenOptions {
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
@@ -406,7 +407,7 @@ fn enable_locked(
     }
 
     let mut conn = index::open(
-        &deps.paths.index_db_for(deps.scope),
+        &deps.paths.index_db.clone(),
         &OpenOptions {
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
@@ -443,12 +444,12 @@ fn enable_locked(
 fn disable_locked(
     id: &PluginId,
     paths: &Paths,
-    scope: &crate::workspace::Scope,
+    _scope: &crate::workspace::Scope,
     embedder_seed: MetaSeed,
     reranker_seed: MetaSeed,
 ) -> Result<u32, TomeError> {
     let conn = index::open(
-        &paths.index_db_for(scope),
+        &paths.index_db.clone(),
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,
@@ -493,7 +494,7 @@ fn reindex_locked(
     }
 
     let mut conn = index::open(
-        &deps.paths.index_db_for(deps.scope),
+        &deps.paths.index_db.clone(),
         &OpenOptions {
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
@@ -525,7 +526,7 @@ fn reindex_locked(
 /// embeddings. Idempotent — zero rows is fine.
 fn auto_disable_locked(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<u32, TomeError> {
     let conn = index::open(
-        &deps.paths.index_db_for(deps.scope),
+        &deps.paths.index_db.clone(),
         &OpenOptions {
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
@@ -696,20 +697,7 @@ mod tests {
     /// Build a `Paths` rooted entirely under `root` so tests never touch
     /// `$HOME` or env vars (foundational retro: gotcha #5).
     fn test_paths(root: &Path) -> Paths {
-        let state = root.join("state");
-        Paths {
-            config_dir: root.join("config"),
-            config_file: root.join("config/config.toml"),
-            data_dir: root.join("data"),
-            catalogs_dir: root.join("data/catalogs"),
-            index_db: root.join("data/index.db"),
-            index_lock: root.join("data/index.lock"),
-            models_dir: root.join("data/models"),
-            state_dir: state.clone(),
-            mcp_log: state.join("mcp.log"),
-            mcp_log_prev: state.join("mcp.log.1"),
-            workspace_registry: state.join("workspaces.txt"),
-        }
+        Paths::from_root(root.to_path_buf())
     }
 
     fn stub_seed() -> MetaSeed {
@@ -847,7 +835,7 @@ mod tests {
     fn enable_happy_path_inserts_skills() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");
@@ -882,7 +870,7 @@ mod tests {
     fn enable_when_already_enabled_returns_error() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");
@@ -944,7 +932,7 @@ mod tests {
     fn enable_aborts_on_missing_frontmatter_delimiters() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");
@@ -979,7 +967,7 @@ mod tests {
     fn enable_skips_skill_with_invalid_yaml_body_but_keeps_going() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");
@@ -1022,7 +1010,7 @@ mod tests {
     fn enable_emits_fallback_warning_for_missing_name() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");
@@ -1060,7 +1048,7 @@ mod tests {
     fn disable_flips_all_rows_to_disabled() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");
@@ -1100,7 +1088,7 @@ mod tests {
     fn disable_when_already_disabled_returns_error() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");
@@ -1149,7 +1137,7 @@ mod tests {
     fn enable_returns_model_missing_when_models_absent_and_download_disallowed() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         // Note: we deliberately do NOT fabricate_models(&paths).
 
         let catalog_root = tmp.path().join("catalog");
@@ -1248,7 +1236,7 @@ mod tests {
     fn reindex_when_nothing_changed_skips_embedder() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");
@@ -1285,7 +1273,7 @@ mod tests {
     fn reindex_re_embeds_only_the_modified_skill() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");
@@ -1335,7 +1323,7 @@ mod tests {
     fn reindex_inserts_new_skill_and_embeds_only_it() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");
@@ -1367,7 +1355,7 @@ mod tests {
     fn reindex_deletes_row_for_removed_skill_no_embed_call() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");
@@ -1405,7 +1393,7 @@ mod tests {
     fn reindex_force_re_embeds_unchanged_skills_too() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");
@@ -1470,7 +1458,7 @@ mod tests {
     fn auto_disable_orphan_drops_all_rows_for_plugin() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");
@@ -1499,7 +1487,7 @@ mod tests {
     fn auto_disable_orphan_is_idempotent_when_no_rows() {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
-        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
         let catalog_root = tmp.path().join("catalog");

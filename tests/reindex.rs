@@ -59,7 +59,7 @@ fn build_deps<'a>(
 fn reindex_all_visits_every_enabled_plugin_zero_changes() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
@@ -98,7 +98,7 @@ fn reindex_all_visits_every_enabled_plugin_zero_changes() {
 fn reindex_one_plugin_re_embeds_only_modified_skill() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
@@ -145,7 +145,7 @@ fn reindex_one_plugin_re_embeds_only_modified_skill() {
 fn reindex_force_re_embeds_every_skill_in_scope() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
@@ -175,7 +175,7 @@ fn reindex_force_re_embeds_every_skill_in_scope() {
 fn reindex_catalog_scope_visits_every_plugin_in_that_catalog() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");

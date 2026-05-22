@@ -28,7 +28,7 @@ use tome::plugin::lifecycle::{self, LifecycleDeps};
 fn enable_rolls_back_when_embedder_fails_mid_pipeline() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
@@ -115,7 +115,7 @@ fn enable_failure_does_not_taint_a_subsequent_clean_enable() {
     // This is the user-visible side of the rollback contract.
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");

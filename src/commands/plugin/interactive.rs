@@ -86,7 +86,8 @@ pub fn run(scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     }
 
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file_for(&scope.scope))?;
+    // F2a: single global config; F11 reintroduces workspace-aware view.
+    let config = store::load(&paths.global_config_file)?;
 
     if config.catalogs.is_empty() {
         let mut out = std::io::stdout().lock();

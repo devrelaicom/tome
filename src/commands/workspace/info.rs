@@ -49,8 +49,8 @@ pub fn assemble(scope: &ResolvedScope, paths: &Paths) -> Result<WorkspaceInfo, T
     })
 }
 
-fn catalog_count(scope: &ResolvedScope, paths: &Paths) -> Result<u32, TomeError> {
-    let config_path = paths.config_file_for(&scope.scope);
+fn catalog_count(_scope: &ResolvedScope, paths: &Paths) -> Result<u32, TomeError> {
+    let config_path = paths.global_config_file.clone();
     if !config_path.is_file() {
         return Ok(0);
     }
@@ -65,8 +65,8 @@ fn catalog_count(scope: &ResolvedScope, paths: &Paths) -> Result<u32, TomeError>
 
 type IndexFacts = (u32, u32, u32, Option<u32>, Option<ModelIdentity>);
 
-fn index_facts(scope: &ResolvedScope, paths: &Paths) -> Result<IndexFacts, TomeError> {
-    let db_path = paths.index_db_for(&scope.scope);
+fn index_facts(_scope: &ResolvedScope, paths: &Paths) -> Result<IndexFacts, TomeError> {
+    let db_path = paths.index_db.clone();
     if !db_path.is_file() {
         return Ok((0, 0, 0, None, None));
     }

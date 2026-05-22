@@ -21,7 +21,12 @@ use super::source;
 
 pub fn run(args: CatalogAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    let config_file = paths.config_file_for(&scope.scope);
+    // F2a: Phase 4 collapses every scope onto a single global
+    // `config.toml`. F11 reintroduces per-workspace catalog enrolment via
+    // the `workspace_catalogs` junction table; until then the
+    // resolved-scope parameter is informational only.
+    let _ = scope;
+    let config_file = paths.global_config_file.clone();
     let url = source::resolve(&args.source)?;
     let cache_dir = paths.cache_dir_for(&url);
 

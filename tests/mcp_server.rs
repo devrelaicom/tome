@@ -217,8 +217,8 @@ fn search_skills_rejects_plugin_without_catalog() {
 fn search_skills_returns_unknown_catalog_for_missing_name() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.config_dir).unwrap();
-    std::fs::write(&paths.config_file, "[catalogs]\n").unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
+    std::fs::write(&paths.global_config_file, "[catalogs]\n").unwrap();
 
     let state = build_state(&env);
 
@@ -256,8 +256,8 @@ fn search_skills_returns_unknown_catalog_for_missing_name() {
 fn get_skill_returns_unknown_catalog_for_missing_name() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.config_dir).unwrap();
-    std::fs::write(&paths.config_file, "[catalogs]\n").unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
+    std::fs::write(&paths.global_config_file, "[catalogs]\n").unwrap();
 
     let state = build_state(&env);
 

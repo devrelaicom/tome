@@ -56,7 +56,7 @@ fn setup_pre_enabled(catalog_name: &str) -> (ToolEnv, TempDir, Paths) {
     let env = ToolEnv::new();
     let fixture_tmp = TempDir::new().unwrap();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&fixture_tmp, "catalog");
@@ -222,7 +222,7 @@ fn bare_plugin_without_a_terminal_exits_54_with_pointer_message() {
     // before any disk reads. But construct one anyway so we don't depend
     // on which error fires first if that ever changes.
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
 
     let out = env
         .cmd()

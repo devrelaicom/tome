@@ -27,7 +27,8 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
         .map_err(|e| TomeError::Usage(format!("invalid plugin id `{}`: {e}", args.id)))?;
 
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file_for(&scope.scope))?;
+    // F2a: single global config; F11 reintroduces workspace-aware view.
+    let config = store::load(&paths.global_config_file)?;
     let plugin_dir = resolve_plugin_dir(&id, &config)?;
 
     // Strict failure here: the contract says exit 22 on a malformed manifest.

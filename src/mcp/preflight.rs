@@ -39,11 +39,12 @@ pub struct EmbedderHandle {
 ///    drift as `EmbedderNameDrift` (41) / `EmbedderVersionDrift` (42).
 /// 5. Verify embedder files exist and pass SHA-256.
 /// 6. Eager-load the embedder.
-pub fn run(scope: &ResolvedScope, paths: &Paths) -> Result<EmbedderHandle, TomeError> {
+pub fn run(_scope: &ResolvedScope, paths: &Paths) -> Result<EmbedderHandle, TomeError> {
     let embedder_entry = pick_kind(ModelKind::Embedder)?;
     let reranker_entry = pick_kind(ModelKind::Reranker)?;
 
-    let db_path = paths.index_db_for(&scope.scope);
+    // F2a: single central index DB; F11 reintroduces workspace-aware view.
+    let db_path = paths.index_db.clone();
     if !db_path.is_file() {
         // FR-M-MCP-4 / exit-codes-p3.md §"Specific-over-generic
         // preference": an absent index DB is a Phase 2 integrity-class

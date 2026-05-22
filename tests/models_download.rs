@@ -21,7 +21,7 @@ use serde_json::Value;
 fn download_with_all_models_already_installed_emits_skipped_records() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
 
     let out = env
@@ -64,7 +64,7 @@ fn download_with_no_models_installed_reports_missing_via_list_first() {
     // skip decision.
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
 
     let out = env
         .cmd()

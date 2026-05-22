@@ -34,7 +34,7 @@ use tome::plugin::lifecycle::{self, LifecycleDeps};
 /// in the supplied env's config and pre-enable `plugin-alpha`.
 fn setup_with_alpha_enabled(env: &ToolEnv, fixture_tmp: &TempDir, catalog_name: &str) -> Paths {
     let paths = paths_for(env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(fixture_tmp, "catalog");

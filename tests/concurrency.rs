@@ -50,7 +50,7 @@ fn second_writer_against_held_lock_exits_50() {
     let tmp = TempDir::new().unwrap();
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
@@ -110,7 +110,7 @@ fn reader_during_writer_does_not_block() {
     // must both succeed without contention.
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let fix = Fixture::build_sample();

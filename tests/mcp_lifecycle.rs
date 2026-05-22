@@ -111,7 +111,7 @@ fn mcp_preflight_index_missing_exits_51() {
     let paths = paths_for(&env);
     // Ensure data dir exists but NO index.db. Models dir not needed for
     // this assertion — preflight aborts before it gets to model checks.
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
 
     // EOF on stdin keeps the subprocess from waiting on protocol bytes
     // — pre-flight runs synchronously before stdin is touched anyway,
@@ -145,7 +145,7 @@ fn mcp_schema_too_new_returns_73() {
     // `open_read_only` still emits for the CLI read paths.
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     {
         let conn = open(&paths.index_db, &open_opts()).expect("bootstrap");
         conn.execute(
@@ -183,7 +183,7 @@ fn mcp_missing_embedder_file_returns_30() {
     // §"Specific-over-generic".
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     let _ = open(&paths.index_db, &open_opts()).expect("bootstrap");
 
     let mut child = env
@@ -213,7 +213,7 @@ fn mcp_checksum_mismatch_returns_32() {
     // digest, so preflight step 5 returns `ModelChecksumMismatch` (32).
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     let _ = open(&paths.index_db, &open_opts()).expect("bootstrap");
     fabricate_all_installed_models(&paths);
 

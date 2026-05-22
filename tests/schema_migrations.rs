@@ -117,7 +117,7 @@ fn cli_status_exits_1_on_schema_too_new() {
     // cannot understand).
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
 
     {
         // Bootstrap then stamp at SCHEMA_VERSION + 1.

@@ -1,17 +1,21 @@
-//! Integration tests for the Phase 3 additions to `Paths::resolve()` —
-//! `state_dir`, `mcp_log`, `mcp_log_prev`, `workspace_registry` — plus the
-//! Scope-aware accessor methods (`config_file_for`, `index_db_for`,
-//! `index_lock_for`, `workspace_marker_dir`).
+//! Phase 4 / F2a coverage for the new `Paths` accessors:
 //!
-//! `Paths::resolve()` reads `HOME` and the `XDG_*_HOME` vars, so this
-//! suite runs single-threaded against a `Mutex` (mirrors the Phase 2
-//! pattern in `tests/paths_phase2.rs`).
+//! - `<home>/.tome/logs/{mcp.log, mcp.log.1}` log paths
+//! - `<home>/.tome/workspaces/<name>/{settings.toml, RULES.md}` workspace
+//!   accessors
+//! - `<project>/.tome/{config.toml, RULES.md}` project-marker associated
+//!   functions
+//!
+//! Phase 3's `_for(&Scope)` accessors are gone — every read/write
+//! operates on the single central paths. F11 will reintroduce
+//! per-workspace catalog/skill isolation via the central DB's
+//! `workspace_catalogs` / `workspace_skills` junction tables.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use tome::paths::Paths;
-use tome::workspace::Scope;
+use tome::workspace::WorkspaceName;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -55,105 +59,65 @@ impl Drop for EnvGuard {
 }
 
 #[test]
-fn resolve_places_state_paths_under_xdg_state_home() {
+fn resolve_places_log_paths_under_root_logs_dir() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let _e = EnvGuard::set(&[
-        ("HOME", "/tmp/fake-home"),
-        ("XDG_CONFIG_HOME", "/tmp/fake-cfg"),
-        ("XDG_DATA_HOME", "/tmp/fake-data"),
-        ("XDG_STATE_HOME", "/tmp/fake-state"),
-    ]);
+    let _e = EnvGuard::set(&[("HOME", "/tmp/fake-home")]);
 
     let p = Paths::resolve().expect("resolve");
-    assert_eq!(p.state_dir, PathBuf::from("/tmp/fake-state/tome"));
-    assert_eq!(p.mcp_log, PathBuf::from("/tmp/fake-state/tome/mcp.log"));
-    assert_eq!(
-        p.mcp_log_prev,
-        PathBuf::from("/tmp/fake-state/tome/mcp.log.1"),
-    );
-    assert_eq!(
-        p.workspace_registry,
-        PathBuf::from("/tmp/fake-state/tome/workspaces.txt"),
-    );
-}
-
-#[test]
-fn resolve_falls_back_to_default_xdg_state_home() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let _e = EnvGuard::set(&[
-        ("HOME", "/tmp/fake-home"),
-        ("XDG_CONFIG_HOME", ""),
-        ("XDG_DATA_HOME", ""),
-        ("XDG_STATE_HOME", ""),
-    ]);
-
-    let p = Paths::resolve().expect("resolve");
-    assert_eq!(
-        p.state_dir,
-        PathBuf::from("/tmp/fake-home/.local/state/tome"),
-    );
+    assert_eq!(p.logs_dir, PathBuf::from("/tmp/fake-home/.tome/logs"));
     assert_eq!(
         p.mcp_log,
-        PathBuf::from("/tmp/fake-home/.local/state/tome/mcp.log"),
+        PathBuf::from("/tmp/fake-home/.tome/logs/mcp.log")
+    );
+    assert_eq!(
+        p.mcp_log_prev,
+        PathBuf::from("/tmp/fake-home/.tome/logs/mcp.log.1"),
     );
 }
 
 #[test]
-fn resolve_rejects_relative_xdg_state_home() {
-    // Mirrors the Phase 1 rule: a relative `XDG_*_HOME` is ignored in
-    // favour of the HOME-derived default. Confirms the same filter is
-    // wired for `XDG_STATE_HOME`.
+fn resolve_places_workspaces_under_root() {
     let _guard = ENV_LOCK.lock().unwrap();
-    let _e = EnvGuard::set(&[
-        ("HOME", "/tmp/fake-home"),
-        ("XDG_STATE_HOME", "relative/path"),
-    ]);
+    let _e = EnvGuard::set(&[("HOME", "/tmp/h")]);
 
     let p = Paths::resolve().expect("resolve");
+    assert_eq!(p.workspaces_dir, PathBuf::from("/tmp/h/.tome/workspaces"));
+}
+
+#[test]
+fn workspace_accessors_route_under_workspaces_dir() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let _e = EnvGuard::set(&[("HOME", "/tmp/h")]);
+
+    let p = Paths::resolve().expect("resolve");
+    let name = WorkspaceName::global();
     assert_eq!(
-        p.state_dir,
-        PathBuf::from("/tmp/fake-home/.local/state/tome"),
+        p.workspace_dir(&name),
+        PathBuf::from("/tmp/h/.tome/workspaces/global"),
+    );
+    assert_eq!(
+        p.workspace_settings_file(&name),
+        PathBuf::from("/tmp/h/.tome/workspaces/global/settings.toml"),
+    );
+    assert_eq!(
+        p.workspace_rules_file(&name),
+        PathBuf::from("/tmp/h/.tome/workspaces/global/RULES.md"),
     );
 }
 
 #[test]
-fn scope_global_accessors_match_resolved_fields() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let _e = EnvGuard::set(&[
-        ("HOME", "/tmp/h"),
-        ("XDG_CONFIG_HOME", "/tmp/cfg"),
-        ("XDG_DATA_HOME", "/tmp/data"),
-        ("XDG_STATE_HOME", "/tmp/state"),
-    ]);
-
-    let p = Paths::resolve().expect("resolve");
-    assert_eq!(p.config_file_for(&Scope::Global), p.config_file);
-    assert_eq!(p.index_db_for(&Scope::Global), p.index_db);
-    assert_eq!(p.index_lock_for(&Scope::Global), p.index_lock);
-}
-
-#[test]
-fn scope_workspace_accessors_route_into_dot_tome() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let _e = EnvGuard::set(&[("HOME", "/tmp/h"), ("XDG_DATA_HOME", "/tmp/d")]);
-
-    let p = Paths::resolve().expect("resolve");
-    let root = PathBuf::from("/tmp/proj");
-    let ws = Scope::Workspace(root.clone());
-    assert_eq!(p.config_file_for(&ws), root.join(".tome/config.toml"));
-    assert_eq!(p.index_db_for(&ws), root.join(".tome/index.db"));
-    assert_eq!(p.index_lock_for(&ws), root.join(".tome/index.lock"));
-}
-
-#[test]
-fn workspace_marker_dir_is_dot_tome_under_root() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let _e = EnvGuard::set(&[("HOME", "/tmp/h"), ("XDG_DATA_HOME", "/tmp/d")]);
-
-    let p = Paths::resolve().expect("resolve");
-    let root = PathBuf::from("/abs/workspace");
+fn project_marker_accessors_are_independent_of_self() {
+    let project = PathBuf::from("/abs/project");
     assert_eq!(
-        p.workspace_marker_dir(&root),
-        PathBuf::from("/abs/workspace/.tome")
+        Paths::project_marker_dir(&project),
+        PathBuf::from("/abs/project/.tome"),
+    );
+    assert_eq!(
+        Paths::project_marker_config(&project),
+        PathBuf::from("/abs/project/.tome/config.toml"),
+    );
+    assert_eq!(
+        Paths::project_marker_rules(&project),
+        PathBuf::from("/abs/project/.tome/RULES.md"),
     );
 }

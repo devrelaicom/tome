@@ -61,7 +61,7 @@ fn assemble_with_no_models_reports_unhealthy() {
 fn assemble_with_models_and_no_catalogs_reports_ok() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
     let home = empty_home();
 
@@ -76,7 +76,7 @@ fn assemble_with_models_and_no_catalogs_reports_ok() {
 fn assemble_with_broken_catalog_cache_reports_degraded() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
     let home = empty_home();
 
@@ -115,7 +115,7 @@ fn assemble_with_broken_catalog_cache_reports_degraded() {
 fn assemble_with_missing_catalog_cache_reports_degraded() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
     let home = empty_home();
 
@@ -136,7 +136,7 @@ fn assemble_with_missing_catalog_cache_reports_degraded() {
 fn assemble_with_manifest_invalid_is_not_auto_fixable() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
     let home = empty_home();
 
@@ -169,7 +169,7 @@ fn assemble_with_manifest_invalid_is_not_auto_fixable() {
 fn assemble_reports_orphan_clone_in_catalogs_list() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
     let home = empty_home();
 
@@ -217,7 +217,7 @@ fn assemble_reports_orphan_clone_in_catalogs_list() {
 fn workspace_registry_status_reports_absent_by_default() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
     let home = empty_home();
 
@@ -227,11 +227,12 @@ fn workspace_registry_status_reports_absent_by_default() {
 }
 
 #[test]
+#[ignore = "F11: workspace registry is replaced by the workspace_projects junction table"]
 fn workspace_registry_status_reports_present_count_after_opt_in() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
-    std::fs::create_dir_all(&paths.state_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
+    std::fs::create_dir_all(&paths.logs_dir).unwrap();
     fabricate_all_installed_models(&paths);
     let home = empty_home();
 
@@ -239,7 +240,7 @@ fn workspace_registry_status_reports_present_count_after_opt_in() {
     let temp_a = TempDir::new().unwrap();
     let temp_b = TempDir::new().unwrap();
     std::fs::write(
-        &paths.workspace_registry,
+        &paths.global_config_file,
         format!("{}\n{}\n", temp_a.path().display(), temp_b.path().display(),),
     )
     .unwrap();
@@ -255,7 +256,7 @@ fn workspace_registry_status_reports_present_count_after_opt_in() {
 fn fix_repairs_broken_catalog_cache_and_re_classifies_ok() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
     let home = empty_home();
 
@@ -285,7 +286,7 @@ fn fix_repairs_broken_catalog_cache_and_re_classifies_ok() {
 fn has_remaining_manual_fixes_detects_unfixable_after_fix_pass() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
     let home = empty_home();
 
@@ -312,7 +313,7 @@ fn has_remaining_manual_fixes_detects_unfixable_after_fix_pass() {
 fn harness_detection_finds_existing_directories() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
 
     let home = empty_home();
@@ -337,7 +338,7 @@ fn harness_detection_finds_existing_directories() {
 fn global_scope_overrides_workspace_in_report() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
     let home = empty_home();
 
@@ -372,7 +373,7 @@ fn cli_doctor_with_no_models_exits_1() {
 fn cli_doctor_with_healthy_state_exits_0() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
 
     let out = env.cmd().args(["doctor"]).output().unwrap();
@@ -390,7 +391,7 @@ fn cli_doctor_with_healthy_state_exits_0() {
 fn cli_doctor_fix_with_manifest_invalid_exits_75() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
 
     let fix = Fixture::build_sample();
@@ -452,7 +453,7 @@ fn fix_runs_forward_schema_migration_end_to_end() {
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
     let home = empty_home();
 
@@ -528,7 +529,7 @@ fn fix_runs_forward_schema_migration_end_to_end() {
 /// (bge-small-en-v1.5 / bge-reranker-base) — stub vs production names
 /// disagree, triggering `EmbedderNameDrift` + `RerankerDrift`.
 fn bootstrap_index_with_stub_seeds(paths: &tome::paths::Paths) {
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     let _ = tome::index::open(
         &paths.index_db,
         &tome::index::OpenOptions {
@@ -549,7 +550,7 @@ fn bootstrap_index_with_stub_seeds(paths: &tome::paths::Paths) {
 fn embedder_name_drift_classifies_unhealthy() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
     bootstrap_index_with_stub_seeds(&paths);
     let home = empty_home();
@@ -595,7 +596,7 @@ fn reranker_drift_alone_classifies_degraded() {
     // (not Unhealthy — embedder drift is the load-bearing one).
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
 
     let (real_embedder_seed, _real_reranker_seed) = tome::commands::plugin::registry_seeds();
@@ -638,7 +639,7 @@ fn no_drift_reported_when_seeds_match_registry() {
     // suggested fix entry, no classification penalty from drift.
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
 
     let (embedder, reranker) = tome::commands::plugin::registry_seeds();

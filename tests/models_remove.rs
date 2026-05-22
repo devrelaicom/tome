@@ -25,7 +25,7 @@ fn embedder() -> &'static tome::embedding::registry::ModelEntry {
 fn remove_with_unknown_model_name_exits_2_with_usage_error() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
 
     let out = env
         .cmd()
@@ -50,7 +50,7 @@ fn remove_with_unknown_model_name_exits_2_with_usage_error() {
 fn remove_of_uninstalled_registered_model_exits_30() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
 
     let entry = embedder();
     let out = env
@@ -71,7 +71,7 @@ fn remove_of_uninstalled_registered_model_exits_30() {
 fn remove_without_force_in_non_tty_exits_54_with_pointer_message() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     let entry = embedder();
     fabricate_installed_model(&paths, entry);
 
@@ -112,7 +112,7 @@ fn remove_without_force_in_non_tty_exits_54_with_pointer_message() {
 fn remove_with_force_deletes_manifest_and_model_directory() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     let entry = embedder();
     fabricate_installed_model(&paths, entry);
 

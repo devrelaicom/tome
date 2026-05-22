@@ -39,7 +39,8 @@ use crate::commands::plugin::{embedder_entry, registry_seeds};
 
 pub fn run(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file_for(&ws.scope))?;
+    // F2a: single global config; F11 reintroduces workspace-aware view.
+    let config = store::load(&paths.global_config_file)?;
 
     let scope = parse_scope(args.scope.as_deref(), &config, &paths, &ws.scope)?;
     let plugins = resolve_targets(&scope, &paths, &ws.scope)?;
@@ -144,8 +145,9 @@ fn resolve_targets(
             // this once via a single SQL query rather than iterating
             // catalogs and re-opening the connection.
             let (embedder_seed, reranker_seed) = registry_seeds();
+            let _ = ws_scope;
             let conn = index::open(
-                &paths.index_db_for(ws_scope),
+                &paths.index_db,
                 &OpenOptions {
                     embedder: embedder_seed,
                     reranker: reranker_seed,
@@ -181,12 +183,12 @@ fn resolve_targets(
 
 fn read_enabled_plugins(
     paths: &Paths,
-    ws_scope: &crate::workspace::Scope,
+    _ws_scope: &crate::workspace::Scope,
     catalog: &str,
 ) -> Result<Vec<String>, TomeError> {
     let (embedder_seed, reranker_seed) = registry_seeds();
     let conn = index::open(
-        &paths.index_db_for(ws_scope),
+        &paths.index_db,
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,

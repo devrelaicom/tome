@@ -30,7 +30,8 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     let id = PluginId::from_str(&args.id)
         .map_err(|e| TomeError::Usage(format!("invalid plugin id `{}`: {e}", args.id)))?;
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file_for(&scope.scope))?;
+    // F2a: single global config; F11 reintroduces workspace-aware view.
+    let config = store::load(&paths.global_config_file)?;
 
     // Pre-check catalog + plugin existence so we can surface the right exit
     // code before doing any model work. Lifecycle re-checks this internally;

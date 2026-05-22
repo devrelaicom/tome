@@ -18,7 +18,7 @@ use tome::embedding::registry::MODEL_REGISTRY;
 fn list_with_no_models_installed_reports_missing_for_every_entry() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
 
     let out = env
         .cmd()
@@ -43,7 +43,7 @@ fn list_with_no_models_installed_reports_missing_for_every_entry() {
 fn list_with_all_models_installed_reports_ok_under_cheap_check() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
 
     let out = env
@@ -74,7 +74,7 @@ fn list_with_verify_flips_tampered_artefact_to_checksum_mismatched() {
     // under `--verify` they must read `checksum_mismatched`.
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     // Only stage the embedder — keeps the rehash bounded to ~66 MB of
     // streamed zero-bytes (a couple of hundred ms on modern hardware) and
     // leaves the reranker in `missing` for a clean control case.

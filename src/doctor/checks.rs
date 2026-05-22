@@ -37,8 +37,9 @@ use crate::workspace::Scope;
 ///
 /// Returns an empty `Vec` when the config doesn't exist or has no
 /// catalogs.
-pub fn check_catalogs(paths: &Paths, scope: &Scope) -> Result<Vec<CatalogCacheHealth>, TomeError> {
-    let config_path = paths.config_file_for(scope);
+pub fn check_catalogs(paths: &Paths, _scope: &Scope) -> Result<Vec<CatalogCacheHealth>, TomeError> {
+    // F2a: single global config; F11 reintroduces workspace-aware view.
+    let config_path = paths.global_config_file.clone();
     let config = if config_path.is_file() {
         Some(catalog_store::load(&config_path)?)
     } else {
@@ -113,20 +114,16 @@ pub fn check_catalogs(paths: &Paths, scope: &Scope) -> Result<Vec<CatalogCacheHe
     Ok(out)
 }
 
-/// FR-M-DOC-2 / `catalog-extensions-p3.md` §"Doctor reporting": read
-/// the opt-in workspace-registry file and return a presence + count
-/// summary. Same lenient semantics as
-/// `catalog::store::reference_count` — every malformed or absent line
-/// counts as zero, never as an error.
-pub fn check_workspace_registry(paths: &Paths) -> crate::doctor::report::WorkspaceRegistryStatus {
-    let present = paths.workspace_registry.is_file();
-    let tracked: u32 = if present {
-        u32::try_from(crate::workspace::inventory::read_registry(&paths.workspace_registry).len())
-            .unwrap_or(u32::MAX)
-    } else {
-        0
-    };
-    crate::doctor::report::WorkspaceRegistryStatus { present, tracked }
+/// Phase 4 / F2a: the Phase 3 opt-in `workspaces.txt` registry is gone.
+/// Workspace bindings now live in the central database's
+/// `workspace_projects` table (F11). The function is retained as a
+/// `present: false, tracked: 0` stub so the doctor JSON envelope shape
+/// stays unchanged until F11 promotes a richer per-binding report.
+pub fn check_workspace_registry(_paths: &Paths) -> crate::doctor::report::WorkspaceRegistryStatus {
+    crate::doctor::report::WorkspaceRegistryStatus {
+        present: false,
+        tracked: 0,
+    }
 }
 
 /// Classify a single clone path. Pure FS reads — no network, no git
@@ -170,20 +167,7 @@ mod tests {
     use time::OffsetDateTime;
 
     fn fixture_paths(tmp: &Path) -> Paths {
-        let state = tmp.join("state");
-        Paths {
-            config_dir: tmp.join("config"),
-            config_file: tmp.join("config/config.toml"),
-            data_dir: tmp.join("data"),
-            catalogs_dir: tmp.join("data/catalogs"),
-            index_db: tmp.join("data/index.db"),
-            index_lock: tmp.join("data/index.lock"),
-            models_dir: tmp.join("data/models"),
-            state_dir: state.clone(),
-            mcp_log: state.join("mcp.log"),
-            mcp_log_prev: state.join("mcp.log.1"),
-            workspace_registry: state.join("workspaces.txt"),
-        }
+        Paths::from_root(tmp.to_path_buf())
     }
 
     fn write_config_with_one_catalog(paths: &Paths, name: &str, cache_path: PathBuf) {
@@ -199,8 +183,12 @@ mod tests {
             },
         );
         let cfg = Config { catalogs };
-        std::fs::create_dir_all(&paths.config_dir).unwrap();
-        std::fs::write(&paths.config_file, toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        std::fs::create_dir_all(&paths.root).unwrap();
+        std::fs::write(
+            &paths.global_config_file,
+            toml::to_string_pretty(&cfg).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]

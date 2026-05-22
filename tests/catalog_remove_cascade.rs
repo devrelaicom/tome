@@ -64,7 +64,7 @@ fn refuse_remove_when_enabled_plugins_exist() {
     let tmp = TempDir::new().unwrap();
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     // Bootstrap on-disk state: copy sample-plugin-catalog into the env's
@@ -94,7 +94,7 @@ fn refuse_remove_when_enabled_plugins_exist() {
         "stderr should mention the enabled plugin id, got: {stderr}",
     );
     // Catalog config NOT mutated.
-    let cfg_text = std::fs::read_to_string(&paths.config_file).unwrap();
+    let cfg_text = std::fs::read_to_string(&paths.global_config_file).unwrap();
     assert!(cfg_text.contains("sample-plugin-catalog"));
     // Skill rows NOT dropped.
     assert!(count_skill_rows(&paths, "sample-plugin-catalog") > 0);
@@ -105,7 +105,7 @@ fn force_cascades_disable_and_removes_catalog() {
     let tmp = TempDir::new().unwrap();
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
@@ -152,7 +152,7 @@ fn force_cascades_disable_and_removes_catalog() {
     );
 
     // Catalog removed from config.
-    let cfg_text = std::fs::read_to_string(&paths.config_file).unwrap();
+    let cfg_text = std::fs::read_to_string(&paths.global_config_file).unwrap();
     assert!(
         !cfg_text.contains("sample-plugin-catalog"),
         "config should no longer reference the removed catalog, got: {cfg_text}",
@@ -202,20 +202,26 @@ fn no_enabled_plugins_keeps_phase_1_behaviour() {
 /// global scope. Workspace's plugins drop; workspace's config loses the
 /// entry; global's config keeps it; the on-disk clone survives because
 /// global still references it.
+///
+/// Phase 4 / F2a collapses both scopes onto the same central
+/// `config.toml` + `index.db`. The Phase 3 cross-scope isolation
+/// invariant this test asserts is precisely what F11 reintroduces via
+/// the `workspace_catalogs` junction table. Ignored until F11 lands.
 #[test]
+#[ignore = "F11: per-workspace isolation moves to workspace_catalogs junction table"]
 fn cascade_remove_in_workspace_does_not_remove_shared_clone() {
     use common::sample_plugin_catalog_fixture;
     use sha2::{Digest, Sha256};
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     // Opt the user into the workspace registry so `reference_count`
     // can see the workspace.
-    std::fs::create_dir_all(&paths.state_dir).unwrap();
-    std::fs::File::create(&paths.workspace_registry).unwrap();
+    std::fs::create_dir_all(&paths.logs_dir).unwrap();
+    std::fs::File::create(&paths.global_config_file).unwrap();
 
     // Build a real git fixture from sample-plugin-catalog so the CLI's
     // `catalog add` succeeds (it needs a cloneable repo).
@@ -294,7 +300,8 @@ fn cascade_remove_in_workspace_does_not_remove_shared_clone() {
     assert!(cache_dir.is_dir());
 
     // Workspace's index has rows for the plugin.
-    let ws_db = paths.index_db_for(&workspace_scope);
+    let ws_db = paths.index_db.clone();
+    let _ = &workspace_scope;
     let pre_rows: i64 = {
         let conn = index::open(
             &ws_db,
@@ -359,7 +366,7 @@ fn cascade_remove_in_workspace_does_not_remove_shared_clone() {
     assert_eq!(post_rows, 0, "workspace skills should be dropped");
 
     // Global config STILL references the catalog.
-    let g_body = std::fs::read_to_string(&paths.config_file).unwrap();
+    let g_body = std::fs::read_to_string(&paths.global_config_file).unwrap();
     assert!(
         g_body.contains("sample-plugin-catalog"),
         "global config lost the catalog: {g_body}",

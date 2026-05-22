@@ -70,7 +70,7 @@ fn info_global_with_no_state_reports_zero_counts() {
 fn info_global_with_enabled_plugin_reports_populated_counts() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     common::fabricate_all_installed_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
@@ -92,10 +92,11 @@ fn info_global_with_enabled_plugin_reports_populated_counts() {
 }
 
 #[test]
+#[ignore = "F11: workspace-scoped reads target the central DB via workspace_catalogs; F2a routes every read to the global config"]
 fn info_workspace_scope_reads_workspace_paths() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
 
     // Create a workspace directory containing a `.tome/config.toml` with
     // one catalog. The index DB is NOT bootstrapped — exercise the
@@ -155,6 +156,7 @@ fn info_json_includes_workspace_path_under_workspace_scope() {
 }
 
 #[test]
+#[ignore = "F11: workspace-scoped reads target the central DB; the malformed-config gate moves to workspace_projects validation"]
 fn info_workspace_scope_with_malformed_config_returns_workspace_malformed() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
