@@ -56,7 +56,7 @@ pub fn run(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), Tome
     }
 
     let embedder = load_embedder(&paths)?;
-    let (embedder_seed, reranker_seed) = registry_seeds();
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let deps = LifecycleDeps {
         paths: &paths,
         scope: &ws.scope,
@@ -64,6 +64,7 @@ pub fn run(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), Tome
         embedder: &embedder,
         embedder_seed,
         reranker_seed,
+        summariser_seed,
         allow_model_download: false,
     };
 
@@ -144,20 +145,24 @@ fn resolve_targets(
             // Walk every catalog row in the index, group by catalog. We do
             // this once via a single SQL query rather than iterating
             // catalogs and re-opening the connection.
-            let (embedder_seed, reranker_seed) = registry_seeds();
+            let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
             let _ = ws_scope;
             let conn = index::open(
                 &paths.index_db,
                 &OpenOptions {
                     embedder: embedder_seed,
                     reranker: reranker_seed,
+                    summariser: summariser_seed,
                 },
             )?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT DISTINCT catalog, plugin FROM skills
-                     WHERE enabled = 1
-                     ORDER BY catalog, plugin",
+                    "SELECT DISTINCT s.catalog, s.plugin
+                     FROM skills AS s
+                     JOIN workspace_skills AS ws ON ws.skill_id = s.id
+                     JOIN workspaces       AS w  ON w.id = ws.workspace_id
+                     WHERE w.name = 'global'
+                     ORDER BY s.catalog, s.plugin",
                 )
                 .map_err(|e| {
                     TomeError::IndexIntegrityCheckFailure(format!("prepare all-scope: {e}"))
@@ -186,12 +191,13 @@ fn read_enabled_plugins(
     _ws_scope: &crate::workspace::Scope,
     catalog: &str,
 ) -> Result<Vec<String>, TomeError> {
-    let (embedder_seed, reranker_seed) = registry_seeds();
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let conn = index::open(
         &paths.index_db,
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,
+            summariser: summariser_seed,
         },
     )?;
     enabled_plugins_for_catalog(&conn, catalog)

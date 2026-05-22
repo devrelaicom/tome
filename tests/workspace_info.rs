@@ -35,7 +35,7 @@ fn workspace_scope(path: &std::path::Path) -> ResolvedScope {
 
 fn enable_alpha(paths: &tome::paths::Paths, config: &tome::config::Config) {
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
-    let (embedder_seed, reranker_seed) = registry_seeds();
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
         paths,
@@ -44,6 +44,7 @@ fn enable_alpha(paths: &tome::paths::Paths, config: &tome::config::Config) {
         embedder: &embedder,
         embedder_seed,
         reranker_seed,
+        summariser_seed,
         allow_model_download: false,
     };
     lifecycle::enable(&id, &deps).expect("enable alpha");
@@ -86,7 +87,7 @@ fn info_global_with_enabled_plugin_reports_populated_counts() {
     assert_eq!(info.skills_indexed, 4);
     assert_eq!(info.schema_version, Some(tome::index::SCHEMA_VERSION));
     let embedder = info.embedder.as_ref().expect("embedder identity present");
-    let (expected, _) = registry_seeds();
+    let (expected, _, _) = registry_seeds();
     assert_eq!(embedder.name, expected.name);
     assert_eq!(embedder.version, expected.version);
 }

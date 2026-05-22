@@ -77,6 +77,25 @@ fn index_facts(_scope: &ResolvedScope, paths: &Paths) -> Result<IndexFacts, Tome
     // cheap; pessimistically running it costs nothing on a healthy DB.
     integrity::check(&conn)?;
 
+    // Schema-version gate. The v2-shaped queries below (`JOIN
+    // workspace_skills`) reference tables that don't exist in an older
+    // on-disk schema. A stale-schema DB is not an error here — `tome
+    // workspace info` is a read-only narrow report; the doctor's
+    // schema-fix suggestion is the user-facing repair path. Return
+    // zeros for the workspace-aware counts and let the caller (doctor)
+    // emit `subsystem: "schema"` via `build_suggested_fixes`.
+    let schema_version = match index::current_schema_version(&conn) {
+        Ok(Some(v)) => Some(v),
+        Ok(None) => Some(index::SCHEMA_VERSION),
+        Err(_) => None,
+    };
+    if let Some(v) = schema_version
+        && v < index::SCHEMA_VERSION
+    {
+        let embedder = read_embedder_identity(&conn)?;
+        return Ok((0, 0, 0, schema_version, embedder));
+    }
+
     let plugins_total: i64 = conn
         .query_row("SELECT COUNT(DISTINCT plugin) FROM skills", [], |r| {
             r.get(0)
@@ -84,22 +103,26 @@ fn index_facts(_scope: &ResolvedScope, paths: &Paths) -> Result<IndexFacts, Tome
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("plugins_total: {e}")))?;
     let plugins_enabled: i64 = conn
         .query_row(
-            "SELECT COUNT(DISTINCT plugin) FROM skills WHERE enabled = 1",
+            "SELECT COUNT(DISTINCT s.plugin)
+             FROM skills AS s
+             JOIN workspace_skills AS ws ON ws.skill_id = s.id
+             JOIN workspaces       AS w  ON w.id = ws.workspace_id
+             WHERE w.name = 'global'",
             [],
             |r| r.get(0),
         )
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("plugins_enabled: {e}")))?;
     let skills_indexed: i64 = conn
-        .query_row("SELECT COUNT(*) FROM skills WHERE enabled = 1", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*)
+             FROM skills AS s
+             JOIN workspace_skills AS ws ON ws.skill_id = s.id
+             JOIN workspaces       AS w  ON w.id = ws.workspace_id
+             WHERE w.name = 'global'",
+            [],
+            |r| r.get(0),
+        )
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("skills_indexed: {e}")))?;
-
-    let schema_version = match index::current_schema_version(&conn) {
-        Ok(Some(v)) => Some(v),
-        Ok(None) => Some(index::SCHEMA_VERSION),
-        Err(_) => None,
-    };
 
     let embedder = read_embedder_identity(&conn)?;
 

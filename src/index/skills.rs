@@ -7,8 +7,15 @@
 //!
 //! Per FR-006 / FR-032, an enable / refresh of a skill whose
 //! `(name, description)` text composition has not changed is a no-op embed:
-//! we keep the existing vector and only flip `enabled = 1`. The diff is
-//! detected via [`content_hash`].
+//! we keep the existing vector and only ensure the matching
+//! `workspace_skills` row exists. The diff is detected via [`content_hash`].
+//!
+//! Phase 4 / F9: the Phase 2/3 `skills.enabled` column is dropped.
+//! Enablement is now expressed by a row in `workspace_skills` joining the
+//! skill to a workspace. This module still operates against the privileged
+//! `global` workspace (resolved via [`crate::index::schema::GLOBAL_WORKSPACE`])
+//! — F11 lifts the lifecycle paths to the resolved-scope workspace; until
+//! then the `(workspace_id, skill_id)` pair always carries the global id.
 //!
 //! Spec: data-model.md §5 (`SkillRecord`) and §9 (`ContentHash`),
 //! research §R8 (embedding-text composition).
@@ -96,6 +103,20 @@ fn now_rfc3339() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
 }
 
+/// SQL fragment computing the boolean `enabled` value as a LEFT JOIN to
+/// `workspace_skills` keyed on the privileged `global` workspace. Used in
+/// every `SELECT` that previously read `skills.enabled` directly.
+const ENABLED_EXPR: &str = "CASE WHEN ws.skill_id IS NOT NULL THEN 1 ELSE 0 END";
+
+/// SQL fragment joining `skills s` to `workspace_skills ws` against the
+/// privileged `global` workspace. The LEFT JOIN means rows present in
+/// `skills` but not enabled in the global workspace still appear, with
+/// `ws.skill_id IS NULL` — same row count as the Phase 2/3 `skills`
+/// projection.
+const GLOBAL_JOIN: &str = "LEFT JOIN workspace_skills AS ws \
+                           ON ws.skill_id = s.id \
+                          AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')";
+
 /// Look up a single skill by identity. Returns `Ok(None)` when absent.
 pub fn find(
     conn: &Connection,
@@ -103,26 +124,27 @@ pub fn find(
     plugin: &str,
     name: &str,
 ) -> Result<Option<SkillRecord>, TomeError> {
-    conn.query_row(
-        "SELECT id, catalog, plugin, name, description, plugin_version, path,
-                content_hash, enabled, indexed_at
-         FROM skills WHERE catalog = ?1 AND plugin = ?2 AND name = ?3",
-        params![catalog, plugin, name],
-        |row| {
-            Ok(SkillRecord {
-                id: row.get(0)?,
-                catalog: row.get(1)?,
-                plugin: row.get(2)?,
-                name: row.get(3)?,
-                description: row.get(4)?,
-                plugin_version: row.get(5)?,
-                path: row.get(6)?,
-                content_hash: row.get(7)?,
-                enabled: row.get::<_, i64>(8)? != 0,
-                indexed_at: row.get(9)?,
-            })
-        },
-    )
+    let sql = format!(
+        "SELECT s.id, s.catalog, s.plugin, s.name, s.description, s.plugin_version, s.path,
+                s.content_hash, {ENABLED_EXPR}, s.indexed_at
+         FROM skills AS s
+         {GLOBAL_JOIN}
+         WHERE s.catalog = ?1 AND s.plugin = ?2 AND s.name = ?3"
+    );
+    conn.query_row(&sql, params![catalog, plugin, name], |row| {
+        Ok(SkillRecord {
+            id: row.get(0)?,
+            catalog: row.get(1)?,
+            plugin: row.get(2)?,
+            name: row.get(3)?,
+            description: row.get(4)?,
+            plugin_version: row.get(5)?,
+            path: row.get(6)?,
+            content_hash: row.get(7)?,
+            enabled: row.get::<_, i64>(8)? != 0,
+            indexed_at: row.get(9)?,
+        })
+    })
     .optional()
     .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("find skill: {e}")))
 }
@@ -133,13 +155,16 @@ pub fn list_for_plugin(
     catalog: &str,
     plugin: &str,
 ) -> Result<Vec<SkillRecord>, TomeError> {
+    let sql = format!(
+        "SELECT s.id, s.catalog, s.plugin, s.name, s.description, s.plugin_version, s.path,
+                s.content_hash, {ENABLED_EXPR}, s.indexed_at
+         FROM skills AS s
+         {GLOBAL_JOIN}
+         WHERE s.catalog = ?1 AND s.plugin = ?2
+         ORDER BY s.name"
+    );
     let mut stmt = conn
-        .prepare(
-            "SELECT id, catalog, plugin, name, description, plugin_version, path,
-                    content_hash, enabled, indexed_at
-             FROM skills WHERE catalog = ?1 AND plugin = ?2
-             ORDER BY name",
-        )
+        .prepare(&sql)
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("prepare list: {e}")))?;
     let rows = stmt
         .query_map(params![catalog, plugin], |row| {
@@ -163,16 +188,21 @@ pub fn list_for_plugin(
 
 /// Distinct enabled plugin names for one catalog, sorted alphabetically.
 /// Used by `tome catalog update` to drive the per-catalog reindex pass and
-/// by `tome reindex <catalog>` to scope the explicit form.
+/// by `tome reindex <catalog>` to scope the explicit form. Phase 4 / F9:
+/// "enabled" means a `workspace_skills` row exists against the privileged
+/// `global` workspace.
 pub fn enabled_plugins_for_catalog(
     conn: &Connection,
     catalog: &str,
 ) -> Result<Vec<String>, TomeError> {
     let mut stmt = conn
         .prepare(
-            "SELECT DISTINCT plugin FROM skills
-             WHERE catalog = ?1 AND enabled = 1
-             ORDER BY plugin",
+            "SELECT DISTINCT s.plugin
+             FROM skills AS s
+             JOIN workspace_skills AS ws ON ws.skill_id = s.id
+             JOIN workspaces       AS w  ON w.id = ws.workspace_id
+             WHERE s.catalog = ?1 AND w.name = 'global'
+             ORDER BY s.plugin",
         )
         .map_err(|e| {
             TomeError::IndexIntegrityCheckFailure(format!("prepare enabled plugins: {e}"))
@@ -186,8 +216,11 @@ pub fn enabled_plugins_for_catalog(
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect enabled plugins: {e}")))
 }
 
-/// Flip every row for `(catalog, plugin)` to `enabled = 0`. Embeddings are
-/// retained so a subsequent re-enable is cheap (FR-005, FR-006).
+/// DELETE every `workspace_skills` row for `(global, plugin)`. The
+/// underlying `skills` rows + embeddings are retained so a subsequent
+/// re-enable is cheap (FR-005, FR-006 + FR-383 retention rule). Phase
+/// 4 / F9 redefines "disable" as removing the workspace enrolment;
+/// shared skills outlive any single workspace.
 pub fn mark_all_disabled_for_plugin(
     conn: &Connection,
     catalog: &str,
@@ -195,7 +228,11 @@ pub fn mark_all_disabled_for_plugin(
 ) -> Result<u32, TomeError> {
     let affected = conn
         .execute(
-            "UPDATE skills SET enabled = 0 WHERE catalog = ?1 AND plugin = ?2",
+            "DELETE FROM workspace_skills
+             WHERE workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+               AND skill_id IN (
+                  SELECT id FROM skills WHERE catalog = ?1 AND plugin = ?2
+               )",
             params![catalog, plugin],
         )
         .map_err(|e| {
@@ -236,6 +273,8 @@ pub fn delete_by_plugin(conn: &Connection, catalog: &str, plugin: &str) -> Resul
 
 /// Insert a new skill row + matching embedding, or update an existing row
 /// in place. Run inside an already-open transaction by the caller.
+/// Phase 4 / F9: the `enabled` column is gone; enablement is recorded
+/// separately via [`upsert_global_workspace_skill`].
 fn upsert_skill(
     tx: &rusqlite::Transaction<'_>,
     pending: &PendingSkill,
@@ -243,18 +282,16 @@ fn upsert_skill(
     embedding: &[f32],
     now: &str,
 ) -> Result<i64, TomeError> {
-    let enabled: i64 = 1;
     tx.execute(
         "INSERT INTO skills
             (catalog, plugin, name, description, plugin_version, path,
-             content_hash, enabled, indexed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             content_hash, indexed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(catalog, plugin, name) DO UPDATE SET
             description    = excluded.description,
             plugin_version = excluded.plugin_version,
             path           = excluded.path,
             content_hash   = excluded.content_hash,
-            enabled        = excluded.enabled,
             indexed_at     = excluded.indexed_at",
         params![
             pending.catalog,
@@ -264,7 +301,6 @@ fn upsert_skill(
             pending.plugin_version,
             pending.path,
             hash,
-            enabled,
             now,
         ],
     )
@@ -294,6 +330,30 @@ fn upsert_skill(
     .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("insert embedding: {e}")))?;
 
     Ok(id)
+}
+
+/// INSERT-or-IGNORE a `workspace_skills` row joining `skill_id` to the
+/// privileged `global` workspace. Idempotent: re-running for an already-
+/// enrolled skill is a no-op (the PK `(workspace_id, skill_id)` enforces
+/// uniqueness). Phase 4 / F9 substitutes this for the prior
+/// `UPDATE skills SET enabled = 1 WHERE id = ?1` write.
+fn upsert_global_workspace_skill(
+    tx: &rusqlite::Transaction<'_>,
+    skill_id: i64,
+    enabled_at_unix: i64,
+) -> Result<(), TomeError> {
+    tx.execute(
+        "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at)
+         VALUES ((SELECT id FROM workspaces WHERE name = 'global'), ?1, ?2)
+         ON CONFLICT(workspace_id, skill_id) DO UPDATE SET enabled_at = excluded.enabled_at",
+        params![skill_id, enabled_at_unix],
+    )
+    .map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!(
+            "upsert workspace_skills (global, skill_id={skill_id}): {e}"
+        ))
+    })?;
+    Ok(())
 }
 
 fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {
@@ -329,6 +389,7 @@ where
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("begin enable tx: {e}")))?;
 
     let now = now_rfc3339();
+    let now_unix = OffsetDateTime::now_utc().unix_timestamp();
     let mut newly_embedded: u32 = 0;
 
     for skill in pending {
@@ -349,27 +410,35 @@ where
                 ))
             })?;
 
-        match existing {
+        let skill_id = match existing {
             Some((id, stored_hash)) if stored_hash == hash => {
+                // Cheap re-enable (FR-006): metadata refresh only, no
+                // embedder invocation, no embedding rewrite.
                 tx.execute(
-                    "UPDATE skills SET enabled = 1, plugin_version = ?2, path = ?3,
-                                       indexed_at = ?4
+                    "UPDATE skills SET plugin_version = ?2, path = ?3, indexed_at = ?4
                      WHERE id = ?1",
                     params![id, skill.plugin_version, skill.path, now],
                 )
                 .map_err(|e| {
                     TomeError::IndexIntegrityCheckFailure(format!(
-                        "flip enabled for {}/{}: {e}",
+                        "refresh metadata for {}/{}: {e}",
                         skill.plugin, skill.name
                     ))
                 })?;
+                id
             }
             _ => {
                 let embedding = embed(&embedding_text(&skill.name, &skill.description))?;
-                upsert_skill(&tx, skill, &hash, &embedding, &now)?;
+                let id = upsert_skill(&tx, skill, &hash, &embedding, &now)?;
                 newly_embedded = newly_embedded.saturating_add(1);
+                id
             }
-        }
+        };
+
+        // Enrol the skill in the privileged `global` workspace (Phase
+        // 4 / F9 replacement for the prior `enabled = 1` flag). F11
+        // will lift this to the resolved-scope workspace.
+        upsert_global_workspace_skill(&tx, skill_id, now_unix)?;
     }
 
     tx.commit()
@@ -402,14 +471,10 @@ where
 /// All four classes commit inside one SQLite transaction so a SIGINT or
 /// embedder failure leaves the index unchanged.
 ///
-/// `enabled` is intentionally forced to 1 for Added/Modified/Unchanged rows.
-/// The contract for `tome reindex` says reindex never changes a plugin's
-/// `enabled` flag, but reindex is only called when the plugin IS enabled —
-/// the catalog-update path filters to `enabled = 1` rows before invoking,
-/// and the explicit CLI path requires the plugin be enabled to be in scope.
-/// Forcing `enabled = 1` here is therefore a no-op in practice and protects
-/// against a corrupted-but-recoverable index where a row's `enabled` bit
-/// was flipped out of band.
+/// Phase 4 / F9: the `enabled` bit is no longer carried on the `skills`
+/// row. Reindex re-asserts the matching `workspace_skills(global, id)`
+/// row for every Added/Modified/Unchanged skill (a no-op when the
+/// enrolment already exists; the PK keeps idempotency).
 pub fn reindex_plugin_atomic<F>(
     conn: &mut Connection,
     catalog: &str,
@@ -426,6 +491,7 @@ where
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("begin reindex tx: {e}")))?;
 
     let now = now_rfc3339();
+    let now_unix = OffsetDateTime::now_utc().unix_timestamp();
     let mut summary = ReindexSummary::default();
 
     // Snapshot existing rows once per call. We'll diff against `pending`
@@ -459,12 +525,11 @@ where
     for skill in pending {
         let hash = content_hash(&skill.name, &skill.description);
 
-        match existing.remove(&skill.name) {
+        let skill_id = match existing.remove(&skill.name) {
             Some((id, stored_hash)) if stored_hash == hash && !force => {
                 // Unchanged: touch metadata only.
                 tx.execute(
-                    "UPDATE skills SET enabled = 1, plugin_version = ?2, path = ?3,
-                                       indexed_at = ?4
+                    "UPDATE skills SET plugin_version = ?2, path = ?3, indexed_at = ?4
                      WHERE id = ?1",
                     params![id, skill.plugin_version, skill.path, now],
                 )
@@ -475,20 +540,27 @@ where
                     ))
                 })?;
                 summary.unchanged = summary.unchanged.saturating_add(1);
+                id
             }
             Some(_) => {
                 // Modified (or force=true rewriting an unchanged row).
                 let embedding = embed(&embedding_text(&skill.name, &skill.description))?;
-                upsert_skill(&tx, skill, &hash, &embedding, &now)?;
+                let id = upsert_skill(&tx, skill, &hash, &embedding, &now)?;
                 summary.modified = summary.modified.saturating_add(1);
+                id
             }
             None => {
                 // Added.
                 let embedding = embed(&embedding_text(&skill.name, &skill.description))?;
-                upsert_skill(&tx, skill, &hash, &embedding, &now)?;
+                let id = upsert_skill(&tx, skill, &hash, &embedding, &now)?;
                 summary.added = summary.added.saturating_add(1);
+                id
             }
-        }
+        };
+
+        // Re-assert the global workspace enrolment for every visited skill
+        // (idempotent — PK keyed on (workspace_id, skill_id)).
+        upsert_global_workspace_skill(&tx, skill_id, now_unix)?;
     }
 
     // Pass 2 — Removed: anything still left in `existing` is on-index but

@@ -14,7 +14,7 @@ mod common;
 
 use common::{
     ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models, paths_for,
-    stub_embedder_seed, stub_reranker_seed, write_config_for_cli,
+    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed, write_config_for_cli,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -44,6 +44,7 @@ fn setup(env: &ToolEnv, fixture_tmp: &TempDir) -> Paths {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();

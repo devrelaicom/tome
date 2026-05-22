@@ -94,14 +94,24 @@ pub fn run(_scope: &ResolvedScope, paths: &Paths) -> Result<EmbedderHandle, Tome
         name: reranker_entry.name.into(),
         version: reranker_entry.version.into(),
     };
-    match detect_drift(&conn, &embedder_ident, &reranker_ident)? {
+    // Phase 4 / F9: summariser identity is also recorded. Drift on the
+    // summariser is not a startup failure (same rationale as reranker
+    // drift — only summary regeneration depends on it).
+    let summariser_entry = crate::summarise::registry::summariser_entry();
+    let summariser_ident = ModelIdent {
+        name: summariser_entry.name.into(),
+        version: summariser_entry.version.into(),
+    };
+    match detect_drift(&conn, &embedder_ident, &reranker_ident, &summariser_ident)? {
         DriftStatus::EmbedderNameDrift { stored, configured } => {
             return Err(TomeError::EmbedderNameDrift { stored, configured });
         }
         DriftStatus::EmbedderVersionDrift { stored, configured } => {
             return Err(TomeError::EmbedderVersionDrift { stored, configured });
         }
-        DriftStatus::RerankerDrift { .. } | DriftStatus::None => {}
+        DriftStatus::RerankerDrift { .. }
+        | DriftStatus::SummariserDrift { .. }
+        | DriftStatus::None => {}
     }
     drop(conn);
 

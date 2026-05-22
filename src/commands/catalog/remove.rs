@@ -77,7 +77,7 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
     // `--force`; the no-force-but-enabled path errored above.
     let mut cascade_records: Vec<CascadeRecord> = Vec::new();
     if !enabled_plugins.is_empty() {
-        let (embedder_seed, reranker_seed) = registry_seeds();
+        let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
         let breakdown = cascade_disable_for_catalog(
             &paths,
             &scope.scope,
@@ -85,6 +85,7 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
             &enabled_plugins,
             embedder_seed,
             reranker_seed,
+            summariser_seed,
         )?;
         cascade_records.reserve(breakdown.len());
         for (plugin, dropped) in &breakdown {
@@ -147,12 +148,13 @@ fn read_enabled_plugins(
     if !index_db.is_file() {
         return Ok(Vec::new());
     }
-    let (embedder_seed, reranker_seed) = registry_seeds();
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let conn = index::open(
         &index_db,
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,
+            summariser: summariser_seed,
         },
     )?;
     enabled_plugins_for_catalog(&conn, catalog)

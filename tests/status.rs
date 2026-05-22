@@ -32,7 +32,7 @@ fn enable_alpha(
     embedder: &StubEmbedder,
 ) {
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
-    let (embedder_seed, reranker_seed) = registry_seeds();
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let deps = LifecycleDeps {
         paths,
         scope: &tome::workspace::Scope::Global,
@@ -40,6 +40,7 @@ fn enable_alpha(
         embedder,
         embedder_seed,
         reranker_seed,
+        summariser_seed,
         allow_model_download: false,
     };
     lifecycle::enable(&id, &deps).expect("enable alpha");
@@ -142,12 +143,13 @@ fn status_degraded_on_reranker_drift_in_meta() {
     // Mutate meta to simulate a reranker upgrade: the stored value records
     // an older reranker name while the registry's reranker (= currently
     // configured) is unchanged.
-    let (embedder_seed, reranker_seed) = registry_seeds();
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let conn = index::open(
         &paths.index_db,
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,
+            summariser: summariser_seed,
         },
     )
     .unwrap();
@@ -176,12 +178,13 @@ fn status_unhealthy_on_embedder_drift() {
     let embedder = StubEmbedder::new();
     enable_alpha(&paths, &config, &embedder);
 
-    let (embedder_seed, reranker_seed) = registry_seeds();
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let conn = index::open(
         &paths.index_db,
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,
+            summariser: summariser_seed,
         },
     )
     .unwrap();

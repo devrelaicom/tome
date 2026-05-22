@@ -155,7 +155,7 @@ fn repair_schema(paths: &Paths, _scope: &Scope) -> Result<(), TomeError> {
         // No DB on disk → nothing to migrate. Not an error.
         return Ok(());
     }
-    let (embedder_seed, reranker_seed) = registry_seeds();
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let lock_path = paths.index_lock.clone();
     let _lock = acquire_lock(&lock_path)?;
     let mut conn = index::open(
@@ -163,6 +163,7 @@ fn repair_schema(paths: &Paths, _scope: &Scope) -> Result<(), TomeError> {
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,
+            summariser: summariser_seed,
         },
     )?;
     let current = migrations::current_schema_version(&conn)?.unwrap_or(index::SCHEMA_VERSION);

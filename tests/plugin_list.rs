@@ -21,7 +21,8 @@ use std::path::Path;
 
 use common::{
     ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models, paths_for,
-    sample_plugin_catalog_fixture, stub_embedder_seed, stub_reranker_seed, write_config_for_cli,
+    sample_plugin_catalog_fixture, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
+    write_config_for_cli,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -56,6 +57,7 @@ fn setup_with_alpha_enabled(env: &ToolEnv, fixture_tmp: &TempDir, catalog_name: 
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = format!("{catalog_name}/plugin-alpha").parse().unwrap();

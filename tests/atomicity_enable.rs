@@ -15,7 +15,7 @@ mod common;
 
 use common::{
     config_with_catalog, copy_sample_plugin_catalog, fabricate_models, lifecycle_paths,
-    stub_embedder_seed, stub_reranker_seed,
+    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::embedding::stub::StubEmbedder;
@@ -46,6 +46,7 @@ fn enable_rolls_back_when_embedder_fails_mid_pipeline() {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
@@ -77,6 +78,7 @@ fn enable_rolls_back_when_embedder_fails_mid_pipeline() {
         &OpenOptions {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
+            summariser: stub_summariser_seed(),
         },
     )
     .unwrap();
@@ -131,6 +133,7 @@ fn enable_failure_does_not_taint_a_subsequent_clean_enable() {
             embedder: &embedder,
             embedder_seed: stub_embedder_seed(),
             reranker_seed: stub_reranker_seed(),
+            summariser_seed: stub_summariser_seed(),
             allow_model_download: false,
         };
         let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
@@ -146,6 +149,7 @@ fn enable_failure_does_not_taint_a_subsequent_clean_enable() {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();

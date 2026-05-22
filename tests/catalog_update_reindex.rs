@@ -11,7 +11,7 @@ mod common;
 
 use common::{
     config_with_catalog, copy_sample_plugin_catalog, fabricate_models, lifecycle_paths,
-    stub_embedder_seed, stub_reranker_seed,
+    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::commands::catalog::update::reindex_catalog_plugins;
@@ -26,12 +26,18 @@ fn count_skills(paths: &tome::paths::Paths, catalog: &str, plugin: &str) -> (i64
         &OpenOptions {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
+            summariser: stub_summariser_seed(),
         },
     )
     .expect("open index");
     conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(enabled), 0) FROM skills
-         WHERE catalog = ?1 AND plugin = ?2",
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN ws.skill_id IS NOT NULL THEN 1 ELSE 0 END), 0)
+         FROM skills AS s
+         LEFT JOIN workspace_skills AS ws
+                ON ws.skill_id = s.id
+               AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+         WHERE s.catalog = ?1 AND s.plugin = ?2",
         rusqlite::params![catalog, plugin],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
@@ -51,6 +57,7 @@ fn enable_alpha(
         embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     lifecycle::enable(&id, &deps).expect("initial enable");
@@ -93,6 +100,7 @@ fn reindex_after_update_re_embeds_only_modified_skill() {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let outcome =
@@ -153,6 +161,7 @@ fn update_auto_disables_plugin_whose_upstream_directory_is_gone() {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let outcome =
@@ -183,6 +192,7 @@ fn update_auto_disables_plugin_whose_upstream_directory_is_gone() {
         &OpenOptions {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
+            summariser: stub_summariser_seed(),
         },
     )
     .expect("open index");
@@ -210,6 +220,7 @@ fn reindex_pass_unchanged_skills_does_no_embed_work() {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let outcome =

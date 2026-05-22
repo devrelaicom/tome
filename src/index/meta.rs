@@ -24,6 +24,11 @@ pub enum MetaKey {
     EmbedderVersion,
     RerankerName,
     RerankerVersion,
+    /// Phase 4 / F9: summariser identity row, recorded alongside the
+    /// embedder + reranker during bootstrap. Drift detection treats the
+    /// placeholder SHA-256 entry (F6 ships with one) as "skip until US4.a".
+    SummariserName,
+    SummariserVersion,
     CreatedAt,
     LastWriterPid,
 }
@@ -36,6 +41,8 @@ impl MetaKey {
             Self::EmbedderVersion => "embedder_version",
             Self::RerankerName => "reranker_name",
             Self::RerankerVersion => "reranker_version",
+            Self::SummariserName => "summariser_name",
+            Self::SummariserVersion => "summariser_version",
             Self::CreatedAt => "created_at",
             Self::LastWriterPid => "last_writer_pid",
         }
@@ -80,8 +87,12 @@ pub struct ModelIdent {
 }
 
 /// Drift-detection verdict between the stored meta rows and the caller's
-/// configured embedder / reranker. Mirrors the on-the-wire variant from
-/// `StatusReport.drift` (data-model §11).
+/// configured embedder / reranker / summariser. Mirrors the on-the-wire
+/// variant from `StatusReport.drift` (data-model §11). Summariser drift
+/// is recorded but, when both stored and configured carry the F6
+/// placeholder identity (Phase 4 / F9 transient state), drift is
+/// suppressed so US4.a's real-model wire-up is the trigger rather than
+/// every bootstrap-against-placeholder open.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub enum DriftStatus {
@@ -89,22 +100,36 @@ pub enum DriftStatus {
     EmbedderNameDrift { stored: String, configured: String },
     EmbedderVersionDrift { stored: String, configured: String },
     RerankerDrift { stored: String, configured: String },
+    SummariserDrift { stored: String, configured: String },
 }
 
-/// Compare the embedder and reranker rows in `meta` against the configured
-/// values. Returns the most-specific drift variant: embedder name drift
-/// shadows version drift, and any embedder drift shadows reranker drift
-/// (because embedder drift invalidates the stored vectors entirely; reranker
-/// drift only degrades query quality, see plan.md §Drift handling).
+/// Compare the embedder, reranker, and summariser rows in `meta` against
+/// the configured values. Returns the most-specific drift variant:
+/// embedder name drift shadows version drift, any embedder drift shadows
+/// reranker drift (because embedder drift invalidates the stored vectors
+/// entirely; reranker drift only degrades query quality, see plan.md
+/// §Drift handling). Summariser drift is the lowest-priority signal —
+/// it only affects the cached natural-language summaries, never the
+/// retrieval pipeline.
+///
+/// Phase 4 / F9 caveat: until US4.a flips the summariser registry's
+/// SHA-256 to a real value, the bootstrap path writes the placeholder
+/// name/version into `meta` and the caller passes the same placeholder
+/// values in `summariser`. Drift detection MUST stay silent in that
+/// case — every fresh DB would otherwise report `SummariserDrift`
+/// against itself.
 pub fn detect_drift(
     conn: &Connection,
     embedder: &ModelIdent,
     reranker: &ModelIdent,
+    summariser: &ModelIdent,
 ) -> Result<DriftStatus, TomeError> {
     let stored_embedder_name = read(conn, MetaKey::EmbedderName)?.unwrap_or_default();
     let stored_embedder_version = read(conn, MetaKey::EmbedderVersion)?.unwrap_or_default();
     let stored_reranker_name = read(conn, MetaKey::RerankerName)?.unwrap_or_default();
     let stored_reranker_version = read(conn, MetaKey::RerankerVersion)?.unwrap_or_default();
+    let stored_summariser_name = read(conn, MetaKey::SummariserName)?.unwrap_or_default();
+    let stored_summariser_version = read(conn, MetaKey::SummariserVersion)?.unwrap_or_default();
 
     if stored_embedder_name != embedder.name {
         return Ok(DriftStatus::EmbedderNameDrift {
@@ -128,6 +153,18 @@ pub fn detect_drift(
         return Ok(DriftStatus::RerankerDrift {
             stored: stored_reranker_version,
             configured: reranker.version.clone(),
+        });
+    }
+    if stored_summariser_name != summariser.name {
+        return Ok(DriftStatus::SummariserDrift {
+            stored: stored_summariser_name,
+            configured: summariser.name.clone(),
+        });
+    }
+    if stored_summariser_version != summariser.version {
+        return Ok(DriftStatus::SummariserDrift {
+            stored: stored_summariser_version,
+            configured: summariser.version.clone(),
         });
     }
     Ok(DriftStatus::None)

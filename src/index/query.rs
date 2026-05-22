@@ -1,9 +1,11 @@
 //! KNN query over `skill_embeddings`, joined with the `skills` table.
 //!
 //! Reranking lives in the embedding crate (slice 5). This layer returns the
-//! top-K rows by cosine distance, filtered to `enabled = 1` and optionally
-//! to a single catalog / plugin so the caller can implement `--catalog` and
-//! `--plugin` flags on `tome query`.
+//! top-K rows by cosine distance, filtered to skills enrolled in the
+//! privileged `global` workspace (via `workspace_skills`) and optionally
+//! to a single catalog / plugin so the caller can implement `--catalog`
+//! and `--plugin` flags on `tome query`. Phase 4 / F9 swapped the
+//! Phase 2/3 `s.enabled = 1` predicate for the workspace-join below.
 //!
 //! Spec: data-model.md §10 (`QueryResult`), contracts/query.md, FR-024.
 
@@ -58,7 +60,9 @@ pub fn knn(
                 s.plugin_version, s.path, e.distance
          FROM skill_embeddings AS e
          JOIN skills AS s ON s.id = e.skill_id
-         WHERE e.embedding MATCH ?1 AND k = ?2 AND s.enabled = 1",
+         JOIN workspace_skills AS ws ON ws.skill_id = s.id
+                                    AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+         WHERE e.embedding MATCH ?1 AND k = ?2",
     );
 
     // Collect params in order: query bytes, k, [catalog], [plugin].

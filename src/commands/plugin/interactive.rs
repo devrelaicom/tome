@@ -500,7 +500,7 @@ fn run_disable_action(
         return Ok(());
     }
 
-    let (embedder_seed, reranker_seed) = registry_seeds();
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let outcome = lifecycle::disable(
         id,
         paths,
@@ -508,6 +508,7 @@ fn run_disable_action(
         config,
         embedder_seed,
         reranker_seed,
+        summariser_seed,
     )?;
     let mut out = std::io::stdout().lock();
     let _ = writeln!(

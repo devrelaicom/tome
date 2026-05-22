@@ -49,7 +49,7 @@ use std::fs;
 
 use common::{
     ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_all_registry_models,
-    paths_for, stub_embedder_seed, stub_reranker_seed, write_config_for_cli,
+    paths_for, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed, write_config_for_cli,
 };
 use tempfile::TempDir;
 use tome::embedding::registry::MODEL_REGISTRY;
@@ -59,6 +59,7 @@ fn options() -> OpenOptions {
     OpenOptions {
         embedder: stub_embedder_seed(),
         reranker: stub_reranker_seed(),
+        summariser: stub_summariser_seed(),
     }
 }
 

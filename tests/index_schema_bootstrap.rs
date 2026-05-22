@@ -24,6 +24,10 @@ fn options() -> OpenOptions {
             name: "stub-reranker".to_owned(),
             version: "0".to_owned(),
         },
+        summariser: MetaSeed {
+            name: "stub-summariser".to_owned(),
+            version: "0".to_owned(),
+        },
     }
 }
 
@@ -62,19 +66,32 @@ fn fresh_open_creates_all_tables_and_indexes() {
         tables.insert(r.expect("row"));
     }
 
+    // Phase 4 / F9 schema v2: `idx_skills_enabled` is gone (the column it
+    // indexed was dropped); four workspace tables + their indices are new.
     for expected in [
         "meta",
         "skills",
         "skill_embeddings",
+        "workspaces",
+        "workspace_skills",
+        "workspace_catalogs",
+        "workspace_projects",
         "idx_skills_catalog_plugin",
-        "idx_skills_enabled",
         "idx_skills_content_hash",
+        "idx_workspace_projects_workspace",
+        "idx_workspace_skills_skill",
+        "idx_workspace_catalogs_url",
     ] {
         assert!(
             tables.contains(expected),
             "expected `{expected}` after bootstrap; got {tables:?}"
         );
     }
+    // Defensively assert the dropped Phase 2/3 index is gone.
+    assert!(
+        !tables.contains("idx_skills_enabled"),
+        "idx_skills_enabled must be dropped in schema v2; got {tables:?}",
+    );
 }
 
 #[test]
@@ -107,6 +124,12 @@ fn fresh_open_seeds_meta_with_embedder_and_reranker() {
         Some(&"stub-reranker".to_owned())
     );
     assert_eq!(by_key.get("reranker_version"), Some(&"0".to_owned()));
+    // Phase 4 / F9: summariser identity row.
+    assert_eq!(
+        by_key.get("summariser_name"),
+        Some(&"stub-summariser".to_owned()),
+    );
+    assert_eq!(by_key.get("summariser_version"), Some(&"0".to_owned()));
     assert!(
         by_key.contains_key("created_at"),
         "created_at must be seeded; got keys: {:?}",
@@ -135,7 +158,8 @@ fn skill_embeddings_virtual_table_accepts_inserts() {
     let dir = TempDir::new().expect("tempdir");
     let conn = open(&db_path_in(&dir), &options()).expect("open should bootstrap");
 
-    // Insert a skill row first (foreign-key target).
+    // Insert a skill row first (foreign-key target). Phase 4 / F9 schema
+    // v2 drops the `enabled` column from the insert list.
     conn.execute(
         "INSERT INTO skills (catalog, plugin, name, description, plugin_version, path, content_hash, indexed_at) \
          VALUES ('cat', 'plug', 'sk', 'desc', '1.0.0', '/tmp/sk/SKILL.md', 'abc', '2026-05-12T00:00:00Z')",

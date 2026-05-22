@@ -65,7 +65,7 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScope, mode: Mode) -> Result
         let embedder_ref =
             embedder.get_or_insert_with_result::<TomeError, _>(|| load_embedder(&paths))?;
 
-        let (embedder_seed, reranker_seed) = registry_seeds();
+        let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
         let deps = LifecycleDeps {
             paths: &paths,
             scope: &scope.scope,
@@ -73,6 +73,7 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScope, mode: Mode) -> Result
             embedder: embedder_ref,
             embedder_seed,
             reranker_seed,
+            summariser_seed,
             allow_model_download: false,
         };
 
@@ -114,12 +115,13 @@ fn read_enabled_plugins(
     _scope: &Scope,
     catalog: &str,
 ) -> Result<Vec<String>, TomeError> {
-    let (embedder_seed, reranker_seed) = registry_seeds();
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let conn = index::open(
         &paths.index_db,
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,
+            summariser: summariser_seed,
         },
     )?;
     enabled_plugins_for_catalog(&conn, catalog)
