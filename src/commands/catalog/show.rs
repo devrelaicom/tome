@@ -1,4 +1,8 @@
-//! `tome catalog show`. See `contracts/catalog-show.md`.
+//! `tome catalog show`. See `contracts/catalog-show.md` and FR-364.
+//!
+//! Phase 4 / F11b: enrolment lives in `workspace_catalogs`. The cache
+//! dir is derived from URL; `last_synced` from the clone directory's
+//! mtime.
 
 use std::io::Write;
 
@@ -7,37 +11,61 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::catalog::manifest::CatalogManifest;
-use crate::catalog::store;
 use crate::cli::CatalogShowArgs;
+use crate::commands::plugin::registry_seeds;
 use crate::error::TomeError;
+use crate::index::{self, OpenOptions, workspace_catalogs};
 use crate::output::Mode;
 use crate::paths::Paths;
 use crate::workspace::ResolvedScope;
 
-pub fn run(args: CatalogShowArgs, _scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: CatalogShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    // F2a: single global config; F11 reintroduces workspace-aware view.
-    let config = store::load(&paths.global_config_file)?;
-    let entry = config
-        .catalogs
-        .get(&args.name)
+    let workspace_name = scope.scope.name().as_str();
+
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
+    let conn = index::open(
+        &paths.index_db,
+        &OpenOptions {
+            embedder: embedder_seed,
+            reranker: reranker_seed,
+            summariser: summariser_seed,
+        },
+    )?;
+
+    let enrolment = workspace_catalogs::find(&conn, workspace_name, &args.name)?
         .ok_or_else(|| TomeError::CatalogNotFound(args.name.clone()))?;
 
-    let manifest_path = entry.path.join("tome-catalog.toml");
+    let cache_dir = paths.cache_dir_for(&enrolment.url);
+    let manifest_path = cache_dir.join("tome-catalog.toml");
     let manifest_bytes = std::fs::read(&manifest_path).map_err(TomeError::Io)?;
-    let manifest =
-        CatalogManifest::parse_and_validate(&manifest_path, &entry.path, &manifest_bytes)
-            .map_err(TomeError::ManifestInvalid)?;
+    let manifest = CatalogManifest::parse_and_validate(&manifest_path, &cache_dir, &manifest_bytes)
+        .map_err(TomeError::ManifestInvalid)?;
+
+    let last_synced = std::fs::metadata(&cache_dir)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .map(OffsetDateTime::from);
 
     match mode {
-        Mode::Human => emit_human(&manifest, entry.last_synced, &entry.url, &entry.ref_),
-        Mode::Json => emit_json(&manifest, entry.last_synced, &entry.url, &entry.ref_),
+        Mode::Human => emit_human(
+            &manifest,
+            last_synced,
+            &enrolment.url,
+            &enrolment.pinned_ref,
+        ),
+        Mode::Json => emit_json(
+            &manifest,
+            last_synced,
+            &enrolment.url,
+            &enrolment.pinned_ref,
+        ),
     }
 }
 
 fn emit_human(
     m: &CatalogManifest,
-    last_synced: OffsetDateTime,
+    last_synced: Option<OffsetDateTime>,
     url: &str,
     ref_: &str,
 ) -> Result<(), TomeError> {
@@ -46,11 +74,10 @@ fn emit_human(
     writeln!(out, "  {}", m.description)?;
     writeln!(out, "  Owner: {} <{}>", m.owner.name, m.owner.email)?;
     writeln!(out, "  Source: {} (ref: {})", url, ref_)?;
-    writeln!(
-        out,
-        "  Last synced: {}",
-        last_synced.format(&Rfc3339).unwrap_or_default()
-    )?;
+    let synced = last_synced
+        .and_then(|t| t.format(&Rfc3339).ok())
+        .unwrap_or_else(|| "—".into());
+    writeln!(out, "  Last synced: {}", synced)?;
     if m.plugins.is_empty() {
         writeln!(out, "\nNo plugins declared.")?;
     } else {
@@ -84,8 +111,8 @@ struct Registered<'a> {
     url: &'a str,
     #[serde(rename = "ref")]
     ref_: &'a str,
-    #[serde(with = "time::serde::rfc3339")]
-    last_synced: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_synced: Option<OffsetDateTime>,
 }
 
 #[derive(Serialize)]
@@ -96,7 +123,7 @@ struct PluginOut<'a> {
 
 fn emit_json(
     m: &CatalogManifest,
-    last_synced: OffsetDateTime,
+    last_synced: Option<OffsetDateTime>,
     url: &str,
     ref_: &str,
 ) -> Result<(), TomeError> {

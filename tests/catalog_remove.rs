@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Fixture, ToolEnv};
+use common::{Fixture, ToolEnv, has_global_enrolment, paths_for};
 use serde_json::Value;
 use std::process::Stdio;
 
@@ -27,9 +27,12 @@ fn force_happy_path_human_mode() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Removed catalog `sample-experts`"));
-    // Registry no longer contains the entry.
-    let cfg = std::fs::read_to_string(env.config_file()).unwrap();
-    assert!(!cfg.contains("[catalogs.sample-experts]"), "{}", cfg);
+    // Enrolment no longer present in workspace_catalogs.
+    let paths = paths_for(&env);
+    assert!(
+        !has_global_enrolment(&paths, "sample-experts"),
+        "enrolment should be removed",
+    );
 }
 
 #[test]
@@ -98,14 +101,12 @@ fn cache_already_missing_still_succeeds() {
         .output()
         .unwrap();
 
-    // Pre-emptively delete the cache directory.
-    let cfg = std::fs::read_to_string(env.config_file()).unwrap();
-    let path_line = cfg
-        .lines()
-        .find(|l| l.trim_start().starts_with("path = "))
-        .unwrap();
-    let cache_path = path_line.split('"').nth(1).unwrap();
-    std::fs::remove_dir_all(cache_path).unwrap();
+    // Pre-emptively delete the cache directory. F11b: derive it from
+    // the enrolment URL via paths.cache_dir_for.
+    let paths = paths_for(&env);
+    let url = common::global_enrolment_url(&paths, "sample-experts").expect("enrolment");
+    let cache_path = paths.cache_dir_for(&url);
+    std::fs::remove_dir_all(&cache_path).unwrap();
 
     let out = env
         .cmd()

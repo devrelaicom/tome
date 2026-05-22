@@ -1,91 +1,173 @@
-//! `tome catalog update`. See `contracts/catalog-update.md` and
-//! `contracts/catalog-extensions.md` §"tome catalog update".
+//! `tome catalog update`. See `contracts/catalog-update.md`,
+//! `contracts/catalog-extensions.md` §"tome catalog update", and FR-365.
+//!
+//! Phase 4 / F11b: refreshes every catalog **URL** that any workspace
+//! enrols (per `workspace_catalogs.distinct_urls`), not just the
+//! resolved workspace's. After each successful per-URL refresh the
+//! reindex pass visits every workspace that enrols the refreshed
+//! catalog (FR-365).
+//!
+//! When `args.name` is `Some`, the targeted refresh is scoped to the
+//! resolved workspace's enrolment of that catalog (same look-up shape
+//! as Phase 1, just sourced from the junction table).
 
 use std::io::Write;
+use std::path::Path;
 
 use serde::Serialize;
 use time::OffsetDateTime;
 
 use crate::catalog::git::{self, Git};
 use crate::catalog::manifest::CatalogManifest;
-use crate::catalog::store;
 use crate::cli::CatalogUpdateArgs;
-use crate::config::{CatalogEntry, Config};
+use crate::commands::plugin::{embedder_entry, registry_seeds};
+use crate::config::Config;
 use crate::embedding::fastembed::FastembedEmbedder;
 use crate::error::TomeError;
 use crate::index::skills::ReindexSummary;
-use crate::index::{self, OpenOptions, enabled_plugins_for_catalog};
+use crate::index::{self, OpenOptions, enabled_plugins_for_catalog, workspace_catalogs};
 use crate::output::Mode;
 use crate::paths::Paths;
 use crate::plugin::PluginId;
 use crate::plugin::lifecycle::{self, LifecycleDeps};
 use crate::presentation::colour;
-use crate::workspace::{ResolvedScope, Scope};
+use crate::workspace::{Scope, WorkspaceName};
 
-use crate::commands::plugin::{embedder_entry, registry_seeds};
-
-pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    // F2a: single global config; F11 reintroduces workspace-aware view.
-    let config_file = paths.global_config_file.clone();
-    let mut config = store::load(&config_file)?;
 
-    let names: Vec<String> = match args.name {
-        Some(name) => {
-            if !config.catalogs.contains_key(&name) {
-                return Err(TomeError::CatalogNotFound(name));
-            }
-            vec![name]
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
+    let conn = index::open(
+        &paths.index_db,
+        &OpenOptions {
+            embedder: embedder_seed.clone(),
+            reranker: reranker_seed.clone(),
+            summariser: summariser_seed.clone(),
+        },
+    )?;
+
+    // Resolve the URL/ref pairs to refresh. With `--name`, only the
+    // resolved workspace's enrolment of that catalog. Without, the
+    // distinct URLs across every workspace.
+    let workspace_name = scope.scope.name().as_str().to_owned();
+    let targets: Vec<RefreshTarget> = match args.name {
+        Some(ref name) => {
+            let enrolment = workspace_catalogs::find(&conn, &workspace_name, name)?
+                .ok_or_else(|| TomeError::CatalogNotFound(name.clone()))?;
+            vec![RefreshTarget {
+                url: enrolment.url,
+                pinned_ref: enrolment.pinned_ref,
+            }]
         }
-        None => config.catalogs.keys().cloned().collect(),
+        None => workspace_catalogs::distinct_urls(&conn)?
+            .into_iter()
+            .map(|(url, pinned_ref)| RefreshTarget { url, pinned_ref })
+            .collect(),
     };
 
-    // The embedder is loaded lazily — only after the first catalog with at
-    // least one enabled plugin needs it. `tome catalog update` against a
-    // tome install with zero enabled plugins must never touch model files.
+    // Drop the read-side handle. The per-URL loop reopens under the
+    // advisory lock for its mutations.
+    drop(conn);
+
+    // Lazy embedder — only paid for once we hit the first catalog with
+    // at least one enabled plugin in any workspace.
     let mut embedder: Option<FastembedEmbedder> = None;
 
-    for name in names {
-        let refreshed = refresh_one(&config_file, &mut config, &name, mode)?;
+    for target in targets {
+        let cache_dir = paths.cache_dir_for(&target.url);
+        let refreshed = refresh_one(&target, &cache_dir, mode)?;
         if !refreshed {
-            // SHA-pinned catalogs (no git op happened). Skip the reindex
-            // pass; pinned catalogs are intentionally frozen.
             continue;
         }
 
-        // Skip the reindex pass entirely when no enabled plugin exists in
-        // this catalog. The index open is cheap (idempotent bootstrap) but
-        // a sync that involves no enabled plugins must not load the
-        // embedder.
-        let enabled = read_enabled_plugins(&paths, &scope.scope, &name)?;
-        if enabled.is_empty() {
-            continue;
-        }
-
-        let embedder_ref =
-            embedder.get_or_insert_with_result::<TomeError, _>(|| load_embedder(&paths))?;
-
+        // Reindex every workspace that enrols this URL. The pass opens
+        // its own connection — readers don't need the advisory lock for
+        // the workspace+catalog list.
         let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
-        let deps = LifecycleDeps {
-            paths: &paths,
-            scope: &scope.scope,
-            config: &config,
-            embedder: embedder_ref,
-            embedder_seed,
-            reranker_seed,
-            summariser_seed,
-            allow_model_download: false,
-        };
+        let conn = index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: embedder_seed.clone(),
+                reranker: reranker_seed.clone(),
+                summariser: summariser_seed.clone(),
+            },
+        )?;
+        let affected = workspace_catalogs::workspaces_with_catalog_url(&conn, &target.url)?;
+        drop(conn);
 
-        let outcome = reindex_catalog_plugins(&name, &enabled, &deps)?;
-        emit_reindex_outcome(mode, &name, &outcome)?;
+        for (ws_name, catalog_name) in affected {
+            let enabled = read_enabled_plugins_for(&paths, &ws_name, &catalog_name)?;
+            if enabled.is_empty() {
+                continue;
+            }
+
+            let embedder_ref =
+                embedder.get_or_insert_with_result::<TomeError, _>(|| load_embedder(&paths))?;
+
+            // LifecycleDeps still carries a `config: &Config` field for
+            // back-compat — F11b makes catalog look-ups via the junction
+            // table, but the lifecycle layer hasn't been re-plumbed yet.
+            // Pass an empty Config; the lifecycle resolve_plugin_dir will
+            // be updated to consult `workspace_catalogs` in a follow-up.
+            // Until then, we synthesise a minimal Config with one entry
+            // so the catalog look-up resolves.
+            let synthetic_config = synthesise_config_for_catalog(&catalog_name, &cache_dir);
+            let ws_scope =
+                Scope(WorkspaceName::parse(&ws_name).unwrap_or_else(|_| WorkspaceName::global()));
+            let (e_seed, r_seed, s_seed) = registry_seeds();
+            let deps = LifecycleDeps {
+                paths: &paths,
+                scope: &ws_scope,
+                config: &synthetic_config,
+                embedder: embedder_ref,
+                embedder_seed: e_seed,
+                reranker_seed: r_seed,
+                summariser_seed: s_seed,
+                allow_model_download: false,
+            };
+
+            let outcome = reindex_catalog_plugins(&catalog_name, &enabled, &deps)?;
+            emit_reindex_outcome(mode, &catalog_name, &outcome)?;
+        }
     }
 
     Ok(())
 }
 
-/// Helper trait so the lazy-embedder pattern reads cleanly. `Option::get_or_insert_with`
-/// returns `&mut T`, not `Result<&mut T, E>`; this mirrors that for the fallible case.
+/// Hand-rolled alias so tests can pull this through. `&ResolvedScope`
+/// from the workspace module.
+pub type ResolvedScopeArg = crate::workspace::ResolvedScope;
+
+#[derive(Debug, Clone)]
+struct RefreshTarget {
+    url: String,
+    pinned_ref: String,
+}
+
+/// Synthesise a minimal `Config` so `lifecycle::reindex_plugin` can
+/// resolve the plugin directory via `resolve_plugin_dir`. F11b drops
+/// `config.toml` as the registry; the lifecycle layer hasn't yet been
+/// re-plumbed to consult `workspace_catalogs` directly. The synthesised
+/// entry mirrors the on-disk cache; consumers only read `.path`.
+fn synthesise_config_for_catalog(catalog_name: &str, cache_dir: &Path) -> Config {
+    use crate::config::CatalogEntry;
+    use std::collections::BTreeMap;
+    let mut catalogs = BTreeMap::new();
+    #[allow(deprecated)]
+    catalogs.insert(
+        catalog_name.to_owned(),
+        CatalogEntry {
+            name: catalog_name.to_owned(),
+            url: String::new(),
+            ref_: String::new(),
+            path: cache_dir.to_path_buf(),
+            last_synced: OffsetDateTime::now_utc(),
+        },
+    );
+    #[allow(deprecated)]
+    Config { catalogs }
+}
+
 trait GetOrInsertWithResult<T> {
     fn get_or_insert_with_result<E, F>(&mut self, f: F) -> Result<&mut T, E>
     where
@@ -110,21 +192,23 @@ fn load_embedder(paths: &Paths) -> Result<FastembedEmbedder, TomeError> {
     FastembedEmbedder::load(entry, &dir)
 }
 
-fn read_enabled_plugins(
+/// Look up enabled plugins for one `(workspace, catalog)`. Opens its
+/// own connection so the lock-state surface is clear.
+fn read_enabled_plugins_for(
     paths: &Paths,
-    scope: &Scope,
+    workspace: &str,
     catalog: &str,
 ) -> Result<Vec<String>, TomeError> {
-    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
+    let (e_seed, r_seed, s_seed) = registry_seeds();
     let conn = index::open(
         &paths.index_db,
         &OpenOptions {
-            embedder: embedder_seed,
-            reranker: reranker_seed,
-            summariser: summariser_seed,
+            embedder: e_seed,
+            reranker: r_seed,
+            summariser: s_seed,
         },
     )?;
-    enabled_plugins_for_catalog(&conn, scope.name().as_str(), catalog)
+    enabled_plugins_for_catalog(&conn, workspace, catalog)
 }
 
 /// Per-plugin row in the catalog-update summary. One of `summary` or
@@ -133,8 +217,6 @@ fn read_enabled_plugins(
 pub struct PluginChange {
     pub plugin: PluginId,
     pub summary: Option<ReindexSummary>,
-    /// When the plugin was auto-disabled per FR-033, the reason text the
-    /// CLI surfaces on stderr.
     pub auto_disabled: Option<String>,
     pub warnings: Vec<String>,
 }
@@ -145,20 +227,6 @@ pub struct CatalogReindexOutcome {
     pub plugins: Vec<PluginChange>,
 }
 
-/// Walk every enabled plugin in one catalog, reindexing it against the
-/// freshly-refreshed on-disk source. Returns an aggregated outcome that
-/// callers (`run` above, the integration test) inspect or print.
-///
-/// Per-plugin failure modes:
-///
-/// * `PluginNotFound` (the plugin dir vanished upstream) or
-///   `PluginManifestParseError` (the plugin.json is gone or malformed) →
-///   the plugin is auto-disabled per FR-033 inside the function. The
-///   per-plugin `PluginChange.auto_disabled` field carries the reason.
-/// * Any other error propagates immediately — `IndexBusy`, `ModelMissing`,
-///   `EmbeddingGenerationFailure`, etc. are infrastructure failures that
-///   would otherwise corrupt the per-plugin accounting if we tried to
-///   continue.
 pub fn reindex_catalog_plugins(
     catalog: &str,
     enabled_plugins: &[String],
@@ -205,65 +273,58 @@ pub fn reindex_catalog_plugins(
     Ok(outcome)
 }
 
-/// Refresh one catalog's git working tree. Returns `Ok(true)` when a
-/// refresh actually happened (and the caller should run the reindex pass);
-/// `Ok(false)` when the catalog is SHA-pinned and was not touched.
-fn refresh_one(
-    config_file: &std::path::Path,
-    config: &mut Config,
-    name: &str,
-    mode: Mode,
-) -> Result<bool, TomeError> {
-    let entry = config.catalogs.get(name).expect("caller checked");
-    let entry = entry.clone();
+/// Refresh one catalog by URL. Returns `Ok(true)` when a refresh
+/// actually happened (caller should run the reindex pass); `Ok(false)`
+/// for SHA-pinned catalogs (intentionally frozen).
+fn refresh_one(target: &RefreshTarget, cache_dir: &Path, mode: Mode) -> Result<bool, TomeError> {
+    let display = display_name_from_cache(cache_dir).unwrap_or_else(|| "<unknown>".to_owned());
 
-    if git::looks_like_sha(&entry.ref_) {
-        emit_pinned(mode, &entry.name, &entry.ref_)?;
+    if git::looks_like_sha(&target.pinned_ref) {
+        emit_pinned(mode, &display, &target.pinned_ref)?;
         return Ok(false);
     }
 
-    let git = Git::new(&entry.name);
-    let head_before = git.rev_parse_head(&entry.path).ok();
-    git.fetch(&entry.path)?;
+    let git = Git::new(&display);
+    let head_before = git.rev_parse_head(cache_dir).ok();
+    git.fetch(cache_dir)?;
 
-    // Resolve the target ref. Branches go through `origin/<ref>`; tags go
-    // through `refs/tags/<ref>`. We don't know which up front, so try the
-    // branch form first; if it fails, fall back to the tag form. Either
-    // success advances HEAD; either failure surfaces via GitFailed.
-    let branch_target = format!("origin/{}", entry.ref_);
-    let result = git.reset_hard(&entry.path, &branch_target);
+    let branch_target = format!("origin/{}", target.pinned_ref);
+    let result = git.reset_hard(cache_dir, &branch_target);
     if result.is_err() {
-        let tag_target = format!("refs/tags/{}", entry.ref_);
-        git.reset_hard(&entry.path, &tag_target)?;
+        let tag_target = format!("refs/tags/{}", target.pinned_ref);
+        git.reset_hard(cache_dir, &tag_target)?;
     }
 
-    let head_after = git.rev_parse_head(&entry.path).ok();
+    let head_after = git.rev_parse_head(cache_dir).ok();
     let advanced = match (head_before, head_after) {
-        (Some(a), Some(b)) if a != b => {
-            Advance::Commits(count_commits_between(&entry.path, &a, &b))
-        }
+        (Some(a), Some(b)) if a != b => Advance::Commits(count_commits_between(cache_dir, &a, &b)),
         (Some(a), Some(b)) if a == b => Advance::UpToDate,
         _ => Advance::Unknown,
     };
 
-    let manifest_path = entry.path.join("tome-catalog.toml");
+    let manifest_path = cache_dir.join("tome-catalog.toml");
     let manifest_bytes = std::fs::read(&manifest_path).map_err(TomeError::Io)?;
-    let manifest =
-        CatalogManifest::parse_and_validate(&manifest_path, &entry.path, &manifest_bytes)
-            .map_err(TomeError::ManifestInvalid)?;
+    let manifest = CatalogManifest::parse_and_validate(&manifest_path, cache_dir, &manifest_bytes)
+        .map_err(TomeError::ManifestInvalid)?;
 
-    let now = OffsetDateTime::now_utc();
-    let updated_entry = CatalogEntry {
-        last_synced: now,
-        ..entry.clone()
-    };
-    config
-        .catalogs
-        .insert(name.to_string(), updated_entry.clone());
-    store::save(config_file, config)?;
-
-    emit_refreshed(mode, &updated_entry, manifest.plugins.len(), advanced)?;
+    emit_refreshed(
+        mode,
+        &display,
+        &target.pinned_ref,
+        manifest.plugins.len(),
+        advanced,
+    )?;
     Ok(true)
+}
+
+/// Read the manifest's declared catalog name from disk. Used as the
+/// display name in human-mode messages — F11b doesn't carry the user's
+/// chosen alias through the refresh loop (the URL is the key now).
+fn display_name_from_cache(cache_dir: &Path) -> Option<String> {
+    let manifest_path = cache_dir.join("tome-catalog.toml");
+    let bytes = std::fs::read(&manifest_path).ok()?;
+    let m = CatalogManifest::parse_and_validate(&manifest_path, cache_dir, &bytes).ok()?;
+    Some(m.name)
 }
 
 fn emit_reindex_outcome(
@@ -372,10 +433,7 @@ enum Advance {
     Unknown,
 }
 
-fn count_commits_between(repo: &std::path::Path, from: &str, to: &str) -> usize {
-    // `git rev-list --count from..to` would be ideal, but we already have the
-    // string SHAs. Re-shelling for one number is fine. If the count call
-    // fails we report 0; the success of `update` does not depend on this.
+fn count_commits_between(repo: &Path, from: &str, to: &str) -> usize {
     use std::process::Command;
     let output = Command::new("git")
         .args(["rev-list", "--count", &format!("{}..{}", from, to)])
@@ -420,7 +478,8 @@ struct PinnedRecord<'a> {
 
 fn emit_refreshed(
     mode: Mode,
-    entry: &CatalogEntry,
+    name: &str,
+    ref_: &str,
     plugin_count: usize,
     advance: Advance,
 ) -> Result<(), TomeError> {
@@ -437,7 +496,7 @@ fn emit_refreshed(
             writeln!(
                 out,
                 "Refreshed `{}` (ref: {}, plugins: {}, {}).",
-                entry.name, entry.ref_, plugin_count, tail
+                name, ref_, plugin_count, tail
             )?;
         }
         Mode::Json => {
@@ -448,11 +507,11 @@ fn emit_refreshed(
             };
             let env = RefreshedEnvelope {
                 refreshed: RefreshedRecord {
-                    name: &entry.name,
-                    ref_: &entry.ref_,
+                    name,
+                    ref_,
                     plugin_count,
                     advanced_commits,
-                    last_synced: entry.last_synced,
+                    last_synced: OffsetDateTime::now_utc(),
                 },
             };
             crate::output::write_json(&env)?;

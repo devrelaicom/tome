@@ -291,14 +291,54 @@ pub fn config_with_catalog(catalog_name: &str, catalog_root: &Path) -> Config {
     Config { catalogs }
 }
 
-/// Write the supplied [`Config`] to `paths.global_config_file` as TOML so a
-/// child `tome` binary process can read it. Used by `plugin list` /
-/// `plugin show` integration tests that bypass `catalog add` (no git fixture
-/// needed).
+/// Write the supplied [`Config`] to `paths.global_config_file` as TOML
+/// (legacy, F11b-deprecated) AND seed each enrolment into the central
+/// DB's `workspace_catalogs` table for the privileged `global` workspace.
+///
+/// **Seed discipline**: this helper opens the DB if it does not yet
+/// exist, stamping `meta` with the **registry** seeds (BGE) so the
+/// CLI binary's later opens see matching identities. Test files that
+/// then call `lifecycle::enable` via the StubEmbedder must use
+/// `stub_*_seed()` consistently from the test side; the central DB
+/// becomes the source of truth for "what identities were stamped".
+///
+/// If the DB already exists at call time, the seed step is a no-op
+/// (subsequent `index::open` calls ignore `opts`).
 pub fn write_config_for_cli(paths: &Paths, config: &Config) {
     std::fs::create_dir_all(&paths.root).expect("create tome root");
+    // Legacy: write config.toml so lifecycle's `resolve_plugin_dir`
+    // (still consults Config) finds the catalog path.
+    #[allow(deprecated)]
     let body = toml::to_string_pretty(config).expect("serialise config");
     std::fs::write(&paths.global_config_file, body).expect("write config.toml");
+
+    // F11b: seed enrolments in the central DB so CLI catalog commands
+    // see them. Use registry seeds so the CLI binary (which opens with
+    // registry seeds) doesn't drift on subsequent opens.
+    let (e, r, s) = registry_seeds_for_test();
+    let conn = tome::index::open(
+        &paths.index_db,
+        &tome::index::OpenOptions {
+            embedder: e,
+            reranker: r,
+            summariser: s,
+        },
+    )
+    .expect("open index db for catalog seed");
+    #[allow(deprecated)]
+    for entry in config.catalogs.values() {
+        match tome::index::workspace_catalogs::insert(
+            &conn,
+            "global",
+            &entry.name,
+            &entry.url,
+            &entry.ref_,
+        ) {
+            Ok(()) => {}
+            Err(tome::error::TomeError::CatalogAlreadyExists(_)) => {}
+            Err(e) => panic!("seed workspace_catalogs failed: {e}"),
+        }
+    }
 }
 
 /// Build a minimal index database on disk with `meta.schema_version` stamped
@@ -344,4 +384,90 @@ pub fn paths_for(env: &ToolEnv) -> Paths {
 /// constructor expression so future Scope reshapes touch one place.
 pub fn global_scope() -> tome::workspace::Scope {
     tome::workspace::Scope(tome::workspace::WorkspaceName::global())
+}
+
+/// Build a `MetaSeed` triple from the registry — matches whatever the
+/// CLI binary opens with. Used by test helpers that open the central
+/// DB AFTER the CLI has stamped meta (re-opens ignore `opts`).
+fn registry_seeds_for_test() -> (
+    tome::index::MetaSeed,
+    tome::index::MetaSeed,
+    tome::index::MetaSeed,
+) {
+    let pick = |kind| {
+        let entry = tome::embedding::registry::MODEL_REGISTRY
+            .iter()
+            .find(|m| std::mem::discriminant(&m.kind) == std::mem::discriminant(&kind))
+            .unwrap();
+        tome::index::MetaSeed {
+            name: entry.name.to_owned(),
+            version: entry.version.to_owned(),
+        }
+    };
+    (
+        pick(tome::embedding::registry::ModelKind::Embedder),
+        pick(tome::embedding::registry::ModelKind::Reranker),
+        pick(tome::embedding::registry::ModelKind::Summariser),
+    )
+}
+
+/// Read every catalog enrolment for the privileged `global` workspace
+/// from the central DB. Used by tests that assert on F11b enrolment
+/// state without parsing config.toml.
+pub fn read_global_enrolments(paths: &Paths) -> Vec<tome::index::CatalogEnrolment> {
+    if !paths.index_db.is_file() {
+        return Vec::new();
+    }
+    let (e, r, s) = registry_seeds_for_test();
+    let conn = tome::index::open(
+        &paths.index_db,
+        &tome::index::OpenOptions {
+            embedder: e,
+            reranker: r,
+            summariser: s,
+        },
+    )
+    .expect("open index db for enrolment read");
+    tome::index::workspace_catalogs::list_for_workspace(&conn, "global").unwrap_or_default()
+}
+
+/// Convenience: true iff a `(global, name)` enrolment exists in the
+/// central DB.
+pub fn has_global_enrolment(paths: &Paths, catalog_name: &str) -> bool {
+    read_global_enrolments(paths)
+        .iter()
+        .any(|e| e.catalog_name == catalog_name)
+}
+
+/// Look up the URL of one `(global, name)` enrolment.
+pub fn global_enrolment_url(paths: &Paths, catalog_name: &str) -> Option<String> {
+    read_global_enrolments(paths)
+        .into_iter()
+        .find(|e| e.catalog_name == catalog_name)
+        .map(|e| e.url)
+}
+
+/// Test helper: overwrite the `pinned_ref` for one `(global, name)`
+/// enrolment. Used by SHA-pinning tests that previously hand-edited
+/// `config.toml`.
+pub fn set_global_enrolment_ref(paths: &Paths, catalog_name: &str, new_ref: &str) {
+    let (e, r, s) = registry_seeds_for_test();
+    let conn = tome::index::open(
+        &paths.index_db,
+        &tome::index::OpenOptions {
+            embedder: e,
+            reranker: r,
+            summariser: s,
+        },
+    )
+    .unwrap();
+    let affected = conn
+        .execute(
+            "UPDATE workspace_catalogs SET pinned_ref = ?1
+             WHERE workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+               AND catalog_name = ?2",
+            rusqlite::params![new_ref, catalog_name],
+        )
+        .unwrap();
+    assert!(affected > 0, "no enrolment matched for `{catalog_name}`");
 }

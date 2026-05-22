@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{Fixture, ToolEnv};
+use common::{Fixture, ToolEnv, global_enrolment_url, paths_for};
 use serde_json::Value;
 
 #[test]
@@ -80,14 +80,11 @@ fn cache_manifest_deleted_returns_io_error() {
         .output()
         .unwrap();
 
-    // Locate the cache dir from the registry.
-    let cfg = std::fs::read_to_string(env.config_file()).unwrap();
-    let path_line = cfg
-        .lines()
-        .find(|l| l.trim_start().starts_with("path = "))
-        .expect("path line");
-    let raw = path_line.split('"').nth(1).expect("quoted path");
-    let manifest = std::path::PathBuf::from(raw).join("tome-catalog.toml");
+    // Locate the cache dir via the enrolment URL.
+    let paths = paths_for(&env);
+    let url = global_enrolment_url(&paths, "sample-experts").expect("enrolment");
+    let cache_dir = paths.cache_dir_for(&url);
+    let manifest = cache_dir.join("tome-catalog.toml");
     std::fs::remove_file(&manifest).expect("rm manifest");
 
     let out = env

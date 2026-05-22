@@ -22,7 +22,6 @@
 use tracing::warn;
 
 use crate::catalog::git::Git;
-use crate::catalog::store as catalog_store;
 use crate::commands::plugin::{embedder_entry, registry_seeds, reranker_entry};
 use crate::commands::status::{check_index, check_model};
 use crate::doctor::checks::check_catalogs;
@@ -30,7 +29,7 @@ use crate::doctor::report::{DoctorReport, SuggestedFix};
 use crate::embedding::download::download_model;
 use crate::embedding::registry::ModelEntry;
 use crate::error::TomeError;
-use crate::index::{self, OpenOptions, acquire_lock, migrations};
+use crate::index::{self, OpenOptions, acquire_lock, migrations, workspace_catalogs};
 use crate::paths::Paths;
 use crate::workspace::Scope;
 
@@ -126,26 +125,35 @@ fn repair_model(entry: &ModelEntry, paths: &Paths) -> Result<(), TomeError> {
     Ok(())
 }
 
-fn repair_catalog(name: &str, paths: &Paths, _scope: &Scope) -> Result<(), TomeError> {
-    let config = catalog_store::load(&paths.global_config_file)?;
-    let entry = config
-        .catalogs
-        .get(name)
-        .ok_or_else(|| TomeError::CatalogNotFound(name.to_owned()))?
-        .clone();
+fn repair_catalog(name: &str, paths: &Paths, scope: &Scope) -> Result<(), TomeError> {
+    let workspace_name = scope.name().as_str();
+    let (e_seed, r_seed, s_seed) = registry_seeds();
+    let conn = index::open(
+        &paths.index_db,
+        &OpenOptions {
+            embedder: e_seed,
+            reranker: r_seed,
+            summariser: s_seed,
+        },
+    )?;
+    let enrolment = workspace_catalogs::find(&conn, workspace_name, name)?
+        .ok_or_else(|| TomeError::CatalogNotFound(name.to_owned()))?;
+    drop(conn);
+
+    let cache_path = paths.cache_dir_for(&enrolment.url);
 
     // The clone destination must not exist. Remove any half-broken
     // cache before re-cloning. This is the same best-effort cleanup
     // pattern Phase 1's `catalog add` uses on rollback.
-    if entry.path.exists() {
-        std::fs::remove_dir_all(&entry.path).map_err(TomeError::Io)?;
+    if cache_path.exists() {
+        std::fs::remove_dir_all(&cache_path).map_err(TomeError::Io)?;
     }
-    if let Some(parent) = entry.path.parent() {
+    if let Some(parent) = cache_path.parent() {
         std::fs::create_dir_all(parent).map_err(TomeError::Io)?;
     }
 
-    let git = Git::new(&entry.name);
-    git.clone_shallow(&entry.url, &entry.path, Some(&entry.ref_))?;
+    let git = Git::new(name);
+    git.clone_shallow(&enrolment.url, &cache_path, Some(&enrolment.pinned_ref))?;
     Ok(())
 }
 
