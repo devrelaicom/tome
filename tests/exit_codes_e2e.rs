@@ -71,7 +71,7 @@ fn plugin_show_with_malformed_plugin_json_exits_22() {
     let tmp = TempDir::new().unwrap();
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    fs::create_dir_all(&paths.data_dir).expect("data dir");
+    fs::create_dir_all(&paths.root).expect("data dir");
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
@@ -109,7 +109,7 @@ fn models_list_with_corrupt_manifest_exits_33() {
     // a parse failure as exit 33 (`ModelRegistrationParseError`).
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    fs::create_dir_all(&paths.data_dir).expect("data dir");
+    fs::create_dir_all(&paths.root).expect("data dir");
     fabricate_all_installed_models(&paths);
 
     let entry = MODEL_REGISTRY.first().expect("at least one model");
@@ -135,7 +135,7 @@ fn status_against_corrupt_index_exits_51() {
     let _tmp = TempDir::new().unwrap();
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    fs::create_dir_all(&paths.data_dir).expect("data dir");
+    fs::create_dir_all(&paths.root).expect("data dir");
 
     {
         // Bootstrap so the path exists and is a real DB.
@@ -195,8 +195,8 @@ fn reindex_unknown_plugin_in_known_catalog_exits_20() {
         path = catalog_root.display(),
     );
     let paths = paths_for(&env);
-    fs::create_dir_all(&paths.config_dir).expect("config dir");
-    fs::write(&paths.config_file, cfg).expect("write config");
+    fs::create_dir_all(&paths.root).expect("config dir");
+    fs::write(&paths.global_config_file, cfg).expect("write config");
 
     let out = env
         .cmd()

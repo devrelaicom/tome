@@ -15,7 +15,7 @@ use tempfile::NamedTempFile;
 use crate::config::Config;
 use crate::error::TomeError;
 use crate::paths::Paths;
-use crate::workspace::{Scope, inventory};
+use crate::workspace::Scope;
 
 pub fn load(config_file: &Path) -> Result<Config, TomeError> {
     match std::fs::read_to_string(config_file) {
@@ -49,39 +49,27 @@ pub fn save(config_file: &Path, config: &Config) -> Result<(), TomeError> {
 /// on-disk clone at `paths.cache_dir_for(url)` is still needed after the
 /// resolved scope drops it.
 ///
-/// Sources walked (contract `catalog-extensions-p3.md` §Reference-counting):
-///
-/// 1. The global `config.toml` (`paths.config_file`).
-/// 2. Every workspace path in `paths.workspace_registry` — opt-in; the
-///    file is absent on a fresh install and reads as an empty list.
+/// Phase 4 / F2a transitional behaviour: with the XDG-separated paths
+/// gone and the `workspaces.txt` opt-in registry deleted, this function
+/// only walks the central global `config.toml`. The Phase 3 per-workspace
+/// `.tome/config.toml` enumeration is dropped here; F11 reintroduces
+/// proper workspace-aware reference counting via the `workspace_catalogs`
+/// junction table once the central DB schema is in place.
 ///
 /// URL equality is exact-string match. Callers must pass the same
 /// scrubbed-and-resolved URL the catalog was registered with.
 ///
 /// ## Concurrency / TOCTOU
 ///
-/// The reference-count read is **not** taken under any lock. Two
-/// processes racing through `catalog remove` may both observe an empty
-/// list and both call `fs::remove_dir_all`; one succeeds, the other
-/// gets `NotFound` and silently continues. The worse race — process A
-/// observes empty, process B adds a new reference, process A removes
-/// the clone — leaves a dangling reference; the next
-/// `tome catalog update` for that scope re-clones. No data loss; one
-/// extra round-trip. Same TOCTOU profile as the Phase 2
-/// `cascade_disable_for_catalog` pre-check.
+/// The reference-count read is **not** taken under any lock. The TOCTOU
+/// profile is unchanged from Phase 3: see the Phase 3 retro notes on
+/// `catalog::store::reference_count` for the full discussion.
 pub fn reference_count(url: &str, paths: &Paths) -> Vec<Scope> {
     let mut refs = Vec::new();
-    if let Ok(global) = load(&paths.config_file)
+    if let Ok(global) = load(&paths.global_config_file)
         && global.catalogs.values().any(|e| e.url == url)
     {
         refs.push(Scope::Global);
-    }
-    for ws in inventory::read_registry(&paths.workspace_registry) {
-        let cfg_path = ws.join(".tome/config.toml");
-        let Ok(cfg) = load(&cfg_path) else { continue };
-        if cfg.catalogs.values().any(|e| e.url == url) {
-            refs.push(Scope::Workspace(ws));
-        }
     }
     refs
 }

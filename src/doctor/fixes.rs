@@ -126,8 +126,8 @@ fn repair_model(entry: &ModelEntry, paths: &Paths) -> Result<(), TomeError> {
     Ok(())
 }
 
-fn repair_catalog(name: &str, paths: &Paths, scope: &Scope) -> Result<(), TomeError> {
-    let config = catalog_store::load(&paths.config_file_for(scope))?;
+fn repair_catalog(name: &str, paths: &Paths, _scope: &Scope) -> Result<(), TomeError> {
+    let config = catalog_store::load(&paths.global_config_file)?;
     let entry = config
         .catalogs
         .get(name)
@@ -149,14 +149,14 @@ fn repair_catalog(name: &str, paths: &Paths, scope: &Scope) -> Result<(), TomeEr
     Ok(())
 }
 
-fn repair_schema(paths: &Paths, scope: &Scope) -> Result<(), TomeError> {
-    let db_path = paths.index_db_for(scope);
+fn repair_schema(paths: &Paths, _scope: &Scope) -> Result<(), TomeError> {
+    let db_path = paths.index_db.clone();
     if !db_path.is_file() {
         // No DB on disk → nothing to migrate. Not an error.
         return Ok(());
     }
     let (embedder_seed, reranker_seed) = registry_seeds();
-    let lock_path = paths.index_lock_for(scope);
+    let lock_path = paths.index_lock.clone();
     let _lock = acquire_lock(&lock_path)?;
     let mut conn = index::open(
         &db_path,

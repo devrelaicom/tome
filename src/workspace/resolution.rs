@@ -33,8 +33,9 @@ use crate::workspace::{ResolvedScope, Scope, ScopeSource};
 
 /// Compute the active scope for this invocation. Pure function over
 /// `args` + process-state (env vars, CWD); takes no `&Paths` because
-/// resolution is layer-zero — `Paths::index_db_for(&scope)` consumes
-/// the result.
+/// resolution is layer-zero — Phase 4's central index uses
+/// `Paths::index_db` directly and the scope is threaded forward for
+/// the future per-workspace junction-table lookups (F11).
 pub fn resolve(args: &GlobalScopeArgs) -> Result<ResolvedScope, TomeError> {
     // Priority 0: mutually-exclusive flag pair. Detect before priority
     // 1/2 so the order in which clap populated them is irrelevant.

@@ -30,7 +30,8 @@ use crate::commands::plugin::registry_seeds;
 
 pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    let config_file = paths.config_file_for(&scope.scope);
+    // F2a: single global config; F11 will reintroduce workspace-aware scope.
+    let config_file = paths.global_config_file.clone();
     let mut config = store::load(&config_file)?;
 
     let entry = config
@@ -139,10 +140,10 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
 /// `catalog remove` flow must still work on a fresh install).
 fn read_enabled_plugins(
     paths: &Paths,
-    scope: &Scope,
+    _scope: &Scope,
     catalog: &str,
 ) -> Result<Vec<String>, TomeError> {
-    let index_db = paths.index_db_for(scope);
+    let index_db = paths.index_db.clone();
     if !index_db.is_file() {
         return Ok(Vec::new());
     }

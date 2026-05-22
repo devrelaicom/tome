@@ -139,8 +139,8 @@ pub fn check_model(
     })
 }
 
-pub fn check_index(paths: &Paths, scope: &Scope) -> Result<IndexHealth, TomeError> {
-    let index_db = paths.index_db_for(scope);
+pub fn check_index(paths: &Paths, _scope: &Scope) -> Result<IndexHealth, TomeError> {
+    let index_db = paths.index_db.clone();
     if !index_db.is_file() {
         return Ok(IndexHealth {
             present: false,
@@ -205,11 +205,11 @@ pub fn check_index(paths: &Paths, scope: &Scope) -> Result<IndexHealth, TomeErro
 
 pub fn check_drift(
     paths: &Paths,
-    scope: &Scope,
+    _scope: &Scope,
     embedder_entry: &ModelEntry,
     reranker_entry: &ModelEntry,
 ) -> Result<DriftStatus, TomeError> {
-    let index_db = paths.index_db_for(scope);
+    let index_db = paths.index_db.clone();
     if !index_db.is_file() {
         return Ok(DriftStatus::None);
     }

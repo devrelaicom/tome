@@ -1,109 +1,125 @@
-//! XDG-aware path resolution. We honour `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
-//! and (Phase 3) `XDG_STATE_HOME` across both macOS and Linux (rather than
-//! `directories`'s macOS-specific `~/Library/...` fallback) — the spec is
-//! explicit about the XDG layout and tests rely on it being controllable
-//! via the env vars. `cache_dir_for(url)` content-addresses each catalog's
-//! cache by sha256(url) (FR-015).
+//! Path resolution for the Phase 4 single-root layout.
 //!
-//! Phase 2 adds the index database, an advisory write lock, and the models
-//! directory; all live under `data_dir` per spec FR-021 (data dir, NOT cache
-//! dir — OS cache cleaners must never sweep them away). FR-021 explicitly
-//! requires reusing the Phase 1 resolver rather than introducing a parallel
-//! path-resolution rule.
+//! Every Tome-owned path lives under `<home>/.tome/`. There is no
+//! XDG-style separation between config / data / cache / state — the
+//! constitution v1.3.0 §Paths amendment formalised the new layout, and
+//! research §R-1 documents why we walked away from XDG and the
+//! `directories` crate (which Tome never actually depended on; Phase 3
+//! used raw `HOME` env-var resolution behind XDG-style joins).
 //!
-//! Phase 3 layers `state_dir` (XDG_STATE_HOME) on top, plus Scope-aware
-//! accessor methods that pick between the global locations carried on this
-//! struct and per-workspace paths derived from `Scope::Workspace(root)`.
-//! Research §R-6 suggests `directories::ProjectDirs::state_dir()` for
-//! `state_dir`; we deviate intentionally and use the same raw-env-var +
-//! HOME-fallback pattern as `config_dir` / `data_dir` so the three
-//! resolvers share an idiom (and so we don't add `directories` as a
-//! single-call dependency).
+//! `home_root()` resolves `<home>` via `std::env::var_os("HOME")`. The
+//! `std::env::home_dir` API has been un-deprecated as of Rust 1.85 and
+//! is a viable future fallback; until then the raw env-var pattern
+//! remains sufficient on every supported platform (Linux, macOS).
+//!
+//! All path joins in the codebase happen here. No other module
+//! constructs Tome-owned paths from string literals — the
+//! `tests/no_phase3_paths.rs` structural guard enforces this for the
+//! Phase 3 identifier set that's now gone.
+//!
+//! The Phase 3 `_for(&Scope)` accessor pattern is **gone**. Phase 4
+//! has exactly one central `index.db`, one central `index.lock`, and
+//! one central global `config.toml`. Per-workspace state moves to
+//! either (a) the central database via the `workspace_skills` /
+//! `workspace_catalogs` junction tables (F11), or (b)
+//! `<root>/workspaces/<name>/{settings.toml,RULES.md}` for harness
+//! composition surfaces. Project-bound `.tome/` markers (F2a uses the
+//! associated functions on this struct) are thin binding pointers, not
+//! databases.
 
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
 use crate::error::TomeError;
-use crate::workspace::Scope;
+use crate::workspace::name::WorkspaceName;
 
+/// Resolve `<home>/.tome/`. Inspects `$HOME` directly per research §R-1.
+///
+/// Errors with [`TomeError::Io`] if `$HOME` is unset — the same shape
+/// Phase 1/2/3 used for the equivalent resolver failure.
+pub fn home_root() -> Result<PathBuf, TomeError> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+        TomeError::Io(std::io::Error::other(
+            "HOME is not set — cannot resolve the Tome root directory",
+        ))
+    })?;
+    Ok(home.join(".tome"))
+}
+
+/// All resolved Tome-owned paths, derived once at startup from
+/// [`home_root`]. Every accessor returns a path strictly inside
+/// [`Paths::root`]; no public method allows constructing a Tome path
+/// that escapes the root.
 #[derive(Debug, Clone)]
 pub struct Paths {
-    pub config_dir: PathBuf,
-    pub config_file: PathBuf,
-    pub data_dir: PathBuf,
-    pub catalogs_dir: PathBuf,
-    // Phase 2 — all under `data_dir`, not `cache_dir` (FR-021).
+    pub root: PathBuf,
+    pub global_config_file: PathBuf,
+    pub global_settings_file: PathBuf,
     pub index_db: PathBuf,
     pub index_lock: PathBuf,
+    pub catalogs_dir: PathBuf,
     pub models_dir: PathBuf,
-    // Phase 3 — state directory + per-feature files. Distinct from
-    // `data_dir` (which holds artefacts that must persist across cache
-    // cleanups, like the index DB and downloaded models) and from
-    // `config_dir` (which holds user-edited TOML). State here is
-    // ephemeral-but-survives-cache-cleanup: the MCP log + the opt-in
-    // workspace inventory.
-    pub state_dir: PathBuf,
+    pub logs_dir: PathBuf,
     pub mcp_log: PathBuf,
     pub mcp_log_prev: PathBuf,
-    pub workspace_registry: PathBuf,
+    pub workspaces_dir: PathBuf,
 }
 
 impl Paths {
+    /// Resolve the Phase 4 layout from `$HOME`. The directories
+    /// themselves are NOT created here — Tome creates each as needed
+    /// (`config.toml` write triggers `<root>/` bootstrap; first
+    /// catalog clone triggers `<root>/catalogs/`; etc.).
     pub fn resolve() -> Result<Self, TomeError> {
-        let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
-            TomeError::Io(std::io::Error::other(
-                "HOME is not set — cannot resolve config and data directories",
-            ))
-        })?;
-        let xdg_config = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| home.join(".config"));
-        let xdg_data = std::env::var_os("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| home.join(".local/share"));
-        let xdg_state = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .unwrap_or_else(|| home.join(".local/state"));
-        let config_dir = xdg_config.join("tome");
-        let config_file = config_dir.join("config.toml");
-        let data_dir = xdg_data.join("tome");
-        let catalogs_dir = data_dir.join("catalogs");
-        let index_db = data_dir.join("index.db");
-        let index_lock = data_dir.join("index.lock");
-        let models_dir = data_dir.join("models");
-        let state_dir = xdg_state.join("tome");
-        let mcp_log = state_dir.join("mcp.log");
-        let mcp_log_prev = state_dir.join("mcp.log.1");
-        let workspace_registry = state_dir.join("workspaces.txt");
-        Ok(Self {
-            config_dir,
-            config_file,
-            data_dir,
-            catalogs_dir,
-            index_db,
-            index_lock,
-            models_dir,
-            state_dir,
-            mcp_log,
-            mcp_log_prev,
-            workspace_registry,
-        })
+        let root = home_root()?;
+        Ok(Self::from_root(root))
     }
 
+    /// Build a `Paths` rooted at an arbitrary directory. Used by tests
+    /// that point at a `TempDir`; the production resolver consumes
+    /// [`home_root`] instead.
+    pub fn from_root(root: PathBuf) -> Self {
+        let global_config_file = root.join("config.toml");
+        let global_settings_file = root.join("settings.toml");
+        let index_db = root.join("index.db");
+        let index_lock = root.join("index.lock");
+        let catalogs_dir = root.join("catalogs");
+        let models_dir = root.join("models");
+        let logs_dir = root.join("logs");
+        let mcp_log = logs_dir.join("mcp.log");
+        let mcp_log_prev = logs_dir.join("mcp.log.1");
+        let workspaces_dir = root.join("workspaces");
+        Self {
+            root,
+            global_config_file,
+            global_settings_file,
+            index_db,
+            index_lock,
+            catalogs_dir,
+            models_dir,
+            logs_dir,
+            mcp_log,
+            mcp_log_prev,
+            workspaces_dir,
+        }
+    }
+
+    /// Content-addressed catalog clone directory. The sha256(url) hex
+    /// digest gives every distinct catalog URL its own directory under
+    /// [`Paths::catalogs_dir`]. Refcounting across workspaces lives in
+    /// `catalog::store::reference_count` (Phase 3 / US3.b).
     pub fn cache_dir_for(&self, url: &str) -> PathBuf {
         let mut h = Sha256::new();
         h.update(url.as_bytes());
         self.catalogs_dir.join(hex::encode(h.finalize()))
     }
 
-    /// On-disk root for a named model. The directory contains the model
-    /// artefact(s) plus a Tome-owned `manifest.json` (see `ModelManifest`).
-    /// Reject empty / traversing / absolute names at the boundary so callers
-    /// can rely on the returned path staying inside `models_dir`.
+    /// On-disk root for a named model. The directory contains the
+    /// model artefact(s) plus a Tome-owned `manifest.json` (see
+    /// `ModelManifest`). Rejects empty / traversing / absolute names
+    /// at the boundary so callers can rely on the returned path
+    /// staying inside [`Paths::models_dir`].
     pub fn model_path(&self, name: &str) -> Result<PathBuf, TomeError> {
         if name.is_empty() {
             return Err(TomeError::Usage("model name is empty".into()));
@@ -121,56 +137,60 @@ impl Paths {
         Ok(self.models_dir.join(name))
     }
 
-    /// Per-model manifest path (the JSON file Tome writes after a verified
-    /// download).
+    /// Per-model manifest path (the JSON file Tome writes after a
+    /// verified download).
     pub fn model_manifest(&self, name: &str) -> Result<PathBuf, TomeError> {
         Ok(self.model_path(name)?.join("manifest.json"))
     }
 
-    // --- Phase 3 Scope-aware accessors -------------------------------------
+    // --- Workspace accessors --------------------------------------------
     //
-    // These return the correct config / index / lock path for the current
-    // scope. `Scope::Global` reads from the existing struct fields (which
-    // F4 will rename to `global_*`); `Scope::Workspace(root)` derives the
-    // per-workspace path from the root. The Phase 3 task list deliberately
-    // splits the rename + call-site sweep into slice F4; this slice just
-    // adds the methods so other modules can be written against them.
+    // Workspaces live under `<root>/workspaces/<name>/`. The
+    // `WorkspaceName` newtype guarantees the name component is already
+    // validated; the join is a pure string operation. No filesystem
+    // bootstrap happens here — `tome workspace add` (US2) is the place
+    // that calls `land_directory` to create the directory atomically.
+
+    /// `<root>/workspaces/<name>/` — the per-workspace settings root.
+    pub fn workspace_dir(&self, name: &WorkspaceName) -> PathBuf {
+        self.workspaces_dir.join(name.as_str())
+    }
+
+    /// `<root>/workspaces/<name>/settings.toml` — workspace-layer
+    /// harness settings (strict TOML).
+    pub fn workspace_settings_file(&self, name: &WorkspaceName) -> PathBuf {
+        self.workspace_dir(name).join("settings.toml")
+    }
+
+    /// `<root>/workspaces/<name>/RULES.md` — summariser output target.
+    pub fn workspace_rules_file(&self, name: &WorkspaceName) -> PathBuf {
+        self.workspace_dir(name).join("RULES.md")
+    }
+
+    // --- Project marker accessors ---------------------------------------
     //
-    // Naming convention: the methods are intentionally suffixed `_for`
-    // (e.g. `config_file_for`) rather than colliding with the like-named
-    // fields. F4 will rename the fields to `global_*` and the suffix can
-    // be dropped if desirable then.
+    // Project markers live at `<project_root>/.tome/`. They are
+    // independent of `Paths::resolve()` — every accessor below is an
+    // associated function rather than a method on `&self`. The contract
+    // is: a project marker is a thin binding pointer; the source of
+    // truth for the bound workspace's settings lives under
+    // `Paths::workspace_dir(&name)`.
 
-    /// Config file for the given scope. Global → `paths.config_file`.
-    /// Workspace → `<workspace-root>/.tome/config.toml`.
-    pub fn config_file_for(&self, scope: &Scope) -> PathBuf {
-        match scope {
-            Scope::Global => self.config_file.clone(),
-            Scope::Workspace(root) => root.join(".tome/config.toml"),
-        }
+    /// `<project_root>/.tome/` — the project's binding marker dir.
+    pub fn project_marker_dir(project_root: &Path) -> PathBuf {
+        project_root.join(".tome")
     }
 
-    /// Index database for the given scope.
-    pub fn index_db_for(&self, scope: &Scope) -> PathBuf {
-        match scope {
-            Scope::Global => self.index_db.clone(),
-            Scope::Workspace(root) => root.join(".tome/index.db"),
-        }
+    /// `<project_root>/.tome/config.toml` — the project-to-workspace
+    /// binding pointer (carries `workspace = "<name>"`).
+    pub fn project_marker_config(project_root: &Path) -> PathBuf {
+        Self::project_marker_dir(project_root).join("config.toml")
     }
 
-    /// Advisory write lockfile for the given scope.
-    pub fn index_lock_for(&self, scope: &Scope) -> PathBuf {
-        match scope {
-            Scope::Global => self.index_lock.clone(),
-            Scope::Workspace(root) => root.join(".tome/index.lock"),
-        }
-    }
-
-    /// The `.tome/` marker directory for a workspace rooted at `root`.
-    /// `root` must be absolute; per `Scope::Workspace` invariants the
-    /// caller has already canonicalised it.
-    pub fn workspace_marker_dir(&self, root: &Path) -> PathBuf {
-        root.join(".tome")
+    /// `<project_root>/.tome/RULES.md` — copy of the workspace-layer
+    /// summary, materialised inside the project for harness pickup.
+    pub fn project_marker_rules(project_root: &Path) -> PathBuf {
+        Self::project_marker_dir(project_root).join("RULES.md")
     }
 }
 
@@ -179,21 +199,52 @@ mod tests {
     use super::*;
 
     fn fixture() -> Paths {
-        let data = PathBuf::from("/tmp/d");
-        let state = PathBuf::from("/tmp/s");
-        Paths {
-            config_dir: PathBuf::from("/tmp/c"),
-            config_file: PathBuf::from("/tmp/c/config.toml"),
-            data_dir: data.clone(),
-            catalogs_dir: data.join("catalogs"),
-            index_db: data.join("index.db"),
-            index_lock: data.join("index.lock"),
-            models_dir: data.join("models"),
-            state_dir: state.clone(),
-            mcp_log: state.join("mcp.log"),
-            mcp_log_prev: state.join("mcp.log.1"),
-            workspace_registry: state.join("workspaces.txt"),
-        }
+        Paths::from_root(PathBuf::from("/tmp/tome-root"))
+    }
+
+    #[test]
+    fn from_root_places_every_path_under_root() {
+        let p = fixture();
+        assert_eq!(p.root, PathBuf::from("/tmp/tome-root"));
+        assert_eq!(p.global_config_file, p.root.join("config.toml"));
+        assert_eq!(p.global_settings_file, p.root.join("settings.toml"));
+        assert_eq!(p.index_db, p.root.join("index.db"));
+        assert_eq!(p.index_lock, p.root.join("index.lock"));
+        assert_eq!(p.catalogs_dir, p.root.join("catalogs"));
+        assert_eq!(p.models_dir, p.root.join("models"));
+        assert_eq!(p.logs_dir, p.root.join("logs"));
+        assert_eq!(p.mcp_log, p.root.join("logs/mcp.log"));
+        assert_eq!(p.mcp_log_prev, p.root.join("logs/mcp.log.1"));
+        assert_eq!(p.workspaces_dir, p.root.join("workspaces"));
+    }
+
+    #[test]
+    fn workspace_accessors_compose_under_workspaces_dir() {
+        let p = fixture();
+        let name = WorkspaceName::global();
+        assert_eq!(p.workspace_dir(&name), p.workspaces_dir.join("global"));
+        assert_eq!(
+            p.workspace_settings_file(&name),
+            p.workspaces_dir.join("global/settings.toml"),
+        );
+        assert_eq!(
+            p.workspace_rules_file(&name),
+            p.workspaces_dir.join("global/RULES.md"),
+        );
+    }
+
+    #[test]
+    fn project_marker_accessors_are_independent_of_self() {
+        let project = PathBuf::from("/abs/project");
+        assert_eq!(Paths::project_marker_dir(&project), project.join(".tome"));
+        assert_eq!(
+            Paths::project_marker_config(&project),
+            project.join(".tome/config.toml"),
+        );
+        assert_eq!(
+            Paths::project_marker_rules(&project),
+            project.join(".tome/RULES.md"),
+        );
     }
 
     #[test]
@@ -204,28 +255,7 @@ mod tests {
         assert_eq!(a, b);
         let c = p.cache_dir_for("https://github.com/owner/other");
         assert_ne!(a, c);
-        // sha256 hex is 64 chars
         assert_eq!(a.file_name().unwrap().to_str().unwrap().len(), 64);
-    }
-
-    #[test]
-    fn phase_2_paths_are_under_data_dir() {
-        // FR-021: index, lock, and models live under the per-user data dir
-        // (not cache dir), so OS cache cleaners cannot silently wipe them.
-        let p = fixture();
-        assert!(p.index_db.starts_with(&p.data_dir));
-        assert!(p.index_lock.starts_with(&p.data_dir));
-        assert!(p.models_dir.starts_with(&p.data_dir));
-    }
-
-    #[test]
-    fn phase_3_state_paths_are_under_state_dir() {
-        // FR (Phase 3): MCP log + workspace inventory live under the state
-        // dir, distinct from data_dir.
-        let p = fixture();
-        assert!(p.mcp_log.starts_with(&p.state_dir));
-        assert!(p.mcp_log_prev.starts_with(&p.state_dir));
-        assert!(p.workspace_registry.starts_with(&p.state_dir));
     }
 
     #[test]
@@ -244,34 +274,5 @@ mod tests {
                 "model_path({bad:?}) should have errored",
             );
         }
-    }
-
-    #[test]
-    fn model_manifest_lives_inside_model_dir() {
-        let p = fixture();
-        let m = p.model_manifest("bge-reranker-base").unwrap();
-        assert_eq!(
-            m,
-            p.models_dir.join("bge-reranker-base").join("manifest.json"),
-        );
-    }
-
-    #[test]
-    fn scope_global_routes_to_global_fields() {
-        let p = fixture();
-        assert_eq!(p.config_file_for(&Scope::Global), p.config_file);
-        assert_eq!(p.index_db_for(&Scope::Global), p.index_db);
-        assert_eq!(p.index_lock_for(&Scope::Global), p.index_lock);
-    }
-
-    #[test]
-    fn scope_workspace_routes_to_dot_tome_subdir() {
-        let p = fixture();
-        let root = PathBuf::from("/tmp/wk");
-        let ws = Scope::Workspace(root.clone());
-        assert_eq!(p.config_file_for(&ws), root.join(".tome/config.toml"));
-        assert_eq!(p.index_db_for(&ws), root.join(".tome/index.db"));
-        assert_eq!(p.index_lock_for(&ws), root.join(".tome/index.lock"));
-        assert_eq!(p.workspace_marker_dir(&root), root.join(".tome"));
     }
 }

@@ -100,7 +100,8 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         ));
     }
 
-    let config = store::load(&state.paths.config_file_for(&state.scope.scope)).map_err(|e| {
+    // F2a: single global config; F11 reintroduces workspace-aware view.
+    let config = store::load(&state.paths.global_config_file).map_err(|e| {
         McpError::internal_error(
             format!("load config: {e}"),
             Some(json!({ "code": "internal" })),

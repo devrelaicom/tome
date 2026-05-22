@@ -66,7 +66,8 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         ));
     }
 
-    let config = store::load(&state.paths.config_file_for(&state.scope.scope))
+    // F2a: single global config; F11 reintroduces workspace-aware view.
+    let config = store::load(&state.paths.global_config_file)
         .map_err(|e| internal(&input, started, e.to_string(), e.category()))?;
 
     if !config.catalogs.contains_key(&input.catalog) {
@@ -204,12 +205,12 @@ enum LookupOutcome {
 
 fn lookup_skill(
     paths: &crate::paths::Paths,
-    scope: &crate::workspace::Scope,
+    _scope: &crate::workspace::Scope,
     catalog: &str,
     plugin: &str,
     name: &str,
 ) -> Result<LookupOutcome, TomeError> {
-    let db_path = paths.index_db_for(scope);
+    let db_path = paths.index_db.clone();
     let conn = crate::index::db::open_read_only(&db_path)?;
     match skills::find(&conn, catalog, plugin, name)? {
         Some(row) if row.enabled => Ok(LookupOutcome::Found(Box::new(row))),

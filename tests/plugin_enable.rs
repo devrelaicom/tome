@@ -27,7 +27,7 @@ use tome::plugin::lifecycle::{self, LifecycleDeps};
 fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
@@ -110,7 +110,7 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
 fn enable_emits_fallback_warnings_for_missing_name_and_description() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
@@ -152,7 +152,7 @@ fn enable_emits_fallback_warnings_for_missing_name_and_description() {
 fn enable_is_idempotent_rejecting_re_enable_with_plugin_already_in_state() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
@@ -192,7 +192,7 @@ fn enable_resolves_nested_plugin_source_from_catalog_manifest() {
     // the plugin and succeeded. Both surfaces now go through the manifest.
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = tmp.path().join("catalog");
@@ -257,7 +257,7 @@ fn cheap_reenable_after_disable_invokes_embedder_zero_times() {
     // closure was not invoked a second time.
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
@@ -317,7 +317,7 @@ fn cheap_reenable_after_disable_invokes_embedder_zero_times() {
 fn enable_returns_model_missing_when_no_models_on_disk_and_download_disallowed() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     // Deliberately skip fabricate_models — the model-presence gate must fire.
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");

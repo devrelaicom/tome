@@ -14,9 +14,10 @@ use crate::output::Mode;
 use crate::paths::Paths;
 use crate::workspace::ResolvedScope;
 
-pub fn run(args: CatalogShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: CatalogShowArgs, _scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file_for(&scope.scope))?;
+    // F2a: single global config; F11 reintroduces workspace-aware view.
+    let config = store::load(&paths.global_config_file)?;
     let entry = config
         .catalogs
         .get(&args.name)

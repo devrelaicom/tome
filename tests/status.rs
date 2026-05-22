@@ -51,7 +51,7 @@ fn enable_alpha(
 fn status_healthy_with_models_and_index() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     common::fabricate_all_installed_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
@@ -75,7 +75,7 @@ fn status_healthy_with_models_and_index() {
 fn status_healthy_with_no_index_yet() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     common::fabricate_all_installed_models(&paths);
 
     let report = assemble_report(&paths, &tome::workspace::Scope::Global, false).expect("assemble");
@@ -91,7 +91,7 @@ fn status_healthy_with_no_index_yet() {
 fn status_unhealthy_when_embedder_missing() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     // Deliberately do NOT fabricate_models — embedder + reranker both
     // report Missing. Embedder Missing trumps reranker Missing in
     // classify(): the overall verdict is Unhealthy.
@@ -107,7 +107,7 @@ fn status_unhealthy_when_embedder_missing() {
 fn status_degraded_when_only_reranker_missing() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     common::fabricate_all_installed_models(&paths);
 
     // Now remove just the reranker dir.
@@ -131,7 +131,7 @@ fn status_degraded_when_only_reranker_missing() {
 fn status_degraded_on_reranker_drift_in_meta() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     common::fabricate_all_installed_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
@@ -168,7 +168,7 @@ fn status_degraded_on_reranker_drift_in_meta() {
 fn status_unhealthy_on_embedder_drift() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     common::fabricate_all_installed_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
@@ -202,7 +202,7 @@ fn status_unhealthy_on_embedder_drift() {
 fn status_verify_flag_detects_checksum_mismatch() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
 
     // Use the real-sized sparse-file fabricator so the on-disk SHA-256 is
     // an all-zero hash, which by construction does NOT match the registry's
@@ -223,7 +223,7 @@ fn status_verify_flag_detects_checksum_mismatch() {
 fn status_cli_exits_0_when_healthy() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     common::fabricate_all_installed_models(&paths);
 
     let out = env.cmd().args(["status"]).output().unwrap();
@@ -247,7 +247,7 @@ fn status_cli_exits_1_when_embedder_missing() {
 fn status_cli_json_emits_structured_record() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     common::fabricate_all_installed_models(&paths);
 
     let out = env.cmd().args(["--json", "status"]).output().unwrap();

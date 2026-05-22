@@ -31,7 +31,7 @@ use tome::plugin::lifecycle::{self, LifecycleDeps};
 fn enable_of_already_enabled_returns_plugin_already_in_state_via_library() {
     let tmp = TempDir::new().unwrap();
     let paths = common::lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
@@ -66,7 +66,7 @@ fn disable_of_already_disabled_via_cli_exits_21() {
     let fixture_tmp = TempDir::new().unwrap();
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&fixture_tmp, "catalog");

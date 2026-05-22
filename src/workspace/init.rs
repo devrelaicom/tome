@@ -1,37 +1,28 @@
-//! `tome workspace init` — atomic `.tome/` creation.
+//! `tome workspace init` — neutered for Phase 4 / Slice F2a.
 //!
-//! Contract: `contracts/workspace-init.md`. The atomicity guarantee
-//! ("never a partial `.tome/`") is delivered by writing into a
-//! sibling temp directory inside the workspace root and renaming
-//! once everything is written. The rename is the only step visible
-//! to readers.
+//! Phase 3's atomic `.tome/` creation is obsolete: Phase 4 splits the
+//! Phase 3 marker into two artefacts:
 //!
-//! Notable design choices:
+//! - `<root>/workspaces/<name>/{settings.toml, RULES.md}` — the
+//!   workspace-layer state, owned by `tome workspace add` (US2).
+//! - `<project>/.tome/config.toml` — a thin binding pointer carrying
+//!   `workspace = "<name>"`, owned by `tome workspace use` (US1).
 //!
-//! - The temp directory lives **inside** the workspace root (not in
-//!   `$TMPDIR`) so the final rename is on the same filesystem and is
-//!   POSIX-atomic. `tempfile::Builder::tempdir_in` handles this.
-//! - `--force` renames an existing `.tome/` to `.tome.old/` BEFORE the
-//!   new directory lands. A crash between rename and remove leaves an
-//!   orphan `.tome.old/` next to the new `.tome/`; doctor reports
-//!   that as a cleanup candidate (out of scope for US2).
-//! - The opt-in workspace registry (`workspaces.txt`) is appended only
-//!   if the file already exists — registration is opt-in (research
-//!   §R-15).
+//! The legacy `tome workspace init` command name is retained as a
+//! `#[ignore]` placeholder so the harness compiles; the real
+//! replacement commands land in slices US1 and US2. F2a delivers only
+//! the path reshape — the lifecycle rewrite follows.
 
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::catalog::store as catalog_store;
-use crate::config::Config;
 use crate::error::TomeError;
 use crate::paths::Paths;
-use crate::workspace::inventory;
 
-/// What `init` produced. Emitted as a single JSON record by the CLI
-/// (`workspace-init.md` §"Output (`--json`)") and consumed by callers
-/// that need the post-init paths.
+/// Pre-Phase-4 outcome record. Retained as a type so the CLI command
+/// dispatcher in `src/commands/workspace/` continues to compile until
+/// US1/US2 rewrite the command surface.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct InitOutcome {
     pub workspace: PathBuf,
@@ -41,167 +32,18 @@ pub struct InitOutcome {
     pub index_bootstrapped: bool,
 }
 
+/// Returns a clear error pointing at the F11/US1 rewrite. The original
+/// implementation depended on per-workspace `.tome/index.db` and
+/// `.tome/config.toml` paths that no longer exist in the Phase 4
+/// layout. Callers that need the new behaviour will live under
+/// `tome workspace add` / `tome workspace use` (US2 / US1).
 pub fn init(
-    target_root: &Path,
-    inherit_global: bool,
-    force: bool,
-    paths: &Paths,
+    _target_root: &Path,
+    _inherit_global: bool,
+    _force: bool,
+    _paths: &Paths,
 ) -> Result<InitOutcome, TomeError> {
-    // 1. Path must exist and be a directory. We canonicalise so the
-    //    outcome record always carries an absolute path, matching the
-    //    contract's example output.
-    if !target_root.exists() {
-        return Err(TomeError::Io(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!(
-                "workspace path `{}` does not exist; create the directory first",
-                target_root.display()
-            ),
-        )));
-    }
-    if !target_root.is_dir() {
-        return Err(TomeError::Io(std::io::Error::other(format!(
-            "workspace path `{}` is not a directory",
-            target_root.display()
-        ))));
-    }
-    let absolute = std::fs::canonicalize(target_root).map_err(TomeError::Io)?;
-    let marker = absolute.join(".tome");
-
-    // FR-S-04: distinguish "no marker" from "marker exists but is not
-    // a directory" (regular file, symlink, FIFO, etc). A non-directory
-    // entry at `.tome` is anomalous — `--force` would rename it to
-    // `.tome.old`, leaving doctor confused; without `--force` we
-    // already refuse via the marker-exists branch but with a generic
-    // "workspace already initialised" error. Surface the specific
-    // shape so the user knows what's there.
-    let marker_lstat = std::fs::symlink_metadata(&marker);
-    let marker_exists = marker_lstat.is_ok();
-    let marker_is_dir = marker_lstat.as_ref().is_ok_and(|m| m.is_dir());
-    if marker_exists && !marker_is_dir {
-        return Err(TomeError::WorkspaceMalformed {
-            path: absolute.clone(),
-            reason: format!(
-                "`.tome` exists but is not a directory ({})",
-                describe_file_type(marker_lstat.as_ref().unwrap()),
-            ),
-        });
-    }
-    if marker_exists && !force {
-        return Err(TomeError::CatalogAlreadyExists(format!(
-            "workspace at {}",
-            marker.display()
-        )));
-    }
-
-    // 2. Build a staging directory inside `absolute` so the final
-    //    rename is on the same filesystem.
-    let staging = tempfile::Builder::new()
-        .prefix(".tome.tmp.")
-        .tempdir_in(&absolute)
-        .map_err(TomeError::Io)?;
-
-    // 3. Permissions 0700 (Unix) on the staging dir before content
-    //    lands so the secret-keeping window starts at directory
-    //    creation, not after the first config write.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(staging.path(), perms).map_err(TomeError::Io)?;
-    }
-
-    // 4. Compose the per-workspace config and write it via the same
-    //    atomic-write helper used by the global registry. Enablement
-    //    state is NEVER copied — `--inherit-global` brings catalog
-    //    sources across, nothing more.
-    let (config, inherited) = build_initial_config(inherit_global, paths)?;
-    let staging_config = staging.path().join("config.toml");
-    let toml_body =
-        toml::to_string_pretty(&config).map_err(|e| TomeError::Internal(anyhow::Error::new(e)))?;
-    catalog_store::write_atomic(&staging_config, toml_body.as_bytes())?;
-
-    // 5. Move an existing `.tome/` aside if `--force` allowed us this
-    //    far. The aside path is deterministic so doctor can find
-    //    orphans later. Pre-cleanup of `.tome.old/` propagates its
-    //    error (FR-M-WKS-2) — a previous `.tome.old/` that can't be
-    //    removed (EACCES, disk-full) would otherwise cause the next
-    //    rename to fail with EEXIST and a confusing error chain.
-    let aside = absolute.join(".tome.old");
-    if marker_exists {
-        if aside.exists()
-            && let Err(e) = std::fs::remove_dir_all(&aside)
-        {
-            return Err(TomeError::Io(std::io::Error::other(format!(
-                "cannot remove pre-existing `.tome.old/` at {}: {e}",
-                aside.display()
-            ))));
-        }
-        std::fs::rename(&marker, &aside).map_err(TomeError::Io)?;
-    }
-
-    // 6. Promote the staging dir to its final name. `keep()` drops the
-    //    auto-cleanup that the `TempDir` `Drop` impl would otherwise
-    //    perform, so the underlying directory survives.
-    let staged_path = staging.keep();
-    if let Err(e) = std::fs::rename(&staged_path, &marker) {
-        // Rollback: try to restore the aside copy so a failed `--force`
-        // doesn't leave the user with neither old nor new `.tome/`.
-        if marker_exists {
-            let _ = std::fs::rename(&aside, &marker);
-        }
-        // Best-effort: clean up the staged dir so it doesn't sit around
-        // confusing the next init attempt.
-        let _ = std::fs::remove_dir_all(&staged_path);
-        return Err(TomeError::Io(e));
-    }
-
-    // 7. Best-effort: remove the aside copy after the new marker
-    //    landed.
-    if marker_exists {
-        let _ = std::fs::remove_dir_all(&aside);
-    }
-
-    // 8. Append to the opt-in workspace registry. Silently no-ops when
-    //    the user hasn't opted in (file absent).
-    inventory::append_if_registry_exists(&paths.workspace_registry, &absolute)?;
-
-    Ok(InitOutcome {
-        workspace: absolute.clone(),
-        catalogs: u32::try_from(config.catalogs.len()).unwrap_or(u32::MAX),
-        inherited,
-        config_path: marker.join("config.toml"),
-        index_bootstrapped: false,
-    })
-}
-
-/// Render a one-word description of a non-directory file type for the
-/// FR-S-04 error message. Defensive — every branch of `FileType` on
-/// Unix is named; on Windows we collapse to "non-directory".
-fn describe_file_type(meta: &std::fs::Metadata) -> &'static str {
-    let ft = meta.file_type();
-    if ft.is_file() {
-        "regular file"
-    } else if ft.is_symlink() {
-        "symlink"
-    } else if ft.is_dir() {
-        // Caller already gated on `is_dir() = false`; this arm is
-        // unreachable but stays for defensiveness.
-        "directory"
-    } else {
-        "non-directory"
-    }
-}
-
-fn build_initial_config(inherit: bool, paths: &Paths) -> Result<(Config, bool), TomeError> {
-    if !inherit {
-        return Ok((Config::default(), false));
-    }
-    // `load` returns `Config::default()` when the global config file
-    // doesn't exist, so `--inherit-global` on a fresh install seeds an
-    // empty `[catalogs]` block — same as the no-flag case. That matches
-    // the contract: `--inherit-global` copies what's there, not a
-    // hypothetical bootstrap.
-    let global = catalog_store::load(&paths.config_file)?;
-    Ok((global, true))
+    Err(TomeError::Internal(anyhow::anyhow!(
+        "`tome workspace init` is replaced in Phase 4 by `tome workspace add` (US2) + `tome workspace use` (US1); see slices F2a → F10 → US1 → US2"
+    )))
 }

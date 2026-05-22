@@ -106,23 +106,19 @@ impl ToolEnv {
         self.home.path()
     }
 
-    pub fn config_dir(&self) -> PathBuf {
-        // `directories` on macOS would route through Application Support if
-        // `qualifier` were non-empty; here we use the XDG vars so the layout
-        // is the same on both supported platforms.
-        self.home.path().join(".config/tome")
+    /// Phase 4: the on-disk root for every Tome path inside the isolated
+    /// `$HOME`. Tests previously named this `config_dir` / `data_dir`
+    /// before the F2a collapse; the single accessor matches the new layout.
+    pub fn tome_root(&self) -> PathBuf {
+        self.home.path().join(".tome")
     }
 
     pub fn config_file(&self) -> PathBuf {
-        self.config_dir().join("config.toml")
-    }
-
-    pub fn data_dir(&self) -> PathBuf {
-        self.home.path().join(".local/share/tome")
+        self.tome_root().join("config.toml")
     }
 
     pub fn catalogs_dir(&self) -> PathBuf {
-        self.data_dir().join("catalogs")
+        self.tome_root().join("catalogs")
     }
 
     /// Build a `Command` for the compiled `tome` binary, pre-populated with
@@ -130,9 +126,6 @@ impl ToolEnv {
     pub fn cmd(&self) -> Command {
         let mut cmd = Command::new(tome_bin());
         cmd.env("HOME", self.home.path())
-            .env("XDG_CONFIG_HOME", self.home.path().join(".config"))
-            .env("XDG_DATA_HOME", self.home.path().join(".local/share"))
-            // `directories` honours these on macOS too when set.
             .env_remove("TOME_LOG")
             .env_remove("RUST_LOG");
         cmd
@@ -169,22 +162,10 @@ pub fn copy_sample_plugin_catalog(into: &TempDir, name: &str) -> PathBuf {
 
 /// Build a `Paths` rooted entirely under `root`. Mirrors the helper used by
 /// `lifecycle::tests::test_paths` so integration tests never have to touch
-/// `$HOME` or environment variables.
+/// `$HOME` or environment variables. F2a collapses everything under one
+/// root, so this is now a thin wrapper over [`Paths::from_root`].
 pub fn lifecycle_paths(root: &Path) -> Paths {
-    let state = root.join("state");
-    Paths {
-        config_dir: root.join("config"),
-        config_file: root.join("config/config.toml"),
-        data_dir: root.join("data"),
-        catalogs_dir: root.join("data/catalogs"),
-        index_db: root.join("data/index.db"),
-        index_lock: root.join("data/index.lock"),
-        models_dir: root.join("data/models"),
-        state_dir: state.clone(),
-        mcp_log: state.join("mcp.log"),
-        mcp_log_prev: state.join("mcp.log.1"),
-        workspace_registry: state.join("workspaces.txt"),
-    }
+    Paths::from_root(root.to_path_buf())
 }
 
 /// `MetaSeed` matching the deterministic stub embedder.
@@ -288,13 +269,14 @@ pub fn config_with_catalog(catalog_name: &str, catalog_root: &Path) -> Config {
     Config { catalogs }
 }
 
-/// Write the supplied [`Config`] to `paths.config_file` as TOML so a child
-/// `tome` binary process can read it. Used by `plugin list` / `plugin show`
-/// integration tests that bypass `catalog add` (no git fixture needed).
+/// Write the supplied [`Config`] to `paths.global_config_file` as TOML so a
+/// child `tome` binary process can read it. Used by `plugin list` /
+/// `plugin show` integration tests that bypass `catalog add` (no git fixture
+/// needed).
 pub fn write_config_for_cli(paths: &Paths, config: &Config) {
-    std::fs::create_dir_all(&paths.config_dir).expect("create config dir");
+    std::fs::create_dir_all(&paths.root).expect("create tome root");
     let body = toml::to_string_pretty(config).expect("serialise config");
-    std::fs::write(&paths.config_file, body).expect("write config.toml");
+    std::fs::write(&paths.global_config_file, body).expect("write config.toml");
 }
 
 /// Build a minimal index database on disk with `meta.schema_version` stamped
@@ -329,23 +311,7 @@ pub fn write_index_db_with_schema_version(path: &Path, version: u32) {
 /// Mirror of [`Paths::resolve`] that derives the layout from a [`ToolEnv`]'s
 /// isolated `$HOME` instead of touching real env vars. Lets the lifecycle
 /// library API and the spawned CLI binary share an on-disk layout without
-/// `Command::env` mutating process state. Originally duplicated across
-/// `plugin_list.rs`, `plugin_show.rs`, and `plugin_interactive.rs`; promoted
-/// here at the 4th caller (`plugin_disable.rs`) per the P4 retro plan.
+/// `Command::env` mutating process state.
 pub fn paths_for(env: &ToolEnv) -> Paths {
-    let home = env.home_path();
-    let state = home.join(".local/state/tome");
-    Paths {
-        config_dir: home.join(".config/tome"),
-        config_file: home.join(".config/tome/config.toml"),
-        data_dir: home.join(".local/share/tome"),
-        catalogs_dir: home.join(".local/share/tome/catalogs"),
-        index_db: home.join(".local/share/tome/index.db"),
-        index_lock: home.join(".local/share/tome/index.lock"),
-        models_dir: home.join(".local/share/tome/models"),
-        state_dir: state.clone(),
-        mcp_log: state.join("mcp.log"),
-        mcp_log_prev: state.join("mcp.log.1"),
-        workspace_registry: state.join("workspaces.txt"),
-    }
+    Paths::from_root(env.tome_root())
 }

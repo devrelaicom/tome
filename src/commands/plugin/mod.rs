@@ -159,7 +159,7 @@ pub(crate) use crate::plugin::lifecycle::resolve_plugin_dir;
 /// re-use [`crate::index::open`] which is idempotent on a re-open.
 pub(crate) fn open_index_for_read(
     paths: &Paths,
-    scope: &crate::workspace::Scope,
+    _scope: &crate::workspace::Scope,
 ) -> Result<rusqlite::Connection, TomeError> {
     // Phase 3 slice F5: read paths use the dedicated read-only handle
     // when possible. The bootstrap / migration / WAL pragmas in
@@ -179,7 +179,7 @@ pub(crate) fn open_index_for_read(
     // reads take the fast path. The bootstrap connection is dropped
     // immediately — the read-only handle is what the caller actually
     // queries.
-    let db_path = paths.index_db_for(scope);
+    let db_path = paths.index_db.clone();
     if !db_path.is_file() {
         let (embedder, reranker) = registry_seeds();
         let _bootstrap =

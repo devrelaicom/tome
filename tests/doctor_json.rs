@@ -15,7 +15,7 @@ use tempfile::TempDir;
 fn doctor_json_shape_is_pinned_on_healthy_install() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
 
     let out = env.cmd().args(["--json", "doctor"]).output().unwrap();
@@ -102,7 +102,7 @@ fn doctor_json_shape_is_pinned_on_healthy_install() {
 fn doctor_json_includes_suggested_fix_record_on_broken_catalog() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_installed_models(&paths);
 
     let fix = Fixture::build_sample();

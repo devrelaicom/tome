@@ -90,7 +90,8 @@ impl ScoringMode {
 
 pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.config_file_for(&scope.scope))?;
+    // F2a: single global config; F11 reintroduces workspace-aware view.
+    let config = store::load(&paths.global_config_file)?;
 
     // Model presence — embedder always required, reranker required unless
     // `--no-rerank`. We check before constructing the heavy
