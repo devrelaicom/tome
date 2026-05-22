@@ -61,6 +61,33 @@ fn count_skill_rows(paths: &tome::paths::Paths, catalog: &str) -> i64 {
     .unwrap_or(0)
 }
 
+/// Count workspace_skills enrolments for one (workspace, catalog). The F11a
+/// cascade semantics drop junction rows for the resolved workspace; the
+/// underlying skills rows are retained per FR-383.
+fn count_workspace_enrolments(paths: &tome::paths::Paths, workspace: &str, catalog: &str) -> i64 {
+    if !paths.index_db.is_file() {
+        return 0;
+    }
+    let conn = index::open(
+        &paths.index_db,
+        &OpenOptions {
+            embedder: stub_embedder_seed(),
+            reranker: stub_reranker_seed(),
+            summariser: stub_summariser_seed(),
+        },
+    )
+    .unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM workspace_skills AS ws
+         JOIN skills     AS s ON s.id = ws.skill_id
+         JOIN workspaces AS w ON w.id = ws.workspace_id
+         WHERE w.name = ?1 AND s.catalog = ?2",
+        rusqlite::params![workspace, catalog],
+        |row| row.get(0),
+    )
+    .unwrap_or(0)
+}
+
 #[test]
 fn refuse_remove_when_enabled_plugins_exist() {
     let tmp = TempDir::new().unwrap();
@@ -159,8 +186,19 @@ fn force_cascades_disable_and_removes_catalog() {
         !cfg_text.contains("sample-plugin-catalog"),
         "config should no longer reference the removed catalog, got: {cfg_text}",
     );
-    // Skill rows dropped.
-    assert_eq!(count_skill_rows(&paths, "sample-plugin-catalog"), 0);
+    // Phase 4 / F11a: workspace_skills enrolments for the resolved
+    // workspace are gone; the underlying skill rows are retained per
+    // FR-383 so other workspaces (post-F11b multi-workspace catalog
+    // enrolment) keep working.
+    assert_eq!(
+        count_workspace_enrolments(&paths, "global", "sample-plugin-catalog"),
+        0,
+        "cascade should clear workspace_skills enrolments for the global workspace",
+    );
+    assert!(
+        count_skill_rows(&paths, "sample-plugin-catalog") > 0,
+        "F11a retention rule: cascade must keep `skills` rows alive (FR-383)",
+    );
 }
 
 #[test]

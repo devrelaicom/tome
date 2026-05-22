@@ -205,22 +205,24 @@ enum LookupOutcome {
 
 fn lookup_skill(
     paths: &crate::paths::Paths,
-    _scope: &crate::workspace::Scope,
+    scope: &crate::workspace::Scope,
     catalog: &str,
     plugin: &str,
     name: &str,
 ) -> Result<LookupOutcome, TomeError> {
     let db_path = paths.index_db.clone();
     let conn = crate::index::db::open_read_only(&db_path)?;
-    match skills::find(&conn, catalog, plugin, name)? {
+    let workspace_name = scope.name().as_str();
+    match skills::find(&conn, workspace_name, catalog, plugin, name)? {
         Some(row) if row.enabled => Ok(LookupOutcome::Found(Box::new(row))),
         Some(_) => Ok(LookupOutcome::UnknownSkill),
         None => {
             // Distinguish "plugin not enabled at all" from "plugin
             // enabled but doesn't have this skill name". The shipping
             // contract treats zero (catalog, plugin) rows as
-            // `unknown_plugin`.
-            let any = skills::list_for_plugin(&conn, catalog, plugin)?;
+            // `unknown_plugin`. `list_for_plugin` scoped to the resolved
+            // workspace is what determines "enabled" here.
+            let any = skills::list_for_plugin(&conn, workspace_name, catalog, plugin)?;
             if any.is_empty() {
                 Ok(LookupOutcome::UnknownPlugin)
             } else {

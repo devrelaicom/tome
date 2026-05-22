@@ -2,10 +2,11 @@
 //!
 //! Reranking lives in the embedding crate (slice 5). This layer returns the
 //! top-K rows by cosine distance, filtered to skills enrolled in the
-//! privileged `global` workspace (via `workspace_skills`) and optionally
-//! to a single catalog / plugin so the caller can implement `--catalog`
-//! and `--plugin` flags on `tome query`. Phase 4 / F9 swapped the
-//! Phase 2/3 `s.enabled = 1` predicate for the workspace-join below.
+//! resolved workspace (via `workspace_skills`) and optionally to a single
+//! catalog / plugin so the caller can implement `--catalog` and `--plugin`
+//! flags on `tome query`. Phase 4 / F11a swapped the F9 hard-coded
+//! `'global'` join for a runtime `workspace_name` parameter sourced from
+//! the resolved scope.
 //!
 //! Spec: data-model.md §10 (`QueryResult`), contracts/query.md, FR-024.
 
@@ -39,11 +40,13 @@ pub struct QueryFilters<'a> {
 }
 
 /// Return the top `top_k` enabled skills closest to `query_vec` in cosine
-/// space. `query_vec` must have length 384 (matches the `FLOAT[384]` virtual
-/// table column); shorter / longer vectors surface as
+/// space, scoped to the workspace named `workspace_name`. `query_vec` must
+/// have length 384 (matches the `FLOAT[384]` virtual table column);
+/// shorter / longer vectors surface as
 /// [`TomeError::IndexIntegrityCheckFailure`].
 pub fn knn(
     conn: &Connection,
+    workspace_name: &str,
     query_vec: &[f32],
     top_k: u32,
     filters: &QueryFilters<'_>,
@@ -55,21 +58,25 @@ pub fn knn(
         )));
     }
 
+    // Collect params in order: query bytes, k, workspace_name, [catalog],
+    // [plugin]. The workspace param at index 3 is bound by the WHERE
+    // sub-select against the `workspaces` table.
+    let query_bytes = vector_to_bytes(query_vec);
+    let mut params: Vec<ToSqlOutput<'_>> = Vec::with_capacity(5);
+    params.push(ToSqlOutput::from(query_bytes));
+    params.push(ToSqlOutput::from(top_k as i64));
+    params.push(ToSqlOutput::from(workspace_name.to_owned()));
+
     let mut sql = String::from(
         "SELECT s.id, s.catalog, s.plugin, s.name, s.description,
                 s.plugin_version, s.path, e.distance
          FROM skill_embeddings AS e
          JOIN skills AS s ON s.id = e.skill_id
          JOIN workspace_skills AS ws ON ws.skill_id = s.id
-                                    AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+                                    AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = ?3)
          WHERE e.embedding MATCH ?1 AND k = ?2",
     );
 
-    // Collect params in order: query bytes, k, [catalog], [plugin].
-    let query_bytes = vector_to_bytes(query_vec);
-    let mut params: Vec<ToSqlOutput<'_>> = Vec::with_capacity(4);
-    params.push(ToSqlOutput::from(query_bytes));
-    params.push(ToSqlOutput::from(top_k as i64));
     if let Some(c) = filters.catalog {
         sql.push_str(" AND s.catalog = ?");
         sql.push_str(&format!("{}", params.len() + 1));

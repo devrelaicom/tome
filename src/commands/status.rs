@@ -139,7 +139,8 @@ pub fn check_model(
     })
 }
 
-pub fn check_index(paths: &Paths, _scope: &Scope) -> Result<IndexHealth, TomeError> {
+pub fn check_index(paths: &Paths, scope: &Scope) -> Result<IndexHealth, TomeError> {
+    let workspace_name = scope.name().as_str();
     let index_db = paths.index_db.clone();
     if !index_db.is_file() {
         return Ok(IndexHealth {
@@ -196,8 +197,8 @@ pub fn check_index(paths: &Paths, _scope: &Scope) -> Result<IndexHealth, TomeErr
          FROM skills AS s
          JOIN workspace_skills AS ws ON ws.skill_id = s.id
          JOIN workspaces       AS w  ON w.id = ws.workspace_id
-         WHERE w.name = 'global'",
-        [],
+         WHERE w.name = ?1",
+        rusqlite::params![workspace_name],
         |r| r.get(0),
     ) {
         Ok(n) => n,
@@ -211,8 +212,8 @@ pub fn check_index(paths: &Paths, _scope: &Scope) -> Result<IndexHealth, TomeErr
          FROM skills AS s
          JOIN workspace_skills AS ws ON ws.skill_id = s.id
          JOIN workspaces       AS w  ON w.id = ws.workspace_id
-         WHERE w.name = 'global'",
-        [],
+         WHERE w.name = ?1",
+        rusqlite::params![workspace_name],
         |r| r.get(0),
     ) {
         Ok(n) => n,
