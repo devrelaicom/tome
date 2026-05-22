@@ -51,7 +51,7 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     let embedder_dir = paths.model_path(embedder_meta.name)?;
     let embedder = FastembedEmbedder::load(embedder_meta, &embedder_dir)?;
 
-    let (embedder_seed, reranker_seed) = registry_seeds();
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let deps = LifecycleDeps {
         paths: &paths,
         scope: &scope.scope,
@@ -59,6 +59,7 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
         embedder: &embedder,
         embedder_seed,
         reranker_seed,
+        summariser_seed,
         allow_model_download: false,
     };
 

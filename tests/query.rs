@@ -16,7 +16,7 @@ mod common;
 
 use common::{
     config_with_catalog, copy_sample_plugin_catalog, fabricate_models, lifecycle_paths,
-    stub_embedder_seed, stub_reranker_seed,
+    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::cli::QueryArgs;
@@ -66,6 +66,7 @@ fn build_query_env() -> QueryEnv {
             embedder: &embedder,
             embedder_seed: stub_embedder_seed(),
             reranker_seed: stub_reranker_seed(),
+            summariser_seed: stub_summariser_seed(),
             allow_model_download: false,
         };
         lifecycle::enable(&id, &deps).expect("enable plugin for query env");
@@ -84,6 +85,7 @@ fn open_conn(env: &QueryEnv) -> rusqlite::Connection {
         &OpenOptions {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
+            summariser: stub_summariser_seed(),
         },
     )
     .unwrap()

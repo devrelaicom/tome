@@ -25,10 +25,12 @@
 use std::cell::RefCell;
 use std::time::Instant;
 
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, Transaction, params};
+use time::OffsetDateTime;
 use tracing::{error, info};
 
 use crate::error::TomeError;
+use crate::index::schema::GLOBAL_WORKSPACE;
 
 /// A single forward migration step. Compared to the Phase 2 shape, `apply`
 /// is a function pointer (rather than `&'static str` SQL) so a migration
@@ -40,8 +42,144 @@ pub struct Migration {
     pub apply: fn(&Transaction) -> Result<(), TomeError>,
 }
 
-/// Compile-time list of every migration. PHASE 3 SHIPS WITH ZERO MIGRATIONS.
-pub const MIGRATIONS: &[Migration] = &[];
+/// Compile-time list of every migration. Phase 4 / F9 registers the
+/// first production migration: `phase_4_v1_to_v2` rebuilds the `skills`
+/// table to drop the `enabled` column, creates the four new workspace
+/// tables + indices, and seeds the privileged `global` workspace row.
+/// See [`phase_4_v1_to_v2`] for the body and the M-MIG-2 audit trail.
+pub const MIGRATIONS: &[Migration] = &[Migration {
+    from: 1,
+    to: 2,
+    name: "phase-4-central-db-refactor",
+    apply: phase_4_v1_to_v2,
+}];
+
+/// The schema v1 → v2 migration body. Implements the SQLite "12-step"
+/// table-rebuild pattern for dropping the `skills.enabled` column (which
+/// has both an index and an implicit CHECK constraint blocking
+/// `ALTER TABLE ... DROP COLUMN`), creates the four new workspace
+/// tables + indices, and seeds the privileged `global` workspace row.
+///
+/// **M-MIG-2 audit** (per reviewer fold-in): the Phase 2/3 `skills` table
+/// carried three indices: `idx_skills_catalog_plugin`,
+/// `idx_skills_enabled`, and `idx_skills_content_hash`. The migration
+/// preserves the catalog/plugin and content_hash indices; it drops
+/// `idx_skills_enabled` (the column it indexes no longer exists). No
+/// triggers or views were registered on `skills` in Phase 2/3.
+///
+/// `apply_pending` updates `meta.schema_version` to `2` after this `fn`
+/// returns `Ok` — the migration body does NOT touch the version row.
+fn phase_4_v1_to_v2(tx: &Transaction) -> Result<(), TomeError> {
+    // Create the new workspace tables + indices first so the `skills`
+    // rebuild that follows can run with foreign-key enforcement disabled
+    // (the new `workspace_skills.skill_id` references `skills(id)` and
+    // would cascade on DROP TABLE; FK is OFF for the rebuild block).
+    tx.execute_batch(
+        "CREATE TABLE workspaces (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT UNIQUE NOT NULL,
+            created_at    INTEGER NOT NULL,
+            last_used_at  INTEGER NOT NULL
+         );
+
+         CREATE TABLE workspace_skills (
+            workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            skill_id      INTEGER NOT NULL REFERENCES skills(id)     ON DELETE CASCADE,
+            enabled_at    INTEGER NOT NULL,
+            PRIMARY KEY (workspace_id, skill_id)
+         );
+
+         CREATE TABLE workspace_catalogs (
+            workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            catalog_name  TEXT NOT NULL,
+            url           TEXT NOT NULL,
+            pinned_ref    TEXT NOT NULL,
+            PRIMARY KEY (workspace_id, catalog_name)
+         );
+
+         CREATE TABLE workspace_projects (
+            project_path  TEXT PRIMARY KEY NOT NULL,
+            workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            bound_at      INTEGER NOT NULL
+         );
+
+         CREATE INDEX idx_workspace_projects_workspace ON workspace_projects(workspace_id);
+         CREATE INDEX idx_workspace_skills_skill       ON workspace_skills(skill_id);
+         CREATE INDEX idx_workspace_catalogs_url       ON workspace_catalogs(url);",
+    )
+    .map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!(
+            "phase_4_v1_to_v2: create workspace tables: {e}"
+        ))
+    })?;
+
+    // Seed the privileged `global` workspace row (FR-323). Phase 3 wipe
+    // (FR-304) guarantees no developer-meaningful timestamp to inherit —
+    // we use the migration time.
+    let now_unix = OffsetDateTime::now_utc().unix_timestamp();
+    tx.execute(
+        "INSERT INTO workspaces (name, created_at, last_used_at) VALUES (?1, ?2, ?2)",
+        params![GLOBAL_WORKSPACE, now_unix],
+    )
+    .map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!(
+            "phase_4_v1_to_v2: seed global workspace: {e}"
+        ))
+    })?;
+
+    // SQLite "12-step" rebuild of the `skills` table to drop the
+    // `enabled` column. FK enforcement is off for the rebuild block
+    // because `DROP TABLE skills` would otherwise cascade through any
+    // FK references; `workspace_skills` was created in the previous
+    // step but is empty at this point so the cascade would be a no-op,
+    // but disabling FK is still the documented SQLite recipe.
+    tx.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+
+         DROP INDEX IF EXISTS idx_skills_enabled;
+
+         CREATE TABLE skills_new (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            catalog         TEXT NOT NULL,
+            plugin          TEXT NOT NULL,
+            name            TEXT NOT NULL,
+            description     TEXT NOT NULL,
+            plugin_version  TEXT NOT NULL,
+            path            TEXT NOT NULL,
+            content_hash    TEXT NOT NULL,
+            indexed_at      INTEGER NOT NULL,
+            UNIQUE (catalog, plugin, name)
+         );
+
+         INSERT INTO skills_new (id, catalog, plugin, name, description,
+                                 plugin_version, path, content_hash, indexed_at)
+         SELECT id, catalog, plugin, name, description,
+                plugin_version, path, content_hash, indexed_at
+         FROM skills;
+
+         DROP TABLE skills;
+         ALTER TABLE skills_new RENAME TO skills;
+
+         -- Recreate every non-`enabled` index that existed on Phase 2/3
+         -- `skills` (audit per the M-MIG-2 trail above). `IF NOT EXISTS`
+         -- handles the case where the test harness downgrade-stamps a
+         -- v2-bootstrapped DB back to v1 (Phase 4's doctor-fix e2e):
+         -- the v2 bootstrap already created these indices, and the
+         -- DROP TABLE + ALTER TABLE rename block above drops only the
+         -- old `skills` table — its indices are removed by the DROP,
+         -- but in the downgrade-then-rerun case the v2 bootstrap's
+         -- pre-existing indices may resurface on the renamed table.
+         CREATE INDEX IF NOT EXISTS idx_skills_catalog_plugin ON skills(catalog, plugin);
+         CREATE INDEX IF NOT EXISTS idx_skills_content_hash   ON skills(content_hash);
+
+         PRAGMA foreign_keys = ON;",
+    )
+    .map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!("phase_4_v1_to_v2: rebuild skills: {e}"))
+    })?;
+
+    Ok(())
+}
 
 thread_local! {
     /// Test-only injection point. Phase 7's `tests/schema_migration_e2e.rs`

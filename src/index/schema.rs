@@ -1,43 +1,68 @@
-//! SQLite schema for the Tome index database.
+//! SQLite schema for the Tome index database (Phase 4 / schema v2).
 //!
-//! Mirror of [`contracts/index-schema.sql`](../../specs/002-phase-2-plugins-index/contracts/index-schema.sql).
-//! When this Rust file and the SQL file diverge, the SQL file is canonical and
-//! this one must be updated.
+//! Phase 4 / F9 collapses the per-workspace databases into a single central
+//! `<root>/index.db`. The on-disk schema gains four new tables —
+//! `workspaces`, `workspace_skills`, `workspace_catalogs`, `workspace_projects`
+//! — that move enablement and catalog enrolment off the workspace-specific
+//! filesystem and onto the central DB. The Phase 2/3 `skills.enabled` column
+//! is dropped: enablement is now expressed by the presence of a
+//! `workspace_skills` row joining a `(workspace, skill)` pair.
 //!
-//! The bootstrap function applies every statement in [`CREATE_STATEMENTS`]
-//! inside a single transaction and seeds the [`meta`] table — see research §R3
-//! for the migration policy ("v0 → v1 is bootstrap, not a migration").
+//! Bootstrap of a fresh DB emits schema v2 directly. The schema v1 → v2
+//! migration in [`crate::index::migrations`] applies only to upgrades from
+//! a Phase 2/3 DB on disk (in practice: synthetic-fixture tests; Phase 3's
+//! FR-304 wipe guarantees no Phase 3 user DB is ever opened by Phase 4).
+//!
+//! Spec: [data-model.md §4](../../specs/004-phase-4-refactor-harnesses/data-model.md)
+//! and [contracts/schema-migration-p4.md](../../specs/004-phase-4-refactor-harnesses/contracts/schema-migration-p4.md).
 
 use rusqlite::{Connection, params};
 use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 use crate::error::TomeError;
 
-/// The schema version Tome's compiled-in code understands. Bumping this
-/// requires a matching `Migration` row in [`crate::index::migrations`].
-pub const SCHEMA_VERSION: u32 = 1;
+/// The schema version Tome's compiled-in code understands. Phase 4 bumps
+/// this to 2. Bumping further requires a matching `Migration` row in
+/// [`crate::index::migrations`].
+pub const SCHEMA_VERSION: u32 = 2;
 
-/// Embedder + reranker identification stored in `meta` at bootstrap. The
-/// caller (typically `db::open`) supplies the configured names so the index
-/// can later detect drift against a future-different runtime config.
+/// The privileged seeded workspace name, present after every bootstrap and
+/// migration. Phase 4's lifecycle paths route un-bound operations through
+/// this workspace until the user opts into named workspaces (US2).
+pub const GLOBAL_WORKSPACE: &str = "global";
+
+/// Embedder / reranker / summariser identification stored in `meta` at
+/// bootstrap. The caller (typically `db::open`) supplies the configured
+/// names so the index can later detect drift against a future-different
+/// runtime config.
 #[derive(Debug, Clone)]
 pub struct MetaSeed {
     pub name: String,
     pub version: String,
 }
 
-/// CREATE statements applied in order for a fresh database. Split into one
-/// statement per slice so a failure mid-bootstrap surfaces with the exact
-/// statement that broke. STRICT typing on `meta` and `skills` is defence in
-/// depth against insert paths that bypass the Rust type system.
+/// CREATE statements applied in order for a fresh schema-v2 database. Each
+/// statement is one element so a failure mid-bootstrap surfaces with the
+/// exact statement that broke. STRICT typing on `meta` is retained as
+/// defence in depth; the workspace + skills tables are non-STRICT so the
+/// schema-v1 → v2 migration's `INSERT INTO skills_new SELECT * FROM skills`
+/// path can carry TEXT-stored `indexed_at` values from v1 into the new
+/// `INTEGER`-declared column without an explicit conversion (data-model
+/// §4 declares INTEGER; the value semantics shift to unix-seconds in a
+/// future migration).
 pub const CREATE_STATEMENTS: &[&str] = &[
     "CREATE TABLE meta (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
     ) STRICT",
+    "CREATE TABLE workspaces (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        name          TEXT UNIQUE NOT NULL,
+        created_at    INTEGER NOT NULL,
+        last_used_at  INTEGER NOT NULL
+    )",
     "CREATE TABLE skills (
-        id              INTEGER PRIMARY KEY,
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
         catalog         TEXT NOT NULL,
         plugin          TEXT NOT NULL,
         name            TEXT NOT NULL,
@@ -45,26 +70,54 @@ pub const CREATE_STATEMENTS: &[&str] = &[
         plugin_version  TEXT NOT NULL,
         path            TEXT NOT NULL,
         content_hash    TEXT NOT NULL,
-        enabled         INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
-        indexed_at      TEXT NOT NULL,
+        indexed_at      INTEGER NOT NULL,
         UNIQUE (catalog, plugin, name)
-    ) STRICT",
+    )",
     "CREATE INDEX idx_skills_catalog_plugin ON skills(catalog, plugin)",
-    "CREATE INDEX idx_skills_enabled        ON skills(enabled)",
     "CREATE INDEX idx_skills_content_hash   ON skills(content_hash)",
     "CREATE VIRTUAL TABLE skill_embeddings USING vec0(
         skill_id   INTEGER PRIMARY KEY,
         embedding  FLOAT[384]
     )",
+    "CREATE TABLE workspace_skills (
+        workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        skill_id      INTEGER NOT NULL REFERENCES skills(id)     ON DELETE CASCADE,
+        enabled_at    INTEGER NOT NULL,
+        PRIMARY KEY (workspace_id, skill_id)
+    )",
+    "CREATE TABLE workspace_catalogs (
+        workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        catalog_name  TEXT NOT NULL,
+        url           TEXT NOT NULL,
+        pinned_ref    TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, catalog_name)
+    )",
+    "CREATE TABLE workspace_projects (
+        project_path  TEXT PRIMARY KEY NOT NULL,
+        workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        bound_at      INTEGER NOT NULL
+    )",
+    "CREATE INDEX idx_workspace_projects_workspace ON workspace_projects(workspace_id)",
+    "CREATE INDEX idx_workspace_skills_skill       ON workspace_skills(skill_id)",
+    "CREATE INDEX idx_workspace_catalogs_url       ON workspace_catalogs(url)",
 ];
 
-/// Apply every [`CREATE_STATEMENTS`] row and seed the `meta` table. Runs
-/// inside a single transaction: a partial bootstrap is never observable on
-/// disk thanks to WAL atomicity.
+/// Apply every [`CREATE_STATEMENTS`] row, seed the `meta` table (including
+/// the new summariser identity rows), and insert the privileged `global`
+/// workspace. Runs inside a single transaction: a partial bootstrap is
+/// never observable on disk thanks to WAL atomicity.
+///
+/// The `summariser` parameter is the third runtime identity row stored in
+/// `meta`, alongside the embedder and reranker. Phase 4 / F6 ships with a
+/// placeholder summariser registry entry whose SHA-256 is intentionally
+/// all-zero (US4.a flips it to the real digest); the placeholder name +
+/// version is still recorded here so drift detection and the doctor surface
+/// know what the bootstrap committed to.
 pub fn bootstrap(
     conn: &mut Connection,
     embedder: &MetaSeed,
     reranker: &MetaSeed,
+    summariser: &MetaSeed,
 ) -> Result<(), TomeError> {
     let tx = conn
         .transaction()
@@ -78,18 +131,19 @@ pub fn bootstrap(
         })?;
     }
 
-    let now = OffsetDateTime::now_utc()
-        .format(&Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned());
+    let now_unix = OffsetDateTime::now_utc().unix_timestamp();
+    let now_rfc = now_unix.to_string();
     let schema_version = SCHEMA_VERSION.to_string();
 
-    let rows: [(&str, &str); 6] = [
+    let rows: [(&str, &str); 8] = [
         ("schema_version", schema_version.as_str()),
         ("embedder_name", embedder.name.as_str()),
         ("embedder_version", embedder.version.as_str()),
         ("reranker_name", reranker.name.as_str()),
         ("reranker_version", reranker.version.as_str()),
-        ("created_at", now.as_str()),
+        ("summariser_name", summariser.name.as_str()),
+        ("summariser_version", summariser.version.as_str()),
+        ("created_at", now_rfc.as_str()),
     ];
     for (k, v) in rows {
         tx.execute(
@@ -100,6 +154,16 @@ pub fn bootstrap(
             TomeError::IndexIntegrityCheckFailure(format!("seed meta `{k}` failed: {e}"))
         })?;
     }
+
+    // Seed the privileged `global` workspace (FR-323). created_at and
+    // last_used_at both reflect bootstrap time; subsequent write-path
+    // commands bump last_used_at (FR-411).
+    tx.execute(
+        "INSERT INTO workspaces (name, created_at, last_used_at)
+         VALUES (?1, ?2, ?2)",
+        params![GLOBAL_WORKSPACE, now_unix],
+    )
+    .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("seed global workspace: {e}")))?;
 
     tx.commit()
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("commit bootstrap: {e}")))?;

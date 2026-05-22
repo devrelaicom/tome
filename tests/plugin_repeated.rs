@@ -19,7 +19,7 @@ mod common;
 
 use common::{
     ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models, paths_for,
-    stub_embedder_seed, stub_reranker_seed, write_config_for_cli,
+    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed, write_config_for_cli,
 };
 use tempfile::TempDir;
 use tome::embedding::stub::StubEmbedder;
@@ -45,6 +45,7 @@ fn enable_of_already_enabled_returns_plugin_already_in_state_via_library() {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
@@ -81,6 +82,7 @@ fn disable_of_already_disabled_via_cli_exits_21() {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();

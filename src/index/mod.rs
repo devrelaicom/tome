@@ -23,7 +23,7 @@ pub use lock::{LockGuard, acquire as acquire_lock};
 pub use meta::{DriftStatus, MetaKey, ModelIdent, detect_drift};
 pub use migrations::{MIGRATIONS, Migration, apply_pending, current_schema_version};
 pub use query::{Candidate, QueryFilters, knn};
-pub use schema::{CREATE_STATEMENTS, MetaSeed, SCHEMA_VERSION, bootstrap};
+pub use schema::{CREATE_STATEMENTS, GLOBAL_WORKSPACE, MetaSeed, SCHEMA_VERSION, bootstrap};
 pub use skills::{
     EnableSummary, PendingSkill, ReindexSummary, SkillRecord, content_hash, delete_by_plugin,
     embedding_text, enable_plugin_atomic, enabled_plugins_for_catalog, find as find_skill,

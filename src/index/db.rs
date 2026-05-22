@@ -26,13 +26,14 @@ use crate::index::migrations;
 use crate::index::schema::{self, MetaSeed};
 use crate::index::vec_ext;
 
-/// Inputs to [`open`] that the caller controls. `embedder` and `reranker`
-/// are written into `meta` on bootstrap and used by drift detection later;
-/// they are ignored on subsequent opens.
+/// Inputs to [`open`] that the caller controls. `embedder`, `reranker`,
+/// and `summariser` are written into `meta` on bootstrap and used by
+/// drift detection later; they are ignored on subsequent opens.
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
     pub embedder: MetaSeed,
     pub reranker: MetaSeed,
+    pub summariser: MetaSeed,
 }
 
 /// Open (or bootstrap) the index database at `db_path`. The parent directory
@@ -53,7 +54,7 @@ pub fn open(db_path: &Path, opts: &OpenOptions) -> Result<Connection, TomeError>
 
     match migrations::current_schema_version(&conn)? {
         None => {
-            schema::bootstrap(&mut conn, &opts.embedder, &opts.reranker)?;
+            schema::bootstrap(&mut conn, &opts.embedder, &opts.reranker, &opts.summariser)?;
         }
         Some(stored) => {
             migrations::apply_pending(&mut conn, stored, schema::SCHEMA_VERSION)?;

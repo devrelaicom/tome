@@ -12,7 +12,7 @@ mod common;
 
 use common::{
     Fixture, ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models, paths_for,
-    stub_embedder_seed, stub_reranker_seed, write_config_for_cli,
+    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed, write_config_for_cli,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -34,6 +34,7 @@ fn enable_alpha(
         embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     lifecycle::enable(&id, &deps).expect("enable alpha");
@@ -48,6 +49,7 @@ fn count_skill_rows(paths: &tome::paths::Paths, catalog: &str) -> i64 {
         &OpenOptions {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
+            summariser: stub_summariser_seed(),
         },
     )
     .unwrap();
@@ -286,6 +288,7 @@ fn cascade_remove_in_workspace_does_not_remove_shared_clone() {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let plugin_id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
@@ -308,6 +311,7 @@ fn cascade_remove_in_workspace_does_not_remove_shared_clone() {
             &OpenOptions {
                 embedder: stub_embedder_seed(),
                 reranker: stub_reranker_seed(),
+                summariser: stub_summariser_seed(),
             },
         )
         .unwrap();
@@ -353,6 +357,7 @@ fn cascade_remove_in_workspace_does_not_remove_shared_clone() {
             &OpenOptions {
                 embedder: stub_embedder_seed(),
                 reranker: stub_reranker_seed(),
+                summariser: stub_summariser_seed(),
             },
         )
         .unwrap();

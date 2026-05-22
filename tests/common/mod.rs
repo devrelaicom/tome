@@ -184,6 +184,18 @@ pub fn stub_reranker_seed() -> MetaSeed {
     }
 }
 
+/// `MetaSeed` matching the deterministic stub summariser. Phase 4 / F9
+/// added a third identity row to `meta` + a third field to
+/// `OpenOptions`; the stub seed mirrors the embedder/reranker shape so
+/// integration tests don't have to know about the registry's
+/// placeholder values.
+pub fn stub_summariser_seed() -> MetaSeed {
+    MetaSeed {
+        name: "stub-summariser".into(),
+        version: "0".into(),
+    }
+}
+
 /// Fabricate `manifest.json` for every entry in `MODEL_REGISTRY` so the
 /// model-presence gate in `lifecycle::enable` is satisfied without a real
 /// download. Mirrors `src/plugin/lifecycle.rs::tests::fabricate_models`.

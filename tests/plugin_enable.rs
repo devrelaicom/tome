@@ -14,7 +14,7 @@ mod common;
 
 use common::{
     config_with_catalog, copy_sample_plugin_catalog, fabricate_models, lifecycle_paths,
-    stub_embedder_seed, stub_reranker_seed,
+    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::embedding::stub::StubEmbedder;
@@ -45,6 +45,7 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
@@ -72,13 +73,20 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
         &OpenOptions {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
+            summariser: stub_summariser_seed(),
         },
     )
     .unwrap();
     let mut stmt = conn
         .prepare(
-            "SELECT name, enabled, content_hash, plugin_version FROM skills
-             WHERE catalog = ?1 AND plugin = ?2 ORDER BY name",
+            "SELECT s.name,
+                    CASE WHEN ws.skill_id IS NOT NULL THEN 1 ELSE 0 END AS enabled,
+                    s.content_hash, s.plugin_version
+             FROM skills AS s
+             LEFT JOIN workspace_skills AS ws
+                    ON ws.skill_id = s.id
+                   AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+             WHERE s.catalog = ?1 AND s.plugin = ?2 ORDER BY s.name",
         )
         .unwrap();
     let rows: Vec<(String, i64, String, String)> = stmt
@@ -124,6 +132,7 @@ fn enable_emits_fallback_warnings_for_missing_name_and_description() {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
@@ -166,6 +175,7 @@ fn enable_is_idempotent_rejecting_re_enable_with_plugin_already_in_state() {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
@@ -238,6 +248,7 @@ source = "./vendor/wrapped-alpha"
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = "nested-test/alpha-plugin".parse().unwrap();
@@ -271,6 +282,7 @@ fn cheap_reenable_after_disable_invokes_embedder_zero_times() {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
@@ -295,6 +307,7 @@ fn cheap_reenable_after_disable_invokes_embedder_zero_times() {
         &config,
         stub_embedder_seed(),
         stub_reranker_seed(),
+        stub_summariser_seed(),
     )
     .expect("disable");
 
@@ -331,6 +344,7 @@ fn enable_returns_model_missing_when_no_models_on_disk_and_download_disallowed()
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();

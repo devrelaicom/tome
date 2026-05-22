@@ -70,6 +70,20 @@ fn open_opts() -> OpenOptions {
                 .version
                 .into(),
         },
+        summariser: MetaSeed {
+            name: MODEL_REGISTRY
+                .iter()
+                .find(|m| m.kind == ModelKind::Summariser)
+                .unwrap()
+                .name
+                .into(),
+            version: MODEL_REGISTRY
+                .iter()
+                .find(|m| m.kind == ModelKind::Summariser)
+                .unwrap()
+                .version
+                .into(),
+        },
     }
 }
 

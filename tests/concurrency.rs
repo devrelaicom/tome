@@ -17,7 +17,7 @@ use std::fs::OpenOptions;
 
 use common::{
     Fixture, ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models, paths_for,
-    stub_embedder_seed, stub_reranker_seed, write_config_for_cli,
+    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed, write_config_for_cli,
 };
 use tempfile::TempDir;
 use tome::embedding::stub::StubEmbedder;
@@ -37,6 +37,7 @@ fn enable_alpha(
         embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     lifecycle::enable(&id, &deps).expect("enable alpha");

@@ -84,6 +84,12 @@ pub struct LifecycleDeps<'a> {
     pub embedder: &'a dyn Embedder,
     pub embedder_seed: MetaSeed,
     pub reranker_seed: MetaSeed,
+    /// Phase 4 / F9 added a third runtime identity row to the index
+    /// `meta` table. Lifecycle callers thread the configured summariser
+    /// identity through alongside the embedder + reranker seeds; the
+    /// value is written into `meta` on first bootstrap and consulted by
+    /// drift detection thereafter.
+    pub summariser_seed: MetaSeed,
     /// `true` when the CLI has confirmed (via TTY prompt) that Tome may
     /// download missing models. `false` is the non-TTY refusal contract —
     /// the function returns `ModelMissing` (exit 30) per plugin-commands.md
@@ -166,6 +172,7 @@ pub fn disable(
     config: &Config,
     embedder_seed: MetaSeed,
     reranker_seed: MetaSeed,
+    summariser_seed: MetaSeed,
 ) -> Result<DisableOutcome, TomeError> {
     let started = Instant::now();
     // We still resolve the plugin directory to reject typos before touching
@@ -173,7 +180,14 @@ pub fn disable(
     let _plugin_dir = resolve_plugin_dir(id, config)?;
 
     let lock = acquire_lock(&paths.index_lock.clone())?;
-    let outcome = disable_locked(id, paths, scope, embedder_seed, reranker_seed);
+    let outcome = disable_locked(
+        id,
+        paths,
+        scope,
+        embedder_seed,
+        reranker_seed,
+        summariser_seed,
+    );
 
     match outcome {
         Ok(skills_retained) => {
@@ -266,6 +280,7 @@ pub fn cascade_disable_for_catalog(
     plugins: &[String],
     embedder_seed: MetaSeed,
     reranker_seed: MetaSeed,
+    summariser_seed: MetaSeed,
 ) -> Result<Vec<(String, u32)>, TomeError> {
     if plugins.is_empty() {
         return Ok(Vec::new());
@@ -277,6 +292,7 @@ pub fn cascade_disable_for_catalog(
             &OpenOptions {
                 embedder: embedder_seed,
                 reranker: reranker_seed,
+                summariser: summariser_seed,
             },
         )?;
         let mut breakdown: Vec<(String, u32)> = Vec::with_capacity(plugins.len());
@@ -374,20 +390,25 @@ pub fn resolve_plugin_dir(id: &PluginId, config: &Config) -> Result<PathBuf, Tom
     Ok(plugin_dir)
 }
 
-/// Returns `true` when the index already contains at least one row for
-/// `(catalog, plugin)` with `enabled = 1`.
+/// Returns `true` when the index already contains at least one
+/// `(catalog, plugin)` row enrolled in the privileged `global`
+/// workspace via `workspace_skills` (Phase 4 / F9 redefinition of
+/// "enabled").
 fn any_skill_enabled(deps: &LifecycleDeps<'_>, id: &PluginId) -> Result<bool, TomeError> {
     let conn = index::open(
         &deps.paths.index_db.clone(),
         &OpenOptions {
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
+            summariser: deps.summariser_seed.clone(),
         },
     )?;
     let count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM skills
-             WHERE catalog = ?1 AND plugin = ?2 AND enabled = 1",
+            "SELECT COUNT(*) FROM skills AS s
+             JOIN workspace_skills AS ws ON ws.skill_id = s.id
+             JOIN workspaces       AS w  ON w.id = ws.workspace_id
+             WHERE s.catalog = ?1 AND s.plugin = ?2 AND w.name = 'global'",
             rusqlite::params![id.catalog, id.plugin],
             |row| row.get(0),
         )
@@ -411,6 +432,7 @@ fn enable_locked(
         &OpenOptions {
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
+            summariser: deps.summariser_seed.clone(),
         },
     )?;
 
@@ -447,23 +469,29 @@ fn disable_locked(
     _scope: &crate::workspace::Scope,
     embedder_seed: MetaSeed,
     reranker_seed: MetaSeed,
+    summariser_seed: MetaSeed,
 ) -> Result<u32, TomeError> {
     let conn = index::open(
         &paths.index_db.clone(),
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,
+            summariser: summariser_seed,
         },
     )?;
 
-    // The contract requires "already-disabled" detection. Two cases collapse
-    // into one PluginAlreadyInState: zero rows for the plugin OR every row
-    // already has `enabled = 0`.
+    // The contract requires "already-disabled" detection. Two cases
+    // collapse into one PluginAlreadyInState: zero rows for the plugin
+    // OR every row already disenrolled from the global workspace.
     let (total, enabled_count): (i64, i64) = conn
         .query_row(
-            "SELECT COUNT(*), COALESCE(SUM(enabled), 0)
-             FROM skills
-             WHERE catalog = ?1 AND plugin = ?2",
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN ws.skill_id IS NOT NULL THEN 1 ELSE 0 END), 0)
+             FROM skills AS s
+             LEFT JOIN workspace_skills AS ws
+                    ON ws.skill_id = s.id
+                   AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+             WHERE s.catalog = ?1 AND s.plugin = ?2",
             rusqlite::params![id.catalog, id.plugin],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -498,6 +526,7 @@ fn reindex_locked(
         &OpenOptions {
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
+            summariser: deps.summariser_seed.clone(),
         },
     )?;
 
@@ -530,6 +559,7 @@ fn auto_disable_locked(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<u32, T
         &OpenOptions {
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
+            summariser: deps.summariser_seed.clone(),
         },
     )?;
     delete_by_plugin(&conn, &id.catalog, &id.plugin)
@@ -717,6 +747,13 @@ mod tests {
         }
     }
 
+    fn stub_summariser_seed() -> MetaSeed {
+        MetaSeed {
+            name: "stub-summariser".into(),
+            version: "0".into(),
+        }
+    }
+
     /// Fabricate model dirs + manifest.json for every entry in
     /// `MODEL_REGISTRY`. We do NOT touch the network.
     fn fabricate_models(paths: &Paths) {
@@ -806,6 +843,7 @@ mod tests {
             embedder,
             embedder_seed: stub_seed(),
             reranker_seed: stub_reranker_seed(),
+            summariser_seed: stub_summariser_seed(),
             allow_model_download,
         }
     }
@@ -816,12 +854,18 @@ mod tests {
             &OpenOptions {
                 embedder: stub_seed(),
                 reranker: stub_reranker_seed(),
+                summariser: stub_summariser_seed(),
             },
         )
         .expect("open index");
         conn.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(enabled), 0) FROM skills
-             WHERE catalog = ?1 AND plugin = ?2",
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN ws.skill_id IS NOT NULL THEN 1 ELSE 0 END), 0)
+             FROM skills AS s
+             LEFT JOIN workspace_skills AS ws
+                    ON ws.skill_id = s.id
+                   AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+             WHERE s.catalog = ?1 AND s.plugin = ?2",
             rusqlite::params![catalog, plugin],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -1078,6 +1122,7 @@ mod tests {
             &config,
             stub_seed(),
             stub_reranker_seed(),
+            stub_summariser_seed(),
         )
         .expect("disable");
         assert_eq!(outcome.skills_retained, 2);
@@ -1114,6 +1159,7 @@ mod tests {
             &config,
             stub_seed(),
             stub_reranker_seed(),
+            stub_summariser_seed(),
         )
         .expect("disable");
 
@@ -1124,6 +1170,7 @@ mod tests {
             &config,
             stub_seed(),
             stub_reranker_seed(),
+            stub_summariser_seed(),
         )
         .expect_err("second disable rejected");
         match err {
@@ -1175,14 +1222,20 @@ mod tests {
             &OpenOptions {
                 embedder: stub_seed(),
                 reranker: stub_reranker_seed(),
+                summariser: stub_summariser_seed(),
             },
         )
         .expect("open index");
         let mut stmt = conn
             .prepare(
-                "SELECT name, content_hash, enabled FROM skills
-                 WHERE catalog = ?1 AND plugin = ?2
-                 ORDER BY name",
+                "SELECT s.name, s.content_hash,
+                        CASE WHEN ws.skill_id IS NOT NULL THEN 1 ELSE 0 END AS enabled
+                 FROM skills AS s
+                 LEFT JOIN workspace_skills AS ws
+                        ON ws.skill_id = s.id
+                       AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+                 WHERE s.catalog = ?1 AND s.plugin = ?2
+                 ORDER BY s.name",
             )
             .expect("prepare snapshot");
         let rows = stmt

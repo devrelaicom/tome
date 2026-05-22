@@ -35,6 +35,10 @@ fn options() -> OpenOptions {
             name: "test-reranker".into(),
             version: "1.0".into(),
         },
+        summariser: MetaSeed {
+            name: "test-summariser".into(),
+            version: "1.0".into(),
+        },
     }
 }
 

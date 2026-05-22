@@ -64,7 +64,7 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
         }
     }
 
-    let (embedder_seed, reranker_seed) = registry_seeds();
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
 
     // Banner — human mode only. JSON stdout stays byte-stable.
     if mode == Mode::Human {
@@ -79,6 +79,7 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
         &config,
         embedder_seed,
         reranker_seed,
+        summariser_seed,
     )?;
 
     match mode {

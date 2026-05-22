@@ -166,13 +166,37 @@ pub fn check_index(paths: &Paths, _scope: &Scope) -> Result<IndexHealth, TomeErr
 
     let mut integrity_ok = integrity::check(&conn).is_ok();
 
+    // Schema-version gate. The v2-shaped queries below (`JOIN
+    // workspace_skills`) target tables that don't exist in an older
+    // on-disk schema. A stale-schema DB is not an integrity failure
+    // here — the doctor's schema-fix suggestion is the user-facing
+    // repair path. Return zeros for the workspace-aware counts and
+    // let `build_suggested_fixes` emit `subsystem: "schema"` based on
+    // the reported `schema_version` field below.
+    if let Some(v) = schema_version
+        && v < index::SCHEMA_VERSION
+    {
+        return Ok(IndexHealth {
+            present: true,
+            schema_version,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            size_bytes,
+            integrity_ok,
+        });
+    }
+
     // A query_row failure here is rare (the schema bootstrap created the
     // table), but if it happens it indicates a corrupt index. Treat that
     // as an integrity failure rather than reporting `(0, 0)` which would
     // look like an empty install. The numeric fields stay at 0 because
     // we genuinely don't know.
     let plugins_enabled: i64 = match conn.query_row(
-        "SELECT COUNT(DISTINCT plugin) FROM skills WHERE enabled = 1",
+        "SELECT COUNT(DISTINCT s.plugin)
+         FROM skills AS s
+         JOIN workspace_skills AS ws ON ws.skill_id = s.id
+         JOIN workspaces       AS w  ON w.id = ws.workspace_id
+         WHERE w.name = 'global'",
         [],
         |r| r.get(0),
     ) {
@@ -182,16 +206,21 @@ pub fn check_index(paths: &Paths, _scope: &Scope) -> Result<IndexHealth, TomeErr
             0
         }
     };
-    let skills_indexed: i64 =
-        match conn.query_row("SELECT COUNT(*) FROM skills WHERE enabled = 1", [], |r| {
-            r.get(0)
-        }) {
-            Ok(n) => n,
-            Err(_) => {
-                integrity_ok = false;
-                0
-            }
-        };
+    let skills_indexed: i64 = match conn.query_row(
+        "SELECT COUNT(*)
+         FROM skills AS s
+         JOIN workspace_skills AS ws ON ws.skill_id = s.id
+         JOIN workspaces       AS w  ON w.id = ws.workspace_id
+         WHERE w.name = 'global'",
+        [],
+        |r| r.get(0),
+    ) {
+        Ok(n) => n,
+        Err(_) => {
+            integrity_ok = false;
+            0
+        }
+    };
 
     Ok(IndexHealth {
         present: true,
@@ -222,7 +251,16 @@ pub fn check_drift(
         name: reranker_entry.name.to_owned(),
         version: reranker_entry.version.to_owned(),
     };
-    detect_drift(&conn, &embedder, &reranker)
+    // Phase 4 / F9: third identity row to compare. The summariser
+    // registry entry comes from the bundled F6 module; until US4.a
+    // flips the placeholder hash, stored + configured both carry the
+    // F6 placeholder identity, so drift stays `None`.
+    let summariser_entry = crate::summarise::registry::summariser_entry();
+    let summariser = ModelIdent {
+        name: summariser_entry.name.to_owned(),
+        version: summariser_entry.version.to_owned(),
+    };
+    detect_drift(&conn, &embedder, &reranker, &summariser)
 }
 
 fn classify(
@@ -341,6 +379,9 @@ fn drift_description(drift: &DriftStatus) -> String {
         ),
         DriftStatus::RerankerDrift { stored, configured } => format!(
             "reranker drift (stored: {stored}, configured: {configured}) — queries still serve; consider `tome reindex --force` for consistency"
+        ),
+        DriftStatus::SummariserDrift { stored, configured } => format!(
+            "summariser drift (stored: {stored}, configured: {configured}) — cached summaries regenerate on next enable/disable"
         ),
     }
 }

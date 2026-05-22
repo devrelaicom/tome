@@ -208,6 +208,17 @@ fn build_suggested_fixes(
                 auto_fixable: false,
             });
         }
+        DriftStatus::SummariserDrift { stored, configured } => {
+            // Phase 4 / F9: summariser drift is informational only.
+            // Summaries are regenerated lazily on the next enable/
+            // disable/reindex (US4); no auto-fix path is required.
+            out.push(SuggestedFix {
+                subsystem: "summariser_drift".to_owned(),
+                diagnosis: format!("summariser stored as `{stored}`, configured as `{configured}`"),
+                command: "tome doctor --fix  # regenerates cached summaries".to_owned(),
+                auto_fixable: false,
+            });
+        }
         DriftStatus::None => {}
     }
     out

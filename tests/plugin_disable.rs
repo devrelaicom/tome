@@ -15,7 +15,7 @@ mod common;
 
 use common::{
     ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models, paths_for,
-    stub_embedder_seed, stub_reranker_seed, write_config_for_cli,
+    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed, write_config_for_cli,
 };
 use serde_json::Value;
 use tempfile::TempDir;
@@ -47,6 +47,7 @@ fn setup_with_alpha_enabled(env: &ToolEnv, fixture_tmp: &TempDir) -> Paths {
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
@@ -61,12 +62,18 @@ fn enabled_row_counts(paths: &Paths) -> (i64, i64) {
         &OpenOptions {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
+            summariser: stub_summariser_seed(),
         },
     )
     .unwrap();
     conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(enabled), 0) FROM skills
-         WHERE catalog = ?1 AND plugin = ?2",
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN ws.skill_id IS NOT NULL THEN 1 ELSE 0 END), 0)
+         FROM skills AS s
+         LEFT JOIN workspace_skills AS ws
+                ON ws.skill_id = s.id
+               AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+         WHERE s.catalog = ?1 AND s.plugin = ?2",
         rusqlite::params!["sample-plugin-catalog", "plugin-alpha"],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
     )

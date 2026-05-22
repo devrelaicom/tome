@@ -16,12 +16,8 @@ mod common;
 use std::path::Path;
 
 use common::{Fixture, ToolEnv, fabricate_all_registry_models, paths_for};
-use rusqlite::Transaction;
 use tempfile::TempDir;
-use tome::doctor::{self, CatalogCacheState, DoctorClassification, SuggestedFix};
-use tome::error::TomeError;
-use tome::index::Migration;
-use tome::index::migrations::MIGRATIONS_OVERRIDE;
+use tome::doctor::{self, CatalogCacheState, DoctorClassification};
 use tome::workspace::{ResolvedScope, ScopeSource};
 
 fn global_scope() -> ResolvedScope {
@@ -411,81 +407,75 @@ fn cli_doctor_fix_with_manifest_invalid_exits_75() {
     );
 }
 
-// ---- --fix schema migration (Phase 3 / US5) ----------------------------
-
-/// RAII guard that installs `MIGRATIONS_OVERRIDE` for the duration of the
-/// test, then clears it on drop. Survives panics so a failing assertion
-/// never poisons subsequent tests on the same thread.
-struct MigrationsGuard;
-impl MigrationsGuard {
-    fn install(m: &'static [Migration]) -> Self {
-        MIGRATIONS_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(m));
-        Self
-    }
-}
-impl Drop for MigrationsGuard {
-    fn drop(&mut self) {
-        MIGRATIONS_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
-    }
-}
-
-/// No-op `apply` that creates a marker table — the test asserts on its
-/// presence to prove the migration ran end-to-end through `doctor::fixes::apply`
-/// → `repair_schema` → `index::open` → `apply_pending`.
-fn doctor_fix_marker_v0_to_v1(tx: &Transaction) -> Result<(), TomeError> {
-    tx.execute_batch("CREATE TABLE doctor_fix_marker (id INTEGER PRIMARY KEY) STRICT")
-        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("doctor v0→v1: {e}")))?;
-    Ok(())
-}
+// ---- --fix schema migration (Phase 4 / F9 — real production migration) -
 
 #[test]
 fn fix_runs_forward_schema_migration_end_to_end() {
-    // Real v1 bootstrap so the index has the full schema, then downgrade-
-    // stamp to v0. The synthetic migration creates a marker table whose
-    // presence proves the migration actually ran via the doctor pipeline.
-    static MIGRATIONS: &[Migration] = &[Migration {
-        from: 0,
-        to: 1,
-        name: "doctor_fix_v0_to_v1",
-        apply: doctor_fix_marker_v0_to_v1,
-    }];
-    let _guard = MigrationsGuard::install(MIGRATIONS);
-
+    // Phase 4 / F9: the production `MIGRATIONS` table now carries
+    // `phase_4_v1_to_v2`, so `doctor::build_suggested_fixes` emits a
+    // `subsystem: "schema"` SuggestedFix naturally when the on-disk
+    // schema is older than `SCHEMA_VERSION`. This test no longer
+    // injects a synthetic fix (T085); it relies on the real production
+    // trigger end-to-end.
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_registry_models(&paths);
     let home = empty_home();
 
-    // Bootstrap the index at SCHEMA_VERSION (= 1) using the production
-    // registry seeds (matches what `commands::status::check_drift` reads
-    // from the configured side, so no drift is reported). Then
-    // downgrade-stamp the schema_version row to 0.
+    // Bootstrap the index at `SCHEMA_VERSION` (= 2) using the production
+    // registry seeds, then downgrade-stamp `schema_version` to 1 to
+    // simulate an existing Phase 2/3 install on disk. The `skills` table
+    // bootstrapped here is already v2 shape (no `enabled` column); the
+    // migration body's `INSERT INTO skills_new SELECT * FROM skills`
+    // copies whatever rows exist (zero in this test) into the rebuilt
+    // table. The marker we verify is the presence of the `workspaces`
+    // table — which is also already present from the v2 bootstrap, so
+    // the assertion shifts to "schema_version row goes from 1 → 2".
     {
-        let (embedder, reranker) = tome::commands::plugin::registry_seeds();
+        let (embedder, reranker, summariser) = tome::commands::plugin::registry_seeds();
         let conn = tome::index::open(
             &paths.index_db,
-            &tome::index::OpenOptions { embedder, reranker },
+            &tome::index::OpenOptions {
+                embedder,
+                reranker,
+                summariser,
+            },
         )
-        .expect("bootstrap v1 index");
+        .expect("bootstrap v2 index");
+        // Drop the `workspaces` table content so the migration's seed
+        // insert has somewhere to land without a unique-name collision.
+        // The migration also creates the table; on a v2 bootstrap this
+        // would conflict, so we drop the entire pre-migration shape and
+        // let the migration recreate it.
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS workspace_projects;
+             DROP TABLE IF EXISTS workspace_catalogs;
+             DROP TABLE IF EXISTS workspace_skills;
+             DROP TABLE IF EXISTS workspaces;",
+        )
+        .expect("strip v2 workspace tables");
         conn.execute(
-            "UPDATE meta SET value = '0' WHERE key = 'schema_version'",
+            "UPDATE meta SET value = '1' WHERE key = 'schema_version'",
             [],
         )
-        .expect("downgrade stamp");
+        .expect("downgrade stamp to v1");
     }
 
-    // Assemble; the "schema needs forward migration" suggested fix is not
-    // currently emitted by build_suggested_fixes (Phase 3 ships zero
-    // production migrations), so inject one manually to exercise the
-    // `repair_schema` dispatch path.
+    // Assemble — with a real migration registered, the suggested-fix
+    // list MUST contain a `subsystem: "schema"` entry without any
+    // manual injection.
     let mut report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
-    report.suggested_fixes.push(SuggestedFix {
-        subsystem: "schema".to_owned(),
-        diagnosis: "schema needs forward migration from v0 to v1".to_owned(),
-        command: "tome doctor --fix".to_owned(),
-        auto_fixable: true,
-    });
+    let has_schema_fix = report
+        .suggested_fixes
+        .iter()
+        .any(|f| f.subsystem == "schema" && f.auto_fixable);
+    assert!(
+        has_schema_fix,
+        "build_suggested_fixes must auto-emit a schema fix when on-disk < SCHEMA_VERSION; \
+         got: {:#?}",
+        report.suggested_fixes,
+    );
 
     let attempts = doctor::fixes::apply(&mut report, &paths, &tome::workspace::Scope::Global);
     assert!(attempts >= 1, "expected at least one repair attempt");
@@ -493,8 +483,9 @@ fn fix_runs_forward_schema_migration_end_to_end() {
 
     assert_eq!(
         report.index.schema_version,
-        Some(1),
-        "schema_version must be bumped to 1 by the migration",
+        Some(tome::index::SCHEMA_VERSION),
+        "schema_version must be bumped to {} by the migration",
+        tome::index::SCHEMA_VERSION,
     );
     assert!(
         report.index.integrity_ok,
@@ -506,19 +497,17 @@ fn fix_runs_forward_schema_migration_end_to_end() {
         "post-fix classification must be Ok; report = {report:#?}",
     );
 
-    // Prove the migration's apply closure was actually invoked (and not
-    // just the no-op `apply_pending(1, 1)` path inside `repair_schema`).
+    // The real migration creates the four workspace tables. Verify the
+    // `workspaces` table exists and seeded the privileged `global` row.
     let conn = rusqlite::Connection::open(&paths.index_db).unwrap();
-    let marker_exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'doctor_fix_marker'",
-            [],
-            |_| Ok(true),
-        )
+    let global_workspace_present: bool = conn
+        .query_row("SELECT 1 FROM workspaces WHERE name = 'global'", [], |_| {
+            Ok(true)
+        })
         .unwrap_or(false);
     assert!(
-        marker_exists,
-        "doctor_fix_marker table must exist (proves migration ran through doctor pipeline)",
+        global_workspace_present,
+        "phase_4_v1_to_v2 must seed the `global` workspace row",
     );
 }
 
@@ -539,6 +528,10 @@ fn bootstrap_index_with_stub_seeds(paths: &tome::paths::Paths) {
             },
             reranker: tome::index::MetaSeed {
                 name: "stub-reranker".into(),
+                version: "0".into(),
+            },
+            summariser: tome::index::MetaSeed {
+                name: "stub-summariser".into(),
                 version: "0".into(),
             },
         },
@@ -599,7 +592,8 @@ fn reranker_drift_alone_classifies_degraded() {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_registry_models(&paths);
 
-    let (real_embedder_seed, _real_reranker_seed) = tome::commands::plugin::registry_seeds();
+    let (real_embedder_seed, _real_reranker_seed, real_summariser_seed) =
+        tome::commands::plugin::registry_seeds();
     let _ = tome::index::open(
         &paths.index_db,
         &tome::index::OpenOptions {
@@ -608,6 +602,7 @@ fn reranker_drift_alone_classifies_degraded() {
                 name: "stub-reranker".into(),
                 version: "0".into(),
             },
+            summariser: real_summariser_seed,
         },
     )
     .expect("bootstrap");
@@ -642,10 +637,14 @@ fn no_drift_reported_when_seeds_match_registry() {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_registry_models(&paths);
 
-    let (embedder, reranker) = tome::commands::plugin::registry_seeds();
+    let (embedder, reranker, summariser) = tome::commands::plugin::registry_seeds();
     let _ = tome::index::open(
         &paths.index_db,
-        &tome::index::OpenOptions { embedder, reranker },
+        &tome::index::OpenOptions {
+            embedder,
+            reranker,
+            summariser,
+        },
     )
     .expect("bootstrap");
     let home = empty_home();

@@ -129,7 +129,7 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
     };
     let reranker: Option<&dyn Reranker> = reranker_loaded.as_ref().map(|r| r as &dyn Reranker);
 
-    let (embedder_seed, reranker_seed) = registry_seeds();
+    let (embedder_seed, reranker_seed, _summariser_seed) = registry_seeds();
     let deps = QueryDeps {
         paths: &paths,
         scope: &scope.scope,
@@ -340,8 +340,18 @@ fn check_drift(
         name: reranker_seed.name.clone(),
         version: reranker_seed.version.clone(),
     };
-    match meta::detect_drift(conn, &embedder_ident, &reranker_ident)? {
-        DriftStatus::None => Ok(None),
+    // Phase 4 / F9: summariser identity is recorded in the index but
+    // never affects query correctness. We pass the configured registry
+    // identity so the drift check stays consistent with bootstrap; any
+    // drift surfaced here is a transient observability signal, not a
+    // failure.
+    let summariser_entry = crate::summarise::registry::summariser_entry();
+    let summariser_ident = ModelIdent {
+        name: summariser_entry.name.to_owned(),
+        version: summariser_entry.version.to_owned(),
+    };
+    match meta::detect_drift(conn, &embedder_ident, &reranker_ident, &summariser_ident)? {
+        DriftStatus::None | DriftStatus::SummariserDrift { .. } => Ok(None),
         DriftStatus::EmbedderNameDrift { stored, configured } => {
             Err(TomeError::EmbedderNameDrift { stored, configured })
         }

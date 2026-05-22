@@ -263,6 +263,9 @@ fn drift_label(d: &crate::index::meta::DriftStatus) -> String {
         DriftStatus::RerankerDrift { stored, configured } => {
             format!("reranker drift (stored: {stored}, configured: {configured})")
         }
+        DriftStatus::SummariserDrift { stored, configured } => {
+            format!("summariser drift (stored: {stored}, configured: {configured})")
+        }
     }
 }
 

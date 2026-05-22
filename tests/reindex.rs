@@ -10,7 +10,7 @@ mod common;
 
 use common::{
     ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models, lifecycle_paths,
-    stub_embedder_seed, stub_reranker_seed,
+    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::commands::reindex::{Scope, run_with_deps};
@@ -33,6 +33,7 @@ fn enable_alpha_and_beta(
         embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     lifecycle::enable(&alpha, &deps).expect("enable alpha");
@@ -51,6 +52,7 @@ fn build_deps<'a>(
         embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     }
 }

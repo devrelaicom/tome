@@ -65,12 +65,20 @@ pub(crate) fn missing_models(paths: &Paths) -> Vec<&'static ModelEntry> {
         .collect()
 }
 
-/// `MetaSeed` values matching the `MODEL_REGISTRY` embedder / reranker.
-/// Wrapping access keeps the CLI from hard-coding indices.
-pub fn registry_seeds() -> (crate::index::MetaSeed, crate::index::MetaSeed) {
+/// `MetaSeed` values matching the `MODEL_REGISTRY` embedder / reranker /
+/// summariser. Wrapping access keeps the CLI from hard-coding indices.
+/// Phase 4 / F9 grows the tuple to three elements alongside the
+/// `OpenOptions` summariser field; older callers that destructured the
+/// two-tuple shape need a trivial update.
+pub fn registry_seeds() -> (
+    crate::index::MetaSeed,
+    crate::index::MetaSeed,
+    crate::index::MetaSeed,
+) {
     use crate::embedding::registry::ModelKind;
     let mut embedder = None;
     let mut reranker = None;
+    let mut summariser = None;
     for entry in MODEL_REGISTRY {
         match entry.kind {
             ModelKind::Embedder if embedder.is_none() => {
@@ -85,12 +93,19 @@ pub fn registry_seeds() -> (crate::index::MetaSeed, crate::index::MetaSeed) {
                     version: entry.version.to_owned(),
                 });
             }
+            ModelKind::Summariser if summariser.is_none() => {
+                summariser = Some(crate::index::MetaSeed {
+                    name: entry.name.to_owned(),
+                    version: entry.version.to_owned(),
+                });
+            }
             _ => {}
         }
     }
     (
         embedder.expect("MODEL_REGISTRY must declare exactly one embedder"),
         reranker.expect("MODEL_REGISTRY must declare exactly one reranker"),
+        summariser.expect("MODEL_REGISTRY must declare exactly one summariser"),
     )
 }
 
@@ -181,9 +196,15 @@ pub(crate) fn open_index_for_read(
     // queries.
     let db_path = paths.index_db.clone();
     if !db_path.is_file() {
-        let (embedder, reranker) = registry_seeds();
-        let _bootstrap =
-            crate::index::open(&db_path, &crate::index::OpenOptions { embedder, reranker })?;
+        let (embedder, reranker, summariser) = registry_seeds();
+        let _bootstrap = crate::index::open(
+            &db_path,
+            &crate::index::OpenOptions {
+                embedder,
+                reranker,
+                summariser,
+            },
+        )?;
     }
     crate::index::open_read_only(&db_path)
 }
@@ -198,7 +219,10 @@ pub(crate) struct IndexAggregate {
 }
 
 /// Aggregate the `skills` rows for one plugin. Returns zero counts on a
-/// fresh index (no row inserted yet).
+/// fresh index (no row inserted yet). Phase 4 / F9: `enabled` now means
+/// "joined to the privileged `global` workspace via `workspace_skills`"
+/// — F11 will lift this to the resolved-scope workspace, but until then
+/// `global` is the single workspace lifecycle commands operate on.
 pub(crate) fn aggregate_for_plugin(
     conn: &rusqlite::Connection,
     catalog: &str,
@@ -207,10 +231,13 @@ pub(crate) fn aggregate_for_plugin(
     let result: (i64, i64, Option<String>) = conn
         .query_row(
             "SELECT COUNT(*),
-                    COALESCE(SUM(enabled), 0),
+                    COALESCE(SUM(CASE WHEN ws.skill_id IS NOT NULL THEN 1 ELSE 0 END), 0),
                     MAX(indexed_at)
-             FROM skills
-             WHERE catalog = ?1 AND plugin = ?2",
+             FROM skills AS s
+             LEFT JOIN workspace_skills AS ws
+                    ON ws.skill_id = s.id
+                   AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+             WHERE s.catalog = ?1 AND s.plugin = ?2",
             rusqlite::params![catalog, plugin],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
