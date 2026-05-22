@@ -48,7 +48,7 @@ pub struct Cli {
 pub struct GlobalScopeArgs {
     /// Use the workspace rooted at this path. Mutually exclusive with
     /// `--global`. Must point at an existing directory containing a
-    /// `.tome/` subdir; otherwise exits 71 (`WorkspaceNotFound`).
+    /// `.tome/` subdir; otherwise exits 71 (`WorkspaceMarkerMissing`).
     #[arg(long, global = true, value_name = "PATH")]
     pub workspace: Option<PathBuf>,
 

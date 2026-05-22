@@ -7,7 +7,10 @@
 use std::io;
 use std::path::PathBuf;
 
-use tome::error::{ManifestInvalid, PluginState, TomeError};
+use tome::error::{
+    CompositionErrorKind, ManifestInvalid, PluginState, ShortOrLong, SummariserFailureKind,
+    TomeError,
+};
 
 fn dummy_io_error() -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, "x")
@@ -50,6 +53,75 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
         ),
         (TomeError::Io(dummy_io_error()), 7, "io"),
         (TomeError::Interrupted, 8, "interrupted"),
+        // 13–20 — Phase 4 new variants (pre-allocated by F3 — no production
+        // wiring yet; see specs/004-phase-4-refactor-harnesses/tasks.md T032).
+        // Note: `SummariserFailure` is mapped to exit 24 (not 20 as the
+        // contract states) to avoid colliding with `PluginNotFound` (20).
+        (
+            TomeError::WorkspaceNotFound {
+                name: "shared".into(),
+            },
+            13,
+            "workspace_not_found",
+        ),
+        (
+            TomeError::WorkspaceAlreadyExists {
+                name: "shared".into(),
+            },
+            14,
+            "workspace_already_exists",
+        ),
+        (
+            TomeError::WorkspaceNameInvalid {
+                name: "-bad".into(),
+                reason: "leading hyphen".into(),
+            },
+            15,
+            "workspace_name_invalid",
+        ),
+        (
+            TomeError::WorkspaceHasBoundProjects {
+                name: "shared".into(),
+                count: 2,
+                projects: vec!["/tmp/a".into(), "/tmp/b".into()],
+            },
+            16,
+            "workspace_has_bound_projects",
+        ),
+        (
+            TomeError::CompositionError {
+                kind: CompositionErrorKind::Cycle {
+                    path: vec!["project".into(), "shared".into(), "shared".into()],
+                },
+            },
+            17,
+            "composition_error",
+        ),
+        (
+            TomeError::HarnessNotSupported {
+                name: "made-up-harness".into(),
+            },
+            18,
+            "harness_not_supported",
+        ),
+        (
+            TomeError::HarnessClash {
+                path: PathBuf::from("/tmp/.cursor/mcp.json"),
+                command: "node".into(),
+                first_arg: "/opt/custom-tome.js".into(),
+            },
+            19,
+            "harness_clash",
+        ),
+        (
+            TomeError::SummariserFailure {
+                kind: SummariserFailureKind::OutputEmpty {
+                    which: ShortOrLong::Long,
+                },
+            },
+            24,
+            "summariser_failure",
+        ),
         // 20–23 — plugin lifecycle
         (
             TomeError::PluginNotFound("foo/bar".into()),
@@ -208,11 +280,11 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
             "workspace_malformed",
         ),
         (
-            TomeError::WorkspaceNotFound {
+            TomeError::WorkspaceMarkerMissing {
                 path: PathBuf::from("/tmp/nope"),
             },
             71,
-            "workspace_not_found",
+            "workspace_marker_missing",
         ),
         (TomeError::WorkspaceConflict, 72, "workspace_conflict"),
         (
@@ -291,6 +363,14 @@ fn exhaustive_match_compile_check() {
             TomeError::GitFailed { .. } => 6,
             TomeError::Io(_) => 7,
             TomeError::Interrupted => 8,
+            TomeError::WorkspaceNotFound { .. } => 13,
+            TomeError::WorkspaceAlreadyExists { .. } => 14,
+            TomeError::WorkspaceNameInvalid { .. } => 15,
+            TomeError::WorkspaceHasBoundProjects { .. } => 16,
+            TomeError::CompositionError { .. } => 17,
+            TomeError::HarnessNotSupported { .. } => 18,
+            TomeError::HarnessClash { .. } => 19,
+            TomeError::SummariserFailure { .. } => 24,
             TomeError::PluginNotFound(_) => 20,
             TomeError::PluginAlreadyInState { .. } => 21,
             TomeError::PluginManifestParseError { .. } => 22,
@@ -314,7 +394,7 @@ fn exhaustive_match_compile_check() {
             TomeError::McpStartupFailed { .. } => 60,
             TomeError::McpProtocolIo { .. } => 61,
             TomeError::WorkspaceMalformed { .. } => 70,
-            TomeError::WorkspaceNotFound { .. } => 71,
+            TomeError::WorkspaceMarkerMissing { .. } => 71,
             TomeError::WorkspaceConflict => 72,
             TomeError::SchemaVersionTooNew { .. } => 73,
             TomeError::SchemaMigrationFailed { .. } => 74,

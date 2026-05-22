@@ -186,7 +186,7 @@ fn env_var_pointing_nowhere_returns_exit_71() {
     env.chdir(tmp.path());
 
     let err = resolve(&args_default()).expect_err("expected workspace not found");
-    assert!(matches!(err, TomeError::WorkspaceNotFound { .. }));
+    assert!(matches!(err, TomeError::WorkspaceMarkerMissing { .. }));
     assert_eq!(err.exit_code(), 71);
 }
 
@@ -201,7 +201,7 @@ fn env_var_without_marker_returns_exit_71() {
     env.chdir(tmp.path());
 
     let err = resolve(&args_default()).expect_err("expected workspace not found");
-    assert!(matches!(err, TomeError::WorkspaceNotFound { .. }));
+    assert!(matches!(err, TomeError::WorkspaceMarkerMissing { .. }));
     assert_eq!(err.exit_code(), 71);
 }
 
@@ -216,7 +216,7 @@ fn flag_pointing_nowhere_returns_exit_71() {
         global: false,
     };
     let err = resolve(&args).expect_err("expected workspace not found");
-    assert!(matches!(err, TomeError::WorkspaceNotFound { .. }));
+    assert!(matches!(err, TomeError::WorkspaceMarkerMissing { .. }));
     assert_eq!(err.exit_code(), 71);
 }
 

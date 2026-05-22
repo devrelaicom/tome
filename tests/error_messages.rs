@@ -5,7 +5,10 @@
 
 use std::path::PathBuf;
 
-use tome::error::{ManifestInvalid, TomeError};
+use tome::error::{
+    CompositionErrorKind, ManifestInvalid, ShortOrLong, SummariserFailureKind, TomeError,
+};
+use tome::workspace::ScopeKind;
 
 fn dummy_file() -> PathBuf {
     PathBuf::from("/tmp/catalog/tome-catalog.toml")
@@ -202,8 +205,8 @@ fn workspace_malformed_names_path_reason_and_hint() {
 }
 
 #[test]
-fn workspace_not_found_names_path_and_init_hint() {
-    let err = TomeError::WorkspaceNotFound {
+fn workspace_marker_missing_names_path_and_init_hint() {
+    let err = TomeError::WorkspaceMarkerMissing {
         path: PathBuf::from("/tmp/nope"),
     };
     let m = err.to_string();
@@ -255,4 +258,190 @@ fn doctor_fix_not_safe_names_subsystem_and_hint() {
     assert!(m.contains("catalog_cache"), "{m}");
     assert!(m.contains("auto-fix"), "{m}");
     assert!(m.contains("suggested fixes"), "{m}");
+}
+
+// ---- Phase 4 TomeError Display assertions ---------------------------------
+// One per new variant, per contracts/exit-codes-p4.md §Error message style.
+// Pre-allocated by F3 — these tests pin the Display surface so production
+// wiring in F6/F8/F9 and US1–US5 can't silently drift the user-facing copy.
+
+#[test]
+fn workspace_not_found_names_workspace_by_name() {
+    let err = TomeError::WorkspaceNotFound {
+        name: "shared".into(),
+    };
+    let m = err.to_string();
+    assert!(m.contains("`shared`"), "{m}");
+    assert!(m.contains("not found"), "{m}");
+    assert!(m.contains("central registry"), "{m}");
+}
+
+#[test]
+fn workspace_already_exists_names_workspace() {
+    let err = TomeError::WorkspaceAlreadyExists {
+        name: "shared".into(),
+    };
+    let m = err.to_string();
+    assert!(m.contains("`shared`"), "{m}");
+    assert!(m.contains("already exists"), "{m}");
+}
+
+#[test]
+fn workspace_name_invalid_names_value_and_reason() {
+    let err = TomeError::WorkspaceNameInvalid {
+        name: "-bad".into(),
+        reason: "leading hyphen".into(),
+    };
+    let m = err.to_string();
+    assert!(m.contains("`-bad`"), "{m}");
+    assert!(m.contains("leading hyphen"), "{m}");
+    assert!(m.contains("invalid"), "{m}");
+}
+
+#[test]
+fn workspace_has_bound_projects_names_count_and_projects() {
+    let err = TomeError::WorkspaceHasBoundProjects {
+        name: "shared".into(),
+        count: 2,
+        projects: vec!["/tmp/a".into(), "/tmp/b".into()],
+    };
+    let m = err.to_string();
+    assert!(m.contains("`shared`"), "{m}");
+    assert!(m.contains("2"), "{m}");
+    assert!(m.contains("/tmp/a"), "{m}");
+    assert!(m.contains("/tmp/b"), "{m}");
+    assert!(m.contains("--force"), "{m}");
+}
+
+#[test]
+fn composition_error_cycle_names_chain() {
+    let err = TomeError::CompositionError {
+        kind: CompositionErrorKind::Cycle {
+            path: vec!["project".into(), "shared".into(), "shared".into()],
+        },
+    };
+    let m = err.to_string();
+    assert!(m.contains("composition"), "{m}");
+    assert!(m.contains("cycle"), "{m}");
+    assert!(m.contains("project"), "{m}");
+    assert!(m.contains("shared"), "{m}");
+}
+
+#[test]
+fn composition_error_workspace_ref_outside_project_names_scope() {
+    let err = TomeError::CompositionError {
+        kind: CompositionErrorKind::WorkspaceRefOutsideProject {
+            found_in: ScopeKind::Global,
+        },
+    };
+    let m = err.to_string();
+    assert!(m.contains("composition"), "{m}");
+    assert!(m.contains("Global"), "{m}");
+}
+
+#[test]
+fn composition_error_unknown_workspace_names_workspace() {
+    let err = TomeError::CompositionError {
+        kind: CompositionErrorKind::UnknownWorkspace("missing".into()),
+    };
+    let m = err.to_string();
+    assert!(m.contains("composition"), "{m}");
+    assert!(m.contains("`missing`"), "{m}");
+}
+
+#[test]
+fn composition_error_bad_exclusion_names_token() {
+    let err = TomeError::CompositionError {
+        kind: CompositionErrorKind::BadExclusion("!../bad".into()),
+    };
+    let m = err.to_string();
+    assert!(m.contains("composition"), "{m}");
+    assert!(m.contains("!../bad"), "{m}");
+}
+
+#[test]
+fn harness_not_supported_names_harness() {
+    let err = TomeError::HarnessNotSupported {
+        name: "made-up-harness".into(),
+    };
+    let m = err.to_string();
+    assert!(m.contains("`made-up-harness`"), "{m}");
+    assert!(m.contains("not supported"), "{m}");
+}
+
+#[test]
+fn harness_clash_names_path_and_command_shape() {
+    let err = TomeError::HarnessClash {
+        path: PathBuf::from("/tmp/.cursor/mcp.json"),
+        command: "node".into(),
+        first_arg: "/opt/custom-tome.js".into(),
+    };
+    let m = err.to_string();
+    assert!(m.contains("/tmp/.cursor/mcp.json"), "{m}");
+    assert!(m.contains("`node`"), "{m}");
+    assert!(m.contains("/opt/custom-tome.js"), "{m}");
+    assert!(m.contains("--force"), "{m}");
+}
+
+#[test]
+fn summariser_failure_model_missing_names_subclass() {
+    let err = TomeError::SummariserFailure {
+        kind: SummariserFailureKind::ModelMissing,
+    };
+    let m = err.to_string();
+    assert!(m.contains("summariser failure"), "{m}");
+    assert!(m.contains("model missing"), "{m}");
+}
+
+#[test]
+fn summariser_failure_checksum_mismatch_names_hashes() {
+    let err = TomeError::SummariserFailure {
+        kind: SummariserFailureKind::ModelChecksumMismatch {
+            expected: "aa".into(),
+            observed: "bb".into(),
+        },
+    };
+    let m = err.to_string();
+    assert!(m.contains("summariser failure"), "{m}");
+    assert!(m.contains("aa"), "{m}");
+    assert!(m.contains("bb"), "{m}");
+}
+
+#[test]
+fn summariser_failure_backend_init_names_source() {
+    let err = TomeError::SummariserFailure {
+        kind: SummariserFailureKind::BackendInitFailed {
+            source: "llama-cpp-2 returned -1".into(),
+        },
+    };
+    let m = err.to_string();
+    assert!(m.contains("summariser failure"), "{m}");
+    assert!(m.contains("backend init"), "{m}");
+    assert!(m.contains("llama-cpp-2 returned -1"), "{m}");
+}
+
+#[test]
+fn summariser_failure_output_unparsable_names_which() {
+    let err = TomeError::SummariserFailure {
+        kind: SummariserFailureKind::OutputUnparsable {
+            which: ShortOrLong::Short,
+        },
+    };
+    let m = err.to_string();
+    assert!(m.contains("summariser failure"), "{m}");
+    assert!(m.contains("unparsable"), "{m}");
+    assert!(m.contains("short"), "{m}");
+}
+
+#[test]
+fn summariser_failure_output_empty_names_which() {
+    let err = TomeError::SummariserFailure {
+        kind: SummariserFailureKind::OutputEmpty {
+            which: ShortOrLong::Long,
+        },
+    };
+    let m = err.to_string();
+    assert!(m.contains("summariser failure"), "{m}");
+    assert!(m.contains("empty"), "{m}");
+    assert!(m.contains("long"), "{m}");
 }
