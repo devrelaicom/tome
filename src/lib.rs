@@ -16,4 +16,7 @@ pub mod output;
 pub mod paths;
 pub mod plugin;
 pub mod presentation;
+pub mod util;
 pub mod workspace;
+
+pub use util::atomic_dir::{land_directory, land_directory_with_replace};
