@@ -16,14 +16,15 @@
 use std::path::Path;
 
 use crate::catalog::manifest::CatalogManifest;
-use crate::catalog::store as catalog_store;
+use crate::commands::plugin::registry_seeds;
 use crate::doctor::report::{CatalogCacheHealth, CatalogCacheState};
 use crate::error::TomeError;
+use crate::index::{self, OpenOptions, workspace_catalogs};
 use crate::paths::Paths;
 use crate::workspace::Scope;
 
-/// Enumerate every catalog in the resolved scope's config and classify
-/// the on-disk clone:
+/// Enumerate every catalog in the resolved scope's enrolments (via
+/// `workspace_catalogs`) and classify the on-disk clone:
 ///
 /// - Missing → cache directory not on disk.
 /// - NotARepo → directory exists but lacks `.git/`.
@@ -35,34 +36,41 @@ use crate::workspace::Scope;
 /// surface; doctor's check is intentionally lighter (existence + parse
 /// only, no validation of plugin sources).
 ///
-/// Returns an empty `Vec` when the config doesn't exist or has no
-/// catalogs.
-pub fn check_catalogs(paths: &Paths, _scope: &Scope) -> Result<Vec<CatalogCacheHealth>, TomeError> {
-    // F2a: single global config; F11 reintroduces workspace-aware view.
-    let config_path = paths.global_config_file.clone();
-    let config = if config_path.is_file() {
-        Some(catalog_store::load(&config_path)?)
+/// Returns an empty `Vec` when the central DB is absent or the scope's
+/// workspace has no enrolments.
+pub fn check_catalogs(paths: &Paths, scope: &Scope) -> Result<Vec<CatalogCacheHealth>, TomeError> {
+    let workspace_name = scope.name().as_str();
+
+    let enrolments = if paths.index_db.is_file() {
+        let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
+        let conn = index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: embedder_seed,
+                reranker: reranker_seed,
+                summariser: summariser_seed,
+            },
+        )?;
+        workspace_catalogs::list_for_workspace(&conn, workspace_name).unwrap_or_default()
     } else {
-        None
+        Vec::new()
     };
 
-    let mut out = Vec::with_capacity(config.as_ref().map_or(0, |c| c.catalogs.len()));
+    let mut out = Vec::with_capacity(enrolments.len());
 
-    // Step 1: classify every catalog the resolved scope's config names.
+    // Step 1: classify every catalog the resolved workspace enrols.
     let mut referenced_paths: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
-    if let Some(cfg) = config.as_ref() {
-        for entry in cfg.catalogs.values() {
-            let cache_path = entry.path.clone();
-            referenced_paths.insert(cache_path.clone());
-            let state = classify_clone(&cache_path);
-            out.push(CatalogCacheHealth {
-                name: entry.name.clone(),
-                url: entry.url.clone(),
-                cache_path,
-                state,
-            });
-        }
+    for e in &enrolments {
+        let cache_path = paths.cache_dir_for(&e.url);
+        referenced_paths.insert(cache_path.clone());
+        let state = classify_clone(&cache_path);
+        out.push(CatalogCacheHealth {
+            name: e.catalog_name.clone(),
+            url: e.url.clone(),
+            cache_path,
+            state,
+        });
     }
 
     // Step 2: enumerate on-disk clones at `paths.catalogs_dir` and
@@ -159,36 +167,30 @@ fn classify_clone(path: &Path) -> CatalogCacheState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{CatalogEntry, Config};
+    use crate::index::workspace_catalogs;
     use crate::workspace::Scope;
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
     use tempfile::TempDir;
-    use time::OffsetDateTime;
 
     fn fixture_paths(tmp: &Path) -> Paths {
         Paths::from_root(tmp.to_path_buf())
     }
 
-    fn write_config_with_one_catalog(paths: &Paths, name: &str, cache_path: PathBuf) {
-        let mut catalogs = BTreeMap::new();
-        catalogs.insert(
-            name.to_owned(),
-            CatalogEntry {
-                name: name.to_owned(),
-                url: format!("file://{}", cache_path.display()),
-                ref_: "main".into(),
-                path: cache_path,
-                last_synced: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+    /// Seed one enrolment into the central DB for the privileged
+    /// `global` workspace. Bootstrap happens via `index::open`; the
+    /// per-test cache_path is the URL-hashed dir under `catalogs/` by
+    /// construction of `paths.cache_dir_for(url)`.
+    fn seed_enrolment(paths: &Paths, catalog: &str, url: &str) {
+        let (e, r, s) = registry_seeds();
+        let conn = index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: e,
+                reranker: r,
+                summariser: s,
             },
-        );
-        let cfg = Config { catalogs };
-        std::fs::create_dir_all(&paths.root).unwrap();
-        std::fs::write(
-            &paths.global_config_file,
-            toml::to_string_pretty(&cfg).unwrap(),
         )
         .unwrap();
+        workspace_catalogs::insert(&conn, "global", catalog, url, "main").unwrap();
     }
 
     #[test]
@@ -204,8 +206,8 @@ mod tests {
     fn check_catalogs_reports_missing_for_absent_clone() {
         let tmp = TempDir::new().unwrap();
         let paths = fixture_paths(tmp.path());
-        let missing = paths.catalogs_dir.join("does-not-exist");
-        write_config_with_one_catalog(&paths, "lost", missing);
+        let url = "https://example.invalid/missing";
+        seed_enrolment(&paths, "lost", url);
 
         let out =
             check_catalogs(&paths, &Scope(crate::workspace::WorkspaceName::global())).unwrap();
@@ -218,9 +220,9 @@ mod tests {
     fn check_catalogs_reports_not_a_repo_for_dir_without_git() {
         let tmp = TempDir::new().unwrap();
         let paths = fixture_paths(tmp.path());
-        let cache = paths.catalogs_dir.join("nogit");
-        std::fs::create_dir_all(&cache).unwrap();
-        write_config_with_one_catalog(&paths, "nogit", cache);
+        let url = "https://example.invalid/nogit";
+        seed_enrolment(&paths, "nogit", url);
+        std::fs::create_dir_all(paths.cache_dir_for(url)).unwrap();
 
         let out =
             check_catalogs(&paths, &Scope(crate::workspace::WorkspaceName::global())).unwrap();
@@ -231,9 +233,9 @@ mod tests {
     fn check_catalogs_reports_manifest_invalid_when_manifest_missing() {
         let tmp = TempDir::new().unwrap();
         let paths = fixture_paths(tmp.path());
-        let cache = paths.catalogs_dir.join("nomanifest");
-        std::fs::create_dir_all(cache.join(".git")).unwrap();
-        write_config_with_one_catalog(&paths, "nomanifest", cache);
+        let url = "https://example.invalid/nomanifest";
+        seed_enrolment(&paths, "nomanifest", url);
+        std::fs::create_dir_all(paths.cache_dir_for(url).join(".git")).unwrap();
 
         let out =
             check_catalogs(&paths, &Scope(crate::workspace::WorkspaceName::global())).unwrap();

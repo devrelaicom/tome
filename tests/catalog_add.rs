@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{Fixture, ToolEnv};
+use common::{Fixture, ToolEnv, global_enrolment_url, has_global_enrolment, paths_for};
 use serde_json::Value;
 
 #[test]
@@ -32,16 +32,14 @@ fn happy_path_human_mode() {
     );
     assert!(stdout.contains("plugins: 2"), "stdout: {}", stdout);
 
-    let config_text = std::fs::read_to_string(env.config_file()).expect("config written");
+    let paths = paths_for(&env);
     assert!(
-        config_text.contains("[catalogs.sample-experts]"),
-        "{}",
-        config_text
+        has_global_enrolment(&paths, "sample-experts"),
+        "expected sample-experts in workspace_catalogs for global",
     );
-    assert!(
-        config_text.contains(&format!("url = \"{}\"", fix.url)),
-        "{}",
-        config_text
+    assert_eq!(
+        global_enrolment_url(&paths, "sample-experts").as_deref(),
+        Some(fix.url.as_str()),
     );
 }
 
@@ -83,9 +81,9 @@ fn name_override_replaces_manifest_name() {
         "stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let config_text = std::fs::read_to_string(env.config_file()).unwrap();
-    assert!(config_text.contains("[catalogs.renamed]"));
-    assert!(!config_text.contains("[catalogs.sample-experts]"));
+    let paths = paths_for(&env);
+    assert!(has_global_enrolment(&paths, "renamed"));
+    assert!(!has_global_enrolment(&paths, "sample-experts"));
 }
 
 #[test]
@@ -188,20 +186,18 @@ fn successful_add_persists_scrubbed_url_in_config() {
         !stdout.contains("supersecret") && !stdout.contains("alice:"),
         "credentials leaked on stdout: {stdout}",
     );
-    let config_text = std::fs::read_to_string(env.config_file()).expect("config written");
+    let paths = paths_for(&env);
+    let url = global_enrolment_url(&paths, "sample-experts")
+        .expect("expected sample-experts in workspace_catalogs");
     assert!(
-        !config_text.contains("supersecret") && !config_text.contains("alice:"),
-        "credentials leaked into config.toml:\n{config_text}",
-    );
-    // The catalog itself is still registered.
-    assert!(
-        config_text.contains("[catalogs.sample-experts]"),
-        "expected sample-experts to be registered, got:\n{config_text}",
+        !url.contains("supersecret") && !url.contains("alice:"),
+        "credentials leaked into workspace_catalogs.url: {url}",
     );
 }
 
 #[cfg(unix)]
 #[test]
+#[ignore = "F11b: config.toml is no longer written for catalog enrolment; index.db permissions are SQLite-managed"]
 fn config_toml_is_chmod_0600_on_unix() {
     use std::os::unix::fs::PermissionsExt;
     let fix = Fixture::build_sample();
@@ -217,7 +213,6 @@ fn config_toml_is_chmod_0600_on_unix() {
         String::from_utf8_lossy(&out.stderr)
     );
     let perms = std::fs::metadata(env.config_file()).unwrap().permissions();
-    // Only the low 9 mode bits are meaningful here.
     assert_eq!(
         perms.mode() & 0o777,
         0o600,

@@ -17,6 +17,7 @@ pub mod query;
 pub mod schema;
 pub mod skills;
 pub mod vec_ext;
+pub mod workspace_catalogs;
 
 pub use db::{OpenOptions, open, open_read_only};
 pub use lock::{LockGuard, acquire as acquire_lock};
@@ -29,3 +30,4 @@ pub use skills::{
     embedding_text, enable_plugin_atomic, enabled_plugins_for_catalog, find as find_skill,
     list_for_plugin, mark_all_disabled_for_plugin, reindex_plugin_atomic,
 };
+pub use workspace_catalogs::CatalogEnrolment;

@@ -180,11 +180,12 @@ fn force_cascades_disable_and_removes_catalog() {
         "skills_dropped must be the real count, not zero",
     );
 
-    // Catalog removed from config.
-    let cfg_text = std::fs::read_to_string(&paths.global_config_file).unwrap();
+    // Catalog removed from workspace_catalogs (F11b: enrolment lives
+    // in the central DB, no longer in config.toml).
+    use common::has_global_enrolment;
     assert!(
-        !cfg_text.contains("sample-plugin-catalog"),
-        "config should no longer reference the removed catalog, got: {cfg_text}",
+        !has_global_enrolment(&paths, "sample-plugin-catalog"),
+        "enrolment should no longer exist in workspace_catalogs",
     );
     // Phase 4 / F11a: workspace_skills enrolments for the resolved
     // workspace are gone; the underlying skill rows are retained per

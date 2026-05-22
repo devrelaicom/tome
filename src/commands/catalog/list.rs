@@ -1,8 +1,10 @@
-//! `tome catalog list`. See `contracts/catalog-list.md`.
+//! `tome catalog list`. See `contracts/catalog-list.md` and FR-364.
 //!
-//! `plugin_count` comes from the cached manifest, not by re-running git. If
-//! the cache is stale the count is the count at last sync — documented in
-//! the contract.
+//! Phase 4 / F11b: reports only the resolved workspace's enrolments from
+//! `workspace_catalogs`. `plugin_count` is read from the cached manifest;
+//! `last_synced` is the clone directory's mtime. Both may be `None` when
+//! the on-disk clone is absent or unreadable — rendered as `—` in the
+//! human table, `null` in JSON.
 
 use std::io::Write;
 
@@ -11,20 +13,32 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::catalog::manifest::CatalogManifest;
-use crate::catalog::store;
 use crate::cli::CatalogListArgs;
-use crate::config::CatalogEntry;
+use crate::commands::plugin::registry_seeds;
 use crate::error::TomeError;
+use crate::index::workspace_catalogs::CatalogEnrolment;
+use crate::index::{self, OpenOptions, workspace_catalogs};
 use crate::output::Mode;
 use crate::paths::Paths;
 use crate::workspace::ResolvedScope;
 
-pub fn run(_args: CatalogListArgs, _scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+pub fn run(_args: CatalogListArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    // F2a: single global config; F11 reintroduces workspace-aware view.
-    let config = store::load(&paths.global_config_file)?;
+    let workspace_name = scope.scope.name().as_str();
 
-    if config.catalogs.is_empty() {
+    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
+    let conn = index::open(
+        &paths.index_db,
+        &OpenOptions {
+            embedder: embedder_seed,
+            reranker: reranker_seed,
+            summariser: summariser_seed,
+        },
+    )?;
+
+    let enrolments = workspace_catalogs::list_for_workspace(&conn, workspace_name)?;
+
+    if enrolments.is_empty() {
         if mode == Mode::Human {
             let mut out = std::io::stdout().lock();
             writeln!(
@@ -36,15 +50,16 @@ pub fn run(_args: CatalogListArgs, _scope: &ResolvedScope, mode: Mode) -> Result
     }
 
     match mode {
-        Mode::Human => emit_human(&config.catalogs),
-        Mode::Json => emit_json(&config.catalogs),
+        Mode::Human => emit_human(&enrolments, &paths),
+        Mode::Json => emit_json(&enrolments, &paths),
     }
 }
 
-fn emit_human(
-    catalogs: &std::collections::BTreeMap<String, CatalogEntry>,
-) -> Result<(), TomeError> {
-    let rows: Vec<Row> = catalogs.values().map(Row::from_entry).collect();
+fn emit_human(enrolments: &[CatalogEnrolment], paths: &Paths) -> Result<(), TomeError> {
+    let rows: Vec<Row> = enrolments
+        .iter()
+        .map(|e| Row::from_enrolment(e, paths))
+        .collect();
     let name_w = column_width(&rows, |r| r.name.len(), "NAME".len());
     let url_w = column_width(&rows, |r| r.url.len(), "URL".len()).min(60);
     let ref_w = column_width(&rows, |r| r.ref_.len(), "REF".len());
@@ -82,26 +97,34 @@ fn emit_human(
     Ok(())
 }
 
-fn emit_json(catalogs: &std::collections::BTreeMap<String, CatalogEntry>) -> Result<(), TomeError> {
-    for entry in catalogs.values() {
-        let plugin_count = read_plugin_count(entry).unwrap_or(0);
+fn emit_json(enrolments: &[CatalogEnrolment], paths: &Paths) -> Result<(), TomeError> {
+    for e in enrolments {
+        let cache_dir = paths.cache_dir_for(&e.url);
+        let plugin_count = read_plugin_count(&cache_dir).unwrap_or(0);
+        let last_synced = clone_mtime(&cache_dir);
         let record = JsonRow {
-            name: &entry.name,
-            url: &entry.url,
-            ref_: &entry.ref_,
+            name: &e.catalog_name,
+            url: &e.url,
+            ref_: &e.pinned_ref,
             plugin_count,
-            last_synced: entry.last_synced,
+            last_synced,
         };
         crate::output::write_json(&record)?;
     }
     Ok(())
 }
 
-fn read_plugin_count(entry: &CatalogEntry) -> Option<usize> {
-    let manifest_path = entry.path.join("tome-catalog.toml");
+fn read_plugin_count(cache_dir: &std::path::Path) -> Option<usize> {
+    let manifest_path = cache_dir.join("tome-catalog.toml");
     let bytes = std::fs::read(&manifest_path).ok()?;
-    let m = CatalogManifest::parse_and_validate(&manifest_path, &entry.path, &bytes).ok()?;
+    let m = CatalogManifest::parse_and_validate(&manifest_path, cache_dir, &bytes).ok()?;
     Some(m.plugins.len())
+}
+
+fn clone_mtime(cache_dir: &std::path::Path) -> Option<OffsetDateTime> {
+    let meta = std::fs::metadata(cache_dir).ok()?;
+    let systime = meta.modified().ok()?;
+    Some(OffsetDateTime::from(systime))
 }
 
 struct Row {
@@ -113,16 +136,17 @@ struct Row {
 }
 
 impl Row {
-    fn from_entry(entry: &CatalogEntry) -> Self {
+    fn from_enrolment(e: &CatalogEnrolment, paths: &Paths) -> Self {
+        let cache_dir = paths.cache_dir_for(&e.url);
+        let last_synced = clone_mtime(&cache_dir)
+            .and_then(|ts| ts.format(&Rfc3339).ok())
+            .unwrap_or_else(|| "—".into());
         Self {
-            name: entry.name.clone(),
-            url: entry.url.clone(),
-            ref_: entry.ref_.clone(),
-            plugins: read_plugin_count(entry).unwrap_or(0),
-            last_synced: entry
-                .last_synced
-                .format(&Rfc3339)
-                .unwrap_or_else(|_| "—".into()),
+            name: e.catalog_name.clone(),
+            url: e.url.clone(),
+            ref_: e.pinned_ref.clone(),
+            plugins: read_plugin_count(&cache_dir).unwrap_or(0),
+            last_synced,
         }
     }
 }
@@ -156,6 +180,6 @@ struct JsonRow<'a> {
     #[serde(rename = "ref")]
     ref_: &'a str,
     plugin_count: usize,
-    #[serde(with = "time::serde::rfc3339")]
-    last_synced: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_synced: Option<OffsetDateTime>,
 }
