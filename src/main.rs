@@ -2,6 +2,7 @@ use clap::Parser;
 
 use tome::catalog::git;
 use tome::cli::{Cli, Command};
+use tome::paths;
 use tome::workspace;
 use tome::{commands, logging, output};
 
@@ -30,10 +31,20 @@ fn main() {
 
     let mode = cli.mode();
 
-    // Phase 3 / Foundational F3: resolve the active scope before any
-    // command runs. Errors here (workspace conflict, workspace not
-    // found) flow through the same exit-code path as command errors.
-    let scope = match workspace::resolution::resolve(&cli.scope) {
+    // Phase 4 / F10: Paths::resolve runs first so the workspace
+    // resolver can consult the central index for membership. Both can
+    // fail (HOME unset, central DB malformed, workspace not found,
+    // workspace name invalid); errors flow through the same exit-code
+    // path as command errors.
+    let paths = match paths::Paths::resolve() {
+        Ok(p) => p,
+        Err(err) => {
+            let code = err.exit_code();
+            output::write_error(mode, &err);
+            std::process::exit(code);
+        }
+    };
+    let scope = match workspace::resolution::resolve(&cli.scope, &paths) {
         Ok(r) => r,
         Err(err) => {
             let code = err.exit_code();

@@ -1,205 +1,194 @@
-//! Resolution algorithm — picks the active `Scope` for a single Tome
-//! invocation. Honours, in priority order:
+//! Phase 4 workspace resolution.
 //!
-//! 1. `--workspace <path>` CLI flag → `ScopeSource::Flag`.
-//! 2. `--global` CLI flag → `ScopeSource::GlobalFlag`.
-//! 3. `TOME_WORKSPACE` env var → `ScopeSource::Env`.
-//! 4. CWD walk → `ScopeSource::CwdWalk` if any parent has `.tome/`.
-//! 5. Global fallback → `ScopeSource::GlobalFallback`.
+//! Picks the active workspace name for a single Tome invocation. Honours,
+//! in priority order:
+//!
+//! 1. `--workspace <name>` CLI flag → [`ScopeSource::Flag`].
+//! 2. `TOME_WORKSPACE` env var → [`ScopeSource::Env`].
+//! 3. Project marker walk → [`ScopeSource::ProjectMarker`] if any ancestor
+//!    of CWD contains `.tome/config.toml`.
+//! 4. Global fallback → [`ScopeSource::GlobalFallback`].
+//!
+//! Phase 4 collapses workspace identity from on-disk paths into validated
+//! [`WorkspaceName`]s. The central `workspaces` table is the source of
+//! truth: every flag-/env-/marker-supplied name is verified against it.
+//! A name that is not present returns [`TomeError::WorkspaceNotFound`]
+//! (exit 13). A malformed marker file returns
+//! [`TomeError::WorkspaceMalformed`] (exit 70). The Phase 3 `--global`
+//! flag and the `WorkspaceMarkerMissing` / `WorkspaceConflict` variants
+//! are gone.
 //!
 //! Contract: `contracts/workspace-resolution.md`.
-//!
-//! Failure modes:
-//! - Both `--workspace` and `--global` set → exit 72 `WorkspaceConflict`.
-//!   We DON'T use clap's `conflicts_with` because that exits 2 (clap's
-//!   usage-error code); the contract requires the dedicated 72 code so
-//!   harnesses can distinguish the workspace conflict from a generic
-//!   typo.
-//! - Explicit `--workspace <path>` or `TOME_WORKSPACE` naming a path
-//!   that doesn't exist OR has no `.tome/` marker → exit 71
-//!   `WorkspaceMarkerMissing`. Silent fall-through would mask configuration
-//!   bugs (the user named a workspace; the resolver must NOT pretend
-//!   they didn't).
-//! - The CWD walk swallows non-`NotFound` `io::Error` and falls
-//!   through to the global fallback (logged at debug). Resolution must
-//!   be cheap and predictable; an unreadable parent directory shouldn't
-//!   abort the entire invocation.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use rusqlite::OptionalExtension;
+use serde::Deserialize;
 
 use crate::cli::GlobalScopeArgs;
 use crate::error::TomeError;
-use crate::workspace::{ResolvedScope, Scope, ScopeSource};
+use crate::paths::Paths;
+use crate::workspace::{ResolvedScope, Scope, ScopeSource, WorkspaceName};
 
-/// Compute the active scope for this invocation. Pure function over
-/// `args` + process-state (env vars, CWD); takes no `&Paths` because
-/// resolution is layer-zero — Phase 4's central index uses
-/// `Paths::index_db` directly and the scope is threaded forward for
-/// the future per-workspace junction-table lookups (F11).
-pub fn resolve(args: &GlobalScopeArgs) -> Result<ResolvedScope, TomeError> {
-    // Priority 0: mutually-exclusive flag pair. Detect before priority
-    // 1/2 so the order in which clap populated them is irrelevant.
-    if args.workspace.is_some() && args.global {
-        return Err(TomeError::WorkspaceConflict);
-    }
-
-    // Priority 1: --workspace <path>.
-    if let Some(raw) = args.workspace.as_ref() {
-        let resolved = validate_workspace_path(raw)?;
-        log_resolution(&resolved.scope, ScopeSource::Flag);
+/// Compute the active scope for this invocation. Touches the filesystem
+/// (project-marker walk + central DB membership check); errors surface
+/// as the dedicated workspace-* exit codes (13/15/70) per FR-344..347.
+pub fn resolve(args: &GlobalScopeArgs, paths: &Paths) -> Result<ResolvedScope, TomeError> {
+    // 1. `--workspace <name>`.
+    if let Some(raw) = args.workspace.as_deref() {
+        let name = WorkspaceName::parse(raw)?;
+        require_workspace_membership(&name, paths)?;
+        log_resolution(&name, ScopeSource::Flag, None);
         return Ok(ResolvedScope {
-            scope: resolved.scope,
+            scope: Scope(name),
             source: ScopeSource::Flag,
+            project_root: None,
         });
     }
 
-    // Priority 2: --global.
-    if args.global {
-        log_resolution(&Scope::Global, ScopeSource::GlobalFlag);
+    // 2. `TOME_WORKSPACE` env var.
+    if let Some(raw) = std::env::var_os("TOME_WORKSPACE") {
+        let s = raw.to_string_lossy();
+        if !s.is_empty() {
+            let name = WorkspaceName::parse(&s)?;
+            require_workspace_membership(&name, paths)?;
+            log_resolution(&name, ScopeSource::Env, None);
+            return Ok(ResolvedScope {
+                scope: Scope(name),
+                source: ScopeSource::Env,
+                project_root: None,
+            });
+        }
+    }
+
+    // 3. Project-marker walk.
+    if let Some((project_root, marker_path)) = walk_for_project_marker() {
+        let cfg = read_project_marker(&marker_path)?;
+        require_workspace_membership(&cfg.workspace, paths)?;
+        log_resolution(
+            &cfg.workspace,
+            ScopeSource::ProjectMarker,
+            Some(&project_root),
+        );
         return Ok(ResolvedScope {
-            scope: Scope::Global,
-            source: ScopeSource::GlobalFlag,
+            scope: Scope(cfg.workspace),
+            source: ScopeSource::ProjectMarker,
+            project_root: Some(project_root),
         });
     }
 
-    // Priority 3: TOME_WORKSPACE env var.
-    if let Some(env_path) = std::env::var_os("TOME_WORKSPACE")
-        && !env_path.is_empty()
-    {
-        let raw = PathBuf::from(&env_path);
-        let resolved = validate_workspace_path(&raw)?;
-        log_resolution(&resolved.scope, ScopeSource::Env);
-        return Ok(ResolvedScope {
-            scope: resolved.scope,
-            source: ScopeSource::Env,
-        });
-    }
-
-    // Priority 4: CWD walk.
-    if let Some(root) = walk_cwd_for_marker()? {
-        let scope = Scope::Workspace(root);
-        log_resolution(&scope, ScopeSource::CwdWalk);
-        return Ok(ResolvedScope {
-            scope,
-            source: ScopeSource::CwdWalk,
-        });
-    }
-
-    // Priority 5: global fallback.
-    log_resolution(&Scope::Global, ScopeSource::GlobalFallback);
-    Ok(ResolvedScope::global_fallback())
+    // 4. Global fallback.
+    let fallback = ResolvedScope::global_fallback();
+    log_resolution(fallback.scope.name(), ScopeSource::GlobalFallback, None);
+    Ok(fallback)
 }
 
-/// Validate that `raw` points at a workspace root: the path exists, is
-/// canonicalisable, and contains a `.tome/` subdir. Returns the scope
-/// with the canonicalised absolute path on success, `WorkspaceMarkerMissing`
-/// otherwise. Used for both `--workspace` and `TOME_WORKSPACE`.
+/// Verify `name` is present in the central `workspaces` table.
 ///
-/// Also enforces contract `workspace-resolution.md` §Validation 1b/1c:
-/// a workspace whose `.tome/config.toml` is unparsable, or whose
-/// `.tome/index.db` exists but cannot be opened, exits with
-/// `WorkspaceMalformed` (70). The check runs once at the resolution
-/// boundary — every downstream command sees a usable workspace or a
-/// clean 70 exit pointing at `tome --global doctor` as the escape
-/// hatch.
-fn validate_workspace_path(raw: &PathBuf) -> Result<ResolvedScope, TomeError> {
-    let absolute = std::fs::canonicalize(raw)
-        .map_err(|_| TomeError::WorkspaceMarkerMissing { path: raw.clone() })?;
-    let marker = absolute.join(".tome");
-    if !marker.is_dir() {
-        return Err(TomeError::WorkspaceMarkerMissing { path: absolute });
-    }
-    validate_workspace_contents(&absolute)?;
-    Ok(ResolvedScope {
-        scope: Scope::Workspace(absolute),
-        // `source` is filled in by the caller — callers know whether the
-        // path came from the flag or the env var. We return a synthetic
-        // `Flag` source here and let the caller overwrite it; cheaper
-        // than threading the source through this helper.
-        source: ScopeSource::Flag,
-    })
-}
-
-/// Enforce contract `workspace-resolution.md` §Validation 1b/1c:
-///
-/// - `.tome/config.toml` must be readable as a valid `Config`. Absent is
-///   allowed (a freshly-bootstrapped workspace has no config until the
-///   first `catalog add`); unparsable → `WorkspaceMalformed` (70).
-/// - `.tome/index.db` may or may not exist. If it exists as a file, it
-///   must open read-only (Phase 2 PRAGMA + integrity rules); failure
-///   → `WorkspaceMalformed` (70) with reason `"index database
-///   malformed"`.
-///
-/// Escape hatch: `tome --global doctor` bypasses workspace resolution
-/// and produces a diagnostic against the global scope.
-fn validate_workspace_contents(absolute: &std::path::Path) -> Result<(), TomeError> {
-    let config_path = absolute.join(".tome/config.toml");
-    if config_path.exists()
-        && let Err(e) = crate::catalog::store::load(&config_path)
-    {
-        return Err(TomeError::WorkspaceMalformed {
-            path: absolute.to_path_buf(),
-            reason: format!("config.toml: {e}"),
+/// Specialised for the no-DB case: when the central index file does not
+/// yet exist (e.g. the very first invocation, before any write command
+/// has bootstrapped the DB), only the privileged `global` name passes.
+/// Every other name returns [`TomeError::WorkspaceNotFound`] so the
+/// developer learns immediately that they need to
+/// `tome workspace init <name>` first.
+fn require_workspace_membership(name: &WorkspaceName, paths: &Paths) -> Result<(), TomeError> {
+    if !paths.index_db.exists() {
+        if name.is_reserved() {
+            return Ok(());
+        }
+        return Err(TomeError::WorkspaceNotFound {
+            name: name.as_str().to_owned(),
         });
     }
-    let index_path = absolute.join(".tome/index.db");
-    if index_path.is_file()
-        && let Err(e) = crate::index::open_read_only(&index_path)
-    {
-        return Err(TomeError::WorkspaceMalformed {
-            path: absolute.to_path_buf(),
-            reason: format!("index database malformed: {e}"),
+    let conn = crate::index::open_read_only(&paths.index_db)?;
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM workspaces WHERE name = ?1",
+            [name.as_str()],
+            |_| Ok(true),
+        )
+        .optional()
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("workspace membership check: {e}"))
+        })?
+        .unwrap_or(false);
+    if !exists {
+        return Err(TomeError::WorkspaceNotFound {
+            name: name.as_str().to_owned(),
         });
     }
     Ok(())
 }
 
-/// Walk from `current_dir()` toward `/`, returning the first parent
-/// directory whose `.tome/` subdir exists (canonicalised so symlinks
-/// resolve once). Stops at the filesystem root. Non-`NotFound`
-/// `io::Error` does NOT propagate; the walk falls through and logs.
-///
-/// Once a marker is found, [`validate_workspace_contents`] runs against
-/// it. A malformed CWD-walked workspace yields `WorkspaceMalformed`
-/// (70) — same contract gate as explicit `--workspace` / `TOME_WORKSPACE`.
-fn walk_cwd_for_marker() -> Result<Option<PathBuf>, TomeError> {
-    let mut here = std::env::current_dir().map_err(TomeError::Io)?;
+/// Walk parents from `current_dir()` toward `/`. Returns the first
+/// `(ancestor_dir, marker_path)` whose `.tome/config.toml` exists. Stops
+/// at the filesystem root. Non-`NotFound` IO errors from `try_exists`
+/// swallow and fall through to global with a debug log (per Phase 3
+/// discipline carried forward).
+fn walk_for_project_marker() -> Option<(PathBuf, PathBuf)> {
+    let mut here = std::env::current_dir().ok()?;
     loop {
-        let marker = here.join(".tome");
+        let marker = Paths::project_marker_config(&here);
         match marker.try_exists() {
             Ok(true) => {
-                let absolute = here.canonicalize().map_err(TomeError::Io)?;
-                validate_workspace_contents(&absolute)?;
-                return Ok(Some(absolute));
+                let canon = here.canonicalize().unwrap_or(here.clone());
+                return Some((canon, marker));
             }
             Ok(false) => {}
             Err(e) => {
-                tracing::debug!(?e, here = %here.display(), "workspace cwd walk: IO error on try_exists, falling through to global");
-                return Ok(None);
+                tracing::debug!(
+                    ?e,
+                    here = %here.display(),
+                    "workspace project-marker walk: IO error on try_exists, falling through",
+                );
+                return None;
             }
         }
         if !here.pop() {
             break;
         }
     }
-    Ok(None)
+    None
+}
+
+/// The on-disk shape of `<project>/.tome/config.toml`. Tome-owned ⇒
+/// `#[serde(deny_unknown_fields)]`. The `harnesses` field is forward-looking
+/// for US3's per-project harness composition — accepted here so a
+/// project marker can advertise it, but F10 itself does nothing with it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectMarkerConfig {
+    pub workspace: WorkspaceName,
+    #[serde(default)]
+    pub harnesses: Option<Vec<String>>,
+}
+
+/// Parse the project marker at `marker_path`. Read errors and parse
+/// errors both surface as [`TomeError::WorkspaceMalformed`] (exit 70)
+/// pointing at the offending file. The marker's parent directory is
+/// the project root.
+fn read_project_marker(marker_path: &Path) -> Result<ProjectMarkerConfig, TomeError> {
+    let body = std::fs::read_to_string(marker_path).map_err(|e| TomeError::WorkspaceMalformed {
+        path: marker_path.to_path_buf(),
+        reason: format!("read project marker: {e}"),
+    })?;
+    toml::from_str(&body).map_err(|e| TomeError::WorkspaceMalformed {
+        path: marker_path.to_path_buf(),
+        reason: format!("project marker: {e}"),
+    })
 }
 
 /// Emit the standard debug-level resolution trace per contract §Debug
 /// logging. Single source so the wire format is uniform across the
 /// resolver's exit points.
-fn log_resolution(scope: &Scope, source: ScopeSource) {
-    match scope {
-        Scope::Global => {
-            tracing::debug!(scope = "global", ?source, "scope resolved");
-        }
-        Scope::Workspace(path) => {
-            tracing::debug!(
-                scope = "workspace",
-                path = %path.display(),
-                ?source,
-                "scope resolved",
-            );
-        }
+fn log_resolution(name: &WorkspaceName, source: ScopeSource, project_root: Option<&Path>) {
+    match project_root {
+        Some(root) => tracing::debug!(
+            name = name.as_str(),
+            ?source,
+            project_root = %root.display(),
+            "scope resolved",
+        ),
+        None => tracing::debug!(name = name.as_str(), ?source, "scope resolved",),
     }
 }

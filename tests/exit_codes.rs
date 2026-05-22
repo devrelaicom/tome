@@ -280,14 +280,6 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
             "workspace_malformed",
         ),
         (
-            TomeError::WorkspaceMarkerMissing {
-                path: PathBuf::from("/tmp/nope"),
-            },
-            71,
-            "workspace_marker_missing",
-        ),
-        (TomeError::WorkspaceConflict, 72, "workspace_conflict"),
-        (
             TomeError::SchemaVersionTooNew {
                 on_disk: 99,
                 expected: 1,
@@ -394,8 +386,6 @@ fn exhaustive_match_compile_check() {
             TomeError::McpStartupFailed { .. } => 60,
             TomeError::McpProtocolIo { .. } => 61,
             TomeError::WorkspaceMalformed { .. } => 70,
-            TomeError::WorkspaceMarkerMissing { .. } => 71,
-            TomeError::WorkspaceConflict => 72,
             TomeError::SchemaVersionTooNew { .. } => 73,
             TomeError::SchemaMigrationFailed { .. } => 74,
             TomeError::DoctorFixNotSafe { .. } => 75,

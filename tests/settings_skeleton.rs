@@ -36,7 +36,7 @@ fn composition_ref_parses_named_workspace() {
     let parsed = CompositionRef::parse("[workspaces.foo]").unwrap();
     assert_eq!(
         parsed,
-        CompositionRef::NamedWorkspace(WorkspaceName::from_string_unvalidated("foo".to_owned()))
+        CompositionRef::NamedWorkspace(WorkspaceName::parse("foo").unwrap())
     );
 }
 
@@ -77,14 +77,28 @@ fn composition_ref_rejects_bracketed_exclusion_named_workspace() {
 }
 
 #[test]
-fn composition_ref_skeleton_does_not_validate_named_workspace_inner_name() {
-    // F8 SKELETON: the named-workspace inner string is wrapped without
-    // validation. F10's `WorkspaceName::parse` will reject e.g. names
-    // with hyphen-suffix; for now we accept and let the resolver fail
-    // on the registry lookup if the name doesn't exist.
-    let parsed = CompositionRef::parse("[workspaces.bad-name-]").unwrap();
+fn composition_ref_validates_named_workspace_inner_name() {
+    // F10: the named-workspace inner string is validated by
+    // `WorkspaceName::parse` at the parse boundary. An invalid name
+    // surfaces as `BadExclusion` (collapsing onto exit 17) — we don't
+    // thread `TomeError` through every composition surface for this one
+    // failure mode.
+    let err =
+        CompositionRef::parse("[workspaces.bad-name-]").expect_err("must reject hyphen-suffix");
+    match err {
+        CompositionErrorKind::BadExclusion(msg) => {
+            assert!(msg.contains("bad-name-"), "{msg}");
+            assert!(msg.contains("ends with"), "{msg}");
+        }
+        other => panic!("expected BadExclusion, got {other:?}"),
+    }
+}
+
+#[test]
+fn composition_ref_accepts_valid_named_workspace_inner_name() {
+    let parsed = CompositionRef::parse("[workspaces.foo-bar]").unwrap();
     match parsed {
-        CompositionRef::NamedWorkspace(name) => assert_eq!(name.as_str(), "bad-name-"),
+        CompositionRef::NamedWorkspace(name) => assert_eq!(name.as_str(), "foo-bar"),
         other => panic!("expected NamedWorkspace, got {other:?}"),
     }
 }

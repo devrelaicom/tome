@@ -79,12 +79,17 @@ impl CompositionRef {
         if let Some(rest) = s.strip_prefix("[workspaces.")
             && let Some(name) = rest.strip_suffix(']')
         {
-            // F8 SKELETON: no validation of the inner name. F10's
-            // `WorkspaceName::parse` will enforce FR-347 character /
-            // length / reserved-name rules.
-            return Ok(CompositionRef::NamedWorkspace(
-                WorkspaceName::from_string_unvalidated(name.to_owned()),
-            ));
+            // Validate per FR-347 at the parse boundary. An invalid name
+            // inside `[workspaces.<name>]` surfaces as
+            // `CompositionErrorKind::BadExclusion` — the parse-time
+            // failure modes already collapse onto exit 17 via the
+            // resolver; routing through `WorkspaceNameInvalid` would
+            // need to thread `TomeError` through the entire composition
+            // surface for one error path.
+            let parsed = WorkspaceName::parse(name).map_err(|e| {
+                CompositionErrorKind::BadExclusion(format!("[workspaces.{name}]: {e}"))
+            })?;
+            return Ok(CompositionRef::NamedWorkspace(parsed));
         }
 
         // 5. Anything else is a plain inclusion. Unknown-harness

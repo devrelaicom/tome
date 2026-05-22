@@ -13,9 +13,7 @@ use crate::index::meta::MetaKey;
 use crate::index::{self, integrity, meta};
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
-use crate::workspace::{
-    ModelIdentity, ResolvedScope, Scope, ScopeKind, ScopeSource, WorkspaceInfo,
-};
+use crate::workspace::{ModelIdentity, ResolvedScope, ScopeKind, ScopeSource, WorkspaceInfo};
 
 pub fn run(scope: &ResolvedScope, paths: &Paths, mode: Mode) -> Result<(), TomeError> {
     let info = assemble(scope, paths)?;
@@ -27,9 +25,10 @@ pub fn run(scope: &ResolvedScope, paths: &Paths, mode: Mode) -> Result<(), TomeE
 /// the index DB is missing, empty, or populated — bootstrap-not-yet
 /// surfaces as `None` schema/embedder + zero counts (FR-103).
 pub fn assemble(scope: &ResolvedScope, paths: &Paths) -> Result<WorkspaceInfo, TomeError> {
-    let (scope_kind, path) = match &scope.scope {
-        Scope::Global => (ScopeKind::Global, None),
-        Scope::Workspace(root) => (ScopeKind::Workspace, Some(root.clone())),
+    let (scope_kind, path) = if scope.scope.is_global() {
+        (ScopeKind::Global, None)
+    } else {
+        (ScopeKind::Workspace, scope.project_root.clone())
     };
 
     let catalogs = catalog_count(scope, paths)?;
@@ -190,9 +189,8 @@ fn emit_human(info: &WorkspaceInfo) -> Result<(), TomeError> {
 fn source_label(source: ScopeSource) -> &'static str {
     match source {
         ScopeSource::Flag => "--workspace flag",
-        ScopeSource::GlobalFlag => "--global flag",
         ScopeSource::Env => "TOME_WORKSPACE env",
-        ScopeSource::CwdWalk => "CWD walk",
+        ScopeSource::ProjectMarker => "project marker walk",
         ScopeSource::GlobalFallback => "global fallback",
     }
 }

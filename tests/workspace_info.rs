@@ -27,9 +27,12 @@ fn global_scope() -> ResolvedScope {
 }
 
 fn workspace_scope(path: &std::path::Path) -> ResolvedScope {
+    // F10: Scope is a name; the project_root carries the bound path.
+    let name = tome::workspace::WorkspaceName::parse("test-ws").unwrap();
     ResolvedScope {
-        scope: Scope::Workspace(path.to_path_buf()),
+        scope: Scope(name),
         source: ScopeSource::Flag,
+        project_root: Some(path.to_path_buf()),
     }
 }
 
@@ -37,9 +40,10 @@ fn enable_alpha(paths: &tome::paths::Paths, config: &tome::config::Config) {
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
     let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let embedder = StubEmbedder::new();
+    let scope = Scope(tome::workspace::WorkspaceName::global());
     let deps = LifecycleDeps {
         paths,
-        scope: &Scope::Global,
+        scope: &scope,
         config,
         embedder: &embedder,
         embedder_seed,
@@ -174,15 +178,20 @@ fn info_workspace_scope_with_malformed_config_returns_workspace_malformed() {
     assert_eq!(err.exit_code(), 70);
 }
 
-// CLI-binary smoke test: bare `tome workspace info` with default `--global`
-// (no fixture) prints a human report and exits 0. Exercises the dispatcher
-// + emit path that the library tests bypass.
+// CLI-binary smoke test: bare `tome workspace info` (no flag, no env,
+// no marker) falls back to global and exits 0. Exercises the dispatcher
+// + emit path that the library tests bypass. Phase 4 / F10 removed the
+// `--global` flag; the fallback IS the privileged-default surface now.
 #[test]
 fn cli_workspace_info_prints_and_exits_zero() {
     let env = ToolEnv::new();
+    // Run the CLI inside a directory with no `.tome/config.toml` so the
+    // resolver's project-marker walk falls through cleanly.
+    let scratch = TempDir::new().unwrap();
     let output = env
         .cmd()
-        .args(["--global", "workspace", "info"])
+        .current_dir(scratch.path())
+        .args(["workspace", "info"])
         .output()
         .expect("spawn tome");
     assert!(
@@ -200,9 +209,11 @@ fn cli_workspace_info_prints_and_exits_zero() {
 #[test]
 fn cli_workspace_info_json_emits_single_line() {
     let env = ToolEnv::new();
+    let scratch = TempDir::new().unwrap();
     let output = env
         .cmd()
-        .args(["--json", "--global", "workspace", "info"])
+        .current_dir(scratch.path())
+        .args(["--json", "workspace", "info"])
         .output()
         .expect("spawn tome");
     assert!(output.status.success(), "exit={:?}", output.status.code());
@@ -210,5 +221,5 @@ fn cli_workspace_info_json_emits_single_line() {
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid json");
     assert_eq!(parsed["scope"], "global");
     assert_eq!(parsed["path"], serde_json::Value::Null);
-    assert_eq!(parsed["source"], "global_flag");
+    assert_eq!(parsed["source"], "global_fallback");
 }

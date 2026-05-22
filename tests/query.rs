@@ -30,7 +30,7 @@ use tome::index::{self, OpenOptions, knn};
 use tome::output::Mode;
 use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
-use tome::workspace::Scope;
+use tome::workspace::{Scope, WorkspaceName};
 
 /// Bootstrap helper: copy the sample-plugin-catalog fixture into a TempDir,
 /// enable both plugins via the lifecycle API, return everything the tests
@@ -61,7 +61,7 @@ fn build_query_env() -> QueryEnv {
             .unwrap();
         let deps = LifecycleDeps {
             paths: &paths,
-            scope: &tome::workspace::Scope::Global,
+            scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
             config: &config,
             embedder: &embedder,
             embedder_seed: stub_embedder_seed(),
@@ -278,7 +278,7 @@ fn run_with_deps_returns_scored_results_without_reranker() {
 
     let deps = QueryDeps {
         paths: &env.paths,
-        scope: &Scope::Global,
+        scope: &Scope(WorkspaceName::global()),
         config: &env.config,
         embedder: &embedder,
         reranker: None,
@@ -316,7 +316,7 @@ fn run_with_deps_uses_reranker_when_provided() {
 
     let deps = QueryDeps {
         paths: &env.paths,
-        scope: &Scope::Global,
+        scope: &Scope(WorkspaceName::global()),
         config: &env.config,
         embedder: &embedder,
         reranker: Some(&reranker),
@@ -337,7 +337,7 @@ fn run_with_deps_rejects_empty_query_text() {
 
     let deps = QueryDeps {
         paths: &env.paths,
-        scope: &Scope::Global,
+        scope: &Scope(WorkspaceName::global()),
         config: &env.config,
         embedder: &embedder,
         reranker: None,
@@ -363,7 +363,7 @@ fn run_with_deps_strict_returns_query_no_results_on_empty_match() {
 
     let deps = QueryDeps {
         paths: &env.paths,
-        scope: &Scope::Global,
+        scope: &Scope(WorkspaceName::global()),
         config: &env.config,
         embedder: &embedder,
         reranker: None,
@@ -391,7 +391,7 @@ fn run_with_deps_filters_applied_pre_rerank() {
 
     let deps = QueryDeps {
         paths: &env.paths,
-        scope: &Scope::Global,
+        scope: &Scope(WorkspaceName::global()),
         config: &env.config,
         embedder: &embedder,
         reranker: Some(&reranker),
@@ -420,7 +420,7 @@ fn run_with_deps_unknown_catalog_filter_returns_catalog_not_found() {
 
     let deps = QueryDeps {
         paths: &env.paths,
-        scope: &Scope::Global,
+        scope: &Scope(WorkspaceName::global()),
         config: &env.config,
         embedder: &embedder,
         reranker: None,

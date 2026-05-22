@@ -22,8 +22,9 @@ use tome::workspace::{ResolvedScope, ScopeSource};
 
 fn global_scope() -> ResolvedScope {
     ResolvedScope {
-        scope: tome::workspace::Scope::Global,
+        scope: tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
         source: ScopeSource::GlobalFallback,
+        project_root: None,
     }
 }
 
@@ -267,7 +268,11 @@ fn fix_repairs_broken_catalog_cache_and_re_classifies_ok() {
     let mut report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
     assert_eq!(report.overall, DoctorClassification::Degraded);
 
-    let attempts = doctor::fixes::apply(&mut report, &paths, &tome::workspace::Scope::Global);
+    let attempts = doctor::fixes::apply(
+        &mut report,
+        &paths,
+        &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
+    );
     assert!(attempts >= 1);
     doctor::fixes::re_assemble(&mut report);
 
@@ -297,7 +302,11 @@ fn has_remaining_manual_fixes_detects_unfixable_after_fix_pass() {
     std::fs::write(cache_dir.join("tome-catalog.toml"), "garbage\n").unwrap();
 
     let mut report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
-    doctor::fixes::apply(&mut report, &paths, &tome::workspace::Scope::Global);
+    doctor::fixes::apply(
+        &mut report,
+        &paths,
+        &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
+    );
     doctor::fixes::re_assemble(&mut report);
 
     assert!(doctor::fixes::has_remaining_manual_fixes(&report));
@@ -477,7 +486,11 @@ fn fix_runs_forward_schema_migration_end_to_end() {
         report.suggested_fixes,
     );
 
-    let attempts = doctor::fixes::apply(&mut report, &paths, &tome::workspace::Scope::Global);
+    let attempts = doctor::fixes::apply(
+        &mut report,
+        &paths,
+        &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
+    );
     assert!(attempts >= 1, "expected at least one repair attempt");
     doctor::fixes::re_assemble(&mut report);
 

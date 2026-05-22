@@ -824,11 +824,18 @@ mod tests {
 
     /// Construct a `LifecycleDeps` against the supplied stub. We have to
     /// thread it through carefully because `LifecycleDeps` borrows.
-    /// Static `Scope::Global` reference used by every lifecycle unit
-    /// test. The Phase 3 contract has lifecycle operations bound to a
-    /// scope; tests stay scope-agnostic by using the global scope
+    ///
+    /// `TEST_SCOPE` is lazily initialised via `OnceLock` because
+    /// `WorkspaceName::global()` heap-allocates and so cannot be
+    /// evaluated in `static` initialiser position. Tests stay
+    /// scope-agnostic by using the privileged `global` workspace
     /// (matches the historical Phase 1/2 behaviour).
-    static TEST_SCOPE: crate::workspace::Scope = crate::workspace::Scope::Global;
+    fn test_scope() -> &'static crate::workspace::Scope {
+        static TEST_SCOPE: std::sync::OnceLock<crate::workspace::Scope> =
+            std::sync::OnceLock::new();
+        TEST_SCOPE
+            .get_or_init(|| crate::workspace::Scope(crate::workspace::WorkspaceName::global()))
+    }
 
     fn make_deps<'a>(
         paths: &'a Paths,
@@ -838,7 +845,7 @@ mod tests {
     ) -> LifecycleDeps<'a> {
         LifecycleDeps {
             paths,
-            scope: &TEST_SCOPE,
+            scope: test_scope(),
             config,
             embedder,
             embedder_seed: stub_seed(),
@@ -1118,7 +1125,7 @@ mod tests {
         let outcome = disable(
             &id,
             &paths,
-            &TEST_SCOPE,
+            test_scope(),
             &config,
             stub_seed(),
             stub_reranker_seed(),
@@ -1155,7 +1162,7 @@ mod tests {
         disable(
             &id,
             &paths,
-            &TEST_SCOPE,
+            test_scope(),
             &config,
             stub_seed(),
             stub_reranker_seed(),
@@ -1166,7 +1173,7 @@ mod tests {
         let err = disable(
             &id,
             &paths,
-            &TEST_SCOPE,
+            test_scope(),
             &config,
             stub_seed(),
             stub_reranker_seed(),

@@ -42,7 +42,7 @@ fn setup_with_alpha_enabled(env: &ToolEnv, fixture_tmp: &TempDir) -> Paths {
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
         paths: &paths,
-        scope: &tome::workspace::Scope::Global,
+        scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
         config: &cli_config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),

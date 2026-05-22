@@ -8,7 +8,9 @@
 //! so the process exits with the contract's specific code.
 //!
 //! Covered here (US1.a):
-//! - `--workspace` + `--global` → exit 72 (`WorkspaceConflict`).
+//! Phase 4 / F10: `--global` is gone; the `--workspace` + `--global`
+//! conflict is no longer expressible. The `WorkspaceConflict` exit
+//! (code 72) is reserved-but-unused and the test is deleted below.
 //! - missing index DB → exit 51 (`IndexIntegrityCheckFailure`,
 //!   specific-over-generic over the residual `McpStartupFailed` 60).
 //!   (The `exit-codes-p3.md` contract names the right variant but mis-
@@ -36,7 +38,6 @@ mod common;
 use std::io::Write;
 
 use common::{ToolEnv, fabricate_all_registry_models, paths_for};
-use tempfile::TempDir;
 use tome::embedding::registry::{MODEL_REGISTRY, ModelKind};
 use tome::index::{MetaSeed, OpenOptions, SCHEMA_VERSION, open};
 
@@ -85,29 +86,6 @@ fn open_opts() -> OpenOptions {
                 .into(),
         },
     }
-}
-
-#[test]
-fn mcp_workspace_and_global_returns_72() {
-    let env = ToolEnv::new();
-    let scratch = TempDir::new().unwrap();
-    let out = env
-        .cmd()
-        .args([
-            "mcp",
-            "--global",
-            "--workspace",
-            scratch.path().to_str().unwrap(),
-        ])
-        .output()
-        .expect("spawn tome mcp");
-    assert_eq!(
-        out.status.code(),
-        Some(72),
-        "expected exit 72 WorkspaceConflict, got {:?}\nstderr:\n{}",
-        out.status.code(),
-        String::from_utf8_lossy(&out.stderr),
-    );
 }
 
 #[test]

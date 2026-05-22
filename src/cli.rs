@@ -1,8 +1,15 @@
 //! `clap` derive definitions. Globals (`--json`, `-v`/`-vv`, plus the
-//! Phase 3 `--workspace` / `--global`) live on the top-level `Cli`;
-//! `--force` is per-subcommand but keeps the same name everywhere
-//! (FR-021). `--help` and `--version` are auto-supplied by clap
-//! (FR-021a).
+//! Phase 4 `--workspace <name>`) live on the top-level `Cli`; `--force`
+//! is per-subcommand but keeps the same name everywhere (FR-021).
+//! `--help` is auto-supplied by clap; `--version` is intercepted by a
+//! pre-parse hook in `main.rs` so the output can include embedder +
+//! reranker identities (FR-021a).
+//!
+//! Phase 4 / F10 deleted the `--global` flag. Workspace identity is a
+//! validated [`crate::workspace::WorkspaceName`] checked against the
+//! central registry; the privileged `global` workspace is the silent
+//! default when no `--workspace` flag, `TOME_WORKSPACE` env var, or
+//! project marker is found.
 
 use std::path::PathBuf;
 
@@ -34,28 +41,21 @@ pub struct Cli {
     pub command: Command,
 }
 
-/// The two mutually-exclusive scope flags. Flattened into `Cli` so they
-/// appear at the top level **and** on every subcommand (clap's
-/// `global = true`).
+/// Workspace selection. Flattened into `Cli` so the flag appears at the
+/// top level **and** on every subcommand (clap's `global = true`).
 ///
-/// We deliberately do NOT use clap's `conflicts_with` to enforce the
-/// mutual exclusivity: clap rejects with its usage-error code (2),
-/// whereas the Phase 3 contract requires exit `72`
-/// (`WorkspaceConflict`) so harnesses can distinguish a workspace
-/// conflict from a generic CLI typo. The resolver in
-/// `workspace::resolution::resolve` checks both fields explicitly.
+/// Phase 4 / F10 collapses the Phase 3 `--workspace <path>` /
+/// `--global` pair into a single name-keyed `--workspace <name>` flag.
+/// The privileged `global` workspace is the silent default — no flag
+/// needed.
 #[derive(Debug, Default, clap::Args)]
 pub struct GlobalScopeArgs {
-    /// Use the workspace rooted at this path. Mutually exclusive with
-    /// `--global`. Must point at an existing directory containing a
-    /// `.tome/` subdir; otherwise exits 71 (`WorkspaceMarkerMissing`).
-    #[arg(long, global = true, value_name = "PATH")]
-    pub workspace: Option<PathBuf>,
-
-    /// Use global state, ignoring any workspace context. Mutually
-    /// exclusive with `--workspace`.
-    #[arg(long, global = true)]
-    pub global: bool,
+    /// Use the named workspace from the central registry. Must already
+    /// exist; create via `tome workspace init <name>`. When omitted, the
+    /// resolver consults `TOME_WORKSPACE` and the project-marker walk
+    /// before falling back to the privileged `global` workspace.
+    #[arg(long, global = true, value_name = "NAME")]
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
