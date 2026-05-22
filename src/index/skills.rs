@@ -12,10 +12,12 @@
 //!
 //! Phase 4 / F9: the Phase 2/3 `skills.enabled` column is dropped.
 //! Enablement is now expressed by a row in `workspace_skills` joining the
-//! skill to a workspace. This module still operates against the privileged
-//! `global` workspace (resolved via [`crate::index::schema::GLOBAL_WORKSPACE`])
-//! — F11 lifts the lifecycle paths to the resolved-scope workspace; until
-//! then the `(workspace_id, skill_id)` pair always carries the global id.
+//! skill to a workspace. Phase 4 / F11a lifts the workspace identity to a
+//! runtime parameter (`workspace_name: &str`) sourced from the resolved
+//! scope — every SQL site below threads that value through the
+//! `workspace_skills` join. The `skills` table itself is shared across
+//! workspaces; only the junction is per-workspace (FR-380, FR-381,
+//! FR-382, FR-383).
 //!
 //! Spec: data-model.md §5 (`SkillRecord`) and §9 (`ContentHash`),
 //! research §R8 (embedding-text composition).
@@ -104,62 +106,76 @@ fn now_rfc3339() -> String {
 }
 
 /// SQL fragment computing the boolean `enabled` value as a LEFT JOIN to
-/// `workspace_skills` keyed on the privileged `global` workspace. Used in
-/// every `SELECT` that previously read `skills.enabled` directly.
+/// `workspace_skills` keyed on the resolved workspace. Used in every
+/// `SELECT` that previously read `skills.enabled` directly.
 const ENABLED_EXPR: &str = "CASE WHEN ws.skill_id IS NOT NULL THEN 1 ELSE 0 END";
 
 /// SQL fragment joining `skills s` to `workspace_skills ws` against the
-/// privileged `global` workspace. The LEFT JOIN means rows present in
-/// `skills` but not enabled in the global workspace still appear, with
-/// `ws.skill_id IS NULL` — same row count as the Phase 2/3 `skills`
-/// projection.
-const GLOBAL_JOIN: &str = "LEFT JOIN workspace_skills AS ws \
-                           ON ws.skill_id = s.id \
-                          AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')";
+/// workspace whose name is bound at the supplied 1-based parameter index.
+/// The LEFT JOIN means rows present in `skills` but not enabled in the
+/// requested workspace still appear, with `ws.skill_id IS NULL` — same row
+/// count as the Phase 2/3 `skills` projection.
+fn workspace_join(workspace_param_index: usize) -> String {
+    format!(
+        "LEFT JOIN workspace_skills AS ws \
+                ON ws.skill_id = s.id \
+               AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = ?{workspace_param_index})"
+    )
+}
 
-/// Look up a single skill by identity. Returns `Ok(None)` when absent.
+/// Look up a single skill by identity, with enablement evaluated against
+/// `workspace_name`. Returns `Ok(None)` when absent.
 pub fn find(
     conn: &Connection,
+    workspace_name: &str,
     catalog: &str,
     plugin: &str,
     name: &str,
 ) -> Result<Option<SkillRecord>, TomeError> {
+    let join = workspace_join(4);
     let sql = format!(
         "SELECT s.id, s.catalog, s.plugin, s.name, s.description, s.plugin_version, s.path,
                 s.content_hash, {ENABLED_EXPR}, s.indexed_at
          FROM skills AS s
-         {GLOBAL_JOIN}
+         {join}
          WHERE s.catalog = ?1 AND s.plugin = ?2 AND s.name = ?3"
     );
-    conn.query_row(&sql, params![catalog, plugin, name], |row| {
-        Ok(SkillRecord {
-            id: row.get(0)?,
-            catalog: row.get(1)?,
-            plugin: row.get(2)?,
-            name: row.get(3)?,
-            description: row.get(4)?,
-            plugin_version: row.get(5)?,
-            path: row.get(6)?,
-            content_hash: row.get(7)?,
-            enabled: row.get::<_, i64>(8)? != 0,
-            indexed_at: row.get(9)?,
-        })
-    })
+    conn.query_row(
+        &sql,
+        params![catalog, plugin, name, workspace_name],
+        |row| {
+            Ok(SkillRecord {
+                id: row.get(0)?,
+                catalog: row.get(1)?,
+                plugin: row.get(2)?,
+                name: row.get(3)?,
+                description: row.get(4)?,
+                plugin_version: row.get(5)?,
+                path: row.get(6)?,
+                content_hash: row.get(7)?,
+                enabled: row.get::<_, i64>(8)? != 0,
+                indexed_at: row.get(9)?,
+            })
+        },
+    )
     .optional()
     .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("find skill: {e}")))
 }
 
-/// List every skill row for one plugin, ordered by name.
+/// List every skill row for one plugin, ordered by name. Enablement is
+/// evaluated against `workspace_name`.
 pub fn list_for_plugin(
     conn: &Connection,
+    workspace_name: &str,
     catalog: &str,
     plugin: &str,
 ) -> Result<Vec<SkillRecord>, TomeError> {
+    let join = workspace_join(3);
     let sql = format!(
         "SELECT s.id, s.catalog, s.plugin, s.name, s.description, s.plugin_version, s.path,
                 s.content_hash, {ENABLED_EXPR}, s.indexed_at
          FROM skills AS s
-         {GLOBAL_JOIN}
+         {join}
          WHERE s.catalog = ?1 AND s.plugin = ?2
          ORDER BY s.name"
     );
@@ -167,7 +183,7 @@ pub fn list_for_plugin(
         .prepare(&sql)
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("prepare list: {e}")))?;
     let rows = stmt
-        .query_map(params![catalog, plugin], |row| {
+        .query_map(params![catalog, plugin, workspace_name], |row| {
             Ok(SkillRecord {
                 id: row.get(0)?,
                 catalog: row.get(1)?,
@@ -188,11 +204,12 @@ pub fn list_for_plugin(
 
 /// Distinct enabled plugin names for one catalog, sorted alphabetically.
 /// Used by `tome catalog update` to drive the per-catalog reindex pass and
-/// by `tome reindex <catalog>` to scope the explicit form. Phase 4 / F9:
-/// "enabled" means a `workspace_skills` row exists against the privileged
-/// `global` workspace.
+/// by `tome reindex <catalog>` to scope the explicit form. Phase 4 / F11a:
+/// "enabled" means a `workspace_skills` row exists against the resolved
+/// workspace `workspace_name`.
 pub fn enabled_plugins_for_catalog(
     conn: &Connection,
+    workspace_name: &str,
     catalog: &str,
 ) -> Result<Vec<String>, TomeError> {
     let mut stmt = conn
@@ -201,14 +218,16 @@ pub fn enabled_plugins_for_catalog(
              FROM skills AS s
              JOIN workspace_skills AS ws ON ws.skill_id = s.id
              JOIN workspaces       AS w  ON w.id = ws.workspace_id
-             WHERE s.catalog = ?1 AND w.name = 'global'
+             WHERE s.catalog = ?1 AND w.name = ?2
              ORDER BY s.plugin",
         )
         .map_err(|e| {
             TomeError::IndexIntegrityCheckFailure(format!("prepare enabled plugins: {e}"))
         })?;
     let rows = stmt
-        .query_map(params![catalog], |row| row.get::<_, String>(0))
+        .query_map(params![catalog, workspace_name], |row| {
+            row.get::<_, String>(0)
+        })
         .map_err(|e| {
             TomeError::IndexIntegrityCheckFailure(format!("query enabled plugins: {e}"))
         })?;
@@ -216,24 +235,26 @@ pub fn enabled_plugins_for_catalog(
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect enabled plugins: {e}")))
 }
 
-/// DELETE every `workspace_skills` row for `(global, plugin)`. The
+/// DELETE every `workspace_skills` row for `(workspace_name, plugin)`. The
 /// underlying `skills` rows + embeddings are retained so a subsequent
-/// re-enable is cheap (FR-005, FR-006 + FR-383 retention rule). Phase
-/// 4 / F9 redefines "disable" as removing the workspace enrolment;
-/// shared skills outlive any single workspace.
+/// re-enable is cheap (FR-005, FR-006 + FR-383 retention rule) and so
+/// other workspaces that still reference the same skill keep working.
+/// Phase 4 / F11a redefines "disable" as removing the workspace
+/// enrolment; shared skills outlive any single workspace.
 pub fn mark_all_disabled_for_plugin(
     conn: &Connection,
+    workspace_name: &str,
     catalog: &str,
     plugin: &str,
 ) -> Result<u32, TomeError> {
     let affected = conn
         .execute(
             "DELETE FROM workspace_skills
-             WHERE workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+             WHERE workspace_id = (SELECT id FROM workspaces WHERE name = ?1)
                AND skill_id IN (
-                  SELECT id FROM skills WHERE catalog = ?1 AND plugin = ?2
+                  SELECT id FROM skills WHERE catalog = ?2 AND plugin = ?3
                )",
-            params![catalog, plugin],
+            params![workspace_name, catalog, plugin],
         )
         .map_err(|e| {
             TomeError::IndexIntegrityCheckFailure(format!("mark_all_disabled_for_plugin: {e}"))
@@ -274,7 +295,7 @@ pub fn delete_by_plugin(conn: &Connection, catalog: &str, plugin: &str) -> Resul
 /// Insert a new skill row + matching embedding, or update an existing row
 /// in place. Run inside an already-open transaction by the caller.
 /// Phase 4 / F9: the `enabled` column is gone; enablement is recorded
-/// separately via [`upsert_global_workspace_skill`].
+/// separately via [`upsert_workspace_skill`].
 fn upsert_skill(
     tx: &rusqlite::Transaction<'_>,
     pending: &PendingSkill,
@@ -332,25 +353,27 @@ fn upsert_skill(
     Ok(id)
 }
 
-/// INSERT-or-IGNORE a `workspace_skills` row joining `skill_id` to the
-/// privileged `global` workspace. Idempotent: re-running for an already-
-/// enrolled skill is a no-op (the PK `(workspace_id, skill_id)` enforces
-/// uniqueness). Phase 4 / F9 substitutes this for the prior
-/// `UPDATE skills SET enabled = 1 WHERE id = ?1` write.
-fn upsert_global_workspace_skill(
+/// INSERT-or-UPSERT a `workspace_skills` row joining `skill_id` to the
+/// workspace named `workspace_name`. Idempotent: re-running for an
+/// already-enrolled skill is a no-op apart from bumping `enabled_at`.
+/// The PK `(workspace_id, skill_id)` enforces uniqueness. Phase 4 / F11a:
+/// the privileged-`global`-only variant from F9 is gone; this is the
+/// general form.
+fn upsert_workspace_skill(
     tx: &rusqlite::Transaction<'_>,
+    workspace_name: &str,
     skill_id: i64,
     enabled_at_unix: i64,
 ) -> Result<(), TomeError> {
     tx.execute(
         "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at)
-         VALUES ((SELECT id FROM workspaces WHERE name = 'global'), ?1, ?2)
+         VALUES ((SELECT id FROM workspaces WHERE name = ?1), ?2, ?3)
          ON CONFLICT(workspace_id, skill_id) DO UPDATE SET enabled_at = excluded.enabled_at",
-        params![skill_id, enabled_at_unix],
+        params![workspace_name, skill_id, enabled_at_unix],
     )
     .map_err(|e| {
         TomeError::IndexIntegrityCheckFailure(format!(
-            "upsert workspace_skills (global, skill_id={skill_id}): {e}"
+            "upsert workspace_skills ({workspace_name}, skill_id={skill_id}): {e}"
         ))
     })?;
     Ok(())
@@ -378,6 +401,7 @@ fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {
 /// is a thin adapter over this signature.
 pub fn enable_plugin_atomic<F>(
     conn: &mut Connection,
+    workspace_name: &str,
     pending: &[PendingSkill],
     mut embed: F,
 ) -> Result<EnableSummary, TomeError>
@@ -435,10 +459,9 @@ where
             }
         };
 
-        // Enrol the skill in the privileged `global` workspace (Phase
-        // 4 / F9 replacement for the prior `enabled = 1` flag). F11
-        // will lift this to the resolved-scope workspace.
-        upsert_global_workspace_skill(&tx, skill_id, now_unix)?;
+        // Enrol the skill in the resolved workspace (Phase 4 / F11a
+        // replacement for F9's privileged-`global`-only write).
+        upsert_workspace_skill(&tx, workspace_name, skill_id, now_unix)?;
     }
 
     tx.commit()
@@ -471,12 +494,14 @@ where
 /// All four classes commit inside one SQLite transaction so a SIGINT or
 /// embedder failure leaves the index unchanged.
 ///
-/// Phase 4 / F9: the `enabled` bit is no longer carried on the `skills`
-/// row. Reindex re-asserts the matching `workspace_skills(global, id)`
-/// row for every Added/Modified/Unchanged skill (a no-op when the
-/// enrolment already exists; the PK keeps idempotency).
+/// Phase 4 / F11a: the `enabled` bit is no longer carried on the
+/// `skills` row. Reindex re-asserts the matching
+/// `workspace_skills(workspace_name, id)` row for every
+/// Added/Modified/Unchanged skill (a no-op when the enrolment already
+/// exists; the PK keeps idempotency).
 pub fn reindex_plugin_atomic<F>(
     conn: &mut Connection,
+    workspace_name: &str,
     catalog: &str,
     plugin: &str,
     pending: &[PendingSkill],
@@ -558,9 +583,9 @@ where
             }
         };
 
-        // Re-assert the global workspace enrolment for every visited skill
-        // (idempotent — PK keyed on (workspace_id, skill_id)).
-        upsert_global_workspace_skill(&tx, skill_id, now_unix)?;
+        // Re-assert the resolved-workspace enrolment for every visited
+        // skill (idempotent — PK keyed on (workspace_id, skill_id)).
+        upsert_workspace_skill(&tx, workspace_name, skill_id, now_unix)?;
     }
 
     // Pass 2 — Removed: anything still left in `existing` is on-index but

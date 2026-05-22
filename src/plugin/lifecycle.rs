@@ -73,12 +73,10 @@ pub struct ReindexOutcome {
 /// decision can pass them through unchanged.
 pub struct LifecycleDeps<'a> {
     pub paths: &'a Paths,
-    /// The active workspace scope. Carried for future F11 work that
-    /// will route every lifecycle write through the `workspace_skills`
-    /// junction table on the single central index. Until then every
-    /// scope shares one `index.db` + `index.lock`; the parameter is
-    /// retained on the boundary so call sites don't need rewiring when
-    /// F11 lands.
+    /// The active workspace scope. Phase 4 / F11a routes every
+    /// lifecycle write through the `workspace_skills` junction keyed on
+    /// `scope.name()`; the central index database stays shared across
+    /// every workspace, the per-workspace dimension is the junction row.
     pub scope: &'a crate::workspace::Scope,
     pub config: &'a Config,
     pub embedder: &'a dyn Embedder,
@@ -95,6 +93,16 @@ pub struct LifecycleDeps<'a> {
     /// the function returns `ModelMissing` (exit 30) per plugin-commands.md
     /// step 4.
     pub allow_model_download: bool,
+}
+
+impl LifecycleDeps<'_> {
+    /// The resolved workspace name as bound to SQL. Always valid — the
+    /// inner [`crate::workspace::WorkspaceName`] is constructed by the
+    /// resolver only after [`crate::workspace::WorkspaceName::parse`] or
+    /// the membership check on the central DB has succeeded.
+    pub fn workspace_name(&self) -> &str {
+        self.scope.name().as_str()
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -261,11 +269,16 @@ pub fn reindex_plugin(
 }
 
 /// Cascade-disable every plugin in `plugins` under one advisory-lock
-/// acquisition. Drops each plugin's rows from `skills` + `skill_embeddings`
-/// using the same connection inside the same lock window. Returns one
-/// `(plugin_name, rows_dropped)` pair per input plugin, preserving input
-/// order — empty plugins still get a `0` entry so the caller can join
-/// against its own list of plugins to emit per-plugin telemetry.
+/// acquisition. Phase 4 / F11a: removes each plugin's `workspace_skills`
+/// enrolment rows for the resolved workspace `workspace_name` rather
+/// than dropping the underlying `skills` + `skill_embeddings` rows
+/// outright. The skill rows are retained so other workspaces enrolling
+/// the same plugin (post-F11b multi-workspace catalog enrolment) still
+/// see their data — this honours FR-383 across the workspace dimension.
+/// Returns one `(plugin_name, rows_dropped)` pair per input plugin,
+/// preserving input order — empty plugins still get a `0` entry so the
+/// caller can join against its own list of plugins to emit per-plugin
+/// telemetry.
 ///
 /// Used by `tome catalog remove --force`. The single-lock-per-cascade
 /// semantics match `contracts/catalog-extensions.md` §"tome catalog remove".
@@ -275,7 +288,7 @@ pub fn reindex_plugin(
 /// because `index::open` validates them against the on-disk `meta` rows.
 pub fn cascade_disable_for_catalog(
     paths: &Paths,
-    _scope: &crate::workspace::Scope,
+    workspace_name: &str,
     catalog: &str,
     plugins: &[String],
     embedder_seed: MetaSeed,
@@ -297,7 +310,7 @@ pub fn cascade_disable_for_catalog(
         )?;
         let mut breakdown: Vec<(String, u32)> = Vec::with_capacity(plugins.len());
         for plugin in plugins {
-            let dropped = delete_by_plugin(&conn, catalog, plugin)?;
+            let dropped = mark_all_disabled_for_plugin(&conn, workspace_name, catalog, plugin)?;
             breakdown.push((plugin.clone(), dropped));
         }
         Ok(breakdown)
@@ -391,9 +404,8 @@ pub fn resolve_plugin_dir(id: &PluginId, config: &Config) -> Result<PathBuf, Tom
 }
 
 /// Returns `true` when the index already contains at least one
-/// `(catalog, plugin)` row enrolled in the privileged `global`
-/// workspace via `workspace_skills` (Phase 4 / F9 redefinition of
-/// "enabled").
+/// `(catalog, plugin)` row enrolled in the resolved workspace via
+/// `workspace_skills` (Phase 4 / F11a redefinition of "enabled").
 fn any_skill_enabled(deps: &LifecycleDeps<'_>, id: &PluginId) -> Result<bool, TomeError> {
     let conn = index::open(
         &deps.paths.index_db.clone(),
@@ -408,8 +420,8 @@ fn any_skill_enabled(deps: &LifecycleDeps<'_>, id: &PluginId) -> Result<bool, To
             "SELECT COUNT(*) FROM skills AS s
              JOIN workspace_skills AS ws ON ws.skill_id = s.id
              JOIN workspaces       AS w  ON w.id = ws.workspace_id
-             WHERE s.catalog = ?1 AND s.plugin = ?2 AND w.name = 'global'",
-            rusqlite::params![id.catalog, id.plugin],
+             WHERE s.catalog = ?1 AND s.plugin = ?2 AND w.name = ?3",
+            rusqlite::params![id.catalog, id.plugin, deps.workspace_name()],
             |row| row.get(0),
         )
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("check enabled skills: {e}")))?;
@@ -440,7 +452,8 @@ fn enable_locked(
     let pending = collect_pending_skills(id, plugin_dir, plugin_version, &mut warnings)?;
 
     let embedder = deps.embedder;
-    let summary = enable_plugin_atomic(&mut conn, &pending, |text| {
+    let workspace_name = deps.workspace_name();
+    let summary = enable_plugin_atomic(&mut conn, workspace_name, &pending, |text| {
         // Cancellation is observed inside the embed loop too (handover
         // gotcha #3): each embed call peeks the SIGINT flag. The closure
         // returns `Err(TomeError::Interrupted)` which `enable_plugin_atomic`
@@ -466,7 +479,7 @@ fn enable_locked(
 fn disable_locked(
     id: &PluginId,
     paths: &Paths,
-    _scope: &crate::workspace::Scope,
+    scope: &crate::workspace::Scope,
     embedder_seed: MetaSeed,
     reranker_seed: MetaSeed,
     summariser_seed: MetaSeed,
@@ -480,9 +493,11 @@ fn disable_locked(
         },
     )?;
 
+    let workspace_name = scope.name().as_str();
+
     // The contract requires "already-disabled" detection. Two cases
     // collapse into one PluginAlreadyInState: zero rows for the plugin
-    // OR every row already disenrolled from the global workspace.
+    // OR every row already disenrolled from the resolved workspace.
     let (total, enabled_count): (i64, i64) = conn
         .query_row(
             "SELECT COUNT(*),
@@ -490,9 +505,9 @@ fn disable_locked(
              FROM skills AS s
              LEFT JOIN workspace_skills AS ws
                     ON ws.skill_id = s.id
-                   AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+                   AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = ?3)
              WHERE s.catalog = ?1 AND s.plugin = ?2",
-            rusqlite::params![id.catalog, id.plugin],
+            rusqlite::params![id.catalog, id.plugin, workspace_name],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("count skills: {e}")))?;
@@ -503,7 +518,7 @@ fn disable_locked(
         });
     }
 
-    let affected = mark_all_disabled_for_plugin(&conn, &id.catalog, &id.plugin)?;
+    let affected = mark_all_disabled_for_plugin(&conn, workspace_name, &id.catalog, &id.plugin)?;
     Ok(affected)
 }
 
@@ -534,8 +549,10 @@ fn reindex_locked(
     let pending = collect_pending_skills(id, plugin_dir, plugin_version, &mut warnings)?;
 
     let embedder = deps.embedder;
+    let workspace_name = deps.workspace_name();
     let summary = reindex_plugin_atomic(
         &mut conn,
+        workspace_name,
         &id.catalog,
         &id.plugin,
         &pending,
@@ -865,15 +882,16 @@ mod tests {
             },
         )
         .expect("open index");
+        let workspace_name = test_scope().name().as_str();
         conn.query_row(
             "SELECT COUNT(*),
                     COALESCE(SUM(CASE WHEN ws.skill_id IS NOT NULL THEN 1 ELSE 0 END), 0)
              FROM skills AS s
              LEFT JOIN workspace_skills AS ws
                     ON ws.skill_id = s.id
-                   AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+                   AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = ?3)
              WHERE s.catalog = ?1 AND s.plugin = ?2",
-            rusqlite::params![catalog, plugin],
+            rusqlite::params![catalog, plugin, workspace_name],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("count")
@@ -1233,6 +1251,7 @@ mod tests {
             },
         )
         .expect("open index");
+        let workspace_name = test_scope().name().as_str();
         let mut stmt = conn
             .prepare(
                 "SELECT s.name, s.content_hash,
@@ -1240,13 +1259,13 @@ mod tests {
                  FROM skills AS s
                  LEFT JOIN workspace_skills AS ws
                         ON ws.skill_id = s.id
-                       AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+                       AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = ?3)
                  WHERE s.catalog = ?1 AND s.plugin = ?2
                  ORDER BY s.name",
             )
             .expect("prepare snapshot");
         let rows = stmt
-            .query_map(rusqlite::params![catalog, plugin], |row| {
+            .query_map(rusqlite::params![catalog, plugin, workspace_name], |row| {
                 let name: String = row.get(0)?;
                 let hash: String = row.get(1)?;
                 let enabled: i64 = row.get(2)?;

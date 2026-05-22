@@ -30,11 +30,13 @@ use super::{
 
 pub fn run(args: PluginListArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    // F2a: single global config; F11 reintroduces workspace-aware view.
+    // F2a: single global config; F11b reintroduces workspace-aware view
+    // of catalog enrolment. F11a already threads the resolved workspace
+    // through the per-plugin aggregate (`workspace_skills` join).
     let config = store::load(&paths.global_config_file)?;
 
     let conn = open_index_for_read(&paths, &scope.scope)?;
-    let rows = collect_rows(&config, &args, &conn, &paths)?;
+    let rows = collect_rows(&config, &args, &conn, &paths, scope.scope.name().as_str())?;
 
     let filtered: Vec<Row> = if args.enabled_only {
         rows.into_iter()
@@ -66,6 +68,7 @@ fn collect_rows(
     args: &PluginListArgs,
     conn: &rusqlite::Connection,
     _paths: &Paths,
+    workspace_name: &str,
 ) -> Result<Vec<Row>, TomeError> {
     let mut out: Vec<Row> = Vec::new();
 
@@ -94,7 +97,7 @@ fn collect_rows(
             };
             let plugin_dir = entry.path.join(&plugin.source);
 
-            let row = build_row(&id, &plugin_dir, conn)?;
+            let row = build_row(&id, &plugin_dir, conn, workspace_name)?;
             out.push(row);
         }
     }
@@ -111,12 +114,13 @@ fn build_row(
     id: &PluginId,
     plugin_dir: &std::path::Path,
     conn: &rusqlite::Connection,
+    workspace_name: &str,
 ) -> Result<Row, TomeError> {
     // Lenient parse — failures fall through to `Unindexable`.
     let manifest = parse_plugin_manifest(&manifest_path_for(plugin_dir)).ok();
     let component_counts = count_components(plugin_dir);
 
-    let agg: IndexAggregate = aggregate_for_plugin(conn, &id.catalog, &id.plugin)?;
+    let agg: IndexAggregate = aggregate_for_plugin(conn, workspace_name, &id.catalog, &id.plugin)?;
 
     let (status, skill_count, version) = match &manifest {
         None => (PluginStatus::Unindexable, None, None),

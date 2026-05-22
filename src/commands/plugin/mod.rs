@@ -219,12 +219,12 @@ pub(crate) struct IndexAggregate {
 }
 
 /// Aggregate the `skills` rows for one plugin. Returns zero counts on a
-/// fresh index (no row inserted yet). Phase 4 / F9: `enabled` now means
-/// "joined to the privileged `global` workspace via `workspace_skills`"
-/// — F11 will lift this to the resolved-scope workspace, but until then
-/// `global` is the single workspace lifecycle commands operate on.
+/// fresh index (no row inserted yet). Phase 4 / F11a: `enabled` now means
+/// "joined to the workspace named `workspace_name` via `workspace_skills`",
+/// sourced from the resolved scope.
 pub(crate) fn aggregate_for_plugin(
     conn: &rusqlite::Connection,
+    workspace_name: &str,
     catalog: &str,
     plugin: &str,
 ) -> Result<IndexAggregate, TomeError> {
@@ -236,9 +236,9 @@ pub(crate) fn aggregate_for_plugin(
              FROM skills AS s
              LEFT JOIN workspace_skills AS ws
                     ON ws.skill_id = s.id
-                   AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = 'global')
+                   AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = ?3)
              WHERE s.catalog = ?1 AND s.plugin = ?2",
-            rusqlite::params![catalog, plugin],
+            rusqlite::params![catalog, plugin, workspace_name],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("aggregate_for_plugin: {e}")))?;

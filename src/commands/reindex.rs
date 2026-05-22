@@ -144,9 +144,10 @@ fn resolve_targets(
         Scope::All => {
             // Walk every catalog row in the index, group by catalog. We do
             // this once via a single SQL query rather than iterating
-            // catalogs and re-opening the connection.
+            // catalogs and re-opening the connection. Scope: the resolved
+            // workspace.
             let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
-            let _ = ws_scope;
+            let workspace_name = ws_scope.name().as_str();
             let conn = index::open(
                 &paths.index_db,
                 &OpenOptions {
@@ -161,14 +162,14 @@ fn resolve_targets(
                      FROM skills AS s
                      JOIN workspace_skills AS ws ON ws.skill_id = s.id
                      JOIN workspaces       AS w  ON w.id = ws.workspace_id
-                     WHERE w.name = 'global'
+                     WHERE w.name = ?1
                      ORDER BY s.catalog, s.plugin",
                 )
                 .map_err(|e| {
                     TomeError::IndexIntegrityCheckFailure(format!("prepare all-scope: {e}"))
                 })?;
             let rows = stmt
-                .query_map([], |row| {
+                .query_map(rusqlite::params![workspace_name], |row| {
                     let c: String = row.get(0)?;
                     let p: String = row.get(1)?;
                     Ok(PluginId {
@@ -188,7 +189,7 @@ fn resolve_targets(
 
 fn read_enabled_plugins(
     paths: &Paths,
-    _ws_scope: &crate::workspace::Scope,
+    ws_scope: &crate::workspace::Scope,
     catalog: &str,
 ) -> Result<Vec<String>, TomeError> {
     let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
@@ -200,7 +201,7 @@ fn read_enabled_plugins(
             summariser: summariser_seed,
         },
     )?;
-    enabled_plugins_for_catalog(&conn, catalog)
+    enabled_plugins_for_catalog(&conn, ws_scope.name().as_str(), catalog)
 }
 
 fn load_embedder(paths: &Paths) -> Result<FastembedEmbedder, TomeError> {

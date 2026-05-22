@@ -80,7 +80,7 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
         let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
         let breakdown = cascade_disable_for_catalog(
             &paths,
-            &scope.scope,
+            scope.scope.name().as_str(),
             &args.name,
             &enabled_plugins,
             embedder_seed,
@@ -136,12 +136,13 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
     Ok(())
 }
 
-/// Read the distinct enabled plugin names for one catalog. Returns an empty
-/// vector when the index database has not been bootstrapped yet (the
-/// `catalog remove` flow must still work on a fresh install).
+/// Read the distinct enabled plugin names for one catalog under the
+/// resolved workspace. Returns an empty vector when the index database
+/// has not been bootstrapped yet (the `catalog remove` flow must still
+/// work on a fresh install).
 fn read_enabled_plugins(
     paths: &Paths,
-    _scope: &Scope,
+    scope: &Scope,
     catalog: &str,
 ) -> Result<Vec<String>, TomeError> {
     let index_db = paths.index_db.clone();
@@ -157,7 +158,7 @@ fn read_enabled_plugins(
             summariser: summariser_seed,
         },
     )?;
-    enabled_plugins_for_catalog(&conn, catalog)
+    enabled_plugins_for_catalog(&conn, scope.name().as_str(), catalog)
 }
 
 fn prompt_yes_no(prompt: &str) -> Result<bool, TomeError> {

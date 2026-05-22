@@ -36,7 +36,7 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
     let component_counts = count_components(&plugin_dir);
 
     let conn = open_index_for_read(&paths, &scope.scope)?;
-    let agg = aggregate_for_plugin(&conn, &id.catalog, &id.plugin)?;
+    let agg = aggregate_for_plugin(&conn, scope.scope.name().as_str(), &id.catalog, &id.plugin)?;
 
     let status = if agg.total == 0 {
         PluginStatus::Disabled

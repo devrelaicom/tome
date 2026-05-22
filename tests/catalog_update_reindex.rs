@@ -196,7 +196,7 @@ fn update_auto_disables_plugin_whose_upstream_directory_is_gone() {
         },
     )
     .expect("open index");
-    let enabled = enabled_plugins_for_catalog(&conn, "sample-plugin-catalog").unwrap();
+    let enabled = enabled_plugins_for_catalog(&conn, "global", "sample-plugin-catalog").unwrap();
     assert!(enabled.is_empty(), "no enabled plugins remain");
 }
 

@@ -112,7 +112,7 @@ fn load_embedder(paths: &Paths) -> Result<FastembedEmbedder, TomeError> {
 
 fn read_enabled_plugins(
     paths: &Paths,
-    _scope: &Scope,
+    scope: &Scope,
     catalog: &str,
 ) -> Result<Vec<String>, TomeError> {
     let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
@@ -124,7 +124,7 @@ fn read_enabled_plugins(
             summariser: summariser_seed,
         },
     )?;
-    enabled_plugins_for_catalog(&conn, catalog)
+    enabled_plugins_for_catalog(&conn, scope.name().as_str(), catalog)
 }
 
 /// Per-plugin row in the catalog-update summary. One of `summary` or

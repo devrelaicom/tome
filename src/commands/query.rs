@@ -221,7 +221,13 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
         catalog: args.catalog.as_deref(),
         plugin: args.plugin.as_deref(),
     };
-    let candidates = knn(&conn, &query_vec, candidate_k, &filters)?;
+    let candidates = knn(
+        &conn,
+        deps.scope.name().as_str(),
+        &query_vec,
+        candidate_k,
+        &filters,
+    )?;
 
     // Score + sort. With a reranker, scores come from the cross-encoder;
     // without, we treat 1.0 − distance as cosine similarity.

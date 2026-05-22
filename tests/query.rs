@@ -105,7 +105,7 @@ fn knn_top_one_matches_self_embedded_skill() {
     let query_text = embedding_text(target_name, target_description);
     let query_vec = embedder.embed(&query_text).unwrap();
 
-    let hits = knn(&conn, &query_vec, 10, &QueryFilters::default()).unwrap();
+    let hits = knn(&conn, "global", &query_vec, 10, &QueryFilters::default()).unwrap();
     assert!(!hits.is_empty(), "expected at least one KNN hit");
     let top = &hits[0];
     assert_eq!(top.name, target_name);
@@ -127,7 +127,8 @@ fn knn_filter_narrows_results_to_one_plugin() {
 
     // Unrelated query → results should span both plugins by default.
     let unrelated = embedder.embed("a totally unrelated query string").unwrap();
-    let unfiltered: Vec<Candidate> = knn(&conn, &unrelated, 20, &QueryFilters::default()).unwrap();
+    let unfiltered: Vec<Candidate> =
+        knn(&conn, "global", &unrelated, 20, &QueryFilters::default()).unwrap();
     let unfiltered_plugins: std::collections::HashSet<&str> =
         unfiltered.iter().map(|c| c.plugin.as_str()).collect();
     assert!(
@@ -144,7 +145,7 @@ fn knn_filter_narrows_results_to_one_plugin() {
         catalog: Some("sample-plugin-catalog"),
         plugin: Some("plugin-beta"),
     };
-    let filtered = knn(&conn, &unrelated, 20, &filters).unwrap();
+    let filtered = knn(&conn, "global", &unrelated, 20, &filters).unwrap();
     assert!(!filtered.is_empty(), "filter must not eliminate every row");
     for hit in &filtered {
         assert_eq!(hit.plugin, "plugin-beta");
@@ -162,7 +163,7 @@ fn knn_catalog_filter_rejects_unknown_catalog_with_empty_result() {
         catalog: Some("does-not-exist"),
         plugin: None,
     };
-    let hits = knn(&conn, &qv, 10, &filters).unwrap();
+    let hits = knn(&conn, "global", &qv, 10, &filters).unwrap();
     assert!(
         hits.is_empty(),
         "unknown-catalog filter must produce zero hits, got {hits:?}",
@@ -176,7 +177,7 @@ fn stub_reranker_preserves_input_order_and_scores_as_one_minus_distance() {
     let embedder = StubEmbedder::new();
 
     let qv = embedder.embed("alpha widget shine").unwrap();
-    let hits = knn(&conn, &qv, 5, &QueryFilters::default()).unwrap();
+    let hits = knn(&conn, "global", &qv, 5, &QueryFilters::default()).unwrap();
     assert!(hits.len() >= 2, "need >=2 candidates to test ordering");
 
     let before: Vec<(String, String)> = hits
@@ -215,7 +216,7 @@ fn reverse_stub_reranker_distinguishes_reranked_from_raw_ordering() {
     let embedder = StubEmbedder::new();
 
     let qv = embedder.embed("plugin-beta skill-x sole skill").unwrap();
-    let hits = knn(&conn, &qv, 5, &QueryFilters::default()).unwrap();
+    let hits = knn(&conn, "global", &qv, 5, &QueryFilters::default()).unwrap();
     assert!(hits.len() >= 2);
 
     let original: Vec<String> = hits.iter().map(|c| c.name.clone()).collect();
@@ -242,7 +243,7 @@ fn knn_rejects_query_vector_of_wrong_length() {
     let conn = open_conn(&env);
     // 383-dim vector — one short of the FLOAT[384] virtual table column.
     let bad = vec![0.0f32; 383];
-    let err = knn(&conn, &bad, 5, &QueryFilters::default()).unwrap_err();
+    let err = knn(&conn, "global", &bad, 5, &QueryFilters::default()).unwrap_err();
     assert!(
         matches!(err, tome::error::TomeError::IndexIntegrityCheckFailure(_)),
         "expected IndexIntegrityCheckFailure, got {err:?}",

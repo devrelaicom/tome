@@ -232,6 +232,7 @@ fn build_catalog_menu(
     config: &Config,
 ) -> Result<Vec<CatalogChoice>, TomeError> {
     let conn = open_index_for_read(paths, &scope.scope)?;
+    let workspace_name = scope.scope.name().as_str();
     let mut out: Vec<CatalogChoice> = Vec::with_capacity(config.catalogs.len() + 1);
     for (catalog_name, entry) in &config.catalogs {
         let manifest = read_catalog_manifest(&entry.path);
@@ -239,7 +240,7 @@ fn build_catalog_menu(
         let mut enabled_count = 0usize;
         if let Some(manifest) = &manifest {
             for plugin in &manifest.plugins {
-                let agg = aggregate_for_plugin(&conn, catalog_name, &plugin.name)?;
+                let agg = aggregate_for_plugin(&conn, workspace_name, catalog_name, &plugin.name)?;
                 if agg.total > 0 && agg.enabled > 0 {
                     enabled_count += 1;
                 }
@@ -300,6 +301,7 @@ fn build_plugin_menu(
         .ok_or_else(|| TomeError::CatalogNotFound(catalog_name.to_owned()))?;
     let manifest = read_catalog_manifest(&entry.path);
     let conn = open_index_for_read(paths, &scope.scope)?;
+    let workspace_name = scope.scope.name().as_str();
 
     let mut out: Vec<PluginChoice> = Vec::new();
     if let Some(manifest) = manifest {
@@ -310,7 +312,7 @@ fn build_plugin_menu(
             };
             let plugin_dir = entry.path.join(&plugin.source);
             let parsed = parse_plugin_manifest(&manifest_path_for(&plugin_dir)).ok();
-            let agg = aggregate_for_plugin(&conn, &id.catalog, &id.plugin)?;
+            let agg = aggregate_for_plugin(&conn, workspace_name, &id.catalog, &id.plugin)?;
             let status = match &parsed {
                 None => PluginStatus::Unindexable,
                 Some(_) => {
@@ -381,7 +383,7 @@ fn render_plugin_view(
     let manifest = parse_plugin_manifest(&manifest_path_for(&plugin_dir));
     let component_counts = count_components(&plugin_dir);
     let conn = open_index_for_read(paths, &scope.scope)?;
-    let agg = aggregate_for_plugin(&conn, &id.catalog, &id.plugin)?;
+    let agg = aggregate_for_plugin(&conn, scope.scope.name().as_str(), &id.catalog, &id.plugin)?;
 
     let status = match &manifest {
         Err(_) => PluginStatus::Unindexable,
