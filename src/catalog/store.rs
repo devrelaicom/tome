@@ -15,7 +15,7 @@ use tempfile::NamedTempFile;
 use crate::config::Config;
 use crate::error::TomeError;
 use crate::paths::Paths;
-use crate::workspace::Scope;
+use crate::workspace::{Scope, WorkspaceName};
 
 pub fn load(config_file: &Path) -> Result<Config, TomeError> {
     match std::fs::read_to_string(config_file) {
@@ -69,7 +69,8 @@ pub fn reference_count(url: &str, paths: &Paths) -> Vec<Scope> {
     if let Ok(global) = load(&paths.global_config_file)
         && global.catalogs.values().any(|e| e.url == url)
     {
-        refs.push(Scope::Global);
+        // F11 rewires this onto the workspace_catalogs junction.
+        refs.push(Scope(WorkspaceName::global()));
     }
     refs
 }

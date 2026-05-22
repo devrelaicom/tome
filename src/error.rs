@@ -213,28 +213,16 @@ pub enum TomeError {
     /// recorded in the central registry no longer exists on disk. The
     /// exit code (70) and category string (`"workspace_malformed"`) stay
     /// stable; the inner `reason` payload disambiguates.
+    ///
+    /// Exit codes 71 (`WorkspaceMarkerMissing`) and 72 (`WorkspaceConflict`)
+    /// were live in Phase 3 but are deleted in Phase 4 / F10: the Phase 4
+    /// resolver targets validated workspace **names** against the central
+    /// registry (so a missing marker is no longer a distinct failure mode),
+    /// and the `--global` flag is gone (so the workspace/global conflict is
+    /// not expressible). Codes 71 and 72 stay reserved-but-unused — we do
+    /// NOT reassign mid-phase to preserve the wire-stable closed set.
     #[error("workspace malformed at {}: {reason}\nhint: run `tome doctor` for a full diagnosis", path.display())]
     WorkspaceMalformed { path: PathBuf, reason: String },
-
-    /// Transitional name — F10 will delete this variant when the
-    /// marker-walk resolver is rewritten for Phase 4's name-keyed
-    /// workspaces (binding-via-central-DB rather than `.tome/`
-    /// markers). The Phase 3 condition this names — "an explicit
-    /// `--workspace <path>` or `TOME_WORKSPACE` pointed at a path that
-    /// doesn't exist or has no `.tome/` marker" — becomes a silent
-    /// fall-through to `global` in Phase 4 (data-model §3 + contract
-    /// `workspace-commands.md`). Until that wiring lands, the variant
-    /// keeps exit code 71 + the original category string so the wire
-    /// format stays stable for Phase 3 consumers.
-    #[error(
-        "workspace not found: {} does not contain a .tome/ marker\nhint: run `tome workspace init {}` to create one",
-        path.display(),
-        path.display()
-    )]
-    WorkspaceMarkerMissing { path: PathBuf },
-
-    #[error("workspace conflict: --workspace and --global cannot be combined")]
-    WorkspaceConflict,
 
     #[error(
         "schema version too new: on-disk schema is v{on_disk}, this Tome supports up to v{expected}\nhint: upgrade Tome to a version that supports schema v{on_disk}"
@@ -339,10 +327,11 @@ impl TomeError {
             // 60–61 — MCP server (Phase 3)
             Self::McpStartupFailed { .. } => 60,
             Self::McpProtocolIo { .. } => 61,
-            // 70–75 — workspace + schema (Phase 3)
+            // 70 — workspace malformed (Phase 3, widened in Phase 4 / F10).
+            // 71 + 72 are reserved-but-unused as of Phase 4 / F10 (see the
+            // `WorkspaceMalformed` doc comment).
+            // 73–75 — schema migration + doctor (Phase 3).
             Self::WorkspaceMalformed { .. } => 70,
-            Self::WorkspaceMarkerMissing { .. } => 71,
-            Self::WorkspaceConflict => 72,
             Self::SchemaVersionTooNew { .. } => 73,
             Self::SchemaMigrationFailed { .. } => 74,
             Self::DoctorFixNotSafe { .. } => 75,
@@ -395,8 +384,6 @@ impl TomeError {
             Self::McpStartupFailed { .. } => "mcp_startup",
             Self::McpProtocolIo { .. } => "mcp_io",
             Self::WorkspaceMalformed { .. } => "workspace_malformed",
-            Self::WorkspaceMarkerMissing { .. } => "workspace_marker_missing",
-            Self::WorkspaceConflict => "workspace_conflict",
             Self::SchemaVersionTooNew { .. } => "schema_too_new",
             Self::SchemaMigrationFailed { .. } => "schema_migration",
             Self::DoctorFixNotSafe { .. } => "doctor_fix_unsafe",

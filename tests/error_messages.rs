@@ -205,22 +205,14 @@ fn workspace_malformed_names_path_reason_and_hint() {
 }
 
 #[test]
-fn workspace_marker_missing_names_path_and_init_hint() {
-    let err = TomeError::WorkspaceMarkerMissing {
-        path: PathBuf::from("/tmp/nope"),
+fn workspace_name_invalid_names_input_and_reason() {
+    let err = TomeError::WorkspaceNameInvalid {
+        name: "bad name".into(),
+        reason: "contains invalid character ` ` at position 3".into(),
     };
     let m = err.to_string();
-    assert!(m.contains("/tmp/nope"), "{m}");
-    assert!(m.contains(".tome/"), "{m}");
-    assert!(m.contains("tome workspace init"), "{m}");
-}
-
-#[test]
-fn workspace_conflict_names_both_flags() {
-    let err = TomeError::WorkspaceConflict;
-    let m = err.to_string();
-    assert!(m.contains("--workspace"), "{m}");
-    assert!(m.contains("--global"), "{m}");
+    assert!(m.contains("bad name"), "{m}");
+    assert!(m.contains("invalid character"), "{m}");
 }
 
 #[test]

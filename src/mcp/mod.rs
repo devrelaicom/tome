@@ -38,7 +38,7 @@ pub use preflight::EmbedderHandle;
 use crate::catalog::git::scrub_to_string;
 use crate::error::TomeError;
 use crate::paths::Paths;
-use crate::workspace::{ResolvedScope, Scope};
+use crate::workspace::ResolvedScope;
 
 /// Graceful-shutdown deadline per `contracts/mcp-server.md` §"Signal
 /// handling" step 2. After this elapses the cancellation token has been
@@ -92,18 +92,20 @@ pub fn run(scope: &ResolvedScope, paths: &Paths) -> Result<(), TomeError> {
                 }
             };
 
-        let scope_label = match &scope.scope {
-            Scope::Global => "global",
-            Scope::Workspace(_) => "workspace",
+        let scope_label = if scope.scope.is_global() {
+            "global"
+        } else {
+            "workspace"
         };
-        let workspace_path = match &scope.scope {
-            Scope::Workspace(p) => Some(scrub_to_string(p.display().to_string().as_bytes())),
-            Scope::Global => None,
-        };
+        let workspace_path = scope
+            .project_root
+            .as_ref()
+            .map(|p| scrub_to_string(p.display().to_string().as_bytes()));
         info!(
             target: "tome::mcp::server",
             scope = scope_label,
-            workspace = workspace_path.as_deref(),
+            workspace_name = scope.scope.name().as_str(),
+            workspace_path = workspace_path.as_deref(),
             embedder = handle.embedder_entry.name,
             reranker_lazy = true,
             "startup ok",

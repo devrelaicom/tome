@@ -52,7 +52,7 @@ fn enable_alpha(
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
     let deps = LifecycleDeps {
         paths,
-        scope: &tome::workspace::Scope::Global,
+        scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
         config,
         embedder,
         embedder_seed: stub_embedder_seed(),
@@ -95,7 +95,7 @@ fn reindex_after_update_re_embeds_only_modified_skill() {
 
     let deps = LifecycleDeps {
         paths: &paths,
-        scope: &tome::workspace::Scope::Global,
+        scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
         config: &config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
@@ -156,7 +156,7 @@ fn update_auto_disables_plugin_whose_upstream_directory_is_gone() {
 
     let deps = LifecycleDeps {
         paths: &paths,
-        scope: &tome::workspace::Scope::Global,
+        scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
         config: &config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
@@ -215,7 +215,7 @@ fn reindex_pass_unchanged_skills_does_no_embed_work() {
 
     let deps = LifecycleDeps {
         paths: &paths,
-        scope: &tome::workspace::Scope::Global,
+        scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
         config: &config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),

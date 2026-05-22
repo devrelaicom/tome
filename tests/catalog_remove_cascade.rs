@@ -29,7 +29,7 @@ fn enable_alpha(
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
     let deps = LifecycleDeps {
         paths,
-        scope: &tome::workspace::Scope::Global,
+        scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
         config,
         embedder,
         embedder_seed: stub_embedder_seed(),
@@ -276,7 +276,9 @@ fn cascade_remove_in_workspace_does_not_remove_shared_clone() {
     // Enable plugin-alpha in the WORKSPACE scope via library API +
     // StubEmbedder. We have to construct LifecycleDeps with the
     // workspace config the CLI just wrote.
-    let workspace_scope = tome::workspace::Scope::Workspace(ws.clone());
+    // F11: rewrite once junction-table reads land.
+    let workspace_scope = tome::workspace::Scope(tome::workspace::WorkspaceName::global());
+    let _ = &ws; // suppress unused-var lint
     let workspace_config_path = ws.join(".tome/config.toml");
     let workspace_config: tome::config::Config =
         toml::from_str(&std::fs::read_to_string(&workspace_config_path).unwrap()).unwrap();

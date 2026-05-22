@@ -28,7 +28,7 @@ fn enable_alpha_and_beta(
     let beta: PluginId = "sample-plugin-catalog/plugin-beta".parse().unwrap();
     let deps = LifecycleDeps {
         paths,
-        scope: &tome::workspace::Scope::Global,
+        scope: shared_scope(),
         config,
         embedder,
         embedder_seed: stub_embedder_seed(),
@@ -40,6 +40,14 @@ fn enable_alpha_and_beta(
     lifecycle::enable(&beta, &deps).expect("enable beta");
 }
 
+/// Returns a static reference to the global Scope so it can be embedded
+/// in `LifecycleDeps<'a>` without a lifetime issue. The lock is fine for
+/// tests — every test in this binary shares the same global-scope value.
+fn shared_scope() -> &'static tome::workspace::Scope {
+    static SCOPE: std::sync::OnceLock<tome::workspace::Scope> = std::sync::OnceLock::new();
+    SCOPE.get_or_init(|| tome::workspace::Scope(tome::workspace::WorkspaceName::global()))
+}
+
 fn build_deps<'a>(
     paths: &'a tome::paths::Paths,
     config: &'a tome::config::Config,
@@ -47,7 +55,7 @@ fn build_deps<'a>(
 ) -> LifecycleDeps<'a> {
     LifecycleDeps {
         paths,
-        scope: &tome::workspace::Scope::Global,
+        scope: shared_scope(),
         config,
         embedder,
         embedder_seed: stub_embedder_seed(),

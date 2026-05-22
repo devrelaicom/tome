@@ -195,7 +195,8 @@ mod tests {
     fn check_catalogs_returns_empty_when_no_config() {
         let tmp = TempDir::new().unwrap();
         let paths = fixture_paths(tmp.path());
-        let out = check_catalogs(&paths, &Scope::Global).unwrap();
+        let out =
+            check_catalogs(&paths, &Scope(crate::workspace::WorkspaceName::global())).unwrap();
         assert!(out.is_empty());
     }
 
@@ -206,7 +207,8 @@ mod tests {
         let missing = paths.catalogs_dir.join("does-not-exist");
         write_config_with_one_catalog(&paths, "lost", missing);
 
-        let out = check_catalogs(&paths, &Scope::Global).unwrap();
+        let out =
+            check_catalogs(&paths, &Scope(crate::workspace::WorkspaceName::global())).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].state, CatalogCacheState::Missing);
         assert_eq!(out[0].name, "lost");
@@ -220,7 +222,8 @@ mod tests {
         std::fs::create_dir_all(&cache).unwrap();
         write_config_with_one_catalog(&paths, "nogit", cache);
 
-        let out = check_catalogs(&paths, &Scope::Global).unwrap();
+        let out =
+            check_catalogs(&paths, &Scope(crate::workspace::WorkspaceName::global())).unwrap();
         assert_eq!(out[0].state, CatalogCacheState::NotARepo);
     }
 
@@ -232,7 +235,8 @@ mod tests {
         std::fs::create_dir_all(cache.join(".git")).unwrap();
         write_config_with_one_catalog(&paths, "nomanifest", cache);
 
-        let out = check_catalogs(&paths, &Scope::Global).unwrap();
+        let out =
+            check_catalogs(&paths, &Scope(crate::workspace::WorkspaceName::global())).unwrap();
         assert_eq!(out[0].state, CatalogCacheState::ManifestInvalid);
     }
 }

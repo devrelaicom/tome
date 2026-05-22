@@ -66,7 +66,7 @@ fn setup_pre_enabled(catalog_name: &str) -> (ToolEnv, TempDir, Paths) {
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
         paths: &paths,
-        scope: &tome::workspace::Scope::Global,
+        scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
         config: &config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),

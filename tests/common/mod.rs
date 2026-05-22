@@ -337,3 +337,11 @@ pub fn write_index_db_with_schema_version(path: &Path, version: u32) {
 pub fn paths_for(env: &ToolEnv) -> Paths {
     Paths::from_root(env.tome_root())
 }
+
+/// Construct a `Scope(global)` value for tests that need to thread a
+/// scope through the lifecycle / query APIs without caring which
+/// workspace they're under. Centralises the (now-tuple-struct)
+/// constructor expression so future Scope reshapes touch one place.
+pub fn global_scope() -> tome::workspace::Scope {
+    tome::workspace::Scope(tome::workspace::WorkspaceName::global())
+}

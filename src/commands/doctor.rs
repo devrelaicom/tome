@@ -111,9 +111,8 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         "  resolved via:  {}",
         match report.workspace.source {
             crate::workspace::ScopeSource::Flag => "--workspace flag",
-            crate::workspace::ScopeSource::GlobalFlag => "--global flag",
             crate::workspace::ScopeSource::Env => "TOME_WORKSPACE env",
-            crate::workspace::ScopeSource::CwdWalk => "CWD walk",
+            crate::workspace::ScopeSource::ProjectMarker => "project marker walk",
             crate::workspace::ScopeSource::GlobalFallback => "global fallback",
         }
     )?;
