@@ -4,8 +4,11 @@
 //!
 //! Phase 2 contracts: `specs/002-phase-2-plugins-index/contracts/exit-codes.md`.
 //! Phase 3 contracts: `specs/003-phase-3-mcp-workspaces/contracts/exit-codes-p3.md`.
+//! Phase 4 contracts: `specs/004-phase-4-refactor-harnesses/contracts/exit-codes-p4.md`.
 
 use std::path::PathBuf;
+
+use crate::workspace::ScopeKind;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TomeError {
@@ -27,11 +30,68 @@ pub enum TomeError {
     #[error("git failed for `{catalog}`: {detail}")]
     GitFailed { catalog: String, detail: String },
 
+    /// Generic filesystem error. Phase 4 widens the semantic scope of this
+    /// variant per FR-602 of `contracts/exit-codes-p4.md`: per-user state
+    /// directory unwritable, project-binding I/O, and other Phase 4
+    /// filesystem failures all collapse onto `Io` (code 7) rather than
+    /// promoting new variants. The exit code and category string stay
+    /// stable; the new failure surfaces are visually distinguishable in
+    /// the inner `io::Error` payload.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
     #[error("interrupted by user")]
     Interrupted,
+
+    // -----------------------------------------------------------------------
+    // Phase 4 — workspace name + project binding (codes 13–16).
+    // Pre-allocated by F3; first wired by US1/US2 (workspace lifecycle +
+    // project binding). See data-model.md §14 and contracts/exit-codes-p4.md.
+    // -----------------------------------------------------------------------
+    #[error("workspace `{name}` not found in the central registry")]
+    WorkspaceNotFound { name: String },
+
+    #[error("workspace `{name}` already exists")]
+    WorkspaceAlreadyExists { name: String },
+
+    #[error("workspace name `{name}` is invalid: {reason}")]
+    WorkspaceNameInvalid { name: String, reason: String },
+
+    #[error(
+        "workspace `{name}` has {count} bound project(s); refusing without --force\nBound: {}",
+        projects.join(", ")
+    )]
+    WorkspaceHasBoundProjects {
+        name: String,
+        count: usize,
+        projects: Vec<String>,
+    },
+
+    // -----------------------------------------------------------------------
+    // Phase 4 — harness composition + integration (codes 17–19).
+    // -----------------------------------------------------------------------
+    #[error("harness composition error: {kind}")]
+    CompositionError { kind: CompositionErrorKind },
+
+    #[error("harness `{name}` is not supported")]
+    HarnessNotSupported { name: String },
+
+    #[error(
+        "harness MCP config clash in {}: existing entry named `tome` does not match Tome's expected shape (command=`{command}`, first_arg=`{first_arg}`)\nhint: rerun with --force to overwrite",
+        path.display()
+    )]
+    HarnessClash {
+        path: PathBuf,
+        command: String,
+        first_arg: String,
+    },
+
+    // -----------------------------------------------------------------------
+    // Phase 4 — summariser (code 24; contract says 20 but that conflicts with
+    // Phase 2's `PluginNotFound`; see `exit_code()` for the resolution note).
+    // -----------------------------------------------------------------------
+    #[error("summariser failure: {kind}")]
+    SummariserFailure { kind: SummariserFailureKind },
 
     // -----------------------------------------------------------------------
     // Phase 2 — plugin lifecycle (codes 20–23).
@@ -144,15 +204,34 @@ pub enum TomeError {
     // -----------------------------------------------------------------------
     // Phase 3 — workspace + schema (codes 70–75).
     // -----------------------------------------------------------------------
+    /// Workspace's on-disk shape failed validation. Phase 4 widens the
+    /// semantic scope of this variant per FR-602 of
+    /// `contracts/exit-codes-p4.md`: it now also covers (a) a project
+    /// marker `<project>/.tome/config.toml` that exists but is unparsable
+    /// or names a workspace via a malformed `workspace` key, and (b) a
+    /// workspace rename precondition where the bound project directory
+    /// recorded in the central registry no longer exists on disk. The
+    /// exit code (70) and category string (`"workspace_malformed"`) stay
+    /// stable; the inner `reason` payload disambiguates.
     #[error("workspace malformed at {}: {reason}\nhint: run `tome doctor` for a full diagnosis", path.display())]
     WorkspaceMalformed { path: PathBuf, reason: String },
 
+    /// Transitional name — F10 will delete this variant when the
+    /// marker-walk resolver is rewritten for Phase 4's name-keyed
+    /// workspaces (binding-via-central-DB rather than `.tome/`
+    /// markers). The Phase 3 condition this names — "an explicit
+    /// `--workspace <path>` or `TOME_WORKSPACE` pointed at a path that
+    /// doesn't exist or has no `.tome/` marker" — becomes a silent
+    /// fall-through to `global` in Phase 4 (data-model §3 + contract
+    /// `workspace-commands.md`). Until that wiring lands, the variant
+    /// keeps exit code 71 + the original category string so the wire
+    /// format stays stable for Phase 3 consumers.
     #[error(
         "workspace not found: {} does not contain a .tome/ marker\nhint: run `tome workspace init {}` to create one",
         path.display(),
         path.display()
     )]
-    WorkspaceNotFound { path: PathBuf },
+    WorkspaceMarkerMissing { path: PathBuf },
 
     #[error("workspace conflict: --workspace and --global cannot be combined")]
     WorkspaceConflict,
@@ -215,6 +294,23 @@ impl TomeError {
             Self::GitFailed { .. } => 6,
             Self::Io(_) => 7,
             Self::Interrupted => 8,
+            // 13–16 — Phase 4 workspace name + project binding
+            Self::WorkspaceNotFound { .. } => 13,
+            Self::WorkspaceAlreadyExists { .. } => 14,
+            Self::WorkspaceNameInvalid { .. } => 15,
+            Self::WorkspaceHasBoundProjects { .. } => 16,
+            // 17–19 — Phase 4 harness composition + integration
+            Self::CompositionError { .. } => 17,
+            Self::HarnessNotSupported { .. } => 18,
+            Self::HarnessClash { .. } => 19,
+            // 24 — Phase 4 summariser. Note: `contracts/exit-codes-p4.md`
+            // ships code 20 for this variant, which collides with Phase 2's
+            // pre-existing `PluginNotFound` (20). Constitutional principle II
+            // (NON-NEGOTIABLE) requires pairwise-unique exit codes; the
+            // first numerically-adjacent free slot after the Phase 2 plugin
+            // range (20–23) is 24. F3 lands `SummariserFailure` here and
+            // flags the contract typo for reconciliation in F4+.
+            Self::SummariserFailure { .. } => 24,
             // 20–23 — plugin lifecycle
             Self::PluginNotFound(_) => 20,
             Self::PluginAlreadyInState { .. } => 21,
@@ -245,7 +341,7 @@ impl TomeError {
             Self::McpProtocolIo { .. } => 61,
             // 70–75 — workspace + schema (Phase 3)
             Self::WorkspaceMalformed { .. } => 70,
-            Self::WorkspaceNotFound { .. } => 71,
+            Self::WorkspaceMarkerMissing { .. } => 71,
             Self::WorkspaceConflict => 72,
             Self::SchemaVersionTooNew { .. } => 73,
             Self::SchemaMigrationFailed { .. } => 74,
@@ -265,6 +361,17 @@ impl TomeError {
             Self::GitFailed { .. } => "git_failed",
             Self::Io(_) => "io",
             Self::Interrupted => "interrupted",
+            // Phase 4 — workspace name + project binding
+            Self::WorkspaceNotFound { .. } => "workspace_not_found",
+            Self::WorkspaceAlreadyExists { .. } => "workspace_already_exists",
+            Self::WorkspaceNameInvalid { .. } => "workspace_name_invalid",
+            Self::WorkspaceHasBoundProjects { .. } => "workspace_has_bound_projects",
+            // Phase 4 — harness composition + integration
+            Self::CompositionError { .. } => "composition_error",
+            Self::HarnessNotSupported { .. } => "harness_not_supported",
+            Self::HarnessClash { .. } => "harness_clash",
+            // Phase 4 — summariser
+            Self::SummariserFailure { .. } => "summariser_failure",
             Self::PluginNotFound(_) => "plugin_not_found",
             Self::PluginAlreadyInState { .. } => "plugin_already_in_state",
             Self::PluginManifestParseError { .. } => "plugin_manifest_parse_error",
@@ -288,12 +395,131 @@ impl TomeError {
             Self::McpStartupFailed { .. } => "mcp_startup",
             Self::McpProtocolIo { .. } => "mcp_io",
             Self::WorkspaceMalformed { .. } => "workspace_malformed",
-            Self::WorkspaceNotFound { .. } => "workspace_not_found",
+            Self::WorkspaceMarkerMissing { .. } => "workspace_marker_missing",
             Self::WorkspaceConflict => "workspace_conflict",
             Self::SchemaVersionTooNew { .. } => "schema_too_new",
             Self::SchemaMigrationFailed { .. } => "schema_migration",
             Self::DoctorFixNotSafe { .. } => "doctor_fix_unsafe",
         }
+    }
+}
+
+/// Sub-classification for `TomeError::CompositionError` (exit 17). Pre-allocated
+/// by F3; consumers wire it in F8 (settings composition) and US3 (layered
+/// settings + composition). The `WorkspaceRefOutsideProject` variant carries a
+/// `ScopeKind` rather than a stringly-typed scope label so the type system
+/// rejects malformed states. The `UnknownWorkspace` sub-variant is allowed by
+/// the contract to map to exit 13 (`WorkspaceNotFound`) instead of 17 — the
+/// caller chooses, by emitting whichever `TomeError` variant matches the
+/// composition surface the failure came from.
+#[derive(Debug)]
+pub enum CompositionErrorKind {
+    /// DFS cycle detected during workspace-reference resolution. The path
+    /// names the chain that triggered the cycle, in the order it was walked.
+    Cycle { path: Vec<String> },
+    /// A `[workspace]` reference was found in a scope that may not carry
+    /// one (workspace or global settings — only project-scoped settings
+    /// may reference workspaces).
+    WorkspaceRefOutsideProject { found_in: ScopeKind },
+    /// A `[workspaces.<name>]` block named a workspace that does not exist
+    /// in the central registry. Per `contracts/exit-codes-p4.md`, callers
+    /// may surface this as exit 13 (`WorkspaceNotFound`) instead of exit
+    /// 17 when the failure is reachable from the workspace-resolution
+    /// surface.
+    UnknownWorkspace(String),
+    /// A `!`-prefixed exclusion in a composition was malformed (not a
+    /// plain name, contained traversal characters, etc.). The string
+    /// carries the offending token.
+    BadExclusion(String),
+}
+
+impl std::fmt::Display for CompositionErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cycle { path } => {
+                write!(f, "composition cycle: {}", path.join(" → "))
+            }
+            Self::WorkspaceRefOutsideProject { found_in } => write!(
+                f,
+                "`[workspace]` reference found in {found_in:?} settings — only project-scoped settings may reference workspaces"
+            ),
+            Self::UnknownWorkspace(name) => {
+                write!(f, "unknown workspace `{name}` referenced in composition")
+            }
+            Self::BadExclusion(token) => {
+                write!(f, "malformed `!`-prefixed exclusion: `{token}`")
+            }
+        }
+    }
+}
+
+/// Sub-classification for `TomeError::SummariserFailure` (exit 20 per the
+/// contract; placed at exit 24 in implementation to avoid colliding with
+/// Phase 2's `PluginNotFound`). Pre-allocated by F3; consumers wire it in
+/// F6 (summariser skeleton + `StubSummariser`) and US4 (RULES.md
+/// regeneration). `ShortOrLong` disambiguates which of the two prompt-driven
+/// outputs failed for `OutputUnparsable` and `OutputEmpty`.
+#[derive(Debug)]
+pub enum SummariserFailureKind {
+    /// The summariser model is not present on disk at the point summarisation
+    /// was requested. Auto-fixable by `tome doctor --fix` (re-download).
+    ModelMissing,
+    /// The on-disk model file's SHA-256 disagrees with the registry pin.
+    /// Distinct from the embedder/reranker variants because the summariser
+    /// uses a different inference runtime (llama-cpp-2) and a different
+    /// recovery flow.
+    ModelChecksumMismatch { expected: String, observed: String },
+    /// `LlamaBackend::init()` or similar initialisation failed. The
+    /// `source` string preserves the underlying error message for the
+    /// human reader; the type itself stays stringly-typed to avoid leaking
+    /// the inference-runtime crate's error types into `TomeError`'s
+    /// public API.
+    BackendInitFailed { source: String },
+    /// The model returned output that the parser could not interpret as
+    /// the requested summary kind. `which` names which prompt was active
+    /// when the failure occurred.
+    OutputUnparsable { which: ShortOrLong },
+    /// The model returned an empty string for the requested summary kind.
+    OutputEmpty { which: ShortOrLong },
+}
+
+impl std::fmt::Display for SummariserFailureKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ModelMissing => f.write_str("model missing"),
+            Self::ModelChecksumMismatch { expected, observed } => write!(
+                f,
+                "model checksum mismatch: expected {expected}, observed {observed}"
+            ),
+            Self::BackendInitFailed { source } => {
+                write!(f, "backend init failed: {source}")
+            }
+            Self::OutputUnparsable { which } => {
+                write!(f, "model output unparsable ({which} summary)")
+            }
+            Self::OutputEmpty { which } => {
+                write!(f, "model output empty ({which} summary)")
+            }
+        }
+    }
+}
+
+/// Discriminator for `SummariserFailureKind::OutputUnparsable` /
+/// `OutputEmpty` — names which of the two prompt-driven outputs failed.
+/// Pre-allocated by F3; the short/long distinction is wired in F6
+/// alongside the summariser prompt set.
+#[derive(Debug, Clone, Copy)]
+pub enum ShortOrLong {
+    Short,
+    Long,
+}
+
+impl std::fmt::Display for ShortOrLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Short => "short",
+            Self::Long => "long",
+        })
     }
 }
 

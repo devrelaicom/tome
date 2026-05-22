@@ -17,7 +17,7 @@
 //!   typo.
 //! - Explicit `--workspace <path>` or `TOME_WORKSPACE` naming a path
 //!   that doesn't exist OR has no `.tome/` marker → exit 71
-//!   `WorkspaceNotFound`. Silent fall-through would mask configuration
+//!   `WorkspaceMarkerMissing`. Silent fall-through would mask configuration
 //!   bugs (the user named a workspace; the resolver must NOT pretend
 //!   they didn't).
 //! - The CWD walk swallows non-`NotFound` `io::Error` and falls
@@ -92,7 +92,7 @@ pub fn resolve(args: &GlobalScopeArgs) -> Result<ResolvedScope, TomeError> {
 
 /// Validate that `raw` points at a workspace root: the path exists, is
 /// canonicalisable, and contains a `.tome/` subdir. Returns the scope
-/// with the canonicalised absolute path on success, `WorkspaceNotFound`
+/// with the canonicalised absolute path on success, `WorkspaceMarkerMissing`
 /// otherwise. Used for both `--workspace` and `TOME_WORKSPACE`.
 ///
 /// Also enforces contract `workspace-resolution.md` §Validation 1b/1c:
@@ -104,10 +104,10 @@ pub fn resolve(args: &GlobalScopeArgs) -> Result<ResolvedScope, TomeError> {
 /// hatch.
 fn validate_workspace_path(raw: &PathBuf) -> Result<ResolvedScope, TomeError> {
     let absolute = std::fs::canonicalize(raw)
-        .map_err(|_| TomeError::WorkspaceNotFound { path: raw.clone() })?;
+        .map_err(|_| TomeError::WorkspaceMarkerMissing { path: raw.clone() })?;
     let marker = absolute.join(".tome");
     if !marker.is_dir() {
-        return Err(TomeError::WorkspaceNotFound { path: absolute });
+        return Err(TomeError::WorkspaceMarkerMissing { path: absolute });
     }
     validate_workspace_contents(&absolute)?;
     Ok(ResolvedScope {

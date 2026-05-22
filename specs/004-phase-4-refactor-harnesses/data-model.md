@@ -551,7 +551,7 @@ pub enum TomeError {
     },                                                            // exit 19
 
     #[error("summariser failure: {kind}")]
-    SummariserFailure { kind: SummariserFailureKind },           // exit 20
+    SummariserFailure { kind: SummariserFailureKind },           // exit 24 (was specced 20 in early drafts; collision with Phase 2 PluginNotFound → moved up)
 }
 
 #[derive(Debug)]
@@ -585,7 +585,7 @@ impl ExitCode for TomeError {
             TomeError::CompositionError { .. }       => 17,
             TomeError::HarnessNotSupported { .. }    => 18,
             TomeError::HarnessClash { .. }           => 19,
-            TomeError::SummariserFailure { .. }      => 20,
+            TomeError::SummariserFailure { .. }      => 24,
         }
     }
 }
