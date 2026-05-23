@@ -237,41 +237,39 @@ fn no_enabled_plugins_keeps_phase_1_behaviour() {
     assert_eq!(v["removed"]["name"], "sample-experts");
 }
 
-// ---- Phase 3 / US3.b — cascade + reference-count integration -------------
+// ---- Phase 4 / F11b — cascade + workspace_catalogs refcount integration --
 
 /// Cascade-remove from a workspace that shares the catalog URL with the
-/// global scope. Workspace's plugins drop; workspace's config loses the
-/// entry; global's config keeps it; the on-disk clone survives because
-/// global still references it.
+/// `global` workspace. Workspace's `workspace_skills` enrolments drop;
+/// workspace's `workspace_catalogs` row disappears; `global`'s rows
+/// stay; the shared on-disk clone survives because `global` still
+/// references the URL (FR-361).
 ///
-/// Phase 4 / F2a collapses both scopes onto the same central
-/// `config.toml` + `index.db`. The Phase 3 cross-scope isolation
-/// invariant this test asserts is precisely what F11 reintroduces via
-/// the `workspace_catalogs` junction table. Ignored until F11 lands.
+/// Phase 4 / F11b reintroduces the Phase 3 cross-scope isolation
+/// invariant via the central `workspace_catalogs` junction table — the
+/// per-workspace `.tome/` directories Phase 3 used are gone.
 #[test]
-#[ignore = "F11: per-workspace isolation moves to workspace_catalogs junction table"]
 fn cascade_remove_in_workspace_does_not_remove_shared_clone() {
-    use common::sample_plugin_catalog_fixture;
-    use sha2::{Digest, Sha256};
+    use common::{cache_dir_for, seed_workspace};
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
-    // Opt the user into the workspace registry so `reference_count`
-    // can see the workspace.
-    std::fs::create_dir_all(&paths.logs_dir).unwrap();
-    std::fs::File::create(&paths.global_config_file).unwrap();
+    // Real git fixture from sample-plugin-catalog (the CLI add path
+    // wants a cloneable repo). The on-disk clone lands at
+    // `paths.cache_dir_for(&url)` — same for both workspaces.
+    let fix = Fixture::build_from(common::sample_plugin_catalog_fixture());
 
-    // Build a real git fixture from sample-plugin-catalog so the CLI's
-    // `catalog add` succeeds (it needs a cloneable repo).
-    let fix = Fixture::build_from(sample_plugin_catalog_fixture());
-
-    // Add the catalog to GLOBAL first via CLI binary (real clone).
+    // Step 1: add the catalog under the privileged `global` workspace
+    // via the CLI binary. This bootstraps the central DB + stamps meta
+    // with REGISTRY seeds (matching what the second CLI invocation
+    // below will use). We can't switch to stub seeds without breaking
+    // the CLI side.
     let add_g = env
         .cmd()
-        .args(["--global", "catalog", "add", &fix.url])
+        .args(["catalog", "add", &fix.url])
         .output()
         .unwrap();
     assert!(
@@ -280,100 +278,105 @@ fn cascade_remove_in_workspace_does_not_remove_shared_clone() {
         String::from_utf8_lossy(&add_g.stderr),
     );
 
-    // Init a workspace and add the SAME URL into it (reuses cache).
-    let ws_root = env.home_path().join("project");
-    std::fs::create_dir_all(&ws_root).unwrap();
-    let init = env
-        .cmd()
-        .args(["workspace", "init", ws_root.to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(
-        init.status.success(),
-        "workspace init failed: {}",
-        String::from_utf8_lossy(&init.stderr),
-    );
-    let ws = std::fs::canonicalize(&ws_root).unwrap();
+    // Step 2: seed a `second` workspace directly into the central DB.
+    // `tome workspace add` (US2) will own this seam once it ships;
+    // until then the test bridges by inserting a `workspaces` row.
+    seed_workspace(&paths, "second");
 
+    // Step 3: enrol the SAME URL in the `second` workspace via the CLI
+    // binary. F11b's add path detects the existing cache (refcount > 0)
+    // and REUSES it — same on-disk clone shared across workspaces.
     let add_w = env
         .cmd()
-        .args([
-            "--workspace",
-            ws.to_str().unwrap(),
-            "catalog",
-            "add",
-            &fix.url,
-        ])
+        .args(["--workspace", "second", "catalog", "add", &fix.url])
         .output()
         .unwrap();
     assert!(
         add_w.status.success(),
-        "workspace add failed: {}",
+        "second-workspace add failed: {}",
         String::from_utf8_lossy(&add_w.stderr),
     );
 
-    // Enable plugin-alpha in the WORKSPACE scope via library API +
-    // StubEmbedder. We have to construct LifecycleDeps with the
-    // workspace config the CLI just wrote.
-    // F11: rewrite once junction-table reads land.
-    let workspace_scope = tome::workspace::Scope(tome::workspace::WorkspaceName::global());
-    let _ = &ws; // suppress unused-var lint
-    let workspace_config_path = ws.join(".tome/config.toml");
-    let workspace_config: tome::config::Config =
-        toml::from_str(&std::fs::read_to_string(&workspace_config_path).unwrap()).unwrap();
+    // Step 4: enable plugin-alpha in the `second` workspace via
+    // library API. The CLI binary would load FastembedEmbedder (real
+    // ONNX); the library API can use StubEmbedder. The catalog clone
+    // the CLI add wrote is at `paths.cache_dir_for(&fix.url)` — but
+    // lifecycle::resolve_plugin_dir consults the Config struct's
+    // CatalogEntry.path (Phase 1 carryover). We synthesise a Config
+    // pointing at the cache dir so resolve_plugin_dir succeeds.
+    let cache_dir = cache_dir_for(&env, &fix.url);
+    assert!(cache_dir.is_dir(), "cache dir should exist post-add");
+
+    let synthetic_config = {
+        use std::collections::BTreeMap;
+        let mut catalogs = BTreeMap::new();
+        #[allow(deprecated)]
+        catalogs.insert(
+            "sample-plugin-catalog".to_owned(),
+            tome::config::CatalogEntry {
+                name: "sample-plugin-catalog".to_owned(),
+                url: fix.url.clone(),
+                ref_: "main".into(),
+                path: cache_dir.clone(),
+                last_synced: time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+            },
+        );
+        #[allow(deprecated)]
+        tome::config::Config { catalogs }
+    };
+
+    let second_scope = tome::workspace::Scope(
+        tome::workspace::WorkspaceName::parse("second").expect("valid workspace name"),
+    );
     let embedder = StubEmbedder::new();
+    // Library-API enable uses stub seeds; meta was stamped with
+    // registry seeds by the CLI add above. The lifecycle reads
+    // `OpenOptions.embedder.name`/`version` only to forward into the
+    // initial `index::open` — they're no-ops on subsequent opens since
+    // meta is "first writer wins". But the lifecycle's drift check
+    // would fire on a mismatch. To sidestep, we pass REGISTRY seeds to
+    // the lifecycle so drift-check passes against the CLI-stamped
+    // meta.
+    let (reg_e, reg_r, reg_s) = {
+        let pick = |kind| {
+            let entry = tome::embedding::registry::MODEL_REGISTRY
+                .iter()
+                .find(|m| std::mem::discriminant(&m.kind) == std::mem::discriminant(&kind))
+                .unwrap();
+            tome::index::MetaSeed {
+                name: entry.name.to_owned(),
+                version: entry.version.to_owned(),
+            }
+        };
+        (
+            pick(tome::embedding::registry::ModelKind::Embedder),
+            pick(tome::embedding::registry::ModelKind::Reranker),
+            pick(tome::embedding::registry::ModelKind::Summariser),
+        )
+    };
     let deps = LifecycleDeps {
         paths: &paths,
-        scope: &workspace_scope,
-        config: &workspace_config,
+        scope: &second_scope,
+        config: &synthetic_config,
         embedder: &embedder,
-        embedder_seed: stub_embedder_seed(),
-        reranker_seed: stub_reranker_seed(),
-        summariser_seed: stub_summariser_seed(),
+        embedder_seed: reg_e,
+        reranker_seed: reg_r,
+        summariser_seed: reg_s,
         allow_model_download: false,
     };
     let plugin_id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
-    lifecycle::enable(&plugin_id, &deps).expect("enable in workspace");
+    lifecycle::enable(&plugin_id, &deps).expect("enable in `second`");
 
-    // Compute the cache directory.
-    let cache_dir = {
-        let mut h = Sha256::new();
-        h.update(fix.url.as_bytes());
-        env.catalogs_dir().join(hex::encode(h.finalize()))
-    };
-    assert!(cache_dir.is_dir());
+    // Sanity: `second` has workspace_skills enrolments now.
+    let pre_ws_rows = count_workspace_enrolments(&paths, "second", "sample-plugin-catalog");
+    assert!(pre_ws_rows > 0, "second should have enrolments pre-remove");
 
-    // Workspace's index has rows for the plugin.
-    let ws_db = paths.index_db.clone();
-    let _ = &workspace_scope;
-    let pre_rows: i64 = {
-        let conn = index::open(
-            &ws_db,
-            &OpenOptions {
-                embedder: stub_embedder_seed(),
-                reranker: stub_reranker_seed(),
-                summariser: stub_summariser_seed(),
-            },
-        )
-        .unwrap();
-        conn.query_row(
-            "SELECT COUNT(*) FROM skills WHERE catalog = 'sample-plugin-catalog'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap()
-    };
-    assert!(
-        pre_rows > 0,
-        "workspace index should have rows before remove"
-    );
-
-    // Cascade-remove from the workspace.
+    // Step 5: cascade-remove from `second` via the CLI binary.
     let rm = env
         .cmd()
         .args([
             "--workspace",
-            ws.to_str().unwrap(),
+            "second",
             "catalog",
             "remove",
             "sample-plugin-catalog",
@@ -387,40 +390,44 @@ fn cascade_remove_in_workspace_does_not_remove_shared_clone() {
         String::from_utf8_lossy(&rm.stderr),
     );
 
-    // Workspace config no longer has it.
-    let ws_body = std::fs::read_to_string(&workspace_config_path).unwrap();
-    assert!(!ws_body.contains("sample-plugin-catalog"), "{ws_body}");
-
-    // Workspace index rows for the catalog dropped.
-    let post_rows: i64 = {
-        let conn = index::open(
-            &ws_db,
-            &OpenOptions {
-                embedder: stub_embedder_seed(),
-                reranker: stub_reranker_seed(),
-                summariser: stub_summariser_seed(),
-            },
-        )
-        .unwrap();
-        conn.query_row(
-            "SELECT COUNT(*) FROM skills WHERE catalog = 'sample-plugin-catalog'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap()
-    };
-    assert_eq!(post_rows, 0, "workspace skills should be dropped");
-
-    // Global config STILL references the catalog.
-    let g_body = std::fs::read_to_string(&paths.global_config_file).unwrap();
+    // ---- Post-conditions ---------------------------------------------------
+    // `second`'s workspace_catalogs row is gone.
     assert!(
-        g_body.contains("sample-plugin-catalog"),
-        "global config lost the catalog: {g_body}",
+        !has_workspace_enrolment(&paths, "second", "sample-plugin-catalog"),
+        "second's workspace_catalogs row should be removed",
     );
-
-    // Cache directory SURVIVES — global still references it.
+    // `global`'s workspace_catalogs row survives.
+    assert!(
+        common::has_global_enrolment(&paths, "sample-plugin-catalog"),
+        "global's workspace_catalogs row must survive a sibling-workspace cascade",
+    );
+    // `second`'s workspace_skills enrolments are gone.
+    assert_eq!(
+        count_workspace_enrolments(&paths, "second", "sample-plugin-catalog"),
+        0,
+        "second's workspace_skills enrolments should be cleared",
+    );
+    // The shared `skills` rows survive per FR-383.
+    assert!(
+        count_skill_rows(&paths, "sample-plugin-catalog") > 0,
+        "shared skill rows must survive — global still references them (FR-383)",
+    );
+    // Cache directory survives — `global` still references the URL
+    // (FR-361 refcount > 0 → no cleanup).
     assert!(
         cache_dir.is_dir(),
         "cache directory deleted despite global still referencing the URL",
     );
+}
+
+/// Helper local to this test file: does the central DB hold a
+/// `(workspace, catalog)` enrolment?
+fn has_workspace_enrolment(paths: &tome::paths::Paths, workspace: &str, catalog: &str) -> bool {
+    if !paths.index_db.is_file() {
+        return false;
+    }
+    let conn = tome::index::open_read_only(&paths.index_db).expect("open ro");
+    tome::index::workspace_catalogs::find(&conn, workspace, catalog)
+        .map(|opt| opt.is_some())
+        .unwrap_or(false)
 }

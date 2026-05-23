@@ -16,7 +16,7 @@ mod common;
 
 use common::{
     config_with_catalog, copy_sample_plugin_catalog, fabricate_models, lifecycle_paths,
-    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
+    seed_workspace, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::embedding::stub::StubEmbedder;
@@ -24,29 +24,6 @@ use tome::index::{self, OpenOptions};
 use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
 use tome::workspace::{Scope, WorkspaceName};
-
-/// Insert a workspace row directly into the central DB. Mirrors the
-/// shape of `schema::bootstrap`'s seed of the privileged `global`
-/// workspace; this is the seam US2 (`tome workspace add`) will own when
-/// it ships. Keeping the helper in the test file (not common/) signposts
-/// that callers should switch to the production path once it exists.
-fn seed_workspace(paths: &tome::paths::Paths, name: &str) {
-    let conn = index::open(
-        &paths.index_db,
-        &OpenOptions {
-            embedder: stub_embedder_seed(),
-            reranker: stub_reranker_seed(),
-            summariser: stub_summariser_seed(),
-        },
-    )
-    .expect("open index for seeding");
-    let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
-    conn.execute(
-        "INSERT INTO workspaces (name, created_at, last_used_at) VALUES (?1, ?2, ?2)",
-        rusqlite::params![name, now_unix],
-    )
-    .expect("seed workspace row");
-}
 
 fn workspace_skill_count(paths: &tome::paths::Paths, workspace: &str) -> i64 {
     let conn = index::open(
