@@ -264,6 +264,220 @@ fn newer_on_disk_refused_with_schema_version_too_new() {
     assert_eq!(stored, 99, "refusal must not touch the on-disk version");
 }
 
+/// T098m (Phase 4 / FR-325): a reader opened against a schema-newer-than-
+/// compiled-in DB MUST be refused with `SchemaVersionTooNew` — never
+/// silently observe garbage columns from a future migration. The
+/// `open_read_only` gate uses the legacy [`TomeError::SchemaTooNew`]
+/// (exit 52) for the read path; here we exercise the writer-side
+/// [`TomeError::SchemaVersionTooNew`] (exit 73) for parity with what a
+/// half-applied future migration would surface to the next reader after
+/// the writer commits beyond the compiled-in target.
+///
+/// We synthesise the "future on-disk version" by stamping the DB at v99
+/// directly, then opening it for a write attempt. The contract is
+/// identical to the "newer-on-disk refused" test above, but phrased in
+/// terms of FR-325's read-path semantics: a reader observing v99 must
+/// receive a structured refusal, never a half-migrated view.
+#[test]
+fn read_path_refuses_newer_on_disk_with_schema_version_too_new() {
+    static MIGRATIONS: &[Migration] = &[];
+    let _guard = MigrationsGuard::install(MIGRATIONS);
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("index.db");
+    write_index_db_with_schema_version(&path, 99);
+
+    // `apply_pending` is the writer-side gate; it must refuse with
+    // `SchemaVersionTooNew` for the same reason `open_read_only` refuses
+    // with `SchemaTooNew` — neither must execute against an unknown
+    // schema. FR-325 names the invariant: a reader must EITHER see a
+    // pre-migration consistent snapshot OR a structured refusal — never
+    // a half-migrated mid-statement view.
+    let mut conn = rusqlite::Connection::open(&path).expect("open synthetic db");
+    let err = apply_pending(&mut conn, 99, tome::index::schema::SCHEMA_VERSION)
+        .expect_err("future-version DB must be refused");
+    assert!(
+        matches!(err, TomeError::SchemaVersionTooNew { on_disk: 99, .. }),
+        "expected SchemaVersionTooNew, got {err:?}",
+    );
+}
+
+/// T098m (Phase 4 / FR-325): SQLite's MVCC snapshot guarantees a
+/// reader holding an open connection sees a consistent view of the
+/// database for the duration of its transaction, regardless of what a
+/// concurrent writer commits. This test exercises the simpler half of
+/// FR-325 — a reader opened against schema v1 keeps observing v1 even
+/// while a writer migrates to v2 on a second thread.
+///
+/// The timing-sensitive "writer commits mid-statement" race is left
+/// `#[ignore]`-d below (US4.b follow-up) because it requires controlled
+/// scheduling we don't have infrastructure for. The MVCC-snapshot half
+/// is what production callers actually rely on.
+#[test]
+fn reader_holding_snapshot_observes_pre_migration_schema() {
+    use std::sync::Arc;
+    use std::sync::Barrier;
+    use std::thread;
+
+    static MIGRATIONS: &[Migration] = &[Migration {
+        from: 1,
+        to: 2,
+        name: "test_mvcc_snapshot_v1_to_v2",
+        apply: migrate_v1_to_v2_create_marker,
+    }];
+    // First step from v0 must exist so v1_marker is queryable for the
+    // multi-step v2 body.
+    static FULL: &[Migration] = &[
+        Migration {
+            from: 0,
+            to: 1,
+            name: "test_mvcc_snapshot_v0_to_v1",
+            apply: migrate_v0_to_v1_create_marker,
+        },
+        Migration {
+            from: 1,
+            to: 2,
+            name: "test_mvcc_snapshot_v1_to_v2",
+            apply: migrate_v1_to_v2_create_marker,
+        },
+    ];
+    let _guard = MigrationsGuard::install(MIGRATIONS);
+    // Silence unused-static warnings: FULL is referenced for documentation
+    // of the migration shape but the actual sequencing here is single-step
+    // because we stamp v1 directly.
+    let _ = FULL;
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("index.db");
+    write_index_db_with_schema_version(&path, 1);
+    // Switch the synthetic DB into WAL mode and pre-create the
+    // v1_marker table. WAL is the only journal mode under which
+    // SQLite's MVCC snapshot semantics apply (FR-325 relies on this);
+    // the helper that built the synthetic v1 DB defaults to rollback
+    // journal. Also create v1_marker by hand — the FULL migration
+    // would have produced it on the v0→v1 step; we stamped v1
+    // directly so the v1→v2 step's `SELECT FROM v1_marker` requires it.
+    {
+        let conn = rusqlite::Connection::open(&path).expect("populate v1 state");
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .expect("enable WAL");
+        conn.execute_batch("CREATE TABLE v1_marker (id INTEGER PRIMARY KEY) STRICT")
+            .expect("create v1_marker");
+    }
+
+    // Reader thread: open a read-only handle, start a deferred transaction
+    // to pin the MVCC snapshot, then wait on the barrier so the writer
+    // can race ahead. After the writer commits + signals, the reader
+    // confirms `v2_marker` is NOT visible from its snapshot.
+    let barrier_start = Arc::new(Barrier::new(2));
+    let barrier_after_commit = Arc::new(Barrier::new(2));
+
+    let reader_path = path.clone();
+    let r_start = Arc::clone(&barrier_start);
+    let r_after = Arc::clone(&barrier_after_commit);
+    let reader = thread::spawn(move || {
+        let conn = rusqlite::Connection::open_with_flags(
+            &reader_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("reader open");
+
+        // Pin the MVCC snapshot by issuing a read against the on-disk
+        // schema version before the writer migrates.
+        let before_version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read schema_version pre-migration");
+        assert_eq!(before_version, "1", "reader must see v1 before migration");
+
+        // Hold open a transaction so SQLite's WAL snapshot is pinned
+        // for the rest of this thread's lifetime.
+        conn.execute_batch("BEGIN DEFERRED").expect("begin tx");
+        // First read inside the transaction establishes the snapshot.
+        let _: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("snapshot establish");
+
+        r_start.wait();
+        // Writer races ahead now.
+        r_after.wait();
+
+        // Inside our pinned snapshot, v2_marker must NOT be visible —
+        // the writer's commit lands after our snapshot.
+        let v2_visible: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='v2_marker'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+
+        conn.execute_batch("COMMIT").ok();
+        v2_visible
+    });
+
+    // Writer thread: wait for reader's snapshot to pin, then run the
+    // v1→v2 migration through the production `apply_pending` path.
+    // `MIGRATIONS_OVERRIDE` is `thread_local!` — the writer thread must
+    // install its OWN guard (the main-thread guard doesn't propagate)
+    // so `apply_pending` here uses the synthetic single-step v1→v2
+    // migration, not the production registry.
+    let writer_path = path.clone();
+    let w_start = Arc::clone(&barrier_start);
+    let w_after = Arc::clone(&barrier_after_commit);
+    let writer = thread::spawn(move || {
+        let _writer_guard = MigrationsGuard::install(MIGRATIONS);
+        w_start.wait();
+        let mut conn = rusqlite::Connection::open(&writer_path).expect("writer open");
+        let new_version = apply_pending(&mut conn, 1, 2).expect("writer migrates");
+        assert_eq!(new_version, 2);
+        w_after.wait();
+    });
+
+    writer.join().expect("writer thread");
+    let v2_visible_to_reader = reader.join().expect("reader thread");
+
+    assert!(
+        !v2_visible_to_reader,
+        "FR-325 MVCC: a reader's pinned snapshot must not observe a post-commit migration",
+    );
+
+    // Fresh read-only handle after both threads complete must see v2.
+    let conn = rusqlite::Connection::open(&path).expect("fresh open");
+    let after_version: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("post-migration version");
+    assert_eq!(
+        after_version, "2",
+        "fresh reader opened after migration must see v2",
+    );
+}
+
+/// T098m timing-sensitive half (FR-325). Verifies a reader that
+/// SUBMITS a statement WHILE the writer is mid-transaction (i.e. the
+/// writer holds BEGIN but has not yet committed) sees the
+/// pre-migration view. SQLite WAL guarantees this — writers don't
+/// block readers — but proving it requires controlled scheduling that
+/// `std::thread` + `Barrier` cannot reliably express without flakiness.
+/// Left ignored; revisit if/when the project picks up a deterministic
+/// concurrency-testing harness (e.g. shuttle).
+#[test]
+#[ignore = "F11c-2 followup: timing-sensitive mid-migration race needs controlled scheduling"]
+fn reader_mid_writer_transaction_sees_pre_migration_view() {
+    // Skeleton intentionally empty: see the doc-comment above.
+}
+
 #[test]
 fn migrations_override_is_thread_local_and_clears_on_drop() {
     // Sanity guard: the RAII `MigrationsGuard` clears the slot on drop.
