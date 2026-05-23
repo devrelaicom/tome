@@ -1,393 +1,355 @@
 # Architecture
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
-> **Generated**: 2026-05-14
-> **Last Updated**: 2026-05-14
+> **Generated**: 2026-05-23
+> **Last Updated**: 2026-05-23
 
 ## Architecture Overview
 
-Tome is a synchronous CLI application (with an async MCP server island) designed to make Claude Code's plugin ecosystem work across other agentic coding harnesses. It provides:
+Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, harness composition management, and workspace-scoped plugin enablement.
 
-- **Catalog management**: register and update third-party plugin catalogs (git repositories)
-- **Plugin lifecycle**: enable/disable plugins and reindex skills for vector search
-- **Skill search**: query-time KNN + reranking across enabled plugins
-- **Workspace isolation**: per-project and global plugin/model state
-- **Diagnostics**: health checks and automated repair via `tome doctor`
-- **MCP interoperability**: stdio MCP server for non-Claude harnesses to query skills
+The architecture is **monolithic with layered structure** split across two execution contexts:
+- **CLI layer** — sync command dispatcher
+- **MCP layer** — async stdio server (Phase 3+)
 
-The codebase is organized into **capability modules** (not layered): each module is responsible for a distinct piece of functionality, with clear dependency boundaries and a synchronous foundation except for the MCP server which lives in a structurally-enforced async island at `src/mcp/`.
+The central nervous system is a **single SQLite database** (`<home>/.tome/index.db`) that centralizes all state: plugin metadata, embeddings, workspace bindings, and enabled skills. Per-workspace composition settings live in separate TOML files (`<root>/workspaces/<name>/settings.toml`) and project markers (`<project>/.tome/config.toml`).
 
 ## Architecture Pattern
 
 | Pattern | Description |
 |---------|-------------|
-| **Capability-organized modules** | `catalog/`, `plugin/`, `index/`, `embedding/`, `workspace/`, `doctor/`, `mcp/` — each module owns its domain without bleed |
-| **Closed error set** | `TomeError` enum with 26+ variants (codes 1–8, 20–23, 30–37, 40–42, 50–54, 60–61, 70–75) — adds exit-code specificity; new variants force test + PRD updates |
-| **Sync-first with async island** | All work is synchronous; `src/mcp/` is the single place where `tokio::`, `.await`, and `async fn` are permitted — enforced by `tests/sync_boundary.rs` |
-| **Silent compute + emit wrapper** | Command pipelines separate pure compute (`fn pipeline(args, deps) -> Result<Outcome>`) from I/O side-effects (emit, exit) — enables library reuse by non-CLI surfaces (MCP, RPC) |
-| **Per-scope config + shared index** | Workspaces and global scope each maintain their own `config.toml`; the index DB is scoped by `${state_dir}/index.db` matching the resolved scope |
-| **Content-addressed shared resources** | On-disk catalog clones are SHA256-addressed; reference counting via `catalog::store::reference_count` prevents orphan cleanup when multiple scopes reference the same URL |
-| **Advisory lock + SQLite WAL** | All index DB mutations acquire an advisory lockfile (`index.lock`); WAL mode enables concurrent readers |
-| **Test-only `thread_local!` injection** | Framework modules expose `#[doc(hidden)] pub static MIGRATIONS_OVERRIDE: thread_local!` for synthesis; production code ignores the override |
+| Layered (capability-based) | Commands → Business Logic (Lifecycle, Embedding, Workspace) → Data Access (Index, Catalog, Config) → Persistence (SQLite, Filesystem, Git) |
+| Hexagonal (ports & adapters) | Trait boundaries for `Embedder`/`Reranker`/`Summariser` + `HarnessModule` allow swappable implementations (production vs stub for tests) |
+| Trait-driven | Core abstractions decouple policy from mechanism; composition via struct fields rather than factory functions |
+| Phase 4 — Harness abstraction | Five `HarnessModule` impls (Claude Code, Codex, Cursor, Gemini, OpenCode) enable independent harness wiring without command-layer coupling |
 
 ## Core Components
 
-### `catalog/` — Catalog Registry
+### CLI Entry Point (`src/main.rs`)
 
-- **Purpose**: Register, update, and cache third-party plugin catalogs (git repositories). Catalog metadata lives in `${state_dir}/catalogs/` as TOML files; actual plugin trees are cloned to `${cache_dir}/catalogs/` by content hash.
-- **Location**: `src/catalog/`
-- **Dependencies**: `git` (shell), `serde`/`toml`, `tempfile` (atomic writes)
-- **Key Types**:
-  - `CatalogManifest` (`tome-catalog.toml` — strict parsing)
-  - `CatalogEntry` (in-memory representation with URL + ref)
-- **Key Functions**:
-  - `store::save_atomic` — atomic TOML write via tempfile
-  - `store::reference_count(url, paths) -> Vec<Scope>` — walk every scope's config to find who references a URL
-  - `git::clone_shallow` — fetch a specific ref, credential-scrub errors
-  - `git::scrub_credentials` — redact secrets from error chains
-- **Dependents**: Every command that lists/enables plugins, catalog-update workflows
+- **Purpose**: Parse arguments, resolve workspace context, dispatch to subcommands
+- **Location**: `src/main.rs`
+- **Key flow**:
+  1. Pre-parse `--version` flag (before clap) to include embedder/reranker/summariser identities
+  2. Resolve `Paths` once from `$HOME/.tome/` (Phase 4 single root)
+  3. Resolve workspace via `workspace::resolution::resolve()` (consults central DB)
+  4. Route command dispatch; translate TomeError to exit codes
+  5. Special-case MCP: skip stderr logging init + ctrlc handler (uses tokio signal)
 
-### `plugin/` — Plugin Metadata & Lifecycle
+### Path Resolution (`src/paths.rs`)
 
-- **Purpose**: Parse plugin manifests (`plugin.json`), skill frontmatter (SKILL.md YAML headers), enumerate plugin components (skills, agents, commands, hooks), and orchestrate enable/disable transitions.
-- **Location**: `src/plugin/`
-- **Dependencies**: `serde` (lenient), `time` (timestamps)
-- **Key Types**:
-  - `PluginId` (parsed `<catalog>/<plugin>`)
-  - `PluginManifest` (lenient)
-  - `SkillFrontmatter` (lenient + fallback defaults)
-  - `PluginRecord` (aggregated view: manifest + index state)
-  - `ComponentCounts` (skills/agents/commands/hooks tally)
-- **Key Functions**:
-  - `lifecycle::enable(plugin_id, deps)` → embedder call + index insert
-  - `lifecycle::disable(plugin_id, deps)` → index delete
-  - `lifecycle::reindex_plugin(id, deps, force)` → re-embed modified skills
-  - `lifecycle::cascade_disable_for_catalog(catalog_id, deps)` → disable all enabled plugins in one lock window
-  - `frontmatter::parse_skill_frontmatter(path)` → extract title/description from SKILL.md
-- **Dependents**: `commands/plugin/`, `index/skills`, MCP tools
+- **Purpose**: Resolve all Tome-owned paths from `$HOME/.tome/` root (Phase 4 consolidated)
+- **Location**: `src/paths.rs`
+- **Phase 4 changes**: Dropped XDG split; everything under single `<home>/.tome/` root (constitution v1.3.0 §Paths amendment)
+- **Public fields**:
+  - `root` — `<home>/.tome/`
+  - `index_db`, `index_lock` — central database
+  - `catalogs_dir`, `models_dir` — on-disk resources
+  - `workspaces_dir` — per-workspace settings
+  - `logs_dir`, `mcp_log`, `mcp_log_prev` — diagnostics
+- **Invariant**: All path joins happen here; no string literals elsewhere (enforced by test guards)
 
-### `index/` — Vector Search Index (SQLite + sqlite-vec)
+### Workspace Scope Resolution (`src/workspace/`)
 
-- **Purpose**: Persist indexed skills with embeddings, reranker scores, and metadata. Schema versioning + forward-only migrations.
-- **Location**: `src/index/`
-- **Dependencies**: `rusqlite`, `sqlite-vec` C extension (vendored), `sha2`/`hex` (content hash), `tempfile` (atomic lock), `serde`
-- **Key Types**:
-  - `SkillRecord` (persisted: plugin, skill name, enabled, embedding, reranker score)
-  - `MetaKey` (config keys: `embedder_name`, `reranker_name`, `reranker_version`)
-  - `DriftStatus` (embedder/reranker mismatch detection)
-  - `Candidate` (KNN result: plugin id, skill name, similarity)
-  - `Migration { from, to, name, apply }` (forward-only schema change)
-- **Key Functions**:
-  - `db::open(paths, scope)` → acquire advisory lock, forward-migrate, return handle
-  - `db::open_read_only(paths, scope)` → open without lock (readers don't block writers)
-  - `migrations::apply_pending(conn, current, target)` → apply sequence of registered migrations
-  - `skills::enable_plugin_atomic(plugin_id, skills, embedder)` → single transaction: insert/update rows, detect content-hash-unchanged for cheap re-enable
-  - `skills::reindex_plugin_atomic(plugin_id, embedder, reranker)` → classify each skill as Added/Modified/Removed, update selectively
-  - `query::knn(conn, query_embedding, filters, reranker)` → search by vector + optional rerank
-  - `integrity::check(conn)` → `PRAGMA integrity_check`
-  - `meta::detect_drift(conn, embedder_name, reranker_name)` → compare stored vs configured identities
-- **Dependents**: Plugin lifecycle, query, status/doctor, MCP tools
+- **Purpose**: Determine active workspace from CLI flag, env var, project marker, or default
+- **Location**: `src/workspace/{name,scope,resolution}.rs`
+- **Phase 4 changes**:
+  - `Scope` → tuple struct `Scope(pub WorkspaceName)` (was: enum `Scope::Global | Scope::Workspace(PathBuf)`)
+  - `ResolvedScope` gains `project_root: Option<PathBuf>` field
+  - `--workspace <NAME>` flag (was: `--workspace <PATH>`); no more `--global` flag
+  - Privileged `"global"` workspace is silent default
+- **Resolution algorithm**:
+  1. Check `--workspace <NAME>` CLI flag (validate against central `workspaces` table)
+  2. Check `TOME_WORKSPACE` env var
+  3. Walk project hierarchy for `.tome/config.toml` marker (read `workspace` field)
+  4. Fall back to `"global"` workspace (always exists)
+  5. Emit `WorkspaceConflict` (72) if multiple markers found; `WorkspaceNotFound` (13) if name not in registry
 
-### `embedding/` — Model Management & Inference
+### Commands Dispatcher (`src/commands/`)
 
-- **Purpose**: Download, verify, and invoke BGE embedder (bge-small-en-v1.5) and reranker (bge-reranker-base). Single embedder; lazy reranker load.
-- **Location**: `src/embedding/`
-- **Dependencies**: `fastembed-rs` (wrapping `ort`/ONNX), `reqwest::blocking`, `sha2`, `indicatif` (progress), `serde`
-- **Key Types**:
-  - `Embedder` trait (sync `fn embed(&self, text: &str) -> Result<Vec<f32>>`)
-  - `Reranker` trait (sync `fn rerank(&self, query: &str, candidates: &[&str]) -> Result<Vec<Score>>`)
-  - `FastembedEmbedder` (production impl via fastembed-rs)
-  - `StubEmbedder` (deterministic test impl, zero models)
-  - `ModelRegistry` entry (name, version, url, sha256)
-- **Key Functions**:
-  - `download::download_model(model_name, paths)` → fetch + verify via SHA-256 + atomic persist
-  - `download::sha256_file(path)` → streaming chunked hash (used by `models list --verify`)
-  - `fastembed::new() -> Result<Arc<dyn Embedder>>` → initialize ONNX model at `${XDG_DATA_HOME}/tome/models/`
-  - `stub::new() -> Arc<dyn Embedder>` (cfg test)
-- **Dependents**: Plugin enable/reindex, query, MCP preflight + tools
+- **Purpose**: Execute 9 CLI subcommands (catalog, plugin, models, query, reindex, status, workspace, mcp, doctor)
+- **Location**: `src/commands/{catalog,plugin,models,query,reindex,status,workspace,mcp,doctor}.rs`
+- **Pattern**: Most commands have:
+  - `pub fn run(args, scope, mode)` — CLI entry with emit/exit
+  - `pub fn pipeline(args, deps)` or `run_with_deps(...)` — silent compute for library reuse by MCP/tests
+- **Key invariant**: Lazy model loading (embedder/reranker not loaded on status/doctor/workspace unless needed)
 
-### `workspace/` — Scope & Context Resolution (Phase 3)
+### Central Index Database (`src/index/`)
 
-- **Purpose**: Represent local (`.tome/`) vs global plugin/model state; resolve which scope applies to a command; manage opt-in workspace registry at `${state_dir}/workspaces.txt`.
-- **Location**: `src/workspace/`
-- **Dependencies**: `serde`/`toml`, `tempfile`, `directories`
-- **Key Types**:
-  - `Scope` (enum: `Global` | `Workspace(PathBuf)`)
-  - `ResolvedScope` (determined scope + source: `--workspace` flag, `--global` flag, env, cwd walk, fallback)
-  - `ScopeSource` (enum variants serialized for JSON: `Flag`, `GlobalFlag`, `Env`, `CwdWalk`, `GlobalFallback`)
-  - `Paths` (updated with per-scope accessors: `config_file_for(&scope)`, `index_db_for(&scope)`, etc.)
-  - `WorkspaceInfo` (read-only report: catalog count, model state, index facts, schema version)
-  - `InitOutcome` (result of `tome workspace init`)
-- **Key Functions**:
-  - `resolution::resolve(scope_args) -> Result<ResolvedScope>` → check `--workspace`/`--global` mutual exclusivity (exit 72), walk cwd for `.tome/`, fallback global
-  - `init::init(target, inherit_global, force, paths)` → atomic directory landing via sibling staging + rename
-  - `info::assemble(scope, paths)` → pure compute (no I/O side-effects) for `workspace info` command + JSON
-  - `inventory::append_if_registry_exists(workspaces_txt_path, item)` → append if file exists (opt-in)
-- **Dependents**: `main.rs` (resolution happens first), every command (threads `ResolvedScope` through), workspace commands
+- **Purpose**: Single SQLite database indexing all plugins, skills, embeddings, and workspace state
+- **Location**: `src/index/{db,schema,skills,query,migrations}.rs`
+- **Schema Version**: 2 (Phase 4)
+- **Core tables**:
+  - `meta` (STRICT) — embedder/reranker/summariser identity + drift detection
+  - `workspaces` — registry of workspace names (id, name UNIQUE, created_at, last_used_at)
+  - `skills` — catalog/plugin/skill metadata (id, catalog, plugin, name UNIQUE triple, content_hash, indexed_at)
+  - `skill_embeddings` — sqlite-vec virtual table (skill_id PK, embedding FLOAT[384])
+  - `workspace_skills` — junction table (workspace_id, skill_id) — enablement is presence of row
+  - `workspace_catalogs` — junction table (workspace_id, catalog_name, url, pinned_ref)
+  - `workspace_projects` — project-to-workspace bindings (project_path PK, workspace_id FK, bound_at)
+- **Phase 4 changes**:
+  - Moved from per-workspace DBs to single central DB
+  - `skills.enabled` column dropped (enablement = presence of `workspace_skills` row)
+  - New workspace/project tables for multi-workspace support
+  - Catalog metadata now derived from filesystem + junction rows (not stored)
+- **Concurrency**: Single advisory lockfile (`index.lock`) per-Paths; readers never acquire lock; schema migration + writes both acquire lock
+- **Dependencies**: `rusqlite` + `sqlite-vec` extension (vendored C code)
 
-### `doctor/` — Diagnostic & Auto-Repair (Phase 3 US4)
+### Embedding Pipeline (`src/embedding/`)
 
-- **Purpose**: Comprehensive health check across models, index, catalogs, harness presence, drift; suggest fixes; apply auto-fixable repairs.
-- **Location**: `src/doctor/`
-- **Dependencies**: Everything (reads every subsystem)
-- **Key Types**:
-  - `DoctorReport` (embedder/reranker health, index integrity, drift, catalogs, harnesses, suggested_fixes, overall classification)
-  - `CatalogCacheState` (enum: `Ok` | `Missing` | `NotARepo` | `ManifestInvalid` | `Orphan` — new in P3 Polish)
-  - `CatalogCacheHealth` (per-catalog result)
-  - `HarnessPresence` (existence check for `.claude/`, `.codex/`, `.cursor/`, `.gemini/`, `.opencode/`, `.continue/`)
-  - `DoctorClassification` (enum: `Ok` | `Degraded` | `Unhealthy`)
-  - `SuggestedFix` (auto_fixable bool, subsystem string: `"embedder"`, `"reranker"`, `"catalog:<name>"`, `"schema"`)
-- **Key Functions**:
-  - `assemble_report(scope, paths, home, verify) -> DoctorReport` — silent compute (no emit)
-  - `checks::check_catalogs(paths, scope)` → walk `${cache_dir}/catalogs/` on disk
-  - `checks::check_workspace_registry(paths)` → validate 1 MiB size cap, 10k entry cap
-  - `harness_detect::probe(home)` → existence-only check for 6 harness dirs
-  - `fixes::apply(report, paths, scope)` → run each auto_fixable fix, re-run check inline
-  - `re_assemble(report)` → recompute suggested_fixes + overall without re-probing
-- **Dependents**: `commands/doctor`, `mcp/preflight`
+- **Purpose**: 384-dimensional text embedding + cross-encoder reranking for skill search
+- **Location**: `src/embedding/{mod,fastembed,stub,registry,download,runtime}.rs`
+- **Trait boundaries**:
+  - `Embedder` trait — `embed(text) -> Vec<f32>` + identity (model name/version)
+  - `Reranker` trait — `rerank(query, candidates) -> Vec<Scored>` + identity
+- **Implementations**:
+  - **Production**: `FastembedEmbedder` (ort-wrapped `fastembed-rs`; CPU-only), `FastembedReranker`
+  - **Test**: `StubEmbedder`, `StubReranker` — deterministic, model-free
+- **Model Registry**: Pinned BGE-small INT8 (45 MB, MIT), BGE-reranker INT8 (280 MB, MIT) with SHA-256 checksums
+- **Download**: Atomic `reqwest::blocking` + `tempfile` + SHA-256 verify; sparse-file fixtures in tests
 
-### `mcp/` — MCP Server (Phase 3 US1, async island)
+### Plugin Lifecycle (`src/plugin/lifecycle.rs`)
 
-- **Purpose**: Stdio MCP server exposing two tools: `search_skills` (KNN+rerank) and `get_skill` (metadata + components).
-- **Location**: `src/mcp/` — **only place async/await is allowed**
-- **Dependencies**: `rmcp`, `tokio` (single-threaded), `tracing` (file subscriber), `tempfile`
-- **Key Types**:
-  - `McpState` (Arc: embedder, reranker `OnceCell`, scope, paths, embedder_entry, reranker_entry)
-  - `Server` (rmcp `ToolRouter` impl)
-  - `SearchSkillsInput` / `GetSkillInput` (request schemas via `schemars`)
-- **Submodules**:
-  - `runtime.rs` — single-threaded tokio builder
-  - `log.rs` — 10 MiB atomic-rotate JSON-lines file logger + `ContractEventFormat` (custom tracing event format pins field names to contract: `ts` not `timestamp`, `msg` not `message`)
-  - `preflight.rs` — FR-110 startup checks (schema version, embedder load + hash, reranker deferred)
-  - `server.rs` — rmcp server loop + graceful shutdown (5 s timeout on SIGTERM/SIGINT)
-  - `state.rs` — `McpState` definition
-  - `tools/search_skills.rs` — tool handler (validates plugin/catalog, lazy-loads reranker, invokes `query::pipeline`)
-  - `tools/get_skill.rs` — tool handler (looks up plugin, reads SKILL.md, walks skill dir recursively)
-- **Key Functions**:
-  - `run(scope, paths) -> Result<()>` — sync entry from CLI, builds runtime, calls async loop
-  - `preflight::run(scope, paths) -> Result<EmbedderHandle>` — sync checks on blocking pool
-- **Dependents**: `commands/mcp`, `main.rs` (special-case: skip logging init, skip ctrlc handler)
+- **Purpose**: Enable/disable/reindex orchestrator composing manifest parse → embedding → index writes
+- **Location**: `src/plugin/lifecycle.rs`
+- **LifecycleDeps struct**: Input bundle wrapping `&Embedder`, config, scope, paths, seeds
+- **Phase 4 changes**: Scope parameter is `&Scope` (not path-based); workspace_name resolved via `scope.name()`
+- **Key invariants**:
+  - Cheap re-enable: if `content_hash` matches, embedder not invoked; row updated with `UPDATE ... SET enabled = 1`
+  - Per-plugin atomicity: each `enable_plugin_atomic` acquires its own advisory lock
+  - Auto-disable on manifest-missing or plugin-not-found (reuses `CatalogNotFound` error per FR-602)
 
-### `commands/` — CLI Entry Points
+### Harness Abstraction (`src/harness/`)
 
-- **Purpose**: Dispatch every user-facing command; apply per-command argument parsing; wire library functions to I/O (stdout, exit codes).
-- **Location**: `src/commands/`
-- **Submodules**:
-  - `catalog.rs` — `add`, `remove`, `list`, `update`, `show`; Phase 2 foundational + Phase 3 US3 refcount
-  - `plugin/` — `enable`, `disable`, `list`, `show`, `interactive`; bare `tome plugin` → three-level TUI
-  - `models/` — `download`, `list`, `remove`; Phase 2 US4
-  - `query.rs` — `tome query` with KNN + reranker + `--strict`; `pipeline` export for MCP reuse (Phase 3 US1.b)
-  - `reindex.rs` — `tome reindex [<scope>] [--force]`; `run_with_deps` library entry (Phase 3 US5)
-  - `status.rs` — `tome status [--verify] [--json]`; read-only pre-flight; `--version` hook
-  - `workspace/` — `info`, `init` (Phase 3 US2)
-  - `doctor.rs` — `tome doctor [--fix] [--verify]`; thin wrapper over doctor library (Phase 3 US4)
-  - `mcp.rs` — `tome mcp` (Phase 3 US1)
-- **Pattern**: Each command typically has `pub fn run(args, scope, mode) -> Result<Outcome>` (emit-path) + `pub fn run_with_deps(args, scope, deps, mode) -> Result<Outcome>` or `pub fn pipeline(args, deps) -> Result<Outcome>` (silent-compute for library reuse)
+- **Purpose**: Trait-driven dispatch to five supported harnesses (Claude Code, Codex, Cursor, Gemini, OpenCode)
+- **Location**: `src/harness/{mod,claude_code,codex,cursor,gemini,opencode,rules_file,mcp_config}.rs`
+- **Phase 4 NEW**: Complete harness abstraction layer with per-harness `HarnessModule` impls
+- **Trait methods**:
+  - Identity — `name()`, `description()`
+  - Detection — `detect(home) -> bool` (existence-only per FR-167)
+  - Rules integration — `rules_file_target()`, `rules_file_strategy()`, `block_body_style()`
+  - MCP config — `mcp_config_path()`, `mcp_config_format()`, `mcp_parent_key()`
+- **Key decisions** (per research §R-8):
+  - Each harness owns a file under `src/harness/`; no per-harness subdirs in commands/
+  - Rules strategies: block-in-file (Claude, Codex, Gemini, OpenCode) vs standalone (Cursor)
+  - MCP config: JSON for most, TOML for Codex; stored per-project (Claude, Cursor, OpenCode) or global (Codex, Gemini)
+- **Registry**: `SUPPORTED_HARNESSES` static + test override hook (`HARNESS_MODULES_OVERRIDE`)
 
-### `presentation/` — Output Formatting & TUI
+### Settings & Composition (`src/settings/`)
 
-- **Purpose**: Tables, progress spinners, colored output, TTY-aware prompts.
-- **Location**: `src/presentation/`
-- **Submodules**:
-  - `tables.rs` — `comfy-table` helpers (plugin lists, skill results)
-  - `progress.rs` — `indicatif` spinners for download/embed
-  - `colour.rs` — `owo-colors` + `NO_COLOR` detection
-  - `prompt.rs` — `inquire` select/confirm/multi-select (refuse on non-TTY)
-- **Dependents**: Every command that outputs or prompts
+- **Purpose**: Parse and resolve layered harness selections across project/workspace/global scopes
+- **Location**: `src/settings/{mod,composition,parser,resolver}.rs`
+- **Phase 4 NEW**: Complete settings layer with composition reference support
+- **Layers** (priority order; first match wins):
+  1. Project marker — `<project>/.tome/config.toml` (`ProjectMarkerConfig`)
+  2. Workspace settings — `<root>/workspaces/<name>/settings.toml` (`WorkspaceSettings`)
+  3. Global settings — `<root>/settings.toml` (`GlobalSettings`)
+- **Composition references**: `[workspace]`, `[global]`, `[workspaces.<name>]` — one level deep (not recursive)
+- **All types**: `#[serde(deny_unknown_fields)]` — Tome-owned inputs are strict per FR-013a boundary
 
-### `output.rs` — JSON / Human Modes
+### Summariser (`src/summarise/`)
 
-- **Purpose**: Single write_* interface supporting both human text and machine-readable JSON.
-- **Key Types**:
-  - `OutputMode` (enum: `Human` | `Json`)
-- **Key Functions**:
-  - `write(mode, value)` where value is `Serialize`
-  - `write_error(mode, error)`
+- **Purpose**: Generate short/long workspace summaries from enabled plugins via Qwen2.5-0.5B-Instruct GGUF
+- **Location**: `src/summarise/{mod,llama,stub,registry,download,prompts}.rs`
+- **Phase 4 NEW**: Skeleton shipped with placeholder registry entry
+- **Architecture**:
+  - `Summariser` trait — `summarise(PluginSummariesInput) -> Result<SummariserOutput, TomeError>`
+  - **Production**: `LlamaSummariser` via `llama-cpp-2` + process-wide `LlamaBackend` singleton (OnceLock + mutex)
+  - **Test**: `StubSummariser` — deterministic, no model load
+- **Model**: Qwen2.5-0.5B-Instruct GGUF (placeholder SHA-256 in F6; real weight lands in US4.a)
+- **Singleton pattern**: First `backend()` call initializes via mutex-gated OnceLock; subsequent calls hit lock-free path
+- **Invocation**: Per-workspace, triggered by enable/disable/reindex/catalog-update; output cached in workspace settings
 
-### Other Core Modules
+### Doctor Diagnostics (`src/doctor/`)
 
-- **`config.rs`** — `config.toml` (strict `#[serde(deny_unknown_fields)]`)
-- **`paths.rs`** — XDG paths (refactored Phase 3 F1 to support per-scope accessors)
-- **`logging.rs`** — `tracing-subscriber` stderr setup (skipped on MCP path)
-- **`cli.rs`** — `clap` derive defs for all commands + global `--json`, `-v`, `--workspace`, `--global`
-- **`error.rs`** — Closed `TomeError` enum with exit codes (26+ variants)
-- **`catalog/git.rs`** — Shell-out to system `git`, credential scrubbing
+- **Purpose**: Broad health check + auto-repair for embedder/reranker/catalogs/schema/drift
+- **Location**: `src/doctor/{mod,checks,fixes}.rs`
+- **Key entry point**: `assemble_report(scope, paths, home, verify) -> DoctorReport`
+- **Report fields**: Embedder health, reranker health, index integrity, drift, catalog cache state, harness presence, suggested fixes, overall classification
+- **Classification**:
+  - Unhealthy — embedder missing/corrupt, integrity fail, embedder drift
+  - Degraded — reranker missing/corrupt, reranker drift, any catalog cache != Ok
+  - Ok — everything passes
+- **Auto-fixes** (routed by `subsystem` string):
+  - `"embedder"` — `embedding::download::download_model`
+  - `"reranker"` — same
+  - `"catalog:<name>"` — `Git::clone_shallow`
+  - `"schema"` — `index::migrations::apply_pending` under advisory lock
+- **No side effects** on `assemble`; `fixes::apply` mutates in place; `re_assemble` rebuilds derived state
+
+### MCP Server (`src/mcp/`)
+
+- **Purpose**: Async stdio MCP server advertising two tools: `search_skills`, `get_skill`
+- **Location**: `src/mcp/{mod,runtime,log,preflight,server,state,tools}.rs`
+- **Async boundary**: Only module allowed to use `tokio` (enforced by `tests/sync_boundary.rs`)
+- **Concurrency model**: Single-threaded tokio runtime per research §R-2
+- **Key components**:
+  - `runtime.rs` — entry point; builds `tokio::runtime::Runtime`, installs file log, runs preflight, blocks on `rmcp::serve_server`
+  - `preflight.rs` — FR-110 pipeline: schema-version gate → drift detection → embedder SHA-256 verify → eager-load FastembedEmbedder
+  - `log.rs` — 10 MiB atomic-rotate file log (JSON lines); stderr reserved for fatal startup errors only (FR-222)
+  - `state.rs` — `McpState { embedder, reranker (OnceLock), scope, paths, ... }`
+  - `tools/search_skills.rs`, `tools/get_skill.rs` — handlers with spawn_blocking for sync work
+- **Tool handlers**: Validate input, lazy-load reranker via `OnceLock::get_or_try_init`, dispatch work inside `spawn_blocking`
+- **Signal handling**: `tokio::signal::ctrl_c()` triggers graceful shutdown; 5 s timeout before hard shutdown
+
+### Catalog Management (`src/catalog/`)
+
+- **Purpose**: Register/list/update/remove external plugin catalogs from git repos
+- **Location**: `src/catalog/{manifest,store,git}.rs`
+- **Key invariants**:
+  - On-disk clone cache at `<root>/catalogs/<sha256>/` (content-addressed)
+  - Reference counting: `catalog::store::reference_count(url, paths) -> Vec<Scope>` determines cleanup eligibility
+  - Credential scrubbing in git errors + model URLs (regex `[A-Za-z][A-Za-z0-9+.-]*://.*@`)
+- **Manifest parsing**: `tome-catalog.toml` (strict, deny unknown fields)
+
+### Configuration (`src/config.rs`)
+
+- **Purpose**: Parse global `<root>/config.toml` — backward-compat layer for Phase 3 catalog enrolments (now moved to central DB junction)
+- **Location**: `src/config.rs`
+- **Type**: `Config` struct with `[catalogs]` table (read on commands that need catalog list)
+- **Strictness**: `#[serde(deny_unknown_fields)]`
 
 ## Data Flow
 
-### `tome plugin enable` Flow
+### Primary User Flow: Enable a Skill
 
 ```
-CLI args → scope resolution
-          ↓
-plugin::identity::parse() → PluginId
-          ↓
-catalog::store::load() → resolve catalog + plugin dir
-          ↓
-plugin::manifest::parse_plugin_manifest() → PluginManifest
-          ↓
-plugin::components::walk() → list of skills
-          ↓
-embedding::fastembed::new() [lazy load, cached] → Arc<dyn Embedder>
-          ↓
-index::db::open() [acquire advisory lock, migrate]
-          ↓
-plugin::frontmatter::parse_skill_frontmatter() × N → SkillFrontmatter array
-          ↓
-for each skill:
-  embedder.embed(text) → Vec<f32>
-  ↓
-index::skills::enable_plugin_atomic() [one transaction]
-  insert into skills, skill_embeddings
-  ↓
-return EnableOutcome (count_enabled, count_had_error)
-          ↓
-emit human or JSON output
+CLI: tome plugin enable <catalog>/<plugin>
+     ↓
+Paths::resolve() — read $HOME, construct <home>/.tome/ paths (Phase 4)
+     ↓
+workspace::resolution::resolve() — consult CLI flag / env / project marker / default
+     ↓
+index::open() — acquire advisory lock, check schema, load embedder/reranker identities from meta
+     ↓
+plugin::lifecycle::enable() — read plugin.json + SKILL.md frontmatter, compute embeddings
+     ↓
+index::skills::enable_plugin_atomic() — INSERT/UPDATE skills, skill_embeddings, workspace_skills junction rows
+     ↓
+Release advisory lock
+     ↓
+CLI: print summary (added/modified/unchanged skill counts)
 ```
 
-### `tome query` Flow
+### Search Flow: Query Skills
 
 ```
-CLI args (query text, --catalog filter, --strict threshold)
-          ↓
-embedding::fastembed::new() [lazy load]
-          ↓
-embedder.embed(query_text) → Vec<f32>
-          ↓
-index::db::open_read_only() [no lock needed]
-          ↓
-index::query::knn(embedding, filters) → Vec<Candidate>
-          ↓
-embedding::reranker = lazy::load() [on demand]
-          ↓
-reranker.rerank(query, skill_texts) → Vec<(candidate, score)>
-          ↓
---strict threshold filter
-          ↓
-emit as table or JSON
+CLI: tome query "find a plugin that does X"
+     ↓
+workspace::resolution::resolve() → Scope(WorkspaceName)
+     ↓
+index::open_read_only() — open DB, don't take lock (readers ≠ writers)
+     ↓
+embedding::Embedder::embed(query) → Vec<f32> (384-dim)
+     ↓
+index::query::knn() — sqlite-vec KNN search filtered by workspace_skills junction (default k=20)
+     ↓
+embedding::Reranker::rerank(query, candidates) — cross-encoder scoring
+     ↓
+Sort by reranker score; emit human-readable or JSON
 ```
 
-### `tome workspace info` Flow
+### MCP Tool Flow: search_skills Handler
 
 ```
-CLI arg (optional --workspace <path>)
-          ↓
-workspace::resolution::resolve() → ResolvedScope
-          ↓
-workspace::info::assemble(scope, paths) [pure compute, no emit]
-  catalog count from resolved config.toml
-  model state from embedding registry + disk
-  index state from read-only DB open
-  schema version from meta table
-          ↓
-emit WorkspaceInfo (human or JSON) → exit 0
+MCP harness: POST {"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_skills", ...}}
+     ↓
+preflight (one-time on MCP startup):
+  - Schema version gate
+  - Drift detection
+  - SHA-256 verify embedder artefact
+  - Eager-load FastembedEmbedder
+     ↓
+Handler: validate plugin_without_catalog / unknown_catalog
+     ↓
+Lazy-load reranker via OnceLock::get_or_try_init() in spawn_blocking
+     ↓
+Call query::pipeline() — compute embedding, KNN, rerank
+     ↓
+Map TomeError to MCP error envelope; emit JSON
 ```
 
-### `tome doctor --fix` Flow
+### Workspace Binding Flow
 
 ```
-doctor::assemble_report(scope, paths, home, verify) → DoctorReport
-  check models, index, drift, catalogs, harnesses
-  build suggested_fixes by classification
-  classify overall (Ok / Degraded / Unhealthy)
-          ↓
-if --fix:
-  for each suggested_fix where auto_fixable:
-    fixes::apply_one()
-    re-check that subsystem inline
-    update report in place
-  ↓
-  doctor::re_assemble() [recompute suggested_fixes + overall]
-          ↓
-emit DoctorReport + exit (0 / 1 / 75)
-```
-
-### MCP `search_skills` Tool Flow
-
-```
-rmcp receive JSON-RPC call → SearchSkillsInput
-          ↓
-validate plugin_without_catalog / unknown_catalog
-          ↓
-state.reranker.get_or_try_init() [lazy load via spawn_blocking]
-          ↓
-spawn_blocking {
-  query::pipeline(args, deps) [pure compute]
-    embed query
-    KNN search
-    rerank
-    return Vec<Candidate>
-  }
-          ↓
-emit JSON array of results
+CLI: tome workspace use
+     ↓
+Resolve project root (CWD or --project flag)
+     ↓
+Check if <project>/.tome/ exists
+     ↓
+If exists + --force not set: refuse or prompt
+     ↓
+Create <project>/.tome/config.toml with [workspace] = <name>
+     ↓
+Index advisory lock: INSERT into workspace_projects (project_path, workspace_id, bound_at)
+     ↓
+CLI: print binding confirmation
 ```
 
 ## Layer Boundaries
 
 | Layer | Responsibility | Can Access | Cannot Access |
 |-------|----------------|------------|---------------|
-| **CLI (`commands/`)** | Parse args, emit output, exit | Libraries, library helpers | Nothing reaches back to CLI |
-| **Library (core modules)** | Silent compute, state mutation | Database, embedder, reranker, catalog | Output/emit, process exit (return Result instead) |
-| **Index (`index/`)** | Query, schema, lock, skills table | SQLite, migrations | Commands, embedding |
-| **Embedding (`embedding/`)** | Model download, inference, reranking | File I/O, `ort`, `fastembed` | Index, plugin, catalog |
-| **Plugin (`plugin/`)** | Metadata parsing, lifecycle | Index, embedding, catalog | CLI output |
-| **Catalog (`catalog/`)** | Registry persistence, git | Git shell, file I/O | Index directly, plugin enable |
-| **Workspace (`workspace/`)** | Scope resolution, context | Catalog, config, paths | Commands (except scope resolution in main.rs) |
-| **MCP (`src/mcp/`, async)** | Server loop, tool dispatch | Everything via library APIs | Process management (return error to harness) |
-
-**Dependency Rule**: No circular dependencies. Higher-level modules (CLI commands) depend on lower-level modules (core libraries); reverse never happens.
+| CLI (commands/) | HTTP/prompt/exit handling | All business logic | Direct DB access (uses index:: API) |
+| Business Logic (plugin/, embedding/, doctor/, workspace/) | Orchestration + decisions | Data access APIs (index::, catalog::) | CLI context (prompts, colors) |
+| Index API (index/) | Query + CRUD on skills/meta/workspace tables | Database (rusqlite) | Business logic |
+| Catalog/Config (catalog/, config.rs) | Manifest parsing, git operations | Filesystem, git CLI | Index operations |
+| Harness (harness/) | Per-harness path/config strategy | Filesystem (existence probes only) | Nothing else |
+| Settings (settings/) | Parse + compose harness lists | Filesystem (read TOML) | Database |
+| Output (output.rs) | JSON/human formatting, error display | Error enum | Any command logic |
+| MCP (mcp/) | Async stdio protocol, tool dispatch | All other modules via spawn_blocking | Direct CLI context |
 
 ## Dependency Rules
 
-- **Higher can depend on lower**: Commands depend on libraries; libraries don't depend on commands.
-- **No circular imports**: Each module explicitly lists its dependencies in the submodule tree.
-- **Sync-only except `src/mcp/`**: The boundary is structurally enforced — `tests/sync_boundary.rs` fails the build if any file outside `src/mcp/` uses `tokio::` or `.await`.
-- **Loose coupling across domains**: `catalog/`, `plugin/`, `index/` are independently testable; integration happens at the command layer.
+- **Higher → Lower only**: Commands depend on business logic; business logic depends on data access; no upward references
+- **Cross-layer**: `Paths` can be accessed anywhere (it's pure path construction); `TomeError` exported everywhere
+- **Async island**: Only `src/mcp/` may import `tokio` (enforced by `tests/sync_boundary.rs`)
+- **Lazy model loading**: Embedder/reranker loaded only when needed (not on status, doctor, query if cache hit)
 
 ## Key Interfaces & Contracts
 
 | Interface | Purpose | Implementations |
 |-----------|---------|-----------------|
-| `Embedder` trait | Embed text → Vec<f32> | `FastembedEmbedder` (production), `StubEmbedder` (tests) |
-| `Reranker` trait | Rerank candidates | `FastembedReranker` (production), `StubReranker` (tests) |
-| `PluginId` | Parsed `<catalog>/<plugin>` | Parse via `identity::parse`, normalize, validate |
-| `TomeError` enum | Closed error set with exit codes | 26+ variants, one-to-one mapping to exit codes |
-| `ResolvedScope` | Resolved workspace vs global | Determined at CLI entry, threaded through every command |
-| `DoctorReport` | Diagnostic output | Built by `assemble_report`, mutated by `fixes::apply`, re-assembled by `re_assemble` |
+| `Embedder` | Text → 384-dim embedding | `FastembedEmbedder` (prod), `StubEmbedder` (test) |
+| `Reranker` | Query + candidates → scored results | `FastembedReranker` (prod), `StubReranker` (test) |
+| `Summariser` | Plugin list → (short, long) summary | `LlamaSummariser` (prod), `StubSummariser` (test) |
+| `HarnessModule` | Per-harness rules/MCP paths | `ClaudeCode`, `Codex`, `Cursor`, `Gemini`, `OpenCode` |
+| `LifecycleDeps` | Input bundle for plugin enable/disable | Struct wrapping embedder, config, scope, paths |
 
 ## State Management
 
-| State Type | Location | Lifetime | Pattern |
-|------------|----------|----------|---------|
-| **Plugin registry** | `${state_dir}/catalogs/` (TOML) | Persistent | Write via `catalog::store::save_atomic` |
-| **Catalog clones** | `${cache_dir}/catalogs/<sha256>/` | Persistent until refcount→0 | Reference-counted by `store::reference_count` |
-| **Index DB** | `${state_dir}/index.db` | Persistent | Advisory lock + WAL |
-| **Models** | `${XDG_DATA_HOME}/tome/models/` | Persistent | Atomic persist + SHA-256 verify |
-| **MCP log** | `${state_dir}/tome/mcp.log` | Persistent, 10 MiB rotation | Atomic rename on rotate |
-| **Workspace registry** | `${state_dir}/workspaces.txt` | Persistent, opt-in | Append-only, dedupe by canonicalize |
-| **Embedder (in-process)** | `Arc<dyn Embedder>` in `McpState` | Per-MCP-server-lifetime | Loaded once on preflight |
-| **Reranker (lazy)** | `OnceCell<Arc<dyn Reranker>>` in `McpState` | Lazily loaded on first query | `get_or_try_init` + `spawn_blocking` |
+| State Type | Location | Pattern |
+|------------|----------|---------|
+| Central index | `<home>/.tome/index.db` | SQLite with WAL + advisory lockfile |
+| Workspace registry | Central DB `workspaces` table | Primary key on `name` UNIQUE |
+| Project bindings | Central DB `workspace_projects` table | project_path PRIMARY KEY → workspace_id FK |
+| Catalog cache | `<home>/.tome/catalogs/<sha256>/` | Content-addressed, reference-counted cleanup |
+| Models | `<home>/.tome/models/` | Atomic downloads via tempfile + SHA-256 |
+| Project marker | `<project>/.tome/config.toml` | Thin TOML; workspace binding + project-scope harnesses |
+| Workspace settings | `<home>/.tome/workspaces/<name>/settings.toml` | Layered harness list + cached summaries |
+| Global settings | `<home>/.tome/settings.toml` | Global harness fallback |
+| MCP log | `<home>/.tome/mcp.log` | 10 MiB atomic-rotate JSON lines |
 
 ## Cross-Cutting Concerns
 
 | Concern | Implementation | Location |
 |---------|----------------|----------|
-| **Logging** | `tracing-subscriber` stderr (`info!`, `error!`) + MCP file log | `src/logging.rs`, `src/mcp/log.rs` |
-| **Error handling** | Closed `TomeError` enum, `thiserror` at module level, `anyhow` at CLI | `src/error.rs` + per-module error types |
-| **Signal handling** | `ctrlc` SIGINT (CLI), `tokio::signal` SIGINT/SIGTERM (MCP) | `src/catalog/git.rs`, `src/mcp/mod.rs` |
-| **Atomic writes** | `tempfile::NamedTempFile` → persist or rollback | `catalog/store.rs`, `workspace/init.rs`, `mcp/log.rs` |
-| **Concurrency** | Advisory lockfile (CLI) + SQLite WAL (readers don't block writers) | `index/lock.rs`, `index/db.rs` |
-| **Credential scrubbing** | Regex redaction of secrets in error chains | `catalog/git.rs`, `mcp/mod.rs` (workspace_path, error_message fields) |
-| **Test isolation** | `StubEmbedder`, `MIGRATIONS_OVERRIDE` thread_local, `home: &Path` parameter | `embedding/stub.rs`, `index/migrations.rs`, `doctor/mod.rs` |
+| Logging | `tracing` + `tracing-subscriber` (stderr only; MCP uses file) | `src/logging.rs` |
+| Error handling | Closed `TomeError` enum + exit codes (1–80+) | `src/error.rs` |
+| Credential scrubbing | Regex remove `scheme://...@host` from strings | `src/catalog/git.rs` |
+| Signal handling | `ctrlc` on CLI (SIGINT → exit 8); tokio signal on MCP (graceful shutdown) | `src/main.rs`, `src/mcp/runtime.rs` |
+| Output formatting | `--json` mode (serde + anstream) vs human (colors, tables, spinner) | `src/output.rs`, `src/presentation/` |
+| Advisory locking | Single lockfile per Paths; database transaction per critical section | `src/index/lock.rs` |
 
----
+## Testing Architecture
 
-## What Does NOT Belong Here
-
-- Directory structure details → STRUCTURE.md
-- Technology versions → STACK.md
-- External service configs → INTEGRATIONS.md
-- Code style rules → CONVENTIONS.md
+- **Unit tests**: Embedded in modules (e.g., `src/error.rs`, `src/settings/mod.rs`)
+- **Integration tests**: Under `tests/` — access library via public API, no `#[cfg(test)]` visibility
+- **Test fixtures**: Synthetic DB builders, sparse-file models, git repos via `git init`
+- **Stub implementations**: `StubEmbedder` / `StubReranker` / `StubSummariser` with deterministic output for reproducible tests
+- **Test injection**: Thread-local `MIGRATIONS_OVERRIDE`, `HARNESS_MODULES_OVERRIDE` via RAII guards
+- **Sync boundary**: `tests/sync_boundary.rs` enforces no `tokio` outside `src/mcp/`
 
 ---
 
