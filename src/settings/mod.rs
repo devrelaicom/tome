@@ -100,7 +100,7 @@ mod toml_or_rfc3339 {
         // string-shaped helper struct). Using `serde_json::Value` as a
         // catch-all would pull in extra work; `toml::value::Datetime`
         // is the upstream type and has a `Display` we can re-parse.
-        #[derive(Deserialize)]
+        #[derive(Deserialize)] // not-strict: `#[serde(untagged)]` is mutually exclusive with `deny_unknown_fields`
         #[serde(untagged)]
         enum Repr {
             Toml(toml::value::Datetime),

@@ -96,6 +96,27 @@ fn embedding_registry_structs_all_carry_deny_unknown_fields() {
     assert_every_deserialize_has_deny_unknown("src/embedding/registry.rs");
 }
 
+/// T098n (Phase 4 / FR-348): `WorkspaceSettings`, `CachedSummaries`,
+/// `CatalogEntry`, `ProjectMarkerConfig`, and `GlobalSettings` are
+/// Tome-owned declarative inputs. Every `Deserialize`-deriving type
+/// in `src/settings/mod.rs` must carry `#[serde(deny_unknown_fields)]`
+/// so a future tooling version inserting a new field is REJECTED by
+/// older Tome (the strictness boundary works in both directions —
+/// neither side silently accepts something it doesn't understand).
+#[test]
+fn settings_module_structs_all_carry_deny_unknown_fields() {
+    assert_every_deserialize_has_deny_unknown("src/settings/mod.rs");
+}
+
+/// T098n (Phase 4 / FR-348): the in-resolver `ProjectMarkerConfig`
+/// shadow in `src/workspace/resolution.rs` is the parser surface for
+/// the `.tome/config.toml` project marker — same strictness contract
+/// as the canonical type in `src/settings/mod.rs`.
+#[test]
+fn workspace_resolution_structs_all_carry_deny_unknown_fields() {
+    assert_every_deserialize_has_deny_unknown("src/workspace/resolution.rs");
+}
+
 // ---------------------------------------------------------------------------
 // Manifest bad-input corpus (FR-022 / FR-023 / SC-005)
 // ---------------------------------------------------------------------------
