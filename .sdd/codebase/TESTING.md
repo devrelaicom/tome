@@ -1,8 +1,8 @@
 # Testing Strategy
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
-> **Generated**: 2026-05-14
-> **Last Updated**: 2026-05-14
+> **Generated**: 2026-05-23
+> **Last Updated**: 2026-05-23
 
 ## Test Framework
 
@@ -25,9 +25,9 @@ Cargo automatically discovers and runs all tests via `cargo test`. No external t
 | `cargo test -- --nocapture` | Show stdout/stderr (suppress output capture) |
 | `cargo test -- --test-threads=1` | Run sequentially (for thread-local state) |
 
-**Phase 3 Status**: 399 tests across 53 test suites:
-- 73 unit tests in `src/lib.rs`
-- 326 integration tests in `tests/*.rs`
+**Phase 4 Status**: 490 tests across 64 test suites:
+- 102 unit tests in `src/lib.rs`
+- 388 integration tests in `tests/*.rs`
 
 ## Test Organization
 
@@ -35,61 +35,72 @@ Cargo automatically discovers and runs all tests via `cargo test`. No external t
 
 ```
 tests/
-├── common/mod.rs              # Shared test harness (Fixture, ToolEnv, helpers)
-├── atomicity.rs               # Atomic writes under SIGINT injection
-├── atomicity_enable.rs        # Plugin enable atomicity (thread-local state)
-├── catalog_add.rs             # Catalog add with fixtures
-├── catalog_cache_refcount.rs  # Shared clone reference counting
-├── catalog_list.rs            # CLI binary list smoke tests
-├── catalog_remove.rs          # Remove without cascade
-├── catalog_remove_cascade.rs  # Remove with --force cascade-disable
-├── catalog_show.rs            # Show single catalog
-├── catalog_update.rs          # Catalog update (git sync)
-├── catalog_update_reindex.rs  # Catalog update triggering reindex
-├── concurrency.rs             # Cross-process index contention
-├── doctor.rs                  # Doctor assemble + --fix tests
-├── doctor_json.rs             # Doctor JSON envelope shape
-├── embedding_stub.rs          # StubEmbedder determinism
-├── error_messages.rs          # TomeError Display format
-├── exit_codes.rs              # Exit code mappings
-├── exit_codes_e2e.rs          # CLI binary exit codes
-├── frontmatter.rs             # SKILL.md frontmatter parsing
-├── index_lock.rs              # Advisory lock contention
-├── index_schema_bootstrap.rs  # DB schema bootstrap
-├── manifest_strictness.rs     # Strictness boundary (#[serde(deny_unknown_fields)])
-├── mcp_lifecycle.rs           # MCP server startup paths
-├── mcp_log_format.rs          # MCP log JSON field names
-├── mcp_server.rs              # MCP tool routing + schemas
-├── model_download.rs          # Model download mid-stream abort
-├── models_download.rs         # CLI models download
-├── models_list.rs             # CLI models list
-├── models_remove.rs           # CLI models remove
-├── path_validation.rs         # XDG path resolution
-├── paths_phase2.rs            # Phase 2 per-scope paths
-├── paths_phase3.rs            # Phase 3 workspace paths
-├── plugin_disable.rs          # Plugin disable CLI
-├── plugin_enable.rs           # Plugin enable library API
-├── plugin_interactive.rs      # Bare `tome plugin` via pty
-├── plugin_list.rs             # Plugin list CLI
-├── plugin_repeated.rs         # Enable/disable of already-enabled
-├── plugin_show.rs             # Plugin show CLI
-├── query.rs                   # KNN + reranker + drift
-├── reindex.rs                 # Reindex command
-├── schema_migration_e2e.rs    # Forward schema migrations (synthetic)
-├── schema_migrations.rs       # Schema version guards
-├── scrubbing.rs               # Credential scrubbing in errors
-├── security_hardening.rs      # Hardening measures (chmod, symlink skip)
-├── status.rs                  # Status report assembly
-├── sync_boundary.rs           # Enforce tokio confinement to src/mcp/
-├── version_output.rs          # `tome --version` formats
-├── workspace_commands.rs      # Scope isolation across commands
-├── workspace_info.rs          # Workspace info report
-├── workspace_init.rs          # Workspace init atomicity
-└── workspace_resolution.rs    # Workspace scope resolution algorithm
+├── common/mod.rs                                  # Shared test harness (Fixture, ToolEnv, helpers)
+├── atomic_dir.rs                                  # Atomic directory landing tests
+├── atomicity.rs                                   # Atomic writes under SIGINT injection
+├── atomicity_enable.rs                            # Plugin enable atomicity (thread-local state)
+├── catalog_add.rs                                 # Catalog add with fixtures
+├── catalog_list.rs                                # CLI binary list smoke tests
+├── catalog_remove.rs                              # Remove without cascade
+├── catalog_remove_cascade.rs                      # Remove with --force cascade-disable
+├── catalog_show.rs                                # Show single catalog
+├── catalog_update.rs                              # Catalog update (git sync)
+├── catalog_update_cross_workspace_reindex.rs      # Cross-workspace reindex
+├── catalog_update_reindex.rs                      # Catalog update triggering reindex
+├── catalog_workspace_refcount.rs                  # Shared clone reference counting across workspaces
+├── concurrency.rs                                 # Cross-process index contention
+├── doctor.rs                                      # Doctor assemble + --fix tests
+├── doctor_json.rs                                 # Doctor JSON envelope shape
+├── embedding_stub.rs                              # StubEmbedder determinism
+├── error_messages.rs                              # TomeError Display format
+├── exit_codes.rs                                  # Exit code mappings
+├── exit_codes_e2e.rs                              # CLI binary exit codes
+├── frontmatter.rs                                 # SKILL.md frontmatter parsing
+├── harness_skeleton.rs                            # Harness module composition (Phase 4)
+├── index_lock.rs                                  # Advisory lock contention
+├── index_schema_bootstrap.rs                      # DB schema bootstrap
+├── manifest_strictness.rs                         # Strictness boundary (#[serde(deny_unknown_fields)])
+├── mcp_lifecycle.rs                               # MCP server startup paths
+├── mcp_log_format.rs                              # MCP log JSON field names
+├── mcp_server.rs                                  # MCP tool routing + schemas
+├── model_download.rs                              # Model download mid-stream abort
+├── models_download.rs                             # CLI models download
+├── models_list.rs                                 # CLI models list
+├── models_remove.rs                               # CLI models remove
+├── no_directories_imports.rs                      # Verify directories crate dropped (Phase 4)
+├── no_phase3_paths.rs                             # Verify phase3-era paths removed (Phase 4)
+├── path_validation.rs                             # XDG path resolution
+├── paths_phase2.rs                                # Phase 2 per-scope paths
+├── paths_phase3.rs                                # Phase 3 workspace paths
+├── plugin_cheap_reenable_across_workspaces.rs     # Cheap re-enable idempotency (Phase 4)
+├── plugin_disable.rs                              # Plugin disable CLI
+├── plugin_enable.rs                               # Plugin enable library API
+├── plugin_interactive.rs                          # Bare `tome plugin` via pty
+├── plugin_list.rs                                 # Plugin list CLI
+├── plugin_repeated.rs                             # Enable/disable of already-enabled
+├── plugin_show.rs                                 # Plugin show CLI
+├── plugin_summariser_forward_progress.rs          # Summariser byte-progress callback (Phase 4)
+├── plugin_workspace_skills.rs                     # Workspace-scoped skills (Phase 4)
+├── query.rs                                       # KNN + reranker + drift
+├── reindex.rs                                     # Reindex command
+├── schema_migration_e2e.rs                        # Forward schema migrations (synthetic)
+├── schema_migrations.rs                           # Schema version guards
+├── scrubbing.rs                                   # Credential scrubbing in errors
+├── security_hardening.rs                          # Hardening measures (chmod, symlink skip)
+├── settings_skeleton.rs                           # Settings composition (Phase 4)
+├── status.rs                                      # Status report assembly
+├── summariser_stub.rs                             # StubSummariser determinism (Phase 4)
+├── sync_boundary.rs                               # Enforce tokio confinement to src/mcp/
+├── version_output.rs                              # `tome --version` formats
+├── workspace_commands.rs                          # Scope isolation across commands
+├── workspace_info.rs                              # Workspace info report
+├── workspace_init.rs                              # Workspace init atomicity
+├── workspace_name.rs                              # WorkspaceName validation (Phase 4)
+└── workspace_resolution.rs                        # Workspace scope resolution algorithm
 
 fixtures/
-├── sample-catalog/            # Git fixture with plugin-alpha + plugin-beta
-└── sample-plugin/             # (future expansion)
+├── sample-catalog/                                # Git fixture with plugin-alpha + plugin-beta
+└── sample-plugin/                                 # (future expansion)
 ```
 
 ### Test File Naming
@@ -136,7 +147,7 @@ Integration tests use the library API with isolated state (temp directories, fak
 fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.data_dir).unwrap();
+    std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
@@ -145,11 +156,12 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
         paths: &paths,
-        scope: &tome::workspace::Scope::Global,
+        scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
         config: &config,
         embedder: &embedder,
         embedder_seed: stub_embedder_seed(),
         reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
@@ -162,7 +174,7 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
 **Characteristics**:
 - Use `TempDir` for isolated state
 - Call library functions directly (not via CLI binary)
-- Pass `StubEmbedder` / `StubReranker` to avoid loading ONNX models
+- Pass `StubEmbedder` / `StubReranker` / `StubSummariser` to avoid loading real models
 - Verify outcomes via assertions on returned structs and on-disk state
 - Run with `cargo test` or `cargo test --test plugin_enable`
 
@@ -174,7 +186,7 @@ Some tests spawn the `tome` binary as a child process to verify exit codes, argu
 #[test]
 fn plugin_disable_non_tty_without_force_refuses() {
     let tmp = TempDir::new().unwrap();
-    let env = ToolEnv::new_in(&tmp);
+    let env = ToolEnv::new();
     let paths = paths_for(&env);
     // ... setup ...
 
@@ -199,13 +211,13 @@ fn plugin_disable_non_tty_without_force_refuses() {
 
 ### Interactive CLI Tests (via rexpect)
 
-The `plugin interactive.rs` test file uses `rexpect` to drive a pty harness:
+The `plugin_interactive.rs` test file uses `rexpect` to drive a pty harness:
 
 ```rust
 #[test]
 fn bare_plugin_navigates_catalog_plugin_view_loop() {
     let tmp = TempDir::new().unwrap();
-    let env = ToolEnv::new_in(&tmp);
+    let env = ToolEnv::new();
     let paths = paths_for(&env);
     // ... setup ...
 
@@ -325,6 +337,21 @@ pub fn write_index_db_with_schema_version(path: &Path, version: u32) {
 }
 ```
 
+**Stub Seeds**:
+```rust
+pub fn stub_embedder_seed() -> MetaSeed {
+    // MetaSeed matching StubEmbedder identity
+}
+
+pub fn stub_reranker_seed() -> MetaSeed {
+    // MetaSeed matching StubReranker identity
+}
+
+pub fn stub_summariser_seed() -> MetaSeed {
+    // MetaSeed matching StubSummariser identity (Phase 4)
+}
+```
+
 ## Test Data
 
 ### Fixtures
@@ -361,7 +388,7 @@ Tests exercising specific failure modes:
 
 - `workspace_resolution.rs::global_fallback_with_workspace_missing_index` (bootstrap-not-yet)
 - `doctor.rs::missing_reranker_classified_as_degraded` (partial failure)
-- `exit_codes_e2e.rs::catalog_not_found_exits_3` (specific exit code)
+- `exit_codes_e2e.rs::plugin_show_with_malformed_plugin_json_exits_22` (specific exit code)
 
 ### Atomicity Tests
 
@@ -369,6 +396,7 @@ Tests verifying multi-step operations are all-or-nothing:
 
 - `atomicity.rs::enable_interrupted_mid_transaction_rolls_back` (inject error mid-transaction)
 - `workspace_init.rs::init_atomic_rename_prevents_partial_dotted_tome` (crash mid-populate)
+- `schema_migration_e2e.rs::forward_migration_fails_mid_step_rolls_back` (SIGINT mid-migration)
 
 ### Concurrency Tests
 
@@ -390,7 +418,16 @@ Tests verifying schema evolution:
 
 - `schema_migrations.rs::read_path_schema_too_new_exits_52`
 - `schema_migration_e2e.rs::forward_migration_v0_to_v1_succeeds`
-- `schema_migration_e2e.rs::forward_migration_fails_mid_step_rolls_back` (deliberate error)
+- `schema_migration_e2e.rs::forward_migration_fails_mid_step_rolls_back`
+
+### Thread-Local Injection Tests (Phase 4+)
+
+Tests verifying per-thread injection patterns:
+
+- `schema_migration_e2e.rs` uses `MigrationsGuard::install(MIGRATIONS)` with per-thread scope
+- **Important**: `MIGRATIONS_OVERRIDE` is `thread_local!` and does NOT propagate across `thread::spawn`. Writer threads must install their own guard.
+
+See CLAUDE.md conventions section on `MigrationsGuard` and `thread_local!`.
 
 ## Mocking Strategy
 
@@ -457,7 +494,24 @@ impl Reranker for StubReranker {
 }
 ```
 
-**Usage**: Pass `Some(&stub_reranker)` when testing query with reranking.
+**Usage**: Pass when testing query with reranking.
+
+### StubSummariser (Phase 4)
+
+Stub for the `Summariser` trait that avoids loading Llama.cpp models:
+
+```rust
+pub struct StubSummariser;
+
+impl Summariser for StubSummariser {
+    fn summarise(&self, text: &str, _style: SummariseStyle) -> Result<String, TomeError> {
+        // Deterministic stub response
+        Ok(format!("Summary of {} chars", text.len()))
+    }
+}
+```
+
+**Usage**: Pass when testing summarisation features without real model load.
 
 ### Git Fixtures
 
@@ -565,14 +619,29 @@ fn test_two() {
 
 `TempDir` is cleaned up automatically on drop, so no manual cleanup needed.
 
+### test_scope() for LifecycleDeps (Phase 4+)
+
+When multiple tests need a `&Scope` for constructing `LifecycleDeps`, use:
+
+```rust
+pub fn test_scope() -> &'static Scope {
+    static SCOPE: OnceLock<Scope> = OnceLock::new();
+    SCOPE.get_or_init(|| {
+        Scope(WorkspaceName::global())
+    })
+}
+```
+
+Returns `&'static Scope` so callers avoid repeated allocations. Preferred over per-call `fn test_scope() -> Scope` when many tests share the same global scope.
+
 ## Known Gaps & Deferrals
 
 **T088**: Manual SC-001 / SC-002 verification against real BGE models. The MCP tools exercise the KNN+rerank pipeline, but the real embedder isn't loaded in CI. Deferred to developer pass post-v0.3.0.
 
-**T093/T094/T095**: MCP protocol-purity, latency, and SIGINT graceful-shutdown tests. Require either real models or a stub-injection point on `McpState`. Deferred to Phase 4+.
+**T093/T094/T095**: MCP protocol-purity, latency, and SIGINT graceful-shutdown tests. Require either real models or a stub-injection point on `McpState`. Deferred to Phase 4+ / post-v0.3.0.
 
 **m-WKS-***: Long-tail coverage gaps in workspace initialization and scope isolation. Documented in `retro/P8.md`.
 
 ---
 
-*This document describes HOW to test. Update when testing strategy changes. Last refreshed 2026-05-14 against Phase 3 polish complete source (399 tests, 53 suites).*
+*This document describes HOW to test. Update when testing strategy changes. Last refreshed 2026-05-23 against Phase 4 Foundational F1–F11 source (490 tests, 64 suites).*

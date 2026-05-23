@@ -1,8 +1,8 @@
 # Coding Conventions
 
 > **Purpose**: Document code style, naming conventions, error handling, and common patterns.
-> **Generated**: 2026-05-14
-> **Last Updated**: 2026-05-14
+> **Generated**: 2026-05-23
+> **Last Updated**: 2026-05-23
 
 ## Code Style
 
@@ -11,8 +11,8 @@
 | Tool | Configuration | Command |
 |------|---------------|---------|
 | rustfmt | `rustfmt.toml` (edition 2024) | `cargo fmt --check` |
-| Clippy | `.clippy.toml` (implied by -D warnings) | `cargo clippy --all-targets --all-features -- -D warnings` |
-| Typos | Implicit (no config file) | `typos` |
+| Clippy | `.clippy.toml` (MSRV check only) | `cargo clippy --all-targets --all-features -- -D warnings` |
+| Typos | `_typos.toml` | `typos` |
 
 All three gates are enforced locally via `.githooks/pre-commit` and in CI. The hook runs them sequentially; use `git commit --no-verify` to bypass with explicit justification in the commit message.
 
@@ -41,12 +41,12 @@ All three gates are enforced locally via `.githooks/pre-commit` and in CI. The h
 
 | Type | Convention | Example |
 |------|------------|---------|
-| Variables | snake_case | `config_dir`, `embedder_seed` |
+| Variables | snake_case | `config_dir`, `embedder_seed`, `workspace_name` |
 | Constants | SCREAMING_SNAKE_CASE | `GRACEFUL_SHUTDOWN_TIMEOUT`, `MIGRATIONS` |
 | Functions | snake_case, verb prefix for actions | `apply_pending`, `open_read_only` |
 | Structs | PascalCase | `TomeError`, `WorkspaceInfo`, `LifecycleDeps` |
-| Enums | PascalCase, variant singular/context | `Scope::Global`, `Scope::Workspace`, `CatalogCacheState::Missing` |
-| Traits | PascalCase | `Embedder`, `Reranker`, `Serializable` |
+| Enums | PascalCase, variant singular/context | `Scope`, `CatalogCacheState::Missing` |
+| Traits | PascalCase | `Embedder`, `Reranker`, `Serializable`, `HarnessModule` |
 | Module docs | Doc comment on first line explaining role | `//! MCP server state and initialization` |
 
 ## Error Handling
@@ -60,6 +60,19 @@ Tome uses a **closed enumeration** for all errors: `TomeError` in `src/error.rs`
 - The PRD — the external contract
 
 This design makes exit codes stable and discoverable; trade-off is that new failure modes require a deliberate variant addition.
+
+### Error Variant Organization
+
+Variants are grouped by **Phase** with comments naming the exit code range:
+
+```rust
+// Phase 1 (codes 2–8, plus Internal=1). Unchanged.
+// Phase 2 — plugin lifecycle (codes 20–23).
+// Phase 3 — MCP / workspace (codes 60–75).
+// Phase 4 — workspace name + harness + summariser (codes 13–19, 24).
+```
+
+**Pre-allocated variants** are added in Foundational phases **before any consumer exists**. Phase 4 F3 allocated codes 13–19, 24 before project binding and harness composition were implemented. Benefit: no mid-feature enum rewrites; the compiler enforces all arms are handled.
 
 ### Error Pattern Examples
 
@@ -77,8 +90,8 @@ GitFailed { catalog: String, detail: String },
 
 **Nested enum for context-specific variants**:
 ```rust
-#[error("plugin `{plugin}` is already {state}")]
-PluginAlreadyInState { plugin: String, state: PluginState },
+#[error("workspace `{name}` not found in the central registry")]
+WorkspaceNotFound { name: String },
 ```
 
 **Display message includes recovery hints**:
@@ -95,7 +108,7 @@ ModelMissing { model: String },
 
 ### Logging Conventions
 
-Logging uses `tracing` (sync path) + `tracing-subscriber` with JSON output on stderr (Phase 2). MCP async handlers use a file log (`mcp.log`) in JSON-lines format to preserve stdout as the MCP protocol channel (contract FR-221).
+Logging uses `tracing` (sync path) + `tracing-subscriber` with JSON output on stderr (Phase 2). MCP async handlers use a file log (`mcp.log`) in JSON-lines format (0600 mode on Unix) to preserve stdout as the MCP protocol channel (contract FR-221).
 
 | Level | When to Use |
 |-------|-------------|
@@ -103,9 +116,8 @@ Logging uses `tracing` (sync path) + `tracing-subscriber` with JSON output on st
 | warn | Recoverable issues (model fetch retries, catalog re-clone fallbacks) |
 | info | Important state transitions (schema migration applied, MCP server started) |
 | debug | Development details (query result counts, embedder vector dimensions) |
-| trace | Not used in production; left for future internal diagnostics |
 
-Credential scrubbing (from git URLs, model download URLs, error chains) is applied at the boundary via `catalog::git::scrub_credentials` and `scrub_to_string()`.
+Credential scrubbing (from git URLs, model download URLs, log fields: `workspace_path`, `error_message`, error chains) is applied at the boundary via `catalog::git::scrub_credentials` and `scrub_to_string()`.
 
 ## Common Patterns
 
@@ -134,7 +146,7 @@ pub fn run_with_deps(args, deps, mode) -> Result<Outcome, Error> {
 - `commands/workspace/info.rs` — `assemble()` for compute, `run()` for emit
 - `commands/status.rs` — `assemble_report()` for compute, `run()` for emit
 
-### Sync Boundary (Phase 3)
+### Sync Boundary (Phase 3+)
 
 Async/await is strictly confined to `src/mcp/` (the MCP server module). Every file under `src/mcp/` may use:
 - `async fn`, `.await`, `tokio::task::spawn_blocking`, `tokio::sync::`
@@ -157,7 +169,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
 
     // Heavy sync work → spawn_blocking
     let outcome = tokio::task::spawn_blocking(move || {
-        // rusqlite, fastembed, etc. work here
+        // rusqlite, fastembed, llama-cpp-2, etc. work here
         do_expensive_sync_work()
     }).await?;
 
@@ -193,7 +205,7 @@ std::fs::rename(&staged_path, &target)?;
 - A SIGINT/crash mid-populate leaves the staging dir (which starts with `.tmp.`) unvisited by readers
 - No temporary files spill into `$TMPDIR` on a different filesystem
 
-See `src/workspace/init.rs` for the full pattern, including rollback semantics (`--force` renames an existing target to `.old` first).
+Promoted from internal helper to `src/util/atomic_dir.rs` in Phase 4 F4. See `src/workspace/init.rs` for the full pattern, including rollback semantics (`--force` renames an existing target to `.old` first).
 
 ### Opt-In Registry File Pattern
 
@@ -221,7 +233,7 @@ See `src/workspace/inventory.rs`.
 
 ### Content-Addressed Shared Resource Reference Counting
 
-When a resource is shared across scopes (e.g., on-disk catalog clones at `catalogs/<sha256>/`), use ad-hoc enumeration instead of unconditional deletion:
+When a resource is shared across scopes (e.g., on-disk catalog clones), use ad-hoc enumeration instead of unconditional deletion:
 
 ```rust
 pub fn reference_count(url: &str, paths: &Paths) -> Result<Vec<Scope>, TomeError> {
@@ -229,13 +241,13 @@ pub fn reference_count(url: &str, paths: &Paths) -> Result<Vec<Scope>, TomeError
     
     // Global config
     if global_config_refs_url(url, paths)? {
-        scopes.push(Scope::Global);
+        scopes.push(Scope(WorkspaceName::GLOBAL));
     }
     
     // Each workspace in the opt-in registry
-    for ws_root in scopes_from_registry(paths)? {
-        if workspace_config_refs_url(url, paths, ws_root)? {
-            scopes.push(Scope::Workspace(ws_root));
+    for ws_name in scopes_from_registry(paths)? {
+        if workspace_config_refs_url(url, paths, &ws_name)? {
+            scopes.push(Scope(ws_name));
         }
     }
     
@@ -252,6 +264,26 @@ if refs.is_empty() {
 **TOCTOU profile**: The enumeration is not locked. A concurrent remove + add race benignly (one wins; the other may leave a dangling reference recoverable by re-fetching). Same profile as Phase 2's `cascade_disable_for_catalog` pre-check.
 
 See `src/catalog/store.rs` for the full implementation.
+
+### Workspace Scope Threading (Phase 4)
+
+Phase 4 introduces a `Scope` type representing the resolved workspace:
+
+```rust
+pub struct Scope(pub WorkspaceName);
+impl Scope {
+    pub fn name(&self) -> &str { ... }
+}
+```
+
+**Convention**: Command-layer code resolves the scope **once** and threads it through all downstream helpers:
+
+```rust
+let scope = workspace::resolve()?;  // Once per command
+lifecycle::enable(&id, &deps_with(&scope))  // Passed to all
+```
+
+**Database parameter convention**: SQL helpers that touch workspace-scoped tables accept `workspace_name: &str` (via `scope.name().as_str()`), not the `Scope` struct itself. This keeps the database layer decoupled from the `Scope` type.
 
 ### Reuse Closed-Set Variants Over Promoting New Ones
 
@@ -272,7 +304,7 @@ return Err(TomeError::CatalogAlreadyExists(format!(
 
 Promote a new variant only if a specific failure mode needs to be distinguished from the existing one. Examples:
 - Phase 3 added `WorkspaceMalformed` (70) because workspace-specific errors (malformed config, unopenable index) differ from catalog errors
-- Phase 3 added `SchemaVersionTooNew` (73) because it's a distinct refusal from all prior database errors
+- Phase 4 added `WorkspaceNotFound` (14) for workspace registry lookup failures
 
 See the `TomeError` enum and the P3/P4 retros for examples.
 
@@ -282,7 +314,7 @@ When a library function would otherwise read `$HOME` directly, accept it as a pa
 
 ```rust
 pub fn assemble_report(
-    scope: &ResolvedScope,
+    scope: &Scope,
     paths: &Paths,
     home: &Path,  // ← Parameter, not env
     verify: bool,
@@ -403,7 +435,9 @@ fn test_migration() {
 }
 ```
 
-Survives panics; no manual teardown; no cross-test leakage. See `tests/schema_migration_e2e.rs`.
+**Important**: `MIGRATIONS_OVERRIDE` is `thread_local!` and does NOT propagate across `thread::spawn`. Tests spawning writer threads need per-thread `MigrationsGuard::install(MIGRATIONS)`. See `tests/schema_migration_e2e.rs`.
+
+Survives panics; no manual teardown; no cross-test leakage.
 
 ### Emit-Only Serialize Records
 
@@ -428,7 +462,7 @@ Tests are split into **library API** (test state via `StubEmbedder` / `StubReran
 - **Light/error paths** (list, show, disable, remove with `--force`) → CLI binary; no embedder load needed.
 - **Interactive paths** (bare `tome plugin`, non-TTY refusals) → CLI binary via `rexpect` (pty harness).
 
-**Rationale**: The full `FastembedEmbedder` loads multi-MB ONNX models; CI is fast when we use `StubEmbedder` for correctness and defer real-model testing to manual passes. See PR #3 (Phase 3 / User Story 1) for the established split.
+**Rationale**: The full `FastembedEmbedder` loads multi-MB ONNX models; CI is fast when we use `StubEmbedder` for correctness and defer real-model testing to manual passes. The boundary is documented per test file.
 
 ## Import Ordering
 
@@ -491,10 +525,10 @@ Format: `type(scope): description`
 | fix | Bug fix | `fix(doctor): embedder drift detection was inverted` |
 | refactor | Code restructure | `refactor(query): extract silent compute path` |
 | test | Adding/improving tests | `test(migrations): add e2e coverage for forward schema steps` |
-| docs | Documentation updates | `docs: refresh CONVENTIONS.md for Phase 3 patterns` |
+| docs | Documentation updates | `docs: refresh CONVENTIONS.md for Phase 4 patterns` |
 | chore | Maintenance | `chore: bump tokio to 1.40` |
 
-Enforced locally by `.githooks/pre-commit` hook running `cog verify` (Cocogitto).
+Enforced locally by `.githooks/commit-msg` hook running `cog verify` (Cocogitto).
 
 **Soft cap**: ~400 lines per commit or 2 modules max. Small PRs are easier to review.
 
@@ -543,4 +577,4 @@ See `CONSTITUTION.md` for the full rationale.
 
 ---
 
-*This document defines HOW to write code. Update when conventions change. Last refreshed 2026-05-14 against Phase 3 polish complete source.*
+*This document defines HOW to write code. Update when conventions change. Last refreshed 2026-05-23 against Phase 4 Foundational F1–F11 source (490 tests, 64 suites).*
