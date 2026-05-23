@@ -447,6 +447,44 @@ pub fn global_enrolment_url(paths: &Paths, catalog_name: &str) -> Option<String>
         .map(|e| e.url)
 }
 
+/// Seed a named workspace row directly into the central DB. Mirrors the
+/// shape of `schema::bootstrap`'s seed of the privileged `global`
+/// workspace; this is the seam US2 (`tome workspace add`) will own when
+/// it ships. Until then, tests that need a non-`global` workspace
+/// present in the `workspaces` table call this helper.
+///
+/// The seed step opens (and creates) the DB if absent, stamping `meta`
+/// with stub seeds. Tests that subsequently invoke the CLI binary
+/// against the same `Paths` must use [`write_config_for_cli`] BEFORE
+/// this call so the CLI's registry-seed open isn't shadowed by a
+/// stub-seeded one (`open` is "first writer wins" on `meta`).
+pub fn seed_workspace(paths: &Paths, name: &str) {
+    let conn = tome::index::open(
+        &paths.index_db,
+        &tome::index::OpenOptions {
+            embedder: stub_embedder_seed(),
+            reranker: stub_reranker_seed(),
+            summariser: stub_summariser_seed(),
+        },
+    )
+    .expect("open index for seeding workspace");
+    let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+    conn.execute(
+        "INSERT INTO workspaces (name, created_at, last_used_at) VALUES (?1, ?2, ?2)",
+        rusqlite::params![name, now_unix],
+    )
+    .expect("seed workspace row");
+}
+
+/// Compute the on-disk cache directory for a given catalog URL using the
+/// same content-addressing as the `tome` binary (sha256 hex of the URL).
+pub fn cache_dir_for(env: &ToolEnv, url: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(url.as_bytes());
+    env.catalogs_dir().join(hex::encode(h.finalize()))
+}
+
 /// Test helper: overwrite the `pinned_ref` for one `(global, name)`
 /// enrolment. Used by SHA-pinning tests that previously hand-edited
 /// `config.toml`.

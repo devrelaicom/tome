@@ -195,31 +195,13 @@ fn successful_add_persists_scrubbed_url_in_config() {
     );
 }
 
-#[cfg(unix)]
-#[test]
-#[ignore = "F11b: config.toml is no longer written for catalog enrolment; index.db permissions are SQLite-managed"]
-fn config_toml_is_chmod_0600_on_unix() {
-    use std::os::unix::fs::PermissionsExt;
-    let fix = Fixture::build_sample();
-    let env = ToolEnv::new();
-    let out = env
-        .cmd()
-        .args(["catalog", "add", &fix.url])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let perms = std::fs::metadata(env.config_file()).unwrap().permissions();
-    assert_eq!(
-        perms.mode() & 0o777,
-        0o600,
-        "config.toml should be 0600, got {:o}",
-        perms.mode() & 0o777,
-    );
-}
+// Removed in F11c-1: `config_toml_is_chmod_0600_on_unix`.
+// Phase 4 / F11b dropped `config.toml` as the registry for catalog
+// enrolment — the central DB's `workspace_catalogs` table owns that
+// state now. File-permission tightening is SQLite-managed for
+// `index.db` (the file mode is set by SQLite at create time) and
+// outside Tome's direct control, so the original chmod-0600 invariant
+// no longer has a meaningful test target.
 
 #[test]
 fn git_failure_with_credential_url_is_scrubbed() {

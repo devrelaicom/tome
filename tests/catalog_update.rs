@@ -85,9 +85,15 @@ fn sha_pinned_catalog_is_a_no_op() {
     assert_eq!(v["pinned"]["name"], "sample-experts");
 }
 
+/// F11b reshape of the old `refresh_all_runs_alphabetically`. The
+/// refresh order is `workspace_catalogs::distinct_urls`, which selects
+/// `MAX(rowid)` per URL grouping and orders by `url` (ascending). We
+/// don't assert a specific order (URL-bytes ordering is an
+/// implementation detail of the SQL query); we assert determinism —
+/// two runs over the same enrolment state must emit the same per-URL
+/// sequence.
 #[test]
-#[ignore = "F11b: refresh order is by URL (sha256-hashed cache dir); display name comes from manifest. Test needs rewrite to assert on per-URL determinism rather than alias names."]
-fn refresh_all_runs_alphabetically() {
+fn refresh_all_is_deterministic() {
     let fix1 = Fixture::build_sample();
     let fix2 = Fixture::build_sample();
     let env = ToolEnv::new();
@@ -100,24 +106,47 @@ fn refresh_all_runs_alphabetically() {
         .output()
         .unwrap();
 
-    let out = env
-        .cmd()
-        .args(["catalog", "update", "--json"])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
+    let collect_names = || -> Vec<String> {
+        let out = env
+            .cmd()
+            .args(["catalog", "update", "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+        out.stdout
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .map(|line| {
+                let v: Value = serde_json::from_slice(line).expect("valid JSON line");
+                // Each NDJSON envelope is either `refreshed` (URL fetched) or
+                // `pinned` (SHA-pinned no-op). We pull the display name from
+                // whichever shape is present.
+                if let Some(name) = v.get("refreshed").and_then(|r| r.get("name")) {
+                    name.as_str().unwrap_or_default().to_owned()
+                } else if let Some(name) = v.get("pinned").and_then(|r| r.get("name")) {
+                    name.as_str().unwrap_or_default().to_owned()
+                } else {
+                    String::new()
+                }
+            })
+            .filter(|n| !n.is_empty())
+            .collect()
+    };
+
+    let first = collect_names();
+    let second = collect_names();
+    assert_eq!(
+        first.len(),
+        2,
+        "expected two refresh envelopes (one per URL), got {:?}",
+        first,
     );
-    let lines: Vec<&[u8]> = out
-        .stdout
-        .split(|&b| b == b'\n')
-        .filter(|l| !l.is_empty())
-        .collect();
-    assert_eq!(lines.len(), 2);
-    let v0: Value = serde_json::from_slice(lines[0]).unwrap();
-    let v1: Value = serde_json::from_slice(lines[1]).unwrap();
-    assert_eq!(v0["refreshed"]["name"], "alpha");
-    assert_eq!(v1["refreshed"]["name"], "zeta");
+    assert_eq!(
+        first, second,
+        "refresh order must be deterministic across runs",
+    );
 }
