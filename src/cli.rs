@@ -132,6 +132,17 @@ pub enum WorkspaceCommand {
     /// enabled-plugin, indexed-skill, bound-project counts plus
     /// `last_used_at`.
     List(WorkspaceListArgs),
+    /// Rename a workspace. Updates every bound project's marker
+    /// `config.toml` atomically, renames `<root>/workspaces/<old>/` to
+    /// `<root>/workspaces/<new>/`, and updates the `workspaces.name`
+    /// row. Refuses either side of `global`.
+    Rename(WorkspaceRenameArgs),
+    /// Force regeneration of a workspace's cached short + long
+    /// summaries. Writes the result into the workspace's
+    /// `settings.toml` `[summaries]` section, rewrites
+    /// `<root>/workspaces/<name>/RULES.md`, and copies the new RULES.md
+    /// to every bound project's marker copy.
+    RegenSummary(WorkspaceRegenSummaryArgs),
     /// Bind the current project directory to the named workspace.
     /// Creates / overwrites `<cwd>/.tome/config.toml` so subsequent
     /// Tome invocations from this tree resolve to `<name>` via the
@@ -179,6 +190,24 @@ pub struct WorkspaceInitArgs {
 #[derive(Debug, clap::Args)]
 pub struct WorkspaceListArgs {
     // No subcommand-specific flags. `--json` is the global flag.
+}
+
+#[derive(Debug, clap::Args)]
+pub struct WorkspaceRenameArgs {
+    /// Existing workspace name. Refuses to rename the reserved `global`
+    /// workspace (exit 15).
+    pub old: String,
+    /// New workspace name. Must satisfy FR-347; must not collide with an
+    /// existing workspace (exit 14); cannot be the reserved `global`
+    /// (exit 15).
+    pub new: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct WorkspaceRegenSummaryArgs {
+    /// Workspace to regenerate summaries for. Defaults to the resolved
+    /// workspace.
+    pub name: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
