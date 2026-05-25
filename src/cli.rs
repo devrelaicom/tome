@@ -143,6 +143,13 @@ pub enum WorkspaceCommand {
     /// `<root>/workspaces/<name>/RULES.md`, and copies the new RULES.md
     /// to every bound project's marker copy.
     RegenSummary(WorkspaceRegenSummaryArgs),
+    /// Copy the workspace's central RULES.md to every bound project's
+    /// marker copy. With `<name>` omitted, syncs every workspace in
+    /// the central registry. Idempotent — destinations whose bytes
+    /// already match the source are skipped without a write. MUST NOT
+    /// regenerate summaries; for that use
+    /// `tome workspace regen-summary` first.
+    Sync(WorkspaceSyncArgs),
     /// Remove a workspace from the central registry. The cascade
     /// removes integration in every bound project, deletes per-workspace
     /// DB rows (`workspace_skills`, `workspace_catalogs`,
@@ -229,6 +236,15 @@ pub struct WorkspaceRenameArgs {
 pub struct WorkspaceRegenSummaryArgs {
     /// Workspace to regenerate summaries for. Defaults to the resolved
     /// workspace.
+    pub name: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct WorkspaceSyncArgs {
+    /// Workspace whose central RULES.md should be propagated. Omit to
+    /// sync every workspace in the central registry. Must satisfy
+    /// FR-347 when present; unknown names surface as exit 13
+    /// (`WorkspaceNotFound`).
     pub name: Option<String>,
 }
 
