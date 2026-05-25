@@ -82,3 +82,85 @@ fn init_force_propagates_pre_cleanup_errors() {
     // See `init_refuses_non_directory_marker_with_workspace_malformed`
     // above for the disposition.
 }
+
+// ---- S-M3: preserve original file mode on atomic rewrite -----------------
+//
+// Phase 4 / US1.d-2a reviewer pass (`review/us1-findings.md` S-M3): the
+// rules-file and MCP-config writers persist a `NamedTempFile` over the
+// target via `tmp.persist(target)`. `tempfile` defaults the staged file
+// to mode 0o600, which would silently drop any developer-set bits (e.g.
+// group-readable workspaces) on the first Tome write. The fix captures
+// the existing target's mode and chmods the staging tempfile to match
+// before persist. These tests pin that behaviour.
+
+#[cfg(unix)]
+#[test]
+fn preserve_file_mode_on_rules_file_rewrite() {
+    use std::os::unix::fs::PermissionsExt;
+    use tome::harness::BlockBodyStyle;
+    use tome::harness::rules_file;
+
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("AGENTS.md");
+
+    // Pre-create the target at 0644 (group + world readable). Without
+    // mode preservation, `tmp.persist` would replace it with a 0600 file.
+    std::fs::write(&target, "# original\n").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    rules_file::write_block(&target, "body", BlockBodyStyle::Inline).expect("write");
+
+    let actual = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        actual, 0o644,
+        "original mode 0o644 must survive the rewrite; got 0o{actual:o}",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn preserve_file_mode_on_mcp_config_rewrite() {
+    use std::os::unix::fs::PermissionsExt;
+    use tome::harness::McpConfigFormat;
+    use tome::harness::mcp_config::{self, TomeEntry};
+
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("settings.json");
+
+    // Pre-create with a Tome-owned entry at mode 0644. Use a real
+    // Tome-owned entry so write_entry doesn't short-circuit on the
+    // idempotence check (which would skip the rewrite entirely).
+    std::fs::write(
+        &target,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "mcpServers": {
+                "tome": {
+                    "command": "tome",
+                    "args": ["mcp", "--workspace", "previous"]
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    // Rewrite with different args so the idempotence pre-check
+    // doesn't no-op.
+    let entry = TomeEntry::new(
+        "tome".to_string(),
+        vec![
+            "mcp".to_string(),
+            "--workspace".to_string(),
+            "now".to_string(),
+        ],
+    );
+    mcp_config::write_entry(&target, McpConfigFormat::Json, "mcpServers", &entry)
+        .expect("write entry");
+
+    let actual = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        actual, 0o644,
+        "original mode 0o644 must survive the rewrite; got 0o{actual:o}",
+    );
+}

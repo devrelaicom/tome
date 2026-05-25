@@ -46,6 +46,8 @@ Any other content under the `"tome"` key is **user-owned** and MUST NOT be overw
 - Without `--force`: exit 19 (`HarnessClash`); error message quotes the existing `command` and `args[0]`.
 - With `--force`: rewrite the entry; preserve any developer-added `env` field on the rewritten entry per FR-503.
 
+> **Clarification (US1.d-2a)**: the `env` preservation guarantee applies ONLY when rewriting a Tome-owned entry (one that already passes `is_tome_owned`). When `--force` overrides a user-owned `tome` entry, the developer's prior `env` is discarded — the safer reading, since a user-owned entry's `env` may be untrusted (e.g. a malicious template injected into the harness config). The `## env field preservation` section below reflects this scope.
+
 ## `env` field preservation
 
 When Tome rewrites a Tome-owned entry (for example, on rebind from workspace A to workspace B, or when the bound workspace name changes), any developer-added `env` field MUST be preserved. The marker comparison ignores `env` entirely; the rewrite touches only `command` and `args`.

@@ -44,7 +44,7 @@ cd ~/projects/my-app
 tome workspace init                      # atomically lands ./.tome/
 tome workspace info                      # scope + catalogs + plugins + index
 tome catalog add ...                     # writes to the workspace, not global
-tome --global plugin list                # explicitly bypass the workspace
+tome --workspace global plugin list      # explicitly target the global workspace
 
 # Diagnostic (Phase 3) — broad doctor with auto-repair
 tome doctor                              # models + index + catalogs + drift + harnesses
