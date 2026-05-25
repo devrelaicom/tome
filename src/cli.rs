@@ -143,6 +143,15 @@ pub enum WorkspaceCommand {
     /// `<root>/workspaces/<name>/RULES.md`, and copies the new RULES.md
     /// to every bound project's marker copy.
     RegenSummary(WorkspaceRegenSummaryArgs),
+    /// Remove a workspace from the central registry. The cascade
+    /// removes integration in every bound project, deletes per-workspace
+    /// DB rows (`workspace_skills`, `workspace_catalogs`,
+    /// `workspace_projects`, `workspaces`) inside one transaction,
+    /// deletes the central `<root>/workspaces/<name>/` directory, and
+    /// refcount-cleans any catalog clone no longer referenced. Refuses
+    /// to remove the reserved `global` workspace (exit 15). Refuses
+    /// without `--force` when ≥ 1 project is bound (exit 16).
+    Remove(WorkspaceRemoveArgs),
     /// Bind the current project directory to the named workspace.
     /// Creates / overwrites `<cwd>/.tome/config.toml` so subsequent
     /// Tome invocations from this tree resolve to `<name>` via the
@@ -153,6 +162,19 @@ pub enum WorkspaceCommand {
     /// Note: the `<name>` argument always takes precedence; the global
     /// `--workspace` flag is ignored for this subcommand.
     Use(WorkspaceUseArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct WorkspaceRemoveArgs {
+    /// Workspace to remove. Refuses the reserved `global` workspace
+    /// (exit 15).
+    pub name: String,
+    /// Cascade removal even when projects are bound to the workspace.
+    /// Without `--force`, a non-empty bind list refuses with exit 16
+    /// (`WorkspaceHasBoundProjects`) carrying the names of every bound
+    /// project path so the user knows what would be torn down.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, clap::Args)]
