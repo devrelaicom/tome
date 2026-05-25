@@ -2,37 +2,42 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-25 (Phase 4 / US1 completed; security audit findings applied)
+> **Last Updated**: 2026-05-25 (Phase 4 / US1 + US2 completed; security audit findings applied)
 
 ## Overview
 
 Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, workspace settings, and project bindings across multiple harnesses. As a synchronous, file-based tool without user authentication, security focuses on:
+
 1. Preventing path traversal and directory-escape attacks via plugin source paths, plugin identities, workspace names, and project path canonicalization
 2. UTF-8 validation for project paths stored in the central DB (primary key constraint)
 3. Integrity verification for downloaded model artefacts (SHA-256 checksums)
-4. Symlink refusal on all harness-managed file writes and skill-directory walks (defence in depth)
-5. Scrubbing credentials from captured Git output and HTTP errors at the boundary
-6. Atomic writes to prevent partial state corruption (staging directory pattern with same-FS rename)
-7. Signal handling for clean interruption
-8. TTY enforcement on interactive flows to prevent prompt injection and non-interactive misuse
-9. Dependency-allowlist enforcement and weekly vulnerability scanning
-10. Binary-size constraints to limit attack surface
-11. MCP server protocol purity (stdout reserved for MCP protocol, errors to stderr)
-12. Structured logging with size-based rotation and credential scrubbing for long-running MCP server
-13. MCP startup pre-flight validation with SHA-256 verification and drift detection
-14. No domain-error leakage in MCP tool responses (structured codes only)
-15. Workspace initialization with secure directory permissions and atomic staging
-16. Project binding with workspace-name validation and UTF-8 path enforcement
-17. Harness MCP config read-modify-write preserving third-party structure (comment/order preservation via `toml_edit`)
-18. RULES.md block insertion and standalone-file strategies with symlink-aware writes
-19. Catalog cache content-trust via ref-counting in central DB and re-use on same URL
-20. Doctor command harness detection without config parsing; network access gated behind `--fix`
-21. Forward-only schema migrations with per-migration transaction atomicity
-22. Central SQLite DB with advisory lockfile covering all state mutations and cache cleanup
-23. Workspace registry validation with size cap, entry limit, NUL rejection, and parent-dir rejection
-24. Workspace init refusal of non-directory `.tome` markers
-25. Credential scrubbing on MCP log fields and error chains
-26. **Phase 4 additions**: Single-root `<home>/.tome/` layout with all state under one directory; central SQLite DB replacing per-scope files; workspace + project binding model with PK on canonical project_path (TEXT); harness MCP config management with symlink-aware writes; summariser inference with Qwen2.5-0.5B; settings composition with layered override; atomic-dir helper for populated-directory landing
+4. Symlink refusal on all workspace/project/harness file writes (defence in depth)
+5. File mode preservation on atomic rewrites to prevent silent permission downgrades (S2-M1 fix)
+6. Scrubbing credentials from captured Git output and HTTP errors at the boundary
+7. Atomic writes to prevent partial state corruption (staging directory pattern with same-FS rename)
+8. Signal handling for clean interruption
+9. TTY enforcement on interactive flows to prevent prompt injection and non-interactive misuse
+10. Dependency-allowlist enforcement and weekly vulnerability scanning
+11. Binary-size constraints to limit attack surface
+12. MCP server protocol purity (stdout reserved for MCP protocol, errors to stderr)
+13. Structured logging with size-based rotation and credential scrubbing for long-running MCP server
+14. MCP startup pre-flight validation with SHA-256 verification and drift detection
+15. No domain-error leakage in MCP tool responses (structured codes only)
+16. Workspace initialization with secure directory permissions and atomic staging
+17. Project binding with workspace-name validation and UTF-8 path enforcement
+18. Harness MCP config read-modify-write preserving third-party structure (comment/order preservation via `toml_edit`)
+19. RULES.md block insertion and standalone-file strategies with symlink-aware writes
+20. Catalog cache content-trust via ref-counting in central DB and re-use on same URL
+21. Doctor command harness detection without config parsing; network access gated behind `--fix`
+22. Forward-only schema migrations with per-migration transaction atomicity
+23. Central SQLite DB with advisory lockfile covering all state mutations and cache cleanup
+24. Workspace registry validation with size cap, entry limit, NUL rejection, and parent-dir rejection
+25. Workspace init refusal of non-directory `.tome` markers
+26. Workspace removal cascade per-project effective list narrowing (US2.d-1 C-B1 fix)
+27. Workspace rename with DB transaction wrapping marker rewrites (US2.d-1 C-B2 fix)
+28. Workspace settings and rules file preservation of forward-compat fields (US2.d-1 T-B1 fix, `toml_edit`)
+29. Credential scrubbing on MCP log fields and error chains
+30. **Phase 4 additions**: Single-root `<home>/.tome/` layout with all state under one directory; central SQLite DB replacing per-scope files; workspace + project binding model with PK on canonical project_path (TEXT); harness MCP config management with symlink-aware writes; summariser inference with Qwen2.5-0.5B; settings composition with layered override; atomic-dir helper for populated-directory landing; mode-preserving atomic file writes
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
@@ -145,7 +150,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Symlink rejection on write** | Refuses symlinks on RULES.md and MCP config write-back via `is_symlink()` check → exit 7 (FR-M-HRN-2) | `src/harness/rules_file.rs` line 79, `src/harness/mcp_config.rs` line 92 |
 | **Ownership marker** | Entry is Tome-owned iff `command == "tome" && args[0] == "mcp"` (FR-501) | `src/harness/mcp_config.rs::is_tome_owned` |
 | **Config clash detection** | Harness clash errors surface on `tome workspace use` with hint to use `--force` | `src/error.rs::HarnessClash` (code 19); amended contract `mcp-config-integration.md` for env preservation semantics |
-| **Mode preservation on rewrite** | Read existing target's mode before write; chmod staged tempfile to that mode before persist (S-M3 fix) | `src/harness/rules_file.rs`, `src/harness/mcp_config.rs` (Phase 4 US1.d-2a) |
+| **Mode preservation on rewrite** | Read existing target's mode before write; chmod staged tempfile to that mode before persist (S2-M1 fix) | `src/catalog/store.rs::write_atomic` (unified surface) + all callers (harness modules, workspace, project) |
 
 ## Data Protection
 
@@ -155,9 +160,9 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 |-----------|-----------|---------|---|
 | Git credentials | Inherited from system Git config | Credential helper, not Tome | Unchanged |
 | Model artefacts | SHA-256 verification on download | `<home>/.tome/models/<name>/` | New layout under single root |
-| Configuration file | Atomic writes, chmod inherited from original on rewrite (0644 typical) | `<home>/.tome/` | Consolidated under single root; enrolment now in DB |
-| Workspace settings | Layered composition with override semantics; atomic writes | `<workspace>/.tome/settings.toml` | New Phase 4 settings model |
-| Project marker config | Atomic writes, chmod 0644 (inherited from existing); workspace binding pointer at `<project>/.tome/config.toml` | `<project>/.tome/config.toml` | New Phase 4 project binding |
+| Configuration file | Atomic writes, chmod inherited from original on rewrite via mode-preservation (S2-M1) | `<home>/.tome/` | Consolidated under single root; enrolment now in DB |
+| Workspace settings | Layered composition with override semantics; atomic writes with mode preservation | `<workspace>/.tome/settings.toml` | New Phase 4 settings model; mode preserved on regen-summary |
+| Project marker config | Atomic writes, chmod inherited from existing; workspace binding pointer at `<project>/.tome/config.toml` | `<project>/.tome/config.toml` | New Phase 4 project binding; mode preserved on rename |
 | Central index DB | SQLite with `PRAGMA foreign_keys = ON` and `journal_mode = WAL` | `<home>/.tome/index.db` | New centralized DB (Phase 3 per-workspace → Phase 4 single central) |
 | Catalog cache | Atomic refresh, ref-counted across workspaces/projects via DB table, re-used on same URL | `<home>/.tome/cache/<sha256-of-url>/` | New layout; ref-counting via `workspace_catalogs` table |
 | Git stderr output | Scrubbed before tracing/display | `src/catalog/git.rs::scrub_credentials` | Unchanged |
@@ -178,13 +183,13 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | `<home>/.tome/models/` | Inherited from umask | Model downloads | New layout under single root |
 | `<home>/.tome/cache/` | Inherited from umask | Catalog clones via SHA-256 addressing | New layout under single root; advisory lock now covers cache cleanup atomicity (FR-366) |
 | `<workspace>/.tome/` | 0700 (before content) | Workspace marker directory | New Phase 4 workspace binding |
-| `<workspace>/.tome/config.toml` | Inherited from umask (typically 0644) | Workspace local config | New Phase 4 workspace binding |
-| `<project>/.tome/` | 0700 (atomic landing via `atomic_dir`) | Project marker directory | New Phase 4 project binding |
-| `<project>/.tome/config.toml` | Inherited from original (if exists) or umask | Project binding pointer + optional RULES.md copy; mode preserved on rewrite (S-M3 fix) | New Phase 4 project binding |
+| `<workspace>/.tome/config.toml` | Inherited from umask (typically 0644) | Workspace local config | New Phase 4 workspace binding; mode preserved on rewrite |
+| `<project>/.tome/` | 0700 (atomic landing via `atomic_dir`) | Project marker directory; recovery branch on rename failure also chmods to 0o700 (S2-M4 fix) | New Phase 4 project binding |
+| `<project>/.tome/config.toml` | Inherited from original (if exists) or umask | Project binding pointer + optional RULES.md copy; mode preserved on rename and regen-summary rewrites (S2-M1 fix) | New Phase 4 project binding |
 
 **Unix-only hardening**: The 0600 chmod is applied explicitly to `mcp.log` via `std::os::unix::fs::OpenOptionsExt::mode()` on Unix; Windows' ACL model is not currently addressed.
 
-**Phase 4 note**: Project marker directories land via `atomic_dir::land_directory_with_replace` with 0o700 chmod on Unix before content is written. Harness-owned parent dirs (e.g. `<project>/.cursor/`) are created by harness modules; chmod policy on those is a design-time choice deferred (S-M4).
+**Phase 4 US2 note**: File mode preservation (S2-M1) lifted into `catalog::store::write_atomic` — the single atomic-write surface used by all workspace/project file writers (`init`, `rename`, `regen_summary`, `sync` project-marker rewrites). Recovery branch on rename failure also chmods central workspace dir to 0o700 (S2-M4 fix).
 
 ### Symlink Handling
 
@@ -193,7 +198,8 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Skill directory walk** | Skip symlinks (explicit rejection) | `entry.file_type()` + `is_symlink()` skip | `src/mcp/tools/get_skill.rs::walk_dir` (lines 272–289, FR-S-02) |
 | **RULES.md write** | Refuse symlinks on write-back | `is_symlink()` check → exit 7 (FR-M-HRN-2) | `src/harness/rules_file.rs` line 79 |
 | **MCP config write** | Refuse symlinks on write-back | `is_symlink()` check → exit 7 | `src/harness/mcp_config.rs` line 92 |
-| **Purpose** | Prevent hostile catalog with `skills/foo/creds → ~/.ssh/id_rsa` or harness config pointing to sensitive files | Defence in depth: `lstat` (no follow) + explicit skip/refusal | Phase 3 PR #56; Phase 4 extends to all harness writes |
+| **Atomic file writes** (US2.d-1 S2-M2) | Refuse symlinks in `catalog::store::write_atomic` | `is_symlink()` check on target before staging write → exit 7 | `src/catalog/store.rs::write_atomic` |
+| **Purpose** | Prevent hostile catalog with `skills/foo/creds → ~/.ssh/id_rsa` or harness config pointing to sensitive files | Defence in depth: `lstat` (no follow) + explicit skip/refusal | Phase 3 PR #56; Phase 4 US1.d-2a + US2.d-1 extends to all atomic writes |
 
 ### Integrity & Verification
 
@@ -220,18 +226,16 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 
 Both BGE checksums are real upstream digests verified at Phase 3 slice 1. Downloads enforce both hash and size; drift surfaces as `ModelChecksumMismatch` (exit 32) rather than silently installing whatever upstream serves.
 
-### Phase 4 / US1 Security Enhancements
+### Phase 4 / US2 Security Enhancements
 
 | Control | Implementation | Location | Fix |
 |---------|----------------|----------|-----|
-| **Non-UTF8 project paths rejected** | `path.to_str()` check; refuse non-UTF8 with exit 7 message naming the invariant | `src/workspace/binding.rs::bind_project` (lines 140–148) | R-B1 blocker fix |
-| **Atomic-dir helper promoted** | Reusable `atomic_dir::land_directory_with_replace` with staging prefix `.tome.tmp.` for future doctor orphan cleanup | `src/util/atomic_dir.rs` | Pattern lift from workspace init |
-| **Single DB transaction for binding** | UPSERT + `last_used_at` bump wrapped in `conn.transaction()` (FR-411) | `src/workspace/binding.rs::bind_project` (lines 227–250) | R-M1 major fix |
-| **File mode preservation on rewrite** | Read existing target's mode; chmod staged tempfile before persist | `src/harness/rules_file.rs`, `src/harness/mcp_config.rs` | S-M3 major fix |
-| **Symlink refusal on harness writes** | All `mcp_config` and `rules_file` write paths check `is_symlink()` → exit 7 | `src/harness/rules_file.rs:79`, `src/harness/mcp_config.rs:92` | Defence in depth |
-| **HarnessClash error messages** | Amended to include doctor pointer (`Re-run 'tome doctor --fix'…`) | `src/error.rs::HarnessClash` Display impl | C-N1 enhancement |
-| **Contract amendment: env preservation** | Clarified that `env` preservation on `--force` applies ONLY to Tome-owned entries; user-owned env is dropped (safer reading) | `contracts/mcp-config-integration.md` | T-B1 blocker resolution |
-| **Cross-harness sync idempotence proof** | New `tests/sync_idempotence.rs` covering mtime stability across re-sync | `tests/sync_idempotence.rs` | T-B2 blocker fix |
+| **File mode preservation** (S2-M1) | Unified in `catalog::store::write_atomic`; all workspace/project file writers use this surface; mode inherited from original target or umask | `src/catalog/store.rs::write_atomic` (lines 81–110) | Lifted from US1.d-2a harness-only fix; now covers workspace settings, project markers, rules files |
+| **Symlink refusal** (S2-M2) | Extended to `catalog::store::write_atomic`; all atomic writes refuse symlinks | `src/catalog/store.rs::write_atomic` (lines 88–95) | Unified defence across all file write surfaces |
+| **Cascade effective-list narrowing** (S2-C-B1) | `workspace remove --force` cascade now reads per-project marker, resolves effective harness list via `settings::resolver::resolve_effective_list`, and only tears down harnesses in that list | `src/workspace/remove.rs::teardown_integration_for_project` (PR US2.d-1) | Security: prevents unconditional iteration of all harness dirs on every remove |
+| **Marker rewrite under transaction** (S2-C-B2) | `workspace rename` now opens `conn.transaction()` BEFORE marker rewrite loop; SQL UPDATE failure still leaves DB inconsistent w.r.t. marker state, but DB row and old markers stay consistent | `src/workspace/rename.rs::rename` (PR US2.d-1) | Partial-failure mode documented; atomicity guarantee at transaction boundary |
+| **Workspace dir chmod on recovery** (S2-M4) | `workspace rename` recovery branch (old dir absent) now chmods the new workspace dir to 0o700 before populating, matching init's security posture | `src/workspace/rename.rs::rename` (lines 269–274, PR US2.d-1) | Closes permission-downgrade vulnerability during recovery |
+| **Marker field preservation** (S2-T-B1) | `workspace rename` now uses `toml_edit::DocumentMut` to preserve optional `harnesses` field + comments in project markers during rewrite | `src/workspace/rename.rs::rename` (PR US2.d-1) | Forward-compat: marker round-trip preserves user-supplied fields |
 
 ## Signal Handling & Interruption
 
@@ -269,7 +273,7 @@ Both BGE checksums are real upstream digests verified at Phase 3 slice 1. Downlo
 | **Audit scanning** | Weekly `cargo audit` in CI | `.github/workflows/` |
 | **Deny rules** | Forbidden licenses and dep categories in `cargo-deny` | `Cargo.deny` |
 | **MSRV pinning** | Minimum supported Rust version pinned and tested | `Cargo.toml` (rust-version = "1.93") |
-| **Binary size cap** | 50 MB hard cap; currently ~22 MiB on macOS arm64 (Phase 3), ~30 MiB projected (Phase 4 with llama-cpp-2) | `CONSTITUTION.md` (NFR-001, revised 2026-05-13) |
+| **Binary size cap** | 50 MB hard cap; currently ~30 MiB on macOS arm64 + Linux x86_64 (Phase 4) | `CONSTITUTION.md` (NFR-001, revised 2026-05-13) |
 | **LTO + strip** | `lto = "thin"`, `strip = "symbols"`, `panic = "abort"` | `Cargo.toml` (profile settings) |
 
 ### Phase 4 New Dependencies
@@ -277,7 +281,7 @@ Both BGE checksums are real upstream digests verified at Phase 3 slice 1. Downlo
 | Crate | Version | Rationale | Security Notes |
 |-------|---------|-----------|---|
 | `llama-cpp-2` | 0.1.x (minor-pinned) | Summariser inference (Qwen2.5-0.5B); CPU-only static link | Pre-1.0; monitor for API changes; no CUDA/Metal features enabled |
-| `toml_edit` | 0.25.x (minor-pinned) | Comment-preserving TOML edits for harness config | Apache 2.0 / MIT; actively maintained |
+| `toml_edit` | 0.25.x (minor-pinned) | Comment-preserving TOML edits for harness config + workspace settings preservation | Apache 2.0 / MIT; actively maintained |
 
 ## Security Testing
 
@@ -290,7 +294,7 @@ Both BGE checksums are real upstream digests verified at Phase 3 slice 1. Downlo
 | **Manifest strictness** | 100% grep assertion on `deny_unknown_fields`; Phase 4 audit (T098n) on 5 new types | `tests/manifest_strictness.rs` |
 | **Concurrency & atomicity** | Advisory lock + interrupt scenarios; cache cleanup under lock (F11b); binding + last_used_at atomic (R-M1) | `tests/atomicity.rs`, `tests/concurrency.rs` |
 | **Exit codes** | Closed enumeration; all Phase 1/2/3/4 codes tested | `tests/exit_codes.rs` |
-| **Security hardening** | File permissions, symlink handling, registry validation, mode preservation on rewrite | `tests/security_hardening.rs` |
+| **Security hardening** | File permissions, symlink handling, registry validation, mode preservation on rewrite (S2-M1), symlink refusal on atomic writes (S2-M2) | `tests/security_hardening.rs` |
 | **MCP protocol purity** | No error leakage to stdout (FR-108) | `tests/mcp_server.rs` |
 | **Workspace isolation** | Cross-workspace catalog enablement + reference-counting (Phase 3); project binding validation (Phase 4) | `tests/workspace_commands.rs`, `tests/catalog_cache_refcount.rs`, Phase 4 tests |
 | **Sync idempotence** | Mtime stability across re-sync with all harness modules | `tests/sync_idempotence.rs` |

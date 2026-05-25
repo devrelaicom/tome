@@ -25,9 +25,9 @@ Cargo automatically discovers and runs all tests via `cargo test`. No external t
 | `cargo test -- --nocapture` | Show stdout/stderr (suppress output capture) |
 | `cargo test -- --test-threads=1` | Run sequentially (for thread-local state or shared resource tests) |
 
-**Phase 4 Status**: 609 passing tests, 29 ignored, across 82 test suites:
+**Phase 4 US2 Status**: 677 passing tests, 29 ignored, across 92 test suites:
 - ~100 unit tests in `src/lib.rs` + modules
-- ~509 integration tests in `tests/*.rs`
+- ~577 integration tests in `tests/*.rs`
 
 ## Test Organization
 
@@ -57,7 +57,7 @@ tests/
 ├── exit_codes.rs                                  # Exit code mappings (library API)
 ├── exit_codes_e2e.rs                              # CLI binary exit codes
 ├── frontmatter.rs                                 # SKILL.md frontmatter parsing
-├── harness_module_claude_code.rs                  # Claude Code production harness (Phase 4)
+├── harness_module_claude_code.rs                  # Claude Code production harness (Phase 4 US1)
 ├── harness_skeleton.rs                            # Harness module composition
 ├── harness_sync_stub.rs                           # Sync algorithm with StubHarness
 ├── index_lock.rs                                  # Advisory lock contention
@@ -91,6 +91,8 @@ tests/
 ├── plugin_workspace_skills.rs                     # Workspace-scoped skills isolation (Phase 4)
 ├── query.rs                                       # KNN + reranker + drift
 ├── reindex.rs                                     # Reindex command
+├── rules_file_block_in_existing.rs                # Rules file injection into existing file (Phase 4 US1)
+├── rules_file_standalone.rs                       # Standalone rules file (Phase 4 US1)
 ├── schema_migration_e2e.rs                        # Forward schema migrations (synthetic)
 ├── schema_migrations.rs                           # Schema version guards
 ├── scrubbing.rs                                   # Credential scrubbing in errors
@@ -98,15 +100,21 @@ tests/
 ├── settings_skeleton.rs                           # Settings composition (Phase 4)
 ├── status.rs                                      # Status report assembly
 ├── summariser_stub.rs                             # StubSummariser determinism (Phase 4)
-├── sync_algorithm.rs                              # Sync orchestrator (Phase 4)
+├── sync_algorithm.rs                              # Sync orchestrator (Phase 4 US1)
 ├── sync_boundary.rs                               # Enforce tokio confinement to src/mcp/
 ├── sync_idempotence.rs                            # Idempotence-by-mtime for sync primitives (Phase 4)
 ├── version_output.rs                              # `tome --version` formats
 ├── workspace_commands.rs                          # Scope isolation across commands
 ├── workspace_info.rs                              # Workspace info report
 ├── workspace_init.rs                              # Workspace init atomicity
+├── workspace_list.rs                              # Workspace list command (Phase 4 US2)
 ├── workspace_name.rs                              # WorkspaceName validation
+├── workspace_remove.rs                            # Workspace remove with cascade (Phase 4 US2)
+├── workspace_remove_cascade.rs                    # Workspace remove catalog refcount cleanup (Phase 4 US2)
+├── workspace_rename.rs                            # Workspace rename command (Phase 4 US2)
+├── workspace_regen_summary.rs                     # Regen summary command (Phase 4 US2)
 ├── workspace_resolution.rs                        # Workspace scope resolution algorithm
+├── workspace_sync.rs                              # Workspace sync command (Phase 4 US2)
 ├── workspace_use_atomicity.rs                     # Project binding atomicity (Phase 4 US1)
 ├── workspace_use_binding.rs                       # Core project-binding flow (Phase 4 US1)
 ├── workspace_use_claude_code_e2e.rs               # Claude Code harness integration (Phase 4 US1)
@@ -126,8 +134,11 @@ Integration test files follow the pattern `<command-or-feature>_<suffix>.rs`:
 - `plugin_enable.rs` — plugin enable feature
 - `catalog_add.rs` — catalog add subcommand
 - `workspace_init.rs` — workspace init subcommand
+- `workspace_list.rs` — workspace list subcommand
 - `workspace_use_binding.rs` — workspace use project binding
 - `workspace_use_atomicity.rs` — workspace use atomicity properties
+- `workspace_rename.rs` — workspace rename lifecycle
+- `workspace_remove_cascade.rs` — workspace remove with catalog cleanup
 - `schema_migration_e2e.rs` — end-to-end synthetic migrations
 - `manifest_strictness.rs` — cross-cutting strictness boundary
 - `sync_idempotence.rs` — sync idempotence verification
@@ -314,6 +325,32 @@ fn mcp_config_write_preserves_mtime_on_idempotent_rewrite() {
 }
 ```
 
+### Workspace Lifecycle Tests (Phase 4 US2)
+
+Tests for workspace operations (`rename`, `remove`, `sync`) exercise the two-phase sync pattern:
+
+```rust
+#[test]
+fn rename_updates_marker_and_database() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    
+    let outcome = workspace::init::init(parse("old-name"), false, &paths).expect("init");
+    
+    // Phase A: database update (atomic with marker rename)
+    // Phase B: sync harnesses (unlocked)
+    let result = workspace::rename::rename(parse("old-name"), parse("new-name"), &paths)
+        .expect("rename");
+    
+    assert_eq!(result.new_name.as_str(), "new-name");
+    
+    // Verify marker file reflects the new name
+    let marker = paths.workspace_dir(&result.new_name).join(".tome");
+    assert!(marker.exists());
+}
+```
+
 ## Shared Test Harness
 
 All integration tests import from `tests/common/mod.rs`:
@@ -424,10 +461,14 @@ pub fn stub_summariser_seed() -> MetaSeed {
 }
 ```
 
-**Workspace Setup**:
+**Workspace Setup (Phase 4 US2)**:
 ```rust
 pub fn seed_workspace(paths: &Paths, name: &str) {
-    // Create the workspace in the central DB (Phase 4)
+    // Create the workspace in the central DB
+}
+
+pub fn seed_project(paths: &Paths, workspace_name: &str, project_root: &Path) {
+    // Bind a project to a workspace in the central DB
 }
 ```
 
@@ -464,6 +505,7 @@ Helper functions that synthesize test data on the fly:
 - `copy_sample_plugin_catalog()` — Copy a fixture to a temp dir
 - `write_index_db_with_schema_version()` — Generate synthetic DB at a version
 - `seed_workspace()` — Insert a workspace into the central DB
+- `seed_project()` — Bind a project to a workspace
 
 **Rationale**: No opaque binary `.db` files in git; no large test data in the repository. Fixtures are code + templates; synthesis is deterministic.
 
@@ -476,6 +518,7 @@ Tests exercising the successful flow:
 - `plugin_enable.rs::enable_inserts_skill_rows_with_content_hash_and_enabled_flag`
 - `workspace_init.rs::init_creates_dot_tome_with_empty_config`
 - `workspace_use_binding.rs::bind_inserts_row_and_returns_outcome`
+- `workspace_rename.rs::rename_updates_marker_and_database`
 - `query.rs::knn_returns_sorted_results_above_minimum_score`
 
 ### Error Path Tests
@@ -485,6 +528,7 @@ Tests exercising specific failure modes:
 - `workspace_resolution.rs::global_fallback_with_workspace_missing_index` (bootstrap-not-yet)
 - `doctor.rs::missing_reranker_classified_as_degraded` (partial failure)
 - `exit_codes_e2e.rs::plugin_show_with_malformed_plugin_json_exits_22` (specific exit code)
+- `workspace_remove_cascade.rs::remove_refuses_without_force_when_plugins_exist`
 
 ### Atomicity Tests
 
@@ -680,8 +724,8 @@ All three quality gates are enforced locally via `.githooks/pre-commit`. PR CI m
 ### Test Execution
 
 - **Unit tests**: ~1 second (no I/O)
-- **Integration tests**: ~40–60 seconds (temp dirs, fixture setup, git ops, DB creation)
-- **Total**: ~70 seconds on a modern machine
+- **Integration tests**: ~60–80 seconds (temp dirs, fixture setup, git ops, DB creation, workspace lifecycle)
+- **Total**: ~80 seconds on a modern machine
 
 Tests are deterministic; no flakiness tolerance. A flaky test is a bug.
 
@@ -769,4 +813,4 @@ Returns `&'static Scope` so callers avoid repeated allocations. Preferred over p
 
 ---
 
-*This document describes HOW to test. Update when testing strategy changes. Last refreshed 2026-05-25 against Phase 4 / US1 source (609 tests, 82 suites).*
+*This document describes HOW to test. Update when testing strategy changes. Last refreshed 2026-05-25 against Phase 4 / US2 source (677 tests, 92 suites).*
