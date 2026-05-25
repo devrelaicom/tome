@@ -1,14 +1,14 @@
 # Testing Strategy
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
-> **Generated**: 2026-05-23
-> **Last Updated**: 2026-05-23
+> **Generated**: 2026-05-25
+> **Last Updated**: 2026-05-25
 
 ## Test Framework
 
 | Type | Framework | Configuration |
 |------|-----------|---------------|
-| Unit | Rust built-in (`#[test]`) | Implicit in `src/lib.rs` |
+| Unit | Rust built-in (`#[test]`) | Implicit in `src/lib.rs` + `src/**/*.rs` |
 | Integration | Rust built-in (`#[test]`) | Files in `tests/` directory |
 | E2E | Not currently in use | N/A |
 
@@ -23,11 +23,11 @@ Cargo automatically discovers and runs all tests via `cargo test`. No external t
 | `cargo test --test <name>` | Single integration test file |
 | `cargo test <pattern>::` | Tests matching the pattern |
 | `cargo test -- --nocapture` | Show stdout/stderr (suppress output capture) |
-| `cargo test -- --test-threads=1` | Run sequentially (for thread-local state) |
+| `cargo test -- --test-threads=1` | Run sequentially (for thread-local state or shared resource tests) |
 
-**Phase 4 Status**: 490 tests across 64 test suites:
-- 102 unit tests in `src/lib.rs`
-- 388 integration tests in `tests/*.rs`
+**Phase 4 Status**: 609 passing tests, 29 ignored, across 82 test suites:
+- ~100 unit tests in `src/lib.rs` + modules
+- ~509 integration tests in `tests/*.rs`
 
 ## Test Organization
 
@@ -36,6 +36,7 @@ Cargo automatically discovers and runs all tests via `cargo test`. No external t
 ```
 tests/
 ├── common/mod.rs                                  # Shared test harness (Fixture, ToolEnv, helpers)
+│   └── Tests call `paths_for()`, `lifecycle_paths()`, `stub_embedder_seed()`, etc.
 ├── atomic_dir.rs                                  # Atomic directory landing tests
 ├── atomicity.rs                                   # Atomic writes under SIGINT injection
 ├── atomicity_enable.rs                            # Plugin enable atomicity (thread-local state)
@@ -53,13 +54,20 @@ tests/
 ├── doctor_json.rs                                 # Doctor JSON envelope shape
 ├── embedding_stub.rs                              # StubEmbedder determinism
 ├── error_messages.rs                              # TomeError Display format
-├── exit_codes.rs                                  # Exit code mappings
+├── exit_codes.rs                                  # Exit code mappings (library API)
 ├── exit_codes_e2e.rs                              # CLI binary exit codes
 ├── frontmatter.rs                                 # SKILL.md frontmatter parsing
-├── harness_skeleton.rs                            # Harness module composition (Phase 4)
+├── harness_module_claude_code.rs                  # Claude Code production harness (Phase 4)
+├── harness_skeleton.rs                            # Harness module composition
+├── harness_sync_stub.rs                           # Sync algorithm with StubHarness
 ├── index_lock.rs                                  # Advisory lock contention
 ├── index_schema_bootstrap.rs                      # DB schema bootstrap
 ├── manifest_strictness.rs                         # Strictness boundary (#[serde(deny_unknown_fields)])
+├── mcp_config_clash.rs                            # MCP config ownership clash detection
+├── mcp_config_create.rs                           # MCP config creation (TOML + JSON)
+├── mcp_config_preserve_order.rs                   # Order/comment preservation on rewrite
+├── mcp_config_remove.rs                           # MCP config entry removal
+├── mcp_config_update.rs                           # MCP config update (read-modify-write)
 ├── mcp_lifecycle.rs                               # MCP server startup paths
 ├── mcp_log_format.rs                              # MCP log JSON field names
 ├── mcp_server.rs                                  # MCP tool routing + schemas
@@ -75,28 +83,37 @@ tests/
 ├── plugin_cheap_reenable_across_workspaces.rs     # Cheap re-enable idempotency (Phase 4)
 ├── plugin_disable.rs                              # Plugin disable CLI
 ├── plugin_enable.rs                               # Plugin enable library API
-├── plugin_interactive.rs                          # Bare `tome plugin` via pty
+├── plugin_interactive.rs                          # Bare `tome plugin` via pty (rexpect)
 ├── plugin_list.rs                                 # Plugin list CLI
 ├── plugin_repeated.rs                             # Enable/disable of already-enabled
 ├── plugin_show.rs                                 # Plugin show CLI
 ├── plugin_summariser_forward_progress.rs          # Summariser byte-progress callback (Phase 4)
-├── plugin_workspace_skills.rs                     # Workspace-scoped skills (Phase 4)
+├── plugin_workspace_skills.rs                     # Workspace-scoped skills isolation (Phase 4)
 ├── query.rs                                       # KNN + reranker + drift
 ├── reindex.rs                                     # Reindex command
 ├── schema_migration_e2e.rs                        # Forward schema migrations (synthetic)
 ├── schema_migrations.rs                           # Schema version guards
 ├── scrubbing.rs                                   # Credential scrubbing in errors
-├── security_hardening.rs                          # Hardening measures (chmod, symlink skip)
+├── security_hardening.rs                          # Hardening measures (chmod, symlink skip, mode preservation)
 ├── settings_skeleton.rs                           # Settings composition (Phase 4)
 ├── status.rs                                      # Status report assembly
 ├── summariser_stub.rs                             # StubSummariser determinism (Phase 4)
+├── sync_algorithm.rs                              # Sync orchestrator (Phase 4)
 ├── sync_boundary.rs                               # Enforce tokio confinement to src/mcp/
+├── sync_idempotence.rs                            # Idempotence-by-mtime for sync primitives (Phase 4)
 ├── version_output.rs                              # `tome --version` formats
 ├── workspace_commands.rs                          # Scope isolation across commands
 ├── workspace_info.rs                              # Workspace info report
 ├── workspace_init.rs                              # Workspace init atomicity
-├── workspace_name.rs                              # WorkspaceName validation (Phase 4)
-└── workspace_resolution.rs                        # Workspace scope resolution algorithm
+├── workspace_name.rs                              # WorkspaceName validation
+├── workspace_resolution.rs                        # Workspace scope resolution algorithm
+├── workspace_use_atomicity.rs                     # Project binding atomicity (Phase 4 US1)
+├── workspace_use_binding.rs                       # Core project-binding flow (Phase 4 US1)
+├── workspace_use_claude_code_e2e.rs               # Claude Code harness integration (Phase 4 US1)
+├── workspace_use_concurrent.rs                    # Concurrent workspace use (Phase 4 US1)
+├── workspace_use_cross_product.rs                 # Cross-product coverage (Phase 4 US1)
+├── workspace_use_forward_progress.rs              # Forward progress validation (Phase 4 US1)
+└── workspace_use_json_shape.rs                    # JSON envelope shape pinning (Phase 4 US1)
 
 fixtures/
 ├── sample-catalog/                                # Git fixture with plugin-alpha + plugin-beta
@@ -109,12 +126,15 @@ Integration test files follow the pattern `<command-or-feature>_<suffix>.rs`:
 - `plugin_enable.rs` — plugin enable feature
 - `catalog_add.rs` — catalog add subcommand
 - `workspace_init.rs` — workspace init subcommand
+- `workspace_use_binding.rs` — workspace use project binding
+- `workspace_use_atomicity.rs` — workspace use atomicity properties
 - `schema_migration_e2e.rs` — end-to-end synthetic migrations
 - `manifest_strictness.rs` — cross-cutting strictness boundary
+- `sync_idempotence.rs` — sync idempotence verification
 
 ## Test Patterns
 
-### Unit Tests (in src/lib.rs)
+### Unit Tests (in src/lib.rs + modules)
 
 Unit tests verify individual functions and small APIs without external dependencies:
 
@@ -127,9 +147,12 @@ fn parse_plugin_identity_accepts_catalog_slash_plugin() {
 }
 
 #[test]
-fn parse_plugin_identity_rejects_missing_slash() {
-    let result: Result<PluginId, _> = "my-plugin".parse();
-    assert!(result.is_err());
+fn parse_workspace_name_validates_at_boundary() {
+    let name = WorkspaceName::parse("my-workspace").unwrap();
+    assert_eq!(name.as_str(), "my-workspace");
+    
+    let err = WorkspaceName::parse("my-workspace-").unwrap_err();
+    assert!(matches!(err, TomeError::WorkspaceNameInvalid { .. }));
 }
 ```
 
@@ -164,8 +187,8 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
         summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
-    let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
 
+    let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
     let outcome = lifecycle::enable(&id, &deps).expect("enable should succeed");
     assert_eq!(outcome.summary.total_skills, 4);
 }
@@ -242,6 +265,55 @@ fn bare_plugin_navigates_catalog_plugin_view_loop() {
 - Only for tests where prompts are central to the feature
 - `rexpect` is a dev-dependency; not in the release binary
 
+### Atomic-Directory Landing Tests (Phase 4)
+
+Tests for `src/util/atomic_dir.rs` verify crash safety:
+
+```rust
+#[test]
+fn land_directory_is_atomic_on_sigint_before_keep() {
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("marker");
+    
+    // Simulate SIGINT mid-populate by returning Err
+    let result = atomic_dir::land_directory(&target, 0o700, |staged| {
+        // Partial write, then error
+        std::fs::File::create(staged.join("partial.txt"))?;
+        Err(TomeError::Interrupted)
+    });
+    
+    // Target must not exist; staging dir cleaned by TempDir::drop
+    assert!(result.is_err());
+    assert!(!target.exists());
+}
+```
+
+### Idempotence-by-Mtime Tests (Phase 4)
+
+Tests for rules files and MCP configs verify that repeated writes with identical content don't change mtime:
+
+```rust
+#[test]
+fn mcp_config_write_preserves_mtime_on_idempotent_rewrite() {
+    let tmp = TempDir::new().unwrap();
+    let config_path = tmp.path().join("config.json");
+    
+    // First write
+    let entry = TomeEntry::new("tome".to_string(), vec!["mcp".to_string()]);
+    mcp_config::write_json(&config_path, &entry).unwrap();
+    let mtime1 = std::fs::metadata(&config_path).unwrap().modified().unwrap();
+    
+    // Sleep to ensure distinct granularity
+    std::thread::sleep(Duration::from_millis(1500));
+    
+    // Identical rewrite
+    mcp_config::write_json(&config_path, &entry).unwrap();
+    let mtime2 = std::fs::metadata(&config_path).unwrap().modified().unwrap();
+    
+    assert_eq!(mtime1, mtime2, "idempotent write should not change mtime");
+}
+```
+
 ## Shared Test Harness
 
 All integration tests import from `tests/common/mod.rs`:
@@ -307,7 +379,7 @@ pub fn fabricate_installed_model(paths: &Paths, entry: &ModelManifest) {
     // Fast: 45 MB embedder + 280 MB reranker take no actual disk space
 }
 
-pub fn fabricate_all_installed_models(paths: &Paths) {
+pub fn fabricate_all_registry_models(paths: &Paths) {
     for entry in MODEL_REGISTRY {
         fabricate_installed_model(paths, entry);
     }
@@ -324,7 +396,7 @@ pub fn paths_for(env: &ToolEnv) -> Paths {
     // Derive XDG paths from ToolEnv.home (used at the 4th caller → promoted here)
 }
 
-pub fn lifecycle_paths(tmp: &Path) -> Paths {
+pub fn lifecycle_paths(root: &Path) -> Paths {
     // Paths rooted in a tempdir for unit-like tests
 }
 ```
@@ -352,6 +424,28 @@ pub fn stub_summariser_seed() -> MetaSeed {
 }
 ```
 
+**Workspace Setup**:
+```rust
+pub fn seed_workspace(paths: &Paths, name: &str) {
+    // Create the workspace in the central DB (Phase 4)
+}
+```
+
+**RAII Injection Guards**:
+```rust
+pub struct HarnessModulesGuard;
+impl HarnessModulesGuard {
+    pub fn install(modules: Vec<Box<dyn HarnessModule>>) {
+        // Installs into HARNESS_MODULES_OVERRIDE thread-local
+    }
+}
+impl Drop for HarnessModulesGuard {
+    fn drop(&mut self) {
+        // Clears the slot on drop (survives panics)
+    }
+}
+```
+
 ## Test Data
 
 ### Fixtures
@@ -369,6 +463,7 @@ Helper functions that synthesize test data on the fly:
 - `fabricate_installed_model()` — Sparse files for model artefacts
 - `copy_sample_plugin_catalog()` — Copy a fixture to a temp dir
 - `write_index_db_with_schema_version()` — Generate synthetic DB at a version
+- `seed_workspace()` — Insert a workspace into the central DB
 
 **Rationale**: No opaque binary `.db` files in git; no large test data in the repository. Fixtures are code + templates; synthesis is deterministic.
 
@@ -380,6 +475,7 @@ Tests exercising the successful flow:
 
 - `plugin_enable.rs::enable_inserts_skill_rows_with_content_hash_and_enabled_flag`
 - `workspace_init.rs::init_creates_dot_tome_with_empty_config`
+- `workspace_use_binding.rs::bind_inserts_row_and_returns_outcome`
 - `query.rs::knn_returns_sorted_results_above_minimum_score`
 
 ### Error Path Tests
@@ -396,13 +492,15 @@ Tests verifying multi-step operations are all-or-nothing:
 
 - `atomicity.rs::enable_interrupted_mid_transaction_rolls_back` (inject error mid-transaction)
 - `workspace_init.rs::init_atomic_rename_prevents_partial_dotted_tome` (crash mid-populate)
+- `workspace_use_atomicity.rs::bind_with_concurrent_writers_serializes` (concurrent binding)
 - `schema_migration_e2e.rs::forward_migration_fails_mid_step_rolls_back` (SIGINT mid-migration)
 
 ### Concurrency Tests
 
-Tests verifying multi-process safety:
+Tests verifying multi-process and multi-thread safety:
 
 - `concurrency.rs::two_processes_contending_on_index_lock` (advisory lock)
+- `workspace_use_concurrent.rs::concurrent_threads_both_succeed` (thread barrier + binding)
 - `atomicity_enable.rs::enable_of_enabled_is_noop` (idempotency)
 
 ### Strictness Boundary Tests
@@ -420,14 +518,25 @@ Tests verifying schema evolution:
 - `schema_migration_e2e.rs::forward_migration_v0_to_v1_succeeds`
 - `schema_migration_e2e.rs::forward_migration_fails_mid_step_rolls_back`
 
-### Thread-Local Injection Tests (Phase 4+)
+### Thread-Local Injection Tests (Phase 3+)
 
 Tests verifying per-thread injection patterns:
 
 - `schema_migration_e2e.rs` uses `MigrationsGuard::install(MIGRATIONS)` with per-thread scope
-- **Important**: `MIGRATIONS_OVERRIDE` is `thread_local!` and does NOT propagate across `thread::spawn`. Writer threads must install their own guard.
+- `sync_algorithm.rs` uses `HarnessModulesGuard::install(stubs)` for harness dispatch testing
 
-See CLAUDE.md conventions section on `MigrationsGuard` and `thread_local!`.
+**Important**: `MIGRATIONS_OVERRIDE` and `HARNESS_MODULES_OVERRIDE` are `thread_local!` and do NOT propagate across `thread::spawn`. Writer threads must install their own guard.
+
+See CONVENTIONS.md for details on the `#[doc(hidden)] pub static` + RAII guard pattern.
+
+### Idempotence Tests (Phase 4)
+
+Tests verifying repeated operations with identical inputs produce no changes:
+
+- `sync_idempotence.rs::rules_file_write_preserves_mtime_on_idempotent_rewrite`
+- `sync_idempotence.rs::mcp_config_write_preserves_mtime_on_idempotent_rewrite`
+
+Pattern: capture mtime before write, sleep 1.5s, rewrite identical content, verify mtime unchanged.
 
 ## Mocking Strategy
 
@@ -463,7 +572,7 @@ impl Embedder for StubEmbedder {
         
         if let Some(fail_after) = self.force_fail_after {
             if count > fail_after {
-                return Err(TomeError::EmbeddingGenerationFailure { /* ... */ });
+                return Err(TomeError::EmbedderFailure { /* ... */ });
             }
         }
         
@@ -494,8 +603,6 @@ impl Reranker for StubReranker {
 }
 ```
 
-**Usage**: Pass when testing query with reranking.
-
 ### StubSummariser (Phase 4)
 
 Stub for the `Summariser` trait that avoids loading Llama.cpp models:
@@ -511,7 +618,22 @@ impl Summariser for StubSummariser {
 }
 ```
 
-**Usage**: Pass when testing summarisation features without real model load.
+### StubHarness (Phase 4)
+
+Stub for the `HarnessModule` trait used in harness sync tests:
+
+```rust
+pub struct StubHarness;
+
+impl HarnessModule for StubHarness {
+    fn name(&self) -> &str { "stub" }
+    fn sync_rules_file(&self, project_root: &Path, content: &str) -> Result<(), TomeError> {
+        // No-op stub
+        Ok(())
+    }
+    // ... other trait methods ...
+}
+```
 
 ### Git Fixtures
 
@@ -530,11 +652,14 @@ let fixture = Fixture::build_sample();
 - Every code path reachable from the public API is tested
 - Every error variant is covered
 - Every exit code is exercised
+- Atomicity properties verified
+- Concurrency safety verified
 
 **Measurement**: `cargo tarpaulin` or similar tool tracks coverage informally; a drop in coverage flags potential gaps for review.
 
 **Exclusions**:
-- `#[cfg(test)]` stub code (e.g., `src/embedding/stub.rs`)
+- `src/embedding/stub.rs` — stub implementation
+- `src/harness/stub.rs` — stub harness module
 - Config file parsing (covered by fixture loading)
 - Dead code (rare due to strong module boundaries)
 
@@ -555,7 +680,7 @@ All three quality gates are enforced locally via `.githooks/pre-commit`. PR CI m
 ### Test Execution
 
 - **Unit tests**: ~1 second (no I/O)
-- **Integration tests**: ~30–60 seconds (temp dirs, fixture setup, git ops)
+- **Integration tests**: ~40–60 seconds (temp dirs, fixture setup, git ops, DB creation)
 - **Total**: ~70 seconds on a modern machine
 
 Tests are deterministic; no flakiness tolerance. A flaky test is a bug.
@@ -595,7 +720,7 @@ let outcome = lifecycle::enable(&id, &deps).expect("enable must succeed");
 For expected errors, use `assert!(result.is_err())`:
 
 ```rust
-let result = plugin_id.parse::<PluginId>();
+let result = "invalid".parse::<WorkspaceName>();
 assert!(result.is_err());
 ```
 
@@ -619,15 +744,15 @@ fn test_two() {
 
 `TempDir` is cleaned up automatically on drop, so no manual cleanup needed.
 
-### test_scope() for LifecycleDeps (Phase 4+)
+### Static Lifetime Scope for Global State (Phase 4+)
 
-When multiple tests need a `&Scope` for constructing `LifecycleDeps`, use:
+When multiple tests need a `&'static Scope` for constructing dependencies:
 
 ```rust
-pub fn test_scope() -> &'static Scope {
-    static SCOPE: OnceLock<Scope> = OnceLock::new();
+pub fn test_scope() -> &'static tome::workspace::Scope {
+    static SCOPE: std::sync::OnceLock<tome::workspace::Scope> = std::sync::OnceLock::new();
     SCOPE.get_or_init(|| {
-        Scope(WorkspaceName::global())
+        tome::workspace::Scope(tome::workspace::WorkspaceName::global())
     })
 }
 ```
@@ -640,8 +765,8 @@ Returns `&'static Scope` so callers avoid repeated allocations. Preferred over p
 
 **T093/T094/T095**: MCP protocol-purity, latency, and SIGINT graceful-shutdown tests. Require either real models or a stub-injection point on `McpState`. Deferred to Phase 4+ / post-v0.3.0.
 
-**m-WKS-***: Long-tail coverage gaps in workspace initialization and scope isolation. Documented in `retro/P8.md`.
+**T088 (US4.b)**: Summariser manual verification — Qwen2.5-0.5B-Instruct model inference tested via stub only in CI. Real model testing deferred.
 
 ---
 
-*This document describes HOW to test. Update when testing strategy changes. Last refreshed 2026-05-23 against Phase 4 Foundational F1–F11 source (490 tests, 64 suites).*
+*This document describes HOW to test. Update when testing strategy changes. Last refreshed 2026-05-25 against Phase 4 / US1 source (609 tests, 82 suites).*
