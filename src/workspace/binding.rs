@@ -74,11 +74,14 @@ pub struct BindOutcome {
 /// lock so a typo doesn't materialise a `.tome/` in the user's home
 /// directory. `--force` bypasses the check via the wrapper, not here.
 ///
-/// Both paths are canonicalised before comparison; if canonicalisation
-/// fails (e.g. `/` itself), we fall back to literal-path equality so
-/// the obvious case still refuses.
+/// `cwd` is canonicalised strictly — a canonicalise failure surfaces as
+/// [`TomeError::Io`] (exit 7) so the dangerous-cwd check never silently
+/// succeeds against a path it could not normalise. `home` canonicalises
+/// best-effort: an unreadable `$HOME` is not a reason to refuse, but the
+/// caller's `cwd == home` comparison still works against the literal
+/// path.
 pub fn is_project_root_acceptable(cwd: &Path, home: &Path) -> Result<(), TomeError> {
-    let cwd_c = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let cwd_c = cwd.canonicalize().map_err(TomeError::Io)?;
     let home_c = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
 
     if cwd_c == home_c {
@@ -129,6 +132,21 @@ pub fn bind_project(
 ) -> Result<BindOutcome, TomeError> {
     let canonical_target = target_root.canonicalize().map_err(TomeError::Io)?;
 
+    // Refuse non-UTF8 project paths — every downstream consumer (DB
+    // `workspace_projects.project_path` column, JSON wire format, the
+    // marker config.toml string) assumes UTF-8. Surface the failure
+    // crisply rather than letting `to_string_lossy` paper over the
+    // invariant.
+    if canonical_target.to_str().is_none() {
+        return Err(TomeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "project path is not valid UTF-8: {}",
+                canonical_target.display()
+            ),
+        )));
+    }
+
     // Make sure the parent of index.db exists; lock acquisition will
     // create the lockfile itself, but the surrounding directory must
     // already be present.
@@ -141,7 +159,7 @@ pub fn bind_project(
     let lock = acquire_lock(&deps.paths.index_lock)?;
 
     let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
-    let conn = index::open(
+    let mut conn = index::open(
         &deps.paths.index_db,
         &OpenOptions {
             embedder: embedder_seed,
@@ -200,9 +218,16 @@ pub fn bind_project(
         _ => None,
     };
 
-    // Step 5: UPSERT the workspace_projects row.
+    // Steps 5+6: UPSERT the workspace_projects row AND bump
+    // workspaces.last_used_at inside one transaction (FR-411). Either
+    // both writes commit, or neither — a partial that left the binding
+    // installed without bumping `last_used_at` would let a stale `tome
+    // workspace list --by last_used_at` ordering survive across runs.
     let now_unix = OffsetDateTime::now_utc().unix_timestamp();
-    conn.execute(
+    let tx = conn.transaction().map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!("begin bind transaction: {e}"))
+    })?;
+    tx.execute(
         "INSERT INTO workspace_projects (project_path, workspace_id, bound_at)
          VALUES (?1, ?2, ?3)
          ON CONFLICT(project_path)
@@ -213,14 +238,15 @@ pub fn bind_project(
     .map_err(|e| {
         TomeError::IndexIntegrityCheckFailure(format!("upsert workspace_projects: {e}"))
     })?;
-
-    // Step 6: bump last_used_at for the bound workspace (FR-411).
-    conn.execute(
+    tx.execute(
         "UPDATE workspaces SET last_used_at = ?1 WHERE id = ?2",
         rusqlite::params![now_unix, workspace_id],
     )
     .map_err(|e| {
         TomeError::IndexIntegrityCheckFailure(format!("bump workspaces.last_used_at: {e}"))
+    })?;
+    tx.commit().map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!("commit bind transaction: {e}"))
     })?;
 
     // Step 7: land the project marker atomically.

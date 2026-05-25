@@ -244,14 +244,37 @@ fn refuse_symlink(target: &Path) -> Result<(), TomeError> {
 }
 
 /// Atomic write: temp file in same dir → fsync → rename.
+///
+/// On Unix, when `target` already exists, captures its file mode and
+/// chmods the staging tempfile to match before persisting. Preserves
+/// any developer-set mode bits (e.g. group-readable workspaces) across
+/// the rewrite. If `target` is absent, the tempfile's libc-default mode
+/// (typically 0o600) wins.
 fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), TomeError> {
     let parent = target
         .parent()
         .ok_or_else(|| TomeError::Io(std::io::Error::other("rules-file path has no parent")))?;
     std::fs::create_dir_all(parent).map_err(TomeError::Io)?;
+
+    #[cfg(unix)]
+    let target_mode: Option<u32> = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(target)
+            .ok()
+            .map(|m| m.permissions().mode())
+    };
+
     let mut tmp = NamedTempFile::with_prefix_in(".tome.tmp.", parent).map_err(TomeError::Io)?;
     tmp.write_all(bytes).map_err(TomeError::Io)?;
     tmp.as_file().sync_all().map_err(TomeError::Io)?;
+
+    #[cfg(unix)]
+    if let Some(mode) = target_mode {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(mode))
+            .map_err(TomeError::Io)?;
+    }
+
     tmp.persist(target).map_err(|e| TomeError::Io(e.error))?;
     Ok(())
 }

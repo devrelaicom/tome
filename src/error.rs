@@ -77,7 +77,7 @@ pub enum TomeError {
     HarnessNotSupported { name: String },
 
     #[error(
-        "harness MCP config clash in {}: existing entry named `tome` does not match Tome's expected shape (command=`{command}`, first_arg=`{first_arg}`)\nhint: rerun with --force to overwrite",
+        "harness MCP config clash in {}: existing entry named `tome` does not match Tome's expected shape (command=`{command}`, first_arg=`{first_arg}`)\nhint: rerun with --force to overwrite, or `tome workspace use <name> --force` to repair after the clash is resolved; `tome doctor --fix` will also surface the residual report",
         path.display()
     )]
     HarnessClash {

@@ -84,6 +84,51 @@ fn read_last_used_at(paths: &tome::paths::Paths, workspace: &str) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
+// 0. Library API: refuses a non-UTF8 project path with TomeError::Io.
+//    Phase 4 / US1.d-2a R-B1.
+// ---------------------------------------------------------------------------
+
+// Gated to Linux because macOS APFS rejects illegal byte sequences at
+// the syscall layer (`Os { code: 92, kind: Uncategorized, message:
+// "Illegal byte sequence" }` from `mkdir(2)`), so we can't even fabricate
+// the bad filename to drive the test. The production code path under
+// test (the `to_str().is_none()` check in `bind_project`) is platform-
+// independent — Linux coverage is sufficient to pin the behaviour.
+#[cfg(target_os = "linux")]
+#[test]
+fn refuses_non_utf8_project_path() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    seed_workspace(&paths, "my-workspace");
+
+    // Build a project directory whose final path component is not
+    // valid UTF-8. `\xff\xfe` is a UTF-16 BOM that is not valid UTF-8.
+    let bad_name = OsString::from_vec(b"bad\xff\xfename".to_vec());
+    let bad_dir = tmp.path().join(bad_name);
+    std::fs::create_dir_all(&bad_dir).expect("create non-UTF8 dir");
+
+    let home = tmp.path().join("fake-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let deps = BindDeps {
+        paths: &paths,
+        home_root: &home,
+    };
+    let name = WorkspaceName::parse("my-workspace").unwrap();
+
+    let err = binding::bind_project(&bad_dir, name, false, &deps)
+        .expect_err("non-UTF8 project path must be refused");
+    assert_eq!(
+        err.exit_code(),
+        7,
+        "expected TomeError::Io (exit 7); got {err:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 1. CLI binary: refuses to bind when CWD is the user's home directory.
 // ---------------------------------------------------------------------------
 

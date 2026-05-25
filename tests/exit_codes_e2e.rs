@@ -252,6 +252,34 @@ fn workspace_use_cwd_is_home_exits_2() {
 }
 
 #[test]
+fn workspace_use_invalid_name_exits_15() {
+    // `WorkspaceName::parse` rejects names containing characters outside
+    // `[a-z0-9-]` per FR-347. The CLI must surface that as exit 15
+    // (`WorkspaceNameInvalid`) rather than collapsing into a generic
+    // usage error.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    let project = env.home_path().join("project");
+    fs::create_dir_all(&project).expect("create project");
+
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["workspace", "use", "Bad_Name!"])
+        .output()
+        .expect("spawn");
+    assert_eq!(
+        out.status.code(),
+        Some(15),
+        "expected exit 15 WorkspaceNameInvalid, got {:?}, stderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+#[test]
 fn workspace_use_harness_clash_exits_19_without_force() {
     // Pre-populate `.claude/settings.json` with a user-owned `tome`
     // entry; configure the global settings to declare `claude-code` as

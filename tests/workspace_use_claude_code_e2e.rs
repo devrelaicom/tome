@@ -397,3 +397,48 @@ fn idempotent_resync_no_disk_changes() {
         ".claude/settings.json mtime must not advance on idempotent re-sync"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 6. Nested CLAUDE.md (.claude/CLAUDE.md): the AtInclude path is computed
+//    relative to the harness's rules-file target. With only
+//    `.claude/CLAUDE.md` pre-existing, claude-code's precedence ladder
+//    (AGENTS.md > CLAUDE.md > .claude/CLAUDE.md) picks the nested file,
+//    and the `@`-include must traverse up one level.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nested_claude_md_uses_parent_path_at_include() {
+    // Pre-create ONLY .claude/CLAUDE.md so the claude-code harness
+    // resolves its target to that nested path.
+    let fx = Fixture::build_with_existing("test-ws", &[(".claude/CLAUDE.md", "# nested rules\n")]);
+    fx.bind_then_sync();
+
+    // AGENTS.md and the top-level CLAUDE.md must NOT have been created
+    // — the harness's precedence ladder picked the nested file.
+    assert!(
+        !fx.project_path.join("AGENTS.md").exists(),
+        "AGENTS.md must not be created when .claude/CLAUDE.md already exists"
+    );
+    assert!(
+        !fx.project_path.join("CLAUDE.md").exists(),
+        "top-level CLAUDE.md must not be created when .claude/CLAUDE.md already exists"
+    );
+
+    // The nested file received the Tome block, and the `@`-include
+    // walks up out of `.claude/` to reach `.tome/RULES.md`.
+    let nested = fx.project_path.join(".claude/CLAUDE.md");
+    let body = fs::read_to_string(&nested).expect("read nested CLAUDE.md");
+    assert!(
+        body.contains("<!-- tome:begin -->") && body.contains("<!-- tome:end -->"),
+        ".claude/CLAUDE.md must carry the Tome block; got: {body}"
+    );
+    assert!(
+        body.contains("@../.tome/RULES.md"),
+        ".claude/CLAUDE.md block must @-include `../.tome/RULES.md`; got: {body}"
+    );
+    // The original prose must survive.
+    assert!(
+        body.contains("# nested rules"),
+        "original heading must survive; got: {body}"
+    );
+}

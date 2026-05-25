@@ -121,8 +121,8 @@ pub struct WorkspaceArgs {
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceCommand {
     /// Report the resolved workspace context for the current invocation.
-    /// Read-only; honours `--workspace` / `--global` like every other
-    /// command. Bootstrap-not-yet is informational, not an error.
+    /// Read-only; honours `--workspace <name>` like every other command.
+    /// Bootstrap-not-yet is informational, not an error.
     Info,
     /// Create a `.tome/` workspace at `<path>` (defaults to current
     /// directory). Atomic — a SIGINT or crash leaves either no `.tome/`
@@ -134,6 +134,9 @@ pub enum WorkspaceCommand {
     /// project-marker walk. The atomic-directory landing means a
     /// SIGINT mid-bind never leaves a partial `.tome/`. Phase 4 / US1.a
     /// stubs the harness-sync seam; US1.b wires the real sync.
+    ///
+    /// Note: the `<name>` argument always takes precedence; the global
+    /// `--workspace` flag is ignored for this subcommand.
     Use(WorkspaceUseArgs),
 }
 
@@ -167,7 +170,7 @@ pub struct WorkspaceInitArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct McpArgs {
-    // No tool-specific flags. `--workspace` / `--global` come from
+    // No tool-specific flags. `--workspace <name>` comes from
     // `GlobalScopeArgs` on the top-level `Cli`. Empty struct keeps the
     // clap-derive pattern consistent with other commands.
 }

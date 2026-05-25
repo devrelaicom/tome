@@ -12,8 +12,15 @@
 //!
 //! 2. **Read-modify-write**: only Tome-owned entries (under the `"tome"`
 //!    key, matching the ownership marker `command == "tome" && args[0]
-//!    == "mcp"`) are mutated. Every other key, value, comment, and
-//!    ordering decision in the file is preserved verbatim.
+//!    == "mcp"`) are mutated. Preservation of the surrounding file
+//!    differs by format:
+//!
+//!    - **TOML** (`toml_edit`): every other key, value, comment, blank
+//!      line, and ordering decision is preserved verbatim.
+//!    - **JSON** (`serde_json` with `preserve_order`): key order and
+//!      unknown keys are preserved; whitespace and indentation are
+//!      normalised by `serde_json`'s pretty-printer (no comment support
+//!      in standard JSON, so there is nothing else to preserve).
 //!
 //! F5 audit (PR #63) confirmed `serde_json/preserve_order` is
 //! behaviourally neutral on the rest of Tome's `serde_json` usage;
@@ -105,6 +112,11 @@ fn parse_err(path: &Path, err: impl std::fmt::Display) -> TomeError {
 }
 
 /// Atomic write: temp file in same dir → fsync → rename.
+///
+/// On Unix, when `target` already exists, captures its file mode and
+/// chmods the staging tempfile to match before persisting. Preserves
+/// developer-set mode bits across the rewrite. If `target` is absent,
+/// the tempfile's libc-default mode (typically 0o600) wins.
 fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), TomeError> {
     let parent = target
         .parent()
@@ -120,9 +132,25 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), TomeError> {
     #[cfg(not(unix))]
     let _ = parent_existed;
 
+    #[cfg(unix)]
+    let target_mode: Option<u32> = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::symlink_metadata(target)
+            .ok()
+            .map(|m| m.permissions().mode())
+    };
+
     let mut tmp = NamedTempFile::with_prefix_in(".tome.tmp.", parent).map_err(TomeError::Io)?;
     tmp.write_all(bytes).map_err(TomeError::Io)?;
     tmp.as_file().sync_all().map_err(TomeError::Io)?;
+
+    #[cfg(unix)]
+    if let Some(mode) = target_mode {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(mode))
+            .map_err(TomeError::Io)?;
+    }
+
     tmp.persist(target).map_err(|e| TomeError::Io(e.error))?;
     Ok(())
 }
@@ -344,10 +372,18 @@ pub fn read_entry(
 /// Write the Tome-owned entry at `mcpServers.tome` (or
 /// `mcp_servers.tome`) in the harness MCP config at `path`.
 ///
-/// Preserves every other key, value, comment, and ordering decision in
-/// the file. Preserves the existing entry's `env` field on rewrite per
-/// FR-503. Creates parent directory (mode 0700 on Unix) and the file
-/// itself if missing. Atomic rename onto `path`.
+/// Surrounding-content preservation differs by format:
+/// - **TOML** preserves every other key, value, comment, blank line,
+///   and ordering decision verbatim (via `toml_edit`).
+/// - **JSON** preserves key order and unknown keys; whitespace and
+///   indentation are normalised by `serde_json`'s pretty-printer.
+///
+/// Preserves the existing entry's `env` field on rewrite per FR-503
+/// (only when the existing entry was already Tome-owned; a user-owned
+/// entry's `env` is discarded on `--force` rewrite — see
+/// `contracts/mcp-config-integration.md` § "Ownership marker (FR-501)"
+/// for the safety rationale). Creates parent directory (mode 0700 on
+/// Unix) and the file itself if missing. Atomic rename onto `path`.
 ///
 /// **Idempotence (FR-525 corollary)**: when the on-disk Tome-owned
 /// entry already has the same `command` + `args` as `entry`, no write

@@ -224,7 +224,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
                 .map(|sharers| sharers.iter().any(|s| effective_names.contains(&s.name)))
                 .unwrap_or(false);
             if any_live {
-                let body = compute_rules_body(snap, project_root);
+                let body = compute_rules_body(snap, project_root)?;
                 let action = write_rules_for_path(snap, &body)?;
                 record_action(
                     &mut outcome,
@@ -410,20 +410,29 @@ fn read_global_settings(deps: &SyncDeps<'_>) -> Result<GlobalSettings, TomeError
 /// that will land between the `<!-- tome:begin -->` / `<!-- tome:end -->`
 /// markers for `BlockInExistingFile`, or the full file contents for
 /// `StandaloneFile`.
-fn compute_rules_body(snap: &HarnessSnapshot, project_root: &Path) -> String {
+///
+/// Returns an error if reading the project marker's `RULES.md` fails
+/// for any reason other than `NotFound` — absent is fine (US2 / US4
+/// own the file, sync is robust to its absence), but a permissions or
+/// I/O failure must surface rather than silently produce an empty block.
+fn compute_rules_body(snap: &HarnessSnapshot, project_root: &Path) -> Result<String, TomeError> {
     match snap.block_body_style {
         BlockBodyStyle::AtInclude => {
             let project_rules = Paths::project_marker_rules(project_root);
             let parent = snap.rules_path.parent().unwrap_or(Path::new(""));
             let relative = relative_path(parent, &project_rules);
-            format!("@{}", relative.display())
+            Ok(format!("@{}", relative.display()))
         }
         BlockBodyStyle::Inline => {
             // Inline body is the verbatim contents of
-            // `<project>/.tome/RULES.md`. If absent, the block is empty
-            // — US2 / US4 own the file, sync is robust to its absence.
+            // `<project>/.tome/RULES.md`. Absent → empty block; other
+            // I/O errors propagate.
             let project_rules = Paths::project_marker_rules(project_root);
-            std::fs::read_to_string(&project_rules).unwrap_or_default()
+            match std::fs::read_to_string(&project_rules) {
+                Ok(s) => Ok(s),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+                Err(e) => Err(TomeError::Io(e)),
+            }
         }
     }
 }

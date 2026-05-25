@@ -230,7 +230,7 @@ fn harness_clash_returns_exit_19_and_continues_other_writes() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn force_overrides_clash_and_preserves_env() {
+fn force_overrides_user_owned_clash_drops_unowned_env() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = install_stub();
     let fx = Fixture::build("test-workspace", Some("harnesses = [\"stub\"]"));

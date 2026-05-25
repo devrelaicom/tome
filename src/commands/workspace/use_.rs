@@ -16,8 +16,28 @@ use crate::paths::Paths;
 use crate::workspace::binding::{self, BindDeps, BindOutcome};
 use crate::workspace::name::WorkspaceName;
 
-pub fn run(args: WorkspaceUseArgs, paths: &Paths, mode: Mode) -> Result<(), TomeError> {
+pub fn run(
+    args: WorkspaceUseArgs,
+    global_workspace: Option<&str>,
+    paths: &Paths,
+    mode: Mode,
+) -> Result<(), TomeError> {
     let name = WorkspaceName::parse(&args.name)?;
+
+    if let Some(global) = global_workspace
+        && global != args.name
+    {
+        // `--workspace <name>` is a global clap flag. For every other
+        // subcommand it picks the workspace; for `workspace use` it is
+        // semantically nonsensical because the positional `<name>`
+        // names the binding target. The Use arm always honours the
+        // positional argument; the global flag is informational here.
+        tracing::debug!(
+            global_workspace = global,
+            positional_name = args.name.as_str(),
+            "workspace use: ignoring global --workspace; positional name wins",
+        );
+    }
 
     let cwd = std::env::current_dir().map_err(TomeError::Io)?;
 
