@@ -32,9 +32,11 @@ pub mod llama;
 pub mod prompts;
 pub mod registry;
 pub mod stub;
+pub mod trigger;
 
 pub use llama::LlamaSummariser;
 pub use stub::StubSummariser;
+pub use trigger::{regenerate_for_trigger, regenerate_for_trigger_with_summariser};
 
 /// Workspace summariser interface. Implementations must be `Send + Sync`
 /// so callers can stash one inside an `Arc<dyn Summariser>` and share

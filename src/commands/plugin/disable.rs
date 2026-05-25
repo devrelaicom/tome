@@ -82,6 +82,11 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
         summariser_seed,
     )?;
 
+    // FR-381 + FR-385: regenerate cached summaries AFTER the
+    // workspace_skills DELETE commits. See `commands::plugin::enable`
+    // for the forward-progress invariant.
+    crate::summarise::regenerate_for_trigger(scope.scope.name(), &paths)?;
+
     match mode {
         Mode::Human => emit_human(&id, &outcome),
         Mode::Json => emit_json(&id, &outcome),

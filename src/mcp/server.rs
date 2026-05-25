@@ -45,6 +45,31 @@ impl Server {
             tool_router: Self::tool_router(),
         }
     }
+
+    /// Override the runtime description for the `search_skills` tool.
+    /// Phase 4 / US4.b composes the description from a fixed scaffold
+    /// plus the resolved workspace's cached `[summaries].short` per
+    /// FR-425; `mcp::run` calls this once after server construction
+    /// and before `serve_server` hands the router to rmcp.
+    ///
+    /// No-op if the `search_skills` route is absent — defensive
+    /// posture; the route is registered by `#[tool_router]` so the
+    /// `.get_mut` lookup is expected to succeed in practice.
+    pub fn override_search_skills_description(
+        &mut self,
+        description: impl Into<std::borrow::Cow<'static, str>>,
+    ) {
+        if let Some(route) = self.tool_router.map.get_mut("search_skills") {
+            route.attr.description = Some(description.into());
+        }
+    }
+
+    /// Read-only borrow of the inner [`ToolRouter`]. Used by tests
+    /// (and the runtime description override path) to introspect the
+    /// registered tools.
+    pub fn tool_router_ref(&self) -> &rmcp::handler::server::tool::ToolRouter<Self> {
+        &self.tool_router
+    }
 }
 
 // `vis = "pub"` makes the macro-generated `tool_router()` associated

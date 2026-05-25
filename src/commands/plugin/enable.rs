@@ -80,6 +80,12 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
         }
     }
 
+    // FR-380 + FR-385: regenerate cached summaries AFTER the
+    // workspace_skills mutation commits. The lifecycle transaction
+    // above already committed; if the summariser fails, exit 24
+    // surfaces and the prior `[summaries]` cache survives.
+    crate::summarise::regenerate_for_trigger(scope.scope.name(), &paths)?;
+
     match mode {
         Mode::Human => emit_human(&id, &outcome),
         Mode::Json => emit_json(&id, &outcome),
