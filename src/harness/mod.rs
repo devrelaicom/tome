@@ -39,6 +39,7 @@ pub mod gemini;
 pub mod mcp_config;
 pub mod opencode;
 pub mod rules_file;
+pub mod sync;
 
 use claude_code::CLAUDE_CODE;
 use codex::CODEX;

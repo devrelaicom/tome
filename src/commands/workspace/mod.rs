@@ -1,8 +1,10 @@
 //! Dispatcher for `tome workspace <subcommand>`. Adds `info`
-//! (US2.a, read-only) and `init` (US2.b, atomic creation).
+//! (US2.a, read-only), `init` (US2.b, atomic creation), and `use`
+//! (US1.a, project binding).
 
 pub mod info;
 mod init;
+pub mod use_;
 
 use crate::cli::WorkspaceCommand;
 use crate::error::TomeError;
@@ -15,5 +17,6 @@ pub fn run(cmd: WorkspaceCommand, scope: &ResolvedScope, mode: Mode) -> Result<(
     match cmd {
         WorkspaceCommand::Info => info::run(scope, &paths, mode),
         WorkspaceCommand::Init(args) => init::run(args, &paths, mode),
+        WorkspaceCommand::Use(args) => use_::run(args, &paths, mode),
     }
 }
