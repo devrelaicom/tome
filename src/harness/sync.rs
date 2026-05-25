@@ -177,7 +177,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         &global_settings,
         &stub_scope,
     )
-    .map_err(|kind| TomeError::CompositionError { kind })?;
+    .map_err(TomeError::from)?;
 
     let effective_names: HashSet<String> =
         effective.harnesses.iter().map(|h| h.name.clone()).collect();

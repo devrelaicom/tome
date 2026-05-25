@@ -513,6 +513,74 @@ impl Drop for HarnessModulesGuard {
     }
 }
 
+/// `HarnessModule` whose `name()` is determined at construction. The
+/// name string is leaked via [`Box::leak`] so we can satisfy the
+/// `&'static str` return shape the trait requires. Used by tests that
+/// drive composition resolution against synthetic harness names not in
+/// the production registry (e.g. `"a"`, `"x"`, `"alpha"`).
+///
+/// Cost: each `new()` call leaks one `String`. Tests that build a
+/// fixed-size set up front (the common case) leak O(n) once, which is
+/// trivial against cargo's per-test-binary memory budget.
+pub struct NamedStubHarness {
+    name: &'static str,
+}
+
+impl NamedStubHarness {
+    pub fn new(name: &str) -> Self {
+        let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+        Self { name: leaked }
+    }
+
+    /// Construct a `Vec<Box<dyn HarnessModule>>` from any iterable of
+    /// names. Helper for the common `HarnessModulesGuard::install(...)`
+    /// call site in composition-resolver tests.
+    pub fn boxed_set<I, S>(names: I) -> Vec<Box<dyn tome::harness::HarnessModule>>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        names
+            .into_iter()
+            .map(|s| {
+                let owned: Box<dyn tome::harness::HarnessModule> =
+                    Box::new(NamedStubHarness::new(s.as_ref()));
+                owned
+            })
+            .collect()
+    }
+}
+
+impl tome::harness::HarnessModule for NamedStubHarness {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn description(&self) -> &'static str {
+        "test-only named stub"
+    }
+    fn detect(&self, _home: &Path) -> bool {
+        true
+    }
+    fn rules_file_target(&self, project_root: &Path) -> PathBuf {
+        project_root.join("STUB_RULES.md")
+    }
+    fn rules_file_strategy(&self) -> tome::harness::RulesFileStrategy {
+        tome::harness::RulesFileStrategy::BlockInExistingFile
+    }
+    fn block_body_style(&self) -> tome::harness::BlockBodyStyle {
+        tome::harness::BlockBodyStyle::Inline
+    }
+    fn mcp_config_path(&self, project_root: &Path, _home: &Path) -> PathBuf {
+        project_root.join("stub.mcp.json")
+    }
+    fn mcp_config_format(&self) -> tome::harness::McpConfigFormat {
+        tome::harness::McpConfigFormat::Json
+    }
+    fn mcp_parent_key(&self) -> &'static str {
+        "mcpServers"
+    }
+}
+
 /// Test helper: overwrite the `pinned_ref` for one `(global, name)`
 /// enrolment. Used by SHA-pinning tests that previously hand-edited
 /// `config.toml`.

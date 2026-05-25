@@ -418,6 +418,12 @@ pub enum CompositionErrorKind {
     /// plain name, contained traversal characters, etc.). The string
     /// carries the offending token.
     BadExclusion(String),
+    /// A harness name surfaced by composition resolution is not in
+    /// [`crate::harness::SUPPORTED_HARNESSES`]. Internal carrier — the
+    /// boundary `From<CompositionErrorKind> for TomeError` impl below
+    /// rewrites this into [`TomeError::HarnessNotSupported`] (exit 18)
+    /// so the wire-visible error code matches the contract.
+    HarnessNotSupported(String),
 }
 
 impl std::fmt::Display for CompositionErrorKind {
@@ -436,6 +442,34 @@ impl std::fmt::Display for CompositionErrorKind {
             Self::BadExclusion(token) => {
                 write!(f, "malformed `!`-prefixed exclusion: `{token}`")
             }
+            Self::HarnessNotSupported(name) => {
+                write!(f, "harness `{name}` is not supported")
+            }
+        }
+    }
+}
+
+/// Boundary mapping from the resolver's internal error kind to the closed
+/// `TomeError` enum. Two sub-variants escape the default `CompositionError`
+/// (exit 17) wrapping per FR-602:
+///
+/// * [`CompositionErrorKind::UnknownWorkspace`] → [`TomeError::WorkspaceNotFound`]
+///   (exit 13). The composition-vs-workspace-resolution surface distinction
+///   doesn't matter to the user — an unknown workspace is an unknown
+///   workspace, surfaced through the workspace-error path.
+/// * [`CompositionErrorKind::HarnessNotSupported`] → [`TomeError::HarnessNotSupported`]
+///   (exit 18). The unsupported-harness check lives inside composition but
+///   reports through its own exit code per the
+///   `contracts/settings-composition.md` error table.
+///
+/// Everything else (cycles, `[workspace]` outside project, bad exclusions)
+/// maps to [`TomeError::CompositionError`] (exit 17).
+impl From<CompositionErrorKind> for TomeError {
+    fn from(kind: CompositionErrorKind) -> Self {
+        match kind {
+            CompositionErrorKind::UnknownWorkspace(name) => Self::WorkspaceNotFound { name },
+            CompositionErrorKind::HarnessNotSupported(name) => Self::HarnessNotSupported { name },
+            other => Self::CompositionError { kind: other },
         }
     }
 }
