@@ -1,6 +1,8 @@
-//! `tome workspace init` CLI wrapper. The atomic FS work lives in
-//! [`crate::workspace::init`]; this module is the thin
-//! arg-validation + emit layer.
+//! `tome workspace init <name>` CLI wrapper.
+//!
+//! The atomic DB + filesystem work lives in [`crate::workspace::init`];
+//! this module is the thin arg-validation + emit layer per the silent-
+//! compute / emit-wrapper pattern documented on CLAUDE.md.
 
 use std::io::Write;
 
@@ -8,18 +10,11 @@ use crate::cli::WorkspaceInitArgs;
 use crate::error::TomeError;
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
-use crate::workspace::{self, InitOutcome};
+use crate::workspace::{self, InitOutcome, WorkspaceName};
 
 pub fn run(args: WorkspaceInitArgs, paths: &Paths, mode: Mode) -> Result<(), TomeError> {
-    // FR-m-WKS-3: surface a real error when CWD is unreadable
-    // (deleted while the user types the command). Previous behaviour
-    // fell back to `PathBuf::default()`, which produced a confusing
-    // `` `` does not exist `` error.
-    let target = match args.path {
-        Some(p) => p,
-        None => std::env::current_dir().map_err(TomeError::Io)?,
-    };
-    let outcome = workspace::init(&target, args.inherit_global, args.force, paths)?;
+    let name = WorkspaceName::parse(&args.name)?;
+    let outcome = workspace::init::init(name, args.inherit_global, paths)?;
     emit(&outcome, args.inherit_global, mode)
 }
 
@@ -34,37 +29,30 @@ fn emit_human(outcome: &InitOutcome, inherit_requested: bool) -> Result<(), Tome
     let mut out = std::io::stdout().lock();
     writeln!(
         out,
-        "Initialized workspace at {}",
-        outcome.workspace.display()
+        "Initialised workspace `{}` at {}",
+        outcome.name.as_str(),
+        outcome.workspace_dir.display(),
     )?;
-    if outcome.inherited {
+    if outcome.inherited_catalogs > 0 {
         writeln!(
             out,
             "  catalogs: {} (inherited from global)",
-            outcome.catalogs,
+            outcome.inherited_catalogs,
+        )?;
+    } else if inherit_requested {
+        // Documented no-op per FR-400: --inherit-global was set but
+        // global had no enrolments.
+        writeln!(
+            out,
+            "  catalogs: 0 (--inherit-global: global has no enrolled catalogs)",
         )?;
     } else {
-        writeln!(out, "  catalogs: {}", outcome.catalogs)?;
+        writeln!(out, "  catalogs: 0")?;
     }
-    writeln!(out, "  config:   {}", outcome.config_path.display())?;
     writeln!(
         out,
-        "  index:    not yet bootstrapped (will be created on first enable)",
+        "  next:     `cd <project> && tome workspace use {}` to bind a project",
+        outcome.name.as_str(),
     )?;
-
-    // Helpful Next-step hint when there are no catalogs and the user
-    // didn't ask to inherit. Mirrors the contract example.
-    if !inherit_requested && outcome.catalogs == 0 {
-        writeln!(out)?;
-        writeln!(
-            out,
-            "Next: run `tome --workspace {} catalog add <source>` to add a catalog,",
-            outcome.workspace.display(),
-        )?;
-        writeln!(
-            out,
-            "      or rerun init with --inherit-global to seed catalogs from the global config.",
-        )?;
-    }
     Ok(())
 }

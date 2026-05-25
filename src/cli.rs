@@ -11,8 +11,6 @@
 //! default when no `--workspace` flag, `TOME_WORKSPACE` env var, or
 //! project marker is found.
 
-use std::path::PathBuf;
-
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -120,14 +118,20 @@ pub struct WorkspaceArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum WorkspaceCommand {
-    /// Report the resolved workspace context for the current invocation.
-    /// Read-only; honours `--workspace <name>` like every other command.
-    /// Bootstrap-not-yet is informational, not an error.
-    Info,
-    /// Create a `.tome/` workspace at `<path>` (defaults to current
-    /// directory). Atomic — a SIGINT or crash leaves either no `.tome/`
-    /// or a complete one, never a partial.
+    /// Report one workspace's details (catalogs, enabled plugins, bound
+    /// projects, cached summary state). Read-only; never acquires the
+    /// advisory lock. `<name>` defaults to the resolved workspace.
+    Info(WorkspaceInfoArgs),
+    /// Create a new workspace in the central registry. Lands
+    /// `<root>/workspaces/<name>/` atomically (settings.toml + RULES.md)
+    /// and inserts a row into the `workspaces` table. `--inherit-global`
+    /// seeds the new workspace's catalogs from the global workspace's
+    /// enrolments at the moment of creation.
     Init(WorkspaceInitArgs),
+    /// List every workspace in the central registry with catalog,
+    /// enabled-plugin, indexed-skill, bound-project counts plus
+    /// `last_used_at`.
+    List(WorkspaceListArgs),
     /// Bind the current project directory to the named workspace.
     /// Creates / overwrites `<cwd>/.tome/config.toml` so subsequent
     /// Tome invocations from this tree resolve to `<name>` via the
@@ -143,7 +147,7 @@ pub enum WorkspaceCommand {
 #[derive(Debug, clap::Args)]
 pub struct WorkspaceUseArgs {
     /// Workspace name (must already exist in the central registry; create
-    /// via `tome workspace add` — US2).
+    /// via `tome workspace init <name>`).
     pub name: String,
     /// Bypass the refusal when CWD is the user's home directory or the
     /// filesystem root. Required only for genuinely unusual project roots
@@ -153,19 +157,28 @@ pub struct WorkspaceUseArgs {
 }
 
 #[derive(Debug, clap::Args)]
+pub struct WorkspaceInfoArgs {
+    /// Workspace name. Defaults to the resolved scope. Missing names
+    /// surface as exit 13 (`WorkspaceNotFound`).
+    pub name: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
 pub struct WorkspaceInitArgs {
-    /// Workspace root. Defaults to the current directory. Must already
-    /// exist — init does NOT create the parent directory.
-    pub path: Option<PathBuf>,
-    /// Seed the new workspace's `[catalogs]` from the global config.
-    /// Enablement state is NEVER copied — enablement lives in the
-    /// index DB, not the config.
+    /// Workspace name. Must satisfy FR-347 (1–64 alphanumeric + hyphen /
+    /// underscore, no leading or trailing punctuation). The privileged
+    /// `global` workspace name is reserved.
+    pub name: String,
+    /// Seed the new workspace's catalogs from the global workspace's
+    /// enrolments at the moment of creation. If global has no enrolled
+    /// catalogs, the flag is a documented no-op.
     #[arg(long = "inherit-global")]
     pub inherit_global: bool,
-    /// Replace a pre-existing `.tome/` (rename aside, then remove).
-    /// Without `--force`, init refuses on a pre-existing marker.
-    #[arg(long)]
-    pub force: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct WorkspaceListArgs {
+    // No subcommand-specific flags. `--json` is the global flag.
 }
 
 #[derive(Debug, clap::Args)]

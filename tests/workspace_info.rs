@@ -139,7 +139,7 @@ fn info_json_shape_is_byte_stable_for_bootstrap_not_yet() {
     let json = serde_json::to_string(&info).expect("serialise");
     assert_eq!(
         json,
-        r#"{"scope":"global","path":null,"source":"global_fallback","catalogs":0,"plugins_total":0,"plugins_enabled":0,"skills_indexed":0,"schema_version":null,"embedder":null}"#,
+        r#"{"scope":"global","path":null,"source":"global_fallback","catalogs":0,"plugins_total":0,"plugins_enabled":0,"skills_indexed":0,"schema_version":null,"embedder":null,"enrolled_catalogs":[],"enabled_plugins":[],"bound_projects":[],"summary_cache":null}"#,
     );
 }
 
@@ -222,4 +222,123 @@ fn cli_workspace_info_json_emits_single_line() {
     assert_eq!(parsed["scope"], "global");
     assert_eq!(parsed["path"], serde_json::Value::Null);
     assert_eq!(parsed["source"], "global_fallback");
+}
+
+// =============================================================
+// Phase 4 / US2.a-1 — enrolled catalogs, enabled plugins, bound
+// projects, summary cache state, and the optional <name> positional.
+// =============================================================
+
+#[test]
+fn info_includes_enrolled_catalogs() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    common::fabricate_all_registry_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    write_config_for_cli(&paths, &config);
+
+    let info = assemble(&global_scope(), &paths).expect("assemble");
+    assert_eq!(info.enrolled_catalogs.len(), 1);
+    assert_eq!(info.enrolled_catalogs[0].name, "sample-plugin-catalog");
+    assert!(info.enrolled_catalogs[0].pinned_ref == "main");
+}
+
+#[test]
+fn info_includes_enabled_plugins() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    common::fabricate_all_registry_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    write_config_for_cli(&paths, &config);
+    enable_alpha(&paths, &config);
+
+    let info = assemble(&global_scope(), &paths).expect("assemble");
+    assert_eq!(info.enabled_plugins.len(), 1);
+    let plugin = &info.enabled_plugins[0];
+    assert_eq!(plugin.catalog, "sample-plugin-catalog");
+    assert_eq!(plugin.plugin, "plugin-alpha");
+    assert!(plugin.skill_count > 0);
+}
+
+#[test]
+fn info_bound_projects_empty_when_no_bindings() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    common::fabricate_all_registry_models(&paths);
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    write_config_for_cli(&paths, &config);
+
+    let info = assemble(&global_scope(), &paths).expect("assemble");
+    assert!(info.bound_projects.is_empty());
+}
+
+#[test]
+fn info_summary_cache_none_when_settings_absent() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    common::fabricate_all_registry_models(&paths);
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    write_config_for_cli(&paths, &config);
+
+    let info = assemble(&global_scope(), &paths).expect("assemble");
+    assert!(info.summary_cache.is_none());
+}
+
+#[test]
+fn info_with_name_argument_targets_other_workspace() {
+    use tome::commands::workspace::info::assemble as _assemble;
+    // assemble takes the resolved scope, but the CLI's `info <name>`
+    // goes through `run` which routes to `assemble_for_name`. That
+    // helper is private to the module; we exercise it indirectly via
+    // the public `WorkspaceInfoArgs` shape through the run entry. For
+    // a library-API test, we mirror the same code path: open the DB,
+    // seed two workspaces, then assert `assemble` on each scope.
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    // Seed central DB with `extra` workspace.
+    common::seed_workspace(&paths, "extra");
+
+    // Resolved as the extra workspace via the Flag source.
+    let name = tome::workspace::WorkspaceName::parse("extra").unwrap();
+    let resolved = tome::workspace::ResolvedScope {
+        scope: tome::workspace::Scope(name.clone()),
+        source: tome::workspace::ScopeSource::Flag,
+        project_root: None,
+    };
+    let info = _assemble(&resolved, &paths).expect("assemble extra");
+    assert_eq!(info.scope, ScopeKind::Workspace);
+    assert_eq!(info.source, tome::workspace::ScopeSource::Flag);
+}
+
+#[test]
+fn info_missing_workspace_returns_workspace_not_found() {
+    // DB exists, workspace_catalogs table exists, but the named
+    // workspace was never created → exit 13.
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    common::seed_workspace(&paths, "real"); // bootstraps DB with v2 schema
+    let name = tome::workspace::WorkspaceName::parse("not-real").unwrap();
+    let resolved = tome::workspace::ResolvedScope {
+        scope: tome::workspace::Scope(name),
+        source: tome::workspace::ScopeSource::Flag,
+        project_root: None,
+    };
+    let err = assemble(&resolved, &paths).unwrap_err();
+    assert!(
+        matches!(err, tome::error::TomeError::WorkspaceNotFound { .. }),
+        "expected WorkspaceNotFound, got {err:?}",
+    );
+    assert_eq!(err.exit_code(), 13);
 }

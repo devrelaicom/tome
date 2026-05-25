@@ -1,63 +1,186 @@
-//! Phase 4 / F2a — `tome workspace init` is replaced by
-//! `tome workspace add` (US2) plus `tome workspace use` (US1). The Phase
-//! 3 surface in `src/workspace/init.rs` is a `TODO(F11)` stub returning
-//! an `Internal` error.
+//! Phase 4 / US2.a-1 — `tome workspace init <name>` library-API tests.
 //!
-//! Every Phase 3 test in this file depended on the deleted
-//! `tome::workspace::inventory` module, the per-workspace
-//! `.tome/index.db`, and the `.tome/config.toml` binding pointer
-//! existing as a real file. Those concepts are split across F11 (junction
-//! tables) + US1 (`tome workspace use` writes the project marker) + US2
-//! (`tome workspace add` writes `<root>/workspaces/<name>/...`).
-//!
-//! Marking each test `#[ignore]` rather than deleting them preserves the
-//! historical coverage list as documentation; US1/US2 unhide them as
-//! they land.
+//! These exercise `workspace::init::init` directly. The CLI binary
+//! wrapper is a thin adapter; the exit-code surface is enforced by
+//! `tests/exit_codes.rs`.
+
+mod common;
+
+use common::lifecycle_paths;
+use tempfile::TempDir;
+use tome::error::TomeError;
+use tome::index::{self, OpenOptions, workspace_catalogs};
+use tome::workspace::{self, WorkspaceName};
+
+fn parse(name: &str) -> WorkspaceName {
+    WorkspaceName::parse(name).expect("valid workspace name")
+}
+
+fn open_central(paths: &tome::paths::Paths) -> rusqlite::Connection {
+    let (e, r, s) = tome::commands::plugin::registry_seeds();
+    index::open(
+        &paths.index_db,
+        &OpenOptions {
+            embedder: e,
+            reranker: r,
+            summariser: s,
+        },
+    )
+    .expect("open central DB")
+}
 
 #[test]
-#[ignore = "F11/US1/US2: workspace init replaced by `workspace add` + `workspace use`"]
-fn init_creates_dot_tome_with_empty_config() {}
+fn init_with_invalid_name_exits_15() {
+    // The WorkspaceName::parse gate fires BEFORE init even gets called.
+    // Verify the exit-code shape so the CLI surface lines up with FR-347.
+    let err = WorkspaceName::parse("bad name with spaces").unwrap_err();
+    assert!(matches!(err, TomeError::WorkspaceNameInvalid { .. }));
+    assert_eq!(err.exit_code(), 15);
+}
 
 #[test]
-#[ignore = "F11/US1/US2: workspace init replaced by `workspace add` + `workspace use`"]
-fn init_inherits_global_catalogs_when_flag_set() {}
+fn init_reserved_name_global_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    let name = parse("global");
+    let err = workspace::init::init(name, false, &paths).unwrap_err();
+    assert!(
+        matches!(err, TomeError::WorkspaceNameInvalid { .. }),
+        "expected WorkspaceNameInvalid, got {err:?}",
+    );
+    assert_eq!(err.exit_code(), 15);
+}
 
 #[test]
-#[ignore = "F11/US1/US2: workspace init replaced by `workspace add` + `workspace use`"]
-fn init_refuses_existing_marker_without_force() {}
+fn init_with_existing_name_exits_14() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let outcome = workspace::init::init(parse("foo"), false, &paths).expect("first init");
+    assert_eq!(outcome.name.as_str(), "foo");
+
+    let err = workspace::init::init(parse("foo"), false, &paths).unwrap_err();
+    assert!(
+        matches!(err, TomeError::WorkspaceAlreadyExists { .. }),
+        "expected WorkspaceAlreadyExists, got {err:?}",
+    );
+    assert_eq!(err.exit_code(), 14);
+}
 
 #[test]
-#[ignore = "F11/US1/US2: workspace init replaced by `workspace add` + `workspace use`"]
-fn init_force_renames_existing_marker_to_dot_tome_old() {}
+fn init_happy_path_creates_dir_and_row() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let outcome = workspace::init::init(parse("new-ws"), false, &paths).expect("init");
+    assert_eq!(outcome.name.as_str(), "new-ws");
+    assert_eq!(outcome.inherited_catalogs, 0);
+
+    // On-disk shape: settings.toml + RULES.md inside the workspace dir.
+    let ws_dir = paths.workspace_dir(&outcome.name);
+    assert!(
+        ws_dir.is_dir(),
+        "workspace dir {} missing",
+        ws_dir.display()
+    );
+    let settings_body = std::fs::read_to_string(ws_dir.join("settings.toml")).unwrap();
+    assert!(
+        settings_body.contains("name = \"new-ws\""),
+        "settings.toml missing name: {settings_body}",
+    );
+    let rules_body = std::fs::read_to_string(ws_dir.join("RULES.md")).unwrap();
+    assert!(
+        rules_body.is_empty(),
+        "RULES.md should be empty placeholder"
+    );
+
+    // DB shape: a `workspaces` row with the given name + a non-zero
+    // created_at + last_used_at.
+    let conn = open_central(&paths);
+    let row: (String, i64, i64) = conn
+        .query_row(
+            "SELECT name, created_at, last_used_at FROM workspaces WHERE name = ?1",
+            rusqlite::params!["new-ws"],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(row.0, "new-ws");
+    assert!(row.1 > 0);
+    assert!(row.2 > 0);
+}
 
 #[test]
-#[ignore = "F11/US1/US2: workspace init replaced by `workspace add` + `workspace use`"]
-fn init_canonicalises_target_root() {}
+fn init_inherit_global_copies_catalogs() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    // Seed global with two enrolments.
+    {
+        let conn = open_central(&paths);
+        workspace_catalogs::insert(&conn, "global", "cat-a", "https://example.com/a", "main")
+            .unwrap();
+        workspace_catalogs::insert(&conn, "global", "cat-b", "https://example.com/b", "v1")
+            .unwrap();
+    }
+
+    let outcome = workspace::init::init(parse("derived"), true, &paths).expect("init");
+    assert_eq!(outcome.inherited_catalogs, 2);
+
+    // DB: junction rows under the new workspace.
+    let conn = open_central(&paths);
+    let rows = workspace_catalogs::list_for_workspace(&conn, "derived").unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].catalog_name, "cat-a");
+    assert_eq!(rows[0].url, "https://example.com/a");
+    assert_eq!(rows[0].pinned_ref, "main");
+    assert_eq!(rows[1].catalog_name, "cat-b");
+
+    // Settings file: [[catalogs]] array mirrors the junction rows.
+    let body = std::fs::read_to_string(paths.workspace_settings_file(&outcome.name)).unwrap();
+    assert!(
+        body.contains("[[catalogs]]"),
+        "missing [[catalogs]]: {body}"
+    );
+    assert!(body.contains("name = \"cat-a\""), "missing cat-a: {body}");
+    assert!(body.contains("name = \"cat-b\""), "missing cat-b: {body}");
+    assert!(
+        body.contains("url = \"https://example.com/a\""),
+        "missing url a: {body}",
+    );
+}
 
 #[test]
-#[ignore = "F11/US1/US2: workspace init replaced by `workspace add` + `workspace use`"]
-fn init_appends_to_opt_in_workspace_registry_when_present() {}
+fn init_inherit_global_with_no_catalogs_is_noop() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    // Open the DB so `global` is seeded but with zero enrolments.
+    let _ = open_central(&paths);
+
+    let outcome = workspace::init::init(parse("empty"), true, &paths).expect("init");
+    assert_eq!(outcome.inherited_catalogs, 0);
+
+    let body = std::fs::read_to_string(paths.workspace_settings_file(&outcome.name)).unwrap();
+    assert!(
+        !body.contains("[[catalogs]]"),
+        "empty inherit should NOT emit a [[catalogs]] block: {body}",
+    );
+}
 
 #[test]
-#[ignore = "F11/US1/US2: workspace init replaced by `workspace add` + `workspace use`"]
-fn init_skips_registry_when_file_absent() {}
+fn init_writes_settings_toml_at_workspace_dir() {
+    // Pin the on-disk layout: <root>/workspaces/<name>/settings.toml
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
 
-#[test]
-#[ignore = "F11/US1/US2: workspace init replaced by `workspace add` + `workspace use`"]
-fn init_chmod_0700_on_unix() {}
-
-#[test]
-#[ignore = "F11/US1/US2: workspace init replaced by `workspace add` + `workspace use`"]
-fn init_atomic_concurrent_calls_yield_one_winner() {}
-
-#[test]
-#[ignore = "F11/US1/US2: workspace init replaced by `workspace add` + `workspace use`"]
-fn init_rejects_missing_target() {}
-
-#[test]
-#[ignore = "F11/US1/US2: workspace init replaced by `workspace add` + `workspace use`"]
-fn init_rejects_non_directory_target() {}
-
-#[test]
-#[ignore = "F11/US1/US2: workspace init replaced by `workspace add` + `workspace use`"]
-fn init_cli_smoke_default_path() {}
+    let outcome = workspace::init::init(parse("layout"), false, &paths).unwrap();
+    let expected_dir = paths.root.join("workspaces").join("layout");
+    assert_eq!(outcome.workspace_dir, expected_dir);
+    assert!(expected_dir.join("settings.toml").is_file());
+    assert!(expected_dir.join("RULES.md").is_file());
+}

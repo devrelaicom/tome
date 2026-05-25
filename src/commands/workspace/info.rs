@@ -1,137 +1,357 @@
-//! `tome workspace info` — narrow read-only report on the resolved scope.
+//! `tome workspace info [<name>]` — read-only report on one workspace.
 //!
-//! Contract: `contracts/workspace-info.md`. Bootstrap-not-yet (the index
-//! file is absent) is informational, not an error.
+//! Phase 4 / US2.a-1 widens the report with the new junction-table
+//! fields: enrolled catalogs, enabled plugins, bound projects, cached
+//! summary lengths. Also accepts an optional `<name>` argument so the
+//! command can target any workspace, not just the resolved scope.
 //!
 //! Read-only; never acquires the advisory lock; never bootstraps the
-//! schema. Distinct from `tome status` which is the broader diagnostic.
+//! schema. Distinct from `tome status` which is the broader
+//! diagnostic.
 
 use std::io::Write;
+use std::path::PathBuf;
 
+use crate::cli::WorkspaceInfoArgs;
 use crate::error::TomeError;
 use crate::index::meta::MetaKey;
-use crate::index::{self, integrity, meta};
+use crate::index::{self, integrity, meta, workspace_catalogs};
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
-use crate::workspace::{ModelIdentity, ResolvedScope, ScopeKind, ScopeSource, WorkspaceInfo};
+use crate::settings::{self, WorkspaceSettings};
+use crate::workspace::{
+    EnabledPluginRecord, ModelIdentity, ResolvedScope, ScopeKind, ScopeSource, SummaryCacheState,
+    WorkspaceCatalogEntry, WorkspaceInfo, WorkspaceName,
+};
 
-pub fn run(scope: &ResolvedScope, paths: &Paths, mode: Mode) -> Result<(), TomeError> {
-    let info = assemble(scope, paths)?;
+pub fn run(
+    args: WorkspaceInfoArgs,
+    scope: &ResolvedScope,
+    paths: &Paths,
+    mode: Mode,
+) -> Result<(), TomeError> {
+    // Pick the target workspace name. With no positional, use the
+    // resolved scope. With a positional, parse + verify membership in
+    // the central DB (exit 13 if absent).
+    let info = match args.name.as_deref() {
+        None => assemble(scope, paths)?,
+        Some(raw) => {
+            let name = WorkspaceName::parse(raw)?;
+            assemble_for_name(&name, paths)?
+        }
+    };
     emit(&info, mode)
 }
 
-/// Build a [`WorkspaceInfo`] from the on-disk state. Pure compute over
-/// `(scope, paths)`; tests call this directly. Behaves identically whether
-/// the index DB is missing, empty, or populated — bootstrap-not-yet
-/// surfaces as `None` schema/embedder + zero counts (FR-103).
+/// Build a [`WorkspaceInfo`] for the resolved scope.
 pub fn assemble(scope: &ResolvedScope, paths: &Paths) -> Result<WorkspaceInfo, TomeError> {
     let (scope_kind, path) = if scope.scope.is_global() {
         (ScopeKind::Global, None)
     } else {
         (ScopeKind::Workspace, scope.project_root.clone())
     };
-
-    let catalogs = catalog_count(scope, paths)?;
-    let (plugins_total, plugins_enabled, skills_indexed, schema_version, embedder) =
-        index_facts(scope, paths)?;
-
-    Ok(WorkspaceInfo {
-        scope: scope_kind,
-        path,
-        source: scope.source,
-        catalogs,
-        plugins_total,
-        plugins_enabled,
-        skills_indexed,
-        schema_version,
-        embedder,
-    })
+    let name = scope.scope.name();
+    let mut info = compute_info(name, paths, scope_kind, scope.source, path)?;
+    // Resolved-scope reads pre-date the Phase 4 widening: the per-scope
+    // source field was tagged from the resolver. Keep the field name as
+    // the resolver supplied it.
+    let _ = &mut info;
+    Ok(info)
 }
 
-fn catalog_count(_scope: &ResolvedScope, paths: &Paths) -> Result<u32, TomeError> {
-    let config_path = paths.global_config_file.clone();
-    if !config_path.is_file() {
-        return Ok(0);
-    }
-    let body = std::fs::read_to_string(&config_path)?;
-    let parsed: crate::config::Config =
-        toml::from_str(&body).map_err(|e| TomeError::WorkspaceMalformed {
-            path: config_path.clone(),
-            reason: format!("config.toml: {e}"),
-        })?;
-    Ok(u32::try_from(parsed.catalogs.len()).unwrap_or(u32::MAX))
+/// Build a [`WorkspaceInfo`] for an explicitly-named workspace. The
+/// `<name>` positional uses this — `source` is [`ScopeSource::Flag`] (the
+/// positional is functionally a flag) and `path` is unset.
+fn assemble_for_name(name: &WorkspaceName, paths: &Paths) -> Result<WorkspaceInfo, TomeError> {
+    // The membership check + the per-field reads share one DB handle;
+    // delegate.
+    let scope_kind = if name.is_reserved() {
+        ScopeKind::Global
+    } else {
+        ScopeKind::Workspace
+    };
+    compute_info(name, paths, scope_kind, ScopeSource::Flag, None)
 }
 
-type IndexFacts = (u32, u32, u32, Option<u32>, Option<ModelIdentity>);
-
-fn index_facts(_scope: &ResolvedScope, paths: &Paths) -> Result<IndexFacts, TomeError> {
-    let db_path = paths.index_db.clone();
-    if !db_path.is_file() {
-        return Ok((0, 0, 0, None, None));
+fn compute_info(
+    name: &WorkspaceName,
+    paths: &Paths,
+    scope_kind: ScopeKind,
+    source: ScopeSource,
+    path: Option<PathBuf>,
+) -> Result<WorkspaceInfo, TomeError> {
+    // Bootstrap-not-yet path: DB file missing. We can't validate the
+    // workspace's central-registry membership, so we treat this as the
+    // permissive "the DB hasn't been created yet" case and return zero
+    // counts regardless of which workspace name was requested. Once
+    // `index.db` exists (any write path), the membership check below
+    // fires.
+    if !paths.index_db.is_file() {
+        return Ok(WorkspaceInfo {
+            scope: scope_kind,
+            path,
+            source,
+            catalogs: 0,
+            plugins_total: 0,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            schema_version: None,
+            embedder: None,
+            enrolled_catalogs: Vec::new(),
+            enabled_plugins: Vec::new(),
+            bound_projects: Vec::new(),
+            summary_cache: None,
+        });
     }
-    let conn = index::open_read_only(&db_path)?;
 
-    // Integrity gate: surface a corrupted index as code 35 (the contract's
-    // explicit exit code for this command). The integrity check itself is
-    // cheap; pessimistically running it costs nothing on a healthy DB.
+    let conn = index::open_read_only(&paths.index_db)?;
+
+    // Integrity gate, mirrored from Phase 3.
     integrity::check(&conn)?;
 
-    // Schema-version gate. The v2-shaped queries below (`JOIN
-    // workspace_skills`) reference tables that don't exist in an older
-    // on-disk schema. A stale-schema DB is not an error here — `tome
-    // workspace info` is a read-only narrow report; the doctor's
-    // schema-fix suggestion is the user-facing repair path. Return
-    // zeros for the workspace-aware counts and let the caller (doctor)
-    // emit `subsystem: "schema"` via `build_suggested_fixes`.
+    // Schema-version gate. Stale-schema is informational here; defer the
+    // repair to `tome doctor --fix` (US5). MUST come BEFORE the
+    // workspace-membership check because the `workspaces` table itself
+    // is part of v2 — a stale-v1 DB has no such table.
     let schema_version = match index::current_schema_version(&conn) {
         Ok(Some(v)) => Some(v),
         Ok(None) => Some(index::SCHEMA_VERSION),
         Err(_) => None,
     };
-    if let Some(v) = schema_version
-        && v < index::SCHEMA_VERSION
-    {
-        let embedder = read_embedder_identity(&conn)?;
-        return Ok((0, 0, 0, schema_version, embedder));
-    }
-
-    let plugins_total: i64 = conn
-        .query_row("SELECT COUNT(DISTINCT plugin) FROM skills", [], |r| {
-            r.get(0)
-        })
-        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("plugins_total: {e}")))?;
-    let plugins_enabled: i64 = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT s.plugin)
-             FROM skills AS s
-             JOIN workspace_skills AS ws ON ws.skill_id = s.id
-             JOIN workspaces       AS w  ON w.id = ws.workspace_id
-             WHERE w.name = 'global'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("plugins_enabled: {e}")))?;
-    let skills_indexed: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
-             FROM skills AS s
-             JOIN workspace_skills AS ws ON ws.skill_id = s.id
-             JOIN workspaces       AS w  ON w.id = ws.workspace_id
-             WHERE w.name = 'global'",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("skills_indexed: {e}")))?;
 
     let embedder = read_embedder_identity(&conn)?;
 
-    Ok((
-        u32::try_from(plugins_total).unwrap_or(u32::MAX),
-        u32::try_from(plugins_enabled).unwrap_or(u32::MAX),
-        u32::try_from(skills_indexed).unwrap_or(u32::MAX),
+    // Stale-schema → workspace-aware queries below may target tables
+    // that don't exist. Collapse to zeros (the schema-fix suggestion
+    // surfaces via doctor).
+    if let Some(v) = schema_version
+        && v < index::SCHEMA_VERSION
+    {
+        return Ok(WorkspaceInfo {
+            scope: scope_kind,
+            path,
+            source,
+            catalogs: 0,
+            plugins_total: 0,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            schema_version,
+            embedder,
+            enrolled_catalogs: Vec::new(),
+            enabled_plugins: Vec::new(),
+            bound_projects: Vec::new(),
+            summary_cache: None,
+        });
+    }
+
+    // Membership check: a named workspace must have a row. The
+    // privileged `global` workspace is seeded on bootstrap.
+    let workspace_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM workspaces WHERE name = ?1",
+            rusqlite::params![name.as_str()],
+            |row| row.get(0),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            other => Err(other),
+        })
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!(
+                "lookup workspace `{}`: {e}",
+                name.as_str()
+            ))
+        })?;
+    let Some(workspace_id) = workspace_id else {
+        // The privileged `global` workspace is seeded on bootstrap. If
+        // the DB is v2-shaped but somehow missing the `global` row,
+        // that's an integrity failure — return zeros rather than
+        // confusing the user with "global not found". For non-global
+        // names, the workspace-not-found verdict is correct.
+        if name.is_reserved() {
+            return Ok(WorkspaceInfo {
+                scope: scope_kind,
+                path,
+                source,
+                catalogs: 0,
+                plugins_total: 0,
+                plugins_enabled: 0,
+                skills_indexed: 0,
+                schema_version,
+                embedder,
+                enrolled_catalogs: Vec::new(),
+                enabled_plugins: Vec::new(),
+                bound_projects: Vec::new(),
+                summary_cache: None,
+            });
+        }
+        return Err(TomeError::WorkspaceNotFound {
+            name: name.as_str().to_owned(),
+        });
+    };
+
+    // Catalog count: junction table (FR-360 / F11b).
+    let catalogs_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM workspace_catalogs WHERE workspace_id = ?1",
+            rusqlite::params![workspace_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("count catalogs: {e}")))?;
+
+    // plugins_total = distinct (catalog, plugin) pairs in `skills`
+    // (workspace-agnostic) — useful for the "how many plugins indexed
+    // at all" diagnostic.
+    let plugins_total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM (
+                 SELECT DISTINCT catalog, plugin FROM skills
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("count plugins_total: {e}")))?;
+
+    // plugins_enabled = distinct (catalog, plugin) for this workspace's
+    // enabled rows.
+    let plugins_enabled: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT s.catalog || '/' || s.plugin)
+             FROM workspace_skills AS ws
+             JOIN skills           AS s  ON s.id = ws.skill_id
+             WHERE ws.workspace_id = ?1",
+            rusqlite::params![workspace_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("count plugins_enabled: {e}"))
+        })?;
+
+    let skills_indexed: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM workspace_skills WHERE workspace_id = ?1",
+            rusqlite::params![workspace_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("count skills_indexed: {e}")))?;
+
+    let enrolled_catalogs = list_enrolled_catalogs(&conn, name)?;
+    let enabled_plugins = list_enabled_plugins(&conn, workspace_id)?;
+    let bound_projects = list_bound_projects(&conn, workspace_id)?;
+    let summary_cache = read_summary_cache(paths, name);
+
+    Ok(WorkspaceInfo {
+        scope: scope_kind,
+        path,
+        source,
+        catalogs: u32::try_from(catalogs_count).unwrap_or(u32::MAX),
+        plugins_total: u32::try_from(plugins_total).unwrap_or(u32::MAX),
+        plugins_enabled: u32::try_from(plugins_enabled).unwrap_or(u32::MAX),
+        skills_indexed: u32::try_from(skills_indexed).unwrap_or(u32::MAX),
         schema_version,
         embedder,
-    ))
+        enrolled_catalogs,
+        enabled_plugins,
+        bound_projects,
+        summary_cache,
+    })
+}
+
+fn list_enrolled_catalogs(
+    conn: &rusqlite::Connection,
+    name: &WorkspaceName,
+) -> Result<Vec<WorkspaceCatalogEntry>, TomeError> {
+    let rows = workspace_catalogs::list_for_workspace(conn, name.as_str())?;
+    Ok(rows
+        .into_iter()
+        .map(|r| WorkspaceCatalogEntry {
+            name: r.catalog_name,
+            url: r.url,
+            pinned_ref: r.pinned_ref,
+        })
+        .collect())
+}
+
+fn list_enabled_plugins(
+    conn: &rusqlite::Connection,
+    workspace_id: i64,
+) -> Result<Vec<EnabledPluginRecord>, TomeError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.catalog, s.plugin, COUNT(*) AS skills
+             FROM workspace_skills AS ws
+             JOIN skills           AS s ON s.id = ws.skill_id
+             WHERE ws.workspace_id = ?1
+             GROUP BY s.catalog, s.plugin
+             ORDER BY s.catalog, s.plugin",
+        )
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("prepare list_enabled_plugins: {e}"))
+        })?;
+    let rows = stmt
+        .query_map(rusqlite::params![workspace_id], |row| {
+            let catalog: String = row.get(0)?;
+            let plugin: String = row.get(1)?;
+            let skill_count: i64 = row.get(2)?;
+            Ok(EnabledPluginRecord {
+                catalog,
+                plugin,
+                skill_count: u32::try_from(skill_count).unwrap_or(u32::MAX),
+            })
+        })
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("query list_enabled_plugins: {e}"))
+        })?;
+    rows.collect::<Result<_, _>>().map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!("collect list_enabled_plugins: {e}"))
+    })
+}
+
+fn list_bound_projects(
+    conn: &rusqlite::Connection,
+    workspace_id: i64,
+) -> Result<Vec<PathBuf>, TomeError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT project_path FROM workspace_projects
+             WHERE workspace_id = ?1
+             ORDER BY project_path",
+        )
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("prepare list_bound_projects: {e}"))
+        })?;
+    let rows = stmt
+        .query_map(rusqlite::params![workspace_id], |row| {
+            let p: String = row.get(0)?;
+            Ok(PathBuf::from(p))
+        })
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("query list_bound_projects: {e}"))
+        })?;
+    rows.collect::<Result<_, _>>().map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!("collect list_bound_projects: {e}"))
+    })
+}
+
+fn read_summary_cache(paths: &Paths, name: &WorkspaceName) -> Option<SummaryCacheState> {
+    let settings_path = paths.workspace_settings_file(name);
+    if !settings_path.is_file() {
+        return None;
+    }
+    let body = std::fs::read_to_string(&settings_path).ok()?;
+    let parsed: WorkspaceSettings = settings::parser::parse_workspace(&body).ok()?;
+    let summaries = parsed.summaries?;
+    use time::format_description::well_known::Rfc3339;
+    let generated_at = summaries
+        .generated_at
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| String::new());
+    Some(SummaryCacheState {
+        short_chars: summaries.short.chars().count(),
+        long_chars: summaries.long.chars().count(),
+        generated_at,
+    })
 }
 
 fn read_embedder_identity(conn: &rusqlite::Connection) -> Result<Option<ModelIdentity>, TomeError> {
@@ -157,7 +377,7 @@ fn emit_human(info: &WorkspaceInfo) -> Result<(), TomeError> {
     let scope_label = match (info.scope, info.path.as_ref()) {
         (ScopeKind::Global, _) => "(global)".to_owned(),
         (ScopeKind::Workspace, Some(p)) => p.display().to_string(),
-        (ScopeKind::Workspace, None) => "(unknown)".to_owned(),
+        (ScopeKind::Workspace, None) => "(named)".to_owned(),
     };
     writeln!(out, "Workspace:       {scope_label}")?;
     writeln!(out, "  resolved via:  {}", source_label(info.source))?;
@@ -182,6 +402,36 @@ fn emit_human(info: &WorkspaceInfo) -> Result<(), TomeError> {
     match info.embedder.as_ref() {
         Some(e) => writeln!(out, "  embedder:      {} {}", e.name, e.version)?,
         None => writeln!(out, "  embedder:      —")?,
+    }
+    if !info.enrolled_catalogs.is_empty() {
+        writeln!(out, "  enrolled catalogs:")?;
+        for c in &info.enrolled_catalogs {
+            writeln!(out, "    - {} ({}) [{}]", c.name, c.url, c.pinned_ref)?;
+        }
+    }
+    if !info.enabled_plugins.is_empty() {
+        writeln!(out, "  enabled plugins:")?;
+        for p in &info.enabled_plugins {
+            writeln!(
+                out,
+                "    - {}/{} ({} skills)",
+                p.catalog, p.plugin, p.skill_count
+            )?;
+        }
+    }
+    if !info.bound_projects.is_empty() {
+        writeln!(out, "  bound projects:")?;
+        for p in &info.bound_projects {
+            writeln!(out, "    - {}", p.display())?;
+        }
+    }
+    match info.summary_cache.as_ref() {
+        Some(s) => writeln!(
+            out,
+            "  summary:       short {} chars, long {} chars (generated {})",
+            s.short_chars, s.long_chars, s.generated_at,
+        )?,
+        None => writeln!(out, "  summary:       not yet generated")?,
     }
     Ok(())
 }

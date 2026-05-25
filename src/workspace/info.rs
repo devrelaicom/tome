@@ -34,9 +34,45 @@ pub struct ModelIdentity {
     pub version: String,
 }
 
+/// One enrolled catalog inside `WorkspaceInfo::enrolled_catalogs`. The
+/// triple (name, url, pinned_ref) mirrors the `workspace_catalogs` junction
+/// table; the on-disk clone path lives at
+/// `paths.cache_dir_for(&url)` and is recomputable by the caller.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorkspaceCatalogEntry {
+    pub name: String,
+    pub url: String,
+    pub pinned_ref: String,
+}
+
+/// One enabled plugin inside `WorkspaceInfo::enabled_plugins`. The
+/// skill_count is the number of `workspace_skills` rows joined to this
+/// `(workspace, catalog, plugin)` triple.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct EnabledPluginRecord {
+    pub catalog: String,
+    pub plugin: String,
+    pub skill_count: u32,
+}
+
+/// Cached summary length information inside
+/// `WorkspaceInfo::summary_cache`. Mirrors the `[summaries]` section of
+/// `<root>/workspaces/<name>/settings.toml`. The `chars` fields are
+/// character counts; the workspace's `RULES.md` body is the on-disk
+/// representation of `long`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SummaryCacheState {
+    pub short_chars: usize,
+    pub long_chars: usize,
+    /// RFC 3339 timestamp string. Distinct from a raw
+    /// `time::OffsetDateTime` so the JSON wire-shape stays stringy
+    /// regardless of TOML's native datetime support.
+    pub generated_at: String,
+}
+
 /// The wire record for `tome workspace info`. Field order matches
-/// `contracts/workspace-info.md` §"Output (`--json`)" so the human-readable
-/// `serde_json::to_string` rendering is deterministic.
+/// `contracts/workspace-commands.md` § `tome workspace info` so the
+/// human-readable `serde_json::to_string` rendering is deterministic.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WorkspaceInfo {
     pub scope: ScopeKind,
@@ -48,4 +84,23 @@ pub struct WorkspaceInfo {
     pub skills_indexed: u32,
     pub schema_version: Option<u32>,
     pub embedder: Option<ModelIdentity>,
+    /// Phase 4 / US2.a — every catalog enrolled in this workspace via
+    /// the `workspace_catalogs` junction table. Ordered by catalog
+    /// name.
+    #[serde(default)]
+    pub enrolled_catalogs: Vec<WorkspaceCatalogEntry>,
+    /// Phase 4 / US2.a — every enabled `(catalog, plugin)` for this
+    /// workspace via the `workspace_skills` junction joined to
+    /// `skills`. Ordered by `(catalog, plugin)`.
+    #[serde(default)]
+    pub enabled_plugins: Vec<EnabledPluginRecord>,
+    /// Phase 4 / US2.a — every project bound to this workspace via the
+    /// `workspace_projects` table. Ordered by `project_path`.
+    #[serde(default)]
+    pub bound_projects: Vec<PathBuf>,
+    /// Phase 4 / US2.a — cached short/long summary lengths + the
+    /// generation timestamp. `None` when the workspace has no
+    /// `[summaries]` block yet (US2.a-2's `regen-summary` fills it).
+    #[serde(default)]
+    pub summary_cache: Option<SummaryCacheState>,
 }
