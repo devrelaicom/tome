@@ -34,9 +34,16 @@ pub fn run(args: WorkspaceUseArgs, paths: &Paths, mode: Mode) -> Result<(), Tome
 
     let mut outcome = binding::bind_project(&cwd, name, args.force, &deps)?;
 
-    // US1.a: stubbed sync. US1.b replaces the body of
-    // `sync_for_project_root` with the real dispatcher.
-    let sync_outcome = harness::sync_for_project_root(&outcome.project_root, &deps)?;
+    // Phase B of the bind algorithm: run the harness sync orchestrator
+    // against the freshly-bound workspace name. `--force` is forwarded
+    // so user-owned `tome` MCP entries get rewritten instead of
+    // returning HarnessClash (exit 19).
+    let sync_outcome = harness::sync_for_project_root(
+        &outcome.project_root,
+        &outcome.workspace,
+        &deps,
+        args.force,
+    )?;
     outcome.sync = Some(sync_outcome);
 
     emit(&outcome, mode)
