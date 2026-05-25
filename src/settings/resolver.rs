@@ -156,8 +156,8 @@ pub fn resolve_effective_list<P: ScopeProvider>(
     let start_key = scope_key(start_scope, project_marker, bound_workspace);
 
     let mut state = ResolveState::default();
-    state.visit(start_scope, &start_key)?;
-    resolve_list(
+    state.enter(start_scope, &start_key)?;
+    let walk_result = resolve_list(
         &start_list,
         start_scope,
         vec![start_scope],
@@ -166,7 +166,9 @@ pub fn resolve_effective_list<P: ScopeProvider>(
         global_settings,
         central_db,
         &mut state,
-    )?;
+    );
+    state.leave();
+    walk_result?;
 
     let excluded: Vec<String> = state.exclusions.iter().cloned().collect();
     let mut effective: Vec<EffectiveHarness> = state
@@ -215,29 +217,52 @@ fn scope_key(
 }
 
 /// Mutable DFS state threaded through recursive scope resolutions.
+///
+/// Cycle detection uses two parallel structures:
+/// * `visited` — O(1) re-visit check on `(ScopeKind, key)`.
+/// * `stack` — DFS path in walk order so a detected cycle renders the
+///   actual loop chain (FR-445 "naming every scope in the loop chain"),
+///   not an alphabetically-sorted set.
 #[derive(Debug, Default)]
 struct ResolveState {
     visited: HashSet<(ScopeKind, String)>,
+    stack: Vec<String>,
     inclusions: Vec<EffectiveHarness>,
     exclusions: HashSet<String>,
 }
 
 impl ResolveState {
-    fn visit(&mut self, scope: ScopeKind, key: &str) -> Result<(), CompositionErrorKind> {
+    /// Enter a new scope in the DFS. Returns `Err(Cycle)` if the
+    /// `(scope, key)` pair is already in the visited set; otherwise
+    /// pushes the key onto the walk-order stack and returns. Callers
+    /// pair this with [`Self::leave`] after the recursive resolution
+    /// completes (success or propagated error — leave must run on both
+    /// paths to keep the stack consistent for any subsequent siblings).
+    ///
+    /// Visited entries are intentionally NEVER removed — once a scope's
+    /// list has been walked it can't contribute new harnesses, and a
+    /// later sibling that names the same scope would silently re-walk
+    /// it without that invariant. The stack is the *active* DFS chain
+    /// for cycle path reporting; the visited set is the *exhausted* set
+    /// of already-walked nodes.
+    fn enter(&mut self, scope: ScopeKind, key: &str) -> Result<(), CompositionErrorKind> {
         let pair = (scope, key.to_owned());
         if !self.visited.insert(pair) {
-            // Re-visit: cycle detected. Render the path as the
-            // accumulated visited list in deterministic order.
-            let mut path: Vec<String> = self
-                .visited
-                .iter()
-                .map(|(_, k)| k.clone())
-                .collect::<Vec<_>>();
-            path.sort();
+            // Re-visit: cycle detected. Path is the current DFS stack
+            // (the chain of scopes that led us back here) plus the
+            // re-visited key as the loop-closing entry. This preserves
+            // walk order — `["A", "B", "A"]` for an A→B→A cycle.
+            let mut path = self.stack.clone();
             path.push(key.to_owned());
             return Err(CompositionErrorKind::Cycle { path });
         }
+        self.stack.push(key.to_owned());
         Ok(())
+    }
+
+    /// Pop the most recently entered key off the DFS stack.
+    fn leave(&mut self) {
+        self.stack.pop();
     }
 }
 
@@ -316,8 +341,8 @@ fn resolve_list<P: ScopeProvider>(
                 )?;
             }
             CompositionRef::Global => {
-                state.visit(ScopeKind::Global, "<global>")?;
-                if let Some(global_list) = global_settings.harnesses.as_ref() {
+                state.enter(ScopeKind::Global, "<global>")?;
+                let sub_result = if let Some(global_list) = global_settings.harnesses.as_ref() {
                     let mut sub_chain = source_chain.clone();
                     sub_chain.push(ScopeKind::Global);
                     resolve_list(
@@ -329,8 +354,12 @@ fn resolve_list<P: ScopeProvider>(
                         global_settings,
                         central_db,
                         state,
-                    )?;
-                }
+                    )
+                } else {
+                    Ok(())
+                };
+                state.leave();
+                sub_result?;
                 // `[global]` is terminal — no further recursion shape.
             }
         }
@@ -352,22 +381,25 @@ fn resolve_named_workspace<P: ScopeProvider>(
     central_db: &P,
     state: &mut ResolveState,
 ) -> Result<(), CompositionErrorKind> {
-    state.visit(ScopeKind::Workspace, name)?;
-    let Some(list) = declared else {
+    state.enter(ScopeKind::Workspace, name)?;
+    let result = if let Some(list) = declared {
+        resolve_list(
+            &list,
+            ScopeKind::Workspace,
+            source_chain,
+            project_marker,
+            bound_workspace,
+            global_settings,
+            central_db,
+            state,
+        )
+    } else {
         // FR-449: workspace exists but didn't declare `harnesses`.
         // Resolve to the empty list — do NOT fall through to global.
-        return Ok(());
+        Ok(())
     };
-    resolve_list(
-        &list,
-        ScopeKind::Workspace,
-        source_chain,
-        project_marker,
-        bound_workspace,
-        global_settings,
-        central_db,
-        state,
-    )
+    state.leave();
+    result
 }
 
 /// Map [`ScopeKind`] (Project/Workspace/Global) → the closed-set
