@@ -20,6 +20,15 @@
 //! | 53   | CatalogHasEnabledPlugins      | covered in `tests/catalog_remove_cascade.rs` |
 //! | 54   | NotATerminal                  | covered in `tests/plugin_disable.rs` etc. |
 //!
+//! Phase 4 US1.d-1 / T164 additions (CLI binary coverage for the
+//! `tome workspace use` surface — bind/sync doesn't load ONNX):
+//!
+//! | Code | Variant                       | Tested via                            |
+//! |------|-------------------------------|---------------------------------------|
+//! | 2    | Usage (cwd is $HOME)          | `workspace_use_cwd_is_home_exits_2`   |
+//! | 13   | WorkspaceNotFound             | `workspace_use_missing_workspace_exits_13` |
+//! | 19   | HarnessClash                  | `workspace_use_harness_clash_exits_19_without_force` |
+//!
 //! Codes reachable only through embedder/inference paths (deferred to
 //! library-level tests for CI cost reasons — running these end-to-end
 //! requires loading `FastembedEmbedder` which pulls ~345 MB of ONNX):
@@ -171,6 +180,130 @@ fn unknown_subcommand_exits_2() {
         out.status.code(),
         Some(2),
         "expected exit 2 Usage, got {:?}, stderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 / US1.d-1 / T164 — `tome workspace use` exit-code surface via
+// the CLI binary. The bind+sync path doesn't load real ONNX models (it
+// only opens the index DB with seed metadata), so these CLI tests stay
+// cheap.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn workspace_use_missing_workspace_exits_13() {
+    // Run `tome workspace use missing-ws` from a project subdir inside
+    // the isolated HOME. The workspace isn't seeded → exit 13
+    // (`WorkspaceNotFound`).
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    let project = env.home_path().join("project");
+    fs::create_dir_all(&project).expect("create project");
+
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["workspace", "use", "missing-ws"])
+        .output()
+        .expect("spawn");
+
+    assert_eq!(
+        out.status.code(),
+        Some(13),
+        "expected exit 13 WorkspaceNotFound, got {:?}, stderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+#[test]
+fn workspace_use_cwd_is_home_exits_2() {
+    // Running `tome workspace use` from $HOME (without --force) must
+    // refuse with exit 2.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    // Seed the workspace so the failure is *only* the dangerous-cwd
+    // check, not a missing workspace.
+    {
+        use common::seed_workspace;
+        seed_workspace(&paths, "test-ws");
+    }
+
+    let out = env
+        .cmd()
+        .current_dir(env.home_path())
+        .args(["workspace", "use", "test-ws"])
+        .output()
+        .expect("spawn");
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "expected exit 2 Usage, got {:?}, stderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+#[test]
+fn workspace_use_harness_clash_exits_19_without_force() {
+    // Pre-populate `.claude/settings.json` with a user-owned `tome`
+    // entry; configure the global settings to declare `claude-code` as
+    // the only effective harness. The bind step writes the marker + row,
+    // then the sync step hits the clash and exits 19.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    {
+        use common::seed_workspace;
+        seed_workspace(&paths, "test-ws");
+    }
+
+    // Global settings declare claude-code as the only effective harness.
+    fs::write(
+        &paths.global_settings_file,
+        "harnesses = [\"claude-code\"]\n",
+    )
+    .expect("write global settings");
+
+    let project = env.home_path().join("project");
+    fs::create_dir_all(&project).expect("create project");
+
+    // User-owned `tome` entry in .claude/settings.json.
+    let claude_dir = project.join(".claude");
+    fs::create_dir_all(&claude_dir).expect("create .claude");
+    let conflict = serde_json::json!({
+        "mcpServers": {
+            "tome": {
+                "command": "evil",
+                "args": ["serve"]
+            }
+        }
+    });
+    fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string_pretty(&conflict).unwrap(),
+    )
+    .expect("write conflict");
+
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["workspace", "use", "test-ws"])
+        .output()
+        .expect("spawn");
+
+    assert_eq!(
+        out.status.code(),
+        Some(19),
+        "expected exit 19 HarnessClash, got {:?}, stderr:\n{}",
         out.status.code(),
         String::from_utf8_lossy(&out.stderr),
     );
