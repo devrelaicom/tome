@@ -8,12 +8,14 @@
 //! is gone in Phase 4 — research §R-11 documents the move to the
 //! `workspace_projects` table as sole source of truth for bindings.
 
+pub mod binding;
 pub mod info;
 pub mod init;
 pub mod name;
 pub mod resolution;
 pub mod scope;
 
+pub use binding::{BindDeps, BindOutcome, bind_project, is_project_root_acceptable};
 pub use info::{ModelIdentity, ScopeKind, WorkspaceInfo};
 pub use init::{InitOutcome, init};
 pub use name::WorkspaceName;

@@ -128,6 +128,25 @@ pub enum WorkspaceCommand {
     /// directory). Atomic — a SIGINT or crash leaves either no `.tome/`
     /// or a complete one, never a partial.
     Init(WorkspaceInitArgs),
+    /// Bind the current project directory to the named workspace.
+    /// Creates / overwrites `<cwd>/.tome/config.toml` so subsequent
+    /// Tome invocations from this tree resolve to `<name>` via the
+    /// project-marker walk. The atomic-directory landing means a
+    /// SIGINT mid-bind never leaves a partial `.tome/`. Phase 4 / US1.a
+    /// stubs the harness-sync seam; US1.b wires the real sync.
+    Use(WorkspaceUseArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct WorkspaceUseArgs {
+    /// Workspace name (must already exist in the central registry; create
+    /// via `tome workspace add` — US2).
+    pub name: String,
+    /// Bypass the refusal when CWD is the user's home directory or the
+    /// filesystem root. Required only for genuinely unusual project roots
+    /// (e.g. binding `/` for a system-management workflow).
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, clap::Args)]
