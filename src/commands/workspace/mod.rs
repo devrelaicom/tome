@@ -6,6 +6,8 @@
 pub mod info;
 mod init;
 pub mod list;
+pub mod regen_summary;
+pub mod rename;
 pub mod use_;
 
 use crate::cli::WorkspaceCommand;
@@ -25,6 +27,8 @@ pub fn run(
         WorkspaceCommand::Info(args) => info::run(args, scope, &paths, mode),
         WorkspaceCommand::Init(args) => init::run(args, &paths, mode),
         WorkspaceCommand::List(args) => list::run(args, &paths, mode),
+        WorkspaceCommand::Rename(args) => rename::run(args, &paths, mode),
+        WorkspaceCommand::RegenSummary(args) => regen_summary::run(args, scope, &paths, mode),
         // The Use arm threads the global `--workspace <name>` through
         // so it can emit a `tracing::debug!` when both the flag and the
         // positional `<name>` are set. The positional always wins; the

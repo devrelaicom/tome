@@ -12,8 +12,11 @@ pub mod binding;
 pub mod info;
 pub mod init;
 pub mod name;
+pub mod regen_summary;
+pub mod rename;
 pub mod resolution;
 pub mod scope;
+pub mod sync;
 
 pub use binding::{BindDeps, BindOutcome, bind_project, is_project_root_acceptable};
 pub use info::{
@@ -22,4 +25,6 @@ pub use info::{
 };
 pub use init::{InitOutcome, init};
 pub use name::WorkspaceName;
+pub use regen_summary::{RegenSummaryOutcome, regen};
+pub use rename::{RenameOutcome, rename};
 pub use scope::{ResolvedScope, Scope, ScopeSource};
