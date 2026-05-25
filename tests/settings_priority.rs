@@ -18,11 +18,18 @@ use tome::workspace::WorkspaceName;
 
 static OVERRIDE_MUTEX: Mutex<()> = Mutex::new(());
 
-fn install_synthetic() -> (std::sync::MutexGuard<'static, ()>, HarnessModulesGuard) {
+fn install_synthetic() -> (HarnessModulesGuard, std::sync::MutexGuard<'static, ()>) {
+    // Tuple drop order matters: fields drop in declared order, so
+    // HarnessModulesGuard (override → None) MUST drop BEFORE the
+    // MutexGuard (releases serialisation). Reversing the tuple opens a
+    // race window where a concurrent test grabs the mutex + installs a
+    // new override, then this test's HarnessModulesGuard::drop clears
+    // it — observable on macOS stable as flaky `HarnessNotSupported`
+    // failures in the override-using tests.
     let lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let names = ["a", "b", "c", "should-not-appear"];
     let guard = HarnessModulesGuard::install(NamedStubHarness::boxed_set(names));
-    (lock, guard)
+    (guard, lock)
 }
 
 fn ws(name: &str, harnesses: Option<Vec<String>>) -> WorkspaceSettings {
