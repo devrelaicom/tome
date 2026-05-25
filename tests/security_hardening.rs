@@ -20,6 +20,8 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
+#[cfg(unix)]
+use tome::error::TomeError;
 
 // ---- S-02: get_skill symlink rejection --------------------------------
 
@@ -114,6 +116,72 @@ fn preserve_file_mode_on_rules_file_rewrite() {
     assert_eq!(
         actual, 0o644,
         "original mode 0o644 must survive the rewrite; got 0o{actual:o}",
+    );
+}
+
+/// S-M3 (US3 review) — `settings::edit::save_settings` routes through
+/// `catalog::store::write_atomic`, which preserves the prior file's
+/// mode. Verify directly: pre-create a settings.toml at 0644, edit it
+/// via `save_settings`, assert the mode survives the rename.
+#[cfg(unix)]
+#[test]
+fn preserve_file_mode_on_workspace_settings_via_settings_edit() {
+    use std::os::unix::fs::PermissionsExt;
+    use tome::settings::edit::{add_harness, open_settings, save_settings};
+
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("settings.toml");
+    std::fs::write(&target, "harnesses = [\"codex\"]\n").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let mut doc = open_settings(&target).expect("open ok");
+    let changed = add_harness(&mut doc, "claude-code");
+    assert!(changed, "expected to mutate doc");
+    save_settings(&target, &doc).expect("save ok");
+
+    let actual = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        actual, 0o644,
+        "original mode 0o644 must survive save_settings; got 0o{actual:o}",
+    );
+}
+
+/// S-M3 (US3 review) — `save_settings` refuses to write through a
+/// symlink. Without this guard, a hostile pre-existing symlink at the
+/// settings file's path could redirect the write to e.g.
+/// `~/.ssh/authorized_keys`. Asserts that the symlink target is not
+/// touched.
+#[cfg(unix)]
+#[test]
+fn refuses_symlink_on_settings_edit() {
+    use std::os::unix::fs::symlink;
+    use tome::settings::edit::{add_harness, open_settings, save_settings};
+
+    let tmp = TempDir::new().unwrap();
+    let outside = tmp.path().join("outside.toml");
+    std::fs::write(&outside, "# sentinel\n").unwrap();
+    let target = tmp.path().join("settings.toml");
+    symlink(&outside, &target).expect("symlink created");
+
+    // `open_settings` reads via `std::fs::read_to_string` which DOES
+    // follow symlinks. We don't care about the read path — only that
+    // the write refuses. Construct a fresh document and try to save.
+    let mut doc = open_settings(&target).expect("read ok (follows link)");
+    let _ = add_harness(&mut doc, "claude-code");
+    let err = save_settings(&target, &doc).expect_err("must refuse symlink");
+    assert_eq!(err.exit_code(), 7, "want Io (7); got {err:?}");
+    // Discriminate that we matched the symlink-refusal branch (not some
+    // other IO failure with the same exit code).
+    assert!(
+        matches!(&err, TomeError::Io(io) if io.kind() == std::io::ErrorKind::InvalidInput),
+        "want Io(InvalidInput) for symlink refusal; got {err:?}",
+    );
+
+    // Sentinel content of `outside` must be untouched.
+    let outside_now = std::fs::read_to_string(&outside).unwrap();
+    assert_eq!(
+        outside_now, "# sentinel\n",
+        "symlink target must NOT have been overwritten",
     );
 }
 

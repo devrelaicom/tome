@@ -21,12 +21,23 @@
 //!
 //! `harness list` (no arg) resolves the effective harness list which
 //! may chase `[workspaces.<name>]` references. The production
-//! [`ScopeProvider`] [`PathsScopeProvider`] reads each named
-//! workspace's `settings.toml` from disk (under `paths.workspaces_dir`)
-//! and returns its `harnesses` field verbatim. Missing workspace
-//! settings files map to `UnknownWorkspace` per the trait contract;
-//! the resolver then either succeeds (no `[workspaces.<name>]`
-//! reference reached) or surfaces as exit 13 (`WorkspaceNotFound`).
+//! [`ScopeProvider`] [`CentralDbScopeProvider`] consults the central
+//! SQLite registry (`workspaces` table) to confirm workspace membership
+//! and then reads the workspace's on-disk `settings.toml` (when present)
+//! for the directly-declared harnesses list:
+//!
+//! * **Workspace exists, settings file present + parses** → `Ok(Some(list))`
+//! * **Workspace exists, settings file absent** → `Ok(None)` (legal — no
+//!   harnesses declared)
+//! * **Workspace exists, file unreadable or unparsable** →
+//!   `Err(SettingsReadFailure)` which maps to exit 70
+//!   (`WorkspaceMalformed`) — distinct from "workspace doesn't exist"
+//! * **Workspace not in central registry** → `Err(UnknownWorkspace)` which
+//!   maps to exit 13 (`WorkspaceNotFound`).
+//!
+//! When the central DB has not yet been bootstrapped (no `index.db` file),
+//! only the privileged `global` workspace is considered to exist. Any
+//! other reference resolves to `UnknownWorkspace`.
 
 pub mod bare;
 pub mod info;
@@ -83,43 +94,96 @@ pub fn run(args: HarnessArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), T
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Production [`ScopeProvider`] backed by disk-resident workspace
-/// settings files. Each `directly_declared_harnesses` call reads
-/// `<root>/workspaces/<name>/settings.toml` and returns its `harnesses`
-/// field verbatim.
-pub(crate) struct PathsScopeProvider<'a> {
+/// Production [`ScopeProvider`] backed by the central SQLite registry
+/// (the source of truth for workspace membership) and the on-disk
+/// `<root>/workspaces/<name>/settings.toml` files (the source of truth
+/// for the directly-declared harness list).
+///
+/// Three-way classification per the trait contract:
+///
+/// 1. **Workspace not in the registry** → `Err(UnknownWorkspace)`
+///    (exit 13).
+/// 2. **Workspace in the registry, settings file absent** →
+///    `Ok(None)` — legal: the workspace exists but doesn't declare a
+///    `harnesses` list. The resolver treats this as "no recursion shape
+///    from this scope" per FR-449.
+/// 3. **Workspace in the registry, settings file present** →
+///    `Ok(Some(list))` with whatever the file declares. IO / parse
+///    failures surface as `Err(SettingsReadFailure)` (exit 70) — distinct
+///    from "unknown" so the user sees the malformed-state hint rather
+///    than a misleading "workspace not found" message.
+///
+/// When the central DB has not been bootstrapped (no `index.db`), only
+/// `WorkspaceName::global()` is considered to exist. The `global`
+/// workspace is the bootstrap-seeded row in every DB; treating it as
+/// always-present aligns with that invariant.
+pub(crate) struct CentralDbScopeProvider<'a> {
     paths: &'a Paths,
 }
 
-impl<'a> PathsScopeProvider<'a> {
+impl<'a> CentralDbScopeProvider<'a> {
     pub(crate) fn new(paths: &'a Paths) -> Self {
         Self { paths }
     }
+
+    /// Confirm `name` exists in the central `workspaces` table. Falls
+    /// back to "only global is known" when the DB file is absent so a
+    /// freshly-installed Tome still resolves `[global]` cleanly without
+    /// requiring an initial bootstrap pass.
+    fn workspace_is_registered(&self, name: &WorkspaceName) -> bool {
+        // Bootstrap-not-yet shortcut: privileged `global` is always
+        // considered present; everything else is unknown.
+        if !self.paths.index_db.exists() {
+            return name.as_str() == WorkspaceName::global().as_str();
+        }
+        let conn = match crate::index::open_read_only(&self.paths.index_db) {
+            Ok(c) => c,
+            // If we can't open read-only, the DB is in a broken state.
+            // Treat the workspace as unknown — surfaces as exit 13 with
+            // a hint pointing at `tome doctor`.
+            Err(_) => return name.as_str() == WorkspaceName::global().as_str(),
+        };
+        conn.query_row(
+            "SELECT 1 FROM workspaces WHERE name = ?1",
+            rusqlite::params![name.as_str()],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
 }
 
-impl ScopeProvider for PathsScopeProvider<'_> {
+impl ScopeProvider for CentralDbScopeProvider<'_> {
     fn directly_declared_harnesses(
         &self,
         name: &WorkspaceName,
     ) -> Result<Option<Vec<String>>, CompositionErrorKind> {
+        // 1. Membership check against the central registry.
+        if !self.workspace_is_registered(name) {
+            return Err(CompositionErrorKind::UnknownWorkspace(
+                name.as_str().to_owned(),
+            ));
+        }
+
+        // 2. Read the workspace's settings.toml. Absent = legal "no
+        //    harnesses declared" → Ok(None). IO + parse failures =
+        //    SettingsReadFailure → exit 70 via the From boundary.
         let path = self.paths.workspace_settings_file(name);
         let body = match std::fs::read_to_string(&path) {
             Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(CompositionErrorKind::UnknownWorkspace(
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(CompositionErrorKind::SettingsReadFailure(
                     name.as_str().to_owned(),
-                ));
-            }
-            Err(_) => {
-                // Treat unreadable as unknown so the resolver maps to
-                // exit 13 (`WorkspaceNotFound`) with a sensible message.
-                return Err(CompositionErrorKind::UnknownWorkspace(
-                    name.as_str().to_owned(),
+                    format!("read {}: {e}", path.display()),
                 ));
             }
         };
-        let ws = parse_workspace(&body)
-            .map_err(|_| CompositionErrorKind::UnknownWorkspace(name.as_str().to_owned()))?;
+        let ws = parse_workspace(&body).map_err(|e| {
+            CompositionErrorKind::SettingsReadFailure(
+                name.as_str().to_owned(),
+                format!("parse {}: {e}", path.display()),
+            )
+        })?;
         Ok(ws.harnesses)
     }
 }

@@ -7,10 +7,17 @@
 
 use std::path::{Path, PathBuf};
 
+use std::sync::Mutex;
+
 use tome::harness::{
     self, BlockBodyStyle, HARNESS_MODULES_OVERRIDE, HarnessModule, MCP_CONFIG_KEY, McpConfigFormat,
     RulesFileStrategy, SUPPORTED_HARNESSES, lookup, with_effective_modules,
 };
+
+/// T-B3 (US3 review): the override slot is process-global. Tests that
+/// install or read it must serialise via this mutex so cargo's parallel
+/// runner can't observe a half-installed state.
+static OVERRIDE_MUTEX: Mutex<()> = Mutex::new(());
 
 #[test]
 fn registry_lists_five_harnesses_in_lex_order() {
@@ -265,6 +272,7 @@ impl HarnessModule for FakeHarness {
 
 #[test]
 fn override_replaces_effective_modules() {
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let _guard = HarnessModulesGuard::install(vec![Box::new(FakeHarness)]);
 
     let names = with_effective_modules(|mods| {
@@ -282,15 +290,15 @@ fn override_replaces_effective_modules() {
 
 #[test]
 fn effective_modules_falls_back_to_static_when_no_override() {
-    // Run AFTER the override test (the guard's Drop has cleared the
-    // slot). Don't assume ordering between #[test] cases — instead
-    // assert the slot is empty here, then read.
-    if HARNESS_MODULES_OVERRIDE.read().unwrap().is_some() {
-        // Another test left the slot dirty. Skip the assertion so we
-        // don't generate a spurious failure; the override test owns
-        // the cleanup contract.
-        return;
-    }
+    // T-B3: acquire the mutex BEFORE inspecting the slot so we don't
+    // observe a half-installed state from a parallel test.
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    // With the mutex held, no override is in-flight; the slot must be
+    // empty for the static-fallback assertion to be meaningful.
+    assert!(
+        HARNESS_MODULES_OVERRIDE.read().unwrap().is_none(),
+        "OVERRIDE_MUTEX held but slot non-empty — install/drop discipline broken",
+    );
     let count = with_effective_modules(|mods| mods.len());
     assert_eq!(count, SUPPORTED_HARNESSES.len());
 }

@@ -93,6 +93,18 @@ fn remove_last_entry_leaves_empty_array() {
     let body = std::fs::read_to_string(&paths.global_settings_file).unwrap();
     assert!(body.contains("harnesses"), "key must remain: {body}");
     assert!(!body.contains("stub"), "name must be gone: {body}");
+
+    // T-M6 (US3 review): parse the resulting TOML and assert the array
+    // is empty. The substring assertion above is necessary but not
+    // sufficient — a write that dropped the key entirely or replaced
+    // the array with a different shape would still pass.
+    let parsed: tome::settings::GlobalSettings =
+        toml::from_str(&body).expect("settings TOML must round-trip");
+    assert_eq!(
+        parsed.harnesses,
+        Some(Vec::<String>::new()),
+        "harnesses key must be present as an empty array",
+    );
 }
 
 #[test]

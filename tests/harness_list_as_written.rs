@@ -44,7 +44,29 @@ fn list_for_named_workspace_emits_as_written_array() {
 }
 
 #[test]
-fn list_for_workspace_without_settings_emits_empty_array() {
+fn list_for_seeded_workspace_without_settings_emits_empty_array() {
+    // The C-B2 fix introduced central-DB membership validation: a name
+    // not in the `workspaces` table → exit 13 (no longer silently empty).
+    // This test pins the OTHER half — a workspace that IS in the DB but
+    // has no settings.toml on disk → harnesses array empty (legal: every
+    // settings field is `#[serde(default)]`).
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    seed_workspace(&paths, "seeded-no-settings");
+    // Deliberately do NOT write settings.toml.
+
+    let args = HarnessListArgs {
+        workspace: Some("seeded-no-settings".to_string()),
+    };
+    let scope = fallback_scope();
+    let result = list::run(args, &scope, &paths, Mode::Json);
+    assert!(result.is_ok(), "list run: {result:?}");
+}
+
+#[test]
+fn list_for_unknown_workspace_returns_workspace_not_found() {
+    // C-B2 + C-M2: missing from central DB → exit 13.
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
@@ -53,8 +75,12 @@ fn list_for_workspace_without_settings_emits_empty_array() {
         workspace: Some("nonexistent-yet-valid".to_string()),
     };
     let scope = fallback_scope();
-    let result = list::run(args, &scope, &paths, Mode::Json);
-    assert!(result.is_ok(), "list run: {result:?}");
+    let err =
+        list::run(args, &scope, &paths, Mode::Json).expect_err("missing workspace must error");
+    assert!(
+        matches!(err, tome::error::TomeError::WorkspaceNotFound { .. }),
+        "expected WorkspaceNotFound, got {err:?}",
+    );
 }
 
 #[test]

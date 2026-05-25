@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{ToolEnv, paths_for};
+use common::{HomeGuard, ToolEnv, paths_for};
 use tome::cli::HarnessInfoArgs;
 use tome::commands::harness::info;
 use tome::output::Mode;
@@ -27,17 +27,8 @@ fn info_for_unknown_harness_returns_exit_18() {
         name: "not-a-real-harness".to_string(),
     };
     let scope = fallback_scope();
-    let prev_home = std::env::var_os("HOME");
-    unsafe {
-        std::env::set_var("HOME", env.home_path());
-    }
+    let _home = HomeGuard::install(env.home_path());
     let err = info::run(args, &scope, &paths, Mode::Json).expect_err("unknown");
-    unsafe {
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
     assert_eq!(err.exit_code(), 18);
 }
 
@@ -52,17 +43,8 @@ fn info_for_real_harness_runs_without_project() {
         name: "claude-code".to_string(),
     };
     let scope = fallback_scope();
-    let prev_home = std::env::var_os("HOME");
-    unsafe {
-        std::env::set_var("HOME", env.home_path());
-    }
+    let _home = HomeGuard::install(env.home_path());
     let result = info::run(args, &scope, &paths, Mode::Json);
-    unsafe {
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
     assert!(result.is_ok(), "info run: {result:?}");
 }
 
@@ -82,16 +64,7 @@ fn info_reports_direct_scope_when_global_declares() {
         name: "claude-code".to_string(),
     };
     let scope = fallback_scope();
-    let prev_home = std::env::var_os("HOME");
-    unsafe {
-        std::env::set_var("HOME", env.home_path());
-    }
+    let _home = HomeGuard::install(env.home_path());
     let result = info::run(args, &scope, &paths, Mode::Human);
-    unsafe {
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
     assert!(result.is_ok(), "info run: {result:?}");
 }

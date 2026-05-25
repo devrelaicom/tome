@@ -84,6 +84,31 @@ fn unsupported_name_in_global_settings_returns_error() {
     }
 }
 
+/// T-M8 / C-M4 (US3 review) — per-entry validation invariant.
+///
+/// Before C-M4 the unsupported-harness check ran at end-of-resolution
+/// against the FINAL effective list. That meant `["fake", "!fake"]`
+/// silently passed: the exclusion cancelled the inclusion before the
+/// check ran. Contract `settings-composition.md` §Error mapping pins
+/// per-entry validation: a typo'd inclusion is reported even if a later
+/// exclusion would have cancelled it. After C-M4 the check runs inside
+/// `resolve_list` for each `CompositionRef::Include`.
+#[test]
+fn fake_then_exclamation_fake_still_errors_per_entry() {
+    let stub = StubScope::new();
+    let global = GlobalSettings {
+        harnesses: Some(vec!["fake".to_owned(), "!fake".to_owned()]),
+    };
+    let err =
+        resolve_effective_list(None, None, &global, &stub).expect_err("must reject inclusion");
+    match err {
+        CompositionErrorKind::HarnessNotSupported(name) => {
+            assert_eq!(name, "fake");
+        }
+        other => panic!("expected HarnessNotSupported, got {other:?}"),
+    }
+}
+
 #[test]
 fn supported_name_resolves_cleanly() {
     let stub = StubScope::new();

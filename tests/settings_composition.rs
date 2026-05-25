@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 use common::{HarnessModulesGuard, NamedStubHarness};
-use tome::settings::resolver::{ScopeKind, StubScope, resolve_effective_list};
+use tome::settings::resolver::{StubScope, resolve_effective_list};
 use tome::settings::{GlobalSettings, ProjectMarkerConfig, WorkspaceSettings};
 use tome::workspace::WorkspaceName;
 
@@ -125,8 +125,11 @@ fn workspace_ref_in_project() {
         .iter()
         .find(|h| h.name == "x")
         .expect("x present");
-    assert!(harness.source_chain.contains(&ScopeKind::Project));
-    assert!(harness.source_chain.contains(&ScopeKind::Workspace));
+    // After C-M1 source_chain is mixed-notation Vec<String>: the
+    // entry-point scope is rendered as `"project"` and the recursion
+    // step that pulled x in is `"[workspace]"`.
+    assert!(harness.source_chain.iter().any(|s| s == "project"));
+    assert!(harness.source_chain.iter().any(|s| s == "[workspace]"));
 }
 
 #[test]
