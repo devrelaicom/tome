@@ -39,6 +39,7 @@ pub mod gemini;
 pub mod mcp_config;
 pub mod opencode;
 pub mod rules_file;
+pub mod stub;
 pub mod sync;
 
 use claude_code::CLAUDE_CODE;
@@ -46,6 +47,9 @@ use codex::CODEX;
 use cursor::CURSOR;
 use gemini::GEMINI;
 use opencode::OPENCODE;
+
+#[doc(hidden)]
+pub use stub::StubHarness;
 
 /// Standardised MCP entry key written by Tome across every harness.
 ///
