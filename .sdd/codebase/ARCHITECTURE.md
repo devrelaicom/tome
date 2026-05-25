@@ -14,16 +14,16 @@ The architecture is **monolithic with layered structure** split across two execu
 
 The central nervous system is a **single SQLite database** (`<home>/.tome/index.db`) that centralizes all state: plugin metadata, embeddings, workspace bindings, project bindings, and enabled skills. Per-workspace composition settings and summaries live in separate TOML files (`<root>/workspaces/<name>/settings.toml`) and central RULES.md. Project markers (`<project>/.tome/config.toml`) are thin binding pointers, not databases.
 
-Phase 4 / US1–US2 adds **harness synchronization** and **workspace lifecycle management** — when a project is bound to a workspace, Tome automatically syncs harness configurations (rules files + MCP configs) across the five supported harnesses. Full workspace create/rename/remove/sync/info/list surface ships with atomic per-harness writes and shared-path deduplication.
+Phase 4 / US1–US2 adds **harness synchronization** and **workspace lifecycle management** — when a project is bound to a workspace, Tome automatically syncs harness configurations (rules files + MCP configs) across the five supported harnesses. US3 completes the harness command surface and wires the composition resolver into production sync paths.
 
 ## Architecture Pattern
 
 | Pattern | Description |
 |---------|-------------|
 | Layered (capability-based) | Commands → Business Logic (Lifecycle, Embedding, Workspace, Harness) → Data Access (Index, Catalog, Config) → Persistence (SQLite, Filesystem, Git) |
-| Hexagonal (ports & adapters) | Trait boundaries for `Embedder`/`Reranker`/`Summariser`/`HarnessModule` allow swappable implementations (production vs stub for tests) |
+| Hexagonal (ports & adapters) | Trait boundaries for `Embedder`/`Reranker`/`Summariser`/`HarnessModule`/`ScopeProvider` allow swappable implementations (production vs stub for tests) |
 | Trait-driven | Core abstractions decouple policy from mechanism; composition via struct fields rather than factory functions |
-| Phase 4 — Harness abstraction + workspace binding + full lifecycle | Five `HarnessModule` impls + sync orchestrator + comprehensive workspace surface (init/list/info/rename/remove/sync + regen-summary) enable multi-workspace projects with atomic per-harness configuration |
+| Phase 4 — Harness abstraction + workspace binding + full lifecycle | Five `HarnessModule` impls + composition resolver + sync orchestrator + comprehensive workspace + harness surfaces enable multi-workspace projects with atomic per-harness configuration |
 
 ## Core Components
 
@@ -148,29 +148,78 @@ Phase 4 / US1–US2 adds **harness synchronization** and **workspace lifecycle m
 ### Settings & Composition (`src/settings/`)
 
 - **Purpose**: Parse and resolve layered harness selections across project/workspace/global scopes
-- **Location**: `src/settings/{mod,composition,parser,resolver}.rs`
-- **Phase 4 NEW**: Complete settings layer with composition reference support
+- **Location**: `src/settings/{mod,composition,parser,resolver,edit}.rs`
+- **Phase 4 US3 changes**: Complete settings composition layer with production wiring via `CentralDbScopeProvider`
 - **Layers** (priority order; first match wins):
   1. Project marker — `<project>/.tome/config.toml` (`ProjectMarkerConfig`)
   2. Workspace settings — `<root>/workspaces/<name>/settings.toml` (`WorkspaceSettings`)
   3. Global settings — `<root>/settings.toml` (`GlobalSettings`)
-- **Composition references**: `[workspace]`, `[global]`, `[workspaces.<name>]` — one level deep (not recursive)
-- **Resolution**: `resolve_effective_list(project_root, workspace_name, paths, home) -> EffectiveHarnessList`
-  - Reads project marker (if present), workspace settings (if present), global settings
-  - Collects composition references and resolves them once (one-deep; no recursion)
-  - Returns merged harness names with priority order
+- **Composition references** (per `contracts/settings-composition.md`):
+  - `[workspace]` — pull in active bound workspace's declared list
+  - `[global]` — pull in global workspace's declared list
+  - `[workspaces.<name>]` — pull in specific named workspace's declared list (one level deep, not recursive)
+- **Resolver algorithm** (mirrors §Algorithm in `src/settings/resolver.rs`):
+  1. Priority walk: first scope with non-None `harnesses` key is the primary declarer; others consulted only via composition refs
+  2. Recursive descent: each entry parses to `CompositionRef`; bare names → inclusion set; bracketed refs → recurse into target scope's **directly-declared** list (FR-449)
+  3. Cycle detection: DFS visited set of `(ScopeKind, key)` tuples; re-visit returns `CompositionErrorKind::Cycle` with path
+  4. Final subtraction: exclusions (names prefixed with `!`) removed from inclusion set; result ordered by first-included-from chain
+- **ScopeProvider trait** (F8 skeleton, US3.a production wiring):
+  - Abstraction over workspace registry; allows resolver to be exercised against in-memory `StubScope` fixtures (tests) or production `CentralDbScopeProvider` (PR #92)
+  - `directly_declared_harnesses(&WorkspaceName) -> Result<Option<Vec<String>>, CompositionErrorKind>`
+  - Production impl (`CentralDbScopeProvider` in `commands/harness/mod.rs`) consults central SQLite registry to confirm membership, reads workspace's on-disk `settings.toml` for directly-declared list
+- **`settings::edit` module** (US3.b): Abstraction for surgical TOML edits (project marker + workspace + global settings)
+  - `open_settings(path)` → `DocumentMut`
+  - `add_harness(doc, name, scope)` / `remove_harness(doc, name, scope)`
+  - `save_settings(doc, path)` → atomic persist
+  - Used by `harness use_ / remove` commands to append/delete harness entries
 - **All types**: `#[serde(deny_unknown_fields)]` — Tome-owned inputs are strict per FR-013a boundary
 
 ### Commands Dispatcher (`src/commands/`)
 
-- **Purpose**: Execute 11 CLI subcommands (catalog, plugin, models, query, reindex, status, workspace, harness, mcp, doctor)
+- **Purpose**: Execute 12 CLI subcommands (catalog, plugin, models, query, reindex, status, workspace, harness, mcp, doctor)
 - **Location**: `src/commands/{catalog,plugin,models,query,reindex,status,workspace,harness,mcp,doctor}.rs`
 - **Pattern**: Most commands have:
   - `pub fn run(args, scope, mode)` — CLI entry with emit/exit
   - `pub fn pipeline(args, deps)` or `run_with_deps(...)` — silent compute for library reuse by MCP/tests
-- **Phase 4 NEW**: `commands/harness/` thin seam (US1.a stub, US1.b real) dispatches to harness sync orchestrator
+- **Phase 4 NEW**: `commands/harness/` full subcommand surface (US3) dispatches to harness sync orchestrator + composition resolver
 - **Phase 4 NEW**: `commands/workspace/` expands from 2 to 8 subcommands: `info/init/list/use_/rename/remove/regen_summary/sync`
 - **Key invariant**: Lazy model loading (embedder/reranker not loaded on status/doctor/workspace unless needed)
+
+### Harness Command Suite (`src/commands/harness/`)
+
+- **Purpose**: Phase 4 / US3 — Complete harness management surface
+- **Location**: `src/commands/harness/{mod,bare,list,use_,remove,info,sync}.rs`
+- **Phase 4 US3 NEW**: Replaces single-function stub with full subcommand dispatcher
+- **`bare`** — `tome harness` (no subcommand) — List all five supported harnesses in tabular form (FR-520)
+  - Detection per harness via `HarnessModule::detect(home)`
+  - Returns table: name, description, detected (yes/no)
+- **`list`** — `tome harness list [<workspace>]` — Resolve and report effective harness list
+  - No argument: compute effective list from project marker + workspace + global (via `ScopeProvider`)
+  - With workspace argument: report that workspace's directly-declared list verbatim
+  - Reuses composition resolver; first production consumer of `CentralDbScopeProvider` (PR #92)
+  - Emits ordered list with source-chain narration per `contracts/settings-composition.md` example output
+- **`use_`** — `tome harness use <name> [--scope {project|workspace|global}] [--force]` — Add harness to chosen scope
+  - Default scope: `project` (requires project marker; fall back to workspace/global outside project)
+  - Surgical TOML edit via `settings::edit::add_harness`
+  - Runs sync when effective list changes (per FR-501)
+- **`remove`** — `tome harness remove <name> [--scope] [--force]` — Remove harness from chosen scope
+  - Surgical edit via `settings::edit::remove_harness`
+  - Runs cleanup pass when effective list changes
+  - Respects shared-path dedup (two harnesses may target same file)
+- **`info`** — `tome harness info [--json]` — Report per-harness details for current project
+  - Detection, target rules-file + MCP-config paths, integration state (config content hash if present)
+  - Source-of-scope annotation (project/workspace/global)
+  - Omits project details when outside project (shows `—`)
+- **`sync`** — `tome harness sync [--force]` — Reconcile filesystem against effective list
+  - Byte-for-byte idempotent (FR-525)
+  - Requires project marker (exit 14 outside project)
+  - Dispatches to `sync_project` orchestrator
+- **`ScopeProvider` production impl** (`CentralDbScopeProvider` in `mod.rs`):
+  - Consults central SQLite `workspaces` table to confirm workspace membership
+  - Reads target workspace's on-disk `settings.toml` for directly-declared harnesses list
+  - Returns `UnknownWorkspace` (exit 13) if workspace not registered
+  - Returns `SettingsReadFailure` (exit 70 `WorkspaceMalformed`) if file unreadable/unparsable
+  - When central DB absent (no `index.db`), only privileged `global` workspace is considered to exist
 
 ### Workspace Command Suite (`src/commands/workspace/`)
 
@@ -346,6 +395,31 @@ Dedup on target paths; respect shared-path cleanup; forward-progress on clash
 CLI: print BindOutcome + SyncOutcome (added/updated/removed counts)
 ```
 
+### Harness Composition Resolution (Phase 4 / US3)
+
+```
+CLI: tome harness list [workspace]
+     ↓
+resolve_effective_list(project_marker, workspace_settings, global_settings, ScopeProvider)
+     ↓
+Priority walk: find first scope with harnesses: key (others consulted only via refs)
+     ↓
+For each declared entry, parse CompositionRef:
+  - Bare name → add to inclusion set
+  - [workspace] / [global] / [workspaces.<name>] → recurse into target's **directly-declared** list
+     ↓
+DFS cycle detection via visited (ScopeKind, key) set; returns Cycle on re-visit
+     ↓
+Subtract exclusions (! prefixed) from inclusions
+     ↓
+Order by first-included-from chain; emit EffectiveHarnessList with source-chain per entry
+     ↓
+Production: ScopeProvider = CentralDbScopeProvider (consults workspaces table + reads .toml files)
+Tests: ScopeProvider = StubScope (hand-rolled in-memory fixture)
+     ↓
+CLI: emit effective list + source chains (or error Cycle / UnknownWorkspace / SettingsReadFailure)
+```
+
 ### Workspace Lifecycle Flow (Phase 4 / US2)
 
 ```
@@ -398,105 +472,29 @@ index::open_read_only() — open DB, don't take lock (readers ≠ writers)
      ↓
 embedding::Embedder::embed(query) → Vec<f32> (384-dim)
      ↓
-index::query::knn() — sqlite-vec KNN search filtered by workspace_skills junction (default k=20)
+index::knn(embedding, filters) → Top-K candidates from workspace_skills
      ↓
-embedding::Reranker::rerank(query, candidates) — cross-encoder scoring
+embedding::Reranker::rerank(query, candidates) → Scored results
      ↓
-Sort by reranker score; emit human-readable or JSON
-```
-
-### MCP Tool Flow: search_skills Handler
-
-```
-MCP harness: POST {"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "search_skills", ...}}
-     ↓
-preflight (one-time on MCP startup):
-  - Schema version gate
-  - Drift detection
-  - SHA-256 verify embedder artefact
-  - Eager-load FastembedEmbedder
-     ↓
-Handler: validate plugin_without_catalog / unknown_catalog
-     ↓
-Lazy-load reranker via OnceLock::get_or_try_init() in spawn_blocking
-     ↓
-Call query::pipeline() — compute embedding, KNN, rerank
-     ↓
-Map TomeError to MCP error envelope; emit JSON
+CLI: print results (name, skill path, score)
 ```
 
 ## Layer Boundaries
 
 | Layer | Responsibility | Can Access | Cannot Access |
 |-------|----------------|------------|---------------|
-| CLI (commands/) | HTTP/prompt/exit handling | All business logic | Direct DB access (uses index:: API) |
-| Business Logic (plugin/, embedding/, doctor/, workspace/, harness/) | Orchestration + decisions | Data access APIs (index::, catalog::, settings::) | CLI context (prompts, colors) |
-| Index API (index/) | Query + CRUD on skills/meta/workspace tables | Database (rusqlite) | Business logic |
-| Catalog/Config (catalog/, config.rs) | Manifest parsing, git operations | Filesystem, git CLI | Index operations |
-| Harness (harness/) | Per-harness path/config strategy | Filesystem (existence probes only) | Nothing else |
-| Settings (settings/) | Parse + compose harness lists | Filesystem (read TOML), workspace names | Database |
-| Workspace (workspace/) | Scope resolution, binding, lifecycle | Catalog, config, index (read-only), settings | Commands |
-| Output (output.rs) | JSON/human formatting, error display | Error enum | Any command logic |
-| MCP (mcp/) | Async stdio protocol, tool dispatch | All other modules via spawn_blocking | Direct CLI context |
-| Util (util/) | Shared helpers (atomic directories, etc.) | Filesystem, standard library | Any domain logic |
+| CLI | Argument parsing, mode dispatch, error formatting | Commands | Database, embedder directly |
+| Commands | Command logic, outcome assembly, emit wrappers | Business logic (workspace, plugin, harness, settings) | Database directly (via deps) |
+| Business logic | Policy (binding, lifecycle, sync) | Index, catalog, plugin, settings, embedding | CLI, presentation |
+| Data access | Queries, writes, transactions | Index, config, catalog on-disk | Commands, business logic |
+| Persistence | SQLite, filesystem, git | Raw operations | Higher layers |
 
 ## Dependency Rules
 
-- **Higher → Lower only**: Commands depend on business logic; business logic depends on data access; no upward references
-- **Cross-layer**: `Paths` can be accessed anywhere (it's pure path construction); `TomeError` exported everywhere
-- **Async island**: Only `src/mcp/` may import `tokio` (enforced by `tests/sync_boundary.rs`)
-- **Lazy model loading**: Embedder/reranker loaded only when needed (not on status, doctor, query if cache hit)
-- **Harness/Settings**: Settings composes harness names but never imports harness module (harness registry accessed via `with_effective_modules` callback)
-
-## Key Interfaces & Contracts
-
-| Interface | Purpose | Implementations |
-|-----------|---------|-----------------|
-| `Embedder` | Text → 384-dim embedding | `FastembedEmbedder` (prod), `StubEmbedder` (test) |
-| `Reranker` | Query + candidates → scored results | `FastembedReranker` (prod), `StubReranker` (test) |
-| `Summariser` | Plugin list → (short, long) summary | `LlamaSummariser` (prod), `StubSummariser` (test) |
-| `HarnessModule` | Per-harness rules/MCP paths | `ClaudeCode`, `Codex`, `Cursor`, `Gemini`, `OpenCode`, `StubHarness` |
-| `LifecycleDeps` | Input bundle for plugin enable/disable | Struct wrapping embedder, config, scope, paths |
-| `BindDeps` | Input bundle for project binding | Struct wrapping paths, home_root |
-| `SyncDeps` | Input bundle for harness sync | Struct wrapping paths, home_root, workspace_name, force |
-
-## State Management
-
-| State Type | Location | Pattern |
-|------------|----------|---------|
-| Central index | `<home>/.tome/index.db` | SQLite with WAL + advisory lockfile |
-| Workspace registry | Central DB `workspaces` table | Primary key on `name` UNIQUE |
-| Project bindings | Central DB `workspace_projects` table | project_path PRIMARY KEY → workspace_id FK |
-| Catalog cache | `<home>/.tome/catalogs/<sha256>/` | Content-addressed, reference-counted cleanup |
-| Models | `<home>/.tome/models/` | Atomic downloads via tempfile + SHA-256 |
-| Project marker | `<project>/.tome/config.toml` | Thin TOML; workspace binding + project-scope harnesses |
-| Workspace settings | `<home>/.tome/workspaces/<name>/settings.toml` | Layered harness list + cached summaries |
-| Workspace RULES.md | `<home>/.tome/workspaces/<name>/RULES.md` | Central workspace rules, copied to projects |
-| Global settings | `<home>/.tome/settings.toml` | Global harness fallback |
-| MCP log | `<home>/.tome/mcp.log` | 10 MiB atomic-rotate JSON lines |
-| Per-harness config | Harness-specific paths (e.g. `<project>/.claude/tools.md`, `<home>/.codex/`) | Rules files + MCP config, written by sync orchestrator |
-
-## Cross-Cutting Concerns
-
-| Concern | Implementation | Location |
-|---------|----------------|----------|
-| Logging | `tracing` + `tracing-subscriber` (stderr only; MCP uses file) | `src/logging.rs` |
-| Error handling | Closed `TomeError` enum + exit codes (1–80+) | `src/error.rs` |
-| Credential scrubbing | Regex remove `scheme://...@host` from strings | `src/catalog/git.rs` |
-| Signal handling | `ctrlc` on CLI (SIGINT → exit 8); tokio signal on MCP (graceful shutdown) | `src/main.rs`, `src/mcp/runtime.rs` |
-| Output formatting | `--json` mode (serde + anstream) vs human (colors, tables, spinner) | `src/output.rs`, `src/presentation/` |
-| Advisory locking | Single lockfile per Paths; database transaction per critical section | `src/index/lock.rs` |
-| Atomic directory landing | Tempfile staging dir → rename on success | `src/util/atomic_dir.rs` |
-| Atomic file writes | `catalog::store::write_atomic` — harness rules/MCP config writes + all workspace TOML updates | `src/catalog/store.rs` |
-
-## Testing Architecture
-
-- **Unit tests**: Embedded in modules (e.g., `src/error.rs`, `src/settings/mod.rs`)
-- **Integration tests**: Under `tests/` — access library via public API, no `#[cfg(test)]` visibility
-- **Test fixtures**: Synthetic DB builders, sparse-file models, git repos via `git init`
-- **Stub implementations**: `StubEmbedder` / `StubReranker` / `StubSummariser` / `StubHarness` with deterministic output for reproducible tests
-- **Test injection**: Thread-local `MIGRATIONS_OVERRIDE`, `HARNESS_MODULES_OVERRIDE` via RAII guards
-- **Sync boundary**: `tests/sync_boundary.rs` enforces no `tokio` outside `src/mcp/`
+- Higher layers can depend on lower layers, not vice versa
+- Trait boundaries (`Embedder`, `Reranker`, `Summariser`, `HarnessModule`, `ScopeProvider`) decouple policy from mechanism
+- `src/mcp/` is the only module allowed async (`tokio`); enforced by `tests/sync_boundary.rs`
+- Workspace-specific code never reads/writes global index directly; uses scope-parameterized helpers
 
 ---
 

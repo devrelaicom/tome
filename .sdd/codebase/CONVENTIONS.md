@@ -186,6 +186,17 @@ if existing_bytes == new_bytes {
 
 Tests verify idempotence by capturing mtime before a write, sleeping 1.5 seconds (to ensure distinct mtime granularity on all filesystems), re-reading, and asserting mtime unchanged.
 
+### Advisory Lock Around Settings File Mutations (Phase 4 US3)
+
+Any command that mutates a Tome-owned config file outside the central DB (e.g., `settings.toml`, `config.toml`) must acquire the index advisory lock for the full read-modify-write window:
+
+```rust
+let _lock = index::lock::LockFile::acquire(&paths.index_lock_path)?;
+// Read, modify, write settings file
+```
+
+This serializes with index writers and prevents concurrent TOCTOU races on the same file.
+
 ## Per-Project Effective List Resolution (Phase 4 US2)
 
 Workspace lifecycle commands that need to know the effective harness list for a project (e.g., `workspace remove` cascade cleanup) call:
@@ -197,6 +208,38 @@ let effective_list = settings::resolver::resolve_effective_list(&StubScope::new(
 The `StubScope::new()` represents a "not yet bound" project; phase A of the sync algorithm later replaces it with a real `ResolvedScope(workspace_name)` read from the database. This pattern avoids DB access until the workspace is actually confirmed to exist.
 
 In tests, use `StubScope` when the database isn't fully initialized; in production code, use the resolved scope from the sync orchestrator.
+
+## Settings File Composition and Inheritance (Phase 4 US3)
+
+Three layers of settings compose in priority order: global (`~/.tome/settings.toml`) < workspace (`~/.tome/workspaces/<name>/settings.toml`) < project (`<root>/.tome/config.toml`):
+
+```rust
+pub fn resolve_effective_list(scope: &Scope, paths: &Paths) -> Result<Vec<String>, TomeError> {
+    // 1. Read global (always exists or defaults)
+    // 2. Overlay workspace (if workspace exists in central DB)
+    // 3. Overlay project (if project marker is present)
+    // First scope to declare harnesses wins; remainder ignored.
+}
+```
+
+Key rule (FR-441): An explicitly empty list (`harnesses = []`) is semantically distinct from no declaration. The resolver stops at the first scope where `harnesses` is `Some(_)`, even if empty.
+
+### `CentralDbScopeProvider` for Harness Resolution (Phase 4 US3)
+
+When a future command needs to resolve the harness list for a workspace (e.g., `tome harness list`), use the production provider:
+
+```rust
+let provider = CentralDbScopeProvider::new(paths);
+let list = settings::resolver::resolve_effective_list(&scope, paths, &provider)?;
+```
+
+The provider distinguishes three failure modes:
+- **Workspace exists, settings present/parsable** → `Ok(Some(list))`
+- **Workspace exists, settings absent** → `Ok(None)` (no harnesses declared; legal)
+- **Workspace exists, settings unreadable/unparsable** → `Err(SettingsReadFailure)` → exit 70 (`WorkspaceMalformed`)
+- **Workspace not in central DB** → `Err(UnknownWorkspace)` → exit 13 (`WorkspaceNotFound`)
+
+When central DB is absent, only the privileged `global` workspace is considered to exist.
 
 ## Lenient Parse & Order Preservation
 
@@ -220,7 +263,7 @@ Every file write follows the pattern:
 
 The mode preservation step is **critical**: on Unix, a naive tempfile write defaults to `0o644`, which would silently weaken the security posture of files that were intentionally restrictive (e.g., `0o600`).
 
-Lifted to `catalog::store::write_atomic` in Phase 4 F2; reusable by any future atomic-write surface.
+Lifted to `catalog::store::write_atomic` in Phase 4 F2; also used by `settings::edit::save_settings` (Phase 4 US3) for order-preserving settings rewrites.
 
 ## Test-Injection Patterns
 
@@ -253,9 +296,10 @@ Used for:
 
 **Why not `#[cfg(test)]`?** Integration tests in `tests/` don't see `#[cfg(test)]` code; only `#[doc(hidden)] pub` is visible across crate boundaries. The `#[doc(hidden)]` attribute signals that the slot is internal.
 
-### HarnessModulesGuard Pattern (Phase 4)
+### HarnessModulesGuard Pattern (Phase 4 US3)
 
-In test files that use fake harness modules:
+In test files that use synthetic harness modules:
+
 ```rust
 pub struct HarnessModulesGuard;
 impl HarnessModulesGuard {
@@ -274,7 +318,47 @@ impl Drop for HarnessModulesGuard {
 }
 ```
 
-Per-test-file scope ensures cleanup on panic.
+Per-test-file scope ensures cleanup on panic. Store in `tests/common/mod.rs` for reuse across test files that mutate harness discovery.
+
+### HomeGuard Pattern for Environment Mutation (Phase 4 US3)
+
+When a test mutates `std::env::set_var("HOME", ...)`, use the `HOME_MUTEX` pattern to serialize with other tests:
+
+```rust
+static HOME_MUTEX: Mutex<()> = Mutex::new(());
+
+#[test]
+fn my_test() {
+    let _lock = HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _home = HomeGuard::install(new_home_path);
+    // ... test code that reads $HOME ...
+}
+```
+
+The `HomeGuard` struct (from `tests/common/mod.rs`) restores the previous `HOME` value on drop. **Field declaration order is critical**: declare `_previous` (the restore guard) **before** `_lock` (the mutex guard) so `_previous` drops first (restoring HOME while still holding the mutex), then `_lock` releases, preventing race windows where another test reads a half-restored HOME.
+
+```rust
+pub struct HomeGuard {
+    _previous: PrevHome,  // Drops FIRST, restores HOME
+    _lock: std::sync::MutexGuard<'static, ()>,  // Drops SECOND, releases mutex
+}
+```
+
+### Per-Test-File `OVERRIDE_MUTEX` (Phase 4 US3)
+
+For tests that use `HARNESS_MODULES_OVERRIDE` or other thread-local injection points, declare a process-wide `Mutex` in the test file:
+
+```rust
+static OVERRIDE_MUTEX: Mutex<()> = Mutex::new(());
+
+fn install_synthetic() -> (HarnessModulesGuard, MutexGuard<'static, ()>) {
+    let lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = HarnessModulesGuard::install(...);
+    (guard, lock)  // Return both; hold lock for entire test
+}
+```
+
+Return both guard and lock from the setup helper, and hold them for the entire test body. **Tuple order matters**: return `(guard, lock)` so guard drops before lock (standard RAII unwinding).
 
 ## Dependency Boundaries
 
@@ -297,11 +381,21 @@ Per-test-file scope ensures cleanup on panic.
 
 When a command's logic is reused by non-CLI surfaces (MCP, library API), split into:
 
-1. **`pipeline(args, deps) -> Result<Outcome, Error>`** — pure compute, no I/O side-effects
-2. **`run(args, deps, mode) -> Result<Outcome, Error>`** — calls `pipeline`, then emits per `mode`
-3. **`run_with_deps(args, deps) -> Result<Outcome, Error>`** — library entry point, calls `run` with a standard mode
+1. **`assemble_*(args, deps) -> Result<Outcome, Error>`** — pure compute, no I/O side-effects (renamed from `pipeline` for CLI clarity)
+2. **`run(args, deps, mode) -> Result<(), Error>`** — calls `assemble_*`, then emits per `mode` and exits
 
-Saves logic duplication and improves testability. Applied to `query::run_with_deps`, `reindex::run_with_deps`, `status::assemble_report`.
+Tests target the `assemble_*` function and assert on returned outcomes; the CLI dispatcher uses `run` which handles emission. This pattern is now pinned for **every CLI subcommand** (US3.d-1 T-B2 compliance).
+
+Example from `harness::info::run`:
+```rust
+pub fn run(args: HarnessInfoArgs, scope: &ResolvedScope, paths: &Paths, mode: Mode) -> Result<(), TomeError> {
+    let outcome = assemble(args, scope, paths)?;
+    output::write_json(mode, &outcome)?;
+    Ok(())
+}
+```
+
+Applied to `workspace::info::run`, `workspace::list::run`, `harness::list::run`, and all CLI commands added in Phase 4 US3+.
 
 ### Helper Visibility Promotion (Phase 3+)
 
@@ -393,4 +487,4 @@ Soft cap of ~400 lines or 2 modules per PR to keep reviews focused.
 
 ---
 
-*This document defines HOW to write code. Update when conventions change. Last refreshed 2026-05-25 against Phase 4 / US2 source (677 tests, 92 suites).*
+*This document defines HOW to write code. Update when conventions change. Last refreshed 2026-05-25 against Phase 4 / US3-complete source (825 passing tests, 17 ignored, 110 suites).*

@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-25 (Phase 4 / US1 + US2 completed; security audit findings applied)
+> **Last Updated**: 2026-05-25 (Phase 4 / US1 + US2 + US3 completed; all security audit findings applied in PR #92)
 
 ## Technical Debt
 
@@ -12,7 +12,7 @@ Items that should be addressed in current or near-term phases:
 
 | ID | Area | Description | Impact | Effort | Notes |
 |----|------|-------------|--------|--------|-------|
-| TD-001 | `src/index/` (Phase 2–4) | Advisory locking for concurrent catalog/index access | Concurrency safety | High | Phase 3 MCP server + Phase 4 central DB exposes concurrent access; advisory lockfile (FR-040, F11b FR-366) is implemented; T088 (real BGE testing) is the verification gap |
+| TD-001 | `src/index/` (Phase 2–4) | Advisory locking for concurrent catalog/index access | Concurrency safety | High | Phase 3 MCP server + Phase 4 central DB exposes concurrent access; advisory lockfile (FR-040, F11b FR-366) is implemented; harness use/remove + workspace operations now under advisory lock (US3 PR #92); T088 (real BGE testing) is the verification gap |
 | TD-003 | Binary size (Phase 2–4) | SQLite + ONNX + llama.cpp pushed binary to ~30 MB; cap is 50 MB | Headroom management | Medium | Phase 4 projection: ~28.4 MB macOS arm64, ~34 MB Linux x86_64 (research §R-4); discipline holds with 16+ MB headroom |
 
 ### Medium Priority
@@ -107,6 +107,10 @@ Code areas that are brittle or risky to modify:
 | `src/settings/mod.rs` (Phase 4 Foundational F8) | Phase 4 introduces layered settings composition with override semantics (global + workspace + project) | New settings shapes all carry `deny_unknown_fields` (T098n verified); test round-trip through compose + override pipeline | Verify strict boundary in future additions |
 | `src/workspace/rename.rs` (Phase 4 US2) | Transaction wraps marker rewrites (C-B2 fix, US2.d-1); SQL failure leaves markers pointing at `<new>` with DB at `<old>`, but DB + old markers stay consistent. Uses `toml_edit` to preserve marker fields (T-B1 fix) | Do not revert to pre-transaction or non-lenient TOML parsing. Test marker field preservation + partial-failure rollback scenarios. Monitor: SQL failure recovery is documented but partial-state is possible |
 | `src/workspace/remove.rs` (Phase 4 US2) | Cascade narrowed to per-project effective harness list (C-B1 fix, US2.d-1); prevents unconditional iteration of all harness dirs | Do not revert to global `SUPPORTED_HARNESSES` iteration. Test with multi-harness projects. Verify resolver is called correctly |
+| `src/commands/harness/mod.rs::CentralDbScopeProvider` (Phase 4 US3, PR #92) | Production scope provider now consults central DB for workspace membership; three-way classification (not registered → UnknownWorkspace, exists without settings → Ok(None), exists with settings → Ok(Some)) | Critical fix: production sync previously used `StubScope::new()` always returning UnknownWorkspace. Central DB check must succeed before settings-file read. Test all three paths explicitly. Do not revert to `PathsScopeProvider` or any provider that masks IO/parse errors as UnknownWorkspace |
+| `src/commands/harness/{use_,remove}.rs` (Phase 4 US3, PR #92) | Advisory lock held across entire read-modify-write window (US3 C-M5 fix, S-M2 security fix) | Critical: both commands now acquire `index.lock` before any settings-file access. Lock must be held until sync completes or no-op is confirmed. Race-safe concurrent edits rely on this lock. Do not move lock acquisition or shorten lock hold window without full concurrency audit |
+| `src/settings/edit.rs::save_settings` (Phase 4 US3, PR #92) | Routes through `write_atomic` for unified mode preservation + symlink refusal. Tested in `tests/security_hardening.rs::preserve_file_mode_on_workspace_settings_via_settings_edit` + `refuses_symlink_on_settings_edit` | Critical: settings file writes must use this path to inherit security boundary (mode preservation, symlink refusal). Do not bypass write_atomic. Regressions are caught by security_hardening tests |
+| `tests/common/mod.rs::HOME_MUTEX + HomeGuard` (Phase 4 US3, PR #92) | Process-global `Mutex<()>` serialises HOME mutations across parallel tests; RAII guard restores HOME on drop before releasing mutex | Critical: all harness tests using `std::env::set_var("HOME", ...)` must acquire mutex and use HomeGuard. Parallel tests no longer collide on HOME. Do not bypass mutex or use raw env::set_var without guard |
 
 ## Deferred Findings from Phase 4 / US1 Review
 
@@ -142,6 +146,57 @@ Phase 4 / US2 audit produced 4 blockers + 23 majors. All 4 blockers applied in P
 | (minors + nits) | Various | Docstring drift, formatting; bulk-deferred to tracking issue |
 
 See `specs/004-phase-4-refactor-harnesses/review/us2-disposition.md` for full triage.
+
+## Deferred Findings from Phase 4 / US3 Review (Resolved in PR #92)
+
+Phase 4 / US3 audit produced **6 blockers + 29 majors**. **All 6 blockers + 12 selected majors resolved in PR #92** (US3.d-1):
+
+### Blockers Applied
+
+| # | Category | Fix | Status |
+|---|----------|-----|--------|
+| **C-B1 + S-M1** | Critical production bypass | `StubScope::new()` replaced by `CentralDbScopeProvider` in `harness::sync::sync_project` | ✅ Resolved PR #92 |
+| **C-B2 + S-M4 + R-M1** | Provider masking errors | `PathsScopeProvider` → `CentralDbScopeProvider` distinguishes workspace-not-found vs. IO errors | ✅ Resolved PR #92 |
+| **C-B3** | Info command incomplete | `harness info` now computes effective list and reports source chain | ✅ Resolved PR #92 |
+| **T-B1** | Test race condition | `HOME_MUTEX` + `HomeGuard` serialises parallel `std::env::set_var("HOME", ...)` calls | ✅ Resolved PR #92 |
+| **T-B2** | Test output never verified | Command run functions refactored to take `out: &mut dyn Write` sink; tests now assert on output | ✅ Resolved PR #92 |
+| **T-B3** | Test override slot races | Per-file `OVERRIDE_MUTEX` added to `harness_skeleton.rs` | ✅ Resolved PR #92 |
+
+### Majors Applied (12/29)
+
+| # | Category | Fix | Status |
+|---|----------|-----|--------|
+| **C-M1** | Contract gap | `EffectiveHarness.source_chain` extended to carry reference strings (`[workspaces.shared]`) | ✅ Resolved PR #92 |
+| **C-M2** | DB membership check missing | `harness list <workspace>` validates central DB membership; exits 13 on unknown | ✅ Resolved PR #92 |
+| **C-M4 + T-M8** | Per-entry validation | Unsupported harness validation moved inside `resolve_list` after parsing each `Include` | ✅ Resolved PR #92 |
+| **C-M5 + R-M2 + S-M2** | Concurrent write race | Advisory lock around `harness use\|remove` read-modify-write window | ✅ Resolved PR #92 |
+| **C-M6** | Multi-block edge case | `write_rules_for_path` correctly handles multi-block-collapse case | ✅ Resolved PR #92 |
+| **R-M3** | Error context wrong | `WorkspaceRefOutsideProject` uses actual scope where `[workspace]` found | ✅ Resolved PR #92 |
+| **R-M8** | Malformed parse fallthrough | `CompositionRef::parse` rejects malformed bracketed refs | ✅ Resolved PR #92 |
+| **T-M1** | FR-447 resolver path untested | New test: `[workspaces.unknown]` → exit 13 via resolver | ✅ Resolved PR #92 |
+| **T-M2** | JSON shape unpinned | Added JSON byte-stability tests for `HarnessBareEntry`, `HarnessInfoOutcome`, etc. | ✅ Resolved PR #92 |
+| **T-M3** | `--force` path untested | New test: `tome harness use --force` exercises FR-502 wiring | ✅ Resolved PR #92 |
+| **T-M5** | CLI thin-wrapper untested | New test: `tome harness sync` against missing project marker → exit 2 | ✅ Resolved PR #92 |
+| **S-M3** | Settings-edit security untested | New tests in `security_hardening.rs`: mode preservation + symlink refusal for `save_settings` | ✅ Resolved PR #92 |
+
+### Majors Deferred (17/29)
+
+| # | Category | Reason | Target |
+|----|----------|--------|--------|
+| C-M3 | Contract | Bare's MCP-config heuristic — cosmetic edge case | Tracking issue |
+| C-M7 | Contract | Informational notice differentiation — cosmetic wording | Tracking issue |
+| C-M8 | Contract | Cycle path scope-kind prefix — depends on C-M1 fix (now resolved); revisit naturally | Follow-up |
+| R-M4 | Rust | Post-edit re-snapshot error masks drift — defensive concern | Tracking issue |
+| R-M5 | Rust | Redundant `home_root()` calls — perf cosmetic | Tracking issue |
+| R-M6 | Rust | Typed enum for direct_scopes — superseded by C-M1 + C-B3 fixes | Tracking issue |
+| R-M7 | Rust | Dead `_for_use` aliases — cleanup | Tracking issue |
+| T-M4 | Test | Informational-notice path — pairs with C-M7 deferral | Tracking issue |
+| T-M6 | Test | `remove_last_entry_leaves_empty_array` substring vs. parse — defer tightening | Tracking issue |
+| T-M7 | Test | Cycle-through-`[global]` — small gap | Tracking issue |
+| T-M9 | Test | Idempotence extends to rules/MCP mtimes — extends pattern | Tracking issue |
+| (minors) | Various | Docstring drift, redundant comments, formatting | Tracking issue |
+
+See `specs/004-phase-4-refactor-harnesses/review/us3-disposition.md` for full triage.
 
 ## Deprecated Code
 
@@ -196,7 +251,7 @@ Dependencies that may need attention:
 | `tracing-subscriber` | 0.3.x (Phase 3–4) | Structured logging framework; used in MCP server only | Monitor for JSON formatter updates and file I/O edge cases | Stable |
 | `schemars` | 1.x (Phase 3–4) | JSON schema generation for MCP tool inputs; used at compile-time | Monitor for schema correctness issues on MCP tool definitions | Active |
 | `llama-cpp-2` | 0.1.x (Phase 4, minor-pinned) | Summariser inference runtime; C++ static link | Pre-1.0 crate; monitor for API churn; test on every minor bump; CPU-only features enforced | Active / Pre-1.0 |
-| `toml_edit` | 0.25.x (Phase 4, minor-pinned) | Comment-preserving TOML edits for harness config + workspace marker preservation | Monitor for breaking changes; no known security issues. Used in critical US2 marker-preservation path (T-B1 fix) | Active |
+| `toml_edit` | 0.25.x (Phase 4, minor-pinned) | Comment-preserving TOML edits for harness config + workspace marker preservation | Monitor for breaking changes; no known security issues. Used in critical US2 marker-preservation path (T-B1 fix) and US3 settings-edit (S-M3 fix) | Active |
 
 ## Phase 3 Deferred Items Disposition (Research §R-17)
 
@@ -221,7 +276,7 @@ Per Phase 4 research §R-17, Phase 3 deferred items are dispositioned as follows
 ## Concern Severity Guide
 
 | Level | Definition | Response Time |
-|-------|------------|----------------|
+|-------|------------|---------------|
 | Critical | Production impact, security breach, test failure blocking ship | Immediate |
 | High | Degraded functionality, security risk, blocking feature | This sprint |
 | Medium | Developer experience, minor functional issues, UX confusion | Next sprint |

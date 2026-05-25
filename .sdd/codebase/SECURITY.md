@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-25 (Phase 4 / US1 + US2 completed; security audit findings applied)
+> **Last Updated**: 2026-05-25 (Phase 4 / US1 + US2 + US3 completed; all security audit findings applied)
 
 ## Overview
 
@@ -37,7 +37,9 @@ Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, wo
 27. Workspace rename with DB transaction wrapping marker rewrites (US2.d-1 C-B2 fix)
 28. Workspace settings and rules file preservation of forward-compat fields (US2.d-1 T-B1 fix, `toml_edit`)
 29. Credential scrubbing on MCP log fields and error chains
-30. **Phase 4 additions**: Single-root `<home>/.tome/` layout with all state under one directory; central SQLite DB replacing per-scope files; workspace + project binding model with PK on canonical project_path (TEXT); harness MCP config management with symlink-aware writes; summariser inference with Qwen2.5-0.5B; settings composition with layered override; atomic-dir helper for populated-directory landing; mode-preserving atomic file writes
+30. **Phase 4 US1 additions**: Single-root `<home>/.tome/` layout with all state under one directory; central SQLite DB replacing per-scope files; workspace + project binding model with PK on canonical project_path (TEXT); harness MCP config management with symlink-aware writes; summariser inference with Qwen2.5-0.5B; settings composition with layered override; atomic-dir helper for populated-directory landing; mode-preserving atomic file writes
+31. **Phase 4 US2 additions**: Workspace removal effective-list narrowing; rename with transaction wrapping; marker field preservation via `toml_edit`
+32. **Phase 4 US3 additions (PR #92)**: Production sync now uses `CentralDbScopeProvider` instead of `StubScope`; advisory lock covers harness use/remove read-modify-write window; `PathsScopeProvider` replaced by `CentralDbScopeProvider` for central-DB workspace membership checks with distinct error handling (IO errors vs. unknown workspace); settings-edit mode preservation + symlink refusal regression tests added
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
@@ -152,6 +154,16 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Config clash detection** | Harness clash errors surface on `tome workspace use` with hint to use `--force` | `src/error.rs::HarnessClash` (code 19); amended contract `mcp-config-integration.md` for env preservation semantics |
 | **Mode preservation on rewrite** | Read existing target's mode before write; chmod staged tempfile to that mode before persist (S2-M1 fix) | `src/catalog/store.rs::write_atomic` (unified surface) + all callers (harness modules, workspace, project) |
 
+### Workspace Scope Provider (Phase 4 / US3 fix — PR #92)
+
+| Control | Implementation | Purpose |
+|---------|----------------|---------|
+| **Central DB membership check** | `CentralDbScopeProvider::workspace_is_registered` queries central `workspaces` table | Verifies workspace name is registered before attempting to read settings |
+| **Replacement of PathsScopeProvider** | Production `harness::sync::sync_project` + `harness list <workspace>` now use `CentralDbScopeProvider` instead of `PathsScopeProvider` | C-B1 + S-M1 fix: production no longer uses `StubScope::new()` which always returned `UnknownWorkspace` for non-global workspaces |
+| **Three-way classification** | (1) workspace not in registry → `UnknownWorkspace` (exit 13); (2) workspace exists, settings absent → `Ok(None)`; (3) workspace exists, settings present → `Ok(Some(list))` | C-B2 fix: distinguishes "workspace doesn't exist" (exit 13) from "workspace exists but settings unreadable" (exit 70 `WorkspaceMalformed`) |
+| **Bootstrap fallback** | When central DB absent (fresh install), only `WorkspaceName::global()` is considered registered | Allows production to function before first `tome workspace init` creates the central DB |
+| **Implementation location** | `src/commands/harness/mod.rs::CentralDbScopeProvider` | Used by `harness::sync::sync_project` (line 178) and `harness list` subcommand |
+
 ## Data Protection
 
 ### Sensitive Data Handling
@@ -198,8 +210,9 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Skill directory walk** | Skip symlinks (explicit rejection) | `entry.file_type()` + `is_symlink()` skip | `src/mcp/tools/get_skill.rs::walk_dir` (lines 272–289, FR-S-02) |
 | **RULES.md write** | Refuse symlinks on write-back | `is_symlink()` check → exit 7 (FR-M-HRN-2) | `src/harness/rules_file.rs` line 79 |
 | **MCP config write** | Refuse symlinks on write-back | `is_symlink()` check → exit 7 | `src/harness/mcp_config.rs` line 92 |
+| **Settings file write** (Phase 4 / US3) | Refuse symlinks on write-back via `save_settings` | `is_symlink()` check in `catalog::store::write_atomic` → exit 7 | `src/settings/edit.rs::save_settings` → `src/catalog/store.rs::write_atomic` (lines 88–95) |
 | **Atomic file writes** (US2.d-1 S2-M2) | Refuse symlinks in `catalog::store::write_atomic` | `is_symlink()` check on target before staging write → exit 7 | `src/catalog/store.rs::write_atomic` |
-| **Purpose** | Prevent hostile catalog with `skills/foo/creds → ~/.ssh/id_rsa` or harness config pointing to sensitive files | Defence in depth: `lstat` (no follow) + explicit skip/refusal | Phase 3 PR #56; Phase 4 US1.d-2a + US2.d-1 extends to all atomic writes |
+| **Purpose** | Prevent hostile catalog with `skills/foo/creds → ~/.ssh/id_rsa` or harness config pointing to sensitive files | Defence in depth: `lstat` (no follow) + explicit skip/refusal | Phase 3 PR #56; Phase 4 US1.d-2a + US2.d-1 + US3 extends to all atomic writes |
 
 ### Integrity & Verification
 
@@ -236,6 +249,17 @@ Both BGE checksums are real upstream digests verified at Phase 3 slice 1. Downlo
 | **Marker rewrite under transaction** (S2-C-B2) | `workspace rename` now opens `conn.transaction()` BEFORE marker rewrite loop; SQL UPDATE failure still leaves DB inconsistent w.r.t. marker state, but DB row and old markers stay consistent | `src/workspace/rename.rs::rename` (PR US2.d-1) | Partial-failure mode documented; atomicity guarantee at transaction boundary |
 | **Workspace dir chmod on recovery** (S2-M4) | `workspace rename` recovery branch (old dir absent) now chmods the new workspace dir to 0o700 before populating, matching init's security posture | `src/workspace/rename.rs::rename` (lines 269–274, PR US2.d-1) | Closes permission-downgrade vulnerability during recovery |
 | **Marker field preservation** (S2-T-B1) | `workspace rename` now uses `toml_edit::DocumentMut` to preserve optional `harnesses` field + comments in project markers during rewrite | `src/workspace/rename.rs::rename` (PR US2.d-1) | Forward-compat: marker round-trip preserves user-supplied fields |
+
+### Phase 4 / US3 Security Enhancements (PR #92)
+
+| Control | Implementation | Location | Fix |
+|---------|----------------|----------|-----|
+| **Production sync uses central-DB provider** (C-B1 + S-M1) | `harness::sync::sync_project` now constructs `CentralDbScopeProvider` instead of `StubScope::new()`; workspace-reference composition works correctly in production | `src/harness/sync.rs` lines 178–185 | Critical: production previously bypassed workspace resolution, returning `UnknownWorkspace` for all non-global workspaces even when they existed |
+| **ScopeProvider replaced** (C-B2 + S-M4 + R-M1) | `PathsScopeProvider` replaced by `CentralDbScopeProvider` across all production call sites; central DB queries confirm workspace membership; IO/parse errors return distinct error codes | `src/commands/harness/mod.rs::CentralDbScopeProvider` (lines 120–150) | Fix: distinguishes "workspace doesn't exist" (exit 13) from "IO/parse error" (exit 70) — errors no longer masked as `UnknownWorkspace` |
+| **Concurrent harness use/remove safe** (C-M5 + R-M2 + S-M2) | Advisory lock at `paths.index_lock` held across entire read-modify-write window in `harness use` and `harness remove` | `src/commands/harness/use_.rs` lines 69–70, `src/commands/harness/remove.rs` lines 53–54 | Race-safe: concurrent edits to settings.toml are serialised; contention returns `IndexBusy` (exit 50) |
+| **Settings write mode preservation** (S-M3) | `save_settings` routes through `write_atomic` which preserves file mode on rewrite; tested in `tests/security_hardening.rs::preserve_file_mode_on_workspace_settings_via_settings_edit` | `src/settings/edit.rs::save_settings` → `src/catalog/store.rs::write_atomic` | Unified defence: same mode-preservation policy as all other atomic writes |
+| **Settings write symlink refusal** (S-M3) | `save_settings` refuses symlinks via `write_atomic::is_symlink()` check; tested in `tests/security_hardening.rs::refuses_symlink_on_settings_edit` | `src/settings/edit.rs::save_settings` → `src/catalog/store.rs::write_atomic` (lines 88–95) | Unified defence: prevents hostile redirection of settings writes to sensitive files |
+| **Test isolation on HOME mutation** (T-B1) | Process-global `HOME` mutation serialised via `HOME_MUTEX` + `HomeGuard` RAII in `tests/common/mod.rs`; harness tests acquire mutex before mutation | `tests/common/mod.rs::HOME_MUTEX`, used by `harness_bare.rs`, `harness_info.rs`, `harness_use_scope.rs` | Race-safe: parallel tests no longer collide on `std::env::set_var("HOME", ...)`|
 
 ## Signal Handling & Interruption
 
@@ -294,10 +318,11 @@ Both BGE checksums are real upstream digests verified at Phase 3 slice 1. Downlo
 | **Manifest strictness** | 100% grep assertion on `deny_unknown_fields`; Phase 4 audit (T098n) on 5 new types | `tests/manifest_strictness.rs` |
 | **Concurrency & atomicity** | Advisory lock + interrupt scenarios; cache cleanup under lock (F11b); binding + last_used_at atomic (R-M1) | `tests/atomicity.rs`, `tests/concurrency.rs` |
 | **Exit codes** | Closed enumeration; all Phase 1/2/3/4 codes tested | `tests/exit_codes.rs` |
-| **Security hardening** | File permissions, symlink handling, registry validation, mode preservation on rewrite (S2-M1), symlink refusal on atomic writes (S2-M2) | `tests/security_hardening.rs` |
+| **Security hardening** | File permissions, symlink handling, registry validation, mode preservation on rewrite (S2-M1), symlink refusal on atomic writes (S2-M2), settings-edit mode + symlink tests (US3 PR #92) | `tests/security_hardening.rs` |
 | **MCP protocol purity** | No error leakage to stdout (FR-108) | `tests/mcp_server.rs` |
-| **Workspace isolation** | Cross-workspace catalog enablement + reference-counting (Phase 3); project binding validation (Phase 4) | `tests/workspace_commands.rs`, `tests/catalog_cache_refcount.rs`, Phase 4 tests |
+| **Workspace isolation** | Cross-workspace catalog enablement + reference-counting (Phase 3); project binding validation (Phase 4); settings composition (US3) | `tests/workspace_commands.rs`, `tests/catalog_cache_refcount.rs`, Phase 4 tests |
 | **Sync idempotence** | Mtime stability across re-sync with all harness modules | `tests/sync_idempotence.rs` |
+| **Harness concurrency** | Parallel HOME mutation via `HOME_MUTEX` (US3 PR #92) | `tests/harness_*.rs` + `tests/common/mod.rs::HomeGuard` |
 
 ---
 

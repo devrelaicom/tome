@@ -25,9 +25,9 @@ Cargo automatically discovers and runs all tests via `cargo test`. No external t
 | `cargo test -- --nocapture` | Show stdout/stderr (suppress output capture) |
 | `cargo test -- --test-threads=1` | Run sequentially (for thread-local state or shared resource tests) |
 
-**Phase 4 US2 Status**: 677 passing tests, 29 ignored, across 92 test suites:
-- ~100 unit tests in `src/lib.rs` + modules
-- ~577 integration tests in `tests/*.rs`
+**Phase 4 US3 Status**: 825 passing tests, 17 ignored, across 110 test suites:
+- ~115 unit tests in `src/lib.rs` + modules
+- ~710 integration tests in `tests/*.rs`
 
 ## Test Organization
 
@@ -35,8 +35,11 @@ Cargo automatically discovers and runs all tests via `cargo test`. No external t
 
 ```
 tests/
-├── common/mod.rs                                  # Shared test harness (Fixture, ToolEnv, helpers)
-│   └── Tests call `paths_for()`, `lifecycle_paths()`, `stub_embedder_seed()`, etc.
+├── common/mod.rs                                  # Shared test harness (Fixture, ToolEnv, helpers, guards)
+│   ├── Fixture, ToolEnv, paths_for, global_scope()
+│   ├── HomeGuard, HarnessModulesGuard (RAII guards for env + injection)
+│   ├── NamedStubHarness for synthetic harness composition
+│   └── seed_workspace(), seed_project(), write_index_db_with_schema_version()
 ├── atomic_dir.rs                                  # Atomic directory landing tests
 ├── atomicity.rs                                   # Atomic writes under SIGINT injection
 ├── atomicity_enable.rs                            # Plugin enable atomicity (thread-local state)
@@ -57,9 +60,18 @@ tests/
 ├── exit_codes.rs                                  # Exit code mappings (library API)
 ├── exit_codes_e2e.rs                              # CLI binary exit codes
 ├── frontmatter.rs                                 # SKILL.md frontmatter parsing
+├── harness_bare.rs                                # Bare `tome harness` (Phase 4 US3)
+├── harness_info.rs                                # `tome harness info` output (Phase 4 US3)
+├── harness_json_shape.rs                          # JSON envelope shape (Phase 4 US3)
+├── harness_list_as_written.rs                     # Declared harnesses (Phase 4 US3)
+├── harness_list_effective.rs                      # Effective harness list (Phase 4 US3)
 ├── harness_module_claude_code.rs                  # Claude Code production harness (Phase 4 US1)
-├── harness_skeleton.rs                            # Harness module composition
-├── harness_sync_stub.rs                           # Sync algorithm with StubHarness
+├── harness_modules.rs                             # Harness discovery + composition (Phase 4)
+├── harness_remove_scope.rs                        # Remove harness from scope (Phase 4 US3)
+├── harness_skeleton.rs                            # Harness module trait + stubs (Phase 4)
+├── harness_sync.rs                                # Sync command smoke test (Phase 4 US3)
+├── harness_sync_stub.rs                           # Sync algorithm with StubHarness (Phase 4)
+├── harness_use_scope.rs                           # Add harness to scope (Phase 4 US3)
 ├── index_lock.rs                                  # Advisory lock contention
 ├── index_schema_bootstrap.rs                      # DB schema bootstrap
 ├── manifest_strictness.rs                         # Strictness boundary (#[serde(deny_unknown_fields)])
@@ -96,8 +108,17 @@ tests/
 ├── schema_migration_e2e.rs                        # Forward schema migrations (synthetic)
 ├── schema_migrations.rs                           # Schema version guards
 ├── scrubbing.rs                                   # Credential scrubbing in errors
-├── security_hardening.rs                          # Hardening measures (chmod, symlink skip, mode preservation)
-├── settings_skeleton.rs                           # Settings composition (Phase 4)
+├── security_hardening.rs                          # Hardening measures (mode preservation, symlink skip)
+├── settings_array_types.rs                        # Array-type settings validation (Phase 4 US3)
+├── settings_bad_exclusion.rs                      # Unsupported harness validation (Phase 4 US3)
+├── settings_composition.rs                        # Settings layering validation (Phase 4 US3)
+├── settings_composition_resolves_to_as_written.rs # Composition semantics (Phase 4 US3)
+├── settings_cycle_detection.rs                    # Circular workspace refs (Phase 4 US3)
+├── settings_harness_not_supported.rs              # Per-entry validation (Phase 4 US3)
+├── settings_priority.rs                           # Layer priority (Phase 4 US3)
+├── settings_skeleton.rs                           # Settings composition skeleton (Phase 4)
+├── settings_unknown_workspace_resolver.rs         # Workspace resolution errors (Phase 4 US3)
+├── settings_workspace_ref_outside_project.rs      # Ref constraints (Phase 4 US3)
 ├── status.rs                                      # Status report assembly
 ├── summariser_stub.rs                             # StubSummariser determinism (Phase 4)
 ├── sync_algorithm.rs                              # Sync orchestrator (Phase 4 US1)
@@ -134,11 +155,10 @@ Integration test files follow the pattern `<command-or-feature>_<suffix>.rs`:
 - `plugin_enable.rs` — plugin enable feature
 - `catalog_add.rs` — catalog add subcommand
 - `workspace_init.rs` — workspace init subcommand
-- `workspace_list.rs` — workspace list subcommand
 - `workspace_use_binding.rs` — workspace use project binding
-- `workspace_use_atomicity.rs` — workspace use atomicity properties
-- `workspace_rename.rs` — workspace rename lifecycle
-- `workspace_remove_cascade.rs` — workspace remove with catalog cleanup
+- `harness_bare.rs` — bare `tome harness` interactive browse (Phase 4 US3)
+- `harness_list_effective.rs` — effective harness list resolution (Phase 4 US3)
+- `settings_composition.rs` — settings layer composition (Phase 4 US3)
 - `schema_migration_e2e.rs` — end-to-end synthetic migrations
 - `manifest_strictness.rs` — cross-cutting strictness boundary
 - `sync_idempotence.rs` — sync idempotence verification
@@ -243,6 +263,33 @@ fn plugin_disable_non_tty_without_force_refuses() {
 - Avoid real model loading (use `--force` to skip prompts, or test error paths)
 - Run alongside other integration tests; separate by feature
 
+### Silent-Compute + Emit-Wrapper Tests (Phase 4 US3)
+
+Tests for CLI commands using the new two-function pattern call the silent compute function (`assemble_*`) and assert on the return value, avoiding stdout emission:
+
+```rust
+#[test]
+fn harness_info_returns_correct_outcome_shape() {
+    // Setup: workspace + harness scope
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    seed_workspace(&paths, "my-workspace");
+    
+    // Call the silent compute function (tested in isolation)
+    let outcome = commands::harness::info::assemble(
+        args,
+        &scope,
+        &paths
+    ).expect("assemble must succeed");
+    
+    // Assert on the outcome struct
+    assert_eq!(outcome.name.as_str(), "my-workspace");
+    assert!(outcome.is_bound);
+}
+```
+
+The CLI dispatcher (`run`) is tested separately in CLI binary tests (for exit codes / TTY behavior). Splitting compute from emit improves testability and allows MCP to reuse the compute path.
+
 ### Interactive CLI Tests (via rexpect)
 
 The `plugin_interactive.rs` test file uses `rexpect` to drive a pty harness:
@@ -325,7 +372,35 @@ fn mcp_config_write_preserves_mtime_on_idempotent_rewrite() {
 }
 ```
 
-### Workspace Lifecycle Tests (Phase 4 US2)
+### Settings Composition Tests (Phase 4 US3)
+
+Tests for `settings::resolver::resolve_effective_list` verify the three-layer priority stack:
+
+```rust
+#[test]
+fn resolve_effective_list_prioritizes_project_over_workspace_over_global() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    
+    // Global declares `["a", "b"]`
+    write_global_settings(&paths, "harnesses = [\"a\", \"b\"]").unwrap();
+    
+    // Workspace declares `["x", "y"]` (overrides global)
+    write_workspace_settings(&paths, "harnesses = [\"x\", \"y\"]").unwrap();
+    
+    // Project declares `["m", "n"]` (overrides workspace)
+    write_project_settings(&project_root, "harnesses = [\"m\", \"n\"]").unwrap();
+    
+    let list = resolve_effective_list(&scope, &paths)?;
+    
+    // Project wins
+    assert_eq!(list, vec!["m", "n"]);
+}
+```
+
+Pattern: The test uses synthetic harness names (`a`, `b`, `x`, `y`, `m`, `n`) installed via `HarnessModulesGuard` so validation passes. See CONVENTIONS.md for the guard discipline.
+
+### Workspace Lifecycle Tests (Phase 4 US2+)
 
 Tests for workspace operations (`rename`, `remove`, `sync`) exercise the two-phase sync pattern:
 
@@ -407,6 +482,51 @@ impl ToolEnv {
 
 Pass the `home_path()` via `Command::env("HOME", ...)` so the spawned binary never sees real config.
 
+### RAII Guards (Phase 4 US3)
+
+Two new RAII guards in `tests/common/mod.rs` manage test isolation:
+
+**`HomeGuard`**: Restores `$HOME` after mutation
+```rust
+pub struct HomeGuard {
+    _previous: PrevHome,  // Drops FIRST, restores HOME
+    _lock: MutexGuard<'static, ()>,  // Drops SECOND, releases mutex
+}
+
+impl HomeGuard {
+    pub fn install(new_home: &Path) -> Self {
+        let lock = HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", new_home) };
+        Self {
+            _previous: PrevHome(previous),
+            _lock: lock,
+        }
+    }
+}
+```
+
+**`HarnessModulesGuard`**: Manages harness module injection
+```rust
+pub struct HarnessModulesGuard;
+impl HarnessModulesGuard {
+    pub fn install(modules: Vec<Box<dyn HarnessModule>>) {
+        *tome::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("HARNESS_MODULES_OVERRIDE poisoned") = Some(modules);
+    }
+}
+impl Drop for HarnessModulesGuard {
+    fn drop(&mut self) {
+        *tome::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("HARNESS_MODULES_OVERRIDE poisoned") = None;
+    }
+}
+```
+
+Both guards survive panics and use field-order semantics to ensure cleanup happens in the correct sequence. See CONVENTIONS.md for detailed discipline.
+
 ### Helper Functions
 
 **Fabricate Models**:
@@ -430,7 +550,7 @@ pub fn config_with_catalog(catalog_name: &str, catalog_root: &Path) -> Config {
 }
 
 pub fn paths_for(env: &ToolEnv) -> Paths {
-    // Derive XDG paths from ToolEnv.home (used at the 4th caller → promoted here)
+    // Derive XDG paths from ToolEnv.home (promoted to common after 4th caller)
 }
 
 pub fn lifecycle_paths(root: &Path) -> Paths {
@@ -461,7 +581,7 @@ pub fn stub_summariser_seed() -> MetaSeed {
 }
 ```
 
-**Workspace Setup (Phase 4 US2)**:
+**Workspace Setup (Phase 4 US2+)**:
 ```rust
 pub fn seed_workspace(paths: &Paths, name: &str) {
     // Create the workspace in the central DB
@@ -472,20 +592,22 @@ pub fn seed_project(paths: &Paths, workspace_name: &str, project_root: &Path) {
 }
 ```
 
-**RAII Injection Guards**:
+**Synthetic Harness Modules (Phase 4 US3)**:
 ```rust
-pub struct HarnessModulesGuard;
-impl HarnessModulesGuard {
-    pub fn install(modules: Vec<Box<dyn HarnessModule>>) {
-        // Installs into HARNESS_MODULES_OVERRIDE thread-local
+pub struct NamedStubHarness;
+impl NamedStubHarness {
+    pub fn new(name: &str) -> Box<dyn HarnessModule> {
+        // Creates a stub module with the given name (leaked via Box::leak)
     }
-}
-impl Drop for HarnessModulesGuard {
-    fn drop(&mut self) {
-        // Clears the slot on drop (survives panics)
+    
+    pub fn boxed_set<I, S>(names: I) -> Vec<Box<dyn HarnessModule>>
+    where I: IntoIterator<Item = S>, S: AsRef<str> {
+        // Helper to build a vec of synthetic harnesses from an iterator
     }
 }
 ```
+
+Used in composition tests to exercise the harness resolver with arbitrary names.
 
 ## Test Data
 
@@ -519,6 +641,7 @@ Tests exercising the successful flow:
 - `workspace_init.rs::init_creates_dot_tome_with_empty_config`
 - `workspace_use_binding.rs::bind_inserts_row_and_returns_outcome`
 - `workspace_rename.rs::rename_updates_marker_and_database`
+- `harness_list_effective.rs::resolve_effective_list_prioritizes_layers`
 - `query.rs::knn_returns_sorted_results_above_minimum_score`
 
 ### Error Path Tests
@@ -529,6 +652,7 @@ Tests exercising specific failure modes:
 - `doctor.rs::missing_reranker_classified_as_degraded` (partial failure)
 - `exit_codes_e2e.rs::plugin_show_with_malformed_plugin_json_exits_22` (specific exit code)
 - `workspace_remove_cascade.rs::remove_refuses_without_force_when_plugins_exist`
+- `settings_harness_not_supported.rs::validate_rejects_unsupported_harness_names`
 
 ### Atomicity Tests
 
@@ -568,6 +692,7 @@ Tests verifying per-thread injection patterns:
 
 - `schema_migration_e2e.rs` uses `MigrationsGuard::install(MIGRATIONS)` with per-thread scope
 - `sync_algorithm.rs` uses `HarnessModulesGuard::install(stubs)` for harness dispatch testing
+- `settings_composition.rs` uses `HarnessModulesGuard::install(synth)` for synthetic harnesses
 
 **Important**: `MIGRATIONS_OVERRIDE` and `HARNESS_MODULES_OVERRIDE` are `thread_local!` and do NOT propagate across `thread::spawn`. Writer threads must install their own guard.
 
@@ -581,6 +706,17 @@ Tests verifying repeated operations with identical inputs produce no changes:
 - `sync_idempotence.rs::mcp_config_write_preserves_mtime_on_idempotent_rewrite`
 
 Pattern: capture mtime before write, sleep 1.5s, rewrite identical content, verify mtime unchanged.
+
+### Settings Composition Tests (Phase 4 US3)
+
+Tests verifying layer priority and validation:
+
+- `settings_composition.rs::resolve_effective_list_prioritizes_project_over_workspace_over_global`
+- `settings_priority.rs::global_layer_is_foundation`
+- `settings_cycle_detection.rs::circular_workspace_refs_rejected`
+- `settings_workspace_ref_outside_project.rs::workspace_ref_must_be_in_project`
+- `settings_bad_exclusion.rs::exclusion_without_inclusion_rejected`
+- `settings_harness_not_supported.rs::validate_per_entry_unsupported_harness`
 
 ## Mocking Strategy
 
@@ -704,6 +840,7 @@ let fixture = Fixture::build_sample();
 **Exclusions**:
 - `src/embedding/stub.rs` — stub implementation
 - `src/harness/stub.rs` — stub harness module
+- `src/summarise/stub.rs` — stub summariser
 - Config file parsing (covered by fixture loading)
 - Dead code (rare due to strong module boundaries)
 
@@ -803,6 +940,28 @@ pub fn test_scope() -> &'static tome::workspace::Scope {
 
 Returns `&'static Scope` so callers avoid repeated allocations. Preferred over per-call `fn test_scope() -> Scope` when many tests share the same global scope.
 
+### Per-Test-File OVERRIDE_MUTEX Pattern (Phase 4 US3)
+
+When a test file uses `HARNESS_MODULES_OVERRIDE`, serialize all tests via a process-wide `Mutex`:
+
+```rust
+static OVERRIDE_MUTEX: Mutex<()> = Mutex::new(());
+
+fn install_synthetic() -> (HarnessModulesGuard, MutexGuard<'static, ()>) {
+    let lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = HarnessModulesGuard::install(NamedStubHarness::boxed_set(names));
+    (guard, lock)
+}
+
+#[test]
+fn my_test() {
+    let (_guard, _lock) = install_synthetic();  // Hold both for lifetime of test
+    // ... test code ...
+}  // Guard drops first (restores override to None), lock drops second (releases mutex)
+```
+
+Field order in the tuple (guard, lock) ensures guard drops before lock (RAII discipline). Without this pattern, concurrent tests race on the process-global injection slot.
+
 ## Known Gaps & Deferrals
 
 **T088**: Manual SC-001 / SC-002 verification against real BGE models. The MCP tools exercise the KNN+rerank pipeline, but the real embedder isn't loaded in CI. Deferred to developer pass post-v0.3.0.
@@ -813,4 +972,4 @@ Returns `&'static Scope` so callers avoid repeated allocations. Preferred over p
 
 ---
 
-*This document describes HOW to test. Update when testing strategy changes. Last refreshed 2026-05-25 against Phase 4 / US2 source (677 tests, 92 suites).*
+*This document describes HOW to test. Update when testing strategy changes. Last refreshed 2026-05-25 against Phase 4 / US3-complete source (825 passing tests, 17 ignored, 110 suites).*
