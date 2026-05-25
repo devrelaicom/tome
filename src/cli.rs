@@ -94,6 +94,101 @@ pub enum Command {
     /// applies the three safe repair classes (re-download models,
     /// re-clone broken catalog caches, forward-migrate the schema).
     Doctor(DoctorArgs),
+    /// Inspect and manage harness integrations (Claude Code, Codex,
+    /// Cursor, Gemini, OpenCode). Run with no subcommand to enumerate
+    /// every supported harness. See `contracts/harness-commands.md`.
+    Harness(HarnessArgs),
+}
+
+/// Wraps the `harness` subcommand so the `command` field can be `None` —
+/// allowing bare `tome harness` to list every supported harness in
+/// tabular form (FR-520).
+#[derive(Debug, clap::Args)]
+pub struct HarnessArgs {
+    #[command(subcommand)]
+    pub command: Option<HarnessCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HarnessCommand {
+    /// List the effective harness list for the resolved project, or the
+    /// directly-declared list for a named workspace. With no `<workspace>`
+    /// argument: computes the effective list via the layered settings
+    /// walk + composition expansion. With a `<workspace>` argument:
+    /// reports that workspace's directly-declared list verbatim.
+    List(HarnessListArgs),
+    /// Append a harness to the chosen scope's settings file. Default
+    /// scope is `project`. Runs the sync algorithm when the effective
+    /// list changes.
+    Use(HarnessUseArgs),
+    /// Remove a harness from the chosen scope's settings file. Runs
+    /// the cleanup pass when the effective list changes.
+    Remove(HarnessRemoveArgs),
+    /// Report per-harness details for the current project: detection,
+    /// targets, integration state, and source-of-scope.
+    Info(HarnessInfoArgs),
+    /// Reconcile the project's actual filesystem state against the
+    /// effective harness list. Byte-for-byte idempotent (FR-525).
+    Sync,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct HarnessListArgs {
+    /// Optional workspace name. When omitted, reports the effective list
+    /// for the current project. When present, reports the workspace's
+    /// directly-declared list verbatim.
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct HarnessUseArgs {
+    /// Harness name (one of the five supported: claude-code, codex,
+    /// cursor, gemini, opencode).
+    pub name: String,
+    /// Settings scope to edit. Defaults to `project` (requires a project
+    /// marker above CWD; use `workspace` or `global` outside a project).
+    #[arg(long, default_value_t = HarnessScopeArg::Project, value_enum)]
+    pub scope: HarnessScopeArg,
+    /// Override a harness-clash on the MCP config write (FR-502 →
+    /// exit 19 without override).
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct HarnessRemoveArgs {
+    /// Harness name.
+    pub name: String,
+    /// Settings scope to edit. Defaults to `project`.
+    #[arg(long, default_value_t = HarnessScopeArg::Project, value_enum)]
+    pub scope: HarnessScopeArg,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct HarnessInfoArgs {
+    /// Harness name.
+    pub name: String,
+}
+
+/// Scope argument for `harness use` and `harness remove`. Distinct from
+/// [`crate::workspace::ScopeKind`] (the workspace-info two-state
+/// classifier) — adds the project layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum HarnessScopeArg {
+    Project,
+    Workspace,
+    Global,
+}
+
+impl std::fmt::Display for HarnessScopeArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Project => "project",
+            Self::Workspace => "workspace",
+            Self::Global => "global",
+        })
+    }
 }
 
 #[derive(Debug, clap::Args)]
