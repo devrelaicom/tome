@@ -7,9 +7,23 @@
 //! contains an explicit composition reference (`[global]`,
 //! `[workspaces.<name>]`).
 
+mod common;
+
+use std::sync::Mutex;
+
+use common::{HarnessModulesGuard, NamedStubHarness};
 use tome::settings::resolver::{ScopeKind, StubScope, resolve_effective_list};
 use tome::settings::{GlobalSettings, ProjectMarkerConfig, WorkspaceSettings};
 use tome::workspace::WorkspaceName;
+
+static OVERRIDE_MUTEX: Mutex<()> = Mutex::new(());
+
+fn install_synthetic() -> (std::sync::MutexGuard<'static, ()>, HarnessModulesGuard) {
+    let lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let names = ["a", "b", "c", "should-not-appear"];
+    let guard = HarnessModulesGuard::install(NamedStubHarness::boxed_set(names));
+    (lock, guard)
+}
 
 fn ws(name: &str, harnesses: Option<Vec<String>>) -> WorkspaceSettings {
     WorkspaceSettings {
@@ -33,6 +47,7 @@ fn names(harnesses: &[tome::settings::EffectiveHarness]) -> Vec<&str> {
 
 #[test]
 fn global_declares_list_no_project_no_workspace_effective_from_global() {
+    let _g = install_synthetic();
     let stub = StubScope::new();
     let global = GlobalSettings {
         harnesses: Some(vec!["a".to_owned()]),
@@ -45,6 +60,7 @@ fn global_declares_list_no_project_no_workspace_effective_from_global() {
 
 #[test]
 fn workspace_declares_list_no_project_effective_from_workspace_global_not_consulted() {
+    let _g = install_synthetic();
     // Workspace declares `["b"]`; global declares `["should-not-appear"]`.
     // The priority walk terminates at the workspace declarer; global is
     // NOT consulted because the workspace's list contains no `[global]`
@@ -62,6 +78,7 @@ fn workspace_declares_list_no_project_effective_from_workspace_global_not_consul
 
 #[test]
 fn workspace_with_explicit_global_ref_unions() {
+    let _g = install_synthetic();
     // Workspace's list explicitly references `[global]`; the union of
     // the workspace's directly-declared `["b"]` and global's `["a"]`
     // is the effective set.
@@ -79,6 +96,7 @@ fn workspace_with_explicit_global_ref_unions() {
 
 #[test]
 fn project_declares_list_workspace_global_ignored_unless_referenced() {
+    let _g = install_synthetic();
     // Project declares `["a"]`. Workspace declares `["b"]`; global
     // declares `["c"]`. Neither workspace nor global is referenced, so
     // both are silently ignored.

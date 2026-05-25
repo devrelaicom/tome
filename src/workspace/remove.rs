@@ -531,6 +531,6 @@ fn compute_effective_names_for_project(
         &global_settings,
         &scope,
     )
-    .map_err(|kind| TomeError::CompositionError { kind })?;
+    .map_err(TomeError::from)?;
     Ok(effective.harnesses.into_iter().map(|h| h.name).collect())
 }

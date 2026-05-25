@@ -1,11 +1,48 @@
 //! T260 / FR-443 + FR-444 + FR-449 — composition resolution forms +
 //! union + subtraction + order-independence.
+//!
+//! These tests reference synthetic harness names (`a`, `b`, `c`,
+//! `alpha`, `x`, `y`, `z`, …). Since US3.b's FR-460 check rejects
+//! anything not in [`SUPPORTED_HARNESSES`], every test installs a
+//! permissive [`HarnessModulesGuard`] up-front via `install_synthetic`.
+
+mod common;
 
 use std::collections::HashSet;
+use std::sync::Mutex;
 
+use common::{HarnessModulesGuard, NamedStubHarness};
 use tome::settings::resolver::{ScopeKind, StubScope, resolve_effective_list};
 use tome::settings::{GlobalSettings, ProjectMarkerConfig, WorkspaceSettings};
 use tome::workspace::WorkspaceName;
+
+static OVERRIDE_MUTEX: Mutex<()> = Mutex::new(());
+
+/// Install a permissive registry containing every synthetic harness
+/// name referenced in this file. The guard returned must be held for
+/// the entire test body; the mutex returned must be held alongside it
+/// (mutex first, then guard) so concurrent tests in this binary don't
+/// clobber the registry slot.
+fn install_synthetic() -> (std::sync::MutexGuard<'static, ()>, HarnessModulesGuard) {
+    let lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let names = [
+        "a",
+        "b",
+        "c",
+        "x",
+        "y",
+        "z",
+        "g1",
+        "g2",
+        "alpha",
+        "beta",
+        "claude-code",
+        "codex",
+        "cursor",
+    ];
+    let guard = HarnessModulesGuard::install(NamedStubHarness::boxed_set(names));
+    (lock, guard)
+}
 
 fn ws(name: &str, harnesses: Option<Vec<String>>) -> WorkspaceSettings {
     WorkspaceSettings {
@@ -29,6 +66,7 @@ fn name_set(harnesses: &[tome::settings::EffectiveHarness]) -> HashSet<String> {
 
 #[test]
 fn plain_include() {
+    let _g = install_synthetic();
     let stub = StubScope::new();
     let global = GlobalSettings {
         harnesses: Some(vec!["claude-code".to_owned()]),
@@ -42,6 +80,7 @@ fn plain_include() {
 
 #[test]
 fn exclude_subtracts_from_union() {
+    let _g = install_synthetic();
     // Global = ["a", "b", "c"]; project = ["[global]", "!b"] → effective
     // = {a, c}; excluded = ["b"].
     let stub = StubScope::new().with_workspace("ws", None);
@@ -61,6 +100,7 @@ fn exclude_subtracts_from_union() {
 
 #[test]
 fn workspace_ref_in_project() {
+    let _g = install_synthetic();
     // Project's `["[workspace]"]` resolves to the bound workspace's
     // directly-declared list `["x"]`.
     let stub = StubScope::new().with_workspace("ws", Some(vec!["x".to_owned()]));
@@ -87,6 +127,7 @@ fn workspace_ref_in_project() {
 
 #[test]
 fn named_workspace_ref() {
+    let _g = install_synthetic();
     // Project references `[workspaces.other]`. The stub registry maps
     // `other` to `["y"]`; the effective set is `{y}`.
     let stub = StubScope::new()
@@ -106,6 +147,7 @@ fn named_workspace_ref() {
 
 #[test]
 fn global_ref() {
+    let _g = install_synthetic();
     // Workspace references `[global]`. Global declares `["z"]`.
     let stub = StubScope::new();
     let ws_settings = ws("ws", Some(vec!["[global]".to_owned()]));
@@ -119,6 +161,7 @@ fn global_ref() {
 
 #[test]
 fn multi_level_composition() {
+    let _g = install_synthetic();
     // Project bound to workspace A. A's list = ["[workspaces.B]"]; B's
     // list = ["x", "y"]. Effective set = {x, y}.
     let stub = StubScope::new()
@@ -141,6 +184,7 @@ fn multi_level_composition() {
 
 #[test]
 fn explicit_add_and_remove_combined() {
+    let _g = install_synthetic();
     // Project = ["a", "[global]", "!a", "b"]; global = ["x"].
     // Inclusions = {a, x, b}; exclusions = {a}; effective = {x, b};
     // excluded = ["a"].
@@ -169,6 +213,7 @@ fn explicit_add_and_remove_combined() {
 
 #[test]
 fn order_of_entries_does_not_affect_membership() {
+    let _g = install_synthetic();
     // FR-444: array entry order doesn't affect the resulting *set* of
     // included harnesses. The internal display order may differ but
     // membership must match.

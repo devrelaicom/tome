@@ -189,9 +189,36 @@ pub fn resolve_effective_list<P: ScopeProvider>(
     let mut seen = HashSet::new();
     effective.retain(|h| seen.insert(h.name.clone()));
 
+    // FR-460: every inclusion must name a harness in the production
+    // registry (or a synthetic one installed via
+    // `HARNESS_MODULES_OVERRIDE` for tests). The check runs once at the
+    // end of resolution rather than on every parsed entry so that
+    // exclusions cancelling out unsupported inclusions earlier in the
+    // walk don't trip a false positive — the final effective list is
+    // what the user sees, so it's what we validate.
+    if let Some(unsupported) = first_unsupported(&effective) {
+        return Err(CompositionErrorKind::HarnessNotSupported(unsupported));
+    }
+
     Ok(EffectiveHarnessList {
         harnesses: effective,
         excluded: excluded_sorted,
+    })
+}
+
+/// Return the first harness name in `list` that isn't registered in the
+/// effective harness registry, or `None` if all are supported.
+///
+/// Consults the test-injected `HARNESS_MODULES_OVERRIDE` slot via
+/// [`crate::harness::with_effective_modules`] so test fixtures that swap
+/// in synthetic harnesses validate against their registry rather than the
+/// production `SUPPORTED_HARNESSES` constant.
+fn first_unsupported(list: &[EffectiveHarness]) -> Option<String> {
+    crate::harness::with_effective_modules(|modules| {
+        let known: HashSet<&str> = modules.iter().map(|m| m.name()).collect();
+        list.iter()
+            .find(|h| !known.contains(h.name.as_str()))
+            .map(|h| h.name.clone())
     })
 }
 
@@ -291,7 +318,9 @@ fn resolve_list<P: ScopeProvider>(
                 state.exclusions.insert(name);
             }
             CompositionRef::CurrentWorkspace => {
-                // `[workspace]` is only valid in project scope (FR-449).
+                // `[workspace]` is only valid in project scope (FR-446 /
+                // FR-449). Encountering it inside a workspace's or
+                // global's directly-declared list is an error.
                 if current_scope != ScopeKind::Project {
                     return Err(CompositionErrorKind::WorkspaceRefOutsideProject {
                         // Map our richer settings::ScopeKind onto
@@ -310,6 +339,19 @@ fn resolve_list<P: ScopeProvider>(
                         found_in: workspace_scope_for(current_scope),
                     });
                 };
+                // FR-446 (project-without-binding): if the caller did
+                // not load a bound workspace, the `[workspace]` token
+                // has nothing to resolve against. Refuse rather than
+                // silently emit an empty inclusion set — surfacing the
+                // shape mismatch is the point of this guard.
+                if bound_workspace.is_none() {
+                    return Err(CompositionErrorKind::WorkspaceRefOutsideProject {
+                        // Closest-fit fallback — `workspace::ScopeKind`
+                        // is Workspace/Global only; the error variant
+                        // semantically wants "Project" here.
+                        found_in: workspace_scope_for(current_scope),
+                    });
+                }
                 let sub_name = pm.workspace.as_str().to_owned();
                 let declared = central_db.directly_declared_harnesses(&pm.workspace)?;
                 let mut sub_chain = source_chain.clone();
