@@ -6,15 +6,15 @@
 
 ## Architecture Overview
 
-Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, harness composition management, and workspace-scoped plugin enablement.
+Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, and workspace-scoped plugin enablement.
 
 The architecture is **monolithic with layered structure** split across two execution contexts:
 - **CLI layer** — sync command dispatcher
 - **MCP layer** — async stdio server (Phase 3+)
 
-The central nervous system is a **single SQLite database** (`<home>/.tome/index.db`) that centralizes all state: plugin metadata, embeddings, workspace bindings, and enabled skills. Per-workspace composition settings live in separate TOML files (`<root>/workspaces/<name>/settings.toml`) and project markers (`<project>/.tome/config.toml`).
+The central nervous system is a **single SQLite database** (`<home>/.tome/index.db`) that centralizes all state: plugin metadata, embeddings, workspace bindings, project bindings, and enabled skills. Per-workspace composition settings and summaries live in separate TOML files (`<root>/workspaces/<name>/settings.toml`) and central RULES.md. Project markers (`<project>/.tome/config.toml`) are thin binding pointers, not databases.
 
-Phase 4 / US1 adds **harness synchronization** — when a project is bound to a workspace, Tome automatically syncs harness configurations (rules files + MCP configs) across the five supported harnesses.
+Phase 4 / US1–US2 adds **harness synchronization** and **workspace lifecycle management** — when a project is bound to a workspace, Tome automatically syncs harness configurations (rules files + MCP configs) across the five supported harnesses. Full workspace create/rename/remove/sync/info/list surface ships with atomic per-harness writes and shared-path deduplication.
 
 ## Architecture Pattern
 
@@ -23,7 +23,7 @@ Phase 4 / US1 adds **harness synchronization** — when a project is bound to a 
 | Layered (capability-based) | Commands → Business Logic (Lifecycle, Embedding, Workspace, Harness) → Data Access (Index, Catalog, Config) → Persistence (SQLite, Filesystem, Git) |
 | Hexagonal (ports & adapters) | Trait boundaries for `Embedder`/`Reranker`/`Summariser`/`HarnessModule` allow swappable implementations (production vs stub for tests) |
 | Trait-driven | Core abstractions decouple policy from mechanism; composition via struct fields rather than factory functions |
-| Phase 4 — Harness abstraction + binding flow | Five `HarnessModule` impls + sync orchestrator enable project-to-workspace bindings with atomic per-harness configuration |
+| Phase 4 — Harness abstraction + workspace binding + full lifecycle | Five `HarnessModule` impls + sync orchestrator + comprehensive workspace surface (init/list/info/rename/remove/sync + regen-summary) enable multi-workspace projects with atomic per-harness configuration |
 
 ## Core Components
 
@@ -82,6 +82,39 @@ Phase 4 / US1 adds **harness synchronization** — when a project is bound to a 
 - **Atomicity**: If DB commits but marker landing fails, doctor's Binding subsystem detects orphan; re-running recovers
 - **Phase B** (harness sync): Runs outside this module, outside the lockfile (see `harness::sync`)
 
+### Workspace Lifecycle (`src/workspace/{init,rename,remove,sync,regen_summary}.rs`)
+
+- **Purpose**: Phase 4 / US2 — Complete workspace management surface
+- **Location**: `src/workspace/{init,rename,remove,sync,regen_summary}.rs`
+- **`init(target_root, workspace_name, inherit_global, force)` entry point**:
+  - Atomic directory landing for `<root>/workspaces/<name>/` (settings.toml + RULES.md skeleton)
+  - Creates row in central `workspaces` table
+  - Optional catalog inheritance from global workspace (enrolment only; enablement not copied per FR-415)
+  - Atomicity via `tempfile::Builder::tempdir_in` + `TempDir::keep()` + `std::fs::rename`
+- **`rename(old_name, new_name, paths, workspace_name)`**:
+  - Validates neither side is reserved `global` (exit 15)
+  - Per-project marker rewrite (loop project_path/workspace_projects, read + replace workspace name, persist atomically per-project)
+  - Filesystem rename of `<root>/workspaces/<old>/` → `<new>/`
+  - Central DB UPDATE to `workspaces.name` (single transaction)
+  - Drift detection post-rename; emits `RenameOutcome` with project_count, manifest_hash, summary cache state
+- **`remove(workspace_name, force, paths)`**:
+  - Refuses reserved `global` (exit 15)
+  - Refuses non-empty bind list unless `--force` (exit 16 `WorkspaceHasBoundProjects`); returns list of bound project paths
+  - 5-step cascade per FR-405:
+    1. Per-project teardown: for each bound project, read marker, resolve effective harness list, per-harness cleanup (respect shared paths)
+    2. Per-project marker removal: delete `<project>/.tome/config.toml`
+    3. Single DB transaction: delete `workspace_skills`, `workspace_catalogs`, `workspace_projects`, `workspaces` rows
+    4. Delete central `<root>/workspaces/<name>/` directory
+    5. Refcount cleanup: for each catalog URL once-referenced only by removed workspace, `remove_dir_all` cache clone
+- **`regen(workspace_name, paths)`**:
+  - Call summariser to generate short + long summaries from enabled plugins (Phase 4 skeleton invokes StubSummariser)
+  - Write to workspace settings `[summaries]` section
+  - Rewrite central `<root>/workspaces/<name>/RULES.md`
+  - Per-project marker copy (RULES.md only; not atomically because RULES.md is read-only to projects)
+- **`sync_one(workspace_name, paths)` + `list_workspace_names(paths)`**:
+  - `sync_one`: Copy central RULES.md to every bound project's marker copy (idempotent, skip if already match)
+  - `list_workspace_names`: Enumerate `<root>/workspaces/` and return Vec<WorkspaceName>
+
 ### Harness Abstraction (`src/harness/`)
 
 - **Purpose**: Trait-driven dispatch to five supported harnesses (Claude Code, Codex, Cursor, Gemini, OpenCode)
@@ -130,24 +163,50 @@ Phase 4 / US1 adds **harness synchronization** — when a project is bound to a 
 
 ### Commands Dispatcher (`src/commands/`)
 
-- **Purpose**: Execute 10 CLI subcommands (catalog, plugin, models, query, reindex, status, workspace, harness, mcp, doctor)
+- **Purpose**: Execute 11 CLI subcommands (catalog, plugin, models, query, reindex, status, workspace, harness, mcp, doctor)
 - **Location**: `src/commands/{catalog,plugin,models,query,reindex,status,workspace,harness,mcp,doctor}.rs`
 - **Pattern**: Most commands have:
   - `pub fn run(args, scope, mode)` — CLI entry with emit/exit
   - `pub fn pipeline(args, deps)` or `run_with_deps(...)` — silent compute for library reuse by MCP/tests
 - **Phase 4 NEW**: `commands/harness/` thin seam (US1.a stub, US1.b real) dispatches to harness sync orchestrator
+- **Phase 4 NEW**: `commands/workspace/` expands from 2 to 8 subcommands: `info/init/list/use_/rename/remove/regen_summary/sync`
 - **Key invariant**: Lazy model loading (embedder/reranker not loaded on status/doctor/workspace unless needed)
 
 ### Workspace Command Suite (`src/commands/workspace/`)
 
-- **Purpose**: Workspace management — info (read-only), init (create), use (bind to project)
-- **Location**: `src/commands/workspace/{info,init,use_}.rs`
-- **`info`** — `tome workspace info` — read-only report of active workspace, scope, plugin/skill counts
-- **`init`** — `tome workspace init [<name>] [--inherit-global] [--force]` — create new workspace + settings skeleton
+- **Purpose**: Workspace management — full lifecycle from creation through removal
+- **Location**: `src/commands/workspace/{info,init,list,use_,rename,remove,regen_summary,sync}.rs`
+- **`info`** — `tome workspace info [<name>]` — read-only report of workspace details, plugin/skill counts, bound projects, summary cache state
+  - Accepts optional `<name>` argument; defaults to resolved scope
+  - New Phase 4 fields: `ScopeKind`, `project_count`, `summary_cache_state`, bound_project_list
+- **`init`** — `tome workspace init <name> [--inherit-global] [--force]` — create new workspace in central registry
+  - Lands `<root>/workspaces/<name>/settings.toml` + RULES.md atomically
+  - Inserts row in central `workspaces` table
+  - Optional catalog inheritance from global (enablement not copied)
+  - Phase 4 NEW
+- **`list`** — `tome workspace list` — enumerate every workspace with catalog/plugin/skill/project counts, last_used_at
+  - Phase 4 NEW
 - **`use_`** — `tome workspace use <name> [--force]` — bind current project to workspace, sync harnesses (Phase 4 / US1.a-c)
   - Calls `binding::bind_project` for Phase A (lock → DB → marker)
   - Calls `commands::harness::sync_for_project_root` for Phase B (harness writes)
   - Emits combined `BindOutcome` + `SyncOutcome` in JSON or human format
+- **`rename`** — `tome workspace rename <old> <new>` — rename workspace, update all bound projects atomically
+  - Refuses both `global` (exit 15)
+  - Per-project marker rewrite + filesystem rename + DB update
+  - Phase 4 NEW
+- **`remove`** — `tome workspace remove <name> [--force]` — delete workspace with 5-step cascade
+  - Refuses `global` (exit 15)
+  - Refuses when projects bound unless `--force` (exit 16)
+  - Per-project teardown, per-project marker cleanup, DB cascade, dir removal, refcount cleanup
+  - Phase 4 NEW
+- **`regen_summary`** — `tome workspace regen-summary <name>` — force regeneration of workspace summaries
+  - Invokes summariser (StubSummariser in Phase 4 foundational)
+  - Writes to workspace settings + central RULES.md
+  - Copies RULES.md to every bound project marker
+  - Phase 4 NEW
+- **`sync`** — `tome workspace sync [<name>]` — copy central RULES.md to every bound project
+  - Omit `<name>` to sync every workspace (idempotent, skip if bytes match)
+  - Phase 4 NEW
 
 ### Central Index Database (`src/index/`)
 
@@ -209,10 +268,10 @@ Phase 4 / US1 adds **harness synchronization** — when a project is bound to a 
 
 ### Doctor Diagnostics (`src/doctor/`)
 
-- **Purpose**: Broad health check + auto-repair for embedder/reranker/catalogs/schema/drift
+- **Purpose**: Broad health check + auto-repair for embedder/reranker/catalogs/schema/drift/bindings
 - **Location**: `src/doctor/{mod,checks,fixes}.rs`
 - **Key entry point**: `assemble_report(scope, paths, home, verify) -> DoctorReport`
-- **Report fields**: Embedder health, reranker health, index integrity, drift, catalog cache state, harness presence, suggested fixes, overall classification
+- **Report fields**: Embedder health, reranker health, index integrity, drift, catalog cache state, harness presence, binding state, suggested fixes, overall classification
 - **Classification**:
   - Unhealthy — embedder missing/corrupt, integrity fail, embedder drift
   - Degraded — reranker missing/corrupt, reranker drift, any catalog cache != Ok
@@ -222,6 +281,7 @@ Phase 4 / US1 adds **harness synchronization** — when a project is bound to a 
   - `"reranker"` — same
   - `"catalog:<name>"` — `Git::clone_shallow`
   - `"schema"` — `index::migrations::apply_pending` under advisory lock
+- **Binding subsystem** (Phase 4 NEW): Detects orphaned project markers (DB row missing but `.tome/config.toml` exists) + cross-workspace project markers (marker workspace != resolved workspace)
 - **No side effects** on `assemble`; `fixes::apply` mutates in place; `re_assemble` rebuilds derived state
 
 ### MCP Server (`src/mcp/`)
@@ -284,6 +344,27 @@ harness::sync::sync_project() — per-harness rules-file + MCP-config writes
 Dedup on target paths; respect shared-path cleanup; forward-progress on clash
      ↓
 CLI: print BindOutcome + SyncOutcome (added/updated/removed counts)
+```
+
+### Workspace Lifecycle Flow (Phase 4 / US2)
+
+```
+CLI: tome workspace init <name> | list | rename <old> <new> | remove <name> | regen-summary <name> | sync [<name>]
+     ↓
+Load central index (read-only for info/list/sync; write for init/rename/remove/regen-summary)
+     ↓
+Acquire lock if mutation (init/rename/remove create/update/delete in workspaces table)
+     ↓
+PHASE A (locked for mutations):
+  - init: create workspace dir + settings skeleton + insert workspaces row
+  - rename: per-project marker rewrites (unlocked after marker-time, before DB rename) + DB row update
+  - remove: per-project teardown (unlocked per-project) → marker removal → DB cascade delete
+  - regen-summary: invoke summariser → update workspace settings + central RULES.md + per-project copies
+     ↓
+PHASE B (unlocked):
+  - sync: copy central RULES.md to every bound project marker (idempotent byte-match skip)
+     ↓
+Release lock; emit outcome (counts, project paths, summary cache state)
 ```
 
 ### Primary User Flow: Enable a Skill
@@ -354,7 +435,7 @@ Map TomeError to MCP error envelope; emit JSON
 | Catalog/Config (catalog/, config.rs) | Manifest parsing, git operations | Filesystem, git CLI | Index operations |
 | Harness (harness/) | Per-harness path/config strategy | Filesystem (existence probes only) | Nothing else |
 | Settings (settings/) | Parse + compose harness lists | Filesystem (read TOML), workspace names | Database |
-| Workspace (workspace/) | Scope resolution, binding | Catalog, config, index (read-only), settings | Commands |
+| Workspace (workspace/) | Scope resolution, binding, lifecycle | Catalog, config, index (read-only), settings | Commands |
 | Output (output.rs) | JSON/human formatting, error display | Error enum | Any command logic |
 | MCP (mcp/) | Async stdio protocol, tool dispatch | All other modules via spawn_blocking | Direct CLI context |
 | Util (util/) | Shared helpers (atomic directories, etc.) | Filesystem, standard library | Any domain logic |
@@ -374,7 +455,7 @@ Map TomeError to MCP error envelope; emit JSON
 | `Embedder` | Text → 384-dim embedding | `FastembedEmbedder` (prod), `StubEmbedder` (test) |
 | `Reranker` | Query + candidates → scored results | `FastembedReranker` (prod), `StubReranker` (test) |
 | `Summariser` | Plugin list → (short, long) summary | `LlamaSummariser` (prod), `StubSummariser` (test) |
-| `HarnessModule` | Per-harness rules/MCP paths | `ClaudeCode`, `Codex`, `Cursor`, `Gemini`, `OpenCode` |
+| `HarnessModule` | Per-harness rules/MCP paths | `ClaudeCode`, `Codex`, `Cursor`, `Gemini`, `OpenCode`, `StubHarness` |
 | `LifecycleDeps` | Input bundle for plugin enable/disable | Struct wrapping embedder, config, scope, paths |
 | `BindDeps` | Input bundle for project binding | Struct wrapping paths, home_root |
 | `SyncDeps` | Input bundle for harness sync | Struct wrapping paths, home_root, workspace_name, force |
@@ -390,6 +471,7 @@ Map TomeError to MCP error envelope; emit JSON
 | Models | `<home>/.tome/models/` | Atomic downloads via tempfile + SHA-256 |
 | Project marker | `<project>/.tome/config.toml` | Thin TOML; workspace binding + project-scope harnesses |
 | Workspace settings | `<home>/.tome/workspaces/<name>/settings.toml` | Layered harness list + cached summaries |
+| Workspace RULES.md | `<home>/.tome/workspaces/<name>/RULES.md` | Central workspace rules, copied to projects |
 | Global settings | `<home>/.tome/settings.toml` | Global harness fallback |
 | MCP log | `<home>/.tome/mcp.log` | 10 MiB atomic-rotate JSON lines |
 | Per-harness config | Harness-specific paths (e.g. `<project>/.claude/tools.md`, `<home>/.codex/`) | Rules files + MCP config, written by sync orchestrator |
@@ -405,13 +487,14 @@ Map TomeError to MCP error envelope; emit JSON
 | Output formatting | `--json` mode (serde + anstream) vs human (colors, tables, spinner) | `src/output.rs`, `src/presentation/` |
 | Advisory locking | Single lockfile per Paths; database transaction per critical section | `src/index/lock.rs` |
 | Atomic directory landing | Tempfile staging dir → rename on success | `src/util/atomic_dir.rs` |
+| Atomic file writes | `catalog::store::write_atomic` — harness rules/MCP config writes + all workspace TOML updates | `src/catalog/store.rs` |
 
 ## Testing Architecture
 
 - **Unit tests**: Embedded in modules (e.g., `src/error.rs`, `src/settings/mod.rs`)
 - **Integration tests**: Under `tests/` — access library via public API, no `#[cfg(test)]` visibility
 - **Test fixtures**: Synthetic DB builders, sparse-file models, git repos via `git init`
-- **Stub implementations**: `StubEmbedder` / `StubReranker` / `StubSummariser` with deterministic output for reproducible tests
+- **Stub implementations**: `StubEmbedder` / `StubReranker` / `StubSummariser` / `StubHarness` with deterministic output for reproducible tests
 - **Test injection**: Thread-local `MIGRATIONS_OVERRIDE`, `HARNESS_MODULES_OVERRIDE` via RAII guards
 - **Sync boundary**: `tests/sync_boundary.rs` enforces no `tokio` outside `src/mcp/`
 

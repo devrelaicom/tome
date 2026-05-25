@@ -186,6 +186,18 @@ if existing_bytes == new_bytes {
 
 Tests verify idempotence by capturing mtime before a write, sleeping 1.5 seconds (to ensure distinct mtime granularity on all filesystems), re-reading, and asserting mtime unchanged.
 
+## Per-Project Effective List Resolution (Phase 4 US2)
+
+Workspace lifecycle commands that need to know the effective harness list for a project (e.g., `workspace remove` cascade cleanup) call:
+
+```rust
+let effective_list = settings::resolver::resolve_effective_list(&StubScope::new(), &paths)?;
+```
+
+The `StubScope::new()` represents a "not yet bound" project; phase A of the sync algorithm later replaces it with a real `ResolvedScope(workspace_name)` read from the database. This pattern avoids DB access until the workspace is actually confirmed to exist.
+
+In tests, use `StubScope` when the database isn't fully initialized; in production code, use the resolved scope from the sync orchestrator.
+
 ## Lenient Parse & Order Preservation
 
 ### Third-Party Data (Phase 4)
@@ -197,17 +209,18 @@ Harness MCP configuration files (JSON, TOML) are treated as **third-party data**
 
 Contrast with **Tome-owned manifests** (`config.toml`, `settings.toml`, `plugin.json` within Tome-controlled catalogs) which use strict `#[serde(deny_unknown_fields)]`.
 
-### Atomic Write for MCP Configs (Phase 4)
+### Atomic Write with Mode Preservation (Phase 4)
 
-Every MCP config read-modify-write follows the pattern:
-1. Read from target (existing file or absent)
-2. Parse with order-preserving library
-3. Modify the MCP entry
-4. Serialize and write to sibling tempfile in same directory
-5. fsync the tempfile
-6. Atomic rename
+Every file write follows the pattern:
+1. Read existing file and capture mode (if it exists)
+2. Write to sibling tempfile in same directory (or use `NamedTempFile`)
+3. Apply captured mode via `symlink_metadata` + `chmod`
+4. fsync the tempfile
+5. Atomic rename
 
-On Unix, existing file mode is captured, applied to the tempfile, and preserved through rename.
+The mode preservation step is **critical**: on Unix, a naive tempfile write defaults to `0o644`, which would silently weaken the security posture of files that were intentionally restrictive (e.g., `0o600`).
+
+Lifted to `catalog::store::write_atomic` in Phase 4 F2; reusable by any future atomic-write surface.
 
 ## Test-Injection Patterns
 
@@ -380,4 +393,4 @@ Soft cap of ~400 lines or 2 modules per PR to keep reviews focused.
 
 ---
 
-*This document defines HOW to write code. Update when conventions change. Last refreshed 2026-05-25 against Phase 4 / US1 source (609 tests, 82 suites).*
+*This document defines HOW to write code. Update when conventions change. Last refreshed 2026-05-25 against Phase 4 / US2 source (677 tests, 92 suites).*

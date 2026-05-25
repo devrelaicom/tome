@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-25 (Phase 4 / US1 completed with 3 blockers + 9 majors fixed; deferred concerns tracked)
+> **Last Updated**: 2026-05-25 (Phase 4 / US1 + US2 completed; security audit findings applied)
 
 ## Technical Debt
 
@@ -12,7 +12,7 @@ Items that should be addressed in current or near-term phases:
 
 | ID | Area | Description | Impact | Effort | Notes |
 |----|------|-------------|--------|--------|-------|
-| TD-001 | `src/index/` (Phase 2–3) | Advisory locking for concurrent catalog/index access | Concurrency safety | High | Phase 3 MCP server + Phase 4 central DB exposes concurrent access; advisory lockfile (FR-040, F11b FR-366) is implemented; T088 (real BGE testing) is the verification gap |
+| TD-001 | `src/index/` (Phase 2–4) | Advisory locking for concurrent catalog/index access | Concurrency safety | High | Phase 3 MCP server + Phase 4 central DB exposes concurrent access; advisory lockfile (FR-040, F11b FR-366) is implemented; T088 (real BGE testing) is the verification gap |
 | TD-003 | Binary size (Phase 2–4) | SQLite + ONNX + llama.cpp pushed binary to ~30 MB; cap is 50 MB | Headroom management | Medium | Phase 4 projection: ~28.4 MB macOS arm64, ~34 MB Linux x86_64 (research §R-4); discipline holds with 16+ MB headroom |
 
 ### Medium Priority
@@ -82,7 +82,7 @@ Code areas that are brittle or risky to modify:
 |------|-------------|-------------|
 | `src/catalog/git.rs::scrub_credentials` | Regex patterns are order-dependent; adding a rule can change ordering semantics | Add test case to `tests/scrubbing.rs` for every rule addition; verify no overlaps with existing rules. Phase 3 Polish PR #36 widened URL_LOGIN to RFC-3986 schemes; PR #54 extended to AWS presigned params |
 | `src/catalog/manifest.rs::validate_source` | Path canonicalization behavior differs across platforms (symlinks, case sensitivity); one test failure can indicate subtle cross-platform issue | Test on both Linux and macOS (CI covers both); `tests/path_validation.rs` has Unix-specific symlink tests |
-| `src/catalog/store.rs::write_atomic` | Atomic rename only works on same filesystem; moving across mounts silently falls back to non-atomic copy | Document assumption in code; consider detecting mount boundary and erroring explicitly |
+| `src/catalog/store.rs::write_atomic` (Phase 4 US2.d-1) | Unified atomic-write surface now used by all workspace/project/harness file writers; mode preservation + symlink refusal are critical security boundaries | Do not remove mode-preservation or symlink-refusal checks; test with `tests/security_hardening.rs` on every platform. Verify callers use this surface exclusively |
 | `src/embedding/download.rs::download_model` | HTTP stream and checksum verification are separate; cleanup closure ensures both failure paths clean `.partial/` (lines 77–87) | Pipeline closure must wrap full download→verify→rename chain; any new step must be inside closure to maintain atomicity guarantee |
 | `src/presentation/prompt.rs::require_terminal()` | TTY check runs on both stdin and stdout; must catch non-TTY in both dimensions to prevent prompt corruption via piped output | Always call `require_terminal()` at flow entry before any prompt; test with `Command::new()` (no pty) to verify short-circuit |
 | `src/commands/plugin/{enable,disable,interactive}.rs` | Non-TTY pointer-message-then-error pattern appears at 3+ sites | Pattern consolidation would yield cleaner code; worth folding in when 4th occurrence appears |
@@ -105,6 +105,8 @@ Code areas that are brittle or risky to modify:
 | `src/workspace/binding.rs::bind_project` (Phase 4 US1.a) | Project path is canonical (canonicalize must succeed) and UTF-8 (to_str check); stored as TEXT PK in `workspace_projects` | Critical: do not remove UTF-8 check (R-B1 fix). Canonicalisation failure surfaces as exit 7 (IO error). Dangerous-CWD check (`$HOME`, `/`) guards against user error | Do not relax UTF-8 or canonicalisation requirements |
 | `src/util/atomic_dir.rs` (Phase 4) | Atomic populated-directory landing via staging + same-FS rename; prefix `.tome.tmp.` reserved for future doctor orphan cleanup | Precondition: target parent must exist. Staging dir is a sibling; SIGINT between keep() and rename leaves orphan. Test SIGINT scenarios; verify orphan cleanup in doctor (US5) | Phase 4 US5 doctor --fix will clean orphans |
 | `src/settings/mod.rs` (Phase 4 Foundational F8) | Phase 4 introduces layered settings composition with override semantics (global + workspace + project) | New settings shapes all carry `deny_unknown_fields` (T098n verified); test round-trip through compose + override pipeline | Verify strict boundary in future additions |
+| `src/workspace/rename.rs` (Phase 4 US2) | Transaction wraps marker rewrites (C-B2 fix, US2.d-1); SQL failure leaves markers pointing at `<new>` with DB at `<old>`, but DB + old markers stay consistent. Uses `toml_edit` to preserve marker fields (T-B1 fix) | Do not revert to pre-transaction or non-lenient TOML parsing. Test marker field preservation + partial-failure rollback scenarios. Monitor: SQL failure recovery is documented but partial-state is possible |
+| `src/workspace/remove.rs` (Phase 4 US2) | Cascade narrowed to per-project effective harness list (C-B1 fix, US2.d-1); prevents unconditional iteration of all harness dirs | Do not revert to global `SUPPORTED_HARNESSES` iteration. Test with multi-harness projects. Verify resolver is called correctly |
 
 ## Deferred Findings from Phase 4 / US1 Review
 
@@ -122,6 +124,24 @@ Phase 4 / US1 audit produced 3 blockers + 25 majors. Three blockers applied in P
 | (30+ minors + nits) | Various | Docstring drift, redundant assertions, formatting; bulk-deferred to tracking issue |
 
 See `specs/004-phase-4-refactor-harnesses/review/us1-disposition.md` for full triage.
+
+## Deferred Findings from Phase 4 / US2 Review
+
+Phase 4 / US2 audit produced 4 blockers + 23 majors. All 4 blockers applied in PR US2.d-1 (C-B1 effective-list narrowing for cascade, C-B2 transaction wrapping for rename, C-B3 JSON array bare emit for workspace list, T-B1 toml_edit for marker preservation). Eleven majors applied in US2.d-1 (C-M1/C-M2/C-M4/C-M5 contract alignments, S2-M1/S2-M2 unified atomic-write surface with mode preservation + symlink refusal, S2-M4 chmod 0o700 recovery, T-M1 JSON wire-shape pins, T-M3 cascade test coverage, T-M4/T-M5/T-M6 test gap coverage). Remaining 12 majors deferred to follow-up:
+
+| ID | Category | Disposition |
+|----|----------|-----------|
+| R-M1 | Rust | SQL DISTINCT cleanup; cosmetic, deferred |
+| R-M3 | Rust | Init FnOnce clone efficiency; cosmetic, deferred |
+| R-M5 | Rust | Summariser lock held during invocation; performance trade-off, revisit in US4.a when LlamaSummariser ships |
+| R-M6 | Rust | TOCTOU comment binding; defensive, defer to future refactor |
+| R-M7 | Rust | `compute_info` early-return; cosmetic, deferred |
+| R-M8 | Rust | Rename pre-check vs write TOCTOU; small surface, doctor surfaces drift, defer |
+| S2-M3 | Security | Unbounded reads on workspace-owned files (settings.toml, RULES.md, config.toml); mirrors US1 S-M1 deferral; multi-site fix planned for v0.4 polish |
+| T-M2 | Test | Concurrent init/rename/regen tests; pattern established, defer to test-hardening follow-up |
+| (minors + nits) | Various | Docstring drift, formatting; bulk-deferred to tracking issue |
+
+See `specs/004-phase-4-refactor-harnesses/review/us2-disposition.md` for full triage.
 
 ## Deprecated Code
 
@@ -143,6 +163,7 @@ Known performance issues:
 | PERF-030 | MCP pre-flight timing | SHA-256 over ~66 MB primary embedder file on every startup | Visible startup latency in cold cache | Acceptable for daemon; defer `--verify` optimization to Phase 5+ unless profiling shows impact (TD-012) | Design decision |
 | PERF-040 | Doctor command latency | Catalog enumeration + harness probing on every run (non-cached) | Slower than status; expected for comprehensive diagnosis | By design: status is the narrow fast path (~200 ms); doctor is the broad slower path for troubleshooting | By design |
 | PERF-050 | Phase 4 Qwen download | Large model file (~400 MB) download wrapped in indeterminate spinner (F6); byte-progress callback deferred | Poor UX visibility during first model fetch | Phase 4 F6 uses indeterminate spinner; upgrade to byte-progress in Phase 4 polish or F6 if time permits | Tracked as TD-010 |
+| PERF-060 | Summariser lock overhead | `workspace regen-summary` holds advisory lock for full LlamaSummariser invocation (many seconds) | Blocks concurrent workspace operations | Acceptable for now; revisit when LlamaSummariser ships in US4.a — `tome catalog update` may need to coexist | R-M5 deferral, tracked |
 
 ## TODO Items
 
@@ -175,7 +196,7 @@ Dependencies that may need attention:
 | `tracing-subscriber` | 0.3.x (Phase 3–4) | Structured logging framework; used in MCP server only | Monitor for JSON formatter updates and file I/O edge cases | Stable |
 | `schemars` | 1.x (Phase 3–4) | JSON schema generation for MCP tool inputs; used at compile-time | Monitor for schema correctness issues on MCP tool definitions | Active |
 | `llama-cpp-2` | 0.1.x (Phase 4, minor-pinned) | Summariser inference runtime; C++ static link | Pre-1.0 crate; monitor for API churn; test on every minor bump; CPU-only features enforced | Active / Pre-1.0 |
-| `toml_edit` | 0.25.x (Phase 4, minor-pinned) | Comment-preserving TOML edits for harness config | Monitor for breaking changes; no known security issues | Active |
+| `toml_edit` | 0.25.x (Phase 4, minor-pinned) | Comment-preserving TOML edits for harness config + workspace marker preservation | Monitor for breaking changes; no known security issues. Used in critical US2 marker-preservation path (T-B1 fix) | Active |
 
 ## Phase 3 Deferred Items Disposition (Research §R-17)
 
