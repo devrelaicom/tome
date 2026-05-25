@@ -30,3 +30,4 @@ pub use regen_summary::{RegenSummaryOutcome, regen};
 pub use remove::{RemoveOutcome, remove};
 pub use rename::{RenameOutcome, rename};
 pub use scope::{ResolvedScope, Scope, ScopeSource};
+pub use sync::{WorkspaceSyncOutcome, list_workspace_names, sync_one};
