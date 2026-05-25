@@ -3486,6 +3486,7 @@ dependencies = [
  "clap",
  "comfy-table",
  "ctrlc",
+ "encoding_rs",
  "fastembed",
  "hex",
  "indicatif",

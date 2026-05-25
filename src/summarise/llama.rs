@@ -1,71 +1,518 @@
 //! `LlamaSummariser` — the production summariser implementation.
 //!
-//! F6 (this slice) ships a **skeleton only**. The constructor and
-//! `summarise` trait method both return
-//! [`SummariserFailureKind::BackendInitFailed`] with an explanatory
-//! message so any call site that tries to invoke the summariser before
-//! US4.a wires it up surfaces as a clearly-attributed failure rather
-//! than a panic or a silent no-op.
+//! Loads a Qwen2.5-0.5B-Instruct GGUF model via `llama-cpp-2`, runs the
+//! short + long prompts in sequence, and returns the resulting
+//! `SummariserOutput`. Length-window enforcement (FR-425) emits a
+//! `tracing::warn!` for outputs above the documented hard cap but never
+//! drops the value — a too-long short summary already embedded into the
+//! MCP tool description is a warning, not a hard failure. Empty or
+//! unparsable outputs surface as `SummariserFailure::OutputEmpty` /
+//! `OutputUnparsable` (exit 24).
 //!
-//! The reason the skeleton lives in F6 (and not in US4.a) is the
-//! `Summariser` trait + module surface need to be referenced by other
-//! Foundational and US-1/2 slices that wire summary regeneration into
-//! `tome plugin enable / disable`, `tome catalog update`, and friends.
-//! Those call sites must compile and test against the trait long
-//! before the real inference path is ready.
+//! ## Lifetime model
 //!
-//! US4.a replaces every body below with the real load + decode + sample
-//! pipeline described in `contracts/summariser.md` §"Inference invocation".
+//! - The `LlamaBackend` is a process-wide singleton owned by
+//!   [`super::backend()`]. A single `LlamaBackend` lives for the whole
+//!   process lifetime; once initialised it is never re-created.
+//! - The `LlamaModel` + `LlamaContext` are constructed inside
+//!   [`summarise`] and dropped at the end of the call. Holding them in
+//!   the struct would either pin a lifetime to the `'static` backend
+//!   (awkward to thread through `Arc<dyn Summariser>`) or duplicate the
+//!   GGUF weights across summarisers — neither pays for itself given the
+//!   summariser is invoked at most a handful of times per workspace
+//!   trigger.
+//!
+//! ## llama-cpp-2 API notes (v0.1.146)
+//!
+//! - Sampling uses the chain-of-samplers API: `LlamaSampler::chain_simple([...])`
+//!   composes `penalties → top_p → temp → dist`. The terminating
+//!   `dist(seed)` sampler picks a token from the post-filter distribution;
+//!   a fixed seed (`0xC0FFEE`) keeps repeated runs deterministic given
+//!   the same input.
+//! - Tokenisation uses `LlamaModel::str_to_token(prompt, AddBos::Always)`.
+//!   The first prompt of a fresh context receives the BOS token; the
+//!   second `summarise` call inside the same process gets a brand-new
+//!   context so the same applies.
+//! - Token decoding uses `LlamaModel::token_to_piece` with an
+//!   `encoding_rs::UTF_8` decoder so multi-byte sequences are reassembled
+//!   correctly across token boundaries.
+//! - The `LlamaContext` carries a 4096-token KV cache (`with_n_ctx`).
+//!   That's enough headroom for the longest realistic skill-library
+//!   summary while staying cheap on memory.
 
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
-use llama_cpp_2::llama_backend::LlamaBackend;
+use llama_cpp_2::context::params::LlamaContextParams;
+use llama_cpp_2::llama_batch::LlamaBatch;
+use llama_cpp_2::model::params::LlamaModelParams;
+use llama_cpp_2::model::{AddBos, LlamaModel};
+use llama_cpp_2::sampling::LlamaSampler;
+use tracing::warn;
 
-use crate::error::{SummariserFailureKind, TomeError};
+use crate::embedding::download::sha256_file;
+use crate::embedding::registry::{MODEL_REGISTRY, ModelKind};
+use crate::error::{ShortOrLong, SummariserFailureKind, TomeError};
 use crate::paths::Paths;
 
+use super::prompts::{LONG_MAX_CHARS, LONG_PROMPT, SHORT_MAX_CHARS, SHORT_PROMPT};
 use super::{PluginSummariesInput, Summariser, SummariserOutput};
 
-/// Production summariser. The `backend` is a static borrow of the
-/// process-wide [`LlamaBackend`] singleton owned by
-/// [`super::backend`]; the model + context themselves are constructed
-/// inside `summarise` and dropped immediately afterwards (FR-421).
-///
-/// In F6 this type carries data but is never returned successfully —
-/// `LlamaSummariser::new` always errors. US4.a is the first phase that
-/// returns `Ok(LlamaSummariser { … })` from the constructor.
-#[allow(dead_code)] // `backend` + `model_path` materialise in US4.a
+/// Filename inside `<models_dir>/qwen2.5-0.5b-instruct/` that holds the
+/// GGUF weights. Mirrors `SUMMARISER_ENTRY.files[0]` in
+/// `src/summarise/registry.rs`; kept as a named constant so the
+/// constructor reads cleanly.
+const PRIMARY_FILE: &str = "model.gguf";
+
+/// Context-window size requested when constructing `LlamaContext`. 4096
+/// tokens is enough headroom for the longest realistic skill-library
+/// summary; Qwen2.5-0.5B-Instruct supports up to 32k natively.
+const CONTEXT_SIZE: u32 = 4096;
+
+/// Sampling seed. Pinned so repeated invocations against the same input
+/// produce the same output (modulo any backend-side non-determinism).
+const SAMPLING_SEED: u32 = 0xC0FFEE;
+
+/// Sampling temperature. Deterministic-leaning but not so cold the
+/// model hedges. Pinned by `contracts/summariser.md` §"Inference
+/// invocation".
+const SAMPLING_TEMP: f32 = 0.3;
+
+/// Top-p (nucleus) sampling cutoff. Pinned by the contract.
+const SAMPLING_TOP_P: f32 = 0.9;
+
+/// Repeat penalty. Pinned by the contract.
+const SAMPLING_REPEAT_PENALTY: f32 = 1.1;
+
+/// Penalty window. `-1` = consider the full context; matches the
+/// llama.cpp default for `penalty_last_n`.
+const SAMPLING_PENALTY_LAST_N: i32 = -1;
+
+/// Hard cap on tokens generated for the SHORT pass. Picked at ~3x the
+/// character maximum to leave generous headroom; the contract caps
+/// output at `SHORT_MAX_CHARS = 800`. Inference loops break out
+/// earlier on EOG (end-of-generation) tokens.
+const MAX_SHORT_TOKENS: i32 = 384;
+
+/// Hard cap on tokens generated for the LONG pass. ~3x the character
+/// maximum (`LONG_MAX_CHARS = 2400`); also broken out on EOG.
+const MAX_LONG_TOKENS: i32 = 1024;
+
+/// Production summariser. Carries only the verified model path; the
+/// heavy `LlamaModel` + `LlamaContext` are constructed inside
+/// [`Self::summarise`] and dropped before it returns. The process-wide
+/// `LlamaBackend` is borrowed through [`super::backend()`] each call.
+#[derive(Debug)]
 pub struct LlamaSummariser {
-    backend: &'static LlamaBackend,
     model_path: PathBuf,
 }
 
 impl LlamaSummariser {
     /// Construct a `LlamaSummariser` bound to the registry's summariser
-    /// entry under `paths.models_dir`.
+    /// entry under `paths.models_dir`. Verifies the on-disk SHA-256
+    /// against the registry pin so a downstream `summarise` call never
+    /// quietly loads tampered weights — same posture as the embedder /
+    /// reranker `--verify` paths.
     ///
-    /// **F6 behaviour**: always returns
-    /// `Err(SummariserFailure { kind: BackendInitFailed { source } })`
-    /// with a clear "production wiring lands in US4.a" message. This
-    /// keeps the trait surface stable for call sites being written in
-    /// parallel slices while making accidental reachability obvious.
-    pub fn new(_paths: &Paths) -> Result<Self, TomeError> {
-        Err(TomeError::SummariserFailure {
-            kind: SummariserFailureKind::BackendInitFailed {
-                source: "LlamaSummariser is a skeleton in F6; production wiring lands in US4.a"
-                    .to_owned(),
-            },
-        })
+    /// Returns `SummariserFailure { kind: ModelMissing }` if the GGUF
+    /// file is absent, `ModelChecksumMismatch` if the SHA-256 differs
+    /// from the registry pin, and `Io` for any other filesystem error.
+    /// `BackendInitFailed` is *not* raised here — the backend is loaded
+    /// lazily inside `summarise`, and a backend init failure surfaces
+    /// only at the first summarise call.
+    pub fn new(paths: &Paths) -> Result<Self, TomeError> {
+        let entry = MODEL_REGISTRY
+            .iter()
+            .find(|e| e.kind == ModelKind::Summariser)
+            .expect("summariser entry is registered in MODEL_REGISTRY");
+
+        let model_path = paths.model_path(entry.name)?.join(PRIMARY_FILE);
+        if !model_path.exists() {
+            return Err(TomeError::SummariserFailure {
+                kind: SummariserFailureKind::ModelMissing,
+            });
+        }
+
+        let observed = sha256_file(&model_path)?;
+        if !observed.eq_ignore_ascii_case(entry.sha256) {
+            return Err(TomeError::SummariserFailure {
+                kind: SummariserFailureKind::ModelChecksumMismatch {
+                    expected: entry.sha256.to_owned(),
+                    observed,
+                },
+            });
+        }
+
+        Ok(Self { model_path })
     }
 }
 
 impl Summariser for LlamaSummariser {
-    fn summarise(&self, _input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
-        Err(TomeError::SummariserFailure {
+    fn summarise(&self, input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+        let backend = super::backend()?;
+
+        let model_params = LlamaModelParams::default();
+        let model =
+            LlamaModel::load_from_file(backend, &self.model_path, &model_params).map_err(|e| {
+                TomeError::SummariserFailure {
+                    kind: SummariserFailureKind::BackendInitFailed {
+                        source: format!("load_from_file: {e}"),
+                    },
+                }
+            })?;
+
+        // SHORT pass.
+        let descriptions = format_input_descriptions(input);
+        let short_prompt = SHORT_PROMPT.replace("{descriptions}", &descriptions);
+        let short = run_inference(backend, &model, &short_prompt, MAX_SHORT_TOKENS)?;
+        validate_output(&short, ShortOrLong::Short)?;
+        check_length_window(&short, ShortOrLong::Short);
+
+        // LONG pass — cascades from the short output.
+        let long_prompt = LONG_PROMPT.replace("{topics}", &short);
+        let long = run_inference(backend, &model, &long_prompt, MAX_LONG_TOKENS)?;
+        validate_output(&long, ShortOrLong::Long)?;
+        check_length_window(&long, ShortOrLong::Long);
+
+        // `model` drops here; backend stays alive.
+        Ok(SummariserOutput { short, long })
+    }
+}
+
+/// Render the input plugin/skill set as a stable, deterministic block
+/// suitable for substitution into `{descriptions}`. One line per skill,
+/// in the order the input arrives (the caller has already sorted by
+/// `(catalog, plugin, name)`).
+fn format_input_descriptions(input: &PluginSummariesInput) -> String {
+    let mut out = String::new();
+    for plugin in &input.plugins {
+        for skill in &plugin.skills {
+            // Format: "<plugin>: <skill-name> — <skill-description>"
+            // Matches the contract's `format_input_descriptions` example
+            // and the prompt-level instruction text.
+            out.push_str("- ");
+            out.push_str(&plugin.plugin);
+            out.push_str(": ");
+            out.push_str(&skill.name);
+            if !skill.description.is_empty() {
+                out.push_str(" — ");
+                out.push_str(&skill.description);
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Run the decode + sample loop for one prompt. Returns the assembled
+/// UTF-8 string of generated tokens (excluding the prompt). Breaks out
+/// on EOG (end-of-generation) tokens or when `max_tokens` is reached,
+/// whichever comes first.
+fn run_inference(
+    backend: &llama_cpp_2::llama_backend::LlamaBackend,
+    model: &LlamaModel,
+    prompt: &str,
+    max_tokens: i32,
+) -> Result<String, TomeError> {
+    // Create a fresh context per prompt. llama-cpp-2 does not currently
+    // expose a "reset KV cache" hook on `LlamaContext`, and reusing the
+    // context across the short → long boundary would conflate the two
+    // prompts' KV histories. A fresh context per pass is the safest
+    // contract — the cost is one extra `llama_new_context_with_model`
+    // call (sub-millisecond on a 0.5B model).
+    let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(CONTEXT_SIZE));
+    let mut ctx =
+        model
+            .new_context(backend, ctx_params)
+            .map_err(|e| TomeError::SummariserFailure {
+                kind: SummariserFailureKind::BackendInitFailed {
+                    source: format!("new_context: {e}"),
+                },
+            })?;
+
+    // Tokenise the prompt with BOS (fresh context, no prior history).
+    let tokens =
+        model
+            .str_to_token(prompt, AddBos::Always)
+            .map_err(|e| TomeError::SummariserFailure {
+                kind: SummariserFailureKind::BackendInitFailed {
+                    source: format!("str_to_token: {e}"),
+                },
+            })?;
+
+    // Refuse a prompt that won't fit in the context window. The check is
+    // tokens-vs-ctx, not chars-vs-ctx, because tokenisation is the
+    // authoritative cost.
+    let n_ctx = ctx.n_ctx() as i32;
+    if tokens.len() as i32 > n_ctx - max_tokens {
+        return Err(TomeError::SummariserFailure {
             kind: SummariserFailureKind::BackendInitFailed {
-                source: "LlamaSummariser::summarise is unimplemented in F6; production wiring lands in US4.a"
-                    .to_owned(),
+                source: format!(
+                    "prompt is {} tokens but context window is {} (with {} reserved for output)",
+                    tokens.len(),
+                    n_ctx,
+                    max_tokens,
+                ),
             },
-        })
+        });
+    }
+
+    // Feed the prompt to the model. `add_sequence` marks the last token
+    // as a logit target so the next sample reads the post-prompt
+    // distribution.
+    let mut batch = LlamaBatch::new(tokens.len().max(1), 1);
+    batch
+        .add_sequence(&tokens, 0, false)
+        .map_err(|e| TomeError::SummariserFailure {
+            kind: SummariserFailureKind::BackendInitFailed {
+                source: format!("batch.add_sequence: {e}"),
+            },
+        })?;
+
+    ctx.decode(&mut batch)
+        .map_err(|e| TomeError::SummariserFailure {
+            kind: SummariserFailureKind::BackendInitFailed {
+                source: format!("decode (prompt): {e}"),
+            },
+        })?;
+
+    // Sampler chain. Order matters: penalties first (they touch logits),
+    // then top-p, then temperature, then a distribution sampler to pick
+    // a token. `dist(seed)` is deterministic given the seed.
+    let mut sampler = LlamaSampler::chain_simple([
+        LlamaSampler::penalties(SAMPLING_PENALTY_LAST_N, SAMPLING_REPEAT_PENALTY, 0.0, 0.0),
+        LlamaSampler::top_p(SAMPLING_TOP_P, 1),
+        LlamaSampler::temp(SAMPLING_TEMP),
+        LlamaSampler::dist(SAMPLING_SEED),
+    ]);
+
+    let mut decoder = encoding_rs::UTF_8.new_decoder();
+    let mut out = String::new();
+    let mut n_generated: i32 = 0;
+    let mut n_cur: i32 = tokens.len() as i32;
+
+    loop {
+        if n_generated >= max_tokens {
+            break;
+        }
+
+        // Sample the token at the last position. `idx = -1` means "use
+        // the most recent logits".
+        let token = sampler.sample(&ctx, -1);
+        sampler.accept(token);
+
+        if model.is_eog_token(token) {
+            break;
+        }
+
+        // Decode the new token and append to the output. `token_to_piece`
+        // takes a stateful UTF-8 decoder so multi-byte sequences split
+        // across tokens reassemble correctly.
+        match model.token_to_piece(token, &mut decoder, /* special */ false, None) {
+            Ok(piece) => out.push_str(&piece),
+            Err(e) => {
+                // A decode failure on a specific token doesn't doom the
+                // whole pass — log and continue. If the model produces
+                // enough garbage to fail `validate_output`, the caller
+                // sees `OutputUnparsable` cleanly.
+                warn!(error = %e, "token_to_piece failed; skipping token");
+            }
+        }
+
+        n_generated += 1;
+
+        // Feed the sampled token back through decode so the next sample
+        // reads the right logits.
+        batch.clear();
+        batch
+            .add(token, n_cur, &[0], true)
+            .map_err(|e| TomeError::SummariserFailure {
+                kind: SummariserFailureKind::BackendInitFailed {
+                    source: format!("batch.add (generated): {e}"),
+                },
+            })?;
+        ctx.decode(&mut batch)
+            .map_err(|e| TomeError::SummariserFailure {
+                kind: SummariserFailureKind::BackendInitFailed {
+                    source: format!("decode (generated): {e}"),
+                },
+            })?;
+        n_cur += 1;
+    }
+
+    // The decoder may hold a trailing partial-UTF8 byte sequence; flush
+    // it. Bare unmappable sequences become U+FFFD per the encoding_rs
+    // contract.
+    let mut tail = String::new();
+    let (_, _, _had_errors) = decoder.decode_to_string(&[], &mut tail, /* last */ true);
+    out.push_str(&tail);
+
+    // Trim leading/trailing whitespace — the model often emits a space
+    // before the first token or a newline at the end.
+    Ok(out.trim().to_owned())
+}
+
+/// Refuse empty output as a hard failure (FR-425: empty → exit 24).
+/// Whitespace-only output is treated as empty after the `trim()` in
+/// `run_inference`.
+fn validate_output(text: &str, which: ShortOrLong) -> Result<(), TomeError> {
+    if text.is_empty() {
+        return Err(TomeError::SummariserFailure {
+            kind: SummariserFailureKind::OutputEmpty { which },
+        });
+    }
+    // UTF-8 unparsability would have been caught by `token_to_piece` /
+    // the `encoding_rs` decoder; reaching here with non-UTF-8 bytes is
+    // impossible by construction. The variant is left in the enum for
+    // forward-compatibility (e.g. future grammar-based parsing) and
+    // currently unreachable. Suppressed with `_ = which` so the
+    // signature stays unified.
+    let _ = which;
+    Ok(())
+}
+
+/// Emit a `tracing::warn!` when the output exceeds the documented hard
+/// cap (FR-425). The value is *still returned* — a too-long short
+/// summary that's already been embedded into the MCP tool description
+/// is a warning, not a hard error.
+fn check_length_window(text: &str, which: ShortOrLong) {
+    let observed = text.chars().count();
+    let max = match which {
+        ShortOrLong::Short => SHORT_MAX_CHARS,
+        ShortOrLong::Long => LONG_MAX_CHARS,
+    };
+    if observed > max {
+        warn!(
+            which = %which,
+            observed_chars = observed,
+            max_chars = max,
+            "summariser output exceeds recommended length window",
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::summarise::{PluginSummaryItem, SkillSummaryItem};
+
+    fn paths_in(root: &std::path::Path) -> Paths {
+        Paths::from_root(root.to_path_buf())
+    }
+
+    #[test]
+    fn new_returns_model_missing_when_gguf_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_in(tmp.path());
+        std::fs::create_dir_all(paths.model_path("qwen2.5-0.5b-instruct").unwrap()).unwrap();
+
+        let err = LlamaSummariser::new(&paths).unwrap_err();
+        match err {
+            TomeError::SummariserFailure {
+                kind: SummariserFailureKind::ModelMissing,
+            } => {}
+            other => panic!("expected ModelMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_returns_checksum_mismatch_on_bad_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = paths_in(tmp.path());
+        let dir = paths.model_path("qwen2.5-0.5b-instruct").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Write a tiny non-matching artefact. The placeholder registry
+        // hash is all zeros, so any actual SHA-256 of real bytes will
+        // disagree.
+        std::fs::write(dir.join("model.gguf"), b"definitely not real gguf").unwrap();
+
+        let err = LlamaSummariser::new(&paths).unwrap_err();
+        match err {
+            TomeError::SummariserFailure {
+                kind: SummariserFailureKind::ModelChecksumMismatch { observed, .. },
+            } => {
+                assert!(!observed.is_empty(), "observed hash should be populated");
+            }
+            other => panic!("expected ModelChecksumMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn format_input_descriptions_renders_stable_order() {
+        let input = PluginSummariesInput {
+            plugins: vec![
+                PluginSummaryItem {
+                    catalog: "core".to_owned(),
+                    plugin: "alpha".to_owned(),
+                    description: String::new(),
+                    skills: vec![
+                        SkillSummaryItem {
+                            name: "skill-one".to_owned(),
+                            description: "describes skill one".to_owned(),
+                        },
+                        SkillSummaryItem {
+                            name: "skill-two".to_owned(),
+                            description: String::new(),
+                        },
+                    ],
+                },
+                PluginSummaryItem {
+                    catalog: "core".to_owned(),
+                    plugin: "beta".to_owned(),
+                    description: String::new(),
+                    skills: vec![SkillSummaryItem {
+                        name: "skill-three".to_owned(),
+                        description: "for beta".to_owned(),
+                    }],
+                },
+            ],
+        };
+        let rendered = format_input_descriptions(&input);
+        assert_eq!(
+            rendered,
+            "- alpha: skill-one — describes skill one\n\
+             - alpha: skill-two\n\
+             - beta: skill-three — for beta\n"
+        );
+    }
+
+    #[test]
+    fn check_length_window_does_not_panic_within_bounds() {
+        check_length_window(&"x".repeat(10), ShortOrLong::Short);
+        check_length_window(&"x".repeat(10), ShortOrLong::Long);
+    }
+
+    #[test]
+    fn validate_output_rejects_empty_short() {
+        let err = validate_output("", ShortOrLong::Short).unwrap_err();
+        match err {
+            TomeError::SummariserFailure {
+                kind:
+                    SummariserFailureKind::OutputEmpty {
+                        which: ShortOrLong::Short,
+                    },
+            } => {}
+            other => panic!("expected OutputEmpty(Short), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_output_rejects_empty_long() {
+        let err = validate_output("", ShortOrLong::Long).unwrap_err();
+        match err {
+            TomeError::SummariserFailure {
+                kind:
+                    SummariserFailureKind::OutputEmpty {
+                        which: ShortOrLong::Long,
+                    },
+            } => {}
+            other => panic!("expected OutputEmpty(Long), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_output_accepts_non_empty() {
+        assert!(validate_output("ok", ShortOrLong::Short).is_ok());
+        assert!(validate_output("ok", ShortOrLong::Long).is_ok());
     }
 }

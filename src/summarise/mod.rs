@@ -119,6 +119,39 @@ static INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
 /// on first call. Subsequent calls hit the fast path. A first-call
 /// failure is cached — every later `backend()` returns the same
 /// `SummariserFailure { kind: BackendInitFailed { source } }`.
+///
+/// ## Concurrency / race semantics (T320, M8 fold-in)
+///
+/// - **Fast path**: once `BACKEND` is populated, every subsequent
+///   `backend()` call is a single `OnceLock::get` — lock-free, no
+///   serialisation, no allocation. This is the steady-state cost.
+/// - **First call**: the slow path takes the `INIT_LOCK` mutex. If
+///   two threads race here, exactly one of them wins the `init()`
+///   call; the other blocks on the mutex, then re-checks `BACKEND`
+///   on entry and returns the winner's result.
+/// - **Init failure**: the first failure is cached into
+///   `INIT_RESULT` and returned verbatim on every subsequent call.
+///   We do *not* retry — a half-broken backend doesn't get to
+///   lazily recover. This matches FR-424's "fail loud, fail same"
+///   semantics.
+/// - **`LlamaCppError::BackendAlreadyInitialized`**: signals a
+///   single-process invariant violation (someone bypassed `backend()`
+///   and called `LlamaBackend::init()` directly). The C++ side
+///   permits at most one backend per process. Our `INIT_LOCK` +
+///   `OnceLock` discipline makes this unreachable through the Tome
+///   API, but if it ever surfaces it is cached just like any other
+///   init failure — the resulting error message carries the upstream
+///   `BackendAlreadyInitialized` text so the operator can correlate
+///   it with the wider process state.
+/// - **Mutex poisoning**: a panic *inside* the lock guard (e.g. a
+///   panicking allocator during `LlamaBackend::init()`) poisons the
+///   mutex. The next `backend()` call surfaces that as
+///   `BackendInitFailed { source: "backend init lock poisoned: ..." }`
+///   rather than re-panicking; the cached-failure invariant holds.
+///
+/// Note: this whole module sits on the sync side of
+/// `tests/sync_boundary.rs`. The MCP server (async) reaches the
+/// summariser only through CLI subprocesses, never in-process.
 pub fn backend() -> Result<&'static LlamaBackend, TomeError> {
     if let Some(backend) = BACKEND.get() {
         return Ok(backend);
