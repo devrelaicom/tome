@@ -72,7 +72,7 @@ tome/
 │   │   ├── harness_detect.rs           # Probe ~/.claude/, ~/.codex/, ~/.cursor/, etc.
 │   │   └── fixes.rs                    # apply + auto-fix dispatch (subsystem routing)
 │   │
-│   ├── harness/                        # Phase 4: Per-harness trait + sync orchestrator
+│   ├── harness/                        # Phase 4: Per-harness trait + sync orchestrator + composition
 │   │   ├── mod.rs                      # HarnessModule trait, SUPPORTED_HARNESSES registry
 │   │   ├── claude_code.rs              # Claude Code harness impl
 │   │   ├── codex.rs                    # Codex harness impl
@@ -88,7 +88,8 @@ tome/
 │   │   ├── mod.rs                      # Type defs (ProjectMarkerConfig, WorkspaceSettings, GlobalSettings)
 │   │   ├── parser.rs                   # TOML deserialization (strict)
 │   │   ├── composition.rs              # CompositionRef + reference parsing
-│   │   └── resolver.rs                 # Resolve effective harness list (priority walk + composition refs)
+│   │   ├── resolver.rs                 # Resolve effective harness list (priority walk + composition refs + ScopeProvider trait)
+│   │   └── edit.rs                     # Phase 4 US3: Surgical TOML edits for harness use/remove
 │   │
 │   ├── summarise/                      # Phase 4: Workspace summariser (skeleton)
 │   │   ├── mod.rs                      # Summariser trait + input/output types
@@ -126,8 +127,14 @@ tome/
 │   │   │   ├── remove.rs               # `tome workspace remove <name> [--force]` — cascade delete
 │   │   │   ├── regen_summary.rs        # `tome workspace regen-summary <name>` — regenerate summaries
 │   │   │   └── sync.rs                 # `tome workspace sync [<name>]` — sync RULES.md to projects
-│   │   ├── harness/                    # Phase 4: Harness sync command wrapper
-│   │   │   └── mod.rs                  # Thin seam to harness::sync orchestrator
+│   │   ├── harness/                    # Phase 4 US3: Complete harness command surface
+│   │   │   ├── mod.rs                  # Dispatcher (6 subcommands) + CentralDbScopeProvider impl
+│   │   │   ├── bare.rs                 # `tome harness` (no subcommand) — list all supported harnesses
+│   │   │   ├── list.rs                 # `tome harness list [workspace]` — resolve effective harness list
+│   │   │   ├── use_.rs                 # `tome harness use <name> [--scope {project|workspace|global}]`
+│   │   │   ├── remove.rs               # `tome harness remove <name> [--scope]` — delete from settings
+│   │   │   ├── info.rs                 # `tome harness info` — per-harness details + detection
+│   │   │   └── sync.rs                 # `tome harness sync [--force]` — reconcile filesystem
 │   │   ├── doctor.rs                   # `tome doctor [--fix] [--verify]`
 │   │   └── mcp.rs                      # `tome mcp` entry point
 │   │
@@ -163,6 +170,7 @@ tome/
 │   ├── reindex.rs                      # Reindex all/per-catalog/per-plugin
 │   ├── status.rs                       # Status command + health checks
 │   ├── workspace_*.rs                  # Workspace info/init/binding/sync/list/rename/remove tests (US1–US2)
+│   ├── harness_*.rs                    # Phase 4 US3: Harness list/use/remove/info/sync/composition tests
 │   ├── doctor.rs                       # Doctor assembly + fixes + harness detect
 │   ├── mcp_*.rs                        # MCP server lifecycle + tools
 │   ├── exit_codes.rs                   # Exit code matrix validation
@@ -172,7 +180,7 @@ tome/
 │   ├── schema_migration_e2e.rs         # Forward migration via MIGRATIONS_OVERRIDE
 │   ├── sync_boundary.rs                # Structural test: no async outside src/mcp/
 │   ├── common/
-│   │   ├── mod.rs                      # Test utilities (StubEmbedder, StubHarness, fixtures, Fixture builder)
+│   │   ├── mod.rs                      # Test utilities (HOME_MUTEX, HarnessModulesGuard, fixtures)
 │   │   └── stub_*.rs                   # Stub implementations for test injection
 │   └── fixtures/
 │       └── sample-plugin-catalog/      # Real plugin tree for integration tests
@@ -212,13 +220,13 @@ tome/
 │   │   ├── data-model.md
 │   │   ├── contracts/
 │   │   └── quickstart.md
-│   └── 004-phase-4-refactor-harnesses/       # Phase 4 (F1–F11 shipped; US1–US2 shipped)
+│   └── 004-phase-4-refactor-harnesses/       # Phase 4 (F1–F11 shipped; US1–US3 shipped)
 │       ├── spec.md
 │       ├── plan.md
 │       ├── research.md (19 R-decisions)
 │       ├── data-model.md (schema v2, Scope reshape, HarnessModule, settings layers)
 │       ├── contracts/ (13 contracts: paths-and-layout, harness-modules, settings-composition, sync-algorithm, workspace-commands, etc.)
-│       ├── retro/ (P2.md: F1–F11; later US1–US2)
+│       ├── retro/ (P2.md: F1–F11; P3.md: US1; P4.md–P5.md: US2–US3)
 │       └── quickstart.md
 │
 ├── PRDs/                               # Product requirement documents
@@ -249,165 +257,190 @@ tome/
 
 ### `src/` — Source Code
 
-| Directory | Purpose | Key Files | When to Add Code |
-|-----------|---------|-----------|------------------|
-| `main.rs` | CLI entry, scope resolution, command dispatch | — | CLI bootstrap only |
-| `cli.rs` | Command-line argument parsing (clap derive) | — | New subcommands or global flags |
-| `error.rs` | Closed TomeError enum + exit code mapping | — | New failure classes only (rare) |
-| `catalog/` | Catalog registry, git ops, reference counting | `git.rs`, `store.rs` | New catalog features |
-| `plugin/` | Plugin metadata, lifecycle orchestration | `lifecycle.rs` | Plugin enable/disable/reindex logic |
-| `index/` | SQLite index, schema, migrations, KNN query | `schema.rs`, `skills.rs` | Schema changes, new queries |
-| `embedding/` | Text embedding, reranking, model management | `registry.rs` | Model updates, embedding features |
-| `workspace/` | Scope resolution, binding, lifecycle management | `binding.rs`, `resolution.rs`, `init.rs`, `rename.rs`, `remove.rs`, `sync.rs` | Multi-workspace features, binding logic, workspace operations |
-| `harness/` | Phase 4: Per-harness trait impls + sync orchestrator | `sync.rs`, per-harness files, `rules_file.rs`, `mcp_config.rs` | New harness integrations, sync logic, rules/MCP strategies |
-| `settings/` | Phase 4: Layered composition resolver | `resolver.rs` | Composition logic changes |
-| `commands/` | CLI command implementations | `catalog.rs`, `plugin/`, `workspace/`, `harness/` | New commands or command logic |
-| `presentation/` | Output formatting, TUI, colors | `tables.rs`, `prompt.rs` | Output enhancements |
-| `mcp/` | MCP server (async island) | `tools/`, `runtime.rs` | MCP tool handlers, server features |
-| `util/` | Shared utilities (atomic directories, etc.) | `atomic_dir.rs` | Common helper functions |
+| Directory | Purpose | Key Files |
+|-----------|---------|-----------|
+| `catalog/` | Catalog registry, git ops | `manifest.rs`, `store.rs`, `git.rs` |
+| `plugin/` | Plugin metadata, lifecycle | `manifest.rs`, `frontmatter.rs`, `lifecycle.rs` |
+| `index/` | SQLite + sqlite-vec index | `db.rs`, `schema.rs`, `skills.rs`, `query.rs` |
+| `embedding/` | Text embedding + reranking | `fastembed.rs`, `stub.rs`, `download.rs` |
+| `workspace/` | Scope resolution, binding, lifecycle | `scope.rs`, `binding.rs`, `init.rs`, `rename.rs`, `remove.rs` |
+| `harness/` | Phase 4: Harness abstraction + sync | `mod.rs` (trait), 5 harness impls, `sync.rs`, `rules_file.rs`, `mcp_config.rs` |
+| `settings/` | Phase 4: Layered composition | `parser.rs`, `resolver.rs` (composition engine), `edit.rs` |
+| `summarise/` | Phase 4: Workspace summariser | `llama.rs`, `stub.rs`, `prompts.rs` |
+| `doctor/` | Health check + auto-repair | `checks.rs`, `fixes.rs`, `harness_detect.rs` |
+| `commands/` | CLI subcommand entry points | Per-command modules + dispatchers |
+| `presentation/` | Output formatting + TUI | `tables.rs`, `prompt.rs`, `colour.rs` |
+| `util/` | Shared utilities | `atomic_dir.rs` (tempfile + rename) |
+| `mcp/` | Async MCP server (Phase 3) | `runtime.rs`, `server.rs`, `tools/` |
 
-### `tests/` — Test Files
+### `src/harness/` — Harness Module Details
 
-| Directory | Purpose | Pattern | When to Add |
-|-----------|---------|---------|------------|
-| `catalog_*.rs` | Catalog lifecycle tests | `#[test] fn catalog_add_updates_refcount()` | Catalog feature changes |
-| `plugin_*.rs` | Plugin enable/disable tests | `#[test] fn plugin_enable_embeds_skills()` | Plugin feature changes |
-| `workspace_*.rs` | Workspace binding + info + sync + lifecycle tests | `#[test] fn workspace_binding_lands_marker()` | Workspace feature changes (US1–US2) |
-| `query.rs` | KNN + rerank tests | `#[test] fn query_with_rerank_sorts_by_score()` | Query logic changes |
-| `common/mod.rs` | Test utilities + fixtures | `fn build_test_db()`, `StubEmbedder` | Shared test helpers |
-| `sync_boundary.rs` | Structural: no async outside `src/mcp/` | Build-time path scan | Architecture enforcement |
+Phase 4 / US3 adds complete harness command surface (6 subcommands) backed by production composition resolver.
+
+| File | Purpose |
+|------|---------|
+| `mod.rs` | `HarnessModule` trait, `SUPPORTED_HARNESSES` registry, `MCP_CONFIG_KEY` static, test injection hook (`HARNESS_MODULES_OVERRIDE`) |
+| `claude_code.rs` | Claude Code harness: block-in-file rules, JSON MCP config (per-project), description + detection |
+| `codex.rs` | Codex harness: block-in-file rules, TOML MCP config (global), description + detection |
+| `cursor.rs` | Cursor harness: standalone rules file, JSON MCP config (per-project), description + detection |
+| `gemini.rs` | Gemini CLI harness: block-in-file rules, JSON MCP config (global), description + detection |
+| `opencode.rs` | OpenCode harness: block-in-file rules (inline strategy), JSON MCP config (per-project), description + detection |
+| `rules_file.rs` | Block-in-file + standalone strategies, atomic write helpers, `<!-- tome:begin/end -->` marker management, `@` include directive handling |
+| `mcp_config.rs` | Read/write helpers for JSON (preserve_order) + TOML (toml_edit), strict/lenient boundaries |
+| `sync.rs` | Sync orchestrator: resolve effective harness list, dispatch per-harness writes, dedup shared paths, cleanup pass, forward-progress on clash |
+| `stub.rs` | `StubHarnessModule` for test injection + parallelism coordination via `HarnessModulesGuard` |
+
+### `src/settings/` — Settings & Composition Details
+
+Phase 4 / US3 wires composition resolver into production paths via `CentralDbScopeProvider`.
+
+| File | Purpose |
+|------|---------|
+| `mod.rs` | Type definitions: `ProjectMarkerConfig`, `WorkspaceSettings`, `GlobalSettings` (all `#[serde(deny_unknown_fields)]`) |
+| `parser.rs` | TOML deserialization for all three types; workspace/global files are optional |
+| `composition.rs` | `CompositionRef` parsing: bare names vs `[scope]` / `[workspaces.<name>]` references |
+| `resolver.rs` | `resolve_effective_list()` pure-compute engine; `ScopeProvider` trait (test: `StubScope`, production: `CentralDbScopeProvider`); cycle detection via DFS |
+| `edit.rs` | Phase 4 US3: Surgical TOML edits — `open_settings()`, `add_harness()`, `remove_harness()`, `save_settings()` for project/workspace/global files |
+
+### `src/commands/harness/` — Harness Command Surface
+
+Phase 4 / US3 implements full subcommand dispatcher + production `ScopeProvider` impl.
+
+| File | Purpose |
+|------|---------|
+| `mod.rs` | Dispatcher, `sync_for_project_root()` entry (called by workspace use), `CentralDbScopeProvider` impl (consults workspaces table + reads .toml files) |
+| `bare.rs` | `tome harness` (no subcommand) — tabular list of 5 supported harnesses + detection status |
+| `list.rs` | `tome harness list [workspace]` — resolve effective harness list via ScopeProvider + composition resolver |
+| `use_.rs` | `tome harness use <name> [--scope]` — append harness to settings file via `settings::edit`, run sync on change |
+| `remove.rs` | `tome harness remove <name> [--scope]` — delete harness from settings file, run cleanup on change |
+| `info.rs` | `tome harness info [--json]` — per-harness detection, targets, source-of-scope annotation |
+| `sync.rs` | `tome harness sync [--force]` — idempotent reconciliation; thin wrapper over `harness::sync::sync_project` |
+
+### `tests/` — Integration Tests
+
+| File Pattern | Purpose |
+|-----|---------|
+| `catalog_*.rs` | Catalog add/remove/update/refcount tests |
+| `plugin_*.rs` | Plugin enable/disable/list/show/interactive tests |
+| `models_*.rs` | Model download/list/remove tests |
+| `workspace_*.rs` | Workspace info/init/binding/sync/list/rename/remove tests (US1–US2) |
+| `harness_*.rs` | Phase 4 US3: Harness list/use/remove/info/sync tests; composition resolver; ScopeProvider fixture tests |
+| `query.rs` | Query + strict mode + reranking tests |
+| `reindex.rs` | Reindex all/per-catalog/per-plugin tests |
+| `status.rs` | Status command + health checks |
+| `doctor.rs` | Doctor assembly + fixes + harness detect + binding subsystem |
+| `mcp_*.rs` | MCP server lifecycle + tools + log rotation |
+| `exit_codes.rs` | Exit code matrix validation |
+| `manifest_strictness.rs` | Strict/lenient parsing guards |
+| `atomicity.rs` | Interrupt-injection tests (SIGINT mid-op) |
+| `concurrency.rs` | Two-process index contention |
+| `schema_migration_e2e.rs` | Forward migration via MIGRATIONS_OVERRIDE |
+| `sync_boundary.rs` | Structural test: no async outside src/mcp/ |
+| `common/mod.rs` | Test utilities: `HOME_MUTEX`, `HarnessModulesGuard`, fixtures, stub implementations |
 
 ## Module Boundaries
 
-### Feature Modules
+### Where to Add New Code
 
-Each capability module is self-contained:
-
-- **`catalog/`** — Manages registry persistence + git cloning
-  - Can call: `config`, `error`, `paths`, `serde`, `util::atomic_dir` (new: write_atomic)
-  - Cannot call: `plugin`, `index`, `commands`
-- **`plugin/`** — Orchestrates enable/disable
-  - Can call: `catalog`, `embedding`, `index`, `config`, `error`
-  - Cannot call: `commands`, `output` (returns Result)
-- **`index/`** — Persists skills + embeddings
-  - Can call: `embedding::registry` (for model identity), `error`, `paths`, `rusqlite`
-  - Cannot call: `plugin`, `commands` (except integration tests)
-- **`embedding/`** — Wraps ML models
-  - Can call: `error`, `paths`, `serde`, `ort`, `fastembed-rs`
-  - Cannot call: `index` (except trait bounds for output), `plugin`
-- **`workspace/`** — Scope resolution + binding + lifecycle (Phase 4 expanded)
-  - Can call: `catalog`, `config`, `paths`, `index` (read-only via public API), `settings`, `plugin`, `util::atomic_dir`
-  - Cannot call: `commands` (except scope passes through)
-- **`harness/`** — Per-harness trait + sync orchestrator (Phase 4)
-  - Can call: `paths` (filesystem checks only, existence probes), `settings` (resolver callback), `error`, `util::atomic_dir` (mcp_config writes)
-  - Cannot call: Any business logic except `settings::resolver::StubScope` for composition
-- **`settings/`** — Composition resolver (Phase 4)
-  - Can call: `serde`, `error`, `workspace::name`, `paths` (readonly)
-  - Cannot call: `index`, `harness` (directly; harness registry accessed via callback)
-- **`summarise/`** — Workspace summariser (Phase 4)
-  - Can call: `error`, `paths`, `serde`, `llama-cpp-2` (production), `plugin`
-  - Cannot call: `index`, `commands`
-- **`doctor/`** — Health check + auto-repair
-  - Can call: `embedding`, `index`, `catalog`, `commands::plugin`, `paths`, `harness` (detect)
-  - Cannot call: None; very broad reading access
-
-### Command Modules
-
-Commands are thin wrappers:
-
-```
-commands/{catalog,plugin,models,query,reindex,status,workspace,harness,mcp,doctor}.rs
-  ↓
-Resolve dependencies (config, index lock, embedder)
-  ↓
-Call library function (plugin::lifecycle, embedding, doctor::assemble_report, workspace::*, harness::sync, etc.)
-  ↓
-Emit output (presentation + output.rs)
-```
-
-Never put business logic inside `commands/` — extract to `plugin/`, `embedding/`, `index/`, `workspace/`, `harness/`, etc.
-
-## Where to Add New Code
-
-| If you're adding... | Put it in... | Example |
+| If you're adding... | Put it in... | Pattern |
 |---------------------|--------------|---------|
-| New catalog feature | `src/catalog/` | `pub fn list_catalogs_by_workspace()` |
-| Plugin enable/disable logic | `src/plugin/lifecycle.rs` | `pub fn auto_disable_orphan_skills()` |
-| New search filter | `src/index/query.rs` | `pub fn knn_with_plugin_filter()` |
-| Model download feature | `src/embedding/download.rs` | `pub fn download_model_with_retry()` |
-| Workspace feature | `src/workspace/{init,rename,remove,sync,regen_summary}.rs` | New binding validators, workspace operations |
-| Project binding logic | `src/workspace/binding.rs` | New binding validators |
-| Harness integration | `src/harness/{harness_name}.rs` | New `HarnessModule` impl |
-| Harness sync logic | `src/harness/sync.rs` | Orchestration changes |
-| Rules file strategy | `src/harness/rules_file.rs` | New strategy type + handlers |
-| MCP config logic | `src/harness/mcp_config.rs` | New format support |
-| Settings composition | `src/settings/resolver.rs` | New composition reference types |
-| Summariser feature | `src/summarise/` | New prompt, backend changes |
-| MCP tool | `src/mcp/tools/` | New file with tool handler |
-| CLI command | `src/commands/{feature}.rs` or `src/commands/{feature}/mod.rs` | New `pub fn run(args, scope, mode)` |
-| Output format | `src/presentation/` | New `comfy-table` wrapper |
-| Test fixture | `tests/common/mod.rs` | `fn build_workspace_db()` |
-| New dependency feature | `build.rs` | C extension compilation |
+| New harness | `src/harness/{name}.rs` + register in `mod.rs` | Impl `HarnessModule` trait (5 methods) |
+| New harness subcommand | `src/commands/harness/{cmd}.rs` | Pattern: `run(args, scope, paths, mode)` + `assemble_*(...)` |
+| New workspace command | `src/commands/workspace/{cmd}.rs` | Pattern: `run(args, scope, paths, mode)` + `assemble_*(...)` or `run_with_deps(...)` |
+| New catalog command | `src/commands/catalog.rs` | Add to existing dispatcher + orchestrator |
+| New skill search filter | `src/index/query.rs` | Add to `QueryFilters` struct + SQL |
+| New embedder impl | `src/embedding/{name}.rs` | Impl `Embedder` trait + register in tests |
+| New workspace scope hook | `src/workspace/` + `src/settings/` | Add to scope resolution + composition |
+| New settings layer | `src/settings/{layer}.rs` | Add type def to `mod.rs`, parser to `parser.rs` |
+| New composition ref type | `src/settings/composition.rs` | Extend `CompositionRef` enum |
+| New diagnostic check | `src/doctor/checks.rs` | Add `pub fn check_*(...)` + classification logic |
+| Surgical TOML edit | `src/settings/edit.rs` | Add helper using `toml_edit::DocumentMut` |
 
-## Import Paths
+### Key Patterns
 
-There are no custom path aliases (e.g., `@/`). Use absolute paths from crate root:
+#### CLI Command Pattern (most commands follow this)
 
 ```rust
-use tome::plugin::lifecycle::enable;
-use tome::index::{open, open_read_only};
-use tome::embedding::{Embedder, Reranker};
-use tome::harness::HarnessModule;
-use tome::workspace::binding::bind_project;
-use tome::workspace::{init, rename, remove, sync_one};
-use tome::settings::resolver::resolve_effective_list;
-use tome::util::atomic_dir::land_directory;
+// src/commands/thing/mod.rs or src/commands/thing.rs
+
+pub fn run(args: ThingArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+    let paths = Paths::resolve()?;
+    let outcome = assemble_thing(&args, scope, &paths)?;  // silent compute
+    output::write(mode, &outcome);  // emit (human / JSON)
+    Ok(())
+}
+
+pub fn assemble_thing(args: &ThingArgs, scope: &ResolvedScope, paths: &Paths) -> Result<ThingOutcome, TomeError> {
+    // Business logic here; no I/O side effects
+    Ok(ThingOutcome { ... })
+}
 ```
 
-## Entry Points
+#### Harness Module Pattern
 
-| File | Purpose | Called by | Calls |
-|------|---------|-----------|-------|
-| `src/main.rs` | CLI bootstrap | Binary | `workspace::resolution`, `commands::*` |
-| `src/mcp/mod.rs::run()` | MCP server bootstrap | Binary via `commands::mcp` | `tokio`, `rmcp::serve_server` |
-| `src/lib.rs` | Library re-exports | Integration tests | All public modules |
-| `src/workspace/binding.rs::bind_project()` | Project binding | `commands::workspace::use_` | `index`, `util::atomic_dir` |
-| `src/harness/sync.rs::sync_project()` | Harness orchestration | `commands::harness::sync_for_project_root()` | `settings`, per-`HarnessModule` |
-| `src/workspace/init.rs::init()` | Workspace creation | `commands::workspace::init` | `util::atomic_dir`, `catalog`, `index` |
-| `src/workspace/rename.rs::rename()` | Workspace rename | `commands::workspace::rename` | `index`, per-project marker writes |
-| `src/workspace/remove.rs::remove()` | Workspace removal | `commands::workspace::remove` | `index`, `harness`, `catalog::store` |
-| `src/workspace/regen_summary.rs::regen()` | Summary regeneration | `commands::workspace::regen_summary` | `summarise`, `util::atomic_dir` |
-| `src/workspace/sync.rs::sync_one()` | RULES.md sync | `commands::workspace::sync` | `util::atomic_dir` |
-| `build.rs` | Build-time setup | Cargo | sqlite-vec C compiler |
+```rust
+// src/harness/{name}.rs
+pub static THE_HARNESS: HarnessModule = HarnessModule { ... };
+
+impl HarnessModule for ... {
+    fn name(&self) -> &'static str { ... }
+    fn detect(&self, home: &Path) -> bool { ... }
+    fn rules_file_target(&self, home: &Path) -> PathBuf { ... }
+    fn rules_file_strategy(&self) -> RulesFileStrategy { ... }
+    fn block_body_style(&self) -> BlockBodyStyle { ... }
+    fn mcp_config_path(&self, home: &Path) -> PathBuf { ... }
+    fn mcp_config_format(&self) -> McpConfigFormat { ... }
+    fn mcp_parent_key(&self) -> &'static str { ... }
+}
+```
+
+#### Composition Reference Pattern (Phase 4 US3)
+
+```rust
+// In settings TOML files, harnesses list can contain:
+// - Bare names: "claude-code", "codex"
+// - References: "[workspace]", "[global]", "[workspaces.prod]"
+// The resolver recursively expands references into a merged effective list,
+// detecting cycles and preserving source chain for debugging.
+```
+
+#### Test Fixture Pattern
+
+```rust
+// tests/common/mod.rs
+lazy_static! {
+    pub static ref HOME_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+}
+
+#[must_use]
+pub struct HomeGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    _temp: TempDir,
+}
+
+impl HomeGuard {
+    pub fn new() -> Result<(Self, PathBuf), Box<dyn std::error::Error>> {
+        let _guard = HOME_MUTEX.lock().unwrap();
+        let temp = TempDir::new()?;
+        let temp_home = temp.path().to_path_buf();
+        // Set $HOME to temp_home for test duration; drop HomeGuard to restore
+        Ok((Self { _guard, _temp: temp }, temp_home))
+    }
+}
+```
 
 ## Generated Files
 
-None — all code is hand-written. `index.db`, `index.lock`, catalog cache, project markers, and workspace directories are generated at runtime but not tracked in git.
+No auto-generated files in src/; test fixtures are synthesized at runtime (e.g., sparse-file models, synthetic DBs).
 
-## Phase 4 Structural Changes (F1–F11 + US1–US2 Shipped)
+---
 
-### Foundational (F1–F11)
-- **Paths**: Consolidated under `<home>/.tome/` (no XDG split) — `src/paths.rs`
-- **Central database**: Single `index.db` per Paths (was: per-workspace) — `src/index/schema.rs` schema v2
-- **Scope type**: `Scope(WorkspaceName)` tuple struct (was: `Scope::Global | Workspace(Path)`) — `src/workspace/scope.rs`
-- **Error variants**: 8 new variants (13, 19, 70, 71, 72, 73, 74, 75) for workspace + binding + clash + schema + exit-codes — `src/error.rs`
-- **WorkspaceName newtype**: Validation + parsing, RFC-952 DNS-label rules — `src/workspace/name.rs`
-- **Workspace junction tables**: `workspace_catalogs`, `workspace_skills`, `workspace_projects` — `src/index/schema.rs`
-- **Per-command scope threading**: Every command accepts resolved `Scope` parameter — `src/commands/`
-- **Harness abstraction**: Five `HarnessModule` impls + registry — `src/harness/`
-- **Settings layers**: Project / workspace / global with composition refs — `src/settings/`
-- **Summariser skeleton**: `src/summarise/` with stub + llama impls
+## What Does NOT Belong Here
 
-### User Stories (US1–US2 Shipped)
-- **US1 (Phase 4 / F1–F11)**: `tome workspace use` — bind project to workspace + harness sync
-  - **US1.a** (binding): `src/workspace/binding.rs`, `src/commands/workspace/use_.rs`
-  - **US1.b-c** (harness sync): `src/harness/sync.rs`, `src/commands/harness/mod.rs`
-- **US2 (Phase 4 / PRs #82–#86)**: Full workspace lifecycle management
-  - **US2.a** (info/list): `src/commands/workspace/info.rs`, `src/commands/workspace/list.rs`
-  - **US2.b** (init): `src/workspace/init.rs`, `src/commands/workspace/init.rs`
-  - **US2.c** (rename/remove): `src/workspace/rename.rs`, `src/workspace/remove.rs`, `src/commands/workspace/rename.rs`, `src/commands/workspace/remove.rs`
-  - **US2.d** (regen-summary/sync): `src/workspace/regen_summary.rs`, `src/workspace/sync.rs`, `src/commands/workspace/regen_summary.rs`, `src/commands/workspace/sync.rs`
-  - **US2.d-1** (atomic writes): `catalog::store::write_atomic` lifted to public, used by workspace/harness writers
+- Architecture patterns → ARCHITECTURE.md
+- Technology choices → STACK.md
+- Code style rules → CONVENTIONS.md
+- Test patterns → TESTING.md
 
 ---
 
