@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-11
-> **Last Updated**: 2026-05-23 (Phase 4 Foundational F1–F11b complete; Phase 3 deferred items disposition documented)
+> **Last Updated**: 2026-05-25 (Phase 4 / US1 completed with 3 blockers + 9 majors fixed; deferred concerns tracked)
 
 ## Technical Debt
 
@@ -19,20 +19,20 @@ Items that should be addressed in current or near-term phases:
 
 Items to address when working in the area:
 
-| ID | Area | Description | Impact | Effort | Mitigation |
-|----|------|-------------|--------|--------|-----------|
-| TD-010 | `src/embedding/download.rs` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner in both `plugin enable` and `models download`; enhancement for polish pass. Phase 4 Qwen download (~400 MB) makes this more urgent; tracked in F6 |
-| TD-011 | `src/index/migrations.rs` (Phase 3 F7 + US5) | Schema-migration framework implementation complete; zero registered migrations shipped | Testing coverage | Low | Framework landed in Phase 3 Foundational F7 + US5. Phase 4 US adds first real `Migration` rows (v1→v2 structural migration); e2e test via `MIGRATIONS_OVERRIDE` injection verified in Phase 3 US5 |
-| TD-012 | `src/mcp/preflight.rs` (Phase 3 F8) | MCP startup pre-flight runs SHA-256 over primary embedder (~66 MB) at every startup | Startup latency | Low | Acceptable for long-running server; cold-cache startup may see latency. Consider `--verify` flag on `tome status` to skip SHA-256 on non-suspect runs. Defer unless profiling shows impact |
-| TD-013 | Phase 3 US1 testing (T088, T093–T095) | Manual verification pending: real BGE models + live harness for SC-001/SC-002 coverage | Integration testing | High | Three categories: (1) happy-path search_skills/get_skill returns (T092 partial via `mcp_server.rs`), (2) MCP protocol purity (T093), (3) latency budget (T094 p50<300ms, p99<600ms), (4) SIGINT graceful shutdown (T095). Tracked in `retro/P3.md`. **Status**: T088 deferred pending developer access to real BGE models for live container/harness testing |
-| TD-014 | `src/mcp/state.rs` (Phase 3 F8) | McpState embedder/reranker seed exposure for test integration | Test isolation | Medium | Handlers derive seeds from `state.embedder_entry.name/version`, hard-coded to MODEL_REGISTRY entries. Tests can't bootstrap index with stub seeds + use handlers without tripping drift detection. Refactor `McpState` to carry `embedder_seed` / `reranker_seed` directly. Est. 1 hour, defer to post-Phase 4 |
-| TD-015 | Error code documentation drift | Contract vs. production code discrepancy on "Index DB missing" | Documentation | Low | Contract listed exit 35 for "Index DB missing" but production surfaces exit 60 (`McpStartupFailed`). Resolved in Phase 3 Polish PR #54; updated contract |
-| TD-016 | `src/workspace/init.rs` (Phase 3 US2) | `.tome.old/` orphan cleanup on crash between rename-aside and rename-in | Recovery cleanup | Low | If `--force` rename-in fails after moving old `.tome/` to `.tome.old/`, rollback restores the old state. But if a crash occurs between rename-aside and rename-in (before rollback logic), `.tome.old/` is left orphan. Phase 4 doctor extensions (US5) should surface and offer cleanup. Currently documented in contract as a known limitation (FR-M-WKS-2) |
-| TD-017 | `src/catalog/store.rs::reference_count` (Phase 3 US3) | Catalog cache TOCTOU window between pre-check and `remove_dir_all` | Concurrency safety | Low | Two processes racing `tome catalog remove` may both observe empty refs and both call `remove_dir_all` (benign: one wins, one no-ops). Worse: process A observes empty, process B adds URL before A deletes clone → dangling reference (recovered by `tome catalog update` re-clone). Documented design; same profile as Phase 9 cascade pre-check. Phase 4: refcounting moved to DB table; TOCTOU semantics unchanged but now under advisory lock (FR-366) |
-| TD-018 | `src/doctor/harness_detect.rs` (Phase 3 US4) | Harness-detected list is privacy-sensitive | Privacy | Low | Presently local-only (never transmitted); document explicitly. Review at design time if any downstream feature proposes report transmission (e.g., crash reporting, bug-filing UI). Recommend opt-in privacy gate before enabling network transmission |
-| TD-019 | Phase 4 Config struct legacy field | `Config::catalogs: BTreeMap<String, CatalogEntry>` unused post-F11b | Code cleanup | Low | F11b moved catalog enrolment to central DB; the field is never written. Excision is a follow-up cleanup PR (low urgency) |
-| TD-020 | Error categorisation | All Phase 1 + Phase 2 + Phase 3 + Phase 4 codes are enumerated; no catch-all variants | Debuggability | Low | Current approach is sound; closed set enforces completeness |
-| TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low | — |
+| ID | Area | Description | Impact | Effort | Mitigation | Status |
+|----|------|-------------|--------|--------|-----------|--------|
+| TD-010 | `src/embedding/download.rs` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner in both `plugin enable` and `models download`; enhancement for polish pass. Phase 4 Qwen download (~400 MB) makes this more urgent; tracked in F6 | Phase 4 F6 uses indeterminate spinner; upgrade in polish or if time permits |
+| TD-011 | `src/index/migrations.rs` (Phase 3 F7 + US5) | Schema-migration framework implementation complete; zero registered migrations shipped | Testing coverage | Low | Framework landed in Phase 3 Foundational F7 + US5. Phase 4 US adds first real `Migration` rows (v1→v2 structural migration); e2e test via `MIGRATIONS_OVERRIDE` injection verified in Phase 3 US5 | Phase 4 (in progress) |
+| TD-012 | `src/mcp/preflight.rs` (Phase 3 F8) | MCP startup pre-flight runs SHA-256 over primary embedder (~66 MB) at every startup | Startup latency | Low | Acceptable for long-running server; cold-cache startup may see latency. Consider `--verify` flag on `tome status` to skip SHA-256 on non-suspect runs. Defer unless profiling shows impact | Acceptable design |
+| TD-013 | Phase 3 US1 testing (T088, T093–T095) | Manual verification pending: real BGE models + live harness for SC-001/SC-002 coverage | Integration testing | High | Three categories: (1) happy-path search_skills/get_skill returns (T092 partial via `mcp_server.rs`), (2) MCP protocol purity (T093), (3) latency budget (T094 p50<300ms, p99<600ms), (4) SIGINT graceful shutdown (T095). Tracked in `retro/P3.md`. **Status**: T088 deferred pending developer access to real BGE models for live container/harness testing | Phase 5+ / Developer pass |
+| TD-014 | `src/mcp/state.rs` (Phase 3 F8) | McpState embedder/reranker seed exposure for test integration | Test isolation | Medium | Handlers derive seeds from `state.embedder_entry.name/version`, hard-coded to MODEL_REGISTRY entries. Tests can't bootstrap index with stub seeds + use handlers without tripping drift detection. Refactor `McpState` to carry `embedder_seed` / `reranker_seed` directly. Est. 1 hour, defer to post-Phase 4 | Post-Phase 4 |
+| TD-015 | Error code documentation drift | Contract vs. production code discrepancy on "Index DB missing" | Documentation | Low | Contract listed exit 35 for "Index DB missing" but production surfaces exit 60 (`McpStartupFailed`). Resolved in Phase 3 Polish PR #54; updated contract | Resolved Phase 3 |
+| TD-016 | `src/workspace/init.rs` (Phase 3 US2) | `.tome.old/` orphan cleanup on crash between rename-aside and rename-in | Recovery cleanup | Low | If `--force` rename-in fails after moving old `.tome/` to `.tome.old/`, rollback restores the old state. But if a crash occurs between rename-aside and rename-in (before rollback logic), `.tome.old/` is left orphan. Phase 4 doctor extensions (US5) should surface and offer cleanup. Currently documented in contract as a known limitation (FR-M-WKS-2) | Phase 4 US5 doctor --fix |
+| TD-017 | `src/catalog/store.rs::reference_count` (Phase 3 US3) | Catalog cache TOCTOU window between pre-check and `remove_dir_all` | Concurrency safety | Low | Two processes racing `tome catalog remove` may both observe empty refs and both call `remove_dir_all` (benign: one wins, one no-ops). Worse: process A observes empty, process B adds URL before A deletes clone → dangling reference (recovered by `tome catalog update` re-clone). Documented design; same profile as Phase 9 cascade pre-check. Phase 4: refcounting moved to DB table; TOCTOU semantics unchanged but now under advisory lock (FR-366) | Phase 4 F11b (DB table + lock) |
+| TD-018 | `src/doctor/harness_detect.rs` (Phase 3 US4) | Harness-detected list is privacy-sensitive | Privacy | Low | Presently local-only (never transmitted); document explicitly. Review at design time if any downstream feature proposes report transmission (e.g., crash reporting, bug-filing UI). Recommend opt-in privacy gate before enabling network transmission | Local-only; monitor |
+| TD-019 | Phase 4 Config struct legacy field | `Config::catalogs: BTreeMap<String, CatalogEntry>` unused post-F11b | Code cleanup | Low | F11b moved catalog enrolment to central DB; the field is never written. Excision is a follow-up cleanup PR (low urgency) | Phase 4 Polish |
+| TD-020 | Error categorisation | All Phase 1 + Phase 2 + Phase 3 + Phase 4 codes are enumerated; no catch-all variants | Debuggability | Low | Current approach is sound; closed set enforces completeness | By design |
+| TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low | — | Acceptable |
 
 ### Low Priority
 
@@ -100,9 +100,28 @@ Code areas that are brittle or risky to modify:
 | `src/mcp/log.rs::open_appender` (Phase 3 F8, PR #56) | MCP log file opened with explicit 0600 mode; existing files tightened on startup | chmod 0600 prevents other local users from reading workspace paths in logs. Test with `tests/security_hardening.rs` on Unix. Windows ACL model not covered (N/A) |
 | `src/index/lock.rs::with_lock()` (Phase 3–4) | Advisory lockfile guards all DB writes; Phase 4 cache cleanup now under lock (F11b FR-366) | Critical: do not move any DB write or shared-resource cleanup outside the lock. Test concurrent access via `tests/concurrency.rs` (cross-process lock stress test) |
 | `src/harness/rules_file.rs` (Phase 4 US1.b) | RULES.md symlink check on write-back; refuses symlinks (exit 7) | Complements Phase 3 skill symlink defence. Do not remove the check; hostile harness rules could point to system files |
+| `src/harness/mcp_config.rs` (Phase 4 US1.b) | MCP config symlink check and read-modify-write via `toml_edit` (comment preservation); symlink refusal on write-back | Complements rules-file symlink defence. Do not remove the check or downgrade to non-lenient parse. Always use `toml_edit` for third-party TOML configs; plain `toml` for Tome-owned files only |
 | `src/workspace/name.rs::validate_grammar` (Phase 4 US1) | Workspace names alphanumeric + underscore only; no path separators, no traversal | Grammar prevents accidental directory escape. Do not relax constraint without audit |
-| `src/settings/mod.rs` (Phase 4 Foundational F8) | Phase 4 introduces layered settings composition with override semantics (global + workspace + project) | New settings shapes all carry `deny_unknown_fields` (T098n verified); test round-trip through compose + override pipeline |
-| `src/harness/mcp_config.rs` (Phase 4 US1.b) | MCP config read-modify-write via `toml_edit` (comment preservation); symlink check on write (exit 7) | Do not use plain `toml` crate for harness config write-back (loses comments). Always use `toml_edit` for third-party configs; plain `toml` for Tome-owned files only |
+| `src/workspace/binding.rs::bind_project` (Phase 4 US1.a) | Project path is canonical (canonicalize must succeed) and UTF-8 (to_str check); stored as TEXT PK in `workspace_projects` | Critical: do not remove UTF-8 check (R-B1 fix). Canonicalisation failure surfaces as exit 7 (IO error). Dangerous-CWD check (`$HOME`, `/`) guards against user error | Do not relax UTF-8 or canonicalisation requirements |
+| `src/util/atomic_dir.rs` (Phase 4) | Atomic populated-directory landing via staging + same-FS rename; prefix `.tome.tmp.` reserved for future doctor orphan cleanup | Precondition: target parent must exist. Staging dir is a sibling; SIGINT between keep() and rename leaves orphan. Test SIGINT scenarios; verify orphan cleanup in doctor (US5) | Phase 4 US5 doctor --fix will clean orphans |
+| `src/settings/mod.rs` (Phase 4 Foundational F8) | Phase 4 introduces layered settings composition with override semantics (global + workspace + project) | New settings shapes all carry `deny_unknown_fields` (T098n verified); test round-trip through compose + override pipeline | Verify strict boundary in future additions |
+
+## Deferred Findings from Phase 4 / US1 Review
+
+Phase 4 / US1 audit produced 3 blockers + 25 majors. Three blockers applied in PR US1.d-2a (R-B1 UTF-8 validation, T-B1 contract amendment on env preservation, T-B2 sync idempotence test). Nine majors applied in the same PR (R-M1 atomic binding transaction, R-M2 error handling on Inline path read, R-M4 canonicalise error handling, R-M6 --global doc scrub, R-M7 --workspace override, C-N1 HarnessClash doctor pointer, R-M3 docstring downgrade, S-M3 mode preservation, T-M1/T-M4/T-M7 test additions). Remaining 16 majors deferred to follow-up or US5 doctor polish:
+
+| ID | Category | Disposition |
+|----|----------|-----------|
+| C-M1 | Contract | Multi-harness mixed-style edge case; deferred to US3.c full harness matrix tests |
+| C-M3 | Contract | Temp file mode 0600 vs 0644 contract; resolves via S-M3 mode-preservation fix |
+| R-M5 | Rust | `bind_project` 130-line refactor (ergonomics); deferred to follow-up polish |
+| S-M1 | Security | Unbounded `read_to_string` on third-party files; deferred to dedicated util helper + PR before v0.4 cut |
+| S-M2 | Security | Symlink TOCTOU window; documented as benign; full closure needs `O_NOFOLLOW` open + dirfd rename; deferred to US5 hardening sweep |
+| S-M4 | Security | Harness-owned parent-dir chmod 0700 on Tome-create vs respecting harness convention; design choice deferred |
+| T-M2, T-M3, T-M5, T-M6, T-M8, T-M9, T-M10, T-M11 | Test | 8 test gap items rolled into "us1-test-gap-followups" tracking issue for US2/US3 polish phases |
+| (30+ minors + nits) | Various | Docstring drift, redundant assertions, formatting; bulk-deferred to tracking issue |
+
+See `specs/004-phase-4-refactor-harnesses/review/us1-disposition.md` for full triage.
 
 ## Deprecated Code
 
@@ -181,7 +200,7 @@ Per Phase 4 research §R-17, Phase 3 deferred items are dispositioned as follows
 ## Concern Severity Guide
 
 | Level | Definition | Response Time |
-|-------|------------|---------------|
+|-------|------------|----------------|
 | Critical | Production impact, security breach, test failure blocking ship | Immediate |
 | High | Degraded functionality, security risk, blocking feature | This sprint |
 | Medium | Developer experience, minor functional issues, UX confusion | Next sprint |

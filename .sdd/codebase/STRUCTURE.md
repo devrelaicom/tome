@@ -1,8 +1,8 @@
 # Project Structure
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
-> **Generated**: 2026-05-23
-> **Last Updated**: 2026-05-23
+> **Generated**: 2026-05-25
+> **Last Updated**: 2026-05-25
 
 ## Directory Layout
 
@@ -12,7 +12,7 @@ tome/
 │   ├── main.rs                         # CLI entry: scope resolution, command dispatch, error mapping
 │   ├── lib.rs                          # Public exports
 │   ├── cli.rs                          # clap derive defs (all commands + global flags)
-│   ├── error.rs                        # Closed TomeError enum (26+ variants → exit codes)
+│   ├── error.rs                        # Closed TomeError enum (30+ variants → exit codes)
 │   ├── config.rs                       # config.toml parsing (strict; legacy Phase 3 shape)
 │   ├── paths.rs                        # Phase 4: consolidated <home>/.tome/ paths (no XDG split)
 │   ├── logging.rs                      # tracing-subscriber wiring
@@ -53,11 +53,12 @@ tome/
 │   │   ├── download.rs                 # Model fetch + verify + atomic persist
 │   │   └── runtime.rs                  # ort Environment singleton setup
 │   │
-│   ├── workspace/                      # Scope + context resolution (Phase 3+)
+│   ├── workspace/                      # Scope + context resolution + binding (Phase 3-4)
 │   │   ├── mod.rs                      # Public API exports
 │   │   ├── scope.rs                    # Phase 4: Scope(WorkspaceName) tuple struct
 │   │   ├── name.rs                     # WorkspaceName validation + parsing
 │   │   ├── resolution.rs               # Workspace vs global determination
+│   │   ├── binding.rs                  # Phase 4: Project binding + marker landing (US1.a)
 │   │   ├── info.rs                     # WorkspaceInfo report assembly
 │   │   └── init.rs                     # Atomic project binding via tempfile
 │   │
@@ -67,7 +68,7 @@ tome/
 │   │   ├── harness_detect.rs           # Probe ~/.claude/, ~/.codex/, ~/.cursor/, etc.
 │   │   └── fixes.rs                    # apply + auto-fix dispatch (subsystem routing)
 │   │
-│   ├── harness/                        # Phase 4: Per-harness trait impls
+│   ├── harness/                        # Phase 4: Per-harness trait + sync orchestrator
 │   │   ├── mod.rs                      # HarnessModule trait, SUPPORTED_HARNESSES registry
 │   │   ├── claude_code.rs              # Claude Code harness impl
 │   │   ├── codex.rs                    # Codex harness impl
@@ -75,13 +76,15 @@ tome/
 │   │   ├── gemini.rs                   # Gemini CLI harness impl
 │   │   ├── opencode.rs                 # OpenCode harness impl
 │   │   ├── rules_file.rs               # Block-in-file + standalone strategies
-│   │   └── mcp_config.rs               # JSON + TOML MCP config read/write
+│   │   ├── mcp_config.rs               # JSON + TOML MCP config read/write primitives
+│   │   ├── sync.rs                     # Phase 4: Sync orchestrator (per-project harness writes)
+│   │   └── stub.rs                     # StubHarnessModule for test injection
 │   │
 │   ├── settings/                       # Phase 4: Layered harness composition
 │   │   ├── mod.rs                      # Type defs (ProjectMarkerConfig, WorkspaceSettings, GlobalSettings)
 │   │   ├── parser.rs                   # TOML deserialization (strict)
 │   │   ├── composition.rs              # CompositionRef + reference parsing
-│   │   └── resolver.rs                 # Resolve effective harness list (priority walk)
+│   │   └── resolver.rs                 # Resolve effective harness list (priority walk + composition refs)
 │   │
 │   ├── summarise/                      # Phase 4: Workspace summariser (skeleton)
 │   │   ├── mod.rs                      # Summariser trait + input/output types
@@ -112,7 +115,10 @@ tome/
 │   │   ├── workspace/                  # `tome workspace` subcommands
 │   │   │   ├── mod.rs                  # Dispatcher
 │   │   │   ├── info.rs                 # `tome workspace info`
-│   │   │   └── init.rs                 # `tome workspace init [--inherit-global] [--force]`
+│   │   │   ├── init.rs                 # `tome workspace init [--inherit-global] [--force]`
+│   │   │   └── use_.rs                 # Phase 4: `tome workspace use <name> [--force]` (bind + sync)
+│   │   ├── harness/                    # Phase 4: Harness sync command wrapper
+│   │   │   └── mod.rs                  # Thin seam to harness::sync orchestrator
 │   │   ├── doctor.rs                   # `tome doctor [--fix] [--verify]`
 │   │   └── mcp.rs                      # `tome mcp` entry point
 │   │
@@ -147,7 +153,7 @@ tome/
 │   ├── query.rs                        # Query + strict mode + rerank
 │   ├── reindex.rs                      # Reindex all/per-catalog/per-plugin
 │   ├── status.rs                       # Status command + health checks
-│   ├── workspace_*.rs                  # Workspace info/init/commands integration
+│   ├── workspace_*.rs                  # Workspace info/init/binding/sync tests
 │   ├── doctor.rs                       # Doctor assembly + fixes + harness detect
 │   ├── mcp_*.rs                        # MCP server lifecycle + tools
 │   ├── exit_codes.rs                   # Exit code matrix validation
@@ -197,23 +203,24 @@ tome/
 │   │   ├── data-model.md
 │   │   ├── contracts/
 │   │   └── quickstart.md
-│   └── 004-phase-4-refactor-harnesses/       # Phase 4 (planning; implementation in flight)
+│   └── 004-phase-4-refactor-harnesses/       # Phase 4 (F1–F11 shipped; US1–US5 in flight)
 │       ├── spec.md
 │       ├── plan.md
 │       ├── research.md (19 R-decisions)
 │       ├── data-model.md (schema v2, Scope reshape, HarnessModule, settings layers)
-│       ├── contracts/ (13 contracts: paths-and-layout, harness-modules, settings-composition, etc.)
+│       ├── contracts/ (13 contracts: paths-and-layout, harness-modules, settings-composition, sync-algorithm, workspace-commands, etc.)
+│       ├── retro/P2.md (F1–F11 retro)
 │       └── quickstart.md
 │
 ├── PRDs/                               # Product requirement documents
 │   ├── phase-1.md
 │   ├── phase-2.md
 │   ├── phase-3.md
-│   └── phase-4.md (in planning)
+│   └── phase-4.md
 │
 ├── retro/                              # Phase retrospectives
-│   ├── P2.md
-│   ├── P3.md
+│   ├── P2.md (phase 2 polish)
+│   ├── P3.md (phase 2 feature complete)
 │   ├── P4.md (workspace lifecycle)
 │   ├── P5.md (refcount)
 │   ├── P6.md (doctor)
@@ -221,12 +228,12 @@ tome/
 │   ├── P8.md (phase 3 polish)
 │   └── P10.md (phase 2 polish / feature complete)
 │
-├── Cargo.toml                          # Package definition (MSRV 1.93, v0.3.0+)
+├── Cargo.toml                          # Package definition (MSRV 1.93, v0.4.0+)
 ├── Cargo.lock                          # Dependency lock
 ├── build.rs                            # sqlite-vec C extension compilation
 ├── CONSTITUTION.md                     # v1.3.0 — constraints + trade-offs (Phase 4 §Paths amendment)
 ├── CLAUDE.md                           # Project context for Claude Code
-└── CHANGELOG.md                        # Version history (v0.1.0, v0.2.0, v0.3.0)
+└── CHANGELOG.md                        # Version history (v0.1.0–v0.3.0, Phase 4 in flight)
 ```
 
 ## Key Directories
@@ -242,13 +249,13 @@ tome/
 | `plugin/` | Plugin metadata, lifecycle orchestration | `lifecycle.rs` | Plugin enable/disable/reindex logic |
 | `index/` | SQLite index, schema, migrations, KNN query | `schema.rs`, `skills.rs` | Schema changes, new queries |
 | `embedding/` | Text embedding, reranking, model management | `registry.rs` | Model updates, embedding features |
-| `workspace/` | Scope resolution, workspace management | `scope.rs`, `resolution.rs` | Multi-workspace features |
-| `harness/` | Phase 4: Per-harness trait impls + registry | `claude_code.rs`, etc. | New harness integrations |
+| `workspace/` | Scope resolution, binding, workspace management | `binding.rs`, `resolution.rs` | Multi-workspace features, binding logic |
+| `harness/` | Phase 4: Per-harness trait impls + sync orchestrator | `sync.rs`, per-harness files | New harness integrations, sync logic |
 | `settings/` | Phase 4: Layered composition resolver | `resolver.rs` | Composition logic changes |
-| `summarise/` | Phase 4: Workspace summariser skeleton | `llama.rs`, `stub.rs` | Summariser implementation |
-| `commands/` | CLI command implementations | `catalog.rs`, `plugin/`, etc. | New commands or command logic |
+| `commands/` | CLI command implementations | `catalog.rs`, `plugin/`, `workspace/`, `harness/` | New commands or command logic |
 | `presentation/` | Output formatting, TUI, colors | `tables.rs`, `prompt.rs` | Output enhancements |
 | `mcp/` | MCP server (async island) | `tools/`, `runtime.rs` | MCP tool handlers, server features |
+| `util/` | Shared utilities (atomic directories, etc.) | `atomic_dir.rs` | Common helper functions |
 
 ### `tests/` — Test Files
 
@@ -256,7 +263,7 @@ tome/
 |-----------|---------|---------|------------|
 | `catalog_*.rs` | Catalog lifecycle tests | `#[test] fn catalog_add_updates_refcount()` | Catalog feature changes |
 | `plugin_*.rs` | Plugin enable/disable tests | `#[test] fn plugin_enable_embeds_skills()` | Plugin feature changes |
-| `workspace_*.rs` | Workspace binding + info tests | `#[test] fn workspace_resolution_walks_cwd()` | Workspace feature changes |
+| `workspace_*.rs` | Workspace binding + info + sync tests | `#[test] fn workspace_binding_lands_marker()` | Workspace feature changes |
 | `query.rs` | KNN + rerank tests | `#[test] fn query_with_rerank_sorts_by_score()` | Query logic changes |
 | `common/mod.rs` | Test utilities + fixtures | `fn build_test_db()`, `StubEmbedder` | Shared test helpers |
 | `sync_boundary.rs` | Structural: no async outside `src/mcp/` | Build-time path scan | Architecture enforcement |
@@ -279,22 +286,28 @@ Each capability module is self-contained:
 - **`embedding/`** — Wraps ML models
   - Can call: `error`, `paths`, `serde`, `ort`, `fastembed-rs`
   - Cannot call: `index` (except trait bounds for output), `plugin`
-- **`workspace/`** — Scope resolution
-  - Can call: `catalog`, `config`, `paths`, `index` (read-only via public API)
-  - Cannot call: `commands`, `plugin` (except scope passes through)
-- **`harness/`** — Per-harness trait (Phase 4)
-  - Can call: `paths` (filesystem checks only, existence probes)
-  - Cannot call: Any business logic
+- **`workspace/`** — Scope resolution + binding
+  - Can call: `catalog`, `config`, `paths`, `index` (read-only via public API), `settings`, `plugin`
+  - Cannot call: `commands` (except scope passes through)
+- **`harness/`** — Per-harness trait + sync orchestrator (Phase 4)
+  - Can call: `paths` (filesystem checks only, existence probes), `settings` (resolver callback), `error`
+  - Cannot call: Any business logic except `settings::resolver::StubScope` for composition
 - **`settings/`** — Composition resolver (Phase 4)
-  - Can call: `serde`, `error`, `workspace::name`
-  - Cannot call: `index`, `harness` (directly; name resolution is post-resolver)
+  - Can call: `serde`, `error`, `workspace::name`, `paths` (readonly)
+  - Cannot call: `index`, `harness` (directly; harness registry accessed via callback)
+- **`summarise/`** — Skeleton workspace summariser (Phase 4)
+  - Can call: `error`, `paths`, `serde`, `llama-cpp-2` (production), `plugin`
+  - Cannot call: `index`, `commands`
+- **`doctor/`** — Health check + auto-repair
+  - Can call: `embedding`, `index`, `catalog`, `commands::plugin`, `paths`, `harness` (detect)
+  - Cannot call: None; very broad reading access
 
 ### Command Modules
 
 Commands are thin wrappers:
 
 ```
-commands/{catalog,plugin,models,query,reindex,status,workspace,mcp,doctor}.rs
+commands/{catalog,plugin,models,query,reindex,status,workspace,harness,mcp,doctor}.rs
   ↓
 Resolve dependencies (config, index lock, embedder)
   ↓
@@ -314,10 +327,12 @@ Never put business logic inside `commands/` — extract to `plugin/`, `embedding
 | New search filter | `src/index/query.rs` | `pub fn knn_with_plugin_filter()` |
 | Model download feature | `src/embedding/download.rs` | `pub fn download_model_with_retry()` |
 | Workspace detection | `src/workspace/resolution.rs` | Logic to find markers |
+| Project binding logic | `src/workspace/binding.rs` | New binding validators |
 | Harness integration | `src/harness/{harness_name}.rs` | New `HarnessModule` impl |
+| Harness sync logic | `src/harness/sync.rs` | Orchestration changes |
 | Settings composition | `src/settings/resolver.rs` | New composition reference types |
 | MCP tool | `src/mcp/tools/` | New file with tool handler |
-| CLI command | `src/commands/{feature}.rs` | New `pub fn run(args, scope, mode)` |
+| CLI command | `src/commands/{feature}.rs` or `src/commands/{feature}/mod.rs` | New `pub fn run(args, scope, mode)` |
 | Output format | `src/presentation/` | New `comfy-table` wrapper |
 | Test fixture | `tests/common/mod.rs` | `fn build_workspace_db()` |
 | New dependency feature | `build.rs` | C extension compilation |
@@ -330,6 +345,8 @@ There are no custom path aliases (e.g., `@/`). Use absolute paths from crate roo
 use tome::plugin::lifecycle::enable;
 use tome::index::{open, open_read_only};
 use tome::embedding::{Embedder, Reranker};
+use tome::harness::HarnessModule;
+use tome::workspace::binding::bind_project;
 ```
 
 ## Entry Points
@@ -339,21 +356,32 @@ use tome::embedding::{Embedder, Reranker};
 | `src/main.rs` | CLI bootstrap | Binary | `workspace::resolution`, `commands::*` |
 | `src/mcp/mod.rs::run()` | MCP server bootstrap | Binary via `commands::mcp` | `tokio`, `rmcp::serve_server` |
 | `src/lib.rs` | Library re-exports | Integration tests | All public modules |
+| `src/workspace/binding.rs::bind_project()` | Project binding | `commands::workspace::use_` | `index`, `util::atomic_dir` |
+| `src/harness/sync.rs::sync_project()` | Harness orchestration | `commands::harness::sync_for_project_root()` | `settings`, per-`HarnessModule` |
 | `build.rs` | Build-time setup | Cargo | sqlite-vec C compiler |
 
 ## Generated Files
 
-None — all code is hand-written. `index.db`, `index.lock`, and catalog cache are generated at runtime but not tracked in git.
+None — all code is hand-written. `index.db`, `index.lock`, catalog cache, and project markers are generated at runtime but not tracked in git.
 
-## Phase 4 Structural Changes
+## Phase 4 Structural Changes (F1–F11 Shipped)
 
+### Foundational (F1–F11)
 - **Paths**: Consolidated under `<home>/.tome/` (no XDG split) — `src/paths.rs`
 - **Central database**: Single `index.db` per Paths (was: per-workspace) — `src/index/schema.rs` schema v2
 - **Scope type**: `Scope(WorkspaceName)` tuple struct (was: `Scope::Global | Workspace(Path)`) — `src/workspace/scope.rs`
+- **Error variants**: 8 new variants (13, 19, 70, 71, 72, 73, 74, 75) for workspace + binding + clash + schema + exit-codes — `src/error.rs`
+- **WorkspaceName newtype**: Validation + parsing, RFC-952 DNS-label rules — `src/workspace/name.rs`
+- **Workspace junction tables**: `workspace_catalogs`, `workspace_skills`, `workspace_projects` — `src/index/schema.rs`
+- **Per-command scope threading**: Every command accepts resolved `Scope` parameter — `src/commands/`
 - **Harness abstraction**: Five `HarnessModule` impls + registry — `src/harness/`
 - **Settings layers**: Project / workspace / global with composition refs — `src/settings/`
 - **Summariser skeleton**: `src/summarise/` with stub + llama impls
-- **Utilities**: Atomic directory helper promoted to `src/util/` — `src/util/atomic_dir.rs`
+
+### User Stories (US1–US5 In Flight / Completed)
+- **US1 (Phase 4 / F1–F11)**: `tome workspace use` — bind project to workspace + harness sync
+  - **US1.a** (binding): `src/workspace/binding.rs`, `src/commands/workspace/use_.rs`
+  - **US1.b-c** (harness sync): `src/harness/sync.rs`, `src/commands/harness/mod.rs`
 
 ---
 
