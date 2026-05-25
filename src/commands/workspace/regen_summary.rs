@@ -20,11 +20,11 @@ use crate::workspace::{self, RegenSummaryOutcome, ResolvedScope, WorkspaceName};
 
 pub fn run(
     args: WorkspaceRegenSummaryArgs,
-    scope: &ResolvedScope,
+    _scope: &ResolvedScope,
     paths: &Paths,
     mode: Mode,
 ) -> Result<(), TomeError> {
-    let name = resolve_target_name(args.name.as_deref(), scope)?;
+    let name = WorkspaceName::parse(&args.name)?;
     let summariser = LlamaSummariser::new(paths)?;
     run_with_summariser(&name, &summariser, paths, mode)
 }
@@ -39,16 +39,6 @@ pub fn run_with_summariser(
 ) -> Result<(), TomeError> {
     let outcome = workspace::regen_summary::regen(name, summariser, paths)?;
     emit(&outcome, mode)
-}
-
-fn resolve_target_name(
-    requested: Option<&str>,
-    scope: &ResolvedScope,
-) -> Result<WorkspaceName, TomeError> {
-    match requested {
-        Some(raw) => WorkspaceName::parse(raw),
-        None => Ok(scope.scope.name().clone()),
-    }
 }
 
 fn emit(outcome: &RegenSummaryOutcome, mode: Mode) -> Result<(), TomeError> {

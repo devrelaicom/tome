@@ -11,7 +11,7 @@ use std::path::Path;
 use common::{lifecycle_paths, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed};
 use tempfile::TempDir;
 use time::OffsetDateTime;
-use tome::harness::{McpConfigFormat, mcp_config};
+use tome::harness::{BlockBodyStyle, McpConfigFormat, mcp_config, rules_file};
 use tome::index::{self, OpenOptions, workspace_catalogs};
 use tome::workspace::{self, WorkspaceName};
 
@@ -33,9 +33,15 @@ fn open_central(paths: &tome::paths::Paths) -> rusqlite::Connection {
 
 fn seed_bound_project(paths: &tome::paths::Paths, workspace_name: &str, project_root: &Path) {
     std::fs::create_dir_all(project_root.join(".tome")).expect("create .tome");
+    // Declare claude-code in the project marker so the per-project
+    // effective harness list resolves to [claude-code] for the cascade
+    // (FR-405). Without this declaration the resolver would emit an
+    // empty effective list — the cascade would correctly leave the
+    // pre-seeded MCP / rules entries alone (they would belong to some
+    // other phantom enrollee, not this project).
     std::fs::write(
         project_root.join(".tome").join("config.toml"),
-        format!("workspace = \"{workspace_name}\"\n"),
+        format!("workspace = \"{workspace_name}\"\nharnesses = [\"claude-code\"]\n"),
     )
     .expect("write project config.toml");
     let conn = open_central(paths);
@@ -165,6 +171,99 @@ fn cascade_step5_refcount_cleans_unreferenced_catalog_cache() {
     assert!(
         !cache_dir.exists(),
         "shared cache dir should have been removed after removing other",
+    );
+}
+
+/// T-M3 (a): Step 1 must remove a Tome-owned rules-file block via the
+/// `BlockInExistingFile` strategy. Pre-populate `<project>/AGENTS.md`
+/// (claude-code's target) with a block; cascade with --force; assert
+/// the block is gone but the file still exists.
+#[test]
+fn cascade_step1_removes_rules_block_via_block_in_existing_file_strategy() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    workspace::init::init(parse("mine"), false, &paths).expect("init");
+
+    let project = tmp.path().join("bound-project");
+    std::fs::create_dir_all(&project).expect("create project");
+    seed_bound_project(&paths, "mine", &project);
+
+    // claude-code's rules target is `<project>/AGENTS.md` with strategy
+    // `BlockInExistingFile`. Pre-populate with developer content + a
+    // Tome-owned block.
+    let agents_md = project.join("AGENTS.md");
+    std::fs::write(&agents_md, "# Project guidelines\n\nKeep it tidy.\n").expect("seed AGENTS.md");
+    rules_file::write_block(&agents_md, "TOME OWNED BODY", BlockBodyStyle::AtInclude)
+        .expect("write Tome block");
+
+    let pre = std::fs::read_to_string(&agents_md).expect("read pre");
+    assert!(
+        pre.contains("<!-- tome:begin -->"),
+        "Tome block should be present pre-cascade: {pre}",
+    );
+
+    // Cascade. claude-code is in the seeded effective list because the
+    // project marker has no exclusion and the global / workspace
+    // settings don't override.
+    let outcome =
+        workspace::remove::remove(parse("mine"), true, &paths, tmp.path()).expect("remove");
+    assert_eq!(outcome.bound_projects_torn_down, 1);
+
+    // The file is still on disk (developer-authored content stays);
+    // the Tome block is gone.
+    assert!(agents_md.is_file(), "AGENTS.md should still exist");
+    let post = std::fs::read_to_string(&agents_md).expect("read post");
+    assert!(
+        !post.contains("<!-- tome:begin -->"),
+        "Tome block should be removed by cascade Step 1: {post}",
+    );
+    assert!(
+        !post.contains("<!-- tome:end -->"),
+        "Tome end marker should be removed: {post}",
+    );
+    assert!(
+        post.contains("Keep it tidy."),
+        "developer content should survive: {post}",
+    );
+}
+
+/// T-M3 (b): a user-owned MCP entry (not Tome-owned — different
+/// command) MUST survive the cascade. The per-project effective list +
+/// `mcp_config::remove_entry`'s `is_tome_owned` gate together protect
+/// it.
+#[test]
+fn cascade_step1_leaves_user_owned_mcp_entry_alone() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    workspace::init::init(parse("mine"), false, &paths).expect("init");
+
+    let project = tmp.path().join("bound-project");
+    std::fs::create_dir_all(&project).expect("create project");
+    seed_bound_project(&paths, "mine", &project);
+
+    // Seed a `tome` entry whose `command` is NOT `tome` — looks like a
+    // user-customised entry the cascade must not clobber.
+    let mcp_path = project.join(".claude/settings.json");
+    let user_entry = mcp_config::TomeEntry::new(
+        "evil-binary".to_string(),
+        vec!["--my-custom".to_string(), "args".to_string()],
+    );
+    mcp_config::write_entry(&mcp_path, McpConfigFormat::Json, "mcpServers", &user_entry)
+        .expect("seed user-owned entry");
+    let pre_bytes = std::fs::read(&mcp_path).expect("read pre");
+
+    let outcome =
+        workspace::remove::remove(parse("mine"), true, &paths, tmp.path()).expect("remove");
+    assert_eq!(outcome.bound_projects_torn_down, 1);
+
+    // The settings.json file must be byte-identical — neither the
+    // entry shape nor the surrounding JSON changed.
+    let post_bytes = std::fs::read(&mcp_path).expect("read post");
+    assert_eq!(
+        pre_bytes, post_bytes,
+        "user-owned tome MCP entry must survive cascade unchanged",
     );
 }
 

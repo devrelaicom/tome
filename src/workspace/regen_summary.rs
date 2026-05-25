@@ -35,6 +35,7 @@
 //! because the underlying skill-state hasn't changed).
 
 use std::path::Path;
+use std::str::FromStr;
 
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -113,9 +114,13 @@ pub fn regen(
         })?;
 
     let input = load_summariser_input(&conn, workspace_id)?;
-    drop(conn);
 
     // Summarise. Failure here exits 20 with prior cache untouched.
+    // Note: the advisory lock + DB conn are held across the summariser
+    // call. This is deliberate — the regen path is single-action and
+    // ordering is important for the post-summarise `last_used_at` bump.
+    // Performance trade-off documented in `us2-disposition.md` (R-M5
+    // deferred).
     let output = summariser.summarise(&input)?;
 
     // Length-window warning per FR-425.
@@ -159,6 +164,24 @@ pub fn regen(
     let rules_path = paths.workspace_rules_file(name);
     store::write_atomic(&rules_path, output.long.as_bytes())?;
 
+    // FR-411: bump `last_used_at` on the workspaces row after a
+    // successful summariser invocation. The advisory lock is still held;
+    // no other writer can be mutating the row.
+    let now_unix = now.unix_timestamp();
+    conn.execute(
+        "UPDATE workspaces SET last_used_at = ?1 WHERE name = ?2",
+        rusqlite::params![now_unix, name.as_str()],
+    )
+    .map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!(
+            "regen-summary: bump last_used_at for `{}`: {e}",
+            name.as_str(),
+        ))
+    })?;
+
+    // Drop the DB handle BEFORE releasing the lock so any WAL checkpoint
+    // completes inside the lock window.
+    drop(conn);
     // Release the lock BEFORE syncing bound projects — the sync helper
     // does not need the central-DB write lock.
     drop(lock);
@@ -288,7 +311,15 @@ fn update_settings_summaries(
 
     summaries_table["short"] = toml_edit::value(short);
     summaries_table["long"] = toml_edit::value(long);
-    summaries_table["generated_at"] = toml_edit::value(generated_at);
+    // Emit `generated_at` as an unquoted TOML datetime literal (per
+    // contracts/workspace-commands.md's example). Falls back to a basic
+    // string when the RFC 3339 input isn't parseable by `toml_edit`'s
+    // datetime grammar — should never happen with `OffsetDateTime`'s
+    // canonical formatter, but the fallback keeps the write infallible.
+    summaries_table["generated_at"] = match toml_edit::Datetime::from_str(generated_at) {
+        Ok(dt) => toml_edit::value(dt),
+        Err(_) => toml_edit::value(generated_at),
+    };
 
     Ok(doc.to_string())
 }

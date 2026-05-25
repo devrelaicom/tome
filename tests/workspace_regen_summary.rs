@@ -237,9 +237,18 @@ fn regen_summary_failure_keeps_prior_cached_summaries() {
     // Second run with a failing summariser must NOT touch the cache.
     let failing = FailingSummariser;
     let err = workspace::regen_summary::regen(&parse("mine"), &failing, &paths).unwrap_err();
+    // T-M4: tighten the matcher to assert the `kind` payload too — the
+    // `ModelMissing` discriminant is what makes the test actually
+    // exercise the documented failure path.
     assert!(
-        matches!(err, TomeError::SummariserFailure { .. }),
-        "expected SummariserFailure, got {err:?}",
+        matches!(
+            err,
+            TomeError::SummariserFailure {
+                kind: SummariserFailureKind::ModelMissing,
+                ..
+            }
+        ),
+        "expected SummariserFailure {{ kind: ModelMissing }}, got {err:?}",
     );
     // Exit code 24 in implementation (closed-set; contract typo'd as
     // 20, see `error.rs` exit_code() note).
@@ -290,6 +299,150 @@ fn regen_summary_long_window_oversize_is_still_cached() {
 
     let rules_body = std::fs::read_to_string(paths.workspace_rules_file(&parse("mine"))).unwrap();
     assert_eq!(rules_body.len(), 3000);
+}
+
+/// T-M5: a settings.toml that already carries `[[catalogs]]` arrays
+/// and a top-level `harnesses` field must survive the regen rewrite —
+/// `toml_edit::DocumentMut`'s structural editing leaves untouched keys
+/// alone. The new `[summaries]` section must also be present.
+#[test]
+fn regen_summary_preserves_existing_catalogs_and_harnesses() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    workspace::init::init(parse("mine"), false, &paths).expect("init");
+    seed_enabled_skill(&paths, "mine", "c", "p", "s", "");
+
+    // Overwrite settings.toml with a richer scaffold than `init`
+    // produces, mirroring the shape data-model §6 documents.
+    let settings_path = paths.workspace_settings_file(&parse("mine"));
+    let pre = "\
+name = \"mine\"
+harnesses = [\"claude-code\", \"!cursor\"]
+
+[summaries]
+
+[[catalogs]]
+name = \"primary\"
+url = \"https://example.com/primary.git\"
+ref = \"main\"
+
+[[catalogs]]
+name = \"secondary\"
+url = \"https://example.com/secondary.git\"
+ref = \"v1\"
+";
+    std::fs::write(&settings_path, pre).expect("seed settings.toml");
+
+    let stub = StubSummariser::new();
+    let _ = workspace::regen_summary::regen(&parse("mine"), &stub, &paths).expect("regen");
+
+    let post = std::fs::read_to_string(&settings_path).expect("read post");
+    // The toml_edit rewrite must keep the developer-authored top-level
+    // fields and array-of-tables intact.
+    assert!(post.contains("name = \"mine\""), "name field lost: {post}");
+    assert!(
+        post.contains("harnesses = [\"claude-code\", \"!cursor\"]"),
+        "harnesses array lost: {post}",
+    );
+    assert!(
+        post.contains("name = \"primary\""),
+        "[[catalogs]] primary entry lost: {post}",
+    );
+    assert!(
+        post.contains("url = \"https://example.com/primary.git\""),
+        "primary url lost: {post}",
+    );
+    assert!(
+        post.contains("name = \"secondary\""),
+        "[[catalogs]] secondary entry lost: {post}",
+    );
+    assert!(
+        post.contains("url = \"https://example.com/secondary.git\""),
+        "secondary url lost: {post}",
+    );
+    // [summaries] is populated.
+    assert!(
+        post.contains("[summaries]"),
+        "summaries section lost: {post}"
+    );
+    assert!(
+        post.contains("short ="),
+        "summaries.short not written: {post}"
+    );
+    assert!(
+        post.contains("long ="),
+        "summaries.long not written: {post}"
+    );
+    assert!(
+        post.contains("generated_at = "),
+        "summaries.generated_at not written: {post}",
+    );
+    // C-M5: generated_at lands as an UNQUOTED TOML datetime literal,
+    // not a basic-string. The unquoted form has no surrounding double
+    // quotes after the `= `.
+    let needle = "generated_at = ";
+    let idx = post.find(needle).expect("generated_at present");
+    let after = &post[idx + needle.len()..];
+    assert!(
+        !after.starts_with('"'),
+        "generated_at must be unquoted datetime literal, got starts-with-quote: {after}",
+    );
+
+    // Parse the doc back to confirm `generated_at` is a Datetime not a
+    // string. `toml::Value::Datetime` lands when the literal was
+    // unquoted; `toml::Value::String` lands when it was quoted.
+    let parsed: toml::Value = toml::from_str(&post).expect("re-parse");
+    let summaries = parsed
+        .get("summaries")
+        .expect("summaries table")
+        .as_table()
+        .expect("summaries is a table");
+    let generated = summaries.get("generated_at").expect("generated_at present");
+    assert!(
+        generated.is_datetime(),
+        "generated_at should parse as toml::Value::Datetime, got {generated:?}",
+    );
+}
+
+#[test]
+fn regen_summary_bumps_last_used_at() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    workspace::init::init(parse("mine"), false, &paths).expect("init");
+    seed_enabled_skill(&paths, "mine", "c", "p", "s", "");
+
+    // Snapshot last_used_at after init.
+    let prior: i64 = {
+        let conn = open_central(&paths);
+        conn.query_row(
+            "SELECT last_used_at FROM workspaces WHERE name = 'mine'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+
+    // Force a clock gap so the post-regen timestamp can't tie.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    let stub = StubSummariser::new();
+    let _ = workspace::regen_summary::regen(&parse("mine"), &stub, &paths).expect("regen");
+
+    let post: i64 = {
+        let conn = open_central(&paths);
+        conn.query_row(
+            "SELECT last_used_at FROM workspaces WHERE name = 'mine'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(
+        post > prior,
+        "regen-summary should bump last_used_at (prior={prior}, post={post})",
+    );
 }
 
 #[test]
