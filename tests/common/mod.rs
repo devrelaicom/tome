@@ -485,6 +485,34 @@ pub fn cache_dir_for(env: &ToolEnv, url: &str) -> PathBuf {
     env.catalogs_dir().join(hex::encode(h.finalize()))
 }
 
+/// RAII guard installing a synthetic harness module set in
+/// [`tome::harness::HARNESS_MODULES_OVERRIDE`]. The slot is restored
+/// to `None` on drop, surviving panics so a failing assertion can't
+/// leak the override into the next test binary entry.
+///
+/// The override slot is a process-global `RwLock`; integration tests
+/// that install one must serialise via the `OVERRIDE_MUTEX` pattern
+/// documented in `tests/harness_sync_stub.rs` to avoid clobbering one
+/// another when cargo runs them in parallel.
+pub struct HarnessModulesGuard;
+
+impl HarnessModulesGuard {
+    pub fn install(modules: Vec<Box<dyn tome::harness::HarnessModule>>) -> Self {
+        *tome::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("HARNESS_MODULES_OVERRIDE poisoned") = Some(modules);
+        Self
+    }
+}
+
+impl Drop for HarnessModulesGuard {
+    fn drop(&mut self) {
+        *tome::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("HARNESS_MODULES_OVERRIDE poisoned") = None;
+    }
+}
+
 /// Test helper: overwrite the `pinned_ref` for one `(global, name)`
 /// enrolment. Used by SHA-pinning tests that previously hand-edited
 /// `config.toml`.
