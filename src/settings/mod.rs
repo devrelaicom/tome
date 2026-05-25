@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::workspace::WorkspaceName;
 
 pub mod composition;
+pub mod edit;
 pub mod parser;
 pub mod resolver;
 

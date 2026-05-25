@@ -68,6 +68,7 @@ fn main() {
             commands::workspace::run(args.command, cli.scope.workspace.as_deref(), &scope, mode)
         }
         Command::Doctor(args) => commands::doctor::run(args, &scope, mode),
+        Command::Harness(args) => commands::harness::run(args, &scope, mode),
     };
 
     match result {
