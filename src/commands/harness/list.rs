@@ -19,11 +19,11 @@ use crate::output::{Mode, write_json};
 use crate::paths::Paths;
 use crate::presentation::tables;
 use crate::settings::parser::{parse_global, parse_project_marker, parse_workspace};
-use crate::settings::resolver::{EffectiveHarness, ScopeKind, resolve_effective_list};
+use crate::settings::resolver::{EffectiveHarness, resolve_effective_list};
 use crate::settings::{GlobalSettings, ProjectMarkerConfig, WorkspaceSettings};
 use crate::workspace::{ResolvedScope, WorkspaceName};
 
-use super::PathsScopeProvider;
+use super::CentralDbScopeProvider;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -41,7 +41,11 @@ pub enum HarnessListOutcome {
 #[derive(Debug, Clone, Serialize)]
 pub struct EffectiveEntry {
     pub name: String,
-    pub source_chain: Vec<ScopeKind>,
+    /// Mixed-notation chain per `contracts/settings-composition.md` —
+    /// each element is either a plain scope name (`"project"` /
+    /// `"workspace"` / `"global"`) or a bracketed reference
+    /// (`"[workspaces.<name>]"`, `"[workspace]"`, `"[global]"`).
+    pub source_chain: Vec<String>,
 }
 
 pub fn run(
@@ -62,6 +66,19 @@ pub fn run(
 
 fn list_as_written(raw: &str, paths: &Paths) -> Result<HarnessListOutcome, TomeError> {
     let name = WorkspaceName::parse(raw)?;
+
+    // C-M2: confirm the workspace exists in the central registry before
+    // reading its settings file. Otherwise a typo like
+    // `tome harness list demoo` would silently return an empty list
+    // instead of exit 13. The `global` workspace is always present
+    // (bootstrap-seeded); fall back to that invariant when the DB has
+    // not yet been created.
+    if !workspace_is_registered(&name, paths) {
+        return Err(TomeError::WorkspaceNotFound {
+            name: name.as_str().to_owned(),
+        });
+    }
+
     let path = paths.workspace_settings_file(&name);
     let body = match std::fs::read_to_string(&path) {
         Ok(b) => b,
@@ -84,11 +101,30 @@ fn list_as_written(raw: &str, paths: &Paths) -> Result<HarnessListOutcome, TomeE
     })
 }
 
+/// Check whether `name` exists in the central `workspaces` table.
+/// Mirrors [`CentralDbScopeProvider::workspace_is_registered`] but
+/// inlined here to avoid making that helper public outside the
+/// `commands::harness` module.
+fn workspace_is_registered(name: &WorkspaceName, paths: &Paths) -> bool {
+    if !paths.index_db.exists() {
+        return name.as_str() == WorkspaceName::global().as_str();
+    }
+    let Ok(conn) = crate::index::open_read_only(&paths.index_db) else {
+        return name.as_str() == WorkspaceName::global().as_str();
+    };
+    conn.query_row(
+        "SELECT 1 FROM workspaces WHERE name = ?1",
+        rusqlite::params![name.as_str()],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
 fn list_effective(scope: &ResolvedScope, paths: &Paths) -> Result<HarnessListOutcome, TomeError> {
     let marker = load_project_marker(scope)?;
     let workspace_settings = load_workspace_settings(scope, paths)?;
     let global_settings = load_global_settings(paths)?;
-    let provider = PathsScopeProvider::new(paths);
+    let provider = CentralDbScopeProvider::new(paths);
 
     let resolved = resolve_effective_list(
         marker.as_ref(),
@@ -189,16 +225,7 @@ fn emit_human(outcome: &HarnessListOutcome) -> Result<(), TomeError> {
                 writeln!(out, "No harnesses declared in any settings layer.")?;
             } else {
                 for h in harnesses {
-                    let chain = h
-                        .source_chain
-                        .iter()
-                        .map(|s| match s {
-                            ScopeKind::Project => "project",
-                            ScopeKind::Workspace => "workspace",
-                            ScopeKind::Global => "global",
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
+                    let chain = h.source_chain.join(" → ");
                     table.add_row(vec![h.name.clone(), chain]);
                 }
                 writeln!(out, "{table}")?;

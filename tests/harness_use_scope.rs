@@ -7,7 +7,7 @@ mod common;
 
 use std::sync::Mutex;
 
-use common::{HarnessModulesGuard, ToolEnv, paths_for, seed_workspace};
+use common::{HarnessModulesGuard, HomeGuard, ToolEnv, paths_for, seed_workspace};
 use tempfile::TempDir;
 use tome::cli::{HarnessScopeArg, HarnessUseArgs};
 use tome::commands::harness::use_;
@@ -137,10 +137,7 @@ fn use_project_scope_writes_project_marker() {
     std::fs::write(marker_dir.join("config.toml"), "workspace = \"global\"\n").unwrap();
 
     // Pre-populate $HOME for any harness detect() calls during sync.
-    let prev_home = std::env::var_os("HOME");
-    unsafe {
-        std::env::set_var("HOME", env.home_path());
-    }
+    let _home = HomeGuard::install(env.home_path());
 
     let args = HarnessUseArgs {
         name: "stub".to_string(),
@@ -150,12 +147,6 @@ fn use_project_scope_writes_project_marker() {
     let scope = make_resolved_scope("global", Some(project_dir.path().to_path_buf()));
     let result = use_::run(args, &scope, &paths, Mode::Json);
 
-    unsafe {
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-    }
     result.expect("use ok");
 
     let marker_body =
@@ -163,6 +154,51 @@ fn use_project_scope_writes_project_marker() {
     assert!(
         marker_body.contains("stub"),
         "project marker must include stub: {marker_body}"
+    );
+}
+
+/// T-M3 (US3 review) — `tome harness use --force` exercises the FR-502
+/// wiring through to `sync::build_deps(..., force: true)`.
+///
+/// The other six tests in this file pass `force: false`. Add one that
+/// runs against a project marker and a synthetic stub harness with
+/// `force: true`; we don't assert on the sync orchestrator's clash
+/// behaviour (the stub harness produces no MCP entries with a clash),
+/// only that the flag round-trips through use_::run without surfacing
+/// an unexpected error.
+#[test]
+fn use_with_force_true_propagates_to_sync_deps() {
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    // Project marker bound to global.
+    let project_dir = TempDir::new().unwrap();
+    let marker_dir = project_dir.path().join(".tome");
+    std::fs::create_dir_all(&marker_dir).unwrap();
+    std::fs::write(marker_dir.join("config.toml"), "workspace = \"global\"\n").unwrap();
+
+    let _home = HomeGuard::install(env.home_path());
+
+    let args = HarnessUseArgs {
+        name: "stub".to_string(),
+        scope: HarnessScopeArg::Project,
+        force: true,
+    };
+    let scope = make_resolved_scope("global", Some(project_dir.path().to_path_buf()));
+    use_::run(args, &scope, &paths, Mode::Json).expect("use --force ok");
+
+    // The settings file must have the entry; the sync path ran under
+    // `force: true` so any pre-existing user-owned MCP entry would have
+    // been overwritten without exit 19.
+    let marker_body =
+        std::fs::read_to_string(Paths::project_marker_config(project_dir.path())).unwrap();
+    assert!(
+        marker_body.contains("stub"),
+        "project marker must include stub: {marker_body}",
     );
 }
 

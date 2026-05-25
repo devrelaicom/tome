@@ -19,9 +19,27 @@ use crate::harness::{
 };
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
+use crate::settings::resolver::resolve_effective_list;
 use crate::workspace::ResolvedScope;
 
 use super::home_root;
+
+/// One reason this harness appears in the effective list. Each entry
+/// names a settings scope plus, optionally, the composition reference
+/// in another scope that pulled this harness in.
+///
+/// Examples:
+///
+/// * `{ scope: "project", via: None }` — declared directly in the
+///   project marker.
+/// * `{ scope: "project", via: Some("[global]") }` — declared in global
+///   settings, pulled into the effective list by the project marker's
+///   `[global]` reference.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HarnessReference {
+    pub scope: String,
+    pub via: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HarnessInfoOutcome {
@@ -34,13 +52,17 @@ pub struct HarnessInfoOutcome {
     pub rules_block_present: Option<bool>,
     pub mcp_entry_present: Option<bool>,
     pub mcp_tome_owned: Option<bool>,
-    /// Which of the three settings scopes (project/workspace/global)
-    /// directly declare this harness in their `harnesses` array.
-    /// Composition references that *would* pull this harness in are
-    /// NOT reported here — we only surface direct declarations to keep
-    /// the report deterministic on `[workspaces.<name>]` references
-    /// against absent workspaces.
-    pub direct_scopes: Vec<String>,
+    /// Why this harness appears in the effective list.
+    ///
+    /// Populated from the resolver's `source_chain` for the named
+    /// harness when a project is resolved: the first chain element is
+    /// the entry-point scope (e.g. `"project"`), and any subsequent
+    /// element is the composition reference that pulled this harness
+    /// into the effective list (e.g. `"[global]"`). When `project_root`
+    /// is `None`, the resolver cannot run with project + workspace
+    /// context, so this falls back to direct-declaration scanning of
+    /// workspace + global settings (C-B3 from US3 review).
+    pub references: Vec<HarnessReference>,
 }
 
 /// Per-harness snapshot captured outside the registry's read guard.
@@ -98,7 +120,7 @@ pub fn run(
             _ => (None, None, None),
         };
 
-    let direct_scopes = collect_direct_scopes(scope, paths, &snap.name)?;
+    let references = collect_references(scope, paths, &snap.name)?;
 
     let outcome = HarnessInfoOutcome {
         name: snap.name,
@@ -110,7 +132,7 @@ pub fn run(
         rules_block_present,
         mcp_entry_present,
         mcp_tome_owned,
-        direct_scopes,
+        references,
     };
 
     match mode {
@@ -136,34 +158,96 @@ fn probe_rules_block(
     }
 }
 
-fn collect_direct_scopes(
+/// Collect references that contribute the named harness to the
+/// effective list (C-B3 from US3 review).
+///
+/// Compute the effective list via the production resolver and find
+/// every entry with `name == name`. For each match, translate its
+/// `source_chain` into a [`HarnessReference`]:
+///
+/// * Chain of length 1 (e.g. `["project"]`) → `{ scope: "project",
+///   via: None }` — direct declaration.
+/// * Longer chain (e.g. `["project", "[global]"]`) → `{ scope:
+///   "project", via: Some("[global]") }` — pulled in via the last
+///   composition reference. The intermediate steps narrate the path but
+///   the user-actionable signal is "disabling the last reference would
+///   remove this harness".
+///
+/// When the resolver fails (e.g. malformed settings or an unknown
+/// `[workspaces.<name>]` reference) we fall back to direct-declaration
+/// scanning rather than propagating the error — `tome harness info` is
+/// a diagnostic; a partial report beats no report.
+fn collect_references(
     scope: &ResolvedScope,
     paths: &Paths,
     name: &str,
-) -> Result<Vec<String>, TomeError> {
-    let mut found = Vec::new();
-    // Project marker
-    if let Some(marker) = super::list::load_project_marker_for_use(scope)?
-        && let Some(list) = marker.harnesses.as_ref()
-        && list.iter().any(|n| n == name)
-    {
-        found.push("project".to_string());
+) -> Result<Vec<HarnessReference>, TomeError> {
+    // Load the three settings layers.
+    let marker = super::list::load_project_marker_for_use(scope)?;
+    let workspace_settings = super::list::load_workspace_settings_for_use(scope, paths)?;
+    let global_settings = super::list::load_global_settings_for_use(paths)?;
+
+    let provider = super::CentralDbScopeProvider::new(paths);
+    let resolved = resolve_effective_list(
+        marker.as_ref(),
+        workspace_settings.as_ref(),
+        &global_settings,
+        &provider,
+    );
+
+    match resolved {
+        Ok(list) => {
+            let mut references: Vec<HarnessReference> = list
+                .harnesses
+                .into_iter()
+                .filter(|h| h.name == name)
+                .map(|h| {
+                    let scope = h.source_chain.first().cloned().unwrap_or_default();
+                    let via = if h.source_chain.len() > 1 {
+                        h.source_chain.last().cloned()
+                    } else {
+                        None
+                    };
+                    HarnessReference { scope, via }
+                })
+                .collect();
+            references.dedup();
+            Ok(references)
+        }
+        Err(_) => {
+            // Fall back to direct-declaration scanning when the
+            // resolver can't run cleanly. This is the pre-C-B3 behaviour
+            // generalised into the new wire shape.
+            let mut found = Vec::new();
+            if let Some(m) = marker.as_ref()
+                && let Some(list) = m.harnesses.as_ref()
+                && list.iter().any(|n| n == name)
+            {
+                found.push(HarnessReference {
+                    scope: "project".to_string(),
+                    via: None,
+                });
+            }
+            if let Some(ws) = workspace_settings.as_ref()
+                && let Some(list) = ws.harnesses.as_ref()
+                && list.iter().any(|n| n == name)
+            {
+                found.push(HarnessReference {
+                    scope: "workspace".to_string(),
+                    via: None,
+                });
+            }
+            if let Some(list) = global_settings.harnesses.as_ref()
+                && list.iter().any(|n| n == name)
+            {
+                found.push(HarnessReference {
+                    scope: "global".to_string(),
+                    via: None,
+                });
+            }
+            Ok(found)
+        }
     }
-    // Workspace settings
-    if let Some(ws) = super::list::load_workspace_settings_for_use(scope, paths)?
-        && let Some(list) = ws.harnesses.as_ref()
-        && list.iter().any(|n| n == name)
-    {
-        found.push("workspace".to_string());
-    }
-    // Global settings
-    let global = super::list::load_global_settings_for_use(paths)?;
-    if let Some(list) = global.harnesses.as_ref()
-        && list.iter().any(|n| n == name)
-    {
-        found.push("global".to_string());
-    }
-    Ok(found)
 }
 
 fn emit_human(outcome: &HarnessInfoOutcome) -> Result<(), TomeError> {
@@ -195,14 +279,15 @@ fn emit_human(outcome: &HarnessInfoOutcome) -> Result<(), TomeError> {
         (Some(false), _) => writeln!(out, "  MCP entry:       absent")?,
         _ => {}
     }
-    if outcome.direct_scopes.is_empty() {
-        writeln!(out, "  Direct declares: (none)")?;
+    if outcome.references.is_empty() {
+        writeln!(out, "  References:      (none)")?;
     } else {
-        writeln!(
-            out,
-            "  Direct declares: {}",
-            outcome.direct_scopes.join(", "),
-        )?;
+        for r in &outcome.references {
+            match &r.via {
+                None => writeln!(out, "  References:      {} (direct)", r.scope)?,
+                Some(via) => writeln!(out, "  References:      {} via {}", r.scope, via)?,
+            }
+        }
     }
     Ok(())
 }

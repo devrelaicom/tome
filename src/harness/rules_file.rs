@@ -297,6 +297,13 @@ pub fn write_block(target: &Path, body: &str, _style: BlockBodyStyle) -> Result<
     };
 
     // Idempotence: single existing block whose body matches → no-op.
+    // C-M6 (US3 review): the multi-block case (`blocks.len() > 1`) is
+    // intentionally NOT short-circuited even when `blocks[0].body == body`.
+    // Multiple Tome blocks indicate a hand-edit or a prior partial write;
+    // the contract requires us to collapse to a single canonical block
+    // even when the first one happens to match what we'd write. The
+    // collapse IS the convergent action — leaving extra blocks in place
+    // would violate FR-525 (byte-for-byte idempotence on the second pass).
     let blocks = find_all_blocks(&existing)?;
     if blocks.len() == 1 && blocks[0].body == body {
         return Ok(());

@@ -418,6 +418,17 @@ pub enum CompositionErrorKind {
     /// plain name, contained traversal characters, etc.). The string
     /// carries the offending token.
     BadExclusion(String),
+    /// A `[workspaces.<name>]` reference resolved through the central
+    /// registry membership check (the named workspace EXISTS), but the
+    /// workspace's on-disk `settings.toml` could not be read or parsed.
+    /// This is distinct from `UnknownWorkspace` (which means the registry
+    /// has no row for `<name>`): the row is present but the data backing
+    /// it is malformed. Routed to [`TomeError::WorkspaceMalformed`] (exit
+    /// 70) by the boundary impl below.
+    ///
+    /// First field is the workspace name; second is a short human-readable
+    /// reason (IO error message or parse failure detail).
+    SettingsReadFailure(String, String),
     /// A harness name surfaced by composition resolution is not in
     /// [`crate::harness::SUPPORTED_HARNESSES`]. Internal carrier — the
     /// boundary `From<CompositionErrorKind> for TomeError` impl below
@@ -441,6 +452,9 @@ impl std::fmt::Display for CompositionErrorKind {
             }
             Self::BadExclusion(token) => {
                 write!(f, "malformed `!`-prefixed exclusion: `{token}`")
+            }
+            Self::SettingsReadFailure(name, reason) => {
+                write!(f, "workspace `{name}` settings could not be read: {reason}")
             }
             Self::HarnessNotSupported(name) => {
                 write!(f, "harness `{name}` is not supported")
@@ -469,6 +483,16 @@ impl From<CompositionErrorKind> for TomeError {
         match kind {
             CompositionErrorKind::UnknownWorkspace(name) => Self::WorkspaceNotFound { name },
             CompositionErrorKind::HarnessNotSupported(name) => Self::HarnessNotSupported { name },
+            CompositionErrorKind::SettingsReadFailure(name, reason) => {
+                // Promote the workspace name into a synthetic path so
+                // `WorkspaceMalformed`'s Display can render it without
+                // additional context. The reason captures the underlying
+                // IO/parse failure verbatim.
+                Self::WorkspaceMalformed {
+                    path: PathBuf::from(format!("workspaces/{name}/settings.toml")),
+                    reason,
+                }
+            }
             other => Self::CompositionError { kind: other },
         }
     }

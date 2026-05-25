@@ -605,3 +605,70 @@ pub fn set_global_enrolment_ref(paths: &Paths, catalog_name: &str, new_ref: &str
         .unwrap();
     assert!(affected > 0, "no enrolment matched for `{catalog_name}`");
 }
+
+// ---------------------------------------------------------------------------
+// HOME env serialisation (T-B1 from US3 review)
+//
+// Process-global `$HOME` mutations across parallel integration tests race
+// otherwise. `HomeGuard::install(new)` snapshots the current value, sets
+// the new one, and restores on Drop — while holding `HOME_MUTEX` so no
+// other test mutates the env concurrently.
+// ---------------------------------------------------------------------------
+
+/// Process-global serialisation lock for tests that mutate `$HOME`.
+///
+/// Exposed `pub` so test files can lock it directly if they need to read
+/// `$HOME` without mutating it (rare); the typical entry point is
+/// [`HomeGuard::install`].
+pub static HOME_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard that installs a new value for `$HOME` and restores the
+/// previous value on drop. Holds `HOME_MUTEX` for its lifetime so
+/// parallel tests are serialised.
+///
+/// **Field-drop order discipline**: `_previous` is declared before
+/// `_lock`. Rust drops struct fields in declaration order, so
+/// `_previous` (whose Drop restores `$HOME`) runs BEFORE `_lock`'s Drop
+/// (which releases `HOME_MUTEX`). That ordering matters — the restore
+/// must complete before another test acquires the mutex and reads the
+/// env. Do not reorder these fields.
+pub struct HomeGuard {
+    _previous: PrevHome,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+struct PrevHome(Option<std::ffi::OsString>);
+
+impl Drop for PrevHome {
+    fn drop(&mut self) {
+        // SAFETY: the surrounding `_lock` field is dropped AFTER us
+        // (declared-order drop), so we still hold the mutex while
+        // restoring. No other thread is racing the env.
+        match &self.0 {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+impl HomeGuard {
+    /// Acquire `HOME_MUTEX`, snapshot the current `$HOME`, and set it
+    /// to `new_home`. The previous value is restored when the returned
+    /// guard is dropped.
+    ///
+    /// On poisoned mutex we recover the inner guard and proceed —
+    /// poisoning from another test's panic shouldn't cascade into this
+    /// one's setup failure.
+    pub fn install(new_home: &Path) -> Self {
+        let lock = HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("HOME");
+        // SAFETY: we hold `HOME_MUTEX` for the lifetime of `Self`.
+        unsafe {
+            std::env::set_var("HOME", new_home);
+        }
+        Self {
+            _previous: PrevHome(previous),
+            _lock: lock,
+        }
+    }
+}

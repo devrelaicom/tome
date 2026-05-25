@@ -10,6 +10,11 @@
 //! still perform a lookup for early signal but proceed regardless when
 //! the array literally contains the name; a missing name + missing
 //! harness simply no-ops.
+//!
+//! ## Concurrency (C-M5 / R-M2 / S-M2 from US3 review)
+//!
+//! The advisory lock at `paths.index_lock` is held across the whole
+//! read-modify-write window. See `harness::use_` for the rationale.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -43,6 +48,10 @@ pub fn run(
     mode: Mode,
 ) -> Result<(), TomeError> {
     let settings_path = resolve_settings_path(&args.scope, scope, paths)?;
+
+    // Lock for the entire read-modify-write + sync window.
+    std::fs::create_dir_all(&paths.root)?;
+    let _lock = crate::index::acquire_lock(&paths.index_lock)?;
 
     let pre = match scope.project_root.as_deref() {
         Some(_) => Some(compute_effective_names(scope, paths)?),

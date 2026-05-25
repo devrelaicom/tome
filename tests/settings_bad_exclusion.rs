@@ -134,3 +134,30 @@ fn plain_name_exclusion_works() {
     assert_eq!(names, vec!["claude-code"]);
     assert_eq!(result.excluded, vec!["cursor".to_owned()]);
 }
+
+/// R-M8 (US3 review) — malformed bracketed refs are rejected at parse
+/// time as `BadExclusion`. Before R-M8 these fell through to
+/// `Include(...)`, silently producing an inclusion of a harness named
+/// `[workspaces.a`.
+#[test]
+fn malformed_bracketed_refs_are_rejected() {
+    let _g = install_registry();
+    let stub = StubScope::new();
+    let cases = [
+        "[workspaces.a", // missing closing bracket
+        "[unknown]",     // unrecognised inner keyword
+        "[]",            // empty brackets
+        "[workspaces.]", // empty workspace name
+    ];
+    for input in cases {
+        let global = GlobalSettings {
+            harnesses: Some(vec![input.to_owned()]),
+        };
+        let err = resolve_effective_list(None, None, &global, &stub)
+            .expect_err("malformed bracketed ref must error");
+        assert!(
+            matches!(err, CompositionErrorKind::BadExclusion(_)),
+            "want BadExclusion for `{input}`, got {err:?}",
+        );
+    }
+}

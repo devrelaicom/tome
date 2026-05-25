@@ -51,10 +51,24 @@ pub enum ScopeKind {
 /// One harness in the effective list, tagged with the scope chain that
 /// contributed it. Multiple contributions collapse to the first chain
 /// observed during DFS (so the chain narrates origin, not history).
+///
+/// `source_chain` is a mixed-notation list per
+/// `contracts/settings-composition.md` example output. Each step is one
+/// of:
+///
+/// * `"project"`, `"workspace"`, `"global"` — direct declaration in the
+///   named scope.
+/// * `"[workspaces.<name>]"`, `"[workspace]"`, `"[global]"` — pulled in
+///   via that composition reference.
+///
+/// Example: a harness declared in `global` settings that the project
+/// marker pulls in via `[global]` would emit `["project", "[global]"]`.
+/// A harness directly declared in the project marker would emit
+/// `["project"]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveHarness {
     pub name: String,
-    pub source_chain: Vec<ScopeKind>,
+    pub source_chain: Vec<String>,
 }
 
 /// The resolved effective harness list.
@@ -157,10 +171,14 @@ pub fn resolve_effective_list<P: ScopeProvider>(
 
     let mut state = ResolveState::default();
     state.enter(start_scope, &start_key)?;
+    // C-M1: source_chain is a mixed-notation Vec<String>. The first
+    // step records the priority-walk scope (`"project"` / `"workspace"`
+    // / `"global"`); subsequent steps are appended by composition-ref
+    // recursion as bracketed reference strings.
     let walk_result = resolve_list(
         &start_list,
         start_scope,
-        vec![start_scope],
+        vec![scope_label(start_scope)],
         project_marker,
         bound_workspace,
         global_settings,
@@ -189,16 +207,10 @@ pub fn resolve_effective_list<P: ScopeProvider>(
     let mut seen = HashSet::new();
     effective.retain(|h| seen.insert(h.name.clone()));
 
-    // FR-460: every inclusion must name a harness in the production
-    // registry (or a synthetic one installed via
-    // `HARNESS_MODULES_OVERRIDE` for tests). The check runs once at the
-    // end of resolution rather than on every parsed entry so that
-    // exclusions cancelling out unsupported inclusions earlier in the
-    // walk don't trip a false positive — the final effective list is
-    // what the user sees, so it's what we validate.
-    if let Some(unsupported) = first_unsupported(&effective) {
-        return Err(CompositionErrorKind::HarnessNotSupported(unsupported));
-    }
+    // C-M4: per-entry validation now happens inside `resolve_list` for
+    // every `CompositionRef::Include` so a typo'd inclusion is reported
+    // even if a later exclusion would have cancelled it out. No
+    // end-of-resolution check is needed.
 
     Ok(EffectiveHarnessList {
         harnesses: effective,
@@ -206,20 +218,26 @@ pub fn resolve_effective_list<P: ScopeProvider>(
     })
 }
 
-/// Return the first harness name in `list` that isn't registered in the
-/// effective harness registry, or `None` if all are supported.
+/// Render a [`ScopeKind`] as its first-step source-chain label per
+/// `contracts/settings-composition.md` (`"project"` / `"workspace"` /
+/// `"global"`). Used to populate [`EffectiveHarness::source_chain`]'s
+/// first step — subsequent steps are bracketed reference strings.
+fn scope_label(scope: ScopeKind) -> String {
+    match scope {
+        ScopeKind::Project => "project".to_string(),
+        ScopeKind::Workspace => "workspace".to_string(),
+        ScopeKind::Global => "global".to_string(),
+    }
+}
+
+/// Is `name` a harness registered in the effective harness registry?
 ///
 /// Consults the test-injected `HARNESS_MODULES_OVERRIDE` slot via
 /// [`crate::harness::with_effective_modules`] so test fixtures that swap
 /// in synthetic harnesses validate against their registry rather than the
 /// production `SUPPORTED_HARNESSES` constant.
-fn first_unsupported(list: &[EffectiveHarness]) -> Option<String> {
-    crate::harness::with_effective_modules(|modules| {
-        let known: HashSet<&str> = modules.iter().map(|m| m.name()).collect();
-        list.iter()
-            .find(|h| !known.contains(h.name.as_str()))
-            .map(|h| h.name.clone())
-    })
+fn is_supported_harness(name: &str) -> bool {
+    crate::harness::with_effective_modules(|modules| modules.iter().any(|m| m.name() == name))
 }
 
 /// Compute the `(ScopeKind, key)` cycle-detection key for the entry
@@ -295,11 +313,17 @@ impl ResolveState {
 
 /// Walk one scope's declared list, dispatching each entry to
 /// inclusions / exclusions / recursive scope resolution.
+///
+/// `source_chain` is the rendered mixed-notation chain accumulated so
+/// far during DFS (see [`EffectiveHarness::source_chain`]). Each
+/// recursive scope dispatch appends one element naming the reference
+/// that triggered the recursion (`"[workspace]"`, `"[workspaces.<name>]"`,
+/// or `"[global]"`).
 #[allow(clippy::too_many_arguments)]
 fn resolve_list<P: ScopeProvider>(
     list: &[String],
     current_scope: ScopeKind,
-    source_chain: Vec<ScopeKind>,
+    source_chain: Vec<String>,
     project_marker: Option<&ProjectMarkerConfig>,
     bound_workspace: Option<&WorkspaceSettings>,
     global_settings: &GlobalSettings,
@@ -309,6 +333,17 @@ fn resolve_list<P: ScopeProvider>(
     for raw in list {
         match CompositionRef::parse(raw)? {
             CompositionRef::Include(name) => {
+                // FR-460 per-entry validation (C-M4 from US3 review):
+                // every inclusion must name a harness in the production
+                // registry (or a synthetic one installed via
+                // `HARNESS_MODULES_OVERRIDE` for tests). Validate at
+                // parse time rather than end-of-resolution so
+                // `["fake", "!fake"]` fails fast on the inclusion
+                // (per-entry cancellation invariant — exclusions cannot
+                // mask a typo'd harness name from being reported).
+                if !is_supported_harness(&name) {
+                    return Err(CompositionErrorKind::HarnessNotSupported(name));
+                }
                 state.inclusions.push(EffectiveHarness {
                     name,
                     source_chain: source_chain.clone(),
@@ -321,13 +356,16 @@ fn resolve_list<P: ScopeProvider>(
                 // `[workspace]` is only valid in project scope (FR-446 /
                 // FR-449). Encountering it inside a workspace's or
                 // global's directly-declared list is an error.
+                //
+                // R-M3 (US3 review): `found_in` must report the scope
+                // where the `[workspace]` token actually appeared
+                // (`current_scope`), not the parent scope it was
+                // discovered through. `workspace_scope_for` maps our
+                // richer settings::ScopeKind (Project / Workspace /
+                // Global) onto the closed-set workspace::ScopeKind
+                // (Workspace / Global) that the error variant carries.
                 if current_scope != ScopeKind::Project {
                     return Err(CompositionErrorKind::WorkspaceRefOutsideProject {
-                        // Map our richer settings::ScopeKind onto
-                        // the closed-set `workspace::ScopeKind` the
-                        // error variant carries (Workspace or
-                        // Global only — Project is excluded by the
-                        // gate above).
                         found_in: workspace_scope_for(current_scope),
                     });
                 }
@@ -355,7 +393,7 @@ fn resolve_list<P: ScopeProvider>(
                 let sub_name = pm.workspace.as_str().to_owned();
                 let declared = central_db.directly_declared_harnesses(&pm.workspace)?;
                 let mut sub_chain = source_chain.clone();
-                sub_chain.push(ScopeKind::Workspace);
+                sub_chain.push("[workspace]".to_string());
                 resolve_named_workspace(
                     &sub_name,
                     declared,
@@ -370,7 +408,7 @@ fn resolve_list<P: ScopeProvider>(
             CompositionRef::NamedWorkspace(name) => {
                 let declared = central_db.directly_declared_harnesses(&name)?;
                 let mut sub_chain = source_chain.clone();
-                sub_chain.push(ScopeKind::Workspace);
+                sub_chain.push(format!("[workspaces.{}]", name.as_str()));
                 resolve_named_workspace(
                     name.as_str(),
                     declared,
@@ -386,7 +424,7 @@ fn resolve_list<P: ScopeProvider>(
                 state.enter(ScopeKind::Global, "<global>")?;
                 let sub_result = if let Some(global_list) = global_settings.harnesses.as_ref() {
                     let mut sub_chain = source_chain.clone();
-                    sub_chain.push(ScopeKind::Global);
+                    sub_chain.push("[global]".to_string());
                     resolve_list(
                         global_list,
                         ScopeKind::Global,
@@ -416,7 +454,7 @@ fn resolve_list<P: ScopeProvider>(
 fn resolve_named_workspace<P: ScopeProvider>(
     name: &str,
     declared: Option<Vec<String>>,
-    source_chain: Vec<ScopeKind>,
+    source_chain: Vec<String>,
     project_marker: Option<&ProjectMarkerConfig>,
     bound_workspace: Option<&WorkspaceSettings>,
     global_settings: &GlobalSettings,

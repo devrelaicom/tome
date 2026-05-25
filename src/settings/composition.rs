@@ -92,6 +92,21 @@ impl CompositionRef {
             return Ok(CompositionRef::NamedWorkspace(parsed));
         }
 
+        // R-M8 (US3 review): inputs that LOOK bracketed but don't match
+        // any recognised form (missing `]`, unrecognised inner keyword,
+        // empty `[]`, etc.) are rejected here rather than falling
+        // through to `Include`. Otherwise `harnesses = ["[workspaces.a"]`
+        // would silently become an inclusion of a harness literally
+        // named `[workspaces.a`, and the reader would never see the
+        // real typo. `BadExclusion` is the closest-fit existing variant
+        // — its Display already says "malformed `!`-prefixed exclusion"
+        // which is misleading here, but the wire-stable exit code (17)
+        // matches what the user expects for a settings-shape failure
+        // and avoids promoting a new variant for the edge case.
+        if s.starts_with('[') {
+            return Err(CompositionErrorKind::BadExclusion(s.to_owned()));
+        }
+
         // 5. Anything else is a plain inclusion. Unknown-harness
         // validation lives in the resolver, not here.
         Ok(CompositionRef::Include(s.to_owned()))

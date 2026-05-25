@@ -12,7 +12,7 @@ mod common;
 use std::sync::Mutex;
 
 use common::{HarnessModulesGuard, NamedStubHarness};
-use tome::settings::resolver::{ScopeKind, StubScope, resolve_effective_list};
+use tome::settings::resolver::{StubScope, resolve_effective_list};
 use tome::settings::{GlobalSettings, ProjectMarkerConfig, WorkspaceSettings};
 use tome::workspace::WorkspaceName;
 
@@ -61,7 +61,7 @@ fn global_declares_list_no_project_no_workspace_effective_from_global() {
     };
     let result = resolve_effective_list(None, None, &global, &stub).expect("resolves");
     assert_eq!(names(&result.harnesses), vec!["a"]);
-    assert_eq!(result.harnesses[0].source_chain, vec![ScopeKind::Global]);
+    assert_eq!(result.harnesses[0].source_chain, vec!["global".to_string()]);
     assert!(result.excluded.is_empty());
 }
 
@@ -80,7 +80,10 @@ fn workspace_declares_list_no_project_effective_from_workspace_global_not_consul
     let result =
         resolve_effective_list(None, Some(&ws_settings), &global, &stub).expect("resolves");
     assert_eq!(names(&result.harnesses), vec!["b"]);
-    assert_eq!(result.harnesses[0].source_chain, vec![ScopeKind::Workspace]);
+    assert_eq!(
+        result.harnesses[0].source_chain,
+        vec!["workspace".to_string()],
+    );
 }
 
 #[test]
@@ -116,7 +119,10 @@ fn project_declares_list_workspace_global_ignored_unless_referenced() {
     let result =
         resolve_effective_list(Some(&proj), Some(&ws_settings), &global, &stub).expect("resolves");
     assert_eq!(names(&result.harnesses), vec!["a"]);
-    assert_eq!(result.harnesses[0].source_chain, vec![ScopeKind::Project]);
+    assert_eq!(
+        result.harnesses[0].source_chain,
+        vec!["project".to_string()],
+    );
 }
 
 #[test]

@@ -45,7 +45,6 @@ use crate::harness::{
 use crate::paths::Paths;
 use crate::settings::{
     self, GlobalSettings, ProjectMarkerConfig, WorkspaceSettings, resolve_effective_list,
-    resolver::StubScope,
 };
 use crate::workspace::WorkspaceName;
 
@@ -148,12 +147,14 @@ pub enum Action {
 /// processes every harness before returning so the user sees the full
 /// state in the next `tome doctor` run.
 ///
-/// **Note on the `ScopeProvider`**: US1.b-3 ships a `StubScope` with no
-/// registered workspaces, meaning `[workspaces.<name>]` composition
-/// references resolve to `UnknownWorkspace` (exit 17). The production
-/// SQLite-backed `ScopeProvider` lands in US3.a. Tests targeting this
-/// slice's surface should declare harnesses inline in the project
-/// marker's `harnesses = [...]` array.
+/// **Note on the `ScopeProvider`**: production uses
+/// [`crate::commands::harness::CentralDbScopeProvider`], which consults
+/// the central SQLite registry for workspace membership and reads each
+/// referenced workspace's `settings.toml` for its directly-declared
+/// harness list. A reference to a workspace that does not exist in the
+/// central registry surfaces as exit 13 (`WorkspaceNotFound`); a
+/// reference to a workspace whose settings file is malformed surfaces
+/// as exit 70 (`WorkspaceMalformed`).
 pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutcome, TomeError> {
     // -----------------------------------------------------------------
     // 1. Read the three settings layers.
@@ -167,15 +168,19 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // -----------------------------------------------------------------
     // 2. Compute the effective list.
     //
-    // US1.b-3 passes an empty `StubScope`; production wires in the
-    // SQLite-backed `ScopeProvider` in US3.a.
+    // The production `ScopeProvider` consults the central registry for
+    // workspace membership and reads each named workspace's
+    // `settings.toml` for its directly-declared harness list. Lives in
+    // `crate::commands::harness` because the `CentralDbScopeProvider`
+    // type is the seam between this orchestrator and the CLI command
+    // surface; keeping it there avoids a circular dep.
     // -----------------------------------------------------------------
-    let stub_scope = StubScope::new();
+    let scope_provider = crate::commands::harness::CentralDbScopeProvider::new(deps.paths);
     let effective = resolve_effective_list(
         Some(&marker),
         workspace_settings.as_ref(),
         &global_settings,
-        &stub_scope,
+        &scope_provider,
     )
     .map_err(TomeError::from)?;
 

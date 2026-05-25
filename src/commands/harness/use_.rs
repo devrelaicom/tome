@@ -7,6 +7,16 @@
 //! [`crate::harness::lookup`]) — otherwise exit 18
 //! (`HarnessNotSupported`). For `--scope project`, the resolved scope
 //! MUST carry a project root; otherwise exit 2 (Usage).
+//!
+//! ## Concurrency (C-M5 / R-M2 / S-M2 from US3 review)
+//!
+//! The advisory lock at `paths.index_lock` is held across the whole
+//! read-modify-write window: pre-edit effective list snapshot → open /
+//! mutate / persist the settings document → post-edit effective list
+//! recompute → sync dispatch. Two concurrent `tome harness use` calls
+//! against the same project would otherwise race on the on-disk file
+//! (last-writer-wins on the rename, but the lost edit is silent).
+//! `IndexBusy` (exit 50) is the documented contention error.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -51,6 +61,13 @@ pub fn run(
 
     // 2. Resolve target settings file path.
     let settings_path = resolve_settings_path(&args.scope, scope, paths)?;
+
+    // Hold the advisory lock across the entire pre-snapshot → edit →
+    // post-snapshot → sync window. The lock path's parent (`paths.root`)
+    // is created by Paths construction; the lockfile itself is touched
+    // on first acquire.
+    std::fs::create_dir_all(&paths.root)?;
+    let _lock = crate::index::acquire_lock(&paths.index_lock)?;
 
     // 3. Snapshot pre-edit effective list (when a project root is
     //    resolved; otherwise sync is meaningless).
@@ -125,7 +142,7 @@ pub(crate) fn compute_effective_names(
     let marker = super::list::load_project_marker_for_use(scope)?;
     let workspace_settings = super::list::load_workspace_settings_for_use(scope, paths)?;
     let global_settings = super::list::load_global_settings_for_use(paths)?;
-    let provider = super::PathsScopeProvider::new(paths);
+    let provider = super::CentralDbScopeProvider::new(paths);
 
     let resolved = resolve_effective_list(
         marker.as_ref(),
