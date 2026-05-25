@@ -20,10 +20,14 @@ static OVERRIDE_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Install a permissive registry containing every synthetic harness
 /// name referenced in this file. The guard returned must be held for
-/// the entire test body; the mutex returned must be held alongside it
-/// (mutex first, then guard) so concurrent tests in this binary don't
-/// clobber the registry slot.
-fn install_synthetic() -> (std::sync::MutexGuard<'static, ()>, HarnessModulesGuard) {
+/// the entire test body. Tuple order is `(HarnessModulesGuard,
+/// MutexGuard)` so fields drop in declared order — HarnessModulesGuard
+/// (override → None) BEFORE the MutexGuard (releases serialisation).
+/// The opposite order opens a race window where a concurrent test
+/// grabs the mutex + installs a new override, then this test's
+/// HarnessModulesGuard::drop clears it (observable on macOS stable as
+/// flaky `HarnessNotSupported` failures).
+fn install_synthetic() -> (HarnessModulesGuard, std::sync::MutexGuard<'static, ()>) {
     let lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let names = [
         "a",
@@ -41,7 +45,7 @@ fn install_synthetic() -> (std::sync::MutexGuard<'static, ()>, HarnessModulesGua
         "cursor",
     ];
     let guard = HarnessModulesGuard::install(NamedStubHarness::boxed_set(names));
-    (lock, guard)
+    (guard, lock)
 }
 
 fn ws(name: &str, harnesses: Option<Vec<String>>) -> WorkspaceSettings {
