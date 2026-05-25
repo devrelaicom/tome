@@ -236,6 +236,62 @@ fn rename_to_same_name_is_usage_error() {
     assert!(workspace_exists(&paths, "foo"));
 }
 
+/// T-B1: a bound project marker that carries the optional `harnesses`
+/// field (per data-model §7) must keep that field after rename. The
+/// old wholesale `format!` rewrite dropped it; the toml_edit rewrite
+/// preserves it.
+#[test]
+fn rename_preserves_marker_harnesses_field() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    workspace::init::init(parse("mine"), false, &paths).expect("init");
+
+    let project = tmp.path().join("rich-project");
+    std::fs::create_dir_all(project.join(".tome")).expect("create .tome");
+    // A marker carrying both the required `workspace` and the optional
+    // `harnesses` array (composition references and exclusions both
+    // legal per data-model §7).
+    let pre_body = "workspace = \"mine\"\nharnesses = [\"[workspace]\", \"!cursor\"]\n";
+    let marker_path = project.join(".tome").join("config.toml");
+    std::fs::write(&marker_path, pre_body).expect("write marker");
+
+    // Seed the workspace_projects row so the rename pre-check is happy.
+    {
+        let conn = open_central(&paths);
+        let workspace_id: i64 = conn
+            .query_row(
+                "SELECT id FROM workspaces WHERE name = ?1",
+                rusqlite::params!["mine"],
+                |row| row.get(0),
+            )
+            .expect("lookup workspace_id");
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        conn.execute(
+            "INSERT INTO workspace_projects (project_path, workspace_id, bound_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![project.to_string_lossy().to_string(), workspace_id, now],
+        )
+        .expect("seed workspace_projects");
+    }
+
+    let outcome = workspace::rename::rename(parse("mine"), parse("yours"), &paths).expect("rename");
+    assert_eq!(outcome.bound_projects_updated, 1);
+
+    let post_body = std::fs::read_to_string(&marker_path).expect("read marker");
+    // The `workspace` field is updated.
+    assert!(
+        post_body.contains("workspace = \"yours\""),
+        "workspace not renamed: {post_body}",
+    );
+    // The `harnesses` array survives the rewrite intact — toml_edit
+    // preserves comments, order, and untouched keys.
+    assert!(
+        post_body.contains("harnesses = [\"[workspace]\", \"!cursor\"]"),
+        "harnesses array lost after rename: {post_body}",
+    );
+}
+
 /// US3 ScopeKind/Subsystem tests live in their own files; here we just
 /// keep one happy-path assertion exercising the `bound_projects_updated`
 /// counter via the [`PathBuf`] in [`tome::workspace::rename::RenameOutcome`].

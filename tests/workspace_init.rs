@@ -90,10 +90,26 @@ fn init_happy_path_creates_dir_and_row() {
         settings_body.contains("name = \"new-ws\""),
         "settings.toml missing name: {settings_body}",
     );
+    // [summaries] is shipped as a commented-out header (the strict
+    // deserialiser rejects an empty `[summaries]` table because
+    // CachedSummaries' fields are required). The comment makes the
+    // shape visible to humans editing the file.
+    assert!(
+        settings_body.contains("[summaries]"),
+        "settings.toml should reference [summaries] section: {settings_body}",
+    );
+    assert!(
+        settings_body.contains("regen-summary"),
+        "settings.toml should point at regen-summary: {settings_body}",
+    );
     let rules_body = std::fs::read_to_string(ws_dir.join("RULES.md")).unwrap();
     assert!(
-        rules_body.is_empty(),
-        "RULES.md should be empty placeholder"
+        rules_body.contains("No summary yet"),
+        "RULES.md should ship with placeholder comment, got: {rules_body:?}",
+    );
+    assert!(
+        rules_body.contains("regen-summary"),
+        "RULES.md placeholder should point at regen-summary, got: {rules_body:?}",
     );
 
     // DB shape: a `workspaces` row with the given name + a non-zero

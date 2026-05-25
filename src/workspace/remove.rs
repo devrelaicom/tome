@@ -79,6 +79,7 @@ use crate::error::TomeError;
 use crate::harness::{self, McpConfigFormat, RulesFileStrategy, with_effective_modules};
 use crate::index::{self, OpenOptions, acquire_lock, workspace_catalogs};
 use crate::paths::Paths;
+use crate::settings::{self, GlobalSettings, resolve_effective_list, resolver::StubScope};
 use crate::workspace::WorkspaceName;
 
 /// Outcome of [`remove`]. Serialised by the CLI's `--json` mode.
@@ -203,7 +204,7 @@ pub fn remove(
             bound_projects_torn_down = bound_projects_torn_down.saturating_add(1);
             continue;
         }
-        teardown_integration_for_project(project, home_root);
+        teardown_integration_for_project(project, home_root, &name, paths);
         bound_projects_torn_down = bound_projects_torn_down.saturating_add(1);
     }
 
@@ -358,11 +359,45 @@ pub fn remove(
     })
 }
 
-/// Step-1 helper: for every harness in the effective registry, remove
-/// the Tome rules-file block / standalone file and the Tome MCP entry
-/// for the given bound project. Per-harness failures are logged at
-/// `warn!` and swallowed — best-effort teardown per the contract.
-fn teardown_integration_for_project(project: &Path, home_root: &Path) {
+/// Step-1 helper: for the harnesses in the per-project effective list,
+/// remove the Tome rules-file block / standalone file and the Tome MCP
+/// entry. Per-harness failures are logged at `warn!` and swallowed —
+/// best-effort teardown per the contract.
+///
+/// Per-project narrowing: the effective list is computed from the
+/// project's own marker (`<project>/.tome/config.toml`) composed with
+/// the bound workspace's `settings.toml` and the global settings — same
+/// algorithm `harness::sync` uses to populate, mirrored on the way out.
+/// A harness that was never enrolled for THIS project is left alone
+/// even if it's enrolled for some other workspace's projects.
+///
+/// If the per-project marker is missing or any settings layer can't be
+/// read or parsed, log warn + skip teardown for THIS project (the
+/// workspace is being removed anyway; doctor surfaces residual drift).
+fn teardown_integration_for_project(
+    project: &Path,
+    home_root: &Path,
+    workspace_name: &WorkspaceName,
+    paths: &Paths,
+) {
+    // Compute the per-project effective list. On any read/parse error
+    // we warn and fall back to an empty effective list — the cascade is
+    // best-effort and a remove of a no-longer-coherent workspace
+    // shouldn't get stuck.
+    let effective_names: std::collections::HashSet<String> =
+        match compute_effective_names_for_project(project, workspace_name, paths) {
+            Ok(names) => names,
+            Err(e) => {
+                warn!(
+                    project = %project.display(),
+                    workspace = %workspace_name.as_str(),
+                    error = %e,
+                    "could not compute effective harness list for project; skipping per-project teardown",
+                );
+                return;
+            }
+        };
+
     // Capture per-harness specifics into owned values up front so we
     // don't hold the registry's read guard across `std::fs` work.
     struct Snapshot {
@@ -376,6 +411,7 @@ fn teardown_integration_for_project(project: &Path, home_root: &Path) {
 
     let snapshots: Vec<Snapshot> = with_effective_modules(|mods| {
         mods.iter()
+            .filter(|m| effective_names.contains(m.name()))
             .map(|m| Snapshot {
                 name: m.name().to_string(),
                 rules_path: m.rules_file_target(project),
@@ -435,4 +471,66 @@ fn teardown_integration_for_project(project: &Path, home_root: &Path) {
             );
         }
     }
+}
+
+/// Read the three settings layers (project marker, workspace
+/// `settings.toml`, global `settings.toml`) and compute the per-project
+/// effective harness name set. Mirrors `harness::sync::sync_project`'s
+/// composition path; uses an empty `StubScope` because the cascade does
+/// not need cross-workspace composition references resolved (they would
+/// only appear in the project marker's `harnesses` array, and an
+/// unresolvable reference there at cascade-time is moot — we're
+/// removing the binding regardless).
+fn compute_effective_names_for_project(
+    project: &Path,
+    _workspace_name: &WorkspaceName,
+    paths: &Paths,
+) -> Result<std::collections::HashSet<String>, TomeError> {
+    let marker_path = Paths::project_marker_config(project);
+    let marker_body = std::fs::read_to_string(&marker_path).map_err(TomeError::Io)?;
+    let marker = settings::parser::parse_project_marker(&marker_body).map_err(|e| {
+        TomeError::WorkspaceMalformed {
+            path: marker_path.clone(),
+            reason: format!("parse project marker: {e}"),
+        }
+    })?;
+
+    // Read the bound workspace's `settings.toml` (if present). The
+    // workspace name from the marker is authoritative — if it disagrees
+    // with the workspace being removed, that's a doctor-flaggable drift
+    // that we don't need to resolve here.
+    let workspace_settings = {
+        let path = paths.workspace_settings_file(&marker.workspace);
+        match std::fs::read_to_string(&path) {
+            Ok(body) => Some(settings::parser::parse_workspace(&body).map_err(|e| {
+                TomeError::WorkspaceMalformed {
+                    path: path.clone(),
+                    reason: format!("parse workspace settings: {e}"),
+                }
+            })?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(TomeError::Io(e)),
+        }
+    };
+
+    let global_settings = match std::fs::read_to_string(&paths.global_settings_file) {
+        Ok(body) => {
+            settings::parser::parse_global(&body).map_err(|e| TomeError::WorkspaceMalformed {
+                path: paths.global_settings_file.clone(),
+                reason: format!("parse global settings: {e}"),
+            })?
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => GlobalSettings::default(),
+        Err(e) => return Err(TomeError::Io(e)),
+    };
+
+    let scope = StubScope::new();
+    let effective = resolve_effective_list(
+        Some(&marker),
+        workspace_settings.as_ref(),
+        &global_settings,
+        &scope,
+    )
+    .map_err(|kind| TomeError::CompositionError { kind })?;
+    Ok(effective.harnesses.into_iter().map(|h| h.name).collect())
 }

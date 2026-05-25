@@ -31,26 +31,22 @@
 //!
 //! - **Pre-check (step 4) fails**: no state changes; DB row, bound
 //!   markers, and the central workspace dir remain under `<old>`.
-//! - **Transaction (step 5) fails**: rollback. Marker `config.toml`
-//!   rewrites happen inside the transaction by construction: each
-//!   rewrite either lands atomically before the next, or the entire
-//!   sequence is rolled back. In practice the per-file rename of
-//!   `.tome/config.toml.tmp.*` IS visible to filesystem readers between
-//!   atomic writes — true atomicity across the file group is not
-//!   achievable without a journaling layer. We do the bound-project
-//!   rewrites BEFORE the SQL UPDATE so a mid-loop failure leaves the
-//!   workspace's DB row still named `<old>` and *some* project markers
-//!   pointing at `<new>`; `tome doctor` (US5) surfaces the drift, and a
-//!   re-run of `rename` (now with the central DB still pointing at
-//!   `<old>` but some projects pointing at `<new>`) will re-fail the
-//!   pre-check or the per-file rewrite cleanly. The transaction's
-//!   rollback gates only the DB UPDATE.
+//! - **Transaction (step 5) fails**: marker `config.toml` rewrites
+//!   happen BEFORE the SQL UPDATE within the same DB transaction scope.
+//!   The transaction is opened first; per-file marker rewrites land
+//!   atomically inside that window; the SQL UPDATE runs last and
+//!   commits. If the UPDATE fails, the transaction rolls back the
+//!   workspace name change — but the marker rewrites are already on
+//!   disk and can't be rolled back. Result: DB stays at `<old>`, some
+//!   markers point at `<new>`. The doctor `Binding` subsystem (US5)
+//!   flags the orphans; `doctor --fix` re-syncs the markers.
 //! - **Step 6 fails** (e.g. cross-FS somehow): the DB transaction is
 //!   already committed. Log a hard error; doctor `--fix` is **not**
 //!   safe here (the central workspace directory is the canonical
 //!   on-disk identity; a cross-FS situation needs manual recovery).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use serde::Serialize;
 use time::OffsetDateTime;
@@ -214,22 +210,22 @@ pub fn rename(
         }
     }
 
-    // Bound-project marker rewrites first, then the SQL UPDATE inside
-    // the same transaction. See module-level docs for the partial-
-    // failure rationale: the marker rewrites are per-file atomic; if
-    // the transaction rolls back, the central DB row stays at `<old>`
-    // but some markers may already point at `<new>` (doctor surfaces).
+    // Open the transaction BEFORE the per-marker rewrite loop so the
+    // SQL UPDATE happens inside the same logical scope. Marker rewrites
+    // are per-file atomic via `catalog::store::write_atomic`; they
+    // cannot be rolled back if the UPDATE fails (see module-level docs
+    // for the partial-failure mode and doctor recovery).
     let bound_projects_updated = u32::try_from(bound_projects.len()).unwrap_or(u32::MAX);
-
-    for project in &bound_projects {
-        let marker_config = Paths::project_marker_config(project);
-        let body = format!("workspace = \"{}\"\n", new.as_str());
-        store::write_atomic(&marker_config, body.as_bytes())?;
-    }
-
     let tx = conn.transaction().map_err(|e| {
         TomeError::IndexIntegrityCheckFailure(format!("begin rename transaction: {e}"))
     })?;
+
+    for project in &bound_projects {
+        let marker_config = Paths::project_marker_config(project);
+        let new_body = rewrite_marker_workspace(&marker_config, new.as_str())?;
+        store::write_atomic(&marker_config, new_body.as_bytes())?;
+    }
+
     let now_unix = OffsetDateTime::now_utc().unix_timestamp();
     tx.execute(
         "UPDATE workspaces SET name = ?1, last_used_at = ?2 WHERE id = ?3",
@@ -269,8 +265,16 @@ pub fn rename(
     } else {
         // Edge case: the row existed but the directory was missing.
         // Stand up an empty target dir so subsequent reads see a
-        // self-consistent state.
+        // self-consistent state. Chmod 0o700 on Unix to match the
+        // init-path discipline (`atomic_dir::land_directory(_, 0o700,
+        // _)`); without this the dir would land at the umask default.
         std::fs::create_dir_all(&new_dir).map_err(TomeError::Io)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&new_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(TomeError::Io)?;
+        }
     }
 
     drop(lock);
@@ -281,4 +285,25 @@ pub fn rename(
         bound_projects_updated,
         workspace_dir: new_dir,
     })
+}
+
+/// Read the project marker at `marker_path`, parse it via
+/// `toml_edit::DocumentMut`, and replace the `workspace = "<old>"` key
+/// with `workspace = "<new>"`. Returns the serialised body. All other
+/// top-level keys (the optional `harnesses` field per data-model §7,
+/// plus any comments / key order) survive the rewrite intact.
+///
+/// A parse failure surfaces as `WorkspaceMalformed` (exit 70).
+fn rewrite_marker_workspace(marker_path: &Path, new_name: &str) -> Result<String, TomeError> {
+    let body = std::fs::read_to_string(marker_path).map_err(|e| TomeError::WorkspaceMalformed {
+        path: marker_path.to_path_buf(),
+        reason: format!("read project marker for rename: {e}"),
+    })?;
+    let mut doc =
+        toml_edit::DocumentMut::from_str(&body).map_err(|e| TomeError::WorkspaceMalformed {
+            path: marker_path.to_path_buf(),
+            reason: format!("parse project marker for rename: {e}"),
+        })?;
+    doc["workspace"] = toml_edit::value(new_name);
+    Ok(doc.to_string())
 }

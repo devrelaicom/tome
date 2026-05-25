@@ -7,7 +7,9 @@
 mod common;
 
 use common::{lifecycle_paths, seed_workspace};
+use std::path::Path;
 use tempfile::TempDir;
+use time::OffsetDateTime;
 use tome::commands::workspace::list::{WorkspaceListEntry, assemble};
 use tome::index::workspace_catalogs;
 
@@ -114,6 +116,103 @@ fn list_entries_are_sorted_alphabetically() {
     let entries = assemble(&paths).expect("assemble");
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, vec!["alpha", "global", "zeta"]);
+}
+
+/// T-M6: a workspace seeded with bound projects + enabled plugins +
+/// catalog enrolments must report non-zero counts. Validates the
+/// COUNT-aggregate SQL in `assemble`.
+#[test]
+fn list_reports_non_zero_counts_for_active_workspace() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    seed_workspace(&paths, "active");
+
+    // Catalog enrolment.
+    {
+        let conn = open_central(&paths);
+        workspace_catalogs::insert(&conn, "active", "primary", "https://example.com/p", "main")
+            .unwrap();
+    }
+
+    // Two enabled skills under one (catalog, plugin), so enabled_plugins
+    // distinct-count is 1 but indexed_skills is 2.
+    seed_enabled_skill_for_test(&paths, "active", "primary", "myplug", "skill-a");
+    seed_enabled_skill_for_test(&paths, "active", "primary", "myplug", "skill-b");
+
+    // Two bound projects.
+    let project_a = tmp.path().join("proj-a");
+    let project_b = tmp.path().join("proj-b");
+    seed_bound_project_for_test(&paths, "active", &project_a);
+    seed_bound_project_for_test(&paths, "active", &project_b);
+
+    let entries = assemble(&paths).expect("assemble");
+    let active = entries
+        .iter()
+        .find(|e| e.name == "active")
+        .expect("`active` entry present");
+    assert_eq!(active.catalogs, 1);
+    assert_eq!(active.enabled_plugins, 1, "two skills under one plugin");
+    assert_eq!(active.indexed_skills, 2);
+    assert_eq!(active.bound_projects, 2);
+}
+
+/// Helper local to this file. Other suites have their own copies; we
+/// keep the helper inline here to avoid a `common/mod.rs` widening.
+fn seed_enabled_skill_for_test(
+    paths: &tome::paths::Paths,
+    workspace_name: &str,
+    catalog: &str,
+    plugin: &str,
+    skill_name: &str,
+) {
+    let conn = open_central(paths);
+    let workspace_id: i64 = conn
+        .query_row(
+            "SELECT id FROM workspaces WHERE name = ?1",
+            rusqlite::params![workspace_name],
+            |row| row.get(0),
+        )
+        .expect("lookup workspace_id");
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    conn.execute(
+        "INSERT INTO skills
+           (catalog, plugin, name, description, plugin_version, path, content_hash, indexed_at)
+         VALUES (?1, ?2, ?3, '', '0.0.0', '/dev/null', 'hash', ?4)",
+        rusqlite::params![catalog, plugin, skill_name, now],
+    )
+    .expect("insert skill");
+    let skill_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![workspace_id, skill_id, now],
+    )
+    .expect("insert workspace_skills");
+}
+
+fn seed_bound_project_for_test(paths: &tome::paths::Paths, workspace_name: &str, project: &Path) {
+    std::fs::create_dir_all(project.join(".tome")).expect("create .tome");
+    std::fs::write(
+        project.join(".tome").join("config.toml"),
+        format!("workspace = \"{workspace_name}\"\n"),
+    )
+    .expect("write project config.toml");
+    let conn = open_central(paths);
+    let workspace_id: i64 = conn
+        .query_row(
+            "SELECT id FROM workspaces WHERE name = ?1",
+            rusqlite::params![workspace_name],
+            |row| row.get(0),
+        )
+        .expect("lookup workspace_id");
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    conn.execute(
+        "INSERT INTO workspace_projects (project_path, workspace_id, bound_at)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![project.to_string_lossy().to_string(), workspace_id, now],
+    )
+    .expect("seed workspace_projects");
 }
 
 #[test]

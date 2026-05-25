@@ -234,9 +234,11 @@ pub struct WorkspaceRenameArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct WorkspaceRegenSummaryArgs {
-    /// Workspace to regenerate summaries for. Defaults to the resolved
-    /// workspace.
-    pub name: Option<String>,
+    /// Workspace to regenerate summaries for. Required — `regen-summary`
+    /// is the explicit summarisation command; we don't want the user to
+    /// accidentally regenerate the resolved scope (often `global`) by
+    /// forgetting an argument.
+    pub name: String,
 }
 
 #[derive(Debug, clap::Args)]

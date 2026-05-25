@@ -37,13 +37,6 @@ pub struct WorkspaceListEntry {
     pub last_used_at: i64,
 }
 
-/// `--json` envelope. Distinct from the bare array because future
-/// optional fields (filters, summary totals) belong on the envelope.
-#[derive(Debug, Clone, Serialize)]
-struct ListEnvelope<'a> {
-    workspaces: &'a [WorkspaceListEntry],
-}
-
 pub fn run(_args: WorkspaceListArgs, paths: &Paths, mode: Mode) -> Result<(), TomeError> {
     let entries = assemble(paths)?;
     emit(&entries, mode)
@@ -138,9 +131,10 @@ fn count_i64(
 fn emit(entries: &[WorkspaceListEntry], mode: Mode) -> Result<(), TomeError> {
     match mode {
         Mode::Human => emit_human(entries),
-        Mode::Json => write_json(&ListEnvelope {
-            workspaces: entries,
-        }),
+        // Contract: `workspace list --json` emits a bare array. Future
+        // optional fields belong on individual entries, not on a wrapping
+        // envelope (cf. `contracts/workspace-commands.md` §`workspace list`).
+        Mode::Json => write_json(entries),
     }
 }
 

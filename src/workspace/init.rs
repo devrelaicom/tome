@@ -141,20 +141,8 @@ pub fn init(
         });
     }
 
-    // Collect global's catalogs FIRST (still under the lock; no INSERT
-    // yet). The `--inherit-global` path mirrors these into both the
-    // junction table AND the on-disk settings.toml. If global has no
-    // enrolments, the flag is a documented no-op.
-    let inherited: Vec<workspace_catalogs::CatalogEnrolment> = if inherit_global {
-        workspace_catalogs::list_for_workspace(&conn, WorkspaceName::GLOBAL)
-            .unwrap_or_else(|_| Vec::new())
-    } else {
-        Vec::new()
-    };
-    let inherited_count = u32::try_from(inherited.len()).unwrap_or(u32::MAX);
-
     let now_unix = OffsetDateTime::now_utc().unix_timestamp();
-    let new_workspace_id: i64 = {
+    let (new_workspace_id, inherited): (i64, Vec<workspace_catalogs::CatalogEnrolment>) = {
         let tx = conn.transaction().map_err(|e| {
             TomeError::IndexIntegrityCheckFailure(format!("begin init transaction: {e}"))
         })?;
@@ -167,6 +155,15 @@ pub fn init(
             TomeError::IndexIntegrityCheckFailure(format!("insert workspaces row: {e}"))
         })?;
         let id = tx.last_insert_rowid();
+        // Read global's catalogs inside the same transaction (contract
+        // step 4 alignment). If global has no enrolments, this is a
+        // documented no-op for the `--inherit-global` flag.
+        let inherited: Vec<workspace_catalogs::CatalogEnrolment> = if inherit_global {
+            workspace_catalogs::list_for_workspace(&tx, WorkspaceName::GLOBAL)
+                .unwrap_or_else(|_| Vec::new())
+        } else {
+            Vec::new()
+        };
         for entry in &inherited {
             tx.execute(
                 "INSERT INTO workspace_catalogs (workspace_id, catalog_name, url, pinned_ref)
@@ -188,8 +185,9 @@ pub fn init(
         tx.commit().map_err(|e| {
             TomeError::IndexIntegrityCheckFailure(format!("commit init transaction: {e}"))
         })?;
-        id
+        (id, inherited)
     };
+    let inherited_count = u32::try_from(inherited.len()).unwrap_or(u32::MAX);
 
     // Drop the DB handle BEFORE the directory landing so a WAL
     // checkpoint completes inside the lock window. The lock itself is
@@ -208,10 +206,12 @@ pub fn init(
             render_settings_toml(name_for_populate.as_str(), &inherited_for_populate);
         std::fs::write(staged.join("settings.toml"), settings_body.as_bytes())
             .map_err(TomeError::Io)?;
-        // US2.a-2 owns the real RULES.md body (summariser output). Until
-        // then, ship an empty placeholder so the file exists for the
-        // `workspace use` sync pickup.
-        std::fs::write(staged.join("RULES.md"), b"").map_err(TomeError::Io)?;
+        // RULES.md is owned by US2.a-2's `regen-summary`. Ship a
+        // one-line HTML comment so the file exists for the `workspace
+        // use` sync pickup AND tells the human "summary not generated
+        // yet".
+        std::fs::write(staged.join("RULES.md"), RULES_MD_PLACEHOLDER.as_bytes())
+            .map_err(TomeError::Io)?;
         Ok(())
     })?;
 
@@ -227,13 +227,25 @@ pub fn init(
     })
 }
 
+/// The RULES.md placeholder written at init time. `regen-summary`
+/// overwrites this with the summariser's long output.
+pub const RULES_MD_PLACEHOLDER: &str =
+    "<!-- No summary yet — run `tome workspace regen-summary <name>` to populate. -->\n";
+
 /// Render the initial `<root>/workspaces/<name>/settings.toml`. The
 /// shape is the Phase 4 [`crate::settings::WorkspaceSettings`] but
 /// emitted hand-rolled to keep the formatting human-friendly (TOML
-/// arrays of tables, no `summaries` section until US2.a-2 fills it).
+/// arrays of tables). Includes a commented-out `[summaries]` header
+/// placeholder — `regen-summary` writes the real `[summaries]` table
+/// (with `short`, `long`, `generated_at`) when it runs. Writing the
+/// header as a comment keeps the file parseable by the strict
+/// `WorkspaceSettings` deserialiser (an empty `[summaries]` table fails
+/// `deny_unknown_fields` on the required `CachedSummaries` fields).
 fn render_settings_toml(name: &str, catalogs: &[workspace_catalogs::CatalogEnrolment]) -> String {
     let mut out = String::new();
     out.push_str(&format!("name = \"{}\"\n", escape_toml_basic(name)));
+    out.push('\n');
+    out.push_str("# [summaries]  -- populated by `tome workspace regen-summary`\n");
     for entry in catalogs {
         out.push_str("\n[[catalogs]]\n");
         out.push_str(&format!(
@@ -264,7 +276,10 @@ mod tests {
     #[test]
     fn render_settings_with_no_catalogs() {
         let body = render_settings_toml("ws", &[]);
-        assert_eq!(body, "name = \"ws\"\n");
+        assert_eq!(
+            body,
+            "name = \"ws\"\n\n# [summaries]  -- populated by `tome workspace regen-summary`\n",
+        );
     }
 
     #[test]
@@ -285,6 +300,7 @@ mod tests {
         ];
         let body = render_settings_toml("test-ws", &entries);
         let expected = "name = \"test-ws\"\n\n\
+# [summaries]  -- populated by `tome workspace regen-summary`\n\n\
 [[catalogs]]\n\
 name = \"a\"\n\
 url = \"https://example.com/a\"\n\
