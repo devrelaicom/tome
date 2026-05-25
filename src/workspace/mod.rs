@@ -16,7 +16,10 @@ pub mod resolution;
 pub mod scope;
 
 pub use binding::{BindDeps, BindOutcome, bind_project, is_project_root_acceptable};
-pub use info::{ModelIdentity, ScopeKind, WorkspaceInfo};
+pub use info::{
+    EnabledPluginRecord, ModelIdentity, ScopeKind, SummaryCacheState, WorkspaceCatalogEntry,
+    WorkspaceInfo,
+};
 pub use init::{InitOutcome, init};
 pub use name::WorkspaceName;
 pub use scope::{ResolvedScope, Scope, ScopeSource};

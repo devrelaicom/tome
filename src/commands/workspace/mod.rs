@@ -1,9 +1,11 @@
-//! Dispatcher for `tome workspace <subcommand>`. Adds `info`
-//! (US2.a, read-only), `init` (US2.b, atomic creation), and `use`
-//! (US1.a, project binding).
+//! Dispatcher for `tome workspace <subcommand>`. Phase 4 / US2.a-1
+//! widens the surface: `info` accepts an optional `<name>` argument and
+//! exposes the new Phase 4 fields; `init` creates a named workspace in
+//! the central registry; `list` lists every workspace with counts.
 
 pub mod info;
 mod init;
+pub mod list;
 pub mod use_;
 
 use crate::cli::WorkspaceCommand;
@@ -20,8 +22,9 @@ pub fn run(
 ) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
     match cmd {
-        WorkspaceCommand::Info => info::run(scope, &paths, mode),
+        WorkspaceCommand::Info(args) => info::run(args, scope, &paths, mode),
         WorkspaceCommand::Init(args) => init::run(args, &paths, mode),
+        WorkspaceCommand::List(args) => list::run(args, &paths, mode),
         // The Use arm threads the global `--workspace <name>` through
         // so it can emit a `tracing::debug!` when both the flag and the
         // positional `<name>` are set. The positional always wins; the
