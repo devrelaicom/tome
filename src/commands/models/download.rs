@@ -75,17 +75,18 @@ pub fn run(args: ModelsDownloadArgs, mode: Mode) -> Result<(), TomeError> {
             )?;
         }
 
-        // F6 added a byte-progress hook to `download_model`. This site
-        // still uses the indeterminate spinner — switching to
-        // `progress::byte_bar(total, …)` is a presentation tweak
-        // tracked for US4 polish, not a behaviour change.
-        let pb = progress::spinner(format!(
-            "downloading {} (~{})",
-            entry.name,
-            human_mb(entry.size_bytes)
-        ));
+        // F6 added a byte-progress hook to `download_model`; US4.a
+        // (T319) wires the determinate byte bar so big artefacts (the
+        // ~400 MB Qwen summariser, the ~280 MB reranker) show real
+        // progress + ETA + throughput. The bar still works for tiny
+        // artefacts; `byte_bar(0, ...)` saturates rather than panicking
+        // (covered by `presentation::progress::tests::bar_with_zero_total_does_not_panic`).
+        let pb = progress::byte_bar(entry.size_bytes, format!("downloading {}", entry.name));
+        let cb = |bytes_so_far: u64, _total: u64| {
+            pb.set_position(bytes_so_far);
+        };
         let started = Instant::now();
-        let result = download_model(entry, &paths.models_dir, None);
+        let result = download_model(entry, &paths.models_dir, Some(&cb));
         pb.finish_and_clear();
         let elapsed = started.elapsed();
         result?;

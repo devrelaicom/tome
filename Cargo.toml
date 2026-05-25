@@ -66,8 +66,19 @@ tokio = { version = "1", default-features = false, features = ["rt", "macros", "
 # Phase 4 — summariser inference. Sync API throughout; one process-wide
 # `LlamaBackend` instance held in a `std::sync::OnceLock`. Statically links
 # `llama.cpp` as a C++ static lib (CPU-only — no CUDA/Metal features enabled).
-# Pre-1.0; minor-pinned per research §R-2.
-llama-cpp-2 = "0.1"
+# Pre-1.0; pinned at exact patch per research §R-2 + T321 fold-in:
+# `llama.cpp` itself ships breaking C ABI changes on every minor version,
+# and `llama-cpp-2`'s patch releases track upstream verbatim. An exact-pin
+# (`=0.1.146`) avoids surprise updates that would silently change tokenizer
+# behaviour or sampler defaults; bumps are intentional + reviewed.
+llama-cpp-2 = "=0.1.146"
+
+# Promoted from transitive (via reqwest, llama-cpp-2) to a direct dep:
+# `LlamaModel::token_to_piece` requires an `&mut encoding_rs::Decoder`
+# argument, and the type is not re-exported by `llama-cpp-2`. Using the
+# same version the rest of the dep tree already pulls in keeps the crate
+# graph minimal.
+encoding_rs = "0.8"
 
 # Phase 4 — comment/order-preserving TOML editor. Scoped to harness MCP
 # config read-modify-write paths only; Tome-owned TOML continues to use the
