@@ -26,11 +26,15 @@ mod common;
 
 use common::lifecycle_paths;
 use tempfile::TempDir;
+use time::OffsetDateTime;
 use tome::embedding::download::download_model;
 use tome::embedding::registry::{MODEL_REGISTRY, ModelKind};
+use tome::output::Mode;
+use tome::paths::Paths;
 use tome::summarise::{
     LlamaSummariser, PluginSummariesInput, PluginSummaryItem, SkillSummaryItem, Summariser,
 };
+use tome::workspace::{self, WorkspaceName};
 
 const ENV_GATE: &str = "TOME_TEST_REAL_MODELS";
 
@@ -157,4 +161,188 @@ fn real_summariser_produces_non_empty_within_window() {
 
     eprintln!("short ({} chars): {}", short_chars, output.short);
     eprintln!("long  ({} chars): {}", long_chars, output.long);
+}
+
+// ---------------------------------------------------------------------------
+// T337 — `tome workspace regen-summary <name>` end-to-end through the
+// production `LlamaSummariser`. Same env-gate + same download discipline as
+// the bare-summariser test above; the difference is we drive the CLI's
+// `commands::workspace::regen_summary::run_with_summariser` entry, which
+// is the exact code path `tome workspace regen-summary` runs in
+// production. The test verifies the on-disk artefacts the user sees:
+// `<workspace>/settings.toml` carries a `[summaries]` table with all three
+// fields, and `<workspace>/RULES.md` matches the long summary body.
+// ---------------------------------------------------------------------------
+
+fn parse_ws(name: &str) -> WorkspaceName {
+    WorkspaceName::parse(name).expect("valid workspace name")
+}
+
+fn seed_enabled_skill_for_real(
+    paths: &Paths,
+    workspace_name: &str,
+    catalog: &str,
+    plugin: &str,
+    skill_name: &str,
+    description: &str,
+) {
+    use common::{stub_embedder_seed, stub_reranker_seed, stub_summariser_seed};
+    use tome::index::{self, OpenOptions};
+
+    let conn = index::open(
+        &paths.index_db,
+        &OpenOptions {
+            embedder: stub_embedder_seed(),
+            reranker: stub_reranker_seed(),
+            summariser: stub_summariser_seed(),
+        },
+    )
+    .expect("open central DB");
+    let workspace_id: i64 = conn
+        .query_row(
+            "SELECT id FROM workspaces WHERE name = ?1",
+            rusqlite::params![workspace_name],
+            |row| row.get(0),
+        )
+        .expect("lookup workspace_id");
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    conn.execute(
+        "INSERT INTO skills
+           (catalog, plugin, name, description, plugin_version, path, content_hash, indexed_at)
+         VALUES (?1, ?2, ?3, ?4, '0.0.0', '/dev/null', 'hash', ?5)",
+        rusqlite::params![catalog, plugin, skill_name, description, now],
+    )
+    .expect("insert skill");
+    let skill_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![workspace_id, skill_id, now],
+    )
+    .expect("insert workspace_skills");
+}
+
+#[test]
+fn regen_summary_through_real_llama_summariser_writes_settings_and_rules() {
+    if std::env::var_os(ENV_GATE).is_none() {
+        eprintln!(
+            "skipping {} (set {ENV_GATE}=1 to enable a real-model run)",
+            module_path!()
+        );
+        return;
+    }
+
+    let tmp = TempDir::new().expect("create temp dir");
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).expect("create root");
+    std::fs::create_dir_all(&paths.models_dir).expect("create models_dir");
+
+    // Download the summariser GGUF into the test-rooted models_dir. With
+    // the placeholder SHA-256 in the registry this returns `ModelCorrupt`;
+    // the assert message points the developer at the registry fix.
+    let entry = MODEL_REGISTRY
+        .iter()
+        .find(|e| e.kind == ModelKind::Summariser)
+        .expect("summariser entry in MODEL_REGISTRY");
+    eprintln!(
+        "downloading {} (~{} MB) for regen-summary E2E",
+        entry.name,
+        entry.size_bytes / 1_000_000,
+    );
+    download_model(entry, &paths.models_dir, None)
+        .expect("download summariser model — flip the registry SHA-256 placeholder first");
+
+    // Seed a workspace + two enabled skills via the library API (the
+    // embedder side stays stubbed; this test only exercises the real
+    // SUMMARISER path).
+    workspace::init::init(parse_ws("real-ws"), false, &paths).expect("init workspace");
+    seed_enabled_skill_for_real(
+        &paths,
+        "real-ws",
+        "core",
+        "data-tools",
+        "csv-validation",
+        "Validate CSV files against a schema",
+    );
+    seed_enabled_skill_for_real(
+        &paths,
+        "real-ws",
+        "core",
+        "git-helpers",
+        "conventional-commits",
+        "Write Conventional Commits-formatted messages",
+    );
+
+    // Drive the production CLI path. `run_with_summariser` is the
+    // dependency-injection seam — here we construct the real
+    // `LlamaSummariser` ourselves so the test asserts the actual prod
+    // wiring (rather than the `StubSummariser` covered in
+    // `tests/workspace_regen_summary.rs`).
+    let summariser = LlamaSummariser::new(&paths).expect("LlamaSummariser::new");
+    tome::commands::workspace::regen_summary::run_with_summariser(
+        &parse_ws("real-ws"),
+        &summariser,
+        &paths,
+        Mode::Human,
+    )
+    .expect("regen-summary should succeed against real model");
+
+    // `<workspace>/settings.toml` carries a populated [summaries] table.
+    let settings_body =
+        std::fs::read_to_string(paths.workspace_settings_file(&parse_ws("real-ws")))
+            .expect("read settings.toml");
+    assert!(
+        settings_body.contains("[summaries]"),
+        "missing [summaries] section: {settings_body}",
+    );
+    assert!(
+        settings_body.contains("short ="),
+        "missing summaries.short: {settings_body}",
+    );
+    assert!(
+        settings_body.contains("long ="),
+        "missing summaries.long: {settings_body}",
+    );
+    assert!(
+        settings_body.contains("generated_at = "),
+        "missing summaries.generated_at: {settings_body}",
+    );
+
+    // RULES.md mirrors the long summary value.
+    let rules_body = std::fs::read_to_string(paths.workspace_rules_file(&parse_ws("real-ws")))
+        .expect("read RULES.md");
+    assert!(
+        !rules_body.is_empty(),
+        "RULES.md should be the long summary, but is empty",
+    );
+
+    // Parse the doc back to extract the long field so we can assert
+    // RULES.md == settings.long. The toml crate gives the typed value;
+    // anything mismatched here means the writer drifted from the reader.
+    let parsed: toml::Value = toml::from_str(&settings_body).expect("re-parse settings.toml");
+    let summaries = parsed
+        .get("summaries")
+        .expect("summaries table")
+        .as_table()
+        .expect("summaries is a table");
+    let long_field = summaries
+        .get("long")
+        .and_then(|v| v.as_str())
+        .expect("long is a string");
+    assert_eq!(
+        rules_body.trim_end(),
+        long_field.trim_end(),
+        "RULES.md body must match settings.summaries.long",
+    );
+
+    eprintln!(
+        "regen-summary E2E ok: short={}, long={}",
+        summaries
+            .get("short")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .chars()
+            .count(),
+        long_field.chars().count(),
+    );
 }
