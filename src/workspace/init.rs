@@ -130,20 +130,8 @@ pub fn init(
     // Phase 4 / FR-400: refuse if the name already exists. The check
     // runs under the lock so the subsequent INSERT can't race with
     // another concurrent `init`.
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM workspaces WHERE name = ?1",
-            rusqlite::params![name.as_str()],
-            |row| row.get(0),
-        )
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(other),
-        })
-        .map_err(|e| {
-            TomeError::IndexIntegrityCheckFailure(format!("lookup existing workspace: {e}"))
-        })?;
+    // Polish R-M7: route through the consolidated helper.
+    let existing: Option<i64> = crate::index::workspaces::resolve_id_optional(&conn, &name)?;
     if existing.is_some() {
         return Err(TomeError::WorkspaceAlreadyExists {
             name: name.as_str().to_owned(),

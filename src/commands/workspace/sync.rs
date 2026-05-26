@@ -136,23 +136,8 @@ fn workspace_exists(name: &WorkspaceName, paths: &Paths) -> Result<bool, TomeErr
         return Ok(false);
     }
     let conn = index::open_read_only(&paths.index_db)?;
-    let row: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM workspaces WHERE name = ?1",
-            rusqlite::params![name.as_str()],
-            |row| row.get(0),
-        )
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(other),
-        })
-        .map_err(|e| {
-            TomeError::IndexIntegrityCheckFailure(format!(
-                "workspace sync: membership check for `{}`: {e}",
-                name.as_str(),
-            ))
-        })?;
+    // Polish R-M7: route through the consolidated helper.
+    let row = crate::index::workspaces::resolve_id_optional(&conn, name)?;
     Ok(row.is_some())
 }
 

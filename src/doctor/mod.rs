@@ -514,22 +514,36 @@ fn build_suggested_fixes(
     if let Some(b) = binding
         && !b.config_well_formed
     {
-        // Two distinct cases share this suggestion: the marker TOML is
+        // Two distinct cases share this diagnosis: the marker TOML is
         // malformed (parse failed) OR the marker is well-formed but the
         // workspace it names is missing from the central registry. The
-        // remediation is the same — developer chooses to rebind or
-        // recreate. `--fix` deliberately does NOT auto-rebind: choosing
-        // a target workspace is a destructive product decision the user
-        // owns, not a safe repair.
+        // remediation in both cases is the same shape — developer
+        // chooses to rebind or recreate. `--fix` deliberately does NOT
+        // auto-rebind: choosing a target workspace is a destructive
+        // product decision the user owns, not a safe repair.
+        //
+        // Polish C-M12: split into two `SuggestedFix` entries so JSON
+        // consumers parsing `command` as one runnable shell line get a
+        // single executable string each, rather than a compound prose
+        // line embedding two alternatives. The two entries together
+        // communicate the same "rebind OR recreate" choice that the
+        // prior compound `command` string did.
+        let diagnosis = format!(
+            "project marker at {} is malformed or names a workspace that does not exist",
+            b.project_root.display(),
+        );
         out.push(SuggestedFix {
             subsystem: Subsystem::Binding,
-            diagnosis: format!(
-                "project marker at {} is malformed or names a workspace that does not exist",
-                b.project_root.display(),
-            ),
+            diagnosis: diagnosis.clone(),
+            command: "tome workspace use <existing-name>  # rebind to an existing workspace"
+                .to_owned(),
+            auto_fixable: false,
+        });
+        out.push(SuggestedFix {
+            subsystem: Subsystem::Binding,
+            diagnosis,
             command: format!(
-                "tome workspace use <existing-name>  # rebind to an existing workspace, \
-                 or `tome workspace init {}` to recreate the named workspace",
+                "tome workspace init {}  # or recreate the named workspace",
                 b.bound_workspace.as_str(),
             ),
             auto_fixable: false,

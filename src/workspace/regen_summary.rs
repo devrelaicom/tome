@@ -99,21 +99,8 @@ pub fn regen(
     )?;
 
     // Workspace membership.
-    let workspace_id: i64 = conn
-        .query_row(
-            "SELECT id FROM workspaces WHERE name = ?1",
-            rusqlite::params![name.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => TomeError::WorkspaceNotFound {
-                name: name.as_str().to_owned(),
-            },
-            other => TomeError::IndexIntegrityCheckFailure(format!(
-                "regen-summary: lookup workspace `{}`: {other}",
-                name.as_str(),
-            )),
-        })?;
+    // Polish R-M7: route through the consolidated helper.
+    let workspace_id: i64 = crate::index::workspaces::resolve_id_required(&conn, name)?;
 
     let input = load_summariser_input(&conn, workspace_id)?;
 
