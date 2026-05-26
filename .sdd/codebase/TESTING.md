@@ -2,7 +2,7 @@
 
 > **Purpose**: Document test frameworks, organization, patterns, and coverage expectations.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26 (Phase 4 v0.4.0 Polish complete via `/sdd:map incremental`)
+> **Last Updated**: 2026-05-26 (Phase 5 US1 shipped via `/sdd:map incremental`)
 
 ## Test Framework
 
@@ -62,7 +62,7 @@ Tests can assert on `call_count()` to verify cheap re-enable (FR-006) and other 
 
 ```
 tests/
-├── common/mod.rs               # Shared helpers: Fixture, HomeGuard, write_index_db_*, fabricate_*
+├── common/mod.rs               # Shared helpers: Fixture, HomeGuard, ClockOverrideGuard, PluginDataDirGuard, WorkspaceDataDirGuard
 ├── catalog_*.rs                # Phase 1 catalog add/remove/list/show (extended for P2+)
 ├── plugin_*.rs                 # Phase 2 plugin enable/disable/list/show + interactive
 ├── query.rs                    # Phase 2 KNN + reranker search
@@ -71,8 +71,13 @@ tests/
 ├── harness_*.rs                # Phase 4 harness lifecycle, integration, rules, MCP
 ├── doctor_*.rs                 # Phase 4 doctor report, fixes, subsystems, JSON shapes
 ├── mcp_*.rs                    # Phase 3 MCP server lifecycle, tools, logging
+├── mcp_prompts*.rs             # Phase 5 MCP prompts + list/get endpoints (new, US1)
 ├── settings_*.rs               # Phase 4 composition resolution, edit, validation
 ├── summariser_*.rs             # Phase 4 summariser registry, prompts, real-model E2E
+├── substitution*.rs            # Phase 5 skeleton + entry_kind_indexing (new, US1)
+├── entry_kind_indexing.rs      # Phase 5 US1.a — kind-discriminated entry indexing with schema v3
+├── frontmatter_p5_fields.rs    # Phase 5 US1.a — frontmatter parser extensions
+├── prompt_naming.rs            # Phase 5 US1.a — prompt naming algorithm + collision handling
 ├── atomicity.rs                # Interrupt-injection for atomic writes
 ├── concurrency.rs              # Two-process lock contention
 ├── exit_codes.rs               # Exhaustive CLI exit code verification
@@ -81,7 +86,7 @@ tests/
 ├── doctor_subsystem_serialize.rs # Phase 4 Subsystem enum round-trip stability
 ├── fixtures/
 │   └── sample-catalog/         # Git repo skeleton for catalog tests
-└── [127 .rs integration test files total]
+└── [135+ .rs integration test files total]
 ```
 
 ### Test File Header Pattern
@@ -89,12 +94,11 @@ tests/
 Every integration test file includes a module comment explaining its scope:
 
 ```rust
-//! Phase 4 / US5.a (T374) — per-subsystem doctor coverage for new Phase 4
-//! surfaces: binding, binding-rules-copy, summariser, harness rules + MCP.
-//!
-//! Verifies that doctor correctly reports health and suggested fixes for
-//! each Phase 4 subsystem, and that --fix applies repairs correctly under
-//! the coordinated two-phase sync orchestrator.
+//! Phase 5 / US1.a (T374) — kind-discriminated entry indexing and schema v3
+//! promotion. Exercises `lifecycle::enable` against a hand-rolled fixture
+//! plugin that ships BOTH `skills/*/SKILL.md` and `commands/*.md`. Verifies
+//! the schema-v3 column shape, identity-tuple widening, and the
+//! `when_to_use`-aware embedding/content-hash composition.
 
 mod common;
 
@@ -169,7 +173,7 @@ fn add_catalog_persists_to_config_toml() {
 
 **Why subprocess?** The binary is compiled once (`cargo build`), and each test forks a separate `Command` invocation. This ensures no global state leaks (ctrlc handlers, thread-locals, open file descriptors) between tests, mirroring how users invoke the tool.
 
-**Count**: 800+ integration tests across 125+ files.
+**Count**: 800+ integration tests across 135+ files.
 
 ### Library-API Tests (Non-CLI Reuse)
 
@@ -195,7 +199,7 @@ fn assemble_workspace_info_without_cli_emission() {
 }
 ```
 
-Tested in: `tests/workspace_info.rs`, `tests/harness_info.rs`, `tests/plugin_list.rs`, `tests/doctor_p4.rs`.
+Tested in: `tests/workspace_info.rs`, `tests/harness_info.rs`, `tests/plugin_list.rs`, `tests/doctor_p4.rs`, `tests/mcp_prompts.rs`.
 
 **Benefit**: Tests the compute logic without waiting for the CLI binary to compile and run, and decouples from output formatting changes.
 
@@ -383,6 +387,31 @@ pub fn write_index_db_with_schema_version(path: &Path, version: u32) -> Result<(
 
 Generates synthetic `.db` files at runtime rather than committing binary fixtures. Avoids PR noise and binary churn in git history.
 
+#### Test Helper Patterns: `lifecycle_paths`, `stub_embedder_seed`
+
+Phase 5 extends test helpers for multi-context testing:
+
+```rust
+// tests/common/mod.rs
+pub fn lifecycle_paths(home: &Path) -> tome::paths::Paths {
+    tome::paths::Paths::from_env_or_home(home).expect("paths")
+}
+
+pub fn stub_embedder_seed() -> tome::embedding::registry::ModelManifest {
+    // Pre-configured seed for StubEmbedder initialization
+}
+
+pub fn stub_reranker_seed() -> tome::embedding::registry::ModelManifest {
+    // Pre-configured seed for StubReranker initialization
+}
+
+pub fn stub_summariser_seed() -> tome::summarise::StubSummariserConfig {
+    // Pre-configured seed for StubSummariser initialization
+}
+```
+
+Used in: Entry-kind indexing tests, prompt naming tests, MCP prompts tests.
+
 ## Test Coverage & Categorization
 
 ### Overall: 954 Passing Tests, 127 Suites, 16 Ignored
@@ -392,6 +421,7 @@ Generates synthetic `.db` files at runtime rather than committing binary fixture
 - **Phase 2**: ~85 tests (plugin enable/disable/list/show, query, models, exit codes)
 - **Phase 3**: ~120 tests (workspace info/init, MCP server, doctor, schema migrations)
 - **Phase 4**: ~710 tests (workspace binding/use/list, harness lifecycle, settings composition, doctor US5, summariser, Polish e2e)
+- **Phase 5 (US1)**: ~9 new tests (substitution skeleton, entry-kind indexing, frontmatter p5 fields, prompt naming, mcp_prompts)
 
 **Ignored**: 16 tests
 - `#[ignore]` used for tests requiring external resources (real model downloads, network access)
@@ -406,14 +436,16 @@ Generates synthetic `.db` files at runtime rather than committing binary fixture
 | Concurrency/Atomicity | 30 | Two-thread/process contention, interrupt injection |
 | Exit Codes | 50+ | `tests/exit_codes.rs`, `tests/exit_codes_e2e.rs` (Polish: new CLI binary tests) |
 | Schema/Migration | 25+ | Forward migration, MVCC reader, too-new schema |
-| Strictness & Format | 20+ | `deny_unknown_fields`, Subsystem wire shape, EffectiveEntry, AsWrittenOutcome, SyncOutcome, WorkspaceCatalogEntry, DoctorReport (Polish: extended JSON pins) |
-| JSON Wire Shapes | 15+ | EffectiveEntry, AsWrittenOutcome, SyncOutcome, WorkspaceCatalogEntry, DoctorReport (Polish: PR-A through PR-G added 5 new wire-shape pins) |
+| Strictness & Format | 20+ | `deny_unknown_fields`, Subsystem wire shape, EffectiveEntry, AsWrittenOutcome, SyncOutcome, WorkspaceCatalogEntry, DoctorReport |
+| JSON Wire Shapes | 20+ | EffectiveEntry, AsWrittenOutcome, SyncOutcome, WorkspaceCatalogEntry, DoctorReport, PromptDescriptor (Phase 5 US1) |
+| Phase 5 US1 Framework | 9 | substitution_skeleton, entry_kind_indexing, frontmatter_p5_fields, prompt_naming, mcp_prompts |
 
 ### Tests NOT Yet Included (Deferred)
 
 - **Real BGE model inference** (SC-001 / SC-002): T088 in `retro/P3.md` — requires real embedder + reranker downloads. Deferred to manual developer verification.
 - **Real Qwen2.5 summariser** (Phase 4 US4): `tests/summariser_real.rs` exists but `#[ignore]`. Enable with `TOME_REAL_SUMMARISER_TESTS=1`.
 - **MCP protocol state machine** (T093–T095): Full SIGINT + deadline latency tests deferred.
+- **Phase 5 US2–US5 integration tests**: TBD in subsequent slices.
 
 ## Test Isolation & Safety
 
@@ -438,7 +470,7 @@ Command::new(cargo_bin("tome"))
 
 ### Thread-Local Injection Safety
 
-Thread-local overrides (`MIGRATIONS_OVERRIDE`, `HARNESS_MODULES_OVERRIDE`, `SUMMARISER_OVERRIDE`) use RAII guards with `Drop` cleanup:
+Thread-local overrides (`MIGRATIONS_OVERRIDE`, `HARNESS_MODULES_OVERRIDE`, `SUMMARISER_OVERRIDE`, `SUBSTITUTION_CLOCK_OVERRIDE`, etc.) use RAII guards with `Drop` cleanup:
 
 ```rust
 pub struct HarnessModulesGuard;
@@ -493,8 +525,71 @@ fn my_test() {
 
 - **Stub embedder**: Deterministic output (same input → same vector every time)
 - **Timestamps**: Pinned to known values (e.g., `OffsetDateTime::from_unix_timestamp(1_700_000_000)`)
+- **Clock injection**: Phase 5 introduces `ClockOverrideGuard` for fixed-time testing in substitution
 - **Mtime tests**: Sleep 1.5 seconds between reads to ensure filesystem granularity difference
 - **No wall-clock dependencies**: No tests rely on current time or floating-point randomness
+
+## Phase 5 US1 Test Additions
+
+### Substitution Skeleton Tests
+
+New `tests/substitution_skeleton.rs` (Phase 5 / F3) verifies the skeleton module compiles and override seams are reachable:
+
+```rust
+//! Phase 5 / F3 — substitution module skeleton smoke tests.
+
+#[test]
+fn render_returns_body_unchanged_in_skeleton() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = dummy_context(tmp.path());
+    let body = "Hello, world! Static body with no placeholders.";
+    let out = substitution::render(body, &ctx).expect("skeleton render");
+    assert_eq!(out, body);
+}
+
+#[test]
+fn clock_override_guard_installs_and_clears() {
+    let when = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+    let _guard = ClockOverrideGuard::install(when);
+    // Timestamp can be injected; guard clears on drop
+}
+```
+
+**Pattern**: Framework ships with skeleton; test-injection seams are immediately available. Actual logic lands in US1/US2/US3.
+
+### Entry-Kind Indexing Tests
+
+New `tests/entry_kind_indexing.rs` (Phase 5 / US1.a) exercises schema v3 with kind-discriminated entries:
+
+```rust
+//! Phase 5 / US1.a — kind-discriminated entry indexing. Exercises
+//! `lifecycle::enable` against a hand-rolled fixture plugin that ships
+//! BOTH `skills/*/SKILL.md` and `commands/*.md`.
+```
+
+Verifies:
+- Skills and commands both indexed under schema v3 with `kind` column
+- Identity tuple widened to `(catalog, plugin, kind, name)`
+- Content-hash composition includes `when_to_use` field
+- Embedding vectors stored per-entry
+
+### Byte-Stable Wire-Shape Pins (Phase 5 US1)
+
+New `tests/mcp_prompts.rs` includes JSON wire-shape pins for `PromptDescriptor`:
+
+```rust
+#[test]
+fn mcp_prompts_get_returns_byte_stable_json_shape() {
+    // Verify exact JSON structure matches contract
+    // (T-M1 from Phase 5 spec contract)
+    let output = /* ... prompt info ... */;
+    let serialised = serde_json::to_string(&output).unwrap();
+    let expected = r#"{"name":"...","description":"...","...}"#;
+    assert_eq!(serialised, expected);
+}
+```
+
+Prevents accidental breaking changes in the `listChanged: false` MCP contract.
 
 ## CI Integration
 
@@ -556,12 +651,15 @@ This prevents accidental breaking changes in the JSON output that external tools
 
 ### 6. JSON Wire-Shape Pin Tests
 
-New in Polish phase (PR-A through PR-G): Five new JSON wire-shape pins added to enforce byte-stability:
-- `EffectiveEntry` shape for `harness list --json`
-- `AsWrittenOutcome` shape for `harness use --json`
-- `SyncOutcome` shape for `harness sync --json` / `workspace sync --json`
-- `WorkspaceCatalogEntry` shape for workspace catalog enrolment output
-- `DoctorReport` shape (extended) for `doctor --json` with new Phase 4 subsystems
+Extended in Phase 5 US1: New `tests/mcp_prompts.rs` pins `PromptDescriptor` JSON shape. Whenever a data type is serialized to `--json` output, add a byte-stable test:
+
+```rust
+#[test]
+fn wire_shape_is_byte_stable() {
+    let actual = serde_json::to_string(&value).unwrap();
+    assert_eq!(actual, r#"expected exact JSON"#);
+}
+```
 
 ### 7. No Brittle String Assertions
 
@@ -572,6 +670,10 @@ let stderr = String::from_utf8_lossy(&output.stderr);
 assert!(stderr.contains("missing"), "expected 'missing' in stderr");  // OK
 assert_eq!(stderr, "exact string", "...");  // Brittle; avoid
 ```
+
+### 8. Framework Integration Tests Before Production
+
+When a framework ships (e.g., substitution skeleton at F3), integration tests verify override seams immediately. Production logic ships in later slices using the tested hooks. **Benefit**: Zero refactor of injection points across slices.
 
 ---
 
@@ -585,4 +687,4 @@ assert_eq!(stderr, "exact string", "...");  // Brittle; avoid
 ---
 
 *This document describes HOW to test. Update when testing strategy changes.*
-*Last refreshed 2026-05-26 against Phase 4 v0.4.0 Polish-complete source (954 tests, 127 suites).*
+*Last refreshed 2026-05-26 against Phase 5 US1-complete source (954 tests, 127 suites).*

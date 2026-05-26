@@ -26,7 +26,8 @@ All references below have been updated to the final assignment.
 
 | Code | Variant | Class | Description |
 |---|---|---|---|
-| 25 | `WorkspaceDataDirWriteFailed { path, source }` | I/O | `create_dir_all` on `${TOME_PLUGIN_DATA}` or `${TOME_WORKSPACE_DATA}` failed (covers both directory classes per Edge Cases resolution). The path field distinguishes which class triggered. |
+| 9 | `PluginDataDirWriteFailed { path, source }` | I/O | `create_dir_all` on `${TOME_PLUGIN_DATA}` failed. US1.d reviewer pass (R-M1) split this from code 25 because the variant name + exit code should carry the per-class discriminator instead of relying on the inner `path` field; mirrors the substitution engine's `SubstitutionError::PluginDataDirCreationFailed` vs `WorkspaceDataDirCreationFailed` split. Code 9 is the lowest free slot in Phase 1's I/O cluster (1–8). |
+| 25 | `WorkspaceDataDirWriteFailed { path, source }` | I/O | `create_dir_all` on `${TOME_WORKSPACE_DATA}` failed. (Pre-US1.d this variant covered both directory classes; the plugin-dir half is now split into code 9 per R-M1.) |
 | 26 | `PromptArgumentMismatch { expected, supplied }` | Caller-supplied | The caller (harness via prompts/get OR agent via get_skill with args) supplied more arguments than the entry's declared schema permits, or supplied named arguments that don't match declared names. |
 | 27 | `EntryNotFound { catalog, plugin, name, kind }` | Lookup | Named entry not found in the active workspace's enabled set (covers Phase 5 read-tool, prompts/get, get_skill_info, plugin-show lookups). |
 | 28 | `SubstitutionFailed { reason }` | Substitution | Substitution layer encountered an unrecoverable failure during a single rendering pass (e.g. invalid argument count beyond what the prompt schema declared, malformed regex match construction — unlikely in production but enumerated for completeness). |
@@ -77,6 +78,7 @@ MCP tool / prompts handlers map these to MCP error envelopes per the existing Ph
 
 | Code | Slug |
 |---|---|
+| 9 | `plugin_data_dir_write_failed` |
 | 25 | `workspace_data_dir_write_failed` |
 | 26 | `prompt_argument_mismatch` |
 | 27 | `entry_not_found` |

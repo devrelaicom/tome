@@ -381,9 +381,14 @@ pub fn delete_by_plugin(conn: &Connection, catalog: &str, plugin: &str) -> Resul
 ///    [`crate::plugin::lifecycle::resolve_plugin_dir`].
 /// 3. Joining the plugin dir with the stored relative path.
 ///
-/// If the stored `path` is already absolute (legacy data; current Phase 5
-/// writers always store relative paths), the absolute form is returned
-/// directly without consulting the catalog manifest.
+/// US1.d reviewer pass (BLOCKER S-H1): the stored path MUST be a
+/// normalised relative path. Absolute paths and `..` components are
+/// rejected at the boundary — a forged or upgrade-corrupted DB row
+/// otherwise lets the resolved absolute path escape the plugin
+/// directory. The legacy "absolute paths short-circuit the manifest
+/// walk" pre-US1.b carve-out is gone; Phase 5 writers always store
+/// catalog-relative paths and an absolute string in the column now
+/// surfaces as `TomeError::Io(InvalidInput)` (exit 7).
 ///
 /// US1.b initially shipped this resolver inline in `mcp::prompts`; US1.c
 /// promotes it because the same resolution now serves two callers:
@@ -410,9 +415,30 @@ pub fn resolve_entry_body_path(
     stored_path: &str,
 ) -> Result<PathBuf, TomeError> {
     let stored = PathBuf::from(stored_path);
+
+    // S-H1 (US1.d reviewer pass / BLOCKER): refuse `..` components and
+    // absolute paths in the DB-stored relative path. A hostile catalog
+    // that managed to land `../etc/passwd` (or `/etc/passwd`) as a
+    // stored `skills.path` value would otherwise have the resolved
+    // absolute path escape the plugin directory. Phase 5 writers always
+    // store catalog-relative paths normalised through `Path::join`; this
+    // boundary check defends against forged or upgrade-corrupted data.
     if stored.is_absolute() {
-        return Ok(stored);
+        return Err(TomeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("stored entry path is absolute: {stored_path}"),
+        )));
     }
+    if stored
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(TomeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("stored path contains parent-directory traversal: {stored_path}"),
+        )));
+    }
+
     let catalog_path =
         workspace_catalogs::resolve_catalog_path(conn, paths, workspace_name, catalog)?;
     let plugin_dir = match read_catalog_manifest(&catalog_path) {

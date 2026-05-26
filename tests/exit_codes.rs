@@ -53,6 +53,17 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
         ),
         (TomeError::Io(dummy_io_error()), 7, "io"),
         (TomeError::Interrupted, 8, "interrupted"),
+        // 9 — Phase 5 / US1.d (R-M1): plugin data dir write failure
+        // (split from `WorkspaceDataDirWriteFailed` so the variant name
+        // + exit code carry the discriminator instead of the inner path).
+        (
+            TomeError::PluginDataDirWriteFailed {
+                path: PathBuf::from("/home/u/.tome/plugin-data/midnight-expert/compact-dev"),
+                source: dummy_io_error(),
+            },
+            9,
+            "plugin_data_dir_write_failed",
+        ),
         // 13–20 — Phase 4 new variants (pre-allocated by F3 — no production
         // wiring yet; see specs/004-phase-4-refactor-harnesses/tasks.md T032).
         // Note: `SummariserFailure` is mapped to exit 24 (not 20 as the
@@ -405,6 +416,7 @@ fn exhaustive_match_compile_check() {
             TomeError::GitFailed { .. } => 6,
             TomeError::Io(_) => 7,
             TomeError::Interrupted => 8,
+            TomeError::PluginDataDirWriteFailed { .. } => 9,
             TomeError::WorkspaceNotFound { .. } => 13,
             TomeError::WorkspaceAlreadyExists { .. } => 14,
             TomeError::WorkspaceNameInvalid { .. } => 15,

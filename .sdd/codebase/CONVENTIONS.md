@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and common patterns.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26 (Phase 4 v0.4.0 Polish complete; refreshed via `/sdd:map incremental`)
+> **Last Updated**: 2026-05-26 (Phase 5 US1 shipped; refreshed via `/sdd:map incremental`)
 
 ## Code Style
 
@@ -34,8 +34,8 @@ All three gates run locally in `.githooks/pre-commit` before every commit; CI re
 
 | Type | Convention | Example |
 |------|------------|---------|
-| Modules | snake_case, capability-organized | `src/doctor/`, `src/summarise/`, `src/harness/` |
-| Test files | Integration test prefix + `_` | `tests/doctor_p4.rs`, `tests/workspace_use_atomicity.rs` |
+| Modules | snake_case, capability-organized | `src/doctor/`, `src/summarise/`, `src/substitution/`, `src/harness/` |
+| Test files | Integration test prefix + `_` | `tests/doctor_p4.rs`, `tests/workspace_use_atomicity.rs`, `tests/mcp_prompts.rs` |
 | Fixtures | Lowercase, descriptive | `tests/fixtures/sample-catalog/` |
 | Config files | TOML for Tome-owned, inherit third-party names | `config.toml`, `settings.toml`, `.mcp.json` (upstream format) |
 | Temporary directories | `.tome.tmp.*` prefix | Used by `atomic_dir` helper for crash safety |
@@ -74,9 +74,30 @@ Variants are grouped by **Phase** with exit code ranges as comments:
 // Phase 2 — plugin lifecycle (codes 20–23).
 // Phase 3 — MCP / workspace (codes 60–75).
 // Phase 4 — workspace name + harness + summariser (codes 13–19, 24).
+// Phase 5 — commands-as-prompts + substitution (codes 9, 25–29).
 ```
 
-**Pre-allocated variants** are added in Foundational phases **before any consumer exists**. Phase 4 F3 pre-allocated codes 13–19, 24 before project binding and harness composition were implemented. Benefit: zero mid-feature enum churn; compiler enforces all arms are covered.
+**Pre-allocated variants** are added in Foundational phases **before any consumer exists**. Phase 5 F1 pre-allocated codes 25–29 for substitution + commands pipeline, code 9 for plugin-data-dir creation failures. Benefit: zero mid-feature enum churn; compiler enforces all arms are covered.
+
+### Phase 5 Error Variants: Data Directory Writes
+
+Phase 5 distinguishes two data-directory write failure modes (exit codes 9 and 25) to signal which directory failed:
+
+```rust
+#[error("workspace data directory write failed at {}: {source}", path.display())]
+WorkspaceDataDirWriteFailed {  // code 25
+    path: PathBuf,
+    source: std::io::Error,
+},
+
+#[error("plugin data dir write failed at {}: {source}", path.display())]
+PluginDataDirWriteFailed {  // code 9 (Phase 1 I/O cluster)
+    path: PathBuf,
+    source: std::io::Error,
+},
+```
+
+Both use named-field pattern (not `#[from]`) because the failure location disambiguates. Mirrors the substitution engine's split (`SubstitutionError::PluginDataDirCreationFailed` vs `WorkspaceDataDirCreationFailed`).
 
 ### Error Variants with Rich Context
 
@@ -104,7 +125,7 @@ WorkspaceNotFound { name: String },
 ModelMissing { model: String },
 ```
 
-## Core Type Patterns (Phase 4)
+## Core Type Patterns (Phase 4 + Phase 5)
 
 ### WorkspaceName Newtype with Validation
 
@@ -482,9 +503,38 @@ impl Drop for InjectionGuard {
 }
 ```
 
-Used for: `MIGRATIONS_OVERRIDE`, `HARNESS_MODULES_OVERRIDE`, `SUMMARISER_OVERRIDE`.
+Used for: `MIGRATIONS_OVERRIDE`, `HARNESS_MODULES_OVERRIDE`, `SUMMARISER_OVERRIDE`, `SUBSTITUTION_CLOCK_OVERRIDE`, `PLUGIN_DATA_DIR_OVERRIDE`, `WORKSPACE_DATA_DIR_OVERRIDE`.
 
 **Why not `#[cfg(test)]`?** Integration tests don't see `#[cfg(test)]` code; only public items are visible. `#[doc(hidden)]` signals that the slot is internal.
+
+### Phase 5 Substitution Guards (US1 / F3)
+
+Three new RAII guards in `tests/common/mod.rs` mirror the Phase 4 pattern for substitution testing:
+
+```rust
+pub struct ClockOverrideGuard;
+
+impl ClockOverrideGuard {
+    pub fn install(when: OffsetDateTime) -> Self {
+        *tome::substitution::SUBSTITUTION_CLOCK_OVERRIDE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(when);
+        Self
+    }
+}
+
+impl Drop for ClockOverrideGuard {
+    fn drop(&mut self) {
+        *tome::substitution::SUBSTITUTION_CLOCK_OVERRIDE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+```
+
+Similar patterns for `PluginDataDirGuard` and `WorkspaceDataDirGuard`. Each guard clears the slot on drop, surviving panics. Used in substitution skeleton tests (`tests/substitution_skeleton.rs`) and later US2/US3 tests for variable injection.
 
 ### HarnessModulesGuard Pattern (Phase 4 US3)
 
@@ -683,6 +733,64 @@ fn registry_qwen_sha256_is_not_placeholder() {
 
 **Pattern**: When a hard-coded value must never be X, use defensive runtime check PLUS automated regression test.
 
+## Substitution & Variable Patterns (Phase 5 US1+)
+
+### Module-Skeleton-with-Override-Seams Pattern (Phase 5 / F3)
+
+Framework modules ship with skeleton implementations and test-injection hooks:
+
+```rust
+// src/substitution/mod.rs
+#[doc(hidden)]
+pub static SUBSTITUTION_CLOCK_OVERRIDE: OnceLock<Mutex<Option<OffsetDateTime>>> = OnceLock::new();
+
+pub fn current_time(ctx: &SubstitutionContext) -> OffsetDateTime {
+    SUBSTITUTION_CLOCK_OVERRIDE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or_else(|| OffsetDateTime::now_utc())
+}
+```
+
+At Phase F3 (skeleton), the module compiles and tests pass with all variables returning body-unchanged. Actual rendering logic ships in US1/US2/US3. Test injection seams are available from day one, enabling integration test setup.
+
+Benefits: (1) framework ships "complete to compile" (2) tests drive implementation (3) zero refactor of injection points between slices.
+
+Used in: `src/substitution/` module skeleton with three override slots (`SUBSTITUTION_CLOCK_OVERRIDE`, `PLUGIN_DATA_DIR_OVERRIDE`, `WORKSPACE_DATA_DIR_OVERRIDE`).
+
+### FK Toggle for Conditional Schema Migration (Phase 5)
+
+When registering a forward migration that creates or modifies a constraint, use a feature flag to toggle enforcement conditionally:
+
+```rust
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        from: 2,
+        to: 3,
+        name: "add_entry_kind_and_promote_identity",
+        apply: |tx| {
+            // Create new schema columns
+            tx.execute("ALTER TABLE skills ADD COLUMN kind TEXT DEFAULT 'skill'", [])?;
+            tx.execute("ALTER TABLE skills ADD COLUMN prompt_name TEXT", [])?;
+            
+            // Toggle FK enforcement off during migration
+            tx.execute("PRAGMA foreign_keys = OFF", [])?;
+            
+            // .. backfill + mutations ..
+            
+            // Re-enable after migration complete
+            tx.execute("PRAGMA foreign_keys = ON", [])?;
+            
+            Ok(())
+        },
+    },
+];
+```
+
+Pattern: Disable FK checks during the migration window, re-enable after. Prevents constraint violation errors during complex backfill. Documented in migration comments per the spec contract.
+
 ## Git Conventions
 
 ### Commit Messages
@@ -713,6 +821,7 @@ Enforced by `cocogitto` in `.githooks/commit-msg`. Use `git commit --no-verify` 
 - `toml_edit` — scoped to `src/harness/mcp_config.rs` only
 - Phase 3: `tokio`, `rmcp` scoped to `src/mcp/` only; enforced by `tests/sync_boundary.rs`
 - Phase 4: `llama-cpp-2` scoped to `src/summarise/llama.rs`; exact-pinned at `=0.1.146` (upstream breaks C ABI on every minor)
+- Phase 5: `regex` promoted from transitive to direct dep (consumed by substitution engine)
 
 ### Not Used
 
@@ -733,4 +842,4 @@ Enforced by `cocogitto` in `.githooks/commit-msg`. Use `git commit --no-verify` 
 ---
 
 *This document defines HOW to write code. Update when conventions change or new patterns stabilize.*
-*Last refreshed 2026-05-26 against Phase 4 v0.4.0 Polish-complete source (916 tests passing, 125 suites).*
+*Last refreshed 2026-05-26 against Phase 5 US1-complete source (954 tests passing, 127 suites).*

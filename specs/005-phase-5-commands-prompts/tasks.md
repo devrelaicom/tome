@@ -190,10 +190,10 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US1.d — Reviewer pass + US1 closeout
 
-- [ ] T148 [US1] Dispatch 4 reviewer agents in parallel (contract / Rust-lens / test / security) with per-scope briefs writing to `/tmp/tome-phase5-us1-{contract,rust,test,security}.md` (per research §R-18)
-- [ ] T149 [US1] Consolidate reviewer findings into `specs/005-phase-5-commands-prompts/review/us1-findings.md` + `us1-disposition.md`
-- [ ] T150 [US1] Apply all reviewer blockers and selected majors; commit fixes
-- [ ] T151 [GIT] Commit: `fix(phase5/us1): reviewer-pass blockers and selected majors`
+- [x] T148 [US1] Dispatch 4 reviewer agents in parallel (contract / Rust-lens / test / security) with per-scope briefs writing to `/tmp/tome-phase5-us1-{contract,rust,test,security}.md` (per research §R-18)
+- [x] T149 [US1] Consolidate reviewer findings into `specs/005-phase-5-commands-prompts/review/us1-findings.md` + `us1-disposition.md`
+- [x] T150 [US1] Apply all reviewer blockers and selected majors; commit fixes
+- [x] T151 [GIT] Commit: `fix(phase5/us1): reviewer-pass blockers and selected majors`
 - [ ] T152 [US1] Run `/sdd:map incremental` to refresh `.sdd/codebase/` against US1 changes
 - [ ] T153 [US1] Review `retro/P3.md` and extract critical learnings to CLAUDE.md (conservative)
 - [ ] T154 [GIT] Commit: `docs: refresh codebase docs + finalize phase 3 retro`

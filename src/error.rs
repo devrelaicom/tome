@@ -119,6 +119,23 @@ pub enum TomeError {
         source: std::io::Error,
     },
 
+    /// Plugin-data directory `create_dir_all` failed. Companion to
+    /// [`Self::WorkspaceDataDirWriteFailed`] (exit 25). US1.d reviewer
+    /// pass (R-M1) split the original combined variant in two because
+    /// `${TOME_PLUGIN_DATA}` and `${TOME_WORKSPACE_DATA}` live under
+    /// distinct directory roots and the `path` payload alone is a
+    /// confusing way for a reader to learn which one failed — variant
+    /// name + exit code should carry the discriminator. Exit code 9 is
+    /// the lowest free slot in the Phase 1 I/O cluster (Phase 1 occupies
+    /// 1–8, then 13+); semantically I/O-adjacent. Mirrors the substitution
+    /// engine's matching split (`SubstitutionError::PluginDataDirCreationFailed`
+    /// vs `WorkspaceDataDirCreationFailed`).
+    #[error("plugin data dir write failed at {}: {source}", path.display())]
+    PluginDataDirWriteFailed {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
     #[error("prompt argument mismatch: expected {expected}, supplied {supplied}")]
     PromptArgumentMismatch { expected: usize, supplied: usize },
 
@@ -329,6 +346,12 @@ impl TomeError {
             Self::GitFailed { .. } => 6,
             Self::Io(_) => 7,
             Self::Interrupted => 8,
+            // 9 — Phase 5 / US1.d (R-M1): plugin data dir write failure.
+            // Split from `WorkspaceDataDirWriteFailed` (25) so the variant
+            // name + exit code carry the discriminator instead of relying
+            // on the inner `path` field. Lowest free slot in Phase 1's
+            // 1–8 cluster; semantically I/O-adjacent.
+            Self::PluginDataDirWriteFailed { .. } => 9,
             // 13–16 — Phase 4 workspace name + project binding
             Self::WorkspaceNotFound { .. } => 13,
             Self::WorkspaceAlreadyExists { .. } => 14,
@@ -409,6 +432,8 @@ impl TomeError {
             Self::GitFailed { .. } => "git_failed",
             Self::Io(_) => "io",
             Self::Interrupted => "interrupted",
+            // Phase 5 / US1.d (R-M1): plugin data dir write failure.
+            Self::PluginDataDirWriteFailed { .. } => "plugin_data_dir_write_failed",
             // Phase 4 — workspace name + project binding
             Self::WorkspaceNotFound { .. } => "workspace_not_found",
             Self::WorkspaceAlreadyExists { .. } => "workspace_already_exists",

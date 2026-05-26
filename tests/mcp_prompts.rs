@@ -554,6 +554,79 @@ fn get_response_description_uses_truncated_entry_description() {
     );
 }
 
+// ---- T-M3 (US1.d reviewer pass): registry-build degradation -----------
+//
+// `PromptRegistry::build_for_workspace` warns-and-skips entries whose
+// body file went missing on disk between enable and registry build
+// (catalog cache evicted, manual deletion) or whose frontmatter parses
+// fail. The rest of the registry must still build so a single bad
+// entry doesn't take prompts/list down. These tests pin both warn-skip
+// branches.
+
+#[test]
+fn registry_build_skips_entry_with_missing_body_file() {
+    // Two commands enabled; delete one body file off disk; assert
+    // registry builds with only the surviving prompt.
+    let cmd1 = "---\nname: alive\ndescription: still here.\n---\nbody\n";
+    let cmd2 = "---\nname: gone\ndescription: about to vanish.\n---\nbody\n";
+    let (tmp, paths) = stage_workspace_with(&[], &[("alive", cmd1), ("gone", cmd2)]);
+
+    // Delete one of the on-disk command bodies. The `stage_workspace_with`
+    // fixture wrote it to `<catalog_root>/plug/commands/gone.md`.
+    let catalog_root = tmp.path().join("catalog");
+    let gone_path = catalog_root.join("plug").join("commands").join("gone.md");
+    assert!(gone_path.exists(), "fixture wrote the body file");
+    std::fs::remove_file(&gone_path).expect("delete body file");
+
+    let conn = open_index(&paths);
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn)
+        .expect("registry build must succeed when one body file is missing");
+
+    let names: Vec<String> = registry
+        .descriptors()
+        .iter()
+        .map(|p| p.name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["plug__alive"],
+        "missing body must warn-and-skip; surviving entry must remain",
+    );
+}
+
+#[test]
+fn registry_build_skips_entry_with_malformed_frontmatter() {
+    // Two commands enabled; corrupt one's frontmatter after enable;
+    // assert registry builds with only the surviving prompt.
+    let cmd1 = "---\nname: alive\ndescription: still here.\n---\nbody\n";
+    let cmd2 = "---\nname: malformed\ndescription: pristine.\n---\nbody\n";
+    let (tmp, paths) = stage_workspace_with(&[], &[("alive", cmd1), ("malformed", cmd2)]);
+
+    // Replace the body of `malformed.md` with content that fails the
+    // frontmatter parse (no opening `---`).
+    let catalog_root = tmp.path().join("catalog");
+    let bad_path = catalog_root
+        .join("plug")
+        .join("commands")
+        .join("malformed.md");
+    std::fs::write(&bad_path, "no frontmatter delimiters here\n").expect("rewrite body");
+
+    let conn = open_index(&paths);
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn)
+        .expect("registry build must succeed when one frontmatter is malformed");
+
+    let names: Vec<String> = registry
+        .descriptors()
+        .iter()
+        .map(|p| p.name.clone())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["plug__alive"],
+        "malformed frontmatter must warn-and-skip; surviving entry must remain",
+    );
+}
+
 #[test]
 fn description_truncated_at_300_chars_with_ellipsis() {
     // Build a 350-char description and confirm the registry caps it.

@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26 (Phase 4 v0.4.0 Polish complete; 916 tests, 125 suites)
+> **Last Updated**: 2026-05-26 (Phase 5 / US1 complete; 916 tests, 125 suites; Phase 4 v0.4.0 Polish complete)
 
 ## Technical Debt
 
@@ -31,11 +31,13 @@ Items to address when working in the area:
 | TD-017 | `src/catalog/store.rs::reference_count` (Phase 3 US3) | Catalog cache TOCTOU window between pre-check and `remove_dir_all` | Concurrency safety | Low | Two processes racing `tome catalog remove` may both observe empty refs and both call `remove_dir_all` (benign: one wins, one no-ops). Worse: process A observes empty, process B adds URL before A deletes clone → dangling reference (recovered by `tome catalog update` re-clone). Documented design; same profile as Phase 9 cascade pre-check. Phase 4: refcounting moved to DB table; TOCTOU semantics unchanged but now under advisory lock (FR-366) | Phase 4 F11b (DB table + lock) |
 | TD-018 | `src/doctor/harness_detect.rs` (Phase 3 US4) | Harness-detected list is privacy-sensitive | Privacy | Low | Presently local-only (never transmitted); document explicitly. Review at design time if any downstream feature proposes report transmission (e.g., crash reporting, bug-filing UI). Recommend opt-in privacy gate before enabling network transmission | Local-only; monitor |
 | TD-019 | Phase 4 Config struct legacy field | `Config::catalogs: BTreeMap<String, CatalogEntry>` unused post-F11b | Code cleanup | Low | F11b moved catalog enrolment to central DB; the field is never written. Excision is a follow-up cleanup PR (low urgency) | Phase 4 Polish v0.4.1+ |
-| TD-020 | Error categorisation | All Phase 1 + Phase 2 + Phase 3 + Phase 4 codes are enumerated; no catch-all variants | Debuggability | Low | Current approach is sound; closed set enforces completeness | By design |
+| TD-020 | Error categorisation | All Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 US1 codes are enumerated; no catch-all variants | Debuggability | Low | Current approach is sound; closed set enforces completeness | By design |
 | TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low | — | Acceptable |
 | TD-050-US4 | `src/summarise/` (Phase 4 US4) | Byte-progress callback for ~400 MB Qwen model download (TD-010 amplified for summariser) | UX | Low | Phase 4 F6 uses indeterminate spinner; upgrade to byte-progress callback in Phase 4 polish if time permits | Phase 4 Polish v0.4.1+ tracking |
 | TD-051-US4 | `src/summarise/llama.rs` | `LlamaSummariser::new` verifies SHA-256 + loads model on every fresh instantiation (no per-process caching across multiple `new()` calls) | Startup latency (rare) | Low | Per-instantiation load is correct for type semantics; process-global singleton `LlamaBackend` is cached. If a future feature creates multiple `LlamaSummariser` instances in sequence without reuse, per-instance load overhead would be measurable. Current triggers create one per regen call; acceptable | Acceptable design |
 | TD-052-US5 | `src/doctor/orphan_cleanup.rs` (Phase 4 US5) | Orphan staging-directory cleanup via `remove_dir_all` with TOCTOU mtime gating | Concurrent-writer race | Low | STAGING_PREFIX + 1h mtime + symlink-skip + `is_dir()` check + 0o700 perms compose correctly; documented TOCTOU semantics benign per `src/doctor/binding.rs::compare_rules` comment (S-M1 deferral) | Documented trade-off; acceptable |
+| TD-053-US1-P5 | `src/substitution/` (Phase 5 US1, NEW) | YAML deserialiser panic safety on complex nested structures | Robustness | Low | `serde_yaml` can panic on certain pathological YAML inputs (documented upstream). Bounded-read cap on SKILL.md (256 KiB) + 256-argument hard cap mitigate blast radius. Entry body-path validation prevents directory-escape. Monitor upstream for security advisories; consider `serde_yaml::safe` if available. Deferred to Phase 5 Polish or Phase 6 | Tracking; low risk given caps |
+| TD-054-US1-P5 | Phase 5 prompt-injection trust boundary | Substitution engine interprets entry prompts with `$ARGUMENTS` / `$N` / `$name` variable substitution. User-controlled argument values injected into command strings | Design | Medium | Trust boundary: documented as "user explicitly enables plugins and accepts substitution semantics". Argument values are NOT escaped (shell-style quoting per research §R-3 matching Claude Code's documented behaviour). Recommend governance doc: "Do not enable plugins from untrusted sources if using `$ARGUMENTS` in high-privilege commands". Phase 5 spec deferred prompt-injection doc to v0.6+ per `retro/P5.md` S-M1 | Phase 6+ documentation |
 
 ### Low Priority
 
@@ -62,6 +64,8 @@ Nice-to-have improvements:
 | SEC-010 | Credential scrubber (Phase 1–4) | Regex-based scrubbing is pattern-based, not semantic; exotic credential formats may leak (e.g., GitLab private tokens with non-standard delimiters) | Medium | Current rules (R-8 + PR #36 widening for RFC-3986 schemes + PR #54 x-amz-* params) cover common patterns. Add integration tests against real Git helper output. Monitor GitHub issues | Ongoing / Last updated Phase 3 Polish PR #54 |
 | SEC-012-US4 | Phase 4 US4 summariser prompt injection (RESOLVED) | Workspace's enabled-plugin descriptions + skill names interpolated into LLM prompts; descriptions from third-party `plugin.json` (lenient parse) | **RESOLVED** | Trust boundary: documented as acceptable per "user authored which plugins are enabled" posture; prompt construction avoids shell/code-generation context; length-capped outputs + non-empty validation | ✅ By design / Documented in PR #97 |
 | SEC-013-US4 | Phase 4 US4 MCP tool description broadcast (NEW) | Cached workspace short summary embedded in MCP tool description broadcast to every connected harness client | Medium | Read once at startup; in-memory cached until `LlamaSummariser` drops; summary length-capped (SHORT: 800 chars per FR-425) + non-empty validated. Do not include sensitive data in plugin descriptions (governance boundary) | By design / Documented |
+| SEC-014-US1-P5 (NEW) | Phase 5 US1 entry body-path traversal (RESOLVED) | Substitution engine could read arbitrary files via `body: ../../etc/passwd` in skill/command YAML frontmatter | **RESOLVED** | `resolve_entry_body_path` validation rejects `..` and absolute paths (exit 28); path must be relative and bounded | ✅ PR #110–#114 security audit fix |
+| SEC-015-US1-P5 (NEW) | Phase 5 US1 arguments DoS (RESOLVED) | Plugin-manifest arguments list unbounded; hostile catalog could declare 1M+ argument names forcing allocation DoS at enable time | **RESOLVED** | Hard cap at 256 entries enforced in `deserialize_arguments` (both string and list forms); exceed → exit 29 `InvalidArgumentFrontmatter` | ✅ PR #110–#114 security audit fix |
 
 ### Low Risk
 
@@ -124,6 +128,8 @@ Code areas that are brittle or risky to modify:
 | `src/doctor/mod.rs + src/doctor/fixes.rs` (Phase 4 US5, PR #99–#101) | Five repair classes: embedder/reranker/catalog/binding/summariser; read-only diagnostic checks; repairs under advisory lock where state-mutating; graceful collapse on SchemaTooNew (C-M2 fix) | Critical: `assemble_report` never crashes per FR-561; check_index uses graceful unwrap_or_else. Do not revert to error propagation. Repairs coalesce harness sync (R-M2 fix) — do not run per-suggestion. User-owned MCP override filtered by active fix list (S-M2 fix) — do not blanket-rewrite | Do not modify without full concurrency audit + FR-561 compliance check |
 | `src/doctor/binding.rs::compare_rules` (Phase 4 US5, PR #99–#101 R-M5) | Distinguishes "workspace source RULES.md absent" from "project copy absent" via typed enum; absence of workspace source prevents infinite-loop attempt on `--fix` | Do not collapse both cases into one enum arm; do not attempt to copy when source is absent. Test both paths explicitly. Surface descriptive message when source is absent | Prevents infinite-loop bug; critical for correctness |
 | `src/doctor/orphan_cleanup.rs` (Phase 4 US5, New) | Orphan staging-directory cleanup via STAGING_PREFIX match + 1h mtime gate + symlink-skip + `is_dir()` check + symmetric parent removal. Composed with advisory lock in doctor flow | STAGING_PREFIX + mtime + symlink-skip + is_dir() compose correctly; never traverse symlinks. Do not remove any component. Test with real `.tome.tmp.*` dirs (cleanup implicit in doctor test flows; orphan tests exercise mtime boundary) | Phase 4 US5 / PR #101 tested; audited by 4 reviewers |
+| `src/plugin/frontmatter.rs::deserialize_arguments` (Phase 5 US1, NEW) | Accepts both space-separated string and YAML list forms; hard cap at 256 entries enforced in deserialiser (PR #110 S-M1) | Do not remove the 256-entry cap; it bounds DoS. Test both forms with boundary values. Exit code 29 on exceed. Monitor `serde_yaml` for panic safety | Phase 5 US1 security audit; part of PR #110–#114 fixes |
+| `src/substitution/resolve.rs::resolve_entry_body_path` (Phase 5 US1, NEW) | Entry body paths (e.g., `body: utils.md` in skill frontmatter) validated to reject `..` and absolute paths (PR #110 S-M2) | Do not remove validation; it prevents directory-escape via hostile manifests. Test traversal patterns explicitly. Exit code 28 on reject. Path must be relative and bounded | Phase 5 US1 security audit; part of PR #110–#114 fixes |
 
 ## Deferred Findings from Phase 4 Review (PR #99–#101)
 
@@ -139,6 +145,17 @@ Phase 4 / US5 audit produced **1 blocker + 21 majors**. **All 1 actionable block
 | T-M2/T-M3/T-M4/T-M5/T-M6/T-M7 | Test | Various test gaps (CLI coverage, edge cases) | Tracking issue |
 
 See `specs/004-phase-4-refactor-harnesses/review/disposition.md` + individual `us*-disposition.md` files for full triage across all 5 user stories.
+
+## Deferred Findings from Phase 5 Review (PR #110–#114)
+
+Phase 5 / US1 security audit produced fixes applied in PR #110–#114:
+
+| Fix | Category | Description | Status |
+|-----|----------|-------------|--------|
+| S-M1 | Security | `resolve_entry_body_path` rejects `..` and absolute paths | ✅ Applied |
+| S-M2 | Security | Arguments list hard-capped at 256 in frontmatter parser (DoS mitigation) | ✅ Applied |
+| (deferred) | Security | YAML deserialiser panic safety (upstream issue; bounded-read cap + argument cap mitigate) | Phase 5 Polish or Phase 6 |
+| (deferred) | Security | Prompt-injection trust boundary documentation | Phase 6+ |
 
 ## Deprecated Code
 
@@ -196,6 +213,7 @@ Dependencies that may need attention:
 | `llama-cpp-2` | 0.1.x (Phase 4, minor-pinned) | Summariser inference runtime; C++ static link | Pre-1.0 crate; monitor for API churn; test on every minor bump; CPU-only features enforced; US4 first production use (C-B1 real hash) | Active / Pre-1.0 |
 | `toml_edit` | 0.25.x (Phase 4, minor-pinned) | Comment-preserving TOML edits for harness config + workspace marker preservation | Monitor for breaking changes; no known security issues. Used in critical US2 marker-preservation path (T-B1 fix) and US3 settings-edit (S-M3 fix) | Active |
 | `encoding_rs` | 0.8.x (Phase 4 US4, direct) | Decode llama-cpp-2 token output to UTF-8 | MPL 2.0; no known security issues; used for model output decoding only | Stable |
+| `serde_yaml` | 0.9.x (Phase 5 US1, direct) | YAML parser for skill/command frontmatter | Monitor for parse safety / panic issues on pathological input; bounded-read cap (256 KiB) + hard argument cap (256 entries) mitigate blast radius | Active; pre-existing as transitive dep |
 
 ## Phase 3 Deferred Items Disposition (Research §R-17)
 
@@ -226,4 +244,4 @@ Per Phase 4 research §R-17, Phase 3 deferred items are dispositioned as follows
 ---
 
 *This document tracks what needs attention. Update when concerns are resolved or discovered.*
-*Last refreshed 2026-05-26 against Phase 4 v0.4.0 Polish-complete source (916 tests passing, 125 suites).*
+*Last refreshed 2026-05-26 against Phase 5 / US1 complete source (Phase 4 v0.4.0 Polish-complete baseline; 916 tests passing, 125 suites).*

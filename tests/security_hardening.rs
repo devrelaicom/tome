@@ -23,6 +23,93 @@ use tempfile::TempDir;
 #[cfg(unix)]
 use tome::error::TomeError;
 
+// ---- S-H1 (US1.d reviewer pass): resolve_entry_body_path rejects ------
+//
+// A hostile catalog could land a `skills.path` value containing `..`
+// or an absolute path, escaping the plugin directory when the resolver
+// joins. The boundary check refuses both at the entry point with
+// `TomeError::Io(InvalidInput)` (exit 7) before consulting the catalog
+// manifest. These tests pin the rejection at the helper level — the
+// stored path is malformed regardless of catalog enrolment state, so
+// the test doesn't need to bootstrap workspaces/catalogs; the helper's
+// validation runs FIRST.
+
+#[test]
+fn resolve_entry_body_path_rejects_parent_traversal() {
+    use rusqlite::Connection;
+    use tome::index::skills::resolve_entry_body_path;
+    use tome::paths::Paths;
+
+    let tmp = TempDir::new().unwrap();
+    let paths = Paths::from_root(tmp.path().to_path_buf());
+    // An in-memory DB is fine — the boundary check rejects the stored
+    // path BEFORE consulting the workspace_catalogs table.
+    let conn = Connection::open_in_memory().expect("memdb");
+
+    let err = resolve_entry_body_path(&conn, &paths, "global", "acme", "plug", "../etc/passwd")
+        .expect_err("`..` in stored path must reject");
+
+    assert_eq!(err.exit_code(), 7, "Io exit code; got {err:?}");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("parent-directory traversal") && msg.contains("../etc/passwd"),
+        "rejection must name the offending path; got: {msg}",
+    );
+}
+
+#[test]
+fn resolve_entry_body_path_rejects_parent_traversal_nested() {
+    // `..` in the middle of an otherwise-legitimate path must also
+    // reject — Path::components() picks up the ParentDir component
+    // regardless of position.
+    use rusqlite::Connection;
+    use tome::index::skills::resolve_entry_body_path;
+    use tome::paths::Paths;
+
+    let tmp = TempDir::new().unwrap();
+    let paths = Paths::from_root(tmp.path().to_path_buf());
+    let conn = Connection::open_in_memory().expect("memdb");
+
+    let err = resolve_entry_body_path(
+        &conn,
+        &paths,
+        "global",
+        "acme",
+        "plug",
+        "skills/../../../etc/passwd",
+    )
+    .expect_err("nested `..` in stored path must reject");
+
+    assert_eq!(err.exit_code(), 7);
+    assert!(
+        err.to_string().contains("parent-directory traversal"),
+        "got: {err}",
+    );
+}
+
+#[test]
+fn resolve_entry_body_path_rejects_absolute_path() {
+    use rusqlite::Connection;
+    use tome::index::skills::resolve_entry_body_path;
+    use tome::paths::Paths;
+
+    let tmp = TempDir::new().unwrap();
+    let paths = Paths::from_root(tmp.path().to_path_buf());
+    let conn = Connection::open_in_memory().expect("memdb");
+
+    // Use an absolute path that doesn't actually exist — the boundary
+    // check rejects on `is_absolute()` BEFORE touching the filesystem.
+    let err = resolve_entry_body_path(&conn, &paths, "global", "acme", "plug", "/etc/passwd")
+        .expect_err("absolute stored path must reject");
+
+    assert_eq!(err.exit_code(), 7, "Io exit code; got {err:?}");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("stored entry path is absolute") && msg.contains("/etc/passwd"),
+        "rejection must name the offending path; got: {msg}",
+    );
+}
+
 // ---- S-02: get_skill symlink rejection --------------------------------
 
 #[cfg(unix)]

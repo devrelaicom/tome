@@ -32,6 +32,18 @@ const DESCRIPTION_FALLBACK_LIMIT_CHARS: usize = 500;
 /// `contracts/frontmatter-p5.md` § Recognised fields.
 const ARGUMENT_NAME_PATTERN: &str = r"^[a-z_][a-z0-9_]*$";
 
+/// S-M1 (US1.d reviewer pass): hard cap on the number of arguments
+/// surfaced by a single entry's frontmatter. Defends against DoS at
+/// plugin-enable time — a hostile catalog could otherwise ship a 1 GiB
+/// YAML list of single-character argument names and force the parser
+/// to allocate proportionally. Enforced in both the YAML sequence
+/// visitor and the space-separated string visitor in
+/// [`deserialize_arguments`]. 256 is intentionally generous: every
+/// real-world prompt declares fewer than 10 named arguments; the cap
+/// exists to bound pathological input, not to constrain legitimate
+/// authoring.
+const MAX_ARGUMENTS: usize = 256;
+
 /// Lenient subset of the YAML header Tome consumes.
 ///
 /// Phase 5 widens this struct with the new fields documented in
@@ -86,6 +98,10 @@ pub struct SkillFrontmatter {
 /// * Any other shape (integer, mapping, list-of-non-strings) → deser error;
 ///   the caller maps this to `TomeError::InvalidArgumentFrontmatter`
 ///   (exit 29).
+///
+/// S-M1 (US1.d reviewer pass): the parser enforces a 256-entry hard cap
+/// on the resulting `Vec<String>` to defend against DoS at plugin-enable
+/// time. See [`MAX_ARGUMENTS`].
 fn deserialize_arguments<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -103,7 +119,16 @@ where
         }
 
         fn visit_str<E: Error>(self, v: &str) -> Result<Self::Value, E> {
-            Ok(v.split_whitespace().map(str::to_owned).collect())
+            let mut out: Vec<String> = Vec::new();
+            for tok in v.split_whitespace() {
+                if out.len() >= MAX_ARGUMENTS {
+                    return Err(E::custom(format!(
+                        "arguments list exceeds {MAX_ARGUMENTS} entries"
+                    )));
+                }
+                out.push(tok.to_owned());
+            }
+            Ok(out)
         }
 
         fn visit_string<E: Error>(self, v: String) -> Result<Self::Value, E> {
@@ -115,10 +140,15 @@ where
             S: serde::de::SeqAccess<'de>,
         {
             let mut out: Vec<String> = match seq.size_hint() {
-                Some(n) => Vec::with_capacity(n),
+                Some(n) => Vec::with_capacity(n.min(MAX_ARGUMENTS)),
                 None => Vec::new(),
             };
             while let Some(elem) = seq.next_element::<String>()? {
+                if out.len() >= MAX_ARGUMENTS {
+                    return Err(<S::Error as Error>::custom(format!(
+                        "arguments list exceeds {MAX_ARGUMENTS} entries"
+                    )));
+                }
                 out.push(elem);
             }
             Ok(out)

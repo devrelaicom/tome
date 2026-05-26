@@ -3,7 +3,18 @@
 Each line is an event (PR open / merge, phase close, etc.). Newest at the bottom.
 
 2026-05-26T12:30:00Z  baseline  main @ 3b075b9 (Phase 4 v0.4.0 PR-G closeout)  test total: 954/127 suites/16 ignored
-2026-05-26T12:50:00Z  PR #110 opened  Phase 1 (Setup)  planning artefacts + version bump 0.4.0 -> 0.5.0-dev  test delta: 0  awaiting CI
+2026-05-26T12:50:00Z  PR #110 opened  Phase 1 (Setup)  planning artefacts + version bump 0.4.0 -> 0.5.0-dev
 2026-05-26T13:15:00Z  PR #110 merged  Phase 1 (Setup) complete  main @ 58bc87d  test total: 954/127/16
-2026-05-26T14:30:00Z  Phase 2 (Foundational) F1+F2+F3 committed  +5 error variants + substitution skeleton + 7 smoke tests
-2026-05-26T14:45:00Z  PR #111 opened  Phase 2 (Foundational) F1+F2+F3  test delta: +7 (954 -> 961)  awaiting CI
+2026-05-26T14:30:00Z  Phase 2 (Foundational) F1+F2+F3 committed  +5 error variants + substitution skeleton
+2026-05-26T14:45:00Z  PR #111 opened  Phase 2 (Foundational) F1+F2+F3  test delta: +7 (954 -> 961)
+2026-05-26T14:56:00Z  PR #111 merged  Phase 2 (Foundational) complete  main @ 0d3c391  test total: 961/128/16
+2026-05-26T14:58:00Z  Phase 3 (US1) US1.a started  schema migration v2->v3 + frontmatter widening + commands walk
+2026-05-26T16:25:00Z  PR #112 opened  US1.a  +23 tests (961 -> 984)  framework FK toggle promoted; 12-step rebuild
+2026-05-26T16:34:00Z  PR #112 merged  US1.a complete  main @ d605fa2  test total: 984/131/16
+2026-05-26T16:35:00Z  US1.b started  MCP prompts capability (prompts/list + name derivation + collisions)
+2026-05-26T19:15:00Z  PR #113 opened  US1.b  +34 tests (984 -> 1018)  T122 rmcp verified  2 latent bugs surfaced for US1.c
+2026-05-26T19:30:00Z  PR #113 merged  US1.b complete  main @ 1c9a135  test total: 1018/135/16
+2026-05-26T19:31:00Z  US1.c started  prompts/get + substitution wiring (no-op stub) + path resolver harmonisation
+2026-05-26T21:50:00Z  PR #114 opened  US1.c  +8 tests (1018 -> 1026)  fixed latent get_skill abs/rel path bug via shared resolver
+2026-05-26T22:15:00Z  PR #114 merged  US1.c complete  main @ 22dd27a  test total: 1026/136/16
+2026-05-26T22:16:00Z  US1.d started  4-reviewer pass + retro fill + mapper refresh + closeout
