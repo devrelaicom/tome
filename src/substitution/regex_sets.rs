@@ -17,8 +17,7 @@ use std::sync::OnceLock;
 pub(super) static BUILTINS_RE: OnceLock<Regex> = OnceLock::new();
 
 /// Compiled regex for the `${TOME_ENV_*}` env-passthrough stage.
-/// Populated by US2.b.
-#[allow(dead_code)]
+/// Populated by [`env_regex`] on first call per US2.b.
 pub(super) static ENV_RE: OnceLock<Regex> = OnceLock::new();
 
 /// Compiled regex for the `$ARGUMENTS` / `$N` / `$NAME` arguments
@@ -40,5 +39,27 @@ pub(super) fn builtin_regex() -> &'static Regex {
     BUILTINS_RE.get_or_init(|| {
         Regex::new(r"\$\{TOME_([A-Z0-9_]+)(?::-(.*?))?\}")
             .expect("BUILTIN_REGEX must compile (constant pattern)")
+    })
+}
+
+/// Return the lazy-compiled regex for the Stage 2 env-passthrough pattern.
+///
+/// Pattern: `\$\{TOME_ENV_([A-Z0-9_]+)(?::-(.*?))?\}` per
+/// `contracts/substitution-engine.md` § Stage 2. Capture group 1 is the
+/// variable name suffix (uppercase ASCII + digits + underscores); the
+/// full host-env lookup key is `format!("TOME_ENV_{name}")` (FR-030).
+/// Capture group 2 is the optional `:-default` value.
+///
+/// The pattern is a constant — `Regex::new` cannot fail at runtime, so
+/// the unreachable case is `expect`ed with a clear message rather than
+/// propagated as `Result`.
+///
+/// Per FR-033 + NFR-005, the pattern's `TOME_ENV_` prefix is mandatory:
+/// references outside that namespace (`${GITHUB_TOKEN}`, `${PATH}`, …)
+/// MUST NOT match.
+pub(super) fn env_regex() -> &'static Regex {
+    ENV_RE.get_or_init(|| {
+        Regex::new(r"\$\{TOME_ENV_([A-Z0-9_]+)(?::-(.*?))?\}")
+            .expect("ENV_REGEX must compile (constant pattern)")
     })
 }
