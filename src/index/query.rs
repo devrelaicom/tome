@@ -67,6 +67,9 @@ pub fn knn(
     params.push(ToSqlOutput::from(top_k as i64));
     params.push(ToSqlOutput::from(workspace_name.to_owned()));
 
+    // Phase 5: `search_skills` covers both kinds (skills + commands) but
+    // honours the `searchable` flag. Entries with
+    // `disable-model-invocation: true` are excluded.
     let mut sql = String::from(
         "SELECT s.id, s.catalog, s.plugin, s.name, s.description,
                 s.plugin_version, s.path, e.distance
@@ -74,7 +77,7 @@ pub fn knn(
          JOIN skills AS s ON s.id = e.skill_id
          JOIN workspace_skills AS ws ON ws.skill_id = s.id
                                     AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = ?3)
-         WHERE e.embedding MATCH ?1 AND k = ?2",
+         WHERE e.embedding MATCH ?1 AND k = ?2 AND s.searchable = 1",
     );
 
     if let Some(c) = filters.catalog {

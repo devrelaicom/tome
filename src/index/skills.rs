@@ -28,6 +28,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::error::TomeError;
+use crate::plugin::identity::EntryKind;
 
 /// One row in the `skills` table after a successful read.
 #[derive(Debug, Clone)]
@@ -36,25 +37,48 @@ pub struct SkillRecord {
     pub catalog: String,
     pub plugin: String,
     pub name: String,
+    /// Phase 5: kind discriminator (`skill` | `command`).
+    pub kind: EntryKind,
     pub description: String,
     pub plugin_version: String,
     pub path: String,
     pub content_hash: String,
+    /// Phase 5: indexed/embedded `when_to_use` guidance.
+    pub when_to_use: Option<String>,
+    /// Phase 5: resolved `searchable` flag (controls `search_skills`
+    /// visibility).
+    pub searchable: bool,
+    /// Phase 5: resolved `user_invocable` flag (controls
+    /// `prompts/list` visibility).
+    pub user_invocable: bool,
     pub enabled: bool,
     pub indexed_at: String,
 }
 
-/// Inputs to [`enable_plugin_atomic`]. The text Tome embeds is composed as
-/// `name + "\n\n" + description` (research §R8); the caller supplies the
+/// Inputs to [`enable_plugin_atomic`]. Phase 5 widens the original
+/// `(name, description)` text composition with `when_to_use` and adds the
+/// kind discriminator + resolved boolean flags. The caller supplies the
 /// raw fields plus the on-disk path.
 #[derive(Debug, Clone)]
 pub struct PendingSkill {
     pub catalog: String,
     pub plugin: String,
     pub name: String,
+    /// Phase 5: `skill` or `command`. The discriminator is directory-rooted
+    /// (`<plugin>/skills/*` → Skill, `<plugin>/commands/*` → Command) and
+    /// recorded in the `skills.kind` column.
+    pub kind: EntryKind,
     pub description: String,
     pub plugin_version: String,
     pub path: String,
+    /// Phase 5: `when_to_use` frontmatter — contributes to embedding text
+    /// when present; `NULL` in DB when absent.
+    pub when_to_use: Option<String>,
+    /// Phase 5: resolved `searchable` flag (see
+    /// `contracts/frontmatter-p5.md` § Resolved defaults).
+    pub searchable: bool,
+    /// Phase 5: resolved `user_invocable` flag.
+    pub user_invocable: bool,
 }
 
 /// Outcome summary of an atomic enable.
@@ -81,22 +105,45 @@ pub struct ReindexSummary {
     pub unchanged: u32,
 }
 
-/// The text composition Tome hashes and embeds. By construction two skills
-/// with the same `(name, description)` produce the same hash, which is the
+/// The text composition Tome hashes and embeds.
+///
+/// Phase 5 (`contracts/entry-schema-p5.md` § Embedding text composition):
+/// the composition widens to include `when_to_use` when present:
+///
+/// ```text
+/// {name}
+///
+/// {description}
+///
+/// When to use: {when_to_use}
+/// ```
+///
+/// The "When to use:" line + preceding blank line appear only when
+/// `when_to_use` is non-empty. Two entries with the same composition
+/// (name + description + when_to_use) produce the same hash, the
 /// condition under which FR-006 / FR-032 perform a no-op refresh.
-pub fn content_hash(name: &str, description: &str) -> String {
+///
+/// Pre-Phase-5 callers that omit `when_to_use` (pass `None`) produce the
+/// historical `name + "\n\n" + description` shape — so existing rows
+/// migrated forward via the v2→v3 schema migration keep their hashes
+/// stable until they're reindexed with a frontmatter that now declares
+/// `when_to_use`.
+pub fn content_hash(name: &str, description: &str, when_to_use: Option<&str>) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(name.as_bytes());
-    hasher.update(b"\n\n");
-    hasher.update(description.as_bytes());
+    let text = embedding_text(name, description, when_to_use);
+    hasher.update(text.as_bytes());
     hex::encode(hasher.finalize())
 }
 
-/// Embedding text for a `(name, description)` pair. Same composition as
-/// [`content_hash`] so the embedder sees exactly the bytes whose digest we
-/// stored.
-pub fn embedding_text(name: &str, description: &str) -> String {
-    format!("{name}\n\n{description}")
+/// Embedding text per [`content_hash`]. Same composition function so the
+/// embedder sees exactly the bytes whose digest we stored.
+pub fn embedding_text(name: &str, description: &str, when_to_use: Option<&str>) -> String {
+    match when_to_use {
+        Some(wtu) if !wtu.is_empty() => {
+            format!("{name}\n\n{description}\n\nWhen to use: {wtu}")
+        }
+        _ => format!("{name}\n\n{description}"),
+    }
 }
 
 fn now_rfc3339() -> String {
@@ -123,47 +170,80 @@ fn workspace_join(workspace_param_index: usize) -> String {
     )
 }
 
+/// Standard `SELECT` projection used by both [`find`] and
+/// [`list_for_plugin`]. Encodes the post-Phase-5 column shape including
+/// the kind discriminator, `when_to_use`, and the resolved boolean
+/// flags. The trailing column is always the LEFT-JOIN `enabled`
+/// expression so `row.get(N)` indices match across callers.
+const SELECT_COLS: &str = "s.id, s.catalog, s.plugin, s.name, s.kind, s.description, \
+                           s.plugin_version, s.path, s.content_hash, s.when_to_use, \
+                           s.searchable, s.user_invocable, s.indexed_at";
+
+fn row_to_skill_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SkillRecord> {
+    let kind_text: String = row.get(4)?;
+    let kind = kind_text.parse::<EntryKind>().map_err(|msg| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other(msg)),
+        )
+    })?;
+    Ok(SkillRecord {
+        id: row.get(0)?,
+        catalog: row.get(1)?,
+        plugin: row.get(2)?,
+        name: row.get(3)?,
+        kind,
+        description: row.get(5)?,
+        plugin_version: row.get(6)?,
+        path: row.get(7)?,
+        content_hash: row.get(8)?,
+        when_to_use: row.get::<_, Option<String>>(9)?,
+        searchable: row.get::<_, i64>(10)? != 0,
+        user_invocable: row.get::<_, i64>(11)? != 0,
+        indexed_at: row.get(12)?,
+        // The trailing `enabled` column is appended by each caller's
+        // SQL — see `find` / `list_for_plugin` below.
+        enabled: row.get::<_, i64>(13)? != 0,
+    })
+}
+
 /// Look up a single skill by identity, with enablement evaluated against
 /// `workspace_name`. Returns `Ok(None)` when absent.
+///
+/// Phase 5: the identity tuple is `(catalog, plugin, kind, name)` —
+/// callers must specify the `kind` they want. The legacy callers that
+/// only know `(catalog, plugin, name)` semantically want skills (the
+/// pre-Phase-5 default); they should pass `EntryKind::Skill`.
 pub fn find(
     conn: &Connection,
     workspace_name: &str,
     catalog: &str,
     plugin: &str,
+    kind: EntryKind,
     name: &str,
 ) -> Result<Option<SkillRecord>, TomeError> {
-    let join = workspace_join(4);
+    let join = workspace_join(5);
     let sql = format!(
-        "SELECT s.id, s.catalog, s.plugin, s.name, s.description, s.plugin_version, s.path,
-                s.content_hash, {ENABLED_EXPR}, s.indexed_at
+        "SELECT {SELECT_COLS}, {ENABLED_EXPR}
          FROM skills AS s
          {join}
-         WHERE s.catalog = ?1 AND s.plugin = ?2 AND s.name = ?3"
+         WHERE s.catalog = ?1 AND s.plugin = ?2 AND s.kind = ?3 AND s.name = ?4"
     );
     conn.query_row(
         &sql,
-        params![catalog, plugin, name, workspace_name],
-        |row| {
-            Ok(SkillRecord {
-                id: row.get(0)?,
-                catalog: row.get(1)?,
-                plugin: row.get(2)?,
-                name: row.get(3)?,
-                description: row.get(4)?,
-                plugin_version: row.get(5)?,
-                path: row.get(6)?,
-                content_hash: row.get(7)?,
-                enabled: row.get::<_, i64>(8)? != 0,
-                indexed_at: row.get(9)?,
-            })
-        },
+        params![catalog, plugin, kind.as_str(), name, workspace_name],
+        row_to_skill_record,
     )
     .optional()
     .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("find skill: {e}")))
 }
 
-/// List every skill row for one plugin, ordered by name. Enablement is
-/// evaluated against `workspace_name`.
+/// List every entry row (both kinds) for one plugin, ordered by
+/// `(kind, name)`. Enablement is evaluated against `workspace_name`.
+///
+/// Phase 5: both `skill` and `command` rows are returned. Callers that
+/// only want skills filter on `record.kind == EntryKind::Skill`.
 pub fn list_for_plugin(
     conn: &Connection,
     workspace_name: &str,
@@ -172,31 +252,20 @@ pub fn list_for_plugin(
 ) -> Result<Vec<SkillRecord>, TomeError> {
     let join = workspace_join(3);
     let sql = format!(
-        "SELECT s.id, s.catalog, s.plugin, s.name, s.description, s.plugin_version, s.path,
-                s.content_hash, {ENABLED_EXPR}, s.indexed_at
+        "SELECT {SELECT_COLS}, {ENABLED_EXPR}
          FROM skills AS s
          {join}
          WHERE s.catalog = ?1 AND s.plugin = ?2
-         ORDER BY s.name"
+         ORDER BY s.kind, s.name"
     );
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("prepare list: {e}")))?;
     let rows = stmt
-        .query_map(params![catalog, plugin, workspace_name], |row| {
-            Ok(SkillRecord {
-                id: row.get(0)?,
-                catalog: row.get(1)?,
-                plugin: row.get(2)?,
-                name: row.get(3)?,
-                description: row.get(4)?,
-                plugin_version: row.get(5)?,
-                path: row.get(6)?,
-                content_hash: row.get(7)?,
-                enabled: row.get::<_, i64>(8)? != 0,
-                indexed_at: row.get(9)?,
-            })
-        })
+        .query_map(
+            params![catalog, plugin, workspace_name],
+            row_to_skill_record,
+        )
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query list: {e}")))?;
     rows.collect::<Result<_, _>>()
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect list: {e}")))
@@ -292,10 +361,13 @@ pub fn delete_by_plugin(conn: &Connection, catalog: &str, plugin: &str) -> Resul
     })
 }
 
-/// Insert a new skill row + matching embedding, or update an existing row
+/// Insert a new entry row + matching embedding, or update an existing row
 /// in place. Run inside an already-open transaction by the caller.
-/// Phase 4 / F9: the `enabled` column is gone; enablement is recorded
-/// separately via [`upsert_workspace_skill`].
+///
+/// Phase 5: writes the kind discriminator and the new
+/// `searchable`/`user_invocable`/`when_to_use` columns. The conflict
+/// target is the widened identity tuple `(catalog, plugin, kind, name)`,
+/// matching the post-v3 unique index `skills_unique`.
 fn upsert_skill(
     tx: &rusqlite::Transaction<'_>,
     pending: &PendingSkill,
@@ -305,23 +377,30 @@ fn upsert_skill(
 ) -> Result<i64, TomeError> {
     tx.execute(
         "INSERT INTO skills
-            (catalog, plugin, name, description, plugin_version, path,
-             content_hash, indexed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(catalog, plugin, name) DO UPDATE SET
+            (catalog, plugin, name, kind, description, plugin_version, path,
+             content_hash, when_to_use, searchable, user_invocable, indexed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT(catalog, plugin, kind, name) DO UPDATE SET
             description    = excluded.description,
             plugin_version = excluded.plugin_version,
             path           = excluded.path,
             content_hash   = excluded.content_hash,
+            when_to_use    = excluded.when_to_use,
+            searchable     = excluded.searchable,
+            user_invocable = excluded.user_invocable,
             indexed_at     = excluded.indexed_at",
         params![
             pending.catalog,
             pending.plugin,
             pending.name,
+            pending.kind.as_str(),
             pending.description,
             pending.plugin_version,
             pending.path,
             hash,
+            pending.when_to_use,
+            i64::from(pending.searchable),
+            i64::from(pending.user_invocable),
             now,
         ],
     )
@@ -329,8 +408,14 @@ fn upsert_skill(
 
     let id: i64 = tx
         .query_row(
-            "SELECT id FROM skills WHERE catalog = ?1 AND plugin = ?2 AND name = ?3",
-            params![pending.catalog, pending.plugin, pending.name],
+            "SELECT id FROM skills
+             WHERE catalog = ?1 AND plugin = ?2 AND kind = ?3 AND name = ?4",
+            params![
+                pending.catalog,
+                pending.plugin,
+                pending.kind.as_str(),
+                pending.name,
+            ],
             |row| row.get(0),
         )
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("look up skill id: {e}")))?;
@@ -417,13 +502,19 @@ where
     let mut newly_embedded: u32 = 0;
 
     for skill in pending {
-        let hash = content_hash(&skill.name, &skill.description);
+        let hash = content_hash(
+            &skill.name,
+            &skill.description,
+            skill.when_to_use.as_deref(),
+        );
 
+        // Phase 5: identity includes `kind` — same-name entries across
+        // kinds resolve to two distinct rows.
         let existing: Option<(i64, String)> = tx
             .query_row(
                 "SELECT id, content_hash FROM skills
-                 WHERE catalog = ?1 AND plugin = ?2 AND name = ?3",
-                params![skill.catalog, skill.plugin, skill.name],
+                 WHERE catalog = ?1 AND plugin = ?2 AND kind = ?3 AND name = ?4",
+                params![skill.catalog, skill.plugin, skill.kind.as_str(), skill.name,],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
@@ -437,11 +528,28 @@ where
         let skill_id = match existing {
             Some((id, stored_hash)) if stored_hash == hash => {
                 // Cheap re-enable (FR-006): metadata refresh only, no
-                // embedder invocation, no embedding rewrite.
+                // embedder invocation, no embedding rewrite. Phase 5
+                // also refreshes the resolved boolean flags +
+                // `when_to_use` so frontmatter changes that don't
+                // touch the embedding-text composition still propagate.
                 tx.execute(
-                    "UPDATE skills SET plugin_version = ?2, path = ?3, indexed_at = ?4
+                    "UPDATE skills
+                     SET plugin_version = ?2,
+                         path = ?3,
+                         when_to_use = ?4,
+                         searchable = ?5,
+                         user_invocable = ?6,
+                         indexed_at = ?7
                      WHERE id = ?1",
-                    params![id, skill.plugin_version, skill.path, now],
+                    params![
+                        id,
+                        skill.plugin_version,
+                        skill.path,
+                        skill.when_to_use,
+                        i64::from(skill.searchable),
+                        i64::from(skill.user_invocable),
+                        now,
+                    ],
                 )
                 .map_err(|e| {
                     TomeError::IndexIntegrityCheckFailure(format!(
@@ -452,7 +560,11 @@ where
                 id
             }
             _ => {
-                let embedding = embed(&embedding_text(&skill.name, &skill.description))?;
+                let embedding = embed(&embedding_text(
+                    &skill.name,
+                    &skill.description,
+                    skill.when_to_use.as_deref(),
+                ))?;
                 let id = upsert_skill(&tx, skill, &hash, &embedding, &now)?;
                 newly_embedded = newly_embedded.saturating_add(1);
                 id
@@ -519,44 +631,74 @@ where
     let now_unix = OffsetDateTime::now_utc().unix_timestamp();
     let mut summary = ReindexSummary::default();
 
-    // Snapshot existing rows once per call. We'll diff against `pending`
-    // below and use the leftover set for the Removed branch.
-    let mut existing: std::collections::HashMap<String, (i64, String)> =
+    // Snapshot existing rows once per call. Keyed by `(kind, name)` so
+    // Phase 5's same-name-different-kind entries don't collide. We'll
+    // diff against `pending` below and use the leftover set for the
+    // Removed branch.
+    let mut existing: std::collections::HashMap<(EntryKind, String), (i64, String)> =
         std::collections::HashMap::new();
     {
         let mut stmt = tx
             .prepare(
-                "SELECT id, name, content_hash FROM skills
+                "SELECT id, kind, name, content_hash FROM skills
                  WHERE catalog = ?1 AND plugin = ?2",
             )
             .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("prepare existing: {e}")))?;
         let rows = stmt
             .query_map(params![catalog, plugin], |row| {
                 let id: i64 = row.get(0)?;
-                let name: String = row.get(1)?;
-                let hash: String = row.get(2)?;
-                Ok((name, (id, hash)))
+                let kind_text: String = row.get(1)?;
+                let name: String = row.get(2)?;
+                let hash: String = row.get(3)?;
+                let kind = kind_text.parse::<EntryKind>().map_err(|msg| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Text,
+                        Box::new(std::io::Error::other(msg)),
+                    )
+                })?;
+                Ok(((kind, name), (id, hash)))
             })
             .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query existing: {e}")))?;
         for row in rows {
-            let (name, value) = row.map_err(|e| {
+            let (key, value) = row.map_err(|e| {
                 TomeError::IndexIntegrityCheckFailure(format!("collect existing: {e}"))
             })?;
-            existing.insert(name, value);
+            existing.insert(key, value);
         }
     }
 
     // Pass 1 — Added / Modified / Unchanged.
     for skill in pending {
-        let hash = content_hash(&skill.name, &skill.description);
+        let hash = content_hash(
+            &skill.name,
+            &skill.description,
+            skill.when_to_use.as_deref(),
+        );
 
-        let skill_id = match existing.remove(&skill.name) {
+        let skill_id = match existing.remove(&(skill.kind, skill.name.clone())) {
             Some((id, stored_hash)) if stored_hash == hash && !force => {
-                // Unchanged: touch metadata only.
+                // Unchanged: touch metadata only. Phase 5 refreshes
+                // `when_to_use` + resolved flags so frontmatter changes
+                // outside the embedding-text composition still propagate.
                 tx.execute(
-                    "UPDATE skills SET plugin_version = ?2, path = ?3, indexed_at = ?4
+                    "UPDATE skills
+                     SET plugin_version = ?2,
+                         path = ?3,
+                         when_to_use = ?4,
+                         searchable = ?5,
+                         user_invocable = ?6,
+                         indexed_at = ?7
                      WHERE id = ?1",
-                    params![id, skill.plugin_version, skill.path, now],
+                    params![
+                        id,
+                        skill.plugin_version,
+                        skill.path,
+                        skill.when_to_use,
+                        i64::from(skill.searchable),
+                        i64::from(skill.user_invocable),
+                        now,
+                    ],
                 )
                 .map_err(|e| {
                     TomeError::IndexIntegrityCheckFailure(format!(
@@ -569,14 +711,22 @@ where
             }
             Some(_) => {
                 // Modified (or force=true rewriting an unchanged row).
-                let embedding = embed(&embedding_text(&skill.name, &skill.description))?;
+                let embedding = embed(&embedding_text(
+                    &skill.name,
+                    &skill.description,
+                    skill.when_to_use.as_deref(),
+                ))?;
                 let id = upsert_skill(&tx, skill, &hash, &embedding, &now)?;
                 summary.modified = summary.modified.saturating_add(1);
                 id
             }
             None => {
                 // Added.
-                let embedding = embed(&embedding_text(&skill.name, &skill.description))?;
+                let embedding = embed(&embedding_text(
+                    &skill.name,
+                    &skill.description,
+                    skill.when_to_use.as_deref(),
+                ))?;
                 let id = upsert_skill(&tx, skill, &hash, &embedding, &now)?;
                 summary.added = summary.added.saturating_add(1);
                 id
@@ -590,7 +740,7 @@ where
 
     // Pass 2 — Removed: anything still left in `existing` is on-index but
     // not on-disk. Drop the row + its embedding.
-    for (_name, (id, _hash)) in existing {
+    for (_key, (id, _hash)) in existing {
         tx.execute(
             "DELETE FROM skill_embeddings WHERE skill_id = ?1",
             params![id],

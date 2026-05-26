@@ -21,10 +21,12 @@ use time::OffsetDateTime;
 
 use crate::error::TomeError;
 
-/// The schema version Tome's compiled-in code understands. Phase 4 bumps
-/// this to 2. Bumping further requires a matching `Migration` row in
-/// [`crate::index::migrations`].
-pub const SCHEMA_VERSION: u32 = 2;
+/// The schema version Tome's compiled-in code understands. Phase 5 bumps
+/// this to 3 (entry-kind unification: `skills.kind` column + widened
+/// unique constraint plus new `searchable` / `user_invocable` /
+/// `when_to_use` columns). Bumping further requires a matching
+/// `Migration` row in [`crate::index::migrations`].
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// The privileged seeded workspace name, present after every bootstrap and
 /// migration. Phase 4's lifecycle paths route un-bound operations through
@@ -61,20 +63,32 @@ pub const CREATE_STATEMENTS: &[&str] = &[
         created_at    INTEGER NOT NULL,
         last_used_at  INTEGER NOT NULL
     )",
+    // Phase 5 / schema v3: the `skills` table now carries `kind`
+    // (`skill` | `command`), `searchable`, `user_invocable`, and
+    // `when_to_use`. The unique constraint widens to include `kind` so a
+    // plugin can ship `skills/foo/SKILL.md` and `commands/foo.md`
+    // side-by-side without name clashes.
     "CREATE TABLE skills (
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
         catalog         TEXT NOT NULL,
         plugin          TEXT NOT NULL,
         name            TEXT NOT NULL,
+        kind            TEXT NOT NULL DEFAULT 'skill',
         description     TEXT NOT NULL,
         plugin_version  TEXT NOT NULL,
         path            TEXT NOT NULL,
         content_hash    TEXT NOT NULL,
-        indexed_at      INTEGER NOT NULL,
-        UNIQUE (catalog, plugin, name)
+        searchable      INTEGER NOT NULL DEFAULT 1,
+        user_invocable  INTEGER NOT NULL DEFAULT 0,
+        when_to_use     TEXT,
+        indexed_at      INTEGER NOT NULL
     )",
     "CREATE INDEX idx_skills_catalog_plugin ON skills(catalog, plugin)",
     "CREATE INDEX idx_skills_content_hash   ON skills(content_hash)",
+    // Phase 5: widened identity tuple. Named `skills_unique` so the
+    // schema-v2 → v3 migration's DROP/CREATE statements target the same
+    // index name a fresh-bootstrap DB uses.
+    "CREATE UNIQUE INDEX skills_unique ON skills (catalog, plugin, kind, name)",
     "CREATE VIRTUAL TABLE skill_embeddings USING vec0(
         skill_id   INTEGER PRIMARY KEY,
         embedding  FLOAT[384]

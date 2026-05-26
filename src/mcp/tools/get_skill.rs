@@ -213,7 +213,16 @@ fn lookup_skill(
     let db_path = paths.index_db.clone();
     let conn = crate::index::db::open_read_only(&db_path)?;
     let workspace_name = scope.name().as_str();
-    match skills::find(&conn, workspace_name, catalog, plugin, name)? {
+    // Phase 5: `get_skill` defaults to the `Skill` kind (FR-084) — the
+    // tool only surfaces skills, not commands.
+    match skills::find(
+        &conn,
+        workspace_name,
+        catalog,
+        plugin,
+        crate::plugin::identity::EntryKind::Skill,
+        name,
+    )? {
         Some(row) if row.enabled => Ok(LookupOutcome::Found(Box::new(row))),
         Some(_) => Ok(LookupOutcome::UnknownSkill),
         None => {

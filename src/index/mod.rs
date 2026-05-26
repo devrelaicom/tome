@@ -24,6 +24,10 @@ pub use db::{OpenOptions, open, open_read_only};
 pub use lock::{LockGuard, acquire as acquire_lock};
 pub use meta::{DriftStatus, MetaKey, ModelIdent, detect_drift};
 pub use migrations::{MIGRATIONS, Migration, apply_pending, current_schema_version};
+// Phase 5 re-export: the `EntryKind` discriminator threads through every
+// `index::skills` entry point. Keep the type accessible from
+// `crate::index::EntryKind` to keep call sites brief.
+pub use crate::plugin::identity::EntryKind;
 pub use query::{Candidate, QueryFilters, knn};
 pub use schema::{CREATE_STATEMENTS, GLOBAL_WORKSPACE, MetaSeed, SCHEMA_VERSION, bootstrap};
 pub use skills::{

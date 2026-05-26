@@ -42,17 +42,27 @@ pub struct Migration {
     pub apply: fn(&Transaction) -> Result<(), TomeError>,
 }
 
-/// Compile-time list of every migration. Phase 4 / F9 registers the
-/// first production migration: `phase_4_v1_to_v2` rebuilds the `skills`
-/// table to drop the `enabled` column, creates the four new workspace
-/// tables + indices, and seeds the privileged `global` workspace row.
-/// See [`phase_4_v1_to_v2`] for the body and the M-MIG-2 audit trail.
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    from: 1,
-    to: 2,
-    name: "phase-4-central-db-refactor",
-    apply: phase_4_v1_to_v2,
-}];
+/// Compile-time list of every migration. Phase 4 / F9 registered the first
+/// production migration: `phase_4_v1_to_v2` rebuilds the `skills` table
+/// to drop the `enabled` column, creates the four new workspace tables +
+/// indices, and seeds the privileged `global` workspace row. Phase 5 /
+/// US1.a registers the second: `phase_5_v2_to_v3` widens the `skills`
+/// identity tuple with a `kind` discriminator and adds the new
+/// `searchable`, `user_invocable`, and `when_to_use` columns.
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        from: 1,
+        to: 2,
+        name: "phase-4-central-db-refactor",
+        apply: phase_4_v1_to_v2,
+    },
+    Migration {
+        from: 2,
+        to: 3,
+        name: "phase5_entry_kind_unification",
+        apply: phase_5_v2_to_v3,
+    },
+];
 
 /// The schema v1 → v2 migration body. Implements the SQLite "12-step"
 /// table-rebuild pattern for dropping the `skills.enabled` column (which
@@ -181,6 +191,90 @@ fn phase_4_v1_to_v2(tx: &Transaction) -> Result<(), TomeError> {
     Ok(())
 }
 
+/// The schema v2 → v3 migration body (Phase 5 / US1.a). Unifies the
+/// `skills` table into a kind-discriminated entry store per
+/// `contracts/schema-migration-p5.md` and `contracts/entry-schema-p5.md`.
+///
+/// The contract's authoritative DDL is:
+///
+/// ```sql
+/// ALTER TABLE skills ADD COLUMN kind TEXT NOT NULL DEFAULT 'skill';
+/// ALTER TABLE skills ADD COLUMN searchable INTEGER NOT NULL DEFAULT 1;
+/// ALTER TABLE skills ADD COLUMN user_invocable INTEGER NOT NULL DEFAULT 0;
+/// ALTER TABLE skills ADD COLUMN when_to_use TEXT;
+/// DROP INDEX IF EXISTS skills_unique;
+/// CREATE UNIQUE INDEX skills_unique ON skills (catalog, plugin, kind, name);
+/// ```
+///
+/// **Contract amendment (US1.a discovery):** the schema-v2 `skills` table
+/// expresses uniqueness via an inline `UNIQUE (catalog, plugin, name)`
+/// table constraint, which SQLite materialises as an auto-named
+/// `sqlite_autoindex_skills_*` rather than a developer-named index. The
+/// contract's `DROP INDEX IF EXISTS skills_unique` therefore no-ops on a
+/// real v2 DB, leaving the old narrow constraint in force — defeating
+/// the kind-discriminated identity model. The migration body below
+/// follows the SQLite "12-step" table-rebuild pattern (same approach
+/// Phase 4's `phase_4_v1_to_v2` used to drop the `enabled` column) so
+/// the resulting `skills` table has the widened identity tuple as the
+/// only unique constraint. The contract's intent is preserved
+/// byte-for-byte; only the mechanism changes.
+fn phase_5_v2_to_v3(tx: &Transaction) -> Result<(), TomeError> {
+    tx.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+
+         CREATE TABLE skills_new (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            catalog         TEXT NOT NULL,
+            plugin          TEXT NOT NULL,
+            name            TEXT NOT NULL,
+            kind            TEXT NOT NULL DEFAULT 'skill',
+            description     TEXT NOT NULL,
+            plugin_version  TEXT NOT NULL,
+            path            TEXT NOT NULL,
+            content_hash    TEXT NOT NULL,
+            searchable      INTEGER NOT NULL DEFAULT 1,
+            user_invocable  INTEGER NOT NULL DEFAULT 0,
+            when_to_use     TEXT,
+            indexed_at      INTEGER NOT NULL
+         );
+
+         -- Backfill per `contracts/schema-migration-p5.md` § Backfill:
+         -- every pre-existing row keeps its identity, gains
+         -- `kind = 'skill'` + default `searchable = 1` +
+         -- `user_invocable = 0` + `when_to_use = NULL`.
+         INSERT INTO skills_new
+            (id, catalog, plugin, name, kind, description,
+             plugin_version, path, content_hash,
+             searchable, user_invocable, when_to_use, indexed_at)
+         SELECT
+             id, catalog, plugin, name, 'skill', description,
+             plugin_version, path, content_hash,
+             1, 0, NULL, indexed_at
+         FROM skills;
+
+         DROP TABLE skills;
+         ALTER TABLE skills_new RENAME TO skills;
+
+         -- Recreate every non-uniqueness index that existed on the v2
+         -- `skills` table. `IF NOT EXISTS` mirrors the v1→v2 migration's
+         -- defensive shape (handles the downgrade-stamp test path).
+         CREATE INDEX IF NOT EXISTS idx_skills_catalog_plugin ON skills(catalog, plugin);
+         CREATE INDEX IF NOT EXISTS idx_skills_content_hash   ON skills(content_hash);
+
+         -- Widened identity tuple as the sole unique constraint. Same
+         -- index name a fresh v3 bootstrap uses (see
+         -- `schema::CREATE_STATEMENTS`).
+         CREATE UNIQUE INDEX skills_unique ON skills (catalog, plugin, kind, name);
+
+         PRAGMA foreign_keys = ON;",
+    )
+    .map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!("phase_5_v2_to_v3: rebuild skills: {e}"))
+    })?;
+
+    Ok(())
+}
+
 thread_local! {
     /// Test-only injection point. Phase 7's `tests/schema_migration_e2e.rs`
     /// registers a synthetic migration table for a single scenario, then
@@ -283,62 +377,113 @@ pub fn apply_pending(conn: &mut Connection, current: u32, target: u32) -> Result
             "migrating",
         );
 
-        let tx = conn
-            .transaction()
-            .map_err(|e| TomeError::SchemaMigrationFailed {
-                from: step.from,
-                to: step.to,
-                source: anyhow::anyhow!("begin tx: {e}"),
-            })?;
-
-        if let Err(err) = (step.apply)(&tx) {
-            error!(
-                target: "tome::index::migrations",
-                from = step.from,
-                to = step.to,
-                name = step.name,
-                error = %err,
-                "migration failed",
-            );
+        // Disable FK enforcement around the per-step transaction. Two of
+        // the registered migrations (phase_4_v1_to_v2 and
+        // phase_5_v2_to_v3) use the SQLite "12-step" table-rebuild
+        // pattern that DROPs the `skills` table and recreates it; with
+        // FKs enabled the DROP cascades through `workspace_skills` via
+        // ON DELETE CASCADE, wiping the very rows the migration is
+        // trying to preserve. `PRAGMA foreign_keys` cannot be set
+        // INSIDE a transaction (SQLite silently ignores), so the
+        // migration-body's PRAGMA statements are belt-and-braces only;
+        // the authoritative toggle is here. Restored to ON on the
+        // success path so post-migration writes still get FK
+        // enforcement. The setting is per-connection — Phase-3 contract
+        // notes the migration framework owns connection PRAGMAs around
+        // each step.
+        let prior_fk = read_fk_pragma(conn).unwrap_or(1);
+        if let Err(e) = conn.pragma_update(None, "foreign_keys", "OFF") {
             return Err(TomeError::SchemaMigrationFailed {
                 from: step.from,
                 to: step.to,
-                source: anyhow::anyhow!(err),
+                source: anyhow::anyhow!("disable foreign_keys: {e}"),
             });
         }
 
-        if let Err(e) = tx.execute(
-            "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
-            rusqlite::params![step.to.to_string()],
-        ) {
-            error!(
-                target: "tome::index::migrations",
-                from = step.from,
-                to = step.to,
-                name = step.name,
-                error = %e,
-                "migration failed (record schema_version)",
-            );
-            return Err(TomeError::SchemaMigrationFailed {
-                from: step.from,
-                to: step.to,
-                source: anyhow::anyhow!("record schema_version: {e}"),
-            });
-        }
+        // Run the per-step work + commit inside a closure so the FK
+        // PRAGMA can be restored on every exit path (success or failure)
+        // before we return from `apply_pending`. Restoring FK on the
+        // failure path matters because the migration framework's caller
+        // (typically `index::db::open`) keeps the connection open for
+        // subsequent reads/writes; leaving FKs OFF would silently relax
+        // the runtime invariant the rest of the binary relies on.
+        let step_result: Result<(), TomeError> = (|| {
+            let tx = conn
+                .transaction()
+                .map_err(|e| TomeError::SchemaMigrationFailed {
+                    from: step.from,
+                    to: step.to,
+                    source: anyhow::anyhow!("begin tx: {e}"),
+                })?;
 
-        if let Err(e) = tx.commit() {
-            error!(
-                target: "tome::index::migrations",
-                from = step.from,
-                to = step.to,
-                name = step.name,
-                error = %e,
-                "migration failed (commit)",
-            );
+            if let Err(err) = (step.apply)(&tx) {
+                error!(
+                    target: "tome::index::migrations",
+                    from = step.from,
+                    to = step.to,
+                    name = step.name,
+                    error = %err,
+                    "migration failed",
+                );
+                return Err(TomeError::SchemaMigrationFailed {
+                    from: step.from,
+                    to: step.to,
+                    source: anyhow::anyhow!(err),
+                });
+            }
+
+            if let Err(e) = tx.execute(
+                "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+                rusqlite::params![step.to.to_string()],
+            ) {
+                error!(
+                    target: "tome::index::migrations",
+                    from = step.from,
+                    to = step.to,
+                    name = step.name,
+                    error = %e,
+                    "migration failed (record schema_version)",
+                );
+                return Err(TomeError::SchemaMigrationFailed {
+                    from: step.from,
+                    to: step.to,
+                    source: anyhow::anyhow!("record schema_version: {e}"),
+                });
+            }
+
+            if let Err(e) = tx.commit() {
+                error!(
+                    target: "tome::index::migrations",
+                    from = step.from,
+                    to = step.to,
+                    name = step.name,
+                    error = %e,
+                    "migration failed (commit)",
+                );
+                return Err(TomeError::SchemaMigrationFailed {
+                    from: step.from,
+                    to: step.to,
+                    source: anyhow::anyhow!("commit: {e}"),
+                });
+            }
+            Ok(())
+        })();
+
+        // Restore the prior FK state on every exit path. Best-effort —
+        // a failure here is itself surfaced as a migration error so the
+        // caller doesn't carry a half-PRAGMA'd connection forward.
+        let restore = conn.pragma_update(
+            None,
+            "foreign_keys",
+            if prior_fk != 0 { "ON" } else { "OFF" },
+        );
+
+        step_result?;
+        if let Err(e) = restore {
             return Err(TomeError::SchemaMigrationFailed {
                 from: step.from,
                 to: step.to,
-                source: anyhow::anyhow!("commit: {e}"),
+                source: anyhow::anyhow!("restore foreign_keys: {e}"),
             });
         }
 
@@ -363,4 +508,12 @@ fn active_migrations() -> &'static [Migration] {
     MIGRATIONS_OVERRIDE
         .with(|slot| *slot.borrow())
         .unwrap_or(MIGRATIONS)
+}
+
+/// Read `PRAGMA foreign_keys` (returns `0` or `1`). Used by
+/// [`apply_pending`] to capture the prior FK state before a step's
+/// transaction so it can be restored on commit/rollback. Errors are
+/// folded by callers (default = ON = 1).
+fn read_fk_pragma(conn: &Connection) -> Result<i64, rusqlite::Error> {
+    conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))
 }
