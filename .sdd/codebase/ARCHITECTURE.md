@@ -14,16 +14,16 @@ The architecture is **monolithic with layered structure** split across two execu
 
 The central nervous system is a **single SQLite database** (`<home>/.tome/index.db`) that centralizes all state: plugin metadata, embeddings, workspace bindings, project bindings, and enabled skills. Per-workspace composition settings and summaries live in separate TOML files (`<root>/workspaces/<name>/settings.toml`) and central RULES.md. Project markers (`<project>/.tome/config.toml`) are thin binding pointers, not databases.
 
-Phase 4 / US1–US3 completes **harness synchronization, workspace lifecycle, and composition management**. Phase 4 / US4 adds **workspace summarisation** — when plugins are enabled/disabled/reindexed, Tome automatically regenerates cached workspace summaries via Qwen2.5-0.5B-Instruct (llama-cpp-2) inference. The MCP server reads the cached short summary at startup to dynamically compose the `search_skills` tool description (FR-425).
+Phase 4 / US1–US4 completes **harness synchronization, workspace lifecycle, composition management, and workspace summarisation**. Phase 4 / US5 (current) adds **comprehensive health diagnostics with binding + harness-integration checks and auto-repair framework**. Doctor now surfaces five new subsystems (Binding, BindingRulesCopy, HarnessRules, HarnessMcp, Summariser) with typed dispatch and `--fix` handling.
 
 ## Architecture Pattern
 
 | Pattern | Description |
 |---------|-------------|
-| Layered (capability-based) | Commands → Business Logic (Lifecycle, Embedding, Workspace, Harness, Summarise) → Data Access (Index, Catalog, Config) → Persistence (SQLite, Filesystem, Git) |
+| Layered (capability-based) | Commands → Business Logic (Lifecycle, Embedding, Workspace, Harness, Summarise, Doctor) → Data Access (Index, Catalog, Config) → Persistence (SQLite, Filesystem, Git) |
 | Hexagonal (ports & adapters) | Trait boundaries for `Embedder`/`Reranker`/`Summariser`/`HarnessModule`/`ScopeProvider` allow swappable implementations (production vs stub for tests) |
 | Trait-driven | Core abstractions decouple policy from mechanism; composition via struct fields rather than factory functions |
-| Phase 4 / US4 — Summariser integration | `Summariser` trait + `LlamaSummariser` (production) + `StubSummariser` (test), with process-wide singleton model caching, triggered regeneration after state mutations, MCP tool description composition from cached summaries |
+| Phase 4 / US5 — Doctor subsystem dispatch | `Subsystem` enum (11 variants) with custom Serialize/Deserialize; type-safe dispatch ladder replacing Phase 3 string routing |
 
 ## Core Components
 
@@ -106,7 +106,7 @@ Phase 4 / US1–US3 completes **harness synchronization, workspace lifecycle, an
     3. Single DB transaction: delete `workspace_skills`, `workspace_catalogs`, `workspace_projects`, `workspaces` rows
     4. Delete central `<root>/workspaces/<name>/` directory
     5. Refcount cleanup: for each catalog URL once-referenced only by removed workspace, `remove_dir_all` cache clone
-- **`regen(workspace_name, paths)`** (Phase 4 / US4.b):
+- **`regen(workspace_name, paths)` (Phase 4 / US4.b)**:
   - Call summariser to generate short + long summaries from enabled plugins
   - Write to workspace settings `[summaries]` section atomically
   - Rewrite central `<root>/workspaces/<name>/RULES.md`
@@ -287,68 +287,31 @@ Phase 4 / US1–US3 completes **harness synchronization, workspace lifecycle, an
   - Omit `<name>` to sync every workspace (idempotent, skip if bytes match)
   - Phase 4 NEW
 
-### Central Index Database (`src/index/`)
-
-- **Purpose**: Single SQLite database indexing all plugins, skills, embeddings, and workspace state
-- **Location**: `src/index/{db,schema,skills,query,migrations}.rs`
-- **Schema Version**: 2 (Phase 4)
-- **Core tables**:
-  - `meta` (STRICT) — embedder/reranker/summariser identity + drift detection
-  - `workspaces` — registry of workspace names (id, name UNIQUE, created_at, last_used_at)
-  - `skills` — catalog/plugin/skill metadata (id, catalog, plugin, name UNIQUE triple, content_hash, indexed_at)
-  - `skill_embeddings` — sqlite-vec virtual table (skill_id PK, embedding FLOAT[384])
-  - `workspace_skills` — junction table (workspace_id, skill_id) — enablement is presence of row
-  - `workspace_catalogs` — junction table (workspace_id, catalog_name, url, pinned_ref)
-  - `workspace_projects` — project-to-workspace bindings (project_path PK, workspace_id FK, bound_at)
-- **Phase 4 changes**:
-  - Moved from per-workspace DBs to single central DB
-  - `skills.enabled` column dropped (enablement = presence of `workspace_skills` row)
-  - New workspace/project tables for multi-workspace support
-  - Catalog metadata now derived from filesystem + junction rows (not stored)
-- **Concurrency**: Single advisory lockfile (`index.lock`) per-Paths; readers never acquire lock; schema migration + writes both acquire lock
-- **Dependencies**: `rusqlite` + `sqlite-vec` extension (vendored C code)
-
-### Embedding Pipeline (`src/embedding/`)
-
-- **Purpose**: 384-dimensional text embedding + cross-encoder reranking for skill search
-- **Location**: `src/embedding/{mod,fastembed,stub,registry,download,runtime}.rs`
-- **Trait boundaries**:
-  - `Embedder` trait — `embed(text) -> Vec<f32>` + identity (model name/version)
-  - `Reranker` trait — `rerank(query, candidates) -> Vec<Scored>` + identity
-- **Implementations**:
-  - **Production**: `FastembedEmbedder` (ort-wrapped `fastembed-rs`; CPU-only), `FastembedReranker`
-  - **Test**: `StubEmbedder`, `StubReranker` — deterministic, model-free
-- **Model Registry**: Pinned BGE-small INT8 (45 MB, MIT), BGE-reranker INT8 (280 MB, MIT) with SHA-256 checksums
-- **Download**: Atomic `reqwest::blocking` + `tempfile` + SHA-256 verify; sparse-file fixtures in tests
-
-### Plugin Lifecycle (`src/plugin/lifecycle.rs`)
-
-- **Purpose**: Enable/disable/reindex orchestrator composing manifest parse → embedding → index writes
-- **Location**: `src/plugin/lifecycle.rs`
-- **LifecycleDeps struct**: Input bundle wrapping `&Embedder`, config, scope, paths, seeds
-- **Phase 4 changes**: Scope parameter is `&Scope` (not path-based); workspace_name resolved via `scope.name()`
-- **Key invariants**:
-  - Cheap re-enable: if `content_hash` matches, embedder not invoked; row updated with `UPDATE ... SET enabled = 1`
-  - Per-plugin atomicity: each `enable_plugin_atomic` acquires its own advisory lock
-  - Auto-disable on manifest-missing or plugin-not-found (reuses `CatalogNotFound` error per FR-602)
-  - After enable/disable commits workspace_skills mutation, `regenerate_for_trigger` is invoked (US4.b)
-
 ### Doctor Diagnostics (`src/doctor/`)
 
-- **Purpose**: Broad health check + auto-repair for embedder/reranker/catalogs/schema/drift/bindings
-- **Location**: `src/doctor/{mod,checks,fixes}.rs`
+- **Purpose**: Broad health check + auto-repair for embedder/reranker/catalogs/schema/drift/binding/harness-integration
+- **Location**: `src/doctor/{mod,checks,fixes,binding,harness_integration,orphan_cleanup}.rs`
 - **Key entry point**: `assemble_report(scope, paths, home, verify) -> DoctorReport`
-- **Report fields**: Embedder health, reranker health, index integrity, drift, catalog cache state, harness presence, binding state, suggested fixes, overall classification
+- **Phase 4 / US5 additions**:
+  - **`Subsystem` enum** (11 variants, typed dispatch): Embedder, Reranker, Index, Drift, Catalog, Schema, Summariser, Binding, BindingRulesCopy, HarnessRules, HarnessMcp
+  - **Custom Serialize/Deserialize**: Wire strings match Phase 3 vocabulary (e.g. `"catalog:name"`, `"harness-mcp:claude-code"`) with new Phase 4 variants slotting alongside
+  - **`SubsystemHealth` enum** (5 variants): Ok, Drift, Broken, UserOwned, NotApplicable — single source of truth for per-subsystem classification
+  - **`ProjectBindingState`** (T366): well-formedness check (marker parses + workspace exists), RULES.md drift classification
+  - **`RulesCopyState` enum** (4 variants): Match, Missing, Drift, SourceMissing — distinguishes "source canonical RULES.md missing" from "project copy missing" for different fix paths
+  - **`HarnessSubsystemReport`** (T367): per-harness rules-file + MCP-config health; test-respects overrides via `with_effective_modules`
+- **Report fields**: Embedder health, reranker health, index integrity, drift, catalog cache state, harness presence, workspace registry status, summariser health, project binding state, effective harness list, harness rules/mcp integration, suggested fixes, overall classification
 - **Classification**:
-  - Unhealthy — embedder missing/corrupt, integrity fail, embedder drift
-  - Degraded — reranker missing/corrupt, reranker drift, any catalog cache != Ok
+  - Unhealthy — embedder missing/corrupt, integrity fail, embedder drift, binding broken
+  - Degraded — reranker missing/corrupt, reranker drift, any catalog cache != Ok, binding drift (RULES.md), harness integration issues
   - Ok — everything passes
-- **Auto-fixes** (routed by `subsystem` string):
-  - `"embedder"` — `embedding::download::download_model`
-  - `"reranker"` — same
-  - `"catalog:<name>"` — `Git::clone_shallow`
-  - `"schema"` — `index::migrations::apply_pending` under advisory lock
-- **Binding subsystem** (Phase 4 NEW): Detects orphaned project markers (DB row missing but `.tome/config.toml` exists) + cross-workspace project markers (marker workspace != resolved workspace)
+- **Auto-fixes** (routed by `Subsystem` enum):
+  - `Embedder` / `Reranker` / `Summariser` — `embedding::download::download_model` / `summarise::download::download_summariser_model`
+  - `Catalog(name)` — `Git::clone_shallow`
+  - `Schema` — `index::migrations::apply_pending` under advisory lock
+  - `BindingRulesCopy` — `workspace::sync::sync_one_project` for single-project copy (C-M3)
+  - `HarnessRules` / `HarnessMcp` — `harness::sync::sync_project` (coalesced single dispatch per project; R-M2)
+- **Harness MCP override** (S-M2): User-owned `tome` entries are `auto_fixable: false` under plain `--fix`; `--fix --force` (US5.b) overrides and rewrites them. Scope gate: only harnesses with outstanding `UserOwned` fix participate in force dispatch
+- **Orphan cleanup** (FR-410): Stale `.tome.tmp.*` staging directories older than 1 hour are swept from `<root>/workspaces/` and every bound project's parent directory
 - **No side effects** on `assemble`; `fixes::apply` mutates in place; `re_assemble` rebuilds derived state
 
 ### MCP Server (`src/mcp/`)
@@ -520,6 +483,48 @@ Apply composed description to search_skills tool via runtime router mutation
 MCP server advertises "search_skills: {description: '...scaffold...short summary...'}"
 ```
 
+### Doctor Diagnosis Flow (Phase 4 / US5)
+
+```
+CLI: tome doctor [--fix] [--verify] [--force]
+     ↓
+Load workspace scope + central index (read-only; no lock)
+     ↓
+assemble_report(scope, paths, home, verify)
+  ↓
+Check embedder / reranker / summariser (model identity + on-disk state)
+  ↓
+Check index (PRAGMA integrity_check, schema version, drift)
+  ↓
+Check catalogs (on-disk cache state: Ok/Missing/NotARepo/ManifestInvalid/Orphan)
+  ↓
+Probe harnesses (five well-known dirs: ~/.claude, ~/.codex, ~/.cursor, ~/.gemini, ~/.opencode)
+  ↓
+Check workspace registry (workspaces.txt presence + entry count)
+  ↓
+If scope is ProjectMarker (T366):
+  - check_binding: marker well-formedness + workspace registry membership + RULES.md drift
+  ↓
+If effective harness list is available (T367):
+  - check_harness_integration: per-harness rules-file + MCP-config health (read-only)
+  ↓
+build_suggested_fixes: emit repair suggestions grouped by Subsystem, classify auto_fixable
+  ↓
+Overall classification: Unhealthy / Degraded / Ok (first match wins)
+  ↓
+--fix path (if requested):
+  - Acquire lock only for schema/catalog repairs
+  - Collect harness fixes (HarnessRules + HarnessMcp); coalesce to single sync_project dispatch (R-M2)
+  - For each auto_fixable (or user-owned harness-mcp with --force):
+    - Invoke repair handler
+    - Re-run affected check
+    - Update report in place
+  - Orphan cleanup: sweep stale .tome.tmp.* dirs
+  - re_assemble: rebuild suggested_fixes + overall classification
+  ↓
+CLI: emit report (human/JSON), exit 0 (healthy) / 1 (degraded) / 75 (unfixable)
+```
+
 ### Primary User Flow: Enable a Skill
 
 ```
@@ -565,8 +570,8 @@ CLI: print results (name, skill path, score)
 | Layer | Responsibility | Can Access | Cannot Access |
 |-------|----------------|------------|---------------|
 | CLI | Argument parsing, mode dispatch, error formatting | Commands | Database, embedder directly |
-| Commands | Command logic, outcome assembly, emit wrappers | Business logic (workspace, plugin, harness, settings, summarise) | Database directly (via deps) |
-| Business logic | Policy (binding, lifecycle, sync, summarisation) | Index, catalog, plugin, settings, embedding, summarise | CLI, presentation |
+| Commands | Command logic, outcome assembly, emit wrappers | Business logic (workspace, plugin, harness, settings, summarise, doctor) | Database directly (via deps) |
+| Business logic | Policy (binding, lifecycle, sync, summarisation, diagnostics) | Index, catalog, plugin, settings, embedding, summarise | CLI, presentation |
 | Data access | Queries, writes, transactions | Index, config, catalog on-disk | Commands, business logic |
 | Persistence | SQLite, filesystem, git | Raw operations | Higher layers |
 
@@ -577,6 +582,7 @@ CLI: print results (name, skill path, score)
 - `src/mcp/` is the only module allowed async (`tokio`); enforced by `tests/sync_boundary.rs`
 - Workspace-specific code never reads/writes global index directly; uses scope-parameterized helpers
 - Summariser trait allows test injection via `SUMMARISER_OVERRIDE` thread_local (mirrors `MIGRATIONS_OVERRIDE` pattern)
+- Doctor's `Subsystem` enum dispatch is type-safe; matches are exhaustive
 
 ---
 
