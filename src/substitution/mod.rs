@@ -96,9 +96,10 @@ impl std::error::Error for SubstitutionError {
 
 /// Render an entry body through the four-stage substitution pipeline.
 ///
-/// Stage 1 (built-ins) ships in US2.a; stages 2–4 still pass through
-/// at this slice. See `contracts/substitution-engine.md` for the full
-/// pipeline shape.
+/// Stage 1 (built-ins) shipped in US2.a; Stage 2 (env passthrough)
+/// lights up in US2.b. Stages 3 and 4 (argument substitution +
+/// `ARGUMENTS:` tail) land in US3. See
+/// `contracts/substitution-engine.md` for the full pipeline shape.
 pub fn render(body: &str, context: &SubstitutionContext) -> Result<String, SubstitutionError> {
     let s = builtins::apply_builtins(body, context)?;
     let s = env::apply_env(&s).into_owned();

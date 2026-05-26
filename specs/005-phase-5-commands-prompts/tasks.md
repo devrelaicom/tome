@@ -234,16 +234,16 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US2.b — Env passthrough stage + lazy data directory creation + workspace rename relocation
 
-- [ ] T214 [US2] Compile `ENV_REGEX` (`\$\{TOME_ENV_([A-Z0-9_]+)(?::-(.*?))?\}`) in `src/substitution/regex.rs::env_regex()` (OnceLock-cached) (use devs:rust-dev agent)
-- [ ] T215 [US2] Implement `apply_env(body)` in `src/substitution/env.rs`: `std::env::var(format!("TOME_ENV_{}", name))` lookup with prefix preserved, default-value fallback, debug-log on unset-no-default per FR-030–FR-033 (use devs:rust-dev agent)
-- [ ] T216 [US2] Wire `apply_env` into `substitution::render()` stage 2 (use devs:rust-dev agent)
-- [ ] T217 [US2] Implement `ensure_workspace_data(paths, workspace, catalog, plugin)` with same lazy + override pattern as plugin_data (use devs:rust-dev agent)
-- [ ] T218 [US2] Extend `src/workspace/rename.rs` (Phase 4 existing) to relocate `<home>/.tome/workspaces/<old>/plugin-data/` → `<home>/.tome/workspaces/<new>/plugin-data/` if source exists, per FR-025; failure surfaces `WorkspaceDataDirWriteFailed` (exit 25) (use devs:rust-dev agent)
-- [ ] T219 [GIT] Commit: `feat(substitution): env passthrough + data-dir creation + workspace rename relocation`
-- [ ] T220 [US2] Create `tests/substitution_env.rs` with tests per `contracts/substitution-engine.md` § Stage 2 (set/unset/default; non-namespace passes through; GITHUB_TOKEN-shaped left verbatim) (use devs:rust-dev agent)
-- [ ] T221 [US2] Create `tests/substitution_data_dir.rs` with tests: lazy create on first reference, concurrent-safe `create_dir_all`, idempotent on second reference, workspace-rename relocation, failure → exit 25 (use devs:rust-dev agent)
-- [ ] T222 [US2] Extend `tests/workspace_rename.rs` (existing) with the new data-dir relocation case (use devs:rust-dev agent)
-- [ ] T223 [GIT] Commit: `test(substitution): env passthrough + data-dir creation`
+- [x] T214 [US2] Compile `ENV_REGEX` (`\$\{TOME_ENV_([A-Z0-9_]+)(?::-(.*?))?\}`) in `src/substitution/regex.rs::env_regex()` (OnceLock-cached) (use devs:rust-dev agent)
+- [x] T215 [US2] Implement `apply_env(body)` in `src/substitution/env.rs`: `std::env::var(format!("TOME_ENV_{}", name))` lookup with prefix preserved, default-value fallback, debug-log on unset-no-default per FR-030–FR-033 (use devs:rust-dev agent)
+- [x] T216 [US2] Wire `apply_env` into `substitution::render()` stage 2 (use devs:rust-dev agent)
+- [x] T217 [US2] Implement `ensure_workspace_data(paths, workspace, catalog, plugin)` with same lazy + override pattern as plugin_data (use devs:rust-dev agent)
+- [x] T218 [US2] Extend `src/workspace/rename.rs` (Phase 4 existing) to relocate `<home>/.tome/workspaces/<old>/plugin-data/` → `<home>/.tome/workspaces/<new>/plugin-data/` if source exists, per FR-025; failure surfaces `WorkspaceDataDirWriteFailed` (exit 25) (use devs:rust-dev agent)
+- [x] T219 [GIT] Commit: `feat(substitution): env passthrough + data-dir creation + workspace rename relocation`
+- [x] T220 [US2] Create `tests/substitution_env.rs` with tests per `contracts/substitution-engine.md` § Stage 2 (set/unset/default; non-namespace passes through; GITHUB_TOKEN-shaped left verbatim) (use devs:rust-dev agent)
+- [x] T221 [US2] Create `tests/substitution_data_dir.rs` with tests: lazy create on first reference, concurrent-safe `create_dir_all`, idempotent on second reference, workspace-rename relocation, failure → exit 25 (use devs:rust-dev agent)
+- [x] T222 [US2] Extend `tests/workspace_rename.rs` (existing) with the new data-dir relocation case (use devs:rust-dev agent)
+- [x] T223 [GIT] Commit: `test(substitution): env passthrough + data-dir creation`
 - [ ] T224 [GIT] Push US2.b slice
 
 ### Slice US2.c — End-to-end through `get_skill` + reviewer pass + US2 closeout

@@ -219,20 +219,52 @@ pub fn rename(
     drop(conn);
 
     // Step 6: rename the central workspace directory atomically.
+    //
+    // Per Phase 5 / US2.b FR-025: this rename atomically relocates the
+    // entire workspace tree, including any `<workspaces>/<old>/plugin-data/`
+    // subtree that prior substitution passes created (`${TOME_WORKSPACE_DATA}`
+    // resolves under `<workspaces>/<name>/plugin-data/<catalog>/<plugin>/`).
+    // If a plugin-data subdir is present pre-rename, the failure path
+    // surfaces as the dedicated `WorkspaceDataDirWriteFailed` (exit 25)
+    // rather than the generic `Io` (exit 7) — operators reading the exit
+    // code learn that the rename's data-dir contract was the affected
+    // surface and can route recovery accordingly. If no plugin-data
+    // subdir exists (workspace was never invoked with a
+    // substitution-bearing entry), the rename failure remains classified
+    // as the existing `Io` for backwards-compat with Phase 4 callers.
     let old_dir = paths.workspace_dir(&old);
     let new_dir = paths.workspace_dir(&new);
     if old_dir.exists() {
+        let old_data_dir = old_dir.join("plugin-data");
+        let new_data_dir = new_dir.join("plugin-data");
+        let data_dir_present = old_data_dir.exists();
         std::fs::rename(&old_dir, &new_dir).map_err(|e| {
-            TomeError::Io(std::io::Error::new(
-                e.kind(),
-                format!(
-                    "workspace rename: rename central directory {} -> {}: {} \
-                     (database transaction is already committed; manual recovery required)",
-                    old_dir.display(),
-                    new_dir.display(),
-                    e,
-                ),
-            ))
+            if data_dir_present {
+                TomeError::WorkspaceDataDirWriteFailed {
+                    path: new_data_dir,
+                    source: std::io::Error::new(
+                        e.kind(),
+                        format!(
+                            "workspace rename: relocate plugin-data {} -> {}: {} \
+                             (database transaction is already committed; manual recovery required)",
+                            old_data_dir.display(),
+                            new_dir.join("plugin-data").display(),
+                            e,
+                        ),
+                    ),
+                }
+            } else {
+                TomeError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "workspace rename: rename central directory {} -> {}: {} \
+                         (database transaction is already committed; manual recovery required)",
+                        old_dir.display(),
+                        new_dir.display(),
+                        e,
+                    ),
+                ))
+            }
         })?;
     } else {
         // Edge case: the row existed but the directory was missing.

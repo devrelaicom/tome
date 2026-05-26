@@ -312,3 +312,45 @@ fn rename_outcome_workspace_dir_is_post_rename_path() {
     let expected: PathBuf = paths.root.join("workspaces/beta");
     assert_eq!(outcome.workspace_dir, expected);
 }
+
+/// Phase 5 / US2.b — FR-025: a workspace rename atomically relocates
+/// `<workspaces>/<old>/plugin-data/` to `<workspaces>/<new>/plugin-data/`.
+/// The parent `std::fs::rename` already covers this; the test pins the
+/// observable contract (file contents preserved byte-for-byte, no
+/// stranded `<old>` directory) so future implementation changes
+/// (e.g. a split rename for cross-FS handling) don't regress.
+#[test]
+fn rename_relocates_plugin_data_subtree_per_fr_025() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    workspace::init::init(parse("alpha"), false, &paths).expect("init alpha");
+
+    // Seed a plugin-data file under alpha.
+    let alpha_dir = paths.workspace_dir(&parse("alpha"));
+    let alpha_pd_file = alpha_dir
+        .join("plugin-data")
+        .join("catalog-x")
+        .join("plugin-y")
+        .join("state.txt");
+    std::fs::create_dir_all(alpha_pd_file.parent().unwrap()).unwrap();
+    std::fs::write(&alpha_pd_file, b"user data").unwrap();
+
+    workspace::rename::rename(parse("alpha"), parse("beta"), &paths).expect("rename");
+
+    // Source workspace dir is gone (no stranded plugin-data).
+    assert!(
+        !alpha_dir.exists(),
+        "alpha workspace dir should be gone after rename",
+    );
+
+    // Target carries the contents at the same relative path.
+    let beta_pd_file = paths
+        .workspace_dir(&parse("beta"))
+        .join("plugin-data")
+        .join("catalog-x")
+        .join("plugin-y")
+        .join("state.txt");
+    assert!(beta_pd_file.is_file());
+    assert_eq!(std::fs::read(&beta_pd_file).unwrap(), b"user data");
+}
