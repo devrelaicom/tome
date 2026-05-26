@@ -2,13 +2,13 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26 (Phase 4 v0.4.0 Polish complete via `/sdd:map incremental`)
+> **Last Updated**: 2026-05-26 (Phase 5 / US1 complete via security audit fix; Phase 4 v0.4.0 Polish complete)
 
 ## Overview
 
-Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, workspace settings, project bindings, workspace summarisation, and harness synchronisation across multiple coding harnesses. As a synchronous, file-based tool without user authentication, security focuses on:
+Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, workspace settings, project bindings, workspace summarisation, command/prompt entries, and harness synchronisation across multiple coding harnesses. As a synchronous, file-based tool without user authentication, security focuses on:
 
-1. Preventing path traversal and directory-escape attacks via plugin source paths, plugin identities, workspace names, project paths, and harness configurations
+1. Preventing path traversal and directory-escape attacks via plugin source paths, plugin identities, workspace names, project paths, entry body paths, and harness configurations
 2. UTF-8 validation for project paths stored in the central DB (primary key constraint)
 3. Integrity verification for downloaded model artefacts (SHA-256 checksums across three inference runtimes: embedder, reranker, summariser)
 4. Symlink refusal on all workspace/project/harness file writes (defence in depth)
@@ -40,6 +40,7 @@ Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, wo
 30. Phase 4 / US4 additions: Bundled Qwen2.5-0.5B-Instruct summariser model; Llama.cpp-2 inference runtime with SHA-256 verified model load; prompt-constructed summaries for plugin descriptions; cached LlamaModel with per-call LlamaContext; summariser-model integrity gate (placeholder detection); length-window enforcement with warn-level logging
 31. Phase 4 / US5 additions: Doctor command extensible with five repair classes (embedder/reranker/catalog/binding/summariser); orphan staging-directory cleanup with TOCTOU-safe mtime gating; project-local harness synchronisation separate from workspace-broadcast; user-owned harness MCP override filtered by active fix list; read-only index access for diagnostic lookups
 32. Phase 4 / Polish additions: `util::bounded_read_to_string` with per-class caps applied to ~26 sites; `home_root()` validation for absolute, canonical, exists; relative/unset `$HOME` exits 2 Usage; consolidated `ProjectMarkerConfig` to one type + canonical `settings::parser::read_project_marker`; doctor harnesses list hyphenated naming; five-layer defence-in-depth for `remove_dir_all` on scanned dirs
+33. **Phase 5 / US1 additions (NEW)**: Entry body-file path validation rejects `..` traversal and absolute paths (prevents directory-escape via skill/command bodies); arguments list hard-capped at 256 entries in frontmatter parser (DoS mitigation)
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
@@ -111,6 +112,39 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 5. **Reject absolute paths**: `segment.starts_with('/')` or `segment.starts_with('\\')` (Unix and Windows)
 
 **Purpose**: Ensure plugin identities (`<catalog>/<plugin>`) are safe to compose into filesystem paths and cannot escape intended directory bounds.
+
+### Entry Body-File Path Validation (Phase 5 / US1, NEW)
+
+| Layer | Validation | Rules |
+|-------|-----------|-------|
+| **Parse barrier** | `resolve_entry_body_path` at substitution-engine entry point | `src/substitution/resolve.rs` (new Phase 5 US1) |
+| **Rejection criteria** | Rejects `..` parent-directory traversal and absolute paths | No `..` anywhere in path, not absolute on Unix/Windows |
+| **Exit code** | Returns `SubstitutionFailed` (exit 28) on traversal | Prevents DoS via malicious entry paths in plugin manifests |
+| **Testing** | Negative-case tests for traversal patterns | Phase 5 US1 integration tests |
+
+**Purpose**: Skills and commands may reference body files (e.g., `src/utils.md` under skill directory). Validate paths to prevent `../../etc/passwd` escapes. Complements plugin-identity and plugin-source validation in the catalog-boundary model.
+
+**Examples of rejections**:
+- `../../etc/passwd` → `SubstitutionFailed`
+- `/etc/passwd` → `SubstitutionFailed`
+- `../sibling.md` → `SubstitutionFailed`
+- `./subdir/body.md` → Accepted (relative, within bounds)
+- `body.md` → Accepted (bare filename)
+
+### Entry Arguments Parsing (Phase 5 / US1, NEW)
+
+| Layer | Control | Limit |
+|-------|---------|-------|
+| **Frontmatter deserialiser** | Hard cap on `arguments` field list | 256 entries max (`MAX_ARGUMENTS` in `src/plugin/frontmatter.rs::deserialize_arguments`) |
+| **Both parse forms** | Enforced for both space-separated string and YAML list forms | Same cap applied uniformly |
+| **Exit code** | Exceeding cap returns `InvalidArgumentFrontmatter` (exit 29) at enable time | Prevents DoS: hostile catalog shipping 1 GiB YAML list |
+| **Testing** | Boundary tests for 256-entry limit; beyond-limit rejection | Phase 5 US1 integration tests |
+
+**Purpose**: Argument names are parsed at plugin-enable time. A malicious `plugin.json` could ship a YAML list with millions of entries, forcing unbounded allocation. The 256 cap is intentionally generous (every real-world prompt declares <10 named arguments); it bounds pathological input without constraining legitimate authoring.
+
+**Implementation** (`src/plugin/frontmatter.rs`):
+- Space-separated form: loop over `v.split_whitespace()`, check `out.len() >= MAX_ARGUMENTS` before push
+- YAML sequence form: check inside `visit_seq`, reject beyond-limit with custom error message
 
 ### Workspace Name Validation (Phase 4)
 
@@ -189,7 +223,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 
 ### Sensitive Data Handling
 
-| Data Type | Protection | Storage | Phase 4 / Polish Changes |
+| Data Type | Protection | Storage | Phase 5 / Polish Changes |
 |-----------|-----------|---------|---|
 | Git credentials | Inherited from system Git config | Credential helper, not Tome | Unchanged |
 | Model artefacts (embedder, reranker) | SHA-256 verification on download | `<home>/.tome/models/<name>/` | Layout unchanged; central registry enforced |
@@ -209,7 +243,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | Orphan staging directories (Phase 4 / US5) | Cleaned by mtime-based filter (1h) after removal of parent workspace; symlink-skipped during cleanup | `<home>/.tome/` | New cleanup phase; STAGING_PREFIX gate + mtime guard + symlink-skipping compose correctly |
 | Project binding marker state (Phase 4 / US1-US5) | Workspace name stored in `<project>/.tome/config.toml` under `[binding]` section | Project-local config; preserved on marker renames (US2.d-1 toml_edit fix) | New workspace binding; mode preserved on all atomic rewrites |
 
-### Model Registry & Integrity (Phase 4 / US4-US5)
+### Model Registry & Integrity (Phase 4 / US4)
 
 | Component | Mechanism | Values | Status |
 |-----------|-----------|--------|--------|
@@ -223,7 +257,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 
 ### File Permissions
 
-| File/Directory | Mode | Condition | Phase 4 / Polish Changes |
+| File/Directory | Mode | Condition | Phase 5 / Polish Changes |
 |---|---|---|---|
 | `<home>/.tome/` | 0755 (created via `create_dir_all`) | Directory holding all Tome state | Single-root layout |
 | `<home>/.tome/index.db` | Inherited from umask (typically 0644) | SQLite DB file; advisory lock prevents reader/writer races | Centralized DB (Phase 3 per-workspace → single central) |
@@ -291,7 +325,23 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **`--force` without `--fix` rejection (R-M1)** | `commands/doctor.rs` now validates `args.force && !args.fix` upfront → `TomeError::Usage("--force requires --fix")` (exit 2) | Clear UX; exit 2 signals usage error, not system Io error | ✅ PR #101 (R-M1) |
 | **NotApplicable health state (C-M1)** | `assemble_report` emits per-harness `SubsystemHealth::NotApplicable` entries when workspace is global-fallback (no project context). Wire distinguishes "no harnesses declared" (empty Vec) from "harnesses declared but outside project" (NotApplicable) | Diagnostic clarity; report shape stabilizes for wire consumers | ✅ PR #101 (C-M1) |
 
-### Orphan Staging-Directory Cleanup (Phase 4 / US5, New Attack Surface)
+## Phase 5 / US1 Security Audit Fix (NEW)
+
+### Entry Path Traversal Prevention
+
+| Concern | Implementation | Fix | Status |
+|---------|----------------|-----|--------|
+| **`resolve_entry_body_path` allows `..` traversal** | Substitution engine resolves skill/command entry bodies (e.g., `body: description.md`). Paths were resolved naively without validation | `resolve_entry_body_path` now rejects `..` anywhere in path and absolute paths (exit 28 `SubstitutionFailed`) | ✅ PR #110–#114 (US1.d security audit) |
+| **Attack scenario** | Malicious `plugin.json` declares entry with `body: ../../etc/passwd`; substitution engine reads system file as entry body | Path validation now prevents escape; only relative paths within bounds are accepted | ✅ Prevents disclosure |
+
+### Frontmatter Arguments DoS Mitigation
+
+| Concern | Implementation | Fix | Status |
+|---------|----------------|-----|--------|
+| **Arguments list unbounded** | YAML deserialiser for `arguments` field accepted any number of entries; hostile `plugin.json` could ship YAML list with millions of entries | Hard cap at 256 entries enforced in `deserialize_arguments` (both space-separated string and list forms); exceed → exit 29 `InvalidArgumentFrontmatter` | ✅ PR #110–#114 (US1.d security audit) |
+| **Attack scenario** | `arguments: [a, b, c, ...1M entries...]` forces unbounded allocation at enable time | 256-entry cap bounds allocation; legitimate use cases (which declare <10 arguments) unaffected | ✅ Prevents allocation DoS |
+
+## Orphan Staging-Directory Cleanup (Phase 4 / US5, Validated)
 
 | Control | Implementation | Status |
 |---------|----------------|--------|
@@ -323,22 +373,6 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Directory exists** | `is_dir()` check on result | 2 (Usage) |
 | **Applied location** | `src/util/io.rs::home_root()` (new canonical validator) | Harness sync + doctor + project binding |
 | **Relative/unset handling** | Relative or env-unset `$HOME` → exit 2 Usage | Clear error for misconfiguration |
-
-### Consolidated Project Marker Type (PR-C)
-
-| Change | Before | After | Impact |
-|--------|--------|-------|--------|
-| **Marker deserialization** | Multiple `deserialize` callers ad-hoc | Single `settings::parser::read_project_marker` | Consistency; enables bounded reads |
-| **Type definition** | `ProjectMarkerConfig` struct in `workspace::binding.rs` | Unified with bounded-read integration | One canonical path for project config |
-| **Error handling** | Per-caller error conversion | Centralized in `read_project_marker` | Consistent error reporting |
-
-### Doctor Harness List Naming (PR-B)
-
-| Update | Before | After | Context |
-|--------|--------|-------|---------|
-| **Harness name output** | Underscored (e.g., `claude_code`) | Hyphenated (e.g., `claude-code`) | Matches CLI harness identity grammar |
-| **Database schema** | No change | Still stores underscored names | Wire format only; internal PK unchanged |
-| **Test coverage** | Implicit | Explicit assertion on wire shape | `tests/doctor_subsystem_serialize.rs` |
 
 ## Signal Handling & Interruption
 
@@ -395,11 +429,13 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Path validation** | 11 negative-case tests (URLs, absolute paths, traversal, symlinks) | `tests/path_validation.rs` |
 | **Workspace name validation** | Phase 4 grammar tests | Phase 4 US1/US2 tests |
 | **Project path validation** | UTF-8 enforcement, canonical path PK, dangerous-CWD refusal | `tests/workspace_use_binding.rs` |
+| **Entry body-path validation (NEW)** | Negative cases for `..` traversal and absolute paths | Phase 5 US1 integration tests |
+| **Arguments parsing validation (NEW)** | Hard cap at 256 entries; exceeding cap via both string and list forms rejected | Phase 5 US1 integration tests |
 | **Credential scrubbing** | 4 pattern rules + integration tests against real Git output; Polish: summariser URL + harness MCP scrubbing | `tests/scrubbing.rs` (extended PR-D) |
 | **Manifest strictness** | 100% grep assertion on `deny_unknown_fields`; Phase 4 US4 audit (T098n) includes summariser types | `tests/manifest_strictness.rs` |
 | **Summariser model integrity** | Placeholder regression guard (3 tests); real-model SHA-256 verify + load; length-window warn; silent no-op carve-out | `tests/summariser_registry_no_placeholder.rs`, `tests/summariser_real.rs`, `tests/summariser_triggers.rs`, `tests/summariser_triggers_end_to_end.rs`, `tests/workspace_regen_summary.rs` |
 | **Concurrency & atomicity** | Advisory lock + interrupt scenarios; cache cleanup under lock (F11b); binding + last_used_at atomic (R-M1) | `tests/atomicity.rs`, `tests/concurrency.rs` |
-| **Exit codes** | Closed enumeration; all Phase 1/2/3/4/US5 codes tested | `tests/exit_codes.rs` |
+| **Exit codes** | Closed enumeration; all Phase 1/2/3/4/Phase 5 US1 codes tested | `tests/exit_codes.rs` |
 | **Security hardening** | File permissions, symlink handling, registry validation, mode preservation on rewrite, symlink refusal on atomic writes, settings-edit security, bounded reads (Polish: PR-E), home path validation (Polish: PR-E) | `tests/security_hardening.rs` (extended) |
 | **MCP protocol purity** | No error leakage to stdout (FR-108) | `tests/mcp_server.rs` |
 | **Workspace isolation** | Cross-workspace catalog enablement + reference-counting (Phase 3); project binding validation (Phase 4); settings composition (US3); summariser per-workspace (US4) | `tests/workspace_commands.rs`, `tests/catalog_cache_refcount.rs`, Phase 4 tests |

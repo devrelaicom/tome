@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26 (Phase 4 v0.4.0 — Polish complete; 954 tests across 127 suites)
+> **Last Updated**: 2026-05-26 (Phase 5 / US1 shipped; substitution engine, prompts, entry kind discriminator)
 
 ## Directory Layout
 
@@ -14,7 +14,7 @@ tome/
 │   ├── cli.rs                          # clap derive defs (all commands + global flags)
 │   ├── error.rs                        # Closed TomeError enum (30+ variants → exit codes)
 │   ├── config.rs                       # config.toml parsing (strict; legacy Phase 3 shape)
-│   ├── paths.rs                        # Phase 4: consolidated <home>/.tome/ paths (no XDG split)
+│   ├── paths.rs                        # Phase 4: consolidated <home>/.tome/ paths; Phase 5: plugin/workspace data-dir accessors
 │   ├── logging.rs                      # tracing-subscriber wiring
 │   ├── output.rs                       # JSON / human output mode dispatcher
 │   │
@@ -27,18 +27,27 @@ tome/
 │   ├── plugin/                         # Plugin metadata + lifecycle
 │   │   ├── mod.rs                      # PluginRecord, PluginStatus
 │   │   ├── manifest.rs                 # plugin.json parsing (lenient)
-│   │   ├── frontmatter.rs              # SKILL.md YAML frontmatter parser
-│   │   ├── identity.rs                 # PluginId: <catalog>/<plugin> parsing
-│   │   ├── components.rs               # Walk skill/agent/command/hook dirs
-│   │   └── lifecycle.rs                # enable/disable/reindex orchestration (per-scope) + trigger regenerate
+│   │   ├── frontmatter.rs              # SKILL.md + command YAML frontmatter parser (Phase 5: widened fields)
+│   │   ├── identity.rs                 # PluginId + Phase 5 NEW: EntryKind enum (Skill | Command)
+│   │   ├── components.rs               # Walk skill/command dirs; Phase 5: list_command_files enumerates commands
+│   │   └── lifecycle.rs                # enable/disable/reindex orchestration (Phase 5: commands + skills)
+│   │
+│   ├── substitution/                   # Phase 5 NEW: Variable rendering engine (F3 skeleton + US1 wire)
+│   │   ├── mod.rs                      # Public API: render(), SubstitutionError enum
+│   │   ├── context.rs                  # SubstitutionContext + SubstitutionContextBuilder + ArgumentValues enum
+│   │   ├── builtins.rs                 # {{TOME_*}} placeholder stage (stub in F3; US2 wires {{TOME_PLUGIN_DATA}}, {{TOME_WORKSPACE_DATA}}, {{TOME_WORKSPACE_NAME}})
+│   │   ├── env.rs                      # {{$VAR}} env-passthrough stage (stub in F3; US2 wires)
+│   │   ├── arguments.rs                # Claude Code $ARGUMENTS / $N / $NAME stage (stub in F3; US3 wires)
+│   │   ├── data_dir.rs                 # Lazy plugin/workspace data-dir creation (F3: paths only; US2 wires create_dir_all)
+│   │   └── regex_sets.rs               # OnceLock<Regex> slots for compiled stage patterns (uncompiled in F3; US2/US3 populate)
 │   │
 │   ├── index/                          # Vector search index (SQLite + sqlite-vec)
 │   │   ├── mod.rs                      # Public API exports
 │   │   ├── db.rs                       # Open, WAL config, schema version check
-│   │   ├── schema.rs                   # CREATE TABLE statements + bootstrap (schema v2)
-│   │   ├── migrations.rs               # Forward-only schema migrations + framework
+│   │   ├── schema.rs                   # CREATE TABLE statements + bootstrap (schema v3: Phase 5 addition)
+│   │   ├── migrations.rs               # Forward-only schema migrations + framework; Phase 5: v2→v3 migration (kind, when_to_use, searchable, user_invocable columns + backfill)
 │   │   ├── vec_ext.rs                  # sqlite-vec extension loader
-│   │   ├── skills.rs                   # Skills table CRUD + content-hash diffing
+│   │   ├── skills.rs                   # Phase 5: CRUD over unified skills table with EntryKind discriminator; resolve_entry_body_path helper
 │   │   ├── query.rs                    # KNN search (workspace-filtered) + optional reranking
 │   │   ├── meta.rs                     # Model identity metadata + drift detection
 │   │   ├── integrity.rs                # PRAGMA integrity_check wrapper
@@ -53,7 +62,7 @@ tome/
 │   │   ├── download.rs                 # Model fetch + verify + atomic persist
 │   │   └── runtime.rs                  # ort Environment singleton setup
 │   │
-│   ├── workspace/                      # Scope + context resolution + binding + lifecycle (Phase 3-4)
+│   ├── workspace/                      # Scope + context resolution + binding + lifecycle (Phase 3-4, US1 wire-up)
 │   │   ├── mod.rs                      # Public API exports
 │   │   ├── scope.rs                    # Phase 4: Scope(WorkspaceName) tuple struct
 │   │   ├── name.rs                     # WorkspaceName validation + parsing
@@ -61,10 +70,10 @@ tome/
 │   │   ├── binding.rs                  # Phase 4: Project binding + marker landing (US1.a)
 │   │   ├── info.rs                     # WorkspaceInfo report assembly
 │   │   ├── init.rs                     # Atomic workspace creation via tempfile
-│   │   ├── regen_summary.rs            # Phase 4 NEW: Summariser invocation (US2/US4.b)
-│   │   ├── rename.rs                   # Phase 4 NEW: Workspace rename with project updates (US2)
-│   │   ├── remove.rs                   # Phase 4 NEW: Workspace removal with 5-step cascade (US2)
-│   │   └── sync.rs                     # Phase 4 NEW: Central RULES.md sync to projects (US2)
+│   │   ├── regen_summary.rs            # Phase 4: Summariser invocation (US2/US4.b)
+│   │   ├── rename.rs                   # Phase 4: Workspace rename with project updates (US2)
+│   │   ├── remove.rs                   # Phase 4: Workspace removal with 5-step cascade (US2)
+│   │   └── sync.rs                     # Phase 4: Central RULES.md sync to projects (US2)
 │   │
 │   ├── doctor/                         # Diagnostic + auto-repair (Phase 3 US4 + Phase 4 US5)
 │   │   ├── mod.rs                      # assemble_report + re_assemble entry
@@ -72,9 +81,9 @@ tome/
 │   │   ├── harness_detect.rs           # Probe ~/.claude/, ~/.codex/, ~/.cursor/, ~/.gemini/, ~/.opencode/
 │   │   ├── report.rs                   # DoctorReport + Subsystem (typed 11-variant enum) + SubsystemHealth
 │   │   ├── fixes.rs                    # apply + apply_one (subsystem routing) + per-subsystem repair handlers
-│   │   ├── binding.rs                  # Phase 4 US5 NEW: check_binding (T366) — marker well-formedness + RULES.md drift
-│   │   ├── harness_integration.rs      # Phase 4 US5 NEW: check_harness_integration (T367) — per-harness rules/mcp checks
-│   │   └── orphan_cleanup.rs           # Phase 4 US5 NEW: cleanup_stale_staging_dirs (FR-410) — 1-hour age gate
+│   │   ├── binding.rs                  # Phase 4 US5: check_binding (T366) — marker well-formedness + RULES.md drift
+│   │   ├── harness_integration.rs      # Phase 4 US5: check_harness_integration (T367) — per-harness rules/mcp checks
+│   │   └── orphan_cleanup.rs           # Phase 4 US5: cleanup_stale_staging_dirs (FR-410) — 1-hour age gate
 │   │
 │   ├── harness/                        # Phase 4: Per-harness trait + sync orchestrator + composition
 │   │   ├── mod.rs                      # HarnessModule trait, SUPPORTED_HARNESSES registry
@@ -109,7 +118,7 @@ tome/
 │   │   ├── catalog.rs                  # `tome catalog {add,remove,list,update,show}`
 │   │   ├── plugin/                     # `tome plugin` subcommands
 │   │   │   ├── mod.rs                  # Dispatcher + shared helpers
-│   │   │   ├── enable.rs               # `tome plugin enable <id>` + trigger regenerate
+│   │   │   ├── enable.rs               # `tome plugin enable <id>` + trigger regenerate (Phase 5: commands + skills)
 │   │   │   ├── disable.rs              # `tome plugin disable <id> [--force]` + trigger regenerate
 │   │   │   ├── list.rs                 # `tome plugin list`
 │   │   │   ├── show.rs                 # `tome plugin show <id>`
@@ -154,24 +163,27 @@ tome/
 │   ├── util/                           # Phase 4: Shared utilities
 │   │   ├── mod.rs                      # Public API exports
 │   │   ├── atomic_dir.rs               # Atomic directory landing (tempfile + rename); STAGING_PREFIX constant (FR-410)
-│   │   └── io.rs                       # Phase 4 Polish NEW: bounded_read_to_string + per-class caps
+│   │   └── io.rs                       # Phase 4 Polish: bounded_read_to_string + per-class caps
 │   │
-│   └── mcp/                            # MCP server (async island, Phase 3+)
+│   └── mcp/                            # MCP server (async island, Phase 3+; Phase 5: prompts)
 │       ├── mod.rs                      # Sync entry point: run()
 │       ├── runtime.rs                  # Single-threaded tokio builder
-│       ├── log.rs                      # 10 MiB rotate JSON file logger + ContractEventFormat
+│       ├── log.rs                      # 10 MiB rotate JSON file logger (contract-formatted for tool logs)
 │       ├── preflight.rs                # FR-110 startup checks (schema, drift, embedder hash)
 │       ├── server.rs                   # rmcp server loop + graceful shutdown
 │       ├── state.rs                    # McpState definition (embedder, reranker OnceLock)
 │       ├── tool_description.rs         # Phase 4 US4.b: Compose runtime tool description from cached summary
+│       ├── prompt_name.rs              # Phase 5 NEW: Prompt-name derivation (<plugin>__<entry> sanitisation + truncation)
+│       ├── prompt_collision.rs         # Phase 5 NEW: Collision detection when entries map to same prompt name
+│       ├── prompts.rs                  # Phase 5 NEW: MCP prompts capability (PromptRegistry, PromptRouter hand-rolled)
 │       └── tools/                      # MCP tool handlers
 │           ├── mod.rs                  # Tool registration
-│           ├── search_skills.rs        # search_skills tool (KNN+rerank, workspace-filtered)
+│           ├── search_skills.rs        # search_skills tool (KNN+rerank, workspace-filtered, 4096-char input cap)
 │           └── get_skill.rs            # get_skill tool (metadata + components)
 │
 ├── tests/                              # Integration tests (access library as external crate)
 │   ├── catalog_*.rs                    # Catalog add/remove/update tests
-│   ├── plugin_*.rs                     # Plugin enable/disable/list/show/interactive
+│   ├── plugin_*.rs                     # Plugin enable/disable/list/show/interactive (Phase 5: commands coverage)
 │   ├── models_*.rs                     # Model download/list/remove
 │   ├── query.rs                        # Query + strict mode + rerank
 │   ├── reindex.rs                      # Reindex all/per-catalog/per-plugin
@@ -180,7 +192,7 @@ tome/
 │   ├── harness_*.rs                    # Phase 4 US3: Harness list/use/remove/info/sync/composition tests
 │   ├── summariser_*.rs                 # Phase 4 US4: Summariser triggers, forward progress, cache, registry tests
 │   ├── doctor*.rs                      # Phase 4 US5: Doctor assembly + fixes + binding + harness integration (T366/T367) + orphan cleanup (T370)
-│   ├── mcp_*.rs                        # MCP server lifecycle + tools + log rotation + tool description (US4.b)
+│   ├── mcp_*.rs                        # MCP server lifecycle + tools + log rotation + tool description (US4.b) + prompts (US1.b)
 │   ├── exit_codes.rs                   # Exit code matrix validation
 │   ├── manifest_strictness.rs          # Strict/lenient parsing guards
 │   ├── atomicity.rs                    # Interrupt-injection tests (SIGINT mid-op)
@@ -204,7 +216,7 @@ tome/
 │   └── codebase/
 │       ├── STACK.md                    # Technologies + versions
 │       ├── INTEGRATIONS.md             # External APIs + services
-│       ├── ARCHITECTURE.md             # System design + patterns
+│       ├── ARCHITECTURE.md             # System design + patterns (Phase 5: substitution, prompts, entry kind)
 │       ├── STRUCTURE.md                # Directory layout (this file)
 │       ├── CONVENTIONS.md              # Naming + code style
 │       ├── TESTING.md                  # Test strategy + patterns
@@ -228,27 +240,36 @@ tome/
 │   │   ├── data-model.md
 │   │   ├── contracts/
 │   │   └── quickstart.md
-│   └── 004-phase-4-refactor-harnesses/       # Phase 4 (F1–F11 + US1–US5 + Polish shipped)
+│   ├── 004-phase-4-refactor-harnesses/
+│   │   ├── spec.md
+│   │   ├── plan.md
+│   │   ├── research.md (19 R-decisions)
+│   │   ├── data-model.md
+│   │   ├── contracts/ (13+ contracts)
+│   │   ├── retro/ (P2–P8 retrospectives)
+│   │   └── quickstart.md
+│   └── 005-phase-5-commands-prompts/        # Phase 5 (F1–F3 + US1 shipped)
 │       ├── spec.md
 │       ├── plan.md
-│       ├── research.md (19 R-decisions)
-│       ├── data-model.md (schema v2, Scope reshape, HarnessModule, Summariser, settings layers, Subsystem typed dispatch, ProjectBindingState)
-│       ├── contracts/ (13+ contracts: paths-and-layout, harness-modules, settings-composition, sync-algorithm, workspace-commands, summariser, doctor, doctor-extensions-p4, etc.)
-│       ├── retro/ (P2.md: F1–F11; P3.md–P7.md: US1–US5; P8.md: Phase 3 Polish; P9.md+: Phase 4 Polish)
+│       ├── research.md (20 R-decisions)
+│       ├── data-model.md (schema v3, EntryKind, SubstitutionContext, PromptRegistry, PromptDescriptor)
+│       ├── contracts/ (9+ contracts: exit-codes-p5, schema-migration-p5, entry-schema-p5, substitution-engine, mcp-prompts, etc.)
+│       ├── notes/ (Phase 5 research notes: rmcp-prompts-api, etc.)
 │       └── quickstart.md
 │
 ├── PRDs/                               # Product requirement documents
 │   ├── phase-1.md
 │   ├── phase-2.md
 │   ├── phase-3.md
-│   └── phase-4.md
+│   ├── phase-4.md
+│   └── phase-5.md
 │
-├── Cargo.toml                          # Package definition (MSRV 1.93, v0.4.0)
+├── Cargo.toml                          # Package definition (MSRV 1.93, v0.5.0-dev)
 ├── Cargo.lock                          # Dependency lock
 ├── build.rs                            # sqlite-vec C extension compilation
-├── CONSTITUTION.md                     # v1.3.0 — constraints + trade-offs (Phase 4 §Paths amendment)
-├── CLAUDE.md                           # Project context for Claude Code
-└── CHANGELOG.md                        # Version history (v0.1.0–v0.4.0, Phase 4 complete)
+├── CONSTITUTION.md                     # v1.3.0 — constraints + trade-offs (Phase 4 §Paths amendment; no Phase 5 amendments)
+├── CLAUDE.md                           # Project context for Claude Code (Phase 5 planning complete; v0.5.0 roadmap)
+└── CHANGELOG.md                        # Version history (v0.1.0–v0.4.0 shipped; Phase 5 in flight)
 ```
 
 ## Key Directories
@@ -257,317 +278,227 @@ tome/
 
 | Directory | Purpose | Key Files |
 |-----------|---------|-----------|
+| `substitution/` | Phase 5 NEW: Variable rendering engine | `context.rs`, `builtins.rs`, `env.rs`, `arguments.rs`, `data_dir.rs`, `regex_sets.rs` |
+| `plugin/` | Plugin metadata, lifecycle (Phase 5: commands) | `manifest.rs`, `frontmatter.rs`, `identity.rs` (EntryKind), `components.rs` (list_command_files), `lifecycle.rs` |
+| `index/` | SQLite + sqlite-vec index (Phase 5: v3 schema) | `db.rs`, `schema.rs`, `migrations.rs` (v2→v3), `skills.rs` (EntryKind), `query.rs` |
+| `mcp/` | MCP server + Phase 5 prompts | `prompts.rs` (PromptRegistry), `prompt_name.rs`, `prompt_collision.rs`, `tools/` |
 | `catalog/` | Catalog registry, git ops | `manifest.rs`, `store.rs`, `git.rs` |
-| `plugin/` | Plugin metadata, lifecycle | `manifest.rs`, `frontmatter.rs`, `lifecycle.rs` |
-| `index/` | SQLite + sqlite-vec index | `db.rs`, `schema.rs`, `skills.rs`, `query.rs` |
 | `embedding/` | Text embedding + reranking | `fastembed.rs`, `stub.rs`, `download.rs` |
 | `workspace/` | Scope resolution, binding, lifecycle | `scope.rs`, `binding.rs`, `init.rs`, `rename.rs`, `remove.rs`, `regen_summary.rs` |
 | `harness/` | Phase 4: Harness abstraction + sync | `mod.rs` (trait), 5 harness impls, `sync.rs`, `rules_file.rs`, `mcp_config.rs` |
 | `settings/` | Phase 4: Layered composition | `parser.rs`, `resolver.rs` (composition engine), `edit.rs` |
-| `summarise/` | Phase 4 US4: Workspace summariser | `llama.rs`, `stub.rs`, `prompts.rs`, `trigger.rs`, `registry.rs` |
-| `doctor/` | Phase 4 US5: Health check + auto-repair | `checks.rs`, `fixes.rs`, `binding.rs`, `harness_integration.rs`, `orphan_cleanup.rs` |
+| `summarise/` | Phase 4: Workspace summariser | `llama.rs`, `stub.rs`, `prompts.rs`, `trigger.rs`, `registry.rs` |
+| `doctor/` | Phase 4: Health check + auto-repair | `checks.rs`, `fixes.rs`, `binding.rs`, `harness_integration.rs`, `orphan_cleanup.rs` |
 | `commands/` | CLI subcommand entry points | Per-command modules + dispatchers |
 | `presentation/` | Output formatting + TUI | `tables.rs`, `prompt.rs`, `colour.rs` |
 | `util/` | Shared utilities | `atomic_dir.rs` (tempfile + rename), `io.rs` (bounded read) |
-| `mcp/` | Async MCP server (Phase 3+) | `runtime.rs`, `server.rs`, `tools/`, `tool_description.rs` (US4.b) |
+| `paths.rs` | Phase 4 single-root layout; Phase 5: data-dir accessors | `home_root()`, `Paths struct`, `plugin_data_dir_for()`, `workspace_data_dir_for()` |
 
-### `src/doctor/` — Diagnostics & Repair (Phase 4 / US5)
-
-Phase 4 / US5 promotes doctor from a Phase 3 subsystem (models/index/drift/catalog) to a comprehensive whole-system health surface with typed subsystem dispatch and auto-repair framework.
+### `src/substitution/` — Substitution Engine Details (Phase 5 / F3 + US1)
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | `assemble_report` + `re_assemble` entry points |
-| `checks.rs` | Phase 3: `check_catalogs`, `check_index`, `check_drift`; Phase 4: `check_workspace_registry` |
-| `report.rs` | Phase 4 US5: `DoctorReport` struct; typed `Subsystem` enum (11 variants) with custom Ser/Deser wire strings; `SubsystemHealth` enum (5 variants); `ProjectBindingState`; `RulesCopyState` enum (4 variants: Match/Missing/Drift/SourceMissing) |
-| `binding.rs` | Phase 4 US5 NEW (T366): `check_binding()` — project marker well-formedness check + workspace registry membership + RULES.md drift via byte-compare |
-| `harness_integration.rs` | Phase 4 US5 NEW (T367): `check_harness_integration()` — per-harness rules-file health (standalone vs block-in-file) + MCP-config health (Tome-owned vs user-authored); respects `HARNESS_MODULES_OVERRIDE` |
-| `orphan_cleanup.rs` | Phase 4 US5 NEW (T370): `cleanup_stale_staging_dirs()` — sweep `.tome.tmp.*` dirs older than 1 hour from `<root>/workspaces/` + every bound project parent; FR-410 age gate |
-| `fixes.rs` | `apply()` per-fix dispatch + `apply_one()` per-subsystem handlers; Phase 4 US5: R-M2 harness sync coalescing, S-M2 user-owned MCP override gate, C-M3 single-project sync for BindingRulesCopy, S-M4 cache-path safety invariant |
-| `harness_detect.rs` | Unchanged; probe five well-known harness dirs |
+| `mod.rs` | `render(body, context) -> Result<String, SubstitutionError>` entry point; `SubstitutionError` enum (4 variants) |
+| `context.rs` | `SubstitutionContext` + `SubstitutionContextBuilder`; `ArgumentValues` enum (named/positional) |
+| `builtins.rs` | Stage 1: `{{TOME_*}}` built-ins (stub in F3; US2 wires real implementations) |
+| `env.rs` | Stage 2: `{{$VAR}}` env passthrough (stub in F3; US2 wires) |
+| `arguments.rs` | Stage 3: Claude Code `$ARGUMENTS` / `$N` / `$NAME` (stub in F3; US3 wires) |
+| `data_dir.rs` | Lazy plugin/workspace data-dir creation (F3: path computation only; US2 wires `create_dir_all`) |
+| `regex_sets.rs` | `OnceLock<Regex>` slots for compiled patterns (uncompiled in F3; US2/US3 populate at startup) |
 
-### `src/harness/` — Harness Module Details
-
-Phase 4 / US3 adds complete harness command surface (6 subcommands) backed by production composition resolver.
+### `src/mcp/` — MCP Prompts Details (Phase 5 / US1)
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | `HarnessModule` trait, `SUPPORTED_HARNESSES` registry, `MCP_CONFIG_KEY` static, test injection hook (`HARNESS_MODULES_OVERRIDE`), `with_effective_modules` helper |
-| `claude_code.rs` | Claude Code harness: block-in-file rules, JSON MCP config (per-project), description + detection |
-| `codex.rs` | Codex harness: block-in-file rules, TOML MCP config (global), description + detection |
-| `cursor.rs` | Cursor harness: standalone rules file, JSON MCP config (per-project), description + detection |
-| `gemini.rs` | Gemini CLI harness: block-in-file rules, JSON MCP config (global), description + detection |
-| `opencode.rs` | OpenCode harness: block-in-file rules (inline strategy), JSON MCP config (per-project), description + detection |
-| `rules_file.rs` | Block-in-file + standalone strategies, atomic write helpers, `<!-- tome:begin/end -->` marker management, `@` include directive handling |
-| `mcp_config.rs` | Read/write helpers for JSON (preserve_order) + TOML (toml_edit), strict/lenient boundaries |
-| `sync.rs` | Sync orchestrator: resolve effective harness list, dispatch per-harness writes, dedup shared paths, cleanup pass, forward-progress on clash, FR-403 (per-harness error tracking) |
-| `stub.rs` | `StubHarnessModule` for test injection + parallelism coordination via `HarnessModulesGuard` |
+| `prompts.rs` | `PromptRegistry` + `PromptEntry`; hand-rolled `PromptRouter` via rmcp; `PromptsCapability` declaration |
+| `prompt_name.rs` | Prompt-name derivation: `<plugin>__<entry>` with sanitisation (`[a-z0-9_-]`), truncation (16+32 caps), override support |
+| `prompt_collision.rs` | Collision detection: `CollisionRecord { prompt_name, entries }`; `resolve_collisions(registry)` |
+| `tool_description.rs` | Phase 4 US4.b preserved: compose runtime description from scaffold + cached summary |
+| `tools/search_skills.rs` | KNN+rerank handler; unchanged but now indexed alongside commands |
+| `tools/get_skill.rs` | Metadata + components handler; now routes to skills/commands via `resolve_entry_body_path` |
 
-### `src/settings/` — Settings & Composition Details
-
-Phase 4 / US3 wires composition resolver into production paths via `CentralDbScopeProvider`.
+### `src/index/` — Schema v3 & Entry Records (Phase 5 / US1)
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | Type definitions: `ProjectMarkerConfig`, `WorkspaceSettings`, `GlobalSettings` (all `#[serde(deny_unknown_fields)]`) |
-| `parser.rs` | TOML deserialization for all three types; workspace/global files are optional |
-| `composition.rs` | `CompositionRef` parsing: bare names vs `[scope]` / `[workspaces.<name>]` references |
-| `resolver.rs` | `resolve_effective_list()` pure-compute engine; `ScopeProvider` trait (test: `StubScope`, production: `CentralDbScopeProvider`); cycle detection via DFS |
-| `edit.rs` | Phase 4 US3: Surgical TOML edits — `open_settings()`, `add_harness()`, `remove_harness()`, `save_settings()` for project/workspace/global files |
+| `schema.rs` | DDL for v3 schema: adds `kind` column (VARCHAR: skill/command); adds `when_to_use` (nullable TEXT); adds `searchable`, `user_invocable` (BOOLEAN with defaults) |
+| `migrations.rs` | Phase 5 v2→v3 forward migration: schema changes + backfill logic (kind via directory walk, searchable/user_invocable defaults per contract) |
+| `skills.rs` | `SkillRecord` struct extended with `kind: EntryKind`, `when_to_use: Option<String>`, `searchable: bool`, `user_invocable: bool`; new `resolve_entry_body_path(catalog, plugin, name, kind) -> PathBuf` helper (routes via kind) |
 
-### `src/summarise/` — Workspace Summariser Details
-
-Phase 4 / US4 implements full summarisation pipeline from trigger to MCP integration.
+### `src/plugin/` — Commands & Entries (Phase 5 / US1)
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | `Summariser` trait (identity + summarise method), input/output types, `backend()` singleton entry point |
-| `llama.rs` | `LlamaSummariser` production impl via llama-cpp-2 + cached model (US4.d-1 S-M4) |
-| `stub.rs` | `StubSummariser` deterministic test impl (returns fixed text) |
-| `trigger.rs` | Phase 4 US4.b: `regenerate_for_trigger()` entry, `SUMMARISER_OVERRIDE` thread_local + `SummariserOverrideGuard` RAII, forward-progress invariant (FR-385) |
-| `registry.rs` | Pinned Qwen2.5-0.5B-Instruct GGUF entry (model name, files, SHA-256) |
-| `prompts.rs` | Fixed `SHORT_PROMPT` + `LONG_PROMPT` templates, length constants (`SHORT_MAX_CHARS=800`, `LONG_MAX_CHARS=2500`) |
-| `download.rs` | Model fetch (stub-only in F6) |
+| `identity.rs` | `PluginId` (unchanged); **NEW**: `EntryKind` enum (`Skill` \| `Command`) with `as_str()` accessor |
+| `frontmatter.rs` | `SkillFrontmatter` widened with `arguments: Option<Vec<PromptArgument>>`, `argument_hint: Option<String>`, `prompt_name: Option<String>`, `when_to_use: Option<String>`, `searchable: Option<bool>` (default true), `user_invocable: Option<bool>` (default false) |
+| `components.rs` | `count_components` (unchanged); **NEW**: `list_command_files(plugin_dir) -> Vec<CommandFile>` enumerates `<plugin>/commands/*.md` flat; `CommandFile { path, name }` |
+| `lifecycle.rs` | `enable_plugin` now calls `list_command_files` and collects `PendingCommand` structs alongside `PendingSkill` |
 
-### `src/commands/harness/` — Harness Command Surface
+### `src/paths.rs` — Data Directory Accessors (Phase 5 / US1)
 
-Phase 4 / US3 implements full subcommand dispatcher + production `ScopeProvider` impl.
-
-| File | Purpose |
-|------|---------|
-| `mod.rs` | Dispatcher, `sync_for_project_root()` entry (called by workspace use), `CentralDbScopeProvider` impl (consults workspaces table + reads .toml files) |
-| `bare.rs` | `tome harness` (no subcommand) — tabular list of 5 supported harnesses + detection status |
-| `list.rs` | `tome harness list [workspace]` — resolve effective harness list via ScopeProvider + composition resolver |
-| `use_.rs` | `tome harness use <name> [--scope]` — append harness to settings file via `settings::edit`, run sync on change + trigger regenerate |
-| `remove.rs` | `tome harness remove <name> [--scope]` — delete harness from settings file, run cleanup on change + trigger regenerate |
-| `info.rs` | `tome harness info [--json]` — per-harness detection, targets, source-of-scope annotation |
-| `sync.rs` | `tome harness sync [--force]` — idempotent reconciliation; thin wrapper over `harness::sync::sync_project` |
-
-### `src/util/` — Utility Modules
-
-Phase 4 Polish adds `io.rs` for bounded I/O operations.
-
-| File | Purpose |
-|------|---------|
-| `atomic_dir.rs` | Atomic directory landing (tempfile + rename); STAGING_PREFIX constant (FR-410) |
-| `io.rs` | Phase 4 Polish NEW: `bounded_read_to_string(reader, max_bytes)` with per-class caps for input validation |
-
-### `src/mcp/` — MCP Server (Phase 3+ with US4/US5 additions)
-
-Phase 4 / US4.b adds runtime tool description composition from cached summaries; US5 interacts read-only with doctor checks.
-
-| File | Purpose |
-|------|---------|
-| `mod.rs` | Sync entry point: `run()` |
-| `runtime.rs` | Single-threaded tokio builder, lifecycle management |
-| `log.rs` | 10 MiB atomic-rotate JSON file logger (contract-formatted for tool logs) |
-| `preflight.rs` | Startup checks: schema version, drift, embedder SHA-256, eager load embedder |
-| `server.rs` | rmcp tool router, handlers, graceful shutdown on SIGTERM |
-| `state.rs` | `McpState` (embedder, reranker OnceLock, scope, paths, ...) |
-| `tool_description.rs` | Phase 4 US4.b: Compose runtime description from scaffold + cached short summary (reads settings.toml at startup) |
-| `tools/mod.rs` | Tool registration + routing |
-| `tools/search_skills.rs` | `search_skills` handler (KNN + rerank, workspace-filtered, 4096-char input cap) |
-| `tools/get_skill.rs` | `get_skill` handler (metadata + components walks) |
-
-### `tests/` — Integration Tests
-
-#### Test Files by Phase
-
-| File Pattern | Purpose | Count |
-|-----|---------|-------|
-| `catalog_*.rs` | Catalog add/remove/update/refcount tests | 8 |
-| `plugin_*.rs` | Plugin enable/disable/list/show/interactive | 9 |
-| `models_*.rs` | Model download/list/remove | 3 |
-| `workspace_*.rs` | Workspace info/init/binding/sync/list/rename/remove (US1–US2) | 28 |
-| `harness_*.rs` | Phase 4 US3: Harness list/use/remove/info/sync/composition | 16 |
-| `summariser_*.rs` | Phase 4 US4: Triggers, forward-progress, cache, registry, real models | 7 |
-| `doctor*.rs` | Phase 4 US5: Fixes, binding (T366), harness integration (T367), orphan cleanup (T370) | 5+ |
-| `query.rs` | Query + strict mode + reranking | 1 |
-| `reindex.rs` | Reindex all/per-catalog/per-plugin | 1 |
-| `status.rs` | Status command + health checks | 1 |
-| `mcp_*.rs` | MCP server lifecycle + tools + log + tool description (US4.b) | 8 |
-| `exit_codes.rs` | Exit code matrix validation | 1 |
-| `manifest_strictness.rs` | Strict/lenient parsing guards | 1 |
-| `atomicity.rs` | Interrupt-injection tests (SIGINT mid-op) | 1 |
-| `concurrency.rs` | Two-process index contention | 1 |
-| `schema_migration_e2e.rs` | Forward migration via MIGRATIONS_OVERRIDE | 1 |
-| `sync_boundary.rs` | Structural test: no async outside src/mcp/ | 1 |
-| **Total** | 127 test files, 954 total tests | 127 |
-
-#### Key Test Fixtures
-
-| File | Purpose |
-|------|---------|
-| `common/mod.rs` | `HOME_MUTEX`, `HarnessModulesGuard`, `SummariserOverrideGuard`, test-specific helpers, sparse-file model fabricators |
-| `fixtures/sample-plugin-catalog/` | Real git-backed plugin tree for catalog add/remove/update tests |
+| Method | Returns | Purpose |
+|--------|---------|---------|
+| `plugin_data_dir_for(catalog, plugin)` | `<root>/plugin-data/<catalog>/<plugin>/` | Process-wide plugin scratch space |
+| `workspace_data_dir_for(workspace, catalog, plugin)` | `<root>/workspaces/<name>/plugin-data/<catalog>/<plugin>/` | Workspace-scoped plugin scratch space |
+| `workspace_dir(workspace)` | `<root>/workspaces/<name>/` | Workspace root (unchanged Phase 4) |
 
 ## Module Boundaries
 
-### Where to Add New Code
+### Where to Add New Code (Phase 5 Updates)
 
 | If you're adding... | Put it in... | Pattern |
 |---------------------|--------------|---------|
+| New substitution stage | `src/substitution/{stage}.rs` | Stage 1-4 namespace; OnceLock<Regex> in `regex_sets.rs` |
+| New built-in variable | `src/substitution/builtins.rs` | Add case to match block; test via `SubstitutionContext` |
+| New entry kind | `src/plugin/identity.rs` | Extend `EntryKind` enum; update Ser/Deser; backfill migration |
+| Command-specific field | `src/plugin/frontmatter.rs` | Extend `SkillFrontmatter` (lenient parsing); document default |
+| Command collection | `src/plugin/lifecycle.rs` | Call `list_command_files`; parse frontmatter; build `PendingCommand` |
+| MCP prompt handler | `src/mcp/prompts.rs` | Register route via `PromptRouter::new_dyn`; implement request handler |
+| Prompt name edge case | `src/mcp/prompt_name.rs` | Extend `sanitise` / `sanitise_trunc` logic; test Unicode boundaries |
+| Prompt collision policy | `src/mcp/prompt_collision.rs` | Extend `resolve_collisions` detection; update warning message |
+| Entry body resolution | `src/index/skills.rs` | Update `resolve_entry_body_path` match arms per new kind |
+| Schema backfill | `src/index/migrations.rs` | Add new v2→v3 backfill step; test via synthetic DB |
 | New harness | `src/harness/{name}.rs` + register in `mod.rs` | Impl `HarnessModule` trait (7 methods) |
-| New harness subcommand | `src/commands/harness/{cmd}.rs` | Pattern: `run(args, scope, paths, mode)` + `assemble_*(...)` |
-| New workspace command | `src/commands/workspace/{cmd}.rs` | Pattern: `run(args, scope, paths, mode)` + `assemble_*(...)` or `run_with_deps(...)` |
-| New catalog command | `src/commands/catalog.rs` | Add to existing dispatcher + orchestrator |
-| New skill search filter | `src/index/query.rs` | Add to `QueryFilters` struct + SQL |
-| New embedder impl | `src/embedding/{name}.rs` | Impl `Embedder` trait + register in tests |
-| New summariser impl | `src/summarise/{name}.rs` | Impl `Summariser` trait, add to test injection hook |
-| New workspace scope hook | `src/workspace/` + `src/settings/` | Add to scope resolution + composition |
-| New settings layer | `src/settings/{layer}.rs` | Add type def to `mod.rs`, parser to `parser.rs` |
-| New composition ref type | `src/settings/composition.rs` | Extend `CompositionRef` enum |
-| New diagnostic check | `src/doctor/checks.rs` or `binding.rs` or `harness_integration.rs` | Add `pub fn check_*(...)` + classification logic |
+| New workspace command | `src/commands/workspace/{cmd}.rs` | Pattern: `run(args, scope, paths, mode)` + `assemble_*` |
 | Surgical TOML edit | `src/settings/edit.rs` | Add helper using `toml_edit::DocumentMut` |
+| New diagnostic check | `src/doctor/checks.rs` or `binding.rs` or `harness_integration.rs` | Add `pub fn check_*` + classification logic |
 | New subsystem (doctor) | `src/doctor/report.rs` | Add variant to `Subsystem` enum + Ser/Deser impl + fix handler to `fixes.rs` |
-| Trigger site (enable/disable/etc.) | `src/commands/{cmd}.rs` or `src/plugin/lifecycle.rs` | After mutation commit, call `regenerate_for_trigger(workspace_name, paths)` |
-| Bounded I/O operation | `src/util/io.rs` | Add `pub fn bounded_*(reader, max_bytes)` with constant cap |
 
 ### Key Patterns
 
-#### CLI Command Pattern (most commands follow this)
+#### Substitution Context Pattern (Phase 5 / US1+US2+US3)
 
 ```rust
-// src/commands/thing/mod.rs or src/commands/thing.rs
+// src/substitution/context.rs
 
-pub fn run(args: ThingArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
-    let paths = Paths::resolve()?;
-    let outcome = assemble_thing(&args, scope, &paths)?;  // silent compute
-    output::write(mode, &outcome);  // emit (human / JSON)
-    Ok(())
+pub struct SubstitutionContext {
+    pub entry: EntryIdentity,  // catalog, plugin, name, kind
+    pub workspace: WorkspaceName,
+    pub arguments: ArgumentValues,  // named or positional
 }
 
-pub fn assemble_thing(args: &ThingArgs, scope: &ResolvedScope, paths: &Paths) -> Result<ThingOutcome, TomeError> {
-    // Business logic here; no I/O side effects
-    Ok(ThingOutcome { ... })
+pub struct SubstitutionContextBuilder { ... }
+
+impl SubstitutionContextBuilder {
+    pub fn build(self) -> Result<SubstitutionContext, SubstitutionError> { ... }
+}
+
+// Consumer calls:
+let context = SubstitutionContextBuilder::new(entry, workspace)
+    .with_arguments(arguments)?
+    .build()?;
+
+let rendered = substitution::render(&body, &context)?;
+```
+
+#### Entry Kind Pattern (Phase 5 / US1)
+
+```rust
+// src/plugin/identity.rs
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EntryKind {
+    Skill,
+    Command,
+}
+
+// In database & wire format: "skill" or "command"
+// In lifecycle: discriminates directory walk (skills/ vs commands/)
+// In MCP prompts: routes to resolve_entry_body_path(catalog, plugin, name, kind)
+```
+
+#### Command Entry Collection Pattern (Phase 5 / US1)
+
+```rust
+// src/plugin/lifecycle.rs
+
+pub async fn collect_pending_commands(
+    plugin_dir: &Path,
+    catalog: &str,
+    plugin: &str,
+    plugin_version: &str,
+) -> Result<Vec<PendingCommand>, TomeError> {
+    let files = plugin::components::list_command_files(plugin_dir);
+    let mut pending = Vec::new();
+    for file in files {
+        let body = fs::read_to_string(&file.path)?;
+        let (frontmatter, _) = parse_command_frontmatter(&body)?;
+        pending.push(PendingCommand {
+            catalog: catalog.to_owned(),
+            plugin: plugin.to_owned(),
+            name: frontmatter.name.or(Some(file.name))?,
+            kind: EntryKind::Command,
+            description: frontmatter.description?,
+            // ... other fields
+        });
+    }
+    Ok(pending)
 }
 ```
 
-#### Harness Module Pattern
+#### MCP Prompt Registration Pattern (Phase 5 / US1)
 
 ```rust
-// src/harness/{name}.rs
-pub struct TheHarnessModule;
+// src/mcp/prompts.rs
 
-impl HarnessModule for TheHarnessModule {
-    fn name(&self) -> &'static str { ... }
-    fn description(&self) -> &'static str { ... }
-    fn detect(&self, home: &Path) -> bool { ... }
-    fn rules_file_target(&self, project_root: &Path) -> PathBuf { ... }
-    fn rules_file_strategy(&self) -> RulesFileStrategy { ... }
-    fn block_body_style(&self) -> BlockBodyStyle { ... }
-    fn mcp_config_path(&self, home: &Path) -> PathBuf { ... }
-    fn mcp_config_format(&self) -> McpConfigFormat { ... }
-    fn mcp_parent_key(&self) -> &'static str { ... }
+pub fn build_prompt_router(
+    registry: &PromptRegistry,
+    db: &Connection,
+) -> Result<PromptRouter, TomeError> {
+    let mut router = PromptRouter::new();
+    
+    for (prompt_name, entry) in &registry.by_name {
+        let handler = {
+            let prompt_name = prompt_name.clone();
+            let entry = entry.clone();
+            move |ctx: PromptContext| -> Pin<Box<dyn Future<Output = Result<PromptGetResponse, McpError>>>> {
+                Box::pin(async move {
+                    // Handle prompt request: read entry body, render via substitution, return
+                    let (body, _) = resolve_entry_body_path(&entry.catalog, &entry.plugin, &entry.name, entry.kind)?;
+                    Ok(PromptGetResponse { messages: vec![...] })
+                })
+            }
+        };
+        
+        router.add_route(PromptRoute::new_dyn(
+            prompt_name.clone(),
+            PromptDescriptor {
+                name: prompt_name.clone(),
+                description: entry.description.clone(),
+                arguments: entry.arguments.clone(),
+            },
+            handler,
+        ));
+    }
+    
+    Ok(router)
 }
 ```
 
-#### Composition Reference Pattern (Phase 4 US3)
+#### Test Entry Kind Override Pattern
 
 ```rust
-// In settings TOML files, harnesses list can contain:
-// - Bare names: "claude-code", "codex"
-// - References: "[workspace]", "[global]", "[workspaces.prod]"
-// The resolver recursively expands references into a merged effective list,
-// detecting cycles and preserving source chain for debugging.
-```
-
-#### Summarisation Trigger Pattern (Phase 4 US4.b)
-
-```rust
-// In enable/disable/reindex/catalog-update commands, after workspace_skills mutation commits:
-
-// Commit workspace_skills rows inside one advisory-lock window
-index::skills::enable_plugin_atomic(/* ... */)?;
-// Lock released here
-
-// Then trigger regeneration (outside lock)
-crate::summarise::regenerate_for_trigger(scope.scope.name(), &paths)?;
-// Forward-progress: if summariser fails, skill state is retained, cached summary not overwritten
-// ModelMissing is silent no-op; other failures exit 24
-```
-
-#### Doctor Subsystem Dispatch Pattern (Phase 4 / US5)
-
-```rust
-// src/doctor/report.rs — type-safe subsystem dispatch via Subsystem enum
-pub enum Subsystem {
-    Embedder,
-    Reranker,
-    Index,
-    Drift,
-    Catalog(String),
-    Schema,
-    Summariser,
-    Binding,
-    BindingRulesCopy,
-    HarnessRules(String),
-    HarnessMcp(String),
-}
-
-// src/doctor/fixes.rs — exhaustive match on enum
-match &fix.subsystem {
-    Subsystem::Embedder => repair_model(...),
-    Subsystem::HarnessMcp(name) => repair_harness_sync_with(...),
-    // ...
-}
-```
-
-#### Test Fixture Pattern
-
-```rust
-// tests/common/mod.rs
-lazy_static! {
-    pub static ref HOME_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-}
+// tests/common/mod.rs or test file
 
 #[must_use]
-pub struct HomeGuard {
-    _guard: std::sync::MutexGuard<'static, ()>,
-    _temp: TempDir,
-}
+pub struct EntryKindOverrideGuard { ... }
 
-impl HomeGuard {
-    pub fn new() -> Result<(Self, PathBuf), Box<dyn std::error::Error>> {
-        let _guard = HOME_MUTEX.lock().unwrap();
-        let temp = TempDir::new()?;
-        let temp_home = temp.path().to_path_buf();
-        // Set $HOME to temp_home for test duration; drop HomeGuard to restore
-        Ok((Self { _guard, _temp: temp }, temp_home))
+impl EntryKindOverrideGuard {
+    pub fn install(overrides: Vec<(PluginId, Vec<EntryKind>)>) -> Self {
+        // Set ENTRY_KIND_OVERRIDE thread_local
     }
 }
-```
 
-#### Test Summariser Injection Pattern (Phase 4 / US4)
-
-```rust
-// tests/summariser_*.rs
-use tome::summarise::{SummariserOverrideGuard, StubSummariser};
-
+// In test:
 #[test]
-fn summariser_trigger_with_stub() -> Result<(), Box<dyn Error>> {
-    let (home, _) = HomeGuard::new()?;
-    let stub = Arc::new(StubSummariser);
-    let _guard = SummariserOverrideGuard::install(stub);  // Installed for test duration
+fn command_entry_kind_preserved() -> Result<(), Box<dyn Error>> {
+    let guard = EntryKindOverrideGuard::install(vec![(
+        "catalog/plugin".parse()?,
+        vec![EntryKind::Command],
+    )]);
     
-    // trigger code path sees SUMMARISER_OVERRIDE, uses stub instead of LlamaSummariser
-    // guard drops at end of test, clearing the slot
-
-    Ok(())
-}
-```
-
-#### Test Harness Module Override Pattern (Phase 4 / US3 + US5)
-
-```rust
-// tests/harness_*.rs or tests/doctor*.rs
-use tome::harness::HarnessModulesGuard;
-
-#[test]
-fn test_with_stub_harness() -> Result<(), Box<dyn Error>> {
-    let guard = HarnessModulesGuard::install(vec![/* stub modules */]);
-    // During test, HARNESS_MODULES_OVERRIDE is populated
-    // with_effective_modules() + lookup() see the override
+    // Test code sees overridden entry kinds
     // guard drops at end of test
     Ok(())
 }
@@ -588,4 +519,4 @@ No auto-generated files in src/; test fixtures are synthesized at runtime (e.g.,
 
 ---
 
-*This document shows WHERE code lives. Updated 2026-05-26 against Phase 4 v0.4.0 post-Polish.*
+*This document shows WHERE code lives. Updated 2026-05-26 against Phase 5 / US1 (substitution skeleton, prompts, entry kind shipped).*

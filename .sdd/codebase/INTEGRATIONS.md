@@ -2,7 +2,7 @@
 
 > **Purpose**: Document all external services, APIs, databases, and third-party integrations.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26 (Phase 4 v0.4.0 complete; Polish hardened all subsystems; 916 tests across 125 suites)
+> **Last Updated**: 2026-05-27 (Phase 5 / US1 shipped; MCP prompts capability + schema v3; collision tracking for prompt naming)
 
 ## Databases & Data Stores
 
@@ -10,48 +10,45 @@
 
 | Service | Type | Purpose | Location |
 |---------|------|---------|----------|
-| SQLite 3 | Embedded relational DB | Local skill index — metadata, embeddings, reranker scores, workspace bindings, project bindings, enabled skills, diagnostic metadata | Global: `<home>/.tome/index.db` (WAL mode); schema in `src/index/schema.rs` |
+| SQLite 3 | Embedded relational DB | Local skill index — metadata, embeddings, reranker scores, workspace bindings, project bindings, enabled entries (skills + commands), diagnostic metadata | Global: `<home>/.tome/index.db` (WAL mode); schema v3 in `src/index/schema.rs` (Phase 5 F2) |
 
 ### Connection Patterns
 
 - **Statically linked**: `rusqlite` with `bundled` feature — no system SQLite dependency.
-- **Concurrency model**: Single advisory lockfile (`index.lock` — global or workspace-scoped) serialises writes; WAL mode allows readers during writes; MCP server uses read-only open per FR-056; Phase 4 US4: summary regeneration writes `generated_at` + hash under advisory lock for atomicity; US5: doctor queries workspace_projects for binding state without taking lock (read-only).
+- **Concurrency model**: Single advisory lockfile (`index.lock` — global or workspace-scoped) serialises writes; WAL mode allows readers during writes; MCP server uses read-only open per FR-056; Phase 5: `prompts/list` + `prompts/get` run read-only without taking lock.
 - **ORM/Query builder**: Direct SQL via `rusqlite` — prepared statements, parameterised queries.
-- **Migration approach**: Forward-only migrations under advisory lock in `src/index/migrations.rs`; Phase 4 F1 introduces schema v2 with `workspace_catalogs` (F11 live) + `workspace_projects` (US1 live) tables; Phase 4 US4: extends meta table with summariser model identity tracking (name, version, last-known digest); Polish: schema stable (v2 final for Phase 4).
+- **Migration approach**: Forward-only migrations under advisory lock in `src/index/migrations.rs`; Phase 5 F2 introduces schema v3 with unified `entries` table (replaces per-kind tables) + `kind` discriminator column; backfill defaults per contracts/schema-migration-p5.md.
 
 ### Cache Structure
 
-- **Catalog cache**: Each remote catalog source content-addressed by `sha256(url)` in `<home>/.tome/catalogs/<sha256>/` — Git working tree, refreshed on `tome catalog update`. Multiple scopes can reference the same URL; shared via reference-count tracking — deleted only when no scope references it (Phase 3 / US3); Phase 4 F11: enrolment moved to `workspace_catalogs` junction table (sole source of truth per FR-360); Polish: doctor detects orphaned catalog clones and suggests repair via `--fix`.
-- **Model cache**: Downloaded model ONNX artefacts (embedder, reranker) + GGUF artefacts (summariser) stored in `<home>/.tome/models/<model-name>/` (global, shared across scopes) with per-model `manifest.json` (strict JSON, `#[serde(deny_unknown_fields)]`); Phase 4 US4: summariser model (Qwen2.5-0.5B-Instruct GGUF, ~400 MB, SHA-256 pinned per US4.d-1 C-B1 fix: `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`, 491,400,032 bytes); `tome models list --verify` validates all three via SHA-256; doctor reports summariser state (Polish PR-E hardening); US5: doctor subsystem classifies summariser as Ok/Missing/Corrupt/Drift; drift detected via meta table identity mismatch.
-- **Workspace summary cache**: Per-workspace `[summaries]` table in `<home>/.tome/workspaces/<name>/settings.toml` with `short_summary`, `long_summary`, `generated_at` (RFC 3339 datetime literal), and `content_hash` (SHA-256 of input plugin list for invalidation detection); Phase 4 US4: regenerated on triggers (plugin enable/disable/reindex/catalog update) or explicit `tome workspace regen-summary`; forward-progress semantics: binding remains committed even if summarisation fails (exit 24 with partial state); Polish: doctor detects cache staleness via content-hash mismatch → Degraded classification.
-- **Atomic writes**: `tempfile` crate (rename-based) prevents corruption on SIGINT; workspace `init` uses `tempfile::Builder::tempdir_in(workspace_root)` for POSIX-atomic staging-to-final rename (Phase 3 / US2); Phase 4 US4: workspace `regen-summary` uses `toml_edit` to read/modify/write `[summaries]` table atomically; Polish: doctor `--fix` repairs atomically (settings writes under advisory lock, staging-rename pattern for `.tome.tmp.*` cleanup with 1-hour mtime gate per PR-E S-M1).
+- **Catalog cache**: Each remote catalog source content-addressed by `sha256(url)` in `<home>/.tome/catalogs/<sha256>/` — Git working tree, refreshed on `tome catalog update`. Multiple scopes can reference the same URL; shared via reference-count tracking — deleted only when no scope references it; Phase 5: unchanged (catalog sync independent of prompts).
+- **Model cache**: Downloaded model ONNX + GGUF artefacts stored in `<home>/.tome/models/`; all three models (embedder, reranker, summariser) are global, shared across scopes; Phase 5: unchanged.
+- **Workspace summary cache**: Per-workspace `[summaries]` table in `<home>/.tome/workspaces/<name>/settings.toml`; Phase 5: unchanged (summary cache independent of prompts).
+- **Plugin/Workspace data directories** (Phase 5 / US2–US3): Lazy-created persistent storage under `<home>/.tome/data/plugins/<catalog>_<plugin>/` and `<home>/.tome/data/workspaces/<workspace-name>/` on first `{{TOME_PLUGIN_DATA}}` / `{{TOME_WORKSPACE_DATA}}` variable reference during prompt execution; created atomically via `std::fs::create_dir_all` per `src/substitution/data_dir.rs`.
+- **Prompt collision tracking** (Phase 5 / US1): In-memory collision detection via `src/mcp/prompt_collision.rs` — maps `<catalog>_<plugin>_<entry_name>` → `EntryIdentity` and detects collisions when building prompt router at MCP startup; collisions trigger suffix-counter resolution per contracts/mcp-prompts.md §Prompt naming algorithm.
+- **Atomic writes**: `tempfile` crate (rename-based) prevents corruption on SIGINT; Phase 5: data-dir creation stays non-atomic (recoverable via re-run; no critical state inside data-dirs per design).
 
-### Workspace Registry (Phase 3 / US2, load-bearing in Phase 3 / US3, extended Phase 4 US2–US5)
+### Workspace Registry (Phase 3 / US2, extended Phase 4, Phase 5 unchanged)
 
 - **File**: `<home>/.tome/workspaces.txt` — opt-in (never created unless explicitly requested)
 - **Format**: Line-delimited absolute paths to workspace roots; dedupe by exact-path match and canonicalize
-- **Size cap**: 1 MiB; entry cap 10k (Phase 3 Polish hardening); no NUL or `..` path traversal sequences
-- **Semantics**: Informational in US2; load-bearing in US3 — tracks which workspaces have been initialized via `--inherit-global`. US3 `catalog remove` consults this file to enumerate all scopes for reference-counting. Phase 4 US4: `workspace list` discovers workspaces via this optional registry (absent registry = global only); summary cache state tracked per workspace via central DB; Polish: doctor enumerates workspaces via registry for comprehensive per-workspace binding checks.
-- **Usage**: Client harnesses can read this file to discover initialized workspaces; Tome treats absence as "no workspace scopes" (global scope only); Phase 4 US1: unused by binding algorithm (central DB is source of truth for workspace_projects); Phase 4 US4: still discovery-only for workspace list (central DB is authority for which workspaces actually exist); Polish: doctor walks registry to enumerate all workspaces (optional file may be absent — fallback is global only).
+- **Size cap**: 1 MiB; entry cap 10k; no NUL or `..` path traversal sequences
+- **Semantics**: Informational in discovery; load-bearing in reference-counting; Phase 5: unchanged (workspace registry independent of prompts).
 
 ---
 
 ## Authentication & Authorization
 
-Phase 1–4 has no explicit application-layer authentication. Phase 3 / US1 MCP server is stdio-based (embedding in harness provides transport-level security). Phase 4 extends scope to workspace/project/harness level without auth changes. Phase 4 US5 adds binding drift detection (no auth change, informational only). Polish hardens all diagnostic paths without auth changes.
+Phase 1–5 has no explicit application-layer authentication. Phase 3 / US1 MCP server is stdio-based (embedding in harness provides transport-level security). Phase 5 / US1 extends MCP with `prompts` capability — same stdio transport, no auth changes.
 
 - **Git operations**: Inherit system SSH keys and HTTP credential helpers (if configured in `~/.gitconfig`).
-- **Hugging Face model downloads**: No API key required; public HTTPS URLs freely accessible (MODEL_REGISTRY pinned to MIT-licensed BGE variants + Apache-2.0 Qwen2.5).
+- **Hugging Face model downloads**: No API key required; public HTTPS URLs freely accessible.
 - **Plugin manifest ownership**: File system permissions validate catalog ownership (email field in `tome-catalog.toml` is metadata only).
 - **Workspace ownership**: Implicitly owned by the user who runs `tome workspace init`; no explicit permission model.
-- **Project binding ownership**: Implicitly owned by the user who runs `tome workspace use`; binding record stored in central DB + `.tome/` marker created in project root with restricted permissions (no explicit ACL); Phase 4 US4: binding identity verified during summary regeneration (skipped if binding mismatch detected); Polish: doctor detects orphaned bindings (marker present but DB record missing or vice versa) and suggests recovery or cleanup via `--fix`.
-- **Workspace removal**: `--force` required when workspace has bound projects (FR-409); cascade teardown via `teardown_integration_for_project` removes harness-specific MCP config + rules-file entries; Phase 4 US4: summary cache deleted along with workspace settings; Polish: cascade per-step failures logged but don't abort.
-- **Workspace rename**: Requires workspace to have no bound projects without `--force` (FR-410 enforces semantic constraint); atomic marker relocation via staging (Phase 4 US2); Phase 4 US4: binding identity verified during summary regeneration, harness sync respects rename identity in workspace settings; Polish: doctor detects rename-stale markers (binding record mtime newer than marker mtime → drift).
-- **Workspace regen-summary**: User runs `tome workspace regen-summary [<name>]` from any context (CLI-only, not MCP-accessible); regeneration happens under advisory lock with forward-progress semantics (binding committed even on summariser failure); Polish: doctor detects summary cache staleness via content-hash comparison and suggests regeneration.
-- **Credential scrubbing**: All Git stderr and model download error chains pass through `scrub_credentials()` before logging (principle XIII; extended to HF URLs and MCP log fields; Phase 4 US4: project path scrubbing in harness rules-file block insertion); Polish: doctor error logs scrub project paths + workspace paths.
-- **MCP server identity** (Phase 3 / US1): Identified by `server_info { name: "tome", version: "0.x" }` in the MCP handshake; no per-call authentication; Polish: MCP startup validates query length cap (4096 chars) — over-length rejected with `code: query_too_long`.
-- **Doctor read-only access** (Phase 3 / US4, extended Phase 4 US4 and US5, hardened Polish): Diagnostics are read-only; repairs (`--fix`) require interactive confirmation (Polish PR-B C-B1 enforces well-formed workflow); Phase 4 US4: extended to summariser state + summary cache freshness detection; Polish: all subsystem repairs flow through `SubsystemHealth` enum with precise auto_fixable classification; confirmation per subsystem.
-- **Harness config access** (Phase 4 US1–US5, Polish hardened): Direct filesystem access to harness-owned `.mcp.json` / `.mcp.toml` files; no permission model beyond OS-level file permissions; Polish: doctor detects UserOwned MCP config (modification detected by harness-module-specific parsing, Tome doesn't claim ownership); `--fix --force` can override (lands in US5.b).
+- **Project binding ownership**: Implicitly owned by the user who runs `tome workspace use`; Phase 5: unchanged (binding independent of prompts).
+- **Credential scrubbing**: All Git stderr and model download error chains pass through `scrub_credentials()` before logging; Phase 5: extended to substitution error messages (workspace/plugin data-dir paths scrubbed from error logs).
+- **MCP server identity** (Phase 3 / US1, extended Phase 5 / US1): Identified by `server_info { name: "tome", version: "0.x" }` in the MCP handshake; Phase 5: extended with `PromptsCapability { listChanged: false }` indicating static prompt list (no runtime changes via MCP).
+- **Prompt access** (Phase 5 / US1): All enabled-and-user-invocable entries from resolved workspace exposed as prompts via MCP; Claude Code harness (or other client) can invoke via `prompts/get`; substitution context built per-call with caller-supplied argument values per contracts/mcp-prompts.md.
 
 ---
 
@@ -59,17 +56,13 @@ Phase 1–4 has no explicit application-layer authentication. Phase 3 / US1 MCP 
 
 ### First-Party APIs
 
-- `commands::query::pipeline(args, deps) -> Result<QueryOutcome, TomeError>` — silent compute path reused by MCP `search_skills` tool (Phase 3 / US1.b); Phase 4 US5: input length validated (4096 chars max) before dispatch (Polish PR-E enforcement).
-- `workspace::binding::bind_project(project_root, workspace_name, deps)` — project-to-workspace binding orchestrator (Phase 4 US1.a); Polish: doctor detects stale binding (marker mtime vs DB record).
-- `workspace::list::list(paths) -> Result<Vec<WorkspaceInfo>, TomeError>` — workspace discovery via opt-in registry (Phase 4 US2.a); Polish: includes binding count per workspace in report (distinct from doctor—just summary).
-- `workspace::rename::rename(old_name, new_name, paths) -> Result<RenameOutcome, TomeError>` — atomic workspace marker relocation with harness marker presence check (Phase 4 US2.a); Polish: doctor verifies rename didn't leave stale marker links.
-- `workspace::regen_summary::regen(name, summariser, paths) -> Result<RegenSummaryOutcome, TomeError>` — summary regeneration via configured summariser (Phase 4 US2.c, fully wired Phase 4 US4.a with `LlamaSummariser`); Polish: doctor detects cache staleness and suggests regeneration.
-- `workspace::sync::sync_for_project_root(project_root, scope, deps) -> Result<SyncOutcome, TomeError>` — harness MCP config + rules-file syncer (Phase 4 US3 complete; hardened Polish PR-B C-M3 for project-local repair dispatch).
-- `workspace::remove::remove(name, force, paths, home, scope)` — 5-step cascade per FR-405: harness teardown, marker removal, DB cleanup, workspace dir removal, catalog refcount check; Phase 4 US4: summary cache deleted during step 1 (workspace settings deletion); Polish: all steps cascaded atomically with per-step error logging.
-- `summarise::LlamaSummariser::new(model_path) -> Result<Self, TomeError>` — initialiser for production summariser (Phase 4 US4.a; returns early error if model not found or corrupt); Polish: doctor can call this in verify mode to detect model issues.
-- `summarise::regenerate_for_trigger(workspace_name, deps) -> Result<SummariserOutput, TomeError>` — automatic summary regeneration triggered by plugin/catalog mutations (Phase 4 US4.b wired in lifecycle); Phase 4 US4.d-1 consolidates summary cache length checks (SHORT_MAX_CHARS / LONG_MAX_CHARS) and triggers; Polish: triggers fire on binding changes (project bound/unbound → invalidate summary cache).
-- `doctor::assemble_report(scope, paths, home, verify) -> Result<DoctorReport, TomeError>` — silent compute path for diagnosis (Phase 3 / US4.a, extended Phase 4 US5); returns report with five Phase 4 subsystems (project_binding, summariser, effective_harness_list, harness_rules, harness_mcp); no advisory lock taken — reads snapshot; Polish: SubsystemHealth per-row emission (PR-A C-M1), graceful Broken collapse on SchemaTooNew (PR-B C-M2).
-- `doctor::fixes::apply(&mut report, paths, scope) -> Result<usize, TomeError>` — repair dispatcher (Phase 3 / US4.b, extended Phase 4 US4 + US5); Polish: coalesced harness sync per project (PR-B R-M2), orphan cleanup with 1-hour mtime gate (PR-E S-M1), per-entry validation (PR-C), SourceMissing distinction for rules-copy (PR-D R-M5).
+- `commands::query::pipeline(args, deps) -> Result<QueryOutcome, TomeError>` — silent compute path reused by MCP `search_skills` tool (Phase 3 / US1.b); Phase 5: unchanged.
+- `mcp::prompts::PromptRouter` — MCP `prompts/list` + `prompts/get` handlers (Phase 5 / US1); router built dynamically from enabled-and-user-invocable entries; `list_all` returns `Vec<Prompt>` with name, description (truncated per `DESCRIPTION_MAX_CHARS` = 300), arguments; `get` loads entry body, renders via substitution pipeline, returns as MCP PromptMessage array per contracts/mcp-prompts.md.
+- `plugin::identity::EntryKind` enum — Skill vs Command discriminator (Phase 5 F2); used in schema v3, prompt router filtering, collision tracking, error messages.
+- `mcp::prompt_name::derive_name(catalog, plugin, entry_name, kind) -> String` — deterministic prompt naming per `<plugin>__<entry_name>` + collision-suffix algorithm (Phase 5 / US1).
+- `mcp::prompt_collision::resolve_collisions(Vec<EntryIdentity>) -> CollisionRecord` — detects and resolves prompt name collisions at startup (Phase 5 / US1) per contracts/mcp-prompts.md §Collision handling.
+- `substitution::render(body, context) -> Result<String, SubstitutionError>` — four-stage variable substitution pipeline (Phase 5 / US1–US3 wired progressively).
+- `substitution::SubstitutionContext` / `SubstitutionContextBuilder` — per-prompt context with workspace, plugin, entry identity, argument values (Phase 5 F3 skeleton, US1 builder wiring, US2–US3 argument value population).
 
 ### Third-Party APIs
 
@@ -77,26 +70,25 @@ Phase 1–4 has no explicit application-layer authentication. Phase 3 / US1 MCP 
 
 | Provider | Purpose | SDK/Client | Configuration |
 |----------|---------|------------|---------------|
-| Hugging Face (`huggingface.co`) | ONNX + GGUF model downloads (embedder, reranker, summariser) | `reqwest::blocking` (direct HTTPS) | `src/embedding/registry.rs` — `MODEL_REGISTRY` (compile-time constants); `src/summarise/registry.rs` — `SUMMARISER_NAME`, `SUMMARISER_VERSION`, `SUMMARISER_SHA256` |
+| Hugging Face (`huggingface.co`) | ONNX + GGUF model downloads (embedder, reranker, summariser) | `reqwest::blocking` (direct HTTPS) | `src/embedding/registry.rs` — `MODEL_REGISTRY` (compile-time constants); `src/summarise/registry.rs` — summariser identity |
 
 **Details**:
-- **Embedder**: `bge-small-en-v1.5` INT8 (~66 MB) from quantised variant
-- **Reranker**: `bge-reranker-base` INT8 (~280 MB) from `onnx-community/bge-reranker-base-ONNX` (source moved Phase 3 slice 1)
-- **Summariser** (Phase 4 US4): `qwen2.5-0.5b-instruct` GGUF (~400 MB, Q4_K_M quantisation) from `Qwen/Qwen2.5-0.5B-Instruct-GGUF`; Phase 4 F6 adds placeholder with all-zero checksum guard (downloads refused until real digest landed); Phase 4 US4.a ships production `LlamaSummariser`; Phase 4 US4.d-1 confirms real SHA-256 pinned: `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db` (491,400,032 bytes); Polish: doctor verifies presence + checksum independently; confirmed in v0.4.0 release.
-- **Integrity**: Pinned SHA-256 + size_bytes verified post-download; no checksum endpoint (hashes are real upstream digests verified at Phase 3 slice 1 start and Phase 4 US4.d-1 for summariser); Polish: doctor can re-verify all three artefacts with `--verify` flag (compares against registry + recorded meta).
-- **Network**: HTTPS only via `rustls-tls` (no system OpenSSL); Polish: doctor never triggers downloads (read-only diagnostics).
-- **Failure modes**: Network error → `TomeError::Io` (exit 7); checksum mismatch → `TomeError::ModelChecksumMismatch` (exit 32); corrupted registry → `TomeError::ModelCorrupt` (exit 31); missing model → `TomeError::ModelMissing` (exit 30); embedder drift → `TomeError::EmbedderNameDrift` (exit 41); summariser model issues → `TomeError::SummariserFailure` (exit 24) with `SummariserFailureKind::{OutputEmpty, BackendInitFailed, InferenceFailure, ModelNotFound, ModelCorrupt}`; Phase 4 US4: adds exit 24 for summarisation pipeline failures; Phase 4 US1–US3: adds harness-specific failure codes (13–20 per FR-592); Polish: doctor repair exit codes depend on fix type (75 if unrecoverable issues remain per PR-B C-B1).
-- **Explicit management**: Phase 6 wires `tome models {download,list,remove}` to manage artefacts; `tome models list --verify` validates SHA-256 per-file via `embedding::download::sha256_file()` + `summarise::download::verify_summariser_model()` (Phase 4 US4); Polish: doctor can validate via `--verify` without triggering downloads.
-- **Status visibility**: Phase 8 adds `tome status [--verify]` for read-only audit without triggering downloads; Phase 4 US4: extends to include summariser model identity + state; Polish: doctor extends status reporting to include all three models per Subsystem enum.
-- **Doctor integration** (Phase 3 / US4, extended Phase 4 US4 and Polish): `tome doctor` reports model health (all three: embedder, reranker, summariser) with optional repair via `--fix`; Phase 4 US4: added `check_summariser` diagnostic helper; Polish: model diagnostics promoted to Subsystem enum variants (Embedder, Reranker, Summariser); repair via `fixes::apply` with type-safe dispatch.
-- **Scope**: Models are global (shared across all workspaces); downloaded to `<home>/.tome/models/` regardless of active scope; Polish: doctor reports global model state, not per-scope.
-- **Cache invalidation** (Phase 4 US4): Summary cache content-hash compared to current input; if hash matches, cached summaries reused; no re-download needed unless model is corrupted or missing; Polish: doctor detects summariser identity drift in meta table (recorded name/version mismatch against registry).
+- **Embedder**: `bge-small-en-v1.5` INT8 (~66 MB)
+- **Reranker**: `bge-reranker-base` INT8 (~280 MB) from `onnx-community/bge-reranker-base-ONNX`
+- **Summariser** (Phase 4 US4): `qwen2.5-0.5b-instruct` GGUF (~400 MB); SHA-256 pinned per US4.d-1: `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`; Phase 5: unchanged
+- **Integrity**: Pinned SHA-256 + size_bytes verified post-download; no checksum endpoint (hashes are real upstream digests).
+- **Network**: HTTPS only via `rustls-tls` (no system OpenSSL).
+- **Failure modes**: Network error → `TomeError::Io` (exit 7); checksum mismatch → `TomeError::ModelChecksumMismatch` (exit 32); corrupted registry → `TomeError::ModelCorrupt` (exit 31); missing model → `TomeError::ModelMissing` (exit 30); Phase 5: adds `WorkspaceDataDirWriteFailed` (26) and `PluginDataDirWriteFailed` (9) for data-dir failures, `PromptArgumentMismatch` (28), `EntryNotFound` (27), `SubstitutionFailed` (29), `InvalidArgumentFrontmatter` (25) per contracts/exit-codes-p5.md.
+- **Status visibility**: Phase 8 adds `tome status [--verify]` for read-only audit; Phase 4 US4: extended to include summariser model identity; Phase 5: unchanged (models remain orthogonal to prompts).
+- **Doctor integration**: `tome doctor` reports model health with optional repair via `--fix`; Phase 5: unchanged (doctor independent of prompts capability).
+- **Scope**: Models are global (shared across all workspaces); Phase 5: unchanged.
+- **Cache invalidation**: Separate from prompt-related caching (Phase 4 US4 model cache, Phase 5 prompt-specific data-dirs are independent).
 
 ---
 
 ## Message Queues & Event Systems
 
-None. Phase 3 / US1 MCP server is stdio-based (single request/response); Phase 4 adds no async event infrastructure; US5 adds no event system. Phase 3 Polish: explicit SIGTERM handler for graceful shutdown (Unix-only) with 5s timeout. Polish phase: no new event systems.
+None in Phase 1–5. Phase 5 adds no async event infrastructure.
 
 ---
 
@@ -104,12 +96,13 @@ None. Phase 3 / US1 MCP server is stdio-based (single request/response); Phase 4
 
 | Service | Purpose | TTL / Eviction | Configuration |
 |---------|---------|----------------|-----------------|
-| Filesystem (home) | Catalog Git working trees | Explicit `tome catalog remove` (user-managed); persistent; shared across scopes via refcount (Phase 3 / US3) | `<home>/.tome/catalogs/` — same URL reused — clone deleted only when all scopes drop it; Polish: doctor detects orphaned clones and suggests repair via `--fix` refcount validation. |
-| Filesystem (home) | Downloaded model artefacts (all three: embedder, reranker, summariser) | Explicit `tome models remove` (user-managed); persistent | `<home>/.tome/models/` — one dir per model with manifest + ONNX/GGUF files; shared across all scopes (global); Phase 4 US4: summariser model stored alongside embedder/reranker; `tome status --verify` validates all three; Polish: doctor validates via `--verify`, classifies state (Ok/Missing/Corrupt/Drift). |
-| Workspace Settings TOML | Cached workspace summaries | Explicit `tome workspace regen-summary` (user-managed); invalidation on plugin enable/disable/reindex/catalog update (automatic triggers); persistent until `workspace remove` | `<home>/.tome/workspaces/<name>/settings.toml` — `[summaries]` table with short + long + generated_at timestamp + content_hash (SHA-256 of input list); Phase 4 US4: content-hash detects stale cache; automatic invalidation baked into lifecycle triggers; Polish: doctor detects staleness, suggests regeneration via `--fix`. |
-| Filesystem | Orphaned staging dirs | Explicit cleanup via `tome doctor --fix`; 1-hour mtime gate (stale staging > 1h old assumed abandoned) | `<workspace_root>/.tome.tmp.*` staging dirs from failed atomic writes; Polish: doctor `--fix` cleans up orphaned staging > 1h old via mtime comparison (PR-E S-M1 hardening). |
+| Filesystem (home) | Catalog Git working trees | Explicit `tome catalog remove` (user-managed); persistent; shared across scopes via refcount | `<home>/.tome/catalogs/` — same URL reused — clone deleted only when all scopes drop it |
+| Filesystem (home) | Downloaded model artefacts (all three: embedder, reranker, summariser) | Explicit `tome models remove` (user-managed); persistent | `<home>/.tome/models/` — one dir per model with manifest + ONNX/GGUF files |
+| Workspace Settings TOML | Cached workspace summaries | Explicit `tome workspace regen-summary`; invalidation on plugin enable/disable/reindex/catalog update (automatic triggers); persistent until `workspace remove` | `<home>/.tome/workspaces/<name>/settings.toml` — `[summaries]` table with short + long + generated_at + content_hash |
+| Filesystem | Persistent plugin/workspace data | User-managed (explicit cleanup); persistent across prompt executions; Phase 5 lazy-creation | `<home>/.tome/data/plugins/<catalog>_<plugin>/` and `<home>/.tome/data/workspaces/<workspace_name>/` — created on first `{{TOME_PLUGIN_DATA}}` / `{{TOME_WORKSPACE_DATA}}` reference |
+| Filesystem | Orphaned staging dirs | Explicit cleanup via `tome doctor --fix`; 1-hour mtime gate (stale staging > 1h old assumed abandoned) | `<workspace_root>/.tome.tmp.*` staging dirs from failed atomic writes |
 
-No TTL-based eviction. Explicit user commands for cleanup (principle VI). Polish: doctor provides advisory cleanup candidates with precise filtering.
+No TTL-based eviction. Explicit user commands for cleanup (principle VI). Phase 5: plugin/workspace data-dirs have no automatic eviction (user-managed, similar to summary cache).
 
 ---
 
@@ -117,10 +110,10 @@ No TTL-based eviction. Explicit user commands for cleanup (principle VI). Polish
 
 | Service | Purpose | Configuration |
 |---------|---------|-----------------|
-| Structured logging (via `tracing`) | Diagnostic tracing to stderr (CLI) and JSON-lines to file (MCP server) | CLI: `RUST_LOG` or `TOME_LOG` environment variables; independent of `--json` stdout. MCP: JSON-lines to `<home>/.tome/mcp.log` per `contracts/log-format.md`; 10 MiB rotation cap; stderr reserved for fatal startup errors only (FR-222); Phase 3 Polish: custom `ContractEventFormat` emits contract-pinned field names (`ts`, `level`, `target`, `msg`); log file 0600 mode (Unix-only); credential scrubbing on `workspace_path` and `error_message` fields; Phase 4 US4: summarisation progress logged at debug level (LLM inference steps, model load time); Polish: doctor subsystem diagnostics logged at debug/warn (binding drift, harness integration state). |
-| Exit codes | Scriptable error handling | 30+ enumerated codes: Phase 2 baseline + Phase 3 additions + Phase 4 F1–F11 (13–20 per FR-592 for harness/settings/summariser) + Phase 4 US4 (24 for `SummariserFailure`) + US5 (75 for `DoctorFixNotSafe` when `--fix` ran but unrecoverable issues remain); Polish: no new exit codes (30+ set is final). |
-| Status checks | Per-subsystem health via `tome status` | Phase 8 — models (all three), index, drift state with lazy `--verify` flag; Phase 4 US4: extended to summariser model state (present/valid/corrupt), summary cache state (present/stale/fresh), workspace binding status, settings composition validation; Polish: unchanged (status stays focused on quick read-only checks; doctor handles broader diagnostics). |
-| Doctor diagnostics | Subsystem health assessment + harness discovery + repair | Phase 3 / US4 — `tome doctor [--fix]` reports model/index/workspace/drift/harness health; Phase 3 Polish: orphan clone detection, registry status; Phase 4 US4: extended to summariser state (present/corrupt/drift), summary cache state (present/stale), settings composition + workspace binding drift (orphaned markers, stale DB records), harness MCP config consistency checks; Polish: typed `Subsystem` enum (11 variants) with byte-stable wire format; `SubsystemHealth` enum (5 variants) for per-subsystem classification; repair flow through exhaustive dispatch ladder (PR-A–PR-F refinements). |
+| Structured logging (via `tracing`) | Diagnostic tracing to stderr (CLI) and JSON-lines to file (MCP server) | CLI: `RUST_LOG` or `TOME_LOG` environment variables; independent of `--json` stdout. MCP: JSON-lines to `<home>/.tome/mcp.log` per `contracts/log-format.md`; 10 MiB rotation cap; Phase 5: includes prompt collision warnings, data-dir creation failures, substitution errors at appropriate levels |
+| Exit codes | Scriptable error handling | 30+ enumerated codes; Phase 5 F1 adds 25–29 for data-dir creation (26, 9), argument mismatches (28), missing entries (27), substitution failures (29), invalid frontmatter (25) |
+| Status checks | Per-subsystem health via `tome status` | Phase 8 — models (all three), index, drift state; Phase 5: unchanged (status independent of prompts capability) |
+| Doctor diagnostics | Subsystem health assessment + harness discovery + repair | Phase 3 / US4 onward; Phase 5: unchanged (doctor independent of prompts) |
 
 ---
 
@@ -128,123 +121,110 @@ No TTL-based eviction. Explicit user commands for cleanup (principle VI). Polish
 
 | Service | Purpose | Configuration |
 |---------|---------|-----------------|
-| XDG-compliant filesystem | Configuration, catalogs, models, index, logs, workspace directories | Global: `<home>/.tome/settings.toml` (Phase 4 F8+), `<home>/.tome/catalogs/<sha>/`, `<home>/.tome/models/` (embedder/reranker/summariser), `<home>/.tome/index.db`, `<home>/.tome/mcp.log`, `<home>/.tome/workspaces.txt` (opt-in); Workspace: `<home>/.tome/workspaces/<name>/{settings.toml, RULES.md, index.db, catalogs/<sha>/}` (Phase 4 consolidated); Project: `${PROJECT}/.tome/{config.toml, RULES.md}` (Phase 4 US1, binding marker + summary context), per-harness `${PROJECT}/.{claude,codex,etc}/{.rules.md, .mcp.json, .mcp.toml}` (Phase 4 US3, read-modify-write atomically); Phase 4 US4: workspace settings now houses summary cache alongside general workspace config; Polish: doctor detects binding-rules-copy drift (project `.tome/RULES.md` vs workspace `.tome/RULES.md` byte mismatch via `RulesCopyState` enum). |
+| XDG-compliant filesystem | Configuration, catalogs, models, index, logs, workspace directories, plugin/workspace data | Global: `<home>/.tome/settings.toml`, `<home>/.tome/catalogs/<sha>/`, `<home>/.tome/models/`, `<home>/.tome/index.db`, `<home>/.tome/mcp.log`, `<home>/.tome/workspaces.txt` (opt-in), `<home>/.tome/data/plugins/` and `<home>/.tome/data/workspaces/` (Phase 5 new); Workspace: `<home>/.tome/workspaces/<name>/{settings.toml, RULES.md, index.db, catalogs/<sha>/}`; Project: `${PROJECT}/.tome/{config.toml, RULES.md}`; Phase 5: data-dir layout per substitution context (lazy-created, user-managed) |
 
 ---
 
 ## Email & Notifications
 
-None in Phase 1–4.
+None in Phase 1–5.
 
 ---
 
-## Agentic Coding Harness Integration (Phase 3 / US4, extended Phase 4 F1–F11 + US1–US5, hardened Polish)
+## Agentic Coding Harness Integration (Phase 5 / US1 extends with prompts)
 
-Phase 3 / US4 adds harness discovery; Phase 4 Foundational extends to harness-specific MCP config integration and settings composition; Phase 4 US1–US3 adds project binding + rules-file + MCP config sync + full settings composition + harness sync algorithm; Phase 4 US4 adds workspace summary integration (independent of harness sync — summary regeneration is CLI-only, not MCP-triggered); Phase 4 US5 adds harness integration diagnostics; Polish hardened all subsystems with PR-A–PR-F fixes.
+Phase 5 / US1 introduces MCP `prompts` capability exposing enabled-and-user-invocable entries (skills + commands) as slash-prompts with variable substitution.
 
-| Harness | Install Location | Discovery | Purpose | Phase 4 Polish Additions |
-|---------|------------------|-----------|---------|------------------------|
-| Claude Code | `~/.claude` | Existence only → Phase 4 F1+ extends to `.mcp.json` inspection → Phase 4 US3 reads/validates `.mcp.json` for sync | First-party harness | Polish: doctor detects rules/MCP config drift + UserOwned state via typed subsystems (PR-A enum promotion); mtime validation via `HarnessSubsystemReport` (PR-D per-harness modules); per-entry validation (PR-C error handling). |
-| Codex | `~/.codex` | Existence only → Phase 4 F1+ extends to `.mcp.toml` inspection → Phase 4 US3 reads/validates `.mcp.toml` for sync | Third-party harness | Polish: same per-harness diagnostics as Claude Code; TOML parsing hardened (PR-C). |
-| Cursor | `~/.cursor` | Existence only → Phase 4 F1+ extends to `.mcp.json` inspection → Phase 4 US3 reads/validates `.mcp.json` for sync | Third-party harness | Polish: rules file (standalone via RulesFileStrategy) presence + content match detection (PR-A per-harness reporting). |
-| Gemini CLI | `~/.gemini` | Existence only → Phase 4 F1+ extends to `.mcp.json` inspection → Phase 4 US3 reads/validates `.mcp.json` for sync | Third-party harness | Polish: same diagnostics as Claude Code; global MCP config scope (PR-C validation). |
-| OpenCode | `~/.opencode` | Existence only → Phase 4 F1+ extends to `.mcp.json` inspection → Phase 4 US3 reads/validates `.mcp.json` for sync | Third-party harness | Polish: same diagnostics as Claude Code; project-local config scope (PR-C validation). |
+| Harness | Prompts Support | Changes |
+|---------|-----------------|---------|
+| Claude Code | Via MCP stdio transport | Phase 5 / US1: prompts/list + prompts/get handlers wired; prompt router built from `<workspace>` enabled + `user_invocable: true` entries (defaults to `false` for non-slash use cases) |
+| Codex, Cursor, Gemini CLI, OpenCode | Via MCP stdio transport (if integrated) | Phase 5: same prompt exposure as Claude Code (harness-agnostic, all route through same MCP server) |
 
-**Discovery semantics (research §R-7, FR-167, Phase 4 R-9/R-11, extended Polish):**
-- **Probe timing**: At startup, `doctor`, or harness commands; scans `$HOME` for each harness directory; Phase 4 US1–US4: also called during binding workflow to sync harness config, during workspace removal to cascade teardown, and during workspace summary regeneration to validate harness presence (but summary regeneration doesn't update harness config); Polish: doctor probes harnesses to detect per-harness integration state (rules-file + MCP config) with sub-subsystem detail per `HarnessSubsystemReport`.
-- **Scope**: Fixed compile-time list in `src/harness/mod.rs::SUPPORTED_HARNESSES` — no dynamic discovery.
-- **Content read**: Phase 3 — existence only; Phase 4 F1–F11 — extends to harness-specific MCP config inspection; Phase 4 US3: harness sync reads MCP config, validates, modifies, writes back atomically; Phase 4 US4: unchanged (summary regeneration doesn't modify harness config); Polish: doctor reads rules-file + MCP config per harness with per-entry validation (PR-C), classifies as Ok/Drift/Broken/UserOwned (PR-A typed enum).
-- **Report shape**: `HarnessPresence { name, path, present: bool }` per contract; Phase 4: extended with optional `mcp_config_present: bool`; Phase 4 US5: extended to `HarnessSubsystemReport` with rules-file state + MCP-config state (per HarnessModule trait method composition snapshot); Polish: per-entry validation (PR-C) emits on first-found unsupported harness name (no silent skip via exclusion).
-- **Update path**: Harness module trait dispatch (`HarnessModule` impl per harness); code change + contract update (not user-configurable); Polish: doctor `--fix` repairs via per-harness sync (coalesced once per project per C-M3 fix), --force override for UserOwned MCP entries (PR-B S-M2 scope gate).
-
-**Summary integration with harnesses (Phase 4 US4, Polish unchanged):**
-- **MCP tool description**: `search_skills` tool description includes the cached short summary read once at server startup (FR-425); over-length emits `tracing::warn!` but never refuses to start; Phase 4 US4: summary read from workspace-scoped cache if workspace detected, else uses static fallback description; Polish: query length cap enforced at handler entry (4096 chars max, `code: query_too_long` on violation per PR-E enforcement).
-- **Project RULES.md**: Long summary written to `${PROJECT}/.tome/RULES.md` on `tome workspace regen-summary` or automatic triggers; harness-agnostic (not specific to any one harness); workspace-scoped (applies to all projects bound to that workspace); Polish: doctor detects binding-rules-copy drift by comparing project `.tome/RULES.md` to workspace `.tome/RULES.md` byte-to-byte via `RulesCopyState::Match/Missing/Drift/SourceMissing` (PR-D R-M5 distinction).
-- **Independent of harness sync**: Summary regeneration doesn't modify harness MCP config or rules-file markers; summary cache lives in workspace settings separate from harness-specific state; Polish: doctor subsystems for summary cache + harness config are separate (independent repair paths per PR-A subsystem enum).
+**Prompt integration details (Phase 5 / US1)**:
+- **Prompt naming**: Deterministic `<plugin>__<entry_name>` per `src/mcp/prompt_name.rs`; collision-suffix counter on hash collision (`<plugin>__<entry_name>__N`) per contracts/mcp-prompts.md §Prompt naming algorithm.
+- **Prompt listing**: `prompts/list` returns all enabled + user-invocable entries; description field truncated to 300 chars per `DESCRIPTION_MAX_CHARS` (FR-066); `listChanged: false` (static at startup per rmcp contract).
+- **Prompt execution**: `prompts/get` accepts prompt name + optional argument values; loads entry body, builds `SubstitutionContext` with workspace + plugin + entry identity + argument values (phase 5 / US3), renders via four-stage substitution pipeline, returns as PromptMessage array per contracts/mcp-prompts.md.
+- **Variable substitution** (Phase 5 / US1–US3 progressive wiring): `{{TOME_*}}` built-ins (workspace name, plugin id, entry kind, data directories) → `{{$VAR}}` env passthrough → `$ARGUMENTS` / `$N` / `$NAME` Claude Code argument syntax; per contracts/substitution-engine.md.
+- **Scope inference**: Prompt router built using resolved workspace's enabled entries; scope determined at MCP startup via cwd walk (or `--workspace` CLI override) per `src/workspace/resolution.rs`.
+- **Data directory scaffolding** (Phase 5 / US2): `{{TOME_PLUGIN_DATA}}` and `{{TOME_WORKSPACE_DATA}}` variables trigger lazy directory creation in `<home>/.tome/data/` on first reference per `src/substitution/data_dir.rs`; created atomically via `std::fs::create_dir_all`.
+- **CLI-only execution**: Prompt bodies execute via MCP prompt invocation; substitution runs once over the body per execution. Unlike skills/commands which can be triggered from CLI directly, prompts are MCP-only (US1 ships prompts capability only; CLI slash-commands land in Phase 5 / US4 as first-class CLI entries discriminated by `EntryKind`).
 
 ---
 
-## Settings Composition (Phase 4 F1–F11 + US1–US5, Polish refined)
+## Settings Composition (Phase 4 extended, Phase 5 unchanged)
 
-Phase 4 Foundational F8 introduces multi-level settings composition framework reused by both CLI and MCP server. Phase 4 US1 extends with project-level config. Phase 4 US2 uses composition resolver in workspace cascade teardown. Phase 4 US3 fully wires resolver into harness sync algorithm. Phase 4 US4 uses resolver to determine summariser eligibility; Phase 4 US5: doctor reports composition snapshot; Polish: all subsystems handle composition changes consistently.
+Composition resolver determines which prompts are available (enabled entries only) + which substitution context to use (workspace-scoped).
 
 | Level | Location | Purpose | Precedence | Phase |
 |-------|----------|---------|-----------|-------|
-| **Project** | `${PROJECT}/.tome/config.toml` (strict, Tome-owned) + `.tome/RULES.md` | Project-specific settings: harness overrides, tool preferences; project context + rules for summarisation (lenient frontmatter) | Highest | F1 (skeleton), US1 (binding record), US3 (read in harness sync), US4 (RULES.md read for summarisation context), Polish (doctor binding state reported via typed enum). |
-| **Workspace** | `<home>/.tome/workspaces/<name>/settings.toml` (strict, Tome-owned) | Workspace-local enablement, harness overrides, tool preferences, summary cache (`[summaries]` table) | Medium | F8, US3 (fully wired in resolver), US4 (summary cache stored here), Polish (doctor detects cache staleness via content-hash). |
-| **Global** | `<home>/.tome/settings.toml` (strict, Tome-owned) | User-wide defaults, catalog list, model preferences | Lowest | F8, US3 (fully wired in resolver), Polish (doctor reports as fallback composition level). |
+| **Project** | `${PROJECT}/.tome/config.toml` (strict) + `.tome/RULES.md` | Project-specific settings + context; Phase 5: context may include project-scoped data for summaries, but prompts stay workspace-scoped (no project discrimination) | Highest | F1+ |
+| **Workspace** | `<home>/.tome/workspaces/<name>/settings.toml` (strict) | Workspace-local enablement, harness overrides, tool preferences, summary cache, entry filters; Phase 5: entry filters (which skills/commands are user-invocable) + `arguments` field validation | Medium | F8+ |
+| **Global** | `<home>/.tome/settings.toml` (strict) | User-wide defaults, catalog list, model preferences; Phase 5: unchanged | Lowest | F8+ |
 
-**Composition resolver** (`src/settings/resolver.rs`, Polish refined):
-- Loads all applicable layers (project optional; workspace optional; global required)
-- Merges in precedence order (project > workspace > global) following FR-441 (stop at first declaring `harnesses` key)
-- Returns unified `ComposedSettings` struct with effective harness list (or empty if opted-out); Polish: EffectiveHarnessList serialisable for JSON doctor output with per-entry source annotation.
-- Validation per layer (Tome-owned → strict `deny_unknown_fields`); Polish: per-entry unsupported-name validation (PR-C) emits on first-found error (no silent skip).
-- Phase 4 US3: `ScopeProvider` trait defines workspace membership checks; production `CentralDbScopeProvider` queries central DB + reads workspace settings.toml
-- Polish: doctor calls resolver and includes composition snapshot in report (effective list per scope); used to determine which harnesses should be checked per HarnessSubsystemReport.
-
-**Harness-specific MCP config** (Phase 4 F8+, fully wired US3, Polish refined):
-- Location: `~/.harness/.mcp.json` or `.mcp.toml` (e.g., `~/.claude/.mcp.json`, `~/.codex/.mcp.toml`)
-- Format: JSON array of tool descriptors (most harnesses) or TOML table (Codex) per MCP spec + harness-specific convention
-- Edit pattern: Phase 4 US3 harness sync reads, parses into struct, validates, modifies via `HarnessModule::sync`, writes back with comment/order preservation; atomic via `NamedTempFile::persist`; Phase 4 US4: unchanged (summary regeneration doesn't touch harness config); Polish: doctor reads config state per harness via `HarnessModule::mcp_config_read` + `is_tome_owned`, classifies as Ok/Drift/Broken/UserOwned (PR-A typed subsystems).
-- Integration: Doctor reports harness MCP config state + consistency per subsystem (HarnessMcp); Polish: doctor suggests repair via `--fix` with type-safe dispatch (PR-A–PR-F refinements); --force override for UserOwned entries (PR-B S-M2).
-- MCP server: tool descriptions optional include summary (FR-425 allows over-length with warning); Polish: MCP server composition logic unchanged by doctor subsystem reporting; query length enforced at handler (PR-E).
+**Phase 5 additions to composition**:
+- **Entry filtering**: Workspace settings can declare `user_invocable: false` to opt out of prompt exposure (for CLI-only skills that don't fit slash-command pattern).
+- **Argument schema**: Both skills and commands can declare `arguments` frontmatter field (list of names + optional descriptions); Phase 5 validates at parse-time per `src/plugin/frontmatter.rs`.
 
 ---
 
-## Project Binding Integration (Phase 4 US1, extended Phase 4 US2–US5, Polish hardened)
+## Schema Version 3 (Phase 5 / F2)
 
-Phase 4 / US1 introduces `tome workspace use` — one-way binding from a project directory to a workspace. Phase 4 / US2 extends `workspace remove` to cascade harness teardown and binding cleanup. Phase 4 / US3 wires harness sync to respect binding identity. Phase 4 / US4 validates binding during summary regeneration (skipped if mismatch detected); Phase 4 / US5: doctor detects binding drift + rules-copy state; Polish: all checks hardened with `ProjectBindingState` and `RulesCopyState` enums.
+**Structural change**: Unified `entries` table with `kind` discriminator column (replaces `skills` + `commands` tables).
 
 | Aspect | Details |
 |--------|---------|
-| **Binding semantics** | User runs `tome workspace use <workspace-name>` from a project directory; Tome records the binding in the central DB (`workspace_projects` table, PK on project_path) and creates an atomic `${PROJECT}/.tome/` marker directory; Phase 4 US2: `workspace remove` cascades by reading workspace_projects + harness compose list, tearing down per-harness entries, removing markers; Phase 4 US3: harness sync respects binding identity and uses composition resolver to determine per-project harness list; Phase 4 US4: summary regeneration verifies binding matches current workspace context (skipped if mismatch detected with warning); Polish: doctor detects binding drift (marker mtime vs DB record) + rules-copy state (project `.tome/RULES.md` content-equal to workspace `.tome/RULES.md`) with typed enum dispatch. |
-| **Storage** | Central: `workspace_projects` table in `<home>/.tome/index.db` (1:1 mapping project_path → workspace_id); Project-local: `${PROJECT}/.tome/config.toml` (contains workspace name for verification); Phase 4 US4: workspace-scoped settings now houses summary cache; binding identity validated before regeneration; Polish: doctor compares project marker mtime to DB record for drift detection (typed `ProjectBindingState::Drift`). |
-| **Atomicity** | `bind_project` acquires advisory lock, UPSERTs DB row, lands marker dir via `tempfile::Builder::tempdir_in + rename`, releases lock; Phase 4 US3: harness sync acquires lock, reads composition/settings, calls per-harness sync methods, releases lock; Phase 4 US4: summary regeneration acquires lock, validates binding, reads project context + workspace settings, invokes summariser, writes `[summaries]` table atomically; Polish: doctor queries binding state without lock (read-only); all fixes under lock per subsystem type (PR-B C-M3 project-local sync). |
-| **Discovery** | Doctor scans for orphaned markers (DB row absent, filesystem present) — advisory; scans for stale bindings (marker mtime outdated) — advisory; orphaned markers are recoverable via re-bind or cleanable via manual deletion; Phase 4 US4: workspace regen-summary skips project-level RULES.md reads if binding is missing or stale (logged at warn level); Polish: `ProjectBindingState` enum (Unbound/Ok/Drift/Broken) classifies binding well-formedness; `RulesCopyState` enum (Match/Missing/Drift/SourceMissing) distinguishes repair paths. |
-| **Scope inference** | When a project is bound, `Paths::resolve()` can return the project's workspace scope if the marker is present + DB record matches. CWD walk sequence: cwd → ancestors → found `.tome/` marker → verify binding in DB → return `Scope(workspace_name)`; Phase 4 US4: scope inference used by `workspace regen-summary` to determine which workspace's settings to update; Polish: scope inference validates binding freshness (mtime check) — used by doctor to detect stale bindings. |
-| **CLI entry** | `tome workspace use [<workspace-name>] [--workspace <override>]` — new `WorkspaceCommand::Use` (Phase 4 US1.a); interactive selection if no workspace-name given; Phase 4 US2–US4: no new use changes (harness sync + composition resolver + summary regeneration handle project-specific context transparently); Polish: unchanged (doctor is read-only, no CLI entry for binding management). |
-| **Summary regeneration** | Phase 4 US4: `tome workspace regen-summary [<name>]` loads project `.tome/RULES.md` frontmatter + body (if binding present) as input context to summariser; summary written to workspace settings; binding identity validated before regeneration (skipped with warning if mismatch); Polish: doctor detects stale binding (mtime drift) and rules-copy state (PR-D R-M5) — suggests `--fix` to sync rules-file from workspace. |
-| **Failure modes** | Non-existent workspace → error; project already bound to different workspace → confirm + rebind; CWD not a project dir (no .git / pyproject.toml / etc.) → error; binding record stale (workspace deleted, marker orphaned) → doctor repair or manual cleanup; Phase 4 US4: project RULES.md missing/unparseable → warning, continue with minimal context; summariser failure → exit 24 with partial state (binding retained); unsupported harness in settings → exit 14 (Polish PR-C per-entry validation). Phase 4 US2: workspace remove refuses without `--force` when bound projects exist; cascade per-step failures are logged but don't abort; Polish: doctor classifies binding state (Healthy/Degraded/Unhealthy via `ProjectBindingState`), suggests specific fixes per issue type (rules-copy sync, marker re-creation, orphan cleanup via coalesced `--fix` dispatch). |
+| **Migration path** | v2 → v3: forward-only migration under advisory lock; backfill `kind = 'skill'` for all existing rows; `commands` table remains empty (future Phase 5 US4 CLI commands populate it); reads from either table work (backward-compat query semantics) per contracts/schema-migration-p5.md |
+| **Discriminator** | `EntryKind` enum — Skill vs Command — stored as lowercased string literal ("skill" / "command") per database convention |
+| **Collision tracking** | In-memory only (built at router startup); no persistence in schema (collision records are computed from enabled + user-invocable entries) |
+| **Prompt routing** | Phase 5 / US1: reads from unified `entries` table; filters by `kind = 'skill'` and `enabled = 1` and scanned frontmatter `user_invocable` field; Phase 5 / US4: CLI commands land in same table with `kind = 'command'` discrimination |
 
 ---
 
-## Workspace Scope Integration (Phase 3 / US2–US3, extended Phase 4 F1–F11 + US1–US5, Polish finalized)
+## Substitution Engine (Phase 5 / F3 skeleton, US1–US3 wiring)
 
-**Status:** Workspace info + init landed (Phase 3 / US2); scope-aware paths (Foundational F1); reference-counted catalog sharing (US3); project binding (US1); workspace lifecycle (US2); full settings composition + harness sync (US3); workspace summary caching (US4); diagnostic subsystem reporting (US5); Polish: all subsystems stable with typed enums and exhaustive pattern matching.
+**Four-stage pipeline** (`src/substitution/mod.rs` main entry point: `render(body, context)`):
 
-| Aspect | Details |
-|--------|---------|
-| **Scope types** | Global (default, uses XDG paths) or Workspace (per `.tome/` directory); resolved via `Paths::resolve()` which walks `cwd` up the tree looking for `.tome/` marker; Phase 4 US4: scope inference also used for workspace-scoped summary cache lookup; Polish: scope inference validates binding freshness (mtime check) for diagnostic accuracy. |
-| **Path model** | Per-scope `Paths` accessor methods: `Paths::config_file_for(&Scope)`, etc. (Phase 3 Foundational F1); Phase 4 US4: workspace-scoped paths (settings file, summary cache) resolved consistently; Polish: doctor uses scope-aware paths to enumerate per-scope subsystems with no per-scope index access (read-only). |
-| **Config location** | Global: `<home>/.tome/settings.toml` (Phase 4 F8+); Workspace: `<home>/.tome/workspaces/<name>/settings.toml` (Phase 4 F8+, includes `[summaries]` table per US4); Project: `${PROJECT}/.tome/config.toml` (Phase 4 US1, binding marker); Phase 4 US4: workspace settings.toml carries both general settings + `[summaries]` table; Polish: doctor reports all three levels (project optional) with typed composition snapshot. |
-| **Index location** | Global: `<home>/.tome/index.db`; Phase 4 US4: project-scoped queries use global index with workspace-scoped row filters; schema meta table tracks summariser model identity; Polish: doctor queries binding state from global index (read-only, no locks). |
-| **Catalog cache location** | Global: `<home>/.tome/catalogs/<sha>/`; Phase 4 US4: unchanged (summary regeneration doesn't depend on catalog state directly, only on enabled-plugin list); Polish: doctor detects orphaned catalog clones and includes in suggested fixes. |
-| **Summary cache location** | Phase 4 US4: `<home>/.tome/workspaces/<name>/settings.toml` — `[summaries]` table with short/long + generated_at (RFC 3339) + content_hash (SHA-256 of input list); workspace-scoped (applies to all projects bound to workspace); Polish: doctor detects cache staleness via content-hash comparison + reports as Subsystem variant. |
-| **Info command** | `tome workspace info` (Phase 3 / US2.a) — read-only scope report; Phase 4 US4: no new changes to info output; Polish: unchanged (info stays lightweight, doctor handles full diagnostics). |
-| **Init command** | `tome workspace init [<path>] [--inherit-global] [--force]` (Phase 3 / US2.b) — atomic `.tome/` creation; Phase 4 US4: no new changes to init semantics (summary cache starts empty); Polish: unchanged (init doesn't trigger doctor). |
-| **List command** | `tome workspace list [--json]` (Phase 4 US2.a) — discover workspaces via opt-in registry; returns `Vec<WorkspaceListItem>` with name + root + binding count + summary cache state; Phase 4 US4: extended to show summary cache presence/staleness; Polish: unchanged (list focuses on discovery, doctor focuses on diagnostics). |
-| **Rename command** | `tome workspace rename <old> <new> [--force]` (Phase 4 US2.a) — atomic marker relocation via staging; requires no bound projects without `--force`; updates project marker + workspace settings + DB metadata; Phase 4 US4: summary cache preserved (namespace-independent, attached to workspace name, renamed atomically); Polish: unchanged (rename stays lightweight, doctor detects post-rename drift via mtime). |
-| **Regen-summary command** | `tome workspace regen-summary [<name>]` (Phase 4 US2.c, fully wired Phase 4 US4.a) — regenerate `[summaries]` table via configured summariser; loads project context (`.tome/RULES.md` frontmatter if binding present) as input; caches short/long summaries + generated_at timestamp + content_hash in workspace settings; automatic triggers wired in Phase 4 US4.b (enable/disable/reindex/catalog update); Polish: doctor detects stale cache and suggests regeneration via `--fix`. |
-| **Remove command** | `tome workspace remove <name> [--force]` (Phase 4 US2.b) — 5-step cascade per FR-405: harness teardown (per-project composition-aware), marker removal, DB cleanup, workspace dir removal (includes deletion of workspace settings.toml which holds summary cache), catalog refcount check; Phase 4 US4: summary cache deleted as part of workspace settings cleanup; Polish: all cascade steps logged with per-step error handling (no abort). |
-| **Registry file** | `<home>/.tome/workspaces.txt` — opt-in; Phase 3 / US3 makes it load-bearing for refcount enumeration; Phase 4 US4: `workspace list` discovers workspaces via this optional registry; Polish: doctor enumerates workspaces via registry (fallback to global if absent) for comprehensive subsystem checks. |
-| **CLI wiring** | `Command::Workspace(WorkspaceArgs)` + `WorkspaceCommand::{Info, Init, Use, List, Rename, RegenSummary, Remove}` (Phase 4 US1 adds `Use`, Phase 4 US2 adds `List/Rename/RegenSummary/Remove`); scope resolution integrated into all commands via `Paths::resolve()`; Phase 4 US4: `workspace regen-summary` driven by summariser output; automatic invalidation tied to lifecycle triggers; Polish: no new CLI changes (doctor is separate command, called standalone or as `--fix` from doctor itself). |
+| Stage | Input | Processing | Output | Phase |
+|-------|-------|-----------|--------|-------|
+| **Built-ins** | `{{TOME_WORKSPACE_NAME}}`, `{{TOME_WORKSPACE_ID}}`, `{{TOME_PLUGIN_CATALOG}}`, `{{TOME_PLUGIN_ID}}`, `{{TOME_ENTRY_NAME}}`, `{{TOME_ENTRY_KIND}}`, `{{TOME_PLUGIN_DATA}}`, `{{TOME_WORKSPACE_DATA}}` | Via `src/substitution/builtins.rs` — substitution context lookups + lazy data-dir creation on first reference | Rendered string | F3 stub, US1–US3 progressive wiring |
+| **Environment** | `{{$VAR}}` (any `$` prefix inside `{{...}}`) | Via `src/substitution/env.rs` — pass through `std::env::var` (fails if var unset) | Rendered string | F3 stub, US2 wiring |
+| **Arguments** | `$ARGUMENTS`, `$N`, `$NAME` | Via `src/substitution/arguments.rs` — positional or named argument lookup from `ArgumentValues` enum | Rendered string | F3 stub, US3 wiring |
+| **ARGUMENTS tail** | `$ARGUMENTS` only if not handled by prior stages | Reserved for future use per contracts; Phase 5 US1–US3 don't implement | Rendered string | Future |
+
+**Regex compilation** (Phase 5 / US2–US3): Compiled regex patterns cached in `src/substitution/regex_sets.rs` via `std::sync::OnceLock` — one slot per stage (builtins / env / arguments patterns); populated on first render call; reused across all prompts.
+
+**Data directory creation** (`src/substitution/data_dir.rs`):
+- `{{TOME_PLUGIN_DATA}}` → `<home>/.tome/data/plugins/<catalog>_<plugin>/`
+- `{{TOME_WORKSPACE_DATA}}` → `<home>/.tome/data/workspaces/<workspace_name>/`
+- Created atomically via `std::fs::create_dir_all` on first reference; failure → `SubstitutionError::PluginDataDirCreationFailed` or `WorkspaceDataDirCreationFailed` (exit 26 / 9 respectively).
+
+**Context building** (`src/substitution/context.rs` — `SubstitutionContextBuilder`):
+- Per-prompt; workspace + plugin identity + entry name/kind + argument values provided by caller.
+- `ArgumentValues` enum — `Positional(Vec<String>)` or `Named(HashMap<String, String>)` per frontmatter declaration.
 
 ---
 
-## Schema Migration Integration (Phase 3 / US5, extended Phase 4 F1–F11 + US1–US5, Polish stable)
+## Project Binding Integration (Phase 4 US1, Phase 5 unchanged)
 
-**Status:** Forward-migration framework (Phase 3 Foundational F7); integration test coverage (Phase 3 / US5); v2 schema (Phase 4 F1+); US1–US3 populate binding tables; US4 extends meta with summariser tracking; Polish: schema stable (v2 final for Phase 4).
+Phase 5 / US1 prompts are workspace-scoped (not project-scoped). Binding still used for:
+- Workspace scope inference (`Paths::resolve()` cwd walk detects project marker).
+- Project context for summary regeneration (Phase 4 US4 RULES.md body + frontmatter).
+- Project-level harness MCP config (Phase 4 US1–US3).
 
-| Aspect | Details |
-|--------|---------|
-| **Framework** | `src/index/migrations.rs` — `Migration` struct with function-pointer apply hooks; `apply_pending(conn, current, target)` three-arg signature; `MIGRATIONS_OVERRIDE` test-injection point; Polish: no new migrations. |
-| **Schema versions** | v0 (Phase 2 bootstrap), v1 (Phase 3 baseline), v2 (Phase 4 / F1 introduces `workspace_catalogs` + `workspace_projects` tables + meta enhancements); v2→v2.1 (Phase 4 US4 extends meta with summariser model identity) — structural-only, no data migration; Polish: no new version (schema stable at v2 for Phase 4). |
-| **Test coverage** | `tests/schema_migration_e2e.rs` — integration tests via synthetic-fixture injection; Phase 4 US4: v2→v2.1 migration passes (extends meta table with new optional columns for summariser identity); Polish: schema stays v2, diagnostic reads work against v2 (no new migrations). |
-| **Test fixtures** | `tests/common/mod.rs::write_index_db_with_schema_version` helper fabricates old-version DBs; Polish: no new fixture generators. |
-| **Atomicity** | All migrations run under advisory lock; rollback on error; no partial state visible to readers; Phase 4 US4: workspace summary cache invalidation tracks model identity for drift detection (separate from migration framework); Polish: doctor queries meta table safely (read-only, no locks). |
-| **Version semantics** | Write-path checks schema version, emits `SchemaVersionTooNew` (exit 73) if too new; read-path retains legacy `SchemaTooNew` (exit 52) for backward compat; Polish: doctor handles schema-too-new gracefully (surfaces as informational via typed Subsystem::Index, doesn't crash per PR-B C-M2). |
-| **Production migrations** | Compile-time `MIGRATIONS` array (Phase 4 F1: v1→v2 introduces structural tables; Phase 4 US4: v2→v2.1 extends meta with summariser identity); Polish: no new migrations (schema v2 is final for Phase 4). |
-| **Doctor integration** | `tome doctor` can repair schema via `--fix`; Phase 4 US4: extended to validate summariser model identity against registry; summary cache freshness checks depend on recorded model digest; Polish: doctor reads schema_version from meta, reports as advisory (not auto-fixed unless explicitly planned). |
+Phase 5: Prompts don't access project context directly (only workspace + plugin + entry identity).
+
+---
+
+## Prompt Name Derivation (Phase 5 / US1)
+
+Per `src/mcp/prompt_name.rs` + `src/mcp/prompt_collision.rs`:
+
+| Input | Processing | Output |
+|-------|-----------|--------|
+| `(catalog, plugin, entry_name, kind)` | Format as `<plugin>__<entry_name>` per contracts/mcp-prompts.md §Prompt naming algorithm | e.g., `claude-code__ask__skill` |
+| Collision detected (hash match on `<plugin>__<entry_name>`) | Append counter suffix (`__1`, `__2`, ...) | e.g., `claude-code__ask__skill__1` on collision |
+
+Collision resolution runs at router startup; in-memory collision records track identity via `src/mcp/prompt_collision.rs::EntryIdentity { catalog, plugin, name, kind }`.
 
 ---
 
@@ -257,4 +237,4 @@ Phase 4 / US1 introduces `tome workspace use` — one-way binding from a project
 
 ---
 
-*This document maps external service dependencies and integration points in Tome at Phase 4 v0.4.0 (Polish complete). Phase 4 feature work (US1–US5) shipped across 20 commits (PRs #82–#101); Polish (PR-A–PR-F) hardened all subsystems with typed enums (`Subsystem`, `SubsystemHealth`, `ProjectBindingState`, `RulesCopyState`, `HarnessSubsystemReport`), exhaustive pattern matching, per-entry validation, coalesced repair dispatch, and 1-hour mtime gate on orphan cleanup. 916 tests across 125 suites. Binary size stable at ~29 MB macOS arm64 / ~34 MB Linux x86_64, well under the 50 MB cap. All three inference runtimes (embedder/reranker/summariser) coordinated under single model registry + status/doctor reporting; doctor detects binding drift + rules-copy state + per-harness integration issues; comprehensive workspace/project/harness diagnostics in single command with type-safe subsystem dispatch.*
+*This document maps external service dependencies and integration points in Tome at Phase 5 / US1 (prompts capability shipped). Phase 5 / US1 introduces MCP `prompts` capability exposing enabled + user-invocable entries as slash-prompts; schema v3 migration with unified `entries` table + `kind` discriminator; substitution skeleton + prompt naming + collision tracking; 5 new exit codes (25–29 for data-dir/argument/entry failures). Zero new top-level dependencies (regex promoted from transitive to direct, no net change). Data-dir scaffolding (lazy-created plugin + workspace persistent storage) lives in `<home>/.tome/data/` per substitution context. Prompt router built dynamically at startup from workspace-enabled + user-invocable entries; `listChanged: false` indicates static list (changes only on plugin enable/disable/reindex). Substitution pipeline (4 stages) runs once per prompt execution. Phase 5 / US2–US3 wire argument substitution + environment variable expansion; Phase 5 / US4 ships CLI slash-commands as first-class entries alongside skills.*
