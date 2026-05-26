@@ -2,19 +2,19 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26
+> **Last Updated**: 2026-05-26 (Phase 4 v0.4.0 complete; 954 tests across 127 suites; Polish phase closed)
 
 ## Architecture Overview
 
-Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, and workspace-scoped plugin enablement.
+Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, workspace-scoped plugin enablement, and comprehensive health diagnostics with auto-repair.
 
 The architecture is **monolithic with layered structure** split across two execution contexts:
 - **CLI layer** — sync command dispatcher
 - **MCP layer** — async stdio server (Phase 3+)
 
-The central nervous system is a **single SQLite database** (`<home>/.tome/index.db`) that centralizes all state: plugin metadata, embeddings, workspace bindings, project bindings, and enabled skills. Per-workspace composition settings and summaries live in separate TOML files (`<root>/workspaces/<name>/settings.toml`) and central RULES.md. Project markers (`<project>/.tome/config.toml`) are thin binding pointers, not databases.
+The central nervous system is a **single SQLite database** (`<home>/.tome/index.db`) that centralizes all state: plugin metadata, embeddings, workspace bindings, project bindings, enabled skills, and diagnostic metadata. Per-workspace composition settings and summaries live in separate TOML files (`<root>/workspaces/<name>/settings.toml`) and central RULES.md. Project markers (`<project>/.tome/config.toml`) are thin binding pointers, not databases.
 
-Phase 4 / US1–US4 completes **harness synchronization, workspace lifecycle, composition management, and workspace summarisation**. Phase 4 / US5 (current) adds **comprehensive health diagnostics with binding + harness-integration checks and auto-repair framework**. Doctor now surfaces five new subsystems (Binding, BindingRulesCopy, HarnessRules, HarnessMcp, Summariser) with typed dispatch and `--fix` handling.
+Phase 4 / US1–US5 completes **harness synchronization, workspace lifecycle, composition management, workspace summarisation, and comprehensive health diagnostics**. Phase 4 / Polish (PR-A–PR-F) closes reviewer findings and hardens all subsystems. Phase 4 ships as v0.4.0 with 954 tests across 127 suites.
 
 ## Architecture Pattern
 
@@ -23,7 +23,7 @@ Phase 4 / US1–US4 completes **harness synchronization, workspace lifecycle, co
 | Layered (capability-based) | Commands → Business Logic (Lifecycle, Embedding, Workspace, Harness, Summarise, Doctor) → Data Access (Index, Catalog, Config) → Persistence (SQLite, Filesystem, Git) |
 | Hexagonal (ports & adapters) | Trait boundaries for `Embedder`/`Reranker`/`Summariser`/`HarnessModule`/`ScopeProvider` allow swappable implementations (production vs stub for tests) |
 | Trait-driven | Core abstractions decouple policy from mechanism; composition via struct fields rather than factory functions |
-| Phase 4 / US5 — Doctor subsystem dispatch | `Subsystem` enum (11 variants) with custom Serialize/Deserialize; type-safe dispatch ladder replacing Phase 3 string routing |
+| Phase 4 / US5 — Doctor subsystem dispatch | `Subsystem` enum (11 typed variants) with byte-stable custom Serialize/Deserialize; exhaustive pattern matching replacing Phase 3 string routing |
 
 ## Core Components
 
@@ -33,7 +33,7 @@ Phase 4 / US1–US4 completes **harness synchronization, workspace lifecycle, co
 - **Location**: `src/main.rs`
 - **Key flow**:
   1. Pre-parse `--version` flag (before clap) to include embedder/reranker/summariser identities
-  2. Resolve `Paths` once from `$HOME/.tome/` (Phase 4 single root)
+  2. Resolve `Paths` once from `$HOME/.tome/` (Phase 4 single root per constitution v1.3.0)
   3. Resolve workspace via `workspace::resolution::resolve()` (consults central DB)
   4. Route command dispatch; translate TomeError to exit codes
   5. Special-case MCP: skip stderr logging init + ctrlc handler (uses tokio signal)
@@ -42,7 +42,7 @@ Phase 4 / US1–US4 completes **harness synchronization, workspace lifecycle, co
 
 - **Purpose**: Resolve all Tome-owned paths from `$HOME/.tome/` root (Phase 4 consolidated)
 - **Location**: `src/paths.rs`
-- **Phase 4 changes**: Dropped XDG split; everything under single `<home>/.tome/` root (constitution v1.3.0 §Paths amendment)
+- **Phase 4 changes**: Dropped XDG split (constitution v1.3.0 §Paths amendment); everything under single `<home>/.tome/` root
 - **Public fields**:
   - `root` — `<home>/.tome/`
   - `index_db`, `index_lock` — central database
@@ -198,104 +198,18 @@ Phase 4 / US1–US4 completes **harness synchronization, workspace lifecycle, co
   - Composed description (scaffold + short summary) is applied to `search_skills` tool via runtime router mutation
   - `warn_if_too_long(desc)` emits warning if `len > 1500 chars` but applies anyway
   - No rerunning of summariser on MCP; subsequent CLI regenerations write to the same file, but MCP keeps in-memory description until restart
-- **Model**: Qwen2.5-0.5B-Instruct GGUF (~400 MB, placeholder SHA-256 in F6; real weight lands in US4.a)
+- **Model**: Qwen2.5-0.5B-Instruct GGUF (~400 MB, SHA-256 pinned: `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`, 491,400,032 bytes per US4.d-1 C-B1 fix)
 - **Prompts**: Fixed SHORT_PROMPT (~400 tokens, 800 char max) + LONG_PROMPT (~1000 tokens, 2500 char max) (US4.d-1 consolidation)
-
-### Commands Dispatcher (`src/commands/`)
-
-- **Purpose**: Execute 12+ CLI subcommands (catalog, plugin, models, query, reindex, status, workspace, harness, mcp, doctor)
-- **Location**: `src/commands/{catalog,plugin,models,query,reindex,status,workspace,harness,mcp,doctor}.rs`
-- **Pattern**: Most commands have:
-  - `pub fn run(args, scope, mode)` — CLI entry with emit/exit
-  - `pub fn pipeline(args, deps)` or `run_with_deps(...)` — silent compute for library reuse by MCP/tests
-- **Phase 4 NEW**: `commands/harness/` full subcommand surface (US3) dispatches to harness sync orchestrator + composition resolver
-- **Phase 4 NEW**: `commands/workspace/` expands from 2 to 8 subcommands: `info/init/list/use_/rename/remove/regen_summary/sync`
-- **Key invariant**: Lazy model loading (embedder/reranker/summariser not loaded on status/doctor/workspace unless needed)
-
-### Harness Command Suite (`src/commands/harness/`)
-
-- **Purpose**: Phase 4 / US3 — Complete harness management surface
-- **Location**: `src/commands/harness/{mod,bare,list,use_,remove,info,sync}.rs`
-- **Phase 4 US3 NEW**: Replaces single-function stub with full subcommand dispatcher
-- **`bare`** — `tome harness` (no subcommand) — List all five supported harnesses in tabular form (FR-520)
-  - Detection per harness via `HarnessModule::detect(home)`
-  - Returns table: name, description, detected (yes/no)
-- **`list`** — `tome harness list [<workspace>]` — Resolve and report effective harness list
-  - No argument: compute effective list from project marker + workspace + global (via `ScopeProvider`)
-  - With workspace argument: report that workspace's directly-declared list verbatim
-  - Reuses composition resolver; first production consumer of `CentralDbScopeProvider` (PR #92)
-  - Emits ordered list with source-chain narration per `contracts/settings-composition.md` example output
-- **`use_`** — `tome harness use <name> [--scope {project|workspace|global}] [--force]` — Add harness to chosen scope
-  - Default scope: `project` (requires project marker; fall back to workspace/global outside project)
-  - Surgical TOML edit via `settings::edit::add_harness`
-  - Runs sync when effective list changes (per FR-501)
-- **`remove`** — `tome harness remove <name> [--scope] [--force]` — Remove harness from chosen scope
-  - Surgical edit via `settings::edit::remove_harness`
-  - Runs cleanup pass when effective list changes
-  - Respects shared-path dedup (two harnesses may target same file)
-- **`info`** — `tome harness info [--json]` — Report per-harness details for current project
-  - Detection, target rules-file + MCP-config paths, integration state (config content hash if present)
-  - Source-of-scope annotation (project/workspace/global)
-  - Omits project details when outside project (shows `—`)
-- **`sync`** — `tome harness sync [--force]` — Reconcile filesystem against effective list
-  - Byte-for-byte idempotent (FR-525)
-  - Requires project marker (exit 14 outside project)
-  - Dispatches to `sync_project` orchestrator
-- **`ScopeProvider` production impl** (`CentralDbScopeProvider` in `mod.rs`):
-  - Consults central SQLite `workspaces` table to confirm workspace membership
-  - Reads target workspace's on-disk `settings.toml` for directly-declared harnesses list
-  - Returns `UnknownWorkspace` (exit 13) if workspace not registered
-  - Returns `SettingsReadFailure` (exit 70 `WorkspaceMalformed`) if file unreadable/unparsable
-  - When central DB absent (no `index.db`), only privileged `global` workspace is considered to exist
-
-### Workspace Command Suite (`src/commands/workspace/`)
-
-- **Purpose**: Workspace management — full lifecycle from creation through removal
-- **Location**: `src/commands/workspace/{info,init,list,use_,rename,remove,regen_summary,sync}.rs`
-- **`info`** — `tome workspace info [<name>]` — read-only report of workspace details, plugin/skill counts, bound projects, summary cache state
-  - Accepts optional `<name>` argument; defaults to resolved scope
-  - New Phase 4 fields: `ScopeKind`, `project_count`, `summary_cache_state`, bound_project_list
-- **`init`** — `tome workspace init <name> [--inherit-global] [--force]` — create new workspace in central registry
-  - Lands `<root>/workspaces/<name>/settings.toml` + RULES.md atomically
-  - Inserts row in central `workspaces` table
-  - Optional catalog inheritance from global (enablement not copied)
-  - Phase 4 NEW
-- **`list`** — `tome workspace list` — enumerate every workspace with catalog/plugin/skill/project counts, last_used_at
-  - Phase 4 NEW
-- **`use_`** — `tome workspace use <name> [--force]` — bind current project to workspace, sync harnesses (Phase 4 / US1.a-c)
-  - Calls `binding::bind_project` for Phase A (lock → DB → marker)
-  - Calls `commands::harness::sync_for_project_root` for Phase B (harness writes)
-  - Emits combined `BindOutcome` + `SyncOutcome` in JSON or human format
-- **`rename`** — `tome workspace rename <old> <new>` — rename workspace, update all bound projects atomically
-  - Refuses both `global` (exit 15)
-  - Per-project marker rewrite + filesystem rename + DB update
-  - Phase 4 NEW
-- **`remove`** — `tome workspace remove <name> [--force]` — delete workspace with 5-step cascade
-  - Refuses `global` (exit 15)
-  - Refuses when projects bound unless `--force` (exit 16)
-  - Per-project teardown, per-project marker cleanup, DB cascade, dir removal, refcount cleanup
-  - Phase 4 NEW
-- **`regen_summary`** — `tome workspace regen-summary <name>` (Phase 4 / US4):
-  - Explicit regeneration command (distinct from triggered regeneration)
-  - Loads enabled plugins for workspace, constructs PluginSummariesInput, invokes summariser
-  - On SummariserFailure, bubbles (exit 24); prior cached summary left in place
-  - Emits warn if outputs exceed length windows (FR-425)
-  - Updates workspace `settings.toml` `[summaries]` atomically, rewrites central RULES.md
-  - Syncs new RULES.md to every bound project marker
-  - Phase 4 NEW
-- **`sync`** — `tome workspace sync [<name>]` — copy central RULES.md to every bound project
-  - Omit `<name>` to sync every workspace (idempotent, skip if bytes match)
-  - Phase 4 NEW
 
 ### Doctor Diagnostics (`src/doctor/`)
 
 - **Purpose**: Broad health check + auto-repair for embedder/reranker/catalogs/schema/drift/binding/harness-integration
 - **Location**: `src/doctor/{mod,checks,fixes,binding,harness_integration,orphan_cleanup}.rs`
 - **Key entry point**: `assemble_report(scope, paths, home, verify) -> DoctorReport`
-- **Phase 4 / US5 additions**:
+- **Phase 4 / US5 additions** (refined Polish PR-A–PR-F):
   - **`Subsystem` enum** (11 variants, typed dispatch): Embedder, Reranker, Index, Drift, Catalog, Schema, Summariser, Binding, BindingRulesCopy, HarnessRules, HarnessMcp
   - **Custom Serialize/Deserialize**: Wire strings match Phase 3 vocabulary (e.g. `"catalog:name"`, `"harness-mcp:claude-code"`) with new Phase 4 variants slotting alongside
-  - **`SubsystemHealth` enum** (5 variants): Ok, Drift, Broken, UserOwned, NotApplicable — single source of truth for per-subsystem classification
+  - **`SubsystemHealth` enum** (5 variants): Ok, Drift, Broken, UserOwned, NotApplicable — single source of truth for per-subsystem classification (PR-A fix C-M1)
   - **`ProjectBindingState`** (T366): well-formedness check (marker parses + workspace exists), RULES.md drift classification
   - **`RulesCopyState` enum** (4 variants): Match, Missing, Drift, SourceMissing — distinguishes "source canonical RULES.md missing" from "project copy missing" for different fix paths
   - **`HarnessSubsystemReport`** (T367): per-harness rules-file + MCP-config health; test-respects overrides via `with_effective_modules`
@@ -311,8 +225,9 @@ Phase 4 / US1–US4 completes **harness synchronization, workspace lifecycle, co
   - `BindingRulesCopy` — `workspace::sync::sync_one_project` for single-project copy (C-M3)
   - `HarnessRules` / `HarnessMcp` — `harness::sync::sync_project` (coalesced single dispatch per project; R-M2)
 - **Harness MCP override** (S-M2): User-owned `tome` entries are `auto_fixable: false` under plain `--fix`; `--fix --force` (US5.b) overrides and rewrites them. Scope gate: only harnesses with outstanding `UserOwned` fix participate in force dispatch
-- **Orphan cleanup** (FR-410): Stale `.tome.tmp.*` staging directories older than 1 hour are swept from `<root>/workspaces/` and every bound project's parent directory
+- **Orphan cleanup** (FR-410): Stale `.tome.tmp.*` staging directories older than 1 hour are swept from `<root>/workspaces/` and every bound project's parent directory (PR-E S-M1/M2 hardening)
 - **No side effects** on `assemble`; `fixes::apply` mutates in place; `re_assemble` rebuilds derived state
+- **Polish hardening** (PR-A–PR-F): SubsystemHealth per-harness emission (PR-A C-M1), graceful Broken collapse on SchemaTooNew (PR-B C-M2), project-local sync helper (PR-B C-M3), --force without --fix rejection (PR-B R-M1), coalesced harness sync (PR-B R-M2), per-entry validation (PR-C), SourceMissing distinction (PR-D R-M5), orphan 1-hour mtime gate (PR-E S-M1), precise --force scoping (PR-E S-M2), debug_assert safety invariants (PR-E S-M4)
 
 ### MCP Server (`src/mcp/`)
 
@@ -325,7 +240,7 @@ Phase 4 / US1–US4 completes **harness synchronization, workspace lifecycle, co
   - `preflight.rs` — FR-110 pipeline: schema-version gate → drift detection → embedder SHA-256 verify → eager-load FastembedEmbedder
   - `log.rs` — 10 MiB atomic-rotate file log (JSON lines); stderr reserved for fatal startup errors only (FR-222)
   - `state.rs` — `McpState { embedder, reranker (OnceLock), scope, paths, ... }`
-  - `tools/search_skills.rs`, `tools/get_skill.rs` — handlers with spawn_blocking for sync work
+  - `tools/search_skills.rs`, `tools/get_skill.rs` — handlers with spawn_blocking for sync work; Phase 4 US5.a: `search_skills` enforces 4096-char input length cap (code: `query_too_long`)
   - `tool_description.rs` (US4.b) — Compose runtime tool description from scaffold + cached workspace short summary
 - **Tool handlers**: Validate input, lazy-load reranker via `OnceLock::get_or_try_init`, dispatch work inside `spawn_blocking`
 - **Signal handling**: `tokio::signal::ctrl_c()` triggers graceful shutdown; 5 s timeout before hard shutdown
@@ -483,7 +398,7 @@ Apply composed description to search_skills tool via runtime router mutation
 MCP server advertises "search_skills: {description: '...scaffold...short summary...'}"
 ```
 
-### Doctor Diagnosis Flow (Phase 4 / US5)
+### Doctor Diagnosis Flow (Phase 4 / US5, hardened Polish PR-A–PR-F)
 
 ```
 CLI: tome doctor [--fix] [--verify] [--force]
@@ -519,7 +434,7 @@ Overall classification: Unhealthy / Degraded / Ok (first match wins)
     - Invoke repair handler
     - Re-run affected check
     - Update report in place
-  - Orphan cleanup: sweep stale .tome.tmp.* dirs
+  - Orphan cleanup: sweep stale .tome.tmp.* dirs (1-hour mtime gate per PR-E S-M1)
   - re_assemble: rebuild suggested_fixes + overall classification
   ↓
 CLI: emit report (human/JSON), exit 0 (healthy) / 1 (degraded) / 75 (unfixable)
@@ -586,4 +501,4 @@ CLI: print results (name, skill path, score)
 
 ---
 
-*This document describes HOW the system is organized. Keep focus on patterns and relationships.*
+*This document describes HOW the system is organized at Phase 4 v0.4.0 (Polish complete). Keep focus on patterns and relationships. Phase 4 feature work (US1–US5) shipped across 20 commits (PRs #82–#101); Polish (PR-A–PR-F) hardened all subsystems with 35+ reviewer-flagged fixes applied. 954 tests across 127 suites. Binary size stable at ~29 MB macOS arm64 / ~34 MB Linux x86_64, well under the 50 MB cap.*

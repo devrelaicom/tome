@@ -2,7 +2,7 @@
 
 > **Purpose**: Document test frameworks, organization, patterns, and coverage expectations.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26 (Phase 4 / US5 complete)
+> **Last Updated**: 2026-05-26 (Phase 4 v0.4.0 Polish complete via `/sdd:map incremental`)
 
 ## Test Framework
 
@@ -18,8 +18,8 @@ Cargo automatically discovers and runs tests via `cargo test`. No external test 
 
 | Command | Purpose | Speed |
 |---------|---------|-------|
-| `cargo test` | All tests + lib (916 passing, 16 ignored, 125 suites) | ~1 min |
-| `cargo test --lib` | Unit tests only (147 passing) | ~1 sec |
+| `cargo test` | All tests + lib (954 passing, 16 ignored, 127 suites) | ~1 min |
+| `cargo test --lib` | Unit tests only (153 passing) | ~1 sec |
 | `cargo test --test <name>` | Single integration file | ~1-10 sec |
 | `cargo test <pattern>::` | Tests matching pattern | Varies |
 | `cargo test -- --nocapture` | Show stdout/stderr | Full output |
@@ -62,7 +62,7 @@ Tests can assert on `call_count()` to verify cheap re-enable (FR-006) and other 
 
 ```
 tests/
-├── common/mod.rs               # Shared helpers: Fixture, HomeGuard, write_index_db_*
+├── common/mod.rs               # Shared helpers: Fixture, HomeGuard, write_index_db_*, fabricate_*
 ├── catalog_*.rs                # Phase 1 catalog add/remove/list/show (extended for P2+)
 ├── plugin_*.rs                 # Phase 2 plugin enable/disable/list/show + interactive
 ├── query.rs                    # Phase 2 KNN + reranker search
@@ -81,7 +81,7 @@ tests/
 ├── doctor_subsystem_serialize.rs # Phase 4 Subsystem enum round-trip stability
 ├── fixtures/
 │   └── sample-catalog/         # Git repo skeleton for catalog tests
-└── [123 .rs integration test files total]
+└── [127 .rs integration test files total]
 ```
 
 ### Test File Header Pattern
@@ -130,7 +130,7 @@ mod tests {
 
 **Coverage**: Pure compute paths, error branches, edge cases. Does NOT exercise filesystem, concurrency, or full lifecycle.
 
-**Count**: 147 tests across 1 test suite (`src/lib.rs`).
+**Count**: 153 tests across 1 test suite (`src/lib.rs`).
 
 ### Integration Tests (Isolated CLI + Filesystem)
 
@@ -169,7 +169,7 @@ fn add_catalog_persists_to_config_toml() {
 
 **Why subprocess?** The binary is compiled once (`cargo build`), and each test forks a separate `Command` invocation. This ensures no global state leaks (ctrlc handlers, thread-locals, open file descriptors) between tests, mirroring how users invoke the tool.
 
-**Count**: 650+ integration tests across 100+ files.
+**Count**: 800+ integration tests across 125+ files.
 
 ### Library-API Tests (Non-CLI Reuse)
 
@@ -221,7 +221,7 @@ fn exit_code_30_on_missing_embedder_model() {
 }
 ```
 
-Exhaustive coverage: Every `TomeError` variant has a corresponding `#[test]` in `exit_codes.rs`. The closed-enum design forces all variants to be tested.
+Exhaustive coverage: Every `TomeError` variant has a corresponding `#[test]` in `exit_codes.rs`. The closed-enum design forces all variants to be tested. Polish phase (PR-A through PR-G) added exit-code tests for codes 14, 16, 17, 18, 70, 7 via CLI binary e2e scenarios.
 
 **Coverage**: 19+ distinct exit codes verified end-to-end.
 
@@ -385,13 +385,13 @@ Generates synthetic `.db` files at runtime rather than committing binary fixture
 
 ## Test Coverage & Categorization
 
-### Overall: 916 Passing Tests, 125 Suites, 16 Ignored
+### Overall: 954 Passing Tests, 127 Suites, 16 Ignored
 
 **Breakdown by Phase**:
 - **Phase 1**: ~40 tests (catalog add/remove/list/show, path validation, strictness)
 - **Phase 2**: ~85 tests (plugin enable/disable/list/show, query, models, exit codes)
 - **Phase 3**: ~120 tests (workspace info/init, MCP server, doctor, schema migrations)
-- **Phase 4**: ~670 tests (workspace binding/use/list, harness lifecycle, settings composition, doctor US5, summariser)
+- **Phase 4**: ~710 tests (workspace binding/use/list, harness lifecycle, settings composition, doctor US5, summariser, Polish e2e)
 
 **Ignored**: 16 tests
 - `#[ignore]` used for tests requiring external resources (real model downloads, network access)
@@ -401,12 +401,13 @@ Generates synthetic `.db` files at runtime rather than committing binary fixture
 
 | Domain | Count | Example |
 |--------|-------|---------|
-| Library API (unit) | 147 | In-process tests in `src/` modules |
-| CLI + Filesystem | 650+ | `tests/catalog_add.rs`, `tests/workspace_use_atomicity.rs` |
+| Library API (unit) | 153 | In-process tests in `src/` modules |
+| CLI + Filesystem | 800+ | `tests/catalog_add.rs`, `tests/workspace_use_atomicity.rs` |
 | Concurrency/Atomicity | 30 | Two-thread/process contention, interrupt injection |
-| Exit Codes | 50+ | `tests/exit_codes.rs` (19 codes verified) |
+| Exit Codes | 50+ | `tests/exit_codes.rs`, `tests/exit_codes_e2e.rs` (Polish: new CLI binary tests) |
 | Schema/Migration | 25+ | Forward migration, MVCC reader, too-new schema |
-| Strictness & Format | 15+ | `deny_unknown_fields`, Subsystem wire shape |
+| Strictness & Format | 20+ | `deny_unknown_fields`, Subsystem wire shape, EffectiveEntry, AsWrittenOutcome, SyncOutcome, WorkspaceCatalogEntry, DoctorReport (Polish: extended JSON pins) |
+| JSON Wire Shapes | 15+ | EffectiveEntry, AsWrittenOutcome, SyncOutcome, WorkspaceCatalogEntry, DoctorReport (Polish: PR-A through PR-G added 5 new wire-shape pins) |
 
 ### Tests NOT Yet Included (Deferred)
 
@@ -467,7 +468,7 @@ fn install_synthetic() -> (HarnessModulesGuard, MutexGuard<'static, ()>) {
 
 ### Environment Variable Isolation
 
-Tests that mutate `$HOME` wrap it in a `HomeGuard` with a process-wide `HOME_MUTEX`:
+Tests that mutate `$HOME` wrap it in a `HomeGuard` with a process-wide `HOME_MUTEX`. Centralized pattern (Polish: PR-E consolidated approach):
 
 ```rust
 static HOME_MUTEX: Mutex<()> = Mutex::new(());
@@ -486,7 +487,7 @@ fn my_test() {
 }
 ```
 
-**Critical**: Field declaration order ensures restoration happens while the mutex is still held.
+**Critical**: Field declaration order ensures restoration happens while the mutex is still held. Polish phase (PR-E) consolidated all `HomeGuard` usage across harness/workspace tests to use the centralized `tests/common/mod.rs` implementation.
 
 ### Determinism & Reproducibility
 
@@ -529,7 +530,7 @@ Tests model SIGINT as a deliberate closure-level `Err`, not as signal flipping. 
 
 ### 4. Exit Code Exhaustiveness
 
-Every `TomeError` variant has a corresponding `#[test]` in `tests/exit_codes.rs`. The closed-enum design enforces this — adding a variant will fail CI until a test is added.
+Every `TomeError` variant has a corresponding `#[test]` in `tests/exit_codes.rs` and/or `tests/exit_codes_e2e.rs`. The closed-enum design enforces this — adding a variant will fail CI until a test is added. Polish phase added e2e exit-code tests for codes 14, 16, 17, 18, 70, 7 via real CLI invocation.
 
 ### 5. Subsystem Enum Wire Stability
 
@@ -553,7 +554,16 @@ fn every_variant_round_trips_via_documented_wire_string() {
 
 This prevents accidental breaking changes in the JSON output that external tools depend on.
 
-### 6. No Brittle String Assertions
+### 6. JSON Wire-Shape Pin Tests
+
+New in Polish phase (PR-A through PR-G): Five new JSON wire-shape pins added to enforce byte-stability:
+- `EffectiveEntry` shape for `harness list --json`
+- `AsWrittenOutcome` shape for `harness use --json`
+- `SyncOutcome` shape for `harness sync --json` / `workspace sync --json`
+- `WorkspaceCatalogEntry` shape for workspace catalog enrolment output
+- `DoctorReport` shape (extended) for `doctor --json` with new Phase 4 subsystems
+
+### 7. No Brittle String Assertions
 
 Tests assert on **exit codes** (stable) and **filesystem state** (observable), rarely on exact stdout strings (fragile to refactoring). When output is checked, use fuzzy matching:
 
@@ -575,4 +585,4 @@ assert_eq!(stderr, "exact string", "...");  // Brittle; avoid
 ---
 
 *This document describes HOW to test. Update when testing strategy changes.*
-*Last refreshed 2026-05-26 against Phase 4 / US5-complete source (916 tests, 125 suites).*
+*Last refreshed 2026-05-26 against Phase 4 v0.4.0 Polish-complete source (954 tests, 127 suites).*

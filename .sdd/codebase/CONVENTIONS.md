@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and common patterns.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26 (Phase 4 / US5 complete)
+> **Last Updated**: 2026-05-26 (Phase 4 v0.4.0 Polish complete; refreshed via `/sdd:map incremental`)
 
 ## Code Style
 
@@ -194,7 +194,7 @@ fn every_variant_round_trips_via_documented_wire_string() {
 }
 ```
 
-Used in: `src/doctor/report.rs::Subsystem` (11 variants covering embedder, reranker, index, drift, catalogs, schema, summariser, binding, rules/MCP per harness).
+**Promotion threshold**: Rule of 6 — when a closed dispatch ladder has >6 variants, promote to typed enum with custom serde. Used in: `src/doctor/report.rs::Subsystem` (11 variants covering embedder, reranker, index, drift, catalogs, schema, summariser, binding, rules/MCP per harness).
 
 ### SubsystemHealth::NotApplicable (Phase 4 / US5)
 
@@ -210,7 +210,7 @@ pub enum SubsystemHealth {
 }
 ```
 
-Wire distinguishes "inapplicable" from "not checked" so callers can tailor UI. Used in: `src/doctor/report.rs` — harness-health rows emit `NotApplicable` when doctor runs outside a workspace project.
+Wire distinguishes "inapplicable" from "not checked" so callers can tailor UI. **Critical**: When a data-model spec says a variant has semantics, emit it in the same PR as the variant. Used in: `src/doctor/report.rs` — harness-health rows emit `NotApplicable` when doctor runs outside a workspace project.
 
 ## File Operations & Atomicity
 
@@ -333,6 +333,8 @@ report.suggested_fixes
 
 Avoids 10× redundant operations when 10 harnesses reference the same source.
 
+**Pattern**: Collect by (target, function), invoke ONCE, clear all affected. Generalizable to any repair dispatcher.
+
 ### Project-Local vs Workspace-Broadcast Helpers (Phase 4 / US5)
 
 When a sync/repair function has both single-project and all-projects semantics, expose as **distinct named functions**:
@@ -347,7 +349,7 @@ pub fn sync_all(workspace_name: &WorkspaceName, paths: &Paths)
     -> Result<usize, TomeError>
 ```
 
-Don't pass an `Option` parameter; the caller knows which it wants.
+Don't pass an `Option` parameter; the caller knows which it wants. **Critical**: Naming difference prevents readers from accidentally calling broadcast when they meant single-target (C-M3 lesson).
 
 ### SourceMissing vs Missing Health States (Phase 4 / US5)
 
@@ -361,7 +363,7 @@ pub enum Health {
 }
 ```
 
-`--fix` for `Missing` copies from source. `--fix` for `SourceMissing` surfaces a manual-action `SuggestedFix`.
+`--fix` for `Missing` copies from source. `--fix` for `SourceMissing` surfaces a manual-action `SuggestedFix`. **Critical**: Don't collapse distinct failure modes (R-M5 lesson); prevents infinite-loop bugs.
 
 ### Read-Only by Default, Fix-on-Explicit-Flag (Phase 4 / FR-563)
 
@@ -388,7 +390,7 @@ pub fn apply(&mut report: DoctorReport, force: bool) -> usize {
 }
 ```
 
-Prevents accidental data loss when a user-owned file clashes with a Tome-owned one.
+Prevents accidental data loss when a user-owned file clashes with a Tome-owned one. **Scope checklist**: (1) document which fixes `--force` affects (2) test both without-force refusal AND with-force rewrite (3) filter to active fix list only.
 
 ### Debug Assertions on Safe-Root Invariants (Phase 4 / US5)
 
@@ -406,6 +408,17 @@ pub fn cleanup_orphan(root: &Path) -> std::io::Result<()> {
 Documents the invariant + catches future refactors that break it.
 
 Used in: `src/doctor/orphan_cleanup.rs` (ensures orphan cleanup never escapes the expected root).
+
+### Defence-in-Depth: 5-Layer remove_dir_all Pattern (Phase 4 / US5)
+
+Any `remove_dir_all` on scanned-directory results composes:
+1. **STAGING_PREFIX literal match** — only `".tome.tmp."` directories
+2. **1h mtime gate** — skip fresh directories (prevents accidental removal)
+3. **Symlink skip** — `DirEntry::metadata` (no traversal) + explicit `is_symlink()` check
+4. **`is_dir()` check** — rejects symlinks-to-dirs
+5. **0o700 staging perms** — parent perms restrictive, limits who can plant dirs
+
+Each layer alone is insufficient. Composition provides defence-in-depth. Used in: `src/doctor/orphan_cleanup.rs` for `.tome.tmp.*` cleanup.
 
 ## Common Command Patterns
 
@@ -430,7 +443,9 @@ pub fn run(args: Args, deps: &Deps) -> Result<(), TomeError> {
 
 Tests use `assemble` and assert on outcomes. CLI uses `run` which handles emission. MCP tools use `assemble` without the emit step.
 
-Applied to: Every Phase 4 subcommand (`workspace::info::run`, `harness::list::run`, etc.).
+**Retroactive application** (Phase 4): All harness subcommands (`workspace::info::run`, `harness::list::run`, etc.) now follow this split. **Promotion threshold**: Rule of 3 — when a third consumer appears (Phase 4: CLI, tests, MCP), refactor the first consumer and apply to all.
+
+Applied to: Every Phase 4 subcommand + all Phase 3 workspace/plugin commands.
 
 ### Helper Visibility Promotion (Phase 3+)
 
@@ -512,6 +527,41 @@ fn summariser_fires_after_enable() {
     // Guard drops, clearing SUMMARISER_OVERRIDE
 }
 ```
+
+### HOME_MUTEX + HomeGuard Pattern (Phase 4 US3)
+
+For tests mutating `$HOME` environment:
+
+```rust
+static HOME_MUTEX: Mutex<()> = Mutex::new(());
+
+pub struct HomeGuard {
+    _lock: MutexGuard<'static, ()>,
+    old_home: Option<String>,
+}
+
+impl HomeGuard {
+    pub fn set(temp_home: &str) -> Result<Self, TomeError> {
+        let lock = HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", temp_home);
+        Ok(Self { _lock: lock, old_home })
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        if let Some(home) = &self.old_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        // _lock drops, releasing mutex
+    }
+}
+```
+
+**Pattern**: Serialize all HOME mutations via process-wide mutex; RAII guard restores on drop. Critical for parallel tests that shouldn't collide on environment. Used in harness tests + workspace tests.
 
 ### Per-Test Mutex for Concurrent Test Isolation (Phase 4 US3)
 
@@ -683,4 +733,4 @@ Enforced by `cocogitto` in `.githooks/commit-msg`. Use `git commit --no-verify` 
 ---
 
 *This document defines HOW to write code. Update when conventions change or new patterns stabilize.*
-*Last refreshed 2026-05-26 against Phase 4 / US5-complete source (916 tests passing, 125 suites).*
+*Last refreshed 2026-05-26 against Phase 4 v0.4.0 Polish-complete source (916 tests passing, 125 suites).*

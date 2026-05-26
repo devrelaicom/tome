@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26 (Phase 4 complete; US5 + Polish pending. 4-reviewer pass: 1 blocker + 21 majors. PR #99–#101 applied 1 blocker + 10 majors in US5.c-1)
+> **Last Updated**: 2026-05-26 (Phase 4 v0.4.0 Polish complete via `/sdd:map incremental`)
 
 ## Overview
 
@@ -39,6 +39,7 @@ Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, wo
 29. Credential scrubbing on MCP log fields and error chains
 30. Phase 4 / US4 additions: Bundled Qwen2.5-0.5B-Instruct summariser model; Llama.cpp-2 inference runtime with SHA-256 verified model load; prompt-constructed summaries for plugin descriptions; cached LlamaModel with per-call LlamaContext; summariser-model integrity gate (placeholder detection); length-window enforcement with warn-level logging
 31. Phase 4 / US5 additions: Doctor command extensible with five repair classes (embedder/reranker/catalog/binding/summariser); orphan staging-directory cleanup with TOCTOU-safe mtime gating; project-local harness synchronisation separate from workspace-broadcast; user-owned harness MCP override filtered by active fix list; read-only index access for diagnostic lookups
+32. Phase 4 / Polish additions: `util::bounded_read_to_string` with per-class caps applied to ~26 sites; `home_root()` validation for absolute, canonical, exists; relative/unset `$HOME` exits 2 Usage; consolidated `ProjectMarkerConfig` to one type + canonical `settings::parser::read_project_marker`; doctor harnesses list hyphenated naming; five-layer defence-in-depth for `remove_dir_all` on scanned dirs
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
@@ -58,9 +59,11 @@ Security controls are enforced in code, tests, and CI—documented in `CONSTITUT
 | **Scrubbing at boundary** | Regex-based pattern detector (R-8) | `src/catalog/git.rs::scrub_credentials` |
 | **Never log secrets** | All `git` stderr passed through scrubber | `src/catalog/git.rs::scrub_to_string` |
 | **HTTP error scrubbing** | `reqwest::Error` details scrubbed before surfacing | `src/embedding/download.rs::scrub_for_diag` |
-| **MCP log scrubbing** | Workspace paths and error messages scrubbed before JSON logging | `src/mcp/tools/search_skills.rs` (line 272), `src/mcp/mod.rs` |
+| **MCP log scrubbing** | Workspace paths and error messages scrubbed before JSON logging | `src/mcp/tools/search_skills.rs`, `src/mcp/mod.rs` |
 | **Model URL scrubbing** | Download URLs with presigned params scrubbed in error chains | `src/embedding/download.rs` (Phase 3 PR #36 + PR #54) |
 | **Harness config scrubbing** | MCP config file paths scrubbed in error logs | Phase 4 harness modules |
+| **Summariser URL scrubbing (Polish)** | Model download URLs with presigned params scrubbed before logging | `src/summarise/llama.rs` (PR-D additions) |
+| **Harness MCP error chain scrubbing (Polish)** | Error messages from harness sync scrubbed before emission | `src/harness/sync.rs` (PR-D additions) |
 | **No credential storage** | Inherit user's Git config entirely | Constitution XII |
 | **No credential prompting** | Only system Git handles auth | Constitution XII, FR-026 |
 
@@ -70,7 +73,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 3. Key-value pairs: `(token|password|api[-_]?key|bearer|authorization|signature|x-amz-*)\s*[:=]\s*\S+` → `<scrubbed>` (includes AWS presigned-URL params)
 4. Long hex (40+ chars outside safe context): `[0-9a-fA-F]{40,}\b` → `<scrubbed>` (except in `:` or `=` contexts where SHAs are preserved)
 
-**Verification**: Comprehensive test coverage in `tests/scrubbing.rs` covers all four rules with worked examples.
+**Verification**: Comprehensive test coverage in `tests/scrubbing.rs` covers all four rules with worked examples. PR-D extended coverage to summariser URL + harness MCP error chains.
 
 ## Input Validation
 
@@ -142,7 +145,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Lenient third-party inputs** | `plugin.json` and `SKILL.md` frontmatter parsed without `deny_unknown_fields` (FR-013a) | Forward-compatible with upstream schema additions |
 | **Coverage** | Strict targets: `CatalogManifest`, `Owner`, `PluginDeclaration`, `Config`, `CatalogEntry`, `ModelManifest`, `ModelKind`, `WorkspaceName`, `ProjectMarkerConfig`, all Phase 4 additions | Mandatory, no exceptions |
 
-### Harness Configuration Validation (Phase 4 / US1.b + US5)
+### Harness Configuration Validation (Phase 4 / US1.b + US5 + Polish)
 
 | Control | Implementation | Location |
 |---------|----------------|----------|
@@ -153,14 +156,16 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **User-owned MCP override (US5)** | Doctor `--fix --force` filters rewrites to only HarnessMcp entries with active SuggestedFix (S-M2 fix) | `src/doctor/fixes.rs::apply_one_fix` |
 | **Config clash detection** | Harness clash errors surface on `tome workspace use` with hint to use `--force` | `src/error.rs::HarnessClash` (code 19); amended contract `mcp-config-integration.md` for env preservation semantics |
 | **Mode preservation on rewrite** | Read existing target's mode before write; chmod staged tempfile to that mode before persist | `src/catalog/store.rs::write_atomic` (unified surface) + all callers (harness modules, workspace, project) |
+| **Bounded read on project marker (Polish)** | `settings::parser::read_project_marker` uses `bounded_read_to_string` with per-class cap (PR-C consolidation) | `src/settings/parser.rs` (new canonical parser) |
 
-### Doctor Command Input Validation (Phase 4 / US5)
+### Doctor Command Input Validation (Phase 4 / US5 + Polish)
 
 | Control | Implementation | Purpose |
 |---------|----------------|---------|
 | **MCP query length cap** | 4096 chars enforced at search_skills input boundary (FR-555) | `src/mcp/tools/search_skills.rs::106` validates before expensive compute |
 | **`--force` flag scoping** | Only applies `--fix` repairs; `--force` without `--fix` → exit 2 (Usage) per R-M1 | `src/commands/doctor.rs` validates upfront |
 | **Read-only diagnostic paths** | `check_model`, `check_index`, `check_drift` use `open_read_only` (R-M7 fix) | `src/doctor/checks.rs`, `src/doctor/binding.rs` |
+| **Home path validation (Polish)** | `home_root()` validates absolute, canonical, exists; relative/unset `$HOME` → exit 2 Usage (PR-E additions) | `src/util/io.rs::home_root` (new canonical validator) |
 
 ### Workspace Scope Provider (Phase 4 / US3)
 
@@ -172,18 +177,26 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Bootstrap fallback** | When central DB absent (fresh install), only `WorkspaceName::global()` is considered registered | Allows production to function before first `tome workspace init` creates the central DB |
 | **Implementation location** | `src/commands/harness/mod.rs::CentralDbScopeProvider` | Used by `harness::sync::sync_project` (line 178) and `harness list` subcommand |
 
+### Bounded String Reading (Polish Addition)
+
+| Control | Implementation | Limits by Class |
+|---------|----------------|------------------|
+| **Per-class caps** | `util::bounded_read_to_string(path, limit)` with per-caller configurable limit | Index DB XML (10 KiB), project markers (16 KiB), settings files (256 KiB), catalog cache (unlimited for now) |
+| **Applied across ~26 sites** | Progressively applied to file-read operations during Polish phase (PR-E) | Reduces unbounded memory consumption from hostile files; defaults are conservative |
+| **Testing** | Integration tests for over-limit rejection per call site | E2e tests verify correct error on oversized files |
+
 ## Data Protection
 
 ### Sensitive Data Handling
 
-| Data Type | Protection | Storage | Phase 4 / US4-US5 Changes |
+| Data Type | Protection | Storage | Phase 4 / Polish Changes |
 |-----------|-----------|---------|---|
 | Git credentials | Inherited from system Git config | Credential helper, not Tome | Unchanged |
 | Model artefacts (embedder, reranker) | SHA-256 verification on download | `<home>/.tome/models/<name>/` | Layout unchanged; central registry enforced |
 | Model artefacts (summariser) | SHA-256 verification on download + on-load (US4.d-1 C-B1 real hash) | `<home>/.tome/models/qwen2.5-0.5b-instruct/` | New Phase 4 US4; SHA-256 `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db` verified 2026-05-26; size 491,400,032 bytes pinned |
-| Configuration file | Atomic writes, chmod inherited from original on rewrite via mode-preservation | `<home>/.tome/` | Consolidated under single root; enrolment now in DB |
+| Configuration file | Atomic writes, chmod inherited from original on rewrite via mode-preservation | `<home>/.tome/` | Single-root layout |
 | Workspace settings | Layered composition with override semantics; atomic writes with mode preservation | `<workspace>/.tome/settings.toml` | New Phase 4 settings model; mode preserved on regen-summary |
-| Project marker config | Atomic writes, chmod inherited from existing; workspace binding pointer at `<project>/.tome/config.toml` | `<project>/.tome/config.toml` | New Phase 4 project binding; mode preserved on rename |
+| Project marker config | Atomic writes, chmod inherited from existing; workspace binding pointer at `<project>/.tome/config.toml` | `<project>/.tome/config.toml` | Consolidated to one type `ProjectMarkerConfig` via `settings::parser::read_project_marker` (PR-C fix) |
 | Central index DB | SQLite with `PRAGMA foreign_keys = ON` and `journal_mode = WAL` | `<home>/.tome/index.db` | Centralized DB (Phase 3 per-workspace → Phase 4 single central) |
 | Catalog cache | Atomic refresh, ref-counted across workspaces/projects via DB table, re-used on same URL | `<home>/.tome/cache/<sha256-of-url>/` | Layout unchanged; ref-counting via `workspace_catalogs` table |
 | Git stderr output | Scrubbed before tracing/display | `src/catalog/git.rs::scrub_credentials` | Unchanged |
@@ -192,7 +205,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | Workspace paths in logs | Scrubbed via `scrub_to_string` before emission | `src/mcp/tools/search_skills.rs` | Unchanged |
 | Error messages in logs | Scrubbed via `scrub_to_string` before emission | `src/mcp/tools/search_skills.rs` | Unchanged |
 | Workspace summaries | Cached short + long text; short embedded in MCP tool description broadcast to clients | `<workspace>/.tome/settings.toml` (under `[summaries]`) | New Phase 4 US4; length-capped (SHORT: 800 chars, LONG: 2500 chars per FR-425); warn-level logging on exceedance; values still cached |
-| Doctor harness list (Phase 4 / US5) | Local-only report; six well-known harness directories probed for existence | Never transmitted; documented boundary | New diagnostic surface; privacy gate before any transmission feature |
+| Doctor harness list (Phase 4 / US5) | Local-only report; six well-known harness directories probed for existence; hyphenated names in output (PR-B fix) | Never transmitted; documented boundary | New diagnostic surface; privacy gate before any transmission feature |
 | Orphan staging directories (Phase 4 / US5) | Cleaned by mtime-based filter (1h) after removal of parent workspace; symlink-skipped during cleanup | `<home>/.tome/` | New cleanup phase; STAGING_PREFIX gate + mtime guard + symlink-skipping compose correctly |
 | Project binding marker state (Phase 4 / US1-US5) | Workspace name stored in `<project>/.tome/config.toml` under `[binding]` section | Project-local config; preserved on marker renames (US2.d-1 toml_edit fix) | New workspace binding; mode preserved on all atomic rewrites |
 
@@ -210,7 +223,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 
 ### File Permissions
 
-| File/Directory | Mode | Condition | Phase 4 / US4-US5 Changes |
+| File/Directory | Mode | Condition | Phase 4 / Polish Changes |
 |---|---|---|---|
 | `<home>/.tome/` | 0755 (created via `create_dir_all`) | Directory holding all Tome state | Single-root layout |
 | `<home>/.tome/index.db` | Inherited from umask (typically 0644) | SQLite DB file; advisory lock prevents reader/writer races | Centralized DB (Phase 3 per-workspace → single central) |
@@ -223,7 +236,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | `<workspace>/.tome/settings.toml` | Inherited from original (if exists) or umask | Workspace layered settings + summaries; mode preserved on regen-summary rewrite (S-M3 via write_atomic) | New Phase 4 US4; unified mode preservation via write_atomic |
 | `<project>/.tome/` | 0700 (atomic landing via `atomic_dir`) | Project marker directory; recovery branch on rename failure also chmods to 0o700 | Phase 4 project binding |
 | `<project>/.tome/config.toml` | Inherited from original (if exists) or umask | Project binding pointer + optional RULES.md copy; mode preserved on rename and regen-summary rewrites | Phase 4 project binding; mode preservation via write_atomic |
-| `<home>/.tome/.tome.tmp.*` (staging dirs, US5) | 0700 (created by `atomic_dir`) | Temporary staging dirs; cleaned by orphan-cleanup mtime filter | New Phase 4 US5; STAGING_PREFIX + 1h mtime + symlink-skip compose correctly |
+| `<home>/.tome/.tome.tmp.*` (staging dirs, US5) | 0700 (created by `atomic_dir`) | Temporary staging dirs; cleaned by orphan-cleanup mtime filter (Polish: five-layer defence-in-depth) | New Phase 4 US5; STAGING_PREFIX + 1h mtime + symlink-skip + is_dir() + 0o700 perms (PR-E extended) |
 
 **Unix-only hardening**: The 0600 chmod is applied explicitly to `mcp.log` via `std::os::unix::fs::OpenOptionsExt::mode()` on Unix; Windows' ACL model is not currently addressed.
 
@@ -236,8 +249,8 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **MCP config write** | Refuse symlinks on write-back | `is_symlink()` check → exit 7 | `src/harness/mcp_config.rs` line 92 |
 | **Settings file write** (Phase 4 / US3) | Refuse symlinks on write-back via `save_settings` | `is_symlink()` check in `catalog::store::write_atomic` → exit 7 | `src/settings/edit.rs::save_settings` → `src/catalog/store.rs::write_atomic` (lines 88–95) |
 | **Atomic file writes** (US2.d-1 / US4) | Refuse symlinks in `catalog::store::write_atomic` | `is_symlink()` check on target before staging write → exit 7 | `src/catalog/store.rs::write_atomic` |
-| **Orphan cleanup walk (US5)** | Skip symlinks; never traverse via symlink | `entry.metadata()` (lstat, no follow) + skip if `is_symlink()` | `src/doctor/orphan_cleanup.rs::cleanup_staging_dirs` |
-| **Purpose** | Prevent hostile catalog with `skills/foo/creds → ~/.ssh/id_rsa` or harness config pointing to sensitive files | Defence in depth: `lstat` (no follow) + explicit skip/refusal | Phase 3 PR #56; Phase 4 US1/US2/US4 extends to all atomic writes; US5 extends to orphan cleanup |
+| **Orphan cleanup walk (US5 + Polish)** | Skip symlinks; never traverse via symlink; rejects symlink-to-dir (layer 3 + 4) | `entry.metadata()` (lstat, no follow) + skip if `is_symlink()` + `is_dir()` check | `src/doctor/orphan_cleanup.rs::cleanup_staging_dirs` (PR-E extended) |
+| **Purpose** | Prevent hostile catalog with `skills/foo/creds → ~/.ssh/id_rsa` or harness config pointing to sensitive files | Defence in depth: `lstat` (no follow) + explicit skip/refusal | Phase 3 PR #56; Phase 4 US1/US2/US4 extends to all atomic writes; US5 extends to orphan cleanup; Polish (PR-E) adds 5-layer cleanup defence |
 
 ### Integrity & Verification
 
@@ -260,7 +273,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Schema migrations** | Forward-only migrations with per-step transaction atomicity under advisory lock | `src/index/migrations.rs::apply_pending` |
 | **Central DB atomicity** | Advisory lock (`index.lock`) covers all DB writes; cache cleanup under lock (F11b FR-366); binding UPSERT + last_used_at bump atomic (R-M1 fix) | `src/index/lock.rs::with_lock()` |
 | **Doctor repairs (US5)** | Five repair classes: embedder download, reranker download, catalog re-clone, binding rules-copy, summariser redownload. Read-only diagnostic checks; repairs run under advisory lock where state-mutating | `src/doctor/fixes.rs` + `src/doctor/checks.rs` |
-| **Orphan cleanup (US5)** | Staging-dir cleanup via STAGING_PREFIX match + 1h mtime gate + `is_dir()` check (rejects symlinks-to-dirs) + symmetric removal of top-level parent on empty | `src/doctor/orphan_cleanup.rs::cleanup_staging_dirs` |
+| **Orphan cleanup (US5 + Polish)** | Staging-dir cleanup via STAGING_PREFIX match + 1h mtime gate + `is_dir()` check + symlink-skip + top-level parent cleanup (five layers, PR-E extended) | `src/doctor/orphan_cleanup.rs::cleanup_staging_dirs` |
 
 ## Phase 4 / US5 Security Hardening (PR #99–#101)
 
@@ -288,6 +301,44 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **`is_dir()` check before recursion** | Rejects `is_symlink()` AND files, only recurses actual directories | Symlink-to-dir attack rejected | ✅ Audited |
 | **Staging-dir permissions (0700)** | Created by `atomic_dir` with explicit `0o700` mode on Unix | Prevents other users from reading staged content mid-operation | ✅ Audited |
 | **Test coverage** | `STAGING_AGE_GATE` boundary tested; orphan cleanup exercised with real `.tome.tmp.*` dirs in tempdir | US5 test surface includes cleanup scenarios | ✅ PR #101 |
+
+## Phase 4 / Polish Security Additions (PR-A through PR-G)
+
+### Bounded String Reads (PR-E)
+
+| Enhancement | Implementation | Scope |
+|-------------|-----------------|-------|
+| **Per-class limits** | `util::bounded_read_to_string(path, limit)` introduced | Applied to ~26 file-read call sites |
+| **Index DB reads** | 10 KiB cap on XML/schema reads | `src/index/db.rs` + related |
+| **Project marker reads** | 16 KiB cap on `ProjectMarkerConfig` deserialization | `src/settings/parser.rs::read_project_marker` |
+| **Settings file reads** | 256 KiB cap on layered settings + composition | `src/settings/mod.rs` + `src/settings/edit.rs` |
+| **Catalog manifest reads** | Conservative limits per caller context | Catalog clones remain unbounded (for now) |
+
+### Home Path Validation (PR-E)
+
+| Requirement | Implementation | Exit Code |
+|-------------|-----------------|-----------|
+| **Absolute path** | `path.is_absolute()` gate | 2 (Usage) |
+| **Canonical path** | `canonicalize()` succeeds without symlink escape | 2 (Usage) |
+| **Directory exists** | `is_dir()` check on result | 2 (Usage) |
+| **Applied location** | `src/util/io.rs::home_root()` (new canonical validator) | Harness sync + doctor + project binding |
+| **Relative/unset handling** | Relative or env-unset `$HOME` → exit 2 Usage | Clear error for misconfiguration |
+
+### Consolidated Project Marker Type (PR-C)
+
+| Change | Before | After | Impact |
+|--------|--------|-------|--------|
+| **Marker deserialization** | Multiple `deserialize` callers ad-hoc | Single `settings::parser::read_project_marker` | Consistency; enables bounded reads |
+| **Type definition** | `ProjectMarkerConfig` struct in `workspace::binding.rs` | Unified with bounded-read integration | One canonical path for project config |
+| **Error handling** | Per-caller error conversion | Centralized in `read_project_marker` | Consistent error reporting |
+
+### Doctor Harness List Naming (PR-B)
+
+| Update | Before | After | Context |
+|--------|--------|-------|---------|
+| **Harness name output** | Underscored (e.g., `claude_code`) | Hyphenated (e.g., `claude-code`) | Matches CLI harness identity grammar |
+| **Database schema** | No change | Still stores underscored names | Wire format only; internal PK unchanged |
+| **Test coverage** | Implicit | Explicit assertion on wire shape | `tests/doctor_subsystem_serialize.rs` |
 
 ## Signal Handling & Interruption
 
@@ -344,19 +395,20 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Path validation** | 11 negative-case tests (URLs, absolute paths, traversal, symlinks) | `tests/path_validation.rs` |
 | **Workspace name validation** | Phase 4 grammar tests | Phase 4 US1/US2 tests |
 | **Project path validation** | UTF-8 enforcement, canonical path PK, dangerous-CWD refusal | `tests/workspace_use_binding.rs` |
-| **Credential scrubbing** | 4 pattern rules + integration tests against real Git output | `tests/scrubbing.rs` |
+| **Credential scrubbing** | 4 pattern rules + integration tests against real Git output; Polish: summariser URL + harness MCP scrubbing | `tests/scrubbing.rs` (extended PR-D) |
 | **Manifest strictness** | 100% grep assertion on `deny_unknown_fields`; Phase 4 US4 audit (T098n) includes summariser types | `tests/manifest_strictness.rs` |
 | **Summariser model integrity** | Placeholder regression guard (3 tests); real-model SHA-256 verify + load; length-window warn; silent no-op carve-out | `tests/summariser_registry_no_placeholder.rs`, `tests/summariser_real.rs`, `tests/summariser_triggers.rs`, `tests/summariser_triggers_end_to_end.rs`, `tests/workspace_regen_summary.rs` |
 | **Concurrency & atomicity** | Advisory lock + interrupt scenarios; cache cleanup under lock (F11b); binding + last_used_at atomic (R-M1) | `tests/atomicity.rs`, `tests/concurrency.rs` |
 | **Exit codes** | Closed enumeration; all Phase 1/2/3/4/US5 codes tested | `tests/exit_codes.rs` |
-| **Security hardening** | File permissions, symlink handling, registry validation, mode preservation on rewrite, symlink refusal on atomic writes, settings-edit security | `tests/security_hardening.rs` |
+| **Security hardening** | File permissions, symlink handling, registry validation, mode preservation on rewrite, symlink refusal on atomic writes, settings-edit security, bounded reads (Polish: PR-E), home path validation (Polish: PR-E) | `tests/security_hardening.rs` (extended) |
 | **MCP protocol purity** | No error leakage to stdout (FR-108) | `tests/mcp_server.rs` |
 | **Workspace isolation** | Cross-workspace catalog enablement + reference-counting (Phase 3); project binding validation (Phase 4); settings composition (US3); summariser per-workspace (US4) | `tests/workspace_commands.rs`, `tests/catalog_cache_refcount.rs`, Phase 4 tests |
 | **Sync idempotence** | Mtime stability across re-sync with all harness modules | `tests/sync_idempotence.rs` |
-| **Harness concurrency** | Parallel HOME mutation via `HOME_MUTEX` (US3 PR #92) | `tests/harness_*.rs` + `tests/common/mod.rs::HomeGuard` |
+| **Harness concurrency** | Parallel HOME mutation via `HOME_MUTEX` (US3 PR #92); consolidated via `HomeGuard` RAII (Polish: PR-E) | `tests/harness_*.rs` + `tests/common/mod.rs::HomeGuard` |
 | **Doctor repairs (US5)** | Five repair classes (embedder/reranker/catalog/binding/summariser) via library API + CLI binary + e2e scenarios | `tests/doctor_fix_p4.rs`, `tests/exit_codes_e2e.rs` |
-| **Orphan cleanup (US5)** | Mtime filtering, STAGING_PREFIX matching, symlink-skip, dir-check, cleanup of empty parents | `tests/doctor_orphan_tmp_cleanup.rs` (implicit; orphan cleanup under lock in doctor flows) |
+| **Orphan cleanup (US5)** | Mtime filtering, STAGING_PREFIX matching, symlink-skip, dir-check, cleanup of empty parents (Polish: extended to five layers) | `tests/doctor_orphan_tmp_cleanup.rs` (Polish: PR-E extended) |
 | **MCP input validation (US5)** | Query length cap 4096 chars enforced at input boundary | `tests/mcp_input_length_caps.rs` |
+| **Bounded reads (Polish)** | Per-class limits verified for project markers, settings files, index reads | Integration tests for oversized file rejection (PR-E) |
 
 ---
 
