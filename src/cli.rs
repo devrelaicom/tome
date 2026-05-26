@@ -193,11 +193,23 @@ impl std::fmt::Display for HarnessScopeArg {
 
 #[derive(Debug, clap::Args)]
 pub struct DoctorArgs {
-    /// Apply the three safe automatic repairs (re-download missing or
-    /// corrupt models, re-clone broken catalog caches, forward-migrate
-    /// the index schema). Destructive repairs are never automatic.
+    /// Apply the safe automatic repairs (re-download missing or
+    /// corrupt models including the summariser, re-clone broken catalog
+    /// caches, forward-migrate the index schema, re-copy the
+    /// `<project>/.tome/RULES.md` from the bound workspace, re-run
+    /// harness sync for every harness whose rules or MCP config has
+    /// drifted). Destructive repairs are never automatic — see
+    /// `--force` for the user-owned-MCP override.
     #[arg(long)]
     pub fix: bool,
+    /// Override safe-by-default repair gates. Currently rewrites
+    /// developer-authored harness MCP `tome` entries on `--fix` (the
+    /// same semantics as `tome harness sync --force`). Other
+    /// manually-classified issues — notably a binding whose marker
+    /// names a missing workspace — are NOT affected by `--force`:
+    /// choosing the target workspace is a developer decision.
+    #[arg(long)]
+    pub force: bool,
     /// Rehash each installed model's primary file against its pinned
     /// SHA-256. Slower than the default but catches silent on-disk
     /// corruption.

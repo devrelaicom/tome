@@ -11,7 +11,18 @@
 //!    via `ProjectMarkerConfig` strict deserialise. Failures collapse to
 //!    `config_well_formed = false` and the suggested-fix dispatcher
 //!    surfaces a developer-actionable hint.
-//! 2. **Rules-copy currency**: byte-compare `<project>/.tome/RULES.md`
+//! 2. **Workspace registry membership**: the marker may parse fine but
+//!    still name a workspace that no longer exists in the central
+//!    `workspaces` table (e.g. the workspace was `tome workspace remove`d
+//!    while a project still has its marker on disk). This is the
+//!    "orphan binding" case from `contracts/doctor-extensions-p4.md`
+//!    §New subsystems → `Binding`. We collapse it into
+//!    `config_well_formed = false` so both shapes share the existing
+//!    Unhealthy classification + non-auto-fixable suggestion path —
+//!    the diagnosis text + suggested commands are the same ("rebind via
+//!    `tome workspace use <existing-name>` or recreate the named
+//!    workspace via `tome workspace init <name>`").
+//! 3. **Rules-copy currency**: byte-compare `<project>/.tome/RULES.md`
 //!    against `<root>/workspaces/<name>/RULES.md`:
 //!    - Source missing OR project copy missing → `Missing`.
 //!    - Bytes equal → `Match`.
@@ -40,11 +51,18 @@ pub fn check_binding(scope: &ResolvedScope, paths: &Paths) -> Option<ProjectBind
 
     // Parse the marker. Failures (NotFound, permission denied, malformed
     // TOML, deny_unknown_fields trip) all collapse to
-    // `config_well_formed = false`.
-    let config_well_formed = std::fs::read_to_string(&marker_path)
+    // `config_well_formed = false`. A well-formed marker is additionally
+    // gated on the bound workspace's presence in the central registry
+    // (US5.b orphan-binding case): a marker that parses but names a
+    // missing workspace is functionally as broken as a malformed marker
+    // — the same Unhealthy classification + non-auto-fixable suggestion
+    // path covers both.
+    let marker_parses = std::fs::read_to_string(&marker_path)
         .ok()
         .and_then(|body| toml::from_str::<ProjectMarkerConfig>(&body).ok())
         .is_some();
+    let workspace_registered = bound_workspace_is_registered(scope, paths);
+    let config_well_formed = marker_parses && workspace_registered;
 
     // RULES.md drift comparison. The resolved scope already carries the
     // bound workspace name; we read the source-of-truth file at
@@ -58,6 +76,37 @@ pub fn check_binding(scope: &ResolvedScope, paths: &Paths) -> Option<ProjectBind
         config_well_formed,
         rules_file_drift,
     })
+}
+
+/// True iff the scope's bound workspace name has a row in the central
+/// `workspaces` table. Bootstrap-not-yet (no `index.db` on disk) is
+/// treated as "only `global` is known" — same shortcut the production
+/// `CentralDbScopeProvider` uses.
+///
+/// Read-only; never propagates errors. Any DB-side failure (file
+/// unreadable, schema-too-new, query error) collapses to `false` so
+/// doctor surfaces the binding as broken rather than itself crashing.
+fn bound_workspace_is_registered(scope: &ResolvedScope, paths: &Paths) -> bool {
+    let name = scope.scope.name();
+    // Bootstrap-not-yet: no central DB on disk, so there is no
+    // authoritative registry to consult. Treat this as permissively
+    // registered — the user's next bootstrap-creating command (catalog
+    // add, plugin enable, workspace init, …) will seed the registry and
+    // a subsequent doctor pass will re-evaluate. This avoids flagging
+    // every fresh-install project as broken.
+    if !paths.index_db.exists() {
+        return true;
+    }
+    let conn = match crate::index::open_read_only(&paths.index_db) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    conn.query_row(
+        "SELECT 1 FROM workspaces WHERE name = ?1",
+        rusqlite::params![name.as_str()],
+        |_| Ok(()),
+    )
+    .is_ok()
 }
 
 fn compare_rules(

@@ -270,8 +270,12 @@ fn fix_repairs_broken_catalog_cache_and_re_classifies_ok() {
 
     let attempts = doctor::fixes::apply(
         &mut report,
-        &paths,
-        &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
+        &doctor::fixes::FixContext {
+            paths: &paths,
+            scope: &global_scope(),
+            home: home.path(),
+            force: false,
+        },
     );
     assert!(attempts >= 1);
     doctor::fixes::re_assemble(&mut report);
@@ -304,8 +308,12 @@ fn has_remaining_manual_fixes_detects_unfixable_after_fix_pass() {
     let mut report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
     doctor::fixes::apply(
         &mut report,
-        &paths,
-        &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
+        &doctor::fixes::FixContext {
+            paths: &paths,
+            scope: &global_scope(),
+            home: home.path(),
+            force: false,
+        },
     );
     doctor::fixes::re_assemble(&mut report);
 
@@ -488,8 +496,12 @@ fn fix_runs_forward_schema_migration_end_to_end() {
 
     let attempts = doctor::fixes::apply(
         &mut report,
-        &paths,
-        &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
+        &doctor::fixes::FixContext {
+            paths: &paths,
+            scope: &global_scope(),
+            home: home.path(),
+            force: false,
+        },
     );
     assert!(attempts >= 1, "expected at least one repair attempt");
     doctor::fixes::re_assemble(&mut report);

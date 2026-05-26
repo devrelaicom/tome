@@ -25,8 +25,32 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     let mut report = doctor::assemble_report(scope, &paths, &home, args.verify)?;
 
     if args.fix {
-        let _attempts = doctor::fixes::apply(&mut report, &paths, &scope.scope);
+        let ctx = doctor::fixes::FixContext {
+            paths: &paths,
+            scope,
+            home: &home,
+            force: args.force,
+        };
+        let _attempts = doctor::fixes::apply(&mut report, &ctx);
+        // FR-410: sweep orphan `.tome.tmp.*` staging directories. Best-
+        // effort — per-fix failures are warn'd inside `cleanup_stale_
+        // staging_dirs`. We don't propagate the count to the report
+        // (no contract field for it) but it surfaces in the trace log.
+        let cleaned = doctor::orphan_cleanup::cleanup_stale_staging_dirs(&paths).unwrap_or(0);
+        if cleaned > 0 {
+            tracing::info!(
+                count = cleaned,
+                "doctor --fix: removed stale `.tome.tmp.*` staging directories",
+            );
+        }
         doctor::fixes::re_assemble(&mut report);
+    } else if args.force {
+        // `--force` without `--fix` is a user error: there is nothing
+        // for `--force` to override during a read-only report pass.
+        return Err(TomeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "`--force` requires `--fix`; rerun as `tome doctor --fix --force`",
+        )));
     }
 
     emit(&report, mode)?;

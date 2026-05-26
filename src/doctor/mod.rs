@@ -15,6 +15,7 @@ pub mod checks;
 pub mod fixes;
 pub mod harness_detect;
 pub mod harness_integration;
+pub mod orphan_cleanup;
 pub mod report;
 
 use std::path::Path;
@@ -50,7 +51,39 @@ pub fn assemble_report(
 ) -> Result<DoctorReport, TomeError> {
     let tome_version = env!("CARGO_PKG_VERSION").to_owned();
 
-    let workspace = assemble_workspace_info(scope, paths)?;
+    // `assemble_workspace_info` errors with `WorkspaceNotFound` when the
+    // resolved scope names a workspace that no longer has a row in the
+    // central registry — exactly the orphan-binding case the doctor
+    // pass is meant to surface. Catch that one variant and fall through
+    // with a synthetic workspace block; every other error still bubbles
+    // because they're real DB / integrity failures that doctor itself
+    // shouldn't paper over.
+    let workspace = match assemble_workspace_info(scope, paths) {
+        Ok(info) => info,
+        Err(TomeError::WorkspaceNotFound { .. }) => {
+            use crate::workspace::{ScopeKind, WorkspaceInfo};
+            WorkspaceInfo {
+                scope: if scope.scope.is_global() {
+                    ScopeKind::Global
+                } else {
+                    ScopeKind::Workspace
+                },
+                path: scope.project_root.clone(),
+                source: scope.source,
+                catalogs: 0,
+                plugins_total: 0,
+                plugins_enabled: 0,
+                skills_indexed: 0,
+                schema_version: None,
+                embedder: None,
+                enrolled_catalogs: Vec::new(),
+                enabled_plugins: Vec::new(),
+                bound_projects: Vec::new(),
+                summary_cache: None,
+            }
+        }
+        Err(e) => return Err(e),
+    };
 
     let embedder_e = embedder_entry();
     let reranker_e = reranker_entry();
@@ -446,6 +479,13 @@ fn build_suggested_fixes(
     if let Some(b) = binding
         && !b.config_well_formed
     {
+        // Two distinct cases share this suggestion: the marker TOML is
+        // malformed (parse failed) OR the marker is well-formed but the
+        // workspace it names is missing from the central registry. The
+        // remediation is the same — developer chooses to rebind or
+        // recreate. `--fix` deliberately does NOT auto-rebind: choosing
+        // a target workspace is a destructive product decision the user
+        // owns, not a safe repair.
         out.push(SuggestedFix {
             subsystem: Subsystem::Binding,
             diagnosis: format!(
@@ -453,7 +493,8 @@ fn build_suggested_fixes(
                 b.project_root.display(),
             ),
             command: format!(
-                "tome workspace use <existing-name>  # or tome workspace init {}",
+                "tome workspace use <existing-name>  # rebind to an existing workspace, \
+                 or `tome workspace init {}` to recreate the named workspace",
                 b.bound_workspace.as_str(),
             ),
             auto_fixable: false,
@@ -552,7 +593,13 @@ fn build_suggested_fixes(
                          Tome refuses to overwrite without explicit force",
                         hm.harness,
                     ),
-                    command: "tome harness sync --force".to_owned(),
+                    // Two paths offered: the harness-scoped explicit
+                    // sync (`tome harness sync --force`) and the
+                    // doctor-scoped override (`tome doctor --fix
+                    // --force`). The doctor flow lets `--fix --force`
+                    // run an end-to-end repair pass in one invocation.
+                    command: "tome doctor --fix --force  # or: tome harness sync --force"
+                        .to_owned(),
                     auto_fixable: false,
                 });
             }
