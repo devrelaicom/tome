@@ -232,3 +232,70 @@ fn preserve_file_mode_on_mcp_config_rewrite() {
         "original mode 0o644 must survive the rewrite; got 0o{actual:o}",
     );
 }
+
+// ---- S-M7: home_root validates $HOME ------------------------------------
+//
+// `paths::home_root` (and the harness-detect mirror at
+// `commands::harness::home_root`) used to be bare `var_os("HOME") |>
+// PathBuf::from`. A user mis-setting `HOME=`, `HOME=relative`, or
+// shell-substituted-with-empty `HOME=$DOESNOTEXIST` would silently land
+// Tome state in cwd. PR-E S-M7 adds explicit validation that surfaces
+// these cases as `TomeError::Usage` (exit 2).
+//
+// These tests share the project-wide `HOME_MUTEX` to serialise the
+// env-mutation surface. The legacy paths_phase{2,3}.rs harnesses had
+// their own per-file ENV_LOCK + unsafe EnvGuard which the T-M8 commit
+// collapses into the shared `HomeGuard`.
+
+mod common;
+
+use common::HomeGuard;
+
+#[test]
+fn home_root_refuses_unset_home() {
+    let lock = common::HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    // Cannot use HomeGuard here — HomeGuard always sets a non-empty
+    // value. Snapshot + unset + restore manually under the same mutex.
+    let previous = std::env::var_os("HOME");
+    // SAFETY: holding HOME_MUTEX for the duration.
+    unsafe { std::env::remove_var("HOME") };
+
+    let err = tome::paths::home_root().unwrap_err();
+    match err {
+        TomeError::Usage(msg) => assert!(msg.contains("HOME is not set"), "got: {msg}"),
+        other => panic!("expected Usage, got {other:?}"),
+    }
+
+    // SAFETY: holding HOME_MUTEX for the duration.
+    unsafe {
+        match previous {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+    drop(lock);
+}
+
+#[test]
+fn home_root_refuses_relative_home() {
+    let _guard = HomeGuard::install(std::path::Path::new("relative/path"));
+    let err = tome::paths::home_root().unwrap_err();
+    match err {
+        TomeError::Usage(msg) => {
+            assert!(msg.contains("not an absolute path"), "got: {msg}");
+        }
+        other => panic!("expected Usage, got {other:?}"),
+    }
+}
+
+#[test]
+fn home_root_accepts_nonexistent_absolute_home() {
+    // PR-E intentionally does NOT canonicalize — fresh-user setups
+    // must work, and the directory is created on demand.
+    let _guard = HomeGuard::install(std::path::Path::new("/tmp/tome-pr-e-fake-home-xyz"));
+    let resolved = tome::paths::home_root().expect("absolute path accepted even when absent");
+    assert_eq!(
+        resolved,
+        std::path::PathBuf::from("/tmp/tome-pr-e-fake-home-xyz/.tome")
+    );
+}

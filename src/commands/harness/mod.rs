@@ -190,12 +190,28 @@ impl ScopeProvider for CentralDbScopeProvider<'_> {
 
 /// Resolve `$HOME` for harness-detect calls. Centralised so subcommands
 /// don't sprinkle `std::env::var_os("HOME")` calls.
+///
+/// PR-E S-M7 mirrors the validation discipline in
+/// [`crate::paths::home_root`]: refuse empty / non-absolute values up
+/// front. Harness detection probes well-known dirs like
+/// `<home>/.claude/` — a relative `$HOME` would resolve into the cwd,
+/// surfacing spurious "claude-code detected" verdicts on the user's
+/// current project directory rather than against their per-user state.
 pub(crate) fn home_root() -> Result<std::path::PathBuf, TomeError> {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| {
-            TomeError::Io(std::io::Error::other(
-                "HOME is not set — cannot probe harness detection paths",
-            ))
-        })
+    let home_os = std::env::var_os("HOME").ok_or_else(|| {
+        TomeError::Usage("$HOME is not set — cannot probe harness detection paths".to_string())
+    })?;
+    if home_os.is_empty() {
+        return Err(TomeError::Usage(
+            "$HOME is set to an empty string — cannot probe harness detection paths".to_string(),
+        ));
+    }
+    let home = std::path::PathBuf::from(home_os);
+    if !home.is_absolute() {
+        return Err(TomeError::Usage(format!(
+            "$HOME is not an absolute path: {}",
+            home.display()
+        )));
+    }
+    Ok(home)
 }

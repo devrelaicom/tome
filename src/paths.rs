@@ -36,14 +36,36 @@ use crate::workspace::name::WorkspaceName;
 
 /// Resolve `<home>/.tome/`. Inspects `$HOME` directly per research §R-1.
 ///
-/// Errors with [`TomeError::Io`] if `$HOME` is unset — the same shape
-/// Phase 1/2/3 used for the equivalent resolver failure.
+/// Validates that `$HOME` is set and (if non-empty) parses as an
+/// absolute path. PR-E S-M7 hardens this past the bare-env-var pattern
+/// so a developer mis-setting `HOME=~/foo` or `HOME=relative` surfaces
+/// as a recognisable error rather than landing Tome state in the cwd.
+///
+/// We deliberately do NOT canonicalise (which would require the path
+/// to exist on disk) — fresh-user setups must work, and the directory
+/// is created on demand by the first write.
+///
+/// # Errors
+///
+/// - [`TomeError::Usage`] (exit 2) when `$HOME` is unset, empty, or
+///   non-absolute. These are user-environment misconfigurations, not
+///   filesystem failures.
 pub fn home_root() -> Result<PathBuf, TomeError> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
-        TomeError::Io(std::io::Error::other(
-            "HOME is not set — cannot resolve the Tome root directory",
-        ))
+    let home_os = std::env::var_os("HOME").ok_or_else(|| {
+        TomeError::Usage("$HOME is not set — cannot resolve the Tome root directory".to_string())
     })?;
+    if home_os.is_empty() {
+        return Err(TomeError::Usage(
+            "$HOME is set to an empty string — cannot resolve the Tome root directory".to_string(),
+        ));
+    }
+    let home = PathBuf::from(home_os);
+    if !home.is_absolute() {
+        return Err(TomeError::Usage(format!(
+            "$HOME is not an absolute path: {}",
+            home.display()
+        )));
+    }
     Ok(home.join(".tome"))
 }
 
