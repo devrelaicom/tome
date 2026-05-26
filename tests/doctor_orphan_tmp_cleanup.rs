@@ -147,3 +147,56 @@ fn cleanup_is_silent_when_workspaces_dir_absent() {
     let removed = cleanup_stale_staging_dirs(&paths).unwrap();
     assert_eq!(removed, 0);
 }
+
+// ---------------------------------------------------------------------------
+// PR-E S-M6: symlink refusal during the sweep walk.
+// ---------------------------------------------------------------------------
+
+/// A hostile catalog or developer might plant a symlink at
+/// `<workspaces>/.tome.tmp.evil` pointing at a sensitive directory. The
+/// sweep walks `read_dir` + `metadata()` (follows symlinks) +
+/// `remove_dir_all`; without explicit refusal it would recursively
+/// delete through the link. The fix mirrors
+/// `mcp/tools/get_skill.rs::walk_dir`: inspect `entry.file_type()`
+/// (which does NOT follow symlinks) and skip symlinked entries before
+/// any further inspection.
+#[cfg(unix)]
+#[test]
+fn refuses_planted_symlink_during_sweep() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.workspaces_dir).unwrap();
+
+    // Sensitive directory that must remain untouched.
+    let payload_dir = env.home_path().join("sensitive");
+    std::fs::create_dir(&payload_dir).unwrap();
+    std::fs::write(payload_dir.join("secret.txt"), b"keep me").unwrap();
+
+    // Plant a symlink at `<workspaces_dir>/.tome.tmp.evil` -> sensitive/.
+    let evil = paths.workspaces_dir.join(format!("{STAGING_PREFIX}evil"));
+    std::os::unix::fs::symlink(&payload_dir, &evil).unwrap();
+    // Backdate so even if we WERE willing to recurse, the age gate
+    // wouldn't be the thing protecting us. The defence under test is
+    // the symlink refusal itself.
+    backdate(&evil, STAGING_AGE_GATE + Duration::from_secs(60));
+
+    let removed = cleanup_stale_staging_dirs(&paths).unwrap();
+    assert_eq!(removed, 0, "must refuse symlinks");
+
+    // Symlink + payload undisturbed.
+    assert!(
+        std::fs::symlink_metadata(&evil)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "planted symlink must remain in place"
+    );
+    assert!(
+        payload_dir.join("secret.txt").is_file(),
+        "sensitive payload must not be touched"
+    );
+    assert_eq!(
+        std::fs::read(payload_dir.join("secret.txt")).unwrap(),
+        b"keep me".to_vec()
+    );
+}
