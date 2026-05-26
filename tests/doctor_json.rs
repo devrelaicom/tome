@@ -73,10 +73,10 @@ fn doctor_json_shape_is_pinned_on_healthy_install() {
     assert!(v["harnesses"].is_array());
 
     // Harnesses array contains every known name in fixed order; first
-    // entry is claude_code per the contract example.
+    // entry is claude-code per the contract example.
     let harnesses = v["harnesses"].as_array().unwrap();
     assert_eq!(harnesses.len(), 6);
-    assert_eq!(harnesses[0]["name"], "claude_code");
+    assert_eq!(harnesses[0]["name"], "claude-code");
     for h in harnesses {
         for field in ["name", "path", "present"] {
             assert!(h.get(field).is_some(), "harness.{field} missing");

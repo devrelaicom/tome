@@ -142,7 +142,7 @@ fn rename_zero_bound_projects_happy_path() {
     let paths = lifecycle_paths(tmp.path());
     std::fs::create_dir_all(&paths.root).unwrap();
     let outcome_init = workspace::init::init(parse("mine"), false, &paths).expect("init");
-    let old_dir = outcome_init.workspace_dir.clone();
+    let old_dir = outcome_init.path.clone();
 
     let outcome = workspace::rename::rename(parse("mine"), parse("yours"), &paths).expect("rename");
     assert_eq!(outcome.old_name.as_str(), "mine");

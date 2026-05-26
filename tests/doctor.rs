@@ -339,7 +339,7 @@ fn harness_detection_finds_existing_directories() {
         .iter()
         .map(|h| (h.name.as_str(), h))
         .collect();
-    assert!(by_name["claude_code"].present);
+    assert!(by_name["claude-code"].present);
     assert!(by_name["cursor"].present);
     assert!(!by_name["codex"].present);
     assert!(!by_name["gemini"].present);

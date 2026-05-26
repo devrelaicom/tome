@@ -1,7 +1,11 @@
-//! T-M1: byte-stable JSON wire-shape pin for
+//! Byte-stable JSON wire-shape pin for
 //! [`tome::workspace::InitOutcome`]. Constructs the struct via a literal
 //! with known fields and asserts the exact `serde_json::to_string`
 //! bytes. Catches accidental field-order / rename changes.
+//!
+//! Wire shape is pinned by `contracts/workspace-commands.md` §
+//! `tome workspace init`. Fields: `name`, `path`, `catalogs_inherited`,
+//! `id` (in that order).
 
 use std::path::PathBuf;
 use tome::workspace::{InitOutcome, WorkspaceName};
@@ -11,13 +15,14 @@ use tome::workspace::{InitOutcome, WorkspaceName};
 fn init_outcome_json_wire_shape_is_byte_stable_unix() {
     let outcome = InitOutcome {
         name: WorkspaceName::parse("my-ws").unwrap(),
-        workspace_dir: PathBuf::from("/tmp/tome/workspaces/my-ws"),
-        inherited_catalogs: 3,
+        path: PathBuf::from("/tmp/tome/workspaces/my-ws"),
+        catalogs_inherited: 3,
+        id: 7,
     };
     let json = serde_json::to_string(&outcome).expect("serialise");
     assert_eq!(
         json,
-        r#"{"name":"my-ws","workspace_dir":"/tmp/tome/workspaces/my-ws","inherited_catalogs":3}"#,
+        r#"{"name":"my-ws","path":"/tmp/tome/workspaces/my-ws","catalogs_inherited":3,"id":7}"#,
     );
 }
 
@@ -28,20 +33,24 @@ fn init_outcome_json_field_order_is_pinned() {
     // the emitted JSON.
     let outcome = InitOutcome {
         name: WorkspaceName::parse("x").unwrap(),
-        workspace_dir: PathBuf::from("x"),
-        inherited_catalogs: 0,
+        path: PathBuf::from("x"),
+        catalogs_inherited: 0,
+        id: 1,
     };
     let json = serde_json::to_string(&outcome).expect("serialise");
     let name_idx = json.find("\"name\"").expect("name field present");
-    let dir_idx = json
-        .find("\"workspace_dir\"")
-        .expect("workspace_dir present");
+    let path_idx = json.find("\"path\"").expect("path present");
     let inherited_idx = json
-        .find("\"inherited_catalogs\"")
-        .expect("inherited_catalogs present");
-    assert!(name_idx < dir_idx, "name must come before workspace_dir");
+        .find("\"catalogs_inherited\"")
+        .expect("catalogs_inherited present");
+    let id_idx = json.find("\"id\"").expect("id present");
+    assert!(name_idx < path_idx, "name must come before path");
     assert!(
-        dir_idx < inherited_idx,
-        "workspace_dir must come before inherited_catalogs",
+        path_idx < inherited_idx,
+        "path must come before catalogs_inherited",
+    );
+    assert!(
+        inherited_idx < id_idx,
+        "catalogs_inherited must come before id",
     );
 }

@@ -174,6 +174,6 @@ Forces regeneration of a workspace's cached summaries.
 6. Rewrite `<root>/workspaces/<name>/RULES.md` from the long summary.
 7. Run `tome workspace sync <name>` automatically.
 
-**Failure modes**: summariser model missing / failed → exit 20; underlying I/O failure → exit 7.
+**Failure modes**: summariser model missing / failed → exit 24; underlying I/O failure → exit 7.
 
 The Phase 3 forward-progress rule (FR-385) does NOT apply here — `regen-summary` is the explicit summarisation command; if it fails, the failure is the result, not a side effect.

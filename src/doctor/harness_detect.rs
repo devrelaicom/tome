@@ -20,7 +20,7 @@ use crate::doctor::report::HarnessPresence;
 ///
 /// Order matches the contract's listing.
 pub const KNOWN_HARNESSES: &[(&str, &str)] = &[
-    ("claude_code", ".claude"),
+    ("claude-code", ".claude"),
     ("codex", ".codex"),
     ("cursor", ".cursor"),
     ("gemini", ".gemini"),
@@ -68,7 +68,7 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(".cursor")).unwrap();
 
         let result = probe(tmp.path());
-        let claude = result.iter().find(|h| h.name == "claude_code").unwrap();
+        let claude = result.iter().find(|h| h.name == "claude-code").unwrap();
         assert!(claude.present);
         let cursor = result.iter().find(|h| h.name == "cursor").unwrap();
         assert!(cursor.present);
@@ -83,7 +83,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join(".claude"), b"not a harness").unwrap();
         let result = probe(tmp.path());
-        let claude = result.iter().find(|h| h.name == "claude_code").unwrap();
+        let claude = result.iter().find(|h| h.name == "claude-code").unwrap();
         assert!(!claude.present, "regular file should not count as harness");
     }
 }
