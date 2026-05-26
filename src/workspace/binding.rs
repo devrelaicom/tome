@@ -169,30 +169,8 @@ pub fn bind_project(
     )?;
 
     // Step 4a: resolve workspace_id for the named workspace.
-    let workspace_id: i64 = match conn
-        .query_row(
-            "SELECT id FROM workspaces WHERE name = ?1",
-            rusqlite::params![name.as_str()],
-            |row| row.get(0),
-        )
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(other),
-        }) {
-        Ok(Some(id)) => id,
-        Ok(None) => {
-            return Err(TomeError::WorkspaceNotFound {
-                name: name.as_str().to_owned(),
-            });
-        }
-        Err(e) => {
-            return Err(TomeError::IndexIntegrityCheckFailure(format!(
-                "lookup workspace `{}`: {e}",
-                name.as_str()
-            )));
-        }
-    };
+    // Polish R-M7: route through the consolidated helper.
+    let workspace_id: i64 = crate::index::workspaces::resolve_id_required(&conn, &name)?;
 
     // Step 4b: capture the prior binding (if any) so we can report
     // rebind_from in the outcome.

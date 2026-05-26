@@ -43,9 +43,7 @@ use crate::harness::{
     with_effective_modules,
 };
 use crate::paths::Paths;
-use crate::settings::{
-    self, GlobalSettings, ProjectMarkerConfig, WorkspaceSettings, resolve_effective_list,
-};
+use crate::settings::{self, GlobalSettings, WorkspaceSettings, resolve_effective_list};
 use crate::workspace::WorkspaceName;
 
 // =====================================================================
@@ -368,16 +366,13 @@ where
 // Settings reads
 // =====================================================================
 
-fn read_project_marker(marker_path: &Path) -> Result<ProjectMarkerConfig, TomeError> {
-    let body = std::fs::read_to_string(marker_path).map_err(|e| TomeError::WorkspaceMalformed {
-        path: marker_path.to_path_buf(),
-        reason: format!("read project marker: {e}"),
-    })?;
-    settings::parser::parse_project_marker(&body).map_err(|e| TomeError::WorkspaceMalformed {
-        path: marker_path.to_path_buf(),
-        reason: format!("parse project marker: {e}"),
-    })
-}
+// Polish R-M5: project-marker reader consolidated to
+// `settings::parser::read_project_marker`. The local wrapper used to
+// map both IO and parse failures to `WorkspaceMalformed`; the canonical
+// helper now splits IO -> `TomeError::Io` (exit 7) vs parse ->
+// `WorkspaceMalformed` (exit 70), which is the semantically accurate
+// classification.
+use crate::settings::parser::read_project_marker;
 
 fn read_workspace_settings(deps: &SyncDeps<'_>) -> Result<Option<WorkspaceSettings>, TomeError> {
     let path = deps.paths.workspace_settings_file(deps.workspace_name);

@@ -638,8 +638,8 @@ pub struct DoctorReport {
     pub drift: SubsystemHealth,
     pub catalogs: Vec<(String, SubsystemHealth)>,
     pub effective_harness_list: Option<EffectiveHarnessList>,  // NEW; None when outside any project
-    pub harness_rules: Vec<(String, SubsystemHealth)>,         // NEW; per harness in effective list
-    pub harness_mcp: Vec<(String, SubsystemHealth)>,           // NEW
+    pub harness_rules: Vec<HarnessSubsystemReport>,            // NEW; per harness in effective list
+    pub harness_mcp: Vec<HarnessSubsystemReport>,              // NEW
     pub detected_uninstalled_harnesses: Vec<String>,           // NEW; supported harnesses present on machine but not in effective list
     pub suggested_fixes: Vec<SuggestedFix>,
     pub overall: DoctorClassification,
@@ -655,7 +655,17 @@ pub struct ProjectBindingState {
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum RulesCopyState { Match, Missing, Drift }
+pub enum RulesCopyState { Match, Missing, Drift, SourceMissing }
+
+/// Per-harness subsystem health entry inside `harness_rules` /
+/// `harness_mcp`. Named-fields struct so JSON consumers see
+/// `{"harness": "claude-code", "health": "ok"}` instead of a tuple
+/// array.
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessSubsystemReport {
+    pub harness: String,
+    pub health: SubsystemHealth,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SuggestedFix {

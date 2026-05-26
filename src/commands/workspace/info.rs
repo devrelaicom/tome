@@ -146,23 +146,8 @@ fn compute_info(
 
     // Membership check: a named workspace must have a row. The
     // privileged `global` workspace is seeded on bootstrap.
-    let workspace_id: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM workspaces WHERE name = ?1",
-            rusqlite::params![name.as_str()],
-            |row| row.get(0),
-        )
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(other),
-        })
-        .map_err(|e| {
-            TomeError::IndexIntegrityCheckFailure(format!(
-                "lookup workspace `{}`: {e}",
-                name.as_str()
-            ))
-        })?;
+    // Polish R-M7: route through the consolidated helper.
+    let workspace_id: Option<i64> = crate::index::workspaces::resolve_id_optional(&conn, name)?;
     let Some(workspace_id) = workspace_id else {
         // The privileged `global` workspace is seeded on bootstrap. If
         // the DB is v2-shaped but somehow missing the `global` row,

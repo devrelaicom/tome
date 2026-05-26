@@ -18,6 +18,7 @@ pub mod schema;
 pub mod skills;
 pub mod vec_ext;
 pub mod workspace_catalogs;
+pub mod workspaces;
 
 pub use db::{OpenOptions, open, open_read_only};
 pub use lock::{LockGuard, acquire as acquire_lock};

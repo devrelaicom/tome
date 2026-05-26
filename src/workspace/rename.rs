@@ -91,12 +91,13 @@ pub fn rename(
         });
     }
     if old == new {
-        // Trivial no-op rename; surface as a usage error so the caller
-        // notices the typo rather than us silently doing nothing.
-        return Err(TomeError::Usage(format!(
-            "workspace rename: `<old>` and `<new>` are the same name (`{}`)",
-            old.as_str(),
-        )));
+        // Trivial no-op rename — surface as a workspace-name error so
+        // the failure routes through the workspace-class exit code (15)
+        // rather than the generic usage code (2). Polish R-M12.
+        return Err(TomeError::WorkspaceNameInvalid {
+            name: new.as_str().to_owned(),
+            reason: "rename old and new names are identical (no-op)".to_owned(),
+        });
     }
 
     if let Some(parent) = paths.index_lock.parent()
@@ -118,40 +119,11 @@ pub fn rename(
     )?;
 
     // Membership: `<old>` must exist.
-    let old_id: i64 = conn
-        .query_row(
-            "SELECT id FROM workspaces WHERE name = ?1",
-            rusqlite::params![old.as_str()],
-            |row| row.get(0),
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => TomeError::WorkspaceNotFound {
-                name: old.as_str().to_owned(),
-            },
-            other => TomeError::IndexIntegrityCheckFailure(format!(
-                "lookup workspace `{}`: {other}",
-                old.as_str()
-            )),
-        })?;
+    // Polish R-M7: route through the consolidated helper.
+    let old_id: i64 = crate::index::workspaces::resolve_id_required(&conn, &old)?;
 
     // Refusal: `<new>` must not exist.
-    let new_exists: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM workspaces WHERE name = ?1",
-            rusqlite::params![new.as_str()],
-            |row| row.get(0),
-        )
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(other),
-        })
-        .map_err(|e| {
-            TomeError::IndexIntegrityCheckFailure(format!(
-                "lookup workspace `{}`: {e}",
-                new.as_str()
-            ))
-        })?;
+    let new_exists: Option<i64> = crate::index::workspaces::resolve_id_optional(&conn, &new)?;
     if new_exists.is_some() {
         return Err(TomeError::WorkspaceAlreadyExists {
             name: new.as_str().to_owned(),

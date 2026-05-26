@@ -103,24 +103,8 @@ pub fn sync_one(name: &WorkspaceName, paths: &Paths) -> Result<WorkspaceSyncOutc
     let conn = index::open_read_only(&paths.index_db)?;
 
     // Membership check: a missing workspace row → nothing to sync.
-    let workspace_id: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM workspaces WHERE name = ?1",
-            rusqlite::params![name.as_str()],
-            |row| row.get(0),
-        )
-        .map(Some)
-        .or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            other => Err(other),
-        })
-        .map_err(|e| {
-            TomeError::IndexIntegrityCheckFailure(format!(
-                "workspace sync: lookup workspace `{}`: {e}",
-                name.as_str(),
-            ))
-        })?;
-    let Some(workspace_id) = workspace_id else {
+    // Polish R-M7: route through the consolidated helper.
+    let Some(workspace_id) = crate::index::workspaces::resolve_id_optional(&conn, name)? else {
         return Ok(outcome);
     };
 

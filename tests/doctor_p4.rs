@@ -107,6 +107,66 @@ fn binding_marker_malformed_classifies_unhealthy() {
     );
 }
 
+/// Polish C-M12: `Binding`-broken emits TWO `SuggestedFix` entries
+/// (one per executable remediation command) rather than one entry
+/// with a compound prose `command` string. JSON consumers parsing the
+/// `command` field as one runnable shell line need this split.
+#[test]
+fn binding_broken_emits_two_split_suggested_fixes_each_with_single_command() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_all_registry_models(&paths);
+    let home = empty_home();
+
+    let project_tmp = TempDir::new().unwrap();
+    let project_root = project_tmp.path().to_path_buf();
+    std::fs::create_dir_all(project_root.join(".tome")).unwrap();
+    std::fs::write(project_root.join(".tome/config.toml"), "extra = 1\n").unwrap();
+
+    let scope = project_scope(project_root, "alpha");
+    let report = doctor::assemble_report(&scope, &paths, home.path(), false).unwrap();
+
+    let binding_fixes: Vec<_> = report
+        .suggested_fixes
+        .iter()
+        .filter(|f| f.subsystem == Subsystem::Binding)
+        .collect();
+    assert_eq!(
+        binding_fixes.len(),
+        2,
+        "expected exactly 2 Binding fixes (rebind + recreate); got {:#?}",
+        binding_fixes,
+    );
+    for f in &binding_fixes {
+        assert!(!f.auto_fixable, "binding fixes must be manual");
+        // Each `command` line is a single executable invocation, not
+        // a compound "X, or Y" string. We check there is no embedded
+        // ", or " separator (C-M12 regression marker).
+        assert!(
+            !f.command.contains(", or "),
+            "C-M12: command should be one executable line, not compound: {:?}",
+            f.command,
+        );
+    }
+    // The two fixes cover the two remediation paths: rebind to an
+    // existing workspace, OR recreate the named workspace via init.
+    assert!(
+        binding_fixes
+            .iter()
+            .any(|f| f.command.starts_with("tome workspace use")),
+        "expected one rebind suggestion, got: {:#?}",
+        binding_fixes,
+    );
+    assert!(
+        binding_fixes
+            .iter()
+            .any(|f| f.command.starts_with("tome workspace init")),
+        "expected one recreate suggestion, got: {:#?}",
+        binding_fixes,
+    );
+}
+
 #[test]
 fn binding_rules_copy_drift_classifies_degraded() {
     let env = ToolEnv::new();

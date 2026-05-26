@@ -283,18 +283,19 @@ pub fn resolve_catalog_path(
 /// seeded by US2 (`tome workspace add`). A miss here means the resolver
 /// produced a name that doesn't exist in the central DB — typically a
 /// stale `--workspace` flag or an orphaned project marker.
+///
+/// Polish R-M7: kept as an `&str`-accepting thin wrapper over the
+/// consolidated [`crate::index::workspaces::resolve_id_required`]
+/// helper. The `&str` boundary survives here because every public
+/// function in this module accepts `workspace_name: &str` for
+/// historical reasons; changing the signature would ripple through 4
+/// public APIs and a dozen call sites. The wrapper centralises the
+/// SQL and error mapping while preserving the `&str` legacy.
 fn lookup_workspace_id(conn: &Connection, workspace_name: &str) -> Result<i64, TomeError> {
-    conn.query_row(
-        "SELECT id FROM workspaces WHERE name = ?1",
-        params![workspace_name],
-        |row| row.get::<_, i64>(0),
-    )
-    .map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => TomeError::WorkspaceNotFound {
-            name: workspace_name.to_owned(),
-        },
-        other => TomeError::IndexIntegrityCheckFailure(format!(
-            "lookup workspace_id `{workspace_name}`: {other}"
-        )),
-    })
+    use crate::workspace::WorkspaceName;
+    // Workspace names in the DB are seeded via `WorkspaceName::parse`,
+    // so re-parsing here should always succeed. The `parse` round-trip
+    // also lets the consolidated helper own the SQL + error mapping.
+    let name = WorkspaceName::parse(workspace_name)?;
+    crate::index::workspaces::resolve_id_required(conn, &name)
 }

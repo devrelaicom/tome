@@ -98,7 +98,7 @@ pub fn run(
                 mcp_format: m.mcp_config_format(),
                 mcp_parent_key: m.mcp_parent_key(),
                 detected: m.detect(&home),
-                detected_path: home.join(format!(".{}", m.name())),
+                detected_path: m.detect_path(&home),
                 rules_target: project_root.as_deref().map(|p| m.rules_file_target(p)),
                 mcp_target: project_root.as_deref().map(|p| m.mcp_config_path(p, &home)),
                 block_body_style: m.block_body_style(),
