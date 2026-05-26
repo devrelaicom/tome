@@ -429,13 +429,9 @@ fn build_substitution_context(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| entry_dir.clone());
 
-    let plugin_data_dir = state
-        .paths
-        .plugin_data_dir_for(&input.catalog, &input.plugin);
-    let workspace_data_dir =
-        state
-            .paths
-            .workspace_data_dir_for(workspace_name, &input.catalog, &input.plugin);
+    // Plugin / workspace data-dir paths are no longer threaded through
+    // the builder (US2.d R-M2): the substitution layer derives them
+    // on-demand from `paths` + names via `data_dir::ensure_*`.
 
     SubstitutionContext::builder()
         .catalog_name(input.catalog.clone())
@@ -445,9 +441,7 @@ fn build_substitution_context(
         .entry_path(skill_path.to_path_buf())
         .entry_dir(entry_dir)
         .plugin_root_dir(plugin_root_dir)
-        .plugin_data_dir(plugin_data_dir)
         .workspace_name(workspace_name.as_str().to_owned())
-        .workspace_data_dir(workspace_data_dir)
         .clock(substitution::current_clock())
         .args(None)
         .declared_args(Vec::new())

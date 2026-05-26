@@ -251,9 +251,9 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 - [x] T225 [US2] Extend `src/mcp/tools/get_skill.rs` to invoke `substitution::render()` on the returned body when ANY substitution applies (built-ins + env always; args from US3) per FR-101 (use devs:rust-dev agent)
 - [x] T226 [US2] Create `tests/substitution_pipeline.rs` with tests verifying stage ordering invariant (built-ins → env, no re-scan), and `mcp_prompts_get_runs_builtins_and_env` end-to-end (use devs:rust-dev agent)
 - [x] T227 [GIT] Commit: `feat(mcp): get_skill + prompts/get invoke substitution (builtins + env)`
-- [ ] T228 [US2] Dispatch 4 reviewer agents in parallel for US2 with per-scope briefs writing to `/tmp/tome-phase5-us2-*.md`
-- [ ] T229 [US2] Consolidate reviewer findings + write disposition; apply blockers + selected majors
-- [ ] T230 [GIT] Commit: `fix(phase5/us2): reviewer-pass blockers and selected majors`
+- [x] T228 [US2] Dispatch 4 reviewer agents in parallel for US2 with per-scope briefs writing to `/tmp/tome-phase5-us2-*.md`
+- [x] T229 [US2] Consolidate reviewer findings + write disposition; apply blockers + selected majors
+- [x] T230 [GIT] Commit: `fix(phase5/us2): reviewer-pass blockers and selected majors`
 - [ ] T231 [US2] Run `/sdd:map incremental` to refresh `.sdd/codebase/` against US2 changes
 - [ ] T232 [US2] Review `retro/P4.md` and extract critical learnings to CLAUDE.md (conservative)
 - [ ] T233 [GIT] Commit: `docs: refresh codebase docs + finalize phase 4 retro`

@@ -99,9 +99,7 @@ fn ctx_builder(home: &std::path::Path) -> SubstitutionContextBuilder {
         .entry_path(PathBuf::from("/plugins/x/skills/hello/SKILL.md"))
         .entry_dir(PathBuf::from("/plugins/x/skills/hello"))
         .plugin_root_dir(PathBuf::from("/plugins/x"))
-        .plugin_data_dir(PathBuf::from("/plugins/x/plugin-data"))
         .workspace_name("global")
-        .workspace_data_dir(PathBuf::from("/workspaces/global/plugin-data"))
         .clock(OffsetDateTime::UNIX_EPOCH)
         .paths(paths)
 }
@@ -246,4 +244,117 @@ fn body_with_no_env_references_is_unchanged_by_stage_2() {
     let _w = WorkspaceDataDirGuard::install(tmp.path().join("wd"));
     let out = substitution::render("plain=${TOME_SKILL_NAME}", &ctx(tmp.path())).unwrap();
     assert_eq!(out, "plain=hello");
+}
+
+// --- No-rescan invariant (NFR-007 / FR-051) ------------------------------
+//
+// These tests pin the structural fix from US2.d B2: a value resolved by
+// the Stage 1 (built-ins) branch that HAPPENS to contain
+// `${TOME_ENV_*}` syntax is emitted verbatim into the output buffer and
+// is NEVER re-scanned by the Stage 2 (env) branch. This closes the
+// exfiltration vector where a hostile plugin author writes
+// `"version": "${TOME_ENV_GITHUB_TOKEN}"` in plugin.json (lenient
+// parser; the manifest is third-party-owned) and any skill body
+// referencing `${TOME_PLUGIN_VERSION}` would otherwise leak the
+// operator's `TOME_ENV_GITHUB_TOKEN` host env var into the LLM context.
+//
+// The combined-regex single-sweep implementation (`substitution::render`
+// after US2.d) makes the invariant structurally true rather than
+// relying on stage-ordering documentation: there is no Stage 2 pass
+// over the Stage 1 output to re-scan.
+
+#[test]
+fn stage_1_substituted_value_containing_tome_env_syntax_is_not_rescanned_by_stage_2() {
+    // Setup: ctx.plugin_version is the literal text "${TOME_ENV_LEAKED}".
+    // TOME_ENV_LEAKED is set in the host env to "SECRET".
+    //
+    // Render: "Version: ${TOME_PLUGIN_VERSION}" — Stage 1 resolves
+    // `${TOME_PLUGIN_VERSION}` to the literal "${TOME_ENV_LEAKED}".
+    //
+    // Expectation: the output is "Version: ${TOME_ENV_LEAKED}" verbatim
+    // — NOT "Version: SECRET". If a Stage 2 pass re-scanned the
+    // resolved value, "SECRET" would leak.
+    let _lock = lock_env();
+    let _guard = EnvVarGuard::set("TOME_ENV_LEAKED", "SECRET");
+    let tmp = tempfile::tempdir().unwrap();
+    let _p = PluginDataDirGuard::install(tmp.path().join("pd"));
+    let _w = WorkspaceDataDirGuard::install(tmp.path().join("wd"));
+
+    let ctx = ctx_builder(tmp.path())
+        .plugin_version("${TOME_ENV_LEAKED}")
+        .build()
+        .expect("builder");
+
+    let out = substitution::render("Version: ${TOME_PLUGIN_VERSION}", &ctx).unwrap();
+    assert_eq!(
+        out, "Version: ${TOME_ENV_LEAKED}",
+        "no-rescan invariant violated: Stage 1 output was re-scanned by Stage 2 — \
+         this is the exfiltration vector closed by US2.d B2",
+    );
+    assert!(
+        !out.contains("SECRET"),
+        "TOME_ENV_LEAKED leaked into output: {out:?}",
+    );
+}
+
+#[test]
+fn stage_1_skill_name_containing_tome_env_syntax_is_not_rescanned() {
+    // Mirror of the previous test against a different Stage 1 built-in
+    // (entry_name → ${TOME_SKILL_NAME}) — same invariant.
+    let _lock = lock_env();
+    let _guard = EnvVarGuard::set("TOME_ENV_HIDDEN", "exfil-target");
+    let tmp = tempfile::tempdir().unwrap();
+    let _p = PluginDataDirGuard::install(tmp.path().join("pd"));
+    let _w = WorkspaceDataDirGuard::install(tmp.path().join("wd"));
+
+    let ctx = ctx_builder(tmp.path())
+        .entry_name("${TOME_ENV_HIDDEN}")
+        .build()
+        .expect("builder");
+
+    let out = substitution::render("Skill is ${TOME_SKILL_NAME}", &ctx).unwrap();
+    assert_eq!(out, "Skill is ${TOME_ENV_HIDDEN}");
+    assert!(
+        !out.contains("exfil-target"),
+        "TOME_ENV_HIDDEN leaked into output: {out:?}",
+    );
+}
+
+#[test]
+fn stage_2_default_containing_builtin_syntax_is_not_rescanned() {
+    // A `${TOME_ENV_FOO:-${TOME_SKILL_NAME}}` reference is a single
+    // regex match — the default capture group is the literal text
+    // `${TOME_SKILL_NAME}`. The env branch resolves the value to that
+    // literal default; it is NOT re-scanned by Stage 1.
+    //
+    // This is the dual of the previous tests: text emitted by the Stage
+    // 2 branch must not be re-scanned by Stage 1 either. The
+    // single-sweep design makes both directions of the invariant true
+    // by construction.
+    let _lock = lock_env();
+    let _guard = EnvVarGuard::unset("TOME_ENV_DEFAULT_RESCAN_PROBE");
+    let tmp = tempfile::tempdir().unwrap();
+    let _p = PluginDataDirGuard::install(tmp.path().join("pd"));
+    let _w = WorkspaceDataDirGuard::install(tmp.path().join("wd"));
+
+    // NB: regex pattern uses `(?::-(.*?))?` (lazy), so the inner `}`
+    // closes the OUTER reference: the default text is
+    // "${TOME_SKILL_NAME" (without the closing `}`). That's a textual
+    // peculiarity of the contract pattern, not a no-rescan violation —
+    // what matters here is that NO part of the resolved-default text
+    // gets sent back through the scanner to resolve `TOME_SKILL_NAME`
+    // against the context's `entry_name` ("hello").
+    let body = "X=${TOME_ENV_DEFAULT_RESCAN_PROBE:-${TOME_SKILL_NAME}}";
+    let out = substitution::render(body, &ctx(tmp.path())).unwrap();
+    // The trailing `}` after the lazy default match is preserved
+    // verbatim; the literal `${TOME_SKILL_NAME` text is NOT resolved
+    // against the context.
+    assert!(
+        out.contains("${TOME_SKILL_NAME"),
+        "Stage 2 default text was re-scanned by Stage 1: {out:?}",
+    );
+    assert!(
+        !out.contains("=hello"),
+        "context entry_name leaked through Stage 2 default text: {out:?}",
+    );
 }

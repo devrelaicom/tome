@@ -109,9 +109,7 @@ fn ctx_builder(home: &Path) -> SubstitutionContextBuilder {
         .entry_path(PathBuf::from("/plugins/x/skills/hello/SKILL.md"))
         .entry_dir(PathBuf::from("/plugins/x/skills/hello"))
         .plugin_root_dir(PathBuf::from("/plugins/x"))
-        .plugin_data_dir(PathBuf::from("/plugins/x/plugin-data"))
         .workspace_name("global")
-        .workspace_data_dir(PathBuf::from("/workspaces/global/plugin-data"))
         .clock(time::OffsetDateTime::UNIX_EPOCH)
         .paths(paths)
 }

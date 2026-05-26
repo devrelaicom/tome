@@ -20,6 +20,11 @@ use super::SubstitutionError;
 /// when caller-supplied args were not consumed by the body.
 pub struct SubstitutionContext {
     // Built-in values (R-9 paths anchored under <home>/.tome/)
+    //
+    // Plugin / workspace data-dir paths are NOT carried as struct
+    // fields — they're derived lazily from `paths` + `catalog_name` +
+    // `plugin_name` (+ `workspace_name`) via the `data_dir::ensure_*`
+    // helpers during substitution. Dropped in US2.d R-M2.
     pub catalog_name: String,
     pub plugin_name: String,
     pub plugin_version: String,
@@ -27,9 +32,7 @@ pub struct SubstitutionContext {
     pub entry_path: PathBuf,
     pub entry_dir: PathBuf,
     pub plugin_root_dir: PathBuf,
-    pub plugin_data_dir: PathBuf,
     pub workspace_name: String,
-    pub workspace_data_dir: PathBuf,
     pub clock: time::OffsetDateTime,
 
     // Argument values + declarations
@@ -79,9 +82,7 @@ pub struct SubstitutionContextBuilder {
     entry_path: Option<PathBuf>,
     entry_dir: Option<PathBuf>,
     plugin_root_dir: Option<PathBuf>,
-    plugin_data_dir: Option<PathBuf>,
     workspace_name: Option<String>,
-    workspace_data_dir: Option<PathBuf>,
     clock: Option<time::OffsetDateTime>,
     args: Option<ArgumentValues>,
     declared_args: Vec<String>,
@@ -124,18 +125,8 @@ impl SubstitutionContextBuilder {
         self
     }
 
-    pub fn plugin_data_dir(mut self, v: impl Into<PathBuf>) -> Self {
-        self.plugin_data_dir = Some(v.into());
-        self
-    }
-
     pub fn workspace_name(mut self, v: impl Into<String>) -> Self {
         self.workspace_name = Some(v.into());
-        self
-    }
-
-    pub fn workspace_data_dir(mut self, v: impl Into<PathBuf>) -> Self {
-        self.workspace_data_dir = Some(v.into());
         self
     }
 
@@ -190,15 +181,9 @@ impl SubstitutionContextBuilder {
             plugin_root_dir: self
                 .plugin_root_dir
                 .map_or_else(|| missing("plugin_root_dir"), Ok)?,
-            plugin_data_dir: self
-                .plugin_data_dir
-                .map_or_else(|| missing("plugin_data_dir"), Ok)?,
             workspace_name: self
                 .workspace_name
                 .map_or_else(|| missing("workspace_name"), Ok)?,
-            workspace_data_dir: self
-                .workspace_data_dir
-                .map_or_else(|| missing("workspace_data_dir"), Ok)?,
             clock: self.clock.map_or_else(|| missing("clock"), Ok)?,
             args: self.args,
             declared_args: self.declared_args,
