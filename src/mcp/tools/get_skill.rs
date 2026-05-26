@@ -140,7 +140,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         }
     };
 
-    let LookupHit { row, body_path } = hit;
+    let LookupHit { body_path } = hit;
     let skill_path = body_path;
 
     // The actual file read + frontmatter strip + sibling walk is all
@@ -194,11 +194,15 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
 
     // The `Output.path` field is documented as the absolute path to the
     // skill body (see the `Output` struct's doc comment) — emit the
-    // resolved `skill_path` (which is absolute) rather than `row.path`
-    // (which is the relative-to-catalog stored form). Pre-US1.c this
-    // returned the raw row value, which only happened to be correct
-    // when the absolute path-stored legacy data was indexed.
-    let _ = row; // suppress unused-warning; kept for future extensions.
+    // resolved `skill_path` (which is absolute) rather than the row's
+    // catalog-relative stored form. Pre-US1.c this returned the raw row
+    // value, which only happened to be correct when absolute-path
+    // legacy data was indexed.
+    //
+    // R-M5 (US1.d reviewer pass): the boxed `SkillRecord` carried on
+    // `LookupHit` was dropped — it was kept as a "future extensions"
+    // placeholder but never read here, costing an Arc-equivalent heap
+    // allocation per call.
     Ok(Output {
         content,
         path: skill_path.display().to_string(),
@@ -206,8 +210,8 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     })
 }
 
-/// Lookup outcome carrying both the row and its resolved absolute body
-/// path so the read step doesn't have to open the DB a second time.
+/// Lookup outcome carrying the resolved absolute body path so the read
+/// step doesn't have to open the DB a second time.
 ///
 /// The `body_path` is computed via
 /// [`skills::resolve_entry_body_path`] — `skills.path` stores the
@@ -218,8 +222,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
 /// codepath that happened to store an absolute string — never the case
 /// post-F11b. The bug was latent because no in-tree integration test
 /// exercised the file-read branch.)
+///
+/// R-M5 (US1.d reviewer pass): the boxed `SkillRecord` field was
+/// removed; it was a "future extensions" placeholder costing a heap
+/// allocation per call with no read site.
 struct LookupHit {
-    row: Box<skills::SkillRecord>,
     body_path: PathBuf,
 }
 
@@ -265,10 +272,7 @@ fn lookup_skill(
                 plugin,
                 &row.path,
             )?;
-            Ok(LookupOutcome::Found(LookupHit {
-                row: Box::new(row),
-                body_path,
-            }))
+            Ok(LookupOutcome::Found(LookupHit { body_path }))
         }
         Some(_) => Ok(LookupOutcome::UnknownSkill),
         None => {

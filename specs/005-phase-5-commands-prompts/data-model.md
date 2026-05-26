@@ -544,6 +544,13 @@ pub enum TomeError {
 
     #[error("workspace data directory write failed at {path}: {source}")]
     WorkspaceDataDirWriteFailed { path: PathBuf, source: std::io::Error },
+
+    /// Plugin data dir create_dir_all failure. Split from
+    /// `WorkspaceDataDirWriteFailed` in US1.d (R-M1) so the variant
+    /// name + exit code disambiguate the directory class instead of
+    /// burying it in the inner path.
+    #[error("plugin data directory write failed at {path}: {source}")]
+    PluginDataDirWriteFailed { path: PathBuf, source: std::io::Error },
 }
 ```
 
@@ -551,7 +558,8 @@ Exit code mapping:
 
 | Variant | Exit code | Notes |
 |---|---|---|
-| `WorkspaceDataDirWriteFailed` | 25 | New; also covers `PluginDataDirWriteFailed` per Edge Cases resolution |
+| `PluginDataDirWriteFailed` | 9 | US1.d reviewer pass (R-M1) split this from `WorkspaceDataDirWriteFailed` (25). Mirrors the substitution engine's matching split (`SubstitutionError::PluginDataDirCreationFailed` vs `WorkspaceDataDirCreationFailed`). Code 9 is the lowest free slot in Phase 1's I/O cluster (1–8). |
+| `WorkspaceDataDirWriteFailed` | 25 | New; covers workspace-data-dir `create_dir_all` failures only after the R-M1 split. |
 | `PromptArgumentMismatch` | 26 | New; assigned 26 (NOT 24) because Phase 4 already ships `SummariserFailure → 24`. Final assignment per `contracts/exit-codes-p5.md`. |
 | `EntryNotFound` | 27 | New; reassigned from contract-proposed 21 (Phase 2 ships `PluginAlreadyInState → 21`). See `contracts/exit-codes-p5.md` § Reassigned slots. |
 | `SubstitutionFailed` | 28 | New; reassigned from contract-proposed 22 (Phase 2 ships `PluginManifestParseError → 22`). See `contracts/exit-codes-p5.md` § Reassigned slots. |

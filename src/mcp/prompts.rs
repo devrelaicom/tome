@@ -110,8 +110,13 @@ pub struct PromptEntry {
     /// Truncated description for `prompts/list` (already capped per
     /// FR-066).
     pub description: String,
-    /// Absolute or stored path to the entry file on disk (as recorded in
-    /// `skills.path`).
+    /// Absolute path to the entry file on disk, resolved at registry
+    /// build time via [`resolve_entry_body_path`]. Always absolute (the
+    /// resolver joins the plugin dir to the catalog-relative stored
+    /// path). US1.d reviewer pass (R-M4) — pre-US1.d the prompts/get
+    /// hot path round-tripped this through `display().to_string()` +
+    /// re-resolution, both lossy (non-UTF8 paths) and pointless (the
+    /// resolver short-circuits on `is_absolute`).
     pub path: PathBuf,
     /// Named arguments declared in the entry's frontmatter.
     pub arguments: Vec<String>,
@@ -121,6 +126,11 @@ pub struct PromptEntry {
     /// `true` when the entry body contains `$ARGUMENTS` (US1.b
     /// heuristic; US3 will replace this with a real regex parse).
     pub body_uses_arguments: bool,
+    /// Plugin version (`plugin.json` `version` field) cached from the
+    /// `skills.plugin_version` column at registry build time. US1.d
+    /// reviewer pass (R-M3) — pre-US1.d the prompts/get hot path opened
+    /// a second read-only DB connection per request to fetch this.
+    pub plugin_version: String,
 }
 
 impl PromptEntry {
@@ -192,9 +202,13 @@ impl PromptRegistry {
     ) -> Result<Self, TomeError> {
         let workspace_id = resolve_id_required(conn, workspace_name)?;
 
+        // R-M3 (US1.d reviewer pass): select `plugin_version` so the
+        // registry can cache it on PromptEntry; pre-US1.d the prompts/get
+        // hot path opened a second read-only DB connection per request
+        // to look this up.
         let mut stmt = conn
             .prepare(
-                "SELECT s.catalog, s.plugin, s.name, s.kind, s.description, s.path, s.indexed_at
+                "SELECT s.catalog, s.plugin, s.name, s.kind, s.description, s.path, s.indexed_at, s.plugin_version
                  FROM skills AS s
                  JOIN workspace_skills AS ws ON ws.skill_id = s.id
                  WHERE ws.workspace_id = ?1
@@ -215,6 +229,7 @@ impl PromptRegistry {
                     description: row.get::<_, String>(4)?,
                     path: row.get::<_, String>(5)?,
                     indexed_at: row.get::<_, String>(6)?,
+                    plugin_version: row.get::<_, String>(7)?,
                 })
             })
             .map_err(|e| {
@@ -327,6 +342,7 @@ impl PromptRegistry {
                     arguments,
                     argument_hint,
                     body_uses_arguments,
+                    plugin_version: row.plugin_version,
                 },
             );
         }
@@ -425,8 +441,9 @@ fn get_prompt_future<'a, S>(
 /// / `prompts/get`:
 ///
 /// 1. Resolve `name` via `state.prompt_registry.lookup`.
-/// 2. Resolve the entry body's absolute path via the shared
-///    [`resolve_entry_body_path`] helper (T-LATENT-1).
+/// 2. Use the registry-cached absolute entry body path (resolved via
+///    [`resolve_entry_body_path`] at startup; cached on `PromptEntry.path`
+///    per R-M4 in US1.d).
 /// 3. Re-parse the entry's frontmatter from disk (so `declared_args`
 ///    and the body content are fresh — the index doesn't carry these).
 /// 4. Map caller args → [`ArgumentValues`].
@@ -516,35 +533,33 @@ fn render_for_get(
     prompt_name: &str,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<String, TomeError> {
-    // (2) Resolve the absolute body path. The registry already cached
-    // the resolved path at startup, but the cache is per-session — the
-    // entry on disk may have been touched since. Re-resolving keeps the
-    // path honest against catalog rebases between server-startup and
-    // prompts/get.
-    let conn = crate::index::db::open_read_only(&state.paths.index_db)?;
-    let body_path = resolve_entry_body_path(
-        &conn,
-        &state.paths,
-        state.scope.scope.name().as_str(),
-        &entry.catalog,
-        &entry.plugin,
-        // The registry stored the absolute path; round-trip through the
-        // `path.display().to_string()` to satisfy the helper's `&str`
-        // argument. (Absolute paths bypass the catalog manifest walk
-        // entirely — the helper short-circuits on `is_absolute`.)
-        &entry.path.display().to_string(),
-    )?;
-    drop(conn);
+    // (2) Use the absolute body path cached on the PromptEntry at
+    // registry build time. R-M4 (US1.d reviewer pass): pre-US1.d this
+    // re-opened a read-only DB connection, re-ran `resolve_entry_body_path`
+    // through a lossy `display().to_string()` round-trip, then dropped
+    // the connection — for an absolute-path short-circuit the resolver
+    // would do anyway. The registry-cached path is honest because the
+    // resolver runs at startup and the catalog manifest is the source
+    // of truth for the plugin dir (a catalog rebase between startup
+    // and prompts/get would need a server restart per the contract).
+    let body_path = entry.path.clone();
 
     // (3) Re-parse the entry's frontmatter from disk to recover
     // `declared_args` + the body content. The `description` cached on
     // `entry.description` is the truncated form for `prompts/list`;
     // the body is what the substitution layer renders.
-    let parsed = parse_skill_frontmatter(&body_path).map_err(|err| TomeError::EntryNotFound {
-        catalog: entry.catalog.clone(),
-        plugin: entry.plugin.clone(),
-        name: entry.name.clone(),
-        kind: format!("{:?}: frontmatter parse failed: {err}", entry.kind),
+    //
+    // R-M2 + S-L1 (US1.d reviewer pass): map frontmatter parse failure
+    // to the dedicated `SkillFrontmatterParseError` (exit 23) — was
+    // being stuffed into `EntryNotFound.kind`, breaking the kind
+    // discriminator contract (the `kind` field's domain is `"skill"`
+    // or `"command"`) and leaking the raw path / `Debug` representation
+    // into the error envelope (S-L1).
+    let parsed = parse_skill_frontmatter(&body_path).map_err(|err| {
+        TomeError::SkillFrontmatterParseError {
+            file: body_path.clone(),
+            message: err.to_string(),
+        }
     })?;
     let declared_args = parsed.frontmatter.arguments.clone();
     let body = parsed.body;
@@ -556,9 +571,17 @@ fn render_for_get(
     let context = build_get_context(state, entry, body_path, declared_args, args)?;
 
     // (6) Render.
+    //
+    // R-M1 (US1.d reviewer pass): split the data-dir creation failure
+    // mapping by source dir class — plugin data dir → exit 9; workspace
+    // data dir → exit 25. The `SubstitutionError` carrier was already
+    // split per the substitution-engine contract; the boundary mapping
+    // here had been collapsing both into one `TomeError` variant.
     substitution::render(&body, &context).map_err(|e| match e {
-        SubstitutionError::PluginDataDirCreationFailed { path, source }
-        | SubstitutionError::WorkspaceDataDirCreationFailed { path, source } => {
+        SubstitutionError::PluginDataDirCreationFailed { path, source } => {
+            TomeError::PluginDataDirWriteFailed { path, source }
+        }
+        SubstitutionError::WorkspaceDataDirCreationFailed { path, source } => {
             TomeError::WorkspaceDataDirWriteFailed { path, source }
         }
         SubstitutionError::InvalidArgumentFrontmatter { file, reason } => {
@@ -610,14 +633,10 @@ fn build_get_context(
             .paths
             .workspace_data_dir_for(workspace_name, &entry.catalog, &entry.plugin);
 
-    // `plugin_version` comes from `plugin.json`; the index already
-    // recorded it on each `SkillRecord`. For US1.c we re-read the
-    // version from the central DB by looking up any row for this plugin
-    // — they all carry the same `plugin_version` per the F11 + Phase 5
-    // schema. We do this OUTSIDE the substitution module so the
-    // substitution layer stays sync + I/O-free in its F3 stub form.
-    let plugin_version = read_plugin_version(state, &entry.catalog, &entry.plugin)
-        .unwrap_or_else(|| "0.0.0".to_owned());
+    // `plugin_version` is cached on the PromptEntry at registry build
+    // time (R-M3 / US1.d reviewer pass) — pre-US1.d this opened a
+    // second read-only DB connection per request to fetch it.
+    let plugin_version = entry.plugin_version.clone();
 
     // `clock`: honour the test-only override slot when set; otherwise
     // local time, falling back to UTC if the host has no local-offset
@@ -643,22 +662,6 @@ fn build_get_context(
         .map_err(|e| TomeError::SubstitutionFailed {
             reason: e.to_string(),
         })
-}
-
-/// Look up `plugin_version` for one plugin via any of its `skills` rows.
-/// All rows for `(catalog, plugin)` carry the same version (the
-/// `upsert_skill` path always passes the same value). Returns `None`
-/// when no row exists — caller falls back to a sentinel value.
-fn read_plugin_version(state: &McpState, catalog: &str, plugin: &str) -> Option<String> {
-    let conn = crate::index::db::open_read_only(&state.paths.index_db).ok()?;
-    let rows = crate::index::skills::list_for_plugin(
-        &conn,
-        state.scope.scope.name().as_str(),
-        catalog,
-        plugin,
-    )
-    .ok()?;
-    rows.into_iter().next().map(|r| r.plugin_version)
 }
 
 /// Resolve the substitution clock — honours
@@ -808,6 +811,20 @@ fn emit_tome_error_for_get(name: &str, started: Instant, err: TomeError) -> McpE
                 })),
             ),
         ),
+        TomeError::PluginDataDirWriteFailed { ref path, .. } => emit_get_error(
+            name,
+            started,
+            "plugin_data_dir_write_failed",
+            McpError::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("plugin data dir write failed at {}: {err}", path.display()),
+                Some(json!({
+                    "code": "plugin_data_dir_write_failed",
+                    "name": name,
+                    "path": path.display().to_string(),
+                })),
+            ),
+        ),
         TomeError::InvalidArgumentFrontmatter { ref file, .. } => emit_get_error(
             name,
             started,
@@ -817,6 +834,27 @@ fn emit_tome_error_for_get(name: &str, started: Instant, err: TomeError) -> McpE
                 format!("invalid argument frontmatter in {}: {err}", file.display()),
                 Some(json!({
                     "code": "invalid_argument_frontmatter",
+                    "name": name,
+                    "file": file.display().to_string(),
+                })),
+            ),
+        ),
+        // R-M2 (US1.d reviewer pass): frontmatter parse failure during
+        // prompts/get → INVALID_PARAMS / skill_frontmatter_parse_error.
+        // Pre-US1.d this was stuffed into EntryNotFound.kind, breaking
+        // the kind-discriminator contract.
+        TomeError::SkillFrontmatterParseError { ref file, .. } => emit_get_error(
+            name,
+            started,
+            "skill_frontmatter_parse_error",
+            McpError::new(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "skill frontmatter parse failed in {}: {err}",
+                    file.display()
+                ),
+                Some(json!({
+                    "code": "skill_frontmatter_parse_error",
                     "name": name,
                     "file": file.display().to_string(),
                 })),
@@ -874,6 +912,7 @@ struct RawRow {
     description: String,
     path: String,
     indexed_at: String,
+    plugin_version: String,
 }
 
 /// Helper: build the rmcp [`PromptRouter`] from a [`PromptRegistry`]

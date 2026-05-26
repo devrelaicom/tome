@@ -200,6 +200,61 @@ fn when_to_use_round_trips() {
     );
 }
 
+// ---- S-M1 (US1.d reviewer pass): arguments cap at 256 ------------------
+
+#[test]
+fn arguments_list_capped_at_256() {
+    // 300-element YAML sequence: must reject with a parser error citing
+    // the cap. Built as a single multiline string the parser will see.
+    let mut src = String::from("---\nname: foo\ndescription: d\narguments:\n");
+    for i in 0..300 {
+        use std::fmt::Write;
+        writeln!(src, "  - arg{i}").unwrap();
+    }
+    src.push_str("---\nbody\n");
+
+    let err = parse_skill_frontmatter_str(&PathBuf::from("/tmp/SKILL.md"), &src)
+        .expect_err("oversized arguments list must reject");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("256"),
+        "rejection message must cite the 256-entry cap; got: {msg}",
+    );
+}
+
+#[test]
+fn arguments_string_capped_at_256_tokens() {
+    // 300 space-separated tokens: same cap applies to the string form.
+    let tokens: String = (0..300)
+        .map(|i| format!("arg{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let src = format!("---\nname: foo\ndescription: d\narguments: {tokens}\n---\nbody\n");
+
+    let err = parse_skill_frontmatter_str(&PathBuf::from("/tmp/SKILL.md"), &src)
+        .expect_err("oversized space-separated arguments must reject");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("256"),
+        "rejection message must cite the 256-entry cap; got: {msg}",
+    );
+}
+
+#[test]
+fn arguments_at_cap_still_parses() {
+    // Exactly 256 entries: must pass cleanly. Defends against off-by-one.
+    let mut src = String::from("---\nname: foo\ndescription: d\narguments:\n");
+    for i in 0..256 {
+        use std::fmt::Write;
+        writeln!(src, "  - arg{i}").unwrap();
+    }
+    src.push_str("---\nbody\n");
+
+    let parsed = parse_skill_frontmatter_str(&PathBuf::from("/tmp/SKILL.md"), &src)
+        .expect("256 entries is at the cap and must parse");
+    assert_eq!(parsed.frontmatter.arguments.len(), 256);
+}
+
 #[test]
 fn disable_model_invocation_flips_resolved_searchable() {
     let parsed = parse(
