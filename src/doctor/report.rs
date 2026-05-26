@@ -167,12 +167,21 @@ pub struct ProjectBindingState {
 
 /// Per-project `.tome/RULES.md` drift classification. Computed by byte
 /// comparison against `<root>/workspaces/<name>/RULES.md`.
+///
+/// US5 reviewer R-M5: `SourceMissing` distinguishes "workspace's
+/// canonical RULES.md is absent" (the source-of-truth file at
+/// `<root>/workspaces/<name>/RULES.md`) from `Missing` (the project's
+/// copy at `<project>/.tome/RULES.md` is absent). The two cases have
+/// different remediation paths — `--fix` for `SourceMissing` skips the
+/// copy and surfaces "run `tome workspace regen-summary <name>` first"
+/// rather than infinite-looping a `cp` of nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RulesCopyState {
     Match,
     Missing,
     Drift,
+    SourceMissing,
 }
 
 /// Typed subsystem identifier replacing Phase 3's free-form `String`

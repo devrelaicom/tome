@@ -127,11 +127,18 @@ fn compare_rules(
                 RulesCopyState::Drift
             }
         }
-        // Any missing side collapses to Missing — the auto-fix is the
-        // same (re-copy from workspace). A read error on either side is
-        // also Missing for the same reason; doctor's recommendation is
-        // identical to the missing case.
-        _ => RulesCopyState::Missing,
+        // R-M5: distinguish "workspace source absent" from "project
+        // copy absent". The auto-fix paths diverge — the former wants
+        // `tome workspace regen-summary <name>` to re-author the source,
+        // the latter wants a re-copy of the existing source. Without
+        // this split, `--fix` would loop forever trying to `cp` a file
+        // that doesn't exist on either side.
+        (Err(se), _) if se.kind() == std::io::ErrorKind::NotFound => RulesCopyState::SourceMissing,
+        (Ok(_), Err(_)) => RulesCopyState::Missing,
+        // Read errors on the source (other than NotFound) collapse to
+        // SourceMissing too — the user-visible symptom (we cannot copy)
+        // is identical and the remediation hint is the more useful one.
+        _ => RulesCopyState::SourceMissing,
     }
 }
 
@@ -158,7 +165,10 @@ mod tests {
     }
 
     #[test]
-    fn reports_missing_when_neither_source_nor_copy_exist() {
+    fn reports_source_missing_when_workspace_rules_absent() {
+        // R-M5: the workspace's canonical RULES.md is absent → distinct
+        // `SourceMissing` (auto_fixable = false) rather than `Missing`
+        // (which would have looped a `cp` of nothing).
         let tmp = TempDir::new().unwrap();
         let paths = Paths::from_root(tmp.path().to_path_buf());
         let project_dir = tmp.path().join("project");
@@ -172,7 +182,7 @@ mod tests {
         let scope = project_scope(project_dir, "global");
         let state = check_binding(&scope, &paths).unwrap();
         assert!(state.config_well_formed);
-        assert_eq!(state.rules_file_drift, RulesCopyState::Missing);
+        assert_eq!(state.rules_file_drift, RulesCopyState::SourceMissing);
     }
 
     #[test]

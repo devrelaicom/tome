@@ -92,7 +92,23 @@ pub fn assemble_report(
     let reranker = check_model(paths, reranker_e, verify)?;
     let summariser = check_model(paths, summariser_e, verify)?;
 
-    let index = check_index(paths, &scope.scope)?;
+    // C-M2 / FR-561: doctor never crashes. `check_index` can return
+    // `SchemaTooNew` (exit 52) or `IndexIntegrityCheckFailure` (exit 51)
+    // from `index::open_read_only`; both are user-actionable failure
+    // surfaces that doctor should *report*, not propagate. Collapse to
+    // a `present: true, integrity_ok: false` `IndexHealth` so the
+    // overall classifier flips to Unhealthy and the report still emits.
+    let index = check_index(paths, &scope.scope).unwrap_or_else(|err| {
+        tracing::warn!(error = %err, "doctor: check_index failed; reporting Broken state");
+        crate::commands::status::IndexHealth {
+            present: true,
+            schema_version: None,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            size_bytes: 0,
+            integrity_ok: false,
+        }
+    });
     let drift = check_drift(paths, &scope.scope, embedder_e, reranker_e)?;
     let catalogs = checks::check_catalogs(paths, &scope.scope)?;
     let workspace_registry = checks::check_workspace_registry(paths);
@@ -114,10 +130,26 @@ pub fn assemble_report(
             home,
             &scope.scope.name().clone(),
         ),
-        // Without a project root we cannot meaningfully evaluate per-
-        // harness file-on-disk state — the per-harness paths are
-        // project-relative for most harnesses. Report empty vectors;
-        // classification falls back to NotApplicable per FR-561.
+        // C-M1: harnesses ARE declared but we have no project context to
+        // resolve project-relative paths against. Emit per-harness
+        // `NotApplicable` entries (one per declared harness, in source
+        // order) so JSON consumers can distinguish "no harnesses declared
+        // globally" (effective_harness_list = None → empty Vec) from
+        // "harnesses declared but no project context" (empty list-of-
+        // Some-harness). Classification stays unaffected per FR-561.
+        (Some(list), None) => {
+            let rules: Vec<HarnessSubsystemReport> = list
+                .harnesses
+                .iter()
+                .map(|h| HarnessSubsystemReport {
+                    harness: h.name.clone(),
+                    health: SubsystemHealth::NotApplicable,
+                })
+                .collect();
+            let mcp = rules.clone();
+            (rules, mcp)
+        }
+        // No declared harnesses at all → empty vectors.
         _ => (Vec::new(), Vec::new()),
     };
 
@@ -524,6 +556,25 @@ fn build_suggested_fixes(
                     ),
                     command: "tome doctor --fix".to_owned(),
                     auto_fixable: true,
+                });
+            }
+            // R-M5: workspace's canonical RULES.md is absent. Re-copying
+            // nothing is a no-op that would re-fire forever, so this
+            // suggestion is NOT auto-fixable; the user runs
+            // `tome workspace regen-summary` to re-author the source.
+            RulesCopyState::SourceMissing => {
+                out.push(SuggestedFix {
+                    subsystem: Subsystem::BindingRulesCopy,
+                    diagnosis: format!(
+                        "workspace `{}`'s RULES.md is empty or missing — cannot copy to {}",
+                        b.bound_workspace.as_str(),
+                        b.project_root.display(),
+                    ),
+                    command: format!(
+                        "tome workspace regen-summary {}  # re-author the source RULES.md first",
+                        b.bound_workspace.as_str(),
+                    ),
+                    auto_fixable: false,
                 });
             }
         }

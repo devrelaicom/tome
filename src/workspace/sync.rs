@@ -185,6 +185,59 @@ pub fn sync_one(name: &WorkspaceName, paths: &Paths) -> Result<WorkspaceSyncOutc
     Ok(outcome)
 }
 
+/// Copy `<root>/workspaces/<name>/RULES.md` to ONE project's
+/// `<project>/.tome/RULES.md`. Project-local equivalent of [`sync_one`]
+/// — does NOT walk every bound project of the workspace.
+///
+/// Used by `doctor::fixes::repair_binding_rules_copy` per US5 reviewer
+/// C-M3: re-copying ONE project's drifted/missing RULES.md must not
+/// silently broadcast to every other bound project of the same
+/// workspace.
+///
+/// Returns `Ok(true)` when a write occurred (drift or missing copy),
+/// `Ok(false)` when the destination already matched the source (idempotent
+/// no-op). The source-missing case returns
+/// [`TomeError::WorkspaceMalformed`] so the doctor pass surfaces the
+/// underlying source-of-truth absence rather than papering over it; the
+/// `RulesCopyState::SourceMissing` suggested fix is the user-facing hint.
+pub fn sync_one_project(
+    name: &WorkspaceName,
+    paths: &Paths,
+    project_root: &std::path::Path,
+) -> Result<bool, TomeError> {
+    let source = paths.workspace_rules_file(name);
+    let source_bytes = match std::fs::read(&source) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(TomeError::WorkspaceMalformed {
+                path: source.clone(),
+                reason: format!("workspace `{}`: source RULES.md absent", name.as_str(),),
+            });
+        }
+        Err(e) => return Err(TomeError::Io(e)),
+    };
+
+    let marker_dir = Paths::project_marker_dir(project_root);
+    if !marker_dir.is_dir() {
+        // Caller (doctor) shouldn't have flagged this project for repair
+        // if its marker dir is gone; surface as an Io NotFound so the
+        // residual suggested-fix list reflects the real state.
+        return Err(TomeError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("project marker `.tome/` absent at {}", marker_dir.display()),
+        )));
+    }
+    let dest = Paths::project_marker_rules(project_root);
+    if let Ok(existing) = std::fs::read(&dest)
+        && existing == source_bytes
+    {
+        // Idempotence — caller can treat this as "nothing to do".
+        return Ok(false);
+    }
+    crate::catalog::store::write_atomic(&dest, &source_bytes)?;
+    Ok(true)
+}
+
 /// List every workspace name in the central registry, alphabetically.
 /// Used by `tome workspace sync` with no name arg to iterate every
 /// workspace.

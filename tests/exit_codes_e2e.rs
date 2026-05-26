@@ -383,6 +383,263 @@ fn workspace_regen_summary_with_missing_model_exits_24() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4 / US5.c-1 / T-M1 — `tome doctor --fix` exit-code surface via
+// the CLI binary, specifically the user-owned-MCP case (exit 75 without
+// `--force`, exit 0 with `--fix --force`).
+//
+// These tests seed the central DB with the production registry seeds
+// (not stub seeds) so the doctor flow doesn't surface embedder drift as
+// an additional non-auto-fixable suggestion that would inflate the
+// residual fix list and confound the exit-code assertion.
+// ---------------------------------------------------------------------------
+
+/// Seed a workspace row using the production MODEL_REGISTRY seeds, so
+/// `tome doctor` (which opens with the registry seeds) doesn't report
+/// embedder drift. Returns once the workspace + DB exist.
+fn seed_workspace_with_registry_seeds(paths: &tome::paths::Paths, name: &str) {
+    let (embedder, reranker, summariser) = tome::commands::plugin::registry_seeds();
+    let conn = tome::index::open(
+        &paths.index_db,
+        &tome::index::OpenOptions {
+            embedder,
+            reranker,
+            summariser,
+        },
+    )
+    .expect("open index for seeding workspace");
+    let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+    conn.execute(
+        "INSERT INTO workspaces (name, created_at, last_used_at) VALUES (?1, ?2, ?2)",
+        rusqlite::params![name, now_unix],
+    )
+    .expect("seed workspace row");
+}
+
+#[test]
+fn doctor_fix_user_owned_mcp_exits_75() {
+    // Pre-condition: a project marker bound to `test-ws`, the global
+    // settings declare `claude-code` as the only effective harness, and
+    // `.claude/settings.json` carries a user-owned `tome` entry. Running
+    // `tome doctor --fix` (without --force) MUST leave the user-owned
+    // entry alone and surface exit 75 — work was attempted but a manual
+    // fix remains.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+    fabricate_all_registry_models(&paths);
+    seed_workspace_with_registry_seeds(&paths, "test-ws");
+
+    // Global settings declare claude-code.
+    fs::write(
+        &paths.global_settings_file,
+        "harnesses = [\"claude-code\"]\n",
+    )
+    .expect("write global settings");
+
+    let project = env.home_path().join("project");
+    fs::create_dir_all(project.join(".tome")).expect("create project marker dir");
+    fs::write(
+        project.join(".tome/config.toml"),
+        "workspace = \"test-ws\"\n",
+    )
+    .expect("write project marker");
+
+    // Insert a workspace_projects row so the project is bound in the
+    // central DB (otherwise the bound-workspace-exists check works but
+    // the rules-copy sync would have nothing to walk).
+    {
+        let conn = tome::index::open_read_only(&paths.index_db).expect("open ro");
+        let ws_id: i64 = conn
+            .query_row(
+                "SELECT id FROM workspaces WHERE name = ?1",
+                rusqlite::params!["test-ws"],
+                |r| r.get(0),
+            )
+            .expect("workspace id");
+        drop(conn);
+        // Re-open for write.
+        let conn = tome::index::open_read_only(&paths.index_db).expect("open ro 2");
+        drop(conn);
+        // Use raw rusqlite to insert without going through the schema
+        // bootstrap a second time.
+        let conn = rusqlite::Connection::open(&paths.index_db).expect("rusqlite open");
+        conn.execute(
+            "INSERT INTO workspace_projects (workspace_id, project_path, bound_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                ws_id,
+                project.to_str().unwrap(),
+                time::OffsetDateTime::now_utc().unix_timestamp(),
+            ],
+        )
+        .expect("insert workspace_projects row");
+    }
+
+    // Pre-populate a user-owned `tome` entry in .claude/settings.json.
+    let claude_dir = project.join(".claude");
+    fs::create_dir_all(&claude_dir).expect("create .claude");
+    let conflict = serde_json::json!({
+        "mcpServers": {
+            "tome": {
+                "command": "evil",
+                "args": ["serve"]
+            }
+        }
+    });
+    fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string_pretty(&conflict).unwrap(),
+    )
+    .expect("write conflict");
+
+    // Run `tome doctor --fix` from inside the project directory so the
+    // scope resolves via project marker walk.
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["doctor", "--fix"])
+        .output()
+        .expect("spawn doctor --fix");
+    assert_eq!(
+        out.status.code(),
+        Some(75),
+        "expected exit 75 DoctorFixNotSafe (user-owned MCP), got {:?}, \
+         stdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // The user-owned entry MUST survive a non-forced --fix.
+    let after = fs::read_to_string(claude_dir.join("settings.json")).expect("read settings.json");
+    assert!(
+        after.contains("\"evil\""),
+        "user-owned `evil` command must survive non-forced --fix; got: {after}",
+    );
+}
+
+#[test]
+fn doctor_fix_force_user_owned_mcp_exits_0() {
+    // Same setup as above, but invoke `tome doctor --fix --force`. The
+    // override rewrites the user-owned entry to the Tome-owned shape
+    // and exits 0.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+    fabricate_all_registry_models(&paths);
+    seed_workspace_with_registry_seeds(&paths, "test-ws");
+
+    fs::write(
+        &paths.global_settings_file,
+        "harnesses = [\"claude-code\"]\n",
+    )
+    .expect("write global settings");
+
+    let project = env.home_path().join("project");
+    fs::create_dir_all(project.join(".tome")).expect("create project marker dir");
+    fs::write(
+        project.join(".tome/config.toml"),
+        "workspace = \"test-ws\"\n",
+    )
+    .expect("write project marker");
+    // Pre-create the project's RULES.md AND the workspace's RULES.md so
+    // the binding-rules-copy check passes; the only outstanding fix is
+    // the user-owned MCP one.
+    let ws = tome::workspace::WorkspaceName::parse("test-ws").unwrap();
+    let src = paths.workspace_rules_file(&ws);
+    fs::create_dir_all(src.parent().unwrap()).expect("create workspace dir");
+    fs::write(&src, b"canonical\n").expect("write workspace RULES.md");
+    fs::write(project.join(".tome/RULES.md"), b"canonical\n").expect("write project RULES.md");
+
+    {
+        let conn = tome::index::open_read_only(&paths.index_db).expect("open ro");
+        let ws_id: i64 = conn
+            .query_row(
+                "SELECT id FROM workspaces WHERE name = ?1",
+                rusqlite::params!["test-ws"],
+                |r| r.get(0),
+            )
+            .expect("workspace id");
+        drop(conn);
+        let conn = rusqlite::Connection::open(&paths.index_db).expect("rusqlite open");
+        conn.execute(
+            "INSERT INTO workspace_projects (workspace_id, project_path, bound_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![
+                ws_id,
+                project.to_str().unwrap(),
+                time::OffsetDateTime::now_utc().unix_timestamp(),
+            ],
+        )
+        .expect("insert workspace_projects row");
+    }
+
+    let claude_dir = project.join(".claude");
+    fs::create_dir_all(&claude_dir).expect("create .claude");
+    let conflict = serde_json::json!({
+        "mcpServers": {
+            "tome": {
+                "command": "evil",
+                "args": ["serve"]
+            }
+        }
+    });
+    fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string_pretty(&conflict).unwrap(),
+    )
+    .expect("write conflict");
+
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["doctor", "--fix", "--force"])
+        .output()
+        .expect("spawn doctor --fix --force");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "expected exit 0 after --fix --force rewrite, got {:?}, \
+         stdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let after = fs::read_to_string(claude_dir.join("settings.json")).expect("read settings.json");
+    assert!(
+        !after.contains("\"evil\""),
+        "user-owned `evil` command must be replaced; got: {after}",
+    );
+    assert!(
+        after.contains("\"tome\""),
+        "rewrite must install the Tome-owned `command = tome`; got: {after}",
+    );
+}
+
+#[test]
+fn doctor_force_without_fix_exits_2() {
+    // R-M1: `--force` without `--fix` is a usage error (exit 2), not an
+    // Io error (exit 7).
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    let out = env
+        .cmd()
+        .args(["doctor", "--force"])
+        .output()
+        .expect("spawn doctor --force");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "expected exit 2 Usage, got {:?}, stderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
 #[test]
 fn reindex_unknown_plugin_in_known_catalog_exits_20() {
     // Filling in the gap flagged by `review/contract-audit.md` §reindex

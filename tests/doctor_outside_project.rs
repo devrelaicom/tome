@@ -67,9 +67,22 @@ fn doctor_outside_project_with_global_harnesses_uses_global_effective_list() {
     let report = doctor::assemble_report(&scope, &paths, home.path(), false).unwrap();
     // Effective list resolves to the global declaration.
     assert!(report.effective_harness_list.is_some());
-    // But without a project root, the per-harness file checks are
-    // skipped — the vectors stay empty per FR-561.
+    // Without a project root, the per-harness file checks can't
+    // resolve — C-M1: the vectors now carry `NotApplicable` entries
+    // (one per declared harness) so JSON consumers distinguish
+    // "no global harnesses" from "globally declared, no project context".
+    // Classification stays unaffected per FR-561.
     assert!(report.project_binding.is_none());
-    assert!(report.harness_rules.is_empty());
-    assert!(report.harness_mcp.is_empty());
+    assert_eq!(report.harness_rules.len(), 1);
+    assert_eq!(report.harness_rules[0].harness, "claude-code");
+    assert_eq!(
+        report.harness_rules[0].health,
+        tome::doctor::SubsystemHealth::NotApplicable,
+    );
+    assert_eq!(report.harness_mcp.len(), 1);
+    assert_eq!(report.harness_mcp[0].harness, "claude-code");
+    assert_eq!(
+        report.harness_mcp[0].health,
+        tome::doctor::SubsystemHealth::NotApplicable,
+    );
 }
