@@ -136,19 +136,19 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US1.a — Schema migration v2→v3 + frontmatter widening + commands directory walk
 
-- [ ] T103 [US1] Add `EntryKind` enum to `src/plugin/identity.rs` (or `src/index/mod.rs`) per data-model.md §1.1; derive `Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize` with `#[serde(rename_all = "lowercase")]` (use devs:rust-dev agent)
-- [ ] T104 [US1] Extend `EntryFrontmatter` (existing `SkillFrontmatter`) in `src/plugin/frontmatter.rs` with the widened Phase 5 lenient field set per `contracts/frontmatter-p5.md` § Recognised fields (use devs:rust-dev agent)
-- [ ] T105 [US1] Add custom `deserialize_with` for the `arguments` field accepting both space-separated string AND YAML list, producing `Vec<String>` (use devs:rust-dev agent)
-- [ ] T106 [US1] Add `resolved_searchable()` and `resolved_user_invocable(kind)` helper methods on `EntryFrontmatter` per `contracts/frontmatter-p5.md` § Resolved defaults (use devs:rust-dev agent)
-- [ ] T107 [US1] Add argument-name validation: each name must match `^[a-z_][a-z0-9_]*$`; illegal names produce `InvalidArgumentFrontmatter` (exit 29) (use devs:rust-dev agent)
-- [ ] T108 [US1] Register Phase 5 migration in `src/index/migrations.rs::MIGRATIONS` with `from: 2, to: 3, name: "phase5_entry_kind_unification", apply: phase5_v3_apply` per `contracts/schema-migration-p5.md` (use devs:rust-dev agent)
-- [ ] T109 [US1] Implement `phase5_v3_apply` function executing the 5-statement DDL (ALTER TABLE ×4 + DROP/CREATE INDEX) inside the migration's transaction (use devs:rust-dev agent)
-- [ ] T110 [US1] Extend `src/plugin/components.rs` to walk `<plugin>/commands/*.md` non-recursively (flat directory listing, filtered to `*.md`) alongside the existing `skills/*/SKILL.md` recursive walk (use devs:rust-dev agent)
-- [ ] T111 [US1] Extend `src/plugin/lifecycle.rs::enable_plugin` to plumb `EntryKind` through the enable pipeline; UPSERT both kinds into `skills` table keyed on `(catalog, plugin, kind, name)` (use devs:rust-dev agent)
-- [ ] T112 [US1] Extend `index::skills::upsert_skill` to write `kind`, `searchable`, `user_invocable`, `when_to_use` columns; UPSERT honours the widened unique constraint (use devs:rust-dev agent)
-- [ ] T113 [US1] Update `index::skills` queries to filter by `kind` where applicable (lookups by identity tuple include kind) (use devs:rust-dev agent)
-- [ ] T114 [US1] Update `embedding_text` composer in `src/index/skills.rs` (or wherever Phase 4 placed it) to include `when_to_use` per `contracts/entry-schema-p5.md` § Embedding text composition (use devs:rust-dev agent)
-- [ ] T115 [GIT] Commit: `feat(schema): v3 migration adds kind/searchable/user_invocable/when_to_use; walks commands directory`
+- [x] T103 [US1] Add `EntryKind` enum to `src/plugin/identity.rs` (or `src/index/mod.rs`) per data-model.md §1.1; derive `Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize` with `#[serde(rename_all = "lowercase")]` (use devs:rust-dev agent)
+- [x] T104 [US1] Extend `EntryFrontmatter` (existing `SkillFrontmatter`) in `src/plugin/frontmatter.rs` with the widened Phase 5 lenient field set per `contracts/frontmatter-p5.md` § Recognised fields (use devs:rust-dev agent)
+- [x] T105 [US1] Add custom `deserialize_with` for the `arguments` field accepting both space-separated string AND YAML list, producing `Vec<String>` (use devs:rust-dev agent)
+- [x] T106 [US1] Add `resolved_searchable()` and `resolved_user_invocable(kind)` helper methods on `EntryFrontmatter` per `contracts/frontmatter-p5.md` § Resolved defaults (use devs:rust-dev agent)
+- [x] T107 [US1] Add argument-name validation: each name must match `^[a-z_][a-z0-9_]*$`; illegal names produce `InvalidArgumentFrontmatter` (exit 29) (use devs:rust-dev agent)
+- [x] T108 [US1] Register Phase 5 migration in `src/index/migrations.rs::MIGRATIONS` with `from: 2, to: 3, name: "phase5_entry_kind_unification", apply: phase5_v3_apply` per `contracts/schema-migration-p5.md` (use devs:rust-dev agent)
+- [x] T109 [US1] Implement `phase5_v3_apply` function executing the 5-statement DDL (ALTER TABLE ×4 + DROP/CREATE INDEX) inside the migration's transaction (use devs:rust-dev agent)
+- [x] T110 [US1] Extend `src/plugin/components.rs` to walk `<plugin>/commands/*.md` non-recursively (flat directory listing, filtered to `*.md`) alongside the existing `skills/*/SKILL.md` recursive walk (use devs:rust-dev agent)
+- [x] T111 [US1] Extend `src/plugin/lifecycle.rs::enable_plugin` to plumb `EntryKind` through the enable pipeline; UPSERT both kinds into `skills` table keyed on `(catalog, plugin, kind, name)` (use devs:rust-dev agent)
+- [x] T112 [US1] Extend `index::skills::upsert_skill` to write `kind`, `searchable`, `user_invocable`, `when_to_use` columns; UPSERT honours the widened unique constraint (use devs:rust-dev agent)
+- [x] T113 [US1] Update `index::skills` queries to filter by `kind` where applicable (lookups by identity tuple include kind) (use devs:rust-dev agent)
+- [x] T114 [US1] Update `embedding_text` composer in `src/index/skills.rs` (or wherever Phase 4 placed it) to include `when_to_use` per `contracts/entry-schema-p5.md` § Embedding text composition (use devs:rust-dev agent)
+- [x] T115 [GIT] Commit: `feat(schema): v3 migration adds kind/searchable/user_invocable/when_to_use; walks commands directory`
 - [ ] T116 [US1] Create `tests/schema_migration_v3.rs` with 4-6 tests per `contracts/schema-migration-p5.md` § Testing (v2→v3 happy path, backfill defaults, identity preservation, FK preservation, mid-tx failure rollback) (use devs:rust-dev agent)
 - [ ] T117 [US1] Create `tests/frontmatter_p5_fields.rs` with the 8 tests per `contracts/frontmatter-p5.md` § Tests (use devs:rust-dev agent)
 - [ ] T118 [US1] Create `tests/entry_kind_indexing.rs` with 5-7 tests covering: both directories index, kind discriminator, same-name-different-kind, workspace_skills syncs both kinds, when_to_use contributes to embedding_text, content_hash invalidated when when_to_use changes (use devs:rust-dev agent)

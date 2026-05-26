@@ -33,8 +33,11 @@ use crate::index::{
     enable_plugin_atomic, mark_all_disabled_for_plugin, reindex_plugin_atomic,
 };
 use crate::paths::Paths;
-use crate::plugin::frontmatter::{FrontmatterError, parse_skill_frontmatter};
-use crate::plugin::identity::PluginId;
+use crate::plugin::components::list_command_files;
+use crate::plugin::frontmatter::{
+    FrontmatterError, ParsedSkill, parse_skill_frontmatter, validate_argument_names,
+};
+use crate::plugin::identity::{EntryKind, PluginId};
 use crate::plugin::manifest::{manifest_path_for, parse_plugin_manifest};
 
 /// Result of a successful enable.
@@ -582,10 +585,14 @@ fn auto_disable_locked(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<u32, T
     delete_by_plugin(&conn, &id.catalog, &id.plugin)
 }
 
-/// Walk `<plugin_dir>/skills/*/SKILL.md`. Errors per-file are funnelled:
+/// Walk every Phase 5 entry under `<plugin_dir>` — both `skills/*/SKILL.md`
+/// and `commands/*.md` — and produce a unified [`PendingSkill`] list
+/// keyed on the kind discriminator. Errors per-file are funnelled
+/// consistently across the two surfaces:
 ///
 /// * Delimiter failure → `SkillFrontmatterParseError` (whole-plugin abort).
 /// * YAML body failure → warning + skip (FR-013c).
+/// * Illegal `arguments` name → `InvalidArgumentFrontmatter` (exit 29).
 /// * IO failure → bubble as `TomeError::Io`.
 fn collect_pending_skills(
     id: &PluginId,
@@ -593,6 +600,21 @@ fn collect_pending_skills(
     plugin_version: &str,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<PendingSkill>, TomeError> {
+    let mut pending: Vec<PendingSkill> = Vec::new();
+    collect_skill_entries(id, plugin_dir, plugin_version, warnings, &mut pending)?;
+    collect_command_entries(id, plugin_dir, plugin_version, warnings, &mut pending)?;
+    Ok(pending)
+}
+
+/// Walk `<plugin_dir>/skills/*/SKILL.md` and append one [`PendingSkill`]
+/// (kind = Skill) per parseable entry.
+fn collect_skill_entries(
+    id: &PluginId,
+    plugin_dir: &Path,
+    plugin_version: &str,
+    warnings: &mut Vec<String>,
+    pending: &mut Vec<PendingSkill>,
+) -> Result<(), TomeError> {
     let skills_root = plugin_dir.join("skills");
     if !skills_root.is_dir() {
         debug!(
@@ -600,7 +622,7 @@ fn collect_pending_skills(
             skills_dir = %skills_root.display(),
             "no skills directory; enabling zero rows",
         );
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     let mut entries: Vec<PathBuf> = match std::fs::read_dir(&skills_root) {
@@ -613,8 +635,6 @@ fn collect_pending_skills(
     // Deterministic ordering across platforms / filesystems.
     entries.sort();
 
-    let mut pending: Vec<PendingSkill> = Vec::with_capacity(entries.len());
-
     for skill_dir in entries {
         if was_cancelled() {
             return Err(TomeError::Interrupted);
@@ -624,62 +644,151 @@ fn collect_pending_skills(
             continue;
         }
 
-        let parsed = match parse_skill_frontmatter(&skill_file) {
-            Ok(p) => p,
-            Err(FrontmatterError::MissingDelimiters { file, message }) => {
-                return Err(TomeError::SkillFrontmatterParseError { file, message });
-            }
-            Err(FrontmatterError::InvalidYaml { file, message }) => {
-                let warning = format!(
-                    "skipped {}: frontmatter YAML invalid: {}",
-                    file.display(),
-                    message
-                );
-                warn!(file = %file.display(), reason = %message, "skipping skill: invalid YAML body");
-                warnings.push(warning);
-                continue;
-            }
-            Err(FrontmatterError::Io { file: _, source }) => return Err(TomeError::Io(source)),
-        };
-
         let dir_name = skill_dir
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        let (name, name_fallback) = parsed.resolved_name(&dir_name);
-        let (description, desc_fallback) = parsed.resolved_description();
-        if name_fallback {
-            warnings.push(format!(
-                "name fallback applied for {}: using directory name `{}`",
-                skill_file.display(),
-                name
-            ));
+        match parse_one_entry(
+            id,
+            plugin_dir,
+            plugin_version,
+            &skill_file,
+            &dir_name,
+            EntryKind::Skill,
+            warnings,
+        )? {
+            Some(p) => pending.push(p),
+            None => continue,
         }
-        if desc_fallback {
-            warnings.push(format!(
-                "description fallback applied for {}: using leading body text",
-                skill_file.display()
-            ));
+    }
+
+    Ok(())
+}
+
+/// Walk `<plugin_dir>/commands/*.md` (flat, non-recursive) and append one
+/// [`PendingSkill`] (kind = Command) per parseable entry.
+fn collect_command_entries(
+    id: &PluginId,
+    plugin_dir: &Path,
+    plugin_version: &str,
+    warnings: &mut Vec<String>,
+    pending: &mut Vec<PendingSkill>,
+) -> Result<(), TomeError> {
+    let commands = list_command_files(plugin_dir);
+    if commands.is_empty() {
+        debug!(
+            plugin = %id,
+            "no commands directory or no command files; enabling zero command rows",
+        );
+        return Ok(());
+    }
+
+    for cmd in commands {
+        if was_cancelled() {
+            return Err(TomeError::Interrupted);
         }
+        match parse_one_entry(
+            id,
+            plugin_dir,
+            plugin_version,
+            &cmd.path,
+            &cmd.name,
+            EntryKind::Command,
+            warnings,
+        )? {
+            Some(p) => pending.push(p),
+            None => continue,
+        }
+    }
 
-        let rel_path = skill_file
-            .strip_prefix(plugin_dir)
-            .unwrap_or(&skill_file)
-            .to_string_lossy()
-            .into_owned();
+    Ok(())
+}
 
-        pending.push(PendingSkill {
-            catalog: id.catalog.clone(),
-            plugin: id.plugin.clone(),
-            name,
-            description,
-            plugin_version: plugin_version.to_owned(),
-            path: rel_path,
+/// Parse a single entry file (skill or command) into a [`PendingSkill`].
+/// Returns `Ok(None)` when the file's YAML body is invalid (FR-013c — the
+/// warning has already been appended) so the caller skips the entry
+/// without aborting the whole plugin.
+fn parse_one_entry(
+    id: &PluginId,
+    plugin_dir: &Path,
+    plugin_version: &str,
+    file: &Path,
+    fallback_name: &str,
+    kind: EntryKind,
+    warnings: &mut Vec<String>,
+) -> Result<Option<PendingSkill>, TomeError> {
+    let parsed: ParsedSkill = match parse_skill_frontmatter(file) {
+        Ok(p) => p,
+        Err(FrontmatterError::MissingDelimiters { file, message }) => {
+            return Err(TomeError::SkillFrontmatterParseError { file, message });
+        }
+        Err(FrontmatterError::InvalidYaml { file: bad, message }) => {
+            let warning = format!(
+                "skipped {}: frontmatter YAML invalid: {}",
+                bad.display(),
+                message,
+            );
+            warn!(file = %bad.display(), reason = %message, "skipping entry: invalid YAML body");
+            warnings.push(warning);
+            return Ok(None);
+        }
+        Err(FrontmatterError::Io { file: _, source }) => return Err(TomeError::Io(source)),
+    };
+
+    // Argument-name validation (FR-013c sibling — Phase 5). Illegal
+    // names are a parse-class failure with exit 29.
+    if let Err(reason) = validate_argument_names(&parsed.frontmatter.arguments) {
+        return Err(TomeError::InvalidArgumentFrontmatter {
+            file: file.to_path_buf(),
+            reason,
         });
     }
 
-    Ok(pending)
+    let (name, name_fallback) = parsed.resolved_name(fallback_name);
+    let (description, desc_fallback) = parsed.resolved_description();
+    if name_fallback {
+        warnings.push(format!(
+            "name fallback applied for {}: using directory name `{}`",
+            file.display(),
+            name,
+        ));
+    }
+    if desc_fallback {
+        warnings.push(format!(
+            "description fallback applied for {}: using leading body text",
+            file.display(),
+        ));
+    }
+
+    let rel_path = file
+        .strip_prefix(plugin_dir)
+        .unwrap_or(file)
+        .to_string_lossy()
+        .into_owned();
+
+    let when_to_use = parsed
+        .frontmatter
+        .when_to_use
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let searchable = parsed.frontmatter.resolved_searchable();
+    let user_invocable = parsed.frontmatter.resolved_user_invocable(kind);
+
+    Ok(Some(PendingSkill {
+        catalog: id.catalog.clone(),
+        plugin: id.plugin.clone(),
+        name,
+        kind,
+        description,
+        plugin_version: plugin_version.to_owned(),
+        path: rel_path,
+        when_to_use,
+        searchable,
+        user_invocable,
+    }))
 }
 
 /// Step 4 — confirm the embedder and reranker entries in `MODEL_REGISTRY`
@@ -1395,7 +1504,7 @@ mod tests {
         let beta = snap.iter().find(|(n, _, _)| n == "beta").unwrap();
         assert_eq!(
             beta.1,
-            crate::index::skills::content_hash("beta", "updated second")
+            crate::index::skills::content_hash("beta", "updated second", None)
         );
     }
 

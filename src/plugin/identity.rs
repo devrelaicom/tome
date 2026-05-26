@@ -96,3 +96,48 @@ pub enum SegmentRejection {
     #[error("must not be an absolute path")]
     Absolute,
 }
+
+/// The kind discriminator on a unified entry row (Phase 5).
+///
+/// Phase 5 widens the v2 schema so the `skills` table carries both kinds —
+/// `skill` (sourced from `<plugin>/skills/<name>/SKILL.md`) and `command`
+/// (sourced from `<plugin>/commands/<name>.md`) — disambiguated by a new
+/// `kind` column whose serde representation matches the lowercase strings
+/// written to disk by the schema-v3 migration.
+///
+/// See `specs/005-phase-5-commands-prompts/contracts/entry-schema-p5.md`
+/// for the authoritative shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EntryKind {
+    Skill,
+    Command,
+}
+
+impl EntryKind {
+    /// Lowercase string form matching the SQL `kind` column literal.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Skill => "skill",
+            Self::Command => "command",
+        }
+    }
+}
+
+impl fmt::Display for EntryKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for EntryKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "skill" => Ok(Self::Skill),
+            "command" => Ok(Self::Command),
+            other => Err(format!("unknown entry kind: {other}")),
+        }
+    }
+}

@@ -9,8 +9,12 @@
 //! omit any subset of components.
 //!
 //! Spec: data-model.md §2 (`ComponentCounts`), tasks.md T035.
+//!
+//! Phase 5 / US1.a additionally exposes [`list_command_files`] which
+//! enumerates `commands/*.md` for the lifecycle pipeline — see
+//! `contracts/entry-schema-p5.md` for the kind-discriminated entry model.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct ComponentCounts {
@@ -69,6 +73,63 @@ fn count_markdown_files(dir: &Path) -> u32 {
         }
     }
     count
+}
+
+/// One discovered command entry: the on-disk file plus the sanitised
+/// `name` Tome will record (the filename stem). Phase 5 / US1.a consumer
+/// is `plugin::lifecycle::collect_pending_commands`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandFile {
+    /// Absolute path to the `.md` file.
+    pub path: PathBuf,
+    /// Filename stem with the `.md` extension stripped — used as the
+    /// fallback `name` if the file's frontmatter does not declare one.
+    pub name: String,
+}
+
+/// Enumerate `<plugin_dir>/commands/*.md` non-recursively. Returned in
+/// case-insensitive ascending order of the filename stem so the on-disk
+/// snapshot stays deterministic across platforms.
+///
+/// Per Phase 5 the walk is FLAT (commands live directly under
+/// `commands/`; sub-directories are ignored). Files whose names start
+/// with `.` are skipped (hidden / editor-temp files). A missing
+/// `commands/` directory yields an empty `Vec`, never an error.
+pub fn list_command_files(plugin_dir: &Path) -> Vec<CommandFile> {
+    let dir = plugin_dir.join("commands");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<CommandFile> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if file_name.starts_with('.') {
+            continue;
+        }
+        let extension_ok = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.eq_ignore_ascii_case("md"))
+            .unwrap_or(false);
+        if !extension_ok {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        out.push(CommandFile {
+            path: path.clone(),
+            name: stem.to_owned(),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
 }
 
 /// Parse `.mcp.json` and count entries under `mcpServers`. A missing,

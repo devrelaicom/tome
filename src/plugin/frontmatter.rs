@@ -23,17 +23,173 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::plugin::identity::EntryKind;
+
 const DESCRIPTION_FALLBACK_LIMIT_CHARS: usize = 500;
 
-/// Subset of the YAML header Tome consumes. Other fields (`when_to_use`,
-/// `allowed-tools`, etc.) are deliberately omitted — serde_yaml will skip
-/// them under the lenient parse policy.
+/// Argument-name pattern enforced by [`validate_argument_names`].
+/// Names must match `^[a-z_][a-z0-9_]*$` per
+/// `contracts/frontmatter-p5.md` § Recognised fields.
+const ARGUMENT_NAME_PATTERN: &str = r"^[a-z_][a-z0-9_]*$";
+
+/// Lenient subset of the YAML header Tome consumes.
+///
+/// Phase 5 widens this struct with the new fields documented in
+/// `contracts/frontmatter-p5.md`. The struct-level `kebab-case` rename
+/// covers `disable-model-invocation`, `user-invocable`, and
+/// `argument-hint`; the two snake_case fields (`when_to_use` and
+/// `prompt_name`) carry explicit `#[serde(rename = "...")]` attributes
+/// that override the struct-level rule. Other fields (`allowed-tools`,
+/// `agent`, etc.) are tolerated silently by `serde_yaml`.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct SkillFrontmatter {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    /// Phase 5 — guidance text indexed alongside `description` to widen the
+    /// embedding-text composition (see `entry-schema-p5.md`).
+    #[serde(default, rename = "when_to_use")]
+    pub when_to_use: Option<String>,
+    /// Phase 5 — argument names. Accepts either a space-separated string
+    /// (`arguments: a b c`) or a YAML list. Both forms produce a `Vec<String>`.
+    #[serde(default, deserialize_with = "deserialize_arguments")]
+    pub arguments: Vec<String>,
+    /// Phase 5 — human-facing argument-hint text shown to invocation
+    /// surfaces. Tome ingests but does not interpret.
+    #[serde(default)]
+    pub argument_hint: Option<String>,
+    /// Phase 5 — when `true`, the entry is excluded from `search_skills`
+    /// (i.e. resolved `searchable = false`).
+    #[serde(default)]
+    pub disable_model_invocation: Option<bool>,
+    /// Phase 5 — explicit override for the `user-invocable` resolved
+    /// default. Skills default to `false`, commands default to `true`.
+    #[serde(default)]
+    pub user_invocable: Option<bool>,
+    /// Phase 5 — explicit prompt-name override surfaced through MCP
+    /// `prompts/list`. Tome ingests but does not interpret in US1.a.
+    #[serde(default, rename = "prompt_name")]
+    pub prompt_name: Option<String>,
+}
+
+/// Custom deserialiser for the `arguments` field per
+/// `contracts/frontmatter-p5.md` § "arguments accepts both string and list
+/// forms".
+///
+/// Accepted shapes:
+/// * Absent → `Vec::new()` (handled by `#[serde(default)]`).
+/// * Empty string or string of only whitespace → `Vec::new()`.
+/// * Space-separated string `"a b c"` → `vec!["a", "b", "c"]`.
+/// * YAML list `[a, b, c]` → `vec!["a", "b", "c"]`.
+/// * Any other shape (integer, mapping, list-of-non-strings) → deser error;
+///   the caller maps this to `TomeError::InvalidArgumentFrontmatter`
+///   (exit 29).
+fn deserialize_arguments<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{Error, Visitor};
+    use std::fmt;
+
+    struct ArgsVisitor;
+
+    impl<'de> Visitor<'de> for ArgsVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a space-separated string or a list of strings")
+        }
+
+        fn visit_str<E: Error>(self, v: &str) -> Result<Self::Value, E> {
+            Ok(v.split_whitespace().map(str::to_owned).collect())
+        }
+
+        fn visit_string<E: Error>(self, v: String) -> Result<Self::Value, E> {
+            self.visit_str(&v)
+        }
+
+        fn visit_seq<S>(self, mut seq: S) -> Result<Self::Value, S::Error>
+        where
+            S: serde::de::SeqAccess<'de>,
+        {
+            let mut out: Vec<String> = match seq.size_hint() {
+                Some(n) => Vec::with_capacity(n),
+                None => Vec::new(),
+            };
+            while let Some(elem) = seq.next_element::<String>()? {
+                out.push(elem);
+            }
+            Ok(out)
+        }
+
+        fn visit_unit<E: Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+
+        fn visit_none<E: Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+
+        fn visit_some<D: serde::Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> Result<Self::Value, D::Error> {
+            deserializer.deserialize_any(self)
+        }
+    }
+
+    deserializer.deserialize_any(ArgsVisitor)
+}
+
+impl SkillFrontmatter {
+    /// Resolved `searchable` value per `contracts/frontmatter-p5.md`
+    /// § Resolved defaults. Equivalent to
+    /// `!disable_model_invocation.unwrap_or(false)` — i.e. searchable by
+    /// default unless the author explicitly opts out.
+    pub fn resolved_searchable(&self) -> bool {
+        !self.disable_model_invocation.unwrap_or(false)
+    }
+
+    /// Resolved `user_invocable` value per `contracts/frontmatter-p5.md`
+    /// § Resolved defaults. Defaults depend on `kind`: skills default to
+    /// `false`, commands default to `true`. An explicit value in
+    /// frontmatter overrides the default.
+    pub fn resolved_user_invocable(&self, kind: EntryKind) -> bool {
+        self.user_invocable.unwrap_or(match kind {
+            EntryKind::Skill => false,
+            EntryKind::Command => true,
+        })
+    }
+}
+
+/// Validate every argument name against `^[a-z_][a-z0-9_]*$`. Returns the
+/// first illegal name on failure. The caller is responsible for converting
+/// this into a `TomeError::InvalidArgumentFrontmatter { file, reason }`
+/// (exit 29).
+pub fn validate_argument_names(names: &[String]) -> Result<(), String> {
+    // Hand-rolled validation to avoid promoting `regex` to a direct dep
+    // before Phase 5 / F2 (which is the dedicated promotion slice).
+    for name in names {
+        if !is_valid_argument_name(name) {
+            return Err(format!(
+                "argument name `{name}` must match {ARGUMENT_NAME_PATTERN}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_argument_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_lowercase() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 /// Parsed `SKILL.md`: the YAML header plus the body text that follows it.
