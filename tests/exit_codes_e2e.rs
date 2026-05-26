@@ -29,6 +29,13 @@
 //! | 13   | WorkspaceNotFound             | `workspace_use_missing_workspace_exits_13` |
 //! | 19   | HarnessClash                  | `workspace_use_harness_clash_exits_19_without_force` |
 //!
+//! Phase 4 US4.c / T338 addition (CLI binary coverage for the
+//! `tome workspace regen-summary` summariser-missing path):
+//!
+//! | Code | Variant                                       | Tested via                                            |
+//! |------|-----------------------------------------------|-------------------------------------------------------|
+//! | 24   | SummariserFailure { kind: ModelMissing }      | `workspace_regen_summary_with_missing_model_exits_24` |
+//!
 //! Codes reachable only through embedder/inference paths (deferred to
 //! library-level tests for CI cost reasons — running these end-to-end
 //! requires loading `FastembedEmbedder` which pulls ~345 MB of ONNX):
@@ -332,6 +339,45 @@ fn workspace_use_harness_clash_exits_19_without_force() {
         out.status.code(),
         Some(19),
         "expected exit 19 HarnessClash, got {:?}, stderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+#[test]
+fn workspace_regen_summary_with_missing_model_exits_24() {
+    // Phase 4 / US4.c / T338 — `tome workspace regen-summary <name>`
+    // must surface `SummariserFailure { kind: ModelMissing }` from
+    // `LlamaSummariser::new` (no GGUF on disk → exit 24).
+    //
+    // Note on the exit-code number: tasks.md / `contracts/summariser.md`
+    // refer to "exit 20" historically, but the closed-set
+    // `TomeError::exit_code()` lands `SummariserFailure { .. }` at 24
+    // per the F3 collision-avoidance fix — 20 is owned by
+    // `PluginNotFound`. The data-model file documents this.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    // The workspace must exist or regen-summary exits 13 (`WorkspaceNotFound`)
+    // before reaching the summariser. Seed directly via the helper so we
+    // don't depend on `tome workspace init` (which would also work but
+    // is a heavier-weight invocation that boots the index machinery
+    // twice).
+    common::seed_workspace(&paths, "test-ws");
+
+    // ToolEnv's $HOME is a fresh tempdir → models_dir is empty. The
+    // summariser GGUF is therefore absent; `LlamaSummariser::new`
+    // returns `ModelMissing` → exit 24.
+    let out = env
+        .cmd()
+        .args(["workspace", "regen-summary", "test-ws"])
+        .output()
+        .expect("spawn regen-summary");
+    assert_eq!(
+        out.status.code(),
+        Some(24),
+        "expected exit 24 SummariserFailure {{ ModelMissing }}, got {:?}, stderr:\n{}",
         out.status.code(),
         String::from_utf8_lossy(&out.stderr),
     );
