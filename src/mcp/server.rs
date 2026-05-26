@@ -19,11 +19,17 @@
 
 use std::sync::Arc;
 
+use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use rmcp::model::{Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{ErrorData as McpError, ServerHandler, tool, tool_handler, tool_router};
+use rmcp::model::{
+    GetPromptRequestParams, GetPromptResult, Implementation, ListPromptsResult,
+    PaginatedRequestParams, PromptsCapability, ServerCapabilities, ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_handler, tool_router};
 
+use crate::mcp::prompts;
 use crate::mcp::state::McpState;
 use crate::mcp::tools::{get_skill, search_skills};
 
@@ -36,13 +42,22 @@ pub struct Server {
     // rather than re-routing through a getter.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+    /// Phase 5 / US1.b: per-session prompts router. Built once at
+    /// construction from the `McpState`'s `PromptRegistry`. The
+    /// `prompts/list` handler reads `list_all()`; the `prompts/get`
+    /// handler dispatches by name. Each route's `get` closure currently
+    /// returns `METHOD_NOT_FOUND` — US1.c lands the real substitution-
+    /// driven body render.
+    prompt_router: PromptRouter<Self>,
 }
 
 impl Server {
     pub fn new(state: Arc<McpState>) -> Self {
+        let prompt_router = prompts::build_router::<Self>(&state.prompt_registry);
         Self {
             state,
             tool_router: Self::tool_router(),
+            prompt_router,
         }
     }
 
@@ -101,7 +116,16 @@ impl Server {
 #[tool_handler]
 impl ServerHandler for Server {
     fn get_info(&self) -> ServerInfo {
-        let capabilities = ServerCapabilities::builder().enable_tools().build();
+        // Phase 5 / US1.b: advertise `prompts` capability alongside the
+        // pre-existing `tools` capability. `list_changed: false` per
+        // NFR-008 — workspace switches require a server restart, so
+        // we never emit `notifications/prompts/list_changed`.
+        let capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_prompts_with(PromptsCapability {
+                list_changed: Some(false),
+            })
+            .build();
         ServerInfo::new(capabilities)
             .with_server_info(Implementation::new("tome", env!("CARGO_PKG_VERSION")))
             .with_instructions(
@@ -109,5 +133,42 @@ impl ServerHandler for Server {
                  with a natural-language task to retrieve ranked candidates, then \
                  `get_skill` to fetch a specific skill's body and resource paths.",
             )
+    }
+
+    /// Phase 5 / US1.b: `prompts/list` returns every user-invocable
+    /// entry from the resolved workspace as an MCP prompt. The
+    /// underlying `PromptRouter::list_all` sorts alphabetically by
+    /// name so the wire output is stable across calls. Pagination is
+    /// not implemented for Phase 5 (the contract pins this).
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        let prompts = self.prompt_router.list_all();
+        Ok(ListPromptsResult {
+            prompts,
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    /// Phase 5 / US1.b: `prompts/get` dispatches by name through the
+    /// per-session [`PromptRouter`]. US1.c replaces the per-route
+    /// `METHOD_NOT_FOUND` stub closures with substitution-driven body
+    /// renders; until then this surface advertises the capability but
+    /// every request resolves to `method_not_found`.
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, McpError> {
+        let prompt_context = rmcp::handler::server::prompt::PromptContext::new(
+            self,
+            request.name,
+            request.arguments,
+            context,
+        );
+        self.prompt_router.get_prompt(prompt_context).await
     }
 }
