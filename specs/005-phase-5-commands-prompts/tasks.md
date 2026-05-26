@@ -149,11 +149,11 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 - [x] T113 [US1] Update `index::skills` queries to filter by `kind` where applicable (lookups by identity tuple include kind) (use devs:rust-dev agent)
 - [x] T114 [US1] Update `embedding_text` composer in `src/index/skills.rs` (or wherever Phase 4 placed it) to include `when_to_use` per `contracts/entry-schema-p5.md` § Embedding text composition (use devs:rust-dev agent)
 - [x] T115 [GIT] Commit: `feat(schema): v3 migration adds kind/searchable/user_invocable/when_to_use; walks commands directory`
-- [ ] T116 [US1] Create `tests/schema_migration_v3.rs` with 4-6 tests per `contracts/schema-migration-p5.md` § Testing (v2→v3 happy path, backfill defaults, identity preservation, FK preservation, mid-tx failure rollback) (use devs:rust-dev agent)
-- [ ] T117 [US1] Create `tests/frontmatter_p5_fields.rs` with the 8 tests per `contracts/frontmatter-p5.md` § Tests (use devs:rust-dev agent)
-- [ ] T118 [US1] Create `tests/entry_kind_indexing.rs` with 5-7 tests covering: both directories index, kind discriminator, same-name-different-kind, workspace_skills syncs both kinds, when_to_use contributes to embedding_text, content_hash invalidated when when_to_use changes (use devs:rust-dev agent)
-- [ ] T119 [US1] Run `cargo test --test schema_migration_v3 --test frontmatter_p5_fields --test entry_kind_indexing` and confirm all green (use devs:rust-dev agent)
-- [ ] T120 [GIT] Commit: `test(phase5): schema migration + frontmatter + entry kind indexing`
+- [x] T116 [US1] Create `tests/schema_migration_v3.rs` with 4-6 tests per `contracts/schema-migration-p5.md` § Testing (v2→v3 happy path, backfill defaults, identity preservation, FK preservation, mid-tx failure rollback) (use devs:rust-dev agent)
+- [x] T117 [US1] Create `tests/frontmatter_p5_fields.rs` with the 8 tests per `contracts/frontmatter-p5.md` § Tests (use devs:rust-dev agent)
+- [x] T118 [US1] Create `tests/entry_kind_indexing.rs` with 5-7 tests covering: both directories index, kind discriminator, same-name-different-kind, workspace_skills syncs both kinds, when_to_use contributes to embedding_text, content_hash invalidated when when_to_use changes (use devs:rust-dev agent)
+- [x] T119 [US1] Run `cargo test --test schema_migration_v3 --test frontmatter_p5_fields --test entry_kind_indexing` and confirm all green (use devs:rust-dev agent)
+- [x] T120 [GIT] Commit: `test(phase5): schema migration + frontmatter + entry kind indexing`
 - [ ] T121 [GIT] Push US1.a slice and open sub-PR
 
 ### Slice US1.b — MCP prompts capability + `prompts/list` + name derivation + collisions
