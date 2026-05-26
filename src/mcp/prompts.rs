@@ -641,7 +641,7 @@ fn build_get_context(
     // `clock`: honour the test-only override slot when set; otherwise
     // local time, falling back to UTC if the host has no local-offset
     // database (musl builds, locked-down sandboxes).
-    let clock = current_clock();
+    let clock = substitution::current_clock();
 
     SubstitutionContext::builder()
         .catalog_name(entry.catalog.clone())
@@ -662,31 +662,6 @@ fn build_get_context(
         .map_err(|e| TomeError::SubstitutionFailed {
             reason: e.to_string(),
         })
-}
-
-/// Resolve the substitution clock — honours
-/// `SUBSTITUTION_CLOCK_OVERRIDE` when set, else `now_utc()`. The
-/// `time` crate's `now_local()` requires the `local-offset` feature
-/// (not enabled in Tome's dep tree); the Phase 5 substitution
-/// contract names the clock value as "wall-clock with the local
-/// offset *when available*" and the substitution engine produces ISO
-/// 8601 with offset, so UTC is a sound default that the test override
-/// can replace for deterministic runs.
-fn current_clock() -> time::OffsetDateTime {
-    use std::sync::Mutex;
-
-    let slot: &std::sync::OnceLock<Mutex<Option<time::OffsetDateTime>>> =
-        &substitution::SUBSTITUTION_CLOCK_OVERRIDE;
-    if let Some(mu) = slot.get() {
-        // Mutex poison recovery per the F3 contract: tests that panic
-        // mid-substitution shouldn't take the slot down for the rest of
-        // the suite. (Same discipline as Phase 4 / P5 backend recovery.)
-        let guard = mu.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(t) = *guard {
-            return t;
-        }
-    }
-    time::OffsetDateTime::now_utc()
 }
 
 /// Map the rmcp `arguments` JSON object → [`ArgumentValues`] per
