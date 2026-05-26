@@ -16,6 +16,7 @@ use tokio::sync::OnceCell;
 use tome::embedding::Reranker;
 use tome::embedding::registry::lookup;
 use tome::embedding::stub::{StubEmbedder, StubReranker};
+use tome::mcp::prompts::PromptRegistry;
 use tome::mcp::state::McpState;
 use tome::mcp::tools::search_skills::{self, MAX_QUERY_CHARS};
 use tome::workspace::ResolvedScope;
@@ -32,6 +33,7 @@ fn build_state(env: &ToolEnv) -> Arc<McpState> {
         paths,
         embedder_entry,
         reranker_entry,
+        prompt_registry: Arc::new(PromptRegistry::default()),
     })
 }
 

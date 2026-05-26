@@ -158,21 +158,21 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US1.b — MCP prompts capability + `prompts/list` + name derivation + collisions
 
-- [ ] T122 [US1] Verify rmcp prompts API shape against current rmcp version (per research §R-14): inspect rmcp crate's `ServerCapabilities`, `PromptsCapability`, `#[prompt_router]` macro, request/response types; record findings in a new `specs/005-phase-5-commands-prompts/notes/rmcp-prompts-api.md` (use devs:rust-dev agent)
-- [ ] T123 [US1] Create `src/mcp/prompt_name.rs` with `derive_name(entry, override)` + `sanitise(s)` + `sanitise_trunc(s, max)` per `contracts/mcp-prompts.md` § Prompt name derivation. Constants `PLUGIN_PORTION_MAX = 16`, `ENTRY_PORTION_MAX = 32`, `SEPARATOR = "__"` (use devs:rust-dev agent)
-- [ ] T124 [US1] Create `src/mcp/prompt_collision.rs` with `CollisionRecord`, `EntryIdentity`, `resolve_collisions(entries) -> (Vec<PromptDescriptor>, Vec<CollisionRecord>)` per `contracts/mcp-prompts.md` § Collision handling (use devs:rust-dev agent)
-- [ ] T125 [US1] Create `src/mcp/prompts.rs` with `PromptDescriptor`, `PromptArgument`, `PromptListResponse`, `PromptGetResponse`, `PromptMessage`, `PromptContent` (Serialize, JsonSchema derives per data-model.md §4.4) (use devs:rust-dev agent)
-- [ ] T126 [US1] Add `PromptRegistry` struct to `src/mcp/state.rs` (HashMap<String, EntryRow> + Vec<CollisionRecord>) and extend `McpState` with `prompt_registry: Arc<PromptRegistry>` field (use devs:rust-dev agent)
-- [ ] T127 [US1] Implement `PromptRegistry::build_for_workspace(workspace_id, conn)` that queries enabled-and-user-invocable entries, derives prompt names (applying overrides), and resolves collisions (use devs:rust-dev agent)
-- [ ] T128 [US1] Extend MCP server initialization in `src/mcp/server.rs` to declare `PromptsCapability { list_changed: Some(false) }` per `contracts/mcp-prompts.md` § Capability declaration (use devs:rust-dev agent)
-- [ ] T129 [US1] Implement `prompts/list` handler in `src/mcp/prompts.rs` using rmcp's `#[prompt_router]` (or equivalent) macro; dispatches sync work via `spawn_blocking` (use devs:rust-dev agent)
-- [ ] T130 [US1] Implement argument schema derivation for prompts: named case (FR-070) + catch-all `args` case (FR-071/072) per `contracts/mcp-prompts.md` § Argument schema derivation (use devs:rust-dev agent)
-- [ ] T131 [US1] Wire `PromptRegistry` construction at MCP startup in `src/mcp/mod.rs::run` (after preflight checks) (use devs:rust-dev agent)
+- [x] T122 [US1] Verify rmcp prompts API shape against current rmcp version (per research §R-14): inspect rmcp crate's `ServerCapabilities`, `PromptsCapability`, `#[prompt_router]` macro, request/response types; record findings in a new `specs/005-phase-5-commands-prompts/notes/rmcp-prompts-api.md` (use devs:rust-dev agent)
+- [x] T123 [US1] Create `src/mcp/prompt_name.rs` with `derive_name(entry, override)` + `sanitise(s)` + `sanitise_trunc(s, max)` per `contracts/mcp-prompts.md` § Prompt name derivation. Constants `PLUGIN_PORTION_MAX = 16`, `ENTRY_PORTION_MAX = 32`, `SEPARATOR = "__"` (use devs:rust-dev agent)
+- [x] T124 [US1] Create `src/mcp/prompt_collision.rs` with `CollisionRecord`, `EntryIdentity`, `resolve_collisions(entries) -> (Vec<PromptDescriptor>, Vec<CollisionRecord>)` per `contracts/mcp-prompts.md` § Collision handling (use devs:rust-dev agent)
+- [x] T125 [US1] Create `src/mcp/prompts.rs` with `PromptDescriptor`, `PromptArgument`, `PromptListResponse`, `PromptGetResponse`, `PromptMessage`, `PromptContent` (Serialize, JsonSchema derives per data-model.md §4.4) (use devs:rust-dev agent)
+- [x] T126 [US1] Add `PromptRegistry` struct to `src/mcp/state.rs` (HashMap<String, EntryRow> + Vec<CollisionRecord>) and extend `McpState` with `prompt_registry: Arc<PromptRegistry>` field (use devs:rust-dev agent)
+- [x] T127 [US1] Implement `PromptRegistry::build_for_workspace(workspace_id, conn)` that queries enabled-and-user-invocable entries, derives prompt names (applying overrides), and resolves collisions (use devs:rust-dev agent)
+- [x] T128 [US1] Extend MCP server initialization in `src/mcp/server.rs` to declare `PromptsCapability { list_changed: Some(false) }` per `contracts/mcp-prompts.md` § Capability declaration (use devs:rust-dev agent)
+- [x] T129 [US1] Implement `prompts/list` handler in `src/mcp/prompts.rs` using rmcp's `#[prompt_router]` (or equivalent) macro; dispatches sync work via `spawn_blocking` (use devs:rust-dev agent)
+- [x] T130 [US1] Implement argument schema derivation for prompts: named case (FR-070) + catch-all `args` case (FR-071/072) per `contracts/mcp-prompts.md` § Argument schema derivation (use devs:rust-dev agent)
+- [x] T131 [US1] Wire `PromptRegistry` construction at MCP startup in `src/mcp/mod.rs::run` (after preflight checks) (use devs:rust-dev agent)
 - [ ] T132 [GIT] Commit: `feat(mcp): prompts capability + prompts/list + name derivation + collisions`
-- [ ] T133 [US1] Create `tests/prompt_naming.rs` with 6-8 tests: sanitisation, truncation per portion, override replaces both portions, harness prefix preserved by harness (use devs:rust-dev agent)
-- [ ] T134 [US1] Create `tests/prompt_collision.rs` with 4-6 tests: counter starts at 2, tie-break on (catalog, plugin, kind, name) lex order, collision logged at warn level (use devs:rust-dev agent)
-- [ ] T135 [US1] Create `tests/mcp_prompts.rs` with tests for `prompts/list` shape, user_invocable filter, both kinds included, named-args schema, catch-all-args schema, listChanged: false declared (use devs:rust-dev agent)
-- [ ] T136 [US1] Create `tests/mcp_prompts_list_json_shape.rs` byte-stable JSON pin per research §R-19 (use devs:rust-dev agent)
+- [x] T133 [US1] Create `tests/prompt_naming.rs` with 6-8 tests: sanitisation, truncation per portion, override replaces both portions, harness prefix preserved by harness (use devs:rust-dev agent)
+- [x] T134 [US1] Create `tests/prompt_collision.rs` with 4-6 tests: counter starts at 2, tie-break on (catalog, plugin, kind, name) lex order, collision logged at warn level (use devs:rust-dev agent)
+- [x] T135 [US1] Create `tests/mcp_prompts.rs` with tests for `prompts/list` shape, user_invocable filter, both kinds included, named-args schema, catch-all-args schema, listChanged: false declared (use devs:rust-dev agent)
+- [x] T136 [US1] Create `tests/mcp_prompts_list_json_shape.rs` byte-stable JSON pin per research §R-19 (use devs:rust-dev agent)
 - [ ] T137 [GIT] Commit: `test(mcp): prompts/list + name derivation + collisions`
 - [ ] T138 [GIT] Push US1.b slice and update PR
 

@@ -22,6 +22,9 @@
 
 pub mod log;
 pub mod preflight;
+pub mod prompt_collision;
+pub mod prompt_name;
+pub mod prompts;
 pub mod runtime;
 pub mod server;
 pub mod state;
@@ -112,6 +115,36 @@ pub fn run(scope: &ResolvedScope, paths: &Paths) -> Result<(), TomeError> {
             "startup ok",
         );
 
+        // Phase 5 / US1.b: build the prompts registry from the
+        // resolved workspace's enabled-and-user-invocable entries.
+        // Sync work (rusqlite open + frontmatter parses) goes through
+        // `spawn_blocking` per the sync-boundary discipline.
+        let registry_scope = scope.clone();
+        let registry_paths = paths.clone();
+        let prompt_registry = match tokio::task::spawn_blocking(move || {
+            build_prompt_registry(&registry_scope, &registry_paths)
+        })
+        .await
+        .map_err(|e| TomeError::McpStartupFailed {
+            reason: format!("prompt-registry task join: {e}"),
+        })? {
+            Ok(reg) => reg,
+            Err(e) => {
+                error!(
+                    target: "tome::mcp::prompts",
+                    error = %scrub_to_string(e.to_string().as_bytes()),
+                    "prompt-registry build failed",
+                );
+                return Err(e);
+            }
+        };
+        info!(
+            target: "tome::mcp::prompts",
+            prompt_count = prompt_registry.by_name.len(),
+            collision_count = prompt_registry.collisions.len(),
+            "prompt registry built",
+        );
+
         let state = Arc::new(state::McpState {
             embedder: Arc::from(handle.embedder),
             reranker: OnceCell::new(),
@@ -119,6 +152,7 @@ pub fn run(scope: &ResolvedScope, paths: &Paths) -> Result<(), TomeError> {
             paths: paths.clone(),
             embedder_entry: handle.embedder_entry,
             reranker_entry: handle.reranker_entry,
+            prompt_registry: Arc::new(prompt_registry),
         });
 
         let mut server = server::Server::new(state);
@@ -216,6 +250,19 @@ pub fn run(scope: &ResolvedScope, paths: &Paths) -> Result<(), TomeError> {
             }
         }
     })
+}
+
+/// Build the per-session [`prompts::PromptRegistry`] from the resolved
+/// scope's central index DB. Opens read-only so the build cannot
+/// trip over the advisory lock held by a concurrent writer. Returns
+/// the registry on success; surface DB / parse failures as
+/// [`TomeError`] so the MCP startup path can log + exit deterministically.
+fn build_prompt_registry(
+    scope: &ResolvedScope,
+    paths: &Paths,
+) -> Result<prompts::PromptRegistry, TomeError> {
+    let conn = crate::index::db::open_read_only(&paths.index_db)?;
+    prompts::PromptRegistry::build_for_workspace(scope.scope.name(), paths, &conn)
 }
 
 /// Resolve the OS shutdown signal future, returning the contract's

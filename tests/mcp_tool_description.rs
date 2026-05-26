@@ -26,6 +26,7 @@ use tokio::sync::OnceCell;
 use tome::embedding::registry::{MODEL_REGISTRY, ModelEntry, ModelKind};
 use tome::embedding::stub::{StubEmbedder, StubReranker};
 use tome::embedding::{Embedder, Reranker};
+use tome::mcp::prompts::PromptRegistry;
 use tome::mcp::server::Server;
 use tome::mcp::state::McpState;
 use tome::mcp::tool_description::{MAX_DESCRIPTION_LEN, SCAFFOLD, compose, warn_if_too_long};
@@ -54,6 +55,7 @@ fn build_state(paths: &Paths, ws: &WorkspaceName) -> Arc<McpState> {
         paths: paths.clone(),
         embedder_entry: entry_for(ModelKind::Embedder),
         reranker_entry: entry_for(ModelKind::Reranker),
+        prompt_registry: Arc::new(PromptRegistry::default()),
     })
 }
 
