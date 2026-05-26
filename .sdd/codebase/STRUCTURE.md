@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26
+> **Last Updated**: 2026-05-26 (Phase 4 v0.4.0 — Polish complete; 954 tests across 127 suites)
 
 ## Directory Layout
 
@@ -153,7 +153,8 @@ tome/
 │   │
 │   ├── util/                           # Phase 4: Shared utilities
 │   │   ├── mod.rs                      # Public API exports
-│   │   └── atomic_dir.rs               # Atomic directory landing (tempfile + rename); STAGING_PREFIX constant (FR-410)
+│   │   ├── atomic_dir.rs               # Atomic directory landing (tempfile + rename); STAGING_PREFIX constant (FR-410)
+│   │   └── io.rs                       # Phase 4 Polish NEW: bounded_read_to_string + per-class caps
 │   │
 │   └── mcp/                            # MCP server (async island, Phase 3+)
 │       ├── mod.rs                      # Sync entry point: run()
@@ -227,13 +228,13 @@ tome/
 │   │   ├── data-model.md
 │   │   ├── contracts/
 │   │   └── quickstart.md
-│   └── 004-phase-4-refactor-harnesses/       # Phase 4 (F1–F11 + US1–US5 shipped; Polish phase pending)
+│   └── 004-phase-4-refactor-harnesses/       # Phase 4 (F1–F11 + US1–US5 + Polish shipped)
 │       ├── spec.md
 │       ├── plan.md
 │       ├── research.md (19 R-decisions)
 │       ├── data-model.md (schema v2, Scope reshape, HarnessModule, Summariser, settings layers, Subsystem typed dispatch, ProjectBindingState)
 │       ├── contracts/ (13+ contracts: paths-and-layout, harness-modules, settings-composition, sync-algorithm, workspace-commands, summariser, doctor, doctor-extensions-p4, etc.)
-│       ├── retro/ (P2.md: F1–F11; P3.md: US1; P4.md–P5.md: US2–US3; P6.md–P7.md: US4; P8.md+: US5)
+│       ├── retro/ (P2.md: F1–F11; P3.md–P7.md: US1–US5; P8.md: Phase 3 Polish; P9.md+: Phase 4 Polish)
 │       └── quickstart.md
 │
 ├── PRDs/                               # Product requirement documents
@@ -242,22 +243,12 @@ tome/
 │   ├── phase-3.md
 │   └── phase-4.md
 │
-├── retro/                              # Phase retrospectives
-│   ├── P2.md (phase 2 polish)
-│   ├── P3.md (phase 2 feature complete)
-│   ├── P4.md (workspace lifecycle)
-│   ├── P5.md (refcount)
-│   ├── P6.md (doctor)
-│   ├── P7.md (schema migration)
-│   ├── P8.md (phase 3 polish)
-│   └── P10.md (phase 2 polish / feature complete)
-│
-├── Cargo.toml                          # Package definition (MSRV 1.93, v0.4.0+)
+├── Cargo.toml                          # Package definition (MSRV 1.93, v0.4.0)
 ├── Cargo.lock                          # Dependency lock
 ├── build.rs                            # sqlite-vec C extension compilation
 ├── CONSTITUTION.md                     # v1.3.0 — constraints + trade-offs (Phase 4 §Paths amendment)
 ├── CLAUDE.md                           # Project context for Claude Code
-└── CHANGELOG.md                        # Version history (v0.1.0–v0.3.0+, Phase 4 in flight)
+└── CHANGELOG.md                        # Version history (v0.1.0–v0.4.0, Phase 4 complete)
 ```
 
 ## Key Directories
@@ -277,7 +268,7 @@ tome/
 | `doctor/` | Phase 4 US5: Health check + auto-repair | `checks.rs`, `fixes.rs`, `binding.rs`, `harness_integration.rs`, `orphan_cleanup.rs` |
 | `commands/` | CLI subcommand entry points | Per-command modules + dispatchers |
 | `presentation/` | Output formatting + TUI | `tables.rs`, `prompt.rs`, `colour.rs` |
-| `util/` | Shared utilities | `atomic_dir.rs` (tempfile + rename) |
+| `util/` | Shared utilities | `atomic_dir.rs` (tempfile + rename), `io.rs` (bounded read) |
 | `mcp/` | Async MCP server (Phase 3+) | `runtime.rs`, `server.rs`, `tools/`, `tool_description.rs` (US4.b) |
 
 ### `src/doctor/` — Diagnostics & Repair (Phase 4 / US5)
@@ -352,6 +343,15 @@ Phase 4 / US3 implements full subcommand dispatcher + production `ScopeProvider`
 | `info.rs` | `tome harness info [--json]` — per-harness detection, targets, source-of-scope annotation |
 | `sync.rs` | `tome harness sync [--force]` — idempotent reconciliation; thin wrapper over `harness::sync::sync_project` |
 
+### `src/util/` — Utility Modules
+
+Phase 4 Polish adds `io.rs` for bounded I/O operations.
+
+| File | Purpose |
+|------|---------|
+| `atomic_dir.rs` | Atomic directory landing (tempfile + rename); STAGING_PREFIX constant (FR-410) |
+| `io.rs` | Phase 4 Polish NEW: `bounded_read_to_string(reader, max_bytes)` with per-class caps for input validation |
+
 ### `src/mcp/` — MCP Server (Phase 3+ with US4/US5 additions)
 
 Phase 4 / US4.b adds runtime tool description composition from cached summaries; US5 interacts read-only with doctor checks.
@@ -366,7 +366,7 @@ Phase 4 / US4.b adds runtime tool description composition from cached summaries;
 | `state.rs` | `McpState` (embedder, reranker OnceLock, scope, paths, ...) |
 | `tool_description.rs` | Phase 4 US4.b: Compose runtime description from scaffold + cached short summary (reads settings.toml at startup) |
 | `tools/mod.rs` | Tool registration + routing |
-| `tools/search_skills.rs` | `search_skills` handler (KNN + rerank, workspace-filtered) |
+| `tools/search_skills.rs` | `search_skills` handler (KNN + rerank, workspace-filtered, 4096-char input cap) |
 | `tools/get_skill.rs` | `get_skill` handler (metadata + components walks) |
 
 ### `tests/` — Integration Tests
@@ -392,7 +392,7 @@ Phase 4 / US4.b adds runtime tool description composition from cached summaries;
 | `concurrency.rs` | Two-process index contention | 1 |
 | `schema_migration_e2e.rs` | Forward migration via MIGRATIONS_OVERRIDE | 1 |
 | `sync_boundary.rs` | Structural test: no async outside src/mcp/ | 1 |
-| **Total** | 125+ test files, 916 total tests | 125+ |
+| **Total** | 127 test files, 954 total tests | 127 |
 
 #### Key Test Fixtures
 
@@ -421,6 +421,7 @@ Phase 4 / US4.b adds runtime tool description composition from cached summaries;
 | Surgical TOML edit | `src/settings/edit.rs` | Add helper using `toml_edit::DocumentMut` |
 | New subsystem (doctor) | `src/doctor/report.rs` | Add variant to `Subsystem` enum + Ser/Deser impl + fix handler to `fixes.rs` |
 | Trigger site (enable/disable/etc.) | `src/commands/{cmd}.rs` or `src/plugin/lifecycle.rs` | After mutation commit, call `regenerate_for_trigger(workspace_name, paths)` |
+| Bounded I/O operation | `src/util/io.rs` | Add `pub fn bounded_*(reader, max_bytes)` with constant cap |
 
 ### Key Patterns
 
@@ -587,4 +588,4 @@ No auto-generated files in src/; test fixtures are synthesized at runtime (e.g.,
 
 ---
 
-*This document shows WHERE code lives. Update when directory structure changes.*
+*This document shows WHERE code lives. Updated 2026-05-26 against Phase 4 v0.4.0 post-Polish.*

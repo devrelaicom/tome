@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26 (Phase 4 complete; US5.c-1 shipped 10 majors + 1 blocker in PR #101; US5.c-2 closes Phase 4)
+> **Last Updated**: 2026-05-26 (Phase 4 v0.4.0 Polish complete; 916 tests, 125 suites)
 
 ## Technical Debt
 
@@ -21,7 +21,7 @@ Items to address when working in the area:
 
 | ID | Area | Description | Impact | Effort | Mitigation | Status |
 |----|------|-------------|--------|--------|-----------|--------|
-| TD-010 | `src/embedding/download.rs` + `src/summarise/` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner in both `plugin enable` and `models download`; Qwen (~400 MB) makes this more urgent; tracked in F6 / polish | Phase 4 F6 uses indeterminate spinner; upgrade in polish or Phase 5+ |
+| TD-010 | `src/embedding/download.rs` + `src/summarise/` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner in both `plugin enable` and `models download`; Qwen (~400 MB) makes this more urgent; tracked in F6 / polish | Phase 4 F6 uses indeterminate spinner; upgrade in Polish v0.4.1+ |
 | TD-011 | `src/index/migrations.rs` (Phase 3 F7 + US5) | Schema-migration framework implementation complete; zero registered migrations shipped | Testing coverage | Low | Framework landed in Phase 3 Foundational F7 + US5. Phase 4 ships first real `Migration` rows (v1→v2 structural migration); e2e test via `MIGRATIONS_OVERRIDE` injection verified in Phase 3 US5 | Phase 4 (in progress) |
 | TD-012 | `src/mcp/preflight.rs` (Phase 3 F8) | MCP startup pre-flight runs SHA-256 over primary embedder (~66 MB) at every startup | Startup latency | Low | Acceptable for long-running server; cold-cache startup may see latency. Consider `--verify` flag on `tome status` to skip SHA-256 on non-suspect runs. Defer unless profiling shows impact | Acceptable design |
 | TD-013 | Phase 3 US1 testing (T088, T093–T095) | Manual verification pending: real BGE models + live harness for SC-001/SC-002 coverage | Integration testing | High | Three categories: (1) happy-path search_skills/get_skill returns (T092 partial via `mcp_server.rs`), (2) MCP protocol purity (T093), (3) latency budget (T094 p50<300ms, p99<600ms), (4) SIGINT graceful shutdown (T095). Tracked in `retro/P3.md`. **Status**: T088 deferred pending developer access to real BGE models for live container/harness testing | Phase 5+ / Developer pass |
@@ -30,10 +30,10 @@ Items to address when working in the area:
 | TD-016 | `src/workspace/init.rs` (Phase 3 US2) | `.tome.old/` orphan cleanup on crash between rename-aside and rename-in | Recovery cleanup | Low | If `--force` rename-in fails after moving old `.tome/` to `.tome.old/`, rollback restores the old state. But if a crash occurs between rename-aside and rename-in (before rollback logic), `.tome.old/` is left orphan. Phase 4 doctor extensions (US5) should surface and offer cleanup. Currently documented in contract as a known limitation (FR-M-WKS-2) | Phase 4 US5 doctor orphan-cleanup (C-M2 + US5.c-1) |
 | TD-017 | `src/catalog/store.rs::reference_count` (Phase 3 US3) | Catalog cache TOCTOU window between pre-check and `remove_dir_all` | Concurrency safety | Low | Two processes racing `tome catalog remove` may both observe empty refs and both call `remove_dir_all` (benign: one wins, one no-ops). Worse: process A observes empty, process B adds URL before A deletes clone → dangling reference (recovered by `tome catalog update` re-clone). Documented design; same profile as Phase 9 cascade pre-check. Phase 4: refcounting moved to DB table; TOCTOU semantics unchanged but now under advisory lock (FR-366) | Phase 4 F11b (DB table + lock) |
 | TD-018 | `src/doctor/harness_detect.rs` (Phase 3 US4) | Harness-detected list is privacy-sensitive | Privacy | Low | Presently local-only (never transmitted); document explicitly. Review at design time if any downstream feature proposes report transmission (e.g., crash reporting, bug-filing UI). Recommend opt-in privacy gate before enabling network transmission | Local-only; monitor |
-| TD-019 | Phase 4 Config struct legacy field | `Config::catalogs: BTreeMap<String, CatalogEntry>` unused post-F11b | Code cleanup | Low | F11b moved catalog enrolment to central DB; the field is never written. Excision is a follow-up cleanup PR (low urgency) | Phase 4 Polish |
+| TD-019 | Phase 4 Config struct legacy field | `Config::catalogs: BTreeMap<String, CatalogEntry>` unused post-F11b | Code cleanup | Low | F11b moved catalog enrolment to central DB; the field is never written. Excision is a follow-up cleanup PR (low urgency) | Phase 4 Polish v0.4.1+ |
 | TD-020 | Error categorisation | All Phase 1 + Phase 2 + Phase 3 + Phase 4 codes are enumerated; no catch-all variants | Debuggability | Low | Current approach is sound; closed set enforces completeness | By design |
 | TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low | — | Acceptable |
-| TD-050-US4 | `src/summarise/` (Phase 4 US4) | Byte-progress callback for ~400 MB Qwen model download (TD-010 amplified for summariser) | UX | Low | Phase 4 F6 uses indeterminate spinner; upgrade to byte-progress callback in Phase 4 polish if time permits | Phase 4 Polish tracking |
+| TD-050-US4 | `src/summarise/` (Phase 4 US4) | Byte-progress callback for ~400 MB Qwen model download (TD-010 amplified for summariser) | UX | Low | Phase 4 F6 uses indeterminate spinner; upgrade to byte-progress callback in Phase 4 polish if time permits | Phase 4 Polish v0.4.1+ tracking |
 | TD-051-US4 | `src/summarise/llama.rs` | `LlamaSummariser::new` verifies SHA-256 + loads model on every fresh instantiation (no per-process caching across multiple `new()` calls) | Startup latency (rare) | Low | Per-instantiation load is correct for type semantics; process-global singleton `LlamaBackend` is cached. If a future feature creates multiple `LlamaSummariser` instances in sequence without reuse, per-instance load overhead would be measurable. Current triggers create one per regen call; acceptable | Acceptable design |
 | TD-052-US5 | `src/doctor/orphan_cleanup.rs` (Phase 4 US5) | Orphan staging-directory cleanup via `remove_dir_all` with TOCTOU mtime gating | Concurrent-writer race | Low | STAGING_PREFIX + 1h mtime + symlink-skip + `is_dir()` check + 0o700 perms compose correctly; documented TOCTOU semantics benign per `src/doctor/binding.rs::compare_rules` comment (S-M1 deferral) | Documented trade-off; acceptable |
 
@@ -51,7 +51,7 @@ Nice-to-have improvements:
 
 | ID | Area | Description | Risk Level | Mitigation | Status |
 |----|------|-------------|------------|-----------|--------|
-| SEC-001 | Phase 2 BGE testing (T088) | Vector search correctness not yet measured against real BGE models (bge-small-en-v1.5, bge-reranker-base) | High | Complete developer-machine pass with real models; validate SC-001 / SC-002 correctness assertions | Pending Phase 4+ / Developer pass |
+| SEC-001 | Phase 2 BGE testing (T088) | Vector search correctness not yet measured against real BGE models (bge-small-en-v1.5, bge-reranker-base) | High | Complete developer-machine pass with real models; validate SC-001 / SC-002 correctness assertions | Pending Phase 5+ / Developer pass |
 
 ### Medium Risk
 
@@ -125,43 +125,20 @@ Code areas that are brittle or risky to modify:
 | `src/doctor/binding.rs::compare_rules` (Phase 4 US5, PR #99–#101 R-M5) | Distinguishes "workspace source RULES.md absent" from "project copy absent" via typed enum; absence of workspace source prevents infinite-loop attempt on `--fix` | Do not collapse both cases into one enum arm; do not attempt to copy when source is absent. Test both paths explicitly. Surface descriptive message when source is absent | Prevents infinite-loop bug; critical for correctness |
 | `src/doctor/orphan_cleanup.rs` (Phase 4 US5, New) | Orphan staging-directory cleanup via STAGING_PREFIX match + 1h mtime gate + symlink-skip + `is_dir()` check + symmetric parent removal. Composed with advisory lock in doctor flow | STAGING_PREFIX + mtime + symlink-skip + is_dir() compose correctly; never traverse symlinks. Do not remove any component. Test with real `.tome.tmp.*` dirs (cleanup implicit in doctor test flows; orphan tests exercise mtime boundary) | Phase 4 US5 / PR #101 tested; audited by 4 reviewers |
 
-## Deferred Findings from Phase 4 / US5 Review (PR #99–#101)
+## Deferred Findings from Phase 4 Review (PR #99–#101)
 
-Phase 4 / US5 audit produced **1 blocker + 21 majors**. **All 1 actionable blocker + 10 selected majors resolved in PR #101** (US5.c-1):
+Phase 4 / US5 audit produced **1 blocker + 21 majors**. **All 1 actionable blocker + 10 selected majors resolved in PR #101** (US5.c-1). **11 majors deferred** per `review/us5-disposition.md`:
 
-### Blocker Applied
-
-| # | Category | Fix | Status |
-|---|----------|-----|--------|
-| **T-B1** | Test coverage | Added `tests/doctor_fix_p4.rs::summariser_fix_redownloads_or_documents_env_gate` to cover fifth repair class (embedder/reranker/catalog/binding/summariser) via SummariserOverrideGuard or pre-created placeholder model file | ✅ Resolved PR #101 |
-
-### Majors Applied (10/21)
-
-| # | Category | Fix | Status |
-|---|----------|-----|--------|
-| **C-M1** | Contract | Emit per-harness `SubsystemHealth::NotApplicable` entries when workspace is global-fallback (no project); distinguishes "no harnesses declared" (empty Vec) from "harnesses declared but outside project" (NotApplicable) | ✅ Resolved PR #101 |
-| **C-M2** | Contract | `check_index` SchemaTooNew gracefully collapses to `IndexHealth::Broken` via `unwrap_or_else`; doctor never crashes per FR-561 | ✅ Resolved PR #101 |
-| **C-M3** | Contract | `repair_binding_rules_copy` now calls new `workspace::sync::sync_one_project` (targets ONE project) instead of `sync_one` (broadcasts workspace); eliminates silent overwrites of sibling projects | ✅ Resolved PR #101 |
-| **R-M1** | Rust | `--force` without `--fix` → exit 2 (Usage error) instead of exit 7 (Io error); validates upfront in `commands/doctor.rs` | ✅ Resolved PR #101 |
-| **R-M2** | Rust | Harness sync deduplicated: collect all `HarnessRules(name)` + `HarnessMcp(name)` suggestions, run `sync_for_project_root` ONCE, clear affected fixes; reduces from 10 redundant passes to 1 | ✅ Resolved PR #101 |
-| **R-M5** | Rust | `binding::compare_rules` now returns typed enum distinguishing "workspace source RULES.md absent" from "project copy absent"; prevents `--fix` infinite-loop | ✅ Resolved PR #101 |
-| **R-M7** | Rust | `repair_catalog` uses `open_read_only` for enrolment lookup; only uses writable handle when deleting cache rows | ✅ Resolved PR #101 |
-| **S-M2** | Security | `--fix --force` filters user-owned harness MCP rewrites to ONLY those with active SuggestedFix entries; no blanket rewrite of every user-owned entry | ✅ Resolved PR #101 |
-| **S-M4** | Security | `repair_catalog::remove_dir_all` now includes `debug_assert!(cache_dir.starts_with(&paths.catalogs_dir))` documenting safety invariant | ✅ Resolved PR #101 |
-| **T-M1** | Test | Added CLI binary test for user-owned-MCP exit 75 + `--fix --force` rewrite exit 0 to `tests/exit_codes_e2e.rs` | ✅ Resolved PR #101 |
-
-### Majors Deferred (11/21)
-
-| # | Category | Reason | Target |
-|----|----------|--------|--------|
-| R-M3 | Rust | re_assemble doesn't refresh drift — future Schema migration concern; defer until first real Phase 4+ migration arrives | Tracking issue |
-| R-M4 | Rust | Gratuitous clone-then-borrow (`&scope.scope.name().clone()`) — cosmetic | Tracking issue |
+| # | Category | Deferral Reason | Target |
+|---|----------|-----------------|--------|
+| R-M3 | Rust | re_assemble doesn't refresh drift — future Schema migration concern | Tracking issue |
+| R-M4 | Rust | Gratuitous clone-then-borrow cosmetic | Tracking issue |
 | R-M6 | Rust | Orphan-cleanup TOCTOU window doc note — documentation only | Tracking issue (S-M1) |
-| S-M1 | Security | Re-canonicalisation of workspace_projects.project_path at read time — defensive against future migration / direct DB edit; defer | Tracking issue |
-| S-M3 | Security | Unbounded reads on harness config files (RULES.md, MCP config) — multi-site fix; carries forward from US1.d-2a S-M1 / US2.d-1 S-M3 / US3.d-1 S-M3 deferrals; planned for v0.4 polish | Phase 4 Polish / v0.4 |
-| T-M2/T-M3/T-M4/T-M5/T-M6/T-M7 | Test | Various test gaps (CLI coverage, edge cases, boundary conditions) that don't represent functional regressions | Tracking issue |
+| S-M1 | Security | Re-canonicalisation of workspace_projects.project_path at read time | Tracking issue |
+| S-M3 | Security | Unbounded reads on harness config files (RULES.md, MCP config) | Phase 4 Polish v0.4.1+ |
+| T-M2/T-M3/T-M4/T-M5/T-M6/T-M7 | Test | Various test gaps (CLI coverage, edge cases) | Tracking issue |
 
-See `specs/004-phase-4-refactor-harnesses/review/us5-disposition.md` for full triage.
+See `specs/004-phase-4-refactor-harnesses/review/disposition.md` + individual `us*-disposition.md` files for full triage across all 5 user stories.
 
 ## Deprecated Code
 
@@ -179,11 +156,11 @@ Known performance issues:
 |----|------|-------------|--------|------------|--------|
 | PERF-001 | Catalog refresh | Each `git fetch` is sequential; large catalogs block the command | Slow UX for multiple catalogs | Phase 1 spec requires sequential; parallelize in Phase 5+ with async | Deferred |
 | PERF-010 | Cache validation | Manifest is re-parsed on every `show` command; no caching layer | Negligible impact (small files) | Cache not needed; revisit if manifests grow large | Acceptable |
-| PERF-020 | Model download progress | Download wrapped in indeterminate spinner, not byte-progress bar | Poor visibility on large files | Phase 4 F6 defers; enhancement for Phase 4 polish or Phase 5+ (TD-010) | Tracked |
+| PERF-020 | Model download progress | Download wrapped in indeterminate spinner, not byte-progress bar | Poor visibility on large files | Phase 4 F6 defers; enhancement for Phase 4 Polish or Phase 5+ (TD-010) | Tracked |
 | PERF-030 | MCP pre-flight timing | SHA-256 over ~66 MB primary embedder file on every startup | Visible startup latency in cold cache | Acceptable for daemon; defer `--verify` optimization to Phase 5+ unless profiling shows impact (TD-012) | Design decision |
 | PERF-040 | Doctor command latency | Catalog enumeration + harness probing + orphan cleanup on every run (non-cached) | Slower than status; expected for comprehensive diagnosis | By design: status is the narrow fast path (~200 ms); doctor is the broad slower path for troubleshooting | By design |
-| PERF-050 | Phase 4 Qwen download | Large model file (~400 MB) download wrapped in indeterminate spinner (F6); byte-progress callback deferred | Poor UX visibility during first model fetch | Phase 4 F6 uses indeterminate spinner; upgrade to byte-progress in Phase 4 polish or F6 if time permits (TD-010 / TD-050-US4) | Tracked |
-| PERF-060 | Summariser lock overhead | `workspace regen-summary` holds advisory lock for full LlamaSummariser invocation (many seconds) | Blocks concurrent workspace operations | Acceptable for now; revisit when LlamaSummariser ships in US4.a — `tome catalog update` may need to coexist | R-M5 deferral, tracked |
+| PERF-050 | Phase 4 Qwen download | Large model file (~400 MB) download wrapped in indeterminate spinner (F6); byte-progress callback deferred | Poor UX visibility during first model fetch | Phase 4 F6 uses indeterminate spinner; upgrade to byte-progress in Phase 4 Polish or F6 if time permits (TD-010 / TD-050-US4) | Tracked |
+| PERF-060 | Summariser lock overhead | `workspace regen-summary` holds advisory lock for full LlamaSummariser invocation (many seconds) | Blocks concurrent workspace operations | Acceptable for now; revisit when LlamaSummariser ships in US4.a | R-M5 deferral, tracked |
 | PERF-070-US4 | Summariser model load (US4.d-1 S-M4 fix) | Model load + caching per `LlamaSummariser` instance; per-call context | Eliminated: S-M4 removed ~400 MB per-trigger re-hash by caching model on `self` | Caching verified; `LlamaModel: Send + Sync` upstream holds `Summariser: Send + Sync` bound | ✅ Resolved PR #97 |
 
 ## TODO Items
@@ -202,7 +179,7 @@ Dependencies that may need attention:
 |---------|---------|---------|---------------|--------|
 | `clap` | 4.x | Actively maintained; track for 5.x breaking changes | Monitor releases; plan migration before major version bump | Stable |
 | `serde` | 1.x | Stable; ecosystem standard | None | Stable |
-| `rusqlite` | 0.32.x (Phase 2–3) | Bundled SQLite; monitor for platform-specific build issues | Test across CI matrix | Stable |
+| `rusqlite` | 0.32.x (Phase 2–4) | Bundled SQLite; monitor for platform-specific build issues | Test across CI matrix | Stable |
 | `sqlite-vec` | vendored (Phase 2–4) | Custom C extension vendored under `vendor/sqlite-vec/`; compiled in via `build.rs` | Compiled as part of build; no separate update cadence | Pinned |
 | `fastembed-rs` | 4.x (Phase 2–4) | Wraps ONNX Runtime; size-critical dependency | Monitor for updates; test binary size on bump | Active |
 | `ort` (transitive) | (Phase 2–4) | ONNX Runtime via fastembed; intrinsically large (~25 MB contribution) | Size budget already accounted for; no waivable constraint | Locked by use case |
@@ -233,10 +210,7 @@ Per Phase 4 research §R-17, Phase 3 deferred items are dispositioned as follows
 | **Drop synthetic `SuggestedFix` injection** (P7-deferred) | Fold into F9 (schema migration registration) | F9 (in progress) | Phase 4 registers first real migration; synthetic injection no longer needed for framework testing |
 | **`tome workspace prune`** (P8-deferred) | Out of scope for Phase 4 | Phase 5+ | Named-workspace + central registry model makes this naturally a "remove workspace whose bound projects are gone" feature |
 | **`Paths.config_file` field rename** (P8-deferred) | Drop the rename (field gone post-F2 reshape) | F2 complete | Phase 4 F2 reshapes `Paths` entirely; the historic field name no longer exists |
-| **Byte-progress callback on `download_model`** (P10-deferred TD-010) | Fold into F6 or polish | F6 / Phase 4 polish | Qwen weights (~400 MB) large enough that indeterminate spinner is poor UX; tracked as TD-010 / TD-050-US4 |
-| **M-MCP-3 / M-MCP-11 / m-WKS-*** (P8-deferred) | Fold into Polish (same pattern as Phase 3) | Phase 4 Polish | Coverage gaps in MCP + workspace long-tail edge cases |
-| **T088 manual SC-001 / SC-002** (P10-deferred) | Out of scope for Phase 4 | Phase 5+ / Developer pass | Needs real BGE models for verification; tracked as SEC-001 HIGH RISK |
-| **T093/T094/T095 MCP integration tests** (P8-deferred) | Out of scope for Phase 4 (unless TD-014 seed refactor cheap) | Phase 5+ | Requires TD-014 `McpState` seed exposure or test fixture enhancement |
+| **Byte-progress callback on `download_model`** (P10-deferred TD-010) | Fold into Polish v0.4.1+ | Phase 4 Polish | Qwen weights (~400 MB) large enough that indeterminate spinner is poor UX; tracked as TD-010 / TD-050-US4 |
 
 ---
 
@@ -252,3 +226,4 @@ Per Phase 4 research §R-17, Phase 3 deferred items are dispositioned as follows
 ---
 
 *This document tracks what needs attention. Update when concerns are resolved or discovered.*
+*Last refreshed 2026-05-26 against Phase 4 v0.4.0 Polish-complete source (916 tests passing, 125 suites).*
