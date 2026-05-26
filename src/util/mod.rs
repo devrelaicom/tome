@@ -11,5 +11,10 @@
 //! discipline on this tree. The single async island lives elsewhere.
 
 pub mod atomic_dir;
+pub mod io;
 
 pub use atomic_dir::{land_directory, land_directory_with_replace};
+pub use io::{
+    HARNESS_MCP_MAX, HARNESS_RULES_MAX, PLUGIN_MANIFEST_MAX, TOME_CONFIG_MAX,
+    bounded_read_to_string,
+};
