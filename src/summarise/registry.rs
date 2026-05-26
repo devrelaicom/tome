@@ -21,15 +21,15 @@
 //! handle the new variant via the same exhaustive `match`es that already
 //! cover embedder/reranker.
 //!
-//! **Checksum placeholder**: F6 ships a skeleton — the production
-//! download path will be wired in US4.a. Until the model is fetched
-//! against the canonical Hugging Face URL and its SHA-256 + size_bytes
-//! recorded, the entry below carries the all-zero placeholder hash. The
-//! download path refuses to install when `ModelEntry::has_placeholder_checksum`
-//! returns true (existing F2-era guard in `embedding::download::download_model`),
-//! so a stray invocation surfaces as `ModelCorrupt` (exit 31) with the
-//! "registry checksum is an unverified placeholder" message rather than
-//! silently installing untrusted bytes.
+//! **Checksum pinning**: the SHA-256 and size_bytes below were computed
+//! against the canonical Hugging Face artefact on 2026-05-26 (US4.d-1,
+//! PR #74). The values are duplicated in `src/embedding/registry.rs`'s
+//! `MODEL_REGISTRY` entry; the
+//! [`tests::summariser_entry_is_in_global_registry`] test catches drift
+//! between the two sources. The download path's
+//! `has_placeholder_checksum` gate no longer trips for this entry —
+//! `tome models download` installs normally and a tampered artefact
+//! surfaces as `ModelChecksumMismatch` (exit 32) at install time.
 
 use crate::embedding::registry::{ModelEntry, ModelKind};
 
@@ -40,21 +40,22 @@ use crate::embedding::registry::{ModelEntry, ModelKind};
 pub const SUMMARISER_NAME: &str = "qwen2.5-0.5b-instruct";
 
 /// Pinned upstream version. Updates when the Hugging Face revision the
-/// `SHA256_PLACEHOLDER` is recomputed against changes.
+/// [`SUMMARISER_SHA256`] is recomputed against changes.
 pub const SUMMARISER_VERSION: &str = "0.5b-Q4_K_M";
 
-/// Phase 4 / F6 placeholder. US4.a replaces this with the real SHA-256
-/// after fetching the canonical GGUF and recording its digest. Until
-/// then `ModelEntry::has_placeholder_checksum` returns true for this
-/// entry — the download path refuses with `ModelCorrupt` (exit 31).
-pub const SHA256_PLACEHOLDER: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+/// Pinned SHA-256 of the canonical Qwen2.5-0.5B-Instruct-GGUF Q4_K_M
+/// artefact. Computed against `SUMMARISER_SOURCE_URL` on 2026-05-26
+/// (US4.d-1, PR #74). The same digest is mirrored verbatim in
+/// `MODEL_REGISTRY`'s summariser entry; the drift test in this module
+/// keeps them aligned.
+pub const SUMMARISER_SHA256: &str =
+    "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db";
 
-/// Approximate size of the Q4_K_M quantisation. Real value is pinned in
-/// US4.a alongside the SHA-256. Until then the size is advisory; the
-/// streaming download does not gate on it (the SHA-256 gate is
-/// authoritative).
-pub const SUMMARISER_SIZE_BYTES_APPROX: u64 = 400_000_000;
+/// Exact size in bytes of the canonical Qwen2.5-0.5B-Instruct-GGUF
+/// Q4_K_M artefact. Verified against the source URL on 2026-05-26
+/// (US4.d-1). The download streaming path SHA-checks the bytes
+/// (authoritative); size is a secondary cross-check.
+pub const SUMMARISER_SIZE_BYTES: u64 = 491_400_032;
 
 /// Canonical upstream URL. The exact filename inside the Hugging Face
 /// repo (`qwen2.5-0.5b-instruct-q4_k_m.gguf`) is pinned here so US4.a
@@ -72,8 +73,8 @@ pub const SUMMARISER_ENTRY: ModelEntry = ModelEntry {
     version: SUMMARISER_VERSION,
     kind: ModelKind::Summariser,
     source_url: SUMMARISER_SOURCE_URL,
-    sha256: SHA256_PLACEHOLDER,
-    size_bytes: SUMMARISER_SIZE_BYTES_APPROX,
+    sha256: SUMMARISER_SHA256,
+    size_bytes: SUMMARISER_SIZE_BYTES,
     licence: "Apache-2.0",
     files: &["model.gguf"],
 };
@@ -113,10 +114,31 @@ mod tests {
     }
 
     #[test]
-    fn summariser_entry_carries_placeholder_until_us4_a() {
-        // F6 ships with a placeholder hash. The download path's
-        // `has_placeholder_checksum` guard refuses to install; flipping
-        // this to a real digest is US4.a's job.
-        assert!(summariser_entry().has_placeholder_checksum());
+    fn summariser_entry_has_real_checksum_not_placeholder() {
+        // US4.d-1 (PR #74) replaced the F6 all-zero placeholder with
+        // the real SHA-256 of the canonical Qwen2.5-0.5B-Instruct
+        // Q4_K_M artefact. The download path's
+        // `has_placeholder_checksum` guard MUST report false now;
+        // otherwise installs fall back to the "registry checksum is
+        // an unverified placeholder" failure mode (regression net for
+        // a future placeholder reintroduction).
+        let entry = summariser_entry();
+        assert!(!entry.has_placeholder_checksum());
+        assert_eq!(entry.sha256, SUMMARISER_SHA256);
+        assert_eq!(entry.size_bytes, SUMMARISER_SIZE_BYTES);
+    }
+
+    #[test]
+    fn summariser_entry_in_global_registry_matches_named_constants() {
+        // Drift catcher: the named constants in this module and the
+        // hard-coded `MODEL_REGISTRY` literals in
+        // `src/embedding/registry.rs` are two sources for the same
+        // value. Either source updating without the other should fail
+        // here.
+        let entry = summariser_entry();
+        assert_eq!(entry.sha256, SUMMARISER_SHA256);
+        assert_eq!(entry.size_bytes, SUMMARISER_SIZE_BYTES);
+        assert_eq!(entry.version, SUMMARISER_VERSION);
+        assert_eq!(entry.source_url, SUMMARISER_SOURCE_URL);
     }
 }

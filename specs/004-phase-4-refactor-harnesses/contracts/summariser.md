@@ -90,8 +90,8 @@ Topics:
 
 | Output | Min | Target | Max (warning emitted above) | Fatal-failure | 
 |--------|-----|--------|------------------------------|---------------|
-| Short summary | 1 char (non-empty) | 400–800 chars | 800 chars (tracing `warn!`) | 0 chars OR unparsable → exit 20 |
-| Long summary | 1 char (non-empty) | 1500–2500 chars | 2500 chars (tracing `warn!`) | 0 chars OR unparsable → exit 20 |
+| Short summary | 1 char (non-empty) | 400–800 chars | 800 chars (tracing `warn!`) | 0 chars OR unparsable → exit 24 |
+| Long summary | 1 char (non-empty) | 1500–2500 chars | 2500 chars (tracing `warn!`) | 0 chars OR unparsable → exit 24 |
 
 Per FR-425, a too-long short summary that gets embedded into the MCP tool description is a tracing warning, not a hard error — the value is still cached and used.
 
@@ -112,13 +112,32 @@ The MCP server does NOT trigger regeneration in-process (FR-425). It reads the c
 When summariser fails during enable/disable/reindex/catalog-update triggers:
 
 1. The underlying skill-state mutation (workspace_skills row insert/delete) MUST be committed before the summariser is invoked.
-2. The summariser failure exits with code 20.
+2. The summariser failure exits with code 24.
 3. The workspace's existing cached summary (if any) is left in place — partial cache is better than no cache.
 4. Doctor reports the summariser subsystem as broken AND the workspace's cached summary as stale.
 
 The developer can re-attempt by running `tome workspace regen-summary <name>` after fixing the underlying cause (download the model, fix the checksum, etc.).
 
 `regen-summary` is the exception: failure here is the result of the command (not a side-effect); cached summary is not modified.
+
+### `ModelMissing` carve-out for trigger callers (FR-420 / FR-423 corollary)
+
+Trigger callers (enable / disable / reindex / catalog-update) treat
+`SummariserFailure { kind: ModelMissing }` as a SILENT no-op — they log
+at `debug` and return `Ok(())`. The skill-state mutation has already
+committed; the prior cached summary survives; the MCP tool description
+falls back to the scaffold. This matches FR-420's posture: the
+summariser model is downloaded on-demand by `tome models download`,
+not as a prerequisite for plugin lifecycle operations.
+
+`regen-summary` is the exception: the same `ModelMissing` variant
+HARD-FAILS with exit 24, because the user explicitly asked to
+regenerate the summary.
+
+All other `SummariserFailure` variants (`OutputEmpty`,
+`OutputUnparsable`, `BackendInitFailed`, `ModelChecksumMismatch`) DO
+bubble up from trigger callers per the FR-385 forward-progress
+contract. Only `ModelMissing` is silent.
 
 ## Inference invocation
 
@@ -169,6 +188,6 @@ generated_at = 2026-05-14T15:00:00Z
 
 - `tests/summariser_stub.rs` — stub correctness + call-count assertions.
 - `tests/summariser_triggers.rs` — every trigger from FR-423 invokes the stub exactly once.
-- `tests/summariser_forward_progress.rs` — enable + simulated stub failure leaves skill state committed, cache untouched, exit 20.
+- `tests/summariser_forward_progress.rs` — enable + simulated stub failure leaves skill state committed, cache untouched, exit 24.
 - `tests/summariser_cache.rs` — cache write/read round-trip; `generated_at` updates on regeneration.
 - `tests/summariser_real.rs` (CI-skipped) — real-model produce-and-validate.

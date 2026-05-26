@@ -254,3 +254,34 @@ fn cross_workspace_triggers_count_independently() {
         "shared StubSummariser counts both workspace invocations",
     );
 }
+
+/// T-M2 (US4.d-1): the `regenerate_for_trigger` production path treats
+/// `SummariserFailure { kind: ModelMissing }` as a SILENT no-op —
+/// returns `Ok(())`, leaves the prior cached summary in place, and does
+/// NOT exit 24. This is the FR-420 / FR-423 carve-out captured in the
+/// contract amendment shipped alongside C-M2.
+///
+/// To trigger `ModelMissing` we set up a workspace without fabricating
+/// the summariser model on disk, then call the PRODUCTION
+/// `regenerate_for_trigger` (not `_with_summariser`). The production
+/// constructor (`LlamaSummariser::new`) hits the placeholder/missing
+/// check and surfaces `ModelMissing`; the trigger catches it and
+/// returns Ok.
+#[test]
+fn model_missing_trigger_is_silent_noop() {
+    use tome::summarise::regenerate_for_trigger;
+
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    // Deliberately DO NOT call fabricate_models — summariser model dir
+    // does not exist on disk.
+    workspace::init::init(WorkspaceName::parse("solo").unwrap(), false, &paths)
+        .expect("init workspace");
+
+    let result = regenerate_for_trigger(&WorkspaceName::parse("solo").unwrap(), &paths);
+    assert!(
+        result.is_ok(),
+        "ModelMissing during trigger must be silent no-op, got {result:?}",
+    );
+}

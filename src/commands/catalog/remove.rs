@@ -168,6 +168,21 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
     drop(lock);
     outcome?;
 
+    // R-M6 (US4.d-1): after a successful cascade-disable of one-or-more
+    // enabled plugins, regenerate the workspace's cached summary so
+    // the MCP tool description and `RULES.md` reflect the (shrunk)
+    // enabled set. Mirrors the pattern used by `plugin disable` (which
+    // triggers regen unconditionally on every disable). `ModelMissing`
+    // is a silent no-op per the contract's trigger-callers carve-out;
+    // any other summariser failure bubbles as exit 24.
+    //
+    // The regen call is OUTSIDE the advisory lock: `regenerate_for_trigger`
+    // takes its own lock internally via `regen_summary::regen`, and
+    // nesting advisory locks across processes is unsafe.
+    if !cascade_records.is_empty() {
+        crate::summarise::regenerate_for_trigger(scope.scope.name(), &paths)?;
+    }
+
     let removed_rec = RemovedView {
         name: args.name.clone(),
         url: enrolment.url.clone(),

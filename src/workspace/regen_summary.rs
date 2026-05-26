@@ -13,7 +13,7 @@
 //!    × `skills` join, grouped by `(catalog, plugin)`.
 //! 4. Construct a [`PluginSummariesInput`]; call
 //!    [`Summariser::summarise`].
-//! 5. On `SummariserFailure`, bubble (exit 20). Prior cached summary
+//! 5. On `SummariserFailure`, bubble (exit 24). Prior cached summary
 //!    (if any) is left in place — we have not written yet.
 //! 6. Emit a `tracing::warn!` if the short summary exceeds 800 chars
 //!    or the long summary exceeds 2500 chars (FR-425). The value is
@@ -46,17 +46,19 @@ use crate::commands::plugin::registry_seeds;
 use crate::error::TomeError;
 use crate::index::{self, OpenOptions, acquire_lock};
 use crate::paths::Paths;
-use crate::summarise::{PluginSummariesInput, PluginSummaryItem, SkillSummaryItem, Summariser};
+use crate::summarise::{
+    LONG_MAX_CHARS, PluginSummariesInput, PluginSummaryItem, SHORT_MAX_CHARS, SkillSummaryItem,
+    Summariser,
+};
 use crate::workspace::WorkspaceName;
 use crate::workspace::sync::sync_workspace_rules_to_bound_projects;
 
-/// Soft cap for the short summary; exceeding triggers a tracing warn!
-/// per FR-425.
-pub const SHORT_MAX_CHARS: usize = 800;
-
-/// Soft cap for the long summary; exceeding triggers a tracing warn!
-/// per FR-425.
-pub const LONG_MAX_CHARS: usize = 2500;
+// Length-window caps live in [`crate::summarise`] (US4.d-1
+// consolidation — there used to be a duplicate pair here that drifted
+// 100 chars on the long bound, firing the warn at a different boundary
+// than the inference loop). Re-imported above; no module-local
+// re-export so consumers don't accidentally re-fork on the next major
+// edit.
 
 /// Outcome of [`regen`]. Serialised by the CLI's `--json` mode.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -115,7 +117,7 @@ pub fn regen(
 
     let input = load_summariser_input(&conn, workspace_id)?;
 
-    // Summarise. Failure here exits 20 with prior cache untouched.
+    // Summarise. Failure here exits 24 with prior cache untouched.
     // Note: the advisory lock + DB conn are held across the summariser
     // call. This is deliberate — the regen path is single-action and
     // ordering is important for the post-summarise `last_used_at` bump.
