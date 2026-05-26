@@ -19,3 +19,11 @@ Each line is an event (PR open / merge, phase close, etc.). Newest at the bottom
 2026-05-26T22:15:00Z  PR #114 merged  US1.c complete  main @ 22dd27a  test total: 1026/136/16
 2026-05-26T22:16:00Z  US1.d started  4-reviewer pass + retro fill + mapper refresh + closeout
 2026-05-27T01:30:00Z  PR #115 opened  US1.d  +13 tests (1026 -> 1039)  reviewer: 1 BLOCKER + 8 majors applied; 16 minors + 5 majors deferred to v0.6+
+2026-05-27T02:30:00Z  PR #115 merged  US1.d complete; Phase 3 (US1) closed  main @ feb2ae8  test total: 1039/137/16
+2026-05-27T02:31:00Z  Phase 4 (US2) US2.a started  substitution built-ins stage + clock injection
+2026-05-27T03:00:00Z  PR #116 opened  US2.a  +21 tests (1039 -> 1060)  first prod use of PluginDataDirWriteFailed (exit 9)
+2026-05-27T03:30:00Z  PR #116 merged  US2.a complete  main @ f711408  test total: 1060/138/16
+2026-05-27T03:31:00Z  US2.b started  env passthrough + data-dir creation + workspace rename relocation
+2026-05-27T04:30:00Z  PR #117 opened  US2.b  +16 tests (1060 -> 1076)
+2026-05-27T05:00:00Z  PR #117 merged  US2.b complete  main @ 37a9c03  test total: 1076/140/16
+2026-05-27T05:01:00Z  US2.c started  end-to-end through get_skill + reviewer pass + US2 closeout
