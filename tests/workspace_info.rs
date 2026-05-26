@@ -342,3 +342,42 @@ fn info_missing_workspace_returns_workspace_not_found() {
     );
     assert_eq!(err.exit_code(), 13);
 }
+
+// =============================================================
+// T-M6 (Polish PR-D): byte-stable JSON wire-shape pin for
+// `WorkspaceCatalogEntry`. The triple `(name, url, pinned_ref)` is the
+// public contract for the enrolled-catalogs array under
+// `WorkspaceInfo.enrolled_catalogs`; a future field rename or addition
+// would break downstream `jq` consumers silently if not pinned here.
+// =============================================================
+
+#[test]
+fn workspace_catalog_entry_json_wire_shape_is_byte_stable() {
+    use tome::workspace::info::WorkspaceCatalogEntry;
+    let entry = WorkspaceCatalogEntry {
+        name: "sample-plugin-catalog".to_owned(),
+        url: "https://github.com/example/catalog.git".to_owned(),
+        pinned_ref: "main".to_owned(),
+    };
+    let json = serde_json::to_string(&entry).expect("serialise");
+    assert_eq!(
+        json,
+        r#"{"name":"sample-plugin-catalog","url":"https://github.com/example/catalog.git","pinned_ref":"main"}"#,
+    );
+}
+
+#[test]
+fn workspace_catalog_entry_field_order_is_pinned() {
+    use tome::workspace::info::WorkspaceCatalogEntry;
+    let entry = WorkspaceCatalogEntry {
+        name: "x".to_owned(),
+        url: "y".to_owned(),
+        pinned_ref: "z".to_owned(),
+    };
+    let json = serde_json::to_string(&entry).expect("serialise");
+    let name_idx = json.find("\"name\"").expect("name field present");
+    let url_idx = json.find("\"url\"").expect("url field present");
+    let pinned_idx = json.find("\"pinned_ref\"").expect("pinned_ref present");
+    assert!(name_idx < url_idx, "name must come before url");
+    assert!(url_idx < pinned_idx, "url must come before pinned_ref");
+}

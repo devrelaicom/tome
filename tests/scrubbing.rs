@@ -167,6 +167,80 @@ fn reqwest_style_error_with_url_credentials_is_redacted() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Phase 4 / Polish PR-D / T-M10 — scrubbing extensions for Phase 4
+// surfaces. Every download URL Tome handles should round-trip through
+// `scrub_to_string` idempotently; every harness-MCP-config error chain
+// path should preserve verbatim (no scrub-eligible content per
+// `contracts/paths-and-layout-p4.md`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scrub_summariser_download_url_is_idempotent_and_preserves_host_path() {
+    // The HuggingFace summariser URL carries no credentials; assert the
+    // scrubber leaves it byte-for-byte stable and keeps host + path
+    // intact so an operator reading a log line can still tell what was
+    // being downloaded.
+    use tome::summarise::registry::SUMMARISER_SOURCE_URL;
+
+    let once = scrub_to_string(SUMMARISER_SOURCE_URL.as_bytes());
+    assert_eq!(
+        once, SUMMARISER_SOURCE_URL,
+        "first-pass scrub mutated a clean HF URL",
+    );
+
+    // Idempotence: scrubbing the scrubbed value MUST return the same
+    // value. Documents that the discipline survives repeated passes
+    // through the boundary.
+    let twice = scrub_to_string(once.as_bytes());
+    assert_eq!(
+        twice, once,
+        "scrub_to_string is not idempotent on clean URL"
+    );
+
+    // Preserves host + path explicitly.
+    assert!(
+        once.contains("huggingface.co"),
+        "host stripped from clean URL: {once}",
+    );
+    assert!(
+        once.contains("qwen2.5-0.5b-instruct-q4_k_m.gguf"),
+        "path stripped from clean URL: {once}",
+    );
+}
+
+#[test]
+fn scrub_to_string_handles_harness_mcp_config_error_chain_paths() {
+    // Harness MCP config paths (e.g. `~/.codex/config.toml`,
+    // `~/.cursor/mcp.json`) carry no scrub-eligible content per the
+    // `paths-and-layout-p4.md` "What is NOT a credential" table. Assert
+    // the scrubber preserves them verbatim so an operator debugging a
+    // sync failure can see exactly which file refused to parse.
+    let input = "failed to parse harness MCP config at \
+                 /home/user/.codex/config.toml: \
+                 invalid TOML at line 3: expected `}` after table";
+    let out = scrub_to_string(input.as_bytes());
+    assert_eq!(
+        out, input,
+        "harness MCP config path / error chain mutated by scrub: {out}",
+    );
+
+    // Same discipline for the other four harnesses' typical paths.
+    for path in [
+        "/home/user/.claude/settings.json",
+        "/home/user/.cursor/mcp.json",
+        "/home/user/.gemini/config.json",
+        "/home/user/.opencode/config.toml",
+    ] {
+        let err = format!("failed at {path}: io error: permission denied");
+        let scrubbed = scrub_to_string(err.as_bytes());
+        assert_eq!(
+            scrubbed, err,
+            "harness path was mutated by scrubber: {path}",
+        );
+    }
+}
+
 #[test]
 fn signed_url_keys_in_colon_form_also_redact() {
     // Some loggers pretty-print query strings as colon-separated KV pairs
