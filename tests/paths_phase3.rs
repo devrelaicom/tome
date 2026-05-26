@@ -10,58 +10,21 @@
 //! operates on the single central paths. F11 will reintroduce
 //! per-workspace catalog/skill isolation via the central DB's
 //! `workspace_catalogs` / `workspace_skills` junction tables.
+//!
+//! PR-E T-M8 collapsed the per-file `ENV_LOCK` + `EnvGuard` onto the
+//! project-wide `HomeGuard` shared by 9 other test files.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use tome::paths::Paths;
 use tome::workspace::WorkspaceName;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-struct EnvGuard {
-    keys: Vec<&'static str>,
-    prior: Vec<(&'static str, Option<std::ffi::OsString>)>,
-}
-
-impl EnvGuard {
-    fn set(keys_values: &[(&'static str, &str)]) -> Self {
-        let prior = keys_values
-            .iter()
-            .map(|(k, _)| (*k, std::env::var_os(k)))
-            .collect();
-        for (k, v) in keys_values {
-            // SAFETY: Tests guard env mutation behind ENV_LOCK; no other
-            // threads observe the transient state.
-            unsafe {
-                std::env::set_var(k, v);
-            }
-        }
-        Self {
-            keys: keys_values.iter().map(|(k, _)| *k).collect(),
-            prior,
-        }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (i, key) in self.keys.iter().enumerate() {
-            // SAFETY: under ENV_LOCK.
-            unsafe {
-                match self.prior.get(i).and_then(|(_, v)| v.clone()) {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-    }
-}
+mod common;
+use common::HomeGuard;
 
 #[test]
 fn resolve_places_log_paths_under_root_logs_dir() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let _e = EnvGuard::set(&[("HOME", "/tmp/fake-home")]);
+    let _guard = HomeGuard::install(std::path::Path::new("/tmp/fake-home"));
 
     let p = Paths::resolve().expect("resolve");
     assert_eq!(p.logs_dir, PathBuf::from("/tmp/fake-home/.tome/logs"));
@@ -77,8 +40,7 @@ fn resolve_places_log_paths_under_root_logs_dir() {
 
 #[test]
 fn resolve_places_workspaces_under_root() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let _e = EnvGuard::set(&[("HOME", "/tmp/h")]);
+    let _guard = HomeGuard::install(std::path::Path::new("/tmp/h"));
 
     let p = Paths::resolve().expect("resolve");
     assert_eq!(p.workspaces_dir, PathBuf::from("/tmp/h/.tome/workspaces"));
@@ -86,8 +48,7 @@ fn resolve_places_workspaces_under_root() {
 
 #[test]
 fn workspace_accessors_route_under_workspaces_dir() {
-    let _guard = ENV_LOCK.lock().unwrap();
-    let _e = EnvGuard::set(&[("HOME", "/tmp/h")]);
+    let _guard = HomeGuard::install(std::path::Path::new("/tmp/h"));
 
     let p = Paths::resolve().expect("resolve");
     let name = WorkspaceName::global();
