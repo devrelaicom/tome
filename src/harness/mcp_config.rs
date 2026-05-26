@@ -162,10 +162,10 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), TomeError> {
 /// Read a JSON file and parse it as a `serde_json::Value`. Missing file
 /// returns `Ok(None)`; parse errors propagate.
 fn read_json_doc(path: &Path) -> Result<Option<JsonValue>, TomeError> {
-    let body = match std::fs::read_to_string(path) {
+    let body = match crate::util::bounded_read_to_string(path, crate::util::HARNESS_MCP_MAX) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(TomeError::Io(e)),
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
     };
     if body.trim().is_empty() {
         // Treat empty file as an empty JSON object.
@@ -246,10 +246,10 @@ fn json_entry_object(entry: &TomeEntry) -> JsonValue {
 /// Read a TOML file and parse it as a `DocumentMut`. Missing file
 /// returns `Ok(None)`; parse errors propagate.
 fn read_toml_doc(path: &Path) -> Result<Option<DocumentMut>, TomeError> {
-    let body = match std::fs::read_to_string(path) {
+    let body = match crate::util::bounded_read_to_string(path, crate::util::HARNESS_MCP_MAX) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(TomeError::Io(e)),
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
     };
     body.parse::<DocumentMut>()
         .map(Some)
