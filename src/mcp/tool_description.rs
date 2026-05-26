@@ -69,7 +69,8 @@ pub fn compose(name: &WorkspaceName, paths: &Paths) -> String {
 /// any of the documented fallback paths (file absent / unparsable /
 /// section missing / field missing / field not a string).
 fn read_cached_short(settings_path: &Path) -> Option<String> {
-    let body = std::fs::read_to_string(settings_path).ok()?;
+    let body =
+        crate::util::bounded_read_to_string(settings_path, crate::util::TOME_CONFIG_MAX).ok()?;
     let doc: toml::Value = toml::from_str(&body).ok()?;
     let short = doc.get("summaries")?.get("short")?.as_str()?;
     Some(short.to_owned())

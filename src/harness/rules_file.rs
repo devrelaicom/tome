@@ -290,10 +290,11 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), TomeError> {
 /// has the same body, no write is performed.
 pub fn write_block(target: &Path, body: &str, _style: BlockBodyStyle) -> Result<(), TomeError> {
     refuse_symlink(target)?;
-    let existing = match std::fs::read_to_string(target) {
+    let existing = match crate::util::bounded_read_to_string(target, crate::util::HARNESS_RULES_MAX)
+    {
         Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(TomeError::Io(e)),
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
     };
 
     // Idempotence: single existing block whose body matches → no-op.
@@ -325,10 +326,11 @@ pub fn write_block(target: &Path, body: &str, _style: BlockBodyStyle) -> Result<
 /// present, no write is performed.
 pub fn remove_block(target: &Path) -> Result<(), TomeError> {
     refuse_symlink(target)?;
-    let existing = match std::fs::read_to_string(target) {
+    let existing = match crate::util::bounded_read_to_string(target, crate::util::HARNESS_RULES_MAX)
+    {
         Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(TomeError::Io(e)),
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
     };
 
     let blocks = find_all_blocks(&existing)?;
@@ -399,7 +401,8 @@ pub fn write_standalone(target: &Path, contents: &str) -> Result<(), TomeError> 
     let _ = parent_existed;
 
     // Idempotence: same on-disk bytes → no write.
-    if let Ok(existing) = std::fs::read_to_string(target)
+    if let Ok(existing) =
+        crate::util::bounded_read_to_string(target, crate::util::HARNESS_RULES_MAX)
         && existing == contents
     {
         return Ok(());
