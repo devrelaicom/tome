@@ -164,7 +164,13 @@ fn binding_rules_copy_missing_classifies_degraded() {
         "workspace = \"gamma\"\n",
     )
     .unwrap();
-    // No RULES.md in either location.
+    // Source RULES.md exists but the project's copy is absent — the
+    // pure "Missing" (copy-side) state. R-M5 distinguishes this from
+    // SourceMissing (workspace-side absent).
+    let ws = tome::workspace::WorkspaceName::parse("gamma").unwrap();
+    let src = paths.workspace_rules_file(&ws);
+    std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+    std::fs::write(&src, b"canonical\n").unwrap();
 
     let scope = project_scope(project_root, "gamma");
     let report = doctor::assemble_report(&scope, &paths, home.path(), false).unwrap();
@@ -286,17 +292,20 @@ fn effective_list_is_none_when_no_scope_declares_harnesses() {
 // ---- Harness rules-file integration (T367 indirect) -----------------------
 
 #[test]
-fn harness_subsystems_empty_when_no_project_root() {
+fn harness_subsystems_not_applicable_when_no_project_root() {
     // From outside any project marker, the per-harness file paths can't
-    // resolve (they're project-relative). The classifier must treat
-    // this as NotApplicable / empty vectors so classification doesn't
-    // trip on absent files.
+    // resolve (they're project-relative). C-M1: the classifier now
+    // emits per-harness `NotApplicable` entries (one per declared
+    // harness) so JSON consumers can distinguish "no harnesses declared"
+    // (empty Vec) from "harnesses declared but no project context"
+    // (Vec of NotApplicable). Classification stays unaffected per
+    // FR-561.
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_registry_models(&paths);
     // Set the global settings.toml to declare a harness; binding is None
-    // so harness subsystems should still resolve to empty lists.
+    // so harness subsystems resolve to NotApplicable entries.
     std::fs::write(
         &paths.global_settings_file,
         "harnesses = [\"claude-code\"]\n",
@@ -307,9 +316,20 @@ fn harness_subsystems_empty_when_no_project_root() {
     let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
     // Effective list resolves to the declared harness.
     assert!(report.effective_harness_list.is_some());
-    // But without a project_root the per-harness file checks are skipped.
-    assert!(report.harness_rules.is_empty());
-    assert!(report.harness_mcp.is_empty());
+    // Per-harness Vec is populated with NotApplicable entries — one per
+    // declared harness — rather than empty.
+    assert_eq!(report.harness_rules.len(), 1);
+    assert_eq!(report.harness_rules[0].harness, "claude-code");
+    assert_eq!(
+        report.harness_rules[0].health,
+        tome::doctor::SubsystemHealth::NotApplicable,
+    );
+    assert_eq!(report.harness_mcp.len(), 1);
+    assert_eq!(report.harness_mcp[0].harness, "claude-code");
+    assert_eq!(
+        report.harness_mcp[0].health,
+        tome::doctor::SubsystemHealth::NotApplicable,
+    );
 }
 
 #[test]

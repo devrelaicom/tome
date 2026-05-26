@@ -43,7 +43,7 @@ use crate::commands::status::{check_index, check_model};
 use crate::doctor::binding::check_binding;
 use crate::doctor::checks::check_catalogs;
 use crate::doctor::harness_integration::check_harness_integration;
-use crate::doctor::report::{DoctorReport, Subsystem, SuggestedFix};
+use crate::doctor::report::{DoctorReport, Subsystem, SubsystemHealth, SuggestedFix};
 use crate::embedding::download::download_model;
 use crate::embedding::registry::ModelEntry;
 use crate::error::TomeError;
@@ -99,16 +99,49 @@ pub fn apply(report: &mut DoctorReport, ctx: &FixContext<'_>) -> usize {
     // Additionally, when `force` is set, pick up the user-owned MCP
     // fixes that were intentionally classified non-auto-fixable: the
     // override path runs the same dispatch.
-    let fixes: Vec<SuggestedFix> = report
-        .suggested_fixes
+    //
+    // R-M2: harness syncs are coalesced. `HarnessRules(_)` and
+    // `HarnessMcp(_)` fixes both dispatch to the same per-project
+    // `harness::sync::sync_project` orchestrator (which is idempotent
+    // per FR-525 — it rewrites only the drifted/broken slices). Running
+    // it once per fix is 10 redundant passes when 1 would do. Collect
+    // those fixes separately, dispatch once, and account each as one
+    // attempt for the residual-classification ledger.
+    let mut harness_fixes: Vec<SuggestedFix> = Vec::new();
+    let mut other_fixes: Vec<SuggestedFix> = Vec::new();
+    for fix in report.suggested_fixes.iter() {
+        if !(fix.auto_fixable || (ctx.force && matches!(&fix.subsystem, Subsystem::HarnessMcp(_))))
+        {
+            continue;
+        }
+        match &fix.subsystem {
+            Subsystem::HarnessRules(_) | Subsystem::HarnessMcp(_) => {
+                harness_fixes.push(fix.clone());
+            }
+            _ => other_fixes.push(fix.clone()),
+        }
+    }
+
+    // S-M2: the `--force` path rewrites user-owned MCP entries by
+    // (re-)running the per-project sync orchestrator with `force = true`.
+    // We must only apply force to harnesses that have an outstanding
+    // `UserOwned`-class fix in THIS pass — not blanket-rewrite every
+    // user-owned entry across every declared harness. The orchestrator
+    // itself operates per-harness, so we capture the set here and gate
+    // the sync invocation on whether ANY user-owned fix participated.
+    let user_owned_harnesses_in_play: std::collections::HashSet<String> = harness_fixes
         .iter()
-        .filter(|f| {
-            f.auto_fixable || (ctx.force && matches!(&f.subsystem, Subsystem::HarnessMcp(_)))
+        .filter_map(|f| match &f.subsystem {
+            Subsystem::HarnessMcp(name) => report
+                .harness_mcp
+                .iter()
+                .find(|h| h.harness == *name && h.health == SubsystemHealth::UserOwned)
+                .map(|h| h.harness.clone()),
+            _ => None,
         })
-        .cloned()
         .collect();
 
-    for fix in fixes {
+    for fix in other_fixes {
         attempts += 1;
         if let Err(e) = apply_one(&fix, report, ctx) {
             warn!(
@@ -116,6 +149,41 @@ pub fn apply(report: &mut DoctorReport, ctx: &FixContext<'_>) -> usize {
                 error = %e,
                 "doctor --fix: repair attempt failed; report retained pre-repair state",
             );
+        }
+    }
+
+    // Dedup: dispatch the harness sync exactly once if any harness fix
+    // was queued. Every queued harness fix counts as one attempt so the
+    // residual-classification accounting matches the per-fix model.
+    if !harness_fixes.is_empty() {
+        attempts += harness_fixes.len();
+        // S-M2: only enable the force path when one of the in-play
+        // fixes is user-owned. Otherwise stick with the no-force sync
+        // even if the caller passed `force = true` — `--force` without
+        // a user-owned fix is a no-op intent.
+        let effective_force = ctx.force && !user_owned_harnesses_in_play.is_empty();
+        if let Err(e) = repair_harness_sync_with(ctx, effective_force) {
+            warn!(
+                subsystem = "harness-sync",
+                error = %e,
+                "doctor --fix: harness sync attempt failed; report retained pre-repair state",
+            );
+        } else {
+            // Re-run the per-harness probe so both rules + mcp reflect
+            // the post-sync state.
+            if let (Some(list), Some(binding)) = (
+                report.effective_harness_list.as_ref(),
+                report.project_binding.as_ref(),
+            ) {
+                let (rules, mcp) = check_harness_integration(
+                    &binding.project_root,
+                    list,
+                    ctx.home,
+                    ctx.scope.scope.name(),
+                );
+                report.harness_rules = rules;
+                report.harness_mcp = mcp;
+            }
         }
     }
 
@@ -165,12 +233,12 @@ fn apply_one(
             Ok(())
         }
         Subsystem::HarnessRules(_) | Subsystem::HarnessMcp(_) => {
-            // Single sync pass repairs both subsystems for every harness
-            // in the effective list. Idempotent (FR-525); we let the
-            // orchestrator do the per-harness write decisions.
-            repair_harness_sync(ctx)?;
-            // Re-run the per-harness integration probe to refresh
-            // both `harness_rules` and `harness_mcp` in the report.
+            // Unreachable: `apply()` coalesces all harness fixes into a
+            // single `repair_harness_sync_with` invocation outside the
+            // `apply_one` dispatch (R-M2). If a caller dispatches one
+            // directly we still want safe behaviour, so fall through to
+            // the (one-shot) sync.
+            repair_harness_sync_with(ctx, ctx.force)?;
             if let (Some(list), Some(binding)) = (
                 report.effective_harness_list.as_ref(),
                 report.project_binding.as_ref(),
@@ -213,20 +281,32 @@ fn repair_model(entry: &ModelEntry, paths: &Paths) -> Result<(), TomeError> {
 
 fn repair_catalog(name: &str, paths: &Paths, scope: &Scope) -> Result<(), TomeError> {
     let workspace_name = scope.name().as_str();
-    let (e_seed, r_seed, s_seed) = registry_seeds();
-    let conn = index::open(
-        &paths.index_db,
-        &OpenOptions {
-            embedder: e_seed,
-            reranker: r_seed,
-            summariser: s_seed,
-        },
-    )?;
+    // R-M7: enrolment lookup is read-only — use `open_read_only` so we
+    // don't request a writer's WAL pragmas / advisory lock just to query
+    // the URL+ref. The subsequent `Git::clone_shallow` doesn't touch the
+    // DB.
+    let conn = index::open_read_only(&paths.index_db)?;
     let enrolment = workspace_catalogs::find(&conn, workspace_name, name)?
         .ok_or_else(|| TomeError::CatalogNotFound(name.to_owned()))?;
     drop(conn);
 
     let cache_path = paths.cache_dir_for(&enrolment.url);
+
+    // S-M4: defence-in-depth invariant — `cache_dir_for` deterministically
+    // maps URL → `<catalogs_dir>/<sha256-of-url>/`. The path MUST be a
+    // descendant of `paths.catalogs_dir`. If it ever isn't (a future
+    // refactor of `cache_dir_for` that breaks the invariant, or a
+    // malformed paths struct in a test), the `remove_dir_all` below
+    // becomes a foot-gun against arbitrary FS state. Crash the test
+    // build via `debug_assert!` so the bug surfaces locally; release
+    // builds keep the assertion out of the hot path but the invariant
+    // is documented for future readers.
+    debug_assert!(
+        cache_path.starts_with(&paths.catalogs_dir),
+        "cache_dir must be under catalogs_dir for safety: {} not under {}",
+        cache_path.display(),
+        paths.catalogs_dir.display(),
+    );
 
     // The clone destination must not exist. Remove any half-broken
     // cache before re-cloning. This is the same best-effort cleanup
@@ -260,22 +340,34 @@ fn repair_summariser(paths: &Paths) -> Result<(), TomeError> {
 }
 
 fn repair_binding_rules_copy(ctx: &FixContext<'_>) -> Result<(), TomeError> {
-    // Re-copy `<root>/workspaces/<name>/RULES.md` → every bound project's
-    // `<project>/.tome/RULES.md`. `workspace::sync::sync_one` is the
-    // existing idempotent surface; doctor calls it for the resolved
-    // workspace and the bound project will be picked up by the
-    // `workspace_projects` walk inside.
-    //
-    // When the suggested fix fires we know `ctx.scope.scope` carries
-    // the workspace whose RULES.md the project is supposed to mirror.
-    let _ = crate::workspace::sync::sync_one(ctx.scope.scope.name(), ctx.paths)?;
+    // C-M3: re-copy `<root>/workspaces/<name>/RULES.md` → THIS project's
+    // `<project>/.tome/RULES.md` ONLY. The legacy `workspace::sync::sync_one`
+    // walks every bound project of the workspace; for a project-local
+    // doctor pass that is wrong — a hand-edited sibling project would be
+    // silently overwritten. We target the resolved scope's `project_root`
+    // exclusively via `sync_one_project`.
+    let Some(project_root) = ctx.scope.project_root.as_deref() else {
+        // The suggested fix should never have fired without a project
+        // root (it's gated on `project_binding.is_some()`). Surface a
+        // warn and no-op; the residual fix stays in the list.
+        warn!(
+            "doctor --fix: binding-rules-copy fix requested but the \
+             resolved scope has no project root; skipping",
+        );
+        return Ok(());
+    };
+    let _ =
+        crate::workspace::sync::sync_one_project(ctx.scope.scope.name(), ctx.paths, project_root)?;
     Ok(())
 }
 
-fn repair_harness_sync(ctx: &FixContext<'_>) -> Result<(), TomeError> {
-    // Resolve the project root from the report's binding; if there is
-    // none, there's nothing to sync — the harness suggested fix
-    // shouldn't have fired in the first place.
+/// Single-pass harness sync that lets the caller override the `force`
+/// bit independently of `ctx.force`. R-M2 / S-M2 lean on this to:
+/// 1. dispatch the orchestrator exactly once per `apply()` invocation
+///    even when multiple harnesses surfaced fixes, and
+/// 2. only enable the force path when an in-play user-owned-MCP fix
+///    actually consented to it.
+fn repair_harness_sync_with(ctx: &FixContext<'_>, force: bool) -> Result<(), TomeError> {
     let Some(project_root) = ctx.scope.project_root.as_deref() else {
         warn!(
             "doctor --fix: harness sync requested but the resolved scope \
@@ -284,7 +376,7 @@ fn repair_harness_sync(ctx: &FixContext<'_>) -> Result<(), TomeError> {
         return Ok(());
     };
     let sync_deps =
-        crate::harness::sync::build_deps(ctx.paths, ctx.home, ctx.scope.scope.name(), ctx.force);
+        crate::harness::sync::build_deps(ctx.paths, ctx.home, ctx.scope.scope.name(), force);
     crate::harness::sync::sync_project(project_root, &sync_deps)?;
     Ok(())
 }

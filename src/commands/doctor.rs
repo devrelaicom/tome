@@ -15,6 +15,17 @@ use crate::presentation::colour;
 use crate::workspace::ResolvedScope;
 
 pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+    // `--force` without `--fix` is a user error: there is nothing for
+    // `--force` to override during a read-only report pass. Surface as
+    // exit 2 (Usage) rather than exit 7 (Io) — per US5 reviewer R-M1
+    // this is a usage-shape failure, not an I/O failure, and the
+    // closed-set error vocabulary already encodes it.
+    if args.force && !args.fix {
+        return Err(TomeError::Usage(
+            "`--force` requires `--fix`; rerun as `tome doctor --fix --force`".to_owned(),
+        ));
+    }
+
     let paths = Paths::resolve()?;
     let home = home_dir().ok_or_else(|| {
         TomeError::Io(std::io::Error::other(
@@ -44,13 +55,6 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
             );
         }
         doctor::fixes::re_assemble(&mut report);
-    } else if args.force {
-        // `--force` without `--fix` is a user error: there is nothing
-        // for `--force` to override during a read-only report pass.
-        return Err(TomeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "`--force` requires `--fix`; rerun as `tome doctor --fix --force`",
-        )));
     }
 
     emit(&report, mode)?;
