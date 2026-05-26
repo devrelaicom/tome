@@ -53,7 +53,7 @@ pub struct Server {
 
 impl Server {
     pub fn new(state: Arc<McpState>) -> Self {
-        let prompt_router = prompts::build_router::<Self>(&state.prompt_registry);
+        let prompt_router = prompts::build_router::<Self>(&state.prompt_registry, state.clone());
         Self {
             state,
             tool_router: Self::tool_router(),
@@ -84,6 +84,15 @@ impl Server {
     /// registered tools.
     pub fn tool_router_ref(&self) -> &rmcp::handler::server::tool::ToolRouter<Self> {
         &self.tool_router
+    }
+
+    /// Read-only borrow of the per-session `McpState`. Required by the
+    /// `prompts/get` route handlers (US1.c): the rmcp `PromptContext`
+    /// hands the handler `&Server` rather than the inner state, so the
+    /// substitution pipeline reaches paths / scope / the prompt
+    /// registry through this accessor.
+    pub fn state(&self) -> &Arc<McpState> {
+        &self.state
     }
 }
 

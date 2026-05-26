@@ -99,8 +99,8 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             .map_err(|e| internal(&input, started, format!("lookup join: {e}"), "internal"))?
             .map_err(|e| internal(&input, started, e.to_string(), e.category()))?;
 
-    let row = match lookup {
-        LookupOutcome::Found(row) => row,
+    let hit = match lookup {
+        LookupOutcome::Found(hit) => hit,
         LookupOutcome::UnknownPlugin => {
             return Err(emit_error(
                 &input,
@@ -140,13 +140,15 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         }
     };
 
-    let skill_path = PathBuf::from(&row.path);
+    let LookupHit { row, body_path } = hit;
+    let skill_path = body_path;
 
     // The actual file read + frontmatter strip + sibling walk is all
     // synchronous I/O; do it on the blocking pool.
     let read_input = input.clone_for_log();
+    let read_path = skill_path.clone();
     let body_and_resources =
-        tokio::task::spawn_blocking(move || read_skill_and_resources(&skill_path))
+        tokio::task::spawn_blocking(move || read_skill_and_resources(&read_path))
             .await
             .map_err(|e| internal(&read_input, started, format!("read join: {e}"), "internal"))?
             .map_err(|e| match e {
@@ -190,15 +192,39 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         "call",
     );
 
+    // The `Output.path` field is documented as the absolute path to the
+    // skill body (see the `Output` struct's doc comment) — emit the
+    // resolved `skill_path` (which is absolute) rather than `row.path`
+    // (which is the relative-to-catalog stored form). Pre-US1.c this
+    // returned the raw row value, which only happened to be correct
+    // when the absolute path-stored legacy data was indexed.
+    let _ = row; // suppress unused-warning; kept for future extensions.
     Ok(Output {
         content,
-        path: row.path,
+        path: skill_path.display().to_string(),
         resources,
     })
 }
 
+/// Lookup outcome carrying both the row and its resolved absolute body
+/// path so the read step doesn't have to open the DB a second time.
+///
+/// The `body_path` is computed via
+/// [`skills::resolve_entry_body_path`] — `skills.path` stores the
+/// **relative** path under the plugin's catalog directory; resolving it
+/// in the same `spawn_blocking` as the row lookup keeps the read path
+/// honest. (Pre-US1.c this module used `PathBuf::from(&row.path)`
+/// directly, which only worked when the index was populated via a
+/// codepath that happened to store an absolute string — never the case
+/// post-F11b. The bug was latent because no in-tree integration test
+/// exercised the file-read branch.)
+struct LookupHit {
+    row: Box<skills::SkillRecord>,
+    body_path: PathBuf,
+}
+
 enum LookupOutcome {
-    Found(Box<skills::SkillRecord>),
+    Found(LookupHit),
     UnknownPlugin,
     UnknownSkill,
 }
@@ -223,7 +249,27 @@ fn lookup_skill(
         crate::plugin::identity::EntryKind::Skill,
         name,
     )? {
-        Some(row) if row.enabled => Ok(LookupOutcome::Found(Box::new(row))),
+        Some(row) if row.enabled => {
+            // Resolve the row's stored relative path to an absolute
+            // body path via the shared helper. A failure here means the
+            // catalog enrolment exists but the on-disk plugin directory
+            // is gone (cache evicted, manifest drift, …); we surface
+            // this through the existing `skill_file_missing` envelope
+            // downstream rather than `unknown_skill` because the
+            // index entry is real — the filesystem isn't.
+            let body_path = skills::resolve_entry_body_path(
+                &conn,
+                paths,
+                workspace_name,
+                catalog,
+                plugin,
+                &row.path,
+            )?;
+            Ok(LookupOutcome::Found(LookupHit {
+                row: Box::new(row),
+                body_path,
+            }))
+        }
         Some(_) => Ok(LookupOutcome::UnknownSkill),
         None => {
             // Distinguish "plugin not enabled at all" from "plugin
