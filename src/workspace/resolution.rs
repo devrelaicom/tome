@@ -23,11 +23,11 @@
 use std::path::{Path, PathBuf};
 
 use rusqlite::OptionalExtension;
-use serde::Deserialize;
 
 use crate::cli::GlobalScopeArgs;
 use crate::error::TomeError;
 use crate::paths::Paths;
+use crate::settings::parser::read_project_marker;
 use crate::workspace::{ResolvedScope, Scope, ScopeSource, WorkspaceName};
 
 /// Compute the active scope for this invocation. Touches the filesystem
@@ -149,33 +149,6 @@ fn walk_for_project_marker() -> Option<(PathBuf, PathBuf)> {
         }
     }
     None
-}
-
-/// The on-disk shape of `<project>/.tome/config.toml`. Tome-owned ⇒
-/// `#[serde(deny_unknown_fields)]`. The `harnesses` field is forward-looking
-/// for US3's per-project harness composition — accepted here so a
-/// project marker can advertise it, but F10 itself does nothing with it.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProjectMarkerConfig {
-    pub workspace: WorkspaceName,
-    #[serde(default)]
-    pub harnesses: Option<Vec<String>>,
-}
-
-/// Parse the project marker at `marker_path`. Read errors and parse
-/// errors both surface as [`TomeError::WorkspaceMalformed`] (exit 70)
-/// pointing at the offending file. The marker's parent directory is
-/// the project root.
-fn read_project_marker(marker_path: &Path) -> Result<ProjectMarkerConfig, TomeError> {
-    let body = std::fs::read_to_string(marker_path).map_err(|e| TomeError::WorkspaceMalformed {
-        path: marker_path.to_path_buf(),
-        reason: format!("read project marker: {e}"),
-    })?;
-    toml::from_str(&body).map_err(|e| TomeError::WorkspaceMalformed {
-        path: marker_path.to_path_buf(),
-        reason: format!("project marker: {e}"),
-    })
 }
 
 /// Emit the standard debug-level resolution trace per contract §Debug

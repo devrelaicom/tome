@@ -214,14 +214,17 @@ fn build_effective_harness_list(
     paths: &Paths,
 ) -> Result<Option<crate::settings::resolver::EffectiveHarnessList>, TomeError> {
     use crate::commands::harness::CentralDbScopeProvider;
-    use crate::settings::parser::{parse_global, parse_project_marker, parse_workspace};
+    use crate::settings::parser::{parse_global, parse_workspace, read_project_marker};
     use crate::settings::resolver::resolve_effective_list;
 
+    // Polish R-M5: route through canonical reader and discard any
+    // error (the doctor surface intentionally swallows malformed
+    // project markers here — the project_binding check is the place
+    // where parse failures classify as `Binding::Broken`).
     let project_marker: Option<ProjectMarkerConfig> = scope
         .project_root
         .as_deref()
-        .and_then(|root| std::fs::read_to_string(Paths::project_marker_config(root)).ok())
-        .and_then(|body| parse_project_marker(&body).ok());
+        .and_then(|root| read_project_marker(&Paths::project_marker_config(root)).ok());
 
     let workspace_settings: Option<WorkspaceSettings> = {
         let path = paths.workspace_settings_file(scope.scope.name());

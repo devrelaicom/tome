@@ -12,8 +12,10 @@
 //! a `tempfile::TempDir` round-trip.
 
 use std::fmt;
+use std::path::Path;
 
 use super::{GlobalSettings, ProjectMarkerConfig, WorkspaceSettings};
+use crate::error::TomeError;
 
 /// Error returned by the parser functions. Path-free by design: the
 /// caller knows which file it was reading and wraps with the path
@@ -86,5 +88,34 @@ pub fn parse_global(content: &str) -> Result<GlobalSettings, ParseError> {
     toml::from_str(content).map_err(|source| ParseError {
         layer: SettingsLayer::Global,
         source,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Polish R-M5: canonical path-aware project-marker reader
+// ---------------------------------------------------------------------------
+
+/// Read and parse the project marker at `path`.
+///
+/// Polish R-M5: consolidates three near-identical readers (previously
+/// at `workspace::resolution::read_project_marker`,
+/// `harness::sync::read_project_marker`,
+/// `commands::harness::list::load_project_marker`) plus two inline
+/// read-and-parse pairs (`doctor::mod` + `doctor::binding`).
+///
+/// IO failures (the file is unreadable for reasons other than absence)
+/// surface as [`TomeError::Io`] (exit 7); parse failures surface as
+/// [`TomeError::WorkspaceMalformed`] (exit 70) carrying `path`.
+///
+/// `NotFound` is propagated as `Err(TomeError::Io(_))` rather than
+/// `Ok(None)` — caller-side Option-wrapping (e.g.
+/// `commands::harness::list::load_project_marker`) is the canonical
+/// place to special-case absence. Doctor consumers that want
+/// silent-on-error semantics call this and discard via `.ok()`.
+pub fn read_project_marker(path: &Path) -> Result<ProjectMarkerConfig, TomeError> {
+    let body = std::fs::read_to_string(path).map_err(TomeError::Io)?;
+    parse_project_marker(&body).map_err(|e| TomeError::WorkspaceMalformed {
+        path: path.to_path_buf(),
+        reason: format!("parse project marker: {e}"),
     })
 }

@@ -18,7 +18,7 @@ use crate::error::TomeError;
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
 use crate::presentation::tables;
-use crate::settings::parser::{parse_global, parse_project_marker, parse_workspace};
+use crate::settings::parser::{parse_global, parse_workspace};
 use crate::settings::resolver::{EffectiveHarness, resolve_effective_list};
 use crate::settings::{GlobalSettings, ProjectMarkerConfig, WorkspaceSettings};
 use crate::workspace::{ResolvedScope, WorkspaceName};
@@ -170,16 +170,14 @@ fn load_project_marker(scope: &ResolvedScope) -> Result<Option<ProjectMarkerConf
         return Ok(None);
     };
     let path = Paths::project_marker_config(project_root);
-    let body = match std::fs::read_to_string(&path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(TomeError::Io(e)),
-    };
-    let pm = parse_project_marker(&body).map_err(|e| TomeError::WorkspaceMalformed {
-        path: path.clone(),
-        reason: format!("parse project marker: {e}"),
-    })?;
-    Ok(Some(pm))
+    // Polish R-M5: route through `settings::parser::read_project_marker`
+    // for the read+parse pair; absent marker collapses to `Ok(None)`
+    // here (caller-side Option-wrapping convention).
+    match crate::settings::parser::read_project_marker(&path) {
+        Ok(pm) => Ok(Some(pm)),
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 fn load_workspace_settings(

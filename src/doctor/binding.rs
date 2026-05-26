@@ -36,7 +36,7 @@
 //! out on them.
 
 use crate::paths::Paths;
-use crate::settings::ProjectMarkerConfig;
+use crate::settings::parser::read_project_marker;
 use crate::workspace::{ResolvedScope, ScopeSource};
 
 use super::report::{ProjectBindingState, RulesCopyState};
@@ -57,10 +57,11 @@ pub fn check_binding(scope: &ResolvedScope, paths: &Paths) -> Option<ProjectBind
     // missing workspace is functionally as broken as a malformed marker
     // — the same Unhealthy classification + non-auto-fixable suggestion
     // path covers both.
-    let marker_parses = std::fs::read_to_string(&marker_path)
-        .ok()
-        .and_then(|body| toml::from_str::<ProjectMarkerConfig>(&body).ok())
-        .is_some();
+    // Polish R-M5: route through the canonical reader. Both IO (incl.
+    // NotFound + EACCES) and parse failures collapse to `false` here
+    // — by design; this surface is the diagnostic that surfaces those
+    // failures, so it can't itself error.
+    let marker_parses = read_project_marker(&marker_path).is_ok();
     let workspace_registered = bound_workspace_is_registered(scope, paths);
     let config_well_formed = marker_parses && workspace_registered;
 

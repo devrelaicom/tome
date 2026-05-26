@@ -108,10 +108,13 @@ fn settings_module_structs_all_carry_deny_unknown_fields() {
     assert_every_deserialize_has_deny_unknown("src/settings/mod.rs");
 }
 
-/// T098n (Phase 4 / FR-348): the in-resolver `ProjectMarkerConfig`
-/// shadow in `src/workspace/resolution.rs` is the parser surface for
-/// the `.tome/config.toml` project marker — same strictness contract
-/// as the canonical type in `src/settings/mod.rs`.
+/// Polish R-M4: the `src/workspace/resolution.rs` `ProjectMarkerConfig`
+/// shadow has been dropped — the resolver now routes through the
+/// canonical type in `src/settings/mod.rs`. The strictness check at
+/// `settings_module_structs_all_carry_deny_unknown_fields` covers the
+/// surviving definition. This test is intentionally retained as a
+/// guard so any future reintroduction of a `Deserialize`-deriving
+/// struct in resolution.rs lands with the strictness invariant.
 #[test]
 fn workspace_resolution_structs_all_carry_deny_unknown_fields() {
     assert_every_deserialize_has_deny_unknown("src/workspace/resolution.rs");
