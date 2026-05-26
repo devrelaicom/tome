@@ -36,6 +36,18 @@
 //! |------|-----------------------------------------------|-------------------------------------------------------|
 //! | 24   | SummariserFailure { kind: ModelMissing }      | `workspace_regen_summary_with_missing_model_exits_24` |
 //!
+//! Phase 4 / Polish PR-D / T-M7 additions (CLI binary coverage for
+//! Phase 4 codes that were library-only-covered until this PR):
+//!
+//! | Code | Variant                       | Tested via                                                |
+//! |------|-------------------------------|-----------------------------------------------------------|
+//! | 14   | WorkspaceAlreadyExists        | `workspace_init_duplicate_exits_14`                       |
+//! | 16   | WorkspaceHasBoundProjects     | `workspace_remove_with_bound_projects_exits_16`           |
+//! | 17   | CompositionError              | `harness_list_with_composition_cycle_exits_17`            |
+//! | 18   | HarnessNotSupported           | `harness_list_with_unsupported_harness_exits_18`          |
+//! | 70   | WorkspaceMalformed            | `workspace_info_with_malformed_global_settings_exits_70`  |
+//! | 7    | Io                            | `workspace_init_with_unwritable_parent_dir_exits_7` (unix)|
+//!
 //! Codes reachable only through embedder/inference paths (deferred to
 //! library-level tests for CI cost reasons — running these end-to-end
 //! requires loading `FastembedEmbedder` which pulls ~345 MB of ONNX):
@@ -673,6 +685,262 @@ fn reindex_unknown_plugin_in_known_catalog_exits_20() {
         Some(20),
         "expected exit 20 PluginNotFound, got {:?}, stderr:\n{}",
         out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4 / Polish PR-D / T-M7 — CLI binary coverage for Phase 4 codes
+// that were library-only-covered until this PR. Each test exercises the
+// failure path through `tome <subcommand>` and asserts the documented
+// exit code from `contracts/exit-codes-p4.md`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn workspace_init_duplicate_exits_14() {
+    // `tome workspace init foo` twice — second invocation hits
+    // `WorkspaceAlreadyExists` (exit 14).
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    // First init must succeed.
+    let first = env
+        .cmd()
+        .args(["workspace", "init", "foo"])
+        .output()
+        .expect("spawn first init");
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "first init must succeed, got {:?}, stderr:\n{}",
+        first.status.code(),
+        String::from_utf8_lossy(&first.stderr),
+    );
+
+    // Second init with the same name must exit 14.
+    let second = env
+        .cmd()
+        .args(["workspace", "init", "foo"])
+        .output()
+        .expect("spawn duplicate init");
+    assert_eq!(
+        second.status.code(),
+        Some(14),
+        "expected exit 14 WorkspaceAlreadyExists, got {:?}, stderr:\n{}",
+        second.status.code(),
+        String::from_utf8_lossy(&second.stderr),
+    );
+}
+
+#[test]
+fn workspace_remove_with_bound_projects_exits_16() {
+    // Init `foo`, bind a project to it, then `workspace remove foo`
+    // without `--force` → exit 16 (`WorkspaceHasBoundProjects`).
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    let init_out = env
+        .cmd()
+        .args(["workspace", "init", "foo"])
+        .output()
+        .expect("spawn init");
+    assert!(
+        init_out.status.success(),
+        "init must succeed, stderr:\n{}",
+        String::from_utf8_lossy(&init_out.stderr),
+    );
+
+    // Bind a project under HOME (avoids the cwd-is-home refusal).
+    let project = env.home_path().join("proj");
+    fs::create_dir_all(&project).expect("create project");
+    let bind_out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["workspace", "use", "foo"])
+        .output()
+        .expect("spawn use");
+    assert!(
+        bind_out.status.success(),
+        "bind must succeed, exit={:?} stderr:\n{}",
+        bind_out.status.code(),
+        String::from_utf8_lossy(&bind_out.stderr),
+    );
+
+    let remove_out = env
+        .cmd()
+        .args(["workspace", "remove", "foo"])
+        .output()
+        .expect("spawn remove");
+    assert_eq!(
+        remove_out.status.code(),
+        Some(16),
+        "expected exit 16 WorkspaceHasBoundProjects, got {:?}, stderr:\n{}",
+        remove_out.status.code(),
+        String::from_utf8_lossy(&remove_out.stderr),
+    );
+}
+
+#[test]
+fn harness_list_with_unsupported_harness_exits_18() {
+    // Write global settings with an unsupported harness name; running
+    // `tome harness list` triggers composition resolution and surfaces
+    // `HarnessNotSupported` (exit 18).
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    fs::write(&paths.global_settings_file, "harnesses = [\"bogus\"]\n")
+        .expect("write global settings");
+
+    let out = env
+        .cmd()
+        .args(["harness", "list"])
+        .output()
+        .expect("spawn harness list");
+    assert_eq!(
+        out.status.code(),
+        Some(18),
+        "expected exit 18 HarnessNotSupported, got {:?}, stdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+#[test]
+fn harness_list_with_composition_cycle_exits_17() {
+    // Seed two workspaces (a, b), then write settings.toml files that
+    // form a composition cycle: a → [workspaces.b], b → [workspaces.a].
+    // Resolving the project's effective list (which pulls in workspace
+    // `a` via the project marker) must hit the cycle and exit 17.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    // Init both workspaces via the CLI so the central DB rows are
+    // populated and the workspace dirs exist.
+    for ws in ["a", "b"] {
+        let out = env
+            .cmd()
+            .args(["workspace", "init", ws])
+            .output()
+            .expect("spawn init");
+        assert!(
+            out.status.success(),
+            "init {ws} stderr:\n{}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+
+    // Write the cyclic settings. Workspace settings require a `name`
+    // field at the top level per `WorkspaceSettings::deny_unknown_fields`;
+    // omitting it would surface as exit 70 (`WorkspaceMalformed`) before
+    // the cycle is reached.
+    let ws_a = tome::workspace::WorkspaceName::parse("a").unwrap();
+    let ws_b = tome::workspace::WorkspaceName::parse("b").unwrap();
+    fs::write(
+        paths.workspace_settings_file(&ws_a),
+        "name = \"a\"\nharnesses = [\"[workspaces.b]\"]\n",
+    )
+    .expect("write a settings");
+    fs::write(
+        paths.workspace_settings_file(&ws_b),
+        "name = \"b\"\nharnesses = [\"[workspaces.a]\"]\n",
+    )
+    .expect("write b settings");
+
+    // Project bound to workspace `a` triggers the cycle on resolution.
+    let project = env.home_path().join("cyclic-project");
+    fs::create_dir_all(project.join(".tome")).expect("create marker dir");
+    fs::write(project.join(".tome/config.toml"), "workspace = \"a\"\n")
+        .expect("write project marker");
+
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["harness", "list"])
+        .output()
+        .expect("spawn harness list");
+    assert_eq!(
+        out.status.code(),
+        Some(17),
+        "expected exit 17 CompositionError (cycle), got {:?}, stdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+#[test]
+fn workspace_info_with_malformed_global_settings_exits_70() {
+    // Write malformed TOML in the global settings file, then call any
+    // command that parses it. `tome harness list` calls
+    // `parse_global` → `WorkspaceMalformed` (exit 70).
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    fs::write(
+        &paths.global_settings_file,
+        "this is = not = valid = toml\n",
+    )
+    .expect("write malformed settings");
+
+    let out = env
+        .cmd()
+        .args(["harness", "list"])
+        .output()
+        .expect("spawn harness list");
+    assert_eq!(
+        out.status.code(),
+        Some(70),
+        "expected exit 70 WorkspaceMalformed, got {:?}, stdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_init_with_unwritable_parent_dir_exits_7() {
+    // chmod 0o500 the workspaces parent dir (read+execute, no write),
+    // then attempt `tome workspace init foo`. The init code tries to
+    // create the workspace subdirectory and fails with a write
+    // permission denied — `Io` (exit 7).
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+    // Ensure the workspaces parent dir exists and is empty, then chmod
+    // it so the init's mkdir fails. (The dir is `<root>/workspaces`.)
+    let workspaces_dir = paths.root.join("workspaces");
+    fs::create_dir_all(&workspaces_dir).expect("create workspaces dir");
+    let mut perms = fs::metadata(&workspaces_dir).unwrap().permissions();
+    perms.set_mode(0o500);
+    fs::set_permissions(&workspaces_dir, perms).expect("chmod workspaces dir");
+
+    let out = env
+        .cmd()
+        .args(["workspace", "init", "foo"])
+        .output()
+        .expect("spawn init");
+
+    // Restore permissions before asserting so a test failure doesn't
+    // leak a chmod'd dir into the TempDir cleanup.
+    let mut restore = fs::metadata(&workspaces_dir).unwrap().permissions();
+    restore.set_mode(0o700);
+    let _ = fs::set_permissions(&workspaces_dir, restore);
+
+    assert_eq!(
+        out.status.code(),
+        Some(7),
+        "expected exit 7 Io, got {:?}, stdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
 }
