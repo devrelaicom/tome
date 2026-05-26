@@ -87,6 +87,36 @@ pub fn bounded_read_to_string(path: &Path, max_bytes: u64) -> Result<String, Tom
     Ok(buf)
 }
 
+/// Read a file's raw bytes into a `Vec<u8>`, refusing files larger than
+/// `max_bytes`. Mirrors [`bounded_read_to_string`] but for callers that
+/// need raw bytes (e.g. byte-equality compares of rules files).
+///
+/// # Errors
+///
+/// - [`TomeError::Io`] (exit 7) when the file is missing, unreadable,
+///   or over-cap.
+pub fn bounded_read(path: &Path, max_bytes: u64) -> Result<Vec<u8>, TomeError> {
+    let meta = std::fs::metadata(path).map_err(TomeError::Io)?;
+    let len = meta.len();
+    if len > max_bytes {
+        return Err(TomeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "file {} exceeds the {} byte cap (size: {} bytes)",
+                path.display(),
+                max_bytes,
+                len
+            ),
+        )));
+    }
+    let cap = std::cmp::min(len, max_bytes) as usize;
+    let mut buf = Vec::with_capacity(cap);
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(TomeError::Io)?;
+    file.read_to_end(&mut buf).map_err(TomeError::Io)?;
+    Ok(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

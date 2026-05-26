@@ -168,9 +168,9 @@ impl ScopeProvider for CentralDbScopeProvider<'_> {
         //    harnesses declared" → Ok(None). IO + parse failures =
         //    SettingsReadFailure → exit 70 via the From boundary.
         let path = self.paths.workspace_settings_file(name);
-        let body = match std::fs::read_to_string(&path) {
+        let body = match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
             Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
                 return Err(CompositionErrorKind::SettingsReadFailure(
                     name.as_str().to_owned(),

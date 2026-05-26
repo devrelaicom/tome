@@ -228,15 +228,18 @@ fn build_effective_harness_list(
 
     let workspace_settings: Option<WorkspaceSettings> = {
         let path = paths.workspace_settings_file(scope.scope.name());
-        std::fs::read_to_string(&path)
+        crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX)
             .ok()
             .and_then(|body| parse_workspace(&body).ok())
     };
 
-    let global_settings: GlobalSettings = std::fs::read_to_string(&paths.global_settings_file)
-        .ok()
-        .and_then(|body| parse_global(&body).ok())
-        .unwrap_or_default();
+    let global_settings: GlobalSettings = crate::util::bounded_read_to_string(
+        &paths.global_settings_file,
+        crate::util::TOME_CONFIG_MAX,
+    )
+    .ok()
+    .and_then(|body| parse_global(&body).ok())
+    .unwrap_or_default();
 
     let scope_provider = CentralDbScopeProvider::new(paths);
     match resolve_effective_list(

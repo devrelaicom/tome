@@ -35,10 +35,12 @@ use crate::error::TomeError;
 /// document. Parse errors surface as `TomeError::Io(InvalidData)` with
 /// the path included.
 pub fn open_settings(path: &Path) -> Result<DocumentMut, TomeError> {
-    let body = match std::fs::read_to_string(path) {
+    let body = match crate::util::bounded_read_to_string(path, crate::util::TOME_CONFIG_MAX) {
         Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(DocumentMut::new()),
-        Err(e) => return Err(TomeError::Io(e)),
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(DocumentMut::new());
+        }
+        Err(e) => return Err(e),
     };
     body.parse::<DocumentMut>().map_err(|e| {
         TomeError::Io(std::io::Error::new(

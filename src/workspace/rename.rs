@@ -267,10 +267,11 @@ pub fn rename(
 ///
 /// A parse failure surfaces as `WorkspaceMalformed` (exit 70).
 fn rewrite_marker_workspace(marker_path: &Path, new_name: &str) -> Result<String, TomeError> {
-    let body = std::fs::read_to_string(marker_path).map_err(|e| TomeError::WorkspaceMalformed {
-        path: marker_path.to_path_buf(),
-        reason: format!("read project marker for rename: {e}"),
-    })?;
+    let body = crate::util::bounded_read_to_string(marker_path, crate::util::TOME_CONFIG_MAX)
+        .map_err(|e| TomeError::WorkspaceMalformed {
+            path: marker_path.to_path_buf(),
+            reason: format!("read project marker for rename: {e}"),
+        })?;
     let mut doc =
         toml_edit::DocumentMut::from_str(&body).map_err(|e| TomeError::WorkspaceMalformed {
             path: marker_path.to_path_buf(),

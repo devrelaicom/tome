@@ -90,7 +90,10 @@ fn check_rules_file(
             }
         }
         RulesFileStrategy::BlockInExistingFile => {
-            let contents = match std::fs::read_to_string(&target) {
+            let contents = match crate::util::bounded_read_to_string(
+                &target,
+                crate::util::HARNESS_RULES_MAX,
+            ) {
                 Ok(s) => s,
                 // No file → no block → broken.
                 Err(_) => return SubsystemHealth::Broken,
@@ -127,7 +130,8 @@ fn expected_body(module: &dyn crate::harness::HarnessModule, project_root: &Path
         }
         BlockBodyStyle::Inline => {
             let rules_path = crate::paths::Paths::project_marker_rules(project_root);
-            std::fs::read_to_string(&rules_path).unwrap_or_default()
+            crate::util::bounded_read_to_string(&rules_path, crate::util::HARNESS_RULES_MAX)
+                .unwrap_or_default()
         }
     }
 }

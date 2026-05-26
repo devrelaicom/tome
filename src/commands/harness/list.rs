@@ -80,16 +80,16 @@ fn list_as_written(raw: &str, paths: &Paths) -> Result<HarnessListOutcome, TomeE
     }
 
     let path = paths.workspace_settings_file(&name);
-    let body = match std::fs::read_to_string(&path) {
+    let body = match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             // No settings file → no declared list. Report empty.
             return Ok(HarnessListOutcome::AsWritten {
                 workspace: name.as_str().to_owned(),
                 harnesses: Vec::new(),
             });
         }
-        Err(e) => return Err(TomeError::Io(e)),
+        Err(e) => return Err(e),
     };
     let ws = parse_workspace(&body).map_err(|e| TomeError::WorkspaceMalformed {
         path: path.clone(),
@@ -185,10 +185,10 @@ fn load_workspace_settings(
     paths: &Paths,
 ) -> Result<Option<WorkspaceSettings>, TomeError> {
     let path = paths.workspace_settings_file(scope.scope.name());
-    let body = match std::fs::read_to_string(&path) {
+    let body = match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(TomeError::Io(e)),
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
     };
     let ws = parse_workspace(&body).map_err(|e| TomeError::WorkspaceMalformed {
         path: path.clone(),
@@ -199,10 +199,12 @@ fn load_workspace_settings(
 
 fn load_global_settings(paths: &Paths) -> Result<GlobalSettings, TomeError> {
     let path = &paths.global_settings_file;
-    let body = match std::fs::read_to_string(path) {
+    let body = match crate::util::bounded_read_to_string(path, crate::util::TOME_CONFIG_MAX) {
         Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(GlobalSettings::default()),
-        Err(e) => return Err(TomeError::Io(e)),
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(GlobalSettings::default());
+        }
+        Err(e) => return Err(e),
     };
     parse_global(&body).map_err(|e| TomeError::WorkspaceMalformed {
         path: path.clone(),

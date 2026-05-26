@@ -474,7 +474,8 @@ fn compute_effective_names_for_project(
     paths: &Paths,
 ) -> Result<std::collections::HashSet<String>, TomeError> {
     let marker_path = Paths::project_marker_config(project);
-    let marker_body = std::fs::read_to_string(&marker_path).map_err(TomeError::Io)?;
+    let marker_body =
+        crate::util::bounded_read_to_string(&marker_path, crate::util::TOME_CONFIG_MAX)?;
     let marker = settings::parser::parse_project_marker(&marker_body).map_err(|e| {
         TomeError::WorkspaceMalformed {
             path: marker_path.clone(),
@@ -488,27 +489,32 @@ fn compute_effective_names_for_project(
     // that we don't need to resolve here.
     let workspace_settings = {
         let path = paths.workspace_settings_file(&marker.workspace);
-        match std::fs::read_to_string(&path) {
+        match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
             Ok(body) => Some(settings::parser::parse_workspace(&body).map_err(|e| {
                 TomeError::WorkspaceMalformed {
                     path: path.clone(),
                     reason: format!("parse workspace settings: {e}"),
                 }
             })?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(TomeError::Io(e)),
+            Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
         }
     };
 
-    let global_settings = match std::fs::read_to_string(&paths.global_settings_file) {
+    let global_settings = match crate::util::bounded_read_to_string(
+        &paths.global_settings_file,
+        crate::util::TOME_CONFIG_MAX,
+    ) {
         Ok(body) => {
             settings::parser::parse_global(&body).map_err(|e| TomeError::WorkspaceMalformed {
                 path: paths.global_settings_file.clone(),
                 reason: format!("parse global settings: {e}"),
             })?
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => GlobalSettings::default(),
-        Err(e) => return Err(TomeError::Io(e)),
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            GlobalSettings::default()
+        }
+        Err(e) => return Err(e),
     };
 
     let scope = StubScope::new();

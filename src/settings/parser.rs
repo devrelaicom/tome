@@ -113,7 +113,7 @@ pub fn parse_global(content: &str) -> Result<GlobalSettings, ParseError> {
 /// place to special-case absence. Doctor consumers that want
 /// silent-on-error semantics call this and discard via `.ok()`.
 pub fn read_project_marker(path: &Path) -> Result<ProjectMarkerConfig, TomeError> {
-    let body = std::fs::read_to_string(path).map_err(TomeError::Io)?;
+    let body = crate::util::bounded_read_to_string(path, crate::util::TOME_CONFIG_MAX)?;
     parse_project_marker(&body).map_err(|e| TomeError::WorkspaceMalformed {
         path: path.to_path_buf(),
         reason: format!("parse project marker: {e}"),
