@@ -194,13 +194,13 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 - [x] T149 [US1] Consolidate reviewer findings into `specs/005-phase-5-commands-prompts/review/us1-findings.md` + `us1-disposition.md`
 - [x] T150 [US1] Apply all reviewer blockers and selected majors; commit fixes
 - [x] T151 [GIT] Commit: `fix(phase5/us1): reviewer-pass blockers and selected majors`
-- [ ] T152 [US1] Run `/sdd:map incremental` to refresh `.sdd/codebase/` against US1 changes
-- [ ] T153 [US1] Review `retro/P3.md` and extract critical learnings to CLAUDE.md (conservative)
-- [ ] T154 [GIT] Commit: `docs: refresh codebase docs + finalize phase 3 retro`
+- [x] T152 [US1] Run `/sdd:map incremental` to refresh `.sdd/codebase/` against US1 changes
+- [x] T153 [US1] Review `retro/P3.md` and extract critical learnings to CLAUDE.md (conservative)
+- [x] T154 [GIT] Commit: `docs: refresh codebase docs + finalize phase 3 retro`
 
 ### Phase Completion
 
-- [ ] T155 [GIT] Push final US1 PRs (per-slice)
+- [x] T155 [GIT] Push final US1 PRs (per-slice)
 - [ ] T156 [GIT] Verify all CI checks pass on each US1 sub-PR
 - [ ] T157 [GIT] Report US1 PR ready status
 
