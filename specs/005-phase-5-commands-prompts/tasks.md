@@ -248,9 +248,9 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US2.c — End-to-end through `get_skill` + reviewer pass + US2 closeout
 
-- [ ] T225 [US2] Extend `src/mcp/tools/get_skill.rs` to invoke `substitution::render()` on the returned body when ANY substitution applies (built-ins + env always; args from US3) per FR-101 (use devs:rust-dev agent)
-- [ ] T226 [US2] Create `tests/substitution_pipeline.rs` with tests verifying stage ordering invariant (built-ins → env, no re-scan), and `mcp_prompts_get_runs_builtins_and_env` end-to-end (use devs:rust-dev agent)
-- [ ] T227 [GIT] Commit: `feat(mcp): get_skill + prompts/get invoke substitution (builtins + env)`
+- [x] T225 [US2] Extend `src/mcp/tools/get_skill.rs` to invoke `substitution::render()` on the returned body when ANY substitution applies (built-ins + env always; args from US3) per FR-101 (use devs:rust-dev agent)
+- [x] T226 [US2] Create `tests/substitution_pipeline.rs` with tests verifying stage ordering invariant (built-ins → env, no re-scan), and `mcp_prompts_get_runs_builtins_and_env` end-to-end (use devs:rust-dev agent)
+- [x] T227 [GIT] Commit: `feat(mcp): get_skill + prompts/get invoke substitution (builtins + env)`
 - [ ] T228 [US2] Dispatch 4 reviewer agents in parallel for US2 with per-scope briefs writing to `/tmp/tome-phase5-us2-*.md`
 - [ ] T229 [US2] Consolidate reviewer findings + write disposition; apply blockers + selected majors
 - [ ] T230 [GIT] Commit: `fix(phase5/us2): reviewer-pass blockers and selected majors`
