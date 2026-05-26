@@ -34,6 +34,14 @@ impl HarnessModule for ClaudeCode {
         home.join(".claude").is_dir()
     }
 
+    fn detect_path(&self, home: &Path) -> PathBuf {
+        // `name()` is "claude-code" but the per-user dir is `~/.claude/`
+        // (no `-code` suffix). Override the default to keep the path
+        // reported by `tome harness info`'s `detected_path` in lockstep
+        // with what `detect` actually probes.
+        home.join(".claude")
+    }
+
     fn rules_file_target(&self, project_root: &Path) -> PathBuf {
         // Precedence: AGENTS.md > CLAUDE.md > .claude/CLAUDE.md. First
         // existing candidate wins; fall back to AGENTS.md if none exist

@@ -133,6 +133,25 @@ pub trait HarnessModule: Send + Sync {
     /// and trivially mockable via a `TempDir`-rooted `home`.
     fn detect(&self, home: &Path) -> bool;
 
+    /// Filesystem path that [`detect`](Self::detect) probes for
+    /// existence.
+    ///
+    /// The default implementation returns `home.join(format!(".{}",
+    /// self.name()))`, which matches every harness whose per-user dir
+    /// matches its `name()`. Harnesses whose per-user dir name diverges
+    /// from `name()` (e.g. `claude-code` -> `~/.claude/`) MUST override
+    /// this method so callers reporting "what we probed" don't lie.
+    ///
+    /// Polish C-M1: `tome harness info` previously computed the probed
+    /// path inline as `home.join(format!(".{}", m.name()))`, producing
+    /// `~/.claude-code/` for the `claude-code` harness despite its
+    /// `detect` actually probing `~/.claude/`. Promoting this to a
+    /// trait method (with overrides only where needed) keeps the two
+    /// surfaces in lockstep.
+    fn detect_path(&self, home: &Path) -> PathBuf {
+        home.join(format!(".{}", self.name()))
+    }
+
     /// Path where Tome's rules content lands for this harness.
     ///
     /// For `BlockInExistingFile` strategies this is a developer-authored
@@ -302,5 +321,34 @@ mod tests {
     #[test]
     fn mcp_config_key_is_tome() {
         assert_eq!(MCP_CONFIG_KEY, "tome");
+    }
+
+    #[test]
+    fn detect_path_defaults_to_dot_name_under_home() {
+        // Default impl: `home.join(format!(".{}", self.name()))`.
+        // Codex / Cursor / Gemini / OpenCode all use the default.
+        let home = std::path::Path::new("/h");
+        for harness in SUPPORTED_HARNESSES {
+            if harness.name() == "claude-code" {
+                continue;
+            }
+            assert_eq!(
+                harness.detect_path(home),
+                home.join(format!(".{}", harness.name())),
+                "{} should use the default detect_path",
+                harness.name(),
+            );
+        }
+    }
+
+    #[test]
+    fn detect_path_for_claude_code_matches_detect_probe() {
+        // Polish C-M1: `claude-code`'s `detect` probes `~/.claude/`,
+        // not `~/.claude-code/`. The overridden `detect_path` MUST
+        // return the same path so `tome harness info`'s `detected_path`
+        // doesn't lie to the caller.
+        let home = std::path::Path::new("/h");
+        let m = lookup("claude-code").unwrap();
+        assert_eq!(m.detect_path(home), home.join(".claude"));
     }
 }
