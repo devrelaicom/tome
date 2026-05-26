@@ -631,3 +631,184 @@ fn standalone_file_strategy_implies_unused_block_body_style() {
         }
     }
 }
+
+// ===========================================================================
+// US5.a / T376b — explicit 5 × 9 method matrix
+// ===========================================================================
+
+/// Expected values for the nine `HarnessModule` trait methods for one
+/// harness. The matrix below is driven from research §R-8 and lives
+/// here as an explicit assertion that adding a new harness to
+/// `SUPPORTED_HARNESSES` requires updating these documented values
+/// (the per-harness sub-modules above cover the precedence-ladder
+/// details for each one).
+struct ExpectedValues {
+    name: &'static str,
+    description_starts_with: &'static str,
+    detect_dir_name: &'static str,
+    rules_strategy: RulesFileStrategy,
+    block_body_style: BlockBodyStyle,
+    mcp_format: McpConfigFormat,
+    mcp_parent_key: &'static str,
+}
+
+#[test]
+fn explicit_5x9_method_matrix_covers_every_supported_harness() {
+    let matrix: &[(&dyn HarnessModule, ExpectedValues)] = &[
+        (
+            &CLAUDE_CODE,
+            ExpectedValues {
+                name: "claude-code",
+                description_starts_with: "",
+                detect_dir_name: ".claude",
+                rules_strategy: RulesFileStrategy::BlockInExistingFile,
+                block_body_style: BlockBodyStyle::AtInclude,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcpServers",
+            },
+        ),
+        (
+            &CODEX,
+            ExpectedValues {
+                name: "codex",
+                description_starts_with: "",
+                detect_dir_name: ".codex",
+                rules_strategy: RulesFileStrategy::BlockInExistingFile,
+                block_body_style: BlockBodyStyle::AtInclude,
+                mcp_format: McpConfigFormat::Toml,
+                mcp_parent_key: "mcp_servers",
+            },
+        ),
+        (
+            &CURSOR,
+            ExpectedValues {
+                name: "cursor",
+                description_starts_with: "",
+                detect_dir_name: ".cursor",
+                rules_strategy: RulesFileStrategy::StandaloneFile,
+                block_body_style: BlockBodyStyle::Inline,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcpServers",
+            },
+        ),
+        (
+            &GEMINI,
+            ExpectedValues {
+                name: "gemini",
+                description_starts_with: "",
+                detect_dir_name: ".gemini",
+                rules_strategy: RulesFileStrategy::BlockInExistingFile,
+                block_body_style: BlockBodyStyle::AtInclude,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcpServers",
+            },
+        ),
+        (
+            &OPENCODE,
+            ExpectedValues {
+                name: "opencode",
+                description_starts_with: "",
+                detect_dir_name: ".opencode",
+                rules_strategy: RulesFileStrategy::BlockInExistingFile,
+                block_body_style: BlockBodyStyle::Inline,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcpServers",
+            },
+        ),
+    ];
+
+    assert_eq!(
+        matrix.len(),
+        SUPPORTED_HARNESSES.len(),
+        "T376b matrix must mention every registered harness exactly once",
+    );
+
+    for (module, expected) in matrix {
+        // 1. name
+        assert_eq!(module.name(), expected.name, "name() for {}", expected.name);
+        // 2. description — non-empty, the prefix gate is informational.
+        assert!(
+            !module.description().is_empty(),
+            "description() for {} must be non-empty",
+            expected.name,
+        );
+        assert!(
+            module
+                .description()
+                .starts_with(expected.description_starts_with),
+            "description() for {} must start with {:?}",
+            expected.name,
+            expected.description_starts_with,
+        );
+        // 3. detect — `<home>/<detect_dir_name>/` must register true,
+        //    absent must register false.
+        let home_present = TempDir::new().unwrap();
+        fs::create_dir(home_present.path().join(expected.detect_dir_name)).unwrap();
+        assert!(
+            module.detect(home_present.path()),
+            "detect() must be true for {} when {} exists",
+            expected.name,
+            expected.detect_dir_name,
+        );
+        let home_absent = TempDir::new().unwrap();
+        assert!(
+            !module.detect(home_absent.path()),
+            "detect() must be false for {} when {} is absent",
+            expected.name,
+            expected.detect_dir_name,
+        );
+        // 4. rules_file_target — non-empty path inside project root.
+        let project = TempDir::new().unwrap();
+        let target = module.rules_file_target(project.path());
+        assert!(
+            target.starts_with(project.path())
+                || target
+                    .to_string_lossy()
+                    .contains(expected.detect_dir_name.trim_start_matches('.')),
+            "rules_file_target for {} should be project-relative or harness-rooted",
+            expected.name,
+        );
+        // 5. rules_file_strategy
+        assert_eq!(
+            module.rules_file_strategy(),
+            expected.rules_strategy,
+            "rules_file_strategy for {}",
+            expected.name,
+        );
+        // 6. block_body_style
+        assert_eq!(
+            module.block_body_style(),
+            expected.block_body_style,
+            "block_body_style for {}",
+            expected.name,
+        );
+        // 7. mcp_config_path — a non-empty path under either project or home.
+        let home = TempDir::new().unwrap();
+        let mcp_path = module.mcp_config_path(project.path(), home.path());
+        assert!(
+            !mcp_path.as_os_str().is_empty(),
+            "mcp_config_path for {} must be non-empty",
+            expected.name,
+        );
+        // 8. mcp_config_format
+        assert_eq!(
+            module.mcp_config_format(),
+            expected.mcp_format,
+            "mcp_config_format for {}",
+            expected.name,
+        );
+        // 9. mcp_parent_key
+        assert_eq!(
+            module.mcp_parent_key(),
+            expected.mcp_parent_key,
+            "mcp_parent_key for {}",
+            expected.name,
+        );
+    }
+    // MCP_CONFIG_KEY is the cross-harness invariant (always "tome").
+    assert_eq!(MCP_CONFIG_KEY, "tome");
+    // Spot-check lookup() reaches each harness by name.
+    for (module, _) in matrix {
+        assert!(lookup(module.name()).is_some(), "lookup({})", module.name());
+    }
+}

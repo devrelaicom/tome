@@ -1,16 +1,27 @@
-//! Serialisable types for `tome doctor`'s report. Data-model §5 / §6.
+//! Serialisable types for `tome doctor`'s report. Data-model §5 / §6 / §15.
 //!
 //! Emit-only — these types are never deserialised, so no
 //! `#[serde(deny_unknown_fields)]`. The wire JSON shape is contract
-//! `contracts/doctor.md`; an integration test pins byte-stability.
+//! `contracts/doctor.md` + `contracts/doctor-extensions-p4.md`; an integration
+//! test pins byte-stability.
+//!
+//! Phase 4 / US5.a promotes the previously-`String`-typed `subsystem` field
+//! on [`SuggestedFix`] to the typed [`Subsystem`] enum (data-model §15).
+//! Custom `Serialize` / `Deserialize` impls preserve the Phase 3 wire shape
+//! byte-for-byte for every Phase 3 variant; new Phase 4 variants slot in
+//! alongside without changing existing keys.
 
+use std::fmt;
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::de::{self, Deserializer, Visitor};
+use serde::ser::Serializer;
+use serde::{Deserialize, Serialize};
 
 use crate::commands::status::{IndexHealth, ModelHealth};
 use crate::index::meta::DriftStatus;
-use crate::workspace::WorkspaceInfo;
+use crate::settings::resolver::EffectiveHarnessList;
+use crate::workspace::{WorkspaceInfo, WorkspaceName};
 
 /// Three-state overall classification used by `tome doctor`. Matches the
 /// shape of `OverallHealth` from Phase 2 status but lives here so the
@@ -90,24 +101,309 @@ pub struct HarnessPresence {
 }
 
 /// A user-actionable repair suggestion. `auto_fixable = true` items are
-/// the three classes `--fix` handles automatically; everything else is
+/// the classes `--fix` handles automatically; everything else is
 /// surfaced as a copy-pasteable command.
+///
+/// The `subsystem` field is the typed [`Subsystem`] enum but serialises to
+/// the documented colon-separated wire string so external `--json` consumers
+/// see the Phase 3 byte shape for every Phase 3 variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SuggestedFix {
-    pub subsystem: String,
+    pub subsystem: Subsystem,
     pub diagnosis: String,
     pub command: String,
     pub auto_fixable: bool,
 }
 
-/// Full doctor report. Field order matches `contracts/doctor.md`
-/// §"Output (`--json`)" so the rendered JSON is deterministic.
+/// Per-subsystem health classification used by Phase 4's new doctor
+/// surfaces (summariser + harness integration + binding). Mirrors the
+/// shape of [`ModelHealth.state`] / [`CatalogCacheState`] but is the
+/// single source of truth for the wire vocabulary across the new
+/// subsystems. The variants are:
+///
+/// - `Ok` — subsystem is healthy.
+/// - `Drift` — subsystem exists but its content differs from what Tome
+///   would produce. Re-runnable by the corresponding `--fix` handler.
+/// - `Broken` — subsystem is missing or unreadable. Re-runnable by
+///   `--fix` for the auto-fixable variants.
+/// - `UserOwned` — only emitted for `HarnessMcp`: the entry under the
+///   `tome` key is developer-authored. `--fix` alone refuses to
+///   overwrite; `--fix --force` (US5.b) does.
+/// - `NotApplicable` — the subsystem isn't applicable in the current
+///   context (e.g. harness subsystems when the effective list is empty
+///   per FR-561). Does NOT affect overall classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubsystemHealth {
+    Ok,
+    Drift,
+    Broken,
+    UserOwned,
+    NotApplicable,
+}
+
+impl SubsystemHealth {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SubsystemHealth::Ok => "ok",
+            SubsystemHealth::Drift => "drift",
+            SubsystemHealth::Broken => "broken",
+            SubsystemHealth::UserOwned => "user_owned",
+            SubsystemHealth::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// Per-project binding state per data-model §15. Populated by
+/// [`crate::doctor::binding::check_binding`] when the resolved scope's
+/// source is `ProjectMarker`; `None` otherwise (FR-564).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProjectBindingState {
+    pub project_root: PathBuf,
+    pub bound_workspace: WorkspaceName,
+    pub config_well_formed: bool,
+    pub rules_file_drift: RulesCopyState,
+}
+
+/// Per-project `.tome/RULES.md` drift classification. Computed by byte
+/// comparison against `<root>/workspaces/<name>/RULES.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RulesCopyState {
+    Match,
+    Missing,
+    Drift,
+}
+
+/// Typed subsystem identifier replacing Phase 3's free-form `String`
+/// field on [`SuggestedFix`]. The custom `Serialize` / `Deserialize`
+/// impls map to the documented colon-separated strings:
+///
+/// - `Embedder` ↔ `"embedder"`
+/// - `Reranker` ↔ `"reranker"`
+/// - `Index` ↔ `"index"`
+/// - `Drift` ↔ `"drift"`
+/// - `Catalog(name)` ↔ `"catalog:<name>"`
+/// - `Schema` ↔ `"schema"`
+/// - `Summariser` ↔ `"summariser"`
+/// - `Binding` ↔ `"binding"`
+/// - `BindingRulesCopy` ↔ `"binding-rules-copy"`
+/// - `HarnessRules(name)` ↔ `"harness-rules:<name>"`
+/// - `HarnessMcp(name)` ↔ `"harness-mcp:<name>"`
+///
+/// The two Phase 3 drift "subsystems" `embedder_drift`, `reranker_drift`,
+/// and the Phase 4 fold-in `summariser_drift` are not part of this enum:
+/// they were never first-class subsystems, just descriptive subsystem
+/// labels on drift-class suggestions. They land here under
+/// `Subsystem::Drift` with the existing drift-specific message attached
+/// (the diagnosis text discriminates between embedder/reranker/summariser
+/// drift on the wire side).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Subsystem {
+    Embedder,
+    Reranker,
+    Index,
+    Drift,
+    Catalog(String),
+    Schema,
+    Summariser,
+    Binding,
+    BindingRulesCopy,
+    HarnessRules(String),
+    HarnessMcp(String),
+}
+
+impl Subsystem {
+    /// Render the wire string (one allocation; only callers that need
+    /// the owned string should use this — comparisons use `PartialEq`
+    /// against `&str` / `String` directly).
+    pub fn to_wire_string(&self) -> String {
+        match self {
+            Subsystem::Embedder => "embedder".to_owned(),
+            Subsystem::Reranker => "reranker".to_owned(),
+            Subsystem::Index => "index".to_owned(),
+            Subsystem::Drift => "drift".to_owned(),
+            Subsystem::Catalog(n) => format!("catalog:{n}"),
+            Subsystem::Schema => "schema".to_owned(),
+            Subsystem::Summariser => "summariser".to_owned(),
+            Subsystem::Binding => "binding".to_owned(),
+            Subsystem::BindingRulesCopy => "binding-rules-copy".to_owned(),
+            Subsystem::HarnessRules(n) => format!("harness-rules:{n}"),
+            Subsystem::HarnessMcp(n) => format!("harness-mcp:{n}"),
+        }
+    }
+
+    /// Parse a wire string back into a `Subsystem`. Returns `None` for
+    /// any string that doesn't match the documented vocabulary.
+    pub fn parse_wire(s: &str) -> Option<Self> {
+        Some(match s {
+            "embedder" => Subsystem::Embedder,
+            "reranker" => Subsystem::Reranker,
+            "index" => Subsystem::Index,
+            "drift" => Subsystem::Drift,
+            "schema" => Subsystem::Schema,
+            "summariser" => Subsystem::Summariser,
+            "binding" => Subsystem::Binding,
+            "binding-rules-copy" => Subsystem::BindingRulesCopy,
+            other => {
+                if let Some(name) = other.strip_prefix("catalog:") {
+                    Subsystem::Catalog(name.to_owned())
+                } else if let Some(name) = other.strip_prefix("harness-rules:") {
+                    Subsystem::HarnessRules(name.to_owned())
+                } else if let Some(name) = other.strip_prefix("harness-mcp:") {
+                    Subsystem::HarnessMcp(name.to_owned())
+                } else {
+                    return None;
+                }
+            }
+        })
+    }
+}
+
+impl fmt::Display for Subsystem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_wire_string())
+    }
+}
+
+/// Comparing a `Subsystem` against a borrowed `&str` matches the wire
+/// shape — letting Phase 3 tests like `fix.subsystem == "embedder"` work
+/// transparently after the type promotion. Callers that need stricter
+/// matching can do `*subsystem == Subsystem::Embedder`.
+impl PartialEq<str> for Subsystem {
+    fn eq(&self, other: &str) -> bool {
+        self.to_wire_string() == other
+    }
+}
+
+impl PartialEq<&str> for Subsystem {
+    fn eq(&self, other: &&str) -> bool {
+        self.to_wire_string() == *other
+    }
+}
+
+impl PartialEq<String> for Subsystem {
+    fn eq(&self, other: &String) -> bool {
+        self.to_wire_string() == *other
+    }
+}
+
+impl Serialize for Subsystem {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&self.to_wire_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Subsystem {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Subsystem;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a Subsystem wire string per contracts/doctor-extensions-p4.md")
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<Subsystem, E> {
+                Subsystem::parse_wire(v)
+                    .ok_or_else(|| E::custom(format!("unknown Subsystem wire string `{v}`")))
+            }
+        }
+        de.deserialize_str(V)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every variant of [`Subsystem`] survives a serialise → deserialise
+    /// round-trip via its documented wire string. The Phase 3 variants
+    /// MUST emit the byte-exact string they did before the typed
+    /// promotion so external `--json` consumers don't observe a break.
+    #[test]
+    fn subsystem_round_trip_locks_wire_shape() {
+        let cases = [
+            (Subsystem::Embedder, "\"embedder\""),
+            (Subsystem::Reranker, "\"reranker\""),
+            (Subsystem::Index, "\"index\""),
+            (Subsystem::Drift, "\"drift\""),
+            (Subsystem::Catalog("name".into()), "\"catalog:name\""),
+            (Subsystem::Schema, "\"schema\""),
+            (Subsystem::Summariser, "\"summariser\""),
+            (Subsystem::Binding, "\"binding\""),
+            (Subsystem::BindingRulesCopy, "\"binding-rules-copy\""),
+            (
+                Subsystem::HarnessRules("claude-code".into()),
+                "\"harness-rules:claude-code\"",
+            ),
+            (
+                Subsystem::HarnessMcp("codex".into()),
+                "\"harness-mcp:codex\"",
+            ),
+        ];
+        for (variant, wire) in cases {
+            let serialised = serde_json::to_string(&variant).unwrap();
+            assert_eq!(serialised, wire, "wire shape for {variant:?}");
+            let parsed: Subsystem = serde_json::from_str(wire).unwrap();
+            assert_eq!(parsed, variant, "round-trip for {wire}");
+        }
+    }
+
+    /// Deserialising an unknown wire string MUST fail rather than silently
+    /// coerce to a default variant — typo'd subsystem names are a bug.
+    #[test]
+    fn subsystem_rejects_unknown_wire_string() {
+        let err: Result<Subsystem, _> = serde_json::from_str("\"not-a-subsystem\"");
+        assert!(err.is_err());
+    }
+
+    /// String-comparison shim: Phase 3 tests + dispatch sites compared
+    /// against `&str` literals. The `PartialEq<&str>` / `PartialEq<str>`
+    /// impls preserve that ergonomics through the type promotion.
+    #[test]
+    fn subsystem_compares_against_str_literals() {
+        assert!(Subsystem::Embedder == "embedder");
+        assert!(Subsystem::Catalog("foo".into()) == "catalog:foo");
+        assert!(Subsystem::HarnessRules("cursor".into()) == "harness-rules:cursor");
+        assert!(Subsystem::HarnessMcp("gemini".into()) != "harness-mcp:codex");
+    }
+}
+
+/// Per-harness integration check result. Pair of `(harness_name, health)`
+/// — used for both `harness_rules` and `harness_mcp` fields on
+/// [`DoctorReport`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HarnessSubsystemReport {
+    pub harness: String,
+    pub health: SubsystemHealth,
+}
+
+/// Full doctor report. Field order matches `contracts/doctor.md` +
+/// `contracts/doctor-extensions-p4.md` so the rendered JSON is
+/// deterministic.
+///
+/// Phase 4 adds:
+/// - `project_binding` — None when outside any project marker.
+/// - `summariser` — mirror of embedder/reranker.
+/// - `effective_harness_list` — None when no harness composition resolves
+///   (no project + no global harness declarations).
+/// - `harness_rules` / `harness_mcp` — per-harness integration state for
+///   every harness in `effective_harness_list`.
+/// - `detected_uninstalled_harnesses` — FR-560 informational list of
+///   supported harnesses present on the machine but not in the effective
+///   list. Never affects classification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DoctorReport {
     pub tome_version: String,
     pub workspace: WorkspaceInfo,
+    /// FR-564: populated only when the resolved scope's source is
+    /// `ProjectMarker`. From outside any project this is `None` and the
+    /// harness subsystems use the global effective list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_binding: Option<ProjectBindingState>,
     pub embedder: ModelHealth,
     pub reranker: ModelHealth,
+    /// Phase 4 / US5.a: summariser cheap-probe identity + state.
+    pub summariser: ModelHealth,
     pub index: IndexHealth,
     pub drift: DriftStatus,
     pub catalogs: Vec<CatalogCacheHealth>,
@@ -115,6 +411,19 @@ pub struct DoctorReport {
     /// status of the opt-in workspace registry file (presence + count).
     pub workspace_registry: WorkspaceRegistryStatus,
     pub harnesses: Vec<HarnessPresence>,
+    /// FR-560 / FR-561: snapshot of the resolved effective harness list
+    /// (composition output). `None` when no scope declares `harnesses`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_harness_list: Option<EffectiveHarnessList>,
+    /// Per-harness rules-file integration state (one entry per harness
+    /// in `effective_harness_list`). Empty when the effective list is.
+    pub harness_rules: Vec<HarnessSubsystemReport>,
+    /// Per-harness MCP-config integration state.
+    pub harness_mcp: Vec<HarnessSubsystemReport>,
+    /// FR-560 informational list: supported harnesses present on the
+    /// local machine (via `HarnessModule::detect`) but NOT in the
+    /// effective list. Never affects overall classification.
+    pub detected_uninstalled_harnesses: Vec<String>,
     pub overall: DoctorClassification,
     pub suggested_fixes: Vec<SuggestedFix>,
 }

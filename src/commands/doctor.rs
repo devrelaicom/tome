@@ -48,7 +48,7 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
                 .suggested_fixes
                 .iter()
                 .find(|f| !f.auto_fixable)
-                .map(|f| f.subsystem.clone())
+                .map(|f| f.subsystem.to_wire_string())
                 .unwrap_or_else(|| "unknown".to_owned()),
         });
     }
