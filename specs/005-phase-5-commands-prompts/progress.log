@@ -1,0 +1,5 @@
+# Phase 5 progress log — autonomous run
+
+Each line is an event (PR open / merge, phase close, etc.). Newest at the bottom.
+
+2026-05-26T12:30:00Z  baseline  main @ 3b075b9 (Phase 4 v0.4.0 PR-G closeout)  test total: 954/127 suites/16 ignored
