@@ -8,13 +8,11 @@
 //!
 //! - The model is ~400 MB; downloading it on every CI run is wasteful
 //!   and slow (network-bound).
-//! - The `MODEL_REGISTRY` summariser entry still carries the placeholder
-//!   SHA-256 (see `src/summarise/registry.rs` — flipping it to a real
-//!   digest is a separate ops task). With the placeholder in place,
-//!   `download_model` refuses to install (`ModelCorrupt`, exit 31) so
-//!   the test would fail even with `TOME_TEST_REAL_MODELS=1`. Once the
-//!   real hash lands, this test becomes the smoke-check that proves the
-//!   end-to-end llama-cpp-2 wiring works.
+//! - As of US4.d-1 (PR #74) the `MODEL_REGISTRY` summariser entry
+//!   carries the real pinned SHA-256, so this test now functions as
+//!   the smoke-check that proves the end-to-end llama-cpp-2 wiring
+//!   works against the real artefact. Still gated on
+//!   `TOME_TEST_REAL_MODELS=1` because the download is large.
 //!
 //! Run with:
 //!
@@ -45,8 +43,9 @@ const ENV_GATE: &str = "TOME_TEST_REAL_MODELS";
 /// the band is the happy path; the gate is "non-empty" only.
 const SHORT_HARD_MAX: usize = 800;
 
-/// Same shape as `SHORT_HARD_MAX` for the long summary.
-const LONG_HARD_MAX: usize = 2400;
+/// Same shape as `SHORT_HARD_MAX` for the long summary. Aligned with
+/// the unified `LONG_MAX_CHARS = 2500` constant (US4.d-1).
+const LONG_HARD_MAX: usize = 2500;
 
 fn fixture_input() -> PluginSummariesInput {
     PluginSummariesInput {
@@ -113,10 +112,10 @@ fn real_summariser_produces_non_empty_within_window() {
         .find(|e| e.kind == ModelKind::Summariser)
         .expect("summariser entry in MODEL_REGISTRY");
 
-    // Download the model. With the registry's placeholder SHA-256 this
-    // will fail with `ModelCorrupt` (exit 31); that's expected until
-    // ops flips the hash. Surface the failure clearly so the developer
-    // knows why the test bailed.
+    // Download the model. Since US4.d-1 (PR #74) the registry carries
+    // the real SHA-256; the download path should succeed against the
+    // canonical Hugging Face URL. A failure here points at network or
+    // an upstream artefact change.
     eprintln!(
         "downloading {} (~{} MB) — this may take a while on the first run",
         entry.name,
@@ -128,7 +127,7 @@ fn real_summariser_produces_non_empty_within_window() {
         }
     };
     download_model(entry, &paths.models_dir, Some(&progress_cb))
-        .expect("download summariser model — flip the registry SHA-256 placeholder first");
+        .expect("download summariser model");
 
     let summariser = LlamaSummariser::new(&paths).expect("LlamaSummariser::new");
 
@@ -237,9 +236,9 @@ fn regen_summary_through_real_llama_summariser_writes_settings_and_rules() {
     std::fs::create_dir_all(&paths.root).expect("create root");
     std::fs::create_dir_all(&paths.models_dir).expect("create models_dir");
 
-    // Download the summariser GGUF into the test-rooted models_dir. With
-    // the placeholder SHA-256 in the registry this returns `ModelCorrupt`;
-    // the assert message points the developer at the registry fix.
+    // Download the summariser GGUF into the test-rooted models_dir.
+    // US4.d-1 pinned the real SHA-256; download succeeds against the
+    // canonical Hugging Face URL.
     let entry = MODEL_REGISTRY
         .iter()
         .find(|e| e.kind == ModelKind::Summariser)
@@ -249,8 +248,7 @@ fn regen_summary_through_real_llama_summariser_writes_settings_and_rules() {
         entry.name,
         entry.size_bytes / 1_000_000,
     );
-    download_model(entry, &paths.models_dir, None)
-        .expect("download summariser model — flip the registry SHA-256 placeholder first");
+    download_model(entry, &paths.models_dir, None).expect("download summariser model");
 
     // Seed a workspace + two enabled skills via the library API (the
     // embedder side stays stubbed; this test only exercises the real

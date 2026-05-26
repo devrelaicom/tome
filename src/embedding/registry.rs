@@ -83,20 +83,24 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
         licence: "MIT",
         files: &["model.onnx", "tokenizer.json"],
     },
-    // Phase 4 — Summariser. The SHA-256 below is the F6 placeholder
-    // (all zeros); US4.a flips it to the real digest after fetching
-    // against the canonical Hugging Face URL. The download path
-    // refuses to install while `has_placeholder_checksum()` returns
-    // true, so a stray invocation surfaces as `ModelCorrupt`
-    // (exit 31) — not silent installation of untrusted bytes.
-    // See `src/summarise/registry.rs` for the named constants.
+    // Phase 4 — Summariser. The SHA-256 and size below were computed
+    // against the canonical Hugging Face artefact (download via
+    // `curl -L <SUMMARISER_SOURCE_URL>` + `shasum -a 256`) on
+    // 2026-05-26 as part of US4.d-1 (PR #74). The named constants in
+    // `src/summarise/registry.rs` mirror these values; the two
+    // sources MUST agree (the
+    // `registry::tests::summariser_entry_is_in_global_registry` test
+    // catches drift). The download path's `has_placeholder_checksum`
+    // gate now passes for this entry — `tome models download` will
+    // install it normally; a tampered artefact surfaces as
+    // `ModelChecksumMismatch` (exit 32) at install time.
     ModelEntry {
         name: "qwen2.5-0.5b-instruct",
         version: "0.5b-Q4_K_M",
         kind: ModelKind::Summariser,
         source_url: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
-        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
-        size_bytes: 400_000_000,
+        sha256: "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+        size_bytes: 491_400_032,
         licence: "Apache-2.0",
         files: &["model.gguf"],
     },

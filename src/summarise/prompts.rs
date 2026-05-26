@@ -8,7 +8,7 @@
 //!    the MCP server's tool description (FR-425).
 //! 2. **Long pass** — using the short output as input, write a 4–6
 //!    sentence rules section for the harness's `RULES.md` file
-//!    (≤ 2400 chars). The output feeds the workspace's composed
+//!    (≤ 2500 chars). The output feeds the workspace's composed
 //!    `RULES.md`.
 //!
 //! Both prompts are pinned `&'static str` constants — research §R-15
@@ -49,28 +49,24 @@ user's skill library covers. Write a 4–6 sentence rules section that
 (2) instructs the agent to call the search_skills tool when working on tasks
    involving those topics,
 (3) is written for the agent to read at session start.
-Plain prose, no headings, no bullet points. Maximum 2400 characters.
+Plain prose, no headings, no bullet points. Maximum 2500 characters.
 
 Topics:
 {topics}";
 
-/// Hard upper bound for the short summary. Outputs strictly above this
-/// emit a tracing warning; outputs at or below are cached without
-/// comment. Per `contracts/summariser.md` §"Length windows" the short
-/// summary is also subject to a soft target window of 400–800 chars.
-pub const SHORT_MAX_CHARS: usize = 800;
+// The hard upper bounds [`SHORT_MAX_CHARS`] and [`LONG_MAX_CHARS`] live
+// in [`crate::summarise`] as the single source of truth across the
+// inference loop (`llama.rs`) and the regen-summary command
+// (`workspace::regen_summary`). US4.d-1 consolidation. Re-exported here
+// for backwards-compatibility with the existing `prompts::*` import
+// paths.
+pub use super::{LONG_MAX_CHARS, SHORT_MAX_CHARS};
 
 /// Target lower bound for the short summary (advisory, no warning emitted).
 pub const SHORT_TARGET_MIN: usize = 400;
 
 /// Target upper bound for the short summary (advisory, no warning emitted).
 pub const SHORT_TARGET_MAX: usize = 800;
-
-/// Hard upper bound for the long summary. Outputs strictly above this
-/// emit a tracing warning. Per the contract the long summary's target
-/// window is 1500–2500 chars, slightly wider than the hard cap so a
-/// model that slightly overshoots target still passes the strict gate.
-pub const LONG_MAX_CHARS: usize = 2400;
 
 /// Target lower bound for the long summary (advisory, no warning emitted).
 pub const LONG_TARGET_MIN: usize = 1500;
@@ -84,8 +80,9 @@ const _: () = {
     assert!(SHORT_TARGET_MIN < SHORT_TARGET_MAX);
     assert!(SHORT_TARGET_MAX <= SHORT_MAX_CHARS);
     assert!(LONG_TARGET_MIN < LONG_TARGET_MAX);
-    // The long target band intentionally extends past LONG_MAX_CHARS
-    // — see the contract's "Length windows" table.
+    // After US4.d-1's consolidation `LONG_MAX_CHARS == LONG_TARGET_MAX`
+    // — the long target band aligns with the hard cap rather than
+    // extending past it. The assert below stays valid (strict <).
     assert!(LONG_TARGET_MIN < LONG_MAX_CHARS);
 };
 

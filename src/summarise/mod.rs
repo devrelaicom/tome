@@ -38,6 +38,32 @@ pub use llama::LlamaSummariser;
 pub use stub::StubSummariser;
 pub use trigger::{regenerate_for_trigger, regenerate_for_trigger_with_summariser};
 
+// ---------------------------------------------------------------------------
+// Length-window constants — single source of truth (US4.d-1 / C-B3-R-B1).
+//
+// Before US4.d-1 these constants were duplicated in `prompts.rs`
+// (`LONG_MAX_CHARS = 2400`) and `workspace::regen_summary`
+// (`LONG_MAX_CHARS = 2500`) — the two warn predicates fired at different
+// boundaries. The contract pins the long max at 2500 chars; US4.d-1
+// unifies on that value and re-exports from `prompts.rs` and
+// `regen_summary` so a single edit here moves both warn boundaries.
+//
+// `SHORT_TARGET_*` + `LONG_TARGET_*` (advisory windows, no warning
+// emitted) stay private to `prompts.rs`; they are wiring details of the
+// inference loop, not user-visible cache boundaries.
+// ---------------------------------------------------------------------------
+
+/// Hard upper bound for the short summary. Outputs strictly above this
+/// emit a `tracing::warn!` (per `contracts/summariser.md` §"Length
+/// windows"). Outputs at or below are cached without comment.
+pub const SHORT_MAX_CHARS: usize = 800;
+
+/// Hard upper bound for the long summary. Outputs strictly above this
+/// emit a `tracing::warn!`. The MCP tool description / `RULES.md`
+/// surface above this cap is still useful — the warning is advisory,
+/// not a hard error (FR-425).
+pub const LONG_MAX_CHARS: usize = 2500;
+
 /// Workspace summariser interface. Implementations must be `Send + Sync`
 /// so callers can stash one inside an `Arc<dyn Summariser>` and share
 /// it across the summary-regeneration triggers in US4 (enable / disable
@@ -147,9 +173,12 @@ static INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
 ///   it with the wider process state.
 /// - **Mutex poisoning**: a panic *inside* the lock guard (e.g. a
 ///   panicking allocator during `LlamaBackend::init()`) poisons the
-///   mutex. The next `backend()` call surfaces that as
-///   `BackendInitFailed { source: "backend init lock poisoned: ..." }`
-///   rather than re-panicking; the cached-failure invariant holds.
+///   mutex. US4.d-1 (R-M7) the next `backend()` call recovers via
+///   `PoisonError::into_inner` and proceeds with its own init attempt;
+///   the poisoned mutex doesn't permanently disable the summariser.
+///   `INIT_RESULT` still discriminates: if the panicking thread set
+///   it before panicking, the cached failure wins; otherwise the new
+///   caller gets a fresh attempt.
 ///
 /// Note: this whole module sits on the sync side of
 /// `tests/sync_boundary.rs`. The MCP server (async) reaches the
@@ -168,11 +197,21 @@ pub fn backend() -> Result<&'static LlamaBackend, TomeError> {
 
     // Slow path: take the init lock so concurrent first-callers
     // serialise on a single `LlamaBackend::init()` attempt.
-    let _guard = INIT_LOCK.lock().map_err(|e| TomeError::SummariserFailure {
-        kind: SummariserFailureKind::BackendInitFailed {
-            source: format!("backend init lock poisoned: {e}"),
-        },
-    })?;
+    //
+    // US4.d-1 (R-M7): on poisoning, recover via `into_inner()` instead
+    // of bubbling. The init lock guards only the brief
+    // `LlamaBackend::init()` call below; any panic inside that scope
+    // is already a hard failure for the calling thread. The next
+    // caller doesn't need to be poisoned by association — they get
+    // their own attempt at init, and the cached `INIT_RESULT`
+    // (populated after init returns) discriminates between "first
+    // attempt failed cleanly" (cached error) and "first attempt
+    // panicked" (no cache; this caller tries again). The lock
+    // poisoning is purely about cross-thread panic propagation; the
+    // backend state itself is owned by `OnceLock`s and is unaffected.
+    let _guard = INIT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // Re-check after acquiring the lock — another thread may have
     // raced through init while we were blocked.

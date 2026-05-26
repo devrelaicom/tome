@@ -283,9 +283,10 @@ impl Summariser for OversizeSummariser {
 #[test]
 fn regen_summary_long_window_oversize_is_still_cached() {
     // FR-425: too-long output emits a tracing::warn but the value is
-    // still written. We don't try to capture the warn here — the
-    // forward-progress assertion (value cached) is the user-facing
-    // contract. The tracing layer's behaviour is library-internal.
+    // still written. The forward-progress assertion (value cached) is
+    // the user-facing contract. The
+    // `regen_summary_long_window_emits_warn_via_layer` companion test
+    // below captures the warn via a custom `tracing-subscriber` layer.
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
     std::fs::create_dir_all(&paths.root).unwrap();
@@ -299,6 +300,134 @@ fn regen_summary_long_window_oversize_is_still_cached() {
 
     let rules_body = std::fs::read_to_string(paths.workspace_rules_file(&parse("mine"))).unwrap();
     assert_eq!(rules_body.len(), 3000);
+}
+
+/// T-M5 (US4.d-1): the length-window warn IS emitted. Verifies via a
+/// `tracing-subscriber::Layer` installed GLOBALLY (via `OnceLock`) that
+/// routes captured events into a per-thread buffer. The disposition
+/// selected this in-line adapter over taking a `tracing_test` dep.
+///
+/// ## Why global-subscriber-with-thread-local-routing
+///
+/// `tracing::subscriber::with_default` is per-thread, BUT
+/// `tracing::callsite` interest is cached per-callsite at first dispatch.
+/// In a parallel-test binary, the first thread to hit a `warn!` line
+/// caches "Interest::never()" against the default `NoSubscriber`; later
+/// threads using `with_default` see the cached miss. The work-around is
+/// to install a subscriber GLOBALLY (which makes every callsite return
+/// `Interest::sometimes()` or `Interest::always()`), then route events
+/// per-thread via thread-local storage. This is the pattern
+/// `tracing-test` itself uses internally; we hand-roll it to avoid the
+/// new dep.
+#[test]
+fn regen_summary_long_window_emits_warn_via_layer() {
+    use std::cell::RefCell;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::field::Visit;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::{Layer, Registry};
+
+    type Buf = Arc<Mutex<Vec<String>>>;
+
+    thread_local! {
+        static THREAD_BUF: RefCell<Option<Buf>> = const { RefCell::new(None) };
+    }
+
+    /// Visitor that flattens fields into a single readable string.
+    #[derive(Default)]
+    struct StringVisitor {
+        buf: String,
+    }
+    impl Visit for StringVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write;
+            let _ = write!(self.buf, " {}={:?}", field.name(), value);
+        }
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            use std::fmt::Write;
+            let _ = write!(self.buf, " {}={}", field.name(), value);
+        }
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            use std::fmt::Write;
+            let _ = write!(self.buf, " {}={}", field.name(), value);
+        }
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            use std::fmt::Write;
+            let _ = write!(self.buf, " {}={}", field.name(), value);
+        }
+    }
+
+    /// Layer that routes WARN events into the calling thread's
+    /// installed `THREAD_BUF`. If no buffer is installed for this
+    /// thread, the event is dropped silently — other tests running in
+    /// parallel don't see it.
+    struct RoutingLayer;
+    impl<S: Subscriber> Layer<S> for RoutingLayer {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            THREAD_BUF.with(|slot| {
+                if let Some(buf) = slot.borrow().as_ref() {
+                    let mut visitor = StringVisitor::default();
+                    event.record(&mut visitor);
+                    buf.lock().unwrap().push(visitor.buf);
+                }
+            });
+        }
+    }
+
+    /// Install the global subscriber exactly once across all tests in
+    /// the binary. Subsequent calls are no-ops (set_global_default
+    /// errors after first call; we ignore the result).
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        let subscriber = Registry::default().with(RoutingLayer);
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
+
+    let warns: Buf = Arc::new(Mutex::new(Vec::<String>::new()));
+    THREAD_BUF.with(|slot| {
+        *slot.borrow_mut() = Some(warns.clone());
+    });
+
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    workspace::init::init(parse("warns"), false, &paths).expect("init");
+    seed_enabled_skill(&paths, "warns", "c", "p", "s", "");
+
+    let s = OversizeSummariser;
+    let _ = workspace::regen_summary::regen(&parse("warns"), &s, &paths).expect("regen");
+
+    // Detach the buffer before asserting so any subsequent warns on
+    // this thread don't accumulate into our assertion target.
+    THREAD_BUF.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+
+    let captured = warns.lock().unwrap();
+    // The regen path emits warns for short > SHORT_MAX_CHARS (800) and
+    // long > LONG_MAX_CHARS (2500). Oversize stub returns 900 and 3000
+    // respectively, so we expect TWO warns from this run.
+    let oversize_warns: Vec<&String> = captured
+        .iter()
+        .filter(|s| s.contains("exceeds recommended length window"))
+        .collect();
+    assert_eq!(
+        oversize_warns.len(),
+        2,
+        "expected exactly 2 length-window warns (short + long), got {oversize_warns:?}",
+    );
+    assert!(
+        oversize_warns.iter().any(|s| s.contains("(short)")),
+        "missing short-summary warn in {oversize_warns:?}",
+    );
+    assert!(
+        oversize_warns.iter().any(|s| s.contains("(long)")),
+        "missing long-summary warn in {oversize_warns:?}",
+    );
 }
 
 /// T-M5: a settings.toml that already carries `[[catalogs]]` arrays

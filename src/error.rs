@@ -498,9 +498,11 @@ impl From<CompositionErrorKind> for TomeError {
     }
 }
 
-/// Sub-classification for `TomeError::SummariserFailure` (exit 20 per the
-/// contract; placed at exit 24 in implementation to avoid colliding with
-/// Phase 2's `PluginNotFound`). Pre-allocated by F3; consumers wire it in
+/// Sub-classification for `TomeError::SummariserFailure` (exit 24). The
+/// Phase 4 design contracts originally proposed exit 20 but exit 20 is
+/// already taken by Phase 2's `PluginNotFound`; the closed-set
+/// implementation routes summariser failures to exit 24. Contract docs
+/// were corrected in US4.d-1 (PR #74). Pre-allocated by F3; consumers wire it in
 /// F6 (summariser skeleton + `StubSummariser`) and US4 (RULES.md
 /// regeneration). `ShortOrLong` disambiguates which of the two prompt-driven
 /// outputs failed for `OutputUnparsable` and `OutputEmpty`.

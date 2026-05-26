@@ -14,13 +14,18 @@
 //! - The `LlamaBackend` is a process-wide singleton owned by
 //!   [`super::backend()`]. A single `LlamaBackend` lives for the whole
 //!   process lifetime; once initialised it is never re-created.
-//! - The `LlamaModel` + `LlamaContext` are constructed inside
-//!   [`summarise`] and dropped at the end of the call. Holding them in
-//!   the struct would either pin a lifetime to the `'static` backend
-//!   (awkward to thread through `Arc<dyn Summariser>`) or duplicate the
-//!   GGUF weights across summarisers — neither pays for itself given the
-//!   summariser is invoked at most a handful of times per workspace
-//!   trigger.
+//! - The `LlamaModel` is **cached** on the [`LlamaSummariser`] (US4.d-1,
+//!   S-M4): SHA-256 verification + `LlamaModel::load_from_file` runs
+//!   once in [`Self::new`]; per-`summarise` calls re-use the cached
+//!   model. Before US4.d-1 each summarise re-hashed the ~400 MB GGUF
+//!   and re-loaded the model — substantially slower for batched
+//!   triggers (catalog update sweeping N workspaces).
+//! - The `LlamaContext` is still constructed per-prompt inside
+//!   [`summarise`] and dropped at the end of the call; the KV cache
+//!   shape is per-pass, so reuse would conflate short / long histories.
+//! - `LlamaModel` is `Send + Sync` (the upstream `unsafe impl` is in
+//!   `llama-cpp-2/src/model.rs`); no `Mutex` wrapper is needed for the
+//!   `Summariser: Send + Sync` bound to hold.
 //!
 //! ## llama-cpp-2 API notes (v0.1.146)
 //!
@@ -41,7 +46,6 @@
 //!   summary while staying cheap on memory.
 
 use std::num::NonZeroU32;
-use std::path::PathBuf;
 
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_batch::LlamaBatch;
@@ -51,11 +55,12 @@ use llama_cpp_2::sampling::LlamaSampler;
 use tracing::warn;
 
 use crate::embedding::download::sha256_file;
-use crate::embedding::registry::{MODEL_REGISTRY, ModelKind};
 use crate::error::{ShortOrLong, SummariserFailureKind, TomeError};
 use crate::paths::Paths;
 
-use super::prompts::{LONG_MAX_CHARS, LONG_PROMPT, SHORT_MAX_CHARS, SHORT_PROMPT};
+use super::prompts::{LONG_PROMPT, SHORT_PROMPT};
+use super::registry::summariser_entry;
+use super::{LONG_MAX_CHARS, SHORT_MAX_CHARS};
 use super::{PluginSummariesInput, Summariser, SummariserOutput};
 
 /// Filename inside `<models_dir>/qwen2.5-0.5b-instruct/` that holds the
@@ -95,36 +100,58 @@ const SAMPLING_PENALTY_LAST_N: i32 = -1;
 const MAX_SHORT_TOKENS: i32 = 384;
 
 /// Hard cap on tokens generated for the LONG pass. ~3x the character
-/// maximum (`LONG_MAX_CHARS = 2400`); also broken out on EOG.
+/// maximum (`LONG_MAX_CHARS = 2500`); also broken out on EOG.
 const MAX_LONG_TOKENS: i32 = 1024;
 
-/// Production summariser. Carries only the verified model path; the
-/// heavy `LlamaModel` + `LlamaContext` are constructed inside
+/// Production summariser. Holds the cached `LlamaModel` after a
+/// successful [`Self::new`] verifies the on-disk SHA-256 and loads the
+/// model. Per-prompt `LlamaContext` instances are constructed inside
 /// [`Self::summarise`] and dropped before it returns. The process-wide
 /// `LlamaBackend` is borrowed through [`super::backend()`] each call.
-#[derive(Debug)]
 pub struct LlamaSummariser {
-    model_path: PathBuf,
+    model: LlamaModel,
+}
+
+impl std::fmt::Debug for LlamaSummariser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `LlamaModel` doesn't implement `Debug`. Render an opaque tag so
+        // `LifecycleDeps`-style structs that derive `Debug` still work.
+        f.debug_struct("LlamaSummariser")
+            .field("model", &"<LlamaModel>")
+            .finish()
+    }
 }
 
 impl LlamaSummariser {
     /// Construct a `LlamaSummariser` bound to the registry's summariser
     /// entry under `paths.models_dir`. Verifies the on-disk SHA-256
-    /// against the registry pin so a downstream `summarise` call never
-    /// quietly loads tampered weights — same posture as the embedder /
-    /// reranker `--verify` paths.
+    /// against the registry pin AND eagerly loads the `LlamaModel`
+    /// (cached on `self`, reused across `summarise` calls — US4.d-1
+    /// S-M4). Same posture as the embedder / reranker `--verify` paths,
+    /// extended with the model-load step.
     ///
     /// Returns `SummariserFailure { kind: ModelMissing }` if the GGUF
-    /// file is absent, `ModelChecksumMismatch` if the SHA-256 differs
-    /// from the registry pin, and `Io` for any other filesystem error.
-    /// `BackendInitFailed` is *not* raised here — the backend is loaded
-    /// lazily inside `summarise`, and a backend init failure surfaces
-    /// only at the first summarise call.
+    /// file is absent OR the registry pin is still the all-zero
+    /// placeholder (S-M3 belt-and-braces — see C-B1); `ModelChecksumMismatch`
+    /// if the SHA-256 differs from the registry pin; `BackendInitFailed`
+    /// if either `LlamaBackend::init` (lazy) or
+    /// `LlamaModel::load_from_file` fails; and `Io` for any other
+    /// filesystem error.
     pub fn new(paths: &Paths) -> Result<Self, TomeError> {
-        let entry = MODEL_REGISTRY
-            .iter()
-            .find(|e| e.kind == ModelKind::Summariser)
-            .expect("summariser entry is registered in MODEL_REGISTRY");
+        let entry = summariser_entry();
+
+        // S-M3: refuse to construct if the registry still carries the
+        // all-zero placeholder. C-B1 flipped this to the real hash in
+        // US4.d-1; this guard catches a regression that re-introduces
+        // a placeholder and surfaces it as `ModelMissing` (silent
+        // no-op via the trigger callers) rather than letting the
+        // checksum-mismatch path run a full SHA-256 over ~400 MB of
+        // legitimately downloaded bytes only to fail at the end.
+        if entry.has_placeholder_checksum() {
+            return Err(TomeError::SummariserFailure {
+                kind: SummariserFailureKind::ModelMissing,
+            });
+        }
 
         let model_path = paths.model_path(entry.name)?.join(PRIMARY_FILE);
         if !model_path.exists() {
@@ -143,17 +170,15 @@ impl LlamaSummariser {
             });
         }
 
-        Ok(Self { model_path })
-    }
-}
-
-impl Summariser for LlamaSummariser {
-    fn summarise(&self, input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+        // Eagerly load the model so the SHA verification + load happen
+        // exactly once per `LlamaSummariser`. Backend init is still lazy
+        // (borrowed via `super::backend()`); a backend init failure
+        // surfaces here for the first time if the caller wasn't using
+        // the summariser earlier.
         let backend = super::backend()?;
-
         let model_params = LlamaModelParams::default();
         let model =
-            LlamaModel::load_from_file(backend, &self.model_path, &model_params).map_err(|e| {
+            LlamaModel::load_from_file(backend, &model_path, &model_params).map_err(|e| {
                 TomeError::SummariserFailure {
                     kind: SummariserFailureKind::BackendInitFailed {
                         source: format!("load_from_file: {e}"),
@@ -161,20 +186,27 @@ impl Summariser for LlamaSummariser {
                 }
             })?;
 
+        Ok(Self { model })
+    }
+}
+
+impl Summariser for LlamaSummariser {
+    fn summarise(&self, input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+        let backend = super::backend()?;
+
         // SHORT pass.
         let descriptions = format_input_descriptions(input);
         let short_prompt = SHORT_PROMPT.replace("{descriptions}", &descriptions);
-        let short = run_inference(backend, &model, &short_prompt, MAX_SHORT_TOKENS)?;
+        let short = run_inference(backend, &self.model, &short_prompt, MAX_SHORT_TOKENS)?;
         validate_output(&short, ShortOrLong::Short)?;
         check_length_window(&short, ShortOrLong::Short);
 
         // LONG pass — cascades from the short output.
         let long_prompt = LONG_PROMPT.replace("{topics}", &short);
-        let long = run_inference(backend, &model, &long_prompt, MAX_LONG_TOKENS)?;
+        let long = run_inference(backend, &self.model, &long_prompt, MAX_LONG_TOKENS)?;
         validate_output(&long, ShortOrLong::Long)?;
         check_length_window(&long, ShortOrLong::Long);
 
-        // `model` drops here; backend stays alive.
         Ok(SummariserOutput { short, long })
     }
 }
@@ -183,14 +215,18 @@ impl Summariser for LlamaSummariser {
 /// suitable for substitution into `{descriptions}`. One line per skill,
 /// in the order the input arrives (the caller has already sorted by
 /// `(catalog, plugin, name)`).
+///
+/// US4.d-1 (C-M1): no `"- "` bullet prefix. The SHORT prompt explicitly
+/// tells the model "no bullet points"; rendering input lines AS bullets
+/// gave the model a contradictory example. Lines now go in as plain
+/// `"<plugin>: <skill-name> — <skill-description>"` records.
 fn format_input_descriptions(input: &PluginSummariesInput) -> String {
     let mut out = String::new();
     for plugin in &input.plugins {
         for skill in &plugin.skills {
             // Format: "<plugin>: <skill-name> — <skill-description>"
-            // Matches the contract's `format_input_descriptions` example
-            // and the prompt-level instruction text.
-            out.push_str("- ");
+            // (no leading `"- "`) — see C-M1 in
+            // `specs/004-phase-4-refactor-harnesses/review/us4-findings.md`.
             out.push_str(&plugin.plugin);
             out.push_str(": ");
             out.push_str(&skill.name);
@@ -468,11 +504,12 @@ mod tests {
             ],
         };
         let rendered = format_input_descriptions(&input);
+        // US4.d-1 (C-M1): no `"- "` bullet prefix.
         assert_eq!(
             rendered,
-            "- alpha: skill-one — describes skill one\n\
-             - alpha: skill-two\n\
-             - beta: skill-three — for beta\n"
+            "alpha: skill-one — describes skill one\n\
+             alpha: skill-two\n\
+             beta: skill-three — for beta\n"
         );
     }
 
