@@ -1,8 +1,8 @@
 # Architecture
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
-> **Generated**: 2026-05-25
-> **Last Updated**: 2026-05-25
+> **Generated**: 2026-05-26
+> **Last Updated**: 2026-05-26
 
 ## Architecture Overview
 
@@ -14,16 +14,16 @@ The architecture is **monolithic with layered structure** split across two execu
 
 The central nervous system is a **single SQLite database** (`<home>/.tome/index.db`) that centralizes all state: plugin metadata, embeddings, workspace bindings, project bindings, and enabled skills. Per-workspace composition settings and summaries live in separate TOML files (`<root>/workspaces/<name>/settings.toml`) and central RULES.md. Project markers (`<project>/.tome/config.toml`) are thin binding pointers, not databases.
 
-Phase 4 / US1–US2 adds **harness synchronization** and **workspace lifecycle management** — when a project is bound to a workspace, Tome automatically syncs harness configurations (rules files + MCP configs) across the five supported harnesses. US3 completes the harness command surface and wires the composition resolver into production sync paths.
+Phase 4 / US1–US3 completes **harness synchronization, workspace lifecycle, and composition management**. Phase 4 / US4 adds **workspace summarisation** — when plugins are enabled/disabled/reindexed, Tome automatically regenerates cached workspace summaries via Qwen2.5-0.5B-Instruct (llama-cpp-2) inference. The MCP server reads the cached short summary at startup to dynamically compose the `search_skills` tool description (FR-425).
 
 ## Architecture Pattern
 
 | Pattern | Description |
 |---------|-------------|
-| Layered (capability-based) | Commands → Business Logic (Lifecycle, Embedding, Workspace, Harness) → Data Access (Index, Catalog, Config) → Persistence (SQLite, Filesystem, Git) |
+| Layered (capability-based) | Commands → Business Logic (Lifecycle, Embedding, Workspace, Harness, Summarise) → Data Access (Index, Catalog, Config) → Persistence (SQLite, Filesystem, Git) |
 | Hexagonal (ports & adapters) | Trait boundaries for `Embedder`/`Reranker`/`Summariser`/`HarnessModule`/`ScopeProvider` allow swappable implementations (production vs stub for tests) |
 | Trait-driven | Core abstractions decouple policy from mechanism; composition via struct fields rather than factory functions |
-| Phase 4 — Harness abstraction + workspace binding + full lifecycle | Five `HarnessModule` impls + composition resolver + sync orchestrator + comprehensive workspace + harness surfaces enable multi-workspace projects with atomic per-harness configuration |
+| Phase 4 / US4 — Summariser integration | `Summariser` trait + `LlamaSummariser` (production) + `StubSummariser` (test), with process-wide singleton model caching, triggered regeneration after state mutations, MCP tool description composition from cached summaries |
 
 ## Core Components
 
@@ -106,11 +106,11 @@ Phase 4 / US1–US2 adds **harness synchronization** and **workspace lifecycle m
     3. Single DB transaction: delete `workspace_skills`, `workspace_catalogs`, `workspace_projects`, `workspaces` rows
     4. Delete central `<root>/workspaces/<name>/` directory
     5. Refcount cleanup: for each catalog URL once-referenced only by removed workspace, `remove_dir_all` cache clone
-- **`regen(workspace_name, paths)`**:
-  - Call summariser to generate short + long summaries from enabled plugins (Phase 4 skeleton invokes StubSummariser)
-  - Write to workspace settings `[summaries]` section
+- **`regen(workspace_name, paths)`** (Phase 4 / US4.b):
+  - Call summariser to generate short + long summaries from enabled plugins
+  - Write to workspace settings `[summaries]` section atomically
   - Rewrite central `<root>/workspaces/<name>/RULES.md`
-  - Per-project marker copy (RULES.md only; not atomically because RULES.md is read-only to projects)
+  - Per-project marker RULES.md copy (idempotent, skip if bytes match)
 - **`sync_one(workspace_name, paths)` + `list_workspace_names(paths)`**:
   - `sync_one`: Copy central RULES.md to every bound project's marker copy (idempotent, skip if already match)
   - `list_workspace_names`: Enumerate `<root>/workspaces/` and return Vec<WorkspaceName>
@@ -174,16 +174,43 @@ Phase 4 / US1–US2 adds **harness synchronization** and **workspace lifecycle m
   - Used by `harness use_ / remove` commands to append/delete harness entries
 - **All types**: `#[serde(deny_unknown_fields)]` — Tome-owned inputs are strict per FR-013a boundary
 
+### Summariser (`src/summarise/`)
+
+- **Purpose**: Phase 4 / US4 — Generate short/long workspace summaries from enabled plugins via Qwen2.5-0.5B-Instruct GGUF
+- **Location**: `src/summarise/{mod,llama,stub,trigger,registry,download,prompts}.rs`
+- **Architecture**:
+  - `Summariser` trait — `summarise(PluginSummariesInput) -> Result<SummariserOutput, TomeError>` (identity + trait boundary)
+  - **Production**: `LlamaSummariser` via `llama-cpp-2` + process-wide `LlamaBackend` singleton (OnceLock + mutex)
+  - **Test**: `StubSummariser` — deterministic, no model load
+- **Model caching** (US4.d-1, S-M4):
+  - SHA-256 verification + `LlamaModel::load_from_file` runs once in `LlamaSummariser::new`
+  - Per-`summarise()` calls reuse the cached model
+  - Per-prompt `LlamaContext` instances constructed fresh inside `summarise` and dropped before return
+  - `LlamaModel` is `Send + Sync`; no `Mutex` wrapper needed
+- **Singleton pattern**: First `backend()` call initializes via mutex-gated OnceLock; subsequent calls hit lock-free path
+- **Triggered regeneration** (US4.b, FR-380/381/382/365/385):
+  - `regenerate_for_trigger(workspace, paths)` invoked AFTER enable/disable/reindex/catalog-update commits their `workspace_skills` mutation
+  - `SUMMARISER_OVERRIDE` thread_local (test injection via `SummariserOverrideGuard` RAII) bypasses production `LlamaSummariser` construct
+  - Forward-progress invariant (FR-385): skill-state mutation commits BEFORE summariser invoked; on summariser failure (exit 24), skill state retained and cached summary not overwritten
+  - `ModelMissing` is silent no-op in trigger callers (FR-423, documented in `contracts/summariser.md`); explicit `tome workspace regen-summary` still hard-fails
+- **MCP integration** (US4.b, FR-425):
+  - `mcp/tool_description.rs::compose(scaffold, cached_short)` reads workspace's `settings.toml` `[summaries].short` at startup
+  - Composed description (scaffold + short summary) is applied to `search_skills` tool via runtime router mutation
+  - `warn_if_too_long(desc)` emits warning if `len > 1500 chars` but applies anyway
+  - No rerunning of summariser on MCP; subsequent CLI regenerations write to the same file, but MCP keeps in-memory description until restart
+- **Model**: Qwen2.5-0.5B-Instruct GGUF (~400 MB, placeholder SHA-256 in F6; real weight lands in US4.a)
+- **Prompts**: Fixed SHORT_PROMPT (~400 tokens, 800 char max) + LONG_PROMPT (~1000 tokens, 2500 char max) (US4.d-1 consolidation)
+
 ### Commands Dispatcher (`src/commands/`)
 
-- **Purpose**: Execute 12 CLI subcommands (catalog, plugin, models, query, reindex, status, workspace, harness, mcp, doctor)
+- **Purpose**: Execute 12+ CLI subcommands (catalog, plugin, models, query, reindex, status, workspace, harness, mcp, doctor)
 - **Location**: `src/commands/{catalog,plugin,models,query,reindex,status,workspace,harness,mcp,doctor}.rs`
 - **Pattern**: Most commands have:
   - `pub fn run(args, scope, mode)` — CLI entry with emit/exit
   - `pub fn pipeline(args, deps)` or `run_with_deps(...)` — silent compute for library reuse by MCP/tests
 - **Phase 4 NEW**: `commands/harness/` full subcommand surface (US3) dispatches to harness sync orchestrator + composition resolver
 - **Phase 4 NEW**: `commands/workspace/` expands from 2 to 8 subcommands: `info/init/list/use_/rename/remove/regen_summary/sync`
-- **Key invariant**: Lazy model loading (embedder/reranker not loaded on status/doctor/workspace unless needed)
+- **Key invariant**: Lazy model loading (embedder/reranker/summariser not loaded on status/doctor/workspace unless needed)
 
 ### Harness Command Suite (`src/commands/harness/`)
 
@@ -248,10 +275,13 @@ Phase 4 / US1–US2 adds **harness synchronization** and **workspace lifecycle m
   - Refuses when projects bound unless `--force` (exit 16)
   - Per-project teardown, per-project marker cleanup, DB cascade, dir removal, refcount cleanup
   - Phase 4 NEW
-- **`regen_summary`** — `tome workspace regen-summary <name>` — force regeneration of workspace summaries
-  - Invokes summariser (StubSummariser in Phase 4 foundational)
-  - Writes to workspace settings + central RULES.md
-  - Copies RULES.md to every bound project marker
+- **`regen_summary`** — `tome workspace regen-summary <name>` (Phase 4 / US4):
+  - Explicit regeneration command (distinct from triggered regeneration)
+  - Loads enabled plugins for workspace, constructs PluginSummariesInput, invokes summariser
+  - On SummariserFailure, bubbles (exit 24); prior cached summary left in place
+  - Emits warn if outputs exceed length windows (FR-425)
+  - Updates workspace `settings.toml` `[summaries]` atomically, rewrites central RULES.md
+  - Syncs new RULES.md to every bound project marker
   - Phase 4 NEW
 - **`sync`** — `tome workspace sync [<name>]` — copy central RULES.md to every bound project
   - Omit `<name>` to sync every workspace (idempotent, skip if bytes match)
@@ -301,19 +331,7 @@ Phase 4 / US1–US2 adds **harness synchronization** and **workspace lifecycle m
   - Cheap re-enable: if `content_hash` matches, embedder not invoked; row updated with `UPDATE ... SET enabled = 1`
   - Per-plugin atomicity: each `enable_plugin_atomic` acquires its own advisory lock
   - Auto-disable on manifest-missing or plugin-not-found (reuses `CatalogNotFound` error per FR-602)
-
-### Summariser (`src/summarise/`)
-
-- **Purpose**: Generate short/long workspace summaries from enabled plugins via Qwen2.5-0.5B-Instruct GGUF
-- **Location**: `src/summarise/{mod,llama,stub,registry,download,prompts}.rs`
-- **Phase 4 NEW**: Skeleton shipped with placeholder registry entry
-- **Architecture**:
-  - `Summariser` trait — `summarise(PluginSummariesInput) -> Result<SummariserOutput, TomeError>`
-  - **Production**: `LlamaSummariser` via `llama-cpp-2` + process-wide `LlamaBackend` singleton (OnceLock + mutex)
-  - **Test**: `StubSummariser` — deterministic, no model load
-- **Model**: Qwen2.5-0.5B-Instruct GGUF (placeholder SHA-256 in F6; real weight lands in US4.a)
-- **Singleton pattern**: First `backend()` call initializes via mutex-gated OnceLock; subsequent calls hit lock-free path
-- **Invocation**: Per-workspace, triggered by enable/disable/reindex/catalog-update; output cached in workspace settings
+  - After enable/disable commits workspace_skills mutation, `regenerate_for_trigger` is invoked (US4.b)
 
 ### Doctor Diagnostics (`src/doctor/`)
 
@@ -345,6 +363,7 @@ Phase 4 / US1–US2 adds **harness synchronization** and **workspace lifecycle m
   - `log.rs` — 10 MiB atomic-rotate file log (JSON lines); stderr reserved for fatal startup errors only (FR-222)
   - `state.rs` — `McpState { embedder, reranker (OnceLock), scope, paths, ... }`
   - `tools/search_skills.rs`, `tools/get_skill.rs` — handlers with spawn_blocking for sync work
+  - `tool_description.rs` (US4.b) — Compose runtime tool description from scaffold + cached workspace short summary
 - **Tool handlers**: Validate input, lazy-load reranker via `OnceLock::get_or_try_init`, dispatch work inside `spawn_blocking`
 - **Signal handling**: `tokio::signal::ctrl_c()` triggers graceful shutdown; 5 s timeout before hard shutdown
 
@@ -441,6 +460,66 @@ PHASE B (unlocked):
 Release lock; emit outcome (counts, project paths, summary cache state)
 ```
 
+### Summarisation Flow (Phase 4 / US4.b — Triggered Regeneration)
+
+```
+CLI: tome plugin enable <catalog>/<plugin> (or disable/reindex/catalog update)
+     ↓
+Load workspace scope + central index
+     ↓
+Execute plugin enable/disable/reindex
+     ↓
+Commit workspace_skills mutation (INSERT/DELETE/UPDATE rows) in own transaction
+     ↓
+Release advisory lock
+     ↓
+regenerate_for_trigger(workspace_name, paths)
+  ↓
+Consult SUMMARISER_OVERRIDE thread_local (test injection point)
+  ↓
+If absent (production path):
+  - Load LlamaSummariser::new(paths) — SHA-256 verify + LlamaModel::load_from_file (cached on self)
+  - Return SummariserFailure::ModelMissing if GGUF absent (silent no-op per FR-423)
+  ↓
+Load enabled plugins for workspace (workspace_skills × skills join)
+  ↓
+Construct PluginSummariesInput with enabled plugin summaries
+  ↓
+Invoke summariser::summarise(input) → SummariserOutput { short, long }
+  ↓
+If SummariserFailure (other than ModelMissing): bubble to main, exit 24 (skill state retained, cache not overwritten)
+  ↓
+Warn if short_chars > 800 or long_chars > 2500 (FR-425)
+  ↓
+Update workspace settings.toml [summaries] section atomically (via toml_edit)
+  ↓
+Rewrite <root>/workspaces/<name>/RULES.md from long summary
+  ↓
+Sync new RULES.md to every bound project's marker copy (idempotent)
+  ↓
+CLI: return success (embedded in enable/disable/reindex outcome)
+```
+
+### MCP Tool Description Composition (Phase 4 / US4.b — Startup)
+
+```
+MCP: tome mcp starts
+     ↓
+Load workspace scope + central index (preflight)
+     ↓
+Read workspace's <root>/workspaces/<name>/settings.toml
+  ↓
+Extract [summaries].short field (if present and non-empty)
+  ↓
+Compose description = SCAFFOLD + "\n\n" + cached_short
+  ↓
+Warn if len > 1500 chars (FR-425)
+  ↓
+Apply composed description to search_skills tool via runtime router mutation
+  ↓
+MCP server advertises "search_skills: {description: '...scaffold...short summary...'}"
+```
+
 ### Primary User Flow: Enable a Skill
 
 ```
@@ -457,6 +536,8 @@ plugin::lifecycle::enable() — read plugin.json + SKILL.md frontmatter, compute
 index::skills::enable_plugin_atomic() — INSERT/UPDATE skills, skill_embeddings, workspace_skills junction rows
      ↓
 Release advisory lock
+     ↓
+summarise::regenerate_for_trigger(workspace_name, paths) — (US4.b)
      ↓
 CLI: print summary (added/modified/unchanged skill counts)
 ```
@@ -484,8 +565,8 @@ CLI: print results (name, skill path, score)
 | Layer | Responsibility | Can Access | Cannot Access |
 |-------|----------------|------------|---------------|
 | CLI | Argument parsing, mode dispatch, error formatting | Commands | Database, embedder directly |
-| Commands | Command logic, outcome assembly, emit wrappers | Business logic (workspace, plugin, harness, settings) | Database directly (via deps) |
-| Business logic | Policy (binding, lifecycle, sync) | Index, catalog, plugin, settings, embedding | CLI, presentation |
+| Commands | Command logic, outcome assembly, emit wrappers | Business logic (workspace, plugin, harness, settings, summarise) | Database directly (via deps) |
+| Business logic | Policy (binding, lifecycle, sync, summarisation) | Index, catalog, plugin, settings, embedding, summarise | CLI, presentation |
 | Data access | Queries, writes, transactions | Index, config, catalog on-disk | Commands, business logic |
 | Persistence | SQLite, filesystem, git | Raw operations | Higher layers |
 
@@ -495,6 +576,7 @@ CLI: print results (name, skill path, score)
 - Trait boundaries (`Embedder`, `Reranker`, `Summariser`, `HarnessModule`, `ScopeProvider`) decouple policy from mechanism
 - `src/mcp/` is the only module allowed async (`tokio`); enforced by `tests/sync_boundary.rs`
 - Workspace-specific code never reads/writes global index directly; uses scope-parameterized helpers
+- Summariser trait allows test injection via `SUMMARISER_OVERRIDE` thread_local (mirrors `MIGRATIONS_OVERRIDE` pattern)
 
 ---
 

@@ -1,8 +1,8 @@
 # Project Structure
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
-> **Generated**: 2026-05-25
-> **Last Updated**: 2026-05-25
+> **Generated**: 2026-05-26
+> **Last Updated**: 2026-05-26
 
 ## Directory Layout
 
@@ -30,7 +30,7 @@ tome/
 │   │   ├── frontmatter.rs              # SKILL.md YAML frontmatter parser
 │   │   ├── identity.rs                 # PluginId: <catalog>/<plugin> parsing
 │   │   ├── components.rs               # Walk skill/agent/command/hook dirs
-│   │   └── lifecycle.rs                # enable/disable/reindex orchestration (per-scope)
+│   │   └── lifecycle.rs                # enable/disable/reindex orchestration (per-scope) + trigger regenerate
 │   │
 │   ├── index/                          # Vector search index (SQLite + sqlite-vec)
 │   │   ├── mod.rs                      # Public API exports
@@ -61,7 +61,7 @@ tome/
 │   │   ├── binding.rs                  # Phase 4: Project binding + marker landing (US1.a)
 │   │   ├── info.rs                     # WorkspaceInfo report assembly
 │   │   ├── init.rs                     # Atomic workspace creation via tempfile
-│   │   ├── regen_summary.rs            # Phase 4 NEW: Summariser invocation (US2)
+│   │   ├── regen_summary.rs            # Phase 4 NEW: Summariser invocation (US2/US4.b)
 │   │   ├── rename.rs                   # Phase 4 NEW: Workspace rename with project updates (US2)
 │   │   ├── remove.rs                   # Phase 4 NEW: Workspace removal with 5-step cascade (US2)
 │   │   └── sync.rs                     # Phase 4 NEW: Central RULES.md sync to projects (US2)
@@ -70,6 +70,7 @@ tome/
 │   │   ├── mod.rs                      # assemble_report + re_assemble entry
 │   │   ├── checks.rs                   # check_catalogs, check_index, check_drift
 │   │   ├── harness_detect.rs           # Probe ~/.claude/, ~/.codex/, ~/.cursor/, etc.
+│   │   ├── report.rs                   # DoctorReport type definition
 │   │   └── fixes.rs                    # apply + auto-fix dispatch (subsystem routing)
 │   │
 │   ├── harness/                        # Phase 4: Per-harness trait + sync orchestrator + composition
@@ -91,21 +92,22 @@ tome/
 │   │   ├── resolver.rs                 # Resolve effective harness list (priority walk + composition refs + ScopeProvider trait)
 │   │   └── edit.rs                     # Phase 4 US3: Surgical TOML edits for harness use/remove
 │   │
-│   ├── summarise/                      # Phase 4: Workspace summariser (skeleton)
+│   ├── summarise/                      # Phase 4: Workspace summariser (US4)
 │   │   ├── mod.rs                      # Summariser trait + input/output types
-│   │   ├── llama.rs                    # LlamaSummariser (production, llama-cpp-2)
+│   │   ├── llama.rs                    # LlamaSummariser (production, llama-cpp-2, model cached on self)
 │   │   ├── stub.rs                     # StubSummariser (deterministic test impl)
-│   │   ├── registry.rs                 # Pinned summariser model (Qwen2.5-0.5B)
-│   │   ├── prompts.rs                  # Prompt templates + length constraints
-│   │   └── download.rs                 # Model fetch (stub-only in F6)
+│   │   ├── trigger.rs                  # Phase 4 US4.b: regenerate_for_trigger + SummariserOverrideGuard
+│   │   ├── registry.rs                 # Pinned summariser model (Qwen2.5-0.5B-Instruct)
+│   │   ├── prompts.rs                  # Prompt templates (SHORT_PROMPT, LONG_PROMPT) + length constraints
+│   │   └── download.rs                 # Model fetch
 │   │
 │   ├── commands/                       # CLI command entry points
 │   │   ├── mod.rs                      # Public API exports
 │   │   ├── catalog.rs                  # `tome catalog {add,remove,list,update,show}`
 │   │   ├── plugin/                     # `tome plugin` subcommands
 │   │   │   ├── mod.rs                  # Dispatcher + shared helpers
-│   │   │   ├── enable.rs               # `tome plugin enable <id>`
-│   │   │   ├── disable.rs              # `tome plugin disable <id> [--force]`
+│   │   │   ├── enable.rs               # `tome plugin enable <id>` + trigger regenerate
+│   │   │   ├── disable.rs              # `tome plugin disable <id> [--force]` + trigger regenerate
 │   │   │   ├── list.rs                 # `tome plugin list`
 │   │   │   ├── show.rs                 # `tome plugin show <id>`
 │   │   │   └── interactive.rs          # Bare `tome plugin` → three-level TUI
@@ -115,9 +117,9 @@ tome/
 │   │   │   ├── list.rs                 # `tome models list [--verify]`
 │   │   │   └── remove.rs               # `tome models remove <name> [--force]`
 │   │   ├── query.rs                    # `tome query [<text>]` + --catalog, --strict, --plain
-│   │   ├── reindex.rs                  # `tome reindex [<scope>] [--force]`
+│   │   ├── reindex.rs                  # `tome reindex [<scope>] [--force]` + trigger regenerate
 │   │   ├── status.rs                   # `tome status [--verify]` + --version hook
-│   │   ├── workspace/                  # `tome workspace` subcommands (Phase 4 US2)
+│   │   ├── workspace/                  # `tome workspace` subcommands (Phase 4 US2/US4)
 │   │   │   ├── mod.rs                  # Dispatcher (8 subcommands)
 │   │   │   ├── info.rs                 # `tome workspace info [<name>]` — read-only report
 │   │   │   ├── init.rs                 # `tome workspace init <name> [--inherit-global] [--force]`
@@ -125,14 +127,14 @@ tome/
 │   │   │   ├── use_.rs                 # `tome workspace use <name> [--force]` (bind + sync)
 │   │   │   ├── rename.rs               # `tome workspace rename <old> <new>` — rename with project updates
 │   │   │   ├── remove.rs               # `tome workspace remove <name> [--force]` — cascade delete
-│   │   │   ├── regen_summary.rs        # `tome workspace regen-summary <name>` — regenerate summaries
+│   │   │   ├── regen_summary.rs        # `tome workspace regen-summary <name>` — explicit regenerate (US4.c)
 │   │   │   └── sync.rs                 # `tome workspace sync [<name>]` — sync RULES.md to projects
 │   │   ├── harness/                    # Phase 4 US3: Complete harness command surface
 │   │   │   ├── mod.rs                  # Dispatcher (6 subcommands) + CentralDbScopeProvider impl
 │   │   │   ├── bare.rs                 # `tome harness` (no subcommand) — list all supported harnesses
 │   │   │   ├── list.rs                 # `tome harness list [workspace]` — resolve effective harness list
-│   │   │   ├── use_.rs                 # `tome harness use <name> [--scope {project|workspace|global}]`
-│   │   │   ├── remove.rs               # `tome harness remove <name> [--scope]` — delete from settings
+│   │   │   ├── use_.rs                 # `tome harness use <name> [--scope {project|workspace|global}]` + trigger regenerate
+│   │   │   ├── remove.rs               # `tome harness remove <name> [--scope]` — delete from settings + trigger regenerate
 │   │   │   ├── info.rs                 # `tome harness info` — per-harness details + detection
 │   │   │   └── sync.rs                 # `tome harness sync [--force]` — reconcile filesystem
 │   │   ├── doctor.rs                   # `tome doctor [--fix] [--verify]`
@@ -150,13 +152,14 @@ tome/
 │   │   ├── mod.rs                      # Public API exports
 │   │   └── atomic_dir.rs               # Atomic directory landing (tempfile + rename)
 │   │
-│   └── mcp/                            # MCP server (async island, Phase 3)
+│   └── mcp/                            # MCP server (async island, Phase 3+)
 │       ├── mod.rs                      # Sync entry point: run()
 │       ├── runtime.rs                  # Single-threaded tokio builder
 │       ├── log.rs                      # 10 MiB rotate JSON file logger + ContractEventFormat
 │       ├── preflight.rs                # FR-110 startup checks (schema, drift, embedder hash)
 │       ├── server.rs                   # rmcp server loop + graceful shutdown
 │       ├── state.rs                    # McpState definition (embedder, reranker OnceLock)
+│       ├── tool_description.rs         # Phase 4 US4.b: Compose runtime tool description from cached summary
 │       └── tools/                      # MCP tool handlers
 │           ├── mod.rs                  # Tool registration
 │           ├── search_skills.rs        # search_skills tool (KNN+rerank, workspace-filtered)
@@ -171,8 +174,9 @@ tome/
 │   ├── status.rs                       # Status command + health checks
 │   ├── workspace_*.rs                  # Workspace info/init/binding/sync/list/rename/remove tests (US1–US2)
 │   ├── harness_*.rs                    # Phase 4 US3: Harness list/use/remove/info/sync/composition tests
-│   ├── doctor.rs                       # Doctor assembly + fixes + harness detect
-│   ├── mcp_*.rs                        # MCP server lifecycle + tools
+│   ├── summariser_*.rs                 # Phase 4 US4: Summariser triggers, forward progress, cache, registry tests
+│   ├── mcp_*.rs                        # MCP server lifecycle + tools + log rotation + tool description (US4.b)
+│   ├── doctor.rs                       # Doctor assembly + fixes + harness detect + binding subsystem
 │   ├── exit_codes.rs                   # Exit code matrix validation
 │   ├── manifest_strictness.rs          # Strict/lenient parsing guards
 │   ├── atomicity.rs                    # Interrupt-injection tests (SIGINT mid-op)
@@ -220,13 +224,13 @@ tome/
 │   │   ├── data-model.md
 │   │   ├── contracts/
 │   │   └── quickstart.md
-│   └── 004-phase-4-refactor-harnesses/       # Phase 4 (F1–F11 shipped; US1–US3 shipped)
+│   └── 004-phase-4-refactor-harnesses/       # Phase 4 (F1–F11 shipped; US1–US4 shipped)
 │       ├── spec.md
 │       ├── plan.md
 │       ├── research.md (19 R-decisions)
-│       ├── data-model.md (schema v2, Scope reshape, HarnessModule, settings layers)
-│       ├── contracts/ (13 contracts: paths-and-layout, harness-modules, settings-composition, sync-algorithm, workspace-commands, etc.)
-│       ├── retro/ (P2.md: F1–F11; P3.md: US1; P4.md–P5.md: US2–US3)
+│       ├── data-model.md (schema v2, Scope reshape, HarnessModule, Summariser, settings layers)
+│       ├── contracts/ (13 contracts: paths-and-layout, harness-modules, settings-composition, sync-algorithm, workspace-commands, summariser, etc.)
+│       ├── retro/ (P2.md: F1–F11; P3.md: US1; P4.md–P5.md: US2–US3; P6.md–P7.md: US4)
 │       └── quickstart.md
 │
 ├── PRDs/                               # Product requirement documents
@@ -263,15 +267,15 @@ tome/
 | `plugin/` | Plugin metadata, lifecycle | `manifest.rs`, `frontmatter.rs`, `lifecycle.rs` |
 | `index/` | SQLite + sqlite-vec index | `db.rs`, `schema.rs`, `skills.rs`, `query.rs` |
 | `embedding/` | Text embedding + reranking | `fastembed.rs`, `stub.rs`, `download.rs` |
-| `workspace/` | Scope resolution, binding, lifecycle | `scope.rs`, `binding.rs`, `init.rs`, `rename.rs`, `remove.rs` |
+| `workspace/` | Scope resolution, binding, lifecycle | `scope.rs`, `binding.rs`, `init.rs`, `rename.rs`, `remove.rs`, `regen_summary.rs` |
 | `harness/` | Phase 4: Harness abstraction + sync | `mod.rs` (trait), 5 harness impls, `sync.rs`, `rules_file.rs`, `mcp_config.rs` |
 | `settings/` | Phase 4: Layered composition | `parser.rs`, `resolver.rs` (composition engine), `edit.rs` |
-| `summarise/` | Phase 4: Workspace summariser | `llama.rs`, `stub.rs`, `prompts.rs` |
+| `summarise/` | Phase 4 US4: Workspace summariser | `llama.rs`, `stub.rs`, `prompts.rs`, `trigger.rs`, `registry.rs` |
 | `doctor/` | Health check + auto-repair | `checks.rs`, `fixes.rs`, `harness_detect.rs` |
 | `commands/` | CLI subcommand entry points | Per-command modules + dispatchers |
 | `presentation/` | Output formatting + TUI | `tables.rs`, `prompt.rs`, `colour.rs` |
 | `util/` | Shared utilities | `atomic_dir.rs` (tempfile + rename) |
-| `mcp/` | Async MCP server (Phase 3) | `runtime.rs`, `server.rs`, `tools/` |
+| `mcp/` | Async MCP server (Phase 3+) | `runtime.rs`, `server.rs`, `tools/`, `tool_description.rs` (US4.b) |
 
 ### `src/harness/` — Harness Module Details
 
@@ -302,6 +306,20 @@ Phase 4 / US3 wires composition resolver into production paths via `CentralDbSco
 | `resolver.rs` | `resolve_effective_list()` pure-compute engine; `ScopeProvider` trait (test: `StubScope`, production: `CentralDbScopeProvider`); cycle detection via DFS |
 | `edit.rs` | Phase 4 US3: Surgical TOML edits — `open_settings()`, `add_harness()`, `remove_harness()`, `save_settings()` for project/workspace/global files |
 
+### `src/summarise/` — Workspace Summariser Details
+
+Phase 4 / US4 implements full summarisation pipeline from trigger to MCP integration.
+
+| File | Purpose |
+|------|---------|
+| `mod.rs` | `Summariser` trait (identity + summarise method), input/output types, `backend()` singleton entry point |
+| `llama.rs` | `LlamaSummariser` production impl via llama-cpp-2 + cached model (US4.d-1 S-M4) |
+| `stub.rs` | `StubSummariser` deterministic test impl (returns fixed text) |
+| `trigger.rs` | Phase 4 US4.b: `regenerate_for_trigger()` entry, `SUMMARISER_OVERRIDE` thread_local + `SummariserOverrideGuard` RAII, forward-progress invariant (FR-385) |
+| `registry.rs` | Pinned Qwen2.5-0.5B-Instruct GGUF entry (model name, files, SHA-256) |
+| `prompts.rs` | Fixed `SHORT_PROMPT` + `LONG_PROMPT` templates, length constants (`SHORT_MAX_CHARS=800`, `LONG_MAX_CHARS=2500`) |
+| `download.rs` | Model fetch (stub-only in F6) |
+
 ### `src/commands/harness/` — Harness Command Surface
 
 Phase 4 / US3 implements full subcommand dispatcher + production `ScopeProvider` impl.
@@ -311,32 +329,59 @@ Phase 4 / US3 implements full subcommand dispatcher + production `ScopeProvider`
 | `mod.rs` | Dispatcher, `sync_for_project_root()` entry (called by workspace use), `CentralDbScopeProvider` impl (consults workspaces table + reads .toml files) |
 | `bare.rs` | `tome harness` (no subcommand) — tabular list of 5 supported harnesses + detection status |
 | `list.rs` | `tome harness list [workspace]` — resolve effective harness list via ScopeProvider + composition resolver |
-| `use_.rs` | `tome harness use <name> [--scope]` — append harness to settings file via `settings::edit`, run sync on change |
-| `remove.rs` | `tome harness remove <name> [--scope]` — delete harness from settings file, run cleanup on change |
+| `use_.rs` | `tome harness use <name> [--scope]` — append harness to settings file via `settings::edit`, run sync on change + trigger regenerate |
+| `remove.rs` | `tome harness remove <name> [--scope]` — delete harness from settings file, run cleanup on change + trigger regenerate |
 | `info.rs` | `tome harness info [--json]` — per-harness detection, targets, source-of-scope annotation |
 | `sync.rs` | `tome harness sync [--force]` — idempotent reconciliation; thin wrapper over `harness::sync::sync_project` |
 
+### `src/mcp/` — MCP Server (Phase 3+ with US4 additions)
+
+Phase 4 / US4.b adds runtime tool description composition from cached summaries.
+
+| File | Purpose |
+|------|---------|
+| `mod.rs` | Sync entry point: `run()` |
+| `runtime.rs` | Single-threaded tokio builder, lifecycle management |
+| `log.rs` | 10 MiB atomic-rotate JSON file logger (contract-formatted for tool logs) |
+| `preflight.rs` | Startup checks: schema version, drift, embedder SHA-256, eager load embedder |
+| `server.rs` | rmcp tool router, handlers, graceful shutdown on SIGTERM |
+| `state.rs` | `McpState` (embedder, reranker OnceLock, scope, paths, ...) |
+| `tool_description.rs` | Phase 4 US4.b: Compose runtime description from scaffold + cached short summary (reads settings.toml at startup) |
+| `tools/mod.rs` | Tool registration + routing |
+| `tools/search_skills.rs` | `search_skills` handler (KNN + rerank, workspace-filtered) |
+| `tools/get_skill.rs` | `get_skill` handler (metadata + components walks) |
+
 ### `tests/` — Integration Tests
 
-| File Pattern | Purpose |
-|-----|---------|
-| `catalog_*.rs` | Catalog add/remove/update/refcount tests |
-| `plugin_*.rs` | Plugin enable/disable/list/show/interactive tests |
-| `models_*.rs` | Model download/list/remove tests |
-| `workspace_*.rs` | Workspace info/init/binding/sync/list/rename/remove tests (US1–US2) |
-| `harness_*.rs` | Phase 4 US3: Harness list/use/remove/info/sync tests; composition resolver; ScopeProvider fixture tests |
-| `query.rs` | Query + strict mode + reranking tests |
-| `reindex.rs` | Reindex all/per-catalog/per-plugin tests |
-| `status.rs` | Status command + health checks |
-| `doctor.rs` | Doctor assembly + fixes + harness detect + binding subsystem |
-| `mcp_*.rs` | MCP server lifecycle + tools + log rotation |
-| `exit_codes.rs` | Exit code matrix validation |
-| `manifest_strictness.rs` | Strict/lenient parsing guards |
-| `atomicity.rs` | Interrupt-injection tests (SIGINT mid-op) |
-| `concurrency.rs` | Two-process index contention |
-| `schema_migration_e2e.rs` | Forward migration via MIGRATIONS_OVERRIDE |
-| `sync_boundary.rs` | Structural test: no async outside src/mcp/ |
-| `common/mod.rs` | Test utilities: `HOME_MUTEX`, `HarnessModulesGuard`, fixtures, stub implementations |
+#### Test Files by Phase
+
+| File Pattern | Purpose | Count |
+|-----|---------|-------|
+| `catalog_*.rs` | Catalog add/remove/update/refcount tests | 8 |
+| `plugin_*.rs` | Plugin enable/disable/list/show/interactive | 9 |
+| `models_*.rs` | Model download/list/remove | 3 |
+| `workspace_*.rs` | Workspace info/init/binding/sync/list/rename/remove (US1–US2) | 28 |
+| `harness_*.rs` | Phase 4 US3: Harness list/use/remove/info/sync/composition | 16 |
+| `summariser_*.rs` | Phase 4 US4: Triggers, forward-progress, cache, registry, real models | 7 |
+| `query.rs` | Query + strict mode + reranking | 1 |
+| `reindex.rs` | Reindex all/per-catalog/per-plugin | 1 |
+| `status.rs` | Status command + health checks | 1 |
+| `doctor.rs` | Doctor assembly + fixes + harness detect + binding | 1 |
+| `mcp_*.rs` | MCP server lifecycle + tools + log + tool description (US4.b) | 8 |
+| `exit_codes.rs` | Exit code matrix validation | 1 |
+| `manifest_strictness.rs` | Strict/lenient parsing guards | 1 |
+| `atomicity.rs` | Interrupt-injection tests (SIGINT mid-op) | 1 |
+| `concurrency.rs` | Two-process index contention | 1 |
+| `schema_migration_e2e.rs` | Forward migration via MIGRATIONS_OVERRIDE | 1 |
+| `sync_boundary.rs` | Structural test: no async outside src/mcp/ | 1 |
+| **Total** | 117 test files, 862 total tests | 117 |
+
+#### Key Test Fixtures
+
+| File | Purpose |
+|------|---------|
+| `common/mod.rs` | `HOME_MUTEX`, `HarnessModulesGuard`, `SummariserOverrideGuard`, test-specific helpers, sparse-file model fabricators |
+| `fixtures/sample-plugin-catalog/` | Real git-backed plugin tree for catalog add/remove/update tests |
 
 ## Module Boundaries
 
@@ -350,11 +395,13 @@ Phase 4 / US3 implements full subcommand dispatcher + production `ScopeProvider`
 | New catalog command | `src/commands/catalog.rs` | Add to existing dispatcher + orchestrator |
 | New skill search filter | `src/index/query.rs` | Add to `QueryFilters` struct + SQL |
 | New embedder impl | `src/embedding/{name}.rs` | Impl `Embedder` trait + register in tests |
+| New summariser impl | `src/summarise/{name}.rs` | Impl `Summariser` trait, add to test injection hook |
 | New workspace scope hook | `src/workspace/` + `src/settings/` | Add to scope resolution + composition |
 | New settings layer | `src/settings/{layer}.rs` | Add type def to `mod.rs`, parser to `parser.rs` |
 | New composition ref type | `src/settings/composition.rs` | Extend `CompositionRef` enum |
 | New diagnostic check | `src/doctor/checks.rs` | Add `pub fn check_*(...)` + classification logic |
 | Surgical TOML edit | `src/settings/edit.rs` | Add helper using `toml_edit::DocumentMut` |
+| Trigger site (enable/disable/etc.) | `src/commands/{cmd}.rs` or `src/plugin/lifecycle.rs` | After mutation commit, call `regenerate_for_trigger(workspace_name, paths)` |
 
 ### Key Patterns
 
@@ -404,6 +451,21 @@ impl HarnessModule for ... {
 // detecting cycles and preserving source chain for debugging.
 ```
 
+#### Summarisation Trigger Pattern (Phase 4 US4.b)
+
+```rust
+// In enable/disable/reindex/catalog-update commands, after workspace_skills mutation commits:
+
+// Commit workspace_skills rows inside one advisory-lock window
+index::skills::enable_plugin_atomic(/* ... */)?;
+// Lock released here
+
+// Then trigger regeneration (outside lock)
+crate::summarise::regenerate_for_trigger(scope.scope.name(), &paths)?;
+// Forward-progress: if summariser fails, skill state is retained, cached summary not overwritten
+// ModelMissing is silent no-op; other failures exit 24
+```
+
 #### Test Fixture Pattern
 
 ```rust
@@ -426,6 +488,25 @@ impl HomeGuard {
         // Set $HOME to temp_home for test duration; drop HomeGuard to restore
         Ok((Self { _guard, _temp: temp }, temp_home))
     }
+}
+```
+
+#### Test Summariser Injection Pattern (Phase 4 US4)
+
+```rust
+// tests/summariser_*.rs
+use tome::summarise::{SummariserOverrideGuard, StubSummariser};
+
+#[test]
+fn summariser_trigger_with_stub() -> Result<(), Box<dyn Error>> {
+    let (home, _) = HomeGuard::new()?;
+    let stub = Arc::new(StubSummariser);
+    let _guard = SummariserOverrideGuard::install(stub);  // Installed for test duration
+    
+    // trigger code path sees SUMMARISER_OVERRIDE, uses stub instead of LlamaSummariser
+    // guard drops at end of test, clearing the slot
+
+    Ok(())
 }
 ```
 

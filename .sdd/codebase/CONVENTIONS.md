@@ -1,8 +1,8 @@
 # Coding Conventions
 
 > **Purpose**: Document code style, naming conventions, error handling, and common patterns.
-> **Generated**: 2026-05-25
-> **Last Updated**: 2026-05-25
+> **Generated**: 2026-05-26
+> **Last Updated**: 2026-05-26
 
 ## Code Style
 
@@ -43,7 +43,7 @@ All three gates are enforced locally via `.githooks/pre-commit` and in CI. The h
 | Type | Convention | Example |
 |------|------------|---------|
 | Variables | snake_case | `config_dir`, `embedder_seed`, `workspace_name`, `project_root` |
-| Constants | SCREAMING_SNAKE_CASE | `GRACEFUL_SHUTDOWN_TIMEOUT`, `MIGRATIONS`, `MCP_CONFIG_KEY` |
+| Constants | SCREAMING_SNAKE_CASE | `GRACEFUL_SHUTDOWN_TIMEOUT`, `MIGRATIONS`, `SHORT_MAX_CHARS` |
 | Functions | snake_case, verb prefix for actions | `apply_pending`, `open_read_only`, `land_directory` |
 | Structs | PascalCase | `TomeError`, `WorkspaceInfo`, `LifecycleDeps`, `BindDeps`, `HarnessModule` |
 | Enums | PascalCase, variant singular/context | `Scope`, `CatalogCacheState::Missing`, `RulesFileStrategy` |
@@ -293,8 +293,40 @@ impl Drop for InjectionGuard {
 Used for:
 - `MIGRATIONS_OVERRIDE` in `tests/schema_migration_e2e.rs`
 - `HARNESS_MODULES_OVERRIDE` in `src/harness/mod.rs` with guard in test files
+- `SUMMARISER_OVERRIDE` in `src/summarise/trigger.rs` (Phase 4 US4.b)
 
 **Why not `#[cfg(test)]`?** Integration tests in `tests/` don't see `#[cfg(test)]` code; only `#[doc(hidden)] pub` is visible across crate boundaries. The `#[doc(hidden)]` attribute signals that the slot is internal.
+
+### SummariserOverrideGuard Pattern (Phase 4 US4.b)
+
+In test files that verify summariser triggering, use the guard to inject a test summariser:
+
+```rust
+use std::sync::Arc;
+use tome::summarise::{Summariser, StubSummariser, SummariserOverrideGuard};
+
+#[test]
+fn summariser_fires_after_enable() {
+    let stub = StubSummariser::new();
+    let stub_arc: Arc<dyn Summariser> = Arc::new(stub.clone());
+    let _guard = SummariserOverrideGuard::install(stub_arc);
+    
+    // Trigger production code path
+    lifecycle::enable(&id, &deps).expect("enable");
+    
+    // Verify the stub was invoked
+    assert_eq!(stub.call_count(), 1);
+    // Guard drops here, clearing SUMMARISER_OVERRIDE
+}
+```
+
+**Key properties**:
+- Install the guard once per test
+- Both guard and stub handle share the same underlying state (via `Arc<dyn Summariser>`)
+- Call count persists across the fixture's lifetime
+- Guard's `Drop` clears the slot automatically, even on panic
+
+Mirrors `MigrationsGuard` from `tests/schema_migration_e2e.rs` and `HarnessModulesGuard` from harness tests — same shape, domain-specific type.
 
 ### HarnessModulesGuard Pattern (Phase 4 US3)
 
@@ -360,6 +392,151 @@ fn install_synthetic() -> (HarnessModulesGuard, MutexGuard<'static, ()>) {
 
 Return both guard and lock from the setup helper, and hold them for the entire test body. **Tuple order matters**: return `(guard, lock)` so guard drops before lock (standard RAII unwinding).
 
+## Summariser & Inference Patterns (Phase 4 US4)
+
+### Single Source of Truth for Length Constants
+
+Hard upper bounds for summariser output are defined **only in `src/summarise/mod.rs`**:
+
+```rust
+pub const SHORT_MAX_CHARS: usize = 800;
+pub const LONG_MAX_CHARS: usize = 2500;
+```
+
+All consumers import and use these constants directly:
+- `src/summarise/prompts.rs` — re-exports and asserts bounds
+- `src/summarise/llama.rs` — uses for inference loop breaks
+- `src/workspace/regen_summary.rs` — uses for warn predicates
+
+**Why one place?** Before consolidation (US4.d-1), the constants were duplicated in multiple files with divergent values (`LONG_MAX_CHARS = 2400` vs 2500), causing warn predicates to fire at different boundaries. A single edit now moves all consumers. Internal advisory windows (`SHORT_TARGET_*`, `LONG_TARGET_*`) remain private to `prompts.rs`.
+
+### Model Cache at Constructor Time
+
+The `LlamaSummariser` struct caches the loaded GGUF model and context environment:
+
+```rust
+pub struct LlamaSummariser {
+    model: LlamaModel,
+    // ... context fields ...
+}
+
+impl LlamaSummariser {
+    pub fn new() -> Result<Self, TomeError> {
+        // Expensive work happens ONCE here:
+        // 1. Verify SHA-256 against registry
+        // 2. Load the GGUF into ONNX Runtime
+        // 3. Deserialize into LlamaModel
+        let model = load_and_verify_model()?;
+        Ok(Self { model, ... })
+    }
+
+    pub fn summarise(&self, input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+        // Fast path: create fresh context per invocation, reuse cached model
+        let context = self.model.create_context()?;
+        // ... inference loop ...
+        Ok(SummariserOutput { short, long })
+    }
+}
+```
+
+**Pattern**: Expensive immutable resource setup (model files, large allocations) happens in the constructor; per-invocation work (context creation, forward passes) is cheap. Generalizable to any singleton service (embedder, reranker).
+
+### OnceLock + Mutex Poison Recovery (Phase 4 US4.d-1, R-M7)
+
+The process-wide `LlamaBackend` singleton uses double-checked locking with poison recovery:
+
+```rust
+static BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
+static INIT_LOCK: Mutex<()> = Mutex::new(());
+static INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
+
+pub fn backend() -> Result<&'static LlamaBackend, TomeError> {
+    if let Some(backend) = BACKEND.get() {
+        return Ok(backend);  // Fast path after first init
+    }
+    
+    // Slow path: acquire mutex, but recover from poison
+    let _guard = INIT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    
+    // Re-check after acquiring lock
+    if let Some(backend) = BACKEND.get() {
+        return Ok(backend);
+    }
+    
+    // Attempt init; cache result
+    match LlamaBackend::init() {
+        Ok(backend) => {
+            let _ = INIT_RESULT.set(Ok(()));
+            BACKEND.set(backend)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            let _ = INIT_RESULT.set(Err(msg.clone()));
+            Err(TomeError::SummariserFailure { /* ... */ })
+        }
+    }
+}
+```
+
+**Key discipline**: Use `unwrap_or_else(PoisonError::into_inner)` instead of `?`. A panicking allocator inside the lock guard poisons the mutex; the next caller recovers and attempts init again (the cached `INIT_RESULT` discriminates between clean failure and poisoning). This keeps the process alive for the OS lifetime, not permanently disabled by a transient panic.
+
+### Silent Model Missing in Trigger Paths (Phase 4 US4, M2)
+
+When the summariser model is absent, trigger paths (`plugin enable`, `disable`, `reindex`, `catalog update`) silently return `Ok(())` and skip the regeneration step:
+
+```rust
+pub fn regenerate_for_trigger(workspace_name: &WorkspaceName, paths: &Paths) -> Result<(), TomeError> {
+    let summariser = match LlamaSummariser::new() {
+        Ok(s) => s,
+        Err(TomeError::SummariserFailure { kind: SummariserFailureKind::ModelMissing, .. }) => {
+            // Silent no-op: model not yet downloaded via `tome models download`
+            return Ok(());
+        }
+        Err(e) => return Err(e),  // Other failures bubble
+    };
+    // ... regenerate with summariser ...
+}
+```
+
+Contrast with the **explicit `tome workspace regen-summary` command**, which hard-fails with exit 24 if the model is missing — users explicitly invoking summary regeneration expect the feature to be available.
+
+**Rationale**: Triggers are implicit (side effects of enable/disable); implicit triggers shouldn't break unrelated user actions. Explicit invocations that name the feature must enforce its availability.
+
+### Defence-in-Depth: Registry Placeholder Prevention
+
+The summariser registry entry for Qwen is guarded against the all-zero SHA placeholder at both runtime and test time:
+
+```rust
+// src/summarise/llama.rs
+pub fn new() -> Result<Self, TomeError> {
+    let entry = MODEL_REGISTRY.iter()
+        .find(|e| e.name == "qwen2.5-0.5b-instruct")
+        .expect("registry missing qwen entry");
+    
+    if entry.sha256 == "0000000000000000000000000000000000000000000000000000000000000000" {
+        return Err(TomeError::SummariserFailure { kind: SummariserFailureKind::ModelMissing, /* ... */ });
+    }
+    // ... proceed ...
+}
+```
+
+Regression test (`tests/summariser_registry_no_placeholder.rs`):
+```rust
+#[test]
+fn registry_qwen_sha256_is_not_placeholder() {
+    let entry = MODEL_REGISTRY.iter()
+        .find(|e| e.name == "qwen2.5-0.5b-instruct")
+        .expect("qwen entry");
+    
+    assert_ne!(entry.sha256, "0000000000000000000000000000000000000000000000000000000000000000",
+        "registry placeholder must be replaced with real hash before Phase 4 US4.a ships");
+}
+```
+
+**Pattern**: When a hard-coded value must never be X (e.g., a placeholder must be replaced before shipping), use a defensive runtime check PLUS an automated regression test. The test will fail if the placeholder sneaks back into a future update.
+
 ## Dependency Boundaries
 
 ### Crate Feature Flags
@@ -367,6 +544,7 @@ Return both guard and lock from the setup helper, and hold them for the entire t
 - `serde_json/preserve_order` — globally enabled for order-preserving JSON serialization
 - `toml_edit` — used only in `src/harness/mcp_config.rs` for TOML comment/order preservation
 - Phase 3: `tokio` and `rmcp` scoped to `src/mcp/` only; enforced by `tests/sync_boundary.rs`
+- Phase 4: `llama-cpp-2` scoped to `src/summarise/llama.rs` (and Phase 4 US4 tests); exact-pinned at `=0.1.146` per research §R-2 (upstream breaking C ABI on every minor)
 
 ### Not Used
 
@@ -487,4 +665,4 @@ Soft cap of ~400 lines or 2 modules per PR to keep reviews focused.
 
 ---
 
-*This document defines HOW to write code. Update when conventions change. Last refreshed 2026-05-25 against Phase 4 / US3-complete source (825 passing tests, 17 ignored, 110 suites).*
+*This document defines HOW to write code. Update when conventions change. Last refreshed 2026-05-26 against Phase 4 / US4-complete source (862 passing tests, 16 ignored, 117 suites).*
