@@ -115,7 +115,7 @@ Phase 5+ may add `tome skills prune` if disk pressure becomes a real concern; cu
 When summary regeneration fails inside the enable/disable/reindex flow:
 
 1. The skill-state mutation transaction MUST have committed before the summariser is invoked.
-2. The summariser failure exits with code 20.
+2. The summariser failure exits with code 24.
 3. The workspace's existing cached summary (if any) is left untouched.
 4. Doctor reports the summariser subsystem as broken AND the workspace's cached summary as stale.
 
@@ -126,5 +126,5 @@ This is the "fail forward" rule: the developer's intent (enable a plugin) is hon
 - `tests/catalog_workspace_refcount.rs` — multi-workspace catalog clone reuse; refcount cleanup on last reference removed; refcount-under-lock serialisation between two workspaces.
 - `tests/plugin_workspace_skills.rs` — enable in workspace A doesn't affect workspace B; disable in A doesn't drop skills row that B still references; rebind via UPSERT.
 - `tests/plugin_cheap_reenable.rs` — content_hash match skips embedder (StubEmbedder call count == 0).
-- `tests/plugin_summariser_forward_progress.rs` — stub failure on enable leaves workspace_skills committed; exit 20.
+- `tests/plugin_summariser_forward_progress.rs` — stub failure on enable leaves workspace_skills committed; exit 24.
 - `tests/catalog_update_cross_workspace_reindex.rs` — `catalog update` reindexes plugins enabled in every workspace, not just the resolved one.

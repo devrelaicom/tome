@@ -63,16 +63,25 @@ use crate::util::atomic_dir;
 use crate::workspace::WorkspaceName;
 
 /// Outcome of [`init`]. Serialised by the CLI's `--json` mode.
+///
+/// Wire shape is pinned by `workspace-commands.md` § `tome workspace init`
+/// and by `tests/workspace_init_json_shape.rs`. The fields below match
+/// that contract byte-for-byte. The `id` field carries the central DB's
+/// auto-assigned `workspaces.id` (the closed-set discipline doesn't
+/// require it but the contract's example calls it out for tooling
+/// keyed on the rowid rather than the name).
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct InitOutcome {
     /// The validated name of the freshly-created workspace.
     pub name: WorkspaceName,
     /// Absolute on-disk path of the landed workspace directory.
-    pub workspace_dir: PathBuf,
+    pub path: PathBuf,
     /// Number of catalogs seeded from the global workspace. Zero unless
     /// `--inherit-global` was set AND global had at least one enrolled
     /// catalog.
-    pub inherited_catalogs: u32,
+    pub catalogs_inherited: u32,
+    /// Auto-assigned `workspaces.id` from the central DB.
+    pub id: i64,
 }
 
 /// Create a new workspace.
@@ -217,13 +226,12 @@ pub fn init(
 
     // Drop the lock at end-of-scope.
     drop(lock);
-    // `new_workspace_id` is informational — useful for debugging.
-    let _ = new_workspace_id;
 
     Ok(InitOutcome {
         name,
-        workspace_dir,
-        inherited_catalogs: inherited_count,
+        path: workspace_dir,
+        catalogs_inherited: inherited_count,
+        id: new_workspace_id,
     })
 }
 

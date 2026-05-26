@@ -31,13 +31,13 @@ fn emit_human(outcome: &InitOutcome, inherit_requested: bool) -> Result<(), Tome
         out,
         "Initialised workspace `{}` at {}",
         outcome.name.as_str(),
-        outcome.workspace_dir.display(),
+        outcome.path.display(),
     )?;
-    if outcome.inherited_catalogs > 0 {
+    if outcome.catalogs_inherited > 0 {
         writeln!(
             out,
             "  catalogs: {} (inherited from global)",
-            outcome.inherited_catalogs,
+            outcome.catalogs_inherited,
         )?;
     } else if inherit_requested {
         // Documented no-op per FR-400: --inherit-global was set but

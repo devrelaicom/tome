@@ -76,7 +76,7 @@ fn init_happy_path_creates_dir_and_row() {
 
     let outcome = workspace::init::init(parse("new-ws"), false, &paths).expect("init");
     assert_eq!(outcome.name.as_str(), "new-ws");
-    assert_eq!(outcome.inherited_catalogs, 0);
+    assert_eq!(outcome.catalogs_inherited, 0);
 
     // On-disk shape: settings.toml + RULES.md inside the workspace dir.
     let ws_dir = paths.workspace_dir(&outcome.name);
@@ -143,7 +143,7 @@ fn init_inherit_global_copies_catalogs() {
     }
 
     let outcome = workspace::init::init(parse("derived"), true, &paths).expect("init");
-    assert_eq!(outcome.inherited_catalogs, 2);
+    assert_eq!(outcome.catalogs_inherited, 2);
 
     // DB: junction rows under the new workspace.
     let conn = open_central(&paths);
@@ -178,7 +178,7 @@ fn init_inherit_global_with_no_catalogs_is_noop() {
     let _ = open_central(&paths);
 
     let outcome = workspace::init::init(parse("empty"), true, &paths).expect("init");
-    assert_eq!(outcome.inherited_catalogs, 0);
+    assert_eq!(outcome.catalogs_inherited, 0);
 
     let body = std::fs::read_to_string(paths.workspace_settings_file(&outcome.name)).unwrap();
     assert!(
@@ -196,7 +196,7 @@ fn init_writes_settings_toml_at_workspace_dir() {
 
     let outcome = workspace::init::init(parse("layout"), false, &paths).unwrap();
     let expected_dir = paths.root.join("workspaces").join("layout");
-    assert_eq!(outcome.workspace_dir, expected_dir);
+    assert_eq!(outcome.path, expected_dir);
     assert!(expected_dir.join("settings.toml").is_file());
     assert!(expected_dir.join("RULES.md").is_file());
 }

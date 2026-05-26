@@ -33,7 +33,7 @@ These Phase 4 failure modes do NOT introduce new variants; they map to existing 
 
 Phase 4 maintains the Phase 1/2/3 closed-error-set principle. No "Other"/"Unknown" variant exists. Every Phase 4 code path emits either:
 
-1. A new variant from the codes 13–20 table above, OR
+1. A new variant from the codes 13–19 / 24 table above, OR
 2. A reused variant from the table above, OR
 3. A Phase 1/2/3 variant (unchanged behaviour)
 

@@ -267,7 +267,7 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
 
 fn harness_display_name(machine_name: &str) -> &'static str {
     match machine_name {
-        "claude_code" => "Claude Code",
+        "claude-code" => "Claude Code",
         "codex" => "Codex",
         "cursor" => "Cursor",
         "gemini" => "Gemini CLI",
