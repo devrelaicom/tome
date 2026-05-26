@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and common patterns.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26
+> **Last Updated**: 2026-05-26 (Phase 4 / US5 complete)
 
 ## Code Style
 
@@ -10,11 +10,11 @@
 
 | Tool | Configuration | Command |
 |------|---------------|---------|
-| rustfmt | `rustfmt.toml` (edition 2024) | `cargo fmt --check` |
-| Clippy | `.clippy.toml` (MSRV check only) | `cargo clippy --all-targets --all-features -- -D warnings` |
-| Typos | `_typos.toml` | `typos` |
+| rustfmt | `rustfmt.toml` (edition = "2024") | `cargo fmt --check` |
+| Clippy | Enforced via hook; strict `-D warnings` | `cargo clippy --all-targets --all-features -- -D warnings` |
+| typos | No config file; tree-wide | `typos` |
 
-All three gates are enforced locally via `.githooks/pre-commit` and in CI. The hook runs them sequentially; use `git commit --no-verify` to bypass with explicit justification in the commit message.
+All three gates run locally in `.githooks/pre-commit` before every commit; CI re-runs on every PR. Bypass with `git commit --no-verify` only with explicit justification in the message body.
 
 ### Style Rules
 
@@ -22,9 +22,11 @@ All three gates are enforced locally via `.githooks/pre-commit` and in CI. The h
 |------|------------|
 | Indentation | 4 spaces (Rust default) |
 | Edition | Rust 2024 |
-| MSRV | 1.93 (locked in `Cargo.toml` `rust-version`; verified in CI) |
-| Line length | No hard limit; rustfmt uses defaults |
+| MSRV | 1.93 (locked in `Cargo.toml` `rust-version`; verified in CI via dtolnay/rust-toolchain) |
+| Line length | No hard limit; rustfmt defaults |
 | Trailing commas | Automatic via rustfmt |
+
+**Key invariant**: Zero compiler warnings under Clippy `-D warnings`. If a pattern would generate a warning, it doesn't ship.
 
 ## Naming Conventions
 
@@ -32,40 +34,40 @@ All three gates are enforced locally via `.githooks/pre-commit` and in CI. The h
 
 | Type | Convention | Example |
 |------|------------|---------|
-| Modules | snake_case | `src/plugin/lifecycle.rs` |
-| Tests (separate dir) | snake_case + descriptive | `tests/plugin_enable.rs` |
-| Fixtures | lowercase | `tests/fixtures/sample-catalog/` |
-| Capabilities | snake_case subdirs | `src/index/`, `src/embedding/`, `src/harness/` |
-| Temp staging dirs | `.tome.tmp.*` prefix | Used by `atomic_dir::land_directory` for crash safety |
+| Modules | snake_case, capability-organized | `src/doctor/`, `src/summarise/`, `src/harness/` |
+| Test files | Integration test prefix + `_` | `tests/doctor_p4.rs`, `tests/workspace_use_atomicity.rs` |
+| Fixtures | Lowercase, descriptive | `tests/fixtures/sample-catalog/` |
+| Config files | TOML for Tome-owned, inherit third-party names | `config.toml`, `settings.toml`, `.mcp.json` (upstream format) |
+| Temporary directories | `.tome.tmp.*` prefix | Used by `atomic_dir` helper for crash safety |
 
 ### Code Elements
 
 | Type | Convention | Example |
 |------|------------|---------|
-| Variables | snake_case | `config_dir`, `embedder_seed`, `workspace_name`, `project_root` |
-| Constants | SCREAMING_SNAKE_CASE | `GRACEFUL_SHUTDOWN_TIMEOUT`, `MIGRATIONS`, `SHORT_MAX_CHARS` |
-| Functions | snake_case, verb prefix for actions | `apply_pending`, `open_read_only`, `land_directory` |
+| Variables | snake_case, descriptive | `config_dir`, `embedder_seed`, `workspace_name`, `project_root`, `subsystem` |
+| Constants | SCREAMING_SNAKE_CASE | `GRACEFUL_SHUTDOWN_TIMEOUT`, `MIGRATIONS`, `SHORT_MAX_CHARS`, `SCHEMA_VERSION` |
+| Functions | snake_case, verb-forward | `apply_pending`, `open_read_only`, `land_directory`, `regenerate_for_trigger` |
 | Structs | PascalCase | `TomeError`, `WorkspaceInfo`, `LifecycleDeps`, `BindDeps`, `HarnessModule` |
-| Enums | PascalCase, variant singular/context | `Scope`, `CatalogCacheState::Missing`, `RulesFileStrategy` |
-| Traits | PascalCase | `Embedder`, `Reranker`, `Serializable`, `HarnessModule`, `Summariser` |
-| Module docs | Doc comment on first line explaining role | `//! MCP server state and initialization` |
-| Newtype wrappers | PascalCase wrapping type | `WorkspaceName(String)`, `PluginId { catalog, plugin }` |
+| Enums | PascalCase; variants PascalCase | `Scope`, `Subsystem { Embedder, Catalog(...) }`, `RulesFileStrategy` |
+| Traits | PascalCase | `Embedder`, `Reranker`, `HarnessModule`, `Summariser` |
+| Module doc comments | First line explains module role | `//! MCP server state and initialization` |
+| Newtype wrappers | PascalCase + unit type | `WorkspaceName(String)`, `PluginId { catalog, plugin }` |
 
 ## Error Handling
 
 ### Closed Error Enum Pattern
 
-Tome uses a **closed enumeration** for all errors: `TomeError` in `src/error.rs` has no `Other`/`Unknown` variant. Every failure class maps to exactly one enumerated variant and a unique exit code. Adding a variant **forces edits** to:
+Tome uses a **closed enumeration** for all errors: `TomeError` in `src/error.rs` has no `Other`/`Unknown` arm. Every failure class maps to exactly one variant and a unique exit code. Adding a variant **forces updates** to:
 
-- `tests/exit_codes.rs` — compiler enforces coverage
-- `specs/*/contracts/exit-codes-*.md` — the spec's authority
-- The PRD — the external contract
+1. `tests/exit_codes.rs` — compiler exhaustiveness
+2. `specs/*/contracts/exit-codes-*.md` — spec authority
+3. PRD / release notes — external contract
 
-This design makes exit codes stable and discoverable; trade-off is that new failure modes require a deliberate variant addition.
+**Design benefit**: Exit codes are stable and discoverable. **Trade-off**: New failure modes require deliberate variant addition (usually pre-allocated in Foundational phases).
 
 ### Error Variant Organization
 
-Variants are grouped by **Phase** with comments naming the exit code range:
+Variants are grouped by **Phase** with exit code ranges as comments:
 
 ```rust
 // Phase 1 (codes 2–8, plus Internal=1). Unchanged.
@@ -74,81 +76,160 @@ Variants are grouped by **Phase** with comments naming the exit code range:
 // Phase 4 — workspace name + harness + summariser (codes 13–19, 24).
 ```
 
-**Pre-allocated variants** are added in Foundational phases **before any consumer exists**. Phase 4 F3 allocated codes 13–19, 24 before project binding and harness composition were implemented. Benefit: no mid-feature enum rewrites; the compiler enforces all arms are handled.
+**Pre-allocated variants** are added in Foundational phases **before any consumer exists**. Phase 4 F3 pre-allocated codes 13–19, 24 before project binding and harness composition were implemented. Benefit: zero mid-feature enum churn; compiler enforces all arms are covered.
 
-### Error Pattern Examples
+### Error Variants with Rich Context
 
-**Single `#[from]` source per enum variant** (when the source is semantically equivalent):
+**Single `#[from]` source** (when semantically equivalent):
 ```rust
 #[error("io: {0}")]
 Io(#[from] std::io::Error),
 ```
 
-**Tuple variants for rich context**:
+**Named fields for structured context**:
 ```rust
 #[error("git failed for `{catalog}`: {detail}")]
 GitFailed { catalog: String, detail: String },
 ```
 
-**Nested enum for context-specific variants**:
+**Nested enum for domain-specific variants**:
 ```rust
 #[error("workspace `{name}` not found in the central registry")]
 WorkspaceNotFound { name: String },
 ```
 
-**Display message includes recovery hints**:
+**Recovery hints in Display messages**:
 ```rust
-#[error("model `{model}` is missing; run `tome models download`")]
+#[error("model `{model}` is missing; run `tome models download` to fetch it")]
 ModelMissing { model: String },
 ```
 
-## Validation & Parsing
+## Core Type Patterns (Phase 4)
 
-### `WorkspaceName` Newtype Validation
+### WorkspaceName Newtype with Validation
 
-All workspace names flow through `WorkspaceName::parse(s: &str)` at **every input boundary**: CLI flags, TOML deserialization, environment variables, and file markers. The type is a newtype `struct WorkspaceName(String)` with immutable access via `as_str()`.
+All workspace names flow through `WorkspaceName::parse(s: &str)` at **every input boundary**: CLI flags, TOML deserialization, environment variables, file markers. The type is a newtype `struct WorkspaceName(String)` with immutable access via `as_str()`.
 
-Rules per FR-347:
+**Validation rules** (FR-347):
 - 1–64 chars from `[a-zA-Z0-9_-]`
 - Must not begin or end with `-` or `_`
 - Must not be `.`, `..`, or empty
-- Reserved name `"global"` parses but is flagged by `is_reserved()` for lifecycle commands
+- Reserved name `"global"` parses OK but `is_reserved()` flags it for lifecycle commands
 
-Deserialization hook (`impl Deserialize for WorkspaceName`) calls `WorkspaceName::parse`, so TOML/JSON round-trips are automatically validated.
-
-**Pattern**:
+**Deserialization automatically validates**:
 ```rust
-let name = WorkspaceName::parse(user_input)?;  // Rejects at boundary
-if name.is_reserved() {
-    return Err(TomeError::...);  // Refuse reserved name in lifecycle commands
+impl Deserialize for WorkspaceName {
+    fn deserialize(...) -> Result<Self, D::Error> {
+        WorkspaceName::parse(s).map_err(...)
+    }
 }
 ```
 
-### `PluginId` Identity Parsing
+### PluginId Identity Parsing
 
-Plugin addresses `catalog/plugin` are validated by `impl FromStr for PluginId`:
+Plugin addresses `catalog/plugin` validate via `impl FromStr for PluginId`:
 ```rust
 let id: PluginId = "my-catalog/my-plugin".parse()?;
 ```
 
-Rejects embedded slashes, parent traversal (`..`), dot-prefixes, and absolute paths in either segment.
+Rejects:
+- Embedded slashes in either segment
+- Parent traversal (`..`) in any segment
+- Dot-prefixes (`.` / `..` or hidden entries)
+- Absolute paths
 
-## Atomic-Directory Landing Pattern
+### Subsystem Enum with Byte-Stable Wire Shape (Phase 4 / US5)
 
-Phase 4 promotes the atomic-directory landing pattern from `workspace::init` into a reusable helper under `src/util/atomic_dir.rs`. Used by workspace binding (project markers) and harness commands.
+When dispatch keys reach >6 distinct values, promote from `String` to typed enum:
 
-### Key Invariants
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Subsystem {
+    Embedder,
+    Reranker,
+    Index,
+    Drift,
+    Catalog(String),           // wire: "catalog:<name>"
+    Schema,
+    Summariser,
+    Binding,
+    BindingRulesCopy,
+    HarnessRules(String),      // wire: "harness-rules:<name>"
+    HarnessMcp(String),        // wire: "harness-mcp:<name>"
+}
 
-1. **Same-filesystem staging**: `tempfile::Builder::new().prefix(".tome.tmp.").tempdir_in(parent)` creates a sibling staging dir on the same filesystem as the target, guaranteeing POSIX-atomic rename.
+impl Subsystem {
+    pub fn to_wire_string(&self) -> String { /* ... */ }
+    pub fn parse_wire(s: &str) -> Option<Self> { /* ... */ }
+}
 
-2. **Mode preservation (Unix)**: On Unix, if the target exists, its file mode is captured, applied to the staging tempfile, and preserved through the rename. If target is absent, libc-default (typically `0o600`) wins.
+// Backward-compat: compare against &str
+impl PartialEq<str> for Subsystem {
+    fn eq(&self, other: &str) -> bool {
+        self.to_wire_string() == other
+    }
+}
+```
+
+**Benefits**:
+- Type safety (exhaustiveness checking at dispatch points)
+- Backward-compatible wire format (Phase 3 tests still work)
+- Colon-separated variants like `"catalog:name"` stored as `Variant(String)` internally
+
+**Test pattern** — pin the byte-stable wire shape:
+```rust
+#[test]
+fn every_variant_round_trips_via_documented_wire_string() {
+    let cases = vec![
+        (Subsystem::Embedder, "\"embedder\""),
+        (Subsystem::Catalog("upstream".into()), "\"catalog:upstream\""),
+        // ...
+    ];
+    for (variant, wire) in cases {
+        let serialised = serde_json::to_string(&variant).unwrap();
+        assert_eq!(serialised, wire);
+        let parsed: Subsystem = serde_json::from_str(wire).unwrap();
+        assert_eq!(parsed, variant);
+    }
+}
+```
+
+Used in: `src/doctor/report.rs::Subsystem` (11 variants covering embedder, reranker, index, drift, catalogs, schema, summariser, binding, rules/MCP per harness).
+
+### SubsystemHealth::NotApplicable (Phase 4 / US5)
+
+When a per-row health check legitimately doesn't apply in a context (e.g., harness subsystems when no project is bound), emit `NotApplicable` rather than omitting the row:
+
+```rust
+pub enum SubsystemHealth {
+    Ok,
+    Drift,
+    Broken,
+    UserOwned,
+    NotApplicable,  // "operation doesn't apply here"
+}
+```
+
+Wire distinguishes "inapplicable" from "not checked" so callers can tailor UI. Used in: `src/doctor/report.rs` — harness-health rows emit `NotApplicable` when doctor runs outside a workspace project.
+
+## File Operations & Atomicity
+
+### Atomic-Directory Landing Pattern
+
+Phase 4 promotes the atomic-directory landing pattern from `workspace::init` into a reusable helper under `src/util/atomic_dir.rs`. Used for workspace markers, harness commands, and any multi-file state that must appear complete or not-at-all to concurrent readers.
+
+**Key invariants**:
+
+1. **Same-filesystem staging**: `tempfile::Builder::new().prefix(".tome.tmp.").tempdir_in(parent)` creates a sibling staging directory on the same filesystem, guaranteeing POSIX-atomic rename.
+
+2. **Mode preservation (Unix)**: If the target exists, capture its file mode. Apply to the staging tempfile, then preserve through the rename. If target is absent, libc default (typically `0o600`) wins.
 
 3. **Crash safety**:
-   - Crash before `TempDir::keep()`: staging dir auto-cleaned
-   - Crash after `keep()` but before final rename: orphan staging dir picked up by `doctor --fix` (matching prefix `.tome.tmp.`)
-   - **Replace variant**: on final rename failure, roll back the `.old` sibling before bubbling error
+   - Crash before `TempDir::keep()` → staging auto-cleaned
+   - Crash after `keep()` but before final rename → orphan staging picked up by `doctor --fix` (matches `.tome.tmp.*` prefix)
+   - Replace variant: on final rename failure, rollback the `.old` sibling before bubbling error
 
-4. **Fsync**: staging directory is synced before `keep()` (best-effort on platforms where directory fsync is a no-op; matters on Linux/macOS).
+4. **Fsync before keep**: Call `nix::fcntl::fsync()` on the staging directory (or best-effort no-op on platforms that don't support dir fsync).
 
 **Public API**:
 ```rust
@@ -159,24 +240,36 @@ where F: FnOnce(&Path) -> Result<(), TomeError>
 pub fn land_directory_with_replace<F>(
     target: &Path, mode_unix: u32, populate: F
 ) -> Result<PathBuf, TomeError>
+where F: FnOnce(&Path) -> Result<(), TomeError>
 ```
 
-Used in `src/workspace/binding.rs` for project marker creation and harness sync paths.
+Used in: `src/workspace/binding.rs` (project marker creation), harness sync paths.
+
+### Write-Through Mode Preservation
+
+Every file write (via `catalog::store::write_atomic`, `settings::edit::save_settings`) follows:
+1. Read existing file and capture mode (Unix) if it exists
+2. Write to sibling tempfile in same directory
+3. Apply captured mode via `symlink_metadata` + `chmod`
+4. fsync the tempfile
+5. Atomic rename
+
+**Critical**: On Unix, naive tempfile writes default to `0o644`, silently weakening files that were intentionally restrictive (e.g., `0o600`). Mode preservation preserves security posture.
 
 ## Sync & Concurrency Patterns
 
 ### Two-Phase Sync Orchestrator (Phase 4)
 
-The workspace binding and harness sync orchestrators follow a two-phase pattern:
+Workspace binding and harness sync use a two-phase pattern:
 
-- **Phase A (brief, under advisory lock)**: Read from the central database to identify the workspace and project binding.
-- **Phase B (unlocked)**: Perform filesystem operations (rules file modifications, MCP config edits) without holding the lock. If a filesystem operation fails, the lock is released and the error bubbles; subsequent invocations will detect and fix the state.
+- **Phase A** (brief, under advisory lock): Read from central DB to identify workspace and binding.
+- **Phase B** (unlocked): Perform filesystem operations (rules file mods, MCP config edits) without holding the lock. On failure, error bubbles; subsequent runs detect and fix.
 
-This allows writers to proceed while filesystem I/O is in flight, improving responsiveness when harness syncs (e.g., git operations on large repos) would otherwise block the index.
+This allows writers to proceed while filesystem I/O is in flight, improving responsiveness when large operations (e.g., git checks on huge repos) would otherwise block the index.
 
 ### Idempotence-by-Mtime (Phase 4)
 
-Rules file and MCP config primitives (`rules_file::read`, `rules_file::write`, `mcp_config::read`, `mcp_config::write`) short-circuit when bytes match:
+Rules file and MCP config primitives (`rules_file::read`, `mcp_config::write`, etc.) short-circuit when bytes match:
 
 ```rust
 if existing_bytes == new_bytes {
@@ -184,153 +277,203 @@ if existing_bytes == new_bytes {
 }
 ```
 
-Tests verify idempotence by capturing mtime before a write, sleeping 1.5 seconds (to ensure distinct mtime granularity on all filesystems), re-reading, and asserting mtime unchanged.
+Tests verify by capturing mtime before write, sleeping 1.5 seconds (filesystem granularity), re-reading, and asserting mtime unchanged.
 
-### Advisory Lock Around Settings File Mutations (Phase 4 US3)
+### Advisory Lock Around Settings Mutations (Phase 4 US3)
 
-Any command that mutates a Tome-owned config file outside the central DB (e.g., `settings.toml`, `config.toml`) must acquire the index advisory lock for the full read-modify-write window:
+Any command mutating Tome-owned config files outside the central DB (e.g., `settings.toml`, `config.toml`) must acquire the index advisory lock for the full read-modify-write window:
 
 ```rust
 let _lock = index::lock::LockFile::acquire(&paths.index_lock_path)?;
-// Read, modify, write settings file
+// Read, modify, write — operations serialize with index writers
 ```
 
-This serializes with index writers and prevents concurrent TOCTOU races on the same file.
+Prevents TOCTOU races on the same file.
 
-## Per-Project Effective List Resolution (Phase 4 US2)
+## Diagnostic & Repair Patterns
 
-Workspace lifecycle commands that need to know the effective harness list for a project (e.g., `workspace remove` cascade cleanup) call:
+### Per-Field State Mutations + Re-assemble (Phase 4 / US5)
 
-```rust
-let effective_list = settings::resolver::resolve_effective_list(&StubScope::new(), &paths)?;
-```
-
-The `StubScope::new()` represents a "not yet bound" project; phase A of the sync algorithm later replaces it with a real `ResolvedScope(workspace_name)` read from the database. This pattern avoids DB access until the workspace is actually confirmed to exist.
-
-In tests, use `StubScope` when the database isn't fully initialized; in production code, use the resolved scope from the sync orchestrator.
-
-## Settings File Composition and Inheritance (Phase 4 US3)
-
-Three layers of settings compose in priority order: global (`~/.tome/settings.toml`) < workspace (`~/.tome/workspaces/<name>/settings.toml`) < project (`<root>/.tome/config.toml`):
+When a repair function mutates state in place per subsystem, expose a sibling `re_assemble()` that recomputes derived state without re-running expensive checks:
 
 ```rust
-pub fn resolve_effective_list(scope: &Scope, paths: &Paths) -> Result<Vec<String>, TomeError> {
-    // 1. Read global (always exists or defaults)
-    // 2. Overlay workspace (if workspace exists in central DB)
-    // 3. Overlay project (if project marker is present)
-    // First scope to declare harnesses wins; remainder ignored.
+pub fn apply(&mut report: DoctorReport, paths, scope) -> usize {
+    // For each suggested fix: apply repair, update per-field state in-place
+}
+
+pub fn re_assemble(report: &mut DoctorReport) {
+    // Recompute suggested_fixes + overall from per-field state (no re-probes)
 }
 ```
 
-Key rule (FR-441): An explicitly empty list (`harnesses = []`) is semantically distinct from no declaration. The resolver stops at the first scope where `harnesses` is `Some(_)`, even if empty.
+Saves half the filesystem cost on catalog-enumeration + harness-probe sides after applying fixes.
 
-### `CentralDbScopeProvider` for Harness Resolution (Phase 4 US3)
+Used in: `src/doctor/fixes.rs` — repairs run per-subsystem (embedder, reranker, catalogs, schema, harnesses), each updates targeted fields. After all repairs, `re_assemble()` recomputes the derived summary.
 
-When a future command needs to resolve the harness list for a workspace (e.g., `tome harness list`), use the production provider:
+### Coalesce Repair Invocations (Phase 4 / US5)
+
+When multiple suggested fixes share a repair function (e.g., 10 harness rules files all from the same source), collect all matching suggestions, run the repair **once**, then clear all affected from the residual list:
 
 ```rust
-let provider = CentralDbScopeProvider::new(paths);
-let list = settings::resolver::resolve_effective_list(&scope, paths, &provider)?;
+// Group all "binding-rules-copy" fixes by source
+let all_binding_fixes: Vec<_> = report.suggested_fixes
+    .iter()
+    .filter(|f| f.subsystem == Subsystem::BindingRulesCopy)
+    .collect();
+
+// Run repair once
+if let Some(first) = all_binding_fixes.first() {
+    repair_binding_rules_copy(&first.details)?;
+}
+
+// Remove all in one shot
+report.suggested_fixes
+    .retain(|f| f.subsystem != Subsystem::BindingRulesCopy);
 ```
 
-The provider distinguishes three failure modes:
-- **Workspace exists, settings present/parsable** → `Ok(Some(list))`
-- **Workspace exists, settings absent** → `Ok(None)` (no harnesses declared; legal)
-- **Workspace exists, settings unreadable/unparsable** → `Err(SettingsReadFailure)` → exit 70 (`WorkspaceMalformed`)
-- **Workspace not in central DB** → `Err(UnknownWorkspace)` → exit 13 (`WorkspaceNotFound`)
+Avoids 10× redundant operations when 10 harnesses reference the same source.
 
-When central DB is absent, only the privileged `global` workspace is considered to exist.
+### Project-Local vs Workspace-Broadcast Helpers (Phase 4 / US5)
 
-## Lenient Parse & Order Preservation
+When a sync/repair function has both single-project and all-projects semantics, expose as **distinct named functions**:
 
-### Third-Party Data (Phase 4)
+```rust
+// Single project
+pub fn sync_one_project(project_root: &Path, source: &Path, paths: &Paths) 
+    -> Result<(), TomeError>
 
-Harness MCP configuration files (JSON, TOML) are treated as **third-party data** and are parsed leniently:
-- Unknown fields are preserved on round-trip (not rejected)
-- Comment and key-order preservation via `toml_edit` (TOML) and `serde_json` with `preserve_order` feature (JSON)
-- Only Tome-owned entries (under key `"tome"` with `command == "tome" && args[0] == "mcp"`) are mutated
+// All projects in workspace
+pub fn sync_all(workspace_name: &WorkspaceName, paths: &Paths) 
+    -> Result<usize, TomeError>
+```
 
-Contrast with **Tome-owned manifests** (`config.toml`, `settings.toml`, `plugin.json` within Tome-controlled catalogs) which use strict `#[serde(deny_unknown_fields)]`.
+Don't pass an `Option` parameter; the caller knows which it wants.
 
-### Atomic Write with Mode Preservation (Phase 4)
+### SourceMissing vs Missing Health States (Phase 4 / US5)
 
-Every file write follows the pattern:
-1. Read existing file and capture mode (if it exists)
-2. Write to sibling tempfile in same directory (or use `NamedTempFile`)
-3. Apply captured mode via `symlink_metadata` + `chmod`
-4. fsync the tempfile
-5. Atomic rename
+When a copy-from-source operation can fail for two reasons, distinguish them in state:
 
-The mode preservation step is **critical**: on Unix, a naive tempfile write defaults to `0o644`, which would silently weaken the security posture of files that were intentionally restrictive (e.g., `0o600`).
+```rust
+pub enum Health {
+    Ok,
+    Missing,           // Destination absent or corrupted
+    SourceMissing,     // Source file gone; manual regeneration needed
+}
+```
 
-Lifted to `catalog::store::write_atomic` in Phase 4 F2; also used by `settings::edit::save_settings` (Phase 4 US3) for order-preserving settings rewrites.
+`--fix` for `Missing` copies from source. `--fix` for `SourceMissing` surfaces a manual-action `SuggestedFix`.
 
-## Test-Injection Patterns
+### Read-Only by Default, Fix-on-Explicit-Flag (Phase 4 / FR-563)
+
+Diagnostic commands separate report from repair:
+
+- **Report path** (no flags): Read-only, never mutates state, safe for scripts
+- **Repair path** (`--fix`): Explicitly flagged, acquires advisory lock, changes disk state
+
+Invariant: a read-only pass must NOT mutate mtimes, DB rows, or filesystem state. Tests verify by checking mtime before and after a read-only invocation.
+
+Used in: `tome doctor [--verify]` (read-only) vs `tome doctor --fix` (repairs only when flag present).
+
+### --force Precise Scoping (Phase 4 / US5)
+
+The `--force` flag should rewrite **only the conflicting fixes in the current run's list**, not bulk-rewrite every user-owned entity globally:
+
+```rust
+pub fn apply(&mut report: DoctorReport, force: bool) -> usize {
+    for fix in report.suggested_fixes.iter() {
+        if auto_fixable && (force || !user_owned) {
+            // Apply only if auto_fixable AND (force OR not user-owned)
+        }
+    }
+}
+```
+
+Prevents accidental data loss when a user-owned file clashes with a Tome-owned one.
+
+### Debug Assertions on Safe-Root Invariants (Phase 4 / US5)
+
+For operations like `remove_dir_all()` on derived paths, assert safety invariants:
+
+```rust
+pub fn cleanup_orphan(root: &Path) -> std::io::Result<()> {
+    debug_assert!(root.starts_with(&safe_parent), 
+        "orphan root {root:?} escaped sandbox {safe_parent:?}");
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+```
+
+Documents the invariant + catches future refactors that break it.
+
+Used in: `src/doctor/orphan_cleanup.rs` (ensures orphan cleanup never escapes the expected root).
+
+## Common Command Patterns
+
+### Silent Compute + Emit Wrapper (Phase 3+)
+
+When a command's logic must be reused by non-CLI surfaces (MCP tools, library APIs), split into two functions:
+
+```rust
+// Silent compute — no I/O side-effects, unit-testable
+pub fn assemble(args: Args, deps: &Deps) -> Result<Outcome, TomeError> {
+    // ... business logic ...
+    Ok(outcome)
+}
+
+// CLI emit wrapper — calls assemble, then formats per mode and exits
+pub fn run(args: Args, deps: &Deps) -> Result<(), TomeError> {
+    let outcome = assemble(args, deps)?;
+    output::emit(&outcome);  // formats as human/JSON
+    Ok(())
+}
+```
+
+Tests use `assemble` and assert on outcomes. CLI uses `run` which handles emission. MCP tools use `assemble` without the emit step.
+
+Applied to: Every Phase 4 subcommand (`workspace::info::run`, `harness::list::run`, etc.).
+
+### Helper Visibility Promotion (Phase 3+)
+
+When two surfaces (e.g., `tome status` + `tome doctor`) must report the same value, promote the shared helper from `private` to `pub` rather than duplicating:
+
+```rust
+pub fn check_model(paths, embedder, verify) -> ModelHealth { /* ... */ }
+// Called by both status and doctor
+```
+
+Cost: three-character edit. Benefit: zero divergence risk.
+
+## Test-Injection & Mock Patterns
 
 ### `#[doc(hidden)] pub static` with RAII Guard (Phase 3+)
 
-When a test needs to inject a thread-local value, use the pattern:
+For integration tests that need thread-local injection (tests don't see `#[cfg(test)]`), use:
+
 ```rust
+// In src/module/mod.rs
 #[doc(hidden)]
 pub static INJECTION_SLOT: std::sync::RwLock<Option<T>> = std::sync::RwLock::new(None);
 ```
 
 In the test file, define an RAII guard:
+
 ```rust
 pub struct InjectionGuard;
 impl InjectionGuard {
-    pub fn install(value: T) {
-        *INJECTION_SLOT.write().unwrap() = Some(value);
-    }
+    pub fn install(value: T) { /* set slot */ }
 }
 impl Drop for InjectionGuard {
-    fn drop(&mut self) {
-        *INJECTION_SLOT.write().unwrap() = None;
-    }
+    fn drop(&mut self) { /* clear slot */ }
 }
 ```
 
-Used for:
-- `MIGRATIONS_OVERRIDE` in `tests/schema_migration_e2e.rs`
-- `HARNESS_MODULES_OVERRIDE` in `src/harness/mod.rs` with guard in test files
-- `SUMMARISER_OVERRIDE` in `src/summarise/trigger.rs` (Phase 4 US4.b)
+Used for: `MIGRATIONS_OVERRIDE`, `HARNESS_MODULES_OVERRIDE`, `SUMMARISER_OVERRIDE`.
 
-**Why not `#[cfg(test)]`?** Integration tests in `tests/` don't see `#[cfg(test)]` code; only `#[doc(hidden)] pub` is visible across crate boundaries. The `#[doc(hidden)]` attribute signals that the slot is internal.
-
-### SummariserOverrideGuard Pattern (Phase 4 US4.b)
-
-In test files that verify summariser triggering, use the guard to inject a test summariser:
-
-```rust
-use std::sync::Arc;
-use tome::summarise::{Summariser, StubSummariser, SummariserOverrideGuard};
-
-#[test]
-fn summariser_fires_after_enable() {
-    let stub = StubSummariser::new();
-    let stub_arc: Arc<dyn Summariser> = Arc::new(stub.clone());
-    let _guard = SummariserOverrideGuard::install(stub_arc);
-    
-    // Trigger production code path
-    lifecycle::enable(&id, &deps).expect("enable");
-    
-    // Verify the stub was invoked
-    assert_eq!(stub.call_count(), 1);
-    // Guard drops here, clearing SUMMARISER_OVERRIDE
-}
-```
-
-**Key properties**:
-- Install the guard once per test
-- Both guard and stub handle share the same underlying state (via `Arc<dyn Summariser>`)
-- Call count persists across the fixture's lifetime
-- Guard's `Drop` clears the slot automatically, even on panic
-
-Mirrors `MigrationsGuard` from `tests/schema_migration_e2e.rs` and `HarnessModulesGuard` from harness tests — same shape, domain-specific type.
+**Why not `#[cfg(test)]`?** Integration tests don't see `#[cfg(test)]` code; only public items are visible. `#[doc(hidden)]` signals that the slot is internal.
 
 ### HarnessModulesGuard Pattern (Phase 4 US3)
 
-In test files that use synthetic harness modules:
+For tests using synthetic harness modules:
 
 ```rust
 pub struct HarnessModulesGuard;
@@ -338,47 +481,41 @@ impl HarnessModulesGuard {
     pub fn install(modules: Vec<Box<dyn HarnessModule>>) {
         *tome::harness::HARNESS_MODULES_OVERRIDE
             .write()
-            .expect("HARNESS_MODULES_OVERRIDE poisoned") = Some(modules);
+            .expect("poisoned") = Some(modules);
     }
 }
 impl Drop for HarnessModulesGuard {
     fn drop(&mut self) {
         *tome::harness::HARNESS_MODULES_OVERRIDE
             .write()
-            .expect("HARNESS_MODULES_OVERRIDE poisoned") = None;
+            .expect("poisoned") = None;
     }
 }
 ```
 
-Per-test-file scope ensures cleanup on panic. Store in `tests/common/mod.rs` for reuse across test files that mutate harness discovery.
+Per-test-file scope ensures cleanup on panic. Store in `tests/common/mod.rs`.
 
-### HomeGuard Pattern for Environment Mutation (Phase 4 US3)
+### SummariserOverrideGuard Pattern (Phase 4 US4.b)
 
-When a test mutates `std::env::set_var("HOME", ...)`, use the `HOME_MUTEX` pattern to serialize with other tests:
+In test files verifying summariser triggering:
 
 ```rust
-static HOME_MUTEX: Mutex<()> = Mutex::new(());
+use tome::summarise::{Summariser, StubSummariser, SummariserOverrideGuard};
 
 #[test]
-fn my_test() {
-    let _lock = HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _home = HomeGuard::install(new_home_path);
-    // ... test code that reads $HOME ...
+fn summariser_fires_after_enable() {
+    let stub = StubSummariser::new();
+    let _guard = SummariserOverrideGuard::install(Arc::new(stub.clone()));
+    
+    lifecycle::enable(&id, &deps).expect("enable");
+    assert_eq!(stub.call_count(), 1);
+    // Guard drops, clearing SUMMARISER_OVERRIDE
 }
 ```
 
-The `HomeGuard` struct (from `tests/common/mod.rs`) restores the previous `HOME` value on drop. **Field declaration order is critical**: declare `_previous` (the restore guard) **before** `_lock` (the mutex guard) so `_previous` drops first (restoring HOME while still holding the mutex), then `_lock` releases, preventing race windows where another test reads a half-restored HOME.
+### Per-Test Mutex for Concurrent Test Isolation (Phase 4 US3)
 
-```rust
-pub struct HomeGuard {
-    _previous: PrevHome,  // Drops FIRST, restores HOME
-    _lock: std::sync::MutexGuard<'static, ()>,  // Drops SECOND, releases mutex
-}
-```
-
-### Per-Test-File `OVERRIDE_MUTEX` (Phase 4 US3)
-
-For tests that use `HARNESS_MODULES_OVERRIDE` or other thread-local injection points, declare a process-wide `Mutex` in the test file:
+For tests using injection points, declare a process-wide mutex in the test file:
 
 ```rust
 static OVERRIDE_MUTEX: Mutex<()> = Mutex::new(());
@@ -390,7 +527,7 @@ fn install_synthetic() -> (HarnessModulesGuard, MutexGuard<'static, ()>) {
 }
 ```
 
-Return both guard and lock from the setup helper, and hold them for the entire test body. **Tuple order matters**: return `(guard, lock)` so guard drops before lock (standard RAII unwinding).
+Return both guard and lock; hold them for the entire test body. **Order matters**: `(guard, lock)` so guard drops before lock (standard RAII unwinding).
 
 ## Summariser & Inference Patterns (Phase 4 US4)
 
@@ -403,16 +540,16 @@ pub const SHORT_MAX_CHARS: usize = 800;
 pub const LONG_MAX_CHARS: usize = 2500;
 ```
 
-All consumers import and use these constants directly:
+All consumers import and use directly:
 - `src/summarise/prompts.rs` — re-exports and asserts bounds
 - `src/summarise/llama.rs` — uses for inference loop breaks
 - `src/workspace/regen_summary.rs` — uses for warn predicates
 
-**Why one place?** Before consolidation (US4.d-1), the constants were duplicated in multiple files with divergent values (`LONG_MAX_CHARS = 2400` vs 2500), causing warn predicates to fire at different boundaries. A single edit now moves all consumers. Internal advisory windows (`SHORT_TARGET_*`, `LONG_TARGET_*`) remain private to `prompts.rs`.
+Before consolidation (US4.d-1), duplicated constants with divergent values caused warn predicates to fire at different boundaries.
 
 ### Model Cache at Constructor Time
 
-The `LlamaSummariser` struct caches the loaded GGUF model and context environment:
+The `LlamaSummariser` caches the loaded GGUF model and context environment:
 
 ```rust
 pub struct LlamaSummariser {
@@ -422,16 +559,16 @@ pub struct LlamaSummariser {
 
 impl LlamaSummariser {
     pub fn new() -> Result<Self, TomeError> {
-        // Expensive work happens ONCE here:
+        // Expensive work happens ONCE:
         // 1. Verify SHA-256 against registry
-        // 2. Load the GGUF into ONNX Runtime
+        // 2. Load GGUF into ONNX Runtime
         // 3. Deserialize into LlamaModel
         let model = load_and_verify_model()?;
         Ok(Self { model, ... })
     }
 
     pub fn summarise(&self, input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
-        // Fast path: create fresh context per invocation, reuse cached model
+        // Fast path: create fresh context, reuse cached model
         let context = self.model.create_context()?;
         // ... inference loop ...
         Ok(SummariserOutput { short, long })
@@ -439,90 +576,50 @@ impl LlamaSummariser {
 }
 ```
 
-**Pattern**: Expensive immutable resource setup (model files, large allocations) happens in the constructor; per-invocation work (context creation, forward passes) is cheap. Generalizable to any singleton service (embedder, reranker).
+**Pattern**: Immutable resource setup (model files, allocations) in constructor. Per-invocation work (context, forward passes) is cheap.
 
-### OnceLock + Mutex Poison Recovery (Phase 4 US4.d-1, R-M7)
+### Silent Model Missing in Trigger Paths (Phase 4 / US4)
 
-The process-wide `LlamaBackend` singleton uses double-checked locking with poison recovery:
-
-```rust
-static BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
-static INIT_LOCK: Mutex<()> = Mutex::new(());
-static INIT_RESULT: OnceLock<Result<(), String>> = OnceLock::new();
-
-pub fn backend() -> Result<&'static LlamaBackend, TomeError> {
-    if let Some(backend) = BACKEND.get() {
-        return Ok(backend);  // Fast path after first init
-    }
-    
-    // Slow path: acquire mutex, but recover from poison
-    let _guard = INIT_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    
-    // Re-check after acquiring lock
-    if let Some(backend) = BACKEND.get() {
-        return Ok(backend);
-    }
-    
-    // Attempt init; cache result
-    match LlamaBackend::init() {
-        Ok(backend) => {
-            let _ = INIT_RESULT.set(Ok(()));
-            BACKEND.set(backend)
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            let _ = INIT_RESULT.set(Err(msg.clone()));
-            Err(TomeError::SummariserFailure { /* ... */ })
-        }
-    }
-}
-```
-
-**Key discipline**: Use `unwrap_or_else(PoisonError::into_inner)` instead of `?`. A panicking allocator inside the lock guard poisons the mutex; the next caller recovers and attempts init again (the cached `INIT_RESULT` discriminates between clean failure and poisoning). This keeps the process alive for the OS lifetime, not permanently disabled by a transient panic.
-
-### Silent Model Missing in Trigger Paths (Phase 4 US4, M2)
-
-When the summariser model is absent, trigger paths (`plugin enable`, `disable`, `reindex`, `catalog update`) silently return `Ok(())` and skip the regeneration step:
+When summariser model is absent, trigger paths (`plugin enable`, `disable`, `reindex`, `catalog update`) silently return `Ok(())`:
 
 ```rust
 pub fn regenerate_for_trigger(workspace_name: &WorkspaceName, paths: &Paths) -> Result<(), TomeError> {
     let summariser = match LlamaSummariser::new() {
         Ok(s) => s,
-        Err(TomeError::SummariserFailure { kind: SummariserFailureKind::ModelMissing, .. }) => {
-            // Silent no-op: model not yet downloaded via `tome models download`
+        Err(TomeError::SummariserFailure { 
+            kind: SummariserFailureKind::ModelMissing, .. 
+        }) => {
+            // Silent no-op: model not yet downloaded
             return Ok(());
         }
-        Err(e) => return Err(e),  // Other failures bubble
+        Err(e) => return Err(e),
     };
-    // ... regenerate with summariser ...
+    // ... regenerate ...
 }
 ```
 
-Contrast with the **explicit `tome workspace regen-summary` command**, which hard-fails with exit 24 if the model is missing — users explicitly invoking summary regeneration expect the feature to be available.
+Contrast with **explicit `tome workspace regen-summary`**, which hard-fails (exit 24) if model is missing.
 
-**Rationale**: Triggers are implicit (side effects of enable/disable); implicit triggers shouldn't break unrelated user actions. Explicit invocations that name the feature must enforce its availability.
+**Rationale**: Triggers are implicit side-effects; shouldn't break unrelated actions. Explicit invocations must enforce feature availability.
 
 ### Defence-in-Depth: Registry Placeholder Prevention
 
-The summariser registry entry for Qwen is guarded against the all-zero SHA placeholder at both runtime and test time:
+Summariser registry entry guards against the all-zero SHA placeholder at both runtime and test time:
 
 ```rust
-// src/summarise/llama.rs
 pub fn new() -> Result<Self, TomeError> {
     let entry = MODEL_REGISTRY.iter()
         .find(|e| e.name == "qwen2.5-0.5b-instruct")
         .expect("registry missing qwen entry");
     
     if entry.sha256 == "0000000000000000000000000000000000000000000000000000000000000000" {
-        return Err(TomeError::SummariserFailure { kind: SummariserFailureKind::ModelMissing, /* ... */ });
+        return Err(TomeError::SummariserFailure { /* ... */ });
     }
     // ... proceed ...
 }
 ```
 
-Regression test (`tests/summariser_registry_no_placeholder.rs`):
+Regression test:
 ```rust
 #[test]
 fn registry_qwen_sha256_is_not_placeholder() {
@@ -530,103 +627,11 @@ fn registry_qwen_sha256_is_not_placeholder() {
         .find(|e| e.name == "qwen2.5-0.5b-instruct")
         .expect("qwen entry");
     
-    assert_ne!(entry.sha256, "0000000000000000000000000000000000000000000000000000000000000000",
-        "registry placeholder must be replaced with real hash before Phase 4 US4.a ships");
+    assert_ne!(entry.sha256, "0000...", "must be real hash before ship");
 }
 ```
 
-**Pattern**: When a hard-coded value must never be X (e.g., a placeholder must be replaced before shipping), use a defensive runtime check PLUS an automated regression test. The test will fail if the placeholder sneaks back into a future update.
-
-## Dependency Boundaries
-
-### Crate Feature Flags
-
-- `serde_json/preserve_order` — globally enabled for order-preserving JSON serialization
-- `toml_edit` — used only in `src/harness/mcp_config.rs` for TOML comment/order preservation
-- Phase 3: `tokio` and `rmcp` scoped to `src/mcp/` only; enforced by `tests/sync_boundary.rs`
-- Phase 4: `llama-cpp-2` scoped to `src/summarise/llama.rs` (and Phase 4 US4 tests); exact-pinned at `=0.1.146` per research §R-2 (upstream breaking C ABI on every minor)
-
-### Not Used
-
-- `tokio` outside `src/mcp/` (sync codebase discipline)
-- `libgit2` / `git2` (shell out to system `git`)
-- `directories` crate (Phase 4 F2 replacement: `std::env`)
-- `atty`, `colored`, `lazy_static`, `once_cell` (Rust std covers or not needed)
-
-## Common Patterns
-
-### Silent Compute + Emit Wrapper (Phase 3+)
-
-When a command's logic is reused by non-CLI surfaces (MCP, library API), split into:
-
-1. **`assemble_*(args, deps) -> Result<Outcome, Error>`** — pure compute, no I/O side-effects (renamed from `pipeline` for CLI clarity)
-2. **`run(args, deps, mode) -> Result<(), Error>`** — calls `assemble_*`, then emits per `mode` and exits
-
-Tests target the `assemble_*` function and assert on returned outcomes; the CLI dispatcher uses `run` which handles emission. This pattern is now pinned for **every CLI subcommand** (US3.d-1 T-B2 compliance).
-
-Example from `harness::info::run`:
-```rust
-pub fn run(args: HarnessInfoArgs, scope: &ResolvedScope, paths: &Paths, mode: Mode) -> Result<(), TomeError> {
-    let outcome = assemble(args, scope, paths)?;
-    output::write_json(mode, &outcome)?;
-    Ok(())
-}
-```
-
-Applied to `workspace::info::run`, `workspace::list::run`, `harness::list::run`, and all CLI commands added in Phase 4 US3+.
-
-### Helper Visibility Promotion (Phase 3+)
-
-When two surfaces (e.g., `tome status` + `tome doctor`) must report the same value, promote the shared helper from `private` to `pub` rather than duplicating compute:
-
-```rust
-pub fn check_model(paths, embedder, verify) -> ModelHealth { /* ... */ }
-// Called by both status and doctor
-```
-
-### Content-Addressed Shared Resources with Reference Counting (Phase 3+)
-
-When an on-disk resource is shared across scopes (e.g., catalog clone cache), build a reference-count lookup by enumerating every scope that could reference the URL:
-
-```rust
-let refs = catalog::store::reference_count(url, paths) -> Vec<Scope>;
-if refs.is_empty() {
-    fs::remove_dir_all(&cache_dir)?;
-}
-```
-
-Prevents dangling references when scopes are deleted. TOCTOU is unlocked (benign race with other removes).
-
-### Reuse Existing Closed-Set Variants (Phase 3+)
-
-When a new failure mode maps semantically to an existing `TomeError` variant + exit code, prefer reuse over a dedicated variant. Trade-off: slightly off-message Display (e.g., `CatalogAlreadyExists("workspace at /path/.tome")`). Benefit: zero enum churn, stable exit codes.
-
-Example: "workspace already initialised" reuses `CatalogAlreadyExists` (code 4) per the contract's explicit permission.
-
-### Optional-Registry Append (Phase 3+)
-
-For opt-in tracking surfaces, write a helper like `inventory::append_if_registry_exists(path, item)` that no-ops when the registry file is absent:
-
-```rust
-pub fn append_if_registry_exists(path: &Path, item: &str) -> Result<(), TomeError> {
-    if !path.exists() {
-        return Ok(());  // Registry not yet created; skip
-    }
-    // Append with dedup by exact-string match
-}
-```
-
-User touches the file once to opt in; subsequent operations append.
-
-### Workspace Name as Opaque Value (Phase 4)
-
-When threading workspace identity, pass `&Scope` (which wraps `WorkspaceName`) rather than loose `&str`:
-
-```rust
-pub fn resolve_plugin_dir(id: &PluginId, scope: &Scope, config: &Config) -> Result<PathBuf, TomeError>
-```
-
-Provides compile-time safety: you can't accidentally pass `"global"` as a string and expect it to be validated.
+**Pattern**: When a hard-coded value must never be X, use defensive runtime check PLUS automated regression test.
 
 ## Git Conventions
 
@@ -634,35 +639,48 @@ Provides compile-time safety: you can't accidentally pass `"global"` as a string
 
 Format: `type(scope): subject`
 
-| Type | Usage |
-|------|-------|
-| feat | New feature |
-| fix | Bug fix |
-| docs | Documentation |
-| style | Formatting (not code style violations) |
-| refactor | Code restructure |
-| test | Adding tests |
-| chore | Maintenance |
+| Type | Usage | Example |
+|------|-------|---------|
+| feat | New feature | `feat(doctor): --fix handlers for Phase 4` |
+| fix | Bug fix | `fix(doctor): US5 reviewer-flagged fixups` |
+| docs | Documentation | `docs(codebase): refresh after US5` |
+| test | Test additions | `test(doctor_p4): per-subsystem coverage` |
+| refactor | Code restructure | (minimize; only when necessary) |
+| chore | Maintenance | Dependency updates, tooling |
 
-Enforced by `cocogitto` in `.githooks/commit-msg`. Use `git commit --no-verify` only with explicit justification in the message body.
+Enforced by `cocogitto` in `.githooks/commit-msg`. Use `git commit --no-verify` only with explicit justification in message body.
 
-### Branch Naming
+### Branching
 
-Trunk-based; short-lived branches off `main`. No formal requirement, but convention is descriptive.
+- **Trunk-based**: Short-lived feature branches off `main`, deleted after merge.
+- **PR size**: ~400 lines or 2 modules as soft cap. Keeps review tractable.
 
-### PR Size
+## Dependency Boundaries
 
-Soft cap of ~400 lines or 2 modules per PR to keep reviews focused.
+### Crate Feature Flags
+
+- `serde_json/preserve_order` — globally enabled for order-preserving JSON
+- `toml_edit` — scoped to `src/harness/mcp_config.rs` only
+- Phase 3: `tokio`, `rmcp` scoped to `src/mcp/` only; enforced by `tests/sync_boundary.rs`
+- Phase 4: `llama-cpp-2` scoped to `src/summarise/llama.rs`; exact-pinned at `=0.1.146` (upstream breaks C ABI on every minor)
+
+### Not Used
+
+- `tokio` outside `src/mcp/` (sync codebase discipline)
+- `libgit2` / `git2` (shell out to system `git`)
+- `directories` crate (replaced by `std::env` in Phase 4 F2)
+- `atty`, `colored`, `lazy_static`, `once_cell` (not needed)
 
 ---
 
 ## What Does NOT Belong Here
 
-- Test strategies → TESTING.md
-- Security practices → SECURITY.md
-- Architecture decisions → ARCHITECTURE.md
-- Technology choices → STACK.md
+- Test strategies → `TESTING.md`
+- Security practices → `SECURITY.md`
+- Architecture decisions → `ARCHITECTURE.md`
+- Technology choices → `STACK.md`
 
 ---
 
-*This document defines HOW to write code. Update when conventions change. Last refreshed 2026-05-26 against Phase 4 / US4-complete source (862 passing tests, 16 ignored, 117 suites).*
+*This document defines HOW to write code. Update when conventions change or new patterns stabilize.*
+*Last refreshed 2026-05-26 against Phase 4 / US5-complete source (916 tests passing, 125 suites).*

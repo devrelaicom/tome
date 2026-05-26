@@ -66,12 +66,15 @@ tome/
 │   │   ├── remove.rs                   # Phase 4 NEW: Workspace removal with 5-step cascade (US2)
 │   │   └── sync.rs                     # Phase 4 NEW: Central RULES.md sync to projects (US2)
 │   │
-│   ├── doctor/                         # Diagnostic + auto-repair (Phase 3 US4)
+│   ├── doctor/                         # Diagnostic + auto-repair (Phase 3 US4 + Phase 4 US5)
 │   │   ├── mod.rs                      # assemble_report + re_assemble entry
-│   │   ├── checks.rs                   # check_catalogs, check_index, check_drift
-│   │   ├── harness_detect.rs           # Probe ~/.claude/, ~/.codex/, ~/.cursor/, etc.
-│   │   ├── report.rs                   # DoctorReport type definition
-│   │   └── fixes.rs                    # apply + auto-fix dispatch (subsystem routing)
+│   │   ├── checks.rs                   # check_catalogs, check_index, check_drift, check_workspace_registry
+│   │   ├── harness_detect.rs           # Probe ~/.claude/, ~/.codex/, ~/.cursor/, ~/.gemini/, ~/.opencode/
+│   │   ├── report.rs                   # DoctorReport + Subsystem (typed 11-variant enum) + SubsystemHealth
+│   │   ├── fixes.rs                    # apply + apply_one (subsystem routing) + per-subsystem repair handlers
+│   │   ├── binding.rs                  # Phase 4 US5 NEW: check_binding (T366) — marker well-formedness + RULES.md drift
+│   │   ├── harness_integration.rs      # Phase 4 US5 NEW: check_harness_integration (T367) — per-harness rules/mcp checks
+│   │   └── orphan_cleanup.rs           # Phase 4 US5 NEW: cleanup_stale_staging_dirs (FR-410) — 1-hour age gate
 │   │
 │   ├── harness/                        # Phase 4: Per-harness trait + sync orchestrator + composition
 │   │   ├── mod.rs                      # HarnessModule trait, SUPPORTED_HARNESSES registry
@@ -137,7 +140,7 @@ tome/
 │   │   │   ├── remove.rs               # `tome harness remove <name> [--scope]` — delete from settings + trigger regenerate
 │   │   │   ├── info.rs                 # `tome harness info` — per-harness details + detection
 │   │   │   └── sync.rs                 # `tome harness sync [--force]` — reconcile filesystem
-│   │   ├── doctor.rs                   # `tome doctor [--fix] [--verify]`
+│   │   ├── doctor.rs                   # `tome doctor [--fix] [--verify] [--force]` (US5 adds force flag)
 │   │   └── mcp.rs                      # `tome mcp` entry point
 │   │
 │   ├── presentation/                   # Output formatting + TUI
@@ -150,7 +153,7 @@ tome/
 │   │
 │   ├── util/                           # Phase 4: Shared utilities
 │   │   ├── mod.rs                      # Public API exports
-│   │   └── atomic_dir.rs               # Atomic directory landing (tempfile + rename)
+│   │   └── atomic_dir.rs               # Atomic directory landing (tempfile + rename); STAGING_PREFIX constant (FR-410)
 │   │
 │   └── mcp/                            # MCP server (async island, Phase 3+)
 │       ├── mod.rs                      # Sync entry point: run()
@@ -175,8 +178,8 @@ tome/
 │   ├── workspace_*.rs                  # Workspace info/init/binding/sync/list/rename/remove tests (US1–US2)
 │   ├── harness_*.rs                    # Phase 4 US3: Harness list/use/remove/info/sync/composition tests
 │   ├── summariser_*.rs                 # Phase 4 US4: Summariser triggers, forward progress, cache, registry tests
+│   ├── doctor*.rs                      # Phase 4 US5: Doctor assembly + fixes + binding + harness integration (T366/T367) + orphan cleanup (T370)
 │   ├── mcp_*.rs                        # MCP server lifecycle + tools + log rotation + tool description (US4.b)
-│   ├── doctor.rs                       # Doctor assembly + fixes + harness detect + binding subsystem
 │   ├── exit_codes.rs                   # Exit code matrix validation
 │   ├── manifest_strictness.rs          # Strict/lenient parsing guards
 │   ├── atomicity.rs                    # Interrupt-injection tests (SIGINT mid-op)
@@ -184,7 +187,7 @@ tome/
 │   ├── schema_migration_e2e.rs         # Forward migration via MIGRATIONS_OVERRIDE
 │   ├── sync_boundary.rs                # Structural test: no async outside src/mcp/
 │   ├── common/
-│   │   ├── mod.rs                      # Test utilities (HOME_MUTEX, HarnessModulesGuard, fixtures)
+│   │   ├── mod.rs                      # Test utilities (HOME_MUTEX, HarnessModulesGuard, SummariserOverrideGuard, fixtures)
 │   │   └── stub_*.rs                   # Stub implementations for test injection
 │   └── fixtures/
 │       └── sample-plugin-catalog/      # Real plugin tree for integration tests
@@ -224,13 +227,13 @@ tome/
 │   │   ├── data-model.md
 │   │   ├── contracts/
 │   │   └── quickstart.md
-│   └── 004-phase-4-refactor-harnesses/       # Phase 4 (F1–F11 shipped; US1–US4 shipped)
+│   └── 004-phase-4-refactor-harnesses/       # Phase 4 (F1–F11 + US1–US5 shipped; Polish phase pending)
 │       ├── spec.md
 │       ├── plan.md
 │       ├── research.md (19 R-decisions)
-│       ├── data-model.md (schema v2, Scope reshape, HarnessModule, Summariser, settings layers)
-│       ├── contracts/ (13 contracts: paths-and-layout, harness-modules, settings-composition, sync-algorithm, workspace-commands, summariser, etc.)
-│       ├── retro/ (P2.md: F1–F11; P3.md: US1; P4.md–P5.md: US2–US3; P6.md–P7.md: US4)
+│       ├── data-model.md (schema v2, Scope reshape, HarnessModule, Summariser, settings layers, Subsystem typed dispatch, ProjectBindingState)
+│       ├── contracts/ (13+ contracts: paths-and-layout, harness-modules, settings-composition, sync-algorithm, workspace-commands, summariser, doctor, doctor-extensions-p4, etc.)
+│       ├── retro/ (P2.md: F1–F11; P3.md: US1; P4.md–P5.md: US2–US3; P6.md–P7.md: US4; P8.md+: US5)
 │       └── quickstart.md
 │
 ├── PRDs/                               # Product requirement documents
@@ -254,7 +257,7 @@ tome/
 ├── build.rs                            # sqlite-vec C extension compilation
 ├── CONSTITUTION.md                     # v1.3.0 — constraints + trade-offs (Phase 4 §Paths amendment)
 ├── CLAUDE.md                           # Project context for Claude Code
-└── CHANGELOG.md                        # Version history (v0.1.0–v0.3.0, Phase 4 in flight)
+└── CHANGELOG.md                        # Version history (v0.1.0–v0.3.0+, Phase 4 in flight)
 ```
 
 ## Key Directories
@@ -271,11 +274,26 @@ tome/
 | `harness/` | Phase 4: Harness abstraction + sync | `mod.rs` (trait), 5 harness impls, `sync.rs`, `rules_file.rs`, `mcp_config.rs` |
 | `settings/` | Phase 4: Layered composition | `parser.rs`, `resolver.rs` (composition engine), `edit.rs` |
 | `summarise/` | Phase 4 US4: Workspace summariser | `llama.rs`, `stub.rs`, `prompts.rs`, `trigger.rs`, `registry.rs` |
-| `doctor/` | Health check + auto-repair | `checks.rs`, `fixes.rs`, `harness_detect.rs` |
+| `doctor/` | Phase 4 US5: Health check + auto-repair | `checks.rs`, `fixes.rs`, `binding.rs`, `harness_integration.rs`, `orphan_cleanup.rs` |
 | `commands/` | CLI subcommand entry points | Per-command modules + dispatchers |
 | `presentation/` | Output formatting + TUI | `tables.rs`, `prompt.rs`, `colour.rs` |
 | `util/` | Shared utilities | `atomic_dir.rs` (tempfile + rename) |
 | `mcp/` | Async MCP server (Phase 3+) | `runtime.rs`, `server.rs`, `tools/`, `tool_description.rs` (US4.b) |
+
+### `src/doctor/` — Diagnostics & Repair (Phase 4 / US5)
+
+Phase 4 / US5 promotes doctor from a Phase 3 subsystem (models/index/drift/catalog) to a comprehensive whole-system health surface with typed subsystem dispatch and auto-repair framework.
+
+| File | Purpose |
+|------|---------|
+| `mod.rs` | `assemble_report` + `re_assemble` entry points |
+| `checks.rs` | Phase 3: `check_catalogs`, `check_index`, `check_drift`; Phase 4: `check_workspace_registry` |
+| `report.rs` | Phase 4 US5: `DoctorReport` struct; typed `Subsystem` enum (11 variants) with custom Ser/Deser wire strings; `SubsystemHealth` enum (5 variants); `ProjectBindingState`; `RulesCopyState` enum (4 variants: Match/Missing/Drift/SourceMissing) |
+| `binding.rs` | Phase 4 US5 NEW (T366): `check_binding()` — project marker well-formedness check + workspace registry membership + RULES.md drift via byte-compare |
+| `harness_integration.rs` | Phase 4 US5 NEW (T367): `check_harness_integration()` — per-harness rules-file health (standalone vs block-in-file) + MCP-config health (Tome-owned vs user-authored); respects `HARNESS_MODULES_OVERRIDE` |
+| `orphan_cleanup.rs` | Phase 4 US5 NEW (T370): `cleanup_stale_staging_dirs()` — sweep `.tome.tmp.*` dirs older than 1 hour from `<root>/workspaces/` + every bound project parent; FR-410 age gate |
+| `fixes.rs` | `apply()` per-fix dispatch + `apply_one()` per-subsystem handlers; Phase 4 US5: R-M2 harness sync coalescing, S-M2 user-owned MCP override gate, C-M3 single-project sync for BindingRulesCopy, S-M4 cache-path safety invariant |
+| `harness_detect.rs` | Unchanged; probe five well-known harness dirs |
 
 ### `src/harness/` — Harness Module Details
 
@@ -283,7 +301,7 @@ Phase 4 / US3 adds complete harness command surface (6 subcommands) backed by pr
 
 | File | Purpose |
 |------|---------|
-| `mod.rs` | `HarnessModule` trait, `SUPPORTED_HARNESSES` registry, `MCP_CONFIG_KEY` static, test injection hook (`HARNESS_MODULES_OVERRIDE`) |
+| `mod.rs` | `HarnessModule` trait, `SUPPORTED_HARNESSES` registry, `MCP_CONFIG_KEY` static, test injection hook (`HARNESS_MODULES_OVERRIDE`), `with_effective_modules` helper |
 | `claude_code.rs` | Claude Code harness: block-in-file rules, JSON MCP config (per-project), description + detection |
 | `codex.rs` | Codex harness: block-in-file rules, TOML MCP config (global), description + detection |
 | `cursor.rs` | Cursor harness: standalone rules file, JSON MCP config (per-project), description + detection |
@@ -291,7 +309,7 @@ Phase 4 / US3 adds complete harness command surface (6 subcommands) backed by pr
 | `opencode.rs` | OpenCode harness: block-in-file rules (inline strategy), JSON MCP config (per-project), description + detection |
 | `rules_file.rs` | Block-in-file + standalone strategies, atomic write helpers, `<!-- tome:begin/end -->` marker management, `@` include directive handling |
 | `mcp_config.rs` | Read/write helpers for JSON (preserve_order) + TOML (toml_edit), strict/lenient boundaries |
-| `sync.rs` | Sync orchestrator: resolve effective harness list, dispatch per-harness writes, dedup shared paths, cleanup pass, forward-progress on clash |
+| `sync.rs` | Sync orchestrator: resolve effective harness list, dispatch per-harness writes, dedup shared paths, cleanup pass, forward-progress on clash, FR-403 (per-harness error tracking) |
 | `stub.rs` | `StubHarnessModule` for test injection + parallelism coordination via `HarnessModulesGuard` |
 
 ### `src/settings/` — Settings & Composition Details
@@ -334,9 +352,9 @@ Phase 4 / US3 implements full subcommand dispatcher + production `ScopeProvider`
 | `info.rs` | `tome harness info [--json]` — per-harness detection, targets, source-of-scope annotation |
 | `sync.rs` | `tome harness sync [--force]` — idempotent reconciliation; thin wrapper over `harness::sync::sync_project` |
 
-### `src/mcp/` — MCP Server (Phase 3+ with US4 additions)
+### `src/mcp/` — MCP Server (Phase 3+ with US4/US5 additions)
 
-Phase 4 / US4.b adds runtime tool description composition from cached summaries.
+Phase 4 / US4.b adds runtime tool description composition from cached summaries; US5 interacts read-only with doctor checks.
 
 | File | Purpose |
 |------|---------|
@@ -363,10 +381,10 @@ Phase 4 / US4.b adds runtime tool description composition from cached summaries.
 | `workspace_*.rs` | Workspace info/init/binding/sync/list/rename/remove (US1–US2) | 28 |
 | `harness_*.rs` | Phase 4 US3: Harness list/use/remove/info/sync/composition | 16 |
 | `summariser_*.rs` | Phase 4 US4: Triggers, forward-progress, cache, registry, real models | 7 |
+| `doctor*.rs` | Phase 4 US5: Fixes, binding (T366), harness integration (T367), orphan cleanup (T370) | 5+ |
 | `query.rs` | Query + strict mode + reranking | 1 |
 | `reindex.rs` | Reindex all/per-catalog/per-plugin | 1 |
 | `status.rs` | Status command + health checks | 1 |
-| `doctor.rs` | Doctor assembly + fixes + harness detect + binding | 1 |
 | `mcp_*.rs` | MCP server lifecycle + tools + log + tool description (US4.b) | 8 |
 | `exit_codes.rs` | Exit code matrix validation | 1 |
 | `manifest_strictness.rs` | Strict/lenient parsing guards | 1 |
@@ -374,7 +392,7 @@ Phase 4 / US4.b adds runtime tool description composition from cached summaries.
 | `concurrency.rs` | Two-process index contention | 1 |
 | `schema_migration_e2e.rs` | Forward migration via MIGRATIONS_OVERRIDE | 1 |
 | `sync_boundary.rs` | Structural test: no async outside src/mcp/ | 1 |
-| **Total** | 117 test files, 862 total tests | 117 |
+| **Total** | 125+ test files, 916 total tests | 125+ |
 
 #### Key Test Fixtures
 
@@ -389,7 +407,7 @@ Phase 4 / US4.b adds runtime tool description composition from cached summaries.
 
 | If you're adding... | Put it in... | Pattern |
 |---------------------|--------------|---------|
-| New harness | `src/harness/{name}.rs` + register in `mod.rs` | Impl `HarnessModule` trait (5 methods) |
+| New harness | `src/harness/{name}.rs` + register in `mod.rs` | Impl `HarnessModule` trait (7 methods) |
 | New harness subcommand | `src/commands/harness/{cmd}.rs` | Pattern: `run(args, scope, paths, mode)` + `assemble_*(...)` |
 | New workspace command | `src/commands/workspace/{cmd}.rs` | Pattern: `run(args, scope, paths, mode)` + `assemble_*(...)` or `run_with_deps(...)` |
 | New catalog command | `src/commands/catalog.rs` | Add to existing dispatcher + orchestrator |
@@ -399,8 +417,9 @@ Phase 4 / US4.b adds runtime tool description composition from cached summaries.
 | New workspace scope hook | `src/workspace/` + `src/settings/` | Add to scope resolution + composition |
 | New settings layer | `src/settings/{layer}.rs` | Add type def to `mod.rs`, parser to `parser.rs` |
 | New composition ref type | `src/settings/composition.rs` | Extend `CompositionRef` enum |
-| New diagnostic check | `src/doctor/checks.rs` | Add `pub fn check_*(...)` + classification logic |
+| New diagnostic check | `src/doctor/checks.rs` or `binding.rs` or `harness_integration.rs` | Add `pub fn check_*(...)` + classification logic |
 | Surgical TOML edit | `src/settings/edit.rs` | Add helper using `toml_edit::DocumentMut` |
+| New subsystem (doctor) | `src/doctor/report.rs` | Add variant to `Subsystem` enum + Ser/Deser impl + fix handler to `fixes.rs` |
 | Trigger site (enable/disable/etc.) | `src/commands/{cmd}.rs` or `src/plugin/lifecycle.rs` | After mutation commit, call `regenerate_for_trigger(workspace_name, paths)` |
 
 ### Key Patterns
@@ -427,12 +446,13 @@ pub fn assemble_thing(args: &ThingArgs, scope: &ResolvedScope, paths: &Paths) ->
 
 ```rust
 // src/harness/{name}.rs
-pub static THE_HARNESS: HarnessModule = HarnessModule { ... };
+pub struct TheHarnessModule;
 
-impl HarnessModule for ... {
+impl HarnessModule for TheHarnessModule {
     fn name(&self) -> &'static str { ... }
+    fn description(&self) -> &'static str { ... }
     fn detect(&self, home: &Path) -> bool { ... }
-    fn rules_file_target(&self, home: &Path) -> PathBuf { ... }
+    fn rules_file_target(&self, project_root: &Path) -> PathBuf { ... }
     fn rules_file_strategy(&self) -> RulesFileStrategy { ... }
     fn block_body_style(&self) -> BlockBodyStyle { ... }
     fn mcp_config_path(&self, home: &Path) -> PathBuf { ... }
@@ -466,6 +486,32 @@ crate::summarise::regenerate_for_trigger(scope.scope.name(), &paths)?;
 // ModelMissing is silent no-op; other failures exit 24
 ```
 
+#### Doctor Subsystem Dispatch Pattern (Phase 4 / US5)
+
+```rust
+// src/doctor/report.rs — type-safe subsystem dispatch via Subsystem enum
+pub enum Subsystem {
+    Embedder,
+    Reranker,
+    Index,
+    Drift,
+    Catalog(String),
+    Schema,
+    Summariser,
+    Binding,
+    BindingRulesCopy,
+    HarnessRules(String),
+    HarnessMcp(String),
+}
+
+// src/doctor/fixes.rs — exhaustive match on enum
+match &fix.subsystem {
+    Subsystem::Embedder => repair_model(...),
+    Subsystem::HarnessMcp(name) => repair_harness_sync_with(...),
+    // ...
+}
+```
+
 #### Test Fixture Pattern
 
 ```rust
@@ -491,7 +537,7 @@ impl HomeGuard {
 }
 ```
 
-#### Test Summariser Injection Pattern (Phase 4 US4)
+#### Test Summariser Injection Pattern (Phase 4 / US4)
 
 ```rust
 // tests/summariser_*.rs
@@ -506,6 +552,22 @@ fn summariser_trigger_with_stub() -> Result<(), Box<dyn Error>> {
     // trigger code path sees SUMMARISER_OVERRIDE, uses stub instead of LlamaSummariser
     // guard drops at end of test, clearing the slot
 
+    Ok(())
+}
+```
+
+#### Test Harness Module Override Pattern (Phase 4 / US3 + US5)
+
+```rust
+// tests/harness_*.rs or tests/doctor*.rs
+use tome::harness::HarnessModulesGuard;
+
+#[test]
+fn test_with_stub_harness() -> Result<(), Box<dyn Error>> {
+    let guard = HarnessModulesGuard::install(vec![/* stub modules */]);
+    // During test, HARNESS_MODULES_OVERRIDE is populated
+    // with_effective_modules() + lookup() see the override
+    // guard drops at end of test
     Ok(())
 }
 ```

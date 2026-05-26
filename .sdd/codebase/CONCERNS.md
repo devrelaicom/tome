@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26 (Phase 4 / US4 completed; all 4 blockers + 9 majors applied in PR #97)
+> **Last Updated**: 2026-05-26 (Phase 4 complete; US5.c-1 shipped 10 majors + 1 blocker in PR #101; US5.c-2 closes Phase 4)
 
 ## Technical Debt
 
@@ -21,13 +21,13 @@ Items to address when working in the area:
 
 | ID | Area | Description | Impact | Effort | Mitigation | Status |
 |----|------|-------------|--------|--------|-----------|--------|
-| TD-010 | `src/embedding/download.rs` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner in both `plugin enable` and `models download`; enhancement for polish pass. Phase 4 Qwen download (~400 MB) makes this more urgent; tracked in F6 | Phase 4 F6 uses indeterminate spinner; upgrade in polish or if time permits |
-| TD-011 | `src/index/migrations.rs` (Phase 3 F7 + US5) | Schema-migration framework implementation complete; zero registered migrations shipped | Testing coverage | Low | Framework landed in Phase 3 Foundational F7 + US5. Phase 4 US adds first real `Migration` rows (v1→v2 structural migration); e2e test via `MIGRATIONS_OVERRIDE` injection verified in Phase 3 US5 | Phase 4 (in progress) |
+| TD-010 | `src/embedding/download.rs` + `src/summarise/` | No byte-progress callback for model downloads | UX | Low | Currently wrapped in indeterminate spinner in both `plugin enable` and `models download`; Qwen (~400 MB) makes this more urgent; tracked in F6 / polish | Phase 4 F6 uses indeterminate spinner; upgrade in polish or Phase 5+ |
+| TD-011 | `src/index/migrations.rs` (Phase 3 F7 + US5) | Schema-migration framework implementation complete; zero registered migrations shipped | Testing coverage | Low | Framework landed in Phase 3 Foundational F7 + US5. Phase 4 ships first real `Migration` rows (v1→v2 structural migration); e2e test via `MIGRATIONS_OVERRIDE` injection verified in Phase 3 US5 | Phase 4 (in progress) |
 | TD-012 | `src/mcp/preflight.rs` (Phase 3 F8) | MCP startup pre-flight runs SHA-256 over primary embedder (~66 MB) at every startup | Startup latency | Low | Acceptable for long-running server; cold-cache startup may see latency. Consider `--verify` flag on `tome status` to skip SHA-256 on non-suspect runs. Defer unless profiling shows impact | Acceptable design |
 | TD-013 | Phase 3 US1 testing (T088, T093–T095) | Manual verification pending: real BGE models + live harness for SC-001/SC-002 coverage | Integration testing | High | Three categories: (1) happy-path search_skills/get_skill returns (T092 partial via `mcp_server.rs`), (2) MCP protocol purity (T093), (3) latency budget (T094 p50<300ms, p99<600ms), (4) SIGINT graceful shutdown (T095). Tracked in `retro/P3.md`. **Status**: T088 deferred pending developer access to real BGE models for live container/harness testing | Phase 5+ / Developer pass |
 | TD-014 | `src/mcp/state.rs` (Phase 3 F8) | McpState embedder/reranker seed exposure for test integration | Test isolation | Medium | Handlers derive seeds from `state.embedder_entry.name/version`, hard-coded to MODEL_REGISTRY entries. Tests can't bootstrap index with stub seeds + use handlers without tripping drift detection. Refactor `McpState` to carry `embedder_seed` / `reranker_seed` directly. Est. 1 hour, defer to post-Phase 4 | Post-Phase 4 |
 | TD-015 | Error code documentation drift | Contract vs. production code discrepancy on "Index DB missing" | Documentation | Low | Contract listed exit 35 for "Index DB missing" but production surfaces exit 60 (`McpStartupFailed`). Resolved in Phase 3 Polish PR #54; updated contract | Resolved Phase 3 |
-| TD-016 | `src/workspace/init.rs` (Phase 3 US2) | `.tome.old/` orphan cleanup on crash between rename-aside and rename-in | Recovery cleanup | Low | If `--force` rename-in fails after moving old `.tome/` to `.tome.old/`, rollback restores the old state. But if a crash occurs between rename-aside and rename-in (before rollback logic), `.tome.old/` is left orphan. Phase 4 doctor extensions (US5) should surface and offer cleanup. Currently documented in contract as a known limitation (FR-M-WKS-2) | Phase 4 US5 doctor --fix |
+| TD-016 | `src/workspace/init.rs` (Phase 3 US2) | `.tome.old/` orphan cleanup on crash between rename-aside and rename-in | Recovery cleanup | Low | If `--force` rename-in fails after moving old `.tome/` to `.tome.old/`, rollback restores the old state. But if a crash occurs between rename-aside and rename-in (before rollback logic), `.tome.old/` is left orphan. Phase 4 doctor extensions (US5) should surface and offer cleanup. Currently documented in contract as a known limitation (FR-M-WKS-2) | Phase 4 US5 doctor orphan-cleanup (C-M2 + US5.c-1) |
 | TD-017 | `src/catalog/store.rs::reference_count` (Phase 3 US3) | Catalog cache TOCTOU window between pre-check and `remove_dir_all` | Concurrency safety | Low | Two processes racing `tome catalog remove` may both observe empty refs and both call `remove_dir_all` (benign: one wins, one no-ops). Worse: process A observes empty, process B adds URL before A deletes clone → dangling reference (recovered by `tome catalog update` re-clone). Documented design; same profile as Phase 9 cascade pre-check. Phase 4: refcounting moved to DB table; TOCTOU semantics unchanged but now under advisory lock (FR-366) | Phase 4 F11b (DB table + lock) |
 | TD-018 | `src/doctor/harness_detect.rs` (Phase 3 US4) | Harness-detected list is privacy-sensitive | Privacy | Low | Presently local-only (never transmitted); document explicitly. Review at design time if any downstream feature proposes report transmission (e.g., crash reporting, bug-filing UI). Recommend opt-in privacy gate before enabling network transmission | Local-only; monitor |
 | TD-019 | Phase 4 Config struct legacy field | `Config::catalogs: BTreeMap<String, CatalogEntry>` unused post-F11b | Code cleanup | Low | F11b moved catalog enrolment to central DB; the field is never written. Excision is a follow-up cleanup PR (low urgency) | Phase 4 Polish |
@@ -35,6 +35,7 @@ Items to address when working in the area:
 | TD-040 | Logging verbosity | Current `-v` / `-vv` mapping is fine; `TOME_LOG` env filter is undocumented | UX | Low | — | Acceptable |
 | TD-050-US4 | `src/summarise/` (Phase 4 US4) | Byte-progress callback for ~400 MB Qwen model download (TD-010 amplified for summariser) | UX | Low | Phase 4 F6 uses indeterminate spinner; upgrade to byte-progress callback in Phase 4 polish if time permits | Phase 4 Polish tracking |
 | TD-051-US4 | `src/summarise/llama.rs` | `LlamaSummariser::new` verifies SHA-256 + loads model on every fresh instantiation (no per-process caching across multiple `new()` calls) | Startup latency (rare) | Low | Per-instantiation load is correct for type semantics; process-global singleton `LlamaBackend` is cached. If a future feature creates multiple `LlamaSummariser` instances in sequence without reuse, per-instance load overhead would be measurable. Current triggers create one per regen call; acceptable | Acceptable design |
+| TD-052-US5 | `src/doctor/orphan_cleanup.rs` (Phase 4 US5) | Orphan staging-directory cleanup via `remove_dir_all` with TOCTOU mtime gating | Concurrent-writer race | Low | STAGING_PREFIX + 1h mtime + symlink-skip + `is_dir()` check + 0o700 perms compose correctly; documented TOCTOU semantics benign per `src/doctor/binding.rs::compare_rules` comment (S-M1 deferral) | Documented trade-off; acceptable |
 
 ### Low Priority
 
@@ -59,8 +60,7 @@ Nice-to-have improvements:
 | SEC-002 | Model-download UX (Phase 2–4) | User declines model-download prompt (e.g., in `tome plugin enable`) → returns exit code (ambiguous). Semantically different from system interrupt | Medium | Lock down user-decline vs. system-interrupt distinction in future iteration | Documented |
 | SEC-003 | Interactive disable (Phase 5+) | User declining disable confirmation returns 0 (no error); semantically different from user-decline in other prompts | Low | Currently consistent with interactive flow semantics; monitor for UX confusion | Documented |
 | SEC-010 | Credential scrubber (Phase 1–4) | Regex-based scrubbing is pattern-based, not semantic; exotic credential formats may leak (e.g., GitLab private tokens with non-standard delimiters) | Medium | Current rules (R-8 + PR #36 widening for RFC-3986 schemes + PR #54 x-amz-* params) cover common patterns. Add integration tests against real Git helper output. Monitor GitHub issues | Ongoing / Last updated Phase 3 Polish PR #54 |
-| SEC-011 | Phase 4 US4 Qwen model integrity (RESOLVED) | Qwen2.5-0.5B-Instruct GGUF SHA-256 was a placeholder sentinel in F6; real hash landed in US4.d-1 PR #97 (C-B1) | **RESOLVED** | F6 shipped placeholder; US4.d-1 C-B1 swapped real hash `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db` verified 2026-05-26; S-M3 belt-and-braces gate prevents regression; T-guard via `tests/summariser_registry_no_placeholder.rs` | ✅ Resolved PR #97 |
-| SEC-012-US4 | Phase 4 US4 summariser prompt injection (NEW) | Workspace's enabled-plugin descriptions + skill names interpolated into LLM prompts; descriptions from third-party `plugin.json` (lenient parse) | Medium | Trust boundary: documented as acceptable per "user authored which plugins are enabled" posture; S-M1 deferral — documentation only, no code change needed. Production prompt construction avoids shell/code-generation context; length-capped outputs + non-empty validation | By design / Documented |
+| SEC-012-US4 | Phase 4 US4 summariser prompt injection (RESOLVED) | Workspace's enabled-plugin descriptions + skill names interpolated into LLM prompts; descriptions from third-party `plugin.json` (lenient parse) | **RESOLVED** | Trust boundary: documented as acceptable per "user authored which plugins are enabled" posture; prompt construction avoids shell/code-generation context; length-capped outputs + non-empty validation | ✅ By design / Documented in PR #97 |
 | SEC-013-US4 | Phase 4 US4 MCP tool description broadcast (NEW) | Cached workspace short summary embedded in MCP tool description broadcast to every connected harness client | Medium | Read once at startup; in-memory cached until `LlamaSummariser` drops; summary length-capped (SHORT: 800 chars per FR-425) + non-empty validated. Do not include sensitive data in plugin descriptions (governance boundary) | By design / Documented |
 
 ### Low Risk
@@ -87,7 +87,7 @@ Code areas that are brittle or risky to modify:
 |------|-------------|-------------|
 | `src/catalog/git.rs::scrub_credentials` | Regex patterns are order-dependent; adding a rule can change ordering semantics | Add test case to `tests/scrubbing.rs` for every rule addition; verify no overlaps with existing rules. Phase 3 Polish PR #36 widened URL_LOGIN to RFC-3986 schemes; PR #54 extended to AWS presigned params |
 | `src/catalog/manifest.rs::validate_source` | Path canonicalization behavior differs across platforms (symlinks, case sensitivity); one test failure can indicate subtle cross-platform issue | Test on both Linux and macOS (CI covers both); `tests/path_validation.rs` has Unix-specific symlink tests |
-| `src/catalog/store.rs::write_atomic` (Phase 4 US2.d-1 + US4) | Unified atomic-write surface now used by all workspace/project/harness/settings file writers; mode preservation + symlink refusal are critical security boundaries | Do not remove mode-preservation or symlink-refusal checks; test with `tests/security_hardening.rs` on every platform. Verify callers use this surface exclusively |
+| `src/catalog/store.rs::write_atomic` (Phase 4 US2.d-1 + US4 + US5) | Unified atomic-write surface now used by all workspace/project/harness/settings/doctor file writers; mode preservation + symlink refusal are critical security boundaries | Do not remove mode-preservation or symlink-refusal checks; test with `tests/security_hardening.rs` on every platform. Verify callers use this surface exclusively |
 | `src/embedding/download.rs::download_model` | HTTP stream and checksum verification are separate; cleanup closure ensures both failure paths clean `.partial/` (lines 77–87) | Pipeline closure must wrap full download→verify→rename chain; any new step must be inside closure to maintain atomicity guarantee |
 | `src/presentation/prompt.rs::require_terminal()` | TTY check runs on both stdin and stdout; must catch non-TTY in both dimensions to prevent prompt corruption via piped output | Always call `require_terminal()` at flow entry before any prompt; test with `Command::new()` (no pty) to verify short-circuit |
 | `src/commands/plugin/{enable,disable,interactive}.rs` | Non-TTY pointer-message-then-error pattern appears at 3+ sites | Pattern consolidation would yield cleaner code; worth folding in when 4th occurrence appears |
@@ -121,135 +121,47 @@ Code areas that are brittle or risky to modify:
 | `src/workspace/regen_summary.rs` (Phase 4 US4) | Generates short + long summaries via `LlamaSummariser::summarise`; length-window warn emitted at 800/2500 char thresholds; values cached in `settings.toml` `[summaries]` section; RULES.md rewritten atomically | Do not remove length-window enforcement (FR-425); do not relax to non-atomic write. Test warn via custom `tracing-subscriber::Layer` in `tests/workspace_regen_summary.rs`. Verify regen happens inside advisory lock (other sections preserved via `toml_edit::DocumentMut`) |
 | `src/commands/catalog/remove.rs::cascade_after_disable` (Phase 4 US4, PR #97 R-M6) | `tome catalog remove --force` now calls `regenerate_for_trigger` after cascade-disable completes (outside advisory lock; regen takes its own) | Do not move regenerate inside the cascade lock (would block concurrent operations unnecessarily). Mirrors plugin-disable pattern. Test via integration tests (catalog_remove_cascade extends to cover regen trigger) |
 | `src/embedding/registry.rs + src/summarise/registry.rs` (Phase 4 US4) | Both registries carry model metadata + checksums; `SUMMARISER_SHA256` / `SUMMARISER_SIZE_BYTES` pinned to real Qwen hash (US4.d-1 C-B1); test guards prevent drift between the two sources | Critical: do not update one source without updating the other. `tests/summariser_registry_no_placeholder.rs` catches placeholder regressions. On model bump, verify real hash before pinning; do not use placeholders in production. Test via `tests/summariser_registry_no_placeholder.rs` (3 tests) |
+| `src/doctor/mod.rs + src/doctor/fixes.rs` (Phase 4 US5, PR #99–#101) | Five repair classes: embedder/reranker/catalog/binding/summariser; read-only diagnostic checks; repairs under advisory lock where state-mutating; graceful collapse on SchemaTooNew (C-M2 fix) | Critical: `assemble_report` never crashes per FR-561; check_index uses graceful unwrap_or_else. Do not revert to error propagation. Repairs coalesce harness sync (R-M2 fix) — do not run per-suggestion. User-owned MCP override filtered by active fix list (S-M2 fix) — do not blanket-rewrite | Do not modify without full concurrency audit + FR-561 compliance check |
+| `src/doctor/binding.rs::compare_rules` (Phase 4 US5, PR #99–#101 R-M5) | Distinguishes "workspace source RULES.md absent" from "project copy absent" via typed enum; absence of workspace source prevents infinite-loop attempt on `--fix` | Do not collapse both cases into one enum arm; do not attempt to copy when source is absent. Test both paths explicitly. Surface descriptive message when source is absent | Prevents infinite-loop bug; critical for correctness |
+| `src/doctor/orphan_cleanup.rs` (Phase 4 US5, New) | Orphan staging-directory cleanup via STAGING_PREFIX match + 1h mtime gate + symlink-skip + `is_dir()` check + symmetric parent removal. Composed with advisory lock in doctor flow | STAGING_PREFIX + mtime + symlink-skip + is_dir() compose correctly; never traverse symlinks. Do not remove any component. Test with real `.tome.tmp.*` dirs (cleanup implicit in doctor test flows; orphan tests exercise mtime boundary) | Phase 4 US5 / PR #101 tested; audited by 4 reviewers |
 
-## Deferred Findings from Phase 4 / US1 Review
+## Deferred Findings from Phase 4 / US5 Review (PR #99–#101)
 
-Phase 4 / US1 audit produced 3 blockers + 25 majors. Three blockers applied in PR US1.d-2a (R-B1 UTF-8 validation, T-B1 contract amendment on env preservation, T-B2 sync idempotence test). Nine majors applied in the same PR (R-M1 atomic binding transaction, R-M2 error handling on Inline path read, R-M4 canonicalise error handling, R-M6 --global doc scrub, R-M7 --workspace override, C-N1 HarnessClash doctor pointer, R-M3 docstring downgrade, S-M3 mode preservation, T-M1/T-M4/T-M7 test additions). Remaining 16 majors deferred to follow-up or US5 doctor polish:
+Phase 4 / US5 audit produced **1 blocker + 21 majors**. **All 1 actionable blocker + 10 selected majors resolved in PR #101** (US5.c-1):
 
-| ID | Category | Disposition |
-|----|----------|-----------|
-| C-M1 | Contract | Multi-harness mixed-style edge case; deferred to US3.c full harness matrix tests |
-| C-M3 | Contract | Temp file mode 0600 vs 0644 contract; resolves via S-M3 mode-preservation fix |
-| R-M5 | Rust | `bind_project` 130-line refactor (ergonomics); deferred to follow-up polish |
-| S-M1 | Security | Unbounded `read_to_string` on third-party files; deferred to dedicated util helper + PR before v0.4 cut |
-| S-M2 | Security | Symlink TOCTOU window; documented as benign; full closure needs `O_NOFOLLOW` open + dirfd rename; deferred to US5 hardening sweep |
-| S-M4 | Security | Harness-owned parent-dir chmod 0700 on Tome-create vs respecting harness convention; design choice deferred |
-| T-M2, T-M3, T-M5, T-M6, T-M8, T-M9, T-M10, T-M11 | Test | 8 test gap items rolled into "us1-test-gap-followups" tracking issue for US2/US3 polish phases |
-| (30+ minors + nits) | Various | Docstring drift, redundant assertions, formatting; bulk-deferred to tracking issue |
-
-See `specs/004-phase-4-refactor-harnesses/review/us1-disposition.md` for full triage.
-
-## Deferred Findings from Phase 4 / US2 Review
-
-Phase 4 / US2 audit produced 4 blockers + 23 majors. All 4 blockers applied in PR US2.d-1 (C-B1 effective-list narrowing for cascade, C-B2 transaction wrapping for rename, C-B3 JSON array bare emit for workspace list, T-B1 toml_edit for marker preservation). Eleven majors applied in US2.d-1 (C-M1/C-M2/C-M4/C-M5 contract alignments, S2-M1/S2-M2 unified atomic-write surface with mode preservation + symlink refusal, S2-M4 chmod 0o700 recovery, T-M1 JSON wire-shape pins, T-M3 cascade test coverage, T-M4/T-M5/T-M6 test gap coverage). Remaining 12 majors deferred to follow-up:
-
-| ID | Category | Disposition |
-|----|----------|--------|
-| R-M1 | Rust | SQL DISTINCT cleanup; cosmetic, deferred |
-| R-M3 | Rust | Init FnOnce clone efficiency; cosmetic, deferred |
-| R-M5 | Rust | Summariser lock held during invocation; performance trade-off, revisit in US4.a when LlamaSummariser ships |
-| R-M6 | Rust | TOCTOU comment binding; defensive, defer to future refactor |
-| R-M7 | Rust | `compute_info` early-return; cosmetic, deferred |
-| R-M8 | Rust | Rename pre-check vs write TOCTOU; small surface, doctor surfaces drift, defer |
-| S2-M3 | Security | Unbounded reads on workspace-owned files (settings.toml, RULES.md, config.toml); mirrors US1 S-M1 deferral; multi-site fix planned for v0.4 polish |
-| T-M2 | Test | Concurrent init/rename/regen tests; pattern established, defer to test-hardening follow-up |
-| (minors + nits) | Various | Docstring drift, formatting; bulk-deferred to tracking issue |
-
-See `specs/004-phase-4-refactor-harnesses/review/us2-disposition.md` for full triage.
-
-## Deferred Findings from Phase 4 / US3 Review (Resolved in PR #92)
-
-Phase 4 / US3 audit produced **6 blockers + 29 majors**. **All 6 blockers + 12 selected majors resolved in PR #92** (US3.d-1):
-
-### Blockers Applied
+### Blocker Applied
 
 | # | Category | Fix | Status |
 |---|----------|-----|--------|
-| **C-B1 + S-M1** | Critical production bypass | `StubScope::new()` replaced by `CentralDbScopeProvider` in `harness::sync::sync_project` | ✅ Resolved PR #92 |
-| **C-B2 + S-M4 + R-M1** | Provider masking errors | `PathsScopeProvider` → `CentralDbScopeProvider` distinguishes workspace-not-found vs. IO errors | ✅ Resolved PR #92 |
-| **C-B3** | Info command incomplete | `harness info` now computes effective list and reports source chain | ✅ Resolved PR #92 |
-| **T-B1** | Test race condition | `HOME_MUTEX` + `HomeGuard` serialises parallel `std::env::set_var("HOME", ...)` calls | ✅ Resolved PR #92 |
-| **T-B2** | Test output never verified | Command run functions refactored to take `out: &mut dyn Write` sink; tests now assert on output | ✅ Resolved PR #92 |
-| **T-B3** | Test override slot races | Per-file `OVERRIDE_MUTEX` added to `harness_skeleton.rs` | ✅ Resolved PR #92 |
+| **T-B1** | Test coverage | Added `tests/doctor_fix_p4.rs::summariser_fix_redownloads_or_documents_env_gate` to cover fifth repair class (embedder/reranker/catalog/binding/summariser) via SummariserOverrideGuard or pre-created placeholder model file | ✅ Resolved PR #101 |
 
-### Majors Applied (12/29)
+### Majors Applied (10/21)
 
 | # | Category | Fix | Status |
 |---|----------|-----|--------|
-| **C-M1** | Contract gap | `EffectiveHarness.source_chain` extended to carry reference strings (`[workspaces.shared]`) | ✅ Resolved PR #92 |
-| **C-M2** | DB membership check missing | `harness list <workspace>` validates central DB membership; exits 13 on unknown | ✅ Resolved PR #92 |
-| **C-M4 + T-M8** | Per-entry validation | Unsupported harness validation moved inside `resolve_list` after parsing each `Include` | ✅ Resolved PR #92 |
-| **C-M5 + R-M2 + S-M2** | Concurrent write race | Advisory lock around `harness use\|remove` read-modify-write window | ✅ Resolved PR #92 |
-| **C-M6** | Multi-block edge case | `write_rules_for_path` correctly handles multi-block-collapse case | ✅ Resolved PR #92 |
-| **R-M3** | Error context wrong | `WorkspaceRefOutsideProject` uses actual scope where `[workspace]` found | ✅ Resolved PR #92 |
-| **R-M8** | Malformed parse fallthrough | `CompositionRef::parse` rejects malformed bracketed refs | ✅ Resolved PR #92 |
-| **T-M1** | FR-447 resolver path untested | New test: `[workspaces.unknown]` → exit 13 via resolver | ✅ Resolved PR #92 |
-| **T-M2** | JSON shape unpinned | Added JSON byte-stability tests for `HarnessBareEntry`, `HarnessInfoOutcome`, etc. | ✅ Resolved PR #92 |
-| **T-M3** | `--force` path untested | New test: `tome harness use --force` exercises FR-502 wiring | ✅ Resolved PR #92 |
-| **T-M5** | CLI thin-wrapper untested | New test: `tome harness sync` against missing project marker → exit 2 | ✅ Resolved PR #92 |
-| **S-M3** | Settings-edit security untested | New tests in `security_hardening.rs`: mode preservation + symlink refusal for `save_settings` | ✅ Resolved PR #92 |
+| **C-M1** | Contract | Emit per-harness `SubsystemHealth::NotApplicable` entries when workspace is global-fallback (no project); distinguishes "no harnesses declared" (empty Vec) from "harnesses declared but outside project" (NotApplicable) | ✅ Resolved PR #101 |
+| **C-M2** | Contract | `check_index` SchemaTooNew gracefully collapses to `IndexHealth::Broken` via `unwrap_or_else`; doctor never crashes per FR-561 | ✅ Resolved PR #101 |
+| **C-M3** | Contract | `repair_binding_rules_copy` now calls new `workspace::sync::sync_one_project` (targets ONE project) instead of `sync_one` (broadcasts workspace); eliminates silent overwrites of sibling projects | ✅ Resolved PR #101 |
+| **R-M1** | Rust | `--force` without `--fix` → exit 2 (Usage error) instead of exit 7 (Io error); validates upfront in `commands/doctor.rs` | ✅ Resolved PR #101 |
+| **R-M2** | Rust | Harness sync deduplicated: collect all `HarnessRules(name)` + `HarnessMcp(name)` suggestions, run `sync_for_project_root` ONCE, clear affected fixes; reduces from 10 redundant passes to 1 | ✅ Resolved PR #101 |
+| **R-M5** | Rust | `binding::compare_rules` now returns typed enum distinguishing "workspace source RULES.md absent" from "project copy absent"; prevents `--fix` infinite-loop | ✅ Resolved PR #101 |
+| **R-M7** | Rust | `repair_catalog` uses `open_read_only` for enrolment lookup; only uses writable handle when deleting cache rows | ✅ Resolved PR #101 |
+| **S-M2** | Security | `--fix --force` filters user-owned harness MCP rewrites to ONLY those with active SuggestedFix entries; no blanket rewrite of every user-owned entry | ✅ Resolved PR #101 |
+| **S-M4** | Security | `repair_catalog::remove_dir_all` now includes `debug_assert!(cache_dir.starts_with(&paths.catalogs_dir))` documenting safety invariant | ✅ Resolved PR #101 |
+| **T-M1** | Test | Added CLI binary test for user-owned-MCP exit 75 + `--fix --force` rewrite exit 0 to `tests/exit_codes_e2e.rs` | ✅ Resolved PR #101 |
 
-### Majors Deferred (17/29)
+### Majors Deferred (11/21)
 
 | # | Category | Reason | Target |
 |----|----------|--------|--------|
-| C-M3 | Contract | Bare's MCP-config heuristic — cosmetic edge case | Tracking issue |
-| C-M7 | Contract | Informational notice differentiation — cosmetic wording | Tracking issue |
-| C-M8 | Contract | Cycle path scope-kind prefix — depends on C-M1 fix (now resolved); revisit naturally | Follow-up |
-| R-M4 | Rust | Post-edit re-snapshot error masks drift — defensive concern | Tracking issue |
-| R-M5 | Rust | Redundant `home_root()` calls — perf cosmetic | Tracking issue |
-| R-M6 | Rust | Typed enum for direct_scopes — superseded by C-M1 + C-B3 fixes | Tracking issue |
-| R-M7 | Rust | Dead `_for_use` aliases — cleanup | Tracking issue |
-| T-M4 | Test | Informational-notice path — pairs with C-M7 deferral | Tracking issue |
-| T-M6 | Test | `remove_last_entry_leaves_empty_array` substring vs. parse — defer tightening | Tracking issue |
-| T-M7 | Test | Cycle-through-`[global]` — small gap | Tracking issue |
-| T-M9 | Test | Idempotence extends to rules/MCP mtimes — extends pattern | Tracking issue |
-| (minors) | Various | Docstring drift, redundant comments, formatting | Tracking issue |
+| R-M3 | Rust | re_assemble doesn't refresh drift — future Schema migration concern; defer until first real Phase 4+ migration arrives | Tracking issue |
+| R-M4 | Rust | Gratuitous clone-then-borrow (`&scope.scope.name().clone()`) — cosmetic | Tracking issue |
+| R-M6 | Rust | Orphan-cleanup TOCTOU window doc note — documentation only | Tracking issue (S-M1) |
+| S-M1 | Security | Re-canonicalisation of workspace_projects.project_path at read time — defensive against future migration / direct DB edit; defer | Tracking issue |
+| S-M3 | Security | Unbounded reads on harness config files (RULES.md, MCP config) — multi-site fix; carries forward from US1.d-2a S-M1 / US2.d-1 S-M3 / US3.d-1 S-M3 deferrals; planned for v0.4 polish | Phase 4 Polish / v0.4 |
+| T-M2/T-M3/T-M4/T-M5/T-M6/T-M7 | Test | Various test gaps (CLI coverage, edge cases, boundary conditions) that don't represent functional regressions | Tracking issue |
 
-See `specs/004-phase-4-refactor-harnesses/review/us3-disposition.md` for full triage.
-
-## Deferred Findings from Phase 4 / US4 Review (Resolved in PR #97)
-
-Phase 4 / US4 audit produced **5 blockers + 21 majors**. **All 4 actionable blockers + 9 selected majors resolved in PR #97** (US4.d-1):
-
-### Blockers Applied
-
-| # | Category | Fix | Status |
-|---|----------|-----|--------|
-| **C-B1** | Placeholder hash regression | Real Qwen2.5-0.5B-Instruct SHA-256 `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db` (verified 2026-05-26) pinned in both `src/embedding/registry.rs` + `src/summarise/registry.rs`; size 491,400,032 bytes | ✅ Resolved PR #97 |
-| **C-B2** | Exit code wrong | Scrubbed stale "exit 20" refs; all summariser failures now route to closed-enum exit 24 (`TomeError::SummariserFailure`) | ✅ Resolved PR #97 |
-| **C-B3 / R-B1** | Length-window drift | Unified `SHORT_MAX_CHARS` (800) + `LONG_MAX_CHARS` (2500) in `src/summarise/mod.rs`; eliminated 100-char drift (long was 2400 in prompts.rs vs 2500 in regen_summary); LONG prompt bumped to match | ✅ Resolved PR #97 |
-| **T-B1** | Trigger coverage zero | Added `tests/summariser_triggers_end_to_end.rs` (2 tests) + `tests/summariser_triggers.rs::model_missing_trigger_is_silent_noop` exercising override slot + trigger paths | ✅ Resolved PR #97 |
-
-### Majors Applied (9/21)
-
-| # | Category | Fix | Status |
-|---|----------|-----|--------|
-| **C-M1** | Prompt format | `format_input_descriptions` no longer prefixes lines with `"- "`; removed contradictory bullet pattern from SHORT prompt | ✅ Resolved PR #97 |
-| **C-M2** | Silent no-op semantics | Contract `summariser.md` now documents "ModelMissing" silent-no-op for trigger callers vs. hard-fail for `regen-summary` (FR-420 corollary) | ✅ Resolved PR #97 |
-| **R-M2** | Registry lookup | `LlamaSummariser::new` uses `summariser_entry()` instead of inline find | ✅ Resolved PR #97 |
-| **R-M6** | Cascade consistency | `tome catalog remove --force` now calls `regenerate_for_trigger` post-cascade (mirrors plugin-disable pattern) | ✅ Resolved PR #97 |
-| **R-M7** | Mutex poison | `backend()` recovers via `PoisonError::into_inner` instead of error bubble | ✅ Resolved PR #97 |
-| **S-M3** | Placeholder gate | `LlamaSummariser::new` belt-and-braces rejects all-zero placeholder with `ModelMissing` (S-M3) | ✅ Resolved PR #97 |
-| **S-M4** | Model caching | `LlamaSummariser` caches loaded `LlamaModel` on `self`; per-call `LlamaContext` eliminates 400 MB per-trigger re-hash | ✅ Resolved PR #97 |
-| **T-M2** | Silent no-op test | `tests/summariser_triggers.rs::model_missing_trigger_is_silent_noop` verifies trigger carve-out | ✅ Resolved PR #97 |
-| **T-M5** | Length-window test | `tests/workspace_regen_summary.rs::regen_summary_long_window_emits_warn_via_layer` captures warn via custom tracing Layer | ✅ Resolved PR #97 |
-
-### Majors Deferred (12/21)
-
-| # | Category | Reason | Target |
-|----|----------|--------|--------|
-| C-M3 | Contract | Qwen context-window size rationale comment; cosmetic, doc-only | Tracking issue |
-| C-M4 | Contract | Reserved token budget discrepancy (plan vs. actual); revisit if Qwen bump planned | Tracking issue |
-| C-M5 | Contract | Top-p vs. temp interaction semantics in SHORT mode; defensive, established | Tracking issue |
-| R-M1 | Rust | Qwen URL const dedup (appears in registry + download); cosmetic, defer | Tracking issue |
-| R-M3 | Rust | Llama-cpp-2 error messages not scrubbed in logs; defer to v0.4 credential scrubber sweep (S-M1 + S2-M3 parallel) | Tracking issue |
-| R-M4 | Rust | `LlamaSampler::chain_simple` sampling order tuning; defer unless perf profiling shows impact | Tracking issue |
-| R-M5 | Rust | `LlamaContext` KV cache size tuning (4096 tokens); acceptable; defer to profiling | Tracking issue |
-| T-M1, T-M3, T-M4, T-M6, T-M7, T-M8 | Test | 6 test edge cases (corner inputs, cross-model consistency, output stability); deferred to v0.4 | Tracking issue |
-| (minors) | Various | Docstring cleanup, comment consistency | Tracking issue |
-
-See `specs/004-phase-4-refactor-harnesses/review/us4-disposition.md` + `us4-findings.md` for full triage.
+See `specs/004-phase-4-refactor-harnesses/review/us5-disposition.md` for full triage.
 
 ## Deprecated Code
 
@@ -269,7 +181,7 @@ Known performance issues:
 | PERF-010 | Cache validation | Manifest is re-parsed on every `show` command; no caching layer | Negligible impact (small files) | Cache not needed; revisit if manifests grow large | Acceptable |
 | PERF-020 | Model download progress | Download wrapped in indeterminate spinner, not byte-progress bar | Poor visibility on large files | Phase 4 F6 defers; enhancement for Phase 4 polish or Phase 5+ (TD-010) | Tracked |
 | PERF-030 | MCP pre-flight timing | SHA-256 over ~66 MB primary embedder file on every startup | Visible startup latency in cold cache | Acceptable for daemon; defer `--verify` optimization to Phase 5+ unless profiling shows impact (TD-012) | Design decision |
-| PERF-040 | Doctor command latency | Catalog enumeration + harness probing on every run (non-cached) | Slower than status; expected for comprehensive diagnosis | By design: status is the narrow fast path (~200 ms); doctor is the broad slower path for troubleshooting | By design |
+| PERF-040 | Doctor command latency | Catalog enumeration + harness probing + orphan cleanup on every run (non-cached) | Slower than status; expected for comprehensive diagnosis | By design: status is the narrow fast path (~200 ms); doctor is the broad slower path for troubleshooting | By design |
 | PERF-050 | Phase 4 Qwen download | Large model file (~400 MB) download wrapped in indeterminate spinner (F6); byte-progress callback deferred | Poor UX visibility during first model fetch | Phase 4 F6 uses indeterminate spinner; upgrade to byte-progress in Phase 4 polish or F6 if time permits (TD-010 / TD-050-US4) | Tracked |
 | PERF-060 | Summariser lock overhead | `workspace regen-summary` holds advisory lock for full LlamaSummariser invocation (many seconds) | Blocks concurrent workspace operations | Acceptable for now; revisit when LlamaSummariser ships in US4.a — `tome catalog update` may need to coexist | R-M5 deferral, tracked |
 | PERF-070-US4 | Summariser model load (US4.d-1 S-M4 fix) | Model load + caching per `LlamaSummariser` instance; per-call context | Eliminated: S-M4 removed ~400 MB per-trigger re-hash by caching model on `self` | Caching verified; `LlamaModel: Send + Sync` upstream holds `Summariser: Send + Sync` bound | ✅ Resolved PR #97 |
@@ -306,6 +218,7 @@ Dependencies that may need attention:
 | `schemars` | 1.x (Phase 3–4) | JSON schema generation for MCP tool inputs; used at compile-time | Monitor for schema correctness issues on MCP tool definitions | Active |
 | `llama-cpp-2` | 0.1.x (Phase 4, minor-pinned) | Summariser inference runtime; C++ static link | Pre-1.0 crate; monitor for API churn; test on every minor bump; CPU-only features enforced; US4 first production use (C-B1 real hash) | Active / Pre-1.0 |
 | `toml_edit` | 0.25.x (Phase 4, minor-pinned) | Comment-preserving TOML edits for harness config + workspace marker preservation | Monitor for breaking changes; no known security issues. Used in critical US2 marker-preservation path (T-B1 fix) and US3 settings-edit (S-M3 fix) | Active |
+| `encoding_rs` | 0.8.x (Phase 4 US4, direct) | Decode llama-cpp-2 token output to UTF-8 | MPL 2.0; no known security issues; used for model output decoding only | Stable |
 
 ## Phase 3 Deferred Items Disposition (Research §R-17)
 
