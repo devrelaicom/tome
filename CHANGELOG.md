@@ -4,6 +4,125 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-05-26
+
+### Phase 4 additions
+
+User-visible
+
+- `tome workspace <subcommand>` — named workspaces with central storage.
+  `init <name>` creates a workspace in `<home>/.tome/workspaces/<name>/`
+  with `settings.toml` + `RULES.md`. `--inherit-global` seeds the new
+  workspace's enrolled catalogs from `global`'s `workspace_catalogs`
+  rows (enablement not copied). `list` reports every workspace with
+  catalog / plugin / skill / bound-project counts. `info [<name>]`
+  carries the per-workspace diagnostic. `rename <old> <new>` rewrites
+  every bound-project marker + the central DB row in one transaction;
+  the workspace directory is renamed atomically. `regen-summary
+  <name>` runs the bundled local summariser and writes the result to
+  `[summaries]` in the workspace's `settings.toml` + propagates the
+  long summary to `RULES.md` + every bound project's marker.
+  `remove <name> [--force]` cascades through bound-project teardown +
+  central DB rows + workspace dir + refcount-clean catalog caches in
+  one advisory-lock window. `sync [<name>]` re-runs the harness
+  integration sweep against every bound project.
+- `tome workspace use <name> [--force] [--json]` — bind the current
+  project to a workspace. Writes `.tome/config.toml` (marker only —
+  pointer, not state) under the central advisory lock. Phase A
+  commits the binding; Phase B runs harness sync without the lock so
+  a slow harness FS doesn't block other Tome writes.
+- `tome harness <subcommand>` — declare harnesses to integrate with.
+  Bare `tome harness` lists the five shipped modules in lex order.
+  `list [<workspace>]` reports the effective harness list per scope
+  with composition source-chain. `use <name> --scope project|workspace|global [--force]`
+  appends `<name>` to the chosen scope's settings file via
+  `toml_edit::DocumentMut` (preserves comments + order) and runs sync
+  if the effective list changes. `remove`, `info`, `sync` mirror the
+  shape. `--force` on `use` overrides developer-owned MCP entries.
+- Bundled local summariser — `qwen2.5-0.5b-instruct` (~400 MB GGUF,
+  SHA-256 verified at use time) via `llama-cpp-2`. Sync inference;
+  the backend singleton is process-global. Triggered automatically by
+  every state-mutating skill operation (plugin enable/disable,
+  reindex with content-hash changes, catalog update, catalog remove
+  --force). FR-385 forward-progress: skill mutation commits BEFORE
+  the summariser is invoked; failure exits 24 with the mutation
+  retained.
+- Layered settings + composition resolver — workspaces declare
+  `harnesses = ["claude-code", "[workspaces.foo]", "!opencode"]`
+  composing across scopes (project marker → workspace → global) with
+  cycle detection (renders the walk-order chain) + bracketed
+  references + `!`-prefixed exclusions. Composition errors exit 17;
+  unknown harness names exit 18.
+- `tome doctor` extended end-to-end with Phase 4 subsystems —
+  `Subsystem` enum promoted to 11 typed variants (Embedder, Reranker,
+  Index, Drift, Catalog(name), Schema, Summariser, Binding,
+  BindingRulesCopy, HarnessRules(name), HarnessMcp(name)) with custom
+  Serialize / Deserialize preserving the wire shape byte-for-byte.
+  `--fix` repair classes for every Phase 4 subsystem. `--force`
+  override for user-owned MCP entries. Orphan `.tome.tmp.*` staging
+  dirs older than 1 hour are swept under five-layer defence-in-depth.
+- `tome doctor --fix --force` requires `--fix` — `--force` alone exits
+  2 (Usage).
+
+Wire-shape changes
+
+- `tome workspace init --json` envelope:
+  `{name, path, catalogs_inherited, id}` (was `workspace_dir` /
+  `inherited_catalogs`; no `id`).
+- Doctor `harnesses[].name` hyphenated: `"claude-code"` (was
+  `"claude_code"`); matches every other doctor harness field.
+- Exit code 24 for `SummariserFailure` (originally specced as 20;
+  reconciled to 24 in Phase 4 to avoid collision with Phase 2's
+  `PluginNotFound`).
+
+Configuration changes
+
+- `~/.tome/` is the new root. The constitution v1.3.0 §Paths amendment
+  dropped the `directories` crate; every Tome-owned path now lives
+  under one absolute, canonicalised root. The Phase 3 XDG split
+  (`config_dir` / `state_dir`) is gone.
+- Single central `index.db` + `index.lock` per host (was one per
+  workspace).
+- `workspace_projects` table — 1:1 binding from project root path to
+  workspace.
+
+Security hardening
+
+- `home_root()` validates `$HOME` is set, absolute, canonicalised.
+  Relative or unset `$HOME` exits 2 (`Usage`), not 7 (`Io`).
+- All Tome-owned config / settings file reads now go through
+  `util::bounded_read_to_string` with per-class caps (1 MiB for
+  Tome-owned, 256 KiB for plugin manifests, 1 MiB for harness MCP
+  configs, 4 MiB for harness rules files). Over-cap reads return
+  `Io(InvalidInput)`.
+- `util::atomic_dir::land_directory` refuses to land through symlinks
+  (plus `.old` aside cleanup).
+- `doctor::orphan_cleanup::sweep_one` refuses to follow planted
+  symlinks.
+- All Tome-owned writes emit mode 0o600 on Unix (audit test pins).
+
+New dependencies
+
+- `llama-cpp-2 = "=0.1.146"` — exact-pinned for the bundled summariser.
+- `encoding_rs = "0.8"` — required by `llama-cpp-2`'s `token_to_piece`.
+- `toml_edit = "0.22"` — comment- and order-preserving TOML edits for
+  settings + harness MCP configs.
+- `filetime = "0.2"` (dev-dep) — mtime backdate for orphan-cleanup tests.
+
+Dropped dependencies
+
+- `directories` — replaced by `<home>/.tome/`-rooted `Paths`.
+
+Test surface
+
+- 916 → 954 tests across 125 → 127 suites (16 ignored).
+- Polish phase added 38 tests across 5 PRs (PR-A through PR-E).
+
+Binary size
+
+- 26.31 MiB on macOS arm64. Well under the 50 MiB cap (constitution
+  v1.2.0). Recorded in `RELEASE-BINARY-SIZE.md`.
+
 ## [0.3.0] — 2026-05-14
 
 ### Phase 3 additions
