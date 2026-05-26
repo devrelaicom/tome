@@ -2,7 +2,7 @@
 
 A Rust CLI (and eventually an MCP server) that makes Claude Code's plugin ecosystem work across other agentic coding harnesses — Cursor, Codex, Gemini CLI, OpenCode, and friends.
 
-> **Status: pre-release, Phase 4 in flight (post-v0.3.0).** Tome manages **catalogs** (Git-hosted plugin collections), **plugins** (enable them locally, build a semantic skill index, search it), **workspaces** (per-project state in `.tome/`), and ships an **MCP server** so harnesses can query the index over the Model Context Protocol. Phase 4 is the central-architecture refactor — collapsing per-workspace state into a single `<home>/.tome/` root, introducing named workspaces with project-binding pointers, and wiring rules-file + MCP-config integration into five harnesses (Claude Code, Codex CLI, Gemini CLI, Cursor, OpenCode). Constitution **v1.3.0** lands as part of Phase 4: the v1.2.0 §Paths `directories`-crate citation is replaced by the consolidated `<home>/.tome/` layout.
+> **Status: pre-release, Phase 4 shipped (v0.4.0).** Tome manages **catalogs** (Git-hosted plugin collections), **plugins** (enable them locally, build a semantic skill index, search it), **named workspaces** (central storage under `<home>/.tome/workspaces/<name>/`, projects bind via `.tome/config.toml` pointers), **rules-file + MCP-config integration into five harnesses** (Claude Code, Codex CLI, Cursor, Gemini CLI, OpenCode), and ships an **MCP server** so harnesses can query the index over the Model Context Protocol. Phase 4 collapsed per-workspace state into a single `<home>/.tome/` root, introduced layered settings with composition refs, bundles a local summariser (`qwen2.5-0.5b-instruct` via `llama-cpp-2`) for skill-set descriptions, and extends `tome doctor` to repair every Phase 4 subsystem.
 
 ## Install
 
@@ -12,7 +12,7 @@ cd tome
 cargo install --path .
 ```
 
-Requires Rust ≥ 1.93 and a system `git` on the executable path. On first plugin enable, Tome downloads two ONNX models (`bge-small-en-v1.5` + `bge-reranker-base`, ~325 MB total, MIT) into `${XDG_DATA_HOME}/tome/models/`.
+Requires Rust ≥ 1.93 and a system `git` on the executable path. On first plugin enable, Tome downloads two ONNX models (`bge-small-en-v1.5` + `bge-reranker-base`, ~325 MB total, MIT). On first workspace summariser invocation, Tome downloads the `qwen2.5-0.5b-instruct` GGUF (~400 MB, MIT). All models live in `<home>/.tome/models/`.
 
 ## Quick example
 
@@ -39,38 +39,48 @@ tome status                              # ok / degraded / unhealthy + per-subsy
 tome models list                         # what's installed; --verify rehashes against pinned SHA-256
 tome reindex midnight-experts            # rebuild the index for one catalog (or omit scope for all)
 
-# Workspaces (Phase 3) — per-project state in `.tome/`
-cd ~/projects/my-app
-tome workspace init                      # atomically lands ./.tome/
-tome workspace info                      # scope + catalogs + plugins + index
-tome catalog add ...                     # writes to the workspace, not global
-tome --workspace global plugin list      # explicitly target the global workspace
+# Named workspaces (Phase 4) — central storage; projects bind via pointer
+tome workspace init my-project                 # creates ~/.tome/workspaces/my-project/
+tome workspace list                            # all workspaces + their counts
+tome workspace use my-project                  # bind the CWD project to the workspace
+                                               # writes .tome/config.toml marker; runs harness sync
+tome workspace regen-summary my-project        # runs the bundled local summariser
+tome --workspace my-project plugin enable ...  # explicitly target the workspace
 
-# Diagnostic (Phase 3) — broad doctor with auto-repair
-tome doctor                              # models + index + catalogs + drift + harnesses
-tome doctor --fix                        # auto-repairs: model re-download, catalog re-clone, schema migrate
-tome doctor --verify --json              # re-hash all model artefacts + emit structured report
+# Harness integration (Phase 4) — declarative composition
+tome harness                                   # list shipped harness modules
+tome harness use claude-code --scope workspace # add claude-code to the workspace settings
+tome harness list                              # effective list with source-chain
+tome harness sync                              # re-run integration sweep for bound project
 
-# MCP server (Phase 3) — Model Context Protocol over stdio
-tome mcp                                 # advertises search_skills + get_skill; stdout = MCP protocol
-                                         # diagnostics → ${XDG_STATE_HOME}/tome/mcp.log (JSON-lines)
+# Diagnostic (Phase 4) — broad doctor with auto-repair
+tome doctor                                    # models + index + catalogs + drift + harnesses
+tome doctor --fix                              # auto-repairs each Phase 4 subsystem
+tome doctor --fix --force                      # also overrides user-owned MCP entries
+tome doctor --verify --json                    # re-hash all model artefacts + structured report
+
+# MCP server — Model Context Protocol over stdio
+tome mcp                                       # advertises search_skills + get_skill
+                                               # diagnostics → ~/.tome/logs/mcp.log (JSON-lines)
 ```
 
 ## Where things live
 
-**Global scope:**
+Every Tome-owned path lives under **`<home>/.tome/`** (constitution v1.3.0 §Paths):
 
-- **Config** — `${XDG_CONFIG_HOME}/tome/config.toml` (catalog registry, 0600 on Unix)
-- **Catalogs** — `${XDG_DATA_HOME}/tome/catalogs/<sha>/` (one git clone per registered catalog; shared across scopes via reference counting)
-- **Models** — `${XDG_DATA_HOME}/tome/models/<name>/` (ONNX weights + `manifest.json` with pinned SHA-256)
-- **Skill index** — `${XDG_DATA_HOME}/tome/index.db` (SQLite + `sqlite-vec`)
-- **Advisory lock** — `${XDG_DATA_HOME}/tome/index.lock` (held during writes; readers do not block)
+- `<home>/.tome/config.toml` — Tome's global config (strict, 0600 on Unix)
+- `<home>/.tome/settings.toml` — global harness composition settings
+- `<home>/.tome/index.db` — central SQLite + `sqlite-vec` (single DB; workspaces and catalog enrolments are junction-table-keyed)
+- `<home>/.tome/index.lock` — single advisory lockfile
+- `<home>/.tome/catalogs/<sha>/` — shared catalog clones (reference-counted via the `workspace_catalogs` table)
+- `<home>/.tome/models/<name>/` — embedder, reranker, and summariser GGUF weights + `manifest.json` with pinned SHA-256
+- `<home>/.tome/workspaces/<name>/{settings.toml, RULES.md}` — per-workspace state (strict TOML; the local summariser writes `RULES.md` + the `[summaries]` cache)
+- `<home>/.tome/logs/mcp.log` (+ `mcp.log.1` rotation) — JSON-lines, 10 MiB cap, 0600 on Unix
 
-**Per workspace** (Phase 3):
+**Per project** (bound via `tome workspace use`):
 
-- **Marker + config + index** — `<workspace>/.tome/{config.toml, index.db, index.lock}` (0700 on Unix)
-- **Workspace registry (opt-in)** — `${XDG_STATE_HOME}/tome/workspaces.txt`; touch the file once to start tracking
-- **MCP log** — `${XDG_STATE_HOME}/tome/mcp.log` (JSON-lines, 10 MiB rotation cap, 0600 on Unix)
+- `<project>/.tome/config.toml` — pointer marker: `workspace = "<name>"` only. No state; the source of truth is the central registry.
+- `<project>/.tome/RULES.md` — propagated from the workspace's RULES.md on every sync.
 
 ## Documentation
 
@@ -78,6 +88,7 @@ tome mcp                                 # advertises search_skills + get_skill;
 - **Project principles:** [`CONSTITUTION.md`](./CONSTITUTION.md)
 - **Phase 2 specification:** [`specs/002-phase-2-plugins-index/`](./specs/002-phase-2-plugins-index/)
 - **Phase 3 specification:** [`specs/003-phase-3-mcp-workspaces/`](./specs/003-phase-3-mcp-workspaces/)
+- **Phase 4 specification:** [`specs/004-phase-4-refactor-harnesses/`](./specs/004-phase-4-refactor-harnesses/)
 - **Contributor on-ramp:** [`CONTRIBUTING.md`](./CONTRIBUTING.md)
 
 ## Licence
