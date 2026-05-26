@@ -54,7 +54,7 @@ pub struct DoctorReport {
 
 `--fix` does NOT repair:
 
-- `Binding` broken (workspace named by marker is missing from `workspaces` table). Reason: ambiguity — should `--fix` re-create the workspace or rebind to a different one? Developer choice. Suggested action: "run `tome workspace use <existing-name>` to rebind, or `tome workspace init <name>` to recreate."
+- `Binding` broken (workspace named by marker is missing from `workspaces` table). Reason: ambiguity — should `--fix` re-create the workspace or rebind to a different one? Developer choice. Polish C-M12 split this into TWO `SuggestedFix` entries (both `auto_fixable: false`, sharing the same `diagnosis`) so JSON consumers parsing the `command` field as a single runnable shell line get one executable command per entry: one with `command: "tome workspace use <existing-name>  # rebind to an existing workspace"` and one with `command: "tome workspace init <name>  # or recreate the named workspace"`.
 - `HarnessMcp(<name>)` user-owned conflict. Reason: developer-authored content under the `tome` key; refusing to overwrite without an explicit `--force` to the underlying sync command. Suggested action: "rerun `tome harness sync --force` to overwrite the user-owned entry."
 
 These cases produce `auto_fixable: false` SuggestedFix items; the doctor reports them and the developer runs the named command explicitly.
