@@ -4,7 +4,7 @@ The lenient YAML frontmatter format Phase 5 reads from plugin `skills/*/SKILL.md
 
 ## Boundary
 
-Per constitution IV (Strict Schemas, Helpful Errors) and the spec's reaffirmation in FR-007: third-party plugin frontmatter is parsed **leniently**. Unknown fields tolerated. Recognised fields with malformed values fail loudly with `InvalidArgumentFrontmatter` (exit 23) naming the file + field.
+Per constitution IV (Strict Schemas, Helpful Errors) and the spec's reaffirmation in FR-007: third-party plugin frontmatter is parsed **leniently**. Unknown fields tolerated. Recognised fields with malformed values fail loudly with `InvalidArgumentFrontmatter` (exit 29) naming the file + field.
 
 ## Recognised fields (all optional)
 
@@ -44,7 +44,7 @@ arguments:
 
 Both produce the same in-memory `Vec<String> = ["component", "from", "to"]`. Deserialiser: a custom `deserialize_with` that accepts either form. Empty `arguments` (absent OR empty list OR empty string) produces `Vec::new()`.
 
-Names within `arguments` MUST match `^[a-z_][a-z0-9_]*$`. Names with illegal characters fail parse with exit 23.
+Names within `arguments` MUST match `^[a-z_][a-z0-9_]*$`. Names with illegal characters fail parse with exit 29.
 
 ## Lenient unknown fields
 
@@ -52,7 +52,7 @@ Unknown frontmatter fields (e.g. Claude Code's `allowed-tools`, `agent`, `contex
 
 ## Malformed recognised fields
 
-Recognised fields with malformed values produce a parse error (exit 23 or 70 depending on Tome-owned vs third-party — third-party uses 23 per Phase 5 spec) naming the file + field:
+Recognised fields with malformed values produce a parse error (exit 29 or 70 depending on Tome-owned vs third-party — third-party uses 29 per Phase 5 spec) naming the file + field:
 
 ```
 Failed to parse frontmatter in /path/to/SKILL.md: field `arguments` must be a string or list, got integer
@@ -107,8 +107,8 @@ Per FR-006:
 | Each new field round-trips | `tests/frontmatter_p5_fields.rs::*` |
 | `arguments` as string AND as list both parse to same `Vec<String>` | `tests/frontmatter_p5_fields.rs::arguments_string_or_list_both_parse` |
 | Unknown fields tolerated | `tests/frontmatter_p5_fields.rs::unknown_field_does_not_fail` |
-| Malformed `arguments` (integer) → exit 23 | `tests/frontmatter_p5_fields.rs::malformed_arguments_field_fails_loudly` |
-| Illegal argument name (`1foo`) → exit 23 | `tests/frontmatter_p5_fields.rs::illegal_argument_name_fails` |
+| Malformed `arguments` (integer) → exit 29 | `tests/frontmatter_p5_fields.rs::malformed_arguments_field_fails_loudly` |
+| Illegal argument name (`1foo`) → exit 29 | `tests/frontmatter_p5_fields.rs::illegal_argument_name_fails` |
 | `user_invocable` default depends on kind | `tests/frontmatter_p5_fields.rs::default_user_invocable_per_kind` |
 | `description` fallback to first 500 chars | `tests/frontmatter_p5_fields.rs::description_fallback_to_body_prefix` |
 | Existing Phase 4 frontmatter (no Phase 5 fields) parses without error | `tests/frontmatter_p5_fields.rs::backwards_compat_phase4_only_frontmatter` |

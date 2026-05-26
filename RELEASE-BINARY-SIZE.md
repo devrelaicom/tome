@@ -16,6 +16,16 @@ stat -c '%s' target/release/tome      # Linux
 | -------- | ------------------ | ----------- | ------- | ----------------------------------------------------------------------- |
 | v0.3.0   | macOS arm64        | ~23 100 000 | ~22.0   | Phase 3 close, post-PR-H polish phase                                   |
 | v0.4.0-rc | macOS arm64       | 27 595 936  | 26.31   | Phase 4 / Polish PR-E (post S-M1–S-M7 + T-M8 + T416 + T419)             |
+| v0.5.0-dev / F2 | macOS arm64  | 27 595 888  | 26.31   | Phase 5 / F1+F2 (5 new TomeError variants pre-allocated; `regex` already direct from Phase 1's catalog::git scrubber — no real promotion needed) |
+
+## Phase 5 size accounting
+
+Phase 5 introduces **no new top-level dependencies**. The originally-planned
+"promote `regex` from transitive to direct" reduced to a no-op: `regex = "1"`
+has been a direct dep since Phase 1 (used by `catalog::git::scrub_credentials`).
+F1's 5 new `TomeError` variants are pure additions to a `#[derive(Debug)]`
+enum — the compiler folds the unused variants out entirely until production
+consumers wire them in subsequent slices.
 
 ## Phase 4 size accounting
 

@@ -551,13 +551,13 @@ Exit code mapping:
 
 | Variant | Exit code | Notes |
 |---|---|---|
-| `EntryNotFound` | 21 | New |
-| `SubstitutionFailed` | 22 | New |
-| `InvalidArgumentFrontmatter` | 23 | New |
 | `WorkspaceDataDirWriteFailed` | 25 | New; also covers `PluginDataDirWriteFailed` per Edge Cases resolution |
 | `PromptArgumentMismatch` | 26 | New; assigned 26 (NOT 24) because Phase 4 already ships `SummariserFailure → 24`. Final assignment per `contracts/exit-codes-p5.md`. |
+| `EntryNotFound` | 27 | New; reassigned from contract-proposed 21 (Phase 2 ships `PluginAlreadyInState → 21`). See `contracts/exit-codes-p5.md` § Reassigned slots. |
+| `SubstitutionFailed` | 28 | New; reassigned from contract-proposed 22 (Phase 2 ships `PluginManifestParseError → 22`). See `contracts/exit-codes-p5.md` § Reassigned slots. |
+| `InvalidArgumentFrontmatter` | 29 | New; reassigned from contract-proposed 23 (Phase 2 ships `SkillFrontmatterParseError → 23`). See `contracts/exit-codes-p5.md` § Reassigned slots. |
 
-**Note**: Phase 4 ships `SummariserFailure → 24`. The PRD's pre-allocation of exit code 24 for Phase 5's `PromptArgumentMismatch` is superseded by `contracts/exit-codes-p5.md` reassigning to **26**, preserving Phase 4's already-shipped semantics per constitution principle II (Predictable Exit Codes — NON-NEGOTIABLE).
+**Note**: Phase 4 ships `SummariserFailure → 24`. The PRD's pre-allocation of exit code 24 for Phase 5's `PromptArgumentMismatch` is superseded by `contracts/exit-codes-p5.md` reassigning to **26**, preserving Phase 4's already-shipped semantics per constitution principle II (Predictable Exit Codes — NON-NEGOTIABLE). The same principle drove the F1-time reassignment of codes 21/22/23 → 27/28/29 to dodge Phase 2's plugin lifecycle cluster (20–23). Phase 5 occupies a clean contiguous cluster at **25–29** after these amendments.
 
 ---
 

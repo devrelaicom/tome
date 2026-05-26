@@ -5,6 +5,7 @@
 //! Phase 2 contracts: `specs/002-phase-2-plugins-index/contracts/exit-codes.md`.
 //! Phase 3 contracts: `specs/003-phase-3-mcp-workspaces/contracts/exit-codes-p3.md`.
 //! Phase 4 contracts: `specs/004-phase-4-refactor-harnesses/contracts/exit-codes-p4.md`.
+//! Phase 5 contracts: `specs/005-phase-5-commands-prompts/contracts/exit-codes-p5.md`.
 
 use std::path::PathBuf;
 
@@ -92,6 +93,52 @@ pub enum TomeError {
     // -----------------------------------------------------------------------
     #[error("summariser failure: {kind}")]
     SummariserFailure { kind: SummariserFailureKind },
+
+    // -----------------------------------------------------------------------
+    // Phase 5 — commands-as-prompts + substitution layer (codes 25–29).
+    // Pre-allocated by F1; first wired by US1 (`EntryNotFound` via the read
+    // tool / prompts/get / plugin-show), US2 (data-dir create_dir_all failures
+    // — `WorkspaceDataDirWriteFailed`), US3 (argument substitution +
+    // `PromptArgumentMismatch`), US1 plugin-enable
+    // (`InvalidArgumentFrontmatter`), and the substitution engine's
+    // unrecoverable failure surface (`SubstitutionFailed`).
+    //
+    // The contract `contracts/exit-codes-p5.md` originally proposed codes
+    // 21/22/23 for `EntryNotFound`/`SubstitutionFailed`/`InvalidArgumentFrontmatter`
+    // but those collide with Phase 2's `PluginAlreadyInState` (21),
+    // `PluginManifestParseError` (22), and `SkillFrontmatterParseError` (23).
+    // Per constitution principle II (NON-NEGOTIABLE pairwise-unique exit
+    // codes) F1 reassigns them to 27/28/29 — same precedent as Phase 4 F3
+    // which moved `SummariserFailure` from contract-proposed 20 to actual
+    // 24 to dodge `PluginNotFound`. Phase 5 ends up occupying a clean
+    // contiguous cluster at 25–29.
+    // -----------------------------------------------------------------------
+    #[error("workspace data directory write failed at {}: {source}", path.display())]
+    WorkspaceDataDirWriteFailed {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("prompt argument mismatch: expected {expected}, supplied {supplied}")]
+    PromptArgumentMismatch { expected: usize, supplied: usize },
+
+    #[error("entry not found: {catalog}/{plugin}/{name} (kind: {kind})")]
+    EntryNotFound {
+        catalog: String,
+        plugin: String,
+        name: String,
+        /// Stringly-typed for now ("skill" or "command"); promotion to an
+        /// `EntryKind` enum can wait until US1 wires the read tool and the
+        /// discriminator's two-valued domain becomes load-bearing on the
+        /// receiver side.
+        kind: String,
+    },
+
+    #[error("substitution failed: {reason}")]
+    SubstitutionFailed { reason: String },
+
+    #[error("invalid argument frontmatter in {}: {reason}", file.display())]
+    InvalidArgumentFrontmatter { file: PathBuf, reason: String },
 
     // -----------------------------------------------------------------------
     // Phase 2 — plugin lifecycle (codes 20–23).
@@ -299,6 +346,18 @@ impl TomeError {
             // range (20–23) is 24. F3 lands `SummariserFailure` here and
             // flags the contract typo for reconciliation in F4+.
             Self::SummariserFailure { .. } => 24,
+            // 25–29 — Phase 5 commands-as-prompts + substitution layer.
+            // Contract proposed 21/22/23 for `EntryNotFound`/
+            // `SubstitutionFailed`/`InvalidArgumentFrontmatter` but those
+            // collide with Phase 2's plugin lifecycle (21/22/23). Per
+            // constitution principle II (NON-NEGOTIABLE), F1 reassigns to
+            // 27/28/29 — same precedent as the summariser-vs-PluginNotFound
+            // reassignment above.
+            Self::WorkspaceDataDirWriteFailed { .. } => 25,
+            Self::PromptArgumentMismatch { .. } => 26,
+            Self::EntryNotFound { .. } => 27,
+            Self::SubstitutionFailed { .. } => 28,
+            Self::InvalidArgumentFrontmatter { .. } => 29,
             // 20–23 — plugin lifecycle
             Self::PluginNotFound(_) => 20,
             Self::PluginAlreadyInState { .. } => 21,
@@ -361,6 +420,12 @@ impl TomeError {
             Self::HarnessClash { .. } => "harness_clash",
             // Phase 4 — summariser
             Self::SummariserFailure { .. } => "summariser_failure",
+            // Phase 5 — commands-as-prompts + substitution layer
+            Self::WorkspaceDataDirWriteFailed { .. } => "workspace_data_dir_write_failed",
+            Self::PromptArgumentMismatch { .. } => "prompt_argument_mismatch",
+            Self::EntryNotFound { .. } => "entry_not_found",
+            Self::SubstitutionFailed { .. } => "substitution_failed",
+            Self::InvalidArgumentFrontmatter { .. } => "invalid_argument_frontmatter",
             Self::PluginNotFound(_) => "plugin_not_found",
             Self::PluginAlreadyInState { .. } => "plugin_already_in_state",
             Self::PluginManifestParseError { .. } => "plugin_manifest_parse_error",

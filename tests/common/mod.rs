@@ -672,3 +672,94 @@ impl HomeGuard {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Substitution layer override guards (Phase 5 / F3)
+//
+// Each guard installs a value into the matching
+// `tome::substitution::*_OVERRIDE` slot on construction and clears the
+// slot's value on Drop. Mirrors the `HarnessModulesGuard` pattern above.
+//
+// Poisoned-mutex recovery via `PoisonError::into_inner` per the Phase 4
+// P5 retro lesson — a panic in one test must not cascade into setup
+// failures for the next.
+//
+// Unlike `HomeGuard`, these guards do not serialise against a process-
+// global lock: the override slots are per-substitution-layer and the
+// production code path consults them as read-only inputs once per
+// `render()` call. Tests that drive `render()` concurrently against
+// different override values would need to introduce their own
+// synchronisation; F3 ships no consumer that does this.
+// ---------------------------------------------------------------------------
+
+/// Install a fixed clock value into
+/// [`tome::substitution::SUBSTITUTION_CLOCK_OVERRIDE`]. The slot is
+/// restored to `None` on drop.
+pub struct ClockOverrideGuard;
+
+impl ClockOverrideGuard {
+    pub fn install(when: time::OffsetDateTime) -> Self {
+        *tome::substitution::SUBSTITUTION_CLOCK_OVERRIDE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(when);
+        Self
+    }
+}
+
+impl Drop for ClockOverrideGuard {
+    fn drop(&mut self) {
+        *tome::substitution::SUBSTITUTION_CLOCK_OVERRIDE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Install a path into
+/// [`tome::substitution::PLUGIN_DATA_DIR_OVERRIDE`]. The slot is
+/// restored to `None` on drop.
+pub struct PluginDataDirGuard;
+
+impl PluginDataDirGuard {
+    pub fn install(path: PathBuf) -> Self {
+        *tome::substitution::PLUGIN_DATA_DIR_OVERRIDE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(path);
+        Self
+    }
+}
+
+impl Drop for PluginDataDirGuard {
+    fn drop(&mut self) {
+        *tome::substitution::PLUGIN_DATA_DIR_OVERRIDE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Install a path into
+/// [`tome::substitution::WORKSPACE_DATA_DIR_OVERRIDE`]. The slot is
+/// restored to `None` on drop.
+pub struct WorkspaceDataDirGuard;
+
+impl WorkspaceDataDirGuard {
+    pub fn install(path: PathBuf) -> Self {
+        *tome::substitution::WORKSPACE_DATA_DIR_OVERRIDE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(path);
+        Self
+    }
+}
+
+impl Drop for WorkspaceDataDirGuard {
+    fn drop(&mut self) {
+        *tome::substitution::WORKSPACE_DATA_DIR_OVERRIDE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}

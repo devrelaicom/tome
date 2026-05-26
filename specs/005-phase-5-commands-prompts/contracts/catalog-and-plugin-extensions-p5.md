@@ -208,10 +208,10 @@ Commands:
 
 | Surface | New exit codes |
 |---|---|
-| `tome plugin enable` | 23 (`InvalidArgumentFrontmatter`) when a frontmatter `arguments` field is malformed |
-| `tome plugin show` | 21 (`EntryNotFound`) when plugin doesn't exist in the active workspace |
-| `tome catalog update` | 23 same as enable (plugin frontmatter malformed during reindex) |
-| `tome reindex` | 23 same as above |
+| `tome plugin enable` | 29 (`InvalidArgumentFrontmatter`) when a frontmatter `arguments` field is malformed |
+| `tome plugin show` | 27 (`EntryNotFound`) when plugin doesn't exist in the active workspace |
+| `tome catalog update` | 29 same as enable (plugin frontmatter malformed during reindex) |
+| `tome reindex` | 29 same as above |
 
 Other failure modes reuse Phase 1–4 codes per existing contracts.
 
