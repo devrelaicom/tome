@@ -1,8 +1,8 @@
 # Testing Strategy
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
-> **Generated**: 2026-05-25
-> **Last Updated**: 2026-05-25
+> **Generated**: 2026-05-26
+> **Last Updated**: 2026-05-26
 
 ## Test Framework
 
@@ -25,9 +25,9 @@ Cargo automatically discovers and runs all tests via `cargo test`. No external t
 | `cargo test -- --nocapture` | Show stdout/stderr (suppress output capture) |
 | `cargo test -- --test-threads=1` | Run sequentially (for thread-local state or shared resource tests) |
 
-**Phase 4 US3 Status**: 825 passing tests, 17 ignored, across 110 test suites:
-- ~115 unit tests in `src/lib.rs` + modules
-- ~710 integration tests in `tests/*.rs`
+**Phase 4 US4 Status**: 862 passing tests, 16 ignored, across 117 test suites:
+- ~135 unit tests in `src/lib.rs` + modules
+- ~727 integration tests in `tests/*.rs`
 
 ## Test Organization
 
@@ -83,6 +83,7 @@ tests/
 ├── mcp_lifecycle.rs                               # MCP server startup paths
 ├── mcp_log_format.rs                              # MCP log JSON field names
 ├── mcp_server.rs                                  # MCP tool routing + schemas
+├── mcp_tool_description.rs                        # MCP tool descriptions with summariser (Phase 4 US4)
 ├── model_download.rs                              # Model download mid-stream abort
 ├── models_download.rs                             # CLI models download
 ├── models_list.rs                                 # CLI models list
@@ -99,7 +100,7 @@ tests/
 ├── plugin_list.rs                                 # Plugin list CLI
 ├── plugin_repeated.rs                             # Enable/disable of already-enabled
 ├── plugin_show.rs                                 # Plugin show CLI
-├── plugin_summariser_forward_progress.rs          # Summariser byte-progress callback (Phase 4)
+├── plugin_summariser_forward_progress.rs          # Summariser byte-progress callback (Phase 4 US4)
 ├── plugin_workspace_skills.rs                     # Workspace-scoped skills isolation (Phase 4)
 ├── query.rs                                       # KNN + reranker + drift
 ├── reindex.rs                                     # Reindex command
@@ -120,7 +121,13 @@ tests/
 ├── settings_unknown_workspace_resolver.rs         # Workspace resolution errors (Phase 4 US3)
 ├── settings_workspace_ref_outside_project.rs      # Ref constraints (Phase 4 US3)
 ├── status.rs                                      # Status report assembly
-├── summariser_stub.rs                             # StubSummariser determinism (Phase 4)
+├── summariser_cache.rs                            # Cache hit/miss semantics (Phase 4 US4)
+├── summariser_forward_progress.rs                 # Byte-progress callback (Phase 4 US4)
+├── summariser_real.rs                             # Real Qwen model tests (env-gated, Phase 4 US4)
+├── summariser_registry_no_placeholder.rs          # Registry placeholder regression (Phase 4 US4)
+├── summariser_stub.rs                             # StubSummariser determinism (Phase 4 US4)
+├── summariser_triggers.rs                         # Trigger-wiring coverage (Phase 4 US4)
+├── summariser_triggers_end_to_end.rs              # End-to-end trigger tests (Phase 4 US4)
 ├── sync_algorithm.rs                              # Sync orchestrator (Phase 4 US1)
 ├── sync_boundary.rs                               # Enforce tokio confinement to src/mcp/
 ├── sync_idempotence.rs                            # Idempotence-by-mtime for sync primitives (Phase 4)
@@ -159,6 +166,8 @@ Integration test files follow the pattern `<command-or-feature>_<suffix>.rs`:
 - `harness_bare.rs` — bare `tome harness` interactive browse (Phase 4 US3)
 - `harness_list_effective.rs` — effective harness list resolution (Phase 4 US3)
 - `settings_composition.rs` — settings layer composition (Phase 4 US3)
+- `summariser_triggers.rs` — summariser trigger wiring (Phase 4 US4)
+- `summariser_cache.rs` — cached summary hit/miss (Phase 4 US4)
 - `schema_migration_e2e.rs` — end-to-end synthetic migrations
 - `manifest_strictness.rs` — cross-cutting strictness boundary
 - `sync_idempotence.rs` — sync idempotence verification
@@ -323,6 +332,41 @@ fn bare_plugin_navigates_catalog_plugin_view_loop() {
 - Only for tests where prompts are central to the feature
 - `rexpect` is a dev-dependency; not in the release binary
 
+### Summariser Tests (Phase 4 US4)
+
+Tests for the workspace summariser verify trigger wiring, caching, and stub determinism:
+
+```rust
+#[test]
+fn summariser_fires_after_enable() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    let ws = WorkspaceName::parse("mine").unwrap();
+    workspace::init::init(ws.clone(), false, &paths).unwrap();
+
+    let stub = StubSummariser::new();
+    let stub_arc: Arc<dyn Summariser> = Arc::new(stub.clone());
+    let _guard = SummariserOverrideGuard::install(stub_arc);
+
+    let deps = LifecycleDeps { /* ... */ };
+    lifecycle::enable(&id, &deps).expect("enable");
+
+    // Summariser was invoked once after enable
+    assert_eq!(stub.call_count(), 1);
+    
+    // _guard drops here, clearing SUMMARISER_OVERRIDE
+}
+```
+
+**Characteristics**:
+- Use `SummariserOverrideGuard::install()` to inject a test summariser (Phase 4 US4.b pattern)
+- Verify call count via `stub.call_count()` (atomic via `Cell`)
+- Assert on cached summary fields in `settings.toml`
+- Both guard and stub handle must be held for the lifetime of the test
+
+Pattern mirrors `MigrationsGuard` (schema tests) and `HarnessModulesGuard` (harness composition tests).
+
 ### Atomic-Directory Landing Tests (Phase 4)
 
 Tests for `src/util/atomic_dir.rs` verify crash safety:
@@ -482,9 +526,9 @@ impl ToolEnv {
 
 Pass the `home_path()` via `Command::env("HOME", ...)` so the spawned binary never sees real config.
 
-### RAII Guards (Phase 4 US3)
+### RAII Guards (Phase 4 US3+)
 
-Two new RAII guards in `tests/common/mod.rs` manage test isolation:
+Multiple RAII guards in `tests/common/mod.rs` manage test isolation:
 
 **`HomeGuard`**: Restores `$HOME` after mutation
 ```rust
@@ -525,7 +569,18 @@ impl Drop for HarnessModulesGuard {
 }
 ```
 
-Both guards survive panics and use field-order semantics to ensure cleanup happens in the correct sequence. See CONVENTIONS.md for detailed discipline.
+**`SummariserOverrideGuard`**: Manages summariser injection (Phase 4 US4.b)
+```rust
+pub use tome::summarise::SummariserOverrideGuard;
+
+// In test file:
+let stub = StubSummariser::new();
+let stub_arc: Arc<dyn Summariser> = Arc::new(stub.clone());
+let _guard = SummariserOverrideGuard::install(stub_arc);
+// Guard drops at end of test scope, clearing SUMMARISER_OVERRIDE
+```
+
+All guards survive panics and use field-order semantics to ensure cleanup happens in the correct sequence. See CONVENTIONS.md for detailed discipline.
 
 ### Helper Functions
 
@@ -577,7 +632,7 @@ pub fn stub_reranker_seed() -> MetaSeed {
 }
 
 pub fn stub_summariser_seed() -> MetaSeed {
-    // MetaSeed matching StubSummariser identity (Phase 4)
+    // MetaSeed matching StubSummariser identity (Phase 4 US4)
 }
 ```
 
@@ -643,6 +698,7 @@ Tests exercising the successful flow:
 - `workspace_rename.rs::rename_updates_marker_and_database`
 - `harness_list_effective.rs::resolve_effective_list_prioritizes_layers`
 - `query.rs::knn_returns_sorted_results_above_minimum_score`
+- `summariser_triggers.rs::summariser_fires_after_enable`
 
 ### Error Path Tests
 
@@ -653,6 +709,7 @@ Tests exercising specific failure modes:
 - `exit_codes_e2e.rs::plugin_show_with_malformed_plugin_json_exits_22` (specific exit code)
 - `workspace_remove_cascade.rs::remove_refuses_without_force_when_plugins_exist`
 - `settings_harness_not_supported.rs::validate_rejects_unsupported_harness_names`
+- `summariser_triggers.rs::trigger_returns_ok_when_model_missing_silent_noop` (Phase 4 US4)
 
 ### Atomicity Tests
 
@@ -693,8 +750,9 @@ Tests verifying per-thread injection patterns:
 - `schema_migration_e2e.rs` uses `MigrationsGuard::install(MIGRATIONS)` with per-thread scope
 - `sync_algorithm.rs` uses `HarnessModulesGuard::install(stubs)` for harness dispatch testing
 - `settings_composition.rs` uses `HarnessModulesGuard::install(synth)` for synthetic harnesses
+- `summariser_triggers.rs` uses `SummariserOverrideGuard::install(stub)` (Phase 4 US4)
 
-**Important**: `MIGRATIONS_OVERRIDE` and `HARNESS_MODULES_OVERRIDE` are `thread_local!` and do NOT propagate across `thread::spawn`. Writer threads must install their own guard.
+**Important**: `MIGRATIONS_OVERRIDE`, `HARNESS_MODULES_OVERRIDE`, and `SUMMARISER_OVERRIDE` are `thread_local!` and do NOT propagate across `thread::spawn`. Writer threads must install their own guard.
 
 See CONVENTIONS.md for details on the `#[doc(hidden)] pub static` + RAII guard pattern.
 
@@ -717,6 +775,17 @@ Tests verifying layer priority and validation:
 - `settings_workspace_ref_outside_project.rs::workspace_ref_must_be_in_project`
 - `settings_bad_exclusion.rs::exclusion_without_inclusion_rejected`
 - `settings_harness_not_supported.rs::validate_per_entry_unsupported_harness`
+
+### Summariser Tests (Phase 4 US4)
+
+Tests verifying summariser wiring and behavior:
+
+- `summariser_triggers.rs::summariser_fires_after_enable` (trigger wiring)
+- `summariser_triggers.rs::trigger_skips_summariser_when_unchanged` (cheap skip)
+- `summariser_cache.rs::trigger_overwrites_cached_summaries` (cache invalidation)
+- `summariser_cache.rs::read_only_paths_do_not_invoke_summariser` (cache reuse)
+- `summariser_stub.rs::stub_deterministic_output` (stub determinism)
+- `summariser_registry_no_placeholder.rs::registry_qwen_sha256_is_not_placeholder` (regression)
 
 ## Mocking Strategy
 
@@ -783,20 +852,51 @@ impl Reranker for StubReranker {
 }
 ```
 
-### StubSummariser (Phase 4)
+### StubSummariser (Phase 4 US4)
 
 Stub for the `Summariser` trait that avoids loading Llama.cpp models:
 
 ```rust
-pub struct StubSummariser;
+#[derive(Clone)]
+pub struct StubSummariser {
+    call_count: Arc<Cell<u32>>,
+}
+
+impl StubSummariser {
+    pub fn new() -> Self {
+        Self {
+            call_count: Arc::new(Cell::new(0)),
+        }
+    }
+    
+    pub fn call_count(&self) -> u32 {
+        self.call_count.get()
+    }
+}
 
 impl Summariser for StubSummariser {
-    fn summarise(&self, text: &str, _style: SummariseStyle) -> Result<String, TomeError> {
-        // Deterministic stub response
-        Ok(format!("Summary of {} chars", text.len()))
+    fn summarise(&self, input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+        let count = self.call_count.get() + 1;
+        self.call_count.set(count);
+        
+        // Deterministic stub: join enabled skill names as the short summary
+        let short = input.plugins.iter()
+            .flat_map(|p| p.skills.iter().map(|s| s.name.clone()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        
+        Ok(SummariserOutput {
+            short,
+            long: format!("Summary of {} skills", input.plugins.len()),
+        })
     }
 }
 ```
+
+**Key properties** (Phase 4 US4.b):
+- `call_count` is backed by `Arc<Cell<u32>>` so multiple holders of the stub see the same counter
+- Cloneable via `#[derive(Clone)]` so the stub can be wrapped in `Arc<dyn Summariser>` and held in `SUMMARISER_OVERRIDE`
+- Deterministic output: enabled skill names form the short summary
 
 ### StubHarness (Phase 4)
 
@@ -940,9 +1040,9 @@ pub fn test_scope() -> &'static tome::workspace::Scope {
 
 Returns `&'static Scope` so callers avoid repeated allocations. Preferred over per-call `fn test_scope() -> Scope` when many tests share the same global scope.
 
-### Per-Test-File OVERRIDE_MUTEX Pattern (Phase 4 US3)
+### Per-Test-File OVERRIDE_MUTEX Pattern (Phase 4 US3+)
 
-When a test file uses `HARNESS_MODULES_OVERRIDE`, serialize all tests via a process-wide `Mutex`:
+When a test file uses `HARNESS_MODULES_OVERRIDE` or `SUMMARISER_OVERRIDE`, serialize all tests via a process-wide `Mutex`:
 
 ```rust
 static OVERRIDE_MUTEX: Mutex<()> = Mutex::new(());
@@ -968,8 +1068,8 @@ Field order in the tuple (guard, lock) ensures guard drops before lock (RAII dis
 
 **T093/T094/T095**: MCP protocol-purity, latency, and SIGINT graceful-shutdown tests. Require either real models or a stub-injection point on `McpState`. Deferred to Phase 4+ / post-v0.3.0.
 
-**T088 (US4.b)**: Summariser manual verification — Qwen2.5-0.5B-Instruct model inference tested via stub only in CI. Real model testing deferred.
+**T331**: Summariser drift detection in `tome doctor`. Deferred to Phase 4 / post-US4.
 
 ---
 
-*This document describes HOW to test. Update when testing strategy changes. Last refreshed 2026-05-25 against Phase 4 / US3-complete source (825 passing tests, 17 ignored, 110 suites).*
+*This document describes HOW to test. Update when testing strategy changes. Last refreshed 2026-05-26 against Phase 4 / US4-complete source (862 passing tests, 16 ignored, 117 suites).*
