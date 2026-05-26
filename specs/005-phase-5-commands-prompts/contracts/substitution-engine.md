@@ -138,7 +138,7 @@ Per FR-044.
 pub enum SubstitutionError {
     PluginDataDirCreationFailed { path: PathBuf, source: std::io::Error },  // → exit 25
     WorkspaceDataDirCreationFailed { path: PathBuf, source: std::io::Error }, // → exit 25
-    InvalidArgumentFrontmatter { reason: String, file: PathBuf },             // → exit 23
+    InvalidArgumentFrontmatter { reason: String, file: PathBuf },             // → exit 29
     PromptArgumentMismatch { expected: usize, supplied: usize },              // → exit 26
 }
 ```

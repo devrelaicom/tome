@@ -368,9 +368,9 @@ All of the following hold after the walkthrough:
 
 | Failure | Expected exit code | Manual reproduction |
 |---|---|---|
-| Entry not found | 21 | `get_skill` with a name not in the workspace's enabled set |
+| Entry not found | 27 | `get_skill` with a name not in the workspace's enabled set |
 | Substitution failure (data-dir permission denied) | 25 | `chmod 0000 <home>/.tome/plugin-data/`; trigger any substitution |
-| Invalid argument frontmatter | 23 | Author a plugin with `arguments: 5` (integer) and enable |
+| Invalid argument frontmatter | 29 | Author a plugin with `arguments: 5` (integer) and enable |
 | Prompt argument count exceeds | 26 | Call `prompts/get migrate-component` with `args: {component, from, to, fourth}` |
 
 ## Notes

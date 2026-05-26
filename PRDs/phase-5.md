@@ -616,11 +616,13 @@ commands separately, indicating each entry's `searchable` and
 
 | Code | Meaning |
 |---|---|
-| 21 | Entry not found |
-| 22 | Substitution failed (e.g., required named arg missing) |
-| 23 | Invalid argument frontmatter (malformed list, illegal names) |
-| 24 | Prompt argument count exceeds caller-supplied args |
 | 25 | Workspace data directory write failed |
+| 26 | Prompt argument count exceeds caller-supplied args (was draft-PRD code 24; Phase 4 already ships `SummariserFailure → 24`) |
+| 27 | Entry not found (was draft-PRD code 21; Phase 2 already ships `PluginAlreadyInState → 21`) |
+| 28 | Substitution failed, e.g., required named arg missing (was draft-PRD code 22; Phase 2 already ships `PluginManifestParseError → 22`) |
+| 29 | Invalid argument frontmatter, malformed list, illegal names (was draft-PRD code 23; Phase 2 already ships `SkillFrontmatterParseError → 23`) |
+
+Reassignments above were applied in Phase 5 / F1 (see `specs/005-phase-5-commands-prompts/contracts/exit-codes-p5.md` § Reassigned slots) to satisfy constitution principle II (NON-NEGOTIABLE pairwise-unique exit codes). Same precedent as Phase 4 F3 (`SummariserFailure` 20 → 24 to dodge `PluginNotFound`).
 
 ## Success criteria
 

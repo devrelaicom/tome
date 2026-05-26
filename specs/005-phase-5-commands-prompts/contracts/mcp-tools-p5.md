@@ -10,7 +10,7 @@ When the MCP server starts in a workspace with at least one enabled plugin, the 
 2. `get_skill_info` — middle-tier metadata + resource enumeration; **NEW in Phase 5**.
 3. `get_skill` — full entry body with substitution applied; existing in Phase 3, extended in Phase 5.
 
-A workspace with zero enabled plugins still advertises all three; calls return `entry_not_found` (exit 21) for any catalog/plugin/name.
+A workspace with zero enabled plugins still advertises all three; calls return `entry_not_found` (exit 27) for any catalog/plugin/name.
 
 ## `search_skills` — updated
 

@@ -76,7 +76,7 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 ### F1: Pre-allocate Phase 5 `TomeError` variants + exit codes
 
 - [ ] T012 Add 5 new variants to `TomeError` in `src/error.rs`: `EntryNotFound`, `SubstitutionFailed`, `InvalidArgumentFrontmatter`, `WorkspaceDataDirWriteFailed`, `PromptArgumentMismatch` per `contracts/exit-codes-p5.md` (use devs:rust-dev agent)
-- [ ] T013 Extend `From<TomeError> for ExitCode` mapping in `src/error.rs` to assign codes 21, 22, 23, 25, 26 per `contracts/exit-codes-p5.md` (use devs:rust-dev agent)
+- [ ] T013 Extend `From<TomeError> for ExitCode` mapping in `src/error.rs` to assign codes 25, 26, 27, 28, 29 per `contracts/exit-codes-p5.md` (codes 21/22/23 originally proposed but reassigned to 27/28/29 to avoid collision with Phase 2's `PluginAlreadyInState`/`PluginManifestParseError`/`SkillFrontmatterParseError`) (use devs:rust-dev agent)
 - [ ] T014 Extend `tests/exit_codes.rs` with 5 assertions pinning each new code (use devs:rust-dev agent)
 - [ ] T015 Run `cargo test --test exit_codes` to confirm all assertions pass (use devs:rust-dev agent)
 - [ ] T016 [GIT] Commit: `feat(error): pre-allocate 5 phase 5 error variants + exit codes`
@@ -140,7 +140,7 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 - [ ] T104 [US1] Extend `EntryFrontmatter` (existing `SkillFrontmatter`) in `src/plugin/frontmatter.rs` with the widened Phase 5 lenient field set per `contracts/frontmatter-p5.md` § Recognised fields (use devs:rust-dev agent)
 - [ ] T105 [US1] Add custom `deserialize_with` for the `arguments` field accepting both space-separated string AND YAML list, producing `Vec<String>` (use devs:rust-dev agent)
 - [ ] T106 [US1] Add `resolved_searchable()` and `resolved_user_invocable(kind)` helper methods on `EntryFrontmatter` per `contracts/frontmatter-p5.md` § Resolved defaults (use devs:rust-dev agent)
-- [ ] T107 [US1] Add argument-name validation: each name must match `^[a-z_][a-z0-9_]*$`; illegal names produce `InvalidArgumentFrontmatter` (exit 23) (use devs:rust-dev agent)
+- [ ] T107 [US1] Add argument-name validation: each name must match `^[a-z_][a-z0-9_]*$`; illegal names produce `InvalidArgumentFrontmatter` (exit 29) (use devs:rust-dev agent)
 - [ ] T108 [US1] Register Phase 5 migration in `src/index/migrations.rs::MIGRATIONS` with `from: 2, to: 3, name: "phase5_entry_kind_unification", apply: phase5_v3_apply` per `contracts/schema-migration-p5.md` (use devs:rust-dev agent)
 - [ ] T109 [US1] Implement `phase5_v3_apply` function executing the 5-statement DDL (ALTER TABLE ×4 + DROP/CREATE INDEX) inside the migration's transaction (use devs:rust-dev agent)
 - [ ] T110 [US1] Extend `src/plugin/components.rs` to walk `<plugin>/commands/*.md` non-recursively (flat directory listing, filtered to `*.md`) alongside the existing `skills/*/SKILL.md` recursive walk (use devs:rust-dev agent)

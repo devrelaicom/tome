@@ -303,6 +303,56 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
             75,
             "doctor_fix_unsafe",
         ),
+        // 25–29 — Phase 5 commands-as-prompts + substitution layer
+        // (pre-allocated by F1 — no production wiring yet; see
+        // specs/005-phase-5-commands-prompts/tasks.md T012-T016).
+        // Note: the contract `contracts/exit-codes-p5.md` originally proposed
+        // codes 21/22/23 for `EntryNotFound`/`SubstitutionFailed`/
+        // `InvalidArgumentFrontmatter` but those collide with Phase 2's plugin
+        // lifecycle cluster (21/22/23). F1 reassigned to 27/28/29 — same
+        // precedent as Phase 4 F3 which moved `SummariserFailure` from
+        // contract-proposed 20 to actual 24 to dodge `PluginNotFound`.
+        (
+            TomeError::WorkspaceDataDirWriteFailed {
+                path: PathBuf::from("/home/u/.tome/plugin-data/midnight-expert/compact-dev"),
+                source: dummy_io_error(),
+            },
+            25,
+            "workspace_data_dir_write_failed",
+        ),
+        (
+            TomeError::PromptArgumentMismatch {
+                expected: 3,
+                supplied: 4,
+            },
+            26,
+            "prompt_argument_mismatch",
+        ),
+        (
+            TomeError::EntryNotFound {
+                catalog: "midnight-expert".into(),
+                plugin: "compact-dev".into(),
+                name: "circuits".into(),
+                kind: "skill".into(),
+            },
+            27,
+            "entry_not_found",
+        ),
+        (
+            TomeError::SubstitutionFailed {
+                reason: "named arg `component` referenced but not declared".into(),
+            },
+            28,
+            "substitution_failed",
+        ),
+        (
+            TomeError::InvalidArgumentFrontmatter {
+                file: PathBuf::from("SKILL.md"),
+                reason: "argument name `1foo` does not match [a-z_][a-z0-9_]*".into(),
+            },
+            29,
+            "invalid_argument_frontmatter",
+        ),
     ]
 }
 
@@ -363,6 +413,11 @@ fn exhaustive_match_compile_check() {
             TomeError::HarnessNotSupported { .. } => 18,
             TomeError::HarnessClash { .. } => 19,
             TomeError::SummariserFailure { .. } => 24,
+            TomeError::WorkspaceDataDirWriteFailed { .. } => 25,
+            TomeError::PromptArgumentMismatch { .. } => 26,
+            TomeError::EntryNotFound { .. } => 27,
+            TomeError::SubstitutionFailed { .. } => 28,
+            TomeError::InvalidArgumentFrontmatter { .. } => 29,
             TomeError::PluginNotFound(_) => 20,
             TomeError::PluginAlreadyInState { .. } => 21,
             TomeError::PluginManifestParseError { .. } => 22,
