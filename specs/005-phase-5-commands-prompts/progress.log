@@ -18,3 +18,4 @@ Each line is an event (PR open / merge, phase close, etc.). Newest at the bottom
 2026-05-26T21:50:00Z  PR #114 opened  US1.c  +8 tests (1018 -> 1026)  fixed latent get_skill abs/rel path bug via shared resolver
 2026-05-26T22:15:00Z  PR #114 merged  US1.c complete  main @ 22dd27a  test total: 1026/136/16
 2026-05-26T22:16:00Z  US1.d started  4-reviewer pass + retro fill + mapper refresh + closeout
+2026-05-27T01:30:00Z  PR #115 opened  US1.d  +13 tests (1026 -> 1039)  reviewer: 1 BLOCKER + 8 majors applied; 16 minors + 5 majors deferred to v0.6+

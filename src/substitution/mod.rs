@@ -96,9 +96,39 @@ impl std::error::Error for SubstitutionError {
 
 /// Render an entry body through the four-stage substitution pipeline.
 ///
-/// F3 stub: returns the body unchanged. US1+US2+US3 wire the stages.
-pub fn render(body: &str, _context: &SubstitutionContext) -> Result<String, SubstitutionError> {
-    Ok(body.to_string())
+/// Stage 1 (built-ins) ships in US2.a; stages 2–4 still pass through
+/// at this slice. See `contracts/substitution-engine.md` for the full
+/// pipeline shape.
+pub fn render(body: &str, context: &SubstitutionContext) -> Result<String, SubstitutionError> {
+    let s = builtins::apply_builtins(body, context)?;
+    let s = env::apply_env(&s).into_owned();
+    // Stages 3 and 4 (argument substitution + ARGUMENTS tail) land in US3.
+    Ok(s)
+}
+
+/// Wall-clock value for the substitution layer.
+///
+/// Honours [`SUBSTITUTION_CLOCK_OVERRIDE`] when set (tests install via
+/// `ClockOverrideGuard`), otherwise returns the current UTC time. The
+/// `time` crate's `now_local()` requires the `local-offset` feature
+/// (not enabled in Tome's dep tree); the Phase 5 substitution contract
+/// names the clock value as "wall-clock with the local offset *when
+/// available*", and the substitution engine produces ISO 8601 with
+/// offset, so UTC is a sound default that the test override can replace
+/// for deterministic runs.
+///
+/// Mutex poison recovery per the F3 contract: a test panic mid-render
+/// must not take the slot down for the rest of the suite.
+pub fn current_clock() -> time::OffsetDateTime {
+    if let Some(slot) = SUBSTITUTION_CLOCK_OVERRIDE.get() {
+        let guard = slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(t) = *guard {
+            return t;
+        }
+    }
+    time::OffsetDateTime::now_utc()
 }
 
 // --- Test injection seams (R-16) ----------------------------------------

@@ -194,13 +194,13 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 - [x] T149 [US1] Consolidate reviewer findings into `specs/005-phase-5-commands-prompts/review/us1-findings.md` + `us1-disposition.md`
 - [x] T150 [US1] Apply all reviewer blockers and selected majors; commit fixes
 - [x] T151 [GIT] Commit: `fix(phase5/us1): reviewer-pass blockers and selected majors`
-- [ ] T152 [US1] Run `/sdd:map incremental` to refresh `.sdd/codebase/` against US1 changes
-- [ ] T153 [US1] Review `retro/P3.md` and extract critical learnings to CLAUDE.md (conservative)
-- [ ] T154 [GIT] Commit: `docs: refresh codebase docs + finalize phase 3 retro`
+- [x] T152 [US1] Run `/sdd:map incremental` to refresh `.sdd/codebase/` against US1 changes
+- [x] T153 [US1] Review `retro/P3.md` and extract critical learnings to CLAUDE.md (conservative)
+- [x] T154 [GIT] Commit: `docs: refresh codebase docs + finalize phase 3 retro`
 
 ### Phase Completion
 
-- [ ] T155 [GIT] Push final US1 PRs (per-slice)
+- [x] T155 [GIT] Push final US1 PRs (per-slice)
 - [ ] T156 [GIT] Verify all CI checks pass on each US1 sub-PR
 - [ ] T157 [GIT] Report US1 PR ready status
 
@@ -220,16 +220,16 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US2.a — Built-ins stage + clock injection
 
-- [ ] T203 [US2] Compile `BUILTIN_REGEX` (`\$\{TOME_([A-Z0-9_]+)(?::-(.*?))?\}`) in `src/substitution/regex.rs::builtin_regex()` (OnceLock-cached per research §R-2) (use devs:rust-dev agent)
-- [ ] T204 [US2] Implement whitelisted 12-built-in resolver in `src/substitution/builtins.rs::resolve_builtin(name, ctx, default)`: SKILL_DIR / SKILL_PATH / SKILL_NAME / PLUGIN_DIR / PLUGIN_NAME / PLUGIN_VERSION / PLUGIN_DATA / CATALOG_NAME / WORKSPACE_NAME / WORKSPACE_DATA / DATE / TIMESTAMP per `contracts/substitution-engine.md` § Stage 1 (use devs:rust-dev agent)
-- [ ] T205 [US2] Implement `apply_builtins(body, ctx)` using regex `replace_all` callback that resolves each match via `resolve_builtin`; unknown names pass through with `tracing::debug!` (FR-023) (use devs:rust-dev agent)
-- [ ] T206 [US2] Implement path-component sanitisation in `src/substitution/data_dir.rs::sanitise_path_component(s)`: replace non-`[A-Za-z0-9._-]` with `_` per FR-024 (use devs:rust-dev agent)
-- [ ] T207 [US2] Implement `ensure_plugin_data(paths, catalog, plugin)` with lazy `create_dir_all` + `PLUGIN_DATA_DIR_OVERRIDE` consultation per research §R-9 (use devs:rust-dev agent)
-- [ ] T208 [US2] Wire `apply_builtins` into `substitution::render()` stage 1 (use devs:rust-dev agent)
-- [ ] T209 [US2] Wire clock injection: `context.clock` defaults to `time::OffsetDateTime::now_local()` unless `SUBSTITUTION_CLOCK_OVERRIDE` is set (use devs:rust-dev agent)
-- [ ] T210 [GIT] Commit: `feat(substitution): built-ins stage + clock injection + path sanitisation`
-- [ ] T211 [US2] Create `tests/substitution_builtins.rs` with tests per `contracts/substitution-engine.md` § Stage 1 (12 builtins resolve, unknown pass through, default syntax, path sanitisation, clock injection produces deterministic DATE/TIMESTAMP) (use devs:rust-dev agent)
-- [ ] T212 [GIT] Commit: `test(substitution): built-ins stage`
+- [x] T203 [US2] Compile `BUILTIN_REGEX` (`\$\{TOME_([A-Z0-9_]+)(?::-(.*?))?\}`) in `src/substitution/regex.rs::builtin_regex()` (OnceLock-cached per research §R-2) (use devs:rust-dev agent)
+- [x] T204 [US2] Implement whitelisted 12-built-in resolver in `src/substitution/builtins.rs::resolve_builtin(name, ctx, default)`: SKILL_DIR / SKILL_PATH / SKILL_NAME / PLUGIN_DIR / PLUGIN_NAME / PLUGIN_VERSION / PLUGIN_DATA / CATALOG_NAME / WORKSPACE_NAME / WORKSPACE_DATA / DATE / TIMESTAMP per `contracts/substitution-engine.md` § Stage 1 (use devs:rust-dev agent)
+- [x] T205 [US2] Implement `apply_builtins(body, ctx)` using regex `replace_all` callback that resolves each match via `resolve_builtin`; unknown names pass through with `tracing::debug!` (FR-023) (use devs:rust-dev agent)
+- [x] T206 [US2] Implement path-component sanitisation in `src/substitution/data_dir.rs::sanitise_path_component(s)`: replace non-`[A-Za-z0-9._-]` with `_` per FR-024 (use devs:rust-dev agent)
+- [x] T207 [US2] Implement `ensure_plugin_data(paths, catalog, plugin)` with lazy `create_dir_all` + `PLUGIN_DATA_DIR_OVERRIDE` consultation per research §R-9 (use devs:rust-dev agent)
+- [x] T208 [US2] Wire `apply_builtins` into `substitution::render()` stage 1 (use devs:rust-dev agent)
+- [x] T209 [US2] Wire clock injection: `context.clock` defaults to `time::OffsetDateTime::now_local()` unless `SUBSTITUTION_CLOCK_OVERRIDE` is set (use devs:rust-dev agent)
+- [x] T210 [GIT] Commit: `feat(substitution): built-ins stage + clock injection + path sanitisation`
+- [x] T211 [US2] Create `tests/substitution_builtins.rs` with tests per `contracts/substitution-engine.md` § Stage 1 (12 builtins resolve, unknown pass through, default syntax, path sanitisation, clock injection produces deterministic DATE/TIMESTAMP) (use devs:rust-dev agent)
+- [x] T212 [GIT] Commit: `test(substitution): built-ins stage`
 - [ ] T213 [GIT] Push US2.a slice
 
 ### Slice US2.b — Env passthrough stage + lazy data directory creation + workspace rename relocation
