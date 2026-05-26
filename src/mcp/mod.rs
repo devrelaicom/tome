@@ -25,6 +25,7 @@ pub mod preflight;
 pub mod runtime;
 pub mod server;
 pub mod state;
+pub mod tool_description;
 pub mod tools;
 
 use std::sync::Arc;
@@ -120,7 +121,15 @@ pub fn run(scope: &ResolvedScope, paths: &Paths) -> Result<(), TomeError> {
             reranker_entry: handle.reranker_entry,
         });
 
-        let server = server::Server::new(state);
+        let mut server = server::Server::new(state);
+
+        // FR-425 + NFR-103: compose the `search_skills` tool
+        // description from the fixed scaffold + the workspace's
+        // cached `[summaries].short` (if any). One-shot synchronous
+        // file read at startup — no in-process summariser invocation.
+        let composed = tool_description::compose(scope.scope.name(), paths);
+        tool_description::warn_if_too_long(scope.scope.name(), &composed);
+        server.override_search_skills_description(composed);
 
         let running = rmcp::serve_server(server, rmcp::transport::stdio())
             .await

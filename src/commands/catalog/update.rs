@@ -128,10 +128,36 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
 
             let outcome = reindex_catalog_plugins(&catalog_name, &enabled, &deps)?;
             emit_reindex_outcome(mode, &catalog_name, &outcome)?;
+
+            // FR-365 + FR-385 + FR-423: regenerate the workspace's
+            // cached summary if any plugin in this catalog changed
+            // identity. Walk the per-plugin changes and fire the
+            // trigger once per workspace+catalog when any change
+            // landed (added / modified / removed skills, or an
+            // auto-disabled plugin).
+            if catalog_reindex_changed_anything(&outcome) {
+                let ws_name = ws_scope.name().clone();
+                crate::summarise::regenerate_for_trigger(&ws_name, &paths)?;
+            }
         }
     }
 
     Ok(())
+}
+
+/// FR-365 gate: did at least one plugin in this catalog actually
+/// change skill identity (or get auto-disabled) for this workspace?
+/// Reindex-of-an-unchanged-tree is a no-op for summarisation.
+fn catalog_reindex_changed_anything(outcome: &CatalogReindexOutcome) -> bool {
+    outcome.plugins.iter().any(|change| {
+        if change.auto_disabled.is_some() {
+            return true;
+        }
+        match &change.summary {
+            Some(s) => s.added > 0 || s.modified > 0 || s.removed > 0,
+            None => false,
+        }
+    })
 }
 
 /// Hand-rolled alias so tests can pull this through. `&ResolvedScope`

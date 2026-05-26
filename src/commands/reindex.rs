@@ -69,6 +69,15 @@ pub fn run(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), Tome
     };
 
     let aggregate = execute(&scope, &plugins, &deps, args.force)?;
+
+    // FR-382 + FR-385: regenerate cached summaries only when at least
+    // one skill's content_hash changed (added / modified / removed).
+    // Reindex of an unchanged tree is a no-op for summarisation —
+    // cached summaries stay valid per FR-423.
+    if aggregate.any_changes() {
+        crate::summarise::regenerate_for_trigger(ws.scope.name(), &paths)?;
+    }
+
     emit(&scope, &aggregate, mode)
 }
 
@@ -217,7 +226,20 @@ pub struct ReindexAggregate {
     pub skills_checked: u32,
     pub skills_re_embedded: u32,
     pub skills_unchanged: u32,
+    /// Number of skills whose row was DELETE'd because the on-disk
+    /// SKILL.md is gone. Counted alongside `added` / `modified` when
+    /// the summariser-trigger gate (FR-382) decides whether to fire.
+    pub skills_removed: u32,
     pub duration_ms: u64,
+}
+
+impl ReindexAggregate {
+    /// `true` iff any skill changed identity (added / modified /
+    /// removed) — the FR-382 gate for triggering summary regeneration
+    /// on reindex.
+    pub fn any_changes(&self) -> bool {
+        self.skills_re_embedded > 0 || self.skills_removed > 0
+    }
 }
 
 /// Execute a reindex against a pre-built `LifecycleDeps`. Loops over every
@@ -247,6 +269,7 @@ pub fn execute(
             .skills_re_embedded
             .saturating_add(s.added.saturating_add(s.modified));
         aggregate.skills_unchanged = aggregate.skills_unchanged.saturating_add(s.unchanged);
+        aggregate.skills_removed = aggregate.skills_removed.saturating_add(s.removed);
     }
     aggregate.duration_ms = duration_ms(started);
     Ok(aggregate)
