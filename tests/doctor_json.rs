@@ -30,16 +30,43 @@ fn doctor_json_shape_is_pinned_on_healthy_install() {
         "workspace",
         "embedder",
         "reranker",
+        // Phase 4 / US5.a additions (T-M9, PR-D):
+        "summariser",
         "index",
         "drift",
         "catalogs",
         "workspace_registry",
         "harnesses",
+        // Phase 4 / US5.a additions (T-M9, PR-D):
+        // `project_binding` + `effective_harness_list` are both
+        // `#[serde(skip_serializing_if = "Option::is_none")]` per
+        // data-model §15; they MAY be absent from a healthy report.
+        // `harness_rules` + `harness_mcp` + `detected_uninstalled_harnesses`
+        // are ALWAYS present (default empty vec).
+        "harness_rules",
+        "harness_mcp",
+        "detected_uninstalled_harnesses",
         "overall",
         "suggested_fixes",
     ] {
         assert!(v.get(field).is_some(), "missing top-level field `{field}`");
     }
+
+    // Phase 4 / US5.a: summariser is a ModelHealth (same shape as
+    // embedder + reranker).
+    let summ = &v["summariser"];
+    for field in ["name", "version", "state"] {
+        assert!(summ.get(field).is_some(), "summariser.{field} missing");
+    }
+
+    // harness_rules + harness_mcp are arrays; on a healthy install with
+    // no effective harness list they're empty.
+    assert!(v["harness_rules"].is_array(), "harness_rules array");
+    assert!(v["harness_mcp"].is_array(), "harness_mcp array");
+    assert!(
+        v["detected_uninstalled_harnesses"].is_array(),
+        "detected_uninstalled_harnesses array",
+    );
 
     // Workspace embeds the WorkspaceInfo schema verbatim.
     let ws = &v["workspace"];
@@ -147,6 +174,93 @@ fn doctor_json_includes_suggested_fix_record_on_broken_catalog() {
             .unwrap()
             .contains("catalog update")
     );
+}
+
+// ---- T-M9 (PR-D): byte-stable JSON wire shape ----------------------------
+//
+// Pin the entire DoctorReport JSON envelope for a minimal bootstrap-state
+// report. The shape is the wire contract per `contracts/doctor.md` +
+// `contracts/doctor-extensions-p4.md`; if a field order or rename drifts,
+// every downstream `jq` consumer breaks silently in the absence of this
+// test.
+//
+// `tome_version` is substituted from `env!("CARGO_PKG_VERSION")` because
+// the field carries the literal package version at build time; the
+// substitution keeps the test stable across version bumps without
+// hand-editing the expected JSON.
+
+#[test]
+fn doctor_json_shape_is_byte_stable_for_minimal_report() {
+    use tome::commands::status::{IndexHealth, ModelHealth};
+    use tome::doctor::report::WorkspaceRegistryStatus;
+    use tome::doctor::{CatalogCacheHealth, DoctorClassification, DoctorReport};
+    use tome::index::meta::DriftStatus;
+    use tome::workspace::{ScopeKind, WorkspaceInfo, scope::ScopeSource};
+
+    // Literal minimal report — empty everywhere a field is Vec /
+    // Option / default. Pin every Phase 4 addition into the wire shape.
+    let report = DoctorReport {
+        tome_version: env!("CARGO_PKG_VERSION").to_owned(),
+        workspace: WorkspaceInfo {
+            scope: ScopeKind::Global,
+            path: None,
+            source: ScopeSource::GlobalFallback,
+            catalogs: 0,
+            plugins_total: 0,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            schema_version: None,
+            embedder: None,
+            enrolled_catalogs: Vec::new(),
+            enabled_plugins: Vec::new(),
+            bound_projects: Vec::new(),
+            summary_cache: None,
+        },
+        project_binding: None,
+        embedder: ModelHealth {
+            name: "bge-small-en-v1.5".to_owned(),
+            version: "1.5".to_owned(),
+            state: "ok".to_owned(),
+        },
+        reranker: ModelHealth {
+            name: "bge-reranker-base".to_owned(),
+            version: "1".to_owned(),
+            state: "ok".to_owned(),
+        },
+        summariser: ModelHealth {
+            name: "qwen2.5-0.5b-instruct".to_owned(),
+            version: "2.5".to_owned(),
+            state: "ok".to_owned(),
+        },
+        index: IndexHealth {
+            present: false,
+            schema_version: None,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            size_bytes: 0,
+            integrity_ok: true,
+        },
+        drift: DriftStatus::None,
+        catalogs: Vec::<CatalogCacheHealth>::new(),
+        workspace_registry: WorkspaceRegistryStatus {
+            present: false,
+            tracked: 0,
+        },
+        harnesses: Vec::new(),
+        effective_harness_list: None,
+        harness_rules: Vec::new(),
+        harness_mcp: Vec::new(),
+        detected_uninstalled_harnesses: Vec::new(),
+        overall: DoctorClassification::Ok,
+        suggested_fixes: Vec::new(),
+    };
+
+    let json = serde_json::to_string(&report).expect("serialise");
+    let expected = format!(
+        r#"{{"tome_version":"{v}","workspace":{{"scope":"global","path":null,"source":"global_fallback","catalogs":0,"plugins_total":0,"plugins_enabled":0,"skills_indexed":0,"schema_version":null,"embedder":null,"enrolled_catalogs":[],"enabled_plugins":[],"bound_projects":[],"summary_cache":null}},"embedder":{{"name":"bge-small-en-v1.5","version":"1.5","state":"ok"}},"reranker":{{"name":"bge-reranker-base","version":"1","state":"ok"}},"summariser":{{"name":"qwen2.5-0.5b-instruct","version":"2.5","state":"ok"}},"index":{{"present":false,"schema_version":null,"plugins_enabled":0,"skills_indexed":0,"size_bytes":0,"integrity_ok":true}},"drift":{{"kind":"none"}},"catalogs":[],"workspace_registry":{{"present":false,"tracked":0}},"harnesses":[],"harness_rules":[],"harness_mcp":[],"detected_uninstalled_harnesses":[],"overall":"ok","suggested_fixes":[]}}"#,
+        v = env!("CARGO_PKG_VERSION"),
+    );
+    assert_eq!(json, expected);
 }
 
 #[test]
