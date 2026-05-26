@@ -2,11 +2,11 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26 (Phase 5 / US1 shipped; commands + prompts as first-class MCP entries)
+> **Last Updated**: 2026-05-27 (Phase 5 / US2 shipped; single-pass render pipeline, lazy data-dir creation, workspace rename relocation)
 
 ## Architecture Overview
 
-Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, workspace-scoped plugin enablement, comprehensive health diagnostics with auto-repair, and **Phase 5 NEW** command indexing and MCP prompts capability.
+Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, workspace-scoped plugin enablement, comprehensive health diagnostics with auto-repair, command indexing and MCP prompts capability, and **Phase 5 / US2 NEW** variable substitution engine with four-stage rendering pipeline and per-plugin/workspace data directories.
 
 The architecture is **monolithic with layered structure** split across two execution contexts:
 - **CLI layer** — sync command dispatcher
@@ -14,7 +14,7 @@ The architecture is **monolithic with layered structure** split across two execu
 
 The central nervous system is a **single SQLite database** (`<home>/.tome/index.db`) that centralizes all state: plugin metadata, embeddings, workspace bindings, project bindings, enabled entries (skills/commands), and diagnostic metadata. Per-workspace composition settings and summaries live in separate TOML files (`<root>/workspaces/<name>/settings.toml`) and central RULES.md. Project markers (`<project>/.tome/config.toml`) are thin binding pointers, not databases.
 
-Phase 5 / US1 ships **commands as first-class database entries** (disambiguated from skills via `kind` column), **MCP prompts capability** (commands/skills as invocable MCP entries), **substitution engine skeleton** (variable rendering pipeline), and **per-plugin/workspace data directories**.
+Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompts capability**, and **substitution engine skeleton**. Phase 5 / US2 ships **single-pass rendering pipeline** (COMBINED_RE union regex), **lazy data-directory creation** within render, and **workspace rename integration** to relocate plugin-data directories.
 
 ## Architecture Pattern
 
@@ -23,7 +23,8 @@ Phase 5 / US1 ships **commands as first-class database entries** (disambiguated 
 | Layered (capability-based) | Commands → Business Logic (Lifecycle, Embedding, Workspace, Harness, Summarise, Doctor, Substitution) → Data Access (Index, Catalog, Config) → Persistence (SQLite, Filesystem, Git) |
 | Hexagonal (ports & adapters) | Trait boundaries for `Embedder`/`Reranker`/`Summariser`/`HarnessModule`/`ScopeProvider` allow swappable implementations (production vs stub for tests) |
 | Trait-driven | Core abstractions decouple policy from mechanism; composition via struct fields rather than factory functions |
-| Phase 5 / US1 — Unified entry dispatch | `EntryKind` enum (`Skill` \| `Command`) with kind-discriminated `skills` table rows; MCP prompts derived from user-invocable entries via `PromptRegistry` |
+| Phase 5 / US1 — Unified entry dispatch | `EntryKind` enum (`Skill` \| `Command`) with kind-discriminated `skills` table rows; MCP prompts derived from user-invocable entries |
+| Phase 5 / US2 — Single-pass substitution | Combined regex union (COMBINED_RE) replaces Stage 1+2 dual sweeps; built-ins, env vars, and arguments rendered in one loop |
 
 ## Core Components
 
@@ -40,36 +41,38 @@ Phase 5 / US1 ships **commands as first-class database entries** (disambiguated 
 
 ### Substitution Engine (`src/substitution/`)
 
-- **Purpose**: Phase 5 / US1 NEW — Render entry bodies through a four-stage variable pipeline
+- **Purpose**: Phase 5 / US1–US2 — Render entry bodies through a single-pass variable pipeline
 - **Location**: `src/substitution/{mod,context,builtins,env,arguments,data_dir,regex_sets}.rs`
-- **F3 skeleton + US1 wire-up**:
-  - `SubstitutionContext` — holds entry identity, workspace scope, argument values
-  - Four rendering stages: built-ins (`{{TOME_*}}`) → env passthrough (`{{$VAR}}`) → Claude Code arguments (`$ARGUMENTS` / `$N` / `$name`) → optional tail
-  - `render(body, context) -> Result<String, SubstitutionError>` — pure compute (no side effects)
-  - **Data directory creation** (lazy, within render): `plugin_data_dir_for(catalog, plugin)` and `workspace_data_dir_for(workspace, catalog, plugin)` created on first `{{TOME_*}}` reference
-- **Built-ins** (US2 wire-up):
-  - `{{TOME_PLUGIN_DATA}}` — absolute path to process-wide plugin scratch space
-  - `{{TOME_WORKSPACE_DATA}}` — absolute path to workspace-specific plugin scratch space
-  - `{{TOME_WORKSPACE_NAME}}` — active workspace name
-- **Regex sets** (US3 wire-up):
-  - Compiled placeholder patterns (`OnceLock<Regex>`) for performance; populated at startup or on first use
-- **Stub impl in F3**: Returns body unchanged; real pipeline wired in US1–US3
+- **Phase 5 / US2 wire-up (rendering pipeline)**:
+  - **Combined regex** (COMBINED_RE in `regex_sets.rs`): Union of all placeholder patterns (`{{TOME_*}}`, `{{$*}}`, `$ARGUMENTS`/`$N`/`$name`)
+  - **Single-pass loop** in `render()`: One regex scan over the entire body (replaces Phase 1+2 dual-sweep pattern)
+  - **Per-match dispatch**: On each match, classify by pattern type and invoke the appropriate stage handler
+  - **Lazy data-dir creation**: `ensure_plugin_data()` and `ensure_workspace_data()` called on first `{{TOME_*}}` reference within a single render pass
+- **Module layout**:
+  - `mod.rs` — `render(body, context) -> Result<String, SubstitutionError>` entry point (single-pass loop); `SubstitutionError` enum (6 variants: PluginDataDirCreationFailed, WorkspaceDataDirCreationFailed, InvalidArgumentFrontmatter, PromptArgumentMismatch, + 2 error types from specific stages)
+  - `context.rs` — `SubstitutionContext` + `SubstitutionContextBuilder`; `ArgumentValues` enum (named/positional)
+  - `builtins.rs` — Stage handler: `{{TOME_PLUGIN_DATA}}`, `{{TOME_WORKSPACE_DATA}}`, `{{TOME_WORKSPACE_NAME}}`, `{{TOME_CATALOG_NAME}}`, `{{TOME_PLUGIN_NAME}}`
+  - `env.rs` — Stage handler: `{{$VAR}}` env passthrough (TOME_ENV_ prefix + generic env passthrough)
+  - `arguments.rs` — Stage handler: Claude Code `$ARGUMENTS` / `$N` / `$name` (shell-style quoting rules)
+  - `data_dir.rs` — Lazy directory creation on first reference (ensures plugin-data and workspace-data trees exist at render time)
+  - `regex_sets.rs` — `OnceLock<Regex>` COMBINED_RE (compiled once at startup or on first use)
+- **Test injection seam**: `SUBSTITUTION_OVERRIDE` thread_local (mirrors `MIGRATIONS_OVERRIDE` / `SUMMARISER_OVERRIDE` pattern per Phase 4 P6 lesson)
 
 ### Entry Kind Discriminator (`src/plugin/identity.rs::EntryKind`)
 
-- **Purpose**: Phase 5 / US1 NEW — Distinguish skills from commands in the unified `skills` table
+- **Purpose**: Phase 5 / US1 — Distinguish skills from commands in the unified `skills` table
 - **Location**: `src/plugin/identity.rs`
 - **Type**: `#[serde(rename_all = "lowercase")] pub enum EntryKind { Skill, Command }`
 - **Usage**:
   - Written to `skills.kind` column (v3 schema migration backfills from directory source)
   - Serialized as `"skill"` / `"command"` in JSON (wire shape matches v3 migration SQL constants)
-  - Read by `plugin::components::list_command_files` (US1.a enumerates `<plugin>/commands/*.md`)
+  - Read by `plugin::components::list_command_files` (enumerates `<plugin>/commands/*.md`)
   - Plumbed through `PendingSkill` struct in `index::skills` (F3 skeleton)
-  - Propagated through MCP prompts registry (US1.b) to surface command entries as invocable prompts
+  - Propagated through MCP prompts registry to surface command entries as invocable prompts
 
 ### Plugin Components & Commands (`src/plugin/components.rs`)
 
-- **Purpose**: Phase 5 / US1 NEW — Walk plugin directories and enumerate commands
+- **Purpose**: Phase 5 / US1 — Walk plugin directories and enumerate commands
 - **Location**: `src/plugin/components.rs`
 - **Key additions**:
   - `list_command_files(plugin_dir) -> Vec<CommandFile>` — enumerate `<plugin>/commands/*.md` flat (non-recursive)
@@ -77,17 +80,18 @@ Phase 5 / US1 ships **commands as first-class database entries** (disambiguated 
   - Naming: `name` is filename stem (fallback when frontmatter omits); on-disk snapshot stays deterministic
 - **Integration**: Called by `plugin::lifecycle::collect_pending_commands` to expand the enable pipeline to both skills and commands
 
-### Paths / Data Directories (`src/paths.rs`)
+### Paths & Data Directories (`src/paths.rs`)
 
-- **Purpose**: Phase 5 / US1 NEW — Central data-directory accessors for plugins
+- **Purpose**: Phase 4 consolidated root; Phase 5 / US1–US2 — Central data-directory accessors
 - **Location**: `src/paths.rs`
 - **New methods**:
-  - `plugin_data_dir_for(catalog, plugin) -> PathBuf` — `<root>/plugin-data/<catalog>/<plugin>/`
-  - `workspace_data_dir_for(workspace, catalog, plugin) -> PathBuf` — `<root>/workspaces/<name>/plugin-data/<catalog>/<plugin>/`
+  - `plugin_data_dir_for(catalog, plugin) -> PathBuf` — `<root>/plugin-data/<catalog>/<plugin>/` (process-wide)
+  - `workspace_data_dir_for(workspace, catalog, plugin) -> PathBuf` — `<root>/workspaces/<name>/plugin-data/<catalog>/<plugin>/` (workspace-scoped)
 - **Semantics**:
   - Process-wide vs workspace-scoped scratch space (mirrors substitution engine's dual reference)
-  - Paths computed in F3; creation wired in US2 (lazy, within substitution render)
+  - Paths computed in F3 (Phase 5 skeleton); creation wired in US2 (lazy, within substitution render)
   - Matching `{{TOME_PLUGIN_DATA}}` / `{{TOME_WORKSPACE_DATA}}` built-in variables
+  - **Phase 5 / US2 NEW**: `ensure_plugin_data()` / `ensure_workspace_data()` called by `substitution::render()` on first `{{TOME_*}}` reference (lazy, idempotent)
 
 ### Plugin Lifecycle & Command Indexing (`src/plugin/lifecycle.rs`)
 
@@ -96,9 +100,21 @@ Phase 5 / US1 ships **commands as first-class database entries** (disambiguated 
 - **Changes**:
   - `enable_plugin` now calls `plugin::components::list_command_files` to enumerate commands
   - `collect_pending_commands(plugin_dir, catalog, plugin, plugin_version) -> Vec<PendingCommand>`
-  - Both skills and commands are inserted via a unified `index::skills::enable_plugin_atomic` call (F3 skeleton, US1 wires)
+  - Both skills and commands are inserted via a unified `index::skills::enable_plugin_atomic` call
   - `PendingSkill` struct extended with `kind: EntryKind`, `when_to_use: Option<String>`, `searchable: bool`, `user_invocable: bool`
-- **Frontmatter parsing** (Phase 5): Widened `SkillFrontmatter` to include new fields per contract
+
+### Workspace Rename & Plugin-Data Relocation (`src/workspace/rename.rs`)
+
+- **Purpose**: Phase 5 / US2 NEW — Relocate plugin-data directories during workspace rename
+- **Location**: `src/workspace/rename.rs`
+- **Algorithm additions**:
+  1. Existing steps 1–5 (rename markers, update DB, rename workspace dir) — **unchanged**
+  2. **NEW Step 6: Plugin-data relocation** (inside the workspace directory rename at step 5):
+     - Before `std::fs::rename(<root>/workspaces/<old>/, ...)`, enumerate `<root>/workspaces/<old>/plugin-data/` for any existing plugin-specific data
+     - Move each `<catalog>/<plugin>/` subdirectory to the new workspace location
+     - Pattern: `std::fs::rename(<old>/plugin-data/<cat>/<plug>/, <new>/plugin-data/<cat>/<plug>/)`
+     - Failures are logged; doctor `--fix` can recover via simple re-copy if needed
+- **Integration**: Part of the single `fs::rename` operation that relocates the workspace directory tree (same atomic boundary)
 
 ### Index Schema / Entry Records (`src/index/skills.rs`)
 
@@ -108,15 +124,15 @@ Phase 5 / US1 ships **commands as first-class database entries** (disambiguated 
   - `SkillRecord` struct gains `kind: EntryKind` field (reads from `skills.kind` column)
   - `SkillRecord` gains `when_to_use: Option<String>`, `searchable: bool`, `user_invocable: bool` (new v3 columns)
   - `PendingSkill` struct extended with matching fields
-  - `resolve_entry_body_path(catalog, plugin, name, kind) -> PathBuf` — NEW helper (US1.b consumer: prompts registry)
-    - Routes to `<plugin>/skills/<name>/SKILL.md` or `<plugin>/commands/<name>.md` based on kind
+  - `resolve_entry_body_path(catalog, plugin, name, kind) -> PathBuf` — NEW helper (routes via kind)
+    - Returns `<plugin>/skills/<name>/SKILL.md` or `<plugin>/commands/<name>.md` based on kind
   - Schema v2→v3 migration (in `index::migrations.rs`, F3 skeleton):
     - Adds `kind` column (backfilled via directory walk: `skill` if exists in `skills/`, else `command`)
     - Adds `when_to_use`, `searchable`, `user_invocable` columns (backfilled with defaults per contract)
 
 ### MCP Prompts Registry (`src/mcp/{prompts,prompt_name,prompt_collision}.rs`)
 
-- **Purpose**: Phase 5 / US1 NEW — Expose commands/skills as invocable MCP prompts
+- **Purpose**: Phase 5 / US1 — Expose commands/skills as invocable MCP prompts
 - **Location**: `src/mcp/{prompts,prompt_name,prompt_collision}.rs`
 - **Components**:
   - **`prompts.rs`** — `PromptRegistry` and `PromptEntry` (one resolved entry ready for registration):
@@ -143,10 +159,10 @@ Phase 5 / US1 ships **commands as first-class database entries** (disambiguated 
     - `argument_hint: Option<String>` — hint for catch-all `args` argument description (Case B fallback)
     - `prompt_name: Option<String>` — override for derived `<plugin>__<entry>` format
     - `when_to_use: Option<String>` — guidance indexed for search
-    - `searchable: Option<bool>` (default `true`) — controls `search_skills` visibility (FR-076)
+    - `searchable: Option<bool>` (default `true`) — controls `search_skills` visibility
     - `user_invocable: Option<bool>` (default `false` for skills; Tome explicit no-op) — controls `prompts/list` visibility
 
-### Data Flow — Phase 5 / US1
+### Data Flow — Phase 5 / US1–US2
 
 ```
 CLI: tome plugin enable <catalog>/<plugin>  (existing)
@@ -169,25 +185,7 @@ regenerate_for_trigger(workspace_name, paths)  (Phase 4 — unchanged)
 ```
 
 ```
-MCP: tome mcp starts (existing preflight)
-     ↓
-Load workspace scope + central index (read-only)
-     ↓
-Query all skills/commands WHERE user_invocable=true
-     ↓
-For each entry, resolve prompt name via derive_name algorithm
-     ↓
-Check for collisions via resolve_collisions; warn if detected
-     ↓
-Build PromptRouter via hand-rolled route registration loop
-     ↓
-Advertise PromptsCapability in Server::get_info
-     ↓
-MCP clients discover /prompts/list with entries derivable as prompts
-```
-
-```
-CLI: tome prompts invoke <prompt_name> [--arg-1 value1 --arg-2 value2 ...]  (Phase 5 / US3)
+CLI: tome prompts invoke <prompt_name> [--arg-1 value1 --arg-2 value2 ...]
      ↓
 Load workspace scope + central index
      ↓
@@ -203,17 +201,43 @@ Validate supplied arguments against declared schema
      ↓
 Build SubstitutionContext { entry, workspace, arguments }
      ↓
-substitution::render(body, context) — four-stage pipeline
+substitution::render(body, context) — SINGLE-PASS pipeline (Phase 5 / US2)
   ↓
-  Stage 1: {{TOME_*}} built-ins + lazy plugin/workspace data-dir creation
+  Compile COMBINED_RE (union of all stage patterns) [once at startup via OnceLock]
   ↓
-  Stage 2: {{$VAR}} env passthrough
-  ↓
-  Stage 3: $ARGUMENTS / $N / $name Claude Code argument substitution
-  ↓
-  Stage 4: optional tail (US2 wire-up)
+  For each regex match in body (in order):
+    ↓
+    If pattern matches {{TOME_*}}: invoke builtins stage handler
+      ↓
+      On first {{TOME_*}}: call ensure_plugin_data() + ensure_workspace_data()
+        ↓
+        create_dir_all(plugin_data_dir_for(...)) if not exists [lazy, idempotent]
+        ↓
+        create_dir_all(workspace_data_dir_for(...)) if not exists [lazy, idempotent]
+    ↓
+    If pattern matches {{$*}}: invoke env stage handler
+    ↓
+    If pattern matches $ARGUMENTS/$N/$name: invoke arguments stage handler
+    ↓
+    Replace match with resolved value
      ↓
 CLI: output rendered body (or pass to harness CLI)
+```
+
+```
+CLI: tome workspace rename <old> <new>
+     ↓
+Existing steps 1-5 (per Phase 4 / US2 contract)
+     ↓
+Within workspace dir rename (step 5):
+  ↓
+  if <old>/plugin-data/ exists:
+    ↓
+    For each <catalog>/<plugin>/ subdir:
+      ↓
+      std::fs::rename(<old>/plugin-data/<cat>/<plug>/, <new>/plugin-data/<cat>/<plug>/)
+      ↓
+      Log success or non-critical error
 ```
 
 ## Layer Boundaries
@@ -231,11 +255,12 @@ CLI: output rendered body (or pass to harness CLI)
 - Higher layers can depend on lower layers, not vice versa
 - Trait boundaries (`Embedder`, `Reranker`, `Summariser`, `HarnessModule`, `ScopeProvider`) decouple policy from mechanism
 - `src/mcp/` is the only module allowed async (`tokio`); enforced by `tests/sync_boundary.rs`
-- `src/substitution/` is sync-only; variable rendering is pure compute (no I/O side effects except lazy data-dir creation)
+- `src/substitution/` is sync-only; variable rendering is pure compute (lazy data-dir creation is the only I/O side effect)
 - Workspace-specific code never reads/writes global index directly; uses scope-parameterized helpers
 - Substitution engine allows test injection via `SUBSTITUTION_OVERRIDE` thread_local (mirrors `MIGRATIONS_OVERRIDE` / `SUMMARISER_OVERRIDE` pattern)
 - Entry kind dispatch via `EntryKind` enum is exhaustive; matches are type-safe
+- **Phase 5 / US2**: Single-pass rendering pipeline ensures each stage pattern is matched exactly once per body (no dual-sweep inefficiency)
 
 ---
 
-*This document describes HOW the system is organized at Phase 5 / US1 (commands + prompts shipped). Phase 5 adds unified entry dispatch, MCP prompts capability, substitution engine skeleton, and per-plugin data directories. 954+ tests across 127+ suites.*
+*This document describes HOW the system is organized at Phase 5 / US2 (commands + prompts + single-pass substitution shipped). 954+ tests across 127+ suites.*

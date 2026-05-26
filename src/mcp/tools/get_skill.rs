@@ -18,6 +18,7 @@ use crate::error::TomeError;
 use crate::index::skills;
 use crate::mcp::state::McpState;
 use crate::plugin::frontmatter;
+use crate::substitution::{self, SubstitutionContext, SubstitutionError};
 
 /// The tool description per `mcp-tools.md` §get_skill lives on the
 /// `#[tool]`-decorated method in `mcp::server` as a doc comment.
@@ -140,7 +141,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         }
     };
 
-    let LookupHit { body_path } = hit;
+    let LookupHit {
+        body_path,
+        plugin_version,
+    } = hit;
     let skill_path = body_path;
 
     // The actual file read + frontmatter strip + sibling walk is all
@@ -178,7 +182,39 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                 ReadError::Io(io) => internal(&read_input, started, io.to_string(), "io"),
             })?;
 
-    let (content, resources) = body_and_resources;
+    let (raw_content, resources) = body_and_resources;
+
+    // Phase 5 / US2.c (FR-101): run the substitution pipeline over the
+    // frontmatter-stripped body so callers see Stage 1 (built-ins) +
+    // Stage 2 (env passthrough) values. `get_skill` never receives args
+    // (it's the read-side; Stage 3 + Stage 4 are exercised via the
+    // `prompts/get` MCP surface in `mcp::prompts`), so `args = None`
+    // and `declared_args = []`.
+    //
+    // Build + render are pure compute (built-ins read context fields;
+    // env reads `std::env::var`; the data-dir built-ins call
+    // `create_dir_all` which is sync). Run on the blocking pool to keep
+    // the runtime responsive per the sync-boundary discipline.
+    let ctx_state = state.clone();
+    let ctx_input = input.clone_for_log();
+    let ctx_skill_path = skill_path.clone();
+    let ctx_plugin_version = plugin_version;
+    let rendered_result = tokio::task::spawn_blocking(move || {
+        let ctx = build_substitution_context(
+            &ctx_state,
+            &ctx_input,
+            &ctx_skill_path,
+            ctx_plugin_version,
+        )?;
+        substitution::render(&raw_content, &ctx).map_err(map_substitution_error)
+    })
+    .await
+    .map_err(|e| internal(&input, started, format!("render join: {e}"), "internal"))?;
+
+    let content = match rendered_result {
+        Ok(s) => s,
+        Err((code, err)) => return Err(emit_error(&input, started, code, err)),
+    };
 
     info!(
         target: "tome::mcp::tools::get_skill",
@@ -226,8 +262,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
 /// R-M5 (US1.d reviewer pass): the boxed `SkillRecord` field was
 /// removed; it was a "future extensions" placeholder costing a heap
 /// allocation per call with no read site.
+///
+/// US2.c (Phase 5): re-added `plugin_version` as a single scalar field
+/// (not the whole `SkillRecord`) so the substitution context can be
+/// built without a second DB read. Mirrors the registry-cached
+/// `PromptEntry.plugin_version` shape in `mcp::prompts`.
 struct LookupHit {
     body_path: PathBuf,
+    plugin_version: String,
 }
 
 enum LookupOutcome {
@@ -272,7 +314,10 @@ fn lookup_skill(
                 plugin,
                 &row.path,
             )?;
-            Ok(LookupOutcome::Found(LookupHit { body_path }))
+            Ok(LookupOutcome::Found(LookupHit {
+                body_path,
+                plugin_version: row.plugin_version,
+            }))
         }
         Some(_) => Ok(LookupOutcome::UnknownSkill),
         None => {
@@ -349,6 +394,137 @@ fn walk_dir(dir: &Path, exclude: &Path, out: &mut Vec<String>) -> std::io::Resul
         }
     }
     Ok(())
+}
+
+/// Build the [`SubstitutionContext`] for one `get_skill` call.
+///
+/// Mirrors `mcp::prompts::build_get_context` for fields shared between
+/// the two surfaces (catalog/plugin/entry scalars, paths, clock, lazy
+/// data-dir slots). The two divergences from prompts:
+///
+/// - `args` is always `None` and `declared_args` always empty (get_skill
+///   never accepts args — Stage 3 + Stage 4 are unreachable here).
+/// - `plugin_version` is sourced from the `SkillRecord.plugin_version`
+///   captured in `LookupHit`, not the registry cache (registry is the
+///   prompts-side construct).
+fn build_substitution_context(
+    state: &McpState,
+    input: &Input,
+    skill_path: &Path,
+    plugin_version: String,
+) -> Result<SubstitutionContext, (&'static str, McpError)> {
+    let workspace_name = state.scope.scope.name();
+
+    // SKILL.md lives at `<plugin_root>/skills/<name>/SKILL.md`. `entry_dir`
+    // is the immediate parent; `plugin_root_dir` walks up looking for the
+    // marker `.claude-plugin/` directory (mirrors the defensive lookup in
+    // `mcp::prompts::build_get_context`).
+    let entry_dir = skill_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| skill_path.to_path_buf());
+    let plugin_root_dir = entry_dir
+        .ancestors()
+        .find(|p| p.join(".claude-plugin").is_dir())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| entry_dir.clone());
+
+    // Plugin / workspace data-dir paths are no longer threaded through
+    // the builder (US2.d R-M2): the substitution layer derives them
+    // on-demand from `paths` + names via `data_dir::ensure_*`.
+
+    SubstitutionContext::builder()
+        .catalog_name(input.catalog.clone())
+        .plugin_name(input.plugin.clone())
+        .plugin_version(plugin_version)
+        .entry_name(input.name.clone())
+        .entry_path(skill_path.to_path_buf())
+        .entry_dir(entry_dir)
+        .plugin_root_dir(plugin_root_dir)
+        .workspace_name(workspace_name.as_str().to_owned())
+        .clock(substitution::current_clock())
+        .args(None)
+        .declared_args(Vec::new())
+        .paths(state.paths.clone())
+        .build()
+        .map_err(|e| {
+            (
+                "substitution_failed",
+                McpError::internal_error(
+                    format!("substitution context build failed: {e}"),
+                    Some(json!({ "code": "substitution_failed" })),
+                ),
+            )
+        })
+}
+
+/// Map a [`SubstitutionError`] surfaced by the render pipeline to a
+/// (`code`, [`McpError`]) tuple. Mirrors the variant routing in
+/// `mcp::prompts::emit_tome_error_for_get` so both MCP surfaces agree
+/// on `data.code` slugs.
+///
+/// `InvalidArgumentFrontmatter` and `PromptArgumentMismatch` are
+/// defensively mapped even though `get_skill` never supplies args
+/// (declared_args is empty and Stage 3 is unreachable) — keeps the
+/// match exhaustive against the closed `SubstitutionError` enum so a
+/// future variant addition surfaces as a compile error here.
+fn map_substitution_error(err: SubstitutionError) -> (&'static str, McpError) {
+    match err {
+        SubstitutionError::PluginDataDirCreationFailed { path, source } => (
+            "plugin_data_dir_write_failed",
+            McpError::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!(
+                    "plugin data dir creation failed at {}: {source}",
+                    path.display()
+                ),
+                Some(json!({
+                    "code": "plugin_data_dir_write_failed",
+                    "path": path.display().to_string(),
+                })),
+            ),
+        ),
+        SubstitutionError::WorkspaceDataDirCreationFailed { path, source } => (
+            "workspace_data_dir_write_failed",
+            McpError::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!(
+                    "workspace data dir creation failed at {}: {source}",
+                    path.display()
+                ),
+                Some(json!({
+                    "code": "workspace_data_dir_write_failed",
+                    "path": path.display().to_string(),
+                })),
+            ),
+        ),
+        SubstitutionError::InvalidArgumentFrontmatter { file, reason } => (
+            "invalid_argument_frontmatter",
+            McpError::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!(
+                    "invalid argument frontmatter in {}: {reason}",
+                    file.display()
+                ),
+                Some(json!({
+                    "code": "invalid_argument_frontmatter",
+                    "file": file.display().to_string(),
+                })),
+            ),
+        ),
+        SubstitutionError::PromptArgumentMismatch { expected, supplied } => (
+            "prompt_argument_mismatch",
+            McpError::new(
+                ErrorCode::INVALID_PARAMS,
+                format!("prompt argument mismatch: expected {expected}, supplied {supplied}"),
+                Some(json!({
+                    "code": "prompt_argument_mismatch",
+                    "expected": expected,
+                    "supplied": supplied,
+                })),
+            ),
+        ),
+    }
 }
 
 /// Build the `internal_error` envelope plus an error log event.

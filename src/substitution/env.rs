@@ -21,51 +21,40 @@
 //! | Unset | `${TOME_ENV_FOO}` | Empty string + `tracing::debug!` |
 //! | Unset | `${TOME_ENV_FOO:-default}` | `default` |
 //!
-//! Fast-path: bodies with no matches short-circuit to `Cow::Borrowed`
-//! so the caller can pass the slice straight into Stage 3 without a
-//! copy.
+//! ## Single-sweep design (US2.d B2 fix)
+//!
+//! Per-match resolution is invoked from the unified Stage 1 + Stage 2
+//! sweep in [`super::render`]. The resolved value is emitted directly
+//! into the output buffer and never re-enters the scanner — this is the
+//! structural enforcement of the no-rescan invariant (NFR-007 /
+//! FR-051) and the fix for the exfiltration vector documented in US2.d
+//! B2 (a hostile plugin's `"version": "${TOME_ENV_GITHUB_TOKEN}"`
+//! cannot leak the operator's env var).
 
-use std::borrow::Cow;
-
-use super::regex_sets;
-
-/// Apply Stage 2 env-passthrough substitution.
+/// Resolve one `${TOME_ENV_<NAME>}` reference to its host-env value.
 ///
-/// Performs a single sweep over `body` rewriting every
-/// `${TOME_ENV_<NAME>}` (with optional `:-default`) reference per the
-/// matrix above. Returns `Cow::Borrowed(body)` when no matches are
-/// found (NFR-007: substituted values are not re-scanned anyway, but
-/// the fast-path avoids allocating an owned string when the body is
-/// entirely free of Stage 2 references).
-pub(super) fn apply_env(body: &str) -> Cow<'_, str> {
-    let re = regex_sets::env_regex();
-    if !re.is_match(body) {
-        return Cow::Borrowed(body);
+/// Pure function: caller supplies the captured `name` (suffix after
+/// `TOME_ENV_`) and the optional `:-default` value; returns the
+/// resolved string per the behaviour matrix in the module docs. Never
+/// fails — when both the host env is unset and no default is supplied,
+/// resolves to the empty string with a `tracing::debug!` event.
+///
+/// The returned `String` is emitted verbatim into the output buffer by
+/// the caller and is NOT re-scanned (NFR-007).
+pub(super) fn resolve_env(name: &str, default: Option<&str>) -> String {
+    let key = format!("TOME_ENV_{name}");
+    match std::env::var(&key) {
+        Ok(value) => value,
+        Err(_) => match default {
+            Some(d) => d.to_owned(),
+            None => {
+                tracing::debug!(
+                    name = name,
+                    key = key.as_str(),
+                    "TOME_ENV_ reference with no host value and no default; resolving to empty string"
+                );
+                String::new()
+            }
+        },
     }
-    re.replace_all(body, |caps: &regex::Captures<'_>| {
-        // capture 1 is `[A-Z0-9_]+` per the constant pattern; it is
-        // always present on a successful match. The unwrap-with-empty
-        // is purely defensive against a future regex change.
-        let name = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        let default = caps.get(2).map(|m| m.as_str());
-        let key = format!("TOME_ENV_{name}");
-        match std::env::var(&key) {
-            Ok(value) => value,
-            Err(_) => match default {
-                Some(d) => d.to_string(),
-                None => {
-                    tracing::debug!(
-                        name = name,
-                        key = key.as_str(),
-                        "TOME_ENV_ reference with no host value and no default; resolving to empty string"
-                    );
-                    String::new()
-                }
-            },
-        }
-    })
-    // `replace_all` returns `Cow<'_, str>` whose lifetime is tied to
-    // `body`; propagate verbatim so the borrowed-fast-path inside the
-    // regex engine is preserved when every replacement happens to be a
-    // direct identity (not the common case, but cheap to keep).
 }

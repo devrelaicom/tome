@@ -94,17 +94,67 @@ impl std::error::Error for SubstitutionError {
     }
 }
 
-/// Render an entry body through the four-stage substitution pipeline.
+/// Render an entry body through the substitution pipeline.
 ///
-/// Stage 1 (built-ins) shipped in US2.a; Stage 2 (env passthrough)
-/// lights up in US2.b. Stages 3 and 4 (argument substitution +
-/// `ARGUMENTS:` tail) land in US3. See
-/// `contracts/substitution-engine.md` for the full pipeline shape.
+/// Stages 1 (built-ins) and 2 (env passthrough) are scanned in a
+/// SINGLE regex pass per US2.d B2 — the resolved value is emitted
+/// directly into the output buffer and never re-enters the scanner.
+/// This is the structural enforcement of the no-rescan invariant
+/// (NFR-007 / FR-051) and closes the exfiltration vector where a
+/// hostile plugin's `"version": "${TOME_ENV_GITHUB_TOKEN}"` could leak
+/// the operator's host env var into the LLM context via a body
+/// referencing `${TOME_PLUGIN_VERSION}`.
+///
+/// Stages 3 and 4 (argument substitution + `ARGUMENTS:` tail) land in
+/// US3. See `contracts/substitution-engine.md` for the full pipeline
+/// shape.
 pub fn render(body: &str, context: &SubstitutionContext) -> Result<String, SubstitutionError> {
-    let s = builtins::apply_builtins(body, context)?;
-    let s = env::apply_env(&s).into_owned();
-    // Stages 3 and 4 (argument substitution + ARGUMENTS tail) land in US3.
-    Ok(s)
+    let re = regex_sets::combined_regex();
+    // Fast-path: bodies with no `${TOME_…}` references short-circuit
+    // without allocating an owned output buffer.
+    if !re.is_match(body) {
+        return Ok(body.to_owned());
+    }
+    let mut out = String::with_capacity(body.len());
+    let mut last_end = 0;
+    for caps in re.captures_iter(body) {
+        // Group 0 is guaranteed to exist for any captures_iter match.
+        let m = caps.get(0).expect("regex group 0 present on every match");
+        out.push_str(&body[last_end..m.start()]);
+        // Group 3 is the optional `:-default` (applies to whichever
+        // branch matched).
+        let default = caps.get(3).map(|c| c.as_str());
+
+        // Per the unified pattern in `regex_sets::combined_regex`,
+        // exactly one of group 1 (env branch) or group 2 (built-in
+        // branch) is set on any successful match. Leftmost alternation
+        // guarantees the env branch wins on `TOME_ENV_*` references.
+        if let Some(env_name) = caps.get(1) {
+            // Stage 2 — env passthrough. Pure function: never errors.
+            let value = env::resolve_env(env_name.as_str(), default);
+            out.push_str(&value);
+        } else {
+            // Stage 1 — built-in.
+            let builtin_name = caps
+                .get(2)
+                .expect("combined_regex always sets group 1 or group 2 on a match")
+                .as_str();
+            match builtins::resolve_builtin(builtin_name, context, default)? {
+                Some(value) => out.push_str(&value),
+                None => {
+                    tracing::debug!(
+                        target: "tome::substitution",
+                        builtin = builtin_name,
+                        "unknown TOME_ built-in; leaving verbatim",
+                    );
+                    out.push_str(m.as_str());
+                }
+            }
+        }
+        last_end = m.end();
+    }
+    out.push_str(&body[last_end..]);
+    Ok(out)
 }
 
 /// Wall-clock value for the substitution layer.

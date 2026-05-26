@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-26 (Phase 5 / US1 shipped; substitution engine, prompts, entry kind discriminator)
+> **Last Updated**: 2026-05-27 (Phase 5 / US2 shipped; single-pass substitution, lazy data-dir creation, workspace rename relocation)
 
 ## Directory Layout
 
@@ -32,14 +32,14 @@ tome/
 │   │   ├── components.rs               # Walk skill/command dirs; Phase 5: list_command_files enumerates commands
 │   │   └── lifecycle.rs                # enable/disable/reindex orchestration (Phase 5: commands + skills)
 │   │
-│   ├── substitution/                   # Phase 5 NEW: Variable rendering engine (F3 skeleton + US1 wire)
-│   │   ├── mod.rs                      # Public API: render(), SubstitutionError enum
+│   ├── substitution/                   # Phase 5 / US1–US2: Variable rendering engine
+│   │   ├── mod.rs                      # Public API: render(), SubstitutionError enum (6 variants); COMBINED_RE single-pass loop (US2)
 │   │   ├── context.rs                  # SubstitutionContext + SubstitutionContextBuilder + ArgumentValues enum
-│   │   ├── builtins.rs                 # {{TOME_*}} placeholder stage (stub in F3; US2 wires {{TOME_PLUGIN_DATA}}, {{TOME_WORKSPACE_DATA}}, {{TOME_WORKSPACE_NAME}})
-│   │   ├── env.rs                      # {{$VAR}} env-passthrough stage (stub in F3; US2 wires)
-│   │   ├── arguments.rs                # Claude Code $ARGUMENTS / $N / $NAME stage (stub in F3; US3 wires)
-│   │   ├── data_dir.rs                 # Lazy plugin/workspace data-dir creation (F3: paths only; US2 wires create_dir_all)
-│   │   └── regex_sets.rs               # OnceLock<Regex> slots for compiled stage patterns (uncompiled in F3; US2/US3 populate)
+│   │   ├── builtins.rs                 # Stage handler: {{TOME_PLUGIN_DATA}}, {{TOME_WORKSPACE_DATA}}, {{TOME_WORKSPACE_NAME}}, {{TOME_CATALOG_NAME}}, {{TOME_PLUGIN_NAME}} (US2)
+│   │   ├── env.rs                      # Stage handler: {{$VAR}} env-passthrough + TOME_ENV_ prefix (US2)
+│   │   ├── arguments.rs                # Stage handler: Claude Code $ARGUMENTS / $N / $NAME (US3)
+│   │   ├── data_dir.rs                 # Lazy plugin/workspace data-dir creation via ensure_plugin_data() / ensure_workspace_data() (US2)
+│   │   └── regex_sets.rs               # OnceLock<Regex> COMBINED_RE (union of all stage patterns, compiled once at startup or on first use per US2)
 │   │
 │   ├── index/                          # Vector search index (SQLite + sqlite-vec)
 │   │   ├── mod.rs                      # Public API exports
@@ -71,7 +71,7 @@ tome/
 │   │   ├── info.rs                     # WorkspaceInfo report assembly
 │   │   ├── init.rs                     # Atomic workspace creation via tempfile
 │   │   ├── regen_summary.rs            # Phase 4: Summariser invocation (US2/US4.b)
-│   │   ├── rename.rs                   # Phase 4: Workspace rename with project updates (US2)
+│   │   ├── rename.rs                   # Phase 4: Workspace rename with project updates (US2); Phase 5 / US2: plugin-data relocation
 │   │   ├── remove.rs                   # Phase 4: Workspace removal with 5-step cascade (US2)
 │   │   └── sync.rs                     # Phase 4: Central RULES.md sync to projects (US2)
 │   │
@@ -137,7 +137,7 @@ tome/
 │   │   │   ├── init.rs                 # `tome workspace init <name> [--inherit-global] [--force]`
 │   │   │   ├── list.rs                 # `tome workspace list` — enumerate all workspaces
 │   │   │   ├── use_.rs                 # `tome workspace use <name> [--force]` (bind + sync)
-│   │   │   ├── rename.rs               # `tome workspace rename <old> <new>` — rename with project updates
+│   │   │   ├── rename.rs               # `tome workspace rename <old> <new>` — rename with project updates + plugin-data relocation (US2)
 │   │   │   ├── remove.rs               # `tome workspace remove <name> [--force]` — cascade delete
 │   │   │   ├── regen_summary.rs        # `tome workspace regen-summary <name>` — explicit regenerate (US4.c)
 │   │   │   └── sync.rs                 # `tome workspace sync [<name>]` — sync RULES.md to projects
@@ -216,7 +216,7 @@ tome/
 │   └── codebase/
 │       ├── STACK.md                    # Technologies + versions
 │       ├── INTEGRATIONS.md             # External APIs + services
-│       ├── ARCHITECTURE.md             # System design + patterns (Phase 5: substitution, prompts, entry kind)
+│       ├── ARCHITECTURE.md             # System design + patterns (Phase 5: substitution, prompts, entry kind, single-pass render)
 │       ├── STRUCTURE.md                # Directory layout (this file)
 │       ├── CONVENTIONS.md              # Naming + code style
 │       ├── TESTING.md                  # Test strategy + patterns
@@ -248,7 +248,7 @@ tome/
 │   │   ├── contracts/ (13+ contracts)
 │   │   ├── retro/ (P2–P8 retrospectives)
 │   │   └── quickstart.md
-│   └── 005-phase-5-commands-prompts/        # Phase 5 (F1–F3 + US1 shipped)
+│   └── 005-phase-5-commands-prompts/        # Phase 5 (F1–F3 + US1–US2 shipped)
 │       ├── spec.md
 │       ├── plan.md
 │       ├── research.md (20 R-decisions)
@@ -268,7 +268,7 @@ tome/
 ├── Cargo.lock                          # Dependency lock
 ├── build.rs                            # sqlite-vec C extension compilation
 ├── CONSTITUTION.md                     # v1.3.0 — constraints + trade-offs (Phase 4 §Paths amendment; no Phase 5 amendments)
-├── CLAUDE.md                           # Project context for Claude Code (Phase 5 planning complete; v0.5.0 roadmap)
+├── CLAUDE.md                           # Project context for Claude Code (Phase 5 US2 complete; v0.5.0 roadmap)
 └── CHANGELOG.md                        # Version history (v0.1.0–v0.4.0 shipped; Phase 5 in flight)
 ```
 
@@ -278,13 +278,13 @@ tome/
 
 | Directory | Purpose | Key Files |
 |-----------|---------|-----------|
-| `substitution/` | Phase 5 NEW: Variable rendering engine | `context.rs`, `builtins.rs`, `env.rs`, `arguments.rs`, `data_dir.rs`, `regex_sets.rs` |
+| `substitution/` | Phase 5 / US1–US2: Variable rendering engine (single-pass pipeline) | `mod.rs` (render loop), `context.rs`, `builtins.rs`, `env.rs`, `arguments.rs`, `data_dir.rs`, `regex_sets.rs` (COMBINED_RE) |
 | `plugin/` | Plugin metadata, lifecycle (Phase 5: commands) | `manifest.rs`, `frontmatter.rs`, `identity.rs` (EntryKind), `components.rs` (list_command_files), `lifecycle.rs` |
 | `index/` | SQLite + sqlite-vec index (Phase 5: v3 schema) | `db.rs`, `schema.rs`, `migrations.rs` (v2→v3), `skills.rs` (EntryKind), `query.rs` |
 | `mcp/` | MCP server + Phase 5 prompts | `prompts.rs` (PromptRegistry), `prompt_name.rs`, `prompt_collision.rs`, `tools/` |
 | `catalog/` | Catalog registry, git ops | `manifest.rs`, `store.rs`, `git.rs` |
 | `embedding/` | Text embedding + reranking | `fastembed.rs`, `stub.rs`, `download.rs` |
-| `workspace/` | Scope resolution, binding, lifecycle | `scope.rs`, `binding.rs`, `init.rs`, `rename.rs`, `remove.rs`, `regen_summary.rs` |
+| `workspace/` | Scope resolution, binding, lifecycle (Phase 5 / US2: rename relocation) | `scope.rs`, `binding.rs`, `init.rs`, `rename.rs`, `remove.rs`, `regen_summary.rs` |
 | `harness/` | Phase 4: Harness abstraction + sync | `mod.rs` (trait), 5 harness impls, `sync.rs`, `rules_file.rs`, `mcp_config.rs` |
 | `settings/` | Phase 4: Layered composition | `parser.rs`, `resolver.rs` (composition engine), `edit.rs` |
 | `summarise/` | Phase 4: Workspace summariser | `llama.rs`, `stub.rs`, `prompts.rs`, `trigger.rs`, `registry.rs` |
@@ -294,17 +294,17 @@ tome/
 | `util/` | Shared utilities | `atomic_dir.rs` (tempfile + rename), `io.rs` (bounded read) |
 | `paths.rs` | Phase 4 single-root layout; Phase 5: data-dir accessors | `home_root()`, `Paths struct`, `plugin_data_dir_for()`, `workspace_data_dir_for()` |
 
-### `src/substitution/` — Substitution Engine Details (Phase 5 / F3 + US1)
+### `src/substitution/` — Substitution Engine Details (Phase 5 / US1–US2)
 
-| File | Purpose |
-|------|---------|
-| `mod.rs` | `render(body, context) -> Result<String, SubstitutionError>` entry point; `SubstitutionError` enum (4 variants) |
-| `context.rs` | `SubstitutionContext` + `SubstitutionContextBuilder`; `ArgumentValues` enum (named/positional) |
-| `builtins.rs` | Stage 1: `{{TOME_*}}` built-ins (stub in F3; US2 wires real implementations) |
-| `env.rs` | Stage 2: `{{$VAR}}` env passthrough (stub in F3; US2 wires) |
-| `arguments.rs` | Stage 3: Claude Code `$ARGUMENTS` / `$N` / `$NAME` (stub in F3; US3 wires) |
-| `data_dir.rs` | Lazy plugin/workspace data-dir creation (F3: path computation only; US2 wires `create_dir_all`) |
-| `regex_sets.rs` | `OnceLock<Regex>` slots for compiled patterns (uncompiled in F3; US2/US3 populate at startup) |
+| File | Purpose | Phase 5 / US2 Status |
+|------|---------|---------------------|
+| `mod.rs` | Single-pass `render(body, context)` entry point (COMBINED_RE loop); `SubstitutionError` enum (6 variants) | Rendered via COMBINED_RE (union regex) instead of dual Stage 1+2 sweeps |
+| `context.rs` | `SubstitutionContext` + `SubstitutionContextBuilder`; `ArgumentValues` enum | Unchanged from US1 |
+| `builtins.rs` | Stage handler: `{{TOME_PLUGIN_DATA}}`, `{{TOME_WORKSPACE_DATA}}`, `{{TOME_WORKSPACE_NAME}}`, `{{TOME_CATALOG_NAME}}`, `{{TOME_PLUGIN_NAME}}` | Wired in US2; lazy data-dir creation triggered on first match |
+| `env.rs` | Stage handler: `{{$VAR}}` env-passthrough (TOME_ENV_ prefix) | Wired in US2 |
+| `arguments.rs` | Stage handler: Claude Code `$ARGUMENTS` / `$N` / `$NAME` | Wired in US3 (deferred) |
+| `data_dir.rs` | Lazy creation: `ensure_plugin_data()` / `ensure_workspace_data()` | Wired in US2; creates dirs on first `{{TOME_*}}` reference during render |
+| `regex_sets.rs` | `OnceLock<Regex>` COMBINED_RE (compiled once at startup) | Populated in US2 via union of all stage patterns |
 
 ### `src/mcp/` — MCP Prompts Details (Phase 5 / US1)
 
@@ -334,23 +334,30 @@ tome/
 | `components.rs` | `count_components` (unchanged); **NEW**: `list_command_files(plugin_dir) -> Vec<CommandFile>` enumerates `<plugin>/commands/*.md` flat; `CommandFile { path, name }` |
 | `lifecycle.rs` | `enable_plugin` now calls `list_command_files` and collects `PendingCommand` structs alongside `PendingSkill` |
 
-### `src/paths.rs` — Data Directory Accessors (Phase 5 / US1)
+### `src/paths.rs` — Data Directory Accessors (Phase 5 / US1–US2)
 
-| Method | Returns | Purpose |
-|--------|---------|---------|
-| `plugin_data_dir_for(catalog, plugin)` | `<root>/plugin-data/<catalog>/<plugin>/` | Process-wide plugin scratch space |
-| `workspace_data_dir_for(workspace, catalog, plugin)` | `<root>/workspaces/<name>/plugin-data/<catalog>/<plugin>/` | Workspace-scoped plugin scratch space |
-| `workspace_dir(workspace)` | `<root>/workspaces/<name>/` | Workspace root (unchanged Phase 4) |
+| Method | Returns | Purpose | US2 Status |
+|--------|---------|---------|-----------|
+| `plugin_data_dir_for(catalog, plugin)` | `<root>/plugin-data/<catalog>/<plugin>/` | Process-wide plugin scratch space | Path computed; directory created lazily in substitution render |
+| `workspace_data_dir_for(workspace, catalog, plugin)` | `<root>/workspaces/<name>/plugin-data/<catalog>/<plugin>/` | Workspace-scoped plugin scratch space | Path computed; directory created lazily in substitution render |
+| `workspace_dir(workspace)` | `<root>/workspaces/<name>/` | Workspace root (unchanged Phase 4) | Unchanged |
+
+### `src/workspace/rename.rs` — Workspace Rename + Plugin-Data Relocation (Phase 5 / US2)
+
+| Step | Purpose | Phase 5 / US2 Status |
+|------|---------|---------------------|
+| 1–5 | Existing rename algorithm (Phase 4 / US2) | Unchanged |
+| 6 | **NEW**: Plugin-data relocation within workspace dir rename | **Wired in US2**: Before the final `fs::rename(<old>/, <new>/)`, enumerate and move any existing `<old>/plugin-data/<cat>/<plug>/` subdirectories to the new location |
 
 ## Module Boundaries
 
-### Where to Add New Code (Phase 5 Updates)
+### Where to Add New Code (Phase 5 / US1–US2 Updates)
 
 | If you're adding... | Put it in... | Pattern |
 |---------------------|--------------|---------|
-| New substitution stage | `src/substitution/{stage}.rs` | Stage 1-4 namespace; OnceLock<Regex> in `regex_sets.rs` |
-| New built-in variable | `src/substitution/builtins.rs` | Add case to match block; test via `SubstitutionContext` |
-| New entry kind | `src/plugin/identity.rs` | Extend `EntryKind` enum; update Ser/Deser; backfill migration |
+| New substitution stage | `src/substitution/{stage}.rs` | Add stage handler; extend COMBINED_RE pattern in `regex_sets.rs`; test via SubstitutionContext |
+| New built-in variable | `src/substitution/builtins.rs` | Add case to match block in `builtins` handler; wired in appropriate US (US2 for {{TOME_*}}) |
+| New entry kind | `src/plugin/identity.rs` | Extend `EntryKind` enum; update Ser/Deser; backfill migration in v2→v3 |
 | Command-specific field | `src/plugin/frontmatter.rs` | Extend `SkillFrontmatter` (lenient parsing); document default |
 | Command collection | `src/plugin/lifecycle.rs` | Call `list_command_files`; parse frontmatter; build `PendingCommand` |
 | MCP prompt handler | `src/mcp/prompts.rs` | Register route via `PromptRouter::new_dyn`; implement request handler |
@@ -358,6 +365,9 @@ tome/
 | Prompt collision policy | `src/mcp/prompt_collision.rs` | Extend `resolve_collisions` detection; update warning message |
 | Entry body resolution | `src/index/skills.rs` | Update `resolve_entry_body_path` match arms per new kind |
 | Schema backfill | `src/index/migrations.rs` | Add new v2→v3 backfill step; test via synthetic DB |
+| Data-dir path accessor | `src/paths.rs` | Add new `*_data_dir_for(...)` method; update `workspace_dir` + `workspace_root` |
+| Data-dir creation | `src/substitution/data_dir.rs` | Add new `ensure_*_data(...)` function; return `SubstitutionError` on failure |
+| Workspace-related mutation | `src/workspace/rename.rs` / `remove.rs` / `init.rs` | Update step sequence; ensure data-dir side effects coordinate (Phase 5 / US2: relocate on rename) |
 | New harness | `src/harness/{name}.rs` + register in `mod.rs` | Impl `HarnessModule` trait (7 methods) |
 | New workspace command | `src/commands/workspace/{cmd}.rs` | Pattern: `run(args, scope, paths, mode)` + `assemble_*` |
 | Surgical TOML edit | `src/settings/edit.rs` | Add helper using `toml_edit::DocumentMut` |
@@ -366,114 +376,138 @@ tome/
 
 ### Key Patterns
 
-#### Substitution Context Pattern (Phase 5 / US1+US2+US3)
+#### Single-Pass Substitution Pattern (Phase 5 / US2)
 
 ```rust
-// src/substitution/context.rs
+// src/substitution/mod.rs — COMBINED_RE single-pass loop (replaces dual-sweep)
 
-pub struct SubstitutionContext {
-    pub entry: EntryIdentity,  // catalog, plugin, name, kind
-    pub workspace: WorkspaceName,
-    pub arguments: ArgumentValues,  // named or positional
+pub fn render(body: &str, context: &SubstitutionContext) -> Result<String, SubstitutionError> {
+    let combined_re = regex_sets::COMBINED_RE.get_or_init(|| {
+        // Compile union of all stage patterns: {{TOME_*}} | {{$*}} | $ARGUMENTS | $N | $name
+        // Pattern union ensures each placeholder is matched exactly once
+    });
+
+    let mut result = String::new();
+    let mut last_end = 0;
+
+    for capture in combined_re.captures_iter(body) {
+        let matched_text = capture.get(0).unwrap();
+        let start = matched_text.start();
+        let end = matched_text.end();
+
+        // Push unmatched prefix
+        result.push_str(&body[last_end..start]);
+
+        // Classify match and dispatch to appropriate stage handler
+        if BUILTINS_RE.is_match(matched_text.as_str()) {
+            let replacement = builtins::resolve(matched_text.as_str(), context)?;
+            result.push_str(&replacement);
+        } else if ENV_RE.is_match(matched_text.as_str()) {
+            let replacement = env::resolve(matched_text.as_str(), context)?;
+            result.push_str(&replacement);
+        } else if ARGUMENTS_RE.is_match(matched_text.as_str()) {
+            let replacement = arguments::resolve(matched_text.as_str(), context)?;
+            result.push_str(&replacement);
+        }
+
+        last_end = end;
+    }
+
+    // Push remaining suffix
+    result.push_str(&body[last_end..]);
+    Ok(result)
 }
-
-pub struct SubstitutionContextBuilder { ... }
-
-impl SubstitutionContextBuilder {
-    pub fn build(self) -> Result<SubstitutionContext, SubstitutionError> { ... }
-}
-
-// Consumer calls:
-let context = SubstitutionContextBuilder::new(entry, workspace)
-    .with_arguments(arguments)?
-    .build()?;
-
-let rendered = substitution::render(&body, &context)?;
 ```
 
-#### Entry Kind Pattern (Phase 5 / US1)
+#### Lazy Data-Dir Creation Pattern (Phase 5 / US2)
 
 ```rust
-// src/plugin/identity.rs
+// src/substitution/builtins.rs — Triggered on first {{TOME_*}} match
 
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EntryKind {
-    Skill,
-    Command,
+pub(super) fn resolve(placeholder: &str, context: &SubstitutionContext) -> Result<String, SubstitutionError> {
+    match placeholder {
+        "{{TOME_PLUGIN_DATA}}" => {
+            // First call to ensure_plugin_data per render pass creates the dir
+            let path = data_dir::ensure_plugin_data(
+                &context.paths,
+                &context.catalog,
+                &context.plugin,
+            )?;
+            Ok(path.to_string_lossy().to_string())
+        }
+        "{{TOME_WORKSPACE_DATA}}" => {
+            let path = data_dir::ensure_workspace_data(
+                &context.paths,
+                &context.workspace,
+                &context.catalog,
+                &context.plugin,
+            )?;
+            Ok(path.to_string_lossy().to_string())
+        }
+        // ... other built-ins
+    }
 }
 
-// In database & wire format: "skill" or "command"
-// In lifecycle: discriminates directory walk (skills/ vs commands/)
-// In MCP prompts: routes to resolve_entry_body_path(catalog, plugin, name, kind)
-```
+// src/substitution/data_dir.rs — Lazy creation with override seam
 
-#### Command Entry Collection Pattern (Phase 5 / US1)
-
-```rust
-// src/plugin/lifecycle.rs
-
-pub async fn collect_pending_commands(
-    plugin_dir: &Path,
+pub(super) fn ensure_plugin_data(
+    paths: &Paths,
     catalog: &str,
     plugin: &str,
-    plugin_version: &str,
-) -> Result<Vec<PendingCommand>, TomeError> {
-    let files = plugin::components::list_command_files(plugin_dir);
-    let mut pending = Vec::new();
-    for file in files {
-        let body = fs::read_to_string(&file.path)?;
-        let (frontmatter, _) = parse_command_frontmatter(&body)?;
-        pending.push(PendingCommand {
-            catalog: catalog.to_owned(),
-            plugin: plugin.to_owned(),
-            name: frontmatter.name.or(Some(file.name))?,
-            kind: EntryKind::Command,
-            description: frontmatter.description?,
-            // ... other fields
-        });
+) -> Result<PathBuf, SubstitutionError> {
+    // Check test-override slot first (per Phase 4 P6 test-injection pattern)
+    if let Some(slot) = PLUGIN_DATA_DIR_OVERRIDE.get() {
+        if let Some(p) = guard.clone() {
+            return Ok(p);
+        }
     }
-    Ok(pending)
+
+    // Compute path + create_dir_all (idempotent)
+    let path = paths.plugin_data_dir_for(catalog, plugin);
+    std::fs::create_dir_all(&path)
+        .map_err(|source| SubstitutionError::PluginDataDirCreationFailed { path: path.clone(), source })?;
+    Ok(path)
 }
 ```
 
-#### MCP Prompt Registration Pattern (Phase 5 / US1)
+#### Workspace Rename Plugin-Data Relocation Pattern (Phase 5 / US2)
 
 ```rust
-// src/mcp/prompts.rs
+// src/workspace/rename.rs — Step 6 integrated into workspace dir rename
 
-pub fn build_prompt_router(
-    registry: &PromptRegistry,
-    db: &Connection,
-) -> Result<PromptRouter, TomeError> {
-    let mut router = PromptRouter::new();
-    
-    for (prompt_name, entry) in &registry.by_name {
-        let handler = {
-            let prompt_name = prompt_name.clone();
-            let entry = entry.clone();
-            move |ctx: PromptContext| -> Pin<Box<dyn Future<Output = Result<PromptGetResponse, McpError>>>> {
-                Box::pin(async move {
-                    // Handle prompt request: read entry body, render via substitution, return
-                    let (body, _) = resolve_entry_body_path(&entry.catalog, &entry.plugin, &entry.name, entry.kind)?;
-                    Ok(PromptGetResponse { messages: vec![...] })
-                })
+// Steps 1-5: existing rename algorithm (Phase 4 / US2)
+// ...
+
+// Step 6: Relocate plugin-data directories (NEW in US2)
+let old_workspace_dir = paths.workspace_dir(&old_name);
+let new_workspace_dir = paths.workspace_dir(&new_name);
+let plugin_data_subdir = old_workspace_dir.join("plugin-data");
+
+if plugin_data_subdir.exists() {
+    for entry in std::fs::read_dir(&plugin_data_subdir)? {
+        let catalog_dir = entry?.path();
+        if catalog_dir.is_dir() {
+            for plugin_entry in std::fs::read_dir(&catalog_dir)? {
+                let plugin_dir = plugin_entry?.path();
+                let plugin_name = plugin_dir.file_name().unwrap();
+                let new_plugin_dir = new_workspace_dir
+                    .join("plugin-data")
+                    .join(catalog_dir.file_name().unwrap())
+                    .join(plugin_name);
+
+                std::fs::create_dir_all(new_plugin_dir.parent().unwrap())?;
+                std::fs::rename(&plugin_dir, &new_plugin_dir)
+                    .map_err(|e| TomeError::Io {
+                        reason: format!("failed to relocate plugin-data"),
+                        source: e,
+                    })?;
             }
-        };
-        
-        router.add_route(PromptRoute::new_dyn(
-            prompt_name.clone(),
-            PromptDescriptor {
-                name: prompt_name.clone(),
-                description: entry.description.clone(),
-                arguments: entry.arguments.clone(),
-            },
-            handler,
-        ));
+        }
     }
-    
-    Ok(router)
 }
+
+// Final atomic rename of workspace dir tree (includes relocated plugin-data)
+std::fs::rename(&old_workspace_dir, &new_workspace_dir)?;
 ```
 
 #### Test Entry Kind Override Pattern
@@ -497,7 +531,7 @@ fn command_entry_kind_preserved() -> Result<(), Box<dyn Error>> {
         "catalog/plugin".parse()?,
         vec![EntryKind::Command],
     )]);
-    
+
     // Test code sees overridden entry kinds
     // guard drops at end of test
     Ok(())
@@ -519,4 +553,4 @@ No auto-generated files in src/; test fixtures are synthesized at runtime (e.g.,
 
 ---
 
-*This document shows WHERE code lives. Updated 2026-05-26 against Phase 5 / US1 (substitution skeleton, prompts, entry kind shipped).*
+*This document shows WHERE code lives. Updated 2026-05-27 against Phase 5 / US2 (single-pass substitution, lazy data-dir creation, workspace rename relocation shipped).*
