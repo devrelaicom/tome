@@ -26,7 +26,9 @@
 
 use std::path::Path;
 
-use crate::harness::{BlockBodyStyle, RulesFileStrategy, lookup, mcp_config, rules_file};
+use crate::harness::{
+    BlockBodyStyle, RulesFileStrategy, mcp_config, rules_file, with_effective_modules,
+};
 use crate::settings::resolver::EffectiveHarnessList;
 use crate::workspace::WorkspaceName;
 
@@ -35,6 +37,12 @@ use super::report::{HarnessSubsystemReport, SubsystemHealth};
 /// Run the per-harness rules-file + MCP-config checks for every harness
 /// in `effective_list`. Returns `(rules, mcp)` — one entry per harness
 /// in the input list, in the same order.
+///
+/// Uses `with_effective_modules` rather than `lookup` so test-installed
+/// overrides (`HARNESS_MODULES_OVERRIDE`) are respected: the stub
+/// harness used by US5.b's `tests/doctor_fix_p4.rs` is invisible to
+/// `lookup` (the production-only `&'static` registry) but visible
+/// through `with_effective_modules`.
 pub fn check_harness_integration(
     project_root: &Path,
     effective_list: &EffectiveHarnessList,
@@ -44,28 +52,25 @@ pub fn check_harness_integration(
     let mut rules = Vec::with_capacity(effective_list.harnesses.len());
     let mut mcp = Vec::with_capacity(effective_list.harnesses.len());
     for harness in &effective_list.harnesses {
-        let Some(module) = lookup(&harness.name) else {
-            // Harness in the effective list but not in the production
-            // registry — this should be impossible (resolver validates),
-            // but be defensive.
-            rules.push(HarnessSubsystemReport {
-                harness: harness.name.clone(),
-                health: SubsystemHealth::Broken,
-            });
-            mcp.push(HarnessSubsystemReport {
-                harness: harness.name.clone(),
-                health: SubsystemHealth::Broken,
-            });
-            continue;
-        };
-
+        let (rules_health, mcp_health) = with_effective_modules(|modules| {
+            match modules.iter().find(|m| m.name() == harness.name) {
+                Some(module) => (
+                    check_rules_file(*module, project_root),
+                    check_mcp_config(*module, project_root, home, workspace_name),
+                ),
+                // Harness in the effective list but not in the
+                // effective registry — should be impossible (resolver
+                // validates) but be defensive.
+                None => (SubsystemHealth::Broken, SubsystemHealth::Broken),
+            }
+        });
         rules.push(HarnessSubsystemReport {
             harness: harness.name.clone(),
-            health: check_rules_file(module, project_root),
+            health: rules_health,
         });
         mcp.push(HarnessSubsystemReport {
             harness: harness.name.clone(),
-            health: check_mcp_config(module, project_root, home, workspace_name),
+            health: mcp_health,
         });
     }
     (rules, mcp)

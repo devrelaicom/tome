@@ -94,6 +94,11 @@ cc = "1"
 # Unix-only by design; our CI matrix is macOS + Ubuntu so this is fine.
 # Not compiled into the release binary — no impact on the 50 MB size cap.
 rexpect = "0.7"
+# Backdate mtimes in atomic-rename / orphan-cleanup tests. `filetime`
+# is already in the dep graph as a transitive of `tempfile`; the
+# explicit dev-dep lets US5.b's `doctor_orphan_tmp_cleanup.rs` use it
+# without depending on libc directly.
+filetime = "0.2"
 
 [profile.release]
 # Phase 1 baseline + Phase 2 binary-size tuning (NFR-001).
