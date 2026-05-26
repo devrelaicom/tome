@@ -18,7 +18,7 @@ use crate::paths::Paths;
 use crate::workspace::{Scope, WorkspaceName};
 
 pub fn load(config_file: &Path) -> Result<Config, TomeError> {
-    match std::fs::read_to_string(config_file) {
+    match crate::util::bounded_read_to_string(config_file, crate::util::TOME_CONFIG_MAX) {
         Ok(text) => {
             let parsed: Config = toml::from_str(&text).map_err(|e| {
                 TomeError::Internal(anyhow::anyhow!(
@@ -29,8 +29,8 @@ pub fn load(config_file: &Path) -> Result<Config, TomeError> {
             })?;
             Ok(parsed)
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-        Err(e) => Err(TomeError::Io(e)),
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(e) => Err(e),
     }
 }
 

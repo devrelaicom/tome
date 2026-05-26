@@ -267,17 +267,18 @@ fn update_settings_summaries(
     long: &str,
     generated_at: &str,
 ) -> Result<String, TomeError> {
-    let body = match std::fs::read_to_string(settings_path) {
-        Ok(b) => b,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Fall back to a minimal scaffold matching workspace::init's
-            // render_settings_toml output. Init lands settings.toml
-            // before regen-summary can run, so this branch is mostly
-            // defensive.
-            format!("name = \"{workspace_name}\"\n")
-        }
-        Err(e) => return Err(TomeError::Io(e)),
-    };
+    let body =
+        match crate::util::bounded_read_to_string(settings_path, crate::util::TOME_CONFIG_MAX) {
+            Ok(b) => b,
+            Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Fall back to a minimal scaffold matching workspace::init's
+                // render_settings_toml output. Init lands settings.toml
+                // before regen-summary can run, so this branch is mostly
+                // defensive.
+                format!("name = \"{workspace_name}\"\n")
+            }
+            Err(e) => return Err(e),
+        };
 
     let mut doc: toml_edit::DocumentMut =
         body.parse()

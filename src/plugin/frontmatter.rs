@@ -99,10 +99,17 @@ pub enum FrontmatterError {
 
 /// Read and parse a `SKILL.md` from disk.
 pub fn parse_skill_frontmatter(path: &Path) -> Result<ParsedSkill, FrontmatterError> {
-    let contents = std::fs::read_to_string(path).map_err(|source| FrontmatterError::Io {
-        file: path.to_path_buf(),
-        source,
-    })?;
+    let contents = crate::util::bounded_read_to_string(path, crate::util::PLUGIN_MANIFEST_MAX)
+        .map_err(|err| match err {
+            crate::error::TomeError::Io(source) => FrontmatterError::Io {
+                file: path.to_path_buf(),
+                source,
+            },
+            other => FrontmatterError::Io {
+                file: path.to_path_buf(),
+                source: std::io::Error::other(other.to_string()),
+            },
+        })?;
     parse_skill_frontmatter_str(path, &contents)
 }
 

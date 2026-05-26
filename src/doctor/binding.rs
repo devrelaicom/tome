@@ -118,8 +118,8 @@ fn compare_rules(
     let source_path = paths.workspace_rules_file(scope.scope.name());
     let project_copy = Paths::project_marker_rules(project_root);
 
-    let source = std::fs::read(&source_path);
-    let copy = std::fs::read(&project_copy);
+    let source = crate::util::bounded_read(&source_path, crate::util::HARNESS_RULES_MAX);
+    let copy = crate::util::bounded_read(&project_copy, crate::util::HARNESS_RULES_MAX);
     match (source, copy) {
         (Ok(s), Ok(c)) => {
             if s == c {
@@ -134,7 +134,9 @@ fn compare_rules(
         // the latter wants a re-copy of the existing source. Without
         // this split, `--fix` would loop forever trying to `cp` a file
         // that doesn't exist on either side.
-        (Err(se), _) if se.kind() == std::io::ErrorKind::NotFound => RulesCopyState::SourceMissing,
+        (Err(crate::error::TomeError::Io(se)), _) if se.kind() == std::io::ErrorKind::NotFound => {
+            RulesCopyState::SourceMissing
+        }
         (Ok(_), Err(_)) => RulesCopyState::Missing,
         // Read errors on the source (other than NotFound) collapse to
         // SourceMissing too — the user-visible symptom (we cannot copy)

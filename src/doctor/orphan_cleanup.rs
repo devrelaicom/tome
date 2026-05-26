@@ -138,6 +138,25 @@ fn sweep_one(parent: &Path) -> usize {
         if !name.starts_with(STAGING_PREFIX) {
             continue;
         }
+        // S-M6: refuse symlinks BEFORE `metadata` (which follows
+        // symlinks). A hostile symlink at `<project>/.tome.tmp.evil`
+        // pointing at a sensitive directory must be skipped, not
+        // followed by `remove_dir_all`. The discipline matches
+        // `mcp/tools/get_skill.rs::walk_dir`.
+        let symlink_meta = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) => {
+                debug!(path = %path.display(), error = %e, "orphan-cleanup: file_type failed");
+                continue;
+            }
+        };
+        if symlink_meta.is_symlink() {
+            debug!(
+                path = %path.display(),
+                "orphan-cleanup: refusing symlink; skipping",
+            );
+            continue;
+        }
         let meta = match entry.metadata() {
             Ok(m) => m,
             Err(e) => {

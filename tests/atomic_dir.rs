@@ -312,3 +312,97 @@ fn creates_missing_parent_on_demand() {
     assert!(target.exists());
     assert!(target.join("x").exists());
 }
+
+// ---------------------------------------------------------------------------
+// PR-E S-M2: symlink refusal at target and at `.old` aside.
+// ---------------------------------------------------------------------------
+
+/// A symlink planted at `target` must be refused before any staging
+/// happens — mirrors the three sibling atomic-write helpers
+/// (`catalog::store::write_atomic`, `harness::rules_file::atomic_write`,
+/// `harness::mcp_config::atomic_write`).
+#[cfg(unix)]
+#[test]
+fn refuses_planted_symlink_at_target() {
+    let (parent, target) = fresh_parent(".tome");
+    let payload_dir = parent.path().join("sensitive");
+    fs::create_dir(&payload_dir).unwrap();
+    fs::write(payload_dir.join("secret.txt"), b"keep me").unwrap();
+
+    // Plant a symlink target -> payload_dir.
+    std::os::unix::fs::symlink(&payload_dir, &target).unwrap();
+    assert!(
+        fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    let err = land_directory(&target, 0o700, |staged| {
+        write_marker(staged, "marker", b"new")?;
+        Ok(())
+    })
+    .unwrap_err();
+
+    match err {
+        TomeError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput),
+        other => panic!("expected Io InvalidInput, got {other:?}"),
+    }
+
+    // The symlink and its payload must be undisturbed.
+    assert!(
+        fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(payload_dir.join("secret.txt").is_file());
+    assert_eq!(
+        fs::read(payload_dir.join("secret.txt")).unwrap(),
+        b"keep me".to_vec()
+    );
+}
+
+/// In replace mode, a symlink planted at the `.old` aside path must be
+/// refused before the helper would have tried to `remove_dir_all` it.
+#[cfg(unix)]
+#[test]
+fn refuses_planted_symlink_at_aside() {
+    let (parent, target) = fresh_parent(".tome");
+
+    // Existing target (a normal directory we want to replace).
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("old.txt"), b"existing").unwrap();
+
+    // Plant a symlink at the `.old` aside, pointing at a sensitive
+    // sibling directory we must not touch.
+    let aside = parent.path().join(".tome.old");
+    let payload_dir = parent.path().join("sensitive");
+    fs::create_dir(&payload_dir).unwrap();
+    fs::write(payload_dir.join("secret.txt"), b"keep me").unwrap();
+    std::os::unix::fs::symlink(&payload_dir, &aside).unwrap();
+
+    let err = land_directory_with_replace(&target, 0o700, |staged| {
+        write_marker(staged, "new.txt", b"new")?;
+        Ok(())
+    })
+    .unwrap_err();
+
+    match err {
+        TomeError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput),
+        other => panic!("expected Io InvalidInput, got {other:?}"),
+    }
+
+    // Symlink + payload untouched.
+    assert!(
+        fs::symlink_metadata(&aside)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(payload_dir.join("secret.txt").is_file());
+    // Target is still there with its original content (we refused before
+    // renaming it aside).
+    assert!(target.is_dir());
+    assert!(target.join("old.txt").is_file());
+}

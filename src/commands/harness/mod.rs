@@ -168,9 +168,9 @@ impl ScopeProvider for CentralDbScopeProvider<'_> {
         //    harnesses declared" → Ok(None). IO + parse failures =
         //    SettingsReadFailure → exit 70 via the From boundary.
         let path = self.paths.workspace_settings_file(name);
-        let body = match std::fs::read_to_string(&path) {
+        let body = match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
             Ok(b) => b,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => {
                 return Err(CompositionErrorKind::SettingsReadFailure(
                     name.as_str().to_owned(),
@@ -190,12 +190,28 @@ impl ScopeProvider for CentralDbScopeProvider<'_> {
 
 /// Resolve `$HOME` for harness-detect calls. Centralised so subcommands
 /// don't sprinkle `std::env::var_os("HOME")` calls.
+///
+/// PR-E S-M7 mirrors the validation discipline in
+/// [`crate::paths::home_root`]: refuse empty / non-absolute values up
+/// front. Harness detection probes well-known dirs like
+/// `<home>/.claude/` — a relative `$HOME` would resolve into the cwd,
+/// surfacing spurious "claude-code detected" verdicts on the user's
+/// current project directory rather than against their per-user state.
 pub(crate) fn home_root() -> Result<std::path::PathBuf, TomeError> {
-    std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .ok_or_else(|| {
-            TomeError::Io(std::io::Error::other(
-                "HOME is not set — cannot probe harness detection paths",
-            ))
-        })
+    let home_os = std::env::var_os("HOME").ok_or_else(|| {
+        TomeError::Usage("$HOME is not set — cannot probe harness detection paths".to_string())
+    })?;
+    if home_os.is_empty() {
+        return Err(TomeError::Usage(
+            "$HOME is set to an empty string — cannot probe harness detection paths".to_string(),
+        ));
+    }
+    let home = std::path::PathBuf::from(home_os);
+    if !home.is_absolute() {
+        return Err(TomeError::Usage(format!(
+            "$HOME is not an absolute path: {}",
+            home.display()
+        )));
+    }
+    Ok(home)
 }

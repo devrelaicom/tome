@@ -376,29 +376,31 @@ use crate::settings::parser::read_project_marker;
 
 fn read_workspace_settings(deps: &SyncDeps<'_>) -> Result<Option<WorkspaceSettings>, TomeError> {
     let path = deps.paths.workspace_settings_file(deps.workspace_name);
-    match std::fs::read_to_string(&path) {
+    match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
         Ok(body) => settings::parser::parse_workspace(&body)
             .map(Some)
             .map_err(|e| TomeError::WorkspaceMalformed {
                 path: path.clone(),
                 reason: format!("parse workspace settings: {e}"),
             }),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(TomeError::Io(e)),
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
 fn read_global_settings(deps: &SyncDeps<'_>) -> Result<GlobalSettings, TomeError> {
     let path = &deps.paths.global_settings_file;
-    match std::fs::read_to_string(path) {
+    match crate::util::bounded_read_to_string(path, crate::util::TOME_CONFIG_MAX) {
         Ok(body) => {
             settings::parser::parse_global(&body).map_err(|e| TomeError::WorkspaceMalformed {
                 path: path.clone(),
                 reason: format!("parse global settings: {e}"),
             })
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(GlobalSettings::default()),
-        Err(e) => Err(TomeError::Io(e)),
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok(GlobalSettings::default())
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -428,10 +430,15 @@ fn compute_rules_body(snap: &HarnessSnapshot, project_root: &Path) -> Result<Str
             // `<project>/.tome/RULES.md`. Absent → empty block; other
             // I/O errors propagate.
             let project_rules = Paths::project_marker_rules(project_root);
-            match std::fs::read_to_string(&project_rules) {
+            match crate::util::bounded_read_to_string(
+                &project_rules,
+                crate::util::HARNESS_RULES_MAX,
+            ) {
                 Ok(s) => Ok(s),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-                Err(e) => Err(TomeError::Io(e)),
+                Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                    Ok(String::new())
+                }
+                Err(e) => Err(e),
             }
         }
     }
@@ -442,10 +449,13 @@ fn write_rules_for_path(snap: &HarnessSnapshot, body: &str) -> Result<Action, To
         RulesFileStrategy::BlockInExistingFile => {
             // Classify before write so we can distinguish Created vs
             // Updated vs LeftAlone in the outcome.
-            let prior = match std::fs::read_to_string(&snap.rules_path) {
+            let prior = match crate::util::bounded_read_to_string(
+                &snap.rules_path,
+                crate::util::HARNESS_RULES_MAX,
+            ) {
                 Ok(s) => Some(s),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(TomeError::Io(e)),
+                Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
             };
             let prior_block = match prior.as_deref() {
                 Some(contents) => rules_file::parse_block(contents)?,
@@ -457,10 +467,13 @@ fn write_rules_for_path(snap: &HarnessSnapshot, body: &str) -> Result<Action, To
             Ok(classification)
         }
         RulesFileStrategy::StandaloneFile => {
-            let prior_bytes = match std::fs::read_to_string(&snap.rules_path) {
+            let prior_bytes = match crate::util::bounded_read_to_string(
+                &snap.rules_path,
+                crate::util::HARNESS_RULES_MAX,
+            ) {
                 Ok(s) => Some(s),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(TomeError::Io(e)),
+                Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
             };
             let classification = match prior_bytes.as_deref() {
                 None => Action::Created,
@@ -476,10 +489,15 @@ fn write_rules_for_path(snap: &HarnessSnapshot, body: &str) -> Result<Action, To
 fn clean_rules_for_path(snap: &HarnessSnapshot) -> Result<Action, TomeError> {
     match snap.rules_strategy {
         RulesFileStrategy::BlockInExistingFile => {
-            let prior = match std::fs::read_to_string(&snap.rules_path) {
+            let prior = match crate::util::bounded_read_to_string(
+                &snap.rules_path,
+                crate::util::HARNESS_RULES_MAX,
+            ) {
                 Ok(s) => Some(s),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Action::LeftAlone),
-                Err(e) => return Err(TomeError::Io(e)),
+                Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(Action::LeftAlone);
+                }
+                Err(e) => return Err(e),
             };
             let had_block = match prior.as_deref() {
                 Some(contents) => rules_file::parse_block(contents)?.is_some(),

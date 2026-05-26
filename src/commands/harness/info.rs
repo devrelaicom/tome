@@ -147,11 +147,14 @@ fn probe_rules_block(
 ) -> Result<bool, TomeError> {
     match strategy {
         RulesFileStrategy::BlockInExistingFile => {
-            let body = match std::fs::read_to_string(target) {
-                Ok(s) => s,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-                Err(e) => return Err(TomeError::Io(e)),
-            };
+            let body =
+                match crate::util::bounded_read_to_string(target, crate::util::HARNESS_RULES_MAX) {
+                    Ok(s) => s,
+                    Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(false);
+                    }
+                    Err(e) => return Err(e),
+                };
             Ok(rules_file::parse_block(&body)?.is_some())
         }
         RulesFileStrategy::StandaloneFile => Ok(target.exists()),

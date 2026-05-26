@@ -117,6 +117,14 @@ fn land_inner<F>(
 where
     F: FnOnce(&Path) -> Result<(), TomeError>,
 {
+    // Symlink refusal at the entry — mirrors the three sibling atomic-
+    // write helpers (`catalog::store::write_atomic`,
+    // `harness::rules_file::atomic_write`,
+    // `harness::mcp_config::atomic_write`). Without this check a planted
+    // symlink at `target` would cause the rename (or replace) to follow
+    // outside the intended scope.
+    refuse_symlink(target)?;
+
     let parent = target.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -168,10 +176,13 @@ where
     let aside: Option<PathBuf> = if replace && target.exists() {
         let aside_path = old_sibling(target);
         // If a stale `.old` already exists from a prior crash, remove it
-        // first so the rename below has somewhere to land.
+        // first so the rename below has somewhere to land. Refuse if a
+        // symlink has been planted at the aside path — `remove_dir_all`
+        // would follow the link otherwise (S-M2).
+        refuse_symlink(&aside_path)?;
         if aside_path.exists() {
-            // Best-effort; if the directory is actually a file or a
-            // symlink, surface the error to the caller via the rename.
+            // Best-effort; if the directory is actually a file, surface
+            // the error to the caller via the rename.
             let _ = std::fs::remove_dir_all(&aside_path);
         }
         std::fs::rename(target, &aside_path).map_err(|e| {
@@ -230,6 +241,22 @@ where
     }
 
     Ok(target.canonicalize()?)
+}
+
+/// Refuse to land through a symlink. Mirrors the three sibling atomic-
+/// write helpers in `catalog::store` and `harness::{rules_file,
+/// mcp_config}`. Missing path → no-op (the rename will create it).
+fn refuse_symlink(path: &Path) -> Result<(), TomeError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(TomeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to land directory through symlink: {}",
+                path.display()
+            ),
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// Compute the `.old` sibling path. Uses `with_file_name` so dot-prefixed

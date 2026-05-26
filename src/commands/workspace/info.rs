@@ -324,7 +324,8 @@ fn read_summary_cache(paths: &Paths, name: &WorkspaceName) -> Option<SummaryCach
     if !settings_path.is_file() {
         return None;
     }
-    let body = std::fs::read_to_string(&settings_path).ok()?;
+    let body =
+        crate::util::bounded_read_to_string(&settings_path, crate::util::TOME_CONFIG_MAX).ok()?;
     let parsed: WorkspaceSettings = settings::parser::parse_workspace(&body).ok()?;
     let summaries = parsed.summaries?;
     use time::format_description::well_known::Rfc3339;
