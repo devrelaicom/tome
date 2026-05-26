@@ -22,12 +22,17 @@
 //! Spec: data-model.md §5 (`SkillRecord`) and §9 (`ContentHash`),
 //! research §R8 (embedding-text composition).
 
+use std::path::PathBuf;
+
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::catalog::manifest::read_catalog_manifest;
 use crate::error::TomeError;
+use crate::index::workspace_catalogs;
+use crate::paths::Paths;
 use crate::plugin::identity::EntryKind;
 
 /// One row in the `skills` table after a successful read.
@@ -359,6 +364,75 @@ pub fn delete_by_plugin(conn: &Connection, catalog: &str, plugin: &str) -> Resul
     u32::try_from(removed).map_err(|_| {
         TomeError::IndexIntegrityCheckFailure(format!("removed rows ({removed}) overflows u32"))
     })
+}
+
+/// Resolve an entry row's `path` column to an absolute on-disk body path.
+///
+/// The `skills.path` column stores the entry body path **relative** to
+/// the plugin's catalog-side root directory (e.g. `skills/foo/SKILL.md`
+/// or `commands/bar.md`). The absolute path is recovered by:
+///
+/// 1. Looking up the catalog's on-disk cache directory via
+///    [`workspace_catalogs::resolve_catalog_path`] (returns the URL-hashed
+///    cache dir under `<root>/catalogs/`).
+/// 2. Reading `<cache_dir>/tome-catalog.toml` to find the plugin's
+///    `source` declaration; falling back to `<cache_dir>/<plugin>` for
+///    manifest-less catalogs. Mirrors
+///    [`crate::plugin::lifecycle::resolve_plugin_dir`].
+/// 3. Joining the plugin dir with the stored relative path.
+///
+/// If the stored `path` is already absolute (legacy data; current Phase 5
+/// writers always store relative paths), the absolute form is returned
+/// directly without consulting the catalog manifest.
+///
+/// US1.b initially shipped this resolver inline in `mcp::prompts`; US1.c
+/// promotes it because the same resolution now serves two callers:
+/// `prompts/get` and the previously-broken `get_skill` MCP tool, which
+/// was calling `PathBuf::from(&row.path)` against a relative path string
+/// (latent bug surfaced during US1.b implementation review).
+///
+/// # Errors
+///
+/// - [`TomeError::CatalogNotFound`] when the workspace has no enrolment
+///   for the row's catalog (e.g. the catalog was disabled mid-session).
+/// - [`TomeError::EntryNotFound`] when the catalog enrolment exists but
+///   the on-disk plugin directory has gone missing (catalog cache
+///   evicted; manifest references a plugin that no longer exists on
+///   disk). The mismatch is preserved so callers can map to a per-
+///   surface error envelope (e.g. `prompt_not_found` for the MCP prompts
+///   surface, `unknown_plugin` for `get_skill`).
+pub fn resolve_entry_body_path(
+    conn: &Connection,
+    paths: &Paths,
+    workspace_name: &str,
+    catalog: &str,
+    plugin: &str,
+    stored_path: &str,
+) -> Result<PathBuf, TomeError> {
+    let stored = PathBuf::from(stored_path);
+    if stored.is_absolute() {
+        return Ok(stored);
+    }
+    let catalog_path =
+        workspace_catalogs::resolve_catalog_path(conn, paths, workspace_name, catalog)?;
+    let plugin_dir = match read_catalog_manifest(&catalog_path) {
+        Some(manifest) => manifest
+            .plugins
+            .iter()
+            .find(|p| p.name == plugin)
+            .map(|decl| catalog_path.join(&decl.source))
+            .unwrap_or_else(|| catalog_path.join(plugin)),
+        None => catalog_path.join(plugin),
+    };
+    if !plugin_dir.is_dir() {
+        return Err(TomeError::EntryNotFound {
+            catalog: catalog.to_owned(),
+            plugin: plugin.to_owned(),
+            name: stored_path.to_owned(),
+            kind: "entry".to_owned(),
+        });
+    }
+    Ok(plugin_dir.join(&stored))
 }
 
 /// Insert a new entry row + matching embedding, or update an existing row

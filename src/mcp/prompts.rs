@@ -20,8 +20,10 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Instant;
 
 use rmcp::ErrorData as McpError;
 use rmcp::handler::server::prompt::PromptContext;
@@ -29,18 +31,18 @@ use rmcp::handler::server::router::prompt::{PromptRoute, PromptRouter};
 use rmcp::model::ErrorCode;
 use rusqlite::Connection;
 use serde_json::json;
-use tracing::warn;
+use tracing::{error, info, warn};
 
-use crate::catalog::manifest::read_catalog_manifest;
 use crate::error::TomeError;
-use crate::index::skills::SkillRecord;
-use crate::index::workspace_catalogs;
+use crate::index::skills::{SkillRecord, resolve_entry_body_path};
 use crate::index::workspaces::resolve_id_required;
 use crate::mcp::prompt_collision::{CollisionRecord, EntryIdentity, resolve_collisions};
 use crate::mcp::prompt_name::derive_name;
+use crate::mcp::state::McpState;
 use crate::paths::Paths;
 use crate::plugin::frontmatter::parse_skill_frontmatter;
 use crate::plugin::identity::EntryKind;
+use crate::substitution::{self, ArgumentValues, SubstitutionContext, SubstitutionError};
 use crate::workspace::WorkspaceName;
 
 // --- Wire-shape re-exports ------------------------------------------------
@@ -222,9 +224,6 @@ impl PromptRegistry {
         let mut identities: Vec<EntryIdentity> = Vec::new();
         let mut hydrated: HashMap<(String, String, EntryKind, String), PromptEntry> =
             HashMap::new();
-        // Per-(catalog, plugin) plugin-dir cache — avoids re-reading
-        // each `tome-catalog.toml` for every entry of the same plugin.
-        let mut plugin_dirs: HashMap<(String, String), Option<PathBuf>> = HashMap::new();
 
         for row in rows {
             let row = row.map_err(|e| {
@@ -246,42 +245,33 @@ impl PromptRegistry {
                 }
             };
 
-            // Resolve the entry's absolute path: the `path` column
-            // stores `<entry-rel-path>` relative to the plugin's
-            // top-level dir; the plugin dir lives under
-            // `paths.cache_dir_for(catalog.url).join(decl.source)` (per
-            // `tome-catalog.toml`) or falls back to
-            // `paths.cache_dir_for(catalog.url).join(plugin)` for
-            // manifest-less catalogs (matches
-            // `lifecycle::resolve_plugin_dir`).
-            let plugin_dir = match plugin_dirs
-                .entry((row.catalog.clone(), row.plugin.clone()))
-                .or_insert_with(|| {
-                    resolve_plugin_dir_for_row(
-                        conn,
-                        paths,
-                        workspace_name.as_str(),
-                        &row.catalog,
-                        &row.plugin,
-                    )
-                }) {
-                Some(p) => p.clone(),
-                None => {
+            // Resolve the entry's absolute path via the shared helper —
+            // see [`resolve_entry_body_path`] for the catalog manifest
+            // walk. Missing plugin dirs / unenrolled catalogs surface as
+            // `TomeError`; we collapse to a warn-and-skip here so a
+            // single bad entry doesn't take the whole registry build
+            // down (mirrors the frontmatter-parse-failure handling
+            // below).
+            let path = match resolve_entry_body_path(
+                conn,
+                paths,
+                workspace_name.as_str(),
+                &row.catalog,
+                &row.plugin,
+                &row.path,
+            ) {
+                Ok(p) => p,
+                Err(err) => {
                     warn!(
                         target: "tome::mcp::prompts",
                         catalog = %row.catalog,
                         plugin = %row.plugin,
                         name = %row.name,
+                        reason = %err,
                         "skipping entry: catalog/plugin dir not resolvable on disk",
                     );
                     continue;
                 }
-            };
-            let stored_path = PathBuf::from(&row.path);
-            let path = if stored_path.is_absolute() {
-                stored_path
-            } else {
-                plugin_dir.join(&stored_path)
             };
 
             // Re-parse the frontmatter to recover `arguments`,
@@ -393,54 +383,23 @@ impl PromptRegistry {
     }
 }
 
-/// Resolve the on-disk plugin directory for a `(catalog, plugin)` pair
-/// in the supplied workspace. Mirrors `lifecycle::resolve_plugin_dir`
-/// but works without a `Config` — the URL comes from the central DB's
-/// `workspace_catalogs` table. Returns `None` when the catalog is not
-/// enrolled, the plugin can't be located in the catalog manifest, or
-/// the plugin directory is missing on disk.
-fn resolve_plugin_dir_for_row(
-    conn: &Connection,
-    paths: &Paths,
-    workspace_name: &str,
-    catalog: &str,
-    plugin: &str,
-) -> Option<PathBuf> {
-    let catalog_path =
-        workspace_catalogs::resolve_catalog_path(conn, paths, workspace_name, catalog).ok()?;
-    let plugin_dir = match read_catalog_manifest(&catalog_path) {
-        Some(manifest) => manifest
-            .plugins
-            .iter()
-            .find(|p| p.name == plugin)
-            .map(|decl| catalog_path.join(&decl.source))
-            .unwrap_or_else(|| catalog_path.join(plugin)),
-        None => catalog_path.join(plugin),
-    };
-    if plugin_dir.is_dir() {
-        Some(plugin_dir)
-    } else {
-        None
-    }
-}
-
-/// Build a stub `prompts/get` handler closure with the HRTB shape
-/// rmcp's [`PromptRoute::new_dyn`] requires. The factory takes the
-/// per-route `name` (the captured state) and returns a closure that
-/// — for any input lifetime `'a` — produces a
-/// `BoxFuture<'a, Result<PromptGetResponse, McpError>>` resolving to a
-/// `METHOD_NOT_FOUND` error. US1.c replaces this with the real
-/// substitution-pipeline handler.
+/// Build the per-route `prompts/get` handler closure with the HRTB
+/// shape rmcp's [`PromptRoute::new_dyn`] requires. The factory captures
+/// the per-route `name` (the resolved prompt name post-collision) +
+/// `Arc<McpState>` (paths, scope, prompt registry) so the closure can
+/// look up the entry by name, resolve the body, build a
+/// [`SubstitutionContext`], and run the substitution pipeline.
 ///
 /// Implementation note: the closure's return type is forwarded through
-/// a free fn (`stub_future`) whose return type is bound to the input
-/// lifetime, so the HRTB infers cleanly. An inline closure with a
-/// captured `String` and `Box::pin(async move { ... })` returns a
-/// `'static` future that fails the variance check because `Box` is
-/// invariant in its element type.
+/// a free async fn (`get_prompt_future`) whose return type is bound to
+/// the input lifetime, so the HRTB infers cleanly. An inline closure
+/// with `Box::pin(async move { ... })` returns a `'static` future that
+/// fails the variance check because `Box` is invariant in its element
+/// type.
 #[allow(clippy::type_complexity)]
-fn make_stub_handler<S>(
+fn make_get_handler<S>(
     name: String,
+    state: Arc<McpState>,
 ) -> impl for<'a> Fn(
     PromptContext<'a, S>,
 ) -> Pin<Box<dyn Future<Output = Result<PromptGetResponse, McpError>> + Send + 'a>>
@@ -450,20 +409,458 @@ fn make_stub_handler<S>(
 where
     S: 'static,
 {
-    move |ctx| stub_future(ctx, name.clone())
+    move |ctx| get_prompt_future(ctx, name.clone(), state.clone())
 }
 
-fn stub_future<'a, S>(
-    _ctx: PromptContext<'a, S>,
+fn get_prompt_future<'a, S>(
+    ctx: PromptContext<'a, S>,
     name: String,
+    state: Arc<McpState>,
 ) -> Pin<Box<dyn Future<Output = Result<PromptGetResponse, McpError>> + Send + 'a>> {
-    Box::pin(async move {
-        Err(McpError::new(
-            ErrorCode::METHOD_NOT_FOUND,
-            format!("prompts/get is not yet implemented for `{name}`"),
-            Some(json!({ "code": "method_not_found" })),
-        ))
+    let arguments = ctx.arguments;
+    Box::pin(async move { handle_get(state, name, arguments).await })
+}
+
+/// Real `prompts/get` handler. Per `contracts/mcp-prompts.md` § Methods
+/// / `prompts/get`:
+///
+/// 1. Resolve `name` via `state.prompt_registry.lookup`.
+/// 2. Resolve the entry body's absolute path via the shared
+///    [`resolve_entry_body_path`] helper (T-LATENT-1).
+/// 3. Re-parse the entry's frontmatter from disk (so `declared_args`
+///    and the body content are fresh — the index doesn't carry these).
+/// 4. Map caller args → [`ArgumentValues`].
+/// 5. Build a [`SubstitutionContext`] (12 built-ins + clock + caller args).
+/// 6. Run [`substitution::render`] (F3 stub passes the body through
+///    unchanged; US2 + US3 wire real stages).
+/// 7. Wrap in [`PromptGetResponse`] (rmcp `GetPromptResult`).
+///
+/// `#[doc(hidden)] pub` so integration tests can exercise the handler
+/// without going through the rmcp `PromptRouter` (which would require
+/// a `Server` instance + a synthetic `PromptContext`). Test seam only —
+/// production callers go through `build_router` + rmcp's
+/// `get_prompt_handler` flow.
+#[doc(hidden)]
+pub async fn handle_get(
+    state: Arc<McpState>,
+    name: String,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<PromptGetResponse, McpError> {
+    let started = Instant::now();
+
+    // (1) Lookup is cheap (HashMap.get); do it on the runtime thread.
+    let Some(entry) = state.prompt_registry.lookup(&name).cloned() else {
+        return Err(emit_get_error(
+            &name,
+            started,
+            "prompt_not_found",
+            McpError::new(
+                ErrorCode::INVALID_PARAMS,
+                format!("prompt `{name}` not found in this workspace"),
+                Some(json!({ "code": "prompt_not_found", "name": name })),
+            ),
+        ));
+    };
+
+    // (2-3-4-5-6) Body resolve + frontmatter re-parse + arg map + render
+    // are all synchronous I/O / compute. Run on the blocking pool per the
+    // sync-boundary discipline (rusqlite is sync, std::fs is sync, the
+    // F3 substitution stub does no I/O but US2+US3 wire create_dir_all).
+    let render_state = state.clone();
+    let render_entry = entry.clone();
+    let render_name = name.clone();
+    let render_result = tokio::task::spawn_blocking(move || {
+        render_for_get(&render_state, &render_entry, &render_name, arguments)
     })
+    .await
+    .map_err(|e| internal_get_error(&name, started, format!("render join: {e}")))?;
+
+    let rendered = match render_result {
+        Ok(r) => r,
+        Err(err) => return Err(emit_tome_error_for_get(&name, started, err)),
+    };
+
+    let description = if entry.description.is_empty() {
+        None
+    } else {
+        Some(entry.description.clone())
+    };
+
+    info!(
+        target: "tome::mcp::prompts",
+        prompt = %name,
+        catalog = %entry.catalog,
+        plugin = %entry.plugin,
+        entry_name = %entry.name,
+        body_bytes = rendered.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "prompts/get ok",
+    );
+
+    let mut result =
+        PromptGetResponse::new(vec![PromptMessage::new_text(PromptRole::User, rendered)]);
+    if let Some(desc) = description {
+        result = result.with_description(desc);
+    }
+    Ok(result)
+}
+
+/// Synchronous body-resolve + frontmatter re-parse + arg map + render.
+/// Returns the rendered body or a [`TomeError`] mapped at the caller.
+///
+/// Closure-style helper rather than a method so it composes cleanly with
+/// `tokio::task::spawn_blocking`.
+fn render_for_get(
+    state: &McpState,
+    entry: &PromptEntry,
+    prompt_name: &str,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<String, TomeError> {
+    // (2) Resolve the absolute body path. The registry already cached
+    // the resolved path at startup, but the cache is per-session — the
+    // entry on disk may have been touched since. Re-resolving keeps the
+    // path honest against catalog rebases between server-startup and
+    // prompts/get.
+    let conn = crate::index::db::open_read_only(&state.paths.index_db)?;
+    let body_path = resolve_entry_body_path(
+        &conn,
+        &state.paths,
+        state.scope.scope.name().as_str(),
+        &entry.catalog,
+        &entry.plugin,
+        // The registry stored the absolute path; round-trip through the
+        // `path.display().to_string()` to satisfy the helper's `&str`
+        // argument. (Absolute paths bypass the catalog manifest walk
+        // entirely — the helper short-circuits on `is_absolute`.)
+        &entry.path.display().to_string(),
+    )?;
+    drop(conn);
+
+    // (3) Re-parse the entry's frontmatter from disk to recover
+    // `declared_args` + the body content. The `description` cached on
+    // `entry.description` is the truncated form for `prompts/list`;
+    // the body is what the substitution layer renders.
+    let parsed = parse_skill_frontmatter(&body_path).map_err(|err| TomeError::EntryNotFound {
+        catalog: entry.catalog.clone(),
+        plugin: entry.plugin.clone(),
+        name: entry.name.clone(),
+        kind: format!("{:?}: frontmatter parse failed: {err}", entry.kind),
+    })?;
+    let declared_args = parsed.frontmatter.arguments.clone();
+    let body = parsed.body;
+
+    // (4) Map caller args → ArgumentValues.
+    let args = map_caller_arguments(prompt_name, arguments, &declared_args)?;
+
+    // (5) Build the SubstitutionContext.
+    let context = build_get_context(state, entry, body_path, declared_args, args)?;
+
+    // (6) Render.
+    substitution::render(&body, &context).map_err(|e| match e {
+        SubstitutionError::PluginDataDirCreationFailed { path, source }
+        | SubstitutionError::WorkspaceDataDirCreationFailed { path, source } => {
+            TomeError::WorkspaceDataDirWriteFailed { path, source }
+        }
+        SubstitutionError::InvalidArgumentFrontmatter { file, reason } => {
+            TomeError::InvalidArgumentFrontmatter { file, reason }
+        }
+        SubstitutionError::PromptArgumentMismatch { expected, supplied } => {
+            TomeError::PromptArgumentMismatch { expected, supplied }
+        }
+    })
+}
+
+/// Construct the [`SubstitutionContext`] for one `prompts/get` call.
+///
+/// `entry_path` carries the absolute path resolved upstream (saves the
+/// caller from threading the path through twice). `entry_dir` is
+/// `entry_path.parent()` with a defensive fallback to the plugin root.
+fn build_get_context(
+    state: &McpState,
+    entry: &PromptEntry,
+    entry_path: PathBuf,
+    declared_args: Vec<String>,
+    args: Option<ArgumentValues>,
+) -> Result<SubstitutionContext, TomeError> {
+    let workspace_name = state.scope.scope.name();
+    // The plugin root dir is `entry_path` walked up to the directory
+    // that hosts `.claude-plugin/`. For Phase 5 / US1.c we approximate
+    // by using `entry_dir`'s grandparent (entries live under
+    // `<plugin>/skills/<x>/SKILL.md` or `<plugin>/commands/<x>.md`).
+    // Real production callers in US2 will replace this with a manifest-
+    // walked plugin_root.
+    let entry_dir = entry_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| entry_path.clone());
+
+    // The substitution context wants the plugin's root directory (parent
+    // of skills/ or commands/). Walk up from entry_dir defensively.
+    let plugin_root_dir = entry_dir
+        .ancestors()
+        .find(|p| p.join(".claude-plugin").is_dir())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| entry_dir.clone());
+
+    let plugin_data_dir = state
+        .paths
+        .plugin_data_dir_for(&entry.catalog, &entry.plugin);
+    let workspace_data_dir =
+        state
+            .paths
+            .workspace_data_dir_for(workspace_name, &entry.catalog, &entry.plugin);
+
+    // `plugin_version` comes from `plugin.json`; the index already
+    // recorded it on each `SkillRecord`. For US1.c we re-read the
+    // version from the central DB by looking up any row for this plugin
+    // — they all carry the same `plugin_version` per the F11 + Phase 5
+    // schema. We do this OUTSIDE the substitution module so the
+    // substitution layer stays sync + I/O-free in its F3 stub form.
+    let plugin_version = read_plugin_version(state, &entry.catalog, &entry.plugin)
+        .unwrap_or_else(|| "0.0.0".to_owned());
+
+    // `clock`: honour the test-only override slot when set; otherwise
+    // local time, falling back to UTC if the host has no local-offset
+    // database (musl builds, locked-down sandboxes).
+    let clock = current_clock();
+
+    SubstitutionContext::builder()
+        .catalog_name(entry.catalog.clone())
+        .plugin_name(entry.plugin.clone())
+        .plugin_version(plugin_version)
+        .entry_name(entry.name.clone())
+        .entry_path(entry_path)
+        .entry_dir(entry_dir)
+        .plugin_root_dir(plugin_root_dir)
+        .plugin_data_dir(plugin_data_dir)
+        .workspace_name(workspace_name.as_str().to_owned())
+        .workspace_data_dir(workspace_data_dir)
+        .clock(clock)
+        .args(args)
+        .declared_args(declared_args)
+        .paths(state.paths.clone())
+        .build()
+        .map_err(|e| TomeError::SubstitutionFailed {
+            reason: e.to_string(),
+        })
+}
+
+/// Look up `plugin_version` for one plugin via any of its `skills` rows.
+/// All rows for `(catalog, plugin)` carry the same version (the
+/// `upsert_skill` path always passes the same value). Returns `None`
+/// when no row exists — caller falls back to a sentinel value.
+fn read_plugin_version(state: &McpState, catalog: &str, plugin: &str) -> Option<String> {
+    let conn = crate::index::db::open_read_only(&state.paths.index_db).ok()?;
+    let rows = crate::index::skills::list_for_plugin(
+        &conn,
+        state.scope.scope.name().as_str(),
+        catalog,
+        plugin,
+    )
+    .ok()?;
+    rows.into_iter().next().map(|r| r.plugin_version)
+}
+
+/// Resolve the substitution clock — honours
+/// `SUBSTITUTION_CLOCK_OVERRIDE` when set, else `now_utc()`. The
+/// `time` crate's `now_local()` requires the `local-offset` feature
+/// (not enabled in Tome's dep tree); the Phase 5 substitution
+/// contract names the clock value as "wall-clock with the local
+/// offset *when available*" and the substitution engine produces ISO
+/// 8601 with offset, so UTC is a sound default that the test override
+/// can replace for deterministic runs.
+fn current_clock() -> time::OffsetDateTime {
+    use std::sync::Mutex;
+
+    let slot: &std::sync::OnceLock<Mutex<Option<time::OffsetDateTime>>> =
+        &substitution::SUBSTITUTION_CLOCK_OVERRIDE;
+    if let Some(mu) = slot.get() {
+        // Mutex poison recovery per the F3 contract: tests that panic
+        // mid-substitution shouldn't take the slot down for the rest of
+        // the suite. (Same discipline as Phase 4 / P5 backend recovery.)
+        let guard = mu.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(t) = *guard {
+            return t;
+        }
+    }
+    time::OffsetDateTime::now_utc()
+}
+
+/// Map the rmcp `arguments` JSON object → [`ArgumentValues`] per
+/// FR-041–FR-043. The contract distinguishes three caller shapes:
+///
+/// 1. Entry declares named arguments AND caller supplied object →
+///    `ArgumentValues::Object { named, declared_order }`. Any key in
+///    `named` that isn't in `declared_args` surfaces as
+///    `PromptArgumentMismatch`. Any extra positional / count mismatch
+///    surfaces likewise.
+/// 2. Entry declares no arguments AND caller supplied object with key
+///    `args` → `ArgumentValues::Single(s)` (the catch-all coercion per
+///    FR-071).
+/// 3. Entry declares no arguments AND caller supplied no args (or empty
+///    args object) → `None`.
+///
+/// All other shapes are `PromptArgumentMismatch`.
+fn map_caller_arguments(
+    _prompt_name: &str,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+    declared_args: &[String],
+) -> Result<Option<ArgumentValues>, TomeError> {
+    // No args supplied → None (stage 3 is skipped).
+    let Some(arguments) = arguments else {
+        return Ok(None);
+    };
+    if arguments.is_empty() {
+        return Ok(None);
+    }
+
+    if !declared_args.is_empty() {
+        // Case 1: named args. Every key must match a declared name.
+        let mut named: std::collections::HashMap<String, String> =
+            std::collections::HashMap::with_capacity(declared_args.len());
+        for (k, v) in &arguments {
+            if !declared_args.iter().any(|d| d == k) {
+                return Err(TomeError::PromptArgumentMismatch {
+                    expected: declared_args.len(),
+                    supplied: arguments.len(),
+                });
+            }
+            named.insert(k.clone(), coerce_value_to_string(v));
+        }
+        Ok(Some(ArgumentValues::Object {
+            named,
+            declared_order: declared_args.to_vec(),
+        }))
+    } else {
+        // Case 2: catch-all `args` key. ANY other key fails.
+        if arguments.len() == 1
+            && let Some(val) = arguments.get("args")
+        {
+            return Ok(Some(ArgumentValues::Single(coerce_value_to_string(val))));
+        }
+        Err(TomeError::PromptArgumentMismatch {
+            expected: 0,
+            supplied: arguments.len(),
+        })
+    }
+}
+
+/// Coerce a JSON value to a string for substitution. Strings pass
+/// through; numbers / booleans / null stringify via Display; objects /
+/// arrays serialise as compact JSON (uncommon for prompts/get but the
+/// MCP spec allows them at the protocol level).
+fn coerce_value_to_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => v.to_string(),
+    }
+}
+
+/// Map a [`TomeError`] surfaced by the get pipeline to a
+/// [`McpError`] envelope, applying the contract's `data.code` slug per
+/// `contracts/mcp-prompts.md` § Error responses.
+fn emit_tome_error_for_get(name: &str, started: Instant, err: TomeError) -> McpError {
+    match err {
+        TomeError::EntryNotFound { .. } => emit_get_error(
+            name,
+            started,
+            "prompt_not_found",
+            McpError::new(
+                ErrorCode::INVALID_PARAMS,
+                format!("prompt `{name}`'s body file is missing on disk: {err}"),
+                Some(json!({ "code": "prompt_not_found", "name": name })),
+            ),
+        ),
+        TomeError::PromptArgumentMismatch { expected, supplied } => emit_get_error(
+            name,
+            started,
+            "prompt_argument_mismatch",
+            McpError::new(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "prompt `{name}` argument mismatch: expected {expected}, supplied {supplied}"
+                ),
+                Some(json!({
+                    "code": "prompt_argument_mismatch",
+                    "name": name,
+                    "expected": expected,
+                    "supplied": supplied,
+                })),
+            ),
+        ),
+        TomeError::WorkspaceDataDirWriteFailed { ref path, .. } => emit_get_error(
+            name,
+            started,
+            "workspace_data_dir_write_failed",
+            McpError::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!(
+                    "workspace data dir write failed at {}: {err}",
+                    path.display()
+                ),
+                Some(json!({
+                    "code": "workspace_data_dir_write_failed",
+                    "name": name,
+                    "path": path.display().to_string(),
+                })),
+            ),
+        ),
+        TomeError::InvalidArgumentFrontmatter { ref file, .. } => emit_get_error(
+            name,
+            started,
+            "invalid_argument_frontmatter",
+            McpError::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("invalid argument frontmatter in {}: {err}", file.display()),
+                Some(json!({
+                    "code": "invalid_argument_frontmatter",
+                    "name": name,
+                    "file": file.display().to_string(),
+                })),
+            ),
+        ),
+        // Everything else (including SubstitutionFailed) maps to
+        // INTERNAL_ERROR / substitution_failed per the contract's
+        // catch-all row.
+        other => internal_get_error(name, started, other.to_string()),
+    }
+}
+
+/// Build an `internal_error` envelope tagged `substitution_failed`
+/// (the contract's catch-all for unexpected pipeline failures).
+fn internal_get_error(name: &str, started: Instant, msg: String) -> McpError {
+    // FR-M-LOG-1 carry-over: scrub error chains in case a downstream
+    // wrapped a reqwest / git error.
+    let scrubbed = crate::catalog::git::scrub_to_string(msg.as_bytes());
+    error!(
+        target: "tome::mcp::prompts",
+        prompt = %name,
+        error_code = "substitution_failed",
+        error_message = %scrubbed,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "prompts/get error",
+    );
+    McpError::new(
+        ErrorCode::INTERNAL_ERROR,
+        msg,
+        Some(json!({ "code": "substitution_failed", "name": name })),
+    )
+}
+
+/// Log the error code, then return the caller's pre-built `McpError`
+/// unchanged. Mirrors `get_skill`'s `emit_error` pattern.
+fn emit_get_error(name: &str, started: Instant, code: &str, err: McpError) -> McpError {
+    info!(
+        target: "tome::mcp::prompts",
+        prompt = %name,
+        result = code,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "prompts/get",
+    );
+    err
 }
 
 /// Internal raw-row representation as pulled from SQLite. Kept private
@@ -479,44 +876,33 @@ struct RawRow {
     indexed_at: String,
 }
 
-/// Helper: build the rmcp [`PromptRouter`] from a [`PromptRegistry`].
+/// Helper: build the rmcp [`PromptRouter`] from a [`PromptRegistry`]
+/// and the shared [`McpState`]. Every entry gets a
+/// [`PromptRoute::new_dyn`] handler that resolves the body, builds a
+/// [`SubstitutionContext`], runs the substitution pipeline, and wraps
+/// in a [`PromptGetResponse`].
 ///
-/// Every entry gets a [`PromptRoute::new_dyn`] handler that — for US1.b
-/// — returns `METHOD_NOT_FOUND`. US1.c replaces this stub with the
-/// substitution-pipeline-driven body render.
-pub fn build_router<S>(registry: &PromptRegistry) -> PromptRouter<S>
+/// The closure must satisfy rmcp's `new_dyn` bound:
+///
+/// ```text
+/// for<'a> Fn(PromptContext<'a, S>)
+///     -> Pin<Box<dyn Future<Output = ...> + Send + 'a>>
+/// ```
+///
+/// Closures with a captured `String` don't pick up the HRTB binding via
+/// inference (the inferred return type drops `'a` and produces
+/// `'static`, which then fails the variance check because `Box<dyn
+/// Trait + 'static>` is not a subtype of `Box<dyn Trait + 'a>`). We
+/// route through a free async fn (`get_prompt_future`) bound to the
+/// input lifetime so the HRTB infers cleanly.
+pub fn build_router<S>(registry: &PromptRegistry, state: Arc<McpState>) -> PromptRouter<S>
 where
     S: rmcp::service::MaybeSend + 'static,
 {
     let mut router: PromptRouter<S> = PromptRouter::new();
     for descriptor in registry.descriptors() {
         let name_for_handler = descriptor.name.clone();
-        // The closure must satisfy rmcp's `new_dyn` bound:
-        //   for<'a> Fn(PromptContext<'a, S>)
-        //       -> MaybeBoxFuture<'a, Result<GetPromptResult, ErrorData>>
-        // `MaybeBoxFuture` is a private alias for `BoxFuture` (the
-        // non-`local` variant rmcp ships by default). Without taking a
-        // direct dep on `futures` we hand-construct the equivalent
-        // `Pin<Box<dyn Future + Send>>` ourselves.
-        // Build the per-route handler.
-        //
-        // rmcp's `new_dyn` requires a HRTB closure:
-        //   for<'a> Fn(PromptContext<'a, S>)
-        //       -> Pin<Box<dyn Future<Output = ...> + Send + 'a>>
-        //
-        // Closures with a captured `String` don't pick up the HRTB
-        // binding via inference (the inferred return type drops `'a`
-        // and produces `'static`, which then fails the variance check
-        // because `Box<dyn Trait + 'static>` is not a subtype of
-        // `Box<dyn Trait + 'a>`). The canonical work-around is to
-        // pre-build the boxed future per route, then move it into a
-        // fresh `Arc` and have the closure clone the `Arc` and rebox.
-        //
-        // Cleaner approach: wrap in an `Arc<dyn Fn(...) -> ...>`
-        // pattern. We use a small `fn` item that takes the captured
-        // state by reference + an erased `&PromptContext` (the route
-        // never reads it) to keep the HRTB satisfaction trivial.
-        let handler = make_stub_handler::<S>(name_for_handler);
+        let handler = make_get_handler::<S>(name_for_handler, state.clone());
         router.add_route(PromptRoute::new_dyn(descriptor, handler));
     }
     router

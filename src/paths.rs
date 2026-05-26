@@ -189,6 +189,41 @@ impl Paths {
         self.workspace_dir(name).join("RULES.md")
     }
 
+    // --- Plugin / workspace data directories (Phase 5 / R-9) -----------
+    //
+    // Per substitution-engine.md §"Stage 1 — Built-ins", the
+    // `${TOME_PLUGIN_DATA}` and `${TOME_WORKSPACE_DATA}` built-ins
+    // resolve to these paths. Phase 5 / US1.c only computes them; lazy
+    // `create_dir_all` lands in US2 alongside the production
+    // substitution engine. Path-component sanitisation per FR-024 is a
+    // concern of the consuming substitution stage, NOT this path
+    // accessor — the accessor preserves the catalog / plugin /
+    // workspace names verbatim so test pinning stays predictable.
+
+    /// `<root>/plugin-data/<catalog>/<plugin>/` — process-wide scratch
+    /// space for one plugin, shared across workspaces. F3 + US1.c only
+    /// compute the path; US2 wires `create_dir_all` and the
+    /// `${TOME_PLUGIN_DATA}` built-in's lazy creation.
+    pub fn plugin_data_dir_for(&self, catalog: &str, plugin: &str) -> PathBuf {
+        self.root.join("plugin-data").join(catalog).join(plugin)
+    }
+
+    /// `<root>/workspaces/<name>/plugin-data/<catalog>/<plugin>/` —
+    /// per-workspace scratch space for one plugin. F3 + US1.c only
+    /// compute the path; US2 wires `create_dir_all` and the
+    /// `${TOME_WORKSPACE_DATA}` built-in's lazy creation.
+    pub fn workspace_data_dir_for(
+        &self,
+        workspace: &WorkspaceName,
+        catalog: &str,
+        plugin: &str,
+    ) -> PathBuf {
+        self.workspace_dir(workspace)
+            .join("plugin-data")
+            .join(catalog)
+            .join(plugin)
+    }
+
     // --- Project marker accessors ---------------------------------------
     //
     // Project markers live at `<project_root>/.tome/`. They are

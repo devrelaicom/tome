@@ -178,14 +178,14 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US1.c — `prompts/get` + substitution wiring (placeholder substitution for now)
 
-- [ ] T139 [US1] Implement `prompts/get` handler in `src/mcp/prompts.rs`: resolve name via `PromptRegistry.by_name`, read entry body, run `substitution::render()` (currently a no-op stub from F3), wrap in `PromptGetResponse` per `contracts/mcp-prompts.md` (use devs:rust-dev agent)
-- [ ] T140 [US1] Build `SubstitutionContext` for a `prompts/get` call: populate all 12 built-in values + clock from `SUBSTITUTION_CLOCK_OVERRIDE` or `time::OffsetDateTime::now_local()` + caller args (use devs:rust-dev agent)
-- [ ] T141 [US1] Map rmcp's prompts/get arguments parameter to `ArgumentValues::Object { named, declared_order }` for entries with declared arguments; map to `ArgumentValues::Single(s)` for entries with no declared arguments (per FR-041–FR-043) (use devs:rust-dev agent)
-- [ ] T142 [US1] Add MCP error responses per `contracts/mcp-prompts.md` § Error responses (prompt_not_found / prompt_argument_mismatch / substitution_failed / workspace_data_dir_write_failed) (use devs:rust-dev agent)
-- [ ] T143 [GIT] Commit: `feat(mcp): prompts/get wired to substitution layer (no-op stub)`
-- [ ] T144 [US1] Extend `tests/mcp_prompts.rs` with `prompts/get` tests: structured args, single-string arg, no args, error cases (use devs:rust-dev agent)
-- [ ] T145 [US1] Create `tests/mcp_prompts_get_json_shape.rs` byte-stable JSON pin (use devs:rust-dev agent)
-- [ ] T146 [GIT] Commit: `test(mcp): prompts/get + JSON wire-shape pin`
+- [x] T139 [US1] Implement `prompts/get` handler in `src/mcp/prompts.rs`: resolve name via `PromptRegistry.by_name`, read entry body, run `substitution::render()` (currently a no-op stub from F3), wrap in `PromptGetResponse` per `contracts/mcp-prompts.md` (use devs:rust-dev agent)
+- [x] T140 [US1] Build `SubstitutionContext` for a `prompts/get` call: populate all 12 built-in values + clock from `SUBSTITUTION_CLOCK_OVERRIDE` or `time::OffsetDateTime::now_local()` + caller args (use devs:rust-dev agent)
+- [x] T141 [US1] Map rmcp's prompts/get arguments parameter to `ArgumentValues::Object { named, declared_order }` for entries with declared arguments; map to `ArgumentValues::Single(s)` for entries with no declared arguments (per FR-041–FR-043) (use devs:rust-dev agent)
+- [x] T142 [US1] Add MCP error responses per `contracts/mcp-prompts.md` § Error responses (prompt_not_found / prompt_argument_mismatch / substitution_failed / workspace_data_dir_write_failed) (use devs:rust-dev agent)
+- [x] T143 [GIT] Commit: `feat(mcp): prompts/get wired to substitution layer (no-op stub)`
+- [x] T144 [US1] Extend `tests/mcp_prompts.rs` with `prompts/get` tests: structured args, single-string arg, no args, error cases (use devs:rust-dev agent)
+- [x] T145 [US1] Create `tests/mcp_prompts_get_json_shape.rs` byte-stable JSON pin (use devs:rust-dev agent)
+- [x] T146 [GIT] Commit: `test(mcp): prompts/get + JSON wire-shape pin`
 - [ ] T147 [GIT] Push US1.c slice and update PR
 
 ### Slice US1.d — Reviewer pass + US1 closeout
