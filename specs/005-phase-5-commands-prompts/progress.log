@@ -3,3 +3,7 @@
 Each line is an event (PR open / merge, phase close, etc.). Newest at the bottom.
 
 2026-05-26T12:30:00Z  baseline  main @ 3b075b9 (Phase 4 v0.4.0 PR-G closeout)  test total: 954/127 suites/16 ignored
+2026-05-26T12:50:00Z  PR #110 opened  Phase 1 (Setup)  planning artefacts + version bump 0.4.0 -> 0.5.0-dev  test delta: 0  awaiting CI
+2026-05-26T13:15:00Z  PR #110 merged  Phase 1 (Setup) complete  main @ 58bc87d  test total: 954/127/16
+2026-05-26T14:30:00Z  Phase 2 (Foundational) F1+F2+F3 committed  +5 error variants + substitution skeleton + 7 smoke tests
+2026-05-26T14:45:00Z  PR #111 opened  Phase 2 (Foundational) F1+F2+F3  test delta: +7 (954 -> 961)  awaiting CI
