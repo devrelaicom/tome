@@ -228,8 +228,8 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 - [x] T208 [US2] Wire `apply_builtins` into `substitution::render()` stage 1 (use devs:rust-dev agent)
 - [x] T209 [US2] Wire clock injection: `context.clock` defaults to `time::OffsetDateTime::now_local()` unless `SUBSTITUTION_CLOCK_OVERRIDE` is set (use devs:rust-dev agent)
 - [x] T210 [GIT] Commit: `feat(substitution): built-ins stage + clock injection + path sanitisation`
-- [ ] T211 [US2] Create `tests/substitution_builtins.rs` with tests per `contracts/substitution-engine.md` § Stage 1 (12 builtins resolve, unknown pass through, default syntax, path sanitisation, clock injection produces deterministic DATE/TIMESTAMP) (use devs:rust-dev agent)
-- [ ] T212 [GIT] Commit: `test(substitution): built-ins stage`
+- [x] T211 [US2] Create `tests/substitution_builtins.rs` with tests per `contracts/substitution-engine.md` § Stage 1 (12 builtins resolve, unknown pass through, default syntax, path sanitisation, clock injection produces deterministic DATE/TIMESTAMP) (use devs:rust-dev agent)
+- [x] T212 [GIT] Commit: `test(substitution): built-ins stage`
 - [ ] T213 [GIT] Push US2.a slice
 
 ### Slice US2.b — Env passthrough stage + lazy data directory creation + workspace rename relocation
