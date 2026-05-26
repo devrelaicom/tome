@@ -434,7 +434,14 @@ fn get_prompt_future<'a, S>(
 /// 6. Run [`substitution::render`] (F3 stub passes the body through
 ///    unchanged; US2 + US3 wire real stages).
 /// 7. Wrap in [`PromptGetResponse`] (rmcp `GetPromptResult`).
-async fn handle_get(
+///
+/// `#[doc(hidden)] pub` so integration tests can exercise the handler
+/// without going through the rmcp `PromptRouter` (which would require
+/// a `Server` instance + a synthetic `PromptContext`). Test seam only —
+/// production callers go through `build_router` + rmcp's
+/// `get_prompt_handler` flow.
+#[doc(hidden)]
+pub async fn handle_get(
     state: Arc<McpState>,
     name: String,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,

@@ -183,9 +183,9 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 - [x] T141 [US1] Map rmcp's prompts/get arguments parameter to `ArgumentValues::Object { named, declared_order }` for entries with declared arguments; map to `ArgumentValues::Single(s)` for entries with no declared arguments (per FR-041–FR-043) (use devs:rust-dev agent)
 - [x] T142 [US1] Add MCP error responses per `contracts/mcp-prompts.md` § Error responses (prompt_not_found / prompt_argument_mismatch / substitution_failed / workspace_data_dir_write_failed) (use devs:rust-dev agent)
 - [x] T143 [GIT] Commit: `feat(mcp): prompts/get wired to substitution layer (no-op stub)`
-- [ ] T144 [US1] Extend `tests/mcp_prompts.rs` with `prompts/get` tests: structured args, single-string arg, no args, error cases (use devs:rust-dev agent)
-- [ ] T145 [US1] Create `tests/mcp_prompts_get_json_shape.rs` byte-stable JSON pin (use devs:rust-dev agent)
-- [ ] T146 [GIT] Commit: `test(mcp): prompts/get + JSON wire-shape pin`
+- [x] T144 [US1] Extend `tests/mcp_prompts.rs` with `prompts/get` tests: structured args, single-string arg, no args, error cases (use devs:rust-dev agent)
+- [x] T145 [US1] Create `tests/mcp_prompts_get_json_shape.rs` byte-stable JSON pin (use devs:rust-dev agent)
+- [x] T146 [GIT] Commit: `test(mcp): prompts/get + JSON wire-shape pin`
 - [ ] T147 [GIT] Push US1.c slice and update PR
 
 ### Slice US1.d — Reviewer pass + US1 closeout

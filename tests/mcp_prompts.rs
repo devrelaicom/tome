@@ -21,14 +21,20 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use serde_json::{Map, Value, json};
 use tempfile::TempDir;
-use tome::embedding::stub::StubEmbedder;
+use tokio::sync::OnceCell;
+use tome::embedding::Reranker;
+use tome::embedding::registry::lookup;
+use tome::embedding::stub::{StubEmbedder, StubReranker};
 use tome::index::{self, OpenOptions};
-use tome::mcp::prompts::PromptRegistry;
+use tome::mcp::prompts::{self, PromptRegistry};
+use tome::mcp::state::McpState;
 use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
-use tome::workspace::WorkspaceName;
+use tome::workspace::{ResolvedScope, WorkspaceName};
 
 use common::{
     config_with_catalog, fabricate_models, lifecycle_paths, stub_embedder_seed, stub_reranker_seed,
@@ -339,6 +345,212 @@ Do a thing.
         descriptors[0].arguments.is_none(),
         "entry with neither declared args nor $ARGUMENTS references must omit the argument schema; got {:?}",
         descriptors[0].arguments
+    );
+}
+
+// ---------------------------------------------------------------------------
+// prompts/get tests (US1.c).
+//
+// These exercise the real `handle_get` entry point — the rmcp
+// `PromptRouter` machinery wraps it identically in production, but the
+// test surface bypasses the router so we don't have to construct a
+// synthetic `PromptContext` (which would require a `Server` instance +
+// a `RequestContext` borrowed for the closure lifetime). `handle_get`
+// is the silent compute path; the router is the emit wrapper.
+//
+// All tests share the `stage_workspace_with` fixture from the
+// `prompts/list` section above; they additionally build an
+// `Arc<McpState>` carrying the resolved `PromptRegistry` for the
+// fixture's enabled entries.
+// ---------------------------------------------------------------------------
+
+/// Build an `Arc<McpState>` wrapping the fixture's `Paths` + a built
+/// `PromptRegistry`. Mirrors `tests/mcp_server.rs::build_state` but
+/// also resolves the registry (so the per-test prompts/get call has
+/// a name to look up).
+fn build_state_for_prompts(paths: &tome::paths::Paths) -> Arc<McpState> {
+    let conn = open_index(paths);
+    let registry = PromptRegistry::build_for_workspace(&global(), paths, &conn)
+        .expect("build prompt registry");
+    drop(conn);
+
+    let embedder_entry = lookup("bge-small-en-v1.5").expect("registry has embedder");
+    let reranker_entry = lookup("bge-reranker-base").expect("registry has reranker");
+    let reranker: Arc<dyn Reranker> = Arc::new(StubReranker::new());
+
+    // Resolve to the privileged `global` workspace so the registry's
+    // `state.scope.scope.name()` lookup matches what
+    // `PromptRegistry::build_for_workspace` was given. `global_fallback`
+    // is the right shape — no project marker, no `--workspace` flag,
+    // privileged-default `global` scope.
+    let scope = ResolvedScope::global_fallback();
+
+    Arc::new(McpState {
+        embedder: Arc::new(StubEmbedder::new()),
+        reranker: OnceCell::new_with(Some(reranker)),
+        scope,
+        paths: paths.clone(),
+        embedder_entry,
+        reranker_entry,
+        prompt_registry: Arc::new(registry),
+    })
+}
+
+/// Convenience: invoke `prompts::handle_get` on a single-thread tokio
+/// runtime. Returns the rendered body text on success.
+fn invoke_get(
+    state: Arc<McpState>,
+    name: &str,
+    arguments: Option<Map<String, Value>>,
+) -> Result<String, rmcp::ErrorData> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let response = rt.block_on(prompts::handle_get(state, name.to_owned(), arguments))?;
+    assert_eq!(response.messages.len(), 1, "single user-role message");
+    let msg = &response.messages[0];
+    match &msg.content {
+        rmcp::model::PromptMessageContent::Text { text } => Ok(text.clone()),
+        other => panic!("expected text content, got {other:?}"),
+    }
+}
+
+#[test]
+fn get_returns_unrendered_body_for_no_args_entry() {
+    // F3 stub returns the body unchanged. The test asserts the
+    // round-trip through handle_get → spawn_blocking → registry
+    // lookup → render → wrap works end-to-end. US2+US3 will replace
+    // the stub with real transforms; the wrapper shape stays the same.
+    let cmd_body =
+        "---\nname: bare\ndescription: A standalone command, no args.\n---\nDo a thing.\n";
+    let (_tmp, paths) = stage_workspace_with(&[], &[("bare", cmd_body)]);
+    let state = build_state_for_prompts(&paths);
+
+    let text = invoke_get(state, "plug__bare", None).expect("prompts/get ok");
+    // The frontmatter-stripped body — `parse_skill_frontmatter` returns
+    // everything after the YAML closing `---` line.
+    assert_eq!(text.trim(), "Do a thing.");
+}
+
+#[test]
+fn get_returns_body_for_structured_named_args() {
+    let cmd_body = "---\nname: deploy\ndescription: Deploy.\narguments: [component, from, to]\n---\nRun a deploy for $1 from $2 to $3\n";
+    let (_tmp, paths) = stage_workspace_with(&[], &[("deploy", cmd_body)]);
+    let state = build_state_for_prompts(&paths);
+
+    let mut args = Map::new();
+    args.insert("component".into(), json!("frontend"));
+    args.insert("from".into(), json!("v1"));
+    args.insert("to".into(), json!("v2"));
+
+    let text = invoke_get(state, "plug__deploy", Some(args)).expect("prompts/get ok");
+    // F3 stub passes the body through unchanged; US3 wires $N
+    // substitution. We assert the unrendered body comes back rather
+    // than locking in stub behaviour we'll soon replace.
+    assert!(
+        text.contains("$1") && text.contains("$2") && text.contains("$3"),
+        "F3 stub returns body unchanged; got: {text:?}",
+    );
+}
+
+#[test]
+fn get_accepts_single_string_arg_via_catchall() {
+    // No declared args; caller supplies `{ "args": "..." }` →
+    // ArgumentValues::Single per FR-071. The handler must accept; the
+    // F3 stub returns the body unchanged.
+    let cmd_body = "---\nname: fix\ndescription: Fix.\n---\nPlease fix $ARGUMENTS\n";
+    let (_tmp, paths) = stage_workspace_with(&[], &[("fix", cmd_body)]);
+    let state = build_state_for_prompts(&paths);
+
+    let mut args = Map::new();
+    args.insert("args".into(), json!("issue-123"));
+
+    let text = invoke_get(state, "plug__fix", Some(args)).expect("prompts/get ok");
+    assert!(text.contains("$ARGUMENTS"), "F3 stub: body unchanged");
+}
+
+#[test]
+fn get_unknown_name_returns_prompt_not_found() {
+    let cmd_body = "---\nname: real\ndescription: Real.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace_with(&[], &[("real", cmd_body)]);
+    let state = build_state_for_prompts(&paths);
+
+    let err = invoke_get(state, "plug__does_not_exist", None)
+        .expect_err("unknown prompt name must reject");
+    let data = err.data.expect("structured error data");
+    assert_eq!(
+        data.get("code").and_then(|c| c.as_str()),
+        Some("prompt_not_found"),
+        "unknown prompt name → prompt_not_found; got {data}",
+    );
+    assert_eq!(
+        data.get("name").and_then(|c| c.as_str()),
+        Some("plug__does_not_exist"),
+        "name round-trips in error envelope",
+    );
+}
+
+#[test]
+fn get_named_args_with_unknown_key_returns_prompt_argument_mismatch() {
+    // Entry declares [a, b]; caller supplies `{c: ...}` → no match.
+    let cmd_body = "---\nname: pair\ndescription: pair.\narguments: [a, b]\n---\nGot $1 $2\n";
+    let (_tmp, paths) = stage_workspace_with(&[], &[("pair", cmd_body)]);
+    let state = build_state_for_prompts(&paths);
+
+    let mut args = Map::new();
+    args.insert("c".into(), json!("nope"));
+
+    let err =
+        invoke_get(state, "plug__pair", Some(args)).expect_err("unknown arg name must reject");
+    let data = err.data.expect("structured error data");
+    assert_eq!(
+        data.get("code").and_then(|c| c.as_str()),
+        Some("prompt_argument_mismatch"),
+        "unknown named key → prompt_argument_mismatch; got {data}",
+    );
+}
+
+#[test]
+fn get_no_declared_args_with_unknown_key_returns_prompt_argument_mismatch() {
+    // No declared args; caller supplies a key OTHER than `args` → mismatch.
+    let cmd_body = "---\nname: bare\ndescription: bare.\n---\nDo it\n";
+    let (_tmp, paths) = stage_workspace_with(&[], &[("bare", cmd_body)]);
+    let state = build_state_for_prompts(&paths);
+
+    let mut args = Map::new();
+    args.insert("not_args".into(), json!("oops"));
+
+    let err = invoke_get(state, "plug__bare", Some(args))
+        .expect_err("non-args key on no-declared-args entry must reject");
+    let data = err.data.expect("structured error data");
+    assert_eq!(
+        data.get("code").and_then(|c| c.as_str()),
+        Some("prompt_argument_mismatch"),
+        "non-args key → prompt_argument_mismatch; got {data}",
+    );
+}
+
+#[test]
+fn get_response_description_uses_truncated_entry_description() {
+    // The PromptGetResponse.description should mirror the
+    // registry-cached (truncated) description so harnesses rendering
+    // the response don't have to re-read prompts/list.
+    let cmd_body = "---\nname: doc\ndescription: A short one.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace_with(&[], &[("doc", cmd_body)]);
+    let state = build_state_for_prompts(&paths);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let response = rt
+        .block_on(prompts::handle_get(state, "plug__doc".into(), None))
+        .expect("ok");
+    assert_eq!(
+        response.description.as_deref(),
+        Some("A short one."),
+        "response description carries the registry-truncated form",
     );
 }
 
