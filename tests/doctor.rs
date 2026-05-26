@@ -102,7 +102,7 @@ fn assemble_with_broken_catalog_cache_reports_degraded() {
     let cat_fix = report
         .suggested_fixes
         .iter()
-        .find(|f| f.subsystem.starts_with("catalog:"))
+        .find(|f| matches!(f.subsystem, tome::doctor::Subsystem::Catalog(_)))
         .expect("catalog suggested fix");
     assert!(cat_fix.auto_fixable);
     assert!(cat_fix.command.starts_with("tome catalog update"));
@@ -152,7 +152,7 @@ fn assemble_with_manifest_invalid_is_not_auto_fixable() {
     let cat_fix = report
         .suggested_fixes
         .iter()
-        .find(|f| f.subsystem.starts_with("catalog:"))
+        .find(|f| matches!(f.subsystem, tome::doctor::Subsystem::Catalog(_)))
         .expect("catalog suggested fix");
     assert!(
         !cat_fix.auto_fixable,
@@ -197,7 +197,7 @@ fn assemble_reports_orphan_clone_in_catalogs_list() {
     let orphan_fix = report
         .suggested_fixes
         .iter()
-        .find(|f| f.subsystem.starts_with("catalog:"))
+        .find(|f| matches!(f.subsystem, tome::doctor::Subsystem::Catalog(_)))
         .expect("orphan suggested fix");
     assert!(
         !orphan_fix.auto_fixable,
@@ -578,12 +578,16 @@ fn embedder_name_drift_classifies_unhealthy() {
         "embedder drift must flip overall to Unhealthy; report = {report:#?}",
     );
 
-    // Suggested fix uses subsystem `embedder_drift` and is NOT auto-fixable.
+    // Suggested fix uses subsystem `Drift` (the diagnosis text
+    // discriminates between embedder/reranker/summariser drift) and is
+    // NOT auto-fixable.
     let drift_fix = report
         .suggested_fixes
         .iter()
-        .find(|f| f.subsystem == "embedder_drift")
-        .expect("drift fix entry");
+        .find(|f| {
+            f.subsystem == tome::doctor::Subsystem::Drift && f.diagnosis.starts_with("embedder:")
+        })
+        .expect("embedder-drift fix entry");
     assert!(
         !drift_fix.auto_fixable,
         "embedder drift requires `tome reindex --force`, not --fix",
@@ -636,7 +640,9 @@ fn reranker_drift_alone_classifies_degraded() {
     let drift_fix = report
         .suggested_fixes
         .iter()
-        .find(|f| f.subsystem == "reranker_drift")
+        .find(|f| {
+            f.subsystem == tome::doctor::Subsystem::Drift && f.diagnosis.starts_with("reranker")
+        })
         .expect("reranker drift fix entry");
     assert!(!drift_fix.auto_fixable);
 }
@@ -668,7 +674,7 @@ fn no_drift_reported_when_seeds_match_registry() {
         report
             .suggested_fixes
             .iter()
-            .all(|f| !f.subsystem.ends_with("_drift")),
+            .all(|f| f.subsystem != tome::doctor::Subsystem::Drift),
         "no drift suggested-fix entries when seeds match",
     );
     assert_eq!(report.overall, DoctorClassification::Ok);

@@ -25,7 +25,7 @@ use crate::catalog::git::Git;
 use crate::commands::plugin::{embedder_entry, registry_seeds, reranker_entry};
 use crate::commands::status::{check_index, check_model};
 use crate::doctor::checks::check_catalogs;
-use crate::doctor::report::{DoctorReport, SuggestedFix};
+use crate::doctor::report::{DoctorReport, Subsystem, SuggestedFix};
 use crate::embedding::download::download_model;
 use crate::embedding::registry::ModelEntry;
 use crate::error::TomeError;
@@ -80,34 +80,43 @@ fn apply_one(
     paths: &Paths,
     scope: &Scope,
 ) -> Result<(), TomeError> {
-    if fix.subsystem == "embedder" {
-        let entry = embedder_entry();
-        repair_model(entry, paths)?;
-        report.embedder = check_model(paths, entry, false)?;
-        return Ok(());
+    match &fix.subsystem {
+        Subsystem::Embedder => {
+            let entry = embedder_entry();
+            repair_model(entry, paths)?;
+            report.embedder = check_model(paths, entry, false)?;
+            Ok(())
+        }
+        Subsystem::Reranker => {
+            let entry = reranker_entry();
+            repair_model(entry, paths)?;
+            report.reranker = check_model(paths, entry, false)?;
+            Ok(())
+        }
+        Subsystem::Catalog(name) => {
+            repair_catalog(name, paths, scope)?;
+            report.catalogs = check_catalogs(paths, scope)?;
+            Ok(())
+        }
+        Subsystem::Schema => {
+            repair_schema(paths, scope)?;
+            report.index = check_index(paths, scope)?;
+            Ok(())
+        }
+        // US5.b lands the per-subsystem fix handlers for Summariser,
+        // BindingRulesCopy, HarnessRules, and HarnessMcp. US5.a ships
+        // the dispatch surface so the report carries the suggested
+        // fixes; trying to apply one here is a no-op (warn + skip)
+        // until US5.b wires them up.
+        other => {
+            warn!(
+                subsystem = %other,
+                "doctor --fix: repair handler for this subsystem is deferred to US5.b; \
+                 leaving the report's pre-repair state in place",
+            );
+            Ok(())
+        }
     }
-    if fix.subsystem == "reranker" {
-        let entry = reranker_entry();
-        repair_model(entry, paths)?;
-        report.reranker = check_model(paths, entry, false)?;
-        return Ok(());
-    }
-    if let Some(name) = fix.subsystem.strip_prefix("catalog:") {
-        repair_catalog(name, paths, scope)?;
-        report.catalogs = check_catalogs(paths, scope)?;
-        return Ok(());
-    }
-    if fix.subsystem == "schema" {
-        repair_schema(paths, scope)?;
-        report.index = check_index(paths, scope)?;
-        return Ok(());
-    }
-    // Unknown auto_fixable subsystem — shouldn't happen but log + skip.
-    warn!(
-        subsystem = %fix.subsystem,
-        "doctor --fix: no repair implementation for subsystem; skipping",
-    );
-    Ok(())
 }
 
 fn repair_model(entry: &ModelEntry, paths: &Paths) -> Result<(), TomeError> {
@@ -195,15 +204,23 @@ pub fn re_assemble(report: &mut DoctorReport) {
     report.suggested_fixes = build_suggested_fixes_pub(
         &report.embedder,
         &report.reranker,
+        &report.summariser,
         &report.index,
         &report.drift,
         &report.catalogs,
+        report.project_binding.as_ref(),
+        &report.harness_rules,
+        &report.harness_mcp,
     );
     report.overall = classify_pub(
         &report.embedder,
         &report.reranker,
+        &report.summariser,
         &report.index,
         &report.drift,
         &report.catalogs,
+        report.project_binding.as_ref(),
+        &report.harness_rules,
+        &report.harness_mcp,
     );
 }

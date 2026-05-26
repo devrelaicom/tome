@@ -65,7 +65,7 @@ pub enum ScopeKind {
 /// marker pulls in via `[global]` would emit `["project", "[global]"]`.
 /// A harness directly declared in the project marker would emit
 /// `["project"]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EffectiveHarness {
     pub name: String,
     pub source_chain: Vec<String>,
@@ -76,7 +76,7 @@ pub struct EffectiveHarness {
 /// `harnesses` is ordered by first-included-from chain. `excluded`
 /// surfaces the names subtracted by `!`-prefixes, for
 /// `tome harness list` to report transparently.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EffectiveHarnessList {
     pub harnesses: Vec<EffectiveHarness>,
     pub excluded: Vec<String>,

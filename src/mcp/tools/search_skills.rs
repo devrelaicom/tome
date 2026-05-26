@@ -48,6 +48,14 @@ fn default_top_k() -> u32 {
     10
 }
 
+/// Maximum allowed length of an MCP `search_skills.query` input, in
+/// `char`s (Unicode scalar values). Research §R-17 documents 4096 as
+/// the cap; queries strictly longer than this are rejected with a
+/// dedicated MCP error envelope. Length is measured in `char`s rather
+/// than `bytes` so multi-byte UTF-8 inputs aren't penalised by their
+/// encoding.
+pub const MAX_QUERY_CHARS: usize = 4096;
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Output {
     pub matches: Vec<SkillMatch>,
@@ -92,6 +100,19 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     }
     if input.query.trim().is_empty() {
         return Err(McpError::invalid_params("query must not be empty", None));
+    }
+    // FR-573 / P8 deferred fold-in (US5.a T373): cap query length so a
+    // hostile or accidental megabyte-blob doesn't tie up the embedder.
+    // 4096 chars is the documented maximum (research §R-17); strictly
+    // greater than the cap is rejected, equal is allowed.
+    if input.query.chars().count() > MAX_QUERY_CHARS {
+        return Err(McpError::invalid_params(
+            format!("query exceeds maximum length of {MAX_QUERY_CHARS} characters"),
+            Some(json!({
+                "code": "query_too_long",
+                "max_chars": MAX_QUERY_CHARS,
+            })),
+        ));
     }
     if input.plugin.is_some() && input.catalog.is_none() {
         return Err(McpError::invalid_params(
