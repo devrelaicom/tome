@@ -91,12 +91,13 @@ pub fn rename(
         });
     }
     if old == new {
-        // Trivial no-op rename; surface as a usage error so the caller
-        // notices the typo rather than us silently doing nothing.
-        return Err(TomeError::Usage(format!(
-            "workspace rename: `<old>` and `<new>` are the same name (`{}`)",
-            old.as_str(),
-        )));
+        // Trivial no-op rename — surface as a workspace-name error so
+        // the failure routes through the workspace-class exit code (15)
+        // rather than the generic usage code (2). Polish R-M12.
+        return Err(TomeError::WorkspaceNameInvalid {
+            name: new.as_str().to_owned(),
+            reason: "rename old and new names are identical (no-op)".to_owned(),
+        });
     }
 
     if let Some(parent) = paths.index_lock.parent()

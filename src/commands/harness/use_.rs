@@ -4,7 +4,7 @@
 //! array) and runs the sync algorithm when the effective list changes.
 //!
 //! Validation: `<name>` must be a supported harness (lookup against
-//! [`crate::harness::lookup`]) — otherwise exit 18
+//! [`crate::harness::with_effective_modules`]) — otherwise exit 18
 //! (`HarnessNotSupported`). For `--scope project`, the resolved scope
 //! MUST carry a project root; otherwise exit 2 (Usage).
 //!

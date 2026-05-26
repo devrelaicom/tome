@@ -222,15 +222,21 @@ fn rename_pre_check_missing_project_dir_exits_70() {
 }
 
 #[test]
-fn rename_to_same_name_is_usage_error() {
+fn rename_to_same_name_is_workspace_name_invalid() {
+    // Polish R-M12: same-name rename now routes through
+    // `WorkspaceNameInvalid` (exit 15) instead of the generic `Usage`
+    // exit 2. Keeps the failure class in the workspace-error family.
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
     std::fs::create_dir_all(&paths.root).unwrap();
     workspace::init::init(parse("foo"), false, &paths).expect("init");
 
     let err = workspace::rename::rename(parse("foo"), parse("foo"), &paths).unwrap_err();
-    assert!(matches!(err, TomeError::Usage(_)), "got {err:?}");
-    assert_eq!(err.exit_code(), 2);
+    assert!(
+        matches!(err, TomeError::WorkspaceNameInvalid { .. }),
+        "got {err:?}",
+    );
+    assert_eq!(err.exit_code(), 15);
 
     // Cross-check zero state change.
     assert!(workspace_exists(&paths, "foo"));

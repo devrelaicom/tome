@@ -219,23 +219,20 @@ pub static HARNESS_MODULES_OVERRIDE: RwLock<Option<Vec<Box<dyn HarnessModule>>>>
 /// (composition resolver, harness commands) map `None` to
 /// `TomeError::HarnessNotSupported` (exit 18).
 ///
-/// The lookup consults `HARNESS_MODULES_OVERRIDE` first; when the slot
-/// is empty (the production case) it falls back to
-/// `SUPPORTED_HARNESSES`. The override returns a `Box`-allocated
-/// reference behind a guard, so the function takes a closure rather
-/// than returning a borrow into the lock. For the production registry
-/// path, the returned reference is `'static`.
+/// Resolves against `SUPPORTED_HARNESSES` only — does NOT consult
+/// `HARNESS_MODULES_OVERRIDE` (the function signature promises a
+/// `'static` reference, which the boxed test modules can't satisfy).
+/// Production code paths should call [`with_effective_modules`] for
+/// override-aware iteration / dispatch.
 ///
-/// Test code that needs an overridden lookup should call the registry
-/// directly via [`with_effective_modules`] instead.
+/// Polish R-M8: kept `pub` for integration-test reachability under
+/// `#[doc(hidden)]` — production code should call
+/// [`with_effective_modules`] which honours `HARNESS_MODULES_OVERRIDE`.
+/// The `pub`-not-`pub(crate)` accommodates the same constraint
+/// documented in F7 (integration tests under `tests/` consume the lib
+/// without `cfg(test)` visibility).
+#[doc(hidden)]
 pub fn lookup(name: &str) -> Option<&'static dyn HarnessModule> {
-    // The override path is intended for tests that swap in synthetic
-    // modules; production code never installs an override. If an
-    // override is present, fall through to `with_effective_modules`
-    // for iteration-aware callers — but `lookup` itself only resolves
-    // against `SUPPORTED_HARNESSES` because the function signature
-    // promises a `'static` reference, which the boxed test modules
-    // can't satisfy.
     SUPPORTED_HARNESSES
         .iter()
         .copied()
@@ -254,9 +251,14 @@ pub fn lookup(name: &str) -> Option<&'static dyn HarnessModule> {
 /// module's `name()` and `description()` to owned `String`s and
 /// returns those.
 pub fn with_effective_modules<R>(f: impl FnOnce(&[&dyn HarnessModule]) -> R) -> R {
+    // Polish R-M3: recover from poison rather than panic. A panicking
+    // writer-side test leaves the lock poisoned; the read side's only
+    // invariant is "I can see the current Vec" which a poisoned-but-
+    // still-readable RwLock still satisfies. Mirrors the discipline at
+    // `src/summarise/mod.rs::backend()`.
     let guard = HARNESS_MODULES_OVERRIDE
         .read()
-        .expect("HARNESS_MODULES_OVERRIDE poisoned");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     match guard.as_ref() {
         Some(boxed) => {
             // Build a transient view of `&dyn HarnessModule` references.
