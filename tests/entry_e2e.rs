@@ -29,12 +29,12 @@ use tempfile::TempDir;
 use tokio::sync::OnceCell;
 use tome::config::Config;
 use tome::embedding::Reranker;
-use tome::embedding::registry::lookup;
+use tome::embedding::registry::{ModelEntry, ModelKind, lookup};
 use tome::embedding::stub::{StubEmbedder, StubReranker};
 use tome::index::{self, OpenOptions};
 use tome::mcp::prompts::{self, PromptRegistry};
 use tome::mcp::state::McpState;
-use tome::mcp::tools::get_skill;
+use tome::mcp::tools::{get_skill, search_skills};
 use tome::plugin::PluginId;
 use tome::plugin::identity::EntryKind;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
@@ -206,6 +206,57 @@ fn build_registry(paths: &tome::paths::Paths) -> PromptRegistry {
     let conn = open_index(paths);
     PromptRegistry::build_for_workspace(&WorkspaceName::global(), paths, &conn)
         .expect("build prompt registry")
+}
+
+/// Stub `ModelEntry`s — required when invoking `search_skills::handle`
+/// (the handler reads `state.embedder_entry.name/version` for drift
+/// detection against the index `meta` row, which is seeded with
+/// `stub_embedder_seed()`). Using `lookup("bge-small-en-v1.5")` instead
+/// would mismatch the stub-seeded index and trip `embedder_drift`.
+/// Mirrors `tests/mcp_search_skills_truncation.rs::{STUB_EMBEDDER_ENTRY,
+/// STUB_RERANKER_ENTRY}` — file-local copies stay in sync with the stub
+/// embedder/reranker's reported identity.
+static STUB_EMBEDDER_ENTRY: ModelEntry = ModelEntry {
+    name: "stub-embedder",
+    version: "0",
+    kind: ModelKind::Embedder,
+    source_url: "stub://embedder",
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+    size_bytes: 0,
+    licence: "MIT",
+    files: &[],
+};
+
+static STUB_RERANKER_ENTRY: ModelEntry = ModelEntry {
+    name: "stub-reranker",
+    version: "0",
+    kind: ModelKind::Reranker,
+    source_url: "stub://reranker",
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+    size_bytes: 0,
+    licence: "MIT",
+    files: &[],
+};
+
+/// State builder for tests that invoke `search_skills::handle`. Uses
+/// the `STUB_EMBEDDER_ENTRY`/`STUB_RERANKER_ENTRY` so the search
+/// pipeline's drift detection agrees with the index seeded by
+/// `lifecycle::enable` (which records `stub_embedder_seed()` /
+/// `stub_reranker_seed()` in `meta`).
+fn build_state_with_stub_entries(
+    paths: &tome::paths::Paths,
+    registry: PromptRegistry,
+) -> Arc<McpState> {
+    let reranker: Arc<dyn Reranker> = Arc::new(StubReranker::new());
+    Arc::new(McpState {
+        embedder: Arc::new(StubEmbedder::new()),
+        reranker: OnceCell::new_with(Some(reranker)),
+        scope: ResolvedScope::global_fallback(),
+        paths: paths.clone(),
+        embedder_entry: &STUB_EMBEDDER_ENTRY,
+        reranker_entry: &STUB_RERANKER_ENTRY,
+        prompt_registry: Arc::new(registry),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -415,5 +466,194 @@ fn prompts_get_with_unknown_named_arg_surfaces_mismatch() {
         data.get("code").and_then(|c| c.as_str()),
         Some("prompt_argument_mismatch"),
         "unknown named key → prompt_argument_mismatch envelope; got {data}",
+    );
+}
+
+/// Phase 5 / US5.a — per-entry invocability matrix end-to-end.
+///
+/// Stages a single plugin with four entries spanning the full 2x2
+/// matrix of `searchable` x `user_invocable` resolved values, then
+/// proves the two read-surfaces (`search_skills` + `prompts/list`)
+/// filter independently per the resolved frontmatter flags:
+///
+/// | Entry                | kind    | frontmatter                   | resolved searchable | resolved user_invocable | search_skills | prompts/list |
+/// |----------------------|---------|-------------------------------|---------------------|-------------------------|---------------|--------------|
+/// | `default-skill`      | skill   | (none)                        | true                | false                   | yes           | no           |
+/// | `default-command`    | command | (none)                        | true                | true                    | yes           | yes          |
+/// | `model-disabled`     | skill   | `disable-model-invocation: true` | false            | false                   | no            | no           |
+/// | `user-invocable-skill` | skill | `user-invocable: true`        | true                | true                    | yes           | yes          |
+///
+/// Verifies that:
+/// - All four entries are present in the DB (`index::skills::find`
+///   bypasses both filters) with the correct resolved flag values.
+/// - `search_skills::handle` returns exactly three (the dormant
+///   `model-disabled` is filtered by `WHERE searchable = 1`).
+/// - `PromptRegistry::descriptors()` returns exactly two (the two
+///   `default-skill` + `model-disabled` entries are filtered by
+///   `WHERE user_invocable = 1`).
+///
+/// This is the integration proof that the two filter clauses
+/// (T353/T354) are independent and compose correctly across the
+/// full matrix of resolved-default + explicit-opt-in/out combinations.
+#[test]
+fn matrix_plugin_filters_searches_and_prompts_per_flag_combination() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+
+    // Bodies use distinct, query-tag-bearing descriptions so the
+    // KNN search returns deterministic candidates against the stub
+    // embedder. The body content is irrelevant — only the
+    // frontmatter `name`/`description` and the flag fields drive
+    // the filter assertions.
+    let default_skill =
+        "---\nname: default-skill\ndescription: matrix default skill no flags.\n---\nbody\n";
+    let model_disabled = "---\nname: model-disabled\ndescription: matrix dormant entry.\ndisable-model-invocation: true\n---\nbody\n";
+    let user_invocable_skill = "---\nname: user-invocable-skill\ndescription: matrix opt-in invocable skill.\nuser-invocable: true\n---\nbody\n";
+    let default_command =
+        "---\nname: default-command\ndescription: matrix default command no flags.\n---\nbody\n";
+
+    stage_workspace(
+        &tmp,
+        &paths,
+        &[
+            ("default-skill", default_skill),
+            ("model-disabled", model_disabled),
+            ("user-invocable-skill", user_invocable_skill),
+        ],
+        &[("default-command", default_command)],
+    );
+
+    // ------------------------------------------------------------------
+    // (1) DB layer: all four entries are present with the correct
+    // resolved flags. `index::skills::find` does NOT filter on
+    // searchable or user_invocable — it is the integrity baseline.
+    // ------------------------------------------------------------------
+    let conn = open_index(&paths);
+    let find = |kind: EntryKind, name: &str| {
+        tome::index::skills::find(&conn, "global", "acme", "plug", kind, name)
+            .expect("find query")
+            .unwrap_or_else(|| panic!("entry `{name}` missing from index"))
+    };
+
+    let default_skill_row = find(EntryKind::Skill, "default-skill");
+    assert!(default_skill_row.enabled);
+    assert!(
+        default_skill_row.searchable,
+        "skill with no flags → resolved searchable = true",
+    );
+    assert!(
+        !default_skill_row.user_invocable,
+        "skill with no flags → resolved user_invocable = false",
+    );
+
+    let default_command_row = find(EntryKind::Command, "default-command");
+    assert!(default_command_row.enabled);
+    assert!(
+        default_command_row.searchable,
+        "command with no flags → resolved searchable = true",
+    );
+    assert!(
+        default_command_row.user_invocable,
+        "command with no flags → resolved user_invocable = true",
+    );
+
+    let dormant_row = find(EntryKind::Skill, "model-disabled");
+    assert!(dormant_row.enabled);
+    assert!(
+        !dormant_row.searchable,
+        "`disable-model-invocation: true` flips resolved searchable to false",
+    );
+    assert!(
+        !dormant_row.user_invocable,
+        "skill default user_invocable=false stays unchanged",
+    );
+
+    let invocable_skill_row = find(EntryKind::Skill, "user-invocable-skill");
+    assert!(invocable_skill_row.enabled);
+    assert!(
+        invocable_skill_row.searchable,
+        "skill with `user-invocable: true` keeps searchable default = true",
+    );
+    assert!(
+        invocable_skill_row.user_invocable,
+        "`user-invocable: true` flips resolved user_invocable to true",
+    );
+    drop(conn);
+
+    // ------------------------------------------------------------------
+    // (2) search_skills surface: three results (dormant filtered).
+    // Use a broad query — the stub embedder returns deterministic
+    // identical vectors so all candidate rows tie; `searchable = 1`
+    // filters BEFORE ranking. top_k = 10 is the schema default; the
+    // catalog only has four entries so the cap doesn't bite.
+    // ------------------------------------------------------------------
+    let state_for_search = build_state_with_stub_entries(&paths, PromptRegistry::default());
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let search_out = rt
+        .block_on(search_skills::handle(
+            state_for_search,
+            search_skills::Input {
+                query: "matrix".into(),
+                top_k: 10,
+                catalog: None,
+                plugin: None,
+                description_max_chars: 150,
+            },
+        ))
+        .expect("search_skills ok");
+
+    let search_names: std::collections::BTreeSet<String> =
+        search_out.matches.iter().map(|m| m.name.clone()).collect();
+    let expected_search: std::collections::BTreeSet<String> = [
+        "default-skill".to_string(),
+        "default-command".to_string(),
+        "user-invocable-skill".to_string(),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        search_names, expected_search,
+        "search_skills must surface exactly the three `searchable = 1` entries; \
+         got: {search_names:?}",
+    );
+    assert!(
+        !search_names.contains("model-disabled"),
+        "dormant `disable-model-invocation: true` entry MUST be excluded from search; \
+         got: {search_names:?}",
+    );
+
+    // ------------------------------------------------------------------
+    // (3) prompts/list surface: two descriptors (the two
+    // `user_invocable = 1` entries: the command + the opt-in skill).
+    // The dormant entry AND the default skill MUST be absent.
+    // ------------------------------------------------------------------
+    let registry = build_registry(&paths);
+    let prompt_names: std::collections::BTreeSet<String> = registry
+        .descriptors()
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
+    let expected_prompts: std::collections::BTreeSet<String> = [
+        "plug__default-command".to_string(),
+        "plug__user-invocable-skill".to_string(),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        prompt_names, expected_prompts,
+        "prompts/list must surface exactly the two `user_invocable = 1` entries; \
+         got: {prompt_names:?}",
+    );
+    assert!(
+        !prompt_names.contains("plug__model-disabled"),
+        "dormant entry MUST NOT appear in prompts/list; got: {prompt_names:?}",
+    );
+    assert!(
+        !prompt_names.contains("plug__default-skill"),
+        "default skill (user_invocable=false) MUST NOT appear in prompts/list; \
+         got: {prompt_names:?}",
     );
 }
