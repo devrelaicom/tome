@@ -34,6 +34,14 @@ pub mod tools;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Slash-command prefix that Claude Code (and harness-compatible MCP
+/// hosts) renders for a Tome MCP prompt called `<name>`. Single source of
+/// truth; `tome doctor` consumes it to render the `Resolved prompts:`
+/// section per `contracts/doctor-extensions-p5.md`. Changing the MCP
+/// server name (currently `tome` per `rmcp` server descriptor) requires
+/// changing both ends in lockstep.
+pub const MCP_SLASH_PREFIX: &str = "/mcp__tome__";
+
 use tokio::sync::OnceCell;
 use tracing::{error, info};
 

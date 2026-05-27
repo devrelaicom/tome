@@ -22,6 +22,7 @@
 //! - `count_entries_by_kind` aggregates by `kind` + flags entries
 //!   whose source mtime exceeds the stored `indexed_at`.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -72,8 +73,7 @@ pub fn check_catalogs(paths: &Paths, scope: &Scope) -> Result<Vec<CatalogCacheHe
     let mut out = Vec::with_capacity(enrolments.len());
 
     // Step 1: classify every catalog the resolved workspace enrols.
-    let mut referenced_paths: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::new();
+    let mut referenced_paths: HashSet<PathBuf> = HashSet::new();
     for e in &enrolments {
         let cache_path = paths.cache_dir_for(&e.url);
         referenced_paths.insert(cache_path.clone());
@@ -97,7 +97,14 @@ pub fn check_catalogs(paths: &Paths, scope: &Scope) -> Result<Vec<CatalogCacheHe
     if paths.catalogs_dir.is_dir() {
         let entries = match std::fs::read_dir(&paths.catalogs_dir) {
             Ok(it) => it,
-            Err(_) => return Ok(out),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    path = %paths.catalogs_dir.display(),
+                    "doctor: read_dir(catalogs_dir) failed during orphan walk; skipping",
+                );
+                return Ok(out);
+            }
         };
         for de in entries.flatten() {
             let p = de.path();
@@ -232,8 +239,7 @@ pub fn detect_orphan_data_dirs(
     conn: &rusqlite::Connection,
 ) -> Result<OrphanDataDirReport, TomeError> {
     // Set of (catalog, plugin) pairs enabled in ANY workspace.
-    let mut any_enrolment_pairs: std::collections::HashSet<(String, String)> =
-        std::collections::HashSet::new();
+    let mut any_enrolment_pairs: HashSet<(String, String)> = HashSet::new();
     {
         let mut stmt = conn
             .prepare(
@@ -266,10 +272,7 @@ pub fn detect_orphan_data_dirs(
     }
 
     // Map of workspace_name -> set of (catalog, plugin) pairs enrolled.
-    let mut per_workspace_pairs: std::collections::HashMap<
-        String,
-        std::collections::HashSet<(String, String)>,
-    > = std::collections::HashMap::new();
+    let mut per_workspace_pairs: HashMap<String, HashSet<(String, String)>> = HashMap::new();
     {
         let mut stmt = conn
             .prepare(
@@ -309,7 +312,7 @@ pub fn detect_orphan_data_dirs(
         }
     }
 
-    let plugin_data = walk_plugin_data_for_orphans(&paths.root.join("plugin-data"), |pair| {
+    let plugin_data = walk_plugin_data_for_orphans(&paths.plugin_data_root(), |pair| {
         !any_enrolment_pairs.contains(pair)
     });
 
@@ -332,8 +335,17 @@ where
     F: FnMut(&(String, String)) -> bool,
 {
     let mut out: Vec<PathBuf> = Vec::new();
-    let Ok(catalogs) = std::fs::read_dir(plugin_data_root) else {
-        return out;
+    let catalogs = match std::fs::read_dir(plugin_data_root) {
+        Ok(it) => it,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %plugin_data_root.display(),
+                "doctor: read_dir(plugin_data) failed during orphan walk; skipping",
+            );
+            return out;
+        }
     };
     for c_entry in catalogs.flatten() {
         let c_path = c_entry.path();
@@ -377,14 +389,20 @@ where
 /// `plugin-data/` subdir contributes zero orphans.
 fn walk_workspace_plugin_data_for_orphans(
     workspaces_dir: &Path,
-    per_workspace_pairs: &std::collections::HashMap<
-        String,
-        std::collections::HashSet<(String, String)>,
-    >,
+    per_workspace_pairs: &HashMap<String, HashSet<(String, String)>>,
 ) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
-    let Ok(workspaces) = std::fs::read_dir(workspaces_dir) else {
-        return out;
+    let workspaces = match std::fs::read_dir(workspaces_dir) {
+        Ok(it) => it,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %workspaces_dir.display(),
+                "doctor: read_dir(workspaces_dir) failed during orphan walk; skipping",
+            );
+            return out;
+        }
     };
     for w_entry in workspaces.flatten() {
         let w_path = w_entry.path();
@@ -398,7 +416,7 @@ fn walk_workspace_plugin_data_for_orphans(
             continue;
         };
         let plugin_data_root = w_path.join("plugin-data");
-        let empty: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        let empty: HashSet<(String, String)> = HashSet::new();
         let enrolled = per_workspace_pairs.get(workspace_name).unwrap_or(&empty);
         let dirs = walk_plugin_data_for_orphans(&plugin_data_root, |pair| !enrolled.contains(pair));
         out.extend(dirs);
@@ -417,10 +435,24 @@ pub fn count_entries_by_kind(
     paths: &Paths,
     conn: &rusqlite::Connection,
 ) -> Result<EntryCountsByKind, TomeError> {
+    // R-M3 (US5.c): wrap both SELECT statements in a single read
+    // transaction so the per-kind counts and the pending-re-embedding
+    // walk see the same SQLite snapshot. Without this, a concurrent
+    // writer between the two statements can produce skills+commands
+    // disagreeing with pending_re_embedding's enumerated row set.
+    // `open_read_only` produces a connection that can't write, so the
+    // transaction is purely a snapshot boundary; rollback is implicit
+    // when `tx` drops.
+    let tx = conn.unchecked_transaction().map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!(
+            "begin read transaction for entry counts: {e}"
+        ))
+    })?;
+
     // Per-kind counts via SQL aggregate. `kind` is the schema-v3 column;
     // it is always present + always one of `skill` / `command`.
     let (skills, commands): (u32, u32) = {
-        let mut stmt = conn
+        let mut stmt = tx
             .prepare(
                 "SELECT s.kind, COUNT(*)
                  FROM skills AS s
@@ -445,7 +477,9 @@ pub fn count_entries_by_kind(
             let (kind, n) = r.map_err(|e| {
                 TomeError::IndexIntegrityCheckFailure(format!("collect entry_counts row: {e}"))
             })?;
-            let n_u32 = u32::try_from(n.max(0)).unwrap_or(u32::MAX);
+            // R-m2 (US5.c): SQLite COUNT(*) is non-negative; the prior
+            // `n.max(0)` defensive clamp is unreachable.
+            let n_u32 = u32::try_from(n).unwrap_or(u32::MAX);
             match kind.as_str() {
                 "skill" => skills = n_u32,
                 "command" => commands = n_u32,
@@ -464,7 +498,7 @@ pub fn count_entries_by_kind(
     // perfect precision for arbitrary-large workspaces).
     let mut pending: u32 = 0;
     {
-        let mut stmt = conn
+        let mut stmt = tx
             .prepare(
                 "SELECT s.catalog, s.plugin, s.path, s.indexed_at
                  FROM skills AS s

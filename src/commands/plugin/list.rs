@@ -63,13 +63,6 @@ struct Row {
     id: PluginId,
     version: Option<String>,
     status: PluginStatus,
-    /// Pre-Phase-5 aggregate count — preserved alongside `per_kind` so
-    /// the JSON emitter can choose whichever shape it wants. Currently
-    /// unused at human-render time (the table cell uses `per_kind`);
-    /// the field is kept to retain the existing JSON wire shape until
-    /// the JSON envelope is intentionally extended.
-    #[allow(dead_code)]
-    skill_count: Option<u32>,
     per_kind: PerKindCounts,
     last_indexed_at: Option<String>,
     record: PluginRecord,
@@ -135,8 +128,8 @@ fn build_row(
     let agg: IndexAggregate = aggregate_for_plugin(conn, workspace_name, &id.catalog, &id.plugin)?;
     let per_kind = per_kind_counts_for_plugin(conn, workspace_name, &id.catalog, &id.plugin)?;
 
-    let (status, skill_count, version) = match &manifest {
-        None => (PluginStatus::Unindexable, None, None),
+    let (status, version) = match &manifest {
+        None => (PluginStatus::Unindexable, None),
         Some(m) => {
             let status = if agg.total == 0 {
                 PluginStatus::Disabled
@@ -145,8 +138,7 @@ fn build_row(
             } else {
                 PluginStatus::Disabled
             };
-            let skill_count = u32::try_from(agg.total).ok();
-            (status, skill_count, m.version.clone())
+            (status, m.version.clone())
         }
     };
 
@@ -175,7 +167,6 @@ fn build_row(
         id: id.clone(),
         version,
         status,
-        skill_count,
         per_kind,
         last_indexed_at: agg.last_indexed_at,
         record,

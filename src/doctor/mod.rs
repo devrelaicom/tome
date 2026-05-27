@@ -100,12 +100,20 @@ pub fn assemble_report(
     // overall classifier flips to Unhealthy and the report still emits.
     let index = check_index(paths, &scope.scope).unwrap_or_else(|err| {
         tracing::warn!(error = %err, "doctor: check_index failed; reporting Broken state");
+        // R-m5 (US5.c): when `check_index` errors but the file IS on
+        // disk (e.g. `SchemaTooNew`, parse failure on `meta` row), the
+        // file's byte size is still observable cheaply. The prior
+        // `size_bytes: 0` was misleading because it conflated
+        // "errored" with "absent". `present` already encodes presence.
+        let size_bytes = std::fs::metadata(&paths.index_db)
+            .map(|m| m.len())
+            .unwrap_or(0);
         crate::commands::status::IndexHealth {
             present: true,
             schema_version: None,
             plugins_enabled: 0,
             skills_indexed: 0,
-            size_bytes: 0,
+            size_bytes,
             integrity_ok: false,
         }
     });
@@ -160,10 +168,14 @@ pub fn assemble_report(
 
     // ---- Phase 5 / US5.b additions ----------------------------------
     //
-    // All three Phase 5 surfaces are populated ONLY when the resolved
-    // scope is a known workspace — `ScopeSource::GlobalFallback`
-    // (privileged default, no explicit workspace context) emits `None`
-    // for each, preserving the Phase 4 byte-stable JSON shape of the
+    // R-M5 (US5.c): the three Phase 5 surfaces emit `(None, None,
+    // None)` ONLY for `ScopeSource::GlobalFallback` — i.e. the
+    // implicit fallback to the privileged `global` workspace when no
+    // `--workspace`, env var, or `.tome/config.toml` was found.
+    // Explicit `--workspace global` resolves through `ScopeSource::Flag`
+    // and DOES populate the surfaces (a user inspecting global has
+    // intent; an unbound shell-out does not). Preserving this
+    // distinction keeps the Phase 4 byte-stable JSON shape of the
     // existing `doctor_json_shape_is_byte_stable_for_minimal_report`
     // test pin.
     //

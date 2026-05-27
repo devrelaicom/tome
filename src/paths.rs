@@ -200,12 +200,20 @@ impl Paths {
     // accessor — the accessor preserves the catalog / plugin /
     // workspace names verbatim so test pinning stays predictable.
 
+    /// `<root>/plugin-data/` — the root of the process-wide plugin-data
+    /// tree. Single source of truth for the `<root>/plugin-data/` layout
+    /// convention; consumed by both `plugin_data_dir_for` and the
+    /// doctor's orphan walk.
+    pub fn plugin_data_root(&self) -> PathBuf {
+        self.root.join("plugin-data")
+    }
+
     /// `<root>/plugin-data/<catalog>/<plugin>/` — process-wide scratch
     /// space for one plugin, shared across workspaces. F3 + US1.c only
     /// compute the path; US2 wires `create_dir_all` and the
     /// `${TOME_PLUGIN_DATA}` built-in's lazy creation.
     pub fn plugin_data_dir_for(&self, catalog: &str, plugin: &str) -> PathBuf {
-        self.root.join("plugin-data").join(catalog).join(plugin)
+        self.plugin_data_root().join(catalog).join(plugin)
     }
 
     /// `<root>/workspaces/<name>/plugin-data/<catalog>/<plugin>/` —

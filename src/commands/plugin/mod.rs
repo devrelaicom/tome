@@ -260,7 +260,9 @@ pub(crate) fn per_kind_counts_for_plugin(
         let (kind, n) = r.map_err(|e| {
             TomeError::IndexIntegrityCheckFailure(format!("collect per_kind_counts row: {e}"))
         })?;
-        let n_u32 = u32::try_from(n.max(0)).unwrap_or(u32::MAX);
+        // R-m2 (US5.c): SQLite COUNT(*) is non-negative; the prior
+        // `n.max(0)` defensive clamp is unreachable.
+        let n_u32 = u32::try_from(n).unwrap_or(u32::MAX);
         match kind.as_str() {
             "skill" => out.skills = n_u32,
             "command" => out.commands = n_u32,

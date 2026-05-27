@@ -185,6 +185,26 @@ fn list_entries(
         } else {
             None
         };
+        // R-M4 (US5.c): mirror US4.d's MAX_DESCRIPTION_MAX_CHARS cap
+        // (100 KiB) as a soft warning surface for `plugin show`. The
+        // contract trust model is "catalog trusted-on-enrol, not
+        // trusted-on-read" so we don't truncate the description here
+        // (operators inspecting a plugin want the full text), but a
+        // catalog shipping multi-megabyte descriptions is misbehaving
+        // and operators should know.
+        if r.description.len()
+            > crate::mcp::tools::search_skills::MAX_DESCRIPTION_MAX_CHARS as usize
+        {
+            tracing::warn!(
+                catalog = %r.catalog,
+                plugin = %r.plugin,
+                entry = %r.name,
+                description_len = r.description.len(),
+                cap = crate::mcp::tools::search_skills::MAX_DESCRIPTION_MAX_CHARS,
+                "plugin show: entry description exceeds the soft size cap; \
+                 likely a misbehaving catalog",
+            );
+        }
         out.push(EntryView {
             name: r.name,
             description: r.description,
