@@ -251,6 +251,13 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
         harness_rules: Vec::new(),
         harness_mcp: Vec::new(),
         detected_uninstalled_harnesses: Vec::new(),
+        // Phase 5 / US5.b: three new Option fields. All None for the
+        // minimal report — `#[serde(skip_serializing_if = "Option::is_none")]`
+        // keeps them absent from the wire shape, preserving byte
+        // stability with the Phase 4 pin.
+        prompts: None,
+        orphan_data_dirs: None,
+        entry_counts: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -277,3 +284,147 @@ fn doctor_json_overall_unhealthy_when_models_missing() {
 // Silence unused-import warning when no harness check uses TempDir.
 #[allow(dead_code)]
 fn _silence(_: TempDir) {}
+
+// ---- Phase 5 / US5.b — JSON pins for the three new fields ---------------
+//
+// `prompts`, `orphan_data_dirs`, and `entry_counts` are
+// `#[serde(skip_serializing_if = "Option::is_none")]`, so an
+// outside-project doctor pass MUST NOT emit any of them. A
+// workspace-scoped pass populates them; the populated shape carries
+// the documented field set per `contracts/doctor-extensions-p5.md`.
+
+#[test]
+fn doctor_json_phase5_fields_absent_outside_workspace() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_all_registry_models(&paths);
+
+    let out = env.cmd().args(["--json", "doctor"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).expect("doctor --json parses");
+    // GlobalFallback scope → all three Phase 5 fields skipped.
+    assert!(
+        v.get("prompts").is_none(),
+        "GlobalFallback: prompts must be absent (skip_serializing_if), got {:?}",
+        v.get("prompts"),
+    );
+    assert!(
+        v.get("orphan_data_dirs").is_none(),
+        "GlobalFallback: orphan_data_dirs must be absent",
+    );
+    assert!(
+        v.get("entry_counts").is_none(),
+        "GlobalFallback: entry_counts must be absent",
+    );
+}
+
+#[test]
+fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
+    // Use the library API to build a known-populated DoctorReport and
+    // serialise it directly. This pins the wire shape independently
+    // of any test harness producing data on-disk.
+    use std::path::PathBuf;
+    use tome::commands::status::{IndexHealth, ModelHealth};
+    use tome::doctor::report::{
+        EntryCountsByKind, OrphanDataDirReport, PromptsReport, WorkspaceRegistryStatus,
+    };
+    use tome::doctor::{CatalogCacheHealth, DoctorClassification, DoctorReport};
+    use tome::index::meta::DriftStatus;
+    use tome::workspace::{ScopeKind, WorkspaceInfo, scope::ScopeSource};
+
+    let report = DoctorReport {
+        tome_version: env!("CARGO_PKG_VERSION").to_owned(),
+        workspace: WorkspaceInfo {
+            scope: ScopeKind::Global,
+            path: None,
+            source: ScopeSource::Flag,
+            catalogs: 0,
+            plugins_total: 0,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            schema_version: None,
+            embedder: None,
+            enrolled_catalogs: Vec::new(),
+            enabled_plugins: Vec::new(),
+            bound_projects: Vec::new(),
+            summary_cache: None,
+        },
+        project_binding: None,
+        embedder: ModelHealth {
+            name: "bge-small-en-v1.5".to_owned(),
+            version: "1.5".to_owned(),
+            state: "ok".to_owned(),
+        },
+        reranker: ModelHealth {
+            name: "bge-reranker-base".to_owned(),
+            version: "1".to_owned(),
+            state: "ok".to_owned(),
+        },
+        summariser: ModelHealth {
+            name: "qwen2.5-0.5b-instruct".to_owned(),
+            version: "2.5".to_owned(),
+            state: "ok".to_owned(),
+        },
+        index: IndexHealth {
+            present: false,
+            schema_version: None,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            size_bytes: 0,
+            integrity_ok: true,
+        },
+        drift: DriftStatus::None,
+        catalogs: Vec::<CatalogCacheHealth>::new(),
+        workspace_registry: WorkspaceRegistryStatus {
+            present: false,
+            tracked: 0,
+        },
+        harnesses: Vec::new(),
+        effective_harness_list: None,
+        harness_rules: Vec::new(),
+        harness_mcp: Vec::new(),
+        detected_uninstalled_harnesses: Vec::new(),
+        prompts: Some(PromptsReport {
+            prompts: Vec::new(),
+            collisions: Vec::new(),
+        }),
+        orphan_data_dirs: Some(OrphanDataDirReport {
+            plugin_data: vec![PathBuf::from("/tmp/orphan/p")],
+            workspace_data: vec![PathBuf::from("/tmp/orphan/w")],
+        }),
+        entry_counts: Some(EntryCountsByKind {
+            skills: 12,
+            commands: 3,
+            pending_re_embedding: 1,
+        }),
+        overall: DoctorClassification::Ok,
+        suggested_fixes: Vec::new(),
+    };
+
+    let json = serde_json::to_value(&report).expect("serialise");
+
+    // Prompts: { prompts: [], collisions: [] }
+    let p = &json["prompts"];
+    assert!(p["prompts"].is_array(), "prompts.prompts must be an array");
+    assert!(
+        p["collisions"].is_array(),
+        "prompts.collisions must be an array"
+    );
+
+    // Orphan data dirs: { plugin_data: [...], workspace_data: [...] }
+    let o = &json["orphan_data_dirs"];
+    let pd = o["plugin_data"].as_array().expect("plugin_data array");
+    assert_eq!(pd.len(), 1);
+    assert_eq!(pd[0], "/tmp/orphan/p");
+    let wd = o["workspace_data"]
+        .as_array()
+        .expect("workspace_data array");
+    assert_eq!(wd.len(), 1);
+    assert_eq!(wd[0], "/tmp/orphan/w");
+
+    // Entry counts: { skills: N, commands: M, pending_re_embedding: K }
+    let c = &json["entry_counts"];
+    assert_eq!(c["skills"], 12);
+    assert_eq!(c["commands"], 3);
+    assert_eq!(c["pending_re_embedding"], 1);
+}
