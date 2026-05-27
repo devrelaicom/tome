@@ -397,11 +397,11 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US5.a — End-to-end frontmatter flag honoring through search + prompts surfaces
 
-- [ ] T353 [US5] Verify `searchable` filter is honoured in `search_skills` query (already in T322); confirm test coverage in `tests/mcp_search_skills_truncation.rs::disable_model_invocation_excluded` (use devs:rust-dev agent)
-- [ ] T354 [US5] Verify `user_invocable` filter is honoured in `PromptRegistry::build_for_workspace` (already in T127); confirm test coverage in `tests/mcp_prompts.rs::list_excludes_non_invocable` (use devs:rust-dev agent)
-- [ ] T355 [US5] Add a 4-entry matrix fixture plugin to `tests/fixtures/sample-plugin-catalog/` covering: default skill, default command, disable-model-invocation skill, user-invocable skill (use devs:rust-dev agent)
-- [ ] T356 [US5] Create `tests/entry_e2e.rs` end-to-end test verifying the matrix: search has 3 (excludes disabled), prompts has 2 (default-command + user-invocable-skill), neither surface contains the both-flags-disabled "dormant" entry (use devs:rust-dev agent)
-- [ ] T357 [GIT] Commit: `test(phase5/us5): per-entry invocability matrix end-to-end`
+- [x] T353 [US5] Verify `searchable` filter is honoured in `search_skills` query (already in T322); confirm test coverage in `tests/mcp_search_skills_truncation.rs::disable_model_invocation_excluded` (use devs:rust-dev agent)
+- [x] T354 [US5] Verify `user_invocable` filter is honoured in `PromptRegistry::build_for_workspace` (already in T127); confirm test coverage in `tests/mcp_prompts.rs::list_excludes_non_invocable` (use devs:rust-dev agent)
+- [x] T355 [US5] Add a 4-entry matrix fixture plugin to `tests/fixtures/sample-plugin-catalog/` covering: default skill, default command, disable-model-invocation skill, user-invocable skill (use devs:rust-dev agent)
+- [x] T356 [US5] Create `tests/entry_e2e.rs` end-to-end test verifying the matrix: search has 3 (excludes disabled), prompts has 2 (default-command + user-invocable-skill), neither surface contains the both-flags-disabled "dormant" entry (use devs:rust-dev agent)
+- [x] T357 [GIT] Commit: `test(phase5/us5): per-entry invocability matrix end-to-end`
 - [ ] T358 [GIT] Push US5.a slice
 
 ### Slice US5.b — `tome plugin show` annotations + `tome doctor` Phase 5 surface
