@@ -344,9 +344,9 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 - [x] T307 [US4] Register the new tool in `src/mcp/server.rs` alongside `search_skills` and `get_skill` via the `#[tool_router]` macro (use devs:rust-dev agent)
 - [x] T308 [US4] Add MCP error responses per `contracts/mcp-tools-p5.md` § Error responses (entry_not_found / invalid_kind / resource_enum_failed) (use devs:rust-dev agent)
 - [x] T309 [GIT] Commit: `feat(mcp): get_skill_info middle-tier tool + resource enumeration`
-- [ ] T310 [US4] Create `tests/mcp_get_skill_info.rs` with tests per `contracts/mcp-tools-p5.md` § Tests: skill-kind includes resources, command-kind omits resources, per-directory cap with sentinel, default kind = skill, kind disambiguation (use devs:rust-dev agent)
-- [ ] T311 [US4] Create `tests/mcp_get_skill_info_json_shape.rs` byte-stable JSON pin (use devs:rust-dev agent)
-- [ ] T312 [GIT] Commit: `test(mcp): get_skill_info + JSON pin`
+- [x] T310 [US4] Create `tests/mcp_get_skill_info.rs` with tests per `contracts/mcp-tools-p5.md` § Tests: skill-kind includes resources, command-kind omits resources, per-directory cap with sentinel, default kind = skill, kind disambiguation (use devs:rust-dev agent)
+- [x] T311 [US4] Create `tests/mcp_get_skill_info_json_shape.rs` byte-stable JSON pin (use devs:rust-dev agent)
+- [x] T312 [GIT] Commit: `test(mcp): get_skill_info + JSON pin`
 - [ ] T313 [GIT] Push US4.a slice
 
 ### Slice US4.b — `when_to_use` indexing + reindex re-eval
