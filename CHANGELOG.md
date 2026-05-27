@@ -4,6 +4,143 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-05-27
+
+### Phase 5 additions
+
+User-visible
+
+- **Commands as first-class entries alongside skills.** Plugins can now ship
+  `commands/<name>.md` files in addition to `skills/<name>/SKILL.md`. The
+  unified `skills` table gains a `kind` discriminator (`skill` | `command`);
+  schema migrates v2 → v3 with structurally-equivalent backfill defaults
+  (skills default to searchable=true / user_invocable=false; commands
+  default to searchable=true / user_invocable=true).
+
+- **User-invocable entries surface as MCP prompts.** A new `prompts/list` +
+  `prompts/get` capability on the MCP server advertises each user-invocable
+  entry as a slash command. Sanitised + collision-resolved prompt names
+  (counter-suffixing per the contract).
+
+- **Variable substitution layer** — Tome built-ins (`${TOME_SKILL_DIR}`,
+  `${TOME_PLUGIN_DATA}`, `${TOME_WORKSPACE_DATA}`, etc.; 12 total),
+  environment passthrough via `${TOME_ENV_FOO}` with default-value syntax,
+  Claude Code-compatible argument substitution (`$ARGUMENTS`,
+  `$ARGUMENTS[N]`, `$N`, `$name`), and `ARGUMENTS:` append-fallback when
+  caller-supplied arguments aren't referenced in the body. Single-sweep
+  regex enforces the NFR-007 no-rescan invariant structurally.
+
+- **Middle-tier MCP discovery tool `get_skill_info`** — between
+  `search_skills` (top-k results, descriptions truncated) and `get_skill`
+  (full body). Returns the full description, `when_to_use`, plugin
+  version, user_invocable flag, absolute path, and a capped resource
+  enumeration of the entry's directory tree.
+
+- **`tome plugin show` extended** with Skills + Commands grouping,
+  per-entry `searchable=` / `user_invocable=` / `[dormant]` annotations
+  + derived prompt name. JSON output mirrors the grouped shape.
+
+- **`tome plugin list` extended** with per-kind count format
+  `<n> skills, <m> commands`.
+
+- **`tome doctor` extended** with three Phase 5 read-only surfaces:
+  `prompts` (registered + collisions), `orphan_data_dirs`,
+  `entry_counts` (per-kind + `pending_re_embedding`). Each field emits
+  `None` only when `ScopeSource::GlobalFallback`. FR-124 read-only
+  invariant structurally enforced.
+
+- **`when_to_use` frontmatter field** is now embedded for semantic
+  search alongside `description` + body.
+
+- **Pre-push hook slim-down** — `.githooks/pre-push` now runs the
+  pre-commit chain (fmt / typos / clippy) only, not
+  `cargo test --workspace`. CI's 4-way matrix runs the full suite +
+  full-features build on every PR.
+
+### Internal additions
+
+- **Schema migration v2 → v3** registered via the Phase 3 framework.
+  New `kind`, `searchable`, `user_invocable`, `when_to_use` columns;
+  unique constraint widened to `(catalog, plugin, kind, name)` via the
+  SQLite 12-step table-rebuild pattern.
+
+- **`src/substitution/` module** hosts the hand-rolled substitution
+  engine. Single-sweep `combined_regex()` enforces the no-rescan
+  invariant; 4-stage pipeline (built-ins / env / arguments / append-
+  fallback).
+
+- **New `src/mcp/{prompts.rs, prompt_name.rs, prompt_collision.rs,
+  tools/get_skill_info.rs, substitution_helpers.rs}`** — prompt
+  registry, derivation algorithm, collision-resolution (counter-suffix
+  on lex order), middle-tier discovery tool, shared substitution-
+  context builder.
+
+- **`Paths::plugin_data_root()`** + `plugin_data_dir_for(catalog, plugin)`
+  + `workspace_data_dir_for(workspace, catalog, plugin)` — single source
+  of truth for the `<root>/plugin-data/` + per-workspace
+  `<root>/workspaces/<ws>/plugin-data/` layouts.
+
+- **`MCP_SLASH_PREFIX`** constant in `src/mcp/mod.rs` — canonical
+  `/mcp__tome__` prefix consumed by `tome doctor` rendering.
+
+- **Frontmatter parser widened** to the Phase 5 lenient field set.
+  `MAX_ARGUMENTS = 256` cap at the parser boundary.
+  `MAX_DESCRIPTION_MAX_CHARS = 100_000` soft cap in search_skills +
+  warning surface in plugin show.
+
+### Bug fixes
+
+- **Path traversal in `resolve_entry_body_path`** (US1.d BLOCKER S-H1).
+  Refuses `..` components + absolute paths in DB-stored relative paths.
+
+- **Data exfiltration vector via substitution** (US2.d BLOCKER B2). A
+  hostile plugin author could set `"version":
+  "${TOME_ENV_GITHUB_TOKEN}"` in `plugin.json` and leak operator env via
+  the `${TOME_PLUGIN_VERSION}` built-in. Fix: single-sweep regex union
+  pattern enforces structurally that resolved values never re-enter the
+  scanner.
+
+- **DoS amplifier in `truncate_description`** (US4.d HIGH C-2). Bounded
+  `char_indices` walk replaces the prior O(n) shape. Polish PR-B
+  propagated the same fix to `prompts::truncate_description` (M-1).
+
+- **Latent `get_skill` MCP tool path resolution** (surfaced during
+  US1.b). Was treating relative `row.path` strings as absolute via
+  `PathBuf::from`. Promoted to the shared `resolve_entry_body_path`
+  helper with the S-H1 boundary check.
+
+### Exit codes
+
+Six new exit codes:
+
+- **9** — `PluginDataDirWriteFailed` (MCP-only).
+- **25** — `WorkspaceDataDirWriteFailed` (MCP + `tome workspace rename`).
+- **26** — `PromptArgumentMismatch`.
+- **27** — `EntryNotFound`.
+- **28** — `SubstitutionFailed`.
+- **29** — `InvalidArgumentFrontmatter`.
+
+Each is wired 1:1 to a `TomeError` variant per the closed-error-set
+discipline.
+
+### Dependencies
+
+No new top-level dependencies. `regex` was promoted from transitive to
+direct at Phase 5 start; no binary-size impact (already linked).
+
+### Tests
+
+954 → 1193 tests (+239) across 127 → 151 suites; ignored 16 unchanged.
+
+### Polish phase notable
+
+The phase-wide 4-reviewer pass found 0 BLOCKERS and 7 majors. Applied:
+M-1 (`prompts::truncate_description` bounded char_indices walk — lifts
+US4.d fix), M-2 (shared `substitution_helpers::build_context_for_entry`),
+M-3 (canonical `EntryKind` dispatch over stringly-typed match),
+M-4 (promoted `validate_db_stored_path` helper). Security audit clean
+across the board.
+
 ## [0.4.0] — 2026-05-26
 
 ### Phase 4 additions
