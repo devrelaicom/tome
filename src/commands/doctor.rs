@@ -268,9 +268,11 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
             // member entries — but the simpler path is to enumerate
             // descriptors directly with a single section header.
             // Per the contract's "Human-mode rendering" section we
-            // qualify with the harness prefix `/mcp__tome__<name>`.
+            // qualify with the harness prefix `/mcp__tome__<name>` —
+            // R-m11 (US5.c): consume the canonical constant from
+            // `src/mcp/mod.rs` rather than hard-coding the literal here.
             for d in &p.prompts {
-                writeln!(out, "  /mcp__tome__{}", d.name)?;
+                writeln!(out, "  {}{}", crate::mcp::MCP_SLASH_PREFIX, d.name)?;
             }
         }
         if !p.collisions.is_empty() {

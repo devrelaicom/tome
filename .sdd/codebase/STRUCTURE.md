@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-27 (Phase 5 / US4 shipped; 3-tier discovery flow with get_skill_info middle tier, when_to_use indexing, truncate_description hardening)
+> **Last Updated**: 2026-05-27 (Phase 5 / US5 shipped; per-entry invocability + doctor read-only extensions; substitution layer + MCP discovery complete; 1193 tests)
 
 ## Directory Layout
 
@@ -14,7 +14,7 @@ tome/
 │   ├── cli.rs                          # clap derive defs (all commands + global flags)
 │   ├── error.rs                        # Closed TomeError enum (30+ variants → exit codes)
 │   ├── config.rs                       # config.toml parsing (strict; legacy Phase 3 shape)
-│   ├── paths.rs                        # Phase 4: consolidated <home>/.tome/ paths; Phase 5: plugin/workspace data-dir accessors
+│   ├── paths.rs                        # Phase 4: consolidated <home>/.tome/ paths; Phase 5: plugin/workspace data-dir accessors + plugin_data_root()
 │   ├── logging.rs                      # tracing-subscriber wiring
 │   ├── output.rs                       # JSON / human output mode dispatcher
 │   │
@@ -27,7 +27,7 @@ tome/
 │   ├── plugin/                         # Plugin metadata + lifecycle
 │   │   ├── mod.rs                      # PluginRecord, PluginStatus
 │   │   ├── manifest.rs                 # plugin.json parsing (lenient)
-│   │   ├── frontmatter.rs              # SKILL.md + command YAML frontmatter parser (Phase 5: widened fields including arguments schema, when_to_use for search)
+│   │   ├── frontmatter.rs              # SKILL.md + command YAML frontmatter parser (Phase 5: widened fields including arguments schema, when_to_use, user_invocable for MCP exposure)
 │   │   ├── identity.rs                 # PluginId + Phase 5 NEW: EntryKind enum (Skill | Command)
 │   │   ├── components.rs               # Walk skill/command dirs; Phase 5: list_command_files enumerates commands
 │   │   └── lifecycle.rs                # enable/disable/reindex orchestration (Phase 5: commands + skills)
@@ -76,11 +76,11 @@ tome/
 │   │   ├── remove.rs                   # Phase 4: Workspace removal with 5-step cascade (US2)
 │   │   └── sync.rs                     # Phase 4: Central RULES.md sync to projects (US2)
 │   │
-│   ├── doctor/                         # Diagnostic + auto-repair (Phase 3 US4 + Phase 4 US5)
+│   ├── doctor/                         # Diagnostic + auto-repair (Phase 3 US4 + Phase 4 US5 + Phase 5 US5)
 │   │   ├── mod.rs                      # assemble_report + re_assemble entry
-│   │   ├── checks.rs                   # check_catalogs, check_index, check_drift, check_workspace_registry
+│   │   ├── checks.rs                   # check_catalogs, check_index, check_drift, check_workspace_registry + Phase 5 / US5: build_prompts_report, count_entries_by_kind, detect_orphan_data_dirs (all read-only)
 │   │   ├── harness_detect.rs           # Probe ~/.claude/, ~/.codex/, ~/.cursor/, ~/.gemini/, ~/.opencode/
-│   │   ├── report.rs                   # DoctorReport + Subsystem (typed 11-variant enum) + SubsystemHealth
+│   │   ├── report.rs                   # DoctorReport + Subsystem (typed 11-variant enum) + SubsystemHealth + Phase 5 / US5: PromptsReport, EntryCountsByKind, OrphanDataDirReport
 │   │   ├── fixes.rs                    # apply + apply_one (subsystem routing) + per-subsystem repair handlers
 │   │   ├── binding.rs                  # Phase 4 US5: check_binding (T366) — marker well-formedness + RULES.md drift
 │   │   ├── harness_integration.rs      # Phase 4 US5: check_harness_integration (T367) — per-harness rules/mcp checks
@@ -121,8 +121,8 @@ tome/
 │   │   │   ├── mod.rs                  # Dispatcher + shared helpers
 │   │   │   ├── enable.rs               # `tome plugin enable <id>` + trigger regenerate (Phase 5: commands + skills)
 │   │   │   ├── disable.rs              # `tome plugin disable <id> [--force]` + trigger regenerate
-│   │   │   ├── list.rs                 # `tome plugin list`
-│   │   │   ├── show.rs                 # `tome plugin show <id>`
+│   │   │   ├── list.rs                 # `tome plugin list` (Phase 5 / US5: per-kind entry counts)
+│   │   │   ├── show.rs                 # `tome plugin show <id>` (Phase 5 / US5: ~228 lines extended for searchable/invocable annotations + kind grouping)
 │   │   │   └── interactive.rs          # Bare `tome plugin` → three-level TUI
 │   │   ├── models/                     # `tome models` subcommands
 │   │   │   ├── mod.rs                  # Dispatcher + shared helpers
@@ -150,7 +150,7 @@ tome/
 │   │   │   ├── remove.rs               # `tome harness remove <name> [--scope]` — delete from settings + trigger regenerate
 │   │   │   ├── info.rs                 # `tome harness info` — per-harness details + detection
 │   │   │   └── sync.rs                 # `tome harness sync [--force]` — reconcile filesystem
-│   │   ├── doctor.rs                   # `tome doctor [--fix] [--verify] [--force]` (US5 adds force flag)
+│   │   ├── doctor.rs                   # `tome doctor [--fix] [--verify] [--force]` (Phase 5 / US5: renders extended report with prompts + entry-kind counts + orphan data-dirs)
 │   │   └── mcp.rs                      # `tome mcp` entry point
 │   │
 │   ├── presentation/                   # Output formatting + TUI
@@ -166,7 +166,7 @@ tome/
 │   │   ├── atomic_dir.rs               # Atomic directory landing (tempfile + rename); STAGING_PREFIX constant (FR-410)
 │   │   └── io.rs                       # Phase 4 Polish: bounded_read_to_string + per-class caps
 │   │
-│   └── mcp/                            # MCP server (async island, Phase 3+; Phase 5: prompts + US4 three-tier discovery)
+│   └── mcp/                            # MCP server (async island, Phase 3+; Phase 5: prompts + US4 three-tier discovery + US5 read-only extensions)
 │       ├── mod.rs                      # Sync entry point: run()
 │       ├── runtime.rs                  # Single-threaded tokio builder
 │       ├── log.rs                      # 10 MiB rotate JSON file logger (contract-formatted for tool logs)
@@ -177,7 +177,7 @@ tome/
 │       ├── prompt_name.rs              # Phase 5 NEW: Prompt-name derivation (<plugin>__<entry> sanitisation + truncation)
 │       ├── prompt_collision.rs         # Phase 5 NEW: Collision detection when entries map to same prompt name
 │       ├── prompts.rs                  # Phase 5 NEW: MCP prompts capability (PromptRegistry, PromptRouter hand-rolled)
-│       └── tools/                      # MCP tool handlers (Phase 5 / US4: three-tier discovery)
+│       └── tools/                      # MCP tool handlers (Phase 5 / US4–US5: three-tier discovery + read-only extensions)
 │           ├── mod.rs                  # Tool registration
 │           ├── search_skills.rs        # search_skills tool (KNN+rerank, workspace-filtered, 4096-char input cap, Phase 5 / US4: when_to_use in results, truncate_description hardening)
 │           ├── get_skill_info.rs       # **Phase 5 / US4 NEW** get_skill_info middle-tier tool (full description + when_to_use + 5-cap resource enumeration)
@@ -185,7 +185,7 @@ tome/
 │
 ├── tests/                              # Integration tests (access library as external crate)
 │   ├── catalog_*.rs                    # Catalog add/remove/update tests
-│   ├── plugin_*.rs                     # Plugin enable/disable/list/show/interactive (Phase 5: commands coverage)
+│   ├── plugin_*.rs                     # Plugin enable/disable/list/show/interactive (Phase 5: commands coverage + US5 annotations)
 │   ├── models_*.rs                     # Model download/list/remove
 │   ├── query.rs                        # Query + strict mode + rerank
 │   ├── reindex.rs                      # Reindex all/per-catalog/per-plugin
@@ -193,10 +193,10 @@ tome/
 │   ├── workspace_*.rs                  # Workspace info/init/binding/sync/list/rename/remove tests (US1–US2)
 │   ├── harness_*.rs                    # Phase 4 US3: Harness list/use/remove/info/sync/composition tests
 │   ├── summariser_*.rs                 # Phase 4 US4: Summariser triggers, forward progress, cache, registry tests
-│   ├── doctor*.rs                      # Phase 4 US5: Doctor assembly + fixes + binding + harness integration (T366/T367) + orphan cleanup (T370)
-│   ├── mcp_*.rs                        # MCP server lifecycle + tools + log rotation + tool description (US4.b) + prompts (US1.b) + **Phase 5 / US4: get_skill_info tests**
+│   ├── doctor*.rs                      # Phase 4 US5: Doctor assembly + fixes + binding + harness integration + orphan cleanup; Phase 5 / US5: prompts report + entry counts + orphan data-dirs
+│   ├── mcp_*.rs                        # MCP server lifecycle + tools + log rotation + tool description (US4.b) + prompts (US1.b) + **Phase 5 / US4–US5: get_skill_info tests + read-only extensions**
 │   ├── substitution_*.rs               # Phase 5: Substitution engine tests (skeleton, builtins, env, arguments, data-dir, e2e)
-│   ├── entry_e2e.rs                    # Phase 5 / US3 NEW: Full enable → search → get → prompts pipeline with argument substitution
+│   ├── entry_e2e.rs                    # Phase 5 / US3 NEW: Full enable → search → get → prompts pipeline with argument substitution + Phase 5 / US5: invocability visibility
 │   ├── exit_codes.rs                   # Exit code matrix validation
 │   ├── manifest_strictness.rs          # Strict/lenient parsing guards
 │   ├── atomicity.rs                    # Interrupt-injection tests (SIGINT mid-op)
@@ -220,7 +220,7 @@ tome/
 │   └── codebase/
 │       ├── STACK.md                    # Technologies + versions
 │       ├── INTEGRATIONS.md             # External APIs + services
-│       ├── ARCHITECTURE.md             # System design + patterns (Phase 5 / US4: three-tier discovery, when_to_use indexing, truncate_description hardening)
+│       ├── ARCHITECTURE.md             # System design + patterns (Phase 5 / US5: per-entry invocability + doctor read-only extensions)
 │       ├── STRUCTURE.md                # Directory layout (this file)
 │       ├── CONVENTIONS.md              # Naming + code style
 │       ├── TESTING.md                  # Test strategy + patterns
@@ -252,13 +252,14 @@ tome/
 │   │   ├── contracts/ (13+ contracts)
 │   │   ├── retro/ (P2–P8 retrospectives)
 │   │   └── quickstart.md
-│   └── 005-phase-5-commands-prompts/        # Phase 5 (F1–F3 + US1–US4 shipped)
+│   └── 005-phase-5-commands-prompts/        # Phase 5 (F1–F3 + US1–US5 shipped)
 │       ├── spec.md
 │       ├── plan.md
 │       ├── research.md (20 R-decisions)
-│       ├── data-model.md (schema v3, EntryKind, SubstitutionContext, ArgumentValues, PromptRegistry, ResourceEnumeration)
+│       ├── data-model.md (schema v3, EntryKind, SubstitutionContext, ArgumentValues, PromptRegistry, ResourceEnumeration, PromptsReport, EntryCountsByKind, OrphanDataDirReport)
 │       ├── contracts/ (9+ contracts: exit-codes-p5, schema-migration-p5, entry-schema-p5, substitution-engine, mcp-tools-p5, mcp-prompts, etc.)
 │       ├── notes/ (Phase 5 research notes: rmcp-prompts-api, argument-coercion, three-tier discovery, when-to-use-indexing)
+│       ├── review/ (Phase 5 reviewer findings + disposition per US)
 │       └── quickstart.md
 │
 ├── PRDs/                               # Product requirement documents
@@ -272,7 +273,7 @@ tome/
 ├── Cargo.lock                          # Dependency lock
 ├── build.rs                            # sqlite-vec C extension compilation
 ├── CONSTITUTION.md                     # v1.3.0 — constraints + trade-offs (Phase 4 §Paths amendment; no Phase 5 amendments)
-├── CLAUDE.md                           # Project context for Claude Code (Phase 5 US4 complete; v0.5.0 roadmap)
+├── CLAUDE.md                           # Project context for Claude Code (Phase 5 US5 complete; v0.5.0 roadmap)
 └── CHANGELOG.md                        # Version history (v0.1.0–v0.4.0 shipped; Phase 5 in flight)
 ```
 
@@ -283,20 +284,20 @@ tome/
 | Directory | Purpose | Key Files |
 |-----------|---------|-----------|
 | `substitution/` | Phase 5 / US1–US3: Variable rendering engine (COMPLETE single-pass pipeline) | `mod.rs` (render loop + body_has_bare_arguments), `context.rs`, `builtins.rs`, `env.rs`, `arguments.rs` (shell_split + coerce_arguments + apply_arguments_match), `data_dir.rs`, `regex_sets.rs` (COMBINED_RE) |
-| `plugin/` | Plugin metadata, lifecycle (Phase 5: commands + arguments + when_to_use) | `manifest.rs`, `frontmatter.rs`, `identity.rs` (EntryKind), `components.rs` (list_command_files), `lifecycle.rs` |
+| `plugin/` | Plugin metadata, lifecycle (Phase 5: commands + arguments + when_to_use + user_invocable) | `manifest.rs`, `frontmatter.rs`, `identity.rs` (EntryKind), `components.rs` (list_command_files), `lifecycle.rs` |
 | `index/` | SQLite + sqlite-vec index (Phase 5: v3 schema with when_to_use) | `db.rs`, `schema.rs`, `migrations.rs` (v2→v3), `skills.rs` (EntryKind + when_to_use), `query.rs` (Phase 5 / US4: when_to_use embeddings) |
-| `mcp/` | MCP server + Phase 5 prompts + three-tier discovery | `prompts.rs` (PromptRegistry), `prompt_name.rs`, `prompt_collision.rs`, `tools/` (search_skills, **get_skill_info**, get_skill) |
+| `mcp/` | MCP server + Phase 5 prompts + three-tier discovery + read-only extensions | `prompts.rs` (PromptRegistry), `prompt_name.rs`, `prompt_collision.rs`, `tools/` (search_skills, **get_skill_info**, get_skill) |
+| `doctor/` | Health check + auto-repair (Phase 5 / US5: read-only extensions) | `checks.rs` (build_prompts_report, count_entries_by_kind, detect_orphan_data_dirs), `report.rs` (PromptsReport, EntryCountsByKind, OrphanDataDirReport) |
 | `catalog/` | Catalog registry, git ops | `manifest.rs`, `store.rs`, `git.rs` |
 | `embedding/` | Text embedding + reranking | `fastembed.rs`, `stub.rs`, `download.rs` |
 | `workspace/` | Scope resolution, binding, lifecycle (Phase 5 / US2: rename relocation) | `scope.rs`, `binding.rs`, `init.rs`, `rename.rs`, `remove.rs`, `regen_summary.rs` |
 | `harness/` | Phase 4: Harness abstraction + sync | `mod.rs` (trait), 5 harness impls, `sync.rs`, `rules_file.rs`, `mcp_config.rs` |
 | `settings/` | Phase 4: Layered composition | `parser.rs`, `resolver.rs` (composition engine), `edit.rs` |
 | `summarise/` | Phase 4: Workspace summariser | `llama.rs`, `stub.rs`, `prompts.rs`, `trigger.rs`, `registry.rs` |
-| `doctor/` | Phase 4: Health check + auto-repair | `checks.rs`, `fixes.rs`, `binding.rs`, `harness_integration.rs`, `orphan_cleanup.rs` |
-| `commands/` | CLI subcommand entry points | Per-command modules + dispatchers |
+| `commands/` | CLI subcommand entry points (Phase 5 / US5: show + list extended) | Per-command modules + dispatchers |
 | `presentation/` | Output formatting + TUI | `tables.rs`, `prompt.rs`, `colour.rs` |
 | `util/` | Shared utilities | `atomic_dir.rs` (tempfile + rename), `io.rs` (bounded read) |
-| `paths.rs` | Phase 4 single-root layout; Phase 5: data-dir accessors | `home_root()`, `Paths struct`, `plugin_data_dir_for()`, `workspace_data_dir_for()` |
+| `paths.rs` | Phase 4 single-root layout; Phase 5: data-dir accessors + plugin_data_root() | `home_root()`, `Paths struct`, `plugin_data_root()`, `plugin_data_dir_for()`, `workspace_data_dir_for()` |
 
 ### `src/substitution/` — Substitution Engine Details (Phase 5 / US1–US3 COMPLETE)
 
@@ -335,19 +336,34 @@ tome/
 | `migrations.rs` | Phase 5 v2→v3 forward migration: schema changes + backfill logic (kind via directory walk, searchable/user_invocable defaults per contract) |
 | `skills.rs` | `SkillRecord` struct extended with `kind: EntryKind`, `when_to_use: Option<String>`, `searchable: bool`, `user_invocable: bool`; new `resolve_entry_body_path(catalog, plugin, name, kind) -> PathBuf` helper (routes via kind) |
 
-### `src/plugin/` — Commands & Entries (Phase 5 / US1–US4)
+### `src/plugin/` — Commands & Entries (Phase 5 / US1–US5)
 
 | File | Purpose |
 |------|---------|
 | `identity.rs` | `PluginId` (unchanged); **NEW**: `EntryKind` enum (`Skill` \| `Command`) with `as_str()` accessor |
-| `frontmatter.rs` | `SkillFrontmatter` widened with `arguments: Option<Vec<PromptArgument>>` (ordered list of declared parameters), `argument_hint: Option<String>`, `prompt_name: Option<String>`, `when_to_use: Option<String>` (**Phase 5 / US4: now indexed for semantic search**), `searchable: Option<bool>` (default true), `user_invocable: Option<bool>` (default false) |
+| `frontmatter.rs` | `SkillFrontmatter` widened with `arguments: Option<Vec<PromptArgument>>` (ordered list of declared parameters), `argument_hint: Option<String>`, `prompt_name: Option<String>`, `when_to_use: Option<String>` (**Phase 5 / US4: now indexed for semantic search**), `searchable: Option<bool>` (default true), `user_invocable: Option<bool>` (default false, **Phase 5 / US5: enforced in Doctor read-only checks**) |
 | `components.rs` | `count_components` (unchanged); **NEW**: `list_command_files(plugin_dir) -> Vec<CommandFile>` enumerates `<plugin>/commands/*.md` flat; `CommandFile { path, name }` |
 | `lifecycle.rs` | `enable_plugin` now calls `list_command_files` and collects `PendingCommand` structs alongside `PendingSkill`; Phase 5 / US3: both are processed through substitution render pipeline; Phase 5 / US4: when_to_use included in embeddings |
 
-### `src/paths.rs` — Data Directory Accessors (Phase 5 / US1–US2)
+### `src/doctor/` — Read-Only Extensions (Phase 5 / US5)
 
-| Method | Returns | Purpose | US2 Status |
-|--------|---------|---------|-----------|
+| File | Purpose |
+|------|---------|
+| `checks.rs` | **NEW**: `build_prompts_report(workspace, paths) -> PromptsReport` (reuses PromptRegistry); `count_entries_by_kind(workspace, paths) -> EntryCountsByKind`; `detect_orphan_data_dirs(workspace, paths) -> Vec<OrphanDataDirReport>` — all read-only via open_read_only |
+| `report.rs` | **NEW**: `PromptsReport { available: u32, by_kind: { skills: u32, commands: u32 } }`; `EntryCountsByKind { skills: u32, commands: u32, other: u32 }`; `OrphanDataDirReport { path, size, last_modified }` |
+
+### `src/commands/plugin/` — Plugin Show + List (Phase 5 / US5)
+
+| File | Purpose |
+|------|---------|
+| `show.rs` | **~228 lines extended** from US4 baseline: Skills + Commands sections (Kind header), per-entry annotations (`[searchable=true/false]`, `[user_invocable=true/false]`, `[dormant]` when disabled), `EntryView` struct for consistency, human + JSON sync |
+| `list.rs` | **~53 lines extended**: Per-kind entry counts in format `plugin: <name> (N skills, M commands)` instead of generic `(N entries)` |
+
+### `src/paths.rs` — Data Directory Accessors (Phase 5 / US1–US5)
+
+| Method | Returns | Purpose | Status |
+|--------|---------|---------|--------|
+| `plugin_data_root()` | `<root>/plugin-data/` | Process-wide plugin-data root (single source of truth per US5) | Phase 5 / US5: new accessor introduced |
 | `plugin_data_dir_for(catalog, plugin)` | `<root>/plugin-data/<catalog>/<plugin>/` | Process-wide plugin scratch space | Path computed; directory created lazily in substitution render |
 | `workspace_data_dir_for(workspace, catalog, plugin)` | `<root>/workspaces/<name>/plugin-data/<catalog>/<plugin>/` | Workspace-scoped plugin scratch space | Path computed; directory created lazily in substitution render |
 | `workspace_dir(workspace)` | `<root>/workspaces/<name>/` | Workspace root (unchanged Phase 4) | Unchanged |
@@ -361,7 +377,7 @@ tome/
 
 ## Module Boundaries
 
-### Where to Add New Code (Phase 5 / US1–US4 Updates)
+### Where to Add New Code (Phase 5 / US1–US5 Updates)
 
 | If you're adding... | Put it in... | Pattern |
 |---------------------|--------------|---------|
@@ -369,7 +385,7 @@ tome/
 | New built-in variable | `src/substitution/builtins.rs` | Add case to match block in `builtins` handler; wired in appropriate US (US2 for {{TOME_*}}) |
 | New argument syntax | `src/substitution/arguments.rs` | Extend `apply_arguments_match` match arms; update `shell_split` quoting rules if needed; test with `coerce_arguments` validation |
 | New entry kind | `src/plugin/identity.rs` | Extend `EntryKind` enum; update Ser/Deser; backfill migration in v2→v3 |
-| Command-specific field | `src/plugin/frontmatter.rs` | Extend `SkillFrontmatter` (lenient parsing); document default; **Phase 5 / US4**: add to when_to_use if it's search-relevant |
+| Command-specific field | `src/plugin/frontmatter.rs` | Extend `SkillFrontmatter` (lenient parsing); document default; **Phase 5 / US4**: add to when_to_use if it's search-relevant; **Phase 5 / US5**: add to invocability checks if visibility-relevant |
 | Command collection | `src/plugin/lifecycle.rs` | Call `list_command_files`; parse frontmatter; build `PendingCommand`; Phase 5 / US3: collect arguments schema from frontmatter |
 | MCP prompt handler | `src/mcp/prompts.rs` | Register route via `PromptRouter::new_dyn`; implement request handler |
 | Prompt name edge case | `src/mcp/prompt_name.rs` | Extend `sanitise` / `sanitise_trunc` logic; test Unicode boundaries |
@@ -379,13 +395,15 @@ tome/
 | Description truncation | `src/mcp/tools/search_skills.rs` | Extend `truncate_description()` if new truncation rules needed; verify char_indices fast-path still applies |
 | Entry body resolution | `src/index/skills.rs` | Update `resolve_entry_body_path` match arms per new kind |
 | Schema backfill | `src/index/migrations.rs` | Add new v2→v3 backfill step; test via synthetic DB; include when_to_use if indexing new fields |
-| Data-dir path accessor | `src/paths.rs` | Add new `*_data_dir_for(...)` method; update `workspace_dir` + `workspace_root` |
+| Data-dir path accessor | `src/paths.rs` | Add new `*_data_dir_for(...)` method; update `plugin_data_root()` + `workspace_dir` + `workspace_root` |
 | Data-dir creation | `src/substitution/data_dir.rs` | Add new `ensure_*_data(...)` function; return `SubstitutionError` on failure |
 | Workspace-related mutation | `src/workspace/rename.rs` / `remove.rs` / `init.rs` | Update step sequence; ensure data-dir side effects coordinate (Phase 5 / US2: relocate on rename) |
+| Doctor read-only check | `src/doctor/checks.rs` | Add new `pub fn check_*` helper; call via `open_read_only`; add variant to `report.rs` if new subsystem needed |
+| Doctor report field | `src/doctor/report.rs` | Add field to `DoctorReport`; add Ser/Deser if reporting new subsystem; no mutation allowed (read-only invariant) |
+| Invocability visibility | `src/commands/plugin/{show,list}.rs` | Consult `user_invocable` field + grouping by `EntryKind`; doctor checks enforce visibility constraints |
 | New harness | `src/harness/{name}.rs` + register in `mod.rs` | Impl `HarnessModule` trait (7 methods) |
 | New workspace command | `src/commands/workspace/{cmd}.rs` | Pattern: `run(args, scope, paths, mode)` + `assemble_*` |
 | Surgical TOML edit | `src/settings/edit.rs` | Add helper using `toml_edit::DocumentMut` |
-| New diagnostic check | `src/doctor/checks.rs` or `binding.rs` or `harness_integration.rs` | Add `pub fn check_*` + classification logic |
 | New subsystem (doctor) | `src/doctor/report.rs` | Add variant to `Subsystem` enum + Ser/Deser impl + fix handler to `fixes.rs` |
 
 ### Key Patterns
@@ -612,6 +630,28 @@ fn clip_and_sentinel(items: Vec<String>) -> Vec<String> {
 }
 ```
 
+#### Doctor Read-Only Extensions Pattern (Phase 5 / US5)
+
+```rust
+// src/doctor/checks.rs — All read-only, never opening transactions
+
+pub fn build_prompts_report(workspace: &Scope, paths: &Paths) -> Result<PromptsReport, TomeError> {
+    // Reuse mcp::prompts::PromptRegistry::build_for_workspace (no duplication)
+    // Call via open_read_only; never take advisory lock
+}
+
+pub fn count_entries_by_kind(workspace: &Scope, paths: &Paths) -> Result<EntryCountsByKind, TomeError> {
+    // Query enabled entries grouped by skills.kind column
+    // Call via open_read_only; never take advisory lock
+}
+
+pub fn detect_orphan_data_dirs(workspace: &Scope, paths: &Paths) -> Result<Vec<OrphanDataDirReport>, TomeError> {
+    // Walk <root>/plugin-data/ and workspace-scoped dirs
+    // Report entries whose skill is not in the index
+    // Call via open_read_only; never take advisory lock
+}
+```
+
 ## Generated Files
 
 No auto-generated files in src/; test fixtures are synthesized at runtime (e.g., sparse-file models, synthetic DBs).
@@ -627,4 +667,4 @@ No auto-generated files in src/; test fixtures are synthesized at runtime (e.g.,
 
 ---
 
-*This document shows WHERE code lives. Updated 2026-05-27 against Phase 5 / US4 (three-tier discovery + when_to_use indexing + truncate_description hardening shipped). 1050+ tests across 133+ suites.*
+*This document shows WHERE code lives. Updated 2026-05-27 against Phase 5 / US5 COMPLETE (per-entry invocability + doctor read-only extensions shipped). 1193 tests across 151 suites.*

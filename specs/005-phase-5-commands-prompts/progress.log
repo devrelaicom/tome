@@ -2,7 +2,7 @@
 
 Each line is an event (PR open / merge, phase close, etc.). Newest at the bottom.
 
-2026-05-26T12:30:00Z  baseline  main @ 3b075b9 (Phase 4 v0.4.0 PR-G closeout)  test total: 954/127 suites/16 ignored
+2026-05-26T12:30:00Z  baseline  main @ 3b075b9  test total: 954/127/16
 2026-05-26T13:15:00Z  PR #110 merged  Phase 1 complete  main @ 58bc87d
 2026-05-26T14:56:00Z  PR #111 merged  Phase 2 complete  main @ 0d3c391
 2026-05-26T16:34:00Z  PR #112 merged  US1.a complete  main @ d605fa2
@@ -17,4 +17,8 @@ Each line is an event (PR open / merge, phase close, etc.). Newest at the bottom
 2026-05-27T11:45:00Z  PR #121 merged  US4.a complete  main @ 048a91a  test total: 1158/145/16
 2026-05-27T12:10:00Z  PR #122 merged  US4.b complete  main @ 5929138  test total: 1159/145/16
 2026-05-27T13:30:00Z  PR #123 merged  US4.c+d / Phase 6 closed  main @ 46433e2  test total: 1172/147/16
-2026-05-27T13:31:00Z  Phase 7 (US5) US5.a started  per-entry invocability flags + doctor extensions
+2026-05-27T14:00:00Z  PR #124 merged  US5.a complete  main @ 7f22f8c  test total: 1173/147/16
+2026-05-27T14:01:00Z  US5.b started  tome plugin show + tome doctor Phase 5 surfaces
+2026-05-27T15:00:00Z  PR #125 merged  US5.b complete  main @ 4d4aa66  test total: 1192/150/16
+2026-05-27T15:30:00Z  PR #126 merged  pre-push hook slim-down (chore)  main @ 407d1f7  test total unchanged
+2026-05-27T16:30:00Z  US5.c branch opened  4-reviewer pass (0 blockers, 4 majors, cleanest US closeout of Phase 5)
