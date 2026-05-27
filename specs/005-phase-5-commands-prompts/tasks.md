@@ -280,11 +280,11 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US3.a — Argument substitution stage + four patterns + name binding
 
-- [ ] T253 [US3] Compile `ARG_REGEX` (`\$ARGUMENTS\[(\d+)\]|\$ARGUMENTS|\$(\d+)|\$([a-z_][a-z0-9_]*)`) in `src/substitution/regex.rs::arg_regex()` (OnceLock-cached) (use devs:rust-dev agent)
-- [ ] T254 [US3] Implement shell-style quoting parser in `src/substitution/arguments.rs::shell_split(s)`: whitespace separates; single OR double quotes preserve internal whitespace; no escapes; no nested quoting per research §R-10 (use devs:rust-dev agent)
-- [ ] T255 [US3] Implement `coerce_arguments(args, declared) -> ResolvedArguments` that materialises positional + named maps per `contracts/substitution-engine.md` § Stage 3 caller coercion table (use devs:rust-dev agent)
-- [ ] T256 [US3] Implement `apply_arguments(body, args, declared)` returning `(rendered_body, replacements_performed: bool)`; uses `regex::Regex::replace_all` with a callback resolving each capture group per the four patterns per FR-040 (use devs:rust-dev agent)
-- [ ] T257 [US3] Wire `apply_arguments` into `substitution::render()` stage 3, gated on `ctx.args.is_some()` (use devs:rust-dev agent)
+- [x] T253 [US3] Compile `ARG_REGEX` (`\$ARGUMENTS\[(\d+)\]|\$ARGUMENTS|\$(\d+)|\$([a-z_][a-z0-9_]*)`) in `src/substitution/regex.rs::arg_regex()` (OnceLock-cached) (use devs:rust-dev agent)
+- [x] T254 [US3] Implement shell-style quoting parser in `src/substitution/arguments.rs::shell_split(s)`: whitespace separates; single OR double quotes preserve internal whitespace; no escapes; no nested quoting per research §R-10 (use devs:rust-dev agent)
+- [x] T255 [US3] Implement `coerce_arguments(args, declared) -> ResolvedArguments` that materialises positional + named maps per `contracts/substitution-engine.md` § Stage 3 caller coercion table (use devs:rust-dev agent)
+- [x] T256 [US3] Implement `apply_arguments(body, args, declared)` returning `(rendered_body, replacements_performed: bool)`; uses `regex::Regex::replace_all` with a callback resolving each capture group per the four patterns per FR-040 (use devs:rust-dev agent)
+- [x] T257 [US3] Wire `apply_arguments` into `substitution::render()` stage 3, gated on `ctx.args.is_some()` (use devs:rust-dev agent)
 - [ ] T258 [GIT] Commit: `feat(substitution): argument stage + four patterns + name binding`
 - [ ] T259 [US3] Create `tests/substitution_arguments.rs` with tests per `contracts/substitution-engine.md` § Stage 3: $ARGUMENTS, $ARGUMENTS[N], $N, $name, out-of-range, single-string vs object, shell-split rules, no-re-scan invariant (use devs:rust-dev agent)
 - [ ] T260 [GIT] Commit: `test(substitution): argument stage`
@@ -292,9 +292,9 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US3.b — ARGUMENTS append-fallback footer
 
-- [ ] T262 [US3] Implement append-fallback logic in `substitution::render()` stage 4: when caller supplied args AND stage 3 returned `replacements_performed: false`, append `\n\nARGUMENTS: <value>` to body per FR-044 + research §R-13 (use devs:rust-dev agent)
-- [ ] T263 [US3] Compute `<value>` per `contracts/substitution-engine.md` § Stage 4: single-string verbatim OR positional values joined by single space (use devs:rust-dev agent)
-- [ ] T264 [US3] Handle edge case: body ends with `\n` (no need for separator) vs body ends with non-newline (separator needed) (use devs:rust-dev agent)
+- [x] T262 [US3] Implement append-fallback logic in `substitution::render()` stage 4: when caller supplied args AND stage 3 returned `replacements_performed: false`, append `\n\nARGUMENTS: <value>` to body per FR-044 + research §R-13 (use devs:rust-dev agent)
+- [x] T263 [US3] Compute `<value>` per `contracts/substitution-engine.md` § Stage 4: single-string verbatim OR positional values joined by single space (use devs:rust-dev agent)
+- [x] T264 [US3] Handle edge case: body ends with `\n` (no need for separator) vs body ends with non-newline (separator needed) (use devs:rust-dev agent)
 - [ ] T265 [GIT] Commit: `feat(substitution): ARGUMENTS append-fallback footer`
 - [ ] T266 [US3] Extend `tests/substitution_arguments.rs` with append-fallback tests: triggered when no body references, NOT triggered when any reference matched, footer format matches contract, newline-suffix edge case (use devs:rust-dev agent)
 - [ ] T267 [GIT] Commit: `test(substitution): append-fallback footer`
