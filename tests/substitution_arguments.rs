@@ -421,6 +421,36 @@ fn stage_3_arg_value_containing_dollar_name_is_not_rescanned_by_stage_3() {
     );
 }
 
+#[test]
+fn stage_2_substituted_value_containing_dollar_pattern_is_not_rescanned_by_stage_3() {
+    // US3.d T-M1: pin the Stage 2 ↔ Stage 3 boundary.
+    // A double-pass design (Stage 1+2 first, then Stage 3) where Stage 2's
+    // output is fed into Stage 3's regex would have a TOME_ENV_* value
+    // containing `$0` text get substituted. Single-sweep architecture
+    // makes this structurally impossible; this test pins the invariant.
+    let _lock = lock_env();
+    let _guard = EnvVarGuard::set("TOME_ENV_INJECT", "$0");
+    let tmp = tempfile::tempdir().unwrap();
+    let _p = PluginDataDirGuard::install(tmp.path().join("pd"));
+    let _w = WorkspaceDataDirGuard::install(tmp.path().join("wd"));
+
+    let ctx = ctx_with_args(
+        tmp.path(),
+        ArgumentValues::Single("first-positional".to_string()),
+        vec![],
+    );
+    let body = "env=${TOME_ENV_INJECT}";
+    let out = substitution::render(body, &ctx).unwrap();
+    // The injected $0 from Stage 2 must appear LITERALLY in the body
+    // section — if Stage 3 had re-scanned it, we'd see "first-positional"
+    // there instead. Stage 4 append-fallback fires (body has no Stage 3
+    // references) — the footer is expected and unrelated to the invariant.
+    assert_eq!(
+        out, "env=$0\n\nARGUMENTS: first-positional",
+        "Stage 2 output `$0` from TOME_ENV_INJECT must NOT be rescanned by Stage 3",
+    );
+}
+
 // --- Stage 4: append-fallback footer --------------------------------------
 
 #[test]

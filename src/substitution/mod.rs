@@ -93,6 +93,25 @@ impl std::error::Error for SubstitutionError {
     }
 }
 
+/// Does `body` reference the bare `$ARGUMENTS` placeholder?
+///
+/// Used by callers (e.g. `mcp::prompts::body_references_arguments`) to
+/// decide whether to surface the catch-all `args` argument in
+/// `prompts/list`. Honours the production regex dispatch — a literal
+/// `$ARGUMENTS_HELP` substring will NOT match (US3.d R-M1 fix:
+/// substring check replaced with proper regex).
+pub fn body_has_bare_arguments(body: &str) -> bool {
+    let re = regex_sets::combined_regex();
+    re.captures_iter(body).any(|caps| {
+        caps.get(0)
+            .map(|m| m.as_str() == "$ARGUMENTS")
+            .unwrap_or(false)
+            && caps.get(regex_sets::ARG_INDEX_GROUP).is_none()
+            && caps.get(regex_sets::POSITIONAL_GROUP).is_none()
+            && caps.get(regex_sets::NAMED_GROUP).is_none()
+    })
+}
+
 /// Render an entry body through the substitution pipeline.
 ///
 /// Stages 1 (built-ins), 2 (env passthrough), and 3 (arguments) are

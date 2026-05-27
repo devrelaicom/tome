@@ -34,7 +34,7 @@ use serde_json::json;
 use tracing::{error, info, warn};
 
 use crate::error::TomeError;
-use crate::index::skills::{SkillRecord, resolve_entry_body_path};
+use crate::index::skills::resolve_entry_body_path;
 use crate::index::workspaces::resolve_id_required;
 use crate::mcp::prompt_collision::{CollisionRecord, EntryIdentity, resolve_collisions};
 use crate::mcp::prompt_name::derive_name;
@@ -87,12 +87,16 @@ fn truncate_description(s: &str) -> String {
 const CATCHALL_DEFAULT_DESCRIPTION: &str =
     "Optional free-form input passed to the entry as a single positional argument.";
 
-/// Heuristic: does `body` reference the `$ARGUMENTS` placeholder? Used
-/// only to decide whether the catch-all `args` argument is surfaced in
-/// `prompts/list` (US3 will replace this with a real regex check; for
-/// US1.b a substring sweep is sufficient).
+/// Does `body` reference the bare `$ARGUMENTS` placeholder? Used only to
+/// decide whether the catch-all `args` argument is surfaced in
+/// `prompts/list` (per `contracts/mcp-prompts.md § Argument schema
+/// derivation` — case B).
+///
+/// US3.d (R-M1): delegates to `substitution::body_has_bare_arguments`
+/// which uses the production regex dispatcher to avoid false positives
+/// on `$ARGUMENTS_HELP`, `$ARGUMENTS_SUFFIX`, etc.
 fn body_references_arguments(body: &str) -> bool {
-    body.contains("$ARGUMENTS")
+    crate::substitution::body_has_bare_arguments(body)
 }
 
 // --- One promoted entry, ready for registration ---------------------------
@@ -914,29 +918,4 @@ where
         router.add_route(PromptRoute::new_dyn(descriptor, handler));
     }
     router
-}
-
-// --- Re-use a record in lookup ergonomics ---------------------------------
-
-/// Convenience builder: take a [`SkillRecord`] (as read by the existing
-/// `skills::find` helpers) and produce the registry-side [`EntryIdentity`]
-/// + a partially-populated [`PromptEntry`] shell. The frontmatter-derived
-/// fields (`arguments` / `argument_hint` / `prompt_name` override) still
-/// need the disk-read pass — this helper just relocates the column-to-
-/// field copy out of [`PromptRegistry::build_for_workspace`] for future
-/// reuse.
-///
-/// Currently unused by the registry build path (which goes straight from
-/// rusqlite rows to identities), but exposed for tests that want to
-/// fabricate a registry from a hand-rolled `SkillRecord` set.
-#[doc(hidden)]
-pub fn _entry_identity_from_record(record: &SkillRecord) -> EntryIdentity {
-    EntryIdentity {
-        catalog: record.catalog.clone(),
-        plugin: record.plugin.clone(),
-        kind: record.kind,
-        name: record.name.clone(),
-        indexed_at: record.indexed_at.clone(),
-        derived_name: derive_name(&record.plugin, &record.name, None),
-    }
 }
