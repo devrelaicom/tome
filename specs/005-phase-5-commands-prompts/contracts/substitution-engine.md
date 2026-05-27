@@ -125,12 +125,16 @@ ARGUMENTS: <value>
 
 `<value>` is computed:
 
-| Caller input | `<value>` |
-|---|---|
-| `Single("foo bar baz")` | `"foo bar baz"` (whole string, verbatim) |
-| `Object({a: "X", b: "Y"})`, declared `[a, b]` | `"X Y"` (positional values joined by single space) |
+| Caller input | `<value>` | Notes |
+|---|---|---|
+| `Single("foo bar baz")` | `"foo bar baz"` | Whole string, appended verbatim. No shell-splitting at append time — Stage 3's shell-split only applies when an entry declares positional arguments (Object input is never reached for Single). |
+| `Single("")` | `""` | Empty caller string still triggers the append (the discriminator is "caller supplied arguments AND stage 3 made no replacements"); the footer reads `ARGUMENTS: ` with a trailing space. |
+| `Object({a: "X", b: "Y"})`, declared `[a, b]` | `"X Y"` | Positional values joined by single space, in declared order. |
+| `Object({a: "X"})`, declared `[a, b]` | `"X "` | Missing-declared positions fill with empty; trailing empty positions render as trailing space. Mirrors the empty-fill rule from `coerce_arguments`. |
 
 Per FR-044.
+
+**Polish CA-M1 clarification (Phase 5)**: the contract table distinguishes single-string-input from Object-input because the implementation paths differ. For Single input the append is byte-verbatim (no quote-stripping, no shell-split — the catch-all `args` carries the whole string forward); for Object input the join is positional and respects declared order. The previous version of this table elided the distinction.
 
 ## Error model
 

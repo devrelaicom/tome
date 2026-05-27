@@ -13,9 +13,10 @@ Decision record for `findings.md`. Mirrors the per-US disposition pattern. Appli
 
 ## Applied — PR-C (test fills + contract doc)
 
-1. **GAP-1** — Add e2e exit-code tests for Phase 5 codes 9 + 25 in `tests/exit_codes_e2e.rs`. Codes 26 (PromptArgumentMismatch), 27 (EntryNotFound), 28 (SubstitutionFailed), 29 (InvalidArgumentFrontmatter) are MCP-server-only error paths that require driving the rmcp server in-process; defer those to v0.6+ when test infrastructure for the MCP wire surfaces in `tests/exit_codes_e2e.rs` (they ARE covered in `tests/mcp_*.rs` at the library API level).
-2. **GAP-2** — Add `pending_re_embedding_zero_when_no_files_touched` to `tests/doctor_p5.rs`.
-3. **CA-M1** — Doc-only amendment to `contracts/substitution-engine.md` § Stage 4 clarifying single-string vs Object input shapes for the append-fallback.
+1. **GAP-2** — Add `pending_re_embedding_zero_when_no_files_touched` to `tests/doctor_p5.rs`.
+2. **CA-M1** — Doc-only amendment to `contracts/substitution-engine.md` § Stage 4 clarifying single-string vs Object input shapes for the append-fallback.
+
+**GAP-1 update — fully deferred** to v0.6+: after walking the variant construction sites, code 9 (`PluginDataDirWriteFailed`) is constructed exclusively in `src/mcp/prompts.rs` and is MCP-only — no CLI surface raises it. Code 25 (`WorkspaceDataDirWriteFailed`) is reachable via `tome workspace rename` BUT only when the workspace has a pre-existing `plugin-data/` subtree AND the rename fails — substantial scaffolding for a single exit-code pin. Codes 26-29 are similarly MCP-only or substitution-internal. All six codes are covered at the library API level (`tests/exit_codes.rs` for variant → code; `tests/mcp_prompts*.rs` for behavioural coverage). v0.6+ work should ship a unified `tests/exit_codes_e2e_mcp.rs` once an in-process MCP test harness exists.
 
 ## Applied — PR-D (docs + release)
 

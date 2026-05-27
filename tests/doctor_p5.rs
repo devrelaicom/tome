@@ -224,6 +224,32 @@ fn entry_counts_by_kind() {
 }
 
 #[test]
+fn pending_re_embedding_zero_when_no_files_touched() {
+    // GAP-2 (Phase 5 Polish): zero-state pin for pending_re_embedding.
+    // Companion to the positive case below: when no source file has
+    // been touched after enable, the mtime > indexed_at heuristic must
+    // count zero pending entries. Guards against an off-by-one where
+    // the comparison is `>=` and counts every enabled entry as pending.
+    let fx = enable_sample_plugin();
+    let home = TempDir::new().unwrap();
+    let scope = ResolvedScope {
+        scope: Scope(WorkspaceName::global()),
+        source: ScopeSource::Flag,
+        project_root: None,
+    };
+    let report = tome::doctor::assemble_report(&scope, &fx.paths, home.path(), false).unwrap();
+    let counts = report
+        .entry_counts
+        .as_ref()
+        .expect("entry_counts populated in workspace scope");
+    assert_eq!(
+        counts.pending_re_embedding, 0,
+        "no files touched after enable; expected 0 pending, got {}",
+        counts.pending_re_embedding,
+    );
+}
+
+#[test]
 fn pending_re_embedding_count_matches_dirty_rows() {
     use std::time::SystemTime;
     let fx = enable_sample_plugin();
