@@ -218,6 +218,58 @@ pub(crate) struct IndexAggregate {
     pub last_indexed_at: Option<String>,
 }
 
+/// Phase 5 / US5.b — per-kind counts for one plugin in one workspace.
+/// `plugin list` renders these as `(<n> skills, <m> commands)` per
+/// `contracts/catalog-and-plugin-extensions-p5.md` § `tome plugin list`.
+/// Both fields count enrolled-in-workspace entries (via the
+/// `workspace_skills` junction) — same definition as the existing
+/// `IndexAggregate.enabled` field, but split by kind.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PerKindCounts {
+    pub skills: u32,
+    pub commands: u32,
+}
+
+pub(crate) fn per_kind_counts_for_plugin(
+    conn: &rusqlite::Connection,
+    workspace_name: &str,
+    catalog: &str,
+    plugin: &str,
+) -> Result<PerKindCounts, TomeError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.kind, COUNT(*)
+             FROM skills AS s
+             JOIN workspace_skills AS ws ON ws.skill_id = s.id
+             JOIN workspaces       AS w  ON w.id = ws.workspace_id
+             WHERE s.catalog = ?1 AND s.plugin = ?2 AND w.name = ?3
+             GROUP BY s.kind",
+        )
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("prepare per_kind_counts: {e}"))
+        })?;
+    let rows = stmt
+        .query_map(rusqlite::params![catalog, plugin, workspace_name], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("query per_kind_counts: {e}"))
+        })?;
+    let mut out = PerKindCounts::default();
+    for r in rows {
+        let (kind, n) = r.map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("collect per_kind_counts row: {e}"))
+        })?;
+        let n_u32 = u32::try_from(n.max(0)).unwrap_or(u32::MAX);
+        match kind.as_str() {
+            "skill" => out.skills = n_u32,
+            "command" => out.commands = n_u32,
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
 /// Aggregate the `skills` rows for one plugin. Returns zero counts on a
 /// fresh index (no row inserted yet). Phase 4 / F11a: `enabled` now means
 /// "joined to the workspace named `workspace_name` via `workspace_skills`",

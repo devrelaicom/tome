@@ -8,20 +8,33 @@
 //! checks must report the same health values status would for the
 //! overlapping subsystems.
 //!
-//! New checks live here:
+//! Phase 4 checks:
 //! - `check_catalogs` enumerates the resolved scope's catalogs and
 //!   classifies each on-disk clone.
 //! - `harness_detect::probe` (sibling module) handles the harness list.
+//!
+//! Phase 5 / US5.b checks (read-only per FR-124 — none of these
+//! lazy-create plugin-data / workspace-data dirs):
+//! - `build_prompts_report` enumerates user-invocable entries via
+//!   the production `PromptRegistry::build_for_workspace`.
+//! - `detect_orphan_data_dirs` walks the central + per-workspace
+//!   plugin-data trees and compares against `workspace_skills`.
+//! - `count_entries_by_kind` aggregates by `kind` + flags entries
+//!   whose source mtime exceeds the stored `indexed_at`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::catalog::manifest::CatalogManifest;
 use crate::commands::plugin::registry_seeds;
-use crate::doctor::report::{CatalogCacheHealth, CatalogCacheState};
+use crate::doctor::report::{
+    CatalogCacheHealth, CatalogCacheState, EntryCountsByKind, OrphanDataDirReport, PromptsReport,
+};
 use crate::error::TomeError;
 use crate::index::{self, OpenOptions, workspace_catalogs};
+use crate::mcp::prompts::PromptRegistry;
 use crate::paths::Paths;
-use crate::workspace::Scope;
+use crate::workspace::{Scope, WorkspaceName};
 
 /// Enumerate every catalog in the resolved scope's enrolments (via
 /// `workspace_catalogs`) and classify the on-disk clone:
@@ -162,6 +175,366 @@ fn classify_clone(path: &Path) -> CatalogCacheState {
         return CatalogCacheState::ManifestInvalid;
     }
     CatalogCacheState::Ok
+}
+
+// -------------------------------------------------------------------------
+// Phase 5 / US5.b — read-only doctor surfaces.
+// -------------------------------------------------------------------------
+
+/// Build the prompts-surface report for the resolved workspace via the
+/// production [`PromptRegistry::build_for_workspace`] — the SAME path
+/// the MCP server runs at startup. Doctor surfaces every collision and
+/// every derived prompt name so authors can confirm what their entries
+/// will look like over the wire.
+///
+/// Failures during registry build (e.g. missing entry body files) are
+/// not fatal — `PromptRegistry::build_for_workspace` already collapses
+/// per-entry parse failures to warn-and-skip. A registry-wide DB error
+/// surfaces here as an `Err`.
+///
+/// Returns `None` (mapped to absent JSON field by the doctor assembler)
+/// when the workspace has zero user-invocable entries AND zero
+/// collisions — same convention as the Phase 4 surfaces.
+pub fn build_prompts_report(
+    workspace: &WorkspaceName,
+    paths: &Paths,
+    conn: &rusqlite::Connection,
+) -> Result<PromptsReport, TomeError> {
+    let registry = PromptRegistry::build_for_workspace(workspace, paths, conn)?;
+    let prompts = registry.descriptors();
+    let collisions = registry.collisions.clone();
+    Ok(PromptsReport {
+        prompts,
+        collisions,
+    })
+}
+
+/// Detect orphan plugin-data + workspace-data directories per
+/// `contracts/doctor-extensions-p5.md` § Detection algorithm.
+///
+/// Algorithm:
+/// 1. Walk `<root>/plugin-data/<catalog>/<plugin>/` and record every
+///    `(catalog, plugin)` pair on disk.
+/// 2. Read `SELECT DISTINCT catalog, plugin FROM skills s JOIN
+///    workspace_skills ws ON ws.skill_id = s.id` to build the
+///    enabled-anywhere set.
+/// 3. On-disk pairs NOT in the enabled set → `plugin_data` orphans.
+/// 4. Walk `<root>/workspaces/<ws>/plugin-data/<catalog>/<plugin>/` for
+///    every workspace dir on disk. For each, look up the per-workspace
+///    `workspace_skills` enrolment. Not enrolled → `workspace_data`
+///    orphan.
+///
+/// FR-124 invariant: this function only reads — no `create_dir_all`,
+/// no writes. Missing top-level dirs (no plugin-data tree ever written)
+/// produce empty vectors.
+pub fn detect_orphan_data_dirs(
+    paths: &Paths,
+    conn: &rusqlite::Connection,
+) -> Result<OrphanDataDirReport, TomeError> {
+    // Set of (catalog, plugin) pairs enabled in ANY workspace.
+    let mut any_enrolment_pairs: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT DISTINCT s.catalog, s.plugin
+                 FROM skills AS s
+                 JOIN workspace_skills AS ws ON ws.skill_id = s.id",
+            )
+            .map_err(|e| {
+                TomeError::IndexIntegrityCheckFailure(format!(
+                    "prepare orphan plugin-data enrolment query: {e}"
+                ))
+            })?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| {
+                TomeError::IndexIntegrityCheckFailure(format!(
+                    "query orphan plugin-data enrolment: {e}"
+                ))
+            })?;
+        for r in rows {
+            let pair = r.map_err(|e| {
+                TomeError::IndexIntegrityCheckFailure(format!(
+                    "collect orphan plugin-data enrolment row: {e}"
+                ))
+            })?;
+            any_enrolment_pairs.insert(pair);
+        }
+    }
+
+    // Map of workspace_name -> set of (catalog, plugin) pairs enrolled.
+    let mut per_workspace_pairs: std::collections::HashMap<
+        String,
+        std::collections::HashSet<(String, String)>,
+    > = std::collections::HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT w.name, s.catalog, s.plugin
+                 FROM workspaces AS w
+                 JOIN workspace_skills AS ws ON ws.workspace_id = w.id
+                 JOIN skills        AS s  ON s.id = ws.skill_id",
+            )
+            .map_err(|e| {
+                TomeError::IndexIntegrityCheckFailure(format!(
+                    "prepare orphan workspace-data enrolment query: {e}"
+                ))
+            })?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| {
+                TomeError::IndexIntegrityCheckFailure(format!(
+                    "query orphan workspace-data enrolment: {e}"
+                ))
+            })?;
+        for r in rows {
+            let (ws, cat, plug) = r.map_err(|e| {
+                TomeError::IndexIntegrityCheckFailure(format!(
+                    "collect orphan workspace-data enrolment row: {e}"
+                ))
+            })?;
+            per_workspace_pairs
+                .entry(ws)
+                .or_default()
+                .insert((cat, plug));
+        }
+    }
+
+    let plugin_data = walk_plugin_data_for_orphans(&paths.root.join("plugin-data"), |pair| {
+        !any_enrolment_pairs.contains(pair)
+    });
+
+    let workspace_data =
+        walk_workspace_plugin_data_for_orphans(&paths.workspaces_dir, &per_workspace_pairs);
+
+    Ok(OrphanDataDirReport {
+        plugin_data,
+        workspace_data,
+    })
+}
+
+/// Walk `<root>/plugin-data/<catalog>/<plugin>/` and call `is_orphan`
+/// for each `(catalog, plugin)` pair to filter. Returned paths are
+/// absolute (joined under `root`). Skips symlinks and non-directories
+/// at every level (S-M6 defence-in-depth, mirrored from
+/// `orphan_cleanup`).
+fn walk_plugin_data_for_orphans<F>(plugin_data_root: &Path, mut is_orphan: F) -> Vec<PathBuf>
+where
+    F: FnMut(&(String, String)) -> bool,
+{
+    let mut out: Vec<PathBuf> = Vec::new();
+    let Ok(catalogs) = std::fs::read_dir(plugin_data_root) else {
+        return out;
+    };
+    for c_entry in catalogs.flatten() {
+        let c_path = c_entry.path();
+        // Symlink defence + dir-only.
+        let Ok(meta) = std::fs::symlink_metadata(&c_path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            continue;
+        }
+        let Some(catalog_name) = c_path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Ok(plugins) = std::fs::read_dir(&c_path) else {
+            continue;
+        };
+        for p_entry in plugins.flatten() {
+            let p_path = p_entry.path();
+            let Ok(p_meta) = std::fs::symlink_metadata(&p_path) else {
+                continue;
+            };
+            if p_meta.file_type().is_symlink() || !p_meta.is_dir() {
+                continue;
+            }
+            let Some(plugin_name) = p_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let pair = (catalog_name.to_owned(), plugin_name.to_owned());
+            if is_orphan(&pair) {
+                out.push(p_path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Walk `<root>/workspaces/<ws>/plugin-data/<catalog>/<plugin>/` and
+/// emit one orphan for every triple whose `(catalog, plugin)` isn't in
+/// the per-workspace enrolment set. A workspace dir with no
+/// `plugin-data/` subdir contributes zero orphans.
+fn walk_workspace_plugin_data_for_orphans(
+    workspaces_dir: &Path,
+    per_workspace_pairs: &std::collections::HashMap<
+        String,
+        std::collections::HashSet<(String, String)>,
+    >,
+) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let Ok(workspaces) = std::fs::read_dir(workspaces_dir) else {
+        return out;
+    };
+    for w_entry in workspaces.flatten() {
+        let w_path = w_entry.path();
+        let Ok(w_meta) = std::fs::symlink_metadata(&w_path) else {
+            continue;
+        };
+        if w_meta.file_type().is_symlink() || !w_meta.is_dir() {
+            continue;
+        }
+        let Some(workspace_name) = w_path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let plugin_data_root = w_path.join("plugin-data");
+        let empty: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        let enrolled = per_workspace_pairs.get(workspace_name).unwrap_or(&empty);
+        let dirs = walk_plugin_data_for_orphans(&plugin_data_root, |pair| !enrolled.contains(pair));
+        out.extend(dirs);
+    }
+    out.sort();
+    out
+}
+
+/// Per-kind entry counts for the resolved workspace per
+/// `contracts/doctor-extensions-p5.md` § `entry_counts`. The
+/// `pending_re_embedding` heuristic compares each enabled entry's
+/// resolved source-file mtime against its stored `indexed_at`. Bounded
+/// to one `fs::metadata` call per enabled entry (microseconds each).
+pub fn count_entries_by_kind(
+    workspace: &WorkspaceName,
+    paths: &Paths,
+    conn: &rusqlite::Connection,
+) -> Result<EntryCountsByKind, TomeError> {
+    // Per-kind counts via SQL aggregate. `kind` is the schema-v3 column;
+    // it is always present + always one of `skill` / `command`.
+    let (skills, commands): (u32, u32) = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.kind, COUNT(*)
+                 FROM skills AS s
+                 JOIN workspace_skills AS ws ON ws.skill_id = s.id
+                 JOIN workspaces       AS w  ON w.id = ws.workspace_id
+                 WHERE w.name = ?1
+                 GROUP BY s.kind",
+            )
+            .map_err(|e| {
+                TomeError::IndexIntegrityCheckFailure(format!("prepare entry_counts: {e}"))
+            })?;
+        let rows = stmt
+            .query_map(rusqlite::params![workspace.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| {
+                TomeError::IndexIntegrityCheckFailure(format!("query entry_counts: {e}"))
+            })?;
+        let mut skills = 0u32;
+        let mut commands = 0u32;
+        for r in rows {
+            let (kind, n) = r.map_err(|e| {
+                TomeError::IndexIntegrityCheckFailure(format!("collect entry_counts row: {e}"))
+            })?;
+            let n_u32 = u32::try_from(n.max(0)).unwrap_or(u32::MAX);
+            match kind.as_str() {
+                "skill" => skills = n_u32,
+                "command" => commands = n_u32,
+                // Unknown kinds (schema drift) are not surfaced as a
+                // doctor failure here — `check_index`'s integrity_check
+                // covers DB corruption, and `tome reindex` would
+                // surface kind-parse failures explicitly.
+                _ => {}
+            }
+        }
+        (skills, commands)
+    };
+
+    // pending_re_embedding: for each enabled entry, compare source-file
+    // mtime against indexed_at. Cap at u32::MAX (heuristic doesn't need
+    // perfect precision for arbitrary-large workspaces).
+    let mut pending: u32 = 0;
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.catalog, s.plugin, s.path, s.indexed_at
+                 FROM skills AS s
+                 JOIN workspace_skills AS ws ON ws.skill_id = s.id
+                 JOIN workspaces       AS w  ON w.id = ws.workspace_id
+                 WHERE w.name = ?1",
+            )
+            .map_err(|e| {
+                TomeError::IndexIntegrityCheckFailure(format!("prepare pending_re_embedding: {e}"))
+            })?;
+        let rows = stmt
+            .query_map(rusqlite::params![workspace.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| {
+                TomeError::IndexIntegrityCheckFailure(format!("query pending_re_embedding: {e}"))
+            })?;
+        for r in rows {
+            let (catalog, plugin, path, indexed_at) = r.map_err(|e| {
+                TomeError::IndexIntegrityCheckFailure(format!(
+                    "collect pending_re_embedding row: {e}"
+                ))
+            })?;
+            // Resolve absolute path on disk. Failures (catalog/plugin
+            // not on disk, traversal refused) → skip; doctor doesn't
+            // flag them here as pending — orphan-detection / other
+            // checks cover that surface.
+            let Ok(abs) = crate::index::skills::resolve_entry_body_path(
+                conn,
+                paths,
+                workspace.as_str(),
+                &catalog,
+                &plugin,
+                &path,
+            ) else {
+                continue;
+            };
+            let Ok(meta) = std::fs::metadata(&abs) else {
+                continue;
+            };
+            let Ok(mtime) = meta.modified() else {
+                continue;
+            };
+            // Parse `indexed_at` (RFC3339 → SystemTime). On parse
+            // failure leave the entry uncounted — DB corruption surface
+            // belongs to integrity_check, not this heuristic.
+            let Ok(indexed_dt) = time::OffsetDateTime::parse(
+                &indexed_at,
+                &time::format_description::well_known::Rfc3339,
+            ) else {
+                continue;
+            };
+            let indexed_st = SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(indexed_dt.unix_timestamp().max(0) as u64);
+            if mtime > indexed_st {
+                pending = pending.saturating_add(1);
+            }
+        }
+    }
+
+    Ok(EntryCountsByKind {
+        skills,
+        commands,
+        pending_re_embedding: pending,
+    })
 }
 
 #[cfg(test)]

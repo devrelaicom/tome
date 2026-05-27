@@ -8,7 +8,7 @@
 
 use std::io::Write;
 
-use comfy_table::{Cell, CellAlignment};
+use comfy_table::Cell;
 use serde::Serialize;
 
 use crate::catalog::store;
@@ -24,8 +24,8 @@ use crate::presentation::{colour, tables};
 use crate::workspace::ResolvedScope;
 
 use super::{
-    IndexAggregate, aggregate_for_plugin, human_relative, open_index_for_read,
-    read_catalog_manifest,
+    IndexAggregate, PerKindCounts, aggregate_for_plugin, human_relative, open_index_for_read,
+    per_kind_counts_for_plugin, read_catalog_manifest,
 };
 
 pub fn run(args: PluginListArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
@@ -54,11 +54,23 @@ pub fn run(args: PluginListArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
 
 /// One row in the human table / one NDJSON record. Stored separately from
 /// `PluginRecord` so the two surfaces can diverge without churn.
+///
+/// Phase 5 / US5.b: `per_kind` carries the split skills/commands
+/// counts so the human-table renderer can produce
+/// `(<n> skills, <m> commands)` per
+/// `contracts/catalog-and-plugin-extensions-p5.md` § `tome plugin list`.
 struct Row {
     id: PluginId,
     version: Option<String>,
     status: PluginStatus,
+    /// Pre-Phase-5 aggregate count — preserved alongside `per_kind` so
+    /// the JSON emitter can choose whichever shape it wants. Currently
+    /// unused at human-render time (the table cell uses `per_kind`);
+    /// the field is kept to retain the existing JSON wire shape until
+    /// the JSON envelope is intentionally extended.
+    #[allow(dead_code)]
     skill_count: Option<u32>,
+    per_kind: PerKindCounts,
     last_indexed_at: Option<String>,
     record: PluginRecord,
 }
@@ -121,6 +133,7 @@ fn build_row(
     let component_counts = count_components(plugin_dir);
 
     let agg: IndexAggregate = aggregate_for_plugin(conn, workspace_name, &id.catalog, &id.plugin)?;
+    let per_kind = per_kind_counts_for_plugin(conn, workspace_name, &id.catalog, &id.plugin)?;
 
     let (status, skill_count, version) = match &manifest {
         None => (PluginStatus::Unindexable, None, None),
@@ -163,6 +176,7 @@ fn build_row(
         version,
         status,
         skill_count,
+        per_kind,
         last_indexed_at: agg.last_indexed_at,
         record,
     })
@@ -181,17 +195,22 @@ fn emit_human(rows: &[Row]) -> Result<(), TomeError> {
         Cell::new("Plugin"),
         Cell::new("Version"),
         Cell::new("Status"),
-        Cell::new("Skills").set_alignment(CellAlignment::Right),
+        // Phase 5 / US5.b: was "Skills"; now reports both kinds.
+        Cell::new("Entries"),
         Cell::new("Last indexed"),
     ]);
 
     for r in rows {
         let version = r.version.clone().unwrap_or_else(|| "—".to_owned());
         let status_cell = render_status(r.status);
-        let skills = r
-            .skill_count
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "—".to_owned());
+        // Phase 5 / US5.b: emit `(N skills, M commands)` when both
+        // kinds are present; `(N skills)` for skill-only plugins;
+        // `(M commands)` for command-only plugins; `—` when neither.
+        // The unindexable plugin case keeps `—`.
+        let entries = match r.status {
+            PluginStatus::Unindexable => "—".to_owned(),
+            _ => format_entries_cell(&r.per_kind),
+        };
         let last_indexed = r
             .last_indexed_at
             .as_deref()
@@ -203,13 +222,27 @@ fn emit_human(rows: &[Row]) -> Result<(), TomeError> {
             Cell::new(&r.id.plugin),
             Cell::new(version),
             Cell::new(status_cell),
-            Cell::new(skills).set_alignment(CellAlignment::Right),
+            Cell::new(entries),
             Cell::new(last_indexed),
         ]);
     }
-
     writeln!(out, "{table}")?;
     Ok(())
+}
+
+/// Format the Phase 5 entries cell per
+/// `contracts/catalog-and-plugin-extensions-p5.md` § `tome plugin list`:
+/// - `(N skills, M commands)` when both kinds are present.
+/// - `(N skills)` when only skills are present.
+/// - `(M commands)` when only commands are present.
+/// - `—` when no entries are enrolled in this workspace.
+fn format_entries_cell(per_kind: &PerKindCounts) -> String {
+    match (per_kind.skills, per_kind.commands) {
+        (0, 0) => "—".to_owned(),
+        (s, 0) => format!("({s} skills)"),
+        (0, c) => format!("({c} commands)"),
+        (s, c) => format!("({s} skills, {c} commands)"),
+    }
 }
 
 fn render_status(status: PluginStatus) -> String {

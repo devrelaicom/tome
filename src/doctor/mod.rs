@@ -31,9 +31,9 @@ use crate::summarise::registry::summariser_entry;
 use crate::workspace::ResolvedScope;
 
 pub use report::{
-    CatalogCacheHealth, CatalogCacheState, DoctorClassification, DoctorReport, HarnessPresence,
-    HarnessSubsystemReport, ProjectBindingState, RulesCopyState, Subsystem, SubsystemHealth,
-    SuggestedFix,
+    CatalogCacheHealth, CatalogCacheState, DoctorClassification, DoctorReport, EntryCountsByKind,
+    HarnessPresence, HarnessSubsystemReport, OrphanDataDirReport, ProjectBindingState,
+    PromptsReport, RulesCopyState, Subsystem, SubsystemHealth, SuggestedFix,
 };
 
 /// Build a [`DoctorReport`] from the on-disk state. Read-only; never
@@ -158,6 +158,23 @@ pub fn assemble_report(
     let detected_uninstalled_harnesses =
         collect_detected_uninstalled(home, effective_harness_list.as_ref());
 
+    // ---- Phase 5 / US5.b additions ----------------------------------
+    //
+    // All three Phase 5 surfaces are populated ONLY when the resolved
+    // scope is a known workspace — `ScopeSource::GlobalFallback`
+    // (privileged default, no explicit workspace context) emits `None`
+    // for each, preserving the Phase 4 byte-stable JSON shape of the
+    // existing `doctor_json_shape_is_byte_stable_for_minimal_report`
+    // test pin.
+    //
+    // FR-124 read-only invariant: none of these functions lazy-create
+    // plugin-data / workspace-data dirs. `build_prompts_report` reuses
+    // the same registry walk the MCP server runs at startup;
+    // `detect_orphan_data_dirs` is `fs::read_dir` only;
+    // `count_entries_by_kind` is pure SQL + `fs::metadata`.
+    let (prompts, orphan_data_dirs, entry_counts) =
+        build_phase5_surfaces(scope, paths).unwrap_or((None, None, None));
+
     let suggested_fixes = build_suggested_fixes(
         &embedder,
         &reranker,
@@ -197,9 +214,84 @@ pub fn assemble_report(
         harness_rules,
         harness_mcp,
         detected_uninstalled_harnesses,
+        prompts,
+        orphan_data_dirs,
+        entry_counts,
         overall,
         suggested_fixes,
     })
+}
+
+/// Resolve the three Phase 5 surfaces (`prompts`, `orphan_data_dirs`,
+/// `entry_counts`) for the active scope. Returns `(None, None, None)`
+/// when:
+/// - The scope is `GlobalFallback` (no explicit workspace context).
+/// - The index DB doesn't exist on disk yet (fresh install).
+/// - Opening the DB fails (a doctor surface that cannot itself observe
+///   the workspace state degrades gracefully; the embedder/index
+///   subsystem checks already classify the underlying failure).
+///
+/// All three surfaces are READ-ONLY per FR-124. None of them
+/// lazy-create plugin-data, workspace-data, or workspace settings
+/// directories.
+type Phase5Surfaces = (
+    Option<report::PromptsReport>,
+    Option<report::OrphanDataDirReport>,
+    Option<report::EntryCountsByKind>,
+);
+
+fn build_phase5_surfaces(
+    scope: &ResolvedScope,
+    paths: &Paths,
+) -> Result<Phase5Surfaces, TomeError> {
+    use crate::workspace::ScopeSource;
+    if matches!(scope.source, ScopeSource::GlobalFallback) {
+        return Ok((None, None, None));
+    }
+    if !paths.index_db.is_file() {
+        return Ok((None, None, None));
+    }
+
+    // Read-only DB handle — the same convention as the Phase 4
+    // surfaces. The bootstrap-on-first-open path is NOT taken here
+    // because we already checked `is_file()`; this prevents the
+    // doctor pass from writing meta seeds when the user's DB hasn't
+    // been bootstrapped yet.
+    let conn = match crate::index::open_read_only(&paths.index_db) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "doctor phase 5 surfaces: open_read_only failed; emitting None");
+            return Ok((None, None, None));
+        }
+    };
+
+    let workspace_name = scope.scope.name();
+
+    let prompts = match checks::build_prompts_report(workspace_name, paths, &conn) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            tracing::warn!(error = %e, "doctor: build_prompts_report failed; emitting None");
+            None
+        }
+    };
+
+    let orphan_data_dirs = match checks::detect_orphan_data_dirs(paths, &conn) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            tracing::warn!(error = %e, "doctor: detect_orphan_data_dirs failed; emitting None");
+            None
+        }
+    };
+
+    let entry_counts = match checks::count_entries_by_kind(workspace_name, paths, &conn) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            tracing::warn!(error = %e, "doctor: count_entries_by_kind failed; emitting None");
+            None
+        }
+    };
+
+    Ok((prompts, orphan_data_dirs, entry_counts))
 }
 
 /// Resolve the effective harness list using the same layered walk as

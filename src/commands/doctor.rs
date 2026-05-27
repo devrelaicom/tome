@@ -246,6 +246,92 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
     }
     writeln!(out)?;
 
+    // Phase 5 / US5.b: prompts surface (skipped when absent).
+    if let Some(p) = &report.prompts {
+        let workspace_label = report
+            .workspace
+            .path
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "global".to_owned());
+        writeln!(
+            out,
+            "Prompts surface for workspace \"{}\":",
+            workspace_label
+        )?;
+        if p.prompts.is_empty() {
+            writeln!(out, "  (no user-invocable entries enrolled)")?;
+        } else {
+            // Render per-plugin grouping. The PromptDescriptor.name is
+            // the final prompt name (post-collision). We re-construct
+            // the plugin grouping by looking at the collision records'
+            // member entries — but the simpler path is to enumerate
+            // descriptors directly with a single section header.
+            // Per the contract's "Human-mode rendering" section we
+            // qualify with the harness prefix `/mcp__tome__<name>`.
+            for d in &p.prompts {
+                writeln!(out, "  /mcp__tome__{}", d.name)?;
+            }
+        }
+        if !p.collisions.is_empty() {
+            writeln!(out)?;
+            writeln!(out, "  Prompt name collisions:")?;
+            for c in &p.collisions {
+                writeln!(
+                    out,
+                    "    base `{}` → {} entries (winner takes the base name; losers suffixed)",
+                    c.base_name,
+                    c.entries.len(),
+                )?;
+                for entry in &c.entries {
+                    writeln!(
+                        out,
+                        "      - {}/{} ({}) → {}",
+                        entry.identity.catalog,
+                        entry.identity.plugin,
+                        entry.identity.name,
+                        entry.final_name,
+                    )?;
+                }
+            }
+        }
+        writeln!(out)?;
+    }
+
+    // Phase 5 / US5.b: orphan persistent-data directories.
+    if let Some(o) = &report.orphan_data_dirs
+        && (!o.plugin_data.is_empty() || !o.workspace_data.is_empty())
+    {
+        writeln!(out, "Orphan persistent data directories:")?;
+        if !o.plugin_data.is_empty() {
+            writeln!(out, "  plugin-data (no longer enabled in any workspace):")?;
+            for p in &o.plugin_data {
+                writeln!(out, "    {}", p.display())?;
+            }
+        }
+        if !o.workspace_data.is_empty() {
+            writeln!(out, "  workspace-data:")?;
+            for p in &o.workspace_data {
+                writeln!(out, "    {}", p.display())?;
+            }
+        }
+        writeln!(out)?;
+        writeln!(
+            out,
+            "  Cleanup: not auto-fixable in Phase 5. Manual rm -rf required; future phases will add tooling.",
+        )?;
+        writeln!(out)?;
+    }
+
+    // Phase 5 / US5.b: per-kind entry counts.
+    if let Some(c) = &report.entry_counts {
+        writeln!(out, "Entry counts:")?;
+        writeln!(out, "  Skills:               {}", c.skills)?;
+        writeln!(out, "  Commands:             {}", c.commands)?;
+        writeln!(out, "  Pending re-embedding: {}", c.pending_re_embedding,)?;
+        writeln!(out)?;
+    }
+
     if !report.suggested_fixes.is_empty() {
         writeln!(out, "Suggested fixes:")?;
         for f in &report.suggested_fixes {

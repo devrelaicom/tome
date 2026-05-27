@@ -386,6 +386,52 @@ pub struct HarnessSubsystemReport {
     pub health: SubsystemHealth,
 }
 
+// --- Phase 5 doctor extensions (US5.b) -----------------------------------
+//
+// `PromptsReport`, `OrphanDataDirReport`, and `EntryCountsByKind` are the
+// three new sections added by Phase 5. They are all `Option` on
+// [`DoctorReport`] so an outside-project / non-workspace doctor pass
+// emits `null` for each (Phase 4 convention; preserves the byte-stable
+// JSON shape of the existing `doctor_json_shape_is_byte_stable_for_minimal_report`
+// pin when these fields are absent).
+
+/// Phase 5 prompts surface — enumeration of every prompt the MCP server
+/// would expose for the resolved workspace plus the collisions detected
+/// during name resolution. Built via [`crate::mcp::prompts::PromptRegistry::build_for_workspace`]
+/// so the doctor view matches what `tome mcp` would surface byte-for-byte.
+///
+/// `PartialEq` is intentionally omitted: rmcp's `Prompt` is `PartialEq`
+/// but [`crate::mcp::prompt_collision::CollisionRecord`] is not, and
+/// deriving `PartialEq` here would require a hand-rolled impl with no
+/// caller. The serialised JSON shape is what tests pin.
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptsReport {
+    pub prompts: Vec<crate::mcp::prompts::PromptDescriptor>,
+    pub collisions: Vec<crate::mcp::prompt_collision::CollisionRecord>,
+}
+
+/// Phase 5 orphan persistent-data-dir surface. Both fields are absolute
+/// paths discovered on disk that have no matching `(workspace, catalog,
+/// plugin)` enrolment. Informational only in Phase 5 (no `--fix` repair
+/// handler; deferred to Phase 6+).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OrphanDataDirReport {
+    pub plugin_data: Vec<std::path::PathBuf>,
+    pub workspace_data: Vec<std::path::PathBuf>,
+}
+
+/// Phase 5 per-kind entry counts for the resolved workspace.
+/// `pending_re_embedding` is a heuristic: counts enabled entries whose
+/// source-file mtime is newer than the stored `indexed_at`. See
+/// `contracts/doctor-extensions-p5.md` § `entry_counts` for the
+/// false-positive caveats.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EntryCountsByKind {
+    pub skills: u32,
+    pub commands: u32,
+    pub pending_re_embedding: u32,
+}
+
 /// Full doctor report. Field order matches `contracts/doctor.md` +
 /// `contracts/doctor-extensions-p4.md` so the rendered JSON is
 /// deterministic.
@@ -400,7 +446,21 @@ pub struct HarnessSubsystemReport {
 /// - `detected_uninstalled_harnesses` — FR-560 informational list of
 ///   supported harnesses present on the machine but not in the effective
 ///   list. Never affects classification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+///
+/// Phase 5 / US5.b adds:
+/// - `prompts` — `PromptsReport` for the resolved workspace; `None` when
+///   not in a workspace context.
+/// - `orphan_data_dirs` — `OrphanDataDirReport`; `None` outside a
+///   workspace context.
+/// - `entry_counts` — `EntryCountsByKind`; `None` outside a workspace
+///   context.
+///
+/// Phase 5 also drops the `PartialEq` / `Eq` derives from `DoctorReport`
+/// because `PromptsReport` carries rmcp's `Prompt` (only `PartialEq`,
+/// not `Eq`) and `CollisionRecord` (no equality at all). The JSON wire
+/// shape is what tests pin; equality on the whole struct has no
+/// production consumer.
+#[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
     pub tome_version: String,
     pub workspace: WorkspaceInfo,
@@ -433,6 +493,18 @@ pub struct DoctorReport {
     /// local machine (via `HarnessModule::detect`) but NOT in the
     /// effective list. Never affects overall classification.
     pub detected_uninstalled_harnesses: Vec<String>,
+    /// Phase 5 / US5.b: prompts surface for the resolved workspace plus
+    /// any collision records. `None` outside a workspace context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompts: Option<PromptsReport>,
+    /// Phase 5 / US5.b: orphan plugin-data + workspace-data directories.
+    /// `None` outside a workspace context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orphan_data_dirs: Option<OrphanDataDirReport>,
+    /// Phase 5 / US5.b: per-kind entry counts for the resolved workspace.
+    /// `None` outside a workspace context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_counts: Option<EntryCountsByKind>,
     pub overall: DoctorClassification,
     pub suggested_fixes: Vec<SuggestedFix>,
 }
