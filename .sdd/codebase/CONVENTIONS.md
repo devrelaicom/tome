@@ -50,7 +50,7 @@ All three enforce at the pre-commit hook (`.githooks/pre-commit`) before commits
 | Structs | PascalCase | `TomeError`, `Config`, `Fixture` |
 | Enums | PascalCase, variants as items | `ScopeKind`, `CompositionErrorKind` |
 | Traits | PascalCase | `Embedder`, `Reranker`, `HarnessModule` |
-| Type aliases | PascalCase or semantic | `ResolvedScope` |
+| Type aliases | PascalCase or semantic | `ResolvedScope`, `SubstitutionContext` |
 
 ## Error Handling
 
@@ -195,6 +195,118 @@ When a refactor touches multiple call sites, do a mechanical sweep across all si
 When a helper function is reused at 3+ call sites, promote it to `pub` or move it to a shared module.
 
 **Example**: `paths_for(&ToolEnv) -> Paths` was duplicated across 3 test files, then promoted to `tests/common/mod.rs`.
+
+### Phase 5: Caller-Controlled String Truncation
+
+When truncating strings for length limits (e.g., MCP tool descriptions), use `char_indices` for boundary-safe truncation that avoids O(n) full-string traversal:
+
+```rust
+// Phase 5 US4.d C-M2 pattern: O(1) boundary-safe truncation
+const MAX_DESCRIPTION: usize = 8000;
+
+if description.len() > MAX_DESCRIPTION {
+    // char_indices walks byte boundaries; last() before limit gives safe truncation point
+    if let Some((idx, _)) = description
+        .char_indices()
+        .take_while(|&(i, _)| i < MAX_DESCRIPTION)
+        .last()
+    {
+        description.truncate(idx);
+    }
+}
+```
+
+**Alternative (fixed-size context)**:
+```rust
+// For O(1) fixed-window: capture indices via char_indices, drop all after limit
+let safe_len = description
+    .char_indices()
+    .nth(MAX_CHARS)
+    .map(|(i, _)| i)
+    .unwrap_or(description.len());
+description.truncate(safe_len);
+```
+
+**Used in**: `src/mcp/tools/search_skills.rs` (US4 description truncation), any bounded-text CLI output.
+
+### Phase 5: JSON Output with Alphabetical Key Order
+
+For deterministic JSON wire shapes, use `BTreeMap` instead of `HashMap`:
+
+```rust
+// src/mcp/tools/*.rs — Serialize with key ordering
+use std::collections::BTreeMap;
+
+#[derive(Serialize)]
+struct SearchResult {
+    #[serde(flatten)]
+    fields: BTreeMap<String, serde_json::Value>,
+}
+```
+
+**Rationale**: MCP tools and CLI output that's parsed by external consumers benefit from deterministic field order. `serde_json` with `preserve_order` feature re-exports `IndexMap`; explicit `BTreeMap` is clearer where sorted order is the intent.
+
+### Phase 5: Sanity Caps for Deserialized Values
+
+When deserializing bounds that should be "reasonable but not enforced at the syntax level", apply sanity caps at code level:
+
+```rust
+// src/substitution/engine.rs — Phase 5 US4 research §R-7
+const MAX_DESCRIPTION_MAX_CHARS: u32 = 100_000;  // Single source of truth
+
+fn deserialize_description_limit(limit: Option<u32>) -> Result<u32, TomeError> {
+    match limit {
+        None => Ok(DEFAULT_DESCRIPTION_MAX),
+        Some(l) if l < 1 => Err(TomeError::ArgumentValidation("description limit must be >= 1")),
+        Some(l) if l > MAX_DESCRIPTION_MAX_CHARS => Err(TomeError::ArgumentValidation("description limit capped at 100k")),
+        Some(l) => Ok(l),
+    }
+}
+```
+
+**Pattern**: Negative/absurd values caught at deserialization boundary; sensible but very large values logged with `warn!` or capped silently depending on contract.
+
+### Phase 5: Stub MetaSeed Pattern in Tests
+
+When tests inject model identity via `embedder_entry` / `reranker_entry` that must match `StubEmbedder`'s compiled-in identity, use an explicit stub seed:
+
+```rust
+// tests/common/mod.rs
+pub fn stub_embedder_seed() -> MetaSeed {
+    MetaSeed {
+        name: "stub-embedder".to_string(),
+        version: "0.0.0".to_string(),
+        entry_point: "stub".to_string(),
+    }
+}
+
+// In test setup:
+let deps = LifecycleDeps {
+    embedder_seed: stub_embedder_seed(),
+    // ... other fields ...
+};
+```
+
+**Rationale** (Phase 5 US4.a C-B1): Tests that bootstrap the index `meta` table with synthetic seeds must match what the stub implementations report. Single source of truth prevents name-drift between test harness and stub.
+
+### Phase 5: Unicode Truncation Boundary Testing
+
+When tests verify string truncation, include edge cases for multi-byte UTF-8 sequences:
+
+```rust
+#[test]
+fn truncate_respects_char_boundaries_with_emoji() {
+    // 4-byte UTF-8 emoji × N to verify char-not-byte slicing
+    let input = "hello 👋 world 🌍 test";  // Emoji are 4 bytes each
+    let max_len = 15;
+    
+    let result = truncate_description(&input, max_len);
+    assert!(result.is_char_boundary(result.len()), "truncation must land on char boundary");
+    assert!(!result.ends_with("👋"), "emoji should not be sliced in half");
+}
+```
+
+**Pattern**: Use emoji or other multi-byte sequences to catch byte-slicing bugs that would panic on `String::truncate()`.
 
 ## Comments & Documentation
 

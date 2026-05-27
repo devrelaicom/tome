@@ -31,7 +31,7 @@
 
 ```
 tests/
-├── *.rs                         # Integration test files (141 total as of Phase 5)
+├── *.rs                         # Integration test files (144 total as of Phase 5)
 ├── common/
 │   ├── mod.rs                   # Shared harness: ToolEnv, Fixture, guards
 │   └── ...                      # (exported helpers)
@@ -52,7 +52,7 @@ tests/
 |----------|-------|---------|
 | **Catalog commands** | `catalog_*.rs` | `catalog_add.rs`, `catalog_remove.rs` (12 files) |
 | **Plugin commands** | `plugin_*.rs` | `plugin_enable.rs`, `plugin_disable.rs` (10 files) |
-| **Query & search** | `query.rs`, `entry_*.rs` | Embedding + reranking tests (4 files) |
+| **Query & search** | `query.rs`, `entry_*.rs` | Embedding + reranking tests (5 files) |
 | **Models & embedding** | `models_*.rs`, `embedding_*.rs` | Download, list, remove (6 files) |
 | **Workspace lifecycle** | `workspace_*.rs` | Init, rename, remove, sync (12 files) |
 | **Harness integration** | `harness_*.rs` | Use, list, remove, sync (12 files) |
@@ -63,9 +63,10 @@ tests/
 | **Frontmatter & manifests** | `frontmatter*.rs`, `manifest_*.rs` | YAML parsing, strictness (4 files) |
 | **Security & hardening** | `security_hardening.rs` | File perms, symlink refusal (1 file) |
 | **Error & exit codes** | `exit_codes*.rs`, `error_messages.rs` | Exit code coverage, Display impl (2 files) |
+| **Substitution** (Phase 5) | `substitution_*.rs` | Variable expansion, argument coercion (6 files) |
 | **Misc** | `path_validation.rs`, `atomic_dir.rs`, etc. | Phase 1 foundational (10 files) |
 
-**Total**: 141 test files across 127 suites (some files define multiple test functions); 954 tests pass.
+**Total**: 144 test files across 127 suites (some files define multiple test functions); 954+ tests pass.
 
 ## Test Patterns
 
@@ -201,6 +202,41 @@ fn test_reads_home_var() {
 
 **Discipline**: `HomeGuard` holds `HOME_MUTEX` for its lifetime, serializing all tests that mutate `$HOME`. This prevents parallel-test races.
 
+### Phase 5: Test Injection for Time-Dependent Features
+
+When tests verify time-based behavior (e.g., substitution with `$now` variable), use a clock injection guard:
+
+```rust
+#[test]
+fn substitution_now_returns_fixed_time() {
+    let now = time::OffsetDateTime::from_unix_timestamp(1609459200).unwrap();
+    let _guard = ClockOverrideGuard::install(now);
+
+    let result = substitution::substitute("built at $now", &ctx);
+    assert_eq!(result, "built at 2021-01-01T00:00:00Z");
+}
+```
+
+**Pattern**: `ClockOverrideGuard` (in `tests/common/mod.rs`) injects via `SUBSTITUTION_CLOCK_OVERRIDE` slot. Drop guard restores real clock. Used in `tests/substitution_*.rs`.
+
+### Phase 5: Test Injection for Data Directory Features
+
+When tests verify plugin or workspace data directory isolation, use data-dir injection guards:
+
+```rust
+#[test]
+fn plugin_data_dir_isolates_per_plugin() {
+    let plugin_root = TempDir::new().unwrap();
+    let _guard = PluginDataDirGuard::install(plugin_root.path());
+
+    // Tests now write plugin data to isolated dir, not user's home
+    let config = load_plugin_config("my-plugin");
+    assert_eq!(config.data_root, plugin_root.path());
+}
+```
+
+**Patterns**: `PluginDataDirGuard`, `WorkspaceDataDirGuard` (Phase 5 US2 data-model changes).
+
 ## Test Data
 
 ### Fixtures
@@ -250,12 +286,17 @@ fn plugin_enable_uses_embedder() {
 
 Similar pattern to embedder; deterministic ranking by vector sum.
 
+### Stub Summariser (Phase 4)
+
+Deterministic text summarization (returns fixed text) instead of loading Qwen2.5 model. Override via `SUMMARISER_OVERRIDE` slot.
+
 ### Test-Only Injection Points
 
 | Slot | Override Guard | Used For |
 |------|----------------|----------|
 | `EMBEDDER_OVERRIDE` | `EmbedderGuard` | Stub embedder in tests |
 | `RERANKER_OVERRIDE` | `RerankerGuard` | Stub reranker in tests |
+| `SUMMARISER_OVERRIDE` | `SummariserOverrideGuard` | Stub summariser (Phase 4) |
 | `HARNESS_MODULES_OVERRIDE` | `HarnessModulesGuard` | Synthetic harness registry |
 | `MIGRATIONS_OVERRIDE` | `MigrationsGuard` | Synthetic schema migrations |
 | `SUBSTITUTION_CLOCK_OVERRIDE` | `ClockOverrideGuard` | Fixed system clock (Phase 5) |
@@ -272,6 +313,7 @@ All defined in `tests/common/mod.rs` with RAII drop guards.
 | CLI binary paths | Representative sampling | ✓ | Exit codes + output format tested |
 | Library API | 100% on public surface | ✓ | Unit tests in modules |
 | Error Display | All variants | ✓ | `tests/error_messages.rs` |
+| JSON wire shapes | Byte-stable pins | ✓ | `tests/*_json_shape.rs` (Phase 4+) |
 
 **Exclusions**: ONNX inference (real model load excluded; library `fastembed` tests own path), real model downloads (fabricated fixtures instead), MCP protocol purity (deferred T093–T095).
 
@@ -308,6 +350,17 @@ Tests that verify core properties hold:
 | Exit code completeness | `exit_codes.rs` | All `TomeError` variants are covered |
 | Syncability | `sync_idempotence.rs` | Harness sync is idempotent |
 | Atomicity | `atomicity.rs` | Partial failures leave committed state |
+| JSON wire shape | `*_json_shape.rs` | Serialization is deterministic + byte-stable |
+
+### Phase 5: Truncation Boundary Tests
+
+Tests for string truncation edge cases (US4.d pattern):
+
+| Test | Checks |
+|------|--------|
+| `mcp_tool_description.rs::truncate_respects_char_boundaries_with_emoji()` | Multi-byte UTF-8 char slicing |
+| `entry_kind_*.rs::search_skills_description_truncation_*()` | Description max-length enforcement |
+| `substitution_*.rs::argument_value_truncation_boundary()` | Argument coercion with limits |
 
 ## CI Integration
 
@@ -380,6 +433,7 @@ fn harness_use_composition_error_exits_17() { ... }
 - **HTTP**: none (no real downloads; fixtures or error paths).
 - **Filesystem**: all under TempDir (no host state pollution).
 - **ONNX models**: stub inference only (no real model load in test suite).
+- **Time**: fixed via `ClockOverrideGuard` when needed (Phase 5).
 
 ### Deterministic Execution
 
