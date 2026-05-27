@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-27 (Phase 5 / US2 complete; 1000+ tests, ~130 suites; CRITICAL security fix landed)
+> **Last Updated**: 2026-05-27 (Phase 5 / US3 complete; argument substitution no-rescan invariant verified; 0 security findings)
 
 ## Technical Debt
 
@@ -39,6 +39,7 @@ Items to address when working in the area:
 | TD-053-US1-P5 | `src/substitution/` (Phase 5 US1) | YAML deserialiser panic safety on complex nested structures | Robustness | Low | `serde_yaml` can panic on certain pathological YAML inputs (documented upstream). Bounded-read cap on SKILL.md (256 KiB) + 256-argument hard cap mitigate blast radius. Entry body-path validation prevents directory-escape. Monitor upstream for security advisories; consider `serde_yaml::safe` if available. Deferred to Phase 5 Polish or Phase 6 | Tracking; low risk given caps |
 | TD-054-US1-P5 | Phase 5 prompt-injection trust boundary | Substitution engine interprets entry prompts with `$ARGUMENTS` / `$N` / `$name` variable substitution. User-controlled argument values injected into command strings | Design | Medium | Trust boundary: documented as "user explicitly enables plugins and accepts substitution semantics". Argument values are NOT escaped (shell-style quoting per research §R-3 matching Claude Code's documented behaviour). Recommend governance doc: "Do not enable plugins from untrusted sources if using `$ARGUMENTS` in high-privilege commands". Phase 5 spec deferred prompt-injection doc to v0.6+ per `retro/P5.md` S-M1 | Phase 6+ documentation |
 | TD-055-US2-P5 | Phase 5 / US2 workspace-data-dir relocation on workspace rename | `workspace rename <old> <new>` must relocate plugin-data directory from `~/.tome/workspaces/<old>/plugin-data/` to `~/.tome/workspaces/<new>/plugin-data/` | Feature completeness | Low | US2.a / US2.b implement the relocation; should be tested against plugins with persisted data across rename. Currently no end-to-end test of data relocation + subsequent plugin invocation. Defer to Phase 5 Polish if not covered by US2 test suite | Phase 5 / US2 complete; test coverage TBD |
+| TD-056-US3-P5 | Phase 5 / US3 argument substitution recursive-substitute prevention | Stage 3 caller-supplied args flow into LLM context without recursive re-scan (structural fix via unified `COMBINED_RE` regex) | Security | Low | No-rescan invariant (NFR-007 / FR-051) enforced structurally in the unified regex pass; hostile argument values containing `${TOME_*}` or `$ARGUMENTS[N]` patterns are emitted verbatim (never re-scanned). Zero security findings from US3 reviewer pass. Verification: `tests/substitution_arguments.rs` + `tests/substitution_pipeline.rs` confirm no-rescan | ✅ Phase 5 / US3 complete; verified end-to-end |
 
 ### Low Priority
 
@@ -68,6 +69,7 @@ Nice-to-have improvements:
 | SEC-014-US1-P5 | Phase 5 US1 entry body-path traversal (RESOLVED) | Substitution engine could read arbitrary files via `body: ../../etc/passwd` in skill/command YAML frontmatter | **RESOLVED** | `resolve_entry_body_path` validation rejects `..` and absolute paths (exit 28); path must be relative and bounded | ✅ PR #110–#114 security audit fix |
 | SEC-015-US1-P5 | Phase 5 US1 arguments DoS (RESOLVED) | Plugin-manifest arguments list unbounded; hostile catalog could declare 1M+ argument names forcing allocation DoS at enable time | **RESOLVED** | Hard cap at 256 entries enforced in `deserialize_arguments` (both string and list forms); exceed → exit 29 `InvalidArgumentFrontmatter` | ✅ PR #110–#114 security audit fix |
 | SEC-016-US2-P5 | **Phase 5 / US2 env-var exfiltration (CRITICAL, RESOLVED)** | Two-pass substitution design allowed hostile plugin's `"version": "${TOME_ENV_GITHUB_TOKEN}"` to leak operator's env vars into LLM context via stage-2 re-scan of stage-1 output | **CRITICAL / RESOLVED** | Structural fix: SINGLE unified regex pass (`COMBINED_RE` in `src/substitution/regex_sets.rs`); resolved values emitted directly to output buffer and never re-scanned; no-rescan invariant (NFR-007 / FR-051) enforced at code level; US2.d blocker fix in PR #116–#120 | ✅ **CRITICAL FIX LANDED** — Phase 5 / US2 complete. Trust boundary documented: operator explicitly enables plugins (trusted decision); argument values NOT escaped (shell-style quoting). Phase 6+ documentation will detail governance: "Do not enable plugins from untrusted sources if using `$ARGUMENTS` in high-privilege commands." Structural fix prevents even malicious plugin authors from exfiltrating through substitution. |
+| SEC-017-US3-P5 | **Phase 5 / US3 argument-substitution recursive-substitute (RESOLVED)** | Three-stage substitution (built-ins, env, arguments) could allow Stage 3 caller args containing `${TOME_*}` or `$ARGUMENTS[N]` to be re-interpreted via Stage 1+2 on subsequent renders or Stage 1 output containing `$0` to be re-interpreted by Stage 3 | **CRITICAL / RESOLVED** | Structural fix identical to SEC-016: unified `COMBINED_RE` regex with single `captures_iter` loop; Stage 3 argument values emitted directly to output buffer and never re-entered scanner; coercion happens once per render, not per-match; no-rescan invariant extends to all three stages (US2.d B2 + US3.a fixes). Phase 5 / US3 blocker (closed C-B1): verified end-to-end via `tests/substitution_pipeline.rs`. 0 security findings from US3 reviewer pass | ✅ **CRITICAL FIX VERIFIED** — Phase 5 / US3 complete. Argument substitution secured via structural enforcement of no-rescan invariant. |
 
 ### Low Risk
 
@@ -135,6 +137,7 @@ Code areas that are brittle or risky to modify:
 | `src/substitution/regex_sets.rs::COMBINED_RE` (Phase 5 / US2, CRITICAL) | Single unified regex pass for Stages 1+2 substitution; resolved values emitted directly to output buffer and never re-scanned (no-rescan invariant NFR-007 / FR-051) | **CRITICAL**: Do not split regex back into two passes (left/right alternation MUST stay in single `captures_iter`). Do not emit resolved values to intermediate buffer that re-enters the scanner. Per-match resolution directly to output is the structural enforcement of the exfiltration-vector closure. Test via `tests/substitution_pipeline.rs` — verify no stage-1 output can trigger stage-2 re-matching | Phase 5 / US2 blocker fix; audited by 4 reviewers. **CRITICAL SECURITY INVARIANT** |
 | `src/substitution/env.rs::resolve_env` (Phase 5 / US2) | Env-passthrough `${TOME_ENV_*}` resolution; operates within single unified regex pass (never feeds output back to regex) | Per-match resolution inside the `COMBINED_RE` loop. No intermediate buffering. Resolved value emitted directly to output. Test that env lookup result never causes secondary match attempts (inherent from the single-pass design) | Structural fix; security-critical property |
 | `src/substitution/builtins.rs::resolve_builtin` (Phase 5 / US2) | Built-in resolution; operates within single unified regex pass (never feeds output back to regex) | Per-match resolution inside the `COMBINED_RE` loop. All paths (including `PLUGIN_DATA` + `WORKSPACE_DATA` directory creation) complete within one match iteration. No intermediate buffering. Resolved value emitted directly to output | Structural fix; security-critical property |
+| **`src/substitution/arguments.rs::coerce_arguments + apply_arguments_match` (Phase 5 / US3, CRITICAL)** | **Argument substitution operates within single unified regex pass (never feeds resolved args back to regex); coerced argument values emitted directly to output buffer and never re-scanned (no-rescan invariant extended to Stage 3)** | **CRITICAL**: Coercion happens once per `render()` call (lines 144–147 of `mod.rs`), before the regex loop. Resolved values from Stage 3 dispatch (lines 197–221) are emitted directly and never re-entered into `combined_regex()`. Test via `tests/substitution_pipeline.rs::stage_3_argument_output_never_resubjected_to_earlier_stages` — verify hostile argument values containing `${TOME_*}` or `$ARGUMENTS[N]` are output verbatim. Do not move coercion inside the loop; do not buffer resolved values; do not allow per-match re-coercion | **Phase 5 / US3 blocker fix (C-B1)**; audited by 4 reviewers. **CRITICAL SECURITY INVARIANT extends to all three stages** |
 
 ## Deferred Findings from Phase 4 Review (PR #99–#101)
 
@@ -151,15 +154,16 @@ Phase 4 / US5 audit produced **1 blocker + 21 majors**. **All 1 actionable block
 
 See `specs/004-phase-4-refactor-harnesses/review/disposition.md` + individual `us*-disposition.md` files for full triage across all 5 user stories.
 
-## Deferred Findings from Phase 5 Review (PR #110–#114, US1 + US2)
+## Deferred Findings from Phase 5 Review (PR #110–#114, US1 + US2 + US3)
 
-Phase 5 / US1+US2 security audit produced fixes applied in PR #110–#114 and subsequent:
+Phase 5 / US1+US2+US3 security audit produced fixes applied in PR #110–#114+ and subsequent:
 
 | Fix | Category | Description | Status |
 |-----|----------|-------------|--------|
 | S-M1 | Security | `resolve_entry_body_path` rejects `..` and absolute paths | ✅ Applied (PR #110–#114) |
 | S-M2 | Security | Arguments list hard-capped at 256 in frontmatter parser (DoS mitigation) | ✅ Applied (PR #110–#114) |
-| C-B1 | Critical | **No-rescan invariant via unified `COMBINED_RE`** (env-var exfiltration fix) | ✅ **APPLIED (PR #116–#120)** |
+| C-B1 | Critical | **No-rescan invariant via unified `COMBINED_RE`** (env-var exfiltration fix, Stage 1+2) | ✅ **APPLIED (PR #116–#120)** |
+| C-B1-ext | Critical | **No-rescan invariant extended to Stage 3** (argument substitution; prevents recursive-substitute via caller args) | ✅ **APPLIED (PR #121–#125 US3)** |
 | C-B2 | Critical | `WorkspaceDataDirCreationFailed` exit code correction (exit 25, not 9) | ✅ Applied (PR #116–#120 US2.d B1 fix) |
 | (deferred) | Security | YAML deserialiser panic safety (upstream issue; bounded-read cap + argument cap mitigate) | Phase 5 Polish or Phase 6 |
 | (deferred) | Security | Prompt-injection trust boundary documentation | Phase 6+ |
@@ -252,4 +256,4 @@ Per Phase 4 research §R-17, Phase 3 deferred items are dispositioned as follows
 ---
 
 *This document tracks what needs attention. Update when concerns are resolved or discovered.*
-*Last refreshed 2026-05-27 against Phase 5 / US2 complete source (1000+ tests passing, ~130 suites); CRITICAL no-rescan invariant fix verified end-to-end.*
+*Last refreshed 2026-05-27 against Phase 5 / US3 complete source (1000+ tests passing, ~130 suites); argument substitution no-rescan invariant verified end-to-end; 0 security findings from US3 reviewer pass.*

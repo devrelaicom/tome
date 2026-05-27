@@ -3,27 +3,27 @@
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
 > **Generated**: 2026-05-27
 > **Last Updated**: 2026-05-27
-> **Phase**: 5 (commands-as-prompts + substitution layer; US2 shipped)
 
 ## Test Framework
 
-| Type | Framework | Configuration |
-|------|-----------|---------------|
-| Unit | Rust built-in (`#[test]`) | `Cargo.toml` test profile |
-| Integration | Rust built-in (`tests/` dir) | CLI binary invocation + library API |
-| E2E | CLI binary + file fixtures | Real git repos, real FS isolation |
+| Type | Framework | Configuration | Commands |
+|------|-----------|---------------|----------|
+| Unit | Rust `#[test]` | None (built-in) | `cargo test --lib` |
+| Integration | Rust `#[test]` in `tests/` | None (built-in) | `cargo test --test '*'` |
+| All | Combined | `.cargo/config.toml` | `cargo test` |
 
 ### Running Tests
 
 | Command | Purpose |
 |---------|---------|
-| `cargo test` | Run all unit + integration tests (uses stub embedder; fast, no models) |
-| `cargo test --test atomicity` | Single integration test file |
-| `cargo test catalog_add::` | One test by path |
-| `cargo test -- --test-threads=1` | Run serially (for tests with shared global state) |
-| `.githooks/pre-push` | Full test suite before push (enforced by git hook) |
+| `cargo test` | Run all unit + integration tests (uses stub embedder — fast) |
+| `cargo test --test catalog_add` | Run one integration test file |
+| `cargo test catalog_add::` | Run one test by path |
+| `cargo test --test query` | Phase 2 query tests |
+| `cargo test --test concurrency` | Two-process index contention |
+| `cargo test --test atomicity` | Interrupt-injection tests |
 
-**CI assertion**: `cargo test` completes in <5 min on CI hardware (parallelized across CPU cores). Stub embedder keeps the CI-fast property.
+**MSRV tested**: CI runs `cargo +1.93 build` to enforce `rust-version = "1.93"`.
 
 ## Test Organization
 
@@ -31,394 +31,88 @@
 
 ```
 tests/
+├── *.rs                         # Integration test files (141 total as of Phase 5)
 ├── common/
-│   └── mod.rs                         # Shared test harness (fixtures, env isolation, helpers)
-├── substitution_*.rs                  # Phase 5 / US2 — substitution pipeline tests
-├── harness_*.rs                       # Phase 4 / US3 — harness integration tests
-├── workspace_*.rs                     # Phase 4 / US2 — workspace lifecycle tests
-├── plugin_*.rs                        # Phase 3 / US1 — plugin enable/disable tests
-├── catalog_*.rs                       # Phase 2 / US7 — catalog lifecycle tests
-├── models_*.rs                        # Phase 3 / US4 — model download/list/remove tests
-├── query.rs                           # Phase 2 / US3 — search + rerank tests
-├── mcp_*.rs                           # Phase 3 / US1 — MCP server tests
-├── doctor_*.rs                        # Phase 3 / US4 — diagnostic + repair tests
-├── exit_codes.rs                      # All phases — exit code table coverage
-├── atomicity.rs                       # All phases — interrupt-safety tests
-├── sync_boundary.rs                   # Phase 3 — structural tokio-isolation test
+│   ├── mod.rs                   # Shared harness: ToolEnv, Fixture, guards
+│   └── ...                      # (exported helpers)
 └── fixtures/
-    ├── sample-catalog/                # Minimal git repo for catalog tests
-    └── sample-plugin-catalog/         # Minimal plugin catalog for lifecycle tests
+    ├── sample-catalog/          # Catalog skeleton (git repo template)
+    └── sample-plugin-catalog/   # Plugin skeleton (for lifecycle tests)
 ```
 
 ### Test File Location Strategy
 
-**Integration-test layout** (all tests in `tests/` directory):
-- Tests consume the `tome` library without `#[cfg(test)]` visibility
-- Each test file imports `common::*` for shared fixtures and helpers
-- One test file per feature area (e.g., `substitution_builtins.rs`, `substitution_env.rs`)
-- Test counts reported by feature: `cargo test -- --list | wc -l`
+**Separate directory** (`tests/` parallel to `src/`): all integration tests. No co-located unit tests (Rust convention discouraged here because the test binary needs to invoke the CLI and construct real environments).
 
-**Phase boundaries**:
-- Phase 1 (catalog) → `catalog_*.rs`
-- Phase 2 (plugin index) → `plugin_*.rs`, `query.rs`, `models_*.rs`
-- Phase 3 (MCP) → `mcp_*.rs`, `workspace_*.rs`
-- Phase 4 (refactor) → `harness_*.rs`, `workspace_*.rs`, `doctor_*.rs`
-- Phase 5 (substitution) → `substitution_*.rs`
+**Unit tests** within `src/` modules: for pure functions that don't need I/O isolation. Example: `src/config.rs::tests` tests TOML round-tripping.
+
+### Test Categories by File
+
+| Category | Files | Example |
+|----------|-------|---------|
+| **Catalog commands** | `catalog_*.rs` | `catalog_add.rs`, `catalog_remove.rs` (12 files) |
+| **Plugin commands** | `plugin_*.rs` | `plugin_enable.rs`, `plugin_disable.rs` (10 files) |
+| **Query & search** | `query.rs`, `entry_*.rs` | Embedding + reranking tests (4 files) |
+| **Models & embedding** | `models_*.rs`, `embedding_*.rs` | Download, list, remove (6 files) |
+| **Workspace lifecycle** | `workspace_*.rs` | Init, rename, remove, sync (12 files) |
+| **Harness integration** | `harness_*.rs` | Use, list, remove, sync (12 files) |
+| **Index & schema** | `index_*.rs`, `schema_migration_*.rs` | Database, migrations (6 files) |
+| **Doctor & diagnostics** | `doctor_*.rs` | Report, fixes, orphan cleanup (7 files) |
+| **MCP server** | `mcp_*.rs` | Server lifecycle, tools, log format (10 files) |
+| **Concurrency & atomicity** | `concurrency.rs`, `atomicity.rs` | Lock contention, interrupts (4 files) |
+| **Frontmatter & manifests** | `frontmatter*.rs`, `manifest_*.rs` | YAML parsing, strictness (4 files) |
+| **Security & hardening** | `security_hardening.rs` | File perms, symlink refusal (1 file) |
+| **Error & exit codes** | `exit_codes*.rs`, `error_messages.rs` | Exit code coverage, Display impl (2 files) |
+| **Misc** | `path_validation.rs`, `atomic_dir.rs`, etc. | Phase 1 foundational (10 files) |
+
+**Total**: 141 test files across 127 suites (some files define multiple test functions); 954 tests pass.
 
 ## Test Patterns
 
-### Standard Test Structure
+### Test Structure: Arrange-Act-Assert
 
 ```rust
 #[test]
-fn test_description_of_the_scenario() {
-    // Arrange: set up test state (fixtures, temp dirs, env)
+fn happy_path_human_mode() {
+    // Arrange: set up fixture and environment
+    let fix = Fixture::build_sample();
     let env = ToolEnv::new();
-    let fixture = Fixture::build_sample();
-    
-    // Act: invoke the code under test
-    let outcome = command::operation(&args, &env)?;
-    
-    // Assert: verify the outcome
-    assert_eq!(outcome.status, Status::Success);
-    assert!(outcome.path.exists());
-}
-```
 
-**Naming**: `test_<verb>_<subject>_when_<condition>` (e.g., `test_enable_plugin_when_already_enabled_skips_embedder`).
-
-### Library API Testing
-
-When code has both a library entry point AND a CLI wrapper, test the library separately from the CLI:
-
-```rust
-#[test]
-fn library_api_path() {
-    // Call the silent-compute function directly (no emit)
-    let outcome = commands::query::pipeline(&args, &deps)?;
-    assert_eq!(outcome.skill_count, 3);
-}
-
-#[test]
-fn cli_binary_path() {
-    // Invoke the CLI binary via Command::new()
-    let env = ToolEnv::new();
-    let output = env.cmd()
-        .arg("query")
-        .arg("--help")
+    // Act: invoke the command
+    let out = env
+        .cmd()
+        .args(["catalog", "add", &fix.url])
         .output()
         .expect("spawn");
-    assert!(output.status.success());
+
+    // Assert: verify exit code, stdout, state
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Added catalog"));
 }
 ```
 
-**Pattern established**: Phase 3 / US1.b (query refactoring); refined Phase 4 across all commands.
-
-### Environment Isolation
-
-Every integration test uses a fresh, isolated `HOME`:
+### Fixture Pattern: Git-backed Catalog
 
 ```rust
-#[test]
-fn test_uses_isolated_home() {
-    let env = ToolEnv::new();  // Fresh TempDir per test
-    let paths = Paths::from_home(env.home_path());
-    // Test against isolated paths; host config never touched
-}
-```
-
-**Global state serialization** (Phase 5 / US2):
-- `HOME_MUTEX` serialises `HomeGuard` installations across parallel tests
-- Per-file `ENV_MUTEX` serialises arbitrary env-var mutations (mirrors `OVERRIDE_MUTEX`)
-- `OVERRIDE_MUTEX` serialises `HarnessModulesGuard` / substitution-layer overrides
-
-### Test Injection Seams
-
-For infrastructure that doesn't have a parameterized dependency injection path, use test-only `#[doc(hidden)] pub static` injection slots:
-
-```rust
-// In src/substitution/mod.rs:
-#[doc(hidden)]
-pub static SUBSTITUTION_CLOCK_OVERRIDE: OnceLock<Mutex<Option<OffsetDateTime>>> = 
-    OnceLock::new();
-
-// In tests/common/mod.rs:
-pub struct ClockOverrideGuard;
-impl ClockOverrideGuard {
-    pub fn install(when: OffsetDateTime) -> Self {
-        *tome::substitution::SUBSTITUTION_CLOCK_OVERRIDE
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(when);
-        Self
-    }
+pub struct Fixture {
+    pub tempdir: TempDir,
+    pub repo_path: PathBuf,
+    pub url: String,  // file:// URL for cloning
 }
 
-// In tests/substitution_builtins.rs:
-#[test]
-fn test_with_deterministic_clock() {
-    let _clock = ClockOverrideGuard::install(FROZEN_TIME);
-    // Clock reads now return FROZEN_TIME
-}
-```
-
-Pattern established by Phase 3 / F7 (migrations); extended Phase 4 (harness modules); widened Phase 5 / US2 (substitution layer).
-
-### RAII Guards for Test Isolation
-
-Use `Drop` trait for clean teardown on panic:
-
-```rust
-let _home_guard = HomeGuard::install(env.home_path());
-let _env_guard = EnvVarGuard::install("MY_VAR", "test_value");
-let _clock_guard = ClockOverrideGuard::install(FROZEN_TIME);
-// On function exit (success or panic), guards drop in LIFO order
-// and restore previous state, even if test panicked.
-```
-
-**Poisoned-mutex recovery** (Phase 4 / P5 retro):
-```rust
-let lock = HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-```
-A panic in one test must not cause setup failures in the next.
-
-### Stage-Isolation Testing (Phase 5 / US2 Pattern)
-
-When testing a pipeline with multiple logical stages (built-ins, env passthrough, arguments), test each stage independently BEFORE testing the full pipeline:
-
-```rust
-// Stage 1: built-ins only
-#[test]
-fn test_substitution_builtins_stage() {
-    let ctx = SubstitutionContext { ... };
-    let result = builtins::resolve_builtin("TOME_ENTRY_NAME", &ctx, None)?;
-    assert_eq!(result, Some("hello".to_string()));
-}
-
-// Stage 2: env vars only
-#[test]
-fn test_substitution_env_stage() {
-    let result = env::resolve_env("MY_VAR", None);
-    // Env-var resolution doesn't error; returns default if missing
-}
-
-// Integration: full pipeline
-#[test]
-fn test_substitution_pipeline_integration() {
-    let rendered = render("${TOME_ENTRY_NAME} says ${MY_VAR}", &ctx)?;
-    assert_eq!(rendered, "hello says test_value");
-}
-```
-
-Test files: `substitution_builtins.rs`, `substitution_env.rs`, `substitution_pipeline.rs` (Phase 5 / US2.d structure).
-
-### Fixture-Based Testing
-
-For catalog + plugin tests, copy pre-built fixtures into temp dirs:
-
-```rust
-#[test]
-fn test_catalog_operation() {
-    let fixture = Fixture::build_sample();  // Clones tests/fixtures/sample-catalog/
-    let env = ToolEnv::new();
-    
-    // fixture.url is a file:// git repo the CLI can clone from
-    env.cmd()
-        .arg("catalog")
-        .arg("add")
-        .arg("test-catalog")
-        .arg(fixture.url)
-        .assert_success();
-}
-```
-
-Fixtures are **real git repos** (initialized via `git init && git add -A && git commit`) so the CLI's `git clone` codepath is tested end-to-end.
-
-### Sparse File Fabrication
-
-For large model/artefact files, use sparse files (zero disk space on Linux/macOS):
-
-```rust
-let dir = paths.models_dir.join("bge-small-en-v1.5");
-std::fs::create_dir_all(&dir)?;
-let f = std::fs::File::create(&dir.join("model.onnx"))?;
-f.set_len(45_000_000)?;  // 45 MB sparse file, ~0 KB on disk
-```
-
-Pattern established Phase 3 / US4; used in `models_download.rs`, `models_list.rs` for `--verify` checksum tests (zero bytes ≠ registry SHA-256, so `--verify` flips state to `checksum_mismatched`).
-
-## Mocking Strategy
-
-### Stub Embedder / Reranker / Summariser
-
-The **closed trait set** (Phase 1–4) has stub implementations for testing:
-
-```rust
-pub trait Embedder { fn embed(&self, text: &str) -> Result<Vec<f32>>; }
-pub trait Reranker { fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<Score>>; }
-pub trait Summariser { fn summarise(&self, text: &str) -> Result<String>; }
-
-// In tests:
-struct StubEmbedder;
-impl Embedder for StubEmbedder {
-    fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        Ok(vec![0.0; 768])  // Deterministic all-zeros vector
+impl Fixture {
+    pub fn build_sample() -> Self {
+        // Copy tests/fixtures/sample-catalog/ into temp dir
+        // Run git init && git commit
+        // Return handle to the temp repo
     }
 }
 ```
 
-**When to use**:
-- Library API paths that call `lifecycle::enable` → use `StubEmbedder`
-- CLI binary paths → never construct embedder (binary doesn't load real ONNX)
-- MCP server tests → use real `FastembedEmbedder` (in-process server needs real models)
+**Used by**: all catalog tests, plugin lifecycle tests, reindex tests.
 
-### No-op Registry Overrides
-
-For tests that need synthetic harnesses or migrations, use `#[doc(hidden)] pub static` injection:
-
-```rust
-// Phase 4 / US3.c:
-let guard = HarnessModulesGuard::install(vec![
-    Box::new(NamedStubHarness::new("a")),
-    Box::new(NamedStubHarness::new("x")),
-]);
-// resolve_effective_list now sees these synthetic harnesses
-
-// Phase 3 / US5:
-let guard = MigrationsGuard::install(&[Migration {
-    from: 0,
-    to: 1,
-    name: "test_migration",
-    apply: |_| Ok(()),
-}]);
-// schema-migration framework now runs test migration
-```
-
-### No Real Network / No Real Model Downloads
-
-**CI-fast guarantee**: All tests use stub embedder or mocked infrastructure. Real model downloads / BGE inference are NOT tested in CI (would add 5–10 min and require real weights from HuggingFace).
-
-- `models_download.rs` tests skip the real network path; CLI smoke tests cover exit codes
-- `query.rs` uses `StubEmbedder` + `StubReranker`
-- `mcp_*.rs` use stub embedders for tool handler tests (except where MCP actually needs real search)
-
-**Manual verification**: Real BGE model testing is documented in retro PDFs as `SC-001` / `SC-002` for human review post-release.
-
-## Test Organization by Phase
-
-### Test Counts
-
-Current suite (Phase 5 / US2 shipped):
-- **954 tests** across **127 suites**
-- **16 tests ignored** (marked `#[ignore]` for manual SC verification or nightly runs)
-- Run time: <5 min with `cargo test` (parallel), <15 min with `.githooks/pre-push` (serial lint + test)
-
-Phase progression:
-- Phase 1: 156 tests / 25 suites
-- Phase 2: 187 tests / 33 suites
-- Phase 3: 374 tests / 50 suites
-- Phase 4: 916 tests / 125 suites
-- Phase 5 (US2): 954 tests / 127 suites
-
-### Phase 5 / US2 Test Additions
-
-Three new test files for substitution pipeline (stage isolation):
-
-| File | Focus | Tests |
-|------|-------|-------|
-| `substitution_builtins.rs` | `{{TOME_*}}` placeholder resolution | ~20 |
-| `substitution_env.rs` | `{{$VAR}}` env passthrough | ~15 |
-| `substitution_data_dir.rs` | Data directory creation + override seam | ~10 |
-| `substitution_pipeline.rs` | Full pipeline end-to-end | ~15 |
-
-Each test file serializes on `OVERRIDE_MUTEX` to prevent clock/data-dir/env-var override races.
-
-## Coverage Requirements
-
-| Metric | Target | Mechanism |
-|--------|--------|-----------|
-| Exit code coverage | All Phase-N variants | `tests/exit_codes.rs` grep guard + CLI binary e2e tests |
-| Error variant coverage | All `TomeError` variants | Compiler forces error mapping + test coverage |
-| Library API coverage | All public surfaces | `common/` helpers reused across integration tests |
-| Atomicity | SIGINT mid-transaction safety | `tests/atomicity.rs` simulates interrupts via `Err` returns |
-
-### Coverage Exclusions
-
-- `src/generated/` — auto-generated code (none currently)
-- `src/mcp/` async runtime boilerplate — tokio internals not tested
-- `build.rs` — sqlite-vec compilation (too low-level)
-
-## Test Categories
-
-### Smoke Tests
-
-Minimal "does the CLI start" assertions:
-
-```rust
-#[test]
-fn cli_help_succeeds() {
-    ToolEnv::new()
-        .cmd()
-        .arg("--help")
-        .assert_success();
-}
-```
-
-Run before any other tests to catch startup-path regressions.
-
-### Regression Tests
-
-When a bug is fixed, the regression test is added FIRST (TDD discipline), then the fix is committed. Example:
-
-```rust
-#[test]
-fn regression_cheap_reenable_skips_embedder() {
-    // Bug: PR #X said enable-of-enabled doesn't re-embed, but it did
-    // Fix: add cheap_reenable branch in lifecycle::enable
-    // Test: verify embedder.call_count == 0 on second enable
-}
-```
-
-### Atomicity Tests
-
-Verify that partial operations (e.g., `git clone` partial → SIGINT) leave correct state:
-
-```rust
-#[test]
-fn catalog_add_aborts_mid_git_clone() {
-    // Simulate SIGINT by returning Err mid-way through git::clone
-    // Verify: catalog not added to index, clone dir left clean
-}
-```
-
-File: `tests/atomicity.rs` + phase-specific subfiles.
-
-## CI Integration
-
-### Test Pipeline
-
-```yaml
-# Enforced by .githooks/pre-push
-1. cargo fmt --check
-2. typos
-3. cargo clippy --all-targets --all-features -- -D warnings
-4. cargo test (all 954 tests in parallel)
-```
-
-**Blocking checks**: All four gates must pass before push is allowed.
-
-### Binary Size Check
-
-On Linux CI, after `cargo build --release`:
-```bash
-stat -c%s target/release/tome  # Asserts < 50 MB (NFR-001)
-```
-
-Current: ~26 MiB on macOS arm64 (well under cap).
-
-## Test Infrastructure
-
-### ToolEnv Helper
+### Test Environment: ToolEnv
 
 ```rust
 pub struct ToolEnv {
@@ -426,50 +120,280 @@ pub struct ToolEnv {
 }
 
 impl ToolEnv {
-    pub fn new() -> Self { /* isolated HOME */ }
-    pub fn cmd(&self) -> Command { /* pre-configured Command */ }
+    pub fn new() -> Self {
+        // Create isolated $HOME with fresh XDG layout
+    }
+
+    pub fn cmd(&self) -> Command {
+        // Return a Command for the `tome` binary
+        // Pre-populate HOME + XDG_* env vars
+        // Suppress logging output
+    }
 }
 ```
 
-Every test gets a fresh `HOME` → test isolation, zero host-config pollution.
+**Key discipline**: Every test gets its own `ToolEnv`. The host's real `~/.tome/` is never touched because `HOME` is redirected to a `TempDir`.
 
-### Paths Helper
+### Library API Pattern: No CLI Binary
+
+When a test needs to verify library logic without loading real ONNX models, use the library API directly:
 
 ```rust
-pub fn lifecycle_paths(root: &Path) -> Paths {
-    Paths::from_root(root.to_path_buf())
+#[test]
+fn enable_sets_enabled_flag() {
+    let root = TempDir::new().unwrap();
+    let paths = lifecycle_paths(root.path());
+    let catalog = copy_sample_plugin_catalog(&root, "sample");
+    fabricate_models(&paths);
+
+    let embedder = StubEmbedder::new();
+    let _guard = EmbedderGuard::install(Arc::new(embedder));
+
+    let id = PluginId::from_str("sample/hello").unwrap();
+    let deps = LifecycleDeps { ... };
+    let outcome = lifecycle::enable(&id, &deps, false).unwrap();
+
+    assert_eq!(outcome.status, PluginStatus::Enabled);
 }
 ```
 
-Parameterized `$HOME` → tests never mutation env vars; all isolation via temp dirs.
+**Used by**: plugin lifecycle, reindex, workspace tests (avoid CLI spawn when library API suffices).
 
-### Registry Seeds
+### CLI Binary Pattern: Full Integration
+
+When testing the CLI's complete stack (command parsing, output formatting, exit codes), spawn the binary:
 
 ```rust
-pub fn stub_embedder_seed() -> MetaSeed {
-    MetaSeed { name: "stub-embedder".into(), version: "0".into() }
+#[test]
+fn catalog_add_emits_json_on_flag() {
+    let fix = Fixture::build_sample();
+    let env = ToolEnv::new();
+
+    let out = env
+        .cmd()
+        .args(["catalog", "add", &fix.url, "--json"])
+        .output()
+        .expect("spawn");
+
+    assert!(out.status.success());
+    let v: Value = serde_json::from_slice(&out.stdout).expect("json parse");
+    assert_eq!(v["added"]["name"], "sample-experts");
 }
 ```
 
-When tests seed the central DB, they use matching `stub_*_seed()` values so the CLI binary later opens and sees consistent identities.
+**Used by**: output formatting tests, exit code coverage, TTY-dependent features like prompts.
 
-## Deferred Test Coverage
+### Isolation: `HomeGuard` for `$HOME` Mutations
 
-Documented in per-phase retroactive analysis documents:
+```rust
+#[test]
+fn test_reads_home_var() {
+    let new_home = TempDir::new().unwrap();
+    let _guard = HomeGuard::install(new_home.path());
 
-- **T088**: Manual SC-001 / SC-002 verification against real BGE models (done post-release)
-- **T093–T095**: MCP protocol purity, latency, SIGINT graceful shutdown (need real model override or stub injection)
-- **T416**: Security hardening audit (all `tome`-owned writes emit 0o600 on Unix)
-- **T419**: Binary size tracking (`RELEASE-BINARY-SIZE.md` recorded on each major phase)
+    // Inside this scope, $HOME is redirected
+    assert_eq!(std::env::var("HOME").unwrap(), new_home.path().to_str().unwrap());
 
----
+    // Test code runs here
+}
+// _guard drops, HOME is restored, mutex is released
+```
+
+**Discipline**: `HomeGuard` holds `HOME_MUTEX` for its lifetime, serializing all tests that mutate `$HOME`. This prevents parallel-test races.
+
+## Test Data
+
+### Fixtures
+
+**Catalog fixture** (`tests/fixtures/sample-catalog/`):
+- Git repo skeleton with `tome-catalog.toml` manifest
+- Two sample plugins (`hello`, `goodbye`) with plugin.json manifests
+- Copied into temp dir by `Fixture::build_sample()` for each test
+
+**Plugin catalog fixture** (`tests/fixtures/sample-plugin-catalog/`):
+- Same structure; used by workspace/lifecycle tests via `copy_sample_plugin_catalog()`
+
+### Fabrication Helpers
+
+| Helper | Purpose | Output |
+|--------|---------|--------|
+| `fabricate_models(paths)` | Create manifest.json for every model | `~/.tome/models/{name}/manifest.json` |
+| `fabricate_installed_models(paths, entries)` | Fabricate model artefact files (sparse) | Manifest + sparse artefact files |
+| `fabricate_all_registry_models(paths)` | Fabricate every entry in `MODEL_REGISTRY` | All 3 models (embedder, reranker, summariser) |
+| `write_index_db_with_schema_version(path, v)` | Synthetic DB with minimal schema | `/path/index.db` at version `v` |
+| `write_config_for_cli(paths, config)` | Seed catalog config + enrol in DB | `config.toml` + `workspace_catalogs` rows |
+| `seed_workspace(paths, name)` | Inject workspace row into DB | `workspaces` table entry |
+
+**Sparse file pattern**: `File::set_len(size)` creates zero-filled files that take ~no disk space. Embedder fixture is 66 MB but occupies 0 bytes on disk. SHA-256 mismatch is intentional for `--verify` tests.
+
+## Mocking Strategy
+
+### Stub Embedder (`src/embedding/stub.rs`)
+
+Deterministic embedder that produces fixed vectors based on input. Used in all tests that don't need real inference.
+
+```rust
+pub struct StubEmbedder {
+    // Produces consistent vectors for the same input
+}
+
+#[test]
+fn plugin_enable_uses_embedder() {
+    let _guard = EmbedderGuard::install(Arc::new(StubEmbedder::new()));
+    // Test proceeds with stub instead of loading ONNX models
+}
+```
+
+**Override mechanism**: `EMBEDDER_OVERRIDE` slot at `src/embedding/mod.rs`, installed via `EmbedderGuard::install()` in `tests/common/mod.rs`.
+
+### Stub Reranker
+
+Similar pattern to embedder; deterministic ranking by vector sum.
+
+### Test-Only Injection Points
+
+| Slot | Override Guard | Used For |
+|------|----------------|----------|
+| `EMBEDDER_OVERRIDE` | `EmbedderGuard` | Stub embedder in tests |
+| `RERANKER_OVERRIDE` | `RerankerGuard` | Stub reranker in tests |
+| `HARNESS_MODULES_OVERRIDE` | `HarnessModulesGuard` | Synthetic harness registry |
+| `MIGRATIONS_OVERRIDE` | `MigrationsGuard` | Synthetic schema migrations |
+| `SUBSTITUTION_CLOCK_OVERRIDE` | `ClockOverrideGuard` | Fixed system clock (Phase 5) |
+| `PLUGIN_DATA_DIR_OVERRIDE` | `PluginDataDirGuard` | Plugin data directory (Phase 5) |
+| `WORKSPACE_DATA_DIR_OVERRIDE` | `WorkspaceDataDirGuard` | Workspace data directory (Phase 5) |
+
+All defined in `tests/common/mod.rs` with RAII drop guards.
+
+## Coverage Requirements
+
+| Metric | Target | Current | Notes |
+|--------|--------|---------|-------|
+| Exit codes | All enumerated variants | ✓ | `tests/exit_codes.rs` grep guard |
+| CLI binary paths | Representative sampling | ✓ | Exit codes + output format tested |
+| Library API | 100% on public surface | ✓ | Unit tests in modules |
+| Error Display | All variants | ✓ | `tests/error_messages.rs` |
+
+**Exclusions**: ONNX inference (real model load excluded; library `fastembed` tests own path), real model downloads (fabricated fixtures instead), MCP protocol purity (deferred T093–T095).
+
+## Test Categories by Purpose
+
+### Smoke Tests
+
+Critical path tests that must pass before deploy:
+
+| Test | Purpose |
+|------|---------|
+| `catalog_add.rs::happy_path_human_mode` | Core catalog registration flow |
+| `plugin_enable.rs::happy_path_json_mode` | Core plugin enable flow |
+| `query.rs::happy_path` | Core search + ranking flow |
+| `workspace_use.rs::happy_path` | Core project binding flow |
+
+### Regression Tests
+
+Tests for previously fixed bugs, linked to phase retros:
+
+| Category | Retro | Example |
+|----------|-------|---------|
+| Phase 4 US1 | `retro/P3.md` | `sync_idempotence.rs` (Sync twice → no changes) |
+| Phase 4 US3 | `retro/P5.md` | `workspace_commands.rs` (Scope isolation) |
+| Phase 5 US3 | (current) | `entry_kind_indexing.rs` (Entry kind + collision handling) |
+
+### Invariant Tests
+
+Tests that verify core properties hold:
+
+| Property | Test File | Checks |
+|----------|-----------|--------|
+| Manifest strictness | `manifest_strictness.rs` | All Tome-owned types have `#[serde(deny_unknown_fields)]` |
+| Exit code completeness | `exit_codes.rs` | All `TomeError` variants are covered |
+| Syncability | `sync_idempotence.rs` | Harness sync is idempotent |
+| Atomicity | `atomicity.rs` | Partial failures leave committed state |
+
+## CI Integration
+
+### Test Pipeline (`.github/workflows/*`)
+
+- Unit tests (parallel)
+- Integration tests (parallel, with stub embedder)
+- Binary size check (`target/release/tome` <= 50 MB)
+- Clippy strict linting
+- rustfmt check
+- typos check
+
+### Required Checks
+
+| Check | Blocking | Runs On |
+|-------|----------|---------|
+| `cargo test` | Yes (main) | Every PR |
+| `cargo clippy` | Yes | Every PR |
+| `cargo fmt --check` | Yes | Every commit hook |
+| `typos` | Yes | Every commit hook |
+| Binary size | Yes (main) | Linux x86_64 |
+| MSRV | Yes | CI only |
+
+### Pre-Commit Hook
+
+`.githooks/pre-commit` runs `cargo fmt --check`, `typos`, and `cargo clippy` sequentially. All three must pass before commit succeeds (no `--no-verify` bypasses without documented reason).
+
+## Test Discipline
+
+### One Assertion Per Test
+
+Each test verifies one behavior. Related assertions on the same outcome are grouped, but independent checks get separate tests.
+
+```rust
+// Good: one concept per test
+#[test]
+fn catalog_add_success_updates_config() { ... }
+
+#[test]
+fn catalog_add_duplicate_exits_4() { ... }
+
+// Bad: mixing multiple concerns
+#[test]
+fn catalog_add_works() {
+    // Assert success
+    // Assert config updated
+    // Assert cache cloned
+    // Assert manifest parsed
+}
+```
+
+### Test Names
+
+Descriptive, underscore-separated. Format: `{subject}_{action}_{expectation}`.
+
+```rust
+#[test]
+fn catalog_add_duplicate_registration_exits_4() { ... }
+
+#[test]
+fn plugin_enable_missing_models_prompts_download() { ... }
+
+#[test]
+fn harness_use_composition_error_exits_17() { ... }
+```
+
+### Minimal External I/O
+
+- **Git**: real repo fabrication via `Fixture` (necessary for catalog tests).
+- **HTTP**: none (no real downloads; fixtures or error paths).
+- **Filesystem**: all under TempDir (no host state pollution).
+- **ONNX models**: stub inference only (no real model load in test suite).
+
+### Deterministic Execution
+
+- No flaky sleeps or timeouts.
+- Stub embedder produces fixed vectors for deterministic test assertions.
+- Concurrent tests serialized via `HOME_MUTEX` + RAII guards.
+- No real time dependencies (fixed clock via `ClockOverrideGuard`).
 
 ## What Does NOT Belong Here
 
 - Code style rules → `CONVENTIONS.md`
-- Security testing details → `SECURITY.md`
+- Security testing → `SECURITY.md`
 - Architecture patterns → `ARCHITECTURE.md`
 
 ---
 
-*This document describes HOW to test. Update when testing strategy changes or new patterns are established.*
+*This document describes HOW to test. Update when testing strategy changes or a new pattern emerges.*

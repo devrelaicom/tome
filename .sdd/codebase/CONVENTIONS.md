@@ -1,109 +1,155 @@
 # Coding Conventions
 
-> **Purpose**: Document code style, naming conventions, error handling, and common patterns used throughout the Tome codebase.
+> **Purpose**: Document code style, naming conventions, error handling, and patterns for Tome (Rust CLI).
 > **Generated**: 2026-05-27
 > **Last Updated**: 2026-05-27
-> **Phase**: 5 (commands-as-prompts + substitution layer; US2 shipped)
 
 ## Code Style
 
-### Formatting & Linting
+### Formatting Tools
 
 | Tool | Configuration | Command |
 |------|---------------|---------|
-| rustfmt | Cargo.toml `edition = "2024"` | `cargo fmt --check` |
-| Clippy | Cargo.toml lint profile | `cargo clippy --all-targets --all-features -- -D warnings` |
-| Typos | `.typos.toml` | `typos` |
-| Git hooks | `.githooks/pre-commit` | `git config core.hooksPath .githooks` |
+| rustfmt | `rustfmt.toml` | `cargo fmt` |
+| clippy | `clippy.toml` | `cargo clippy --all-targets --all-features -- -D warnings` |
+| typos | `_typos.toml` | `typos` |
 
-### Style Rules (Enforced)
+All three enforce at the pre-commit hook (`.githooks/pre-commit`) before commits land. No linting violations are permitted (`-D warnings`).
 
-| Rule | Convention | Example |
-|------|------------|---------|
-| Indentation | 4 spaces (Rust standard) | |
-| Trailing commas | Always in multi-line | `vec![1, 2, 3,]` |
-| Line length | No hard limit; readability-driven | |
-| Comments | Explain *why*, not *what* | `// Merge both passes to close exfiltration vector per NFR-007` |
-| Unsafe blocks | Always justified with SAFETY comment | `// SAFETY: we hold HOME_MUTEX for the lifetime of Self.` |
+### Style Rules
 
-**Pre-commit hook** (`.githooks/pre-commit`) runs three gates in sequence:
-1. `cargo fmt --check` — format violations fail the commit
-2. `typos` — spelling errors fail the commit
-3. `cargo clippy --all-targets --all-features -- -D warnings` — all warnings treated as errors
+| Rule | Convention |
+|------|------------|
+| Edition | Rust 2024 (in `Cargo.toml`) |
+| MSRV | 1.93 (enforced in CI) |
+| Indentation | 4 spaces (rustfmt default) |
+| Semicolons | Required (rustfmt enforced) |
+| Max line length | 100 chars (soft; clippy tunable) |
+| Comments | Explain *why*, not *what* (readers know Rust) |
 
-Bypass with `git commit --no-verify` only when unavoidable; document the reason in the commit body.
+**Strictness boundary** (FR-013a): `#[serde(deny_unknown_fields)]` applies to Tome-owned inputs (`config.toml`, model manifests, index `meta` rows). Third-party inputs (SKILL.md YAML frontmatter, `plugin.json` metadata) parse leniently — enforced by `tests/manifest_strictness.rs` grep guard.
 
 ## Naming Conventions
 
 ### Files & Directories
 
-| Type | Convention | Example | Notes |
-|------|------------|---------|-------|
-| Modules | snake_case | `src/substitution/builtins.rs` | Capability-organised |
-| Test files | kebab-case with domain prefix | `tests/substitution_builtins.rs` | One test file per feature area |
-| Fixtures | descriptive snake_case | `tests/fixtures/sample-plugin-catalog/` | |
+| Type | Convention | Example |
+|------|------------|---------|
+| Modules | snake_case, descriptive | `src/workspace/binding.rs`, `src/plugin/lifecycle.rs` |
+| Submodules | snake_case, noun-verb paired | `src/commands/plugin/{mod,enable,disable,list,show}.rs` |
+| Test files | snake_case + `_*.rs` suffix | `tests/catalog_add.rs`, `tests/plugin_enable.rs` |
+| Test fixtures | PascalCase directories | `tests/fixtures/sample-catalog/` |
 
 ### Code Elements
 
-| Type | Convention | Example | Notes |
-|------|------------|---------|-------|
-| Variables | camelCase | `home_path`, `config_file` | |
-| Constants | SCREAMING_SNAKE_CASE | `SHORT_MAX_CHARS = 800` | Single source of truth for shared constants (e.g. substitution length windows) |
-| Functions | snake_case, verb-first | `lifecycle_paths()`, `resolve_builtin()` | Public APIs use `run_with_deps()` split for library reuse |
-| Structs | PascalCase | `SubstitutionContext`, `HomeGuard` | RAII helpers suffix with `Guard` |
-| Traits | PascalCase | `HarnessModule`, `Embedder` | Closed trait sets match Phase contract names |
-| Enums | PascalCase | `TomeError`, `CompositionErrorKind` | Closed error enum enforces exit-code chain |
-| Methods | snake_case | `.install()`, `.build()` | RAII guards implement `Drop` explicitly |
-
-### Error Handling
-
 | Type | Convention | Example |
 |------|------------|---------|
-| Custom errors | `#[derive(thiserror::Error)]` enum | `src/error.rs` — closed `TomeError` enum |
-| Error variants | PascalCase, descriptive | `WorkspaceNotFound { name }`, `HarnessClash { path, command, first_arg }` |
-| Logging | `tracing::error!`, `warn!`, `info!`, `debug!` | Structured fields for context |
-| Result handling | Early return with `?` operator | `err_value?` propagates to caller |
-| Anyhow wrapping | Applied only at application boundary | `anyhow::Context::context()` for chain context |
+| Variables | snake_case | `catalog_name`, `plugin_id`, `is_enabled` |
+| Constants | SCREAMING_SNAKE_CASE | `MAX_RETRIES`, `LONG_MAX_CHARS` |
+| Functions | snake_case, verb-prefix | `enable_plugin`, `resolve_plugin_dir`, `assemble_report` |
+| Structs | PascalCase | `TomeError`, `Config`, `Fixture` |
+| Enums | PascalCase, variants as items | `ScopeKind`, `CompositionErrorKind` |
+| Traits | PascalCase | `Embedder`, `Reranker`, `HarnessModule` |
+| Type aliases | PascalCase or semantic | `ResolvedScope` |
 
-**Closed Error Enum Discipline**: The `TomeError` enum in `src/error.rs` has NO `Other`/`Unknown` arm. Every failure class has its own variant and exit code. Adding a variant forces edits to:
-1. Exit-code table in the phase-specific contract
-2. `tests/exit_codes.rs` — grep guard validates completeness
-3. Spec FRs documenting the failure mode
+## Error Handling
 
-This is structural enforcement: the compiler catches missing exit-code mappings.
+### Error Pattern: Closed Enum with Exit Codes
+
+Tome uses a **closed `TomeError` enum** — every error variant has an enumerated exit code. The compiler enforces the chain: adding a variant forces edits to `tests/exit_codes.rs`, the spec, and contracts.
+
+**File**: `src/error.rs`
+
+**Exit codes by phase**:
+- Phase 1: codes 2–8, plus Internal=1
+- Phase 2: codes 20–52 (plugins, index, embedding)
+- Phase 3: codes 60–75 (MCP, doctor, schema migration)
+- Phase 4: codes 13–20 (workspace, harness, composition)
+- Phase 5: codes 21–26 (commands, prompts, substitution)
+
+**Contract reference**: `specs/00X-phase-Y-*/contracts/exit-codes-p*.md` per phase.
+
+### Error Propagation
+
+- Library functions return `Result<T, TomeError>` (errors are specific and closed).
+- CLI commands call `TomeError::exit_code()` to map errors to integers.
+- Application-level context chains use `anyhow::Context` where needed.
+- Credential scrubbing at boundaries via `src/catalog/git.rs::scrub_credentials` before logging.
+
+### Logging Conventions
+
+| Level | Usage | Example |
+|-------|-------|---------|
+| `error!` | Unrecoverable failures, MCP preflight failures | `error!("hard shutdown: {}")` |
+| `warn!` | Recoverable issues, state drift | `warn!("length window exceeded")` |
+| `info!` | Important transitions, user-facing events | `info!("plugin enabled: {}")` |
+| `debug!` | Internal state, algorithm details | `debug!("cost function: {}")` |
+
+**Tool**: `tracing` + `tracing-subscriber` with `env-filter` feature. Configured via `RUST_LOG` env var.
 
 ## Common Patterns
 
-### Silent Compute / Emit Wrapper
+### Atomic Writes (Multi-File Invariant)
 
-When a CLI command's compute path is reused by a non-CLI surface (MCP tools, library API, tests), split into:
+When a directory of files must appear complete or not at all, use `util::atomic_dir::land_directory_with_replace`:
 
 ```rust
-// Silent compute path — no I/O side-effects, returns Outcome
-pub fn pipeline(args: &Args, deps: &Deps) -> Result<Outcome, TomeError> { ... }
+// 1. Create sibling staging dir on same filesystem
+let staging = TempDir::new_in(parent)?;
 
-// Library entry point — pipeline + optional emit
-pub fn run_with_deps(args: Args, deps: Deps) -> Result<Outcome, TomeError> {
-    let outcome = pipeline(&args, &deps)?;
-    // ... emit outcome if mode != Json
-    Ok(outcome)
+// 2. Populate staging
+write_file_1(&staging)?;
+write_file_2(&staging)?;
+
+// 3. Move existing aside (optional)
+if target.exists() {
+    fs::rename(&target, &target.with_extension("old"))?;
 }
 
-// CLI wrapper — resolves dependencies, calls run_with_deps
-pub fn run(args: Args, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
-    let deps = /* construct from scope */;
-    run_with_deps(args, deps)?;
+// 4. POSIX-atomic rename
+land_directory_with_replace(staging, target)?;
+```
+
+**Used in**: `src/workspace/init.rs`, `src/util/atomic_dir.rs`.
+
+### Silent Compute + Emit Wrapper
+
+When a command's logic is reused by non-CLI surfaces (MCP, library API, tests), split into:
+
+```rust
+// Library entry: pure computation
+pub fn assemble_report(args, deps) -> Result<Outcome, Error> {
+    // compute
+}
+
+// CLI wrapper: calls library, then emits
+pub fn run(args, deps, mode: Mode) -> Result<(), Error> {
+    let outcome = assemble_report(args, deps)?;
+    output::write_json_or_human(&outcome, mode);
     Ok(())
 }
 ```
 
-Examples: `commands/query.rs`, `commands/status.rs`, `commands/reindex.rs`.
+**Pattern used in**: `commands/status/mod.rs`, `commands/plugin/{enable,list,show}.rs`, `commands/reindex.rs`, `commands/doctor.rs`.
 
-**Test boundary**: heavy-state paths (embedder load) use library API + `StubEmbedder`; light/error paths use CLI binary via `ToolEnv::cmd()`.
+### Test Injection via `#[doc(hidden)] pub static`
 
-### RAII Test Isolation Helpers
+For integration tests (under `tests/`, which have no `cfg(test)` visibility), inject state via process-local slots:
 
-Process-global mutable state (env vars, override slots, serialization mutexes) uses RAII guard structs:
+```rust
+// src/plugin/lifecycle.rs
+#[doc(hidden)]
+pub static EMBEDDER_OVERRIDE: OnceLock<Option<Arc<dyn Embedder>>> = OnceLock::new();
+
+// tests/plugin_enable.rs
+let _guard = embedding::StubEmbedderGuard::with_force_fail_after(2);
+```
+
+**Patterns**: `HARNESS_MODULES_OVERRIDE`, `MIGRATIONS_OVERRIDE`, `SUBSTITUTION_CLOCK_OVERRIDE`, `PLUGIN_DATA_DIR_OVERRIDE`, `WORKSPACE_DATA_DIR_OVERRIDE`. All guarded by `tests/common/mod.rs` RAII helpers.
+
+### RAII Guards for Process-Global Mutations
+
+When tests mutate process-global state (`$HOME`, override slots, etc.), use RAII guards:
 
 ```rust
 pub struct HomeGuard {
@@ -111,152 +157,144 @@ pub struct HomeGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
-impl HomeGuard {
-    pub fn install(new_home: &Path) -> Self {
-        let lock = HOME_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-        // ... set HOME and return guard
-    }
-}
-
 impl Drop for HomeGuard {
     fn drop(&mut self) {
-        // Restore previous value (SAFETY: we held the lock)
+        // Restore in declared-field order: _previous before _lock
     }
 }
+
+// Usage
+let _guard = HomeGuard::install(test_home_path);
+// guard drops, HOME is restored, mutex is released
 ```
 
-Pattern established by Phase 4 / US3.c-1; extended in Phase 5 / US2:
-- `HomeGuard` — serialises `$HOME` mutations via `HOME_MUTEX`
-- `EnvVarGuard` — serialises arbitrary env-var mutations via per-file `ENV_MUTEX`
-- `ClockOverrideGuard` — installs clock override into `SUBSTITUTION_CLOCK_OVERRIDE` slot
-- `PluginDataDirGuard`, `WorkspaceDataDirGuard` — install data-dir overrides
+**Discipline**: declare fields in reverse drop order. Documented at `tests/common/mod.rs` §HOME serialisation.
 
-Poisoned-mutex recovery via `PoisonError::into_inner()` — a panic in one test must not cascade into setup of the next.
+### Reference-Counted Shared Resources
 
-### Single-Regex-Sweep with No-Rescan Invariant
-
-When multiple stages of a transform must scan the same input (e.g. substitution's built-ins + env passthrough), compile a SINGLE regex that covers all stages and emit resolved values directly into the output buffer. This closes the exfiltration vector where a hostile plugin's `"version": "${TOME_ENV_GITHUB_TOKEN}"` could leak the host env var into the LLM context.
-
-Pattern in `src/substitution/mod.rs::render()`:
-1. Compile `combined_regex()` with all stages as alternations
-2. Fast-path: if no match, return input unchanged (zero allocation)
-3. Single `captures_iter()` pass: emit matched groups directly to output buffer
-4. Never re-scan resolved values (NFR-007 / FR-051)
-
-### Atomic Populated-Directory Landing
-
-When a multi-file directory must appear either complete or not-at-all to readers:
+For on-disk resources shared across workspaces (e.g., catalog cache dirs), reference-count instead of unconditionally deleting:
 
 ```rust
-let staging = tempfile::Builder::new()
-    .prefix(".tome.tmp.")
-    .tempdir_in(target_parent)?;
-// Populate staging/
-// ... chmod mode preservation on staged files ...
-let staged_path = staging.keep()?.into_path();
-std::fs::rename(staged_path, target)?; // POSIX-atomic when same filesystem
-```
-
-Replace-existing semantics: rename existing target aside to `.<name>.old/` first, rollback on final rename failure. Pattern established by Phase 4 / US1.b; refined in Phase 4 / US2.b for workspace initialization.
-
-### Per-Entry Validation Before Collection
-
-When a collection will be built under the advisory lock, validate each entry BEFORE acquiring the lock rather than deferring errors:
-
-```rust
-// Validate all entries first (cheap, no lock needed)
-for entry in user_list {
-    harness::lookup(&entry)?; // Fails fast with HarnessNotSupported
+// src/catalog/store.rs
+pub fn reference_count(url: &str, paths: &Paths) -> Vec<Scope> {
+    // Walk global config + every workspace in workspaces.txt
+    // Return list of scopes that still reference this URL
 }
-// Then acquire lock and build
-let lock = index::lock::acquire()?;
 ```
 
-Pattern: `HarnessNotSupported` returned immediately; `CompositionError` (structural issues) detected at resolution time, not at sync time.
+**TOCTOU profile**: concurrent removes race benignly; concurrent add + remove may leave a dangling reference recoverable by re-fetching.
 
-## Module Organization
+### Structural Fix Over Targeted Fix
 
-Tome's architecture is **capability-organised**, not layer-organised:
+When a refactor touches multiple call sites, do a mechanical sweep across all sites rather than targeted fixes at a few.
 
-```
-src/
-├── catalog/          # Catalog manifest + git operations
-├── commands/         # CLI command implementations (silent-compute + emit wrappers)
-├── config/           # config.toml parsing (strict, #[serde(deny_unknown_fields)])
-├── embedding/        # Embedder + reranker traits, model download, ONNX runtime
-├── error.rs          # Closed TomeError enum (exit-code source of truth)
-├── harness/          # Harness integration (claude-code, codex, cursor, etc.)
-├── index/            # SQLite index, schema, migrations, vector search
-├── mcp/              # MCP server (async island; sync boundary enforced by tests)
-├── paths.rs          # XDG path resolution, phase-specific layouts
-├── plugin/           # Plugin lifecycle (enable/disable/reindex, SKILL.md parsing)
-├── presentation/     # Output formatting (tables, progress, colour, prompts)
-├── settings/         # Workspace-scoped settings + composition resolver
-├── substitution/     # Variable substitution pipeline (FR-022/051)
-├── summarise/        # Summariser abstraction + LlamaModel inference
-├── util/             # Atomic writes, error utilities
-└── workspace/        # Workspace lifecycle, scope resolution
-```
+**Example**: Phase 4 US1 mechanical sweep threaded `ResolvedScope` + `Paths::*_for(&scope)` through every command surface (35 files touched).
 
-Each module is **root-owned** — no circular dependencies. Phase 3's `tests/sync_boundary.rs` enforces that only `src/mcp/` uses `tokio` / `async`.
+### Helper Visibility Promotion (Rule of 3)
 
-## Strictness Boundary
+When a helper function is reused at 3+ call sites, promote it to `pub` or move it to a shared module.
 
-**Tome-owned inputs** (config.toml, manifest.json, index schema) use `#[serde(deny_unknown_fields)]` — forward-incompatible changes are caught immediately. Tests in `tests/manifest_strictness.rs` grep for the marker across all relevant types.
+**Example**: `paths_for(&ToolEnv) -> Paths` was duplicated across 3 test files, then promoted to `tests/common/mod.rs`.
 
-**Third-party inputs** (plugin.json, SKILL.md frontmatter) parse **leniently** — unknown fields are ignored, allowing upstream extensions without breaking Tome's plugin consumption. This is explicitly documented in the phase-1 spec (FR-013a) and reinforced in all later phases.
+## Comments & Documentation
+
+| Type | Format | Usage |
+|------|--------|-------|
+| Module-level doc | `//! ...` | Every `mod.rs` explains its purpose |
+| Function-level doc | `/// ...` | Public functions get docs with examples |
+| Inline comments | `// ...` | Explain *why* — assume reader knows Rust |
+| TODO/FIXME | `// TODO: ...` | Mark incomplete work |
+| Compiler directives | `#[doc(hidden)]` | Mark test-injection seams |
 
 ## Git Conventions
 
 ### Commit Messages
 
-Format: `type(scope): subject`
+Format: `type(scope): description`
 
-| Type | Usage | Examples |
-|------|-------|----------|
-| `feat` | New feature | `feat(plugin): add enable command` |
-| `fix` | Bug fix | `fix(index): correct schema migration order` |
-| `test` | Test additions | `test(substitution): add built-ins stage coverage` |
-| `refactor` | Code restructure | `refactor(harness): consolidate sync paths` |
-| `docs` | Documentation | `docs(CLAUDE.md): update phase-5 learnings` |
-| `chore` | Maintenance | `chore(deps): pin llama-cpp-2 at 0.1.146` |
+| Type | Usage |
+|------|-------|
+| feat | New feature (phase deliverable) |
+| fix | Bug fix |
+| refactor | Code restructure (no behavior change) |
+| test | Test additions or fixes |
+| docs | Documentation |
+| chore | Maintenance, dependencies |
 
-Enforced by `cocogitto` via `.githooks/commit-msg` hook.
+**Enforcement**: `cocogitto` hook at `.githooks/commit-msg` validates format. Constitution principle IX mandates this.
 
-### Branching
+### Branch Naming
 
-**Trunk-based development**: short-lived branches off `main`. PR strategy:
-- **Small batches**: ~400 lines or 2 modules max as soft cap
-- **Parallel slices**: each user story pre-planned into concrete 2–4 line slices
-- **Four-reviewer pass**: contract audit, Rust-lens code review, test audit, security audit (after feature complete)
+Trunk-based development. Short-lived feature/fix branches off `main`.
 
-## Comments & Documentation
+### PR Strategy
 
-| Type | When to Use | Format |
-|------|------------|--------|
-| Module docstring | Every file in `src/` | `//! Public API and invariants for this module` |
-| Item docstring | Public structs, traits, enums, functions | `/// What this does and why` |
-| SAFETY comment | Every unsafe block | `// SAFETY: we hold HOME_MUTEX for the lifetime of Self.` |
-| TODO | Planned work (document why it's deferred) | `// TODO (Phase 6): add concurrent reindex via rayon` |
-| Inline comment | Complex logic, non-obvious invariants | `// Leftmost alternation guarantees env branch wins on TOME_ENV_* refs` |
+- **Small batches**: ~400 lines or 2 modules max as soft cap.
+- **Chunked slices**: multi-PR features follow numbered slices (PR #74 Slice 1a, PR #75 Slice 1b).
+- **Focused commits**: one logical change per commit.
 
-**Phase annotations**: When a pattern, guard, or variant was introduced, cite the phase and user story:
+## Import Ordering
+
+Standard order:
+
+1. External crates (`clap`, `serde`, `rusqlite`)
+2. Internal crates (rare; Tome is single-binary)
+3. Crate-root re-exports (`crate::commands`, `crate::error`)
+4. Relative imports (`self::helper`, `super::parent`)
+
 ```rust
-// Phase 5 / US2 — environment variable substitution stage.
-// Env vars are never re-scanned (no-rescan invariant, NFR-007).
+use std::path::PathBuf;
+
+use clap::Parser;
+use rusqlite::Connection;
+
+use crate::commands;
+use crate::error::TomeError;
+
+use self::helper;
+use super::config;
 ```
 
-This aids navigation of the phase-locked spec documents.
+## Module Organization
+
+Capability-oriented: each module owns one cohesive feature.
+
+| Module | Responsibility |
+|--------|-----------------|
+| `catalog` | Catalog manifest, git cloning, registry persistence |
+| `config` | Top-level `config.toml` / per-catalog entries (legacy) |
+| `paths` | XDG path resolution, Tome root layout |
+| `error` | Closed `TomeError` enum + exit codes |
+| `commands` | CLI command dispatch + emission adapters |
+| `plugin` | Plugin manifest, frontmatter, lifecycle |
+| `index` | SQLite database, schema, migrations, skill CRUD, queries |
+| `embedding` | Embedder/Reranker traits, FastembedEmbedder impl |
+| `presentation` | CLI tables, spinners, colour, prompts |
+| `workspace` | Workspace lifecycle, binding, resolution, scope |
+| `settings` | Layered settings composition, TOML edit |
+| `harness` | Per-harness module integration, rules-file + MCP-config |
+| `doctor` | System diagnostics, suggested fixes |
+| `mcp` | Async MCP server (only async island) |
+| `substitution` | Hand-rolled variable substitution (Phase 5) |
+| `summarise` | LLM-based text summarization (Phase 4) |
+
+## Testing Discipline
+
+See `TESTING.md` for detailed test patterns, but core conventions:
+
+- **One assertion per test** (or tightly-related assertions).
+- **Test file names match functionality**: `catalog_add.rs` tests `tome catalog add`.
+- **Common helpers in `tests/common/mod.rs`**: `ToolEnv`, `Fixture`, guard patterns.
+- **Isolation via TempDir**: every test gets fresh `$HOME` and XDG layout.
+- **No real I/O by default**: models, embedders, git clones fabricated or stubbed.
+
+## Strictness at Boundaries
+
+- **Input strictness**: `#[serde(deny_unknown_fields)]` on Tome-owned inputs.
+- **Output leniency**: third-party JSON and YAML parsed leniently.
+- **Credentials scrubbed**: all error chains + model URLs sanitized before logging.
+- **Symlink refusal**: symlink paths refused at every read/write entry point.
 
 ---
 
-## What Does NOT Belong Here
-
-- Test strategies → `TESTING.md`
-- Security practices → `SECURITY.md`
-- Architecture patterns → `ARCHITECTURE.md`
-- Technology choices → `STACK.md`
-
----
-
-*This document defines HOW to write code. Update when conventions change or new patterns are established.*
+*This document defines HOW to write code. Update when conventions change or a new pattern reaches 3+ uses.*

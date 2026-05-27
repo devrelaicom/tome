@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-27 (Phase 5 / US2 complete; CRITICAL no-rescan invariant structural fix)
+> **Last Updated**: 2026-05-27 (Phase 5 / US3 complete; argument substitution secured via no-rescan invariant)
 
 ## Overview
 
@@ -41,7 +41,8 @@ Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, wo
 31. Phase 4 / US5 additions: Doctor command extensible with five repair classes (embedder/reranker/catalog/binding/summariser); orphan staging-directory cleanup with TOCTOU-safe mtime gating; project-local harness synchronisation separate from workspace-broadcast; user-owned harness MCP override filtered by active fix list; read-only index access for diagnostic lookups
 32. Phase 4 / Polish additions: `util::bounded_read_to_string` with per-class caps applied to ~26 sites; `home_root()` validation for absolute, canonical, exists; relative/unset `$HOME` exits 2 Usage; consolidated `ProjectMarkerConfig` to one type + canonical `settings::parser::read_project_marker`; doctor harnesses list hyphenated naming; five-layer defence-in-depth for `remove_dir_all` on scanned dirs
 33. Phase 5 / US1 additions: Entry body-file path validation rejects `..` traversal and absolute paths (prevents directory-escape via skill/command bodies); arguments list hard-capped at 256 entries in frontmatter parser (DoS mitigation)
-34. **Phase 5 / US2 additions (CRITICAL SECURITY FIX)**: No-rescan invariant (NFR-007 / FR-051) enforced via SINGLE unified regex pass for Stages 1+2 substitution (`COMBINED_RE`); resolved values emitted directly to output buffer and never re-scanned, closing the data-exfiltration vector where a hostile plugin's `"version": "${TOME_ENV_GITHUB_TOKEN}"` could leak operator's env vars into LLM context
+34. Phase 5 / US2 additions (CRITICAL SECURITY FIX): No-rescan invariant (NFR-007 / FR-051) enforced via SINGLE unified regex pass for Stages 1+2 substitution (`COMBINED_RE`); resolved values emitted directly to output buffer and never re-scanned, closing the data-exfiltration vector where a hostile plugin's `"version": "${TOME_ENV_GITHUB_TOKEN}"` could leak operator's env vars into LLM context
+35. **Phase 5 / US3 additions (STRUCTURAL SECURITY)**: Argument substitution (Stage 3) folded into the unified `COMBINED_RE` regex; caller-supplied args never recursive-substitute (no `$ARGUMENTS` output re-matched for `${TOME_*}`, no argument-value re-matched for `$N`); structural enforcement via single `captures_iter` loop with direct output emission — hostile argument values containing `${TOME_*}` or `$ARGUMENTS[N]` patterns cannot exfiltrate (Stage 3 is coerced once per render, not re-scanned); 0 security findings from US3 reviewer pass
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
@@ -199,11 +200,11 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 |---------|----------------|---------|
 | **MCP query length cap** | 4096 chars enforced at search_skills input boundary (FR-555) | `src/mcp/tools/search_skills.rs::106` validates before expensive compute |
 
-## Substitution Engine Security (Phase 5 / US2, CRITICAL)
+## Substitution Engine Security (Phase 5 / US2–US3, CRITICAL)
 
 ### No-Rescan Invariant (NFR-007 / FR-051) — Structural Fix
 
-**CRITICAL SECURITY ARCHITECTURE**: The substitution engine enforces the no-rescan invariant via SINGLE unified regex pass for Stages 1 (built-ins) + Stage 2 (env passthrough).
+**CRITICAL SECURITY ARCHITECTURE**: The substitution engine enforces the no-rescan invariant via SINGLE unified regex pass for Stages 1 (built-ins), 2 (env passthrough), AND 3 (caller-supplied arguments).
 
 **The Vulnerability** (US2.d B2 blocker):
 - Naive two-pass design: Stage 1 scans `${TOME_*}` → resolves to string → Stage 2 re-scans result
@@ -213,33 +214,38 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 - Result: operator's secret leaks into LLM context (e.g., skill prompt includes `${TOME_PLUGIN_VERSION}`)
 
 **The Fix** (`src/substitution/regex_sets.rs::COMBINED_RE`):
-- Single regex pattern: `\$\{TOME_(?:ENV_([A-Z0-9_]+)|([A-Z0-9_]+))(?::-(.*?))?\}`
-- Two capture groups with leftmost-first alternation:
-  - Group 1: `ENV_` branch (env-passthrough)
-  - Group 2: Built-in branch (Stage 1 names)
-- Single `captures_iter` loop emits resolved values directly to output buffer
+- Single regex pattern: `\$\{TOME_(?:ENV_([A-Z0-9_]+)|([A-Z0-9_]+))(?::-(.*?))?\}|\$ARGUMENTS\[(\d+)\]|\$ARGUMENTS|\$(\d+)|\$([a-z_][a-z0-9_]*)`
+- Six capture groups with leftmost-first alternation:
+  - Group 1: `ENV_` branch (Stage 2; env-passthrough)
+  - Group 2: Built-in branch (Stage 1; names)
+  - Group 3: `:-default` (applies to Stage 1 or 2)
+  - Groups 4–6: Stage 3 alternatives (`$ARGUMENTS[N]`, `$N`, `$<name>`)
+  - Bare `$ARGUMENTS` has no capture group (dispatcher matches `m.as_str()`)
+- Single `captures_iter` loop emits resolved values directly to output buffer (lines 161–238 of `src/substitution/mod.rs`)
 - **Resolved values never re-enter the scanner** → exfiltration vector closed structurally
 
-**Code Location**: `src/substitution/mod.rs::render()` (lines 97–158)
+**Code Location**: `src/substitution/mod.rs::render()` (lines 115–262)
 ```rust
-// Stage 1 + 2 unified pass — no intermediate re-scan
+// Stages 1 + 2 + 3 unified pass — no intermediate re-scan
 let re = regex_sets::combined_regex();
 for caps in re.captures_iter(body) {
-    // Per-match: exactly one of group 1 (env) or group 2 (builtin) is set
+    // Per-match: exactly one of group 1 (env), 2 (builtin), 4/5/6 (arg) is set
     if let Some(env_name) = caps.get(1) {
         let value = env::resolve_env(env_name.as_str(), default);  // Stage 2
         out.push_str(&value);  // Direct emit; never re-scanned
-    } else {
-        // Stage 1: resolve builtin
-        let value = builtins::resolve_builtin(...)?;
+    } else if let Some(builtin_name) = caps.get(2) {
+        let value = builtins::resolve_builtin(...)?;  // Stage 1
         out.push_str(&value);  // Direct emit; never re-scanned
+    } else if let Some(args) = resolved_args.as_ref() {
+        // Stage 3: argument dispatch (details below)
+        // Coerced argument values emitted directly; never re-scanned
     }
 }
 ```
 
 **Trust Boundary Definition**:
 - **Input**: Entry body (skill or command YAML frontmatter, third-party authored)
-- **Trusted operations**: Built-in paths (`${TOME_SKILL_DIR}`, `${TOME_WORKSPACE_DATA}`), env passthrough
+- **Trusted operations**: Built-in paths (`${TOME_SKILL_DIR}`, `${TOME_WORKSPACE_DATA}`), env passthrough, caller arguments
 - **Substituted output**: Rendered body fed to LLM/prompt context
 - **Constraint**: Operator explicitly enables plugins (trusted decision); argument values NOT escaped (shell-style quoting per FR-043)
 - **Documented limitation** (Phase 6+): Operators must not enable plugins from untrusted sources if plugins use `$ARGUMENTS` in high-privilege commands
@@ -248,8 +254,10 @@ for caps in re.captures_iter(body) {
 - `tests/substitution_pipeline.rs` — integration tests for unified pass
 - `tests/substitution_env.rs` — env-passthrough tests
 - `tests/substitution_builtins.rs` — built-in resolution tests
-- Test assertion: `resolve_env(...)` output never fed back to `combined_regex()` for re-matching
+- `tests/substitution_arguments.rs` — Stage 3 argument dispatch tests
+- Test assertion: no resolved value from any stage is fed back to `combined_regex()` for re-matching
 - Phase 5 / US2 blocker (Closed C-B1): No-rescan invariant verified end-to-end
+- Phase 5 / US3 (Closed): Argument substitution folded into unified regex; 0 security findings
 
 ### Stage 1: Built-ins Resolution
 
@@ -296,6 +304,68 @@ for caps in re.captures_iter(body) {
 
 No transitive data exfiltration possible (Stage 1 output cannot leak into Stage 2).
 
+### Stage 3: Argument Substitution (Phase 5 / US3)
+
+**Reference Formats** (`src/substitution/arguments.rs`):
+
+| Format | Example | Resolution |
+|--------|---------|-----------|
+| **Indexed positional** | `$ARGUMENTS[N]` | Nth positional argument (0-indexed) |
+| **Bare positional join** | `$ARGUMENTS` | All positional arguments joined by space |
+| **Positional shorthand** | `$N` | Nth positional argument (equivalent to `$ARGUMENTS[N]`) |
+| **Named argument** | `$<name>` | Lookup by declared argument name |
+
+**Coercion Algorithm** (`src/substitution/arguments.rs::coerce_arguments`):
+
+The caller-supplied arguments are coerced once per render (not per-match) according to the entry's declared argument shape:
+
+1. **Declared names (entry specifies `arguments: ["foo", "bar"]`)**
+   - Caller supplies single string → shell-split into tokens; bind positionally to names
+   - Caller supplies object with named keys → lookup by name; extra values are positional
+   - Object with unknown keys → `PromptArgumentMismatch` (exit 26)
+
+2. **Catch-all (entry specifies `arguments: "args"`)**
+   - Caller supplies single string → keep as whole positional (no shell-split)
+   - Caller supplies object → error (exit 26)
+
+3. **No arguments (entry has no `arguments` field)**
+   - Caller supplies any arguments → references like `$0` left verbatim (Stage 3 structurally skipped)
+
+**Security Structural Fix** (`src/substitution/mod.rs::render()`):
+
+The coerced `ResolvedArguments` are held in a single `resolved_args` variable (lines 144–147) created ONCE before the regex loop. Per-match dispatch in the loop (lines 197–221) looks up the resolved value and emits it directly to the output buffer:
+
+```rust
+// Coerce once, before loop (never re-scanned)
+let resolved_args = match &context.args {
+    Some(values) => Some(arguments::coerce_arguments(values, &context.declared_args)?),
+    None => None,
+};
+
+for caps in re.captures_iter(body) {
+    // ...
+    } else if let Some(args) = resolved_args.as_ref() {
+        // Stage 3: emit resolved value directly
+        let (value, substituted) = arguments::apply_arguments_match(&caps, args);
+        if substituted {
+            out.push_str(&value);  // Direct emit; never re-scanned
+        }
+    }
+}
+```
+
+**No Recursive Substitution**:
+- A Stage-1 built-in resolving to `$0` cannot be hijacked by a Stage-3 positional substitution (Stage 1 output never re-entered the scanner)
+- A caller-supplied argument value containing `${TOME_*}` or `$ARGUMENTS[N]` patterns cannot exfiltrate (argument values emitted directly; never re-scanned)
+- Example: hostile caller supplies `arg0="${TOME_ENV_SECRET}"` → rendered as literal `"${TOME_ENV_SECRET}"` (not re-interpreted)
+
+**Test Coverage** (`tests/substitution_arguments.rs` + `tests/substitution_pipeline.rs`):
+- Indexed positional, bare join, shorthand, named dispatch tests
+- Shell-split coercion tests (quoted strings, escapes)
+- Named/positional mismatch tests
+- No-rescan verification: `stage_1_output_cannot_be_hijacked_by_stage_3`
+- Mixed-stage pipeline tests confirming output never re-enters scanner
+
 ### Default Value Support
 
 Both stages support optional `:-fallback` syntax:
@@ -305,6 +375,26 @@ ${TOME_SKILL_NAME:-default}   → Built-in always set; default unused but accept
 ```
 
 Per contract `contracts/substitution-engine.md` § Stage 2 table.
+
+### Stage 4: ARGUMENTS Append Fallback (Phase 5 / US3)
+
+**Trigger Conditions** (per `contracts/substitution-engine.md` § Stage 4):
+- Caller supplied arguments AND Stage 3 reported zero replacements in the body
+
+**Value** (per research §R-13):
+- `Single("<string>")` → whole string verbatim
+- `Object({...})` → positional values joined by single space (no shell-split reversal)
+
+**Separator Policy** (`src/substitution/mod.rs::stage_4_value`):
+- Body ends with `\n` → add one `\n` + `ARGUMENTS: `
+- Body ends with non-`\n` → add two `\n`s + `ARGUMENTS: `
+
+**Example**:
+```
+Body: "Hello, world!"
+Args: ["foo", "bar"]
+Result: "Hello, world!\n\nARGUMENTS: foo bar"
+```
 
 ## File System Security
 
@@ -386,9 +476,12 @@ Per contract `contracts/substitution-engine.md` § Stage 2 table.
 - Exit 28: `SubstitutionFailed` (body-path traversal, env var issues)
 - Exit 29: `InvalidArgumentFrontmatter` (arguments list DoS cap, etc.)
 
+**Phase 5 / US3 additions**:
+- No new exit codes (uses Phase 5 / US2 codes: 26 for mismatch, 28 for substitution issues)
+
 See `specs/005-phase-5-commands-prompts/contracts/exit-codes-p5.md` for full enumeration.
 
 ---
 
 *This document defines security controls. Update when security posture changes.*
-*Last refreshed 2026-05-27 against Phase 5 / US2 complete source; 1000+ tests passing.*
+*Last refreshed 2026-05-27 against Phase 5 / US3 complete source (1000+ tests passing, ~130 suites); argument substitution secured via unified no-rescan invariant.*
