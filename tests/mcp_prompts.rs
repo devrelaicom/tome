@@ -435,7 +435,12 @@ fn get_returns_unrendered_body_for_no_args_entry() {
 
 #[test]
 fn get_returns_body_for_structured_named_args() {
-    let cmd_body = "---\nname: deploy\ndescription: Deploy.\narguments: [component, from, to]\n---\nRun a deploy for $1 from $2 to $3\n";
+    // 0-indexed positional refs per `contracts/substitution-engine.md`
+    // § Stage 3. With declared `[component, from, to]` and caller
+    // `{component: "frontend", from: "v1", to: "v2"}`:
+    //   positional[0] = frontend, [1] = v1, [2] = v2
+    // Body `$0 $1 $2` resolves to `frontend v1 v2`.
+    let cmd_body = "---\nname: deploy\ndescription: Deploy.\narguments: [component, from, to]\n---\nRun a deploy for $0 from $1 to $2\n";
     let (_tmp, paths) = stage_workspace_with(&[], &[("deploy", cmd_body)]);
     let state = build_state_for_prompts(&paths);
 
@@ -445,20 +450,19 @@ fn get_returns_body_for_structured_named_args() {
     args.insert("to".into(), json!("v2"));
 
     let text = invoke_get(state, "plug__deploy", Some(args)).expect("prompts/get ok");
-    // F3 stub passes the body through unchanged; US3 wires $N
-    // substitution. We assert the unrendered body comes back rather
-    // than locking in stub behaviour we'll soon replace.
     assert!(
-        text.contains("$1") && text.contains("$2") && text.contains("$3"),
-        "F3 stub returns body unchanged; got: {text:?}",
+        text.contains("Run a deploy for frontend from v1 to v2"),
+        "Stage 3 positional substitution; got: {text:?}",
     );
 }
 
 #[test]
 fn get_accepts_single_string_arg_via_catchall() {
     // No declared args; caller supplies `{ "args": "..." }` →
-    // ArgumentValues::Single per FR-071. The handler must accept; the
-    // F3 stub returns the body unchanged.
+    // ArgumentValues::Single per FR-071. With declared empty, the
+    // Stage-3 coercer treats the whole string as a single positional;
+    // `$ARGUMENTS` resolves to positional.join(" ") = the whole string
+    // per FR-042's whole-string convention.
     let cmd_body = "---\nname: fix\ndescription: Fix.\n---\nPlease fix $ARGUMENTS\n";
     let (_tmp, paths) = stage_workspace_with(&[], &[("fix", cmd_body)]);
     let state = build_state_for_prompts(&paths);
@@ -467,7 +471,10 @@ fn get_accepts_single_string_arg_via_catchall() {
     args.insert("args".into(), json!("issue-123"));
 
     let text = invoke_get(state, "plug__fix", Some(args)).expect("prompts/get ok");
-    assert!(text.contains("$ARGUMENTS"), "F3 stub: body unchanged");
+    assert!(
+        text.contains("Please fix issue-123"),
+        "$ARGUMENTS resolved via catch-all; got: {text:?}",
+    );
 }
 
 #[test]

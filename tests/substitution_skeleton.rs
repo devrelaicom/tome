@@ -43,13 +43,20 @@ fn render_returns_body_unchanged_in_skeleton() {
 }
 
 #[test]
-fn render_with_args_returns_body_unchanged_in_skeleton() {
+fn render_with_args_appends_arguments_footer_when_body_has_no_refs() {
+    // Phase 5 / US3.b lit up the Stage 4 append-fallback. The body
+    // here has no Stage-3 references, so the footer is appended.
+    // (The F3 skeleton-era version of this test asserted body
+    // unchanged — superseded by Stage 4.)
     let tmp = tempfile::tempdir().unwrap();
     let mut ctx = dummy_context(tmp.path());
     ctx.args = Some(ArgumentValues::Single("hello world".to_string()));
     let body = "Body that the skeleton will not transform.";
-    let out = substitution::render(body, &ctx).expect("skeleton render");
-    assert_eq!(out, body);
+    let out = substitution::render(body, &ctx).expect("render");
+    assert_eq!(
+        out,
+        "Body that the skeleton will not transform.\n\nARGUMENTS: hello world"
+    );
 }
 
 #[test]

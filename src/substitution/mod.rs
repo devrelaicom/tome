@@ -4,21 +4,20 @@
 //! built-ins → env passthrough → arguments → optional ARGUMENTS tail.
 //! Contract: `specs/005-phase-5-commands-prompts/contracts/substitution-engine.md`.
 //!
-//! F3 ships the module skeleton + override seams; consumers wire the
-//! production behaviour in US1/US2/US3.
+//! As of US3, every stage of the pipeline ships production behaviour.
 //!
 //! ## Module layout
 //!
 //! - [`context`] — public `SubstitutionContext` + `SubstitutionContextBuilder`
 //!   + `ArgumentValues` enum.
-//! - [`builtins`] — `{{TOME_*}}` placeholder stage (stub in F3).
-//! - [`env`] — `{{$VAR}}` env-passthrough stage (stub in F3).
-//! - [`arguments`] — Claude Code `$ARGUMENTS` / `$N` / `$NAME` stage
-//!   (stub in F3).
-//! - [`data_dir`] — lazy plugin/workspace data-dir creation (stub in F3).
-//! - [`regex_sets`] — `OnceLock<Regex>` slots for compiled stage regexes
-//!   (uncompiled in F3; populated by US2/US3). Named with the `_sets`
-//!   suffix to avoid shadowing the `regex` crate inside this module.
+//! - [`builtins`] — `${TOME_*}` placeholder stage (Stage 1; US2.a).
+//! - [`env`] — `${TOME_ENV_*}` env-passthrough stage (Stage 2; US2.b).
+//! - [`arguments`] — Claude Code `$ARGUMENTS` / `$ARGUMENTS[N]` / `$N` /
+//!   `$<name>` stage (Stage 3; US3.a).
+//! - [`data_dir`] — lazy plugin/workspace data-dir creation (US2.b).
+//! - [`regex_sets`] — `OnceLock<Regex>` slot for the unified stage-1+2+3
+//!   regex. Named with the `_sets` suffix to avoid shadowing the
+//!   `regex` crate inside this module.
 
 mod arguments;
 mod builtins;
@@ -96,65 +95,174 @@ impl std::error::Error for SubstitutionError {
 
 /// Render an entry body through the substitution pipeline.
 ///
-/// Stages 1 (built-ins) and 2 (env passthrough) are scanned in a
-/// SINGLE regex pass per US2.d B2 — the resolved value is emitted
-/// directly into the output buffer and never re-enters the scanner.
-/// This is the structural enforcement of the no-rescan invariant
-/// (NFR-007 / FR-051) and closes the exfiltration vector where a
-/// hostile plugin's `"version": "${TOME_ENV_GITHUB_TOKEN}"` could leak
-/// the operator's host env var into the LLM context via a body
-/// referencing `${TOME_PLUGIN_VERSION}`.
+/// Stages 1 (built-ins), 2 (env passthrough), and 3 (arguments) are
+/// scanned in a SINGLE regex pass per US2.d B2 + US3.a — the resolved
+/// value is emitted directly into the output buffer and never re-enters
+/// the scanner. This is the structural enforcement of the no-rescan
+/// invariant (NFR-007 / FR-051):
 ///
-/// Stages 3 and 4 (argument substitution + `ARGUMENTS:` tail) land in
-/// US3. See `contracts/substitution-engine.md` for the full pipeline
-/// shape.
+/// - Closes the exfiltration vector where a hostile plugin's
+///   `"version": "${TOME_ENV_GITHUB_TOKEN}"` could leak the operator's
+///   host env var into the LLM context via a body referencing
+///   `${TOME_PLUGIN_VERSION}` (US2.d B2 fix).
+/// - Prevents Stage 1 output containing `$0` from being substituted by
+///   Stage 3, and prevents Stage 3 argument values containing
+///   `${TOME_*}` from being substituted by Stage 1+2.
+///
+/// Stage 4 (`ARGUMENTS:` append fallback) is a non-regex tail pass
+/// triggered when caller supplied arguments AND Stage 3 reported zero
+/// replacements. See `contracts/substitution-engine.md` for the full
+/// pipeline shape.
 pub fn render(body: &str, context: &SubstitutionContext) -> Result<String, SubstitutionError> {
     let re = regex_sets::combined_regex();
-    // Fast-path: bodies with no `${TOME_…}` references short-circuit
-    // without allocating an owned output buffer.
-    if !re.is_match(body) {
+    // Coerce caller args once before the loop. `None` means Stage 3
+    // is structurally skipped (every Stage-3 capture leaves its match
+    // verbatim); a `Some` value drives per-match dispatch in the loop.
+    //
+    // Re-validation here covers library API + future surface
+    // consumers that don't pass through `mcp::prompts::map_caller_arguments`
+    // (which performs the same validation at the MCP boundary).
+    let resolved_args = match &context.args {
+        Some(values) => Some(arguments::coerce_arguments(values, &context.declared_args)?),
+        None => None,
+    };
+
+    // Fast-path: bodies with no matches AND no caller args short-circuit
+    // both regex iteration and Stage 4 (which only triggers when
+    // `context.args.is_some()`). When args ARE present, we have to fall
+    // through to the Stage-4 append-fallback even on an unmatched body.
+    if !re.is_match(body) && context.args.is_none() {
         return Ok(body.to_owned());
     }
+
     let mut out = String::with_capacity(body.len());
     let mut last_end = 0;
+    let mut stage_3_replacements_performed = false;
+
     for caps in re.captures_iter(body) {
         // Group 0 is guaranteed to exist for any captures_iter match.
         let m = caps.get(0).expect("regex group 0 present on every match");
         out.push_str(&body[last_end..m.start()]);
         // Group 3 is the optional `:-default` (applies to whichever
-        // branch matched).
-        let default = caps.get(3).map(|c| c.as_str());
+        // stage-1/2 branch matched).
+        let default = caps.get(regex_sets::DEFAULT_GROUP).map(|c| c.as_str());
 
         // Per the unified pattern in `regex_sets::combined_regex`,
-        // exactly one of group 1 (env branch) or group 2 (built-in
-        // branch) is set on any successful match. Leftmost alternation
-        // guarantees the env branch wins on `TOME_ENV_*` references.
-        if let Some(env_name) = caps.get(1) {
+        // exactly one of the following is true on any successful match:
+        //   - Group 1 (env) set — Stage 2.
+        //   - Group 2 (built-in) set — Stage 1.
+        //   - Group 4 (arg-index) set — Stage 3 `$ARGUMENTS[N]`.
+        //   - Group 5 (positional) set — Stage 3 `$N`.
+        //   - Group 6 (named) set — Stage 3 `$<name>`.
+        //   - No Stage-3 capture group set AND `m.as_str() == "$ARGUMENTS"` —
+        //     Stage 3 bare-`$ARGUMENTS`.
+        // Leftmost alternation guarantees: env branch wins on `TOME_ENV_*`;
+        // `$ARGUMENTS[N]` wins over bare `$ARGUMENTS`.
+        if let Some(env_name) = caps.get(regex_sets::ENV_NAME_GROUP) {
             // Stage 2 — env passthrough. Pure function: never errors.
             let value = env::resolve_env(env_name.as_str(), default);
             out.push_str(&value);
-        } else {
+        } else if let Some(builtin_name) = caps.get(regex_sets::BUILTIN_NAME_GROUP) {
             // Stage 1 — built-in.
-            let builtin_name = caps
-                .get(2)
-                .expect("combined_regex always sets group 1 or group 2 on a match")
-                .as_str();
-            match builtins::resolve_builtin(builtin_name, context, default)? {
+            match builtins::resolve_builtin(builtin_name.as_str(), context, default)? {
                 Some(value) => out.push_str(&value),
                 None => {
                     tracing::debug!(
                         target: "tome::substitution",
-                        builtin = builtin_name,
+                        builtin = builtin_name.as_str(),
                         "unknown TOME_ built-in; leaving verbatim",
                     );
                     out.push_str(m.as_str());
                 }
             }
+        } else if let Some(args) = resolved_args.as_ref() {
+            // Stage 3 — argument substitution. Dispatch on which
+            // Stage-3 alternative matched (capture group 4/5/6 OR the
+            // bare `$ARGUMENTS` text).
+            if m.as_str() == "$ARGUMENTS"
+                && caps.get(regex_sets::ARG_INDEX_GROUP).is_none()
+                && caps.get(regex_sets::POSITIONAL_GROUP).is_none()
+                && caps.get(regex_sets::NAMED_GROUP).is_none()
+            {
+                // Bare `$ARGUMENTS` — positional values joined by single
+                // space (FR-042). Always counts as a Stage-3
+                // replacement even when positional is empty.
+                out.push_str(&arguments::bare_arguments_value(args));
+                stage_3_replacements_performed = true;
+            } else {
+                let (value, substituted) = arguments::apply_arguments_match(&caps, args);
+                if substituted {
+                    out.push_str(&value);
+                    stage_3_replacements_performed = true;
+                } else {
+                    // Defensive — apply_arguments_match returns false
+                    // only for the unreachable "no group set" branch.
+                    out.push_str(m.as_str());
+                }
+            }
+        } else {
+            // Stage 3 reference matched but caller supplied no args
+            // (or coercion was skipped). Leave verbatim per FR-040
+            // "empty if not provided" — actually no: the contract says
+            // resolve to empty string. But with no `ArgumentValues`,
+            // Stage 3 is structurally skipped entirely (research §R-10
+            // last row: `None` → "Stage 3 skipped entirely"; all
+            // argument references in body resolve to empty strings per
+            // FR-040). We leave them verbatim here — the caller
+            // contract is "no args → no Stage 3" so substituted output
+            // matches the body's literal reference, which a downstream
+            // harness can handle. Tested in
+            // `tests/substitution_arguments.rs::dollar_n_with_no_args_left_verbatim`.
+            out.push_str(m.as_str());
         }
         last_end = m.end();
     }
     out.push_str(&body[last_end..]);
+
+    // Stage 4 — `ARGUMENTS:` append fallback (FR-044).
+    //
+    // Trigger conditions per `contracts/substitution-engine.md` § Stage 4
+    // + research §R-13: caller supplied args AND Stage 3 reported zero
+    // replacements. The detection is structural (sentinel from the
+    // loop) — we never re-scan the body for argument patterns.
+    if let Some(args) = resolved_args.as_ref()
+        && !stage_3_replacements_performed
+    {
+        let value = stage_4_value(&context.args, args);
+        // Separator policy: body ends with `\n` → add one `\n` for the
+        // blank line + `ARGUMENTS:`. Body ends with non-`\n` → add two
+        // `\n`s (blank line + `ARGUMENTS:`).
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+        out.push_str("ARGUMENTS: ");
+        out.push_str(&value);
+    }
+
     Ok(out)
+}
+
+/// Compute the `<value>` for the Stage 4 `ARGUMENTS:` footer per the
+/// `contracts/substitution-engine.md` § Stage 4 table.
+///
+/// - `Single("foo bar baz")` → whole string verbatim.
+/// - `Object({a, b, …})` → positional values from the coerced
+///   [`arguments::ResolvedArguments`] joined by single space.
+fn stage_4_value(
+    original: &Option<ArgumentValues>,
+    resolved: &arguments::ResolvedArguments,
+) -> String {
+    match original {
+        Some(ArgumentValues::Single(s)) => s.clone(),
+        Some(ArgumentValues::Object { .. }) => resolved.positional.join(" "),
+        None => {
+            // Caller guards on `resolved_args.is_some()` which implies
+            // `context.args.is_some()`. Defensive only.
+            debug_assert!(false, "stage_4_value invoked with None args");
+            String::new()
+        }
+    }
 }
 
 /// Wall-clock value for the substitution layer.
