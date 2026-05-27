@@ -95,6 +95,7 @@ fn synthetic_candidate(name: &str, distance: f32) -> Candidate {
         catalog: "cat".to_owned(),
         plugin: "plug".to_owned(),
         name: name.to_owned(),
+        kind: tome::plugin::identity::EntryKind::Skill,
         description: format!("description of {name}"),
         plugin_version: "1.0.0".to_owned(),
         path: format!("/tmp/{name}/SKILL.md"),

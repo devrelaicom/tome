@@ -359,12 +359,12 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US4.c — `search_skills` truncation parameter + reviewer pass + US4 closeout
 
-- [ ] T319 [US4] Extend `SearchSkillsInput` in `src/mcp/tools/search_skills.rs` with `description_max_chars: u32` (default 150) per `contracts/mcp-tools-p5.md` (use devs:rust-dev agent)
-- [ ] T320 [US4] Extend `SearchResult` with `kind: EntryKind` field per FR-091 (use devs:rust-dev agent)
-- [ ] T321 [US4] Implement truncation: if description char count > `description_max_chars`, slice at boundary and append `…` (U+2026); preserve full description if shorter per FR-092 (use devs:rust-dev agent)
-- [ ] T322 [US4] Add `WHERE searchable = 1` filter to the existing search_skills DB query (FR-090) (use devs:rust-dev agent)
-- [ ] T323 [US4] Add input validation: `description_max_chars < 0` → `invalid_description_max_chars` MCP error (use devs:rust-dev agent)
-- [ ] T324 [GIT] Commit: `feat(mcp): search_skills description truncation + kind in result`
+- [x] T319 [US4] Extend `SearchSkillsInput` in `src/mcp/tools/search_skills.rs` with `description_max_chars: u32` (default 150) per `contracts/mcp-tools-p5.md` (use devs:rust-dev agent)
+- [x] T320 [US4] Extend `SearchResult` with `kind: EntryKind` field per FR-091 (use devs:rust-dev agent)
+- [x] T321 [US4] Implement truncation: if description char count > `description_max_chars`, slice at boundary and append `…` (U+2026); preserve full description if shorter per FR-092 (use devs:rust-dev agent)
+- [x] T322 [US4] Add `WHERE searchable = 1` filter to the existing search_skills DB query (FR-090) (use devs:rust-dev agent)
+- [x] T323 [US4] Add input validation: `description_max_chars < 0` → `invalid_description_max_chars` MCP error (use devs:rust-dev agent)
+- [x] T324 [GIT] Commit: `feat(mcp): search_skills description truncation + kind in result`
 - [ ] T325 [US4] Create `tests/mcp_search_skills_truncation.rs` with tests: default 150 truncation, override via parameter, ellipsis appended, kind in result, disable_model_invocation excluded (use devs:rust-dev agent)
 - [ ] T326 [US4] Create `tests/mcp_search_skills_json_shape.rs` byte-stable JSON pin (extend existing if applicable) (use devs:rust-dev agent)
 - [ ] T327 [GIT] Commit: `test(mcp): search_skills truncation + kind + searchable filter`
