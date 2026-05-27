@@ -365,9 +365,9 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 - [x] T322 [US4] Add `WHERE searchable = 1` filter to the existing search_skills DB query (FR-090) (use devs:rust-dev agent)
 - [x] T323 [US4] Add input validation: `description_max_chars < 0` → `invalid_description_max_chars` MCP error (use devs:rust-dev agent)
 - [x] T324 [GIT] Commit: `feat(mcp): search_skills description truncation + kind in result`
-- [ ] T325 [US4] Create `tests/mcp_search_skills_truncation.rs` with tests: default 150 truncation, override via parameter, ellipsis appended, kind in result, disable_model_invocation excluded (use devs:rust-dev agent)
-- [ ] T326 [US4] Create `tests/mcp_search_skills_json_shape.rs` byte-stable JSON pin (extend existing if applicable) (use devs:rust-dev agent)
-- [ ] T327 [GIT] Commit: `test(mcp): search_skills truncation + kind + searchable filter`
+- [x] T325 [US4] Create `tests/mcp_search_skills_truncation.rs` with tests: default 150 truncation, override via parameter, ellipsis appended, kind in result, disable_model_invocation excluded (use devs:rust-dev agent)
+- [x] T326 [US4] Create `tests/mcp_search_skills_json_shape.rs` byte-stable JSON pin (extend existing if applicable) (use devs:rust-dev agent)
+- [x] T327 [GIT] Commit: `test(mcp): search_skills truncation + kind + searchable filter`
 - [ ] T328 [US4] Dispatch 4 reviewer agents in parallel for US4 with per-scope briefs
 - [ ] T329 [US4] Consolidate reviewer findings + write disposition; apply blockers + selected majors
 - [ ] T330 [GIT] Commit: `fix(phase5/us4): reviewer-pass blockers and selected majors`
