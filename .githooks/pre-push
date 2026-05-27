@@ -1,16 +1,17 @@
 #!/bin/sh
 # Tome — pre-push hook
 #
-# Runs the full test suite before a branch leaves the developer's machine.
-# Constitution principle X says "no change lands on main without green CI";
-# this hook is the local mirror of that — it catches failures before CI has
-# to.
+# Final local quality gate before a branch leaves the dev machine. Mirrors
+# the pre-commit chain (cargo fmt / typos / clippy) so a --no-verify'd
+# commit can't slip through. The full test suite + build matrix runs in CI
+# on every PR (4-way OS × toolchain matrix, all features); duplicating it
+# locally costs 30+ min for no signal CI doesn't already produce.
 #
 # Git invokes pre-push with stdin connected to a pipe carrying refspecs.
-# Reading or ignoring that pipe is the hook's responsibility. We don't need
-# the refspecs for `cargo test`, so we drain stdin and discard. This also
-# decouples cargo test's stdio inheritance from git's pipe, avoiding a class
-# of harness-wrapper deadlocks observed during Phase 2 slice 2 (see
+# Reading or ignoring that pipe is the hook's responsibility — we don't
+# need the refspecs, so drain and discard. This also decouples downstream
+# stdio inheritance from git's pipe (a class of harness-wrapper deadlocks
+# observed during Phase 2 slice 2 — see
 # specs/002-phase-2-plugins-index/retro/P2.md).
 
 set -e
@@ -18,5 +19,11 @@ set -e
 # Drain stdin (git push pipes refspecs here).
 cat > /dev/null
 
-echo "▶ cargo test --workspace"
-exec cargo test --workspace
+echo "▶ cargo fmt --all -- --check"
+cargo fmt --all -- --check
+
+echo "▶ typos"
+typos
+
+echo "▶ cargo clippy --all-targets --all-features -- -D warnings"
+cargo clippy --all-targets --all-features -- -D warnings
