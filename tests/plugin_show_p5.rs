@@ -212,6 +212,16 @@ fn skill_default_flags_in_json() {
     assert_eq!(s["user_invocable"], false);
     // user_invocable=false → no derived prompt_name.
     assert_eq!(s["prompt_name"], Value::Null);
+    // T-G2 (US5.c): contract specifies both arrays always present in
+    // JSON output. A skills-only plugin must still ship an empty
+    // `commands` array — never omit + never null.
+    let commands = record["commands"]
+        .as_array()
+        .expect("commands array must be present even when empty");
+    assert!(
+        commands.is_empty(),
+        "skills-only plugin must have empty commands array; got {commands:?}",
+    );
 }
 
 #[test]
@@ -231,6 +241,42 @@ fn command_default_flags_and_derived_prompt_name() {
     assert!(
         derived_name.contains("fix"),
         "prompt_name `{derived_name}` should include entry name"
+    );
+    // T-G2 (US5.c): contract specifies both arrays always present in
+    // JSON output. A commands-only plugin must still ship an empty
+    // `skills` array.
+    let skills = record["skills"]
+        .as_array()
+        .expect("skills array must be present even when empty");
+    assert!(
+        skills.is_empty(),
+        "commands-only plugin must have empty skills array; got {skills:?}",
+    );
+}
+
+#[test]
+fn dormant_not_annotated_when_searchable_true() {
+    // T-G1 (US5.c): negative case for the [dormant] annotation.
+    // SKILL_DEFAULT resolves to searchable=true, user_invocable=false;
+    // [dormant] requires BOTH flags false, so this entry must not be
+    // annotated. Companion to dormant_entry_annotated which exercises
+    // the positive case.
+    let fx = setup_with_entries("plug", &[("s1", SKILL_DEFAULT)], &[]);
+    let out = fx
+        .env
+        .cmd()
+        .args(["plugin", "show", "acme/plug"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("[dormant]"),
+        "skill with searchable=true must NOT be annotated [dormant]; got:\n{stdout}",
     );
 }
 

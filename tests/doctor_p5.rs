@@ -204,12 +204,15 @@ fn entry_counts_by_kind() {
         .as_ref()
         .expect("entry_counts populated in workspace scope");
 
-    // The sample-plugin-catalog enables plugin-alpha which ships
-    // 5 skill directories under `skills/` (one with malformed
-    // frontmatter is skipped by the parser, leaving 4 indexable).
-    assert!(
-        counts.skills >= 1,
-        "expected >=1 skill, got {}",
+    // T-W1 (US5.c): tighten the prior `>=1` assertion to the exact
+    // fixture count. plugin-alpha ships 5 skill directories under
+    // `skills/` (skill-a, skill-b, skill-c, skill-d,
+    // skill-malformed-yaml-body); the malformed entry is skipped by
+    // the lenient parser, leaving 4 indexable skills.
+    assert_eq!(
+        counts.skills, 4,
+        "plugin-alpha fixture ships 4 indexable skills (5 dirs - 1 \
+         malformed-yaml); got {}",
         counts.skills,
     );
     // No commands in the sample fixture.
