@@ -13,11 +13,16 @@
 //! Contract: `specs/005-phase-5-commands-prompts/contracts/mcp-prompts.md`
 //! § Collision handling.
 
+use serde::Serialize;
+
 use crate::plugin::identity::EntryKind;
 
 /// Minimal identity carrier used by the resolver. Decoupled from
 /// `SkillRecord` so the resolver stays pure and trivially testable.
-#[derive(Debug, Clone)]
+///
+/// `Serialize` is required because Phase 5 surfaces this through
+/// `tome doctor --json` via [`super::prompts::CollisionRecord`].
+#[derive(Debug, Clone, Serialize)]
 pub struct EntryIdentity {
     pub catalog: String,
     pub plugin: String,
@@ -36,7 +41,7 @@ pub struct EntryIdentity {
 /// Record of one collision bucket — one entry per name that had two or
 /// more candidates. Emitted regardless of how many entries collided so
 /// the doctor surface can list each one.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CollisionRecord {
     /// The bucket key — the derived name BEFORE counter suffixing.
     pub base_name: String,
@@ -47,7 +52,7 @@ pub struct CollisionRecord {
 
 /// One entry inside a [`CollisionRecord`] with its final assigned name
 /// (the base name for the winner, suffixed for losers).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ResolvedCollisionEntry {
     pub identity: EntryIdentity,
     pub final_name: String,

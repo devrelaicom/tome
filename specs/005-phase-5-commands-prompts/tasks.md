@@ -406,18 +406,18 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US5.b — `tome plugin show` annotations + `tome doctor` Phase 5 surface
 
-- [ ] T359 [US5] Extend `src/commands/plugin/show.rs` to render Skills and Commands sections separately, each entry annotated with `searchable=` / `user_invocable=` / `prompt=<derived>` / `[dormant]` per `contracts/catalog-and-plugin-extensions-p5.md` § Human-mode output (use devs:rust-dev agent)
-- [ ] T360 [US5] Extend `tome plugin show --json` output shape per `contracts/catalog-and-plugin-extensions-p5.md` § JSON-mode output (use devs:rust-dev agent)
-- [ ] T361 [US5] Extend `src/commands/plugin/list.rs` count format to include commands per `contracts/catalog-and-plugin-extensions-p5.md` § `tome plugin list` (use devs:rust-dev agent)
-- [ ] T362 [US5] Add `PromptsReport`, `OrphanDataDirReport`, `EntryCountsByKind` types to `src/doctor/report.rs` per `contracts/doctor-extensions-p5.md` § DoctorReport struct extension (use devs:rust-dev agent)
-- [ ] T363 [US5] Extend `DoctorReport` with `prompts`, `orphan_data_dirs`, `entry_counts` Option fields (use devs:rust-dev agent)
-- [ ] T364 [US5] Implement `doctor::checks::build_prompts_report(workspace, conn)` reusing US1's `PromptRegistry::build_for_workspace` (use devs:rust-dev agent)
-- [ ] T365 [US5] Implement `doctor::checks::detect_orphan_data_dirs(paths, conn)` per `contracts/doctor-extensions-p5.md` § Detection algorithm (use devs:rust-dev agent)
-- [ ] T366 [US5] Implement `doctor::checks::count_entries_by_kind(workspace, conn)` including `pending_re_embedding` count (use devs:rust-dev agent)
-- [ ] T367 [US5] Extend `doctor::assemble_report` to populate the three new sections when in-workspace; emit None when outside-project per Phase 4 convention (use devs:rust-dev agent)
-- [ ] T368 [US5] Extend human-mode + JSON-mode rendering in `src/commands/doctor.rs` per `contracts/doctor-extensions-p5.md` § Human-mode rendering (use devs:rust-dev agent)
-- [ ] T369 [US5] Enforce read-only invariant (FR-124): doctor must NOT lazy-create data dirs; verify by snapshotting `<home>/.tome/` before/after (use devs:rust-dev agent)
-- [ ] T370 [GIT] Commit: `feat(doctor,plugin-show): phase 5 surfaces — prompts, orphans, entry counts, per-entry annotations`
+- [x] T359 [US5] Extend `src/commands/plugin/show.rs` to render Skills and Commands sections separately, each entry annotated with `searchable=` / `user_invocable=` / `prompt=<derived>` / `[dormant]` per `contracts/catalog-and-plugin-extensions-p5.md` § Human-mode output (use devs:rust-dev agent)
+- [x] T360 [US5] Extend `tome plugin show --json` output shape per `contracts/catalog-and-plugin-extensions-p5.md` § JSON-mode output (use devs:rust-dev agent)
+- [x] T361 [US5] Extend `src/commands/plugin/list.rs` count format to include commands per `contracts/catalog-and-plugin-extensions-p5.md` § `tome plugin list` (use devs:rust-dev agent)
+- [x] T362 [US5] Add `PromptsReport`, `OrphanDataDirReport`, `EntryCountsByKind` types to `src/doctor/report.rs` per `contracts/doctor-extensions-p5.md` § DoctorReport struct extension (use devs:rust-dev agent)
+- [x] T363 [US5] Extend `DoctorReport` with `prompts`, `orphan_data_dirs`, `entry_counts` Option fields (use devs:rust-dev agent)
+- [x] T364 [US5] Implement `doctor::checks::build_prompts_report(workspace, conn)` reusing US1's `PromptRegistry::build_for_workspace` (use devs:rust-dev agent)
+- [x] T365 [US5] Implement `doctor::checks::detect_orphan_data_dirs(paths, conn)` per `contracts/doctor-extensions-p5.md` § Detection algorithm (use devs:rust-dev agent)
+- [x] T366 [US5] Implement `doctor::checks::count_entries_by_kind(workspace, conn)` including `pending_re_embedding` count (use devs:rust-dev agent)
+- [x] T367 [US5] Extend `doctor::assemble_report` to populate the three new sections when in-workspace; emit None when outside-project per Phase 4 convention (use devs:rust-dev agent)
+- [x] T368 [US5] Extend human-mode + JSON-mode rendering in `src/commands/doctor.rs` per `contracts/doctor-extensions-p5.md` § Human-mode rendering (use devs:rust-dev agent)
+- [x] T369 [US5] Enforce read-only invariant (FR-124): doctor must NOT lazy-create data dirs; verify by snapshotting `<home>/.tome/` before/after (use devs:rust-dev agent)
+- [x] T370 [GIT] Commit: `feat(doctor,plugin-show): phase 5 surfaces — prompts, orphans, entry counts, per-entry annotations`
 - [ ] T371 [US5] Create `tests/plugin_show_p5.rs` with tests per `contracts/catalog-and-plugin-extensions-p5.md` § Tests (use devs:rust-dev agent)
 - [ ] T372 [US5] Create `tests/plugin_show_p5_json_shape.rs` byte-stable JSON pin (use devs:rust-dev agent)
 - [ ] T373 [US5] Create `tests/doctor_p5.rs` with tests per `contracts/doctor-extensions-p5.md` § Tests (use devs:rust-dev agent)

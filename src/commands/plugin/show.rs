@@ -2,19 +2,29 @@
 //!
 //! Renders one plugin's metadata + component breakdown + index state.
 //!
-//! Spec: `contracts/plugin-commands.md` §4.
+//! Phase 5 / US5.b extends the output (both human + JSON) per
+//! `contracts/catalog-and-plugin-extensions-p5.md` § `tome plugin show`
+//! to group entries into Skills / Commands sections, each annotated
+//! with the resolved `searchable=` / `user_invocable=` flags + the
+//! derived `prompt_name` (when the entry is user-invocable). Entries
+//! whose flags resolve to BOTH `searchable=false` AND
+//! `user_invocable=false` are annotated `[dormant]`.
 
 use std::io::Write;
 use std::str::FromStr;
 
 use comfy_table::{Cell, CellAlignment};
+use serde::Serialize;
 
 use crate::catalog::store;
 use crate::cli::PluginShowArgs;
 use crate::error::TomeError;
+use crate::mcp::prompt_name::derive_name;
 use crate::output::Mode;
 use crate::paths::Paths;
 use crate::plugin::components::count_components;
+use crate::plugin::frontmatter::parse_skill_frontmatter;
+use crate::plugin::identity::EntryKind;
 use crate::plugin::manifest::{manifest_path_for, parse_plugin_manifest};
 use crate::plugin::{PluginId, PluginRecord, PluginStatus};
 use crate::presentation::{colour, tables};
@@ -27,7 +37,6 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
         .map_err(|e| TomeError::Usage(format!("invalid plugin id `{}`: {e}", args.id)))?;
 
     let paths = Paths::resolve()?;
-    // F2a: single global config; F11 reintroduces workspace-aware view.
     let config = store::load(&paths.global_config_file)?;
     let plugin_dir = resolve_plugin_dir(&id, &config)?;
 
@@ -52,13 +61,38 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
         OffsetDateTime::parse(s, &Rfc3339).ok()
     });
 
+    // Phase 5 / US5.b: enumerate entries from the DB for the resolved
+    // workspace and split by `kind`. Each entry is hydrated with its
+    // frontmatter (for `argument_hint` + `prompt_name` override) so the
+    // human + JSON outputs match the MCP `prompts/list` view.
+    //
+    // Frontmatter reads happen against `plugin_dir` (the catalog's
+    // on-disk plugin tree resolved via `lifecycle::resolve_plugin_dir`)
+    // rather than `resolve_entry_body_path` (which resolves via
+    // `paths.cache_dir_for(url)`). The two diverge in test fixtures
+    // where the catalog source lives at a custom path; in production
+    // they are equal because the catalog cache IS the plugin source.
+    let entries = list_entries(
+        &conn,
+        &plugin_dir,
+        scope.scope.name().as_str(),
+        &id.catalog,
+        &id.plugin,
+    )?;
+    let mut skills: Vec<EntryView> = Vec::new();
+    let mut commands: Vec<EntryView> = Vec::new();
+    for e in entries {
+        match e.kind {
+            EntryKind::Skill => skills.push(e),
+            EntryKind::Command => commands.push(e),
+        }
+    }
+
     let record = PluginRecord {
         id: id.clone(),
         version: manifest.version.clone().unwrap_or_default(),
         author: manifest.author.as_ref().and_then(|a| a.display()),
         description: manifest.description.clone(),
-        // Follow-up: derive from `git log -1 -- <plugin source>` against the
-        // catalog cache. Phase 2 has no git-log integration yet.
         last_upstream_change: None,
         status,
         component_counts,
@@ -66,12 +100,112 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
     };
 
     match mode {
-        Mode::Human => emit_human(&record, &agg),
-        Mode::Json => crate::output::write_json(&record),
+        Mode::Human => emit_human(&record, &agg, &skills, &commands),
+        Mode::Json => emit_json(&record, &skills, &commands),
     }
 }
 
-fn emit_human(record: &PluginRecord, agg: &super::IndexAggregate) -> Result<(), TomeError> {
+/// One per-entry projection emitted by [`list_entries`] — carries all
+/// the fields the human + JSON renderers need without re-reading
+/// frontmatter twice.
+#[derive(Debug, Clone, Serialize)]
+struct EntryView {
+    name: String,
+    description: String,
+    when_to_use: Option<String>,
+    #[serde(skip)]
+    kind: EntryKind,
+    searchable: bool,
+    user_invocable: bool,
+    /// Sanitised + truncated prompt name (no harness prefix). `None` for
+    /// non-user-invocable entries — those never appear in
+    /// `prompts/list`.
+    prompt_name: Option<String>,
+    /// Declared argument names. Empty when the entry takes catch-all
+    /// `args` or no arguments.
+    arguments: Vec<String>,
+    /// Frontmatter `argument-hint` text, surfaced verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    argument_hint: Option<String>,
+}
+
+/// Pull every enabled-or-indexed entry for `(catalog, plugin)` from
+/// the index and hydrate per-entry frontmatter from disk. The
+/// frontmatter parse is the same lenient parser used by the enable
+/// pipeline; unparsable entries (or entries whose source file is no
+/// longer on disk) surface with the DB-stored defaults (empty
+/// `arguments`, no override).
+///
+/// Frontmatter paths are resolved relative to `plugin_dir` using each
+/// row's stored `skills.path` (a plugin-relative path produced by the
+/// enable pipeline). Stored paths are already-sanitised through
+/// `Path::join`; defensively skip absolute or traversal-bearing stored
+/// paths via the same boundary check as `resolve_entry_body_path`.
+fn list_entries(
+    conn: &rusqlite::Connection,
+    plugin_dir: &std::path::Path,
+    workspace_name: &str,
+    catalog: &str,
+    plugin: &str,
+) -> Result<Vec<EntryView>, TomeError> {
+    use std::path::{Component, PathBuf};
+    let records = crate::index::skills::list_for_plugin(conn, workspace_name, catalog, plugin)?;
+    let mut out: Vec<EntryView> = Vec::with_capacity(records.len());
+    for r in records {
+        let stored = PathBuf::from(&r.path);
+        // S-H1 boundary mirror: refuse absolute / traversing stored
+        // paths. A well-behaved enable pipeline never writes either,
+        // but a forged or upgrade-corrupted row should not escape
+        // `plugin_dir`.
+        let safe = !stored.is_absolute()
+            && !stored
+                .components()
+                .any(|c| matches!(c, Component::ParentDir));
+        let absolute = if safe {
+            Some(plugin_dir.join(&stored))
+        } else {
+            None
+        };
+        let (arguments, argument_hint, prompt_name_override) =
+            match absolute.as_deref().map(parse_skill_frontmatter) {
+                Some(Ok(parsed)) => (
+                    parsed.frontmatter.arguments.clone(),
+                    parsed.frontmatter.argument_hint.clone(),
+                    parsed.frontmatter.prompt_name.clone(),
+                ),
+                _ => (Vec::new(), None, None),
+            };
+
+        let prompt_name = if r.user_invocable {
+            Some(derive_name(
+                &r.plugin,
+                &r.name,
+                prompt_name_override.as_deref(),
+            ))
+        } else {
+            None
+        };
+        out.push(EntryView {
+            name: r.name,
+            description: r.description,
+            when_to_use: r.when_to_use,
+            kind: r.kind,
+            searchable: r.searchable,
+            user_invocable: r.user_invocable,
+            prompt_name,
+            arguments,
+            argument_hint,
+        });
+    }
+    Ok(out)
+}
+
+fn emit_human(
+    record: &PluginRecord,
+    agg: &super::IndexAggregate,
+    skills: &[EntryView],
+    commands: &[EntryView],
+) -> Result<(), TomeError> {
     let mut out = std::io::stdout().lock();
     writeln!(out, "Plugin:       {}", record.id)?;
     writeln!(
@@ -132,5 +266,85 @@ fn emit_human(record: &PluginRecord, agg: &super::IndexAggregate) -> Result<(), 
         ]);
     }
     writeln!(out, "{table}")?;
+
+    // Phase 5 / US5.b: per-section listing.
+    if !skills.is_empty() {
+        writeln!(out)?;
+        writeln!(out, "Skills ({}):", skills.len())?;
+        for e in skills {
+            write_entry_line(&mut out, e)?;
+        }
+    }
+    if !commands.is_empty() {
+        writeln!(out)?;
+        writeln!(out, "Commands ({}):", commands.len())?;
+        for e in commands {
+            write_entry_line(&mut out, e)?;
+        }
+    }
+
     Ok(())
+}
+
+/// Render one entry line per the contract's "Human-mode output". The
+/// fixed-width name + flag suffix matches the contract example:
+///
+/// ```text
+///   compact-circuits     searchable=true  user_invocable=false
+///     description: ...
+///   fix-issue            searchable=true  user_invocable=true   prompt=midnight_expert__fix_issue
+///     description: ...
+///     arguments: [...]
+/// ```
+fn write_entry_line<W: Write>(out: &mut W, e: &EntryView) -> std::io::Result<()> {
+    let dormant = !e.searchable && !e.user_invocable;
+    let prompt_suffix = e
+        .prompt_name
+        .as_deref()
+        .map(|p| format!("   prompt={p}"))
+        .unwrap_or_default();
+    let dormant_suffix = if dormant { "  [dormant]" } else { "" };
+    writeln!(
+        out,
+        "  {:20} searchable={}  user_invocable={}{prompt_suffix}{dormant_suffix}",
+        e.name, e.searchable, e.user_invocable,
+    )?;
+    if !e.description.is_empty() {
+        writeln!(out, "    description: {}", e.description)?;
+    }
+    // Argument disclosure differs by entry kind:
+    //   * Named arguments declared → list them.
+    //   * No declared args but the entry surface allows catch-all `args`
+    //     → render the documented "(none — accepts free-form 'args')"
+    //     string when the entry is user-invocable (otherwise hide; a
+    //     skill that doesn't accept args has nothing to show).
+    if !e.arguments.is_empty() {
+        writeln!(out, "    arguments: {:?}", e.arguments)?;
+    } else if e.user_invocable {
+        writeln!(out, "    arguments: (none — accepts free-form 'args')")?;
+    }
+    Ok(())
+}
+
+/// JSON-mode emission per the contract's "JSON-mode output" — the
+/// `skills` + `commands` arrays carry the full per-entry projection
+/// including the derived prompt_name.
+fn emit_json(
+    record: &PluginRecord,
+    skills: &[EntryView],
+    commands: &[EntryView],
+) -> Result<(), TomeError> {
+    #[derive(Serialize)]
+    struct Envelope<'a> {
+        #[serde(flatten)]
+        record: &'a PluginRecord,
+        skills: &'a [EntryView],
+        commands: &'a [EntryView],
+    }
+    let env = Envelope {
+        record,
+        skills,
+        commands,
+    };
+    crate::output::write_json(&env)
 }
