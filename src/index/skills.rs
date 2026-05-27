@@ -415,29 +415,7 @@ pub fn resolve_entry_body_path(
     stored_path: &str,
 ) -> Result<PathBuf, TomeError> {
     let stored = PathBuf::from(stored_path);
-
-    // S-H1 (US1.d reviewer pass / BLOCKER): refuse `..` components and
-    // absolute paths in the DB-stored relative path. A hostile catalog
-    // that managed to land `../etc/passwd` (or `/etc/passwd`) as a
-    // stored `skills.path` value would otherwise have the resolved
-    // absolute path escape the plugin directory. Phase 5 writers always
-    // store catalog-relative paths normalised through `Path::join`; this
-    // boundary check defends against forged or upgrade-corrupted data.
-    if stored.is_absolute() {
-        return Err(TomeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("stored entry path is absolute: {stored_path}"),
-        )));
-    }
-    if stored
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(TomeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("stored path contains parent-directory traversal: {stored_path}"),
-        )));
-    }
+    validate_db_stored_path(&stored)?;
 
     let catalog_path =
         workspace_catalogs::resolve_catalog_path(conn, paths, workspace_name, catalog)?;
@@ -459,6 +437,36 @@ pub fn resolve_entry_body_path(
         });
     }
     Ok(plugin_dir.join(&stored))
+}
+
+/// Refuse absolute paths and `..` components in DB-stored relative
+/// paths. The shared S-H1 (US1.d BLOCKER) boundary check; consumed by
+/// [`resolve_entry_body_path`] and by
+/// `commands/plugin/show.rs::list_entries`'s frontmatter-resolution
+/// path. Phase 5 Polish M-4 promoted this from two inline copies to a
+/// single SSOT so future safety additions (NUL refusal, UTF-8 component
+/// validation, …) land in one place rather than silently lagging at the
+/// second site.
+pub(crate) fn validate_db_stored_path(stored: &std::path::Path) -> Result<(), TomeError> {
+    if stored.is_absolute() {
+        return Err(TomeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("stored entry path is absolute: {}", stored.display()),
+        )));
+    }
+    if stored
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(TomeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "stored path contains parent-directory traversal: {}",
+                stored.display(),
+            ),
+        )));
+    }
+    Ok(())
 }
 
 /// Insert a new entry row + matching embedding, or update an existing row

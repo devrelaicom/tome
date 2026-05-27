@@ -413,49 +413,30 @@ fn build_substitution_context(
     skill_path: &Path,
     plugin_version: String,
 ) -> Result<SubstitutionContext, (&'static str, McpError)> {
-    let workspace_name = state.scope.scope.name();
-
-    // SKILL.md lives at `<plugin_root>/skills/<name>/SKILL.md`. `entry_dir`
-    // is the immediate parent; `plugin_root_dir` walks up looking for the
-    // marker `.claude-plugin/` directory (mirrors the defensive lookup in
-    // `mcp::prompts::build_get_context`).
-    let entry_dir = skill_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| skill_path.to_path_buf());
-    let plugin_root_dir = entry_dir
-        .ancestors()
-        .find(|p| p.join(".claude-plugin").is_dir())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| entry_dir.clone());
-
-    // Plugin / workspace data-dir paths are no longer threaded through
-    // the builder (US2.d R-M2): the substitution layer derives them
-    // on-demand from `paths` + names via `data_dir::ensure_*`.
-
-    SubstitutionContext::builder()
-        .catalog_name(input.catalog.clone())
-        .plugin_name(input.plugin.clone())
-        .plugin_version(plugin_version)
-        .entry_name(input.name.clone())
-        .entry_path(skill_path.to_path_buf())
-        .entry_dir(entry_dir)
-        .plugin_root_dir(plugin_root_dir)
-        .workspace_name(workspace_name.as_str().to_owned())
-        .clock(substitution::current_clock())
-        .args(None)
-        .declared_args(Vec::new())
-        .paths(state.paths.clone())
-        .build()
-        .map_err(|e| {
-            (
-                "substitution_failed",
-                McpError::internal_error(
-                    format!("substitution context build failed: {e}"),
-                    Some(json!({ "code": "substitution_failed" })),
-                ),
-            )
-        })
+    // Polish M-2 (Phase 5): delegates to the shared
+    // `mcp::substitution_helpers::build_context_for_entry` — same body
+    // shape as `prompts::build_get_context` modulo the
+    // args/declared_args constants (get_skill never accepts args).
+    crate::mcp::substitution_helpers::build_context_for_entry(
+        input.catalog.clone(),
+        input.plugin.clone(),
+        plugin_version,
+        input.name.clone(),
+        skill_path.to_path_buf(),
+        state.scope.scope.name(),
+        state.paths.clone(),
+        None,
+        Vec::new(),
+    )
+    .map_err(|e| {
+        (
+            "substitution_failed",
+            McpError::internal_error(
+                format!("substitution context build failed: {e}"),
+                Some(json!({ "code": "substitution_failed" })),
+            ),
+        )
+    })
 }
 
 /// Map a [`SubstitutionError`] surfaced by the render pipeline to a

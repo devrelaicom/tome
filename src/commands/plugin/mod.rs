@@ -257,16 +257,26 @@ pub(crate) fn per_kind_counts_for_plugin(
         })?;
     let mut out = PerKindCounts::default();
     for r in rows {
-        let (kind, n) = r.map_err(|e| {
+        let (kind_text, n) = r.map_err(|e| {
             TomeError::IndexIntegrityCheckFailure(format!("collect per_kind_counts row: {e}"))
         })?;
         // R-m2 (US5.c): SQLite COUNT(*) is non-negative; the prior
         // `n.max(0)` defensive clamp is unreachable.
         let n_u32 = u32::try_from(n).unwrap_or(u32::MAX);
-        match kind.as_str() {
-            "skill" => out.skills = n_u32,
-            "command" => out.commands = n_u32,
-            _ => {}
+        // M-3 (Polish): canonical EntryKind dispatch over stringly-
+        // typed match — surfaces schema drift as
+        // IndexIntegrityCheckFailure rather than silently
+        // undercounting via `_ => {}`.
+        let kind = kind_text
+            .parse::<crate::plugin::identity::EntryKind>()
+            .map_err(|msg| {
+                TomeError::IndexIntegrityCheckFailure(format!(
+                    "unknown kind `{kind_text}` in per_kind_counts: {msg}"
+                ))
+            })?;
+        match kind {
+            crate::plugin::identity::EntryKind::Skill => out.skills = n_u32,
+            crate::plugin::identity::EntryKind::Command => out.commands = n_u32,
         }
     }
     Ok(out)

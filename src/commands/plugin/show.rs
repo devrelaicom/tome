@@ -148,24 +148,17 @@ fn list_entries(
     catalog: &str,
     plugin: &str,
 ) -> Result<Vec<EntryView>, TomeError> {
-    use std::path::{Component, PathBuf};
+    use std::path::PathBuf;
     let records = crate::index::skills::list_for_plugin(conn, workspace_name, catalog, plugin)?;
     let mut out: Vec<EntryView> = Vec::with_capacity(records.len());
     for r in records {
         let stored = PathBuf::from(&r.path);
-        // S-H1 boundary mirror: refuse absolute / traversing stored
-        // paths. A well-behaved enable pipeline never writes either,
-        // but a forged or upgrade-corrupted row should not escape
-        // `plugin_dir`.
-        let safe = !stored.is_absolute()
-            && !stored
-                .components()
-                .any(|c| matches!(c, Component::ParentDir));
-        let absolute = if safe {
-            Some(plugin_dir.join(&stored))
-        } else {
-            None
-        };
+        // Polish M-4: SSOT S-H1 boundary check (US1.d BLOCKER). Future
+        // additions to the safety predicate land in one place; this
+        // site no longer maintains a parallel inline copy.
+        let absolute = crate::index::skills::validate_db_stored_path(&stored)
+            .ok()
+            .map(|_| plugin_dir.join(&stored));
         let (arguments, argument_hint, prompt_name_override) =
             match absolute.as_deref().map(parse_skill_frontmatter) {
                 Some(Ok(parsed)) => (
