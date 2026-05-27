@@ -2,7 +2,7 @@
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-27
+> **Last Updated**: 2026-05-27 (Phase 5 Polish complete, v0.5.0)
 
 ## Test Framework
 
@@ -25,13 +25,15 @@
 
 **MSRV tested**: CI runs `cargo +1.93 build` to enforce `rust-version = "1.93"`.
 
+**Pre-push hook** (Phase 5 Polish change): local `cargo fmt`, `cargo clippy`, `typos` checks only. Full `cargo test --workspace` runs in CI as the source of truth (deferred from local pre-push per Phase 5 Polish PR #126 to keep pre-push under ~1 minute on warm cache). Test discipline NOT relaxed — CI matrix is the enforcement surface.
+
 ## Test Organization
 
 ### Directory Structure
 
 ```
 tests/
-├── *.rs                         # Integration test files (151 total as of Phase 5 US5)
+├── *.rs                         # Integration test files (151 total as of Phase 5 Polish)
 ├── common/
 │   ├── mod.rs                   # Shared harness: ToolEnv, Fixture, guards
 │   └── ...                      # (exported helpers)
@@ -66,9 +68,11 @@ tests/
 | **Substitution** (Phase 5) | `substitution_*.rs`, `entry_*.rs` | Variable expansion, argument coercion (8 files) |
 | **Misc** | `path_validation.rs`, `atomic_dir.rs`, etc. | Phase 1 foundational (10 files) |
 
-**Total**: 151 test files across 147 suites (some files define multiple test functions); 1193+ tests pass.
+**Total**: 151 test files across 151 suites; 1193 tests pass (Phase 5 Polish: 954 → 1193, +239 tests across +24 suites).
 
-**Phase 5 expansion**: +19 tests across `tests/plugin_show_p5.rs` + `tests/plugin_show_p5_json_shape.rs` + `tests/doctor_p5.rs` + `tests/doctor_json.rs` (US5.b); +1 for T-G1 dormant-negative test (US5.c).
+**Phase 5 expansion**: 
+- US1.a–US4.d: +218 tests
+- Polish phase: +21 tests (exact-count pins + dormant-state + zero-state invariants + test coverage gap fills)
 
 ## Test Patterns
 
@@ -319,6 +323,8 @@ All defined in `tests/common/mod.rs` with RAII drop guards.
 
 **Exclusions**: ONNX inference (real model load excluded; library `fastembed` tests own path), real model downloads (fabricated fixtures instead), MCP protocol purity (deferred T093–T095).
 
+**Phase 5 Polish note**: Exit codes 9, 25-29 are partially deferred from e2e CLI coverage. Code 9 (`PluginDataDirWriteFailed`) is MCP-only; codes 25, 26-29 are narrow scaffolding or MCP-internal. All six are covered at the library API level via `tests/exit_codes.rs` and MCP tool tests (`tests/mcp_prompts*.rs`, `tests/mcp_get_skill*.rs`). v0.6+ unifies them via `tests/exit_codes_e2e_mcp.rs` once an in-process MCP test harness exists.
+
 ## Test Categories by Purpose
 
 ### Smoke Tests
@@ -356,27 +362,32 @@ Tests that verify core properties hold:
 | Atomicity | `atomicity.rs` | Partial failures leave committed state |
 | JSON wire shape | `*_json_shape.rs` | Serialization is deterministic + byte-stable |
 | Read-only invariant | `doctor_p5.rs` | `doctor assemble_report` creates no directories (Phase 5 US5.a) |
+| Exact-count pins | `plugin_show_p5.rs`, `doctor_p5.rs` | Deterministic fixture counts stay exact (Phase 5 Polish) |
 
 ### Phase 5: Truncation Boundary Tests
 
-Tests for string truncation edge cases (US4.d pattern):
+Tests for string truncation edge cases (US4.d + Polish M-1 pattern):
 
 | Test | Checks |
 |------|--------|
 | `mcp_tool_description.rs::truncate_respects_char_boundaries_with_emoji()` | Multi-byte UTF-8 char slicing |
+| `mcp_search_skills_truncation.rs::truncation_at_multibyte_char_boundary_does_not_split_codepoint()` | Emoji boundaries (Polish M-1) |
 | `entry_kind_*.rs::search_skills_description_truncation_*()` | Description max-length enforcement |
 | `substitution_*.rs::argument_value_truncation_boundary()` | Argument coercion with limits |
 
 ### Phase 5: Exact-Count + Empty-Section Invariant Tests
 
-Tests that verify deterministic entity counts and collection states (US5.b pattern):
+Tests that verify deterministic entity counts and collection states (US5.b + Polish patterns):
 
-| Test | Checks |
-|------|--------|
-| `plugin_show_p5.rs::dormant_entry_annotated()` | Dormant bit set correctly |
-| `plugin_show_p5.rs::dormant_not_annotated_when_searchable_true()` | Boolean-logic negative case (T-G1) |
-| `doctor_p5.rs::empty_section_arrays_present_not_omitted()` | Empty arrays serialize; not omitted (T-G2) |
-| `doctor_json.rs::entry_counts_by_kind_exact_match()` | Exact skill/command/agent counts match fixture (T-W1) |
+| Test | Checks | Pattern |
+|------|--------|---------|
+| `plugin_show_p5.rs::dormant_entry_annotated()` | Dormant bit set correctly | Positive assertion |
+| `plugin_show_p5.rs::dormant_not_annotated_when_searchable_true()` | Boolean-logic negative case (T-G1) | Explicit "NOT" test |
+| `doctor_p5.rs::empty_section_arrays_present_not_omitted()` | Empty arrays serialize; not omitted (T-G2) | Presence invariant |
+| `doctor_json.rs::entry_counts_by_kind_exact_match()` | Exact skill/command/agent counts match fixture (T-W1) | Exact-count discipline |
+| `doctor_p5.rs::pending_re_embedding_zero_when_no_files_touched()` | Zero re-embeds when nothing changed (GAP-2, Polish) | Zero-state assertion |
+
+**Rationale** (Polish phase learnings): The zero-state and empty-section invariant tests catch "off-by-one forgot to reset" bugs. Phase 5 Polish T-W1 introduced the pattern; now applied to pending counts and empty arrays. Together with positive tests, this three-case coverage (positive/negative/zero/empty) becomes the canonical pattern for deterministic fixtures.
 
 ## CI Integration
 
@@ -403,6 +414,10 @@ Tests that verify deterministic entity counts and collection states (US5.b patte
 ### Pre-Commit Hook
 
 `.githooks/pre-commit` runs `cargo fmt --check`, `typos`, and `cargo clippy` sequentially. All three must pass before commit succeeds (no `--no-verify` bypasses without documented reason).
+
+### Pre-Push Hook (Phase 5 Polish Change)
+
+**Phase 5 Polish PR #126**: Pre-push hook now runs **local fmt/clippy/typos checks ONLY** (no full `cargo test --workspace`). Rationale: pre-push completes under ~1 minute on warm cache, staying responsive for local iteration. Full test suite runs in CI (GitHub matrix across Linux/macOS) as the source of truth. Test discipline is NOT relaxed — CI is the enforcement surface.
 
 ## Test Discipline
 
@@ -463,16 +478,18 @@ fn doctor_p5_surface_creates_no_dirs() { ... }
 
 ### Phase 5: 4-Reviewer Parallel Pass Pattern
 
-Every user story closeout runs a parallel 4-reviewer pass:
+**Phase 5 Polish introduces this pattern at PHASE-WIDE scope** (distinct from per-US passes). Every Phase 5+ closeout runs a parallel 4-reviewer pass **once at the end** rather than per-user-story:
 
 | Reviewer | Focus | Deliverable |
 |----------|-------|-------------|
-| Contract audit | Spec alignment, contract drift | `review/findings.md` + `review/disposition.md` |
-| Rust-lens | Code review, idioms, safety | Inline code comments |
-| Test audit | Coverage gaps, edge cases | Test additions |
-| Security audit | Hardening, boundary validation | Security findings |
+| Contract audit | Spec alignment, cross-US drift, contract amendments | `review/findings.md` + `review/disposition.md` |
+| Rust-lens | Code review, idioms, safety, cross-US patterns | Inline code comments, M-1/M-2/M-3/M-4 fixes |
+| Test audit | Coverage gaps, edge cases, invariant tests | Test additions (GAP-2, Polish M-1 truncation) |
+| Security audit | Hardening, boundary validation, no new vectors | Security findings, deferred items |
 
-Findings + disposition committed **BEFORE** fixes land (Phase 5 PR pattern). Exemplified in US5.c: "4-reviewer pass surfaced 0 BLOCKERS + 4 majors + 1 test gap + 5 minors; applied 2 majors + 1 test."
+Findings + disposition committed **BEFORE** fixes land (Phase 5 Polish PR pattern). Exemplified in Polish Polish: "4-reviewer pass surfaced 0 BLOCKERS + 4 majors + 1 test gap + 5 minors; applied 2 majors + 1 test."
+
+**Impact**: Phase-wide passes catch cross-US drift earlier than per-US passes can. Emerged at Phase 5 Polish as the structural-safety net for multi-user-story phases.
 
 ## What Does NOT Belong Here
 

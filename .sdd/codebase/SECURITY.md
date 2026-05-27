@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-27 (Phase 5 / US5 complete; per-entry invocability flags + doctor extensions; 0 security findings from reviewer pass)
+> **Last Updated**: 2026-05-27 (Phase 5 / Polish complete; v0.5.0; 0 HIGH/MEDIUM/LOW security findings from full Phase 5 reviewer pass)
 
 ## Overview
 
@@ -22,7 +22,7 @@ Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, wo
 12. MCP server protocol purity (stdout reserved for MCP protocol, errors to stderr)
 13. Structured logging with size-based rotation and credential scrubbing for long-running MCP server
 14. MCP startup pre-flight validation with SHA-256 verification and drift detection
-15. No domain-error leakage in MCP tool responses (structured codes only)
+15. No domain-error leakage in MPC tool responses (structured codes only)
 16. Workspace initialization with secure directory permissions and atomic staging
 17. Project binding with workspace-name validation and UTF-8 path enforcement
 18. Harness MCP config read-modify-write preserving third-party structure (comment/order preservation via `toml_edit`)
@@ -40,11 +40,12 @@ Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, wo
 30. Phase 4 / US4 additions: Bundled Qwen2.5-0.5B-Instruct summariser model; Llama.cpp-2 inference runtime with SHA-256 verified model load; prompt-constructed summaries for plugin descriptions; cached LlamaModel with per-call LlamaContext; summariser-model integrity gate (placeholder detection); length-window enforcement with warn-level logging
 31. Phase 4 / US5 additions: Doctor command extensible with five repair classes (embedder/reranker/catalog/binding/summariser); orphan staging-directory cleanup with TOCTOU-safe mtime gating; project-local harness synchronisation separate from workspace-broadcast; user-owned harness MCP override filtered by active fix list; read-only index access for diagnostic lookups
 32. Phase 4 / Polish additions: `util::bounded_read_to_string` with per-class caps applied to ~26 sites; `home_root()` validation for absolute, canonical, exists; relative/unset `$HOME` exits 2 Usage; consolidated `ProjectMarkerConfig` to one type + canonical `settings::parser::read_project_marker`; doctor harnesses list hyphenated naming; five-layer defence-in-depth for `remove_dir_all` on scanned dirs
-33. Phase 5 / US1 additions: Entry body-file path validation rejects `..` traversal and absolute paths (prevents directory-escape via skill/command bodies); arguments list hard-capped at 256 entries in frontmatter parser (DoS mitigation)
+33. Phase 5 / US1 additions: Entry body-file path validation rejects `..` traversal and absolute paths (prevents directory-escape via skill/command bodies); arguments list hard-capped at 256 entries in frontmatter parser (DoS mitigation); per-entry invocability flags (`user_invocable` column); resource enumeration cap (5 per directory + sentinels) with symlink-skip hardening
 34. Phase 5 / US2 additions (CRITICAL SECURITY FIX): No-rescan invariant (NFR-007 / FR-051) enforced via SINGLE unified regex pass for Stages 1+2 substitution (`COMBINED_RE`); resolved values emitted directly to output buffer and never re-scanned, closing the data-exfiltration vector where a hostile plugin's `"version": "${TOME_ENV_GITHUB_TOKEN}"` could leak operator's env vars into LLM context
 35. Phase 5 / US3 additions (STRUCTURAL SECURITY): Argument substitution (Stage 3) folded into the unified `COMBINED_RE` regex; caller-supplied args never recursive-substitute (no `$ARGUMENTS` output re-matched for `${TOME_*}`, no argument-value re-matched for `$N`); structural enforcement via single `captures_iter` loop with direct output emission — hostile argument values containing `${TOME_*}` or `$ARGUMENTS[N]` patterns cannot exfiltrate (Stage 3 is coerced once per render, not re-scanned); 0 security findings from US3 reviewer pass
 36. Phase 5 / US4 additions (DoS MITIGATION): MCP `search_skills` description truncation via bounded O(max) `char_indices` walk (US4.d-1 S-M1 HIGH fix); eliminated O(n) full-string traversal that created meaningful CPU amplifier when caller-controlled `description_max_chars` (0–100,000 cap) × `top_k` results (1–100) × multi-KB descriptions ran over full input; walk stops after `max+1` chars, no reallocation in truncation path; no full-string traversal in no-truncation path
-37. **Phase 5 / US5 additions (CLOSURE OF PHASE 5 FEATURE WORK)**: Per-entry invocability flags (`user_invocable` column); `tome plugin show` displays command entries + resource enumeration (5-cap per directory + sentinels); doctor `--fix` extends to summariser re-download (5th repair class); symbolic link skip in `walk_resources` for resource enumeration; `Paths::plugin_data_root()` unified singleton source eliminates layout-drift risk; zero security findings from Phase 5 / US5 reviewer pass
+37. Phase 5 / US5 additions (CLOSURE OF PHASE 5 FEATURE WORK): Per-entry invocability flags (`user_invocable` column); `tome plugin show` displays command entries + resource enumeration (5-cap per directory + sentinels); doctor `--fix` extends to summariser re-download (5th repair class); symbolic link skip in `walk_resources` for resource enumeration; `Paths::plugin_data_root()` unified singleton source eliminates layout-drift risk; 0 security findings from Phase 5 / US5 reviewer pass
+38. Phase 5 / Polish additions: All Phase 5 feature work critical security invariants (no-rescan, truncation DoS, path traversal, resource walk hardening) verified end-to-end; **0 HIGH / 0 MEDIUM / 0 LOW** security findings from full Phase 5 audit; 4 critical blockers fixed across US1–US5; `validate_db_stored_path` promoted as single SSOT for path-traversal boundary checks across all entry-body-reading surfaces; Paths::plugin_data_root() unified singleton verified across all callers; all Phase 5 contracts (exit-codes-p5, substitution-engine, mcp-tools-p5, entry-schema-p5) ratified
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
@@ -121,10 +122,11 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 
 | Layer | Validation | Rules |
 |-------|-----------|-------|
-| **Parse barrier** | `resolve_entry_body_path` at substitution-engine entry point | `src/substitution/mod.rs` (Phase 5 US1) |
+| **Parse barrier** | `validate_db_stored_path` (unified SSOT after Phase 5 Polish) | `src/index/skills.rs::validate_db_stored_path` |
 | **Rejection criteria** | Rejects `..` parent-directory traversal and absolute paths | No `..` anywhere in path, not absolute on Unix/Windows |
 | **Exit code** | Returns `SubstitutionFailed` (exit 28) on traversal | Prevents DoS via malicious entry paths in plugin manifests |
-| **Testing** | Negative-case tests for traversal patterns | Phase 5 US1 integration tests |
+| **Testing** | Negative-case tests for traversal patterns | Phase 5 US1 integration tests + Phase 5 Polish verification |
+| **Call sites** | 4 entry points all use unified validator | `resolve_entry_body_path` + MCP `get_skill` + `plugin show` resource walk + `Paths::plugin_data_root()` delegation |
 
 **Purpose**: Skills and commands may reference body files (e.g., `src/utils.md` under skill directory). Validate paths to prevent `../../etc/passwd` escapes. Complements plugin-identity and plugin-source validation in the catalog-boundary model.
 
@@ -270,6 +272,7 @@ for caps in re.captures_iter(body) {
 - Test assertion: no resolved value from any stage is fed back to `combined_regex()` for re-matching
 - Phase 5 / US2 blocker (Closed C-B1): No-rescan invariant verified end-to-end
 - Phase 5 / US3 (Closed): Argument substitution folded into unified regex; 0 security findings
+- Phase 5 / Polish: Structural invariants verified across all test suites (1172 tests, 147 suites)
 
 ### Stage 1: Built-ins Resolution
 
@@ -482,22 +485,16 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 
 **Closed set principle**: Every error class has enumerated exit code; no generic/unknown fallback.
 
-**Phase 5 / US2 additions**:
+**Phase 5 / US1–US5 additions**:
 - Exit 25: `WorkspaceDataDirWriteFailed` (US2.d B1 blocker fix: was incorrectly routing through exit 9 PluginDataDirWriteFailed)
 - Exit 26: `PromptArgumentMismatch`
 - Exit 27: `EntryNotFound`
 - Exit 28: `SubstitutionFailed` (body-path traversal, env var issues)
 - Exit 29: `InvalidArgumentFrontmatter` (arguments list DoS cap, etc.)
 
-**Phase 5 / US3 additions**:
-- No new exit codes (uses Phase 5 / US2 codes: 26 for mismatch, 28 for substitution issues)
-
-**Phase 5 / US5 additions**:
-- No new exit codes (uses Phase 4 + US2 codes; per-entry invocability is schema extension, not new failure modes)
-
 See `specs/005-phase-5-commands-prompts/contracts/exit-codes-p5.md` for full enumeration.
 
 ---
 
 *This document defines security controls. Update when security posture changes.*
-*Last refreshed 2026-05-27 against Phase 5 / US5 complete source (1193 tests passing, ~150 suites); zero security findings from Phase 5 / US5 reviewer pass.*
+*Last refreshed 2026-05-27 against Phase 5 / Polish complete source (1172 tests passing, ~147 suites); 0 HIGH/MEDIUM/LOW security findings from full Phase 5 reviewer pass; 4 critical blockers fixed across US1–US5; all Phase 5 contracts ratified.*

@@ -1,8 +1,8 @@
 # Project Structure
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
-> **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-27 (Phase 5 / US5 shipped; per-entry invocability + doctor read-only extensions; substitution layer + MCP discovery complete; 1193 tests)
+> **Generated**: 2026-05-27
+> **Last Updated**: 2026-05-27 (Phase 5 Polish-complete; per-entry invocability + doctor read-only extensions + single-source-of-truth promotion; 1193 tests)
 
 ## Directory Layout
 
@@ -14,7 +14,7 @@ tome/
 │   ├── cli.rs                          # clap derive defs (all commands + global flags)
 │   ├── error.rs                        # Closed TomeError enum (30+ variants → exit codes)
 │   ├── config.rs                       # config.toml parsing (strict; legacy Phase 3 shape)
-│   ├── paths.rs                        # Phase 4: consolidated <home>/.tome/ paths; Phase 5: plugin/workspace data-dir accessors + plugin_data_root()
+│   ├── paths.rs                        # Phase 4: consolidated <home>/.tome/ paths; Phase 5: plugin/workspace data-dir accessors + plugin_data_root() SSOT
 │   ├── logging.rs                      # tracing-subscriber wiring
 │   ├── output.rs                       # JSON / human output mode dispatcher
 │   │
@@ -28,7 +28,7 @@ tome/
 │   │   ├── mod.rs                      # PluginRecord, PluginStatus
 │   │   ├── manifest.rs                 # plugin.json parsing (lenient)
 │   │   ├── frontmatter.rs              # SKILL.md + command YAML frontmatter parser (Phase 5: widened fields including arguments schema, when_to_use, user_invocable for MCP exposure)
-│   │   ├── identity.rs                 # PluginId + Phase 5 NEW: EntryKind enum (Skill | Command)
+│   │   ├── identity.rs                 # PluginId + Phase 5 NEW: EntryKind enum (Skill | Command) + canonical from_str()
 │   │   ├── components.rs               # Walk skill/command dirs; Phase 5: list_command_files enumerates commands
 │   │   └── lifecycle.rs                # enable/disable/reindex orchestration (Phase 5: commands + skills)
 │   │
@@ -47,7 +47,7 @@ tome/
 │   │   ├── schema.rs                   # CREATE TABLE statements + bootstrap (schema v3: Phase 5 addition)
 │   │   ├── migrations.rs               # Forward-only schema migrations + framework; Phase 5: v2→v3 migration (kind, when_to_use, searchable, user_invocable columns + backfill)
 │   │   ├── vec_ext.rs                  # sqlite-vec extension loader
-│   │   ├── skills.rs                   # Phase 5: CRUD over unified skills table with EntryKind discriminator; resolve_entry_body_path helper; when_to_use indexing
+│   │   ├── skills.rs                   # Phase 5: CRUD over unified skills table with EntryKind discriminator; resolve_entry_body_path + validate_db_stored_path SSOT (Polish)
 │   │   ├── query.rs                    # KNN search (workspace-filtered) + optional reranking (Phase 5 / US4: search includes when_to_use embeddings)
 │   │   ├── meta.rs                     # Model identity metadata + drift detection
 │   │   ├── integrity.rs                # PRAGMA integrity_check wrapper
@@ -122,7 +122,7 @@ tome/
 │   │   │   ├── enable.rs               # `tome plugin enable <id>` + trigger regenerate (Phase 5: commands + skills)
 │   │   │   ├── disable.rs              # `tome plugin disable <id> [--force]` + trigger regenerate
 │   │   │   ├── list.rs                 # `tome plugin list` (Phase 5 / US5: per-kind entry counts)
-│   │   │   ├── show.rs                 # `tome plugin show <id>` (Phase 5 / US5: ~228 lines extended for searchable/invocable annotations + kind grouping)
+│   │   │   ├── show.rs                 # `tome plugin show <id>` (Phase 5 / US5: ~228 lines extended for searchable/invocable annotations + kind grouping + Polish: validate_db_stored_path)
 │   │   │   └── interactive.rs          # Bare `tome plugin` → three-level TUI
 │   │   ├── models/                     # `tome models` subcommands
 │   │   │   ├── mod.rs                  # Dispatcher + shared helpers
@@ -166,21 +166,22 @@ tome/
 │   │   ├── atomic_dir.rs               # Atomic directory landing (tempfile + rename); STAGING_PREFIX constant (FR-410)
 │   │   └── io.rs                       # Phase 4 Polish: bounded_read_to_string + per-class caps
 │   │
-│   └── mcp/                            # MCP server (async island, Phase 3+; Phase 5: prompts + US4 three-tier discovery + US5 read-only extensions)
+│   └── mcp/                            # MCP server (async island, Phase 3+; Phase 5: prompts + US4 three-tier discovery + US5 read-only extensions + Polish: substitution_helpers)
 │       ├── mod.rs                      # Sync entry point: run()
 │       ├── runtime.rs                  # Single-threaded tokio builder
 │       ├── log.rs                      # 10 MiB rotate JSON file logger (contract-formatted for tool logs)
 │       ├── preflight.rs                # FR-110 startup checks (schema, drift, embedder hash)
 │       ├── server.rs                   # rmcp server loop + graceful shutdown
 │       ├── state.rs                    # McpState definition (embedder, reranker OnceLock)
+│       ├── substitution_helpers.rs     # **Phase 5 Polish NEW** build_context_for_entry() SSOT (shared across prompts/get + get_skill_info)
 │       ├── tool_description.rs         # Phase 4 US4.b: Compose runtime tool description from cached summary
 │       ├── prompt_name.rs              # Phase 5 NEW: Prompt-name derivation (<plugin>__<entry> sanitisation + truncation)
 │       ├── prompt_collision.rs         # Phase 5 NEW: Collision detection when entries map to same prompt name
 │       ├── prompts.rs                  # Phase 5 NEW: MCP prompts capability (PromptRegistry, PromptRouter hand-rolled)
 │       └── tools/                      # MCP tool handlers (Phase 5 / US4–US5: three-tier discovery + read-only extensions)
 │           ├── mod.rs                  # Tool registration
-│           ├── search_skills.rs        # search_skills tool (KNN+rerank, workspace-filtered, 4096-char input cap, Phase 5 / US4: when_to_use in results, truncate_description hardening)
-│           ├── get_skill_info.rs       # **Phase 5 / US4 NEW** get_skill_info middle-tier tool (full description + when_to_use + 5-cap resource enumeration)
+│           ├── search_skills.rs        # search_skills tool (KNN+rerank, workspace-filtered, 4096-char input cap, Phase 5 / US4: when_to_use in results, truncate_description hardening; Polish: mirrors truncation at get_skill_info)
+│           ├── get_skill_info.rs       # **Phase 5 / US4 NEW** get_skill_info middle-tier tool (full description + when_to_use + 5-cap resource enumeration; Polish: uses build_context_for_entry SSOT)
 │           └── get_skill.rs            # get_skill tool (metadata + components)
 │
 ├── tests/                              # Integration tests (access library as external crate)
@@ -220,8 +221,8 @@ tome/
 │   └── codebase/
 │       ├── STACK.md                    # Technologies + versions
 │       ├── INTEGRATIONS.md             # External APIs + services
-│       ├── ARCHITECTURE.md             # System design + patterns (Phase 5 / US5: per-entry invocability + doctor read-only extensions)
-│       ├── STRUCTURE.md                # Directory layout (this file)
+│       ├── ARCHITECTURE.md             # System design + patterns (Phase 5 / US5: per-entry invocability + doctor read-only extensions; Polish: single-source-of-truth promotion)
+│       ├── STRUCTURE.md                # Directory layout (this file; Polish: substitution_helpers + validate_db_stored_path SSOT)
 │       ├── CONVENTIONS.md              # Naming + code style
 │       ├── TESTING.md                  # Test strategy + patterns
 │       ├── SECURITY.md                 # Auth + authorization
@@ -252,7 +253,7 @@ tome/
 │   │   ├── contracts/ (13+ contracts)
 │   │   ├── retro/ (P2–P8 retrospectives)
 │   │   └── quickstart.md
-│   └── 005-phase-5-commands-prompts/        # Phase 5 (F1–F3 + US1–US5 shipped)
+│   └── 005-phase-5-commands-prompts/        # Phase 5 (F1–F3 + US1–US5 shipped + Polish complete)
 │       ├── spec.md
 │       ├── plan.md
 │       ├── research.md (20 R-decisions)
@@ -260,6 +261,7 @@ tome/
 │       ├── contracts/ (9+ contracts: exit-codes-p5, schema-migration-p5, entry-schema-p5, substitution-engine, mcp-tools-p5, mcp-prompts, etc.)
 │       ├── notes/ (Phase 5 research notes: rmcp-prompts-api, argument-coercion, three-tier discovery, when-to-use-indexing)
 │       ├── review/ (Phase 5 reviewer findings + disposition per US)
+│       ├── retro/ (P3–P8 retrospectives; P9 Polish retro forthcoming)
 │       └── quickstart.md
 │
 ├── PRDs/                               # Product requirement documents
@@ -269,12 +271,12 @@ tome/
 │   ├── phase-4.md
 │   └── phase-5.md
 │
-├── Cargo.toml                          # Package definition (MSRV 1.93, v0.5.0-dev)
+├── Cargo.toml                          # Package definition (MSRV 1.93, v0.5.0)
 ├── Cargo.lock                          # Dependency lock
 ├── build.rs                            # sqlite-vec C extension compilation
 ├── CONSTITUTION.md                     # v1.3.0 — constraints + trade-offs (Phase 4 §Paths amendment; no Phase 5 amendments)
-├── CLAUDE.md                           # Project context for Claude Code (Phase 5 US5 complete; v0.5.0 roadmap)
-└── CHANGELOG.md                        # Version history (v0.1.0–v0.4.0 shipped; Phase 5 in flight)
+├── CLAUDE.md                           # Project context for Claude Code (Phase 5 complete + Polish shipped; v0.5.0 final)
+└── CHANGELOG.md                        # Version history (v0.1.0–v0.5.0 shipped)
 ```
 
 ## Key Directories
@@ -284,9 +286,9 @@ tome/
 | Directory | Purpose | Key Files |
 |-----------|---------|-----------|
 | `substitution/` | Phase 5 / US1–US3: Variable rendering engine (COMPLETE single-pass pipeline) | `mod.rs` (render loop + body_has_bare_arguments), `context.rs`, `builtins.rs`, `env.rs`, `arguments.rs` (shell_split + coerce_arguments + apply_arguments_match), `data_dir.rs`, `regex_sets.rs` (COMBINED_RE) |
-| `plugin/` | Plugin metadata, lifecycle (Phase 5: commands + arguments + when_to_use + user_invocable) | `manifest.rs`, `frontmatter.rs`, `identity.rs` (EntryKind), `components.rs` (list_command_files), `lifecycle.rs` |
-| `index/` | SQLite + sqlite-vec index (Phase 5: v3 schema with when_to_use) | `db.rs`, `schema.rs`, `migrations.rs` (v2→v3), `skills.rs` (EntryKind + when_to_use), `query.rs` (Phase 5 / US4: when_to_use embeddings) |
-| `mcp/` | MCP server + Phase 5 prompts + three-tier discovery + read-only extensions | `prompts.rs` (PromptRegistry), `prompt_name.rs`, `prompt_collision.rs`, `tools/` (search_skills, **get_skill_info**, get_skill) |
+| `plugin/` | Plugin metadata, lifecycle (Phase 5: commands + arguments + when_to_use + user_invocable) | `manifest.rs`, `frontmatter.rs`, `identity.rs` (EntryKind + canonical from_str), `components.rs` (list_command_files), `lifecycle.rs` |
+| `index/` | SQLite + sqlite-vec index (Phase 5: v3 schema with when_to_use; Polish: validate_db_stored_path SSOT) | `db.rs`, `schema.rs`, `migrations.rs` (v2→v3), `skills.rs` (EntryKind + when_to_use + validate_db_stored_path), `query.rs` (Phase 5 / US4: when_to_use embeddings) |
+| `mcp/` | MCP server + Phase 5 prompts + three-tier discovery + read-only extensions + Polish: substitution_helpers | `prompts.rs` (PromptRegistry), `prompt_name.rs`, `prompt_collision.rs`, `substitution_helpers.rs` (build_context_for_entry SSOT), `tools/` (search_skills, **get_skill_info**, get_skill) |
 | `doctor/` | Health check + auto-repair (Phase 5 / US5: read-only extensions) | `checks.rs` (build_prompts_report, count_entries_by_kind, detect_orphan_data_dirs), `report.rs` (PromptsReport, EntryCountsByKind, OrphanDataDirReport) |
 | `catalog/` | Catalog registry, git ops | `manifest.rs`, `store.rs`, `git.rs` |
 | `embedding/` | Text embedding + reranking | `fastembed.rs`, `stub.rs`, `download.rs` |
@@ -294,10 +296,10 @@ tome/
 | `harness/` | Phase 4: Harness abstraction + sync | `mod.rs` (trait), 5 harness impls, `sync.rs`, `rules_file.rs`, `mcp_config.rs` |
 | `settings/` | Phase 4: Layered composition | `parser.rs`, `resolver.rs` (composition engine), `edit.rs` |
 | `summarise/` | Phase 4: Workspace summariser | `llama.rs`, `stub.rs`, `prompts.rs`, `trigger.rs`, `registry.rs` |
-| `commands/` | CLI subcommand entry points (Phase 5 / US5: show + list extended) | Per-command modules + dispatchers |
+| `commands/` | CLI subcommand entry points (Phase 5 / US5: show + list extended; Polish: validate_db_stored_path) | Per-command modules + dispatchers |
 | `presentation/` | Output formatting + TUI | `tables.rs`, `prompt.rs`, `colour.rs` |
 | `util/` | Shared utilities | `atomic_dir.rs` (tempfile + rename), `io.rs` (bounded read) |
-| `paths.rs` | Phase 4 single-root layout; Phase 5: data-dir accessors + plugin_data_root() | `home_root()`, `Paths struct`, `plugin_data_root()`, `plugin_data_dir_for()`, `workspace_data_dir_for()` |
+| `paths.rs` | Phase 4 single-root layout; Phase 5: data-dir accessors; Polish: plugin_data_root() SSOT | `home_root()`, `Paths struct`, `plugin_data_root()` SSOT, `plugin_data_dir_for()`, `workspace_data_dir_for()` |
 
 ### `src/substitution/` — Substitution Engine Details (Phase 5 / US1–US3 COMPLETE)
 
@@ -311,39 +313,40 @@ tome/
 | `data_dir.rs` | Lazy creation: `ensure_plugin_data()` / `ensure_workspace_data()` | Wired in US2; creates dirs on first `{{TOME_*}}` reference during render |
 | `regex_sets.rs` | `OnceLock<Regex>` COMBINED_RE (compiled once at startup) | Populated in US2 via union of all stage patterns (builtins + env + arguments); production dispatch uses `captures_iter` |
 
-### `src/mcp/tools/` — Three-Tier Discovery (Phase 5 / US4)
+### `src/mcp/tools/` — Three-Tier Discovery (Phase 5 / US4, Polish: shared context)
 
-| File | Purpose | Phase 5 / US4 Status |
-|------|---------|---------------------|
-| `search_skills.rs` | **Tier 1**: KNN+rerank (5–10 results); truncated descriptions (512 chars default); first 100 chars when_to_use | **Phase 5 / US4 C-1**: truncate_description via char_indices fast-path (O(1) if no truncation, O(k) if truncation at pos k) |
-| `get_skill_info.rs` | **Tier 2 NEW**: Full description (no truncation), when_to_use, plugin_version, user_invocable, **resources (skill-only)** — files + directories with 5-cap per level + "and N more" sentinel | Phase 5 / US4 T303–T308; resource enumeration walks parent dir non-recursively, skips symlinks, BTreeMap for alphabetical JSON order |
-| `get_skill.rs` | **Tier 3**: Complete body + components | Unchanged from Phase 5 / US1–US3 |
+| File | Purpose | Phase 5 / US4 Status | Polish |
+|------|---------|---------------------|--------|
+| `search_skills.rs` | **Tier 1**: KNN+rerank (5–10 results); truncated descriptions (512 chars default); first 100 chars when_to_use | **Phase 5 / US4 C-1**: truncate_description via char_indices fast-path (O(1) if no truncation, O(k) if truncation at pos k) | Mirrored pattern at get_skill_info |
+| `get_skill_info.rs` | **Tier 2 NEW**: Full description (no truncation), when_to_use, plugin_version, user_invocable, **resources (skill-only)** — files + directories with 5-cap per level + "and N more" sentinel | Phase 5 / US4 T303–T308; resource enumeration walks parent dir non-recursively, skips symlinks, BTreeMap for alphabetical JSON order | **Polish**: Uses build_context_for_entry() SSOT (eliminates ~50 LOC duplication with prompts/get) |
+| `get_skill.rs` | **Tier 3**: Complete body + components | Unchanged from Phase 5 / US1–US3 | |
 
-### `src/mcp/` — MCP Prompts Details (Phase 5 / US1)
+### `src/mcp/` — MCP Prompts Details + Polish (Phase 5 / US1, Polish: substitution_helpers)
 
-| File | Purpose |
-|------|---------|
-| `prompts.rs` | `PromptRegistry` + `PromptEntry`; hand-rolled `PromptRouter` via rmcp; `PromptsCapability` declaration |
-| `prompt_name.rs` | Prompt-name derivation: `<plugin>__<entry>` with sanitisation (`[a-z0-9_-]`), truncation (16+32 caps), override support |
-| `prompt_collision.rs` | Collision detection: `CollisionRecord { prompt_name, entries }`; `resolve_collisions(registry)` |
-| `tool_description.rs` | Phase 4 US4.b preserved: compose runtime description from scaffold + cached summary |
+| File | Purpose | Phase 5 / US1 | Polish |
+|------|---------|-------------|--------|
+| `prompts.rs` | `PromptRegistry` + `PromptEntry`; hand-rolled `PromptRouter` via rmcp; `PromptsCapability` declaration | Phase 5 / US1 complete | |
+| `prompt_name.rs` | Prompt-name derivation: `<plugin>__<entry>` with sanitisation (`[a-z0-9_-]`), truncation (16+32 caps), override support | Phase 5 / US1 complete | |
+| `prompt_collision.rs` | Collision detection: `CollisionRecord { prompt_name, entries }`; `resolve_collisions(registry)` | Phase 5 / US1 complete | |
+| `tool_description.rs` | Phase 4 US4.b preserved: compose runtime description from scaffold + cached summary | Phase 4 preserved | |
+| `substitution_helpers.rs` | **Phase 5 Polish NEW**: `build_context_for_entry()` SSOT (shared across `prompts/get` + `get_skill_info`); eliminates ~50 LOC duplication | | **NEW**: Centralizes plugin version lookup, entry body reading, frontmatter parsing, arguments schema extraction |
 
-### `src/index/` — Schema v3 & Entry Records (Phase 5 / US1)
+### `src/index/` — Schema v3 & Entry Records (Phase 5 / US1, Polish: SSOT for validation)
 
-| File | Purpose |
-|------|---------|
-| `schema.rs` | DDL for v3 schema: adds `kind` column (VARCHAR: skill/command); adds `when_to_use` (nullable TEXT); adds `searchable`, `user_invocable` (BOOLEAN with defaults) |
-| `migrations.rs` | Phase 5 v2→v3 forward migration: schema changes + backfill logic (kind via directory walk, searchable/user_invocable defaults per contract) |
-| `skills.rs` | `SkillRecord` struct extended with `kind: EntryKind`, `when_to_use: Option<String>`, `searchable: bool`, `user_invocable: bool`; new `resolve_entry_body_path(catalog, plugin, name, kind) -> PathBuf` helper (routes via kind) |
+| File | Purpose | Phase 5 / US1 | Polish |
+|------|---------|-------------|--------|
+| `schema.rs` | DDL for v3 schema: adds `kind` column (VARCHAR: skill/command); adds `when_to_use` (nullable TEXT); adds `searchable`, `user_invocable` (BOOLEAN with defaults) | Phase 5 / US1 complete | |
+| `migrations.rs` | Phase 5 v2→v3 forward migration: schema changes + backfill logic (kind via directory walk, searchable/user_invocable defaults per contract) | Phase 5 / US1 complete | |
+| `skills.rs` | `SkillRecord` struct extended with `kind: EntryKind`, `when_to_use: Option<String>`, `searchable: bool`, `user_invocable: bool`; `resolve_entry_body_path(...)` helper (routes via kind); **Phase 5 Polish: `validate_db_stored_path()` SSOT** | Phase 5 / US1 complete | **NEW**: validate_db_stored_path() promoted to pub(crate) as canonical boundary-check (consumed by get_skill + commands/plugin/show) |
 
-### `src/plugin/` — Commands & Entries (Phase 5 / US1–US5)
+### `src/plugin/` — Commands & Entries (Phase 5 / US1–US5, Polish: canonical from_str)
 
-| File | Purpose |
-|------|---------|
-| `identity.rs` | `PluginId` (unchanged); **NEW**: `EntryKind` enum (`Skill` \| `Command`) with `as_str()` accessor |
-| `frontmatter.rs` | `SkillFrontmatter` widened with `arguments: Option<Vec<PromptArgument>>` (ordered list of declared parameters), `argument_hint: Option<String>`, `prompt_name: Option<String>`, `when_to_use: Option<String>` (**Phase 5 / US4: now indexed for semantic search**), `searchable: Option<bool>` (default true), `user_invocable: Option<bool>` (default false, **Phase 5 / US5: enforced in Doctor read-only checks**) |
-| `components.rs` | `count_components` (unchanged); **NEW**: `list_command_files(plugin_dir) -> Vec<CommandFile>` enumerates `<plugin>/commands/*.md` flat; `CommandFile { path, name }` |
-| `lifecycle.rs` | `enable_plugin` now calls `list_command_files` and collects `PendingCommand` structs alongside `PendingSkill`; Phase 5 / US3: both are processed through substitution render pipeline; Phase 5 / US4: when_to_use included in embeddings |
+| File | Purpose | Phase 5 | Polish |
+|------|---------|---------|--------|
+| `identity.rs` | `PluginId` (unchanged); **NEW**: `EntryKind` enum (`Skill` \| `Command`) with `as_str()` accessor | Phase 5 / US1 complete | **NEW**: Canonical `EntryKind::from_str()` consumed at six sites |
+| `frontmatter.rs` | `SkillFrontmatter` widened with `arguments: Option<Vec<PromptArgument>>` (ordered list of declared parameters), `argument_hint: Option<String>`, `prompt_name: Option<String>`, `when_to_use: Option<String>` (**Phase 5 / US4: now indexed for semantic search**), `searchable: Option<bool>` (default true), `user_invocable: Option<bool>` (default false, **Phase 5 / US5: enforced in Doctor read-only checks**) | Phase 5 / US1–US5 complete | |
+| `components.rs` | `count_components` (unchanged); **NEW**: `list_command_files(plugin_dir) -> Vec<CommandFile>` enumerates `<plugin>/commands/*.md` flat; `CommandFile { path, name }` | Phase 5 / US1 complete | |
+| `lifecycle.rs` | `enable_plugin` now calls `list_command_files` and collects `PendingCommand` structs alongside `PendingSkill`; Phase 5 / US3: both are processed through substitution render pipeline; Phase 5 / US4: when_to_use included in embeddings | Phase 5 / US1–US4 complete | |
 
 ### `src/doctor/` — Read-Only Extensions (Phase 5 / US5)
 
@@ -352,21 +355,21 @@ tome/
 | `checks.rs` | **NEW**: `build_prompts_report(workspace, paths) -> PromptsReport` (reuses PromptRegistry); `count_entries_by_kind(workspace, paths) -> EntryCountsByKind`; `detect_orphan_data_dirs(workspace, paths) -> Vec<OrphanDataDirReport>` — all read-only via open_read_only |
 | `report.rs` | **NEW**: `PromptsReport { available: u32, by_kind: { skills: u32, commands: u32 } }`; `EntryCountsByKind { skills: u32, commands: u32, other: u32 }`; `OrphanDataDirReport { path, size, last_modified }` |
 
-### `src/commands/plugin/` — Plugin Show + List (Phase 5 / US5)
+### `src/commands/plugin/` — Plugin Show + List (Phase 5 / US5, Polish: validation)
 
-| File | Purpose |
-|------|---------|
-| `show.rs` | **~228 lines extended** from US4 baseline: Skills + Commands sections (Kind header), per-entry annotations (`[searchable=true/false]`, `[user_invocable=true/false]`, `[dormant]` when disabled), `EntryView` struct for consistency, human + JSON sync |
-| `list.rs` | **~53 lines extended**: Per-kind entry counts in format `plugin: <name> (N skills, M commands)` instead of generic `(N entries)` |
+| File | Purpose | Polish |
+|------|---------|--------|
+| `show.rs` | **~228 lines extended** from US4 baseline: Skills + Commands sections (Kind header), per-entry annotations (`[searchable=true/false]`, `[user_invocable=true/false]`, `[dormant]` when disabled), `EntryView` struct for consistency, human + JSON sync | **NEW**: Calls validate_db_stored_path() on displayed paths (defence-in-depth S-H1) |
+| `list.rs` | **~53 lines extended**: Per-kind entry counts in format `plugin: <name> (N skills, M commands)` instead of generic `(N entries)` | |
 
-### `src/paths.rs` — Data Directory Accessors (Phase 5 / US1–US5)
+### `src/paths.rs` — Data Directory Accessors (Phase 5 / US1–US5, Polish: SSOT)
 
-| Method | Returns | Purpose | Status |
-|--------|---------|---------|--------|
-| `plugin_data_root()` | `<root>/plugin-data/` | Process-wide plugin-data root (single source of truth per US5) | Phase 5 / US5: new accessor introduced |
-| `plugin_data_dir_for(catalog, plugin)` | `<root>/plugin-data/<catalog>/<plugin>/` | Process-wide plugin scratch space | Path computed; directory created lazily in substitution render |
-| `workspace_data_dir_for(workspace, catalog, plugin)` | `<root>/workspaces/<name>/plugin-data/<catalog>/<plugin>/` | Workspace-scoped plugin scratch space | Path computed; directory created lazily in substitution render |
-| `workspace_dir(workspace)` | `<root>/workspaces/<name>/` | Workspace root (unchanged Phase 4) | Unchanged |
+| Method | Returns | Purpose | Status | Polish |
+|--------|---------|---------|--------|--------|
+| `plugin_data_root()` | `<root>/plugin-data/` | Process-wide plugin-data root (single source of truth per US5) | Phase 5 / US5: new accessor introduced | **NEW SSOT** — replaces two prior inline path computations |
+| `plugin_data_dir_for(catalog, plugin)` | `<root>/plugin-data/<catalog>/<plugin>/` | Process-wide plugin scratch space | Path computed; directory created lazily in substitution render | |
+| `workspace_data_dir_for(workspace, catalog, plugin)` | `<root>/workspaces/<name>/plugin-data/<catalog>/<plugin>/` | Workspace-scoped plugin scratch space | Path computed; directory created lazily in substitution render | |
+| `workspace_dir(workspace)` | `<root>/workspaces/<name>/` | Workspace root (unchanged Phase 4) | Unchanged | |
 
 ### `src/workspace/rename.rs` — Workspace Rename + Plugin-Data Relocation (Phase 5 / US2)
 
@@ -377,14 +380,14 @@ tome/
 
 ## Module Boundaries
 
-### Where to Add New Code (Phase 5 / US1–US5 Updates)
+### Where to Add New Code (Phase 5 / US1–US5 + Polish Updates)
 
 | If you're adding... | Put it in... | Pattern |
 |---------------------|--------------|---------|
 | New substitution stage | `src/substitution/{stage}.rs` | Add stage handler; extend COMBINED_RE pattern in `regex_sets.rs`; test via SubstitutionContext |
 | New built-in variable | `src/substitution/builtins.rs` | Add case to match block in `builtins` handler; wired in appropriate US (US2 for {{TOME_*}}) |
 | New argument syntax | `src/substitution/arguments.rs` | Extend `apply_arguments_match` match arms; update `shell_split` quoting rules if needed; test with `coerce_arguments` validation |
-| New entry kind | `src/plugin/identity.rs` | Extend `EntryKind` enum; update Ser/Deser; backfill migration in v2→v3 |
+| New entry kind | `src/plugin/identity.rs` | Extend `EntryKind` enum; add `from_str()` match arm; update Ser/Deser; backfill migration in v2→v3 |
 | Command-specific field | `src/plugin/frontmatter.rs` | Extend `SkillFrontmatter` (lenient parsing); document default; **Phase 5 / US4**: add to when_to_use if it's search-relevant; **Phase 5 / US5**: add to invocability checks if visibility-relevant |
 | Command collection | `src/plugin/lifecycle.rs` | Call `list_command_files`; parse frontmatter; build `PendingCommand`; Phase 5 / US3: collect arguments schema from frontmatter |
 | MCP prompt handler | `src/mcp/prompts.rs` | Register route via `PromptRouter::new_dyn`; implement request handler |
@@ -392,11 +395,13 @@ tome/
 | Prompt collision policy | `src/mcp/prompt_collision.rs` | Extend `resolve_collisions` detection; update warning message |
 | MCP discovery tier | `src/mcp/tools/{search_skills,get_skill_info,get_skill}.rs` | **Phase 5 / US4 patterns**: search_skills truncates descriptions (char_indices), get_skill_info walks resources (5-cap + sentinel), get_skill returns complete body |
 | Resource enumeration | `src/mcp/tools/get_skill_info.rs` | Extend `walk_resources()` logic; maintain 5-cap + sentinel; use BTreeMap for sorted JSON; skip symlinks at every level |
-| Description truncation | `src/mcp/tools/search_skills.rs` | Extend `truncate_description()` if new truncation rules needed; verify char_indices fast-path still applies |
-| Entry body resolution | `src/index/skills.rs` | Update `resolve_entry_body_path` match arms per new kind |
+| Description truncation | `src/mcp/tools/search_skills.rs` + `get_skill_info.rs` | Extend `truncate_description()` if new truncation rules needed; verify char_indices fast-path still applies; keep both sites synchronized (Polish pattern) |
+| Entry body resolution | `src/index/skills.rs` | Update `resolve_entry_body_path` match arms per new kind; call `validate_db_stored_path()` for boundary checks (Polish SSOT) |
+| Path boundary validation | `src/index/skills.rs` | Call canonical `validate_db_stored_path()` SSOT at every read/write point requiring path safety (Polish pattern) |
 | Schema backfill | `src/index/migrations.rs` | Add new v2→v3 backfill step; test via synthetic DB; include when_to_use if indexing new fields |
-| Data-dir path accessor | `src/paths.rs` | Add new `*_data_dir_for(...)` method; update `plugin_data_root()` + `workspace_dir` + `workspace_root` |
-| Data-dir creation | `src/substitution/data_dir.rs` | Add new `ensure_*_data(...)` function; return `SubstitutionError` on failure |
+| Data-dir path accessor | `src/paths.rs` | Add new `*_data_dir_for(...)` method; coordinate with `plugin_data_root()` SSOT; update lazy-creation in `data_dir.rs` |
+| Data-dir creation | `src/substitution/data_dir.rs` | Add new `ensure_*_data(...)` function; return `SubstitutionError` on failure; call from appropriate substitution stage |
+| Shared MCP context | `src/mcp/substitution_helpers.rs` | Add helper function to `build_context_for_entry()` SSOT module (Polish pattern for cross-handler reuse); consume from both prompts/get + get_skill_info |
 | Workspace-related mutation | `src/workspace/rename.rs` / `remove.rs` / `init.rs` | Update step sequence; ensure data-dir side effects coordinate (Phase 5 / US2: relocate on rename) |
 | Doctor read-only check | `src/doctor/checks.rs` | Add new `pub fn check_*` helper; call via `open_read_only`; add variant to `report.rs` if new subsystem needed |
 | Doctor report field | `src/doctor/report.rs` | Add field to `DoctorReport`; add Ser/Deser if reporting new subsystem; no mutation allowed (read-only invariant) |
@@ -408,7 +413,7 @@ tome/
 
 ### Key Patterns
 
-#### Single-Pass Substitution Pattern (Phase 5 / US2)
+#### Single-Pass Substitution Pattern (Phase 5 / US2, Polish: unified dispatch)
 
 ```rust
 // src/substitution/mod.rs — COMBINED_RE single-pass loop (replaces dual-sweep)
@@ -527,10 +532,11 @@ if plugin_data_subdir.exists() {
 std::fs::rename(&old_workspace_dir, &new_workspace_dir)?;
 ```
 
-#### Description Truncation Fast-Path Pattern (Phase 5 / US4)
+#### Description Truncation Fast-Path Pattern (Phase 5 / US4, Polish: unified)
 
 ```rust
 // src/mcp/tools/search_skills.rs::truncate_description — O(1) fast-path, O(k) truncation
+// (SAME pattern mirrored at get_skill_info.rs for consistency)
 
 fn truncate_description(s: &str, max: usize) -> String {
     if max == 0 {
@@ -559,7 +565,67 @@ fn truncate_description(s: &str, max: usize) -> String {
 }
 ```
 
-#### Three-Tier MCP Discovery Pattern (Phase 5 / US4)
+#### Shared MCP Context Builder Pattern (Phase 5 Polish, SSOT)
+
+```rust
+// src/mcp/substitution_helpers.rs — Shared SSOT across prompts/get + get_skill_info
+
+pub fn build_context_for_entry(
+    catalog: &str,
+    plugin: &str,
+    entry_name: &str,
+    kind: EntryKind,
+    scope: &Scope,
+    paths: &Paths,
+) -> Result<SubstitutionContext, TomeError> {
+    // Lookup plugin version
+    let plugin_version = get_plugin_version(catalog, plugin, paths)?;
+    
+    // Resolve entry body path (uses kind discriminator)
+    let body_path = index::skills::resolve_entry_body_path(catalog, plugin, entry_name, kind);
+    
+    // Read full body
+    let body = fs::read_to_string(&body_path)?;
+    
+    // Parse frontmatter for arguments + when_to_use
+    let frontmatter = plugin::frontmatter::parse_skill_frontmatter(&body)?;
+    
+    // Build context with all fields populated
+    SubstitutionContext::builder()
+        .workspace_name(scope.0.clone())
+        .catalog(catalog.to_owned())
+        .plugin(plugin.to_owned())
+        .entry_name(entry_name.to_owned())
+        .plugin_version(plugin_version)
+        .arguments(coerce_frontmatter_arguments(&frontmatter)?)
+        .build()
+}
+```
+
+#### Path Boundary Validation Pattern (Phase 5 Polish, SSOT)
+
+```rust
+// src/index/skills.rs::validate_db_stored_path — Canonical check at every boundary
+
+pub(crate) fn validate_db_stored_path(path: &Path) -> Result<(), TomeError> {
+    // Reject .. components and absolute paths
+    for component in path.components() {
+        if matches!(component, std::path::Component::ParentDir) {
+            return Err(TomeError::PathTraversalAttempt { path: path.to_owned() });
+        }
+        if matches!(component, std::path::Component::RootDir) {
+            return Err(TomeError::PathTraversalAttempt { path: path.to_owned() });
+        }
+    }
+    Ok(())
+}
+
+// Called by every read/write site:
+// - get_skill::resolve_entry_body_path (S-H1 boundary)
+// - commands/plugin/show.rs::list_entries (displayed paths, defence-in-depth)
+```
+
+#### Three-Tier MCP Discovery Pattern (Phase 5 / US4, Polish: shared context)
 
 ```rust
 // src/mcp/tools/{search_skills,get_skill_info,get_skill}.rs
@@ -569,9 +635,10 @@ pub async fn handle_search(state, input) -> Result<SearchResults, Error> {
     // KNN + rerank → top 5–10 with truncate_description(desc, 512)
 }
 
-// Tier 2: get_skill_info — full metadata + resource enumeration
+// Tier 2: get_skill_info — full metadata + resource enumeration (Polish: shared context)
 pub async fn handle_info(state, input) -> Result<SkillInfo, Error> {
-    // Lookup entry → read full description (no truncation) + when_to_use
+    // Build context via build_context_for_entry() SSOT (shared with prompts/get)
+    // Read full description (no truncation) + when_to_use
     // For skills: walk parent dir (1-level deep) with 5-cap per dir
     // resources: { files: [...], directories: { "name": [...], ... } }
 }
@@ -667,4 +734,4 @@ No auto-generated files in src/; test fixtures are synthesized at runtime (e.g.,
 
 ---
 
-*This document shows WHERE code lives. Updated 2026-05-27 against Phase 5 / US5 COMPLETE (per-entry invocability + doctor read-only extensions shipped). 1193 tests across 151 suites.*
+*This document shows WHERE code lives. Updated 2026-05-27 against Phase 5 COMPLETE + Polish shipped (per-entry invocability + doctor read-only extensions + single-source-of-truth promotion). 1193 tests across 151 suites.*
