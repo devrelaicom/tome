@@ -28,6 +28,7 @@ pub mod prompts;
 pub mod runtime;
 pub mod server;
 pub mod state;
+pub mod substitution_helpers;
 pub mod tool_description;
 pub mod tools;
 

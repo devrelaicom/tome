@@ -22,3 +22,6 @@ Each line is an event (PR open / merge, phase close, etc.). Newest at the bottom
 2026-05-27T15:00:00Z  PR #125 merged  US5.b complete  main @ 4d4aa66  test total: 1192/150/16
 2026-05-27T15:30:00Z  PR #126 merged  pre-push hook slim-down (chore)  main @ 407d1f7  test total unchanged
 2026-05-27T16:30:00Z  US5.c branch opened  4-reviewer pass (0 blockers, 4 majors, cleanest US closeout of Phase 5)
+2026-05-27T17:30:00Z  PR #127 merged  US5.c / Phase 7 closed  main @ abd0f48  test total: 1193/151/16
+2026-05-27T17:31:00Z  Phase 5 Polish started  phase-wide 4-reviewer pass; PR-A→PR-E plan
+2026-05-27T18:30:00Z  Polish complete  v0.5.0 cut on phase-5-polish branch  test total: 1194/151/16

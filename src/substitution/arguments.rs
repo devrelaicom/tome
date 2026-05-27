@@ -233,6 +233,12 @@ pub(super) fn apply_arguments_match(
 ) -> (String, bool) {
     use super::regex_sets::{ARG_INDEX_GROUP, NAMED_GROUP, POSITIONAL_GROUP};
 
+    // Polish m-3 (Phase 5): `unwrap_or(usize::MAX)` sentinels the
+    // overflow path — the `\d+` regex match parses cleanly for any
+    // input that fits a usize, but a 20+-digit value (e.g.
+    // `$99999999999999999999`) would otherwise panic. MAX falls
+    // through `positional.get(MAX)` → None → empty, matching the
+    // contract's "out-of-range index renders empty" rule.
     if let Some(idx) = caps.get(ARG_INDEX_GROUP) {
         let n: usize = idx.as_str().parse().unwrap_or(usize::MAX);
         let value = args.positional.get(n).cloned().unwrap_or_default();

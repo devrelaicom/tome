@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
@@ -67,13 +67,42 @@ pub use rmcp::model::PromptMessageRole as PromptRole;
 pub const DESCRIPTION_MAX_CHARS: usize = 300;
 
 /// Truncate `description` at a char (Unicode scalar value) boundary and
-/// append U+2026 (`…`) when truncated. Mirrors FR-092 in
-/// `search_skills` — same Unicode-safe approach.
+/// append U+2026 (`…`) when truncated. Mirrors the bounded-walk shape
+/// US4.d C-2 + Security HIGH fix landed in
+/// [`crate::mcp::tools::search_skills::truncate_description`]: walks at
+/// most `max + 1` chars regardless of input size (no `chars().count()`
+/// over the full input, no `take().collect()` allocation). Runs at
+/// registry-build time per entry rather than per request, so the DoS
+/// amplifier isn't the same shape as search_skills', but the pattern
+/// drift was the real cost — keeping the two truncate sites structurally
+/// identical prevents future copy-paste regressions.
 fn truncate_description(s: &str) -> String {
-    if s.chars().count() <= DESCRIPTION_MAX_CHARS {
-        return s.to_owned();
+    let max = DESCRIPTION_MAX_CHARS;
+    if max == 0 {
+        return String::new();
     }
-    let mut out: String = s.chars().take(DESCRIPTION_MAX_CHARS - 1).collect();
+    let mut iter = s.char_indices();
+    // Walk past `max` chars; if we exhaust the iterator within those,
+    // no truncation needed.
+    for _ in 0..max {
+        if iter.next().is_none() {
+            return s.to_owned();
+        }
+    }
+    // Reserve one slot for the ellipsis by truncating at `max - 1`
+    // content chars and appending `…`. The contract for this site says
+    // the post-truncation string is `DESCRIPTION_MAX_CHARS` chars total
+    // (content + ellipsis), DIFFERING from search_skills (which is
+    // `max + 1` total: `max` content + ellipsis). The walk above
+    // measures the input; once we know it overflows, find the
+    // `max - 1`-th char's byte offset for the slice.
+    let mut iter = s.char_indices();
+    for _ in 0..(max - 1) {
+        iter.next();
+    }
+    let cut = iter.next().map(|(idx, _)| idx).unwrap_or(s.len());
+    let mut out = String::with_capacity(cut + '\u{2026}'.len_utf8());
+    out.push_str(&s[..cut]);
     out.push('\u{2026}');
     out
 }
@@ -138,10 +167,15 @@ pub struct PromptEntry {
 }
 
 impl PromptEntry {
-    /// Build the rmcp [`PromptDescriptor`] (sans the prompt name, which
-    /// is the registry HashMap key) including argument-schema derivation
-    /// per FR-070 / FR-071 / FR-072.
-    pub fn descriptor(&self, name: String) -> PromptDescriptor {
+    /// Build the rmcp [`PromptDescriptor`] including argument-schema
+    /// derivation per FR-070 / FR-071 / FR-072.
+    ///
+    /// Polish m-4 (Phase 5): parameter named `prompt_name` (not `name`)
+    /// to disambiguate from `self.name` (the entry's frontmatter name).
+    /// The two diverge: `self.name` is `"fix-issue"`, the parameter is
+    /// the registry HashMap key e.g. `"my-plugin__fix-issue2"` — the
+    /// post-collision final name advertised to the host.
+    pub fn descriptor(&self, prompt_name: String) -> PromptDescriptor {
         let arguments = if !self.arguments.is_empty() {
             // Case A — named arguments. All required strings per FR-070,
             // declaration order preserved.
@@ -170,7 +204,7 @@ impl PromptEntry {
             None
         };
 
-        PromptDescriptor::new(name, Some(self.description.clone()), arguments)
+        PromptDescriptor::new(prompt_name, Some(self.description.clone()), arguments)
     }
 }
 
@@ -599,9 +633,11 @@ fn render_for_get(
 
 /// Construct the [`SubstitutionContext`] for one `prompts/get` call.
 ///
-/// `entry_path` carries the absolute path resolved upstream (saves the
-/// caller from threading the path through twice). `entry_dir` is
-/// `entry_path.parent()` with a defensive fallback to the plugin root.
+/// Polish M-2 (Phase 5): delegates to the shared
+/// [`super::substitution_helpers::build_context_for_entry`] helper.
+/// Both `prompts/get` and `get_skill` build the same context shape
+/// modulo args + plugin_version source; the helper consolidates the
+/// duplication.
 fn build_get_context(
     state: &McpState,
     entry: &PromptEntry,
@@ -609,57 +645,20 @@ fn build_get_context(
     declared_args: Vec<String>,
     args: Option<ArgumentValues>,
 ) -> Result<SubstitutionContext, TomeError> {
-    let workspace_name = state.scope.scope.name();
-    // The plugin root dir is `entry_path` walked up to the directory
-    // that hosts `.claude-plugin/`. For Phase 5 / US1.c we approximate
-    // by using `entry_dir`'s grandparent (entries live under
-    // `<plugin>/skills/<x>/SKILL.md` or `<plugin>/commands/<x>.md`).
-    // Real production callers in US2 will replace this with a manifest-
-    // walked plugin_root.
-    let entry_dir = entry_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| entry_path.clone());
-
-    // The substitution context wants the plugin's root directory (parent
-    // of skills/ or commands/). Walk up from entry_dir defensively.
-    let plugin_root_dir = entry_dir
-        .ancestors()
-        .find(|p| p.join(".claude-plugin").is_dir())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| entry_dir.clone());
-
-    // `plugin_version` is cached on the PromptEntry at registry build
-    // time (R-M3 / US1.d reviewer pass) — pre-US1.d this opened a
-    // second read-only DB connection per request to fetch it.
-    let plugin_version = entry.plugin_version.clone();
-
-    // `clock`: honour the test-only override slot when set; otherwise
-    // local time, falling back to UTC if the host has no local-offset
-    // database (musl builds, locked-down sandboxes).
-    let clock = substitution::current_clock();
-
-    // Plugin / workspace data-dir paths are no longer threaded through
-    // the builder (US2.d R-M2): the substitution layer derives them
-    // on-demand from `paths` + names via `data_dir::ensure_*`.
-
-    SubstitutionContext::builder()
-        .catalog_name(entry.catalog.clone())
-        .plugin_name(entry.plugin.clone())
-        .plugin_version(plugin_version)
-        .entry_name(entry.name.clone())
-        .entry_path(entry_path)
-        .entry_dir(entry_dir)
-        .plugin_root_dir(plugin_root_dir)
-        .workspace_name(workspace_name.as_str().to_owned())
-        .clock(clock)
-        .args(args)
-        .declared_args(declared_args)
-        .paths(state.paths.clone())
-        .build()
-        .map_err(|e| TomeError::SubstitutionFailed {
-            reason: e.to_string(),
-        })
+    super::substitution_helpers::build_context_for_entry(
+        entry.catalog.clone(),
+        entry.plugin.clone(),
+        entry.plugin_version.clone(),
+        entry.name.clone(),
+        entry_path,
+        state.scope.scope.name(),
+        state.paths.clone(),
+        args,
+        declared_args,
+    )
+    .map_err(|e| TomeError::SubstitutionFailed {
+        reason: e.to_string(),
+    })
 }
 
 /// Map the rmcp `arguments` JSON object → [`ArgumentValues`] per

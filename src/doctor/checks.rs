@@ -474,20 +474,28 @@ pub fn count_entries_by_kind(
         let mut skills = 0u32;
         let mut commands = 0u32;
         for r in rows {
-            let (kind, n) = r.map_err(|e| {
+            let (kind_text, n) = r.map_err(|e| {
                 TomeError::IndexIntegrityCheckFailure(format!("collect entry_counts row: {e}"))
             })?;
             // R-m2 (US5.c): SQLite COUNT(*) is non-negative; the prior
             // `n.max(0)` defensive clamp is unreachable.
             let n_u32 = u32::try_from(n).unwrap_or(u32::MAX);
-            match kind.as_str() {
-                "skill" => skills = n_u32,
-                "command" => commands = n_u32,
-                // Unknown kinds (schema drift) are not surfaced as a
-                // doctor failure here — `check_index`'s integrity_check
-                // covers DB corruption, and `tome reindex` would
-                // surface kind-parse failures explicitly.
-                _ => {}
+            // M-3 (Polish): canonical EntryKind dispatch over stringly-
+            // typed match — surfaces schema drift as
+            // IndexIntegrityCheckFailure rather than silently
+            // undercounting via `_ => {}`. Matches the discipline at
+            // src/index/skills.rs:189 / :753, src/index/query.rs:106,
+            // src/mcp/prompts.rs:281.
+            let kind = kind_text
+                .parse::<crate::plugin::identity::EntryKind>()
+                .map_err(|msg| {
+                    TomeError::IndexIntegrityCheckFailure(format!(
+                        "unknown kind `{kind_text}` in entry_counts: {msg}"
+                    ))
+                })?;
+            match kind {
+                crate::plugin::identity::EntryKind::Skill => skills = n_u32,
+                crate::plugin::identity::EntryKind::Command => commands = n_u32,
             }
         }
         (skills, commands)

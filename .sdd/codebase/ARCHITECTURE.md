@@ -1,12 +1,12 @@
 # Architecture
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
-> **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-27 (Phase 5 / US5 shipped; per-entry invocability + doctor read-only extensions; substitution layer + MCP discovery complete; 1193 tests)
+> **Generated**: 2026-05-27
+> **Last Updated**: 2026-05-27 (Phase 5 Polish-complete; v0.5.0 shipped; per-entry invocability + doctor read-only extensions + single-source-of-truth promotion; 1193 tests)
 
 ## Architecture Overview
 
-Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, workspace-scoped plugin enablement, comprehensive health diagnostics with auto-repair, command indexing and MCP prompts capability, variable substitution engine with four-stage single-pass rendering pipeline, three-tier MCP discovery flow with middle-tier metadata fetching, and **Phase 5 / US5 COMPLETE** per-entry invocability flags with read-only doctor extensions (prompts report, entry-kind counts, orphan data-dir detection).
+Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, workspace-scoped plugin enablement, comprehensive health diagnostics with auto-repair, command indexing and MCP prompts capability, variable substitution engine with four-stage single-pass rendering pipeline, three-tier MCP discovery flow with middle-tier metadata fetching, and **Phase 5 SHIPPED** per-entry invocability flags with read-only doctor extensions (prompts report, entry-kind counts, orphan data-dir detection).
 
 The architecture is **monolithic with layered structure** split across two execution contexts:
 - **CLI layer** — sync command dispatcher
@@ -14,7 +14,14 @@ The architecture is **monolithic with layered structure** split across two execu
 
 The central nervous system is a **single SQLite database** (`<home>/.tome/index.db`) that centralizes all state: plugin metadata, embeddings, workspace bindings, project bindings, enabled entries (skills/commands), and diagnostic metadata. Per-workspace composition settings and summaries live in separate TOML files (`<root>/workspaces/<name>/settings.toml`) and central RULES.md. Project markers (`<project>/.tome/config.toml`) are thin binding pointers, not databases.
 
-Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompts capability**, and **substitution engine skeleton**. Phase 5 / US2 shipped **single-pass rendering pipeline** (COMBINED_RE union regex), **lazy data-directory creation**, and **workspace rename integration**. Phase 5 / US3 shipped **argument substitution completeness**: Claude Code-compatible `$ARGUMENTS`, `$N`, and `$name` substitution with shell-style quoting, argument coercion, and frontmatter-declared parameter schemas. Phase 5 / US4 shipped **three-tier MCP discovery** with middle-tier `get_skill_info` tool (full description + `when_to_use` + 5-cap resource enumeration), **when_to_use indexing for search**, and **bounded-memory description truncation** via char_indices walk. **Phase 5 / US5 COMPLETE** ships **per-entry invocability metadata** (existing `user_invocable` frontmatter field + Doctor enforcement), **read-only doctor extensions** (prompts report + entry counts + orphan data-dir detection), and **plugin show enhancement** with searchable/invocable annotations.
+Phase 5 **SHIPPED** — all five user stories complete:
+- **US1** — Commands as first-class database entries + MCP prompts capability
+- **US2** — Single-pass substitution (builtins, env) + workspace-data relocation
+- **US3** — Argument substitution (shell_split + coerce_arguments) + argument validation
+- **US4** — Three-tier MCP discovery with bounded-memory description truncation + when_to_use indexing
+- **US5** — Per-entry invocability enforcement + doctor read-only extensions (prompts report, entry-kind counts, orphan data-dir detection)
+
+**Polish phase complete** — Single-source-of-truth promotion now firmly established across four instances: `plugin_data_root()`, `workspace_data_dir_for()`, `MCP_SLASH_PREFIX`, and `validate_db_stored_path` + `build_context_for_entry`. Bounded-walk discipline for caller-controlled string truncation is now uniform across both truncate sites. Stringly-typed enum dispatch rejected at six sites via canonical `EntryKind::from_str`.
 
 ## Architecture Pattern
 
@@ -28,6 +35,8 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
 | Phase 5 / US3 — Argument substitution | Claude Code `$ARGUMENTS` / `$N` / `$name` with shell_split + coerce_arguments + apply_arguments_match pipeline; ARGUMENTS footer appended in render tail |
 | Phase 5 / US4 — Three-tier MCP discovery | `search_skills` (small ranked list, truncated via char_indices walk) → `get_skill_info` (full description + when_to_use + 5-cap resource enumeration) → `get_skill` (full body); when_to_use indexed for semantic search |
 | Phase 5 / US5 — Per-entry invocability + Doctor read-only | `user_invocable` frontmatter field controls MCP prompts visibility; Doctor read-only extensions report prompts registry status, entry-kind counts, orphan data directories (FR-124 read-only enforcement structural) |
+| Phase 5 Polish — Single-source-of-truth accessors | `plugin_data_root()` for process-wide root; `workspace_data_dir_for()` for workspace-scoped paths; `validate_db_stored_path()` as canonical boundary-check helper; `build_context_for_entry()` as shared MCP context builder (eliminates ~50 LOC duplication across `prompts::build_get_context` + `tools::get_skill::build_substitution_context`) |
+| Phase 5 Polish — Stringly-typed dispatch rejection | Six sites use canonical `EntryKind::from_str()` + exhaustive match instead of substring patterns; defence-in-depth for schema drift |
 
 ## Core Components
 
@@ -46,7 +55,7 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
 
 - **Purpose**: Phase 5 / US1–US3 — Render entry bodies through a single-pass four-stage variable pipeline
 - **Location**: `src/substitution/{mod,context,builtins,env,arguments,data_dir,regex_sets}.rs`
-- **Phase 5 / US3 COMPLETE pipeline**:
+- **Phase 5 COMPLETE pipeline**:
   - **Stage 1: Built-ins** (`{{TOME_PLUGIN_DATA}}`, `{{TOME_WORKSPACE_DATA}}`, `{{TOME_WORKSPACE_NAME}}`, `{{TOME_CATALOG_NAME}}`, `{{TOME_PLUGIN_NAME}}`)
   - **Stage 2: Environment** (`{{$VAR}}` passthrough with TOME_ENV_ prefix)
   - **Stage 3: Arguments** (`$ARGUMENTS`, `$N` / `$1`–`$N`, `$name` with shell-style quoting; ARGUMENTS footer appended in render tail)
@@ -57,7 +66,7 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
   - `context.rs` — `SubstitutionContext` + `SubstitutionContextBuilder`; `ArgumentValues` enum (named/positional pairs)
   - `builtins.rs` — Stage 1 handler (5 placeholder patterns); lazy data-dir creation on first match
   - `env.rs` — Stage 2 handler (env var passthrough); TOME_ENV_ prefix support
-  - `arguments.rs` — **Phase 5 / US3 NEW** Stage 3 handler with three sub-pipelines:
+  - `arguments.rs` — **Phase 5 / US3 COMPLETE** Stage 3 handler with three sub-pipelines:
     - `shell_split(input) -> Vec<String>` — POSIX shell quoting parser (handles single/double quotes, backslash escape)
     - `coerce_arguments(supplied: Vec<String>, declared: &[PromptArgument]) -> Result<ArgumentValues, SubstitutionError>` — match supplied args to declared schema (positional + named + validation)
     - `apply_arguments_match(pattern, values) -> String` — resolve `$ARGUMENTS`, `$N`, `$name` placeholders to their values
@@ -88,6 +97,7 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
   - Read by `plugin::components::list_command_files` (enumerates `<plugin>/commands/*.md`)
   - Plumbed through `PendingSkill` struct in `index::skills` (F3 skeleton)
   - Propagated through MCP prompts registry to surface command entries as invocable prompts
+  - **Polish phase**: Canonical `EntryKind::from_str()` consumed at six sites instead of stringly-typed dispatch
 
 ### Plugin Components & Commands (`src/plugin/components.rs`)
 
@@ -101,10 +111,10 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
 
 ### Paths & Data Directories (`src/paths.rs`)
 
-- **Purpose**: Phase 4 consolidated root; Phase 5 / US1–US2 — Central data-directory accessors
+- **Purpose**: Phase 4 consolidated root; Phase 5 / US1–US2 — Central data-directory accessors; Phase 5 Polish — **single source of truth** for `plugin_data_root()`
 - **Location**: `src/paths.rs`
 - **New methods**:
-  - `plugin_data_root() -> PathBuf` — `<root>/plugin-data/` (process-wide root, single source of truth per Phase 5 / US5)
+  - `plugin_data_root() -> PathBuf` — **Polish phase**: New accessor introduced as SSOT; replaces two prior inline `<root>/plugin-data/` paths
   - `plugin_data_dir_for(catalog, plugin) -> PathBuf` — `<root>/plugin-data/<catalog>/<plugin>/` (process-wide)
   - `workspace_data_dir_for(workspace, catalog, plugin) -> PathBuf` — `<root>/workspaces/<name>/plugin-data/<catalog>/<plugin>/` (workspace-scoped)
 - **Semantics**:
@@ -138,14 +148,18 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
 
 ### Index Schema / Entry Records (`src/index/skills.rs`)
 
-- **Purpose**: Phase 5 / US1 — CRUD over the unified `skills` table with kind discriminator
+- **Purpose**: Phase 5 / US1 — CRUD over the unified `skills` table with kind discriminator; Polish — canonical **`validate_db_stored_path` SSOT** for path-traversal boundary checks
 - **Location**: `src/index/skills.rs`
 - **Changes**:
   - `SkillRecord` struct gains `kind: EntryKind` field (reads from `skills.kind` column)
   - `SkillRecord` gains `when_to_use: Option<String>`, `searchable: bool`, `user_invocable: bool` (new v3 columns)
   - `PendingSkill` struct extended with matching fields
-  - `resolve_entry_body_path(catalog, plugin, name, kind) -> PathBuf` — NEW helper (routes via kind)
+  - `resolve_entry_body_path(catalog, plugin, name, kind) -> PathBuf` — Helper that routes via kind
     - Returns `<plugin>/skills/<name>/SKILL.md` or `<plugin>/commands/<name>.md` based on kind
+    - **Polish phase**: Promoted to `pub(crate)` as canonical SSOT (consumed by `resolve_entry_body_path` + `commands/plugin/show.rs::list_entries`)
+  - **`validate_db_stored_path(path: &Path) -> Result<(), TomeError>`** — **Polish phase SSOT**
+    - Rejects `..` components and absolute paths (defence-in-depth for path-traversal per S-H1)
+    - Called by both `get_skill::resolve_entry_body_path` + new `commands/plugin/show.rs::validate_displayed_path`
   - Schema v2→v3 migration (in `index::migrations.rs`, F3 skeleton):
     - Adds `kind` column (backfilled via directory walk: `skill` if exists in `skills/`, else `command`)
     - Adds `when_to_use`, `searchable`, `user_invocable` columns (backfilled with defaults per contract)
@@ -169,10 +183,10 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
     - `resolve_collisions(registry) -> Vec<CollisionRecord>` — identifies conflicts for user visibility
   - **`tool_description.rs`** (Phase 4 US4.b, preserved): Compose runtime tool description from scaffold + cached summary
 
-### MCP Discovery Flow — Phase 5 / US4 (Three-Tier) (`src/mcp/tools/`)
+### MCP Discovery Flow — Phase 5 / US4 (Three-Tier) & Polish (`src/mcp/tools/`)
 
-- **Purpose**: Three-tier discovery pattern optimized for semantic search agent workflows
-- **Location**: `src/mcp/tools/{search_skills,get_skill_info,get_skill}.rs`
+- **Purpose**: Three-tier discovery pattern optimized for semantic search agent workflows; Polish phase — **single-source-of-truth context builder**
+- **Location**: `src/mcp/tools/{search_skills,get_skill_info,get_skill}.rs` + **Polish: `src/mcp/substitution_helpers.rs`**
 - **Tier 1: `search_skills` tool**:
   - KNN + optional reranking against `when_to_use` + `description` embeddings
   - Returns **5–10 top results** (configurable), each with:
@@ -192,6 +206,7 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
       - `files`: top-level sibling files in the entry's parent dir (excl. entry itself), alphabetized, capped at 5 entries + sentinel `"and N more"` if overflow
       - `directories`: BTreeMap of immediate subdirectories (keyed by name, alphabetized) with their immediate children (capped per-subdir, same sentinel rule)
       - Symlinks skipped at every level (hostile-catalog defence)
+  - **Polish phase**: Builds context via **`build_context_for_entry()` SSOT** (shared with `prompts/get` handler; eliminates ~50 LOC duplication that existed across `mcp::prompts::build_get_context` + `mcp::tools::get_skill::build_substitution_context`)
   - Latency: O(n) walk of parent directory + subdirs; all paths returned as absolute strings
 - **Tier 3: `get_skill` tool (existing)**:
   - Full entry body fetch: SKILL.md or command markdown
@@ -200,7 +215,7 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
 
 ### Description Truncation Hardening (`src/mcp/tools/search_skills.rs`)
 
-- **Purpose**: Phase 5 / US4 C-1 — Efficient bounded-memory truncation in `search_skills` results
+- **Purpose**: Phase 5 / US4 C-1 — Efficient bounded-memory truncation in `search_skills` results; Polish — **mirrored at `get_skill_info` for consistency**
 - **Location**: `src/mcp/tools/search_skills.rs::truncate_description(s: &str, max: usize) -> String`
 - **Algorithm**:
   1. If `max == 0`, return empty string
@@ -210,7 +225,17 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
   5. Slice at that boundary, append UTF-8 ellipsis `'…'` (U+2026), return
 - **Correctness**: Guaranteed UTF-8 safe — slices always happen at char boundaries (never mid-multibyte)
 - **Performance**: O(n) in worst case (must scan full input if no truncation), but O(k) when truncation happens at position k << n; no intermediate allocations in fast-path
-- **Replaces**: Previous implementation that always scanned the full string (DoS vector when max << input length)
+- **Polish phase**: Now mirrors identical pattern at both `search_skills.rs` + `get_skill_info.rs`; single-source-of-truth helper pattern established
+
+### Substitution Context Builder (`src/mcp/substitution_helpers.rs`)
+
+- **Purpose**: Phase 5 Polish — Shared SSOT for building `SubstitutionContext` across both `prompts/get` + `get_skill_info` MCP handlers
+- **Location**: `src/mcp/substitution_helpers.rs` (NEW, Polish phase)
+- **Exports**:
+  - `pub fn build_context_for_entry(catalog: &str, plugin: &str, entry_name: &str, ...) -> Result<SubstitutionContext, TomeError>`
+  - Centralizes: plugin version lookup, entry body reading, frontmatter parsing, argument extraction, when_to_use access
+  - Eliminates ~50 LOC duplication that existed across two MCP handler implementations
+- **Pattern**: First instance of shared handler helper across multiple MCP tools; reusable for future tiered-discovery tools
 
 ### Prompt Arguments & Frontmatter (`src/plugin/frontmatter.rs`)
 
@@ -258,6 +283,7 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
   - New `EntryView` struct (derived from query result + frontmatter for human + JSON consistency)
   - Rendered in both plain-text (with visual grouping) and JSON (separate `skills` / `commands` arrays)
   - Lines extended ~228: metadata parsing, grouping logic, annotation rendering
+  - **Polish phase**: Added `validate_db_stored_path()` call for displayed paths (defence-in-depth S-H1)
 
 ### Plugin List Enhancement (`src/commands/plugin/list.rs`)
 
@@ -268,9 +294,9 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
   - Queries from `count_entries_by_kind` helper (shared with doctor)
   - Lines extended ~53: count queries + format
 
-### Data Flow — Phase 5 / US1–US5
+### Data Flow — Phase 5 Complete & Polish
 
-#### Enable + Index Pipeline (US1–US3 unchanged, US4 adds search indexing, US5 adds invocability tracking)
+#### Enable + Index Pipeline (US1–US3 unchanged, US4 adds search indexing, US5 adds invocability tracking, Polish: command normalization)
 
 ```
 CLI: tome plugin enable <catalog>/<plugin>
@@ -296,7 +322,7 @@ Release advisory lock
 regenerate_for_trigger(workspace_name, paths)  (Phase 4; include when_to_use in embeddings per US4)
 ```
 
-#### Three-Tier Discovery Flow (Phase 5 / US4)
+#### Three-Tier Discovery Flow (Phase 5 / US4, Polish: shared context builder)
 
 ```
 CLI/MCP Agent: "How do I do X?"
@@ -316,7 +342,7 @@ Agent reviews summaries; picks candidate
      ↓
 MCP: call get_skill_info(catalog, plugin, name, kind)  [Tier 2 — detailed metadata + resource preview]
      ↓
-tome: Lookup entry in index → read frontmatter → walk parent dir for resources (5-cap per dir)
+tome: Lookup entry in index → build context via build_context_for_entry() SSOT → read frontmatter → walk parent dir for resources (5-cap per dir)
   ↓
   Return SkillInfo {
     - Full description (no truncation)
@@ -377,11 +403,12 @@ If --fix:
 - `src/substitution/` is sync-only; variable rendering is pure compute (lazy data-dir creation is the only I/O side effect)
 - Workspace-specific code never reads/writes global index directly; uses scope-parameterized helpers
 - Substitution engine allows test injection via `SUBSTITUTION_OVERRIDE` thread_local (mirrors `MIGRATIONS_OVERRIDE` / `SUMMARISER_OVERRIDE` pattern)
-- Entry kind dispatch via `EntryKind` enum is exhaustive; matches are type-safe
+- Entry kind dispatch via `EntryKind` enum is exhaustive; matches are type-safe; canonical `EntryKind::from_str()` consumed at six sites (Polish defense-in-depth)
 - **Phase 5 / US3**: Single-pass rendering pipeline with per-match dispatch ensures each stage pattern is matched exactly once per body; argument coercion is validated before render
 - **Phase 5 / US4**: Three-tier MCP discovery separates concerns: `search_skills` optimizes for ranking + truncation (char_indices fast-path), `get_skill_info` separates metadata from body, `get_skill` remains unchanged; resource enumeration walks (non-recursive, 5-cap per dir, alphabetical via BTreeMap for JSON stability)
 - **Phase 5 / US5**: Doctor read-only extensions use only query-level operations; structural enforcement via `open_read_only` with no transaction acquisition
+- **Phase 5 Polish**: Single-source-of-truth accessors established: `plugin_data_root()` for process-wide data root; `workspace_data_dir_for()` for workspace-scoped paths; `validate_db_stored_path()` for boundary checks; `build_context_for_entry()` for shared MCP context (eliminates ~50 LOC cross-handler duplication)
 
 ---
 
-*This document describes HOW the system is organized at Phase 5 / US5 COMPLETE (per-entry invocability + doctor read-only extensions shipped). 1193 tests across 151 suites.*
+*This document describes HOW the system is organized at Phase 5 COMPLETE + Polish shipped (per-entry invocability + doctor read-only extensions + single-source-of-truth promotion). 1193 tests across 151 suites.*

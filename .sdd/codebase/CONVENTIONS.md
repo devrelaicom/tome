@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and patterns for Tome (Rust CLI).
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-27
+> **Last Updated**: 2026-05-27 (Phase 5 Polish complete, v0.5.0)
 
 ## Code Style
 
@@ -52,7 +52,29 @@ All three enforce at the pre-commit hook (`.githooks/pre-commit`) before commits
 | Traits | PascalCase | `Embedder`, `Reranker`, `HarnessModule` |
 | Type aliases | PascalCase or semantic | `ResolvedScope`, `SubstitutionContext` |
 
-**Phase 5 constant promotion pattern**: String literals that appear across multiple modules become constants at their first cross-module consumer. Example: `MCP_SLASH_PREFIX = "/mcp__tome__"` defined in `src/mcp/mod.rs` once, consumed by `commands/doctor.rs` (establishes rule-of-3).
+**Phase 5 constant promotion pattern**: String literals that appear across multiple modules become constants at their first cross-module consumer. Example: `MCP_SLASH_PREFIX = "/mcp__"` defined in `src/mcp/mod.rs` once, consumed by `commands/doctor.rs` (establishes rule-of-3).
+
+### Phase 5: Stringly-Typed Enum Dispatch Pattern
+
+When deserializing enum variants from database or JSON strings, prefer `kind.parse::<EntryKind>()` + match-on-variants over stringly-typed `match kind.as_str()`:
+
+```rust
+// Good: type-safe dispatch
+let kind = stored_kind.parse::<EntryKind>()?;
+match kind {
+    EntryKind::Skill => { ... },
+    EntryKind::Command => { ... },
+}
+
+// Bad: stringly-typed dispatch
+match kind.as_str() {
+    "skill" => { ... },
+    "command" => { ... },
+    _ => { ... },  // Unknown branches are error-prone
+}
+```
+
+**Rationale** (Phase 5 Polish M-3): Schema-column enums should round-trip through type-safe parsing. The Unknown case surfaces as `IndexIntegrityCheckFailure` (exit 51) — a clear signal to the user that their database schema is ahead of the running binary. Used in `doctor/checks.rs`, `commands/plugin/show.rs`, and future entry-kind dispatch sites.
 
 ## Error Handling
 
@@ -67,7 +89,7 @@ Tome uses a **closed `TomeError` enum** — every error variant has an enumerate
 - Phase 2: codes 20–52 (plugins, index, embedding)
 - Phase 3: codes 60–75 (MCP, doctor, schema migration)
 - Phase 4: codes 13–20 (workspace, harness, composition)
-- Phase 5: codes 21–26 (commands, prompts, substitution)
+- Phase 5: codes 9, 21–26 (substitution, commands, prompts, data dirs)
 
 **Contract reference**: `specs/00X-phase-Y-*/contracts/exit-codes-p*.md` per phase.
 
@@ -200,7 +222,11 @@ When a helper function is reused at 3+ call sites, promote it to `pub` or move i
 
 **Example**: `paths_for(&ToolEnv) -> Paths` was duplicated across 3 test files, then promoted to `tests/common/mod.rs`.
 
-**Phase 5 examples**: `Paths::plugin_data_root()` — single-source-of-truth accessor at first cross-module consumer per US5.a; `body_has_bare_arguments()` — promoted to `pub` in `src/substitution/mod.rs` for use in `prompts/get` + `get_skill` MCP tools (US3.d R-M1).
+**Phase 5 examples**: 
+- `Paths::plugin_data_root()` — single-source-of-truth accessor at first cross-module consumer per US5.a
+- `body_has_bare_arguments()` — promoted to `pub` in `src/substitution/mod.rs` for use in `prompts/get` + `get_skill` MCP tools (US3.d R-M1)
+- `build_context_for_entry()` — extracted to `src/substitution/context.rs` at Polish M-2 to serve both `prompts.rs::build_get_context` and `get_skill.rs::build_substitution_context`
+- `validate_db_stored_path()` — extracted to `src/index/skills.rs` at Polish M-4 to serve both `resolve_entry_body_path` and `commands/plugin/show.rs::list_entries`
 
 ### Single-Source-of-Truth for Length Windows
 
@@ -237,11 +263,11 @@ let workspaces = list_workspaces(&conn)?;
 When truncating strings for length limits (e.g., MCP tool descriptions), use `char_indices` for boundary-safe truncation that avoids O(n) full-string traversal:
 
 ```rust
-// Phase 5 US4.d C-M2 pattern: O(1) boundary-safe truncation
+// Phase 5 US4.d C-M2 + Polish M-1 pattern: O(max) bounded-walk truncation
 const MAX_DESCRIPTION: usize = 8000;
 
 if description.len() > MAX_DESCRIPTION {
-    // char_indices walks byte boundaries; last() before limit gives safe truncation point
+    // char_indices walks at most max+1 chars; never full string
     if let Some((idx, _)) = description
         .char_indices()
         .take_while(|&(i, _)| i < MAX_DESCRIPTION)
@@ -253,9 +279,9 @@ if description.len() > MAX_DESCRIPTION {
 }
 ```
 
-**Alternative (fixed-size context)**:
+**Alternative (fixed-window O(1) lookup)**:
 ```rust
-// For O(1) fixed-window: capture indices via char_indices, drop all after limit
+// For fixed-size windows: capture indices, drop all after limit
 let safe_len = description
     .char_indices()
     .nth(MAX_CHARS)
@@ -264,7 +290,9 @@ let safe_len = description
 description.truncate(safe_len);
 ```
 
-**Used in**: `src/mcp/tools/search_skills.rs` (US4 description truncation), any bounded-text CLI output.
+**Security note** (US4.d HIGH fix): Pre-fix implementations did TWO `chars()` passes per value (early `chars().count()` check + `chars().take().collect()` for truncation). With caller-controlled `max` × `top_k` results × multi-KB inputs, this was a DoS amplifier. Bounded-walk discipline prevents regression: **never call `chars().count()` as an early gate**; **only walk up to the limit**.
+
+**Used in**: `src/mcp/tools/search_skills.rs` (US4), `src/mcp/prompts.rs` (Polish M-1), any bounded-text CLI output.
 
 ### Phase 5: JSON Output with Alphabetical Key Order
 
@@ -308,7 +336,7 @@ fn validate_description_max(limit: Option<u32>) -> Result<u32, TomeError> {
 When tests inject model identity via `embedder_entry` / `reranker_entry` that must match `StubEmbedder`'s compiled-in identity, use an explicit stub seed:
 
 ```rust
-// tests/common/mod.rs
+// tests/common/mod.rs (future: promote when 3rd caller emerges)
 pub fn stub_embedder_seed() -> MetaSeed {
     MetaSeed {
         name: "stub-embedder".to_string(),
@@ -407,7 +435,7 @@ Trunk-based development. Short-lived feature/fix branches off `main`.
 - **Small batches**: ~400 lines or 2 modules max as soft cap.
 - **Chunked slices**: multi-PR features follow numbered slices (PR #74 Slice 1a, PR #75 Slice 1b).
 - **Focused commits**: one logical change per commit.
-- **4-reviewer parallel pass** (Phase 5 pattern): contract audit / Rust-lens / test audit / security audit in parallel before applying fixes. Findings + disposition committed BEFORE fixes land.
+- **4-reviewer parallel pass** (Phase 5+ pattern): contract audit / Rust-lens / test audit / security audit in parallel at phase-wide closeout (distinct from per-US passes). Findings + disposition committed BEFORE fixes land. Pattern established in Phase 5 Polish: 4 agents in ONE message, captures cross-US drift.
 
 ## Import Ordering
 
@@ -473,6 +501,7 @@ See `TESTING.md` for detailed test patterns, but core conventions:
 - **Output leniency**: third-party JSON and YAML parsed leniently. Output `Serialize` types do NOT carry `#[serde(deny_unknown_fields)]` (Phase 5: consistency pattern established).
 - **Credentials scrubbed**: all error chains + model URLs sanitized before logging.
 - **Symlink refusal**: symlink paths refused at every read/write entry point.
+- **Path validation**: database-stored paths validated to be relative + `..`-free via `validate_db_stored_path()` before use in `fs::read` (Phase 5 Polish M-4).
 
 ---
 
