@@ -286,7 +286,7 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 - [x] T256 [US3] Implement `apply_arguments(body, args, declared)` returning `(rendered_body, replacements_performed: bool)`; uses `regex::Regex::replace_all` with a callback resolving each capture group per the four patterns per FR-040 (use devs:rust-dev agent)
 - [x] T257 [US3] Wire `apply_arguments` into `substitution::render()` stage 3, gated on `ctx.args.is_some()` (use devs:rust-dev agent)
 - [ ] T258 [GIT] Commit: `feat(substitution): argument stage + four patterns + name binding`
-- [ ] T259 [US3] Create `tests/substitution_arguments.rs` with tests per `contracts/substitution-engine.md` § Stage 3: $ARGUMENTS, $ARGUMENTS[N], $N, $name, out-of-range, single-string vs object, shell-split rules, no-re-scan invariant (use devs:rust-dev agent)
+- [x] T259 [US3] Create `tests/substitution_arguments.rs` with tests per `contracts/substitution-engine.md` § Stage 3: $ARGUMENTS, $ARGUMENTS[N], $N, $name, out-of-range, single-string vs object, shell-split rules, no-re-scan invariant (use devs:rust-dev agent)
 - [ ] T260 [GIT] Commit: `test(substitution): argument stage`
 - [ ] T261 [GIT] Push US3.a slice
 
@@ -296,7 +296,7 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 - [x] T263 [US3] Compute `<value>` per `contracts/substitution-engine.md` § Stage 4: single-string verbatim OR positional values joined by single space (use devs:rust-dev agent)
 - [x] T264 [US3] Handle edge case: body ends with `\n` (no need for separator) vs body ends with non-newline (separator needed) (use devs:rust-dev agent)
 - [ ] T265 [GIT] Commit: `feat(substitution): ARGUMENTS append-fallback footer`
-- [ ] T266 [US3] Extend `tests/substitution_arguments.rs` with append-fallback tests: triggered when no body references, NOT triggered when any reference matched, footer format matches contract, newline-suffix edge case (use devs:rust-dev agent)
+- [x] T266 [US3] Extend `tests/substitution_arguments.rs` with append-fallback tests: triggered when no body references, NOT triggered when any reference matched, footer format matches contract, newline-suffix edge case (use devs:rust-dev agent)
 - [ ] T267 [GIT] Commit: `test(substitution): append-fallback footer`
 - [ ] T268 [GIT] Push US3.b slice
 
