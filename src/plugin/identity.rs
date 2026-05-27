@@ -107,7 +107,17 @@ pub enum SegmentRejection {
 ///
 /// See `specs/005-phase-5-commands-prompts/contracts/entry-schema-p5.md`
 /// for the authoritative shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum EntryKind {
     Skill,

@@ -11,6 +11,7 @@ Each line is an event (PR open / merge, phase close, etc.). Newest at the bottom
 2026-05-27T02:30:00Z  PR #115 merged  US1.d / Phase 3 closed  main @ feb2ae8  test total: 1039/137/16
 2026-05-27T03:30:00Z  PR #116 merged  US2.a complete  main @ f711408
 2026-05-27T05:00:00Z  PR #117 merged  US2.b complete  main @ 37a9c03
-2026-05-27T07:30:00Z  PR #118 merged  US2.c+d / Phase 4 closed  main @ 914cb0f  test total: 1089/141/16  (BLOCKERS fixed: exfiltration vector closed)
-2026-05-27T08:30:00Z  PR #119 merged  US3.a+b complete  main @ 4d9e437  test total: 1134/142/16  (4-stage substitution pipeline complete; NFR-007 structural)
-2026-05-27T08:31:00Z  US3.c started  end-to-end + reviewer pass + closeout
+2026-05-27T07:30:00Z  PR #118 merged  US2.c+d / Phase 4 closed  main @ 914cb0f  test total: 1089/141/16
+2026-05-27T08:30:00Z  PR #119 merged  US3.a+b complete  main @ 4d9e437  test total: 1134/142/16
+2026-05-27T10:30:00Z  PR #120 merged  US3.c+d / Phase 5 closed  main @ 37e3666  test total: 1139/143/16  (substitution layer COMPLETE end-to-end; 0-BLOCKER reviewer pass)
+2026-05-27T10:31:00Z  Phase 6 (US4) US4.a started  get_skill_info middle-tier tool + when_to_use indexing
