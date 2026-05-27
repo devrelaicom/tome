@@ -13,11 +13,8 @@ Each line is an event (PR open / merge, phase close, etc.). Newest at the bottom
 2026-05-27T05:00:00Z  PR #117 merged  US2.b complete  main @ 37a9c03
 2026-05-27T07:30:00Z  PR #118 merged  US2.c+d / Phase 4 closed  main @ 914cb0f  test total: 1089/141/16
 2026-05-27T08:30:00Z  PR #119 merged  US3.a+b complete  main @ 4d9e437  test total: 1134/142/16
-2026-05-27T10:30:00Z  PR #120 merged  US3.c+d / Phase 5 closed  main @ 37e3666  test total: 1139/143/16  (substitution layer COMPLETE end-to-end; 0-BLOCKER reviewer pass)
-2026-05-27T10:31:00Z  Phase 6 (US4) US4.a started  get_skill_info middle-tier tool + when_to_use indexing
-2026-05-27T11:30:00Z  PR #121 opened  US4.a  +19 tests (1139 -> 1158)  new MCP tool + resource enumeration with symlink defence
+2026-05-27T10:30:00Z  PR #120 merged  US3.c+d / Phase 5 closed  main @ 37e3666  test total: 1139/143/16
 2026-05-27T11:45:00Z  PR #121 merged  US4.a complete  main @ 048a91a  test total: 1158/145/16
-2026-05-27T11:46:00Z  US4.b started  when_to_use indexing verification + reindex re-eval
-2026-05-27T12:00:00Z  PR #122 opened  US4.b  +1 test (1158 -> 1159)  reindex re-embed on when_to_use change
 2026-05-27T12:10:00Z  PR #122 merged  US4.b complete  main @ 5929138  test total: 1159/145/16
-2026-05-27T12:11:00Z  US4.c started  search_skills extension (truncation + kind + searchable filter) + reviewer pass + US4 closeout
+2026-05-27T13:30:00Z  PR #123 merged  US4.c+d / Phase 6 closed  main @ 46433e2  test total: 1172/147/16
+2026-05-27T13:31:00Z  Phase 7 (US5) US5.a started  per-entry invocability flags + doctor extensions
