@@ -351,9 +351,9 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US4.b — `when_to_use` indexing + reindex re-eval
 
-- [ ] T314 [US4] Verify embedding_text composer (already extended in US1.a T114) produces the documented format per `contracts/entry-schema-p5.md` § Embedding text composition (use devs:rust-dev agent)
-- [ ] T315 [US4] Run reindex pass against the fixture catalog; confirm rows whose frontmatter has `when_to_use` re-embed because content_hash changed (use devs:rust-dev agent)
-- [ ] T316 [US4] Extend `tests/entry_kind_indexing.rs` with `when_to_use_change_invalidates_content_hash` and `query_semantically_matches_when_to_use_text` (use devs:rust-dev agent)
+- [x] T314 [US4] Verify embedding_text composer (already extended in US1.a T114) produces the documented format per `contracts/entry-schema-p5.md` § Embedding text composition (use devs:rust-dev agent)
+- [x] T315 [US4] Run reindex pass against the fixture catalog; confirm rows whose frontmatter has `when_to_use` re-embed because content_hash changed (use devs:rust-dev agent)
+- [x] T316 [US4] Extend `tests/entry_kind_indexing.rs` with `when_to_use_change_invalidates_content_hash` and `query_semantically_matches_when_to_use_text` (use devs:rust-dev agent)
 - [ ] T317 [GIT] Commit: `feat(index): when_to_use contributes to embedding_text`
 - [ ] T318 [GIT] Push US4.b slice
 
