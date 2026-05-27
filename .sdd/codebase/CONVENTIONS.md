@@ -45,12 +45,14 @@ All three enforce at the pre-commit hook (`.githooks/pre-commit`) before commits
 | Type | Convention | Example |
 |------|------------|---------|
 | Variables | snake_case | `catalog_name`, `plugin_id`, `is_enabled` |
-| Constants | SCREAMING_SNAKE_CASE | `MAX_RETRIES`, `LONG_MAX_CHARS` |
+| Constants | SCREAMING_SNAKE_CASE | `MAX_RETRIES`, `LONG_MAX_CHARS`, `MCP_SLASH_PREFIX` |
 | Functions | snake_case, verb-prefix | `enable_plugin`, `resolve_plugin_dir`, `assemble_report` |
 | Structs | PascalCase | `TomeError`, `Config`, `Fixture` |
-| Enums | PascalCase, variants as items | `ScopeKind`, `CompositionErrorKind` |
+| Enums | PascalCase, variants as items | `ScopeKind`, `CompositionErrorKind`, `EntryKind` |
 | Traits | PascalCase | `Embedder`, `Reranker`, `HarnessModule` |
 | Type aliases | PascalCase or semantic | `ResolvedScope`, `SubstitutionContext` |
+
+**Phase 5 constant promotion pattern**: String literals that appear across multiple modules become constants at their first cross-module consumer. Example: `MCP_SLASH_PREFIX = "/mcp__tome__"` defined in `src/mcp/mod.rs` once, consumed by `commands/doctor.rs` (establishes rule-of-3).
 
 ## Error Handling
 
@@ -81,9 +83,11 @@ Tome uses a **closed `TomeError` enum** — every error variant has an enumerate
 | Level | Usage | Example |
 |-------|-------|---------|
 | `error!` | Unrecoverable failures, MCP preflight failures | `error!("hard shutdown: {}")` |
-| `warn!` | Recoverable issues, state drift | `warn!("length window exceeded")` |
+| `warn!` | Recoverable issues, state drift, read_dir failures | `warn!("length window exceeded"); warn!("read_dir error on {}: {}", path, err)` |
 | `info!` | Important transitions, user-facing events | `info!("plugin enabled: {}")` |
 | `debug!` | Internal state, algorithm details | `debug!("cost function: {}")` |
+
+**Phase 5 read_dir pattern**: Silent-bail on `NotFound` (legitimate under FR-124 read-only doctor invariant), emit `warn!` with `path` + `error` fields on other errors. Used in `doctor::assemble_report` multi-statement snapshot reads.
 
 **Tool**: `tracing` + `tracing-subscriber` with `env-filter` feature. Configured via `RUST_LOG` env var.
 
@@ -130,7 +134,7 @@ pub fn run(args, deps, mode: Mode) -> Result<(), Error> {
 }
 ```
 
-**Pattern used in**: `commands/status/mod.rs`, `commands/plugin/{enable,list,show}.rs`, `commands/reindex.rs`, `commands/doctor.rs`.
+**Pattern used in**: `commands/status/mod.rs`, `commands/plugin/{enable,list,show}.rs`, `commands/reindex.rs`, `commands/doctor.rs`, `commands/workspace/mod.rs`.
 
 ### Test Injection via `#[doc(hidden)] pub static`
 
@@ -196,6 +200,38 @@ When a helper function is reused at 3+ call sites, promote it to `pub` or move i
 
 **Example**: `paths_for(&ToolEnv) -> Paths` was duplicated across 3 test files, then promoted to `tests/common/mod.rs`.
 
+**Phase 5 examples**: `Paths::plugin_data_root()` — single-source-of-truth accessor at first cross-module consumer per US5.a; `body_has_bare_arguments()` — promoted to `pub` in `src/substitution/mod.rs` for use in `prompts/get` + `get_skill` MCP tools (US3.d R-M1).
+
+### Single-Source-of-Truth for Length Windows
+
+When multiple modules need the same length limit (e.g., short vs long summaries, description truncation), define it once:
+
+```rust
+// src/substitution/mod.rs (Phase 5)
+pub const MAX_DESCRIPTION_MAX_CHARS: u32 = 100_000;
+
+// Reference it everywhere
+const DEFAULT_DESCRIPTION_MAX: u32 = 150;
+```
+
+**Rationale**: Phase 4 US4 caught a `LONG_MAX_CHARS` split (2400 vs 2500) across `src/mcp/prompts.rs` and `src/commands/workspace/regen_summary.rs`. Single source discovered at first cross-module consumer.
+
+### Snapshot Consistency for Diagnostic Reads
+
+When a doctor command or other read-only tool makes multiple SQL reads, use `conn.unchecked_transaction()` on read-only connections to establish a consistent snapshot:
+
+```rust
+// src/doctor/mod.rs (Phase 5 US5.a)
+let conn = index::db::open_read_only(&paths.index_db)?;
+let _tx = conn.unchecked_transaction()?;  // Snapshot boundary
+
+// All reads within this scope see consistent schema_version + rows
+let schema_version = meta::get_schema_version(&conn)?;
+let workspaces = list_workspaces(&conn)?;
+```
+
+**Rationale**: `unchecked_transaction()` is valid on read-only connections; works because the transaction is purely a snapshot boundary, rollback is implicit on Drop (Phase 5 US5.a pattern).
+
 ### Phase 5: Caller-Controlled String Truncation
 
 When truncating strings for length limits (e.g., MCP tool descriptions), use `char_indices` for boundary-safe truncation that avoids O(n) full-string traversal:
@@ -212,6 +248,7 @@ if description.len() > MAX_DESCRIPTION {
         .last()
     {
         description.truncate(idx);
+        description.push('…');  // U+2026 ellipsis
     }
 }
 ```
@@ -231,7 +268,7 @@ description.truncate(safe_len);
 
 ### Phase 5: JSON Output with Alphabetical Key Order
 
-For deterministic JSON wire shapes, use `BTreeMap` instead of `HashMap`:
+For deterministic JSON wire shapes, use `BTreeMap` or `IndexMap` (via `serde_json` feature `preserve_order`) for objects:
 
 ```rust
 // src/mcp/tools/*.rs — Serialize with key ordering
@@ -244,27 +281,27 @@ struct SearchResult {
 }
 ```
 
-**Rationale**: MCP tools and CLI output that's parsed by external consumers benefit from deterministic field order. `serde_json` with `preserve_order` feature re-exports `IndexMap`; explicit `BTreeMap` is clearer where sorted order is the intent.
+**Rationale**: MCP tools and CLI output that's parsed by external consumers benefit from deterministic field order. `serde_json` with `preserve_order` feature re-exports `IndexMap`; explicit `BTreeMap` is clearer where sorted order is the intent. Phase 5 US4.d solidified this: all new Serialize types get byte-stable JSON pins via `*_json_shape.rs` test files.
 
 ### Phase 5: Sanity Caps for Deserialized Values
 
 When deserializing bounds that should be "reasonable but not enforced at the syntax level", apply sanity caps at code level:
 
 ```rust
-// src/substitution/engine.rs — Phase 5 US4 research §R-7
-const MAX_DESCRIPTION_MAX_CHARS: u32 = 100_000;  // Single source of truth
+// src/mcp/tools/search_skills.rs — Phase 5 US4.c
+const MAX_DESCRIPTION_MAX_CHARS: u32 = 100_000;  // Documented in contracts
 
-fn deserialize_description_limit(limit: Option<u32>) -> Result<u32, TomeError> {
+fn validate_description_max(limit: Option<u32>) -> Result<u32, TomeError> {
     match limit {
         None => Ok(DEFAULT_DESCRIPTION_MAX),
-        Some(l) if l < 1 => Err(TomeError::ArgumentValidation("description limit must be >= 1")),
-        Some(l) if l > MAX_DESCRIPTION_MAX_CHARS => Err(TomeError::ArgumentValidation("description limit capped at 100k")),
+        Some(l) if l < 1 => Err(TomeError::InvalidDescriptionMaxChars),
+        Some(l) if l > MAX_DESCRIPTION_MAX_CHARS => Err(TomeError::InvalidDescriptionMaxChars),
         Some(l) => Ok(l),
     }
 }
 ```
 
-**Pattern**: Negative/absurd values caught at deserialization boundary; sensible but very large values logged with `warn!` or capped silently depending on contract.
+**Pattern**: Negative/absurd values caught at deserialization boundary; sensible but very large values documented in contracts per FR-092.
 
 ### Phase 5: Stub MetaSeed Pattern in Tests
 
@@ -306,7 +343,33 @@ fn truncate_respects_char_boundaries_with_emoji() {
 }
 ```
 
-**Pattern**: Use emoji or other multi-byte sequences to catch byte-slicing bugs that would panic on `String::truncate()`.
+**Pattern**: Use emoji or other multi-byte sequences to catch byte-slicing bugs that would panic on `String::truncate()`. Phase 5 US4.d T-M1 added this pattern.
+
+### Phase 5: Exact-Count Assertions Over Heuristics
+
+When testing deterministic fixtures with known entity counts, use exact assertions instead of inequality checks:
+
+```rust
+// Phase 5 US5.a T-W1 pattern
+#[test]
+fn doctor_p5_surface_creates_no_dirs() {
+    let fix = Fixture::build_sample();  // 4 skills, 2 plugins
+    let env = ToolEnv::new();
+    
+    // Count files before
+    let before_count = count_all_files(&env.home);
+    
+    // Run doctor
+    let out = env.cmd().args(["doctor"]).output().unwrap();
+    assert!(out.status.success());
+    
+    // Count files after — exact match proves read-only
+    let after_count = count_all_files(&env.home);
+    assert_eq!(before_count, after_count, "doctor must not create any directories");
+}
+```
+
+**Rationale**: Masks off-by-one regressions better than `>=` checks. Phase 5 US5.a extended this: exact entry counts (`assert_eq!(counts.skills, 4)`) prevent silent mutations.
 
 ## Comments & Documentation
 
@@ -344,6 +407,7 @@ Trunk-based development. Short-lived feature/fix branches off `main`.
 - **Small batches**: ~400 lines or 2 modules max as soft cap.
 - **Chunked slices**: multi-PR features follow numbered slices (PR #74 Slice 1a, PR #75 Slice 1b).
 - **Focused commits**: one logical change per commit.
+- **4-reviewer parallel pass** (Phase 5 pattern): contract audit / Rust-lens / test audit / security audit in parallel before applying fixes. Findings + disposition committed BEFORE fixes land.
 
 ## Import Ordering
 
@@ -356,6 +420,7 @@ Standard order:
 
 ```rust
 use std::path::PathBuf;
+use std::collections::{HashSet, HashMap};  // Phase 5: consolidated multiline imports
 
 use clap::Parser;
 use rusqlite::Connection;
@@ -366,6 +431,8 @@ use crate::error::TomeError;
 use self::helper;
 use super::config;
 ```
+
+**Phase 5 US5.c pattern**: `use std::collections::{HashSet, HashMap};` at top-of-file over `std::collections::HashSet` / `std::collections::HashMap` fully-qualified in function bodies.
 
 ## Module Organization
 
@@ -403,7 +470,7 @@ See `TESTING.md` for detailed test patterns, but core conventions:
 ## Strictness at Boundaries
 
 - **Input strictness**: `#[serde(deny_unknown_fields)]` on Tome-owned inputs.
-- **Output leniency**: third-party JSON and YAML parsed leniently.
+- **Output leniency**: third-party JSON and YAML parsed leniently. Output `Serialize` types do NOT carry `#[serde(deny_unknown_fields)]` (Phase 5: consistency pattern established).
 - **Credentials scrubbed**: all error chains + model URLs sanitized before logging.
 - **Symlink refusal**: symlink paths refused at every read/write entry point.
 

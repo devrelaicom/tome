@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-27 (Phase 5 / US4 complete; `truncate_description` DoS vector fixed via bounded char_indices walk)
+> **Last Updated**: 2026-05-27 (Phase 5 / US5 complete; per-entry invocability flags + doctor extensions; 0 security findings from reviewer pass)
 
 ## Overview
 
@@ -43,7 +43,8 @@ Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, wo
 33. Phase 5 / US1 additions: Entry body-file path validation rejects `..` traversal and absolute paths (prevents directory-escape via skill/command bodies); arguments list hard-capped at 256 entries in frontmatter parser (DoS mitigation)
 34. Phase 5 / US2 additions (CRITICAL SECURITY FIX): No-rescan invariant (NFR-007 / FR-051) enforced via SINGLE unified regex pass for Stages 1+2 substitution (`COMBINED_RE`); resolved values emitted directly to output buffer and never re-scanned, closing the data-exfiltration vector where a hostile plugin's `"version": "${TOME_ENV_GITHUB_TOKEN}"` could leak operator's env vars into LLM context
 35. Phase 5 / US3 additions (STRUCTURAL SECURITY): Argument substitution (Stage 3) folded into the unified `COMBINED_RE` regex; caller-supplied args never recursive-substitute (no `$ARGUMENTS` output re-matched for `${TOME_*}`, no argument-value re-matched for `$N`); structural enforcement via single `captures_iter` loop with direct output emission — hostile argument values containing `${TOME_*}` or `$ARGUMENTS[N]` patterns cannot exfiltrate (Stage 3 is coerced once per render, not re-scanned); 0 security findings from US3 reviewer pass
-36. **Phase 5 / US4 additions (DoS MITIGATION)**: MCP `search_skills` description truncation via bounded O(max) `char_indices` walk (US4.d-1 S-M1 HIGH fix); eliminated O(n) full-string traversal that created meaningful CPU amplifier when caller-controlled `description_max_chars` (0–100,000 cap) × `top_k` results (1–100) × multi-KB descriptions ran over full input; walk stops after `max+1` chars, no reallocation in truncation path; no full-string traversal in no-truncation path
+36. Phase 5 / US4 additions (DoS MITIGATION): MCP `search_skills` description truncation via bounded O(max) `char_indices` walk (US4.d-1 S-M1 HIGH fix); eliminated O(n) full-string traversal that created meaningful CPU amplifier when caller-controlled `description_max_chars` (0–100,000 cap) × `top_k` results (1–100) × multi-KB descriptions ran over full input; walk stops after `max+1` chars, no reallocation in truncation path; no full-string traversal in no-truncation path
+37. **Phase 5 / US5 additions (CLOSURE OF PHASE 5 FEATURE WORK)**: Per-entry invocability flags (`user_invocable` column); `tome plugin show` displays command entries + resource enumeration (5-cap per directory + sentinels); doctor `--fix` extends to summariser re-download (5th repair class); symbolic link skip in `walk_resources` for resource enumeration; `Paths::plugin_data_root()` unified singleton source eliminates layout-drift risk; zero security findings from Phase 5 / US5 reviewer pass
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
@@ -429,8 +430,9 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 | Atomic dir landing | Staging path symlink refusal | Exit 7 | `src/util/atomic_dir.rs::refuse_symlink` |
 | MCP get_skill walk | Directory symlink skip | Silent skip | `src/mcp/tools/get_skill.rs` (`is_symlink()` filter) |
 | Doctor orphan cleanup | Symlink-skip in sweep | Silent skip | `src/doctor/orphan_cleanup.rs::sweep_one` (symlink_metadata check) |
+| **MCP plugin show resource walk** | **Directory symlink skip (Phase 5 / US5)** | **Silent skip** | **`src/mcp/tools/plugin_show.rs::walk_resources` (`is_symlink()` filter; US5 new surface)** |
 
-**Threat Model**: Hostile catalog clones `skills/creds → ~/.ssh/id_rsa`, operator runs `tome plugin enable` → would leak SSH key via skill content. **Mitigation**: symlink skip in MCP `get_skill` walk + symlink refusal on writes.
+**Threat Model**: Hostile catalog clones `skills/creds → ~/.ssh/id_rsa`, operator runs `tome plugin enable` → would leak SSH key via skill content. **Mitigation**: symlink skip in MCP `get_skill` walk + symlink refusal on writes + resource enumeration skip in `plugin_show`.
 
 ### File Mode Preservation
 
@@ -490,9 +492,12 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 **Phase 5 / US3 additions**:
 - No new exit codes (uses Phase 5 / US2 codes: 26 for mismatch, 28 for substitution issues)
 
+**Phase 5 / US5 additions**:
+- No new exit codes (uses Phase 4 + US2 codes; per-entry invocability is schema extension, not new failure modes)
+
 See `specs/005-phase-5-commands-prompts/contracts/exit-codes-p5.md` for full enumeration.
 
 ---
 
 *This document defines security controls. Update when security posture changes.*
-*Last refreshed 2026-05-27 against Phase 5 / US4 complete source (1000+ tests passing, ~130 suites); MCP `search_skills` description truncation secured via bounded O(max) char_indices walk.*
+*Last refreshed 2026-05-27 against Phase 5 / US5 complete source (1193 tests passing, ~150 suites); zero security findings from Phase 5 / US5 reviewer pass.*

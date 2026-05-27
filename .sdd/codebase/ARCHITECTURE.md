@@ -2,11 +2,11 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-27 (Phase 5 / US4 shipped; 3-tier MCP discovery flow, middle-tier get_skill_info tool, when_to_use indexing + search, truncate_description hardening)
+> **Last Updated**: 2026-05-27 (Phase 5 / US5 shipped; per-entry invocability + doctor read-only extensions; substitution layer + MCP discovery complete; 1193 tests)
 
 ## Architecture Overview
 
-Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, workspace-scoped plugin enablement, comprehensive health diagnostics with auto-repair, command indexing and MCP prompts capability, variable substitution engine with four-stage single-pass rendering pipeline, and **Phase 5 / US4 COMPLETE** three-tier MCP discovery flow (search_skills → get_skill_info → get_skill) with `when_to_use` indexing and bounded-memory description truncation.
+Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, workspace-scoped plugin enablement, comprehensive health diagnostics with auto-repair, command indexing and MCP prompts capability, variable substitution engine with four-stage single-pass rendering pipeline, three-tier MCP discovery flow with middle-tier metadata fetching, and **Phase 5 / US5 COMPLETE** per-entry invocability flags with read-only doctor extensions (prompts report, entry-kind counts, orphan data-dir detection).
 
 The architecture is **monolithic with layered structure** split across two execution contexts:
 - **CLI layer** — sync command dispatcher
@@ -14,7 +14,7 @@ The architecture is **monolithic with layered structure** split across two execu
 
 The central nervous system is a **single SQLite database** (`<home>/.tome/index.db`) that centralizes all state: plugin metadata, embeddings, workspace bindings, project bindings, enabled entries (skills/commands), and diagnostic metadata. Per-workspace composition settings and summaries live in separate TOML files (`<root>/workspaces/<name>/settings.toml`) and central RULES.md. Project markers (`<project>/.tome/config.toml`) are thin binding pointers, not databases.
 
-Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompts capability**, and **substitution engine skeleton**. Phase 5 / US2 shipped **single-pass rendering pipeline** (COMBINED_RE union regex), **lazy data-directory creation**, and **workspace rename integration**. Phase 5 / US3 shipped **argument substitution completeness**: Claude Code-compatible `$ARGUMENTS`, `$N`, and `$name` substitution with shell-style quoting, argument coercion, and frontmatter-declared parameter schemas. **Phase 5 / US4 COMPLETE** ships **three-tier MCP discovery** with middle-tier `get_skill_info` tool (full description + `when_to_use` + 5-cap resource enumeration), **when_to_use indexing for search**, and **bounded-memory description truncation** via char_indices walk (O(n) worst-case, but O(1) fast-path when no truncation needed).
+Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompts capability**, and **substitution engine skeleton**. Phase 5 / US2 shipped **single-pass rendering pipeline** (COMBINED_RE union regex), **lazy data-directory creation**, and **workspace rename integration**. Phase 5 / US3 shipped **argument substitution completeness**: Claude Code-compatible `$ARGUMENTS`, `$N`, and `$name` substitution with shell-style quoting, argument coercion, and frontmatter-declared parameter schemas. Phase 5 / US4 shipped **three-tier MCP discovery** with middle-tier `get_skill_info` tool (full description + `when_to_use` + 5-cap resource enumeration), **when_to_use indexing for search**, and **bounded-memory description truncation** via char_indices walk. **Phase 5 / US5 COMPLETE** ships **per-entry invocability metadata** (existing `user_invocable` frontmatter field + Doctor enforcement), **read-only doctor extensions** (prompts report + entry counts + orphan data-dir detection), and **plugin show enhancement** with searchable/invocable annotations.
 
 ## Architecture Pattern
 
@@ -27,6 +27,7 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
 | Phase 5 / US2–US3 — Single-pass substitution | COMBINED_RE union regex processes all stages (builtins, env, arguments, ARGUMENTS tail) in one loop with per-match dispatch |
 | Phase 5 / US3 — Argument substitution | Claude Code `$ARGUMENTS` / `$N` / `$name` with shell_split + coerce_arguments + apply_arguments_match pipeline; ARGUMENTS footer appended in render tail |
 | Phase 5 / US4 — Three-tier MCP discovery | `search_skills` (small ranked list, truncated via char_indices walk) → `get_skill_info` (full description + when_to_use + 5-cap resource enumeration) → `get_skill` (full body); when_to_use indexed for semantic search |
+| Phase 5 / US5 — Per-entry invocability + Doctor read-only | `user_invocable` frontmatter field controls MCP prompts visibility; Doctor read-only extensions report prompts registry status, entry-kind counts, orphan data directories (FR-124 read-only enforcement structural) |
 
 ## Core Components
 
@@ -103,6 +104,7 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
 - **Purpose**: Phase 4 consolidated root; Phase 5 / US1–US2 — Central data-directory accessors
 - **Location**: `src/paths.rs`
 - **New methods**:
+  - `plugin_data_root() -> PathBuf` — `<root>/plugin-data/` (process-wide root, single source of truth per Phase 5 / US5)
   - `plugin_data_dir_for(catalog, plugin) -> PathBuf` — `<root>/plugin-data/<catalog>/<plugin>/` (process-wide)
   - `workspace_data_dir_for(workspace, catalog, plugin) -> PathBuf` — `<root>/workspaces/<name>/plugin-data/<catalog>/<plugin>/` (workspace-scoped)
 - **Semantics**:
@@ -221,11 +223,54 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
     - `prompt_name: Option<String>` — override for derived `<plugin>__<entry>` format
     - `when_to_use: Option<String>` — guidance indexed for search (Phase 5 / US4: now indexed for semantic search)
     - `searchable: Option<bool>` (default `true`) — controls `search_skills` visibility
-    - `user_invocable: Option<bool>` (default `false` for skills; Tome explicit no-op) — controls `prompts/list` visibility
+    - `user_invocable: Option<bool>` (default `false` for skills; **Phase 5 / US5: now enforced by Doctor read-only checks**) — controls `prompts/list` visibility + reported in `plugin show`
 
-### Data Flow — Phase 5 / US1–US4
+### Doctor Read-Only Extensions (`src/doctor/`)
 
-#### Enable + Index Pipeline (US1–US3 unchanged, US4 adds search indexing)
+- **Purpose**: Phase 5 / US5 — Structural enforcement of FR-124 read-only invariant + per-entry invocability reporting
+- **Location**: `src/doctor/{checks.rs, report.rs}`
+- **Key additions**:
+  - **`build_prompts_report(workspace, paths) -> PromptsReport`** (NEW):
+    - Reuses `mcp::prompts::PromptRegistry::build_for_workspace` (no re-implementation per DRY)
+    - Gathers enabled + user-invocable entries ready for MCP exposure
+    - Reports count by kind (Skills / Commands)
+    - Read-only — never modifies DB or filesystem
+  - **`count_entries_by_kind(workspace, paths) -> EntryCountsByKind`** (NEW):
+    - `{ skills: u32, commands: u32, other: u32 }` (other reserved for future kinds)
+    - Queries enabled entries grouped by `skills.kind` column
+    - Read-only
+  - **`detect_orphan_data_dirs(workspace, paths) -> Vec<OrphanDataDirReport>`** (NEW):
+    - Walks `<root>/plugin-data/` and `<root>/workspaces/<name>/plugin-data/` for directories whose entry is not in the index
+    - Returns per-orphan report with path + size + last-modified
+    - Informational only — no repair offered in Phase 5 (potential Phase 6 cleanup action)
+    - Read-only
+  - **Structural enforcement**: All three helpers `open_read_only`, never open transaction, never modify state
+- **Integration**: Rendered in `tome doctor` output + extended `plugin show` + extended `plugin list` annotations
+- **Test injection seam**: None required (reads from production DB, no overrideable state)
+
+### Plugin Show Enhancement (`src/commands/plugin/show.rs`)
+
+- **Purpose**: Phase 5 / US5 — Enhanced display with per-entry searchable/invocable annotations
+- **Location**: `src/commands/plugin/show.rs`
+- **Changes**:
+  - Skills + Commands grouped in output (Kind header per section)
+  - Per-entry annotations: `[searchable=true/false]`, `[user_invocable=true/false]`, `[dormant]` when disabled
+  - New `EntryView` struct (derived from query result + frontmatter for human + JSON consistency)
+  - Rendered in both plain-text (with visual grouping) and JSON (separate `skills` / `commands` arrays)
+  - Lines extended ~228: metadata parsing, grouping logic, annotation rendering
+
+### Plugin List Enhancement (`src/commands/plugin/list.rs`)
+
+- **Purpose**: Phase 5 / US5 — Per-kind entry counts in plugin summary
+- **Location**: `src/commands/plugin/list.rs`
+- **Changes**:
+  - Format: `plugin: <plugin-name> (N skills, M commands)` instead of `plugin: <plugin-name> (N entries)`
+  - Queries from `count_entries_by_kind` helper (shared with doctor)
+  - Lines extended ~53: count queries + format
+
+### Data Flow — Phase 5 / US1–US5
+
+#### Enable + Index Pipeline (US1–US3 unchanged, US4 adds search indexing, US5 adds invocability tracking)
 
 ```
 CLI: tome plugin enable <catalog>/<plugin>
@@ -241,6 +286,8 @@ index::skills::enable_plugin_atomic(pending_commands, pending_skills)
   Insert/update skills table rows with kind=command/skill
   ↓
   Insert/update when_to_use column (Phase 5 / US4: now indexed for search)
+  ↓
+  Insert user_invocable flag (Phase 5 / US5: enforced in Doctor read-only checks)
   ↓
   Insert workspace_skills junction rows (existing)
      ↓
@@ -289,6 +336,29 @@ If yes:
   Agent renders/executes full entry
 ```
 
+#### Doctor Read-Only Extensions (Phase 5 / US5)
+
+```
+CLI: tome doctor [--fix] [--verify]
+     ↓
+assemble_report(scope, paths, home, verify) — all checks run in read-only mode
+  ↓
+  Existing checks: embedder, reranker, index, drift, catalogs, harness-detection
+  ↓
+  + Phase 5 / US5 NEW:
+    - build_prompts_report() — what entries are exposed as MCP prompts
+    - count_entries_by_kind() — breakdown by skill/command
+    - detect_orphan_data_dirs() — plugin-data dirs with missing entries
+  ↓
+  All use open_read_only; never take advisory lock; never modify state
+  ↓
+Emit human or JSON report
+     ↓
+If --fix:
+  Only repair classes from Phase 4 US5 (embedder, reranker, schema, catalogs, harness-binding, orphan-staging)
+  Phase 5 additions are informational-only (no auto-repair offered)
+```
+
 ## Layer Boundaries
 
 | Layer | Responsibility | Can Access | Cannot Access |
@@ -310,7 +380,8 @@ If yes:
 - Entry kind dispatch via `EntryKind` enum is exhaustive; matches are type-safe
 - **Phase 5 / US3**: Single-pass rendering pipeline with per-match dispatch ensures each stage pattern is matched exactly once per body; argument coercion is validated before render
 - **Phase 5 / US4**: Three-tier MCP discovery separates concerns: `search_skills` optimizes for ranking + truncation (char_indices fast-path), `get_skill_info` separates metadata from body, `get_skill` remains unchanged; resource enumeration walks (non-recursive, 5-cap per dir, alphabetical via BTreeMap for JSON stability)
+- **Phase 5 / US5**: Doctor read-only extensions use only query-level operations; structural enforcement via `open_read_only` with no transaction acquisition
 
 ---
 
-*This document describes HOW the system is organized at Phase 5 / US4 (three-tier discovery + when_to_use indexing + truncation hardening shipped). 1050+ tests across 133+ suites.*
+*This document describes HOW the system is organized at Phase 5 / US5 COMPLETE (per-entry invocability + doctor read-only extensions shipped). 1193 tests across 151 suites.*

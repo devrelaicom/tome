@@ -31,7 +31,7 @@
 
 ```
 tests/
-├── *.rs                         # Integration test files (144 total as of Phase 5)
+├── *.rs                         # Integration test files (151 total as of Phase 5 US5)
 ├── common/
 │   ├── mod.rs                   # Shared harness: ToolEnv, Fixture, guards
 │   └── ...                      # (exported helpers)
@@ -63,10 +63,12 @@ tests/
 | **Frontmatter & manifests** | `frontmatter*.rs`, `manifest_*.rs` | YAML parsing, strictness (4 files) |
 | **Security & hardening** | `security_hardening.rs` | File perms, symlink refusal (1 file) |
 | **Error & exit codes** | `exit_codes*.rs`, `error_messages.rs` | Exit code coverage, Display impl (2 files) |
-| **Substitution** (Phase 5) | `substitution_*.rs` | Variable expansion, argument coercion (6 files) |
+| **Substitution** (Phase 5) | `substitution_*.rs`, `entry_*.rs` | Variable expansion, argument coercion (8 files) |
 | **Misc** | `path_validation.rs`, `atomic_dir.rs`, etc. | Phase 1 foundational (10 files) |
 
-**Total**: 144 test files across 127 suites (some files define multiple test functions); 954+ tests pass.
+**Total**: 151 test files across 147 suites (some files define multiple test functions); 1193+ tests pass.
+
+**Phase 5 expansion**: +19 tests across `tests/plugin_show_p5.rs` + `tests/plugin_show_p5_json_shape.rs` + `tests/doctor_p5.rs` + `tests/doctor_json.rs` (US5.b); +1 for T-G1 dormant-negative test (US5.c).
 
 ## Test Patterns
 
@@ -329,6 +331,7 @@ Critical path tests that must pass before deploy:
 | `plugin_enable.rs::happy_path_json_mode` | Core plugin enable flow |
 | `query.rs::happy_path` | Core search + ranking flow |
 | `workspace_use.rs::happy_path` | Core project binding flow |
+| `doctor.rs::assemble_report_happy_path` | Core diagnostic flow (Phase 5 US5) |
 
 ### Regression Tests
 
@@ -338,7 +341,8 @@ Tests for previously fixed bugs, linked to phase retros:
 |----------|-------|---------|
 | Phase 4 US1 | `retro/P3.md` | `sync_idempotence.rs` (Sync twice → no changes) |
 | Phase 4 US3 | `retro/P5.md` | `workspace_commands.rs` (Scope isolation) |
-| Phase 5 US3 | (current) | `entry_kind_indexing.rs` (Entry kind + collision handling) |
+| Phase 5 US3 | `retro/P5.md` | `entry_kind_indexing.rs` (Entry kind + collision handling) |
+| Phase 5 US5 | (current) | `doctor_phase5_surface_creates_no_dirs` (FR-124 read-only invariant) |
 
 ### Invariant Tests
 
@@ -351,6 +355,7 @@ Tests that verify core properties hold:
 | Syncability | `sync_idempotence.rs` | Harness sync is idempotent |
 | Atomicity | `atomicity.rs` | Partial failures leave committed state |
 | JSON wire shape | `*_json_shape.rs` | Serialization is deterministic + byte-stable |
+| Read-only invariant | `doctor_p5.rs` | `doctor assemble_report` creates no directories (Phase 5 US5.a) |
 
 ### Phase 5: Truncation Boundary Tests
 
@@ -361,6 +366,17 @@ Tests for string truncation edge cases (US4.d pattern):
 | `mcp_tool_description.rs::truncate_respects_char_boundaries_with_emoji()` | Multi-byte UTF-8 char slicing |
 | `entry_kind_*.rs::search_skills_description_truncation_*()` | Description max-length enforcement |
 | `substitution_*.rs::argument_value_truncation_boundary()` | Argument coercion with limits |
+
+### Phase 5: Exact-Count + Empty-Section Invariant Tests
+
+Tests that verify deterministic entity counts and collection states (US5.b pattern):
+
+| Test | Checks |
+|------|--------|
+| `plugin_show_p5.rs::dormant_entry_annotated()` | Dormant bit set correctly |
+| `plugin_show_p5.rs::dormant_not_annotated_when_searchable_true()` | Boolean-logic negative case (T-G1) |
+| `doctor_p5.rs::empty_section_arrays_present_not_omitted()` | Empty arrays serialize; not omitted (T-G2) |
+| `doctor_json.rs::entry_counts_by_kind_exact_match()` | Exact skill/command/agent counts match fixture (T-W1) |
 
 ## CI Integration
 
@@ -425,6 +441,9 @@ fn plugin_enable_missing_models_prompts_download() { ... }
 
 #[test]
 fn harness_use_composition_error_exits_17() { ... }
+
+#[test]
+fn doctor_p5_surface_creates_no_dirs() { ... }
 ```
 
 ### Minimal External I/O
@@ -441,6 +460,19 @@ fn harness_use_composition_error_exits_17() { ... }
 - Stub embedder produces fixed vectors for deterministic test assertions.
 - Concurrent tests serialized via `HOME_MUTEX` + RAII guards.
 - No real time dependencies (fixed clock via `ClockOverrideGuard`).
+
+### Phase 5: 4-Reviewer Parallel Pass Pattern
+
+Every user story closeout runs a parallel 4-reviewer pass:
+
+| Reviewer | Focus | Deliverable |
+|----------|-------|-------------|
+| Contract audit | Spec alignment, contract drift | `review/findings.md` + `review/disposition.md` |
+| Rust-lens | Code review, idioms, safety | Inline code comments |
+| Test audit | Coverage gaps, edge cases | Test additions |
+| Security audit | Hardening, boundary validation | Security findings |
+
+Findings + disposition committed **BEFORE** fixes land (Phase 5 PR pattern). Exemplified in US5.c: "4-reviewer pass surfaced 0 BLOCKERS + 4 majors + 1 test gap + 5 minors; applied 2 majors + 1 test."
 
 ## What Does NOT Belong Here
 
