@@ -20,6 +20,7 @@ use crate::embedding::fastembed::FastembedReranker;
 use crate::error::TomeError;
 use crate::index::MetaSeed;
 use crate::mcp::state::McpState;
+use crate::plugin::identity::EntryKind;
 
 /// The tool description per `mcp-tools.md` §search_skills lives on the
 /// `#[tool]`-decorated method in `mcp::server` as a doc comment — the
@@ -42,11 +43,36 @@ pub struct Input {
     /// Format: plugin name only, NOT `<catalog>/<plugin>`.
     #[serde(default)]
     pub plugin: Option<String>,
+    /// Truncate each result's description at this many characters
+    /// (Unicode scalar values), per FR-092. Default 150 — agent-consumed
+    /// search results preserve token budget. Set to a very large value
+    /// (e.g. 99999) to opt out. Negative values are rejected by the
+    /// `u32` deserialiser; values above [`MAX_DESCRIPTION_MAX_CHARS`]
+    /// surface as `invalid_description_max_chars`.
+    #[serde(default = "default_description_max_chars")]
+    pub description_max_chars: u32,
 }
 
 fn default_top_k() -> u32 {
     10
 }
+
+fn default_description_max_chars() -> u32 {
+    150
+}
+
+/// Sanity cap on `description_max_chars`. Values strictly above this
+/// surface as `invalid_description_max_chars` — anything in this range
+/// already vastly exceeds what an agent should ever request in a single
+/// result, so we reject rather than silently allocate a megabyte string.
+///
+/// US4.d M-1: this constant is INTENTIONALLY a sanity guard above the
+/// documented contract surface (`contracts/mcp-tools-p5.md` § Error
+/// responses only lists `description_max_chars < 0` as the rejection
+/// trigger). `u32` deserialisation handles the negative branch; this
+/// catches absurd-but-legal-u32 values that no real agent would request.
+/// Contract amended in same commit to mention the 100_000 sanity cap.
+pub const MAX_DESCRIPTION_MAX_CHARS: u32 = 100_000;
 
 /// Maximum allowed length of an MCP `search_skills.query` input, in
 /// `char`s (Unicode scalar values). Research §R-17 documents 4096 as
@@ -66,8 +92,14 @@ pub struct SkillMatch {
     pub catalog: String,
     pub plugin: String,
     pub name: String,
+    /// Phase 5: entry kind discriminator (`skill` | `command`) per
+    /// FR-091. Lets callers distinguish skills from commands in the
+    /// same ranked result set.
+    pub kind: EntryKind,
     /// The indexed description (frontmatter `description` or fallback
-    /// per FR-012).
+    /// per FR-012), truncated to `description_max_chars` characters
+    /// (Unicode scalar values) with the ellipsis character `…` (U+2026)
+    /// appended when truncation occurred, per FR-092.
     pub description: String,
     pub plugin_version: String,
     /// Absolute path to the SKILL.md file.
@@ -96,6 +128,19 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         return Err(McpError::invalid_params(
             "top_k must be between 1 and 100",
             None,
+        ));
+    }
+    // Sanity-cap description_max_chars per `mcp-tools-p5.md` § Error
+    // responses. Serde's `u32` deserialisation already rejects negative
+    // values; this guards against absurdly-large values that would
+    // defeat the purpose of truncation.
+    if input.description_max_chars > MAX_DESCRIPTION_MAX_CHARS {
+        return Err(McpError::invalid_params(
+            format!("description_max_chars must be at most {MAX_DESCRIPTION_MAX_CHARS}"),
+            Some(json!({
+                "code": "invalid_description_max_chars",
+                "max": MAX_DESCRIPTION_MAX_CHARS,
+            })),
         ));
     }
     if input.query.trim().is_empty() {
@@ -233,6 +278,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         }
     })?;
 
+    let description_max_chars = input.description_max_chars as usize;
     let matches: Vec<SkillMatch> = outcome
         .results
         .iter()
@@ -240,7 +286,8 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             catalog: s.candidate.catalog.clone(),
             plugin: s.candidate.plugin.clone(),
             name: s.candidate.name.clone(),
-            description: s.candidate.description.clone(),
+            kind: s.candidate.kind,
+            description: truncate_description(&s.candidate.description, description_max_chars),
             plugin_version: s.candidate.plugin_version.clone(),
             path: s.candidate.path.clone(),
             score: s.score,
@@ -264,6 +311,57 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     );
 
     Ok(Output { matches })
+}
+
+/// Truncate `s` to `max` Unicode scalar values, appending the ellipsis
+/// character `…` (U+2026) when truncation occurred. Per FR-092 the
+/// post-truncation string is exactly `max` content chars + the one
+/// ellipsis char (total `max + 1`). When `s` already fits within `max`
+/// chars, it's returned verbatim. When `max == 0` an empty string is
+/// returned (defensive — the input validation rejects values strictly
+/// above [`MAX_DESCRIPTION_MAX_CHARS`] but `0` is a legal opt-out
+/// value if a caller really wants empty descriptions).
+///
+/// Character count uses Unicode scalar values (`chars()`), NOT bytes —
+/// a multi-byte UTF-8 input isn't penalised by its encoding. Mirrors
+/// the same discipline used for `MAX_QUERY_CHARS` (Phase 4 US5.a).
+///
+/// US4.d C-2 + Security HIGH fix: this implementation uses
+/// `char_indices` to walk past `max` chars then stop — bounded O(max)
+/// work regardless of input size. The previous implementation called
+/// `chars().count()` for the early-return check, which is O(n) over
+/// the FULL input even when no truncation was needed. With caller-
+/// controlled `description_max_chars` (sanity cap 100,000) running over
+/// `top_k` results × multi-KB descriptions, that was a meaningful DoS
+/// amplifier. The new shape: walk at most `max + 1` chars, then either
+/// return the input verbatim (no truncation needed) or slice at the
+/// `max+1`-th char's byte offset and append the ellipsis. No
+/// `take().collect()` allocation in the truncation path; no full-string
+/// traversal in the no-truncation path.
+fn truncate_description(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    let mut iter = s.char_indices();
+    // Walk past `max` chars; if we exhaust the iterator within those,
+    // no truncation needed (input already fit).
+    for _ in 0..max {
+        if iter.next().is_none() {
+            return s.to_owned();
+        }
+    }
+    // If the (max+1)-th char exists, slice at its byte offset and
+    // append the ellipsis. Otherwise the input was exactly `max` chars
+    // — no truncation needed.
+    match iter.next() {
+        None => s.to_owned(),
+        Some((byte_idx, _)) => {
+            let mut out = String::with_capacity(byte_idx + '\u{2026}'.len_utf8());
+            out.push_str(&s[..byte_idx]);
+            out.push('\u{2026}');
+            out
+        }
+    }
 }
 
 /// Split a `<catalog>/<plugin>` identifier for the JSON error payload.

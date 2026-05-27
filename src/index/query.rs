@@ -15,6 +15,7 @@ use rusqlite::params_from_iter;
 use rusqlite::types::ToSqlOutput;
 
 use crate::error::TomeError;
+use crate::plugin::identity::EntryKind;
 
 /// One hit returned by [`knn`]. The caller composes the user-facing
 /// [`crate::index::query::QueryResult`] from these plus the scoring stage
@@ -25,6 +26,9 @@ pub struct Candidate {
     pub catalog: String,
     pub plugin: String,
     pub name: String,
+    /// Phase 5: entry kind discriminator. `search_skills` surfaces this
+    /// in result rows so agents can distinguish skills from commands.
+    pub kind: EntryKind,
     pub description: String,
     pub plugin_version: String,
     pub path: String,
@@ -71,7 +75,7 @@ pub fn knn(
     // honours the `searchable` flag. Entries with
     // `disable-model-invocation: true` are excluded.
     let mut sql = String::from(
-        "SELECT s.id, s.catalog, s.plugin, s.name, s.description,
+        "SELECT s.id, s.catalog, s.plugin, s.name, s.kind, s.description,
                 s.plugin_version, s.path, e.distance
          FROM skill_embeddings AS e
          JOIN skills AS s ON s.id = e.skill_id
@@ -98,15 +102,24 @@ pub fn knn(
 
     let rows = stmt
         .query_map(params_from_iter(params.iter()), |row| {
+            let kind_text: String = row.get(4)?;
+            let kind = kind_text.parse::<EntryKind>().map_err(|msg| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::other(msg)),
+                )
+            })?;
             Ok(Candidate {
                 skill_id: row.get(0)?,
                 catalog: row.get(1)?,
                 plugin: row.get(2)?,
                 name: row.get(3)?,
-                description: row.get(4)?,
-                plugin_version: row.get(5)?,
-                path: row.get(6)?,
-                distance: row.get::<_, f64>(7)? as f32,
+                kind,
+                description: row.get(5)?,
+                plugin_version: row.get(6)?,
+                path: row.get(7)?,
+                distance: row.get::<_, f64>(8)? as f32,
             })
         })
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query knn: {e}")))?;

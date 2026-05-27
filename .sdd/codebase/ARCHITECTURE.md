@@ -2,11 +2,11 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-27 (Phase 5 / US3 shipped; argument substitution stage complete, single-pass render production-ready, entry e2e pipeline tested)
+> **Last Updated**: 2026-05-27 (Phase 5 / US4 shipped; 3-tier MCP discovery flow, middle-tier get_skill_info tool, when_to_use indexing + search, truncate_description hardening)
 
 ## Architecture Overview
 
-Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, workspace-scoped plugin enablement, comprehensive health diagnostics with auto-repair, command indexing and MCP prompts capability, and **Phase 5 / US3 COMPLETE** variable substitution engine with four-stage single-pass rendering pipeline (built-ins → env → arguments → ARGUMENTS footer), shell-style argument coercion, and per-plugin/workspace data directories.
+Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, workspace-scoped plugin enablement, comprehensive health diagnostics with auto-repair, command indexing and MCP prompts capability, variable substitution engine with four-stage single-pass rendering pipeline, and **Phase 5 / US4 COMPLETE** three-tier MCP discovery flow (search_skills → get_skill_info → get_skill) with `when_to_use` indexing and bounded-memory description truncation.
 
 The architecture is **monolithic with layered structure** split across two execution contexts:
 - **CLI layer** — sync command dispatcher
@@ -14,7 +14,7 @@ The architecture is **monolithic with layered structure** split across two execu
 
 The central nervous system is a **single SQLite database** (`<home>/.tome/index.db`) that centralizes all state: plugin metadata, embeddings, workspace bindings, project bindings, enabled entries (skills/commands), and diagnostic metadata. Per-workspace composition settings and summaries live in separate TOML files (`<root>/workspaces/<name>/settings.toml`) and central RULES.md. Project markers (`<project>/.tome/config.toml`) are thin binding pointers, not databases.
 
-Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompts capability**, and **substitution engine skeleton**. Phase 5 / US2 shipped **single-pass rendering pipeline** (COMBINED_RE union regex), **lazy data-directory creation**, and **workspace rename integration**. Phase 5 / US3 ships **argument substitution completeness**: Claude Code-compatible `$ARGUMENTS`, `$N`, and `$name` substitution with shell-style quoting, argument coercion, and frontmatter-declared parameter schemas.
+Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompts capability**, and **substitution engine skeleton**. Phase 5 / US2 shipped **single-pass rendering pipeline** (COMBINED_RE union regex), **lazy data-directory creation**, and **workspace rename integration**. Phase 5 / US3 shipped **argument substitution completeness**: Claude Code-compatible `$ARGUMENTS`, `$N`, and `$name` substitution with shell-style quoting, argument coercion, and frontmatter-declared parameter schemas. **Phase 5 / US4 COMPLETE** ships **three-tier MCP discovery** with middle-tier `get_skill_info` tool (full description + `when_to_use` + 5-cap resource enumeration), **when_to_use indexing for search**, and **bounded-memory description truncation** via char_indices walk (O(n) worst-case, but O(1) fast-path when no truncation needed).
 
 ## Architecture Pattern
 
@@ -26,6 +26,7 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
 | Phase 5 / US1 — Unified entry dispatch | `EntryKind` enum (`Skill` \| `Command`) with kind-discriminated `skills` table rows; MCP prompts derived from user-invocable entries |
 | Phase 5 / US2–US3 — Single-pass substitution | COMBINED_RE union regex processes all stages (builtins, env, arguments, ARGUMENTS tail) in one loop with per-match dispatch |
 | Phase 5 / US3 — Argument substitution | Claude Code `$ARGUMENTS` / `$N` / `$name` with shell_split + coerce_arguments + apply_arguments_match pipeline; ARGUMENTS footer appended in render tail |
+| Phase 5 / US4 — Three-tier MCP discovery | `search_skills` (small ranked list, truncated via char_indices walk) → `get_skill_info` (full description + when_to_use + 5-cap resource enumeration) → `get_skill` (full body); when_to_use indexed for semantic search |
 
 ## Core Components
 
@@ -166,6 +167,49 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
     - `resolve_collisions(registry) -> Vec<CollisionRecord>` — identifies conflicts for user visibility
   - **`tool_description.rs`** (Phase 4 US4.b, preserved): Compose runtime tool description from scaffold + cached summary
 
+### MCP Discovery Flow — Phase 5 / US4 (Three-Tier) (`src/mcp/tools/`)
+
+- **Purpose**: Three-tier discovery pattern optimized for semantic search agent workflows
+- **Location**: `src/mcp/tools/{search_skills,get_skill_info,get_skill}.rs`
+- **Tier 1: `search_skills` tool**:
+  - KNN + optional reranking against `when_to_use` + `description` embeddings
+  - Returns **5–10 top results** (configurable), each with:
+    - Catalog, plugin, entry name, kind, plugin_version
+    - **Truncated description** (512 chars by default) — see `truncate_description` hardening below
+    - First 100 chars of `when_to_use` guidance (if present)
+    - Example command-line invocation (for skills only)
+  - **Phase 5 / US4 C-1**: Description truncation via **bounded-memory char_indices walk** (O(n) worst-case, O(1) fast-path when input fits)
+- **Tier 2: `get_skill_info` tool (NEW, Phase 5 / US4)**:
+  - Middle-tier metadata fetch: allows agent to decide whether to fetch full body
+  - Input: catalog, plugin, name, kind (defaults to Skill)
+  - Output:
+    - Full frontmatter description (NO truncation — search_skills handles that)
+    - Full `when_to_use` guidance text (not truncated)
+    - Plugin version, user_invocable flag
+    - **Resource enumeration** (skill-only; commands return None per FR-083):
+      - `files`: top-level sibling files in the entry's parent dir (excl. entry itself), alphabetized, capped at 5 entries + sentinel `"and N more"` if overflow
+      - `directories`: BTreeMap of immediate subdirectories (keyed by name, alphabetized) with their immediate children (capped per-subdir, same sentinel rule)
+      - Symlinks skipped at every level (hostile-catalog defence)
+  - Latency: O(n) walk of parent directory + subdirs; all paths returned as absolute strings
+- **Tier 3: `get_skill` tool (existing)**:
+  - Full entry body fetch: SKILL.md or command markdown
+  - Preceded by Tier 2 (agent now knows whether this is worth fetching)
+  - Returns complete body, component list, all sibling resources
+
+### Description Truncation Hardening (`src/mcp/tools/search_skills.rs`)
+
+- **Purpose**: Phase 5 / US4 C-1 — Efficient bounded-memory truncation in `search_skills` results
+- **Location**: `src/mcp/tools/search_skills.rs::truncate_description(s: &str, max: usize) -> String`
+- **Algorithm**:
+  1. If `max == 0`, return empty string
+  2. Iterate via `s.char_indices()` and count characters (NOT bytes)
+  3. **Fast-path**: If input fits within `max` chars, return unchanged (no allocation, O(1) when no truncation needed)
+  4. **Truncation path**: At first character beyond `max`, capture its byte offset via `char_indices`
+  5. Slice at that boundary, append UTF-8 ellipsis `'…'` (U+2026), return
+- **Correctness**: Guaranteed UTF-8 safe — slices always happen at char boundaries (never mid-multibyte)
+- **Performance**: O(n) in worst case (must scan full input if no truncation), but O(k) when truncation happens at position k << n; no intermediate allocations in fast-path
+- **Replaces**: Previous implementation that always scanned the full string (DoS vector when max << input length)
+
 ### Prompt Arguments & Frontmatter (`src/plugin/frontmatter.rs`)
 
 - **Purpose**: Phase 5 / US1 — Parse `arguments` frontmatter for entry invocation
@@ -175,14 +219,16 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
     - `arguments: Option<Vec<PromptArgument>>` — ordered list of expected arguments (name, type hint, optional description)
     - `argument_hint: Option<String>` — hint for catch-all `args` argument description (Case B fallback)
     - `prompt_name: Option<String>` — override for derived `<plugin>__<entry>` format
-    - `when_to_use: Option<String>` — guidance indexed for search
+    - `when_to_use: Option<String>` — guidance indexed for search (Phase 5 / US4: now indexed for semantic search)
     - `searchable: Option<bool>` (default `true`) — controls `search_skills` visibility
     - `user_invocable: Option<bool>` (default `false` for skills; Tome explicit no-op) — controls `prompts/list` visibility
 
-### Data Flow — Phase 5 / US1–US3
+### Data Flow — Phase 5 / US1–US4
+
+#### Enable + Index Pipeline (US1–US3 unchanged, US4 adds search indexing)
 
 ```
-CLI: tome plugin enable <catalog>/<plugin>  (existing)
+CLI: tome plugin enable <catalog>/<plugin>
      ↓
 Load workspace scope + central index
      ↓
@@ -194,73 +240,53 @@ index::skills::enable_plugin_atomic(pending_commands, pending_skills)
   ↓
   Insert/update skills table rows with kind=command/skill
   ↓
+  Insert/update when_to_use column (Phase 5 / US4: now indexed for search)
+  ↓
   Insert workspace_skills junction rows (existing)
      ↓
 Release advisory lock
      ↓
-regenerate_for_trigger(workspace_name, paths)  (Phase 4 — unchanged)
+regenerate_for_trigger(workspace_name, paths)  (Phase 4; include when_to_use in embeddings per US4)
 ```
 
-```
-CLI: tome prompts invoke <prompt_name> [--arg-1 value1 --arg-2 value2 ...] [-- extra-args ...]
-     ↓
-Load workspace scope + central index
-     ↓
-Reverse-lookup prompt_name → (catalog, plugin, entry_name, kind)
-     ↓
-Resolve entry body path via resolve_entry_body_path(catalog, plugin, name, kind)
-     ↓
-Read entry body (SKILL.md or command .md)
-     ↓
-Parse entry frontmatter (including arguments schema)
-     ↓
-Collect supplied arguments: positional [arg1, arg2, ...] + named {arg_name: value, ...}
-     ↓
-Validate supplied arguments against declared schema via coerce_arguments()
-     ↓
-Build SubstitutionContext { entry, workspace, arguments: ArgumentValues { positional, named } }
-     ↓
-substitution::render(body, context) — SINGLE-PASS pipeline (Phase 5 / US3)
-  ↓
-  Compile COMBINED_RE (union of all stage patterns) [once at startup via OnceLock]
-  ↓
-  For each regex match in body (in order):
-    ↓
-    If pattern matches {{TOME_*}}: invoke builtins stage handler
-      ↓
-      On first {{TOME_*}}: call ensure_plugin_data() + ensure_workspace_data()
-        ↓
-        create_dir_all(plugin_data_dir_for(...)) if not exists [lazy, idempotent]
-        ↓
-        create_dir_all(workspace_data_dir_for(...)) if not exists [lazy, idempotent]
-    ↓
-    If pattern matches {{$*}}: invoke env stage handler
-    ↓
-    If pattern matches $ARGUMENTS/$N/$name: invoke arguments stage handler
-      ↓
-      apply_arguments_match(pattern, values) → resolved arg value
-    ↓
-    Replace match with resolved value
-  ↓
-  Tail: if body_has_bare_arguments(original_body): append ` -- ${remaining_positional_args}`
-     ↓
-CLI: output rendered body (or pass to harness CLI)
-```
+#### Three-Tier Discovery Flow (Phase 5 / US4)
 
 ```
-CLI: tome workspace rename <old> <new>
+CLI/MCP Agent: "How do I do X?"
      ↓
-Existing steps 1-5 (per Phase 4 / US2 contract)
+MCP: call search_skills(query="X", rerank=true)  [Tier 1 — fast semantic search]
      ↓
-Within workspace dir rename (step 5):
+tome: Embed query → KNN search + optional rerank → Top 5–10 results
   ↓
-  if <old>/plugin-data/ exists:
-    ↓
-    For each <catalog>/<plugin>/ subdir:
+  For each result:
+    - Full description truncated to 512 chars via truncate_description (char_indices fast-path)
+    - when_to_use guidance clipped to first 100 chars (search-preview)
+    - Example invocation (skill-only)
+  ↓
+Return ranked list with truncated metadata
+     ↓
+Agent reviews summaries; picks candidate
+     ↓
+MCP: call get_skill_info(catalog, plugin, name, kind)  [Tier 2 — detailed metadata + resource preview]
+     ↓
+tome: Lookup entry in index → read frontmatter → walk parent dir for resources (5-cap per dir)
+  ↓
+  Return SkillInfo {
+    - Full description (no truncation)
+    - Full when_to_use (for agent decision logic)
+    - Plugin version, user_invocable
+    - Resource enumeration { files: [...], directories: { "name": [...], ... } }
       ↓
-      std::fs::rename(<old>/plugin-data/<cat>/<plug>/, <new>/plugin-data/<cat>/<plug>/)
-      ↓
-      Log success or non-critical error
+      Each level cap-5 + "and N more" sentinel
+  ↓
+Agent scans resources; decides whether to fetch full body
+     ↓
+If yes:
+  MCP: call get_skill(catalog, plugin, name, kind)  [Tier 3 — complete body]
+  ↓
+  tome: Resolve body path → read full markdown → return with all components
+  ↓
+  Agent renders/executes full entry
 ```
 
 ## Layer Boundaries
@@ -283,7 +309,8 @@ Within workspace dir rename (step 5):
 - Substitution engine allows test injection via `SUBSTITUTION_OVERRIDE` thread_local (mirrors `MIGRATIONS_OVERRIDE` / `SUMMARISER_OVERRIDE` pattern)
 - Entry kind dispatch via `EntryKind` enum is exhaustive; matches are type-safe
 - **Phase 5 / US3**: Single-pass rendering pipeline with per-match dispatch ensures each stage pattern is matched exactly once per body; argument coercion is validated before render
+- **Phase 5 / US4**: Three-tier MCP discovery separates concerns: `search_skills` optimizes for ranking + truncation (char_indices fast-path), `get_skill_info` separates metadata from body, `get_skill` remains unchanged; resource enumeration walks (non-recursive, 5-cap per dir, alphabetical via BTreeMap for JSON stability)
 
 ---
 
-*This document describes HOW the system is organized at Phase 5 / US3 (commands + prompts + complete substitution shipped). 954+ tests across 127+ suites.*
+*This document describes HOW the system is organized at Phase 5 / US4 (three-tier discovery + when_to_use indexing + truncation hardening shipped). 1050+ tests across 133+ suites.*

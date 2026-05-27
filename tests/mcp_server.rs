@@ -183,6 +183,7 @@ fn search_skills_rejects_top_k_out_of_range() {
                 top_k: 0,
                 catalog: None,
                 plugin: None,
+                description_max_chars: 150,
             },
         ))
         .expect_err("top_k = 0 must reject");
@@ -201,6 +202,7 @@ fn search_skills_rejects_top_k_out_of_range() {
                 top_k: 101,
                 catalog: None,
                 plugin: None,
+                description_max_chars: 150,
             },
         ))
         .expect_err("top_k = 101 must reject");
@@ -229,6 +231,7 @@ fn search_skills_rejects_plugin_without_catalog() {
                 top_k: 10,
                 catalog: None,
                 plugin: Some("writers".into()),
+                description_max_chars: 150,
             },
         ))
         .expect_err("plugin without catalog must reject");
@@ -263,6 +266,7 @@ fn search_skills_returns_unknown_catalog_for_missing_name() {
                 top_k: 10,
                 catalog: Some("nonexistent".into()),
                 plugin: None,
+                description_max_chars: 150,
             },
         ))
         .expect_err("unknown catalog must reject");

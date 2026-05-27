@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-27 (Phase 5 / US3 complete; argument substitution no-rescan invariant verified; 0 security findings)
+> **Last Updated**: 2026-05-27 (Phase 5 / US4 complete; search_skills DoS vector fixed via bounded char_indices walk; 0 security findings)
 
 ## Technical Debt
 
@@ -40,6 +40,7 @@ Items to address when working in the area:
 | TD-054-US1-P5 | Phase 5 prompt-injection trust boundary | Substitution engine interprets entry prompts with `$ARGUMENTS` / `$N` / `$name` variable substitution. User-controlled argument values injected into command strings | Design | Medium | Trust boundary: documented as "user explicitly enables plugins and accepts substitution semantics". Argument values are NOT escaped (shell-style quoting per research §R-3 matching Claude Code's documented behaviour). Recommend governance doc: "Do not enable plugins from untrusted sources if using `$ARGUMENTS` in high-privilege commands". Phase 5 spec deferred prompt-injection doc to v0.6+ per `retro/P5.md` S-M1 | Phase 6+ documentation |
 | TD-055-US2-P5 | Phase 5 / US2 workspace-data-dir relocation on workspace rename | `workspace rename <old> <new>` must relocate plugin-data directory from `~/.tome/workspaces/<old>/plugin-data/` to `~/.tome/workspaces/<new>/plugin-data/` | Feature completeness | Low | US2.a / US2.b implement the relocation; should be tested against plugins with persisted data across rename. Currently no end-to-end test of data relocation + subsequent plugin invocation. Defer to Phase 5 Polish if not covered by US2 test suite | Phase 5 / US2 complete; test coverage TBD |
 | TD-056-US3-P5 | Phase 5 / US3 argument substitution recursive-substitute prevention | Stage 3 caller-supplied args flow into LLM context without recursive re-scan (structural fix via unified `COMBINED_RE` regex) | Security | Low | No-rescan invariant (NFR-007 / FR-051) enforced structurally in the unified regex pass; hostile argument values containing `${TOME_*}` or `$ARGUMENTS[N]` patterns are emitted verbatim (never re-scanned). Zero security findings from US3 reviewer pass. Verification: `tests/substitution_arguments.rs` + `tests/substitution_pipeline.rs` confirm no-rescan | ✅ Phase 5 / US3 complete; verified end-to-end |
+| TD-057-US4-P5 | Phase 5 / US4 MCP search_skills description truncation DoS | `search_skills` truncate_description was O(n) over full input × top_k results × caller-controlled description_max_chars (100K cap) creating meaningful CPU amplifier | **SECURITY (HIGH)** | **RESOLVED** via US4.d-1 S-M1: bounded O(max) `char_indices` walk (no full-string traversal even in no-truncation path); walk stops after `max+1` chars; no reallocation in truncation path; bounded input length cap (4096 chars query) × output bounds (0–100K desc × 1–100 results) create no amplification | ✅ **FIXED IN PR #119–#121** — Phase 5 / US4 complete. Verified: `src/mcp/tools/search_skills.rs::truncate_description` (lines 341–365) uses bounded walk; no full-string traversal |
 
 ### Low Priority
 
@@ -70,6 +71,7 @@ Nice-to-have improvements:
 | SEC-015-US1-P5 | Phase 5 US1 arguments DoS (RESOLVED) | Plugin-manifest arguments list unbounded; hostile catalog could declare 1M+ argument names forcing allocation DoS at enable time | **RESOLVED** | Hard cap at 256 entries enforced in `deserialize_arguments` (both string and list forms); exceed → exit 29 `InvalidArgumentFrontmatter` | ✅ PR #110–#114 security audit fix |
 | SEC-016-US2-P5 | **Phase 5 / US2 env-var exfiltration (CRITICAL, RESOLVED)** | Two-pass substitution design allowed hostile plugin's `"version": "${TOME_ENV_GITHUB_TOKEN}"` to leak operator's env vars into LLM context via stage-2 re-scan of stage-1 output | **CRITICAL / RESOLVED** | Structural fix: SINGLE unified regex pass (`COMBINED_RE` in `src/substitution/regex_sets.rs`); resolved values emitted directly to output buffer and never re-scanned; no-rescan invariant (NFR-007 / FR-051) enforced at code level; US2.d blocker fix in PR #116–#120 | ✅ **CRITICAL FIX LANDED** — Phase 5 / US2 complete. Trust boundary documented: operator explicitly enables plugins (trusted decision); argument values NOT escaped (shell-style quoting). Phase 6+ documentation will detail governance: "Do not enable plugins from untrusted sources if using `$ARGUMENTS` in high-privilege commands." Structural fix prevents even malicious plugin authors from exfiltrating through substitution. |
 | SEC-017-US3-P5 | **Phase 5 / US3 argument-substitution recursive-substitute (RESOLVED)** | Three-stage substitution (built-ins, env, arguments) could allow Stage 3 caller args containing `${TOME_*}` or `$ARGUMENTS[N]` to be re-interpreted via Stage 1+2 on subsequent renders or Stage 1 output containing `$0` to be re-interpreted by Stage 3 | **CRITICAL / RESOLVED** | Structural fix identical to SEC-016: unified `COMBINED_RE` regex with single `captures_iter` loop; Stage 3 argument values emitted directly to output buffer and never re-entered scanner; coercion happens once per render, not per-match; no-rescan invariant extends to all three stages (US2.d B2 + US3.a fixes). Phase 5 / US3 blocker (closed C-B1): verified end-to-end via `tests/substitution_pipeline.rs`. 0 security findings from US3 reviewer pass | ✅ **CRITICAL FIX VERIFIED** — Phase 5 / US3 complete. Argument substitution secured via structural enforcement of no-rescan invariant. |
+| **SEC-018-US4-P5** | **Phase 5 / US4 search_skills description-truncation DoS (HIGH, RESOLVED)** | MCP `search_skills` truncate_description used O(n) full-string traversal over full input even when no truncation needed; caller-controlled `description_max_chars` (0–100K) × `top_k` (1–100) × multi-KB result descriptions created meaningful CPU amplifier | **HIGH / RESOLVED** | Structural fix: `char_indices` bounded walk in `truncate_description` (lines 341–365 of `src/mcp/tools/search_skills.rs`); walk stops after `max+1` chars, no full-string traversal in no-truncation path, no reallocation in truncation path; input bounds (4096-char query cap) + sanity cap (100K description) prevent amplification | ✅ **FIXED IN US4.d-1 S-M1 / PR #119–#121** — Phase 5 / US4 complete. 0 security findings from US4 reviewer pass. TOCTOU residual documented as accepted risk per Phase 4 trust model (catalog trusted-on-enrol not on-read; per-FD openat/O_NOFOLLOW hardening deferred to v0.6+). |
 
 ### Low Risk
 
@@ -138,6 +140,7 @@ Code areas that are brittle or risky to modify:
 | `src/substitution/env.rs::resolve_env` (Phase 5 / US2) | Env-passthrough `${TOME_ENV_*}` resolution; operates within single unified regex pass (never feeds output back to regex) | Per-match resolution inside the `COMBINED_RE` loop. No intermediate buffering. Resolved value emitted directly to output. Test that env lookup result never causes secondary match attempts (inherent from the single-pass design) | Structural fix; security-critical property |
 | `src/substitution/builtins.rs::resolve_builtin` (Phase 5 / US2) | Built-in resolution; operates within single unified regex pass (never feeds output back to regex) | Per-match resolution inside the `COMBINED_RE` loop. All paths (including `PLUGIN_DATA` + `WORKSPACE_DATA` directory creation) complete within one match iteration. No intermediate buffering. Resolved value emitted directly to output | Structural fix; security-critical property |
 | **`src/substitution/arguments.rs::coerce_arguments + apply_arguments_match` (Phase 5 / US3, CRITICAL)** | **Argument substitution operates within single unified regex pass (never feeds resolved args back to regex); coerced argument values emitted directly to output buffer and never re-scanned (no-rescan invariant extended to Stage 3)** | **CRITICAL**: Coercion happens once per `render()` call (lines 144–147 of `mod.rs`), before the regex loop. Resolved values from Stage 3 dispatch (lines 197–221) are emitted directly and never re-entered into `combined_regex()`. Test via `tests/substitution_pipeline.rs::stage_3_argument_output_never_resubjected_to_earlier_stages` — verify hostile argument values containing `${TOME_*}` or `$ARGUMENTS[N]` are output verbatim. Do not move coercion inside the loop; do not buffer resolved values; do not allow per-match re-coercion | **Phase 5 / US3 blocker fix (C-B1)**; audited by 4 reviewers. **CRITICAL SECURITY INVARIANT extends to all three stages** |
+| **`src/mcp/tools/search_skills.rs::truncate_description` (Phase 5 / US4, HIGH)** | **Description truncation via bounded `char_indices` walk (O(max)) with no full-string traversal in no-truncation path; prevents CPU amplifier when caller-controlled `description_max_chars` × `top_k` × multi-KB result descriptions run over full input** | **CRITICAL**: Walk uses `char_indices()` to stop after `max+1` chars (line 348); no reallocation in truncation path (line 359); if input exhausted within `max` chars, return verbatim without closure allocation (line 350). Test via `tests/mcp_tools_search_skills.rs::truncate_description_*` — verify walk stops early on no-truncation, verify ellipsis only appended on actual truncation. Do not change to `.chars().count()` for early-return check (would re-introduce O(n) traversal). Do not buffer intermediate strings. Structure: `if max == 0 return empty; loop max times; at max+1, slice and append ellipsis` | **Phase 5 / US4.d-1 S-M1 fix (HIGH severity)**; audited by 4 reviewers. **SECURITY: DoS mitigation enforced structurally** |
 
 ## Deferred Findings from Phase 4 Review (PR #99–#101)
 
@@ -154,9 +157,9 @@ Phase 4 / US5 audit produced **1 blocker + 21 majors**. **All 1 actionable block
 
 See `specs/004-phase-4-refactor-harnesses/review/disposition.md` + individual `us*-disposition.md` files for full triage across all 5 user stories.
 
-## Deferred Findings from Phase 5 Review (PR #110–#114, US1 + US2 + US3)
+## Deferred Findings from Phase 5 Review (PR #110–#114, US1 + US2 + US3 + US4)
 
-Phase 5 / US1+US2+US3 security audit produced fixes applied in PR #110–#114+ and subsequent:
+Phase 5 / US1+US2+US3+US4 security audits produced fixes applied in PR #110–#114+ and subsequent:
 
 | Fix | Category | Description | Status |
 |-----|----------|-------------|--------|
@@ -165,6 +168,7 @@ Phase 5 / US1+US2+US3 security audit produced fixes applied in PR #110–#114+ a
 | C-B1 | Critical | **No-rescan invariant via unified `COMBINED_RE`** (env-var exfiltration fix, Stage 1+2) | ✅ **APPLIED (PR #116–#120)** |
 | C-B1-ext | Critical | **No-rescan invariant extended to Stage 3** (argument substitution; prevents recursive-substitute via caller args) | ✅ **APPLIED (PR #121–#125 US3)** |
 | C-B2 | Critical | `WorkspaceDataDirCreationFailed` exit code correction (exit 25, not 9) | ✅ Applied (PR #116–#120 US2.d B1 fix) |
+| **S-M1-US4** | **HIGH Security** | **`truncate_description` bounded O(max) `char_indices` walk** (DoS: prevents CPU amplification via description truncation) | ✅ **APPLIED (US4.d-1 S-M1 / PR #119–#121)** |
 | (deferred) | Security | YAML deserialiser panic safety (upstream issue; bounded-read cap + argument cap mitigate) | Phase 5 Polish or Phase 6 |
 | (deferred) | Security | Prompt-injection trust boundary documentation | Phase 6+ |
 
@@ -190,6 +194,7 @@ Known performance issues:
 | PERF-050 | Phase 4 Qwen download | Large model file (~400 MB) download wrapped in indeterminate spinner (F6); byte-progress callback deferred | Poor UX visibility during first model fetch | Phase 4 F6 uses indeterminate spinner; upgrade to byte-progress in Phase 4 Polish or F6 if time permits (TD-010 / TD-050-US4) | Tracked |
 | PERF-060 | Summariser lock overhead | `workspace regen-summary` holds advisory lock for full LlamaSummariser invocation (many seconds) | Blocks concurrent workspace operations | Acceptable for now; revisit when LlamaSummariser ships in US4.a | R-M5 deferral, tracked |
 | PERF-070-US4 | Summariser model load (US4.d-1 S-M4 fix) | Model load + caching per `LlamaSummariser` instance; per-call context | Eliminated: S-M4 removed ~400 MB per-trigger re-hash by caching model on `self` | Caching verified; `LlamaModel: Send + Sync` upstream holds `Summariser: Send + Sync` bound | ✅ Resolved PR #97 |
+| **PERF-080-US4** | **MCP search_skills description truncation** | **Previous O(n) full-string traversal × top_k results × caller-controlled max created CPU amplifier** | **Eliminated: O(max) bounded walk** | **Structural fix: walk stops after max+1 chars, no reallocation in truncation path** | ✅ **Resolved US4.d-1 S-M1 / PR #119–#121** |
 
 ## TODO Items
 
@@ -256,4 +261,4 @@ Per Phase 4 research §R-17, Phase 3 deferred items are dispositioned as follows
 ---
 
 *This document tracks what needs attention. Update when concerns are resolved or discovered.*
-*Last refreshed 2026-05-27 against Phase 5 / US3 complete source (1000+ tests passing, ~130 suites); argument substitution no-rescan invariant verified end-to-end; 0 security findings from US3 reviewer pass.*
+*Last refreshed 2026-05-27 against Phase 5 / US4 complete source (1000+ tests passing, ~130 suites); MCP `search_skills` description truncation secured via bounded O(max) char_indices walk; 0 security findings from US4 reviewer pass.*

@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-27 (Phase 5 / US3 complete; argument substitution secured via no-rescan invariant)
+> **Last Updated**: 2026-05-27 (Phase 5 / US4 complete; `truncate_description` DoS vector fixed via bounded char_indices walk)
 
 ## Overview
 
@@ -42,7 +42,8 @@ Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, wo
 32. Phase 4 / Polish additions: `util::bounded_read_to_string` with per-class caps applied to ~26 sites; `home_root()` validation for absolute, canonical, exists; relative/unset `$HOME` exits 2 Usage; consolidated `ProjectMarkerConfig` to one type + canonical `settings::parser::read_project_marker`; doctor harnesses list hyphenated naming; five-layer defence-in-depth for `remove_dir_all` on scanned dirs
 33. Phase 5 / US1 additions: Entry body-file path validation rejects `..` traversal and absolute paths (prevents directory-escape via skill/command bodies); arguments list hard-capped at 256 entries in frontmatter parser (DoS mitigation)
 34. Phase 5 / US2 additions (CRITICAL SECURITY FIX): No-rescan invariant (NFR-007 / FR-051) enforced via SINGLE unified regex pass for Stages 1+2 substitution (`COMBINED_RE`); resolved values emitted directly to output buffer and never re-scanned, closing the data-exfiltration vector where a hostile plugin's `"version": "${TOME_ENV_GITHUB_TOKEN}"` could leak operator's env vars into LLM context
-35. **Phase 5 / US3 additions (STRUCTURAL SECURITY)**: Argument substitution (Stage 3) folded into the unified `COMBINED_RE` regex; caller-supplied args never recursive-substitute (no `$ARGUMENTS` output re-matched for `${TOME_*}`, no argument-value re-matched for `$N`); structural enforcement via single `captures_iter` loop with direct output emission — hostile argument values containing `${TOME_*}` or `$ARGUMENTS[N]` patterns cannot exfiltrate (Stage 3 is coerced once per render, not re-scanned); 0 security findings from US3 reviewer pass
+35. Phase 5 / US3 additions (STRUCTURAL SECURITY): Argument substitution (Stage 3) folded into the unified `COMBINED_RE` regex; caller-supplied args never recursive-substitute (no `$ARGUMENTS` output re-matched for `${TOME_*}`, no argument-value re-matched for `$N`); structural enforcement via single `captures_iter` loop with direct output emission — hostile argument values containing `${TOME_*}` or `$ARGUMENTS[N]` patterns cannot exfiltrate (Stage 3 is coerced once per render, not re-scanned); 0 security findings from US3 reviewer pass
+36. **Phase 5 / US4 additions (DoS MITIGATION)**: MCP `search_skills` description truncation via bounded O(max) `char_indices` walk (US4.d-1 S-M1 HIGH fix); eliminated O(n) full-string traversal that created meaningful CPU amplifier when caller-controlled `description_max_chars` (0–100,000 cap) × `top_k` results (1–100) × multi-KB descriptions ran over full input; walk stops after `max+1` chars, no reallocation in truncation path; no full-string traversal in no-truncation path
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
@@ -147,6 +148,16 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 **Implementation** (`src/plugin/frontmatter.rs`):
 - Space-separated form: loop over `v.split_whitespace()`, check `out.len() >= MAX_ARGUMENTS` before push
 - YAML sequence form: check inside `visit_seq`, reject beyond-limit with custom error message
+
+### MCP Tool Input Bounds (Phase 5 / US4)
+
+| Tool | Parameter | Limit | Exit Code | Location |
+|------|-----------|-------|-----------|----------|
+| `search_skills` | `query` length | 4096 Unicode chars (`MAX_QUERY_CHARS`) | N/A (input validation via MCP `invalid_params`) | `src/mcp/tools/search_skills.rs::153` |
+| `search_skills` | `description_max_chars` | 100,000 chars cap (`MAX_DESCRIPTION_MAX_CHARS`) | N/A (input validation via MCP `invalid_params`) | `src/mcp/tools/search_skills.rs::137` |
+| `search_skills` | `top_k` | 1–100 range | N/A | `src/mcp/tools/search_skills.rs::127` |
+
+**Security Property**: Caller-controlled `description_max_chars` × `top_k` × result size cannot amplify CPU cost via description truncation. Truncation uses bounded O(max) `char_indices` walk (Phase 5 / US4.d-1 S-M1): walk stops after `max+1` chars, no full-string traversal in no-truncation path, no reallocation in truncation path.
 
 ### Workspace Name Validation (Phase 4)
 
@@ -484,4 +495,4 @@ See `specs/005-phase-5-commands-prompts/contracts/exit-codes-p5.md` for full enu
 ---
 
 *This document defines security controls. Update when security posture changes.*
-*Last refreshed 2026-05-27 against Phase 5 / US3 complete source (1000+ tests passing, ~130 suites); argument substitution secured via unified no-rescan invariant.*
+*Last refreshed 2026-05-27 against Phase 5 / US4 complete source (1000+ tests passing, ~130 suites); MCP `search_skills` description truncation secured via bounded O(max) char_indices walk.*

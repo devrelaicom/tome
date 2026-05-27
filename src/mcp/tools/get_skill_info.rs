@@ -275,6 +275,17 @@ fn lookup_entry(
 ///   the JSON object's key order matches alphabetical iteration.
 /// - Symlinks (file or dir) are skipped at every level — same hostile-catalog
 ///   defence as `get_skill::walk_dir` (FR-S-02).
+///
+/// US4.d C-1 (accepted-risk note): after the per-entry `file_type()` lstat
+/// check the parent walk collects subdir `PathBuf`s into a Vec, then a
+/// second loop calls `read_dir(&sub)` on each. There's a residual TOCTOU
+/// window: between the lstat check and the second `read_dir`, a hostile
+/// concurrent `rename(2)` could swap a real directory for a symlink, and
+/// the second `read_dir` would follow it. Accepted per Phase 4's trust
+/// model — the walked directory is inside a catalog clone the user has
+/// EXPLICITLY enabled (trusted-on-enrol, not trusted-on-read). Hardening
+/// to per-FD `openat`/`O_NOFOLLOW` would require `cap-std`; deferred to
+/// v0.6+ if a real threat materialises.
 fn walk_resources(body_path: &Path) -> std::io::Result<ResourceEnumeration> {
     let parent = body_path.parent().ok_or_else(|| {
         std::io::Error::new(
