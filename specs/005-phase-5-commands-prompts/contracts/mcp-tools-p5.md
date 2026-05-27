@@ -59,7 +59,7 @@ Truncation rule (FR-092): if the description's character count (Unicode scalar v
 |---|---|---|
 | `query` exceeds `MAX_QUERY_CHARS` | INVALID_PARAMS | `query_too_long` |
 | `top_k` < 1 or > 100 | INVALID_PARAMS | `invalid_top_k` |
-| `description_max_chars` < 0 | INVALID_PARAMS | `invalid_description_max_chars` |
+| `description_max_chars` < 0 OR > 100_000 (`MAX_DESCRIPTION_MAX_CHARS` sanity cap) | INVALID_PARAMS | `invalid_description_max_chars` |
 | Workspace has no enabled plugins | OK (returns empty array) | — |
 
 ## `get_skill_info` — NEW

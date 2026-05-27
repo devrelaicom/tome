@@ -450,3 +450,37 @@ fn description_max_chars_zero_yields_empty_description() {
         "description_max_chars = 0 must yield empty string with no ellipsis"
     );
 }
+
+#[test]
+fn truncation_at_multibyte_char_boundary_does_not_split_codepoint() {
+    // US4.d test-gap fix: multi-byte UTF-8 characters at the truncation
+    // boundary must not be split. Description with 100 emoji (4 bytes
+    // each in UTF-8) + truncate at 50 chars → output should be 50 emoji
+    // + ellipsis, not 50 chars worth of garbled bytes.
+    //
+    // The bug we're guarding against: a byte-based truncation would
+    // slice mid-codepoint and produce invalid UTF-8 OR a U+FFFD
+    // replacement. The char_indices-based implementation (US4.d C-2)
+    // walks char boundaries and slices at a valid offset.
+    let emoji = "🎯"; // 4 UTF-8 bytes, 1 char
+    let description: String = emoji.repeat(100); // 400 bytes, 100 chars
+    let body = format!("---\nname: emoji\ndescription: {description}\n---\nbody\n");
+    let (_tmp, paths) = stage_workspace(&[("emoji", &body)], &[]);
+    let state = build_state(&paths);
+
+    let out = invoke(state, make_input("emoji", 50)).expect("search ok");
+    assert!(!out.matches.is_empty());
+    let truncated = &out.matches[0].description;
+    // 50 emoji + 1 ellipsis = 51 chars. Verify char count, not byte count.
+    assert_eq!(
+        truncated.chars().count(),
+        51,
+        "truncation at multibyte boundary must produce 50 chars + 1 ellipsis (51 total), got {} chars",
+        truncated.chars().count()
+    );
+    // Must be valid UTF-8 (would already error during deserialisation
+    // if not, but assert explicitly via successful chars() iteration).
+    assert!(truncated.ends_with('\u{2026}'), "must end with ellipsis");
+    let prefix_emoji_count = truncated.chars().filter(|c| *c == '🎯').count();
+    assert_eq!(prefix_emoji_count, 50, "must contain exactly 50 emoji");
+}
