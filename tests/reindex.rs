@@ -152,6 +152,72 @@ fn reindex_one_plugin_re_embeds_only_modified_skill() {
 }
 
 #[test]
+fn reindex_re_embeds_when_only_when_to_use_changes() {
+    // US4.b (T317): pins the wiring that US1.a established —
+    // `when_to_use` participates in `content_hash`, so a frontmatter
+    // change to that field alone (no description or body change)
+    // triggers reindex to re-embed. Proves the path:
+    //   SKILL.md frontmatter when_to_use change
+    //   → parse_skill_frontmatter picks it up
+    //   → upsert_skill computes content_hash via embedding_text
+    //   → reindex compares stored vs new hash, re-embeds on diff.
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+
+    let embedder = StubEmbedder::new();
+    enable_alpha_and_beta(&paths, &config, &embedder);
+    let baseline = embedder.call_count();
+
+    // Add when_to_use to skill-a's frontmatter without changing
+    // description or body. Pre-US4.b the content_hash was over only
+    // (name, description, body); now it includes when_to_use too, so
+    // the row's stored hash must mismatch and reindex must re-embed.
+    let skill_a = catalog_root
+        .join("plugin-alpha")
+        .join("skills")
+        .join("skill-a")
+        .join("SKILL.md");
+    std::fs::write(
+        &skill_a,
+        "---\n\
+         name: skill-a\n\
+         description: Well-formed skill that documents how to make alpha widgets shine.\n\
+         when_to_use: When the user asks about alpha widget polish.\n\
+         ---\n\
+         \n\
+         # skill-a\n\
+         \n\
+         Detailed body describing the alpha widget skill.\n",
+    )
+    .unwrap();
+
+    let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
+    let agg = run_with_deps(
+        Scope::Plugin(id.clone()),
+        &[id],
+        &build_deps(&paths, &config, &embedder),
+        false,
+        Mode::Json,
+    )
+    .expect("reindex one plugin");
+
+    assert_eq!(
+        agg.skills_re_embedded, 1,
+        "when_to_use change must trigger re-embed"
+    );
+    assert_eq!(
+        embedder.call_count() - baseline,
+        1,
+        "exactly one embed call for the when_to_use-modified skill",
+    );
+}
+
+#[test]
 fn reindex_force_re_embeds_every_skill_in_scope() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
