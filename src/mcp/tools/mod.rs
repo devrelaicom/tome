@@ -13,4 +13,5 @@
 //! [`specs/003-phase-3-mcp-workspaces/contracts/mcp-tools.md`].
 
 pub mod get_skill;
+pub mod get_skill_info;
 pub mod search_skills;

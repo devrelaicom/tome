@@ -2,8 +2,10 @@
 //! tractable without spawning a real `rmcp` handshake or loading the
 //! 345 MB BGE ONNX models:
 //!
-//! - The `ToolRouter` advertises exactly the two tools the contract names
-//!   (`search_skills` and `get_skill`).
+//! - The `ToolRouter` advertises exactly the three tools the contract names
+//!   (`search_skills`, `get_skill_info`, `get_skill`). Phase 5 / US4.a
+//!   widened the two-tool surface to three by adding the middle-tier
+//!   `get_skill_info` between discovery and full-body fetch.
 //! - The advertised descriptions match the contract's normative wording
 //!   and do NOT enumerate any specific catalog / plugin / skill name
 //!   that lives in the test fixture (FR-108 — "the description must not
@@ -56,16 +58,26 @@ fn build_state(env: &ToolEnv) -> Arc<McpState> {
 }
 
 #[test]
-fn router_advertises_exactly_two_tools() {
-    let names: Vec<String> = Server::tool_router()
+fn router_advertises_exactly_three_tools() {
+    // Phase 5 / US4.a: `get_skill_info` joins `search_skills` + `get_skill`
+    // as the middle-tier metadata + resource-enumeration surface. The
+    // ToolRouter's `list_all()` returns tools in registration order; the
+    // assertion sorts both sides to keep the check insensitive to that
+    // detail.
+    let mut names: Vec<String> = Server::tool_router()
         .list_all()
         .into_iter()
         .map(|t| t.name.to_string())
         .collect();
+    names.sort();
     assert_eq!(
         names,
-        vec!["get_skill".to_string(), "search_skills".to_string()],
-        "expected exactly the two contract-required tools, got {:?}",
+        vec![
+            "get_skill".to_string(),
+            "get_skill_info".to_string(),
+            "search_skills".to_string(),
+        ],
+        "expected exactly the three contract-required tools, got {:?}",
         names,
     );
 }
@@ -100,6 +112,20 @@ fn descriptions_match_contract_wording() {
     assert!(
         get_desc.contains("frontmatter stripped"),
         "get_skill description must reference frontmatter stripping; got: {get_desc}",
+    );
+
+    let info = tools
+        .iter()
+        .find(|t| t.name == "get_skill_info")
+        .expect("get_skill_info advertised");
+    let info_desc = info.description.as_deref().unwrap_or("");
+    assert!(
+        info_desc.contains("without loading its full body"),
+        "get_skill_info description must explain it's the middle-tier (avoids full body); got: {info_desc}",
+    );
+    assert!(
+        info_desc.contains("when_to_use"),
+        "get_skill_info description must reference when_to_use guidance; got: {info_desc}",
     );
 }
 

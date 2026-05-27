@@ -31,7 +31,7 @@ use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_handler,
 
 use crate::mcp::prompts;
 use crate::mcp::state::McpState;
-use crate::mcp::tools::{get_skill, search_skills};
+use crate::mcp::tools::{get_skill, get_skill_info, search_skills};
 
 #[derive(Clone)]
 pub struct Server {
@@ -119,6 +119,17 @@ impl Server {
         Parameters(input): Parameters<get_skill::Input>,
     ) -> Result<Json<get_skill::Output>, McpError> {
         get_skill::handle(self.state.clone(), input).await.map(Json)
+    }
+
+    /// Inspect one entry without loading its full body: full description, `when_to_use` guidance, plugin version, user-invocable flag, absolute path, and (for skills) a capped enumeration of adjacent files and subdirectories. The middle tier between `search_skills` (ranked discovery) and `get_skill` (full body). Use this to decide whether to load the body or to surface the description to a user.
+    #[tool(name = "get_skill_info")]
+    async fn get_skill_info(
+        &self,
+        Parameters(input): Parameters<get_skill_info::Input>,
+    ) -> Result<Json<get_skill_info::SkillInfo>, McpError> {
+        get_skill_info::handle(self.state.clone(), input)
+            .await
+            .map(Json)
     }
 }
 
