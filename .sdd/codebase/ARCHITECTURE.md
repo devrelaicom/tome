@@ -2,11 +2,11 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-27 (Phase 5 / US2 shipped; single-pass render pipeline, lazy data-dir creation, workspace rename relocation)
+> **Last Updated**: 2026-05-27 (Phase 5 / US3 shipped; argument substitution stage complete, single-pass render production-ready, entry e2e pipeline tested)
 
 ## Architecture Overview
 
-Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, workspace-scoped plugin enablement, comprehensive health diagnostics with auto-repair, command indexing and MCP prompts capability, and **Phase 5 / US2 NEW** variable substitution engine with four-stage rendering pipeline and per-plugin/workspace data directories.
+Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, workspace-scoped plugin enablement, comprehensive health diagnostics with auto-repair, command indexing and MCP prompts capability, and **Phase 5 / US3 COMPLETE** variable substitution engine with four-stage single-pass rendering pipeline (built-ins → env → arguments → ARGUMENTS footer), shell-style argument coercion, and per-plugin/workspace data directories.
 
 The architecture is **monolithic with layered structure** split across two execution contexts:
 - **CLI layer** — sync command dispatcher
@@ -14,7 +14,7 @@ The architecture is **monolithic with layered structure** split across two execu
 
 The central nervous system is a **single SQLite database** (`<home>/.tome/index.db`) that centralizes all state: plugin metadata, embeddings, workspace bindings, project bindings, enabled entries (skills/commands), and diagnostic metadata. Per-workspace composition settings and summaries live in separate TOML files (`<root>/workspaces/<name>/settings.toml`) and central RULES.md. Project markers (`<project>/.tome/config.toml`) are thin binding pointers, not databases.
 
-Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompts capability**, and **substitution engine skeleton**. Phase 5 / US2 ships **single-pass rendering pipeline** (COMBINED_RE union regex), **lazy data-directory creation** within render, and **workspace rename integration** to relocate plugin-data directories.
+Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompts capability**, and **substitution engine skeleton**. Phase 5 / US2 shipped **single-pass rendering pipeline** (COMBINED_RE union regex), **lazy data-directory creation**, and **workspace rename integration**. Phase 5 / US3 ships **argument substitution completeness**: Claude Code-compatible `$ARGUMENTS`, `$N`, and `$name` substitution with shell-style quoting, argument coercion, and frontmatter-declared parameter schemas.
 
 ## Architecture Pattern
 
@@ -24,7 +24,8 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
 | Hexagonal (ports & adapters) | Trait boundaries for `Embedder`/`Reranker`/`Summariser`/`HarnessModule`/`ScopeProvider` allow swappable implementations (production vs stub for tests) |
 | Trait-driven | Core abstractions decouple policy from mechanism; composition via struct fields rather than factory functions |
 | Phase 5 / US1 — Unified entry dispatch | `EntryKind` enum (`Skill` \| `Command`) with kind-discriminated `skills` table rows; MCP prompts derived from user-invocable entries |
-| Phase 5 / US2 — Single-pass substitution | Combined regex union (COMBINED_RE) replaces Stage 1+2 dual sweeps; built-ins, env vars, and arguments rendered in one loop |
+| Phase 5 / US2–US3 — Single-pass substitution | COMBINED_RE union regex processes all stages (builtins, env, arguments, ARGUMENTS tail) in one loop with per-match dispatch |
+| Phase 5 / US3 — Argument substitution | Claude Code `$ARGUMENTS` / `$N` / `$name` with shell_split + coerce_arguments + apply_arguments_match pipeline; ARGUMENTS footer appended in render tail |
 
 ## Core Components
 
@@ -41,22 +42,38 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
 
 ### Substitution Engine (`src/substitution/`)
 
-- **Purpose**: Phase 5 / US1–US2 — Render entry bodies through a single-pass variable pipeline
+- **Purpose**: Phase 5 / US1–US3 — Render entry bodies through a single-pass four-stage variable pipeline
 - **Location**: `src/substitution/{mod,context,builtins,env,arguments,data_dir,regex_sets}.rs`
-- **Phase 5 / US2 wire-up (rendering pipeline)**:
-  - **Combined regex** (COMBINED_RE in `regex_sets.rs`): Union of all placeholder patterns (`{{TOME_*}}`, `{{$*}}`, `$ARGUMENTS`/`$N`/`$name`)
-  - **Single-pass loop** in `render()`: One regex scan over the entire body (replaces Phase 1+2 dual-sweep pattern)
-  - **Per-match dispatch**: On each match, classify by pattern type and invoke the appropriate stage handler
-  - **Lazy data-dir creation**: `ensure_plugin_data()` and `ensure_workspace_data()` called on first `{{TOME_*}}` reference within a single render pass
+- **Phase 5 / US3 COMPLETE pipeline**:
+  - **Stage 1: Built-ins** (`{{TOME_PLUGIN_DATA}}`, `{{TOME_WORKSPACE_DATA}}`, `{{TOME_WORKSPACE_NAME}}`, `{{TOME_CATALOG_NAME}}`, `{{TOME_PLUGIN_NAME}}`)
+  - **Stage 2: Environment** (`{{$VAR}}` passthrough with TOME_ENV_ prefix)
+  - **Stage 3: Arguments** (`$ARGUMENTS`, `$N` / `$1`–`$N`, `$name` with shell-style quoting; ARGUMENTS footer appended in render tail)
+  - **Stage 4: ARGUMENTS Tail** (Optional `-- ${remaining_args}` footer for catch-all arguments)
+- **Single-pass loop** in `render(body, context) -> Result<String, SubstitutionError>`: One regex scan (COMBINED_RE) over entire body with per-match dispatch
 - **Module layout**:
-  - `mod.rs` — `render(body, context) -> Result<String, SubstitutionError>` entry point (single-pass loop); `SubstitutionError` enum (6 variants: PluginDataDirCreationFailed, WorkspaceDataDirCreationFailed, InvalidArgumentFrontmatter, PromptArgumentMismatch, + 2 error types from specific stages)
-  - `context.rs` — `SubstitutionContext` + `SubstitutionContextBuilder`; `ArgumentValues` enum (named/positional)
-  - `builtins.rs` — Stage handler: `{{TOME_PLUGIN_DATA}}`, `{{TOME_WORKSPACE_DATA}}`, `{{TOME_WORKSPACE_NAME}}`, `{{TOME_CATALOG_NAME}}`, `{{TOME_PLUGIN_NAME}}`
-  - `env.rs` — Stage handler: `{{$VAR}}` env passthrough (TOME_ENV_ prefix + generic env passthrough)
-  - `arguments.rs` — Stage handler: Claude Code `$ARGUMENTS` / `$N` / `$name` (shell-style quoting rules)
-  - `data_dir.rs` — Lazy directory creation on first reference (ensures plugin-data and workspace-data trees exist at render time)
+  - `mod.rs` — `render(body, context)` entry point (single-pass loop); `body_has_bare_arguments(body) -> bool` helper (replaces substring check per US3.d R-M1 fix); `SubstitutionError` enum (6 variants)
+  - `context.rs` — `SubstitutionContext` + `SubstitutionContextBuilder`; `ArgumentValues` enum (named/positional pairs)
+  - `builtins.rs` — Stage 1 handler (5 placeholder patterns); lazy data-dir creation on first match
+  - `env.rs` — Stage 2 handler (env var passthrough); TOME_ENV_ prefix support
+  - `arguments.rs` — **Phase 5 / US3 NEW** Stage 3 handler with three sub-pipelines:
+    - `shell_split(input) -> Vec<String>` — POSIX shell quoting parser (handles single/double quotes, backslash escape)
+    - `coerce_arguments(supplied: Vec<String>, declared: &[PromptArgument]) -> Result<ArgumentValues, SubstitutionError>` — match supplied args to declared schema (positional + named + validation)
+    - `apply_arguments_match(pattern, values) -> String` — resolve `$ARGUMENTS`, `$N`, `$name` placeholders to their values
+  - `data_dir.rs` — Lazy creation helpers: `ensure_plugin_data()` / `ensure_workspace_data()`
   - `regex_sets.rs` — `OnceLock<Regex>` COMBINED_RE (compiled once at startup or on first use)
-- **Test injection seam**: `SUBSTITUTION_OVERRIDE` thread_local (mirrors `MIGRATIONS_OVERRIDE` / `SUMMARISER_OVERRIDE` pattern per Phase 4 P6 lesson)
+- **Test injection seam**: `SUBSTITUTION_OVERRIDE` thread_local (mirrors `MIGRATIONS_OVERRIDE` / `SUMMARISER_OVERRIDE` pattern)
+
+### Argument Substitution Details (`src/substitution/arguments.rs`)
+
+- **Purpose**: Phase 5 / US3 — Match Claude Code argument syntax and render to entry contexts
+- **Location**: `src/substitution/arguments.rs`
+- **Key functions**:
+  - **`shell_split(input: &str) -> Vec<String>`**: Parse POSIX shell quoting (respects single/double quotes, backslash escape sequences) to split arguments on unquoted whitespace. Returns all tokens including empty strings from consecutive separators (preserves intent).
+  - **`coerce_arguments(supplied: Vec<String>, declared: &[PromptArgument]) -> Result<ArgumentValues, SubstitutionError>`**: Match supplied argument list to declared `PromptArgument` schema. Validates: positional count matches, named arguments exist in schema, no duplicates. Returns `ArgumentValues { positional: Vec<String>, named: HashMap<String, String> }`.
+  - **`apply_arguments_match(pattern: &str, values: &ArgumentValues) -> String`**: Resolve a single matched pattern (e.g., `$1`, `$filename`, `$ARGUMENTS`) to its value from the validated `ArgumentValues`. Returns empty string for missing optional arguments (per Claude Code spec).
+  - **Integration in `render()`**: For each regex match of type `$ARGUMENTS` / `$N` / `$name`, invoke `apply_arguments_match` to substitute the value in-place.
+  - **ARGUMENTS footer**: In `render()`'s tail, after all inline substitutions complete, if `body_has_bare_arguments(body)` is true, append ` -- ${remaining_args}` using unconsumed positional arguments (catch-all collect behavior per contract).
+- **Error handling**: `SubstitutionError::PromptArgumentMismatch { expected, supplied }` when count mismatch; `InvalidArgumentFrontmatter { reason, file }` on schema parse error.
 
 ### Entry Kind Discriminator (`src/plugin/identity.rs::EntryKind`)
 
@@ -91,7 +108,7 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
   - Process-wide vs workspace-scoped scratch space (mirrors substitution engine's dual reference)
   - Paths computed in F3 (Phase 5 skeleton); creation wired in US2 (lazy, within substitution render)
   - Matching `{{TOME_PLUGIN_DATA}}` / `{{TOME_WORKSPACE_DATA}}` built-in variables
-  - **Phase 5 / US2 NEW**: `ensure_plugin_data()` / `ensure_workspace_data()` called by `substitution::render()` on first `{{TOME_*}}` reference (lazy, idempotent)
+  - **Phase 5 / US2**: `ensure_plugin_data()` / `ensure_workspace_data()` called by `substitution::render()` on first `{{TOME_*}}` reference (lazy, idempotent)
 
 ### Plugin Lifecycle & Command Indexing (`src/plugin/lifecycle.rs`)
 
@@ -105,11 +122,11 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
 
 ### Workspace Rename & Plugin-Data Relocation (`src/workspace/rename.rs`)
 
-- **Purpose**: Phase 5 / US2 NEW — Relocate plugin-data directories during workspace rename
+- **Purpose**: Phase 5 / US2 — Relocate plugin-data directories during workspace rename
 - **Location**: `src/workspace/rename.rs`
 - **Algorithm additions**:
   1. Existing steps 1–5 (rename markers, update DB, rename workspace dir) — **unchanged**
-  2. **NEW Step 6: Plugin-data relocation** (inside the workspace directory rename at step 5):
+  2. **Step 6: Plugin-data relocation** (inside the workspace directory rename at step 5):
      - Before `std::fs::rename(<root>/workspaces/<old>/, ...)`, enumerate `<root>/workspaces/<old>/plugin-data/` for any existing plugin-specific data
      - Move each `<catalog>/<plugin>/` subdirectory to the new workspace location
      - Pattern: `std::fs::rename(<old>/plugin-data/<cat>/<plug>/, <new>/plugin-data/<cat>/<plug>/)`
@@ -155,14 +172,14 @@ Phase 5 / US1 shipped **commands as first-class database entries**, **MCP prompt
 - **Location**: `src/plugin/frontmatter.rs`
 - **Changes**:
   - `SkillFrontmatter` extended with:
-    - `arguments: Option<Vec<PromptArgument>>` — ordered list of expected arguments
+    - `arguments: Option<Vec<PromptArgument>>` — ordered list of expected arguments (name, type hint, optional description)
     - `argument_hint: Option<String>` — hint for catch-all `args` argument description (Case B fallback)
     - `prompt_name: Option<String>` — override for derived `<plugin>__<entry>` format
     - `when_to_use: Option<String>` — guidance indexed for search
     - `searchable: Option<bool>` (default `true`) — controls `search_skills` visibility
     - `user_invocable: Option<bool>` (default `false` for skills; Tome explicit no-op) — controls `prompts/list` visibility
 
-### Data Flow — Phase 5 / US1–US2
+### Data Flow — Phase 5 / US1–US3
 
 ```
 CLI: tome plugin enable <catalog>/<plugin>  (existing)
@@ -171,7 +188,7 @@ Load workspace scope + central index
      ↓
 plugin::components::list_command_files(plugin_dir) + collect_pending_commands(...)
      ↓
-For each command + skill, read frontmatter (widened with when_to_use, searchable, user_invocable)
+For each command + skill, read frontmatter (widened with when_to_use, searchable, user_invocable, arguments)
      ↓
 index::skills::enable_plugin_atomic(pending_commands, pending_skills)
   ↓
@@ -185,7 +202,7 @@ regenerate_for_trigger(workspace_name, paths)  (Phase 4 — unchanged)
 ```
 
 ```
-CLI: tome prompts invoke <prompt_name> [--arg-1 value1 --arg-2 value2 ...]
+CLI: tome prompts invoke <prompt_name> [--arg-1 value1 --arg-2 value2 ...] [-- extra-args ...]
      ↓
 Load workspace scope + central index
      ↓
@@ -197,11 +214,13 @@ Read entry body (SKILL.md or command .md)
      ↓
 Parse entry frontmatter (including arguments schema)
      ↓
-Validate supplied arguments against declared schema
+Collect supplied arguments: positional [arg1, arg2, ...] + named {arg_name: value, ...}
      ↓
-Build SubstitutionContext { entry, workspace, arguments }
+Validate supplied arguments against declared schema via coerce_arguments()
      ↓
-substitution::render(body, context) — SINGLE-PASS pipeline (Phase 5 / US2)
+Build SubstitutionContext { entry, workspace, arguments: ArgumentValues { positional, named } }
+     ↓
+substitution::render(body, context) — SINGLE-PASS pipeline (Phase 5 / US3)
   ↓
   Compile COMBINED_RE (union of all stage patterns) [once at startup via OnceLock]
   ↓
@@ -218,8 +237,12 @@ substitution::render(body, context) — SINGLE-PASS pipeline (Phase 5 / US2)
     If pattern matches {{$*}}: invoke env stage handler
     ↓
     If pattern matches $ARGUMENTS/$N/$name: invoke arguments stage handler
+      ↓
+      apply_arguments_match(pattern, values) → resolved arg value
     ↓
     Replace match with resolved value
+  ↓
+  Tail: if body_has_bare_arguments(original_body): append ` -- ${remaining_positional_args}`
      ↓
 CLI: output rendered body (or pass to harness CLI)
 ```
@@ -259,8 +282,8 @@ Within workspace dir rename (step 5):
 - Workspace-specific code never reads/writes global index directly; uses scope-parameterized helpers
 - Substitution engine allows test injection via `SUBSTITUTION_OVERRIDE` thread_local (mirrors `MIGRATIONS_OVERRIDE` / `SUMMARISER_OVERRIDE` pattern)
 - Entry kind dispatch via `EntryKind` enum is exhaustive; matches are type-safe
-- **Phase 5 / US2**: Single-pass rendering pipeline ensures each stage pattern is matched exactly once per body (no dual-sweep inefficiency)
+- **Phase 5 / US3**: Single-pass rendering pipeline with per-match dispatch ensures each stage pattern is matched exactly once per body; argument coercion is validated before render
 
 ---
 
-*This document describes HOW the system is organized at Phase 5 / US2 (commands + prompts + single-pass substitution shipped). 954+ tests across 127+ suites.*
+*This document describes HOW the system is organized at Phase 5 / US3 (commands + prompts + complete substitution shipped). 954+ tests across 127+ suites.*

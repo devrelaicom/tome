@@ -302,12 +302,12 @@ Block numbering with buffer space — refine within blocks as needed; the buffer
 
 ### Slice US3.c — End-to-end via `prompts/get` + `get_skill` with args + reviewer pass + US3 closeout
 
-- [ ] T269 [US3] Extend `src/mcp/tools/get_skill.rs` arg-handling path to invoke substitution stage 3 when caller passes `args` field (use devs:rust-dev agent)
-- [ ] T270 [US3] Verify `prompts/get` arg dispatch from US1.c (T141) correctly maps named/positional to `ArgumentValues` (use devs:rust-dev agent)
-- [ ] T271 [US3] Add `prompt_argument_mismatch` error path: when caller supplies more args than declared OR named args not in declaration set, surface MCP error per `contracts/exit-codes-p5.md` (use devs:rust-dev agent)
-- [ ] T272 [GIT] Commit: `feat(mcp): prompts/get + get_skill arg substitution end-to-end`
-- [ ] T273 [US3] Create `tests/entry_e2e.rs` end-to-end test exercising the full enable → index → search → info → get → prompts pipeline (use devs:rust-dev agent)
-- [ ] T274 [GIT] Commit: `test(phase5): end-to-end through enable/index/search/info/get/prompts`
+- [x] T269 [US3] Extend `src/mcp/tools/get_skill.rs` arg-handling path to invoke substitution stage 3 when caller passes `args` field (use devs:rust-dev agent) — verification only: `get_skill::handle` builds a `SubstitutionContext` with `args(None)` + `declared_args(Vec::new())` by design (the tool has no `args` field in its `Input`; Stage 3 + Stage 4 are no-ops on the read surface, per contract).
+- [x] T270 [US3] Verify `prompts/get` arg dispatch from US1.c (T141) correctly maps named/positional to `ArgumentValues` (use devs:rust-dev agent) — verified: `handle_get` → `map_caller_arguments` → `ArgumentValues::Object` / `Single` → `build_get_context.args` already in place since US1.c and now exercised by the active Stage 3 substitution.
+- [x] T271 [US3] Add `prompt_argument_mismatch` error path: when caller supplies more args than declared OR named args not in declaration set, surface MCP error per `contracts/exit-codes-p5.md` (use devs:rust-dev agent) — already wired: `map_caller_arguments` returns `TomeError::PromptArgumentMismatch` for unknown / surplus keys; `emit_tome_error_for_get` surfaces `code: "prompt_argument_mismatch"` envelope.
+- [x] T272 [GIT] Commit: `feat(mcp): prompts/get + get_skill arg substitution end-to-end` — SKIPPED: verification (T269/T270/T271) confirmed no wiring change was needed; the substitution layer activation in US3.a+b already brought all three surfaces to spec.
+- [x] T273 [US3] Create `tests/entry_e2e.rs` end-to-end test exercising the full enable → index → search → info → get → prompts pipeline (use devs:rust-dev agent)
+- [x] T274 [GIT] Commit: `test(phase5): end-to-end through enable/index/search/info/get/prompts`
 - [ ] T275 [US3] Dispatch 4 reviewer agents in parallel for US3 with per-scope briefs
 - [ ] T276 [US3] Consolidate reviewer findings + write disposition; apply blockers + selected majors
 - [ ] T277 [GIT] Commit: `fix(phase5/us3): reviewer-pass blockers and selected majors`

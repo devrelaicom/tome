@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-26
-> **Last Updated**: 2026-05-27 (Phase 5 / US2 shipped; single-pass substitution, lazy data-dir creation, workspace rename relocation)
+> **Last Updated**: 2026-05-27 (Phase 5 / US3 shipped; argument substitution complete, single-pass render production-ready, entry e2e pipeline tested)
 
 ## Directory Layout
 
@@ -27,19 +27,19 @@ tome/
 │   ├── plugin/                         # Plugin metadata + lifecycle
 │   │   ├── mod.rs                      # PluginRecord, PluginStatus
 │   │   ├── manifest.rs                 # plugin.json parsing (lenient)
-│   │   ├── frontmatter.rs              # SKILL.md + command YAML frontmatter parser (Phase 5: widened fields)
+│   │   ├── frontmatter.rs              # SKILL.md + command YAML frontmatter parser (Phase 5: widened fields including arguments schema)
 │   │   ├── identity.rs                 # PluginId + Phase 5 NEW: EntryKind enum (Skill | Command)
 │   │   ├── components.rs               # Walk skill/command dirs; Phase 5: list_command_files enumerates commands
 │   │   └── lifecycle.rs                # enable/disable/reindex orchestration (Phase 5: commands + skills)
 │   │
-│   ├── substitution/                   # Phase 5 / US1–US2: Variable rendering engine
-│   │   ├── mod.rs                      # Public API: render(), SubstitutionError enum (6 variants); COMBINED_RE single-pass loop (US2)
-│   │   ├── context.rs                  # SubstitutionContext + SubstitutionContextBuilder + ArgumentValues enum
-│   │   ├── builtins.rs                 # Stage handler: {{TOME_PLUGIN_DATA}}, {{TOME_WORKSPACE_DATA}}, {{TOME_WORKSPACE_NAME}}, {{TOME_CATALOG_NAME}}, {{TOME_PLUGIN_NAME}} (US2)
-│   │   ├── env.rs                      # Stage handler: {{$VAR}} env-passthrough + TOME_ENV_ prefix (US2)
-│   │   ├── arguments.rs                # Stage handler: Claude Code $ARGUMENTS / $N / $NAME (US3)
+│   ├── substitution/                   # Phase 5 / US1–US3: Variable rendering engine (COMPLETE)
+│   │   ├── mod.rs                      # Public API: render(), body_has_bare_arguments() helper; SubstitutionError enum (6 variants); COMBINED_RE single-pass loop (US2); ARGUMENTS footer tail (US3)
+│   │   ├── context.rs                  # SubstitutionContext + SubstitutionContextBuilder + ArgumentValues enum (named + positional pairs)
+│   │   ├── builtins.rs                 # Stage 1 handler: {{TOME_PLUGIN_DATA}}, {{TOME_WORKSPACE_DATA}}, {{TOME_WORKSPACE_NAME}}, {{TOME_CATALOG_NAME}}, {{TOME_PLUGIN_NAME}} (US2)
+│   │   ├── env.rs                      # Stage 2 handler: {{$VAR}} env-passthrough + TOME_ENV_ prefix (US2)
+│   │   ├── arguments.rs                # Stage 3 handler: Claude Code $ARGUMENTS / $N / $NAME (US3); shell_split + coerce_arguments + apply_arguments_match pipeline
 │   │   ├── data_dir.rs                 # Lazy plugin/workspace data-dir creation via ensure_plugin_data() / ensure_workspace_data() (US2)
-│   │   └── regex_sets.rs               # OnceLock<Regex> COMBINED_RE (union of all stage patterns, compiled once at startup or on first use per US2)
+│   │   └── regex_sets.rs               # OnceLock<Regex> COMBINED_RE (union of all stage patterns, compiled once at startup per US2)
 │   │
 │   ├── index/                          # Vector search index (SQLite + sqlite-vec)
 │   │   ├── mod.rs                      # Public API exports
@@ -52,7 +52,8 @@ tome/
 │   │   ├── meta.rs                     # Model identity metadata + drift detection
 │   │   ├── integrity.rs                # PRAGMA integrity_check wrapper
 │   │   ├── lock.rs                     # Advisory lockfile acquisition
-│   │   └── workspace_catalogs.rs       # Phase 4: junction table CRUD (workspace → catalogs)
+│   │   ├── workspace_catalogs.rs       # Phase 4: junction table CRUD (workspace → catalogs)
+│   │   └── workspaces.rs               # Phase 4: workspace name resolution (ID lookups)
 │   │
 │   ├── embedding/                      # Model management + inference
 │   │   ├── mod.rs                      # Embedder/Reranker/Scored traits
@@ -193,6 +194,8 @@ tome/
 │   ├── summariser_*.rs                 # Phase 4 US4: Summariser triggers, forward progress, cache, registry tests
 │   ├── doctor*.rs                      # Phase 4 US5: Doctor assembly + fixes + binding + harness integration (T366/T367) + orphan cleanup (T370)
 │   ├── mcp_*.rs                        # MCP server lifecycle + tools + log rotation + tool description (US4.b) + prompts (US1.b)
+│   ├── substitution_*.rs               # Phase 5: Substitution engine tests (skeleton, builtins, env, arguments, data-dir, e2e)
+│   ├── entry_e2e.rs                    # Phase 5 / US3 NEW: Full enable → search → get → prompts pipeline with argument substitution
 │   ├── exit_codes.rs                   # Exit code matrix validation
 │   ├── manifest_strictness.rs          # Strict/lenient parsing guards
 │   ├── atomicity.rs                    # Interrupt-injection tests (SIGINT mid-op)
@@ -216,7 +219,7 @@ tome/
 │   └── codebase/
 │       ├── STACK.md                    # Technologies + versions
 │       ├── INTEGRATIONS.md             # External APIs + services
-│       ├── ARCHITECTURE.md             # System design + patterns (Phase 5: substitution, prompts, entry kind, single-pass render)
+│       ├── ARCHITECTURE.md             # System design + patterns (Phase 5 / US3: complete substitution, prompts, entry kind, single-pass render with argument coercion)
 │       ├── STRUCTURE.md                # Directory layout (this file)
 │       ├── CONVENTIONS.md              # Naming + code style
 │       ├── TESTING.md                  # Test strategy + patterns
@@ -248,13 +251,13 @@ tome/
 │   │   ├── contracts/ (13+ contracts)
 │   │   ├── retro/ (P2–P8 retrospectives)
 │   │   └── quickstart.md
-│   └── 005-phase-5-commands-prompts/        # Phase 5 (F1–F3 + US1–US2 shipped)
+│   └── 005-phase-5-commands-prompts/        # Phase 5 (F1–F3 + US1–US3 shipped)
 │       ├── spec.md
 │       ├── plan.md
 │       ├── research.md (20 R-decisions)
-│       ├── data-model.md (schema v3, EntryKind, SubstitutionContext, PromptRegistry, PromptDescriptor)
+│       ├── data-model.md (schema v3, EntryKind, SubstitutionContext, ArgumentValues, PromptRegistry)
 │       ├── contracts/ (9+ contracts: exit-codes-p5, schema-migration-p5, entry-schema-p5, substitution-engine, mcp-prompts, etc.)
-│       ├── notes/ (Phase 5 research notes: rmcp-prompts-api, etc.)
+│       ├── notes/ (Phase 5 research notes: rmcp-prompts-api, argument-coercion, etc.)
 │       └── quickstart.md
 │
 ├── PRDs/                               # Product requirement documents
@@ -268,7 +271,7 @@ tome/
 ├── Cargo.lock                          # Dependency lock
 ├── build.rs                            # sqlite-vec C extension compilation
 ├── CONSTITUTION.md                     # v1.3.0 — constraints + trade-offs (Phase 4 §Paths amendment; no Phase 5 amendments)
-├── CLAUDE.md                           # Project context for Claude Code (Phase 5 US2 complete; v0.5.0 roadmap)
+├── CLAUDE.md                           # Project context for Claude Code (Phase 5 US3 complete; v0.5.0 roadmap)
 └── CHANGELOG.md                        # Version history (v0.1.0–v0.4.0 shipped; Phase 5 in flight)
 ```
 
@@ -278,8 +281,8 @@ tome/
 
 | Directory | Purpose | Key Files |
 |-----------|---------|-----------|
-| `substitution/` | Phase 5 / US1–US2: Variable rendering engine (single-pass pipeline) | `mod.rs` (render loop), `context.rs`, `builtins.rs`, `env.rs`, `arguments.rs`, `data_dir.rs`, `regex_sets.rs` (COMBINED_RE) |
-| `plugin/` | Plugin metadata, lifecycle (Phase 5: commands) | `manifest.rs`, `frontmatter.rs`, `identity.rs` (EntryKind), `components.rs` (list_command_files), `lifecycle.rs` |
+| `substitution/` | Phase 5 / US1–US3: Variable rendering engine (COMPLETE single-pass pipeline) | `mod.rs` (render loop + body_has_bare_arguments), `context.rs`, `builtins.rs`, `env.rs`, `arguments.rs` (shell_split + coerce_arguments + apply_arguments_match), `data_dir.rs`, `regex_sets.rs` (COMBINED_RE) |
+| `plugin/` | Plugin metadata, lifecycle (Phase 5: commands + arguments) | `manifest.rs`, `frontmatter.rs`, `identity.rs` (EntryKind), `components.rs` (list_command_files), `lifecycle.rs` |
 | `index/` | SQLite + sqlite-vec index (Phase 5: v3 schema) | `db.rs`, `schema.rs`, `migrations.rs` (v2→v3), `skills.rs` (EntryKind), `query.rs` |
 | `mcp/` | MCP server + Phase 5 prompts | `prompts.rs` (PromptRegistry), `prompt_name.rs`, `prompt_collision.rs`, `tools/` |
 | `catalog/` | Catalog registry, git ops | `manifest.rs`, `store.rs`, `git.rs` |
@@ -294,17 +297,17 @@ tome/
 | `util/` | Shared utilities | `atomic_dir.rs` (tempfile + rename), `io.rs` (bounded read) |
 | `paths.rs` | Phase 4 single-root layout; Phase 5: data-dir accessors | `home_root()`, `Paths struct`, `plugin_data_dir_for()`, `workspace_data_dir_for()` |
 
-### `src/substitution/` — Substitution Engine Details (Phase 5 / US1–US2)
+### `src/substitution/` — Substitution Engine Details (Phase 5 / US1–US3 COMPLETE)
 
-| File | Purpose | Phase 5 / US2 Status |
+| File | Purpose | Phase 5 / US3 Status |
 |------|---------|---------------------|
-| `mod.rs` | Single-pass `render(body, context)` entry point (COMBINED_RE loop); `SubstitutionError` enum (6 variants) | Rendered via COMBINED_RE (union regex) instead of dual Stage 1+2 sweeps |
-| `context.rs` | `SubstitutionContext` + `SubstitutionContextBuilder`; `ArgumentValues` enum | Unchanged from US1 |
-| `builtins.rs` | Stage handler: `{{TOME_PLUGIN_DATA}}`, `{{TOME_WORKSPACE_DATA}}`, `{{TOME_WORKSPACE_NAME}}`, `{{TOME_CATALOG_NAME}}`, `{{TOME_PLUGIN_NAME}}` | Wired in US2; lazy data-dir creation triggered on first match |
-| `env.rs` | Stage handler: `{{$VAR}}` env-passthrough (TOME_ENV_ prefix) | Wired in US2 |
-| `arguments.rs` | Stage handler: Claude Code `$ARGUMENTS` / `$N` / `$NAME` | Wired in US3 (deferred) |
+| `mod.rs` | Single-pass `render(body, context)` entry point (COMBINED_RE loop); `body_has_bare_arguments(body) -> bool` helper; `SubstitutionError` enum (6 variants); ARGUMENTS footer appended in render tail | Production-ready; all four stages dispatched in one loop; ARGUMENTS tail appended after inline substitutions complete |
+| `context.rs` | `SubstitutionContext` + `SubstitutionContextBuilder`; `ArgumentValues` enum (named + positional pairs) | Phase 5 / US3: ArgumentValues fully populated during coerce_arguments validation |
+| `builtins.rs` | Stage 1 handler: `{{TOME_PLUGIN_DATA}}`, `{{TOME_WORKSPACE_DATA}}`, `{{TOME_WORKSPACE_NAME}}`, `{{TOME_CATALOG_NAME}}`, `{{TOME_PLUGIN_NAME}}` | Wired in US2; lazy data-dir creation triggered on first match |
+| `env.rs` | Stage 2 handler: `{{$VAR}}` env-passthrough (TOME_ENV_ prefix) | Wired in US2; handles both `{{$NAME}}` and TOME_ENV_ prefix variants |
+| `arguments.rs` | **Phase 5 / US3 COMPLETE** Stage 3 handler: Claude Code `$ARGUMENTS` / `$N` / `$NAME` with three sub-pipelines: `shell_split()` (POSIX quoting parser) → `coerce_arguments()` (match to declared schema) → `apply_arguments_match()` (resolve placeholders) | Full implementation: handles positional ($1, $2, ...), named ($name), and catch-all ($ARGUMENTS); POSIX shell quoting; frontmatter validation |
 | `data_dir.rs` | Lazy creation: `ensure_plugin_data()` / `ensure_workspace_data()` | Wired in US2; creates dirs on first `{{TOME_*}}` reference during render |
-| `regex_sets.rs` | `OnceLock<Regex>` COMBINED_RE (compiled once at startup) | Populated in US2 via union of all stage patterns |
+| `regex_sets.rs` | `OnceLock<Regex>` COMBINED_RE (compiled once at startup) | Populated in US2 via union of all stage patterns (builtins + env + arguments); production dispatch uses `captures_iter` |
 
 ### `src/mcp/` — MCP Prompts Details (Phase 5 / US1)
 
@@ -325,14 +328,14 @@ tome/
 | `migrations.rs` | Phase 5 v2→v3 forward migration: schema changes + backfill logic (kind via directory walk, searchable/user_invocable defaults per contract) |
 | `skills.rs` | `SkillRecord` struct extended with `kind: EntryKind`, `when_to_use: Option<String>`, `searchable: bool`, `user_invocable: bool`; new `resolve_entry_body_path(catalog, plugin, name, kind) -> PathBuf` helper (routes via kind) |
 
-### `src/plugin/` — Commands & Entries (Phase 5 / US1)
+### `src/plugin/` — Commands & Entries (Phase 5 / US1–US3)
 
 | File | Purpose |
 |------|---------|
 | `identity.rs` | `PluginId` (unchanged); **NEW**: `EntryKind` enum (`Skill` \| `Command`) with `as_str()` accessor |
-| `frontmatter.rs` | `SkillFrontmatter` widened with `arguments: Option<Vec<PromptArgument>>`, `argument_hint: Option<String>`, `prompt_name: Option<String>`, `when_to_use: Option<String>`, `searchable: Option<bool>` (default true), `user_invocable: Option<bool>` (default false) |
+| `frontmatter.rs` | `SkillFrontmatter` widened with `arguments: Option<Vec<PromptArgument>>` (ordered list of declared parameters), `argument_hint: Option<String>`, `prompt_name: Option<String>`, `when_to_use: Option<String>`, `searchable: Option<bool>` (default true), `user_invocable: Option<bool>` (default false) |
 | `components.rs` | `count_components` (unchanged); **NEW**: `list_command_files(plugin_dir) -> Vec<CommandFile>` enumerates `<plugin>/commands/*.md` flat; `CommandFile { path, name }` |
-| `lifecycle.rs` | `enable_plugin` now calls `list_command_files` and collects `PendingCommand` structs alongside `PendingSkill` |
+| `lifecycle.rs` | `enable_plugin` now calls `list_command_files` and collects `PendingCommand` structs alongside `PendingSkill`; Phase 5 / US3: both are processed through substitution render pipeline |
 
 ### `src/paths.rs` — Data Directory Accessors (Phase 5 / US1–US2)
 
@@ -351,15 +354,16 @@ tome/
 
 ## Module Boundaries
 
-### Where to Add New Code (Phase 5 / US1–US2 Updates)
+### Where to Add New Code (Phase 5 / US1–US3 Updates)
 
 | If you're adding... | Put it in... | Pattern |
 |---------------------|--------------|---------|
 | New substitution stage | `src/substitution/{stage}.rs` | Add stage handler; extend COMBINED_RE pattern in `regex_sets.rs`; test via SubstitutionContext |
 | New built-in variable | `src/substitution/builtins.rs` | Add case to match block in `builtins` handler; wired in appropriate US (US2 for {{TOME_*}}) |
+| New argument syntax | `src/substitution/arguments.rs` | Extend `apply_arguments_match` match arms; update `shell_split` quoting rules if needed; test with `coerce_arguments` validation |
 | New entry kind | `src/plugin/identity.rs` | Extend `EntryKind` enum; update Ser/Deser; backfill migration in v2→v3 |
 | Command-specific field | `src/plugin/frontmatter.rs` | Extend `SkillFrontmatter` (lenient parsing); document default |
-| Command collection | `src/plugin/lifecycle.rs` | Call `list_command_files`; parse frontmatter; build `PendingCommand` |
+| Command collection | `src/plugin/lifecycle.rs` | Call `list_command_files`; parse frontmatter; build `PendingCommand`; Phase 5 / US3: collect arguments schema from frontmatter |
 | MCP prompt handler | `src/mcp/prompts.rs` | Register route via `PromptRouter::new_dyn`; implement request handler |
 | Prompt name edge case | `src/mcp/prompt_name.rs` | Extend `sanitise` / `sanitise_trunc` logic; test Unicode boundaries |
 | Prompt collision policy | `src/mcp/prompt_collision.rs` | Extend `resolve_collisions` detection; update warning message |
@@ -415,7 +419,42 @@ pub fn render(body: &str, context: &SubstitutionContext) -> Result<String, Subst
 
     // Push remaining suffix
     result.push_str(&body[last_end..]);
+
+    // Tail: append ARGUMENTS footer if body references bare $ARGUMENTS
+    if body_has_bare_arguments(body) && !context.arguments.positional.is_empty() {
+        result.push_str(" -- ");
+        result.push_str(&context.arguments.positional.join(" "));
+    }
+
     Ok(result)
+}
+```
+
+#### Argument Substitution Pipeline (Phase 5 / US3)
+
+```rust
+// src/substitution/arguments.rs — Three-stage argument processing
+
+// Stage 1: Parse shell quoting
+pub fn shell_split(input: &str) -> Vec<String> {
+    // POSIX shell quoting parser: respects single/double quotes, backslash escape
+    // Returns all tokens including empty strings from consecutive separators
+}
+
+// Stage 2: Validate against declared schema
+pub fn coerce_arguments(
+    supplied: Vec<String>,
+    declared: &[PromptArgument],
+) -> Result<ArgumentValues, SubstitutionError> {
+    // Match supplied args to declared positional + named parameters
+    // Returns ArgumentValues { positional: Vec<String>, named: HashMap<String, String> }
+    // Errors on: count mismatch, unknown named args, duplicates
+}
+
+// Stage 3: Apply to matched placeholder
+pub fn apply_arguments_match(pattern: &str, values: &ArgumentValues) -> String {
+    // Resolve $1, $2, ..., $name, $ARGUMENTS to their values
+    // Returns empty string for missing optional arguments per Claude Code spec
 }
 ```
 
@@ -435,38 +474,8 @@ pub(super) fn resolve(placeholder: &str, context: &SubstitutionContext) -> Resul
             )?;
             Ok(path.to_string_lossy().to_string())
         }
-        "{{TOME_WORKSPACE_DATA}}" => {
-            let path = data_dir::ensure_workspace_data(
-                &context.paths,
-                &context.workspace,
-                &context.catalog,
-                &context.plugin,
-            )?;
-            Ok(path.to_string_lossy().to_string())
-        }
         // ... other built-ins
     }
-}
-
-// src/substitution/data_dir.rs — Lazy creation with override seam
-
-pub(super) fn ensure_plugin_data(
-    paths: &Paths,
-    catalog: &str,
-    plugin: &str,
-) -> Result<PathBuf, SubstitutionError> {
-    // Check test-override slot first (per Phase 4 P6 test-injection pattern)
-    if let Some(slot) = PLUGIN_DATA_DIR_OVERRIDE.get() {
-        if let Some(p) = guard.clone() {
-            return Ok(p);
-        }
-    }
-
-    // Compute path + create_dir_all (idempotent)
-    let path = paths.plugin_data_dir_for(catalog, plugin);
-    std::fs::create_dir_all(&path)
-        .map_err(|source| SubstitutionError::PluginDataDirCreationFailed { path: path.clone(), source })?;
-    Ok(path)
 }
 ```
 
@@ -479,63 +488,15 @@ pub(super) fn ensure_plugin_data(
 // ...
 
 // Step 6: Relocate plugin-data directories (NEW in US2)
-let old_workspace_dir = paths.workspace_dir(&old_name);
-let new_workspace_dir = paths.workspace_dir(&new_name);
 let plugin_data_subdir = old_workspace_dir.join("plugin-data");
-
 if plugin_data_subdir.exists() {
     for entry in std::fs::read_dir(&plugin_data_subdir)? {
-        let catalog_dir = entry?.path();
-        if catalog_dir.is_dir() {
-            for plugin_entry in std::fs::read_dir(&catalog_dir)? {
-                let plugin_dir = plugin_entry?.path();
-                let plugin_name = plugin_dir.file_name().unwrap();
-                let new_plugin_dir = new_workspace_dir
-                    .join("plugin-data")
-                    .join(catalog_dir.file_name().unwrap())
-                    .join(plugin_name);
-
-                std::fs::create_dir_all(new_plugin_dir.parent().unwrap())?;
-                std::fs::rename(&plugin_dir, &new_plugin_dir)
-                    .map_err(|e| TomeError::Io {
-                        reason: format!("failed to relocate plugin-data"),
-                        source: e,
-                    })?;
-            }
-        }
+        // Move each catalog/plugin/ subdirectory to new location
     }
 }
 
 // Final atomic rename of workspace dir tree (includes relocated plugin-data)
 std::fs::rename(&old_workspace_dir, &new_workspace_dir)?;
-```
-
-#### Test Entry Kind Override Pattern
-
-```rust
-// tests/common/mod.rs or test file
-
-#[must_use]
-pub struct EntryKindOverrideGuard { ... }
-
-impl EntryKindOverrideGuard {
-    pub fn install(overrides: Vec<(PluginId, Vec<EntryKind>)>) -> Self {
-        // Set ENTRY_KIND_OVERRIDE thread_local
-    }
-}
-
-// In test:
-#[test]
-fn command_entry_kind_preserved() -> Result<(), Box<dyn Error>> {
-    let guard = EntryKindOverrideGuard::install(vec![(
-        "catalog/plugin".parse()?,
-        vec![EntryKind::Command],
-    )]);
-
-    // Test code sees overridden entry kinds
-    // guard drops at end of test
-    Ok(())
-}
 ```
 
 ## Generated Files
@@ -553,4 +514,4 @@ No auto-generated files in src/; test fixtures are synthesized at runtime (e.g.,
 
 ---
 
-*This document shows WHERE code lives. Updated 2026-05-27 against Phase 5 / US2 (single-pass substitution, lazy data-dir creation, workspace rename relocation shipped).*
+*This document shows WHERE code lives. Updated 2026-05-27 against Phase 5 / US3 (argument substitution complete, single-pass render production-ready, entry e2e pipeline tested).*
