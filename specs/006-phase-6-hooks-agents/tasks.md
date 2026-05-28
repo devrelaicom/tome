@@ -28,8 +28,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Purpose**: Confirm the feature branch + commit the planning artifacts. (The branch `006-phase-6-hooks-agents` was created during `/sdd:specify`; the planning artifacts from `/sdd:specify` + `/sdd:plan` are currently uncommitted.)
 
-- [ ] T001 [GIT] Verify current branch is `006-phase-6-hooks-agents` (`git branch --show-current`); confirm the working tree holds only the expected planning artifacts (`git status --short`: `specs/006-phase-6-hooks-agents/`, `PRDs/phase-6.md`, modified `CLAUDE.md`).
-- [ ] T002 [GIT] Commit planning artifacts: `git add PRDs/phase-6.md specs/006-phase-6-hooks-agents/ CLAUDE.md && git commit` — `docs(phase-6): spec, plan, research, data-model, 9 contracts, quickstart, tasks`.
+- [X] T001 [GIT] Verify current branch is `006-phase-6-hooks-agents` (`git branch --show-current`); confirm the working tree holds only the expected planning artifacts (`git status --short`: `specs/006-phase-6-hooks-agents/`, `PRDs/phase-6.md`, modified `CLAUDE.md`).
+- [X] T002 [GIT] Commit planning artifacts: `git add PRDs/phase-6.md specs/006-phase-6-hooks-agents/ CLAUDE.md && git commit` — `docs(phase-6): spec, plan, research, data-model, 9 contracts, quickstart, tasks`.
 
 **Checkpoint**: Branch is clean, planning artifacts committed, ready for foundational work.
 
