@@ -33,7 +33,7 @@ use crate::index::{
     enable_plugin_atomic, mark_all_disabled_for_plugin, reindex_plugin_atomic,
 };
 use crate::paths::Paths;
-use crate::plugin::components::list_command_files;
+use crate::plugin::components::{list_agent_files, list_command_files};
 use crate::plugin::frontmatter::{
     FrontmatterError, ParsedSkill, parse_skill_frontmatter, validate_argument_names,
 };
@@ -585,13 +585,17 @@ fn auto_disable_locked(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<u32, T
     delete_by_plugin(&conn, &id.catalog, &id.plugin)
 }
 
-/// Walk every Phase 5 entry under `<plugin_dir>` — both `skills/*/SKILL.md`
-/// and `commands/*.md` — and produce a unified [`PendingSkill`] list
-/// keyed on the kind discriminator. Errors per-file are funnelled
-/// consistently across the two surfaces:
+/// Walk every entry under `<plugin_dir>` — `skills/*/SKILL.md`,
+/// `commands/*.md`, and (Phase 6 / US1) `agents/*.md` — and produce a
+/// unified [`PendingSkill`] list keyed on the kind discriminator. Errors
+/// per-file are funnelled consistently across the three surfaces:
 ///
-/// * Delimiter failure → `SkillFrontmatterParseError` (whole-plugin abort).
-/// * YAML body failure → warning + skip (FR-013c).
+/// * Delimiter failure → `SkillFrontmatterParseError` for skills/commands;
+///   `AgentTranslationFailed` (exit 45) for agents (NFR-010 — a malformed
+///   *recognised* agent structure fails loudly per entry-schema-p6.md §
+///   "Indexing pipeline" step 1).
+/// * YAML body failure → warning + skip (FR-013c) for skills/commands;
+///   `AgentTranslationFailed` (exit 45) for agents.
 /// * Illegal `arguments` name → `InvalidArgumentFrontmatter` (exit 29).
 /// * IO failure → bubble as `TomeError::Io`.
 fn collect_pending_skills(
@@ -603,6 +607,7 @@ fn collect_pending_skills(
     let mut pending: Vec<PendingSkill> = Vec::new();
     collect_skill_entries(id, plugin_dir, plugin_version, warnings, &mut pending)?;
     collect_command_entries(id, plugin_dir, plugin_version, warnings, &mut pending)?;
+    collect_agent_entries(id, plugin_dir, plugin_version, warnings, &mut pending)?;
     Ok(pending)
 }
 
@@ -703,6 +708,115 @@ fn collect_command_entries(
     }
 
     Ok(())
+}
+
+/// Walk `<plugin_dir>/agents/*.md` (flat, non-recursive) and append one
+/// [`PendingSkill`] (kind = Agent) per file. Phase 6 / US1.
+///
+/// Unlike skills/commands, a malformed agent file fails LOUDLY: per
+/// `entry-schema-p6.md` § "Indexing pipeline" step 1 + NFR-010, an agent
+/// whose frontmatter delimiters are absent or whose YAML body is invalid
+/// surfaces as [`TomeError::AgentTranslationFailed`] (exit 45) rather than
+/// the skill-style "abort the whole plugin" (delimiter) / "warn and skip"
+/// (YAML body) split. Agents are not searchable and not user-invocable, so
+/// argument-name validation does not apply. The clash-set (FR-072) is a
+/// separate per-sync computation, not done here.
+fn collect_agent_entries(
+    id: &PluginId,
+    plugin_dir: &Path,
+    plugin_version: &str,
+    warnings: &mut Vec<String>,
+    pending: &mut Vec<PendingSkill>,
+) -> Result<(), TomeError> {
+    let agents = list_agent_files(plugin_dir);
+    if agents.is_empty() {
+        debug!(
+            plugin = %id,
+            "no agents directory or no agent files; enabling zero agent rows",
+        );
+        return Ok(());
+    }
+
+    for agent in agents {
+        if was_cancelled() {
+            return Err(TomeError::Interrupted);
+        }
+        let parsed: ParsedSkill =
+            parse_skill_frontmatter(&agent.path).map_err(|err| match err {
+                // Both delimiter and YAML-body failures are "malformed
+                // recognised structure" for an agent — fail loudly with the
+                // agent-specific exit 45 (entry-schema-p6.md, NFR-010).
+                FrontmatterError::MissingDelimiters { .. }
+                | FrontmatterError::InvalidYaml { .. } => TomeError::AgentTranslationFailed {
+                    agent: agent.path.display().to_string(),
+                },
+                FrontmatterError::Io { source, .. } => TomeError::Io(source),
+            })?;
+
+        // `name` = frontmatter `name` else filename stem.
+        let (name, name_fallback) = parsed.resolved_name(&agent.name);
+        if name_fallback {
+            warnings.push(format!(
+                "name fallback applied for {}: using filename `{}`",
+                agent.path.display(),
+                name,
+            ));
+        }
+
+        // `description` = frontmatter `description` else the first
+        // non-empty body line (trimmed), per entry-schema-p6.md step 3.
+        let description = resolve_agent_description(&parsed);
+
+        let rel_path = agent
+            .path
+            .strip_prefix(plugin_dir)
+            .unwrap_or(&agent.path)
+            .to_string_lossy()
+            .into_owned();
+
+        pending.push(PendingSkill {
+            catalog: id.catalog.clone(),
+            plugin: id.plugin.clone(),
+            name,
+            kind: EntryKind::Agent,
+            description,
+            plugin_version: plugin_version.to_owned(),
+            path: rel_path,
+            // Agents do not contribute embedding text (when_to_use=NULL),
+            // are never searchable, and never user-invocable
+            // (entry-schema-p6.md). `resolved_user_invocable` already
+            // hard-returns false for the Agent kind, but agents are not
+            // embedded at all so these are pinned literals.
+            when_to_use: None,
+            searchable: false,
+            user_invocable: false,
+        });
+    }
+
+    Ok(())
+}
+
+/// Resolve an agent's `description`: trimmed frontmatter `description` if
+/// non-empty, else the first non-empty line of the body, trimmed; else an
+/// empty string (the `skills.description` column is NOT NULL, so agents
+/// with neither a frontmatter description nor any body text store `""`).
+fn resolve_agent_description(parsed: &ParsedSkill) -> String {
+    if let Some(desc) = parsed
+        .frontmatter
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return desc.to_owned();
+    }
+    parsed
+        .body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_owned()
 }
 
 /// Parse a single entry file (skill or command) into a [`PendingSkill`].

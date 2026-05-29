@@ -13,6 +13,12 @@
 //! Phase 5 / US1.a additionally exposes [`list_command_files`] which
 //! enumerates `commands/*.md` for the lifecycle pipeline — see
 //! `contracts/entry-schema-p5.md` for the kind-discriminated entry model.
+//!
+//! Phase 6 / US1 adds [`list_agent_files`], the agent analogue: a flat walk
+//! of `agents/*.md` indexed as `kind='agent'` rows. The on-disk layout is
+//! identical to commands (flat `.md` files), so both share the
+//! [`EntryFile`] shape and the [`list_entry_files`] walk — see
+//! `contracts/entry-schema-p6.md` § "Indexing pipeline".
 
 use std::path::{Path, PathBuf};
 
@@ -75,17 +81,23 @@ fn count_markdown_files(dir: &Path) -> u32 {
     count
 }
 
-/// One discovered command entry: the on-disk file plus the sanitised
-/// `name` Tome will record (the filename stem). Phase 5 / US1.a consumer
-/// is `plugin::lifecycle::collect_pending_commands`.
+/// One discovered flat-file entry (command or agent): the on-disk file
+/// plus the sanitised `name` Tome will record (the filename stem). Phase 5
+/// / US1.a command consumer is `plugin::lifecycle::collect_command_entries`;
+/// Phase 6 / US1 adds the agent consumer `collect_agent_entries`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandFile {
+pub struct EntryFile {
     /// Absolute path to the `.md` file.
     pub path: PathBuf,
     /// Filename stem with the `.md` extension stripped — used as the
     /// fallback `name` if the file's frontmatter does not declare one.
     pub name: String,
 }
+
+/// Phase 5 name for a discovered command entry. Retained as an alias so the
+/// command lifecycle path reads unchanged; Phase 6 generalised the struct to
+/// [`EntryFile`] to share the flat `.md` walk with agents.
+pub type CommandFile = EntryFile;
 
 /// Enumerate `<plugin_dir>/commands/*.md` non-recursively. Returned in
 /// case-insensitive ascending order of the filename stem so the on-disk
@@ -96,11 +108,30 @@ pub struct CommandFile {
 /// with `.` are skipped (hidden / editor-temp files). A missing
 /// `commands/` directory yields an empty `Vec`, never an error.
 pub fn list_command_files(plugin_dir: &Path) -> Vec<CommandFile> {
-    let dir = plugin_dir.join("commands");
+    list_entry_files(plugin_dir, "commands")
+}
+
+/// Enumerate `<plugin_dir>/agents/*.md` non-recursively (Phase 6 / US1).
+/// Mirrors [`list_command_files`] exactly — the agent on-disk layout is the
+/// same flat `.md` convention — so the same FLAT walk, dotfile skip,
+/// case-insensitive `.md` filter, and deterministic stem sort apply. A
+/// missing `agents/` directory yields an empty `Vec`, never an error
+/// (`entry-schema-p6.md` § "Indexing pipeline").
+pub fn list_agent_files(plugin_dir: &Path) -> Vec<EntryFile> {
+    list_entry_files(plugin_dir, "agents")
+}
+
+/// Shared flat `<plugin_dir>/<subdir>/*.md` walk backing both
+/// [`list_command_files`] and [`list_agent_files`]. Non-recursive;
+/// dotfiles skipped; `.md` matched case-insensitively; results sorted by
+/// filename stem for cross-platform determinism. A missing/unreadable
+/// `<subdir>` yields an empty `Vec`, never an error.
+fn list_entry_files(plugin_dir: &Path, subdir: &str) -> Vec<EntryFile> {
+    let dir = plugin_dir.join(subdir);
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
-    let mut out: Vec<CommandFile> = Vec::new();
+    let mut out: Vec<EntryFile> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -123,7 +154,7 @@ pub fn list_command_files(plugin_dir: &Path) -> Vec<CommandFile> {
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        out.push(CommandFile {
+        out.push(EntryFile {
             path: path.clone(),
             name: stem.to_owned(),
         });
@@ -147,4 +178,38 @@ fn count_mcp_servers(path: &Path) -> u32 {
         .and_then(|v| v.as_object())
         .map(|obj| u32::try_from(obj.len()).unwrap_or(u32::MAX))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    /// Missing `agents/` directory yields an empty Vec, never an error.
+    #[test]
+    fn list_agent_files_missing_dir_is_empty() {
+        let tmp = TempDir::new().unwrap();
+        assert!(list_agent_files(tmp.path()).is_empty());
+    }
+
+    /// Flat `.md` walk: deterministic stem sort, dotfiles skipped,
+    /// non-`.md` ignored, sub-directories not recursed.
+    #[test]
+    fn list_agent_files_walks_flat_md_sorted_skipping_dotfiles() {
+        let tmp = TempDir::new().unwrap();
+        let agents = tmp.path().join("agents");
+        fs::create_dir_all(&agents).unwrap();
+        fs::write(agents.join("zeta.md"), "z").unwrap();
+        fs::write(agents.join("alpha.md"), "a").unwrap();
+        fs::write(agents.join(".hidden.md"), "h").unwrap();
+        fs::write(agents.join("notes.txt"), "t").unwrap();
+        fs::create_dir_all(agents.join("nested")).unwrap();
+        fs::write(agents.join("nested").join("deep.md"), "d").unwrap();
+
+        let found = list_agent_files(tmp.path());
+        let names: Vec<&str> = found.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "zeta"], "sorted by stem, flat only");
+        assert!(found.iter().all(|e| e.path.is_file()));
+    }
 }

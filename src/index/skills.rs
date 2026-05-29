@@ -309,6 +309,52 @@ pub fn enabled_plugins_for_catalog(
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect enabled plugins: {e}")))
 }
 
+/// The set of agent `<name>` values held by **≥ 2 distinct agent-kind rows
+/// enabled in `workspace_name`** — the cross-plugin agent name-clash set
+/// (FR-072). This is the single source of truth for agent name-collision
+/// detection: later US1 work (native-translation displayed-name prefixing,
+/// MCP-persona naming) consults it so a clashing agent name is disambiguated
+/// identically everywhere. Computed **once per sync** (FR-072), not per
+/// entry.
+///
+/// "≥ 2 rows" is keyed on the identity `(catalog, plugin)` pair behind each
+/// agent row, so two plugins each shipping `agents/reviewer.md` clash, but a
+/// single plugin's lone `reviewer` agent does not. Only rows enrolled in the
+/// resolved workspace via `workspace_skills` count — a name held solely by
+/// disabled agents is not a live clash.
+///
+/// Returns a `BTreeSet` so the caller gets deterministic ordering for
+/// display / logging without a follow-up sort.
+///
+// Landed in the agent-indexing slice as the SSOT for clash detection; its
+// first non-test consumer is the native-translation / persona-naming slice
+// later in US1. `allow(dead_code)` keeps the query co-located with the
+// agent-row writers it depends on rather than splitting it out when that
+// slice lands.
+#[allow(dead_code)]
+pub(crate) fn agent_name_clash_set(
+    conn: &Connection,
+    workspace_name: &str,
+) -> Result<std::collections::BTreeSet<String>, TomeError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.name
+             FROM skills AS s
+             JOIN workspace_skills AS ws ON ws.skill_id = s.id
+             JOIN workspaces       AS w  ON w.id = ws.workspace_id
+             WHERE s.kind = 'agent' AND w.name = ?1
+             GROUP BY s.name
+             HAVING COUNT(DISTINCT s.catalog || '/' || s.plugin) >= 2
+             ORDER BY s.name",
+        )
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("prepare clash set: {e}")))?;
+    let rows = stmt
+        .query_map(params![workspace_name], |row| row.get::<_, String>(0))
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query clash set: {e}")))?;
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect clash set: {e}")))
+}
+
 /// DELETE every `workspace_skills` row for `(workspace_name, plugin)`. The
 /// underlying `skills` rows + embeddings are retained so a subsequent
 /// re-enable is cheap (FR-005, FR-006 + FR-383 retention rule) and so
@@ -476,11 +522,17 @@ pub(crate) fn validate_db_stored_path(stored: &std::path::Path) -> Result<(), To
 /// `searchable`/`user_invocable`/`when_to_use` columns. The conflict
 /// target is the widened identity tuple `(catalog, plugin, kind, name)`,
 /// matching the post-v3 unique index `skills_unique`.
+///
+/// Phase 6 / US1: `embedding` is `None` for agent rows — agents are never
+/// embedded (`entry-schema-p6.md` § "Indexing pipeline" step 6). The prior
+/// `skill_embeddings` row (if any) is still deleted so a kind that *was*
+/// embeddable and is now an agent — or a re-index that drops embedding —
+/// leaves no orphan vector, but no new vector row is written when `None`.
 fn upsert_skill(
     tx: &rusqlite::Transaction<'_>,
     pending: &PendingSkill,
     hash: &str,
-    embedding: &[f32],
+    embedding: Option<&[f32]>,
     now: &str,
 ) -> Result<i64, TomeError> {
     tx.execute(
@@ -536,12 +588,16 @@ fn upsert_skill(
         params![id],
     )
     .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("drop prior embedding: {e}")))?;
-    let bytes = embedding_to_bytes(embedding);
-    tx.execute(
-        "INSERT INTO skill_embeddings (skill_id, embedding) VALUES (?1, ?2)",
-        params![id, bytes],
-    )
-    .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("insert embedding: {e}")))?;
+    // Phase 6 / US1: agent rows pass `None` and get no `skill_embeddings`
+    // row at all. Searchable kinds (skill/command) always carry a vector.
+    if let Some(embedding) = embedding {
+        let bytes = embedding_to_bytes(embedding);
+        tx.execute(
+            "INSERT INTO skill_embeddings (skill_id, embedding) VALUES (?1, ?2)",
+            params![id, bytes],
+        )
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("insert embedding: {e}")))?;
+    }
 
     Ok(id)
 }
@@ -570,6 +626,29 @@ fn upsert_workspace_skill(
         ))
     })?;
     Ok(())
+}
+
+/// Embed an entry's text unless it is an agent. Phase 6 / US1: agent rows
+/// are never embedded (`entry-schema-p6.md` § "Indexing pipeline" step 6),
+/// so this returns `Ok(None)` for `EntryKind::Agent` without invoking the
+/// embedder; every other kind embeds the standard composition. Shared by
+/// the Added and Modified branches of [`reindex_plugin_atomic`].
+fn embed_unless_agent<F>(
+    pending: &PendingSkill,
+    embed: &mut F,
+) -> Result<Option<Vec<f32>>, TomeError>
+where
+    F: FnMut(&str) -> Result<Vec<f32>, TomeError>,
+{
+    if pending.kind == EntryKind::Agent {
+        return Ok(None);
+    }
+    let vector = embed(&embedding_text(
+        &pending.name,
+        &pending.description,
+        pending.when_to_use.as_deref(),
+    ))?;
+    Ok(Some(vector))
 }
 
 fn embedding_to_bytes(v: &[f32]) -> Vec<u8> {
@@ -668,19 +747,33 @@ where
                 id
             }
             _ => {
-                let embedding = embed(&embedding_text(
-                    &skill.name,
-                    &skill.description,
-                    skill.when_to_use.as_deref(),
-                ))?;
-                let id = upsert_skill(&tx, skill, &hash, &embedding, &now)?;
-                newly_embedded = newly_embedded.saturating_add(1);
+                // Phase 6 / US1: agents are never embedded — skip the
+                // embedder call entirely and write no `skill_embeddings`
+                // row. `newly_embedded` counts only kinds that actually
+                // produced a vector (skills + commands).
+                let embedding = if skill.kind == EntryKind::Agent {
+                    None
+                } else {
+                    let vector = embed(&embedding_text(
+                        &skill.name,
+                        &skill.description,
+                        skill.when_to_use.as_deref(),
+                    ))?;
+                    Some(vector)
+                };
+                let id = upsert_skill(&tx, skill, &hash, embedding.as_deref(), &now)?;
+                if embedding.is_some() {
+                    newly_embedded = newly_embedded.saturating_add(1);
+                }
                 id
             }
         };
 
-        // Enrol the skill in the resolved workspace (Phase 4 / F11a
-        // replacement for F9's privileged-`global`-only write).
+        // Enrol the entry in the resolved workspace (Phase 4 / F11a
+        // replacement for F9's privileged-`global`-only write). Agents are
+        // enrolled too — the junction is plugin-grained and kind-agnostic
+        // (entry-schema-p6.md), so enabling enrols skills+commands+agents
+        // and disabling removes them all.
         upsert_workspace_skill(&tx, workspace_name, skill_id, now_unix)?;
     }
 
@@ -819,23 +912,16 @@ where
             }
             Some(_) => {
                 // Modified (or force=true rewriting an unchanged row).
-                let embedding = embed(&embedding_text(
-                    &skill.name,
-                    &skill.description,
-                    skill.when_to_use.as_deref(),
-                ))?;
-                let id = upsert_skill(&tx, skill, &hash, &embedding, &now)?;
+                // Phase 6 / US1: agents skip the embedder (no vector row).
+                let embedding = embed_unless_agent(skill, &mut embed)?;
+                let id = upsert_skill(&tx, skill, &hash, embedding.as_deref(), &now)?;
                 summary.modified = summary.modified.saturating_add(1);
                 id
             }
             None => {
-                // Added.
-                let embedding = embed(&embedding_text(
-                    &skill.name,
-                    &skill.description,
-                    skill.when_to_use.as_deref(),
-                ))?;
-                let id = upsert_skill(&tx, skill, &hash, &embedding, &now)?;
+                // Added. Phase 6 / US1: agents skip the embedder.
+                let embedding = embed_unless_agent(skill, &mut embed)?;
+                let id = upsert_skill(&tx, skill, &hash, embedding.as_deref(), &now)?;
                 summary.added = summary.added.saturating_add(1);
                 id
             }
@@ -863,4 +949,120 @@ where
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("commit reindex tx: {e}")))?;
 
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::{MetaSeed, OpenOptions, open};
+    use tempfile::TempDir;
+
+    fn seed() -> MetaSeed {
+        MetaSeed {
+            name: "stub".into(),
+            version: "0".into(),
+        }
+    }
+
+    /// Open a bootstrapped on-disk DB (the vec0 extension is registered by
+    /// `index::open`, which an in-memory raw `Connection` would lack).
+    fn open_db(dir: &TempDir) -> Connection {
+        open(
+            &dir.path().join("index.db"),
+            &OpenOptions {
+                embedder: seed(),
+                reranker: seed(),
+                summariser: seed(),
+            },
+        )
+        .expect("open index")
+    }
+
+    /// Insert an agent row for `(catalog, plugin, name)` and enrol it in the
+    /// `global` workspace. No embedding row — mirrors the indexing-pipeline
+    /// invariant.
+    fn insert_enabled_agent(conn: &Connection, catalog: &str, plugin: &str, name: &str) {
+        conn.execute(
+            "INSERT INTO skills
+                (catalog, plugin, name, kind, description, plugin_version,
+                 path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+             VALUES (?1, ?2, ?3, 'agent', 'd', '0.0.0', ?4, 'h', 0, 0, NULL, '1970-01-01T00:00:00Z')",
+            params![catalog, plugin, name, format!("agents/{name}.md")],
+        )
+        .expect("insert agent");
+        let skill_id: i64 = conn
+            .query_row(
+                "SELECT id FROM skills WHERE catalog=?1 AND plugin=?2 AND kind='agent' AND name=?3",
+                params![catalog, plugin, name],
+                |r| r.get(0),
+            )
+            .expect("agent id");
+        let ws_id: i64 = conn
+            .query_row("SELECT id FROM workspaces WHERE name = 'global'", [], |r| {
+                r.get(0)
+            })
+            .expect("global ws id");
+        conn.execute(
+            "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+            params![ws_id, skill_id],
+        )
+        .expect("enrol agent");
+    }
+
+    #[test]
+    fn clash_set_reports_names_held_by_two_plugins() {
+        let dir = TempDir::new().unwrap();
+        let conn = open_db(&dir);
+
+        // `reviewer` shipped by two distinct plugins → a clash.
+        insert_enabled_agent(&conn, "cat", "plugin-a", "reviewer");
+        insert_enabled_agent(&conn, "cat", "plugin-b", "reviewer");
+        // `lonely` shipped by only one plugin → not a clash.
+        insert_enabled_agent(&conn, "cat", "plugin-a", "lonely");
+
+        let clashes = agent_name_clash_set(&conn, "global").expect("clash set");
+        assert!(clashes.contains("reviewer"), "reviewer must clash");
+        assert!(
+            !clashes.contains("lonely"),
+            "single-plugin name must not clash",
+        );
+        assert_eq!(clashes.len(), 1);
+    }
+
+    #[test]
+    fn clash_set_ignores_same_plugin_and_disabled_agents() {
+        let dir = TempDir::new().unwrap();
+        let conn = open_db(&dir);
+
+        // Two `dup` agents under the SAME plugin: GROUP BY counts distinct
+        // (catalog, plugin) pairs, so a single plugin can't self-clash.
+        insert_enabled_agent(&conn, "cat", "plugin-a", "dup");
+        // Insert a second `dup` row for the same plugin would violate the
+        // (catalog, plugin, kind, name) unique index — instead use a second
+        // catalog to prove cross-catalog clashes are caught.
+        insert_enabled_agent(&conn, "other", "plugin-a", "dup");
+
+        let clashes = agent_name_clash_set(&conn, "global").expect("clash set");
+        assert!(
+            clashes.contains("dup"),
+            "same plugin name across two catalogs clashes",
+        );
+
+        // A name held only by a non-enrolled (disabled) agent is not a live
+        // clash: insert two rows but enrol neither.
+        conn.execute(
+            "INSERT INTO skills
+                (catalog, plugin, name, kind, description, plugin_version,
+                 path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+             VALUES ('cat','p1','ghost','agent','d','0.0.0','agents/ghost.md','h',0,0,NULL,'1970-01-01T00:00:00Z'),
+                    ('cat','p2','ghost','agent','d','0.0.0','agents/ghost.md','h',0,0,NULL,'1970-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("insert disabled agents");
+        let clashes = agent_name_clash_set(&conn, "global").expect("clash set");
+        assert!(
+            !clashes.contains("ghost"),
+            "disabled (non-enrolled) agents do not contribute to the clash set",
+        );
+    }
 }

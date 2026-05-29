@@ -91,11 +91,11 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 ### Agent indexing
 
-- [ ] T029 [US1] Walk `agents/*.md` in `src/plugin/components.rs` alongside skills/ and commands/ (use devs:rust-dev agent).
-- [ ] T030 [US1] Insert agent rows in `src/index/skills.rs` with `kind='agent'`, `searchable=0`, `user_invocable=0`, embedding skipped; name = frontmatter `name` else filename stem; description = else first non-empty body line (use devs:rust-dev agent).
-- [ ] T031 [US1] Plumb agent kind through enable/disable/reindex in `src/plugin/lifecycle.rs` (use devs:rust-dev agent).
-- [ ] T032 [US1] Add the workspace-scoped clash-set query (≥2 enabled agent rows sharing `<name>`) in `src/index/skills.rs`, computed once per sync (FR-072) (use devs:rust-dev agent).
-- [ ] T033 [GIT] Commit: `feat(phase-6): index plugin agents (kind=agent, non-searchable)`.
+- [X] T029 [US1] Walk `agents/*.md` in `src/plugin/components.rs` alongside skills/ and commands/ (use devs:rust-dev agent).
+- [X] T030 [US1] Insert agent rows in `src/index/skills.rs` with `kind='agent'`, `searchable=0`, `user_invocable=0`, embedding skipped; name = frontmatter `name` else filename stem; description = else first non-empty body line (use devs:rust-dev agent).
+- [X] T031 [US1] Plumb agent kind through enable/disable/reindex in `src/plugin/lifecycle.rs` (use devs:rust-dev agent).
+- [X] T032 [US1] Add the workspace-scoped clash-set query (≥2 enabled agent rows sharing `<name>`) in `src/index/skills.rs`, computed once per sync (FR-072) (use devs:rust-dev agent).
+- [X] T033 [GIT] Commit: `feat(phase-6): index plugin agents (kind=agent, non-searchable)`.
 
 ### Translation core + naming + removal
 
@@ -123,7 +123,7 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [ ] T049 [P] [US1] `tests/agent_translate_opencode.rs` — `mode: subagent`, filename name, `model: opus`→`anthropic/claude-opus-4.7` (use devs:rust-dev agent).
 - [ ] T050 [P] [US1] `tests/agent_naming_clash.rs` — two plugins, same agent name → both files namespaced, displayed names prefixed (use devs:rust-dev agent).
 - [ ] T051 [P] [US1] `tests/agent_removal.rs` — disable removes `<plugin>__*` only; other plugins' agents remain (use devs:rust-dev agent).
-- [ ] T052 [P] [US1] Extend `tests/entry_kind_agent_indexing.rs` — end-to-end enable → agent row present, searchable=0 (use devs:rust-dev agent).
+- [X] T052 [P] [US1] Extend `tests/entry_kind_agent_indexing.rs` — end-to-end enable → agent row present, searchable=0 (use devs:rust-dev agent). (Done in chunk A alongside indexing.)
 - [ ] T053 [P] [US1] JSON wire-shape pin for the agent `dropped_fields` doctor sub-record (placeholder until US5 doctor lands; assert shape) in `tests/agent_translate_claude_code.rs` (use devs:rust-dev agent).
 - [ ] T054 [GIT] Commit: `test(phase-6): US1 native agent translation + naming + removal`.
 
