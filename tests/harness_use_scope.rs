@@ -52,7 +52,7 @@ fn use_unknown_harness_errors_with_exit_18() {
 #[test]
 fn use_project_scope_without_project_errors_with_usage() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
@@ -72,7 +72,7 @@ fn use_project_scope_without_project_errors_with_usage() {
 #[test]
 fn use_global_scope_writes_global_settings_file() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
@@ -97,7 +97,7 @@ fn use_global_scope_writes_global_settings_file() {
 #[test]
 fn use_workspace_scope_writes_workspace_settings_file() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
@@ -123,7 +123,7 @@ fn use_workspace_scope_writes_workspace_settings_file() {
 #[test]
 fn use_project_scope_writes_project_marker() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
@@ -169,7 +169,7 @@ fn use_project_scope_writes_project_marker() {
 #[test]
 fn use_with_force_true_propagates_to_sync_deps() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
@@ -205,7 +205,7 @@ fn use_with_force_true_propagates_to_sync_deps() {
 #[test]
 fn use_idempotent_when_name_already_present_does_not_invoke_sync() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);

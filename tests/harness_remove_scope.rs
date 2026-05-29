@@ -24,7 +24,7 @@ fn make_resolved_scope(name: &str) -> ResolvedScope {
 #[test]
 fn remove_from_empty_global_settings_is_noop() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
@@ -48,7 +48,7 @@ fn remove_from_empty_global_settings_is_noop() {
 #[test]
 fn remove_existing_entry_from_global_drops_it() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
@@ -75,7 +75,7 @@ fn remove_existing_entry_from_global_drops_it() {
 #[test]
 fn remove_last_entry_leaves_empty_array() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
@@ -110,7 +110,7 @@ fn remove_last_entry_leaves_empty_array() {
 #[test]
 fn remove_from_workspace_scope_writes_workspace_settings_file() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);

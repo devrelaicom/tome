@@ -61,11 +61,11 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 ### F3 — `HarnessModule` trait + `StubHarness` skeleton
 
-- [ ] T016 Add the `HooksStrategy`, `GuardrailsTarget`/`GuardrailsPlacement`, and `AgentFormat` types in `src/harness/mod.rs` (use devs:rust-dev agent).
-- [ ] T017 Extend the `HarnessModule` trait in `src/harness/mod.rs` with `hooks_strategy`, `hook_settings_path`, `guardrails_target`, `supports_native_agents`, `agent_dir`, `agent_format`, `translate_agent`, with safe defaults (`GuardrailsOnly` / `None` / `false`) (use devs:rust-dev agent).
-- [ ] T018 Implement the new trait methods on `StubHarness` in `src/harness/stub.rs` for test injection (use devs:rust-dev agent).
-- [ ] T019 [P] Add `tests/harness_trait_p6.rs` exercising the default impls + `StubHarness` overrides via `HARNESS_MODULES_OVERRIDE` (use devs:rust-dev agent).
-- [ ] T020 [GIT] Commit: `feat(phase-6): extend HarnessModule trait + StubHarness for hooks/guardrails/agents`.
+- [X] T016 Add the `HooksStrategy`, `GuardrailsTarget`/`GuardrailsPlacement`, and `AgentFormat` types in `src/harness/mod.rs` (use devs:rust-dev agent).
+- [X] T017 Extend the `HarnessModule` trait in `src/harness/mod.rs` with `hooks_strategy`, `hook_settings_path`, `guardrails_target`, `supports_native_agents`, `agent_dir`, `agent_format`, `translate_agent`, with safe defaults (`GuardrailsOnly` / `None` / `false`) (use devs:rust-dev agent).
+- [X] T018 Implement the new trait methods on `StubHarness` in `src/harness/stub.rs` for test injection (use devs:rust-dev agent).
+- [X] T019 [P] Add `tests/harness_trait_p6.rs` exercising the default impls + `StubHarness` overrides via `HARNESS_MODULES_OVERRIDE` (use devs:rust-dev agent).
+- [X] T020 [GIT] Commit: `feat(phase-6): extend HarnessModule trait + StubHarness for hooks/guardrails/agents`.
 
 ### Foundational closeout
 

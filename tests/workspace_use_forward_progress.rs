@@ -122,7 +122,7 @@ fn db_row_exists(paths: &tome::paths::Paths, project_path: &Path) -> bool {
 #[test]
 fn binding_commits_even_when_harness_clash_returns_exit_19() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
     let fx = Fixture::build("test-workspace");
 
     // Pre-populate the stub harness's MCP config path with a user-owned

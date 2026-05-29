@@ -140,7 +140,7 @@ fn deps_for<'a>(fx: &'a Fixture, force: bool) -> SyncDeps<'a> {
 #[test]
 fn fr540_project_marker_wins_priority_walk() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let fx = build_fixture(Some("harnesses = [\"stub\"]"));
 
@@ -167,8 +167,10 @@ fn fr540_project_marker_wins_priority_walk() {
 #[test]
 fn fr541_decisions_cover_every_registered_harness() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard =
-        HarnessModulesGuard::install(vec![Box::new(StubHarness), Box::new(OtherStubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(StubHarness::default()),
+        Box::new(OtherStubHarness),
+    ]);
 
     let fx = build_fixture(Some("harnesses = [\"stub\"]"));
     let outcome = sync::sync_project(&fx.project, &deps_for(&fx, false)).expect("sync");
@@ -202,7 +204,7 @@ fn fr541_decisions_cover_every_registered_harness() {
 #[test]
 fn fr542_rules_file_created_on_first_run() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let fx = build_fixture(Some("harnesses = [\"stub\"]"));
     let outcome = sync::sync_project(&fx.project, &deps_for(&fx, false)).expect("sync");
@@ -226,8 +228,10 @@ fn fr542_rules_file_created_on_first_run() {
 #[test]
 fn fr543_cleanup_removes_block_for_dropped_harness() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard =
-        HarnessModulesGuard::install(vec![Box::new(StubHarness), Box::new(OtherStubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(StubHarness::default()),
+        Box::new(OtherStubHarness),
+    ]);
 
     // First run: both harnesses live.
     let fx = build_fixture(Some("harnesses = [\"stub\", \"other-stub\"]"));
@@ -271,7 +275,7 @@ fn fr543_cleanup_removes_block_for_dropped_harness() {
 #[test]
 fn fr544_stale_workspace_arg_in_tome_owned_entry_is_updated() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let fx = build_fixture(Some("harnesses = [\"stub\"]"));
 
@@ -309,7 +313,7 @@ fn fr544_stale_workspace_arg_in_tome_owned_entry_is_updated() {
 #[test]
 fn fr545_mcp_entry_removed_when_harness_not_in_list() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let fx = build_fixture(Some("harnesses = [\"stub\"]"));
 
@@ -342,7 +346,7 @@ fn fr545_mcp_entry_removed_when_harness_not_in_list() {
 #[test]
 fn fr546_manual_delete_is_recovered_on_next_sync() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let fx = build_fixture(Some("harnesses = [\"stub\"]"));
     sync::sync_project(&fx.project, &deps_for(&fx, false)).expect("sync 1");
@@ -369,7 +373,7 @@ fn fr546_manual_delete_is_recovered_on_next_sync() {
 #[test]
 fn fr547_outcome_fields_populated_correctly() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let fx = build_fixture(Some("harnesses = [\"stub\"]"));
 
@@ -399,8 +403,10 @@ fn fr547_outcome_fields_populated_correctly() {
 #[test]
 fn fr482_shared_rules_path_written_once() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard =
-        HarnessModulesGuard::install(vec![Box::new(StubHarness), Box::new(SharingStubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(StubHarness::default()),
+        Box::new(SharingStubHarness),
+    ]);
 
     let fx = build_fixture(Some("harnesses = [\"stub\", \"sharing-stub\"]"));
     let outcome = sync::sync_project(&fx.project, &deps_for(&fx, false)).expect("sync");
@@ -426,8 +432,10 @@ fn fr482_shared_rules_path_written_once() {
 #[test]
 fn fr483_shared_rules_path_retained_while_any_sharer_is_live() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard =
-        HarnessModulesGuard::install(vec![Box::new(StubHarness), Box::new(SharingStubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(StubHarness::default()),
+        Box::new(SharingStubHarness),
+    ]);
 
     let fx = build_fixture(Some("harnesses = [\"stub\", \"sharing-stub\"]"));
     sync::sync_project(&fx.project, &deps_for(&fx, false)).expect("sync 1");
