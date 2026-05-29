@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and patterns for Tome (Rust CLI).
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 US2 — real Claude Code hooks)
+> **Last Updated**: 2026-05-29 (Phase 6 US3 — guardrails + rules-file correction)
 
 ## Code Style
 
@@ -592,17 +592,18 @@ pub(crate) fn render_codex_toml(scalars: &[(String, String)], body: &str) -> Str
 
 **Discipline**: Never hand-roll TOML quoting or escaping. `toml_edit`'s `value()` function's default string representation promotes any value containing a newline to `"""…"""` — exactly the triple-quoted form the contract mandates (FR-033 / R-14). Agent bodies are Markdown (multi-line), so the promotion is reliable and deterministic. Verified in `tests/agent_translate_codex.rs::body_lands_in_triple_quoted_developer_instructions`.
 
-### Phase 6: `reconcile_<sink>` Template for Sync Orchestration (US2)
+### Phase 6: `reconcile_<sink>` Template for Sync Orchestration (US2/US3)
 
-When writing a harness sync reconciliation function (hooks, agents, guardrails), follow the `reconcile_hooks` / `reconcile_agents` template in `src/harness/sync.rs`:
+When writing a harness sync reconciliation function (hooks, agents, guardrails), follow the `reconcile_hooks` / `reconcile_agents` / `reconcile_guardrails` template in `src/harness/sync.rs`:
 
 ```rust
-fn reconcile_hooks(
+fn reconcile_guardrails(
     deps: &SyncDeps<'_>,
     effective_names: &HashSet<String>,
     snapshots: &[HarnessSnapshot],
+    suppressed: &HashMap<String, HashSet<String>>,  // <harness> → <catalog>:<plugin>
     outcome: &mut SyncOutcome,
-) -> Result<HooksReconciliation, TomeError> {
+) -> Result<GuardrailsReconciliation, TomeError> {
     // 1. Open the central DB read-only (propagate the error for an EXISTING DB;
     //    never .ok()-swallow a non-absent database).
     let conn = if deps.paths.index_db.exists() {
@@ -611,7 +612,7 @@ fn reconcile_hooks(
         None
     };
 
-    // 2. Compute shared inputs once (enabled plugins, rewritten hooks, etc.).
+    // 2. Compute shared inputs once (enabled plugins, guardrails bodies, etc.).
     let workspace = deps.workspace_name.as_str();
     let enabled = match &conn {
         Some(c) => crate::index::skills::enabled_plugins_for_workspace(c, workspace)?,
@@ -624,7 +625,7 @@ fn reconcile_hooks(
 
     for snap in snapshots {
         // A write failure on harness A doesn't stop harness B from being processed.
-        match process_harness(snap, &effective_names, &enabled) {
+        match process_harness_guardrails(snap, &effective_names, &enabled, suppressed) {
             Ok(action) => { actions.insert(snap.name.clone(), action); },
             Err(e) if first_error.is_none() => {
                 first_error = Some(e);
@@ -637,13 +638,13 @@ fn reconcile_hooks(
     }
 
     // 4. Append the new SyncSubsystem variant LAST so the byte-stable JSON pin
-    //    only gains a trailing field (Hooks appended after Agents).
-    let recon = HooksReconciliation { actions, first_error };
+    //    only gains a trailing field (Guardrails appended after Agents/Hooks).
+    let recon = GuardrailsReconciliation { actions, first_error };
     Ok(recon)
 }
 ```
 
-**Discipline**: The template ensures proper error propagation (abort on existing DB, forward-progress on per-harness failures), single computation of shared inputs, and byte-stable JSON ordering (new `SyncSubsystem::Hooks` field appended to `HarnessDecision` LAST). Used in `src/harness/sync.rs` at lines 707+ (reconcile_hooks) and 913+ (reconcile_agents); verified in `tests/harness_sync_stub.rs` (hooks forward-progress test).
+**Discipline**: The template ensures proper error propagation (abort on existing DB, forward-progress on per-harness failures), single computation of shared inputs, and byte-stable JSON ordering (new `SyncSubsystem::Guardrails` field appended to `HarnessDecision` LAST). Used in `src/harness/sync.rs` at lines 913+ (reconcile_agents) and 1100+ (reconcile_guardrails); verified in `tests/harness_sync_stub.rs` (agents + guardrails forward-progress tests).
 
 ### Phase 6: Targeted Two-Token Rewrite via Fixed-Needle `str::replace` (US2)
 
@@ -748,6 +749,76 @@ fn non_utf8_guard<'a>(path: &'a Path, error_path: &Path) -> Result<&'a str, Tome
 
 **Rationale** (R2-2): Hook paths become command-line arguments in executed hooks. Non-UTF-8 paths with `to_string_lossy` substitution create silently-broken commands rather than failing early. Applied at `src/harness/hooks.rs::read_rewritten_entries` before rewrite, surfacing `TomeError::HookSettingsWriteFailed` (exit 44). Verified in `tests/hooks_merge.rs` (wrong-type settings → exit 44).
 
+### Phase 6: Validate Verbatim Third-Party Content for Managed-Marker Collisions (US3)
+
+When plugin content is copied verbatim into a marker-delimited region of a file Tome re-parses (e.g., `GUARDRAILS.md` body into a `<!-- START GUARDRAILS: … -->` region), scan it for ANY managed-marker regex that would let content escape its region, wedge the file, or corrupt sibling regions. The scan uses the exact same compiled regexes the reconciler parses with:
+
+```rust
+// src/harness/guardrails.rs::body_contains_marker_line (B-1 fail-closed pattern)
+fn body_contains_marker_line(body: &str) -> bool {
+    body.split('\n').any(|line| {
+        // Check for guardrails START/END markers
+        start_regex().is_match(line) ||
+            end_regex().is_match(line) ||
+            // Check for Phase 4 tome:begin/end block markers
+            block_marker_regex().is_match(line)
+    })
+}
+```
+
+A body that fails the validation surfaces `TomeError::GuardrailsWriteFailed` (exit 46) naming the source file. Escaping the body is wrong (it is contractually verbatim), so refusal is the defence against region-escape/file-wedge. The reconcile loop records this on its forward-progress error slot and keeps reconciling sibling plugins (FR-084).
+
+**Used in**: `src/harness/guardrails.rs::read_guardrails_source` (boundary validation), verified in `tests/guardrails_marker_injection.rs` (three crafted marker-injection bodies each rejected; sibling plugin region still renders; re-sync convergent).
+
+### Phase 6: Parameterised Keyed Marker Family for Per-Plugin Regions (US3)
+
+The `MarkerSpec` type in `src/harness/rules_file.rs` generalises the single `tome:begin/end` block into a parameterised keyed-marker family. Multiple keyed regions coexist with the block on the same file; deterministic placement ensures idempotence:
+
+```rust
+// src/harness/rules_file.rs::MarkerSpec / find_marker_regions / compose_in_file
+pub struct MarkerSpec {
+    start_regex: Regex,
+    end_regex: Regex,
+    render_begin: fn(&str) -> String,
+    render_end: fn(&str) -> String,
+}
+
+fn compose_in_file(target: &Path, desired: &BTreeMap<String, String>) -> Result<(), TomeError> {
+    // 1. Read existing file content
+    let contents = std::fs::read_to_string(target)?;
+    let mut lines: Vec<String> = contents.split('\n').map(|s| s.to_owned()).collect();
+
+    // 2. Find all existing regions; overwrite in-place or mark for append
+    let regions = find_marker_regions(&lines)?;
+    let mut appends = BTreeMap::new();
+    for (key, body) in desired {
+        if let Some((start, end)) = regions.get(key) {
+            // Overwrite between markers in place
+            update_region_in_place(&mut lines, *start, *end, body)?;
+        } else {
+            // Queue for append in lex order
+            appends.insert(key.clone(), body.clone());
+        }
+    }
+
+    // 3. Append new regions in lexicographic order
+    for (key, body) in &appends {
+        lines.push(render_begin(key));
+        lines.push(body.clone());
+        lines.push(render_end(key));
+    }
+
+    // 4. Remove orphaned regions (desired keys not in file)
+    prune_orphans(&mut lines, desired.keys())?;
+
+    // 5. Write atomically
+    write_atomic_idempotent(target, &lines)?;
+    Ok(())
+}
+```
+
+**Discipline**: Within a file: the `tome:begin/end` block is rendered first, then guardrails regions in lexicographic `<catalog>:<plugin>` order (FR-014). Existing regions are overwritten between their markers in place (never duplicated, never reordered); new regions are appended in lex order; orphaned regions are removed. A re-sync with no change rewrites nothing (idempotence via short-circuit compare, FR-525). Used in `src/harness/guardrails.rs::reconcile_in_file_region`, verified in `tests/guardrails_render.rs` (region placement, lexicographic order, overwrite-in-place, new-append, orphan-removal, idempotence).
+
 ## Comments & Documentation
 
 | Type | Format | Usage |
@@ -828,7 +899,7 @@ Capability-oriented: each module owns one cohesive feature.
 | `presentation` | CLI tables, spinners, colour, prompts |
 | `workspace` | Workspace lifecycle, binding, resolution, scope |
 | `settings` | Layered settings composition, TOML edit |
-| `harness` | Per-harness module integration, rules-file + MCP-config + agent translation + hooks merge |
+| `harness` | Per-harness module integration, rules-file + MCP-config + agent translation + hooks merge + guardrails |
 | `doctor` | System diagnostics, suggested fixes |
 | `mcp` | Async MCP server (only async island) |
 | `substitution` | Hand-rolled variable substitution (Phase 5) |

@@ -193,9 +193,9 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T094 [US3] 4-reviewer pass; write `review/us3-findings.md` + `review/us3-disposition.md`.
 - [X] T095 [US3] Apply US3 blockers + selected majors (use devs:rust-dev agent).
 - [X] T096 [GIT] Commit: `fix(phase-6): apply US3 reviewer findings`.
-- [ ] T097 [US3] Run codebase mapping for Phase 5 changes (`/sdd:map incremental`).
-- [ ] T098 [US3] Review `retro/P5.md`; extract learnings to `CLAUDE.md` (conservative).
-- [ ] T099 [GIT] Commit: `docs(phase-6): US3 closeout — mapping + retro`.
+- [X] T097 [US3] Run codebase mapping for Phase 5 changes (`/sdd:map incremental`).
+- [X] T098 [US3] Review `retro/P5.md`; extract learnings to `CLAUDE.md` (conservative).
+- [X] T099 [GIT] Commit: `docs(phase-6): US3 closeout — mapping + retro`.
 - [ ] T100 [GIT] Push; PR with US3 summary; verify CI; report PR ready status.
 
 **Checkpoint**: Guardrails degrade honestly everywhere; Claude Code reads its rules.

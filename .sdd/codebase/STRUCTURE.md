@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-29
-> **Last Updated**: 2026-05-31 (Phase 6 / US2; hooks.rs SSOT for parsing + rewrite + merge/remove; sync reconciliation 3b subsystem integrated; claude_code harness trait methods wired)
+> **Last Updated**: 2026-05-31 (Phase 6 / US3; guardrails.rs SSOT for prose rendering with marker validation; rules_file.rs generalised to parameterised marker engine; sync reconciliation 3a subsystem; Claude Code rules-file correction: CLAUDE.md > .claude/CLAUDE.md, AGENTS.md dropped)
 
 ## Directory Layout
 
@@ -47,7 +47,7 @@ tome/
 │   │   ├── schema.rs                   # CREATE TABLE statements + bootstrap (schema v4: Phase 6 Foundational marker; v3: Phase 5 addition)
 │   │   ├── migrations.rs               # Forward-only schema migrations + framework; Phase 5: v2→v3 migration; Phase 6: v3→v4 marker (no DDL, advances SCHEMA_VERSION only)
 │   │   ├── vec_ext.rs                  # sqlite-vec extension loader
-│   │   ├── skills.rs                   # Phase 5: CRUD over unified skills table with EntryKind discriminator; resolve_entry_body_path + validate_db_stored_path SSOT (Polish); Phase 6: agent rows (searchable=false, user_invocable=false per FR-070a); US1: agent_name_clash_set + enabled_agents_for_workspace queries wired
+│   │   ├── skills.rs                   # Phase 5: CRUD over unified skills table with EntryKind discriminator; resolve_entry_body_path + validate_db_stored_path SSOT (Polish); Phase 6: agent rows (searchable=false, user_invocable=false per FR-070a); US1: agent_name_clash_set + enabled_agents_for_workspace queries wired; US2: enabled_plugins_for_workspace query wired
 │   │   ├── query.rs                    # KNN search (workspace-filtered) + optional reranking (Phase 5 / US4: search includes when_to_use embeddings)
 │   │   ├── meta.rs                     # Model identity metadata + drift detection
 │   │   ├── integrity.rs                # PRAGMA integrity_check wrapper
@@ -76,9 +76,9 @@ tome/
 │   │   ├── remove.rs                   # Phase 4: Workspace removal with 5-step cascade (US2)
 │   │   └── sync.rs                     # Phase 4: Central RULES.md sync to projects (US2)
 │   │
-│   ├── doctor/                         # Diagnostic + auto-repair (Phase 3 US4 + Phase 4 US5 + Phase 5 US5 + Phase 6 skeleton + US1 agent integration + US2 hooks integration)
+│   ├── doctor/                         # Diagnostic + auto-repair (Phase 3 US4 + Phase 4 US5 + Phase 5 US5 + Phase 6 skeleton + US1 agent integration + US2 hooks integration + US3 guardrails integration)
 │   │   ├── mod.rs                      # assemble_report + re_assemble entry
-│   │   ├── checks.rs                   # check_catalogs, check_index, check_drift, check_workspace_registry + Phase 5 / US5: build_prompts_report, count_entries_by_kind, detect_orphan_data_dirs (all read-only); Phase 6/US1: agent diagnostics integrated; Phase 6/US2: hooks diagnostics skeleton
+│   │   ├── checks.rs                   # check_catalogs, check_index, check_drift, check_workspace_registry + Phase 5 / US5: build_prompts_report, count_entries_by_kind, detect_orphan_data_dirs (all read-only); Phase 6/US1: agent diagnostics integrated; Phase 6/US2: hooks diagnostics skeleton; Phase 6/US3: guardrails diagnostics skeleton
 │   │   ├── harness_detect.rs           # Probe ~/.claude/, ~/.codex/, ~/.cursor/, ~/.gemini/, ~/.opencode/
 │   │   ├── report.rs                   # DoctorReport + Subsystem (typed 11-variant enum) + SubsystemHealth + Phase 5 / US5: PromptsReport, EntryCountsByKind, OrphanDataDirReport; Phase 6/US1: agent count integrated
 │   │   ├── fixes.rs                    # apply + apply_one (subsystem routing) + per-subsystem repair handlers
@@ -86,19 +86,20 @@ tome/
 │   │   ├── harness_integration.rs      # Phase 4 US5: check_harness_integration (T367) — per-harness rules/mcp checks
 │   │   └── orphan_cleanup.rs           # Phase 4 US5: cleanup_stale_staging_dirs (FR-410) — 1-hour age gate
 │   │
-│   ├── harness/                        # Phase 4+: Per-harness trait + sync orchestrator + composition; Phase 6: trait extension for hooks/guardrails/agents; US1: native agent translation fully wired; US2: real hooks reconciliation fully wired
+│   ├── harness/                        # Phase 4+: Per-harness trait + sync orchestrator + composition; Phase 6: trait extension for hooks/guardrails/agents; US1: native agent translation fully wired; US2: real hooks reconciliation fully wired; US3: guardrails rendering fully wired
 │   │   ├── mod.rs                      # HarnessModule trait (Phase 4: 8 methods; Phase 6 Foundational: +7 new methods all safe-by-default); SUPPORTED_HARNESSES registry; shape enums (HooksStrategy, GuardrailsPlacement, GuardrailsTarget, AgentFormat)
+│   │   ├── guardrails.rs               # **Phase 6 / US3 COMPLETE** Guardrails prose soft-fallback SSOT: read_guardrails_source (verbatim body + marker-shape validation, fail-closed), region_key, marker renderers; marker regions per plugin with FR-013 Claude Code suppression (hooks_present filter); used by sync 3a subsystem
 │   │   ├── hooks.rs                    # **Phase 6 / US2 COMPLETE** Hooks parsing + rewrite SSOT: read_rewritten_entries, targeted two-variable rewrite (${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA} → absolute; other ${CLAUDE_*} verbatim), merge_into_settings (idempotent append), remove_from_settings (structural removal), ownership model (re-derivation + deep-equal), atomic writes (symlink-refusing, mode-preserving)
 │   │   ├── agents.rs                   # **Phase 6 / US1 COMPLETE** Agent type definitions + SSOT parsing/translation: CanonicalAgent::parse, agent_filename, plugin_of_owned_file (ownership split), is_safe_agent_name, map_model (alias table), infer_read_only, displayed_name, render_markdown_yaml, render_codex_toml
-│   │   ├── claude_code.rs              # Claude Code harness impl; Phase 6/US1: translate_agent() override, agent_dir(), agent_format(), supports_native_agents() wired; Phase 6/US2: hooks_strategy() = RealJson, hook_settings_path() wired
-│   │   ├── codex.rs                    # Codex harness impl; Phase 6/US1: translate_agent() override for TOML emission, agent_dir(), agent_format() wired
-│   │   ├── cursor.rs                   # Cursor harness impl; Phase 6/US1: translate_agent() override, agent_dir(), agent_format() wired
-│   │   ├── gemini.rs                   # Gemini CLI harness impl; no native agent support (supports_native_agents=false)
-│   │   ├── opencode.rs                 # OpenCode harness impl; Phase 6/US1: translate_agent() override with <plugin>__<name> display, agent_dir(), agent_format() wired
-│   │   ├── rules_file.rs               # Block-in-file + standalone strategies + atomic_write
+│   │   ├── claude_code.rs              # Claude Code harness impl; Phase 6/US1: translate_agent() override, agent_dir(), agent_format(), supports_native_agents() wired; Phase 6/US2: hooks_strategy() = RealJson, hook_settings_path() wired; Phase 6/US3: guardrails_target() with Claude Code suppression, rules_file_target() corrected (CLAUDE.md > .claude/CLAUDE.md, AGENTS.md dropped per FR-020/021/022)
+│   │   ├── codex.rs                    # Codex harness impl; Phase 6/US1: translate_agent() override for TOML emission, agent_dir(), agent_format() wired; Phase 6/US3: guardrails_target() in-file AGENTS.md
+│   │   ├── cursor.rs                   # Cursor harness impl; Phase 6/US1: translate_agent() override, agent_dir(), agent_format() wired; Phase 6/US3: guardrails_target() with standalone sibling (or in-file per strategy)
+│   │   ├── gemini.rs                   # Gemini CLI harness impl; no native agent support (supports_native_agents=false); Phase 6/US3: guardrails_target() in-file AGENTS.md
+│   │   ├── opencode.rs                 # OpenCode harness impl; Phase 6/US1: translate_agent() override with <plugin>__<name> display, agent_dir(), agent_format() wired; Phase 6/US3: guardrails_target() in-file AGENTS.md
+│   │   ├── rules_file.rs               # **Phase 6 / US3 COMPLETE** Generalised marker engine (not just Phase 4 `tome:begin/end`): MarkerSpec (parameterised regex pair + render funcs), MarkerRegion, find_marker_regions, compose_in_file (lex-merge, deterministic order, orphan removal, atomic write); refuse_symlink/atomic_write promoted to pub(crate); used by guardrails 3a subsystem
 │   │   ├── mcp_config.rs               # JSON + TOML MCP config read/write primitives
-│   │   ├── sync.rs                     # Phase 4: Sync orchestrator (per-project harness writes); Phase 6/US1: reconcile_agents pass (3c subsystem) fully integrated; Phase 6/US2: reconcile_hooks pass (3b subsystem) fully integrated BEFORE agents; clash set computation (FR-072); forward progress (FR-084)
-│   │   └── stub.rs                     # StubHarnessModule for test injection; Phase 6: extended with agent/hook method overrides for testing; US1: agent translation test overrides; US2: hooks parsing test overrides
+│   │   ├── sync.rs                     # Phase 4: Sync orchestrator (per-project harness writes); Phase 6/US1: reconcile_agents pass (3c subsystem) fully integrated; Phase 6/US2: reconcile_hooks pass (3b subsystem) fully integrated; Phase 6/US3: reconcile_guardrails pass (3a subsystem) fully integrated BEFORE hooks BEFORE agents; clash set computation (FR-072); forward progress (FR-084); hooks suppression set computation for Claude Code
+│   │   └── stub.rs                     # StubHarnessModule for test injection; Phase 6: extended with agent/hook/guardrails method overrides for testing; US1: agent translation test overrides; US2: hooks parsing test overrides; US3: guardrails rendering test overrides
 │   │
 │   ├── settings/                       # Phase 4: Layered harness composition
 │   │   ├── mod.rs                      # Type defs (ProjectMarkerConfig, WorkspaceSettings, GlobalSettings)
@@ -152,7 +153,7 @@ tome/
 │   │   │   ├── remove.rs               # `tome harness remove <name> [--scope]` — delete from settings + trigger regenerate
 │   │   │   ├── info.rs                 # `tome harness info` — per-harness details + detection
 │   │   │   └── sync.rs                 # `tome harness sync [--force]` — reconcile filesystem
-│   │   ├── doctor.rs                   # `tome doctor [--fix] [--verify] [--force]` (Phase 5 / US5: renders extended report with prompts + entry-kind counts + orphan data-dirs; Phase 6/US1: agent integration; Phase 6/US2: hooks skeleton)
+│   │   ├── doctor.rs                   # `tome doctor [--fix] [--verify] [--force]` (Phase 5 / US5: renders extended report with prompts + entry-kind counts + orphan data-dirs; Phase 6/US1: agent integration; Phase 6/US2: hooks skeleton; Phase 6/US3: guardrails skeleton)
 │   │   └── mcp.rs                      # `tome mcp` entry point
 │   │
 │   ├── presentation/                   # Output formatting + TUI
@@ -168,7 +169,7 @@ tome/
 │   │   ├── atomic_dir.rs               # Atomic directory landing (tempfile + rename); STAGING_PREFIX constant (FR-410)
 │   │   └── io.rs                       # Phase 4 Polish: bounded_read_to_string + per-class caps
 │   │
-│   └── mcp/                            # MCP server (async island, Phase 3+; Phase 5: prompts + US4 three-tier discovery + US5 read-only extensions + Polish: substitution_helpers; Phase 6/US1: agent rows excluded from search/prompts per FR-070a; Phase 6/US2: hooks excluded from prompts)
+│   └── mcp/                            # MCP server (async island, Phase 3+; Phase 5: prompts + US4 three-tier discovery + US5 read-only extensions + Polish: substitution_helpers; Phase 6/US1: agent rows excluded from search/prompts per FR-070a; Phase 6/US2: hooks excluded from prompts; Phase 6/US3: guardrails excluded from prompts)
 │       ├── mod.rs                      # Sync entry point: run()
 │       ├── runtime.rs                  # Single-threaded tokio builder
 │       ├── log.rs                      # 10 MiB rotate JSON file logger (contract-formatted for tool logs)
@@ -180,7 +181,7 @@ tome/
 │       ├── prompt_name.rs              # Phase 5 NEW: Prompt-name derivation (<plugin>__<entry> sanitisation + truncation)
 │       ├── prompt_collision.rs         # Phase 5 NEW: Collision detection when entries map to same prompt name
 │       ├── prompts.rs                  # Phase 5 NEW: MCP prompts capability (PromptRegistry, PromptRouter hand-rolled); skills/commands only (agents excluded per FR-070a)
-│       └── tools/                      # MCP tool handlers (Phase 5 / US4–US5: three-tier discovery + read-only extensions; Phase 6/US1: agent rows excluded from search/prompts per FR-070a; Phase 6/US2: hooks excluded)
+│       └── tools/                      # MCP tool handlers (Phase 5 / US4–US5: three-tier discovery + read-only extensions; Phase 6/US1: agent rows excluded from search/prompts per FR-070a; Phase 6/US2: hooks excluded; Phase 6/US3: guardrails excluded)
 │           ├── mod.rs                  # Tool registration
 │           ├── search_skills.rs        # search_skills tool (KNN+rerank, workspace-filtered, 4096-char input cap, Phase 5 / US4: when_to_use in results, truncate_description hardening; Polish: mirrors truncation at get_skill_info; Phase 6/US1: agent rows searchable=false, excluded from results per FR-070a)
 │           ├── get_skill_info.rs       # Phase 5 / US4 NEW: get_skill_info middle-tier tool (full description + when_to_use + 5-cap resource enumeration; Polish: uses build_context_for_entry SSOT; Phase 6/US1: agent rows excluded per FR-070a)
@@ -188,16 +189,16 @@ tome/
 │
 ├── tests/                              # Integration tests (access library as external crate)
 │   ├── catalog_*.rs                    # Catalog add/remove/update tests
-│   ├── plugin_*.rs                     # Plugin enable/disable/list/show/interactive (Phase 5: commands coverage + US5 annotations; Phase 6/US1: agent entry-kind + translation tests; Phase 6/US2: hooks tests)
+│   ├── plugin_*.rs                     # Plugin enable/disable/list/show/interactive (Phase 5: commands coverage + US5 annotations; Phase 6/US1: agent entry-kind + translation tests; Phase 6/US2: hooks tests; Phase 6/US3: guardrails tests)
 │   ├── models_*.rs                     # Model download/list/remove
 │   ├── query.rs                        # Query + strict mode + rerank
 │   ├── reindex.rs                      # Reindex all/per-catalog/per-plugin
 │   ├── status.rs                       # Status command + health checks
 │   ├── workspace_*.rs                  # Workspace info/init/binding/sync/list/rename/remove tests (US1–US2)
-│   ├── harness_*.rs                    # Phase 4 US3: Harness list/use/remove/info/sync/composition tests; Phase 6: harness_trait_p6.rs for trait extension; US1: harness_agents_*.rs for translation + sync; US2: harness_hooks_*.rs for parsing + sync
+│   ├── harness_*.rs                    # Phase 4 US3: Harness list/use/remove/info/sync/composition tests; Phase 6: harness_trait_p6.rs for trait extension; US1: harness_agents_*.rs for translation + sync; US2: harness_hooks_*.rs for parsing + sync; US3: harness_guardrails_*.rs for rendering + sync
 │   ├── summariser_*.rs                 # Phase 4 US4: Summariser triggers, forward progress, cache, registry tests
-│   ├── doctor*.rs                      # Phase 4 US5: Doctor assembly + fixes + binding + harness integration + orphan cleanup; Phase 5 / US5: prompts report + entry counts + orphan data-dirs; Phase 6/US1: agent integration tests; Phase 6/US2: hooks skeleton tests
-│   ├── mcp_*.rs                        # MCP server lifecycle + tools + log rotation + tool description (US4.b) + prompts (US1.b) + Phase 5 / US4–US5: get_skill_info tests + read-only extensions; Phase 6/US1: agent exclusion tests; Phase 6/US2: hooks excluded
+│   ├── doctor*.rs                      # Phase 4 US5: Doctor assembly + fixes + binding + harness integration + orphan cleanup; Phase 5 / US5: prompts report + entry counts + orphan data-dirs; Phase 6/US1: agent integration tests; Phase 6/US2: hooks skeleton tests; Phase 6/US3: guardrails skeleton tests
+│   ├── mcp_*.rs                        # MCP server lifecycle + tools + log rotation + tool description (US4.b) + prompts (US1.b) + Phase 5 / US4–US5: get_skill_info tests + read-only extensions; Phase 6/US1: agent exclusion tests; Phase 6/US2: hooks excluded; Phase 6/US3: guardrails excluded
 │   ├── substitution_*.rs               # Phase 5: Substitution engine tests (skeleton, builtins, env, arguments, data-dir, e2e)
 │   ├── entry_kind_agent_indexing.rs    # **Phase 6 Foundational NEW** Agent entry-kind indexing + schema widening tests
 │   ├── harness_trait_p6.rs             # **Phase 6 Foundational NEW** HarnessModule trait extension (7 new methods, safe-by-default impls, exhaustive match widening)
@@ -208,6 +209,10 @@ tome/
 │   ├── harness_hooks_parsing.rs        # **Phase 6 / US2 NEW** Hooks parsing (read_rewritten_entries), two-variable rewrite, idempotency tests
 │   ├── harness_hooks_merge_remove.rs   # **Phase 6 / US2 NEW** Merge/remove semantics (append_if_absent, remove_if_present, prune_empty_event), ownership model tests
 │   ├── harness_hooks_sync.rs           # **Phase 6 / US2 NEW** Sync reconciliation (reconcile_hooks), enabled-plugin enumeration, per-harness merge/remove, orphan cleanup, forward progress
+│   ├── harness_guardrails_parsing.rs   # **Phase 6 / US3 NEW** Guardrails parsing (read_guardrails_source), verbatim body, marker-shape validation (fail-closed), per-plugin per-harness reconciliation
+│   ├── harness_guardrails_reconciliation.rs | **Phase 6 / US3 NEW** Sync reconciliation (reconcile_guardrails), enabled-plugin enumeration, suppression-set computation, per-harness region composition (lex order, overwrite, orphan removal), forward progress
+│   ├── harness_guardrails_marker_engine.rs | **Phase 6 / US3 NEW** Generalized marker engine (MarkerSpec, MarkerRegion, find_marker_regions, compose_in_file), lex-order determinism, idempotence, both Phase 4 `tome:begin/end` + guardrails coexistence
+│   ├── harness_phase6_correction.rs   # **Phase 6 / US3 NEW** Claude Code rules-file sink corrected to CLAUDE.md > .claude/CLAUDE.md (AGENTS.md dropped per FR-020/021/022)
 │   ├── entry_e2e.rs                    # Phase 5 / US3 NEW: Full enable → search → get → prompts pipeline with argument substitution + Phase 5 / US5: invocability visibility; Phase 6/US1: agent rows excluded
 │   ├── exit_codes.rs                   # Exit code matrix validation; Phase 6: +4 new codes (43–46)
 │   ├── manifest_strictness.rs          # Strict/lenient parsing guards
@@ -232,8 +237,8 @@ tome/
 │   └── codebase/
 │       ├── STACK.md                    # Technologies + versions
 │       ├── INTEGRATIONS.md             # External APIs + services
-│       ├── ARCHITECTURE.md             # System design + patterns (Phase 5 / US5: per-entry invocability + doctor read-only extensions; Polish: single-source-of-truth promotion; Phase 6 Foundational: harness trait extension; US1: agent translation pipeline end-to-end; US2: real hooks parsing + merge/remove + sync reconciliation 3b)
-│       ├── STRUCTURE.md                # Directory layout (this file; Phase 6 Foundational: harness/agents.rs + harness/hooks.rs + trait extension; US1: agents.rs fully fleshed out with SSOT parsing/translation; sync reconciliation; lifecycle integration; US2: hooks.rs fully fleshed out with SSOT parsing/rewrite/merge-remove; sync reconciliation 3b; claude_code trait methods wired)
+│       ├── ARCHITECTURE.md             # System design + patterns (Phase 5 / US5: per-entry invocability + doctor read-only extensions; Polish: single-source-of-truth promotion; Phase 6 Foundational: harness trait extension; US1: agent translation pipeline end-to-end; US2: real hooks parsing + merge/remove + sync reconciliation 3b; US3: guardrails prose fallback + sync reconciliation 3a + Phase 6 correction: Claude Code rules-file sink CLAUDE.md)
+│       ├── STRUCTURE.md                # Directory layout (this file; Phase 6 Foundational: harness/agents.rs + harness/hooks.rs + harness/guardrails.rs + rules_file.rs generalised marker engine + trait extension; US1: agents.rs fully fleshed out with SSOT parsing/translation; sync reconciliation; lifecycle integration; US2: hooks.rs fully fleshed out with SSOT parsing/rewrite/merge-remove; sync reconciliation 3b; claude_code trait methods wired; US3: guardrails.rs fully fleshed out with SSOT parsing/rendering + rules_file.rs generalised to parameterised marker engine; sync reconciliation 3a BEFORE hooks 3b BEFORE agents 3c; Phase 6 correction: Claude Code rules_file_target() corrected CLAUDE.md > .claude/CLAUDE.md, AGENTS.md dropped)
 │       ├── CONVENTIONS.md              # Naming + code style
 │       ├── TESTING.md                  # Test strategy + patterns
 │       ├── SECURITY.md                 # Auth + authorization
@@ -274,11 +279,11 @@ tome/
 │   │   ├── review/ (Phase 5 reviewer findings + disposition per US)
 │   │   ├── retro/ (P3–P8 retrospectives)
 │   │   └── quickstart.md
-│   └── 006-phase-6-hooks-agents/           # Phase 6 (Foundational + US1 + US2 complete; spec + plan + contracts + research + retro complete)
+│   └── 006-phase-6-hooks-agents/           # Phase 6 (Foundational + US1 + US2 + US3 complete; spec + plan + contracts + research + retro complete)
 │       ├── spec.md
 │       ├── plan.md
 │       ├── research.md (20 R-decisions)
-│       ├── data-model.md (v4 schema marker, HooksStrategy, GuardrailsTarget, AgentFormat, CanonicalAgent, TranslatedAgent, agent clash-set, enabled-agent enumeration, RewrittenHooks, ownership model, etc.)
+│       ├── data-model.md (v4 schema marker, HooksStrategy, GuardrailsTarget, GuardrailsPlacement, AgentFormat, CanonicalAgent, TranslatedAgent, agent clash-set, enabled-agent enumeration, RewrittenHooks, ownership model, MarkerSpec, MarkerRegion, etc.)
 │       ├── contracts/ (9+ contracts: exit-codes-p6, schema-migration-p6, entry-schema-p6, harness-modules-p6, hooks-reconciliation, guardrails-prose, agent-translation, agent-sync, agent-indexing, etc.)
 │       ├── retro/ (P2–P4 retrospectives)
 │       └── quickstart.md
@@ -295,8 +300,8 @@ tome/
 ├── Cargo.lock                          # Dependency lock
 ├── build.rs                            # sqlite-vec C extension compilation
 ├── CONSTITUTION.md                     # v1.3.0 — constraints + trade-offs (Phase 4 §Paths amendment; no Phase 5 amendments; no Phase 6 amendments)
-├── CLAUDE.md                           # Project context for Claude Code (Phase 5 complete + Polish shipped; v0.5.0 final; Phase 6: Foundational + US1 + US2 complete)
-└── CHANGELOG.md                        # Version history (v0.1.0–v0.5.0 shipped; Phase 6 US1–US2 in development)
+├── CLAUDE.md                           # Project context for Claude Code (Phase 5 complete + Polish shipped; v0.5.0 final; Phase 6: Foundational + US1 + US2 + US3 complete)
+└── CHANGELOG.md                        # Version history (v0.1.0–v0.5.0 shipped; Phase 6 US1–US3 in development)
 ```
 
 ## Key Directories
@@ -307,46 +312,65 @@ tome/
 |-----------|---------|-----------|
 | `substitution/` | Phase 5 / US1–US3: Variable rendering engine (COMPLETE single-pass pipeline) | `mod.rs` (render loop + body_has_bare_arguments), `context.rs`, `builtins.rs`, `env.rs`, `arguments.rs` (shell_split + coerce_arguments + apply_arguments_match), `data_dir.rs`, `regex_sets.rs` (COMBINED_RE) |
 | `plugin/` | Plugin metadata, lifecycle (Phase 5: commands + arguments + when_to_use + user_invocable; Phase 6/US1: agents enumeration + lifecycle + frontmatter parsing) | `manifest.rs`, `frontmatter.rs`, `identity.rs` (EntryKind + Agent variant + canonical from_str), `components.rs` (list_command_files, list_agent_files), `lifecycle.rs` (collect_pending_agents) |
-| `index/` | SQLite + sqlite-vec index (Phase 5: v3 schema with when_to_use; Polish: validate_db_stored_path SSOT; Phase 6: v4 marker migration, agent rows with searchable=false/user_invocable=false; US1: agent queries wired; US2: enabled_plugins_for_workspace query wired) | `db.rs`, `schema.rs` (v4 marker), `migrations.rs` (v3→v4), `skills.rs` (agent queries: agent_name_clash_set, enabled_agents_for_workspace; US2: enabled_plugins_for_workspace), `query.rs` (Phase 5 / US4: when_to_use embeddings) |
-| `mcp/` | MCP server + Phase 5 prompts + three-tier discovery + read-only extensions + Polish: substitution_helpers; Phase 6/US1: agent rows excluded per FR-070a; Phase 6/US2: hooks excluded | `prompts.rs` (PromptRegistry, skills/commands only), `prompt_name.rs`, `prompt_collision.rs`, `substitution_helpers.rs` (build_context_for_entry SSOT), `tools/` (search_skills, get_skill_info, get_skill) |
-| `doctor/` | Health check + auto-repair (Phase 5 / US5: read-only extensions; Phase 6/US1: agent count integrated; Phase 6/US2: hooks skeleton) | `checks.rs` (count_entries_by_kind extended for agent count; hooks checks skeleton), `report.rs` (agent counts; hooks skeleton), fixes.rs |
+| `index/` | SQLite + sqlite-vec index (Phase 5: v3 schema with when_to_use; Polish: validate_db_stored_path SSOT; Phase 6: v4 marker migration, agent rows with searchable=false/user_invocable=false; US1: agent queries wired; US2: enabled_plugins_for_workspace query wired) | `db.rs`, `schema.rs` (v4 marker), `migrations.rs` (v3→v4), `skills.rs` (agent queries: agent_name_clash_set, enabled_agents_for_workspace, enabled_plugins_for_workspace; US2 hooks enumeration), `query.rs` (Phase 5 / US4: when_to_use embeddings) |
+| `mcp/` | MCP server + Phase 5 prompts + three-tier discovery + read-only extensions + Polish: substitution_helpers; Phase 6/US1: agent rows excluded per FR-070a; Phase 6/US2: hooks excluded; Phase 6/US3: guardrails excluded | `prompts.rs` (PromptRegistry, skills/commands only), `prompt_name.rs`, `prompt_collision.rs`, `substitution_helpers.rs` (build_context_for_entry SSOT), `tools/` (search_skills, get_skill_info, get_skill) |
+| `doctor/` | Health check + auto-repair (Phase 5 / US5: read-only extensions; Phase 6/US1: agent count integrated; Phase 6/US2: hooks skeleton; Phase 6/US3: guardrails skeleton) | `checks.rs` (count_entries_by_kind extended for agent count; hooks/guardrails checks skeleton), `report.rs` (agent counts; hooks/guardrails skeleton), fixes.rs |
 | `catalog/` | Catalog registry, git ops | `manifest.rs`, `store.rs`, `git.rs` |
 | `embedding/` | Text embedding + reranking | `fastembed.rs`, `stub.rs`, `download.rs` |
 | `workspace/` | Scope resolution, binding, lifecycle (Phase 5 / US2: rename relocation) | `scope.rs`, `binding.rs`, `init.rs`, `rename.rs`, `remove.rs`, `regen_summary.rs` |
-| `harness/` | Phase 4: Harness abstraction + sync; Phase 6 Foundational: trait extension for hooks/guardrails/agents; US1: native agent translation fully wired; US2: real hooks parsing + sync fully wired | `mod.rs` (trait +7 new methods safe-by-default; shape enums), `hooks.rs` (RewrittenHooks, read_rewritten_entries, merge/remove semantics, atomic writes, two-variable rewrite SSOT), `agents.rs` (CanonicalAgent::parse, translation SSOT, model-alias, naming, render primitives), 5 harness impls (translate_agent overrides + US2: hooks_strategy / hook_settings_path), `sync.rs` (reconcile_hooks 3b pass + reconcile_agents 3c pass), `rules_file.rs`, `mcp_config.rs`, `stub.rs` |
+| `harness/` | Phase 4: Harness abstraction + sync; Phase 6 Foundational: trait extension for hooks/guardrails/agents; US1: native agent translation fully wired; US2: real hooks parsing + sync fully wired; US3: guardrails rendering + marker engine fully wired | `mod.rs` (trait +7 new methods safe-by-default; shape enums), `guardrails.rs` (verbatim body read, marker validation, per-plugin region rendering SSOT), `hooks.rs` (RewrittenHooks, read_rewritten_entries, merge/remove semantics, atomic writes, two-variable rewrite SSOT), `agents.rs` (CanonicalAgent::parse, translation SSOT, model-alias, naming, render primitives), 5 harness impls (translate_agent overrides + US2: hooks_strategy / hook_settings_path + US3: guardrails_target), `rules_file.rs` (MarkerSpec/MarkerRegion, find_marker_regions, compose_in_file, parameterised marker engine for both Phase 4 `tome:begin/end` + guardrails), `sync.rs` (reconcile_guardrails 3a + reconcile_hooks 3b + reconcile_agents 3c passes), `mcp_config.rs`, `stub.rs` |
 | `settings/` | Phase 4: Layered composition | `parser.rs`, `resolver.rs` (composition engine), `edit.rs` |
 | `summarise/` | Phase 4: Workspace summariser | `llama.rs`, `stub.rs`, `prompts.rs`, `trigger.rs`, `registry.rs` |
-| `commands/` | CLI subcommand entry points (Phase 5 / US5: show + list extended; Phase 6/US1: agent integration; Phase 6/US2: hooks integration skeleton) | Per-command modules + dispatchers |
+| `commands/` | CLI subcommand entry points (Phase 5 / US5: show + list extended; Phase 6/US1: agent integration; Phase 6/US2: hooks integration skeleton; Phase 6/US3: guardrails integration skeleton) | Per-command modules + dispatchers |
 | `presentation/` | Output formatting + TUI | `tables.rs`, `prompt.rs`, `colour.rs` |
 | `util/` | Shared utilities | `atomic_dir.rs` (tempfile + rename), `io.rs` (bounded read) |
 | `paths.rs` | Phase 4 single-root layout; Phase 5: data-dir accessors; Polish: plugin_data_root() SSOT | `home_root()`, `Paths struct`, `plugin_data_root()` SSOT, `plugin_data_dir_for()`, `workspace_data_dir_for()` |
 
-### `src/harness/hooks.rs` — Real Claude Code Hooks (Phase 6 / US2 COMPLETE)
+### `src/harness/guardrails.rs` — Guardrails Prose Soft-Fallback (Phase 6 / US3 COMPLETE)
 
 | Function | Purpose | Contract |
 |----------|---------|----------|
-| `read_rewritten_entries()` | Read plugin's `hooks/hooks.json`, validate shape, apply two-variable rewrite, return RewrittenHooks | Only two tokens rewritten (${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA}); all other ${CLAUDE_*} left verbatim (NFR-007); keys/numbers/booleans/nulls untouched; malformed → exit 43; absent file → Ok(None) |
-| `merge_into_settings()` | Idempotently append rewritten entries to settings.local.json by deep-equal (FR-004) | Never duplicates user-identical entries; creates file + parent (0700) when absent (FR-002); atomic, mode-preserving, symlink-refusing; any failure → exit 44; returns true on change |
-| `remove_from_settings()` | Remove matching hooks by deep structural equality, prune empty events (FR-005/FR-006) | Non-matching/user-edited entries left in place; no sidecar provenance marker (NFR-003); missing file is no-op; any failure → exit 44; returns true on change |
+| `read_guardrails_source()` | Read plugin's `hooks/GUARDRAILS.md`, copy body verbatim, validate marker-shape (fail-closed per B-1) | Symlink-refused, bounded-read; returns `Ok(None)` when absent; body with marker-shaped lines → exit 46 |
+| `region_key()` | Render provenance key `<catalog>:<plugin>` | SSOT for removal identifier; used in START/END marker lines |
+| `begin_marker()` / `end_marker()` | Render canonical marker lines | Compiled once; matching enforced by MarkerSpec |
 
-### `src/harness/sync.rs` — Reconciliation (Phase 6 / US1–US2)
+### `src/harness/rules_file.rs` — Generalized Marker Engine (Phase 6 / US3 COMPLETE)
+
+| Type/Function | Purpose | Details |
+|----------|---------|---------|
+| `MarkerSpec` | Parameterised regex pair (START / END) + render functions | Compiled once via `OnceLock`; not just Phase 4 `tome:begin/end` anymore |
+| `MarkerRegion` | Parsed marker pair with line numbers + body | Used by both Phase 4 rules-block + guardrails regions |
+| `find_marker_regions()` | Scan for all marker-delimited regions | Works with any `MarkerSpec`; returns regions in file order |
+| `compose_in_file()` | Lex-merge regions into target file (deterministic lex order, overwrite-in-place, orphan removal) | Atomic write; returns `true` on change; idempotent (no-op rewrites nothing per FR-525) |
+| `refuse_symlink()` | Security: reject symlinks at target paths | Promoted to `pub(crate)` for harness modules |
+| `atomic_write()` | Atomic tempfile + rename (symlink-refusing, mode-preserving) | Promoted to `pub(crate)`; shared by both Phase 4 rules-block + guardrails writers |
+
+### `src/harness/sync.rs` — Reconciliation (Phase 6 / US1–US3)
 
 | Function | Purpose | Details |
 |----------|---------|---------|
-| `reconcile_hooks()` | 3b subsystem: merge/remove hooks across harnesses (runs BEFORE agents) | Enumerate enabled plugins once per sync; parse + rewrite each once; dispatch merge (live) / remove (non-live) per harness; forward progress on parse failures; record per-file granularity + per-harness action |
-| `reconcile_agents()` | 3c subsystem: emit agent files, translation, cleanup (runs AFTER hooks) | Enumerate enabled agents once per sync; compute clash set once; parse canonicals; dispatch per-harness translation; atomic writes; orphan cleanup; forward progress on parse failures |
-| `sync_project()` | Main orchestrator: Phase A (settings load) → Phase B (3a rules + 3b MCP) → Phase 3c hooks → Phase 3d agents | Integrates hooks sink BEFORE agents sink per design order |
+| `reconcile_guardrails()` | 3a subsystem: render guardrails regions into harness rules-file targets (runs FIRST, BEFORE hooks 3b & agents 3c) | Enumerate enabled plugins once per sync; read + validate guardrails once; compute suppression set (Claude Code hooks only); dispatch per-harness `compose_in_file()` (live vs non-live); forward progress on read failures; record per-file granularity + per-harness action |
+| `reconcile_hooks()` | 3b subsystem: merge/remove hooks across harnesses (runs AFTER guardrails 3a, BEFORE agents 3c) | Enumerate enabled plugins once per sync; parse + rewrite each once; dispatch merge (live) / remove (non-live) per harness; forward progress on parse failures; record per-file granularity + per-harness action |
+| `reconcile_agents()` | 3c subsystem: emit agent files, translation, cleanup (runs AFTER hooks 3b) | Enumerate enabled agents once per sync; compute clash set once; parse canonicals; dispatch per-harness translation; atomic writes; orphan cleanup; forward progress on parse failures |
+| `sync_project()` | Main orchestrator: Phase A (settings load) → Phase B (3a guardrails + 3b rules + 3b MCP) → Phase 3b hooks → Phase 3c agents | Integrates all three sinks in correct order: guardrails (3a) → hooks (3b) → agents (3c); supression set passed to guardrails for Claude Code |
 
-### `src/harness/{claude_code,codex,cursor,opencode}.rs` — Per-Harness Overrides (Phase 6 / US1–US2)
+### `src/harness/{claude_code,codex,cursor,opencode}.rs` — Per-Harness Overrides (Phase 6 / US1–US3)
 
-| Method | Purpose | US2 changes |
-|--------|---------|------------|
-| `supports_native_agents()` | Returns `true` for native-agent-supporting harnesses | No US2 change |
-| `agent_dir(project_root)` | Returns target directory for translated agent files | No US2 change |
-| `agent_format()` | Returns serialization format for translated agents | No US2 change |
-| `translate_agent(canonical)` | Translate to harness-native form | No US2 change |
-| `hooks_strategy()` | **US2 NEW** Returns HooksStrategy (RealJson only for Claude Code) | Claude Code: RealJson; all others: GuardrailsOnly |
-| `hook_settings_path(project_root)` | **US2 NEW** Returns target path for hook settings (Claude Code only) | Claude Code: `<project>/.claude/settings.local.json`; all others: None |
+| Method | Purpose | US2 changes | US3 changes |
+|--------|---------|------------|------------|
+| `supports_native_agents()` | Returns `true` for native-agent-supporting harnesses | No US2 change | No US3 change |
+| `agent_dir(project_root)` | Returns target directory for translated agent files | No US2 change | No US3 change |
+| `agent_format()` | Returns serialization format for translated agents | No US2 change | No US3 change |
+| `translate_agent(canonical)` | Translate to harness-native form | No US2 change | No US3 change |
+| `hooks_strategy()` | **US2 NEW** Returns HooksStrategy (RealJson only for Claude Code) | Claude Code: RealJson; all others: GuardrailsOnly | No US3 change |
+| `hook_settings_path(project_root)` | **US2 NEW** Returns target path for hook settings (Claude Code only) | Claude Code: `<project>/.claude/settings.local.json`; all others: None | No US3 change |
+| `guardrails_target(project_root)` | **US3 NEW** Returns per-harness guardrails placement + suppression flag | N/A | Claude Code: in-file `CLAUDE.md` (corrected) + suppress_if_hooks_present=true; others: in-file AGENTS.md or Cursor sibling |
+
+### `src/harness/{claude_code}.rs` — Claude Code Harness (Phase 6 / US3 COMPLETE)
+
+| Method | Previous | Phase 6 Correction |
+|--------|----------|-------------------|
+| `rules_file_target()` | Candidate set was `AGENTS.md` / `<project>/AGENTS.md` | **CORRECTED**: `CLAUDE.md` > `.claude/CLAUDE.md` (first existing; AGENTS.md dropped per FR-020/021/022 — Claude Code does not natively read AGENTS.md) |
 
 ### `src/plugin/components.rs` — Agent Enumeration (Phase 6 / US1)
 
@@ -362,62 +386,86 @@ tome/
 | `collect_agent_entries(plugin, workspace, ...)` | Parse agent files + build `PendingAgent` list | Part of enable pipeline after `collect_command_entries`; parses frontmatter, validates names via `is_safe_agent_name`, builds agent records for insertion |
 | `enable_plugin_atomic()` | Atomic enable (embed + insert skills/commands/agents) | Agent rows inserted with `kind='agent'`, `searchable=false`, `user_invocable=false` (FR-070a) |
 
-### `src/index/skills.rs` — Entry Queries (Phase 6 / US1–US2)
+### `src/index/skills.rs` — Entry Queries (Phase 6 / US1–US3)
 
 | Query | Purpose | Details |
 |-------|---------|---------|
 | `agent_name_clash_set(conn, workspace)` | Return agent names appearing in 2+ enabled plugins | Used by sync reconciliation for display-name decisions (FR-041); returns `BTreeSet<String>` |
 | `enabled_agents_for_workspace(conn, workspace)` | Return enabled agent rows for a workspace | Returns `Vec<EnabledAgent>` (catalog, plugin, name); used to enumerate agents for translation |
-| `enabled_plugins_for_workspace(conn, workspace)` | **US2 NEW** Return enabled plugin rows for a workspace | Returns `Vec<(catalog, plugin)>`; used to enumerate plugins for hooks reconciliation |
-| `plugin_root_dir()` | **US2 NEW** Resolve catalog-relative plugin path to absolute root | Looks up plugin install path from index; used during hooks enumeration to read hooks.json |
+| `enabled_plugins_for_workspace(conn, workspace)` | **US2 NEW** Return enabled plugin rows for a workspace | Returns `Vec<(catalog, plugin)>`; used to enumerate plugins for hooks + guardrails reconciliation |
+| `plugin_root_dir()` | **US2 NEW** Resolve catalog-relative plugin path to absolute root | Looks up plugin install path from index; used during hooks + guardrails enumeration |
 | `resolve_entry_body_path()` | Resolve catalog-relative entry path to absolute `.md` | Works for all entry kinds (skill, command, agent) |
 
 ## Module Boundaries
 
-### Where to Add New Code (Phase 6 / US2)
+### Where to Add New Code (Phase 6 / US3)
 
 | If you're adding... | Put it in... | Pattern |
 |---------------------|--------------|---------|
 | New harness | `src/harness/{name}.rs` + register in `mod.rs` | Impl `HarnessModule` trait (8 methods Phase 4 + 7 new Phase 6, all methods override-able for per-harness specifics) |
+| Guardrails parsing logic | `src/harness/guardrails.rs` | Guardrails rendering SSOT complete in US3 (no further changes unless new fallback mechanism added) |
+| Guardrails region composition | `src/harness/rules_file.rs` | `compose_in_file()` shared for both Phase 4 `tome:begin/end` + guardrails; MarkerSpec parameterises both |
+| Guardrails reconciliation | `src/harness/sync.rs` | `reconcile_guardrails()` (3a) fully wired in US3; called in `sync_project()` BEFORE hooks BEFORE agents |
 | Hooks parsing logic | `src/harness/hooks.rs` | Hooks rewriting SSOT complete in US2 (no further changes unless US3 guardrails alter strategy) |
 | Hooks merge/remove | `src/harness/hooks.rs` | merge_into_settings / remove_from_settings functions; SSOT for ownership model (re-derivation + deep-equal) |
-| Hooks reconciliation | `src/harness/sync.rs` | reconcile_hooks() passes (3b) fully wired in US2; called in sync_project() BEFORE agents |
+| Hooks reconciliation | `src/harness/sync.rs` | reconcile_hooks() passes (3b) fully wired in US2; called in sync_project() AFTER guardrails BEFORE agents |
 | Agent parsing | `src/plugin/frontmatter.rs` | Agent frontmatter parsing complete in US1 (no changes) |
 | Agent enumeration | `src/plugin/components.rs` | `list_agent_files()` fully wired in US1 |
 | Agent lifecycle | `src/plugin/lifecycle.rs` | `collect_pending_agents()` fully wired in US1; no further changes needed |
 | Agent type | `src/harness/agents.rs` | Both types (CanonicalAgent, TranslatedAgent) complete; all helpers (parse, filename, alias, read-only, naming, renders) complete in US1 |
 | Harness agent override | `src/harness/{name}.rs` | Override `supports_native_agents()`, `agent_dir()`, `agent_format()`, `translate_agent()` methods (US1 complete for all five harnesses) |
 | Harness hook override | `src/harness/{name}.rs` | Override `hooks_strategy()` and `hook_settings_path()` methods (US2 complete; Claude Code returns RealJson + path; all others GuardrailsOnly + None) |
+| Harness guardrails override | `src/harness/{name}.rs` | Override `guardrails_target()` method (US3 complete; Claude Code returns in-file placement + suppress_if_hooks_present=true; all others return in-file AGENTS.md or Cursor sibling placement) |
 | Entry-kind exhaustive match | `src/commands/plugin/{mod,list,show}.rs`, `src/doctor/{checks,report}.rs`, `src/plugin/frontmatter.rs` | All matches extended to handle `EntryKind::Agent` in US1; defence-in-depth via canonical `from_str()` |
 | Agent doctor check | `src/doctor/checks.rs` | Stub extends to real checks in US5 (agent/hook/guardrails diagnostics) |
 | Hooks doctor check | `src/doctor/checks.rs` | Skeleton in US2; full implementation in US5 |
+| Guardrails doctor check | `src/doctor/checks.rs` | Skeleton in US3; full implementation in later phase |
 | Agent visibility | `src/commands/plugin/{show,list}.rs` | Consult agent rows from index; filter per invariants (searchable=false, user_invocable=false always) |
-| Hooks visibility | `src/commands/plugin/{show,list}.rs` | US3 guardrails will surface hooks; US2 no display |
-| Hook reconciliation sink | `src/harness/sync.rs` + per-harness impl | US2 hooks reconciliation complete in sync.rs; US3 wires guardrails rendering + write |
-| Guardrails prose | `src/harness/mod.rs` + per-harness impl | US1 agent translation complete; US2 hooks complete; US3 wires prose rendering + write |
+| Hooks visibility | `src/commands/plugin/{show,list}.rs` | US3 guardrails will surface hooks in doctor; US2 no display |
+| Guardrails visibility | `src/commands/plugin/{show,list}.rs` | US3 guardrails will surface guardrails status in doctor; not surfaced in show/list |
+| Hook reconciliation sink | `src/harness/sync.rs` + per-harness impl | US2 hooks reconciliation complete in sync.rs; US3 wires guardrails (3a) BEFORE hooks (3b) |
+| Guardrails rendering sink | `src/harness/sync.rs` + per-harness impl | US3 guardrails reconciliation complete in sync.rs; runs BEFORE hooks (3b) before agents (3c) |
+| New marker family | `src/harness/rules_file.rs` + `src/harness/{new}.rs` | Parameterised `MarkerSpec` + `find_marker_regions()` + `compose_in_file()` support any marker family (used by Phase 4 `tome:begin/end` + guardrails in US3) |
 | New substitution stage | `src/substitution/{stage}.rs` | US1 (Phase 6 / US1) complete; no new stages needed |
-| Schema change | `src/index/{schema,migrations}.rs` | v4 marker in Foundational, no backfill; agent rows use existing kind column; US1–US2 indexing complete |
-| Exit code | `src/error.rs` + `tests/exit_codes.rs` | Phase 6 codes 43–46 all wired in Foundational + US1–US2 (43: hook parse, 44: hook write, 45: agent translation, 46: guardrails write) |
+| Schema change | `src/index/{schema,migrations}.rs` | v4 marker in Foundational, no backfill; agent rows use existing kind column; US1–US2–US3 indexing complete |
+| Exit code | `src/error.rs` + `tests/exit_codes.rs` | Phase 6 codes 43–46 all wired in Foundational + US1–US2–US3 (43: hook parse, 44: hook write, 45: agent translation, 46: guardrails write) |
 
 ### Key Patterns
 
-#### Hooks Rewriting SSOT Pattern (Phase 6 / US2 COMPLETE)
+#### Guardrails Rendering SSOT Pattern (Phase 6 / US3 COMPLETE)
 
-All harness-agnostic hooks logic lives in `src/harness/hooks.rs`:
-- `read_rewritten_entries()` — parsing + rewriting SSOT
-- `merge_into_settings()` — merge semantics + idempotence SSOT
-- `remove_from_settings()` — removal semantics + ownership model SSOT (re-derivation + deep-equal)
-- Two-variable rewrite (${CLAUDE_PLUGIN_ROOT}, ${CLAUDE_PLUGIN_DATA}) applied to JSON string leaves only
-- All other ${CLAUDE_*} tokens left verbatim for Claude Code runtime resolution
-- Atomic writes (symlink-refusing, mode-preserving) to settings.local.json only
+All harness-agnostic guardrails logic lives in `src/harness/guardrails.rs`:
+- `read_guardrails_source()` — parsing + verbatim body + marker-shape validation SSOT
+- Marker region structure defined by `begin_marker()` / `end_marker()` / `region_key()` SSOT
+- Body never parsed (verbatim per contract); marker-shape lines fail-closed (exit 46, B-1)
 
-Per-harness `hooks_strategy()` + `hook_settings_path()` overrides; only Claude Code participates (RealJson).
+Per-harness `guardrails_target()` overrides return placement + suppression flag; only Claude Code suppresses (when plugin ships real hooks).
+
+#### Generalized Marker Engine Pattern (Phase 6 / US3 COMPLETE)
+
+Parameterised marker support in `src/harness/rules_file.rs`:
+- `MarkerSpec` encapsulates regex pair + render functions (compiled once per family)
+- `find_marker_regions()` — universal scanner for any marker family
+- `compose_in_file()` — universal lex-merger (deterministic order, overwrite-in-place, orphan removal, atomic write)
+- Both Phase 4 `tome:begin/end` rules-block + US3 guardrails regions coexist in same file, handled by same engine
+
+#### Guardrails Reconciliation Pass (Phase 6 / US3 COMPLETE)
+
+Three-phase integration into `sync_project()`:
+1. **Phase A** (DB read, caller responsibility): Project marker landed, workspace settings loaded
+2. **Phase 3a** (guardrails subsystem, runs BEFORE hooks 3b, BEFORE agents 3c): `reconcile_guardrails()` runs AFTER rules/MCP loop
+   - Enumerate enabled plugins (read-only DB access, once per sync)
+   - Read + validate each plugin's guardrails once (forward progress on read failure)
+   - Compute suppression set from hooks (Claude Code only; hooks must be parsed first)
+   - Per-harness dispatch: `compose_in_file()` lex-merges regions (deterministic, overwrite-in-place, orphan removal)
+   - Record per-file granularity + per-harness action
+3. **Result**: `SyncOutcome` with guardrails change granularity per file + aggregate per-harness action
 
 #### Hooks Reconciliation Pass (Phase 6 / US2 COMPLETE)
 
 Three-phase integration into `sync_project()`:
 1. **Phase A** (DB read, caller responsibility): Project marker landed, workspace settings loaded
-2. **Phase 3b** (hooks subsystem, runs BEFORE agents): `reconcile_hooks()` runs AFTER rules/MCP loop
+2. **Phase 3b** (hooks subsystem, runs AFTER guardrails 3a, BEFORE agents 3c): `reconcile_hooks()` runs AFTER rules/MCP loop
    - Enumerate enabled plugins (read-only DB access, once per sync)
    - Read + rewrite each plugin's hooks once
    - Per-harness dispatch: merge (live) / remove (non-live)
@@ -441,7 +489,7 @@ Per-harness `translate_agent()` overrides call these helpers; sync reconciliatio
 
 Three-phase integration into `sync_project()`:
 1. **Phase A** (DB read, caller responsibility): Project marker landed, workspace settings loaded
-2. **Phase B** (3c agents subsystem): `reconcile_agents()` runs AFTER hooks (3b)
+2. **Phase C** (3c agents subsystem): `reconcile_agents()` runs AFTER hooks (3b)
    - Enumerate enabled agents (read-only DB access)
    - Compute clash set once (FR-072)
    - Parse canonicals (forward progress on failure, FR-084)
@@ -461,6 +509,14 @@ match entry.kind {
 ```
 No catch-all; canonical `from_str()` guards at query time.
 
+#### Phase 6 Correction: Claude Code Rules-File Sink (Phase 6 / US3)
+
+Rules-file sink for Claude Code corrected from `AGENTS.md` to `CLAUDE.md`:
+- Candidate set: `CLAUDE.md` > `.claude/CLAUDE.md` (first existing; creates `CLAUDE.md` on first write)
+- **AGENTS.md is no longer a candidate** — Claude Code does not natively read `AGENTS.md`
+- Both rules-include block (Phase 4) and guardrails region (Phase 6) land in `CLAUDE.md` now
+- Codex / Gemini / OpenCode / Cursor keep using `AGENTS.md` (not Claude Code, so no correction)
+
 ---
 
 ## What Does NOT Belong Here
@@ -472,4 +528,4 @@ No catch-all; canonical `from_str()` guards at query time.
 
 ---
 
-*This document shows WHERE code lives. Updated 2026-05-31 against Phase 6 / US2 COMPLETE (real Claude Code hooks: parsing + two-variable rewrite SSOT in hooks.rs, per-harness hooks_strategy/hook_settings_path, sync reconciliation 3b subsystem before agents 3c, idempotent merge/remove semantics, atomic writes to settings.local.json). Test suites: Phase 5 baseline + entry_kind_agent_indexing, harness_trait_p6, schema_migration_p6, exit_codes + US1: agent_translation, agent_sync_reconciliation, agent_indexing_lifecycle, agent_e2e + US2: hooks_parsing, hooks_merge_remove, hooks_sync_reconciliation.*
+*This document shows WHERE code lives. Updated 2026-05-31 against Phase 6 / US3 COMPLETE (guardrails prose soft-fallback: per-plugin marker regions in rules files with Claude Code suppression when hooks present; rules_file.rs generalised to parameterised marker engine supporting both Phase 4 `tome:begin/end` + guardrails; sync reconciliation 3a subsystem before hooks 3b before agents 3c; Phase 6 correction: Claude Code rules_file_target() now CLAUDE.md > .claude/CLAUDE.md with AGENTS.md dropped). Test suites: Phase 5 baseline + entry_kind_agent_indexing, harness_trait_p6, schema_migration_p6, exit_codes + US1: agent_translation, agent_sync_reconciliation, agent_indexing_lifecycle, agent_e2e + US2: hooks_parsing, hooks_merge_remove, hooks_sync_reconciliation + US3: guardrails_parsing, guardrails_reconciliation, guardrails_marker_engine, phase6_correction_claude_code.*

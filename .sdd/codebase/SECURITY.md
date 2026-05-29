@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 / US2 real hooks; incremental update)
+> **Last Updated**: 2026-05-29 (Phase 6 / US3 guardrails + rules correction; incremental update)
 
 ## Overview
 
@@ -48,6 +48,7 @@ Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, wo
 38. Phase 5 / Polish additions: All Phase 5 feature work critical security invariants (no-rescan, truncation DoS, path traversal, resource walk hardening) verified end-to-end; **0 HIGH / 0 MEDIUM / 0 LOW** security findings from full Phase 5 audit; 4 critical blockers fixed across US1–US5; `validate_db_stored_path` promoted as single SSOT for path-traversal boundary checks across all entry-body-reading surfaces; Paths::plugin_data_root() unified singleton verified across all callers; all Phase 5 contracts (exit-codes-p5, substitution-engine, mcp-tools-p5, entry-schema-p5) ratified
 39. Phase 6 / US1 additions (NATIVE AGENTS): Plugin-supplied agent names validated as single safe path segment before becoming a filename (`is_safe_agent_name`); path-traversal vector closed (frontmatter `name: ../../evil` rejected before storing). Defence-in-depth: `target.parent() == Some(dir)` assertion before every agent write. Agent file writes reuse atomic, symlink-refusing, mode-preserving discipline (`write_standalone`). Plugin removal is literal prefix match (`plugin_of_owned_file`), not glob, scoped to directory walk. Privileged-field passthrough (hooks/mcpServers/permissionMode → `.claude/agents/`) is the intended FR-050 default, auditable in-file; striping opt-out (US5) surfaces privilege escalation report in doctor.
 40. Phase 6 / US2 additions (REAL HOOKS — THIRD-PARTY JSON WRITE SURFACE): Plugin-supplied `hooks/hooks.json` read on plugin enable with two-variable rewrite (`${CLAUDE_PLUGIN_ROOT}` + `${CLAUDE_PLUGIN_DATA}` → absolute paths); UTF-8 validation (fail-closed exit 44) prevents non-UTF-8 install paths from emitting U+FFFD-corrupted hook commands. Hooks merged into project's `.claude/settings.local.json` (gitignored, never committed) by deep structural-equality match (idempotent, never duplicates user-edited copy). Settings file read/write atomic, symlink-refusing, mode-preserving; 1 MiB read-cap enforced. Trust gate is operator's explicit `tome plugin enable`; Tome never auto-enables. Parent `.claude/` created 0700 on Unix when absent. Hook JSON rewrite is targeted two-token textual substitution only (NOT full Phase 5 substitution pipeline per NFR-007); syntax-valid textual replacement handles double-slash in paths safely. On disable, hooks re-derived and structurally-matching entries removed only (no sidecar ownership tracking; user-edited copy stays). 0 security findings from US2 reviewer pass.
+41. Phase 6 / US3 additions (GUARDRAILS SOFT FALLBACK + RULES-FILE CORRECTION): Plugin-shipped `hooks/GUARDRAILS.md` body copied verbatim into per-plugin marker regions in harness rules files; body validation enforces marker-injection defence (`body_contains_marker_line`): any line matching guardrails START/END regex or `tome:begin/end` block-marker regex rejected (exit 46, naming source) closing region-escape (persistent prose injection outside Tome's markers), file-wedge (exit-46-forever DoS), and rules-block corruption; loud-but-isolated (sibling plugins still reconcile). Guardrails write/delete targets (CLAUDE.md/AGENTS.md/GEMINI.md/Cursor sibling) atomic, symlink-refusing (exit 46 for guardrails targets per exit-codes-p6.md), mode-preserving. Path composition uses no attacker-influenced text in filesystem paths; `<catalog>:<plugin>` flows only into marker TEXT. Claude Code rules-include block and guardrails now land in `CLAUDE.md` (Phase 4 correction: was AGENTS.md) — same atomic/symlink/mode discipline, Claude Code now reads a file it actually reads; AGENTS.md shared across other harnesses resolves same `.tome/RULES.md` with no content duplication. 0 security findings from US3 reviewer pass.
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
@@ -243,6 +244,50 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 - `${CLAUDE_PLUGIN_DATA}/cache` → `/home/user/.tome/plugin-data/<cat>/<plugin>/cache` (correct)
 - `${CLAUDE_SESSION_ID}` → `${CLAUDE_SESSION_ID}` (left verbatim; Claude Code resolves at runtime)
 
+### Guardrails Body Validation (Phase 6 / US3)
+
+| Layer | Control | Implementation | Purpose |
+|-------|---------|----------------|---------|
+| **Presence check** | `hooks/GUARDRAILS.md` is optional | Returns `Ok(None)` when absent (benign fall-through; no guardrails region rendered) | `src/harness/guardrails.rs::read_guardrails_source` |
+| **Symlink refusal** | Refuse symlink before read | `refuse_symlink(&source)?` returns exit 46 | `src/harness/guardrails.rs::read_guardrails_source` (line 130) |
+| **Read-size cap** | Bounded read at `HARNESS_RULES_MAX` | `crate::util::bounded_read_to_string` prevents huge guardrails files | `src/harness/guardrails.rs::read_guardrails_source` (line 133) |
+| **Marker-injection defence (B-1)** | Body scanned for managed marker lines before copying verbatim | `body_contains_marker_line` checks against guardrails START/END regexes + `tome:begin/end` block-marker regex | `src/harness/guardrails.rs::body_contains_marker_line` (lines 149–155) |
+| **Rejection on marker match** | Any line matching any managed marker → `GuardrailsWriteFailed` (exit 46) | Naming the source file in the error for diagnostics | `src/harness/guardrails.rs::read_guardrails_source` (lines 139–141) |
+
+**Marker-Injection Defence Detail** (FR-084, B-1 security blocker):
+
+A guardrails body that itself contains a line resembling a managed marker (a guardrails START/END, or a Phase 4 `tome:begin/end` block marker) could:
+- **Region-escape**: If the body contains `<!-- END GUARDRAILS: <key> -->`, it could prematurely end the region, allowing subsequent lines (or text from sibling plugins) to escape the marker pair
+- **File-wedge DoS**: A stray `<!-- END` line with no matching START makes the parser fail on re-read, blocking future syncs (exit 46 forever)
+- **Rules-block corruption**: If the body contains `<!-- tome:begin -->` or `<!-- tome:end -->`, it could interfere with the Phase 4 rules-include block parsing
+
+**Defence Mechanism** (`src/harness/guardrails.rs::read_guardrails_source` + `body_contains_marker_line`):
+
+1. On plugin enable, before copying the GUARDRAILS.md body verbatim, Tome scans every line against:
+   - `START_REGEX` (matches the guardrails START marker pattern, e.g., `^<!-- START GUARDRAILS: .+ -->\s*$`)
+   - `END_REGEX` (matches the guardrails END marker pattern, key-agnostic)
+   - `BLOCK_MARKER_REGEX` (matches the Phase 4 `tome:begin` or `tome:end` line patterns)
+
+2. If ANY line matches ANY of the three regexes, the read fails with `TomeError::GuardrailsWriteFailed` (exit 46), naming the source file.
+
+3. The exact regexes used for validation are the same compiled regexes the reconciler parses with (`start_regex()`, `end_regex()`, `block_marker_regex()` in `src/harness/guardrails.rs`), ensuring the scan and parse can never disagree on what counts as a marker.
+
+4. A plugin's guardrails body is therefore **never stored in the index** and is **never rendered to disk** if it contains any marker line.
+
+**Examples of rejection**:
+- Body contains `<!-- START GUARDRAILS: evil:plugin -->` → Rejected (line matches START_REGEX)
+- Body contains `<!-- END GUARDRAILS: x:y -->` → Rejected (line matches END_REGEX)
+- Body contains `<!-- tome:begin -->` → Rejected (line matches BLOCK_MARKER_REGEX)
+- Body with trailing whitespace on a marker line → Rejected (regexes allow trailing whitespace; scan must too)
+- Body with ordinary prose, headings, includes, no marker lines → Accepted (B-1 test case)
+
+**Impact on Reconciliation**:
+
+- On a failed marker validation, the plugin's guardrails region is not rendered to any harness's rules file.
+- The reconciler continues to process sibling plugins' guardrails normally (loud-but-isolated error handling per FR-084).
+- The error surfaces with the source file path in the exit message.
+- User-authored guardrails regions in rules files are not affected (they are outside the Tome-managed marker pairs and are never re-parsed).
+
 ### Manifest Strictness
 
 | Rule | Implementation | Enforcement |
@@ -251,7 +296,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Compile-time check** | Every Tome-owned Deserialize struct preceded by attribute | Verified by structural grep test |
 | **Test enforcement** | `tests/manifest_strictness.rs` — assertion on 100% coverage | Test fails if any struct lacks attribute |
 | **Phase 4 US4 audit** | T098n extended to `SummariserRegistry`, `CachedSummaries` (with deny check); `src/summarise/registry.rs::SUMMARISER_ENTRY` manually audited | Phase 4 complete; all Tome-owned types verified; zero missing |
-| **Lenient third-party inputs** | `plugin.json` and `SKILL.md` frontmatter parsed without `deny_unknown_fields` (FR-013a); hooks JSON also lenient on forward-compat | Forward-compatible with upstream schema additions |
+| **Lenient third-party inputs** | `plugin.json` and `SKILL.md` frontmatter parsed without `deny_unknown_fields` (FR-013a); hooks JSON also lenient on forward-compat; guardrails body never parsed | Forward-compatible with upstream schema additions |
 | **Coverage** | Strict targets: `CatalogManifest`, `Owner`, `PluginDeclaration`, `Config`, `CatalogEntry`, `ModelManifest`, `ModelKind`, `WorkspaceName`, `ProjectMarkerConfig`, all Phase 4 additions | Mandatory, no exceptions |
 
 ### Harness Configuration Validation (Phase 4 / US1.b + US5 + Polish)
@@ -328,6 +373,57 @@ pub fn merge_into_settings(target: &Path, hooks: &RewrittenHooks) -> Result<bool
 | **MCP log** | Harness sync errors scrubbed before JSON logging | `src/mcp/` log output |
 
 **Design note**: The rewritten hooks become literal executed commands — if a hook command contains a secret (e.g., an API key), that secret is operator-supplied, not Tome's responsibility to scrub. The trust model assumes operators deliberately include secrets in hooks when that's correct for their use case.
+
+## Guardrails and Rules-File Write Security (Phase 6 / US3)
+
+### Guardrails Write Discipline
+
+| Layer | Control | Guarantee |
+|-------|---------|-----------|
+| **Symlink refusal on read** | `refuse_symlink(&source)?` at read entry point | Exit 46 (GuardrailsWriteFailed); prevents reading through symlinks to source |
+| **Symlink refusal on write** | `refuse_symlink(target)` checks target before read/write (in-file and sibling writes) | Exit 46; prevents writing to symlink targets |
+| **Mode preservation** | Read existing target's mode before write; chmod staged tempfile to that mode before persist | `src/harness/rules_file.rs::atomic_write` path; permissions preserved on rewrite |
+| **Atomic persist** | Write to tempfile → POSIX rename (via `rules_file::atomic_write`) | Crash mid-write leaves no partial file; same-FS rename is atomic |
+| **Marker validation** | Body validated via `body_contains_marker_line` before copying verbatim | Exit 46 on marker match; prevents region-escape, file-wedge, rules-block corruption |
+| **Deterministic ordering** | Regions ordered lexicographically by `<catalog>:<plugin>` key within file | Re-syncs never reorder existing content; idempotence verified |
+| **In-place overwrite** | Existing region content overwritten between markers; no duplication | Re-synced region with new body replaces old body in place |
+| **Orphan removal** | Regions for disabled plugins or unsuppressed-for-file plugins removed entirely (including preceding blank separator) | Per-plugin removal via marker-key match and orphaned-region detection |
+
+**Code Location** (`src/harness/guardrails.rs`):
+```rust
+/// Reconcile guardrails regions in an in-file target (CLAUDE.md, AGENTS.md, GEMINI.md).
+pub fn reconcile_in_file_region(
+    target: &Path,
+    desired: &BTreeMap<String, String>,
+) -> Result<GuardrailsAction, TomeError> {
+    refuse_symlink(target).map_err(|_| TomeError::GuardrailsWriteFailed { ... })?;
+    // ... read, compose, validate, write via atomic_write ...
+    Ok(action)
+}
+
+/// Validate body before copying verbatim.
+pub fn read_guardrails_source(plugin_root: &Path) -> Result<Option<String>, TomeError> {
+    let source = plugin_root.join("hooks").join("GUARDRAILS.md");
+    refuse_symlink(&source).map_err(|_| TomeError::GuardrailsWriteFailed { ... })?;
+    let body = bounded_read_to_string(&source, ...)?;
+    if body_contains_marker_line(&body) {
+        return Err(TomeError::GuardrailsWriteFailed { path: source });
+    }
+    Ok(Some(body))
+}
+```
+
+### Claude Code Rules-File Correction (Phase 6 / US3)
+
+| Control | Implementation | Change from Phase 4 |
+|---------|----------------|---------------------|
+| **Claude Code target (FR-020)** | Both rules-include block and guardrails regions target `CLAUDE.md` | Was `AGENTS.md` — Phase 4 latent error (Claude Code does not read `AGENTS.md` natively) |
+| **Candidate precedence (FR-022)** | Claude Code candidates: `CLAUDE.md` > `.claude/CLAUDE.md` (first existing wins; create `CLAUDE.md` when none exist) | Previously listed `AGENTS.md` first; new correction makes Claude Code read a file it actually reads |
+| **Shared AGENTS.md (FR-021)** | Codex, Gemini, OpenCode continue sharing one `AGENTS.md` rules-include block | Unchanged from Phase 4 |
+| **No transitive import** | Tome does NOT create a chain where Claude Code imports AGENTS.md (FR-022) | Design constraint: both files resolve same `.tome/RULES.md` with no content duplication |
+| **Both point to same rules file** | Claude Code's `CLAUDE.md` block + shared `AGENTS.md` block both resolve same `.tome/RULES.md` via the include directive (no duplicated rules) | Symmetry: one file, two harness-local entry points, no double-apply |
+
+**Rationale**: Phase 4 mistakenly targeted `AGENTS.md` for Claude Code because the Codex/Gemini/OpenCode shared block was in `AGENTS.md`. Claude Code does not natively read `AGENTS.md` and never has — the shared block would be invisible to Claude Code users. The Phase 6 correction makes the rules-include block land in `CLAUDE.md` for Claude Code, while the other harnesses keep their shared `AGENTS.md` block. Both include directives point at the same `.tome/RULES.md`, so there is no content duplication and no reliance on Claude Code ever shipping native `AGENTS.md` support.
 
 ## Agent File Write Security (Phase 6 / US1)
 
@@ -610,6 +706,7 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 | **Settings edits** | `toml_edit` via `write_atomic` | Mode preserved; symlinks refused |
 | **Agent file write** | `write_standalone` (Phase 6 / US1) | Symlink refused; atomic persist; mode preserved |
 | **Hooks settings write** | Read → merge → write via `write_settings` (Phase 6 / US2) | Atomic persist; mode preserved; idempotent |
+| **Guardrails write** | Read → compose → write via `atomic_write` (Phase 6 / US3) | Symlink refused; atomic persist; mode preserved; marker-validated |
 | **Model downloads** | Stream-to-partial → rename | Cleanup closure ensures partial removed on checksum mismatch |
 
 ### Symlink Refusal (Defense in Depth)
@@ -622,11 +719,13 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 | Atomic dir landing | Staging path symlink refusal | Exit 7 | `src/util/atomic_dir.rs::refuse_symlink` |
 | **Hooks settings file (US2)** | **Write-back symlink check** | **Exit 7** | **`src/harness/hooks.rs::refuse_symlink_settings` (new US2 surface)** |
 | **Agent file write** | **Write-back symlink check (Phase 6 / US1)** | **Exit 7** | **`src/harness/rules_file.rs::refuse_symlink` (reused for agents)** |
+| **Guardrails source read (US3)** | **Source file symlink check** | **Exit 46** | **`src/harness/guardrails.rs::read_guardrails_source` (new US3 surface)** |
+| **Guardrails target write (US3)** | **Target file symlink check** | **Exit 46** | **`src/harness/guardrails.rs::reconcile_in_file_region` + `reconcile_standalone_sibling` (new US3 surfaces)** |
 | MCP get_skill walk | Directory symlink skip | Silent skip | `src/mcp/tools/get_skill.rs` (`is_symlink()` filter) |
 | Doctor orphan cleanup | Symlink-skip in sweep | Silent skip | `src/doctor/orphan_cleanup.rs::sweep_one` (symlink_metadata check) |
 | **MCP plugin show resource walk** | **Directory symlink skip (Phase 5 / US5)** | **Silent skip** | **`src/mcp/tools/plugin_show.rs::walk_resources` (`is_symlink()` filter; US5 new surface)** |
 
-**Threat Model**: Hostile catalog clones `skills/creds → ~/.ssh/id_rsa`, operator runs `tome plugin enable` → would leak SSH key via skill content. **Mitigation**: symlink skip in MCP `get_skill` walk + symlink refusal on writes + resource enumeration skip in `plugin_show`. Phase 6 US1 extends to agent file writes: symlink refusal before emitting to `.claude/agents/`. Phase 6 US2 extends to hooks settings file writes: symlink refusal before reading/writing `.claude/settings.local.json`.
+**Threat Model**: Hostile catalog clones `skills/creds → ~/.ssh/id_rsa`, operator runs `tome plugin enable` → would leak SSH key via skill content. **Mitigation**: symlink skip in MCP `get_skill` walk + symlink refusal on writes + resource enumeration skip in `plugin_show`. Phase 6 US1 extends to agent file writes: symlink refusal before emitting to `.claude/agents/`. Phase 6 US2 extends to hooks settings file writes: symlink refusal before reading/writing `.claude/settings.local.json`. Phase 6 US3 extends to guardrails source reads and target writes: symlink refusal for both directions, exit 46 dedicated to guardrails failures.
 
 ### File Mode Preservation
 
@@ -637,6 +736,7 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 | Rules file rewrite | Same | Same | `src/harness/rules_file.rs::atomic_write` (via `write_atomic`) |
 | **Hooks settings file (US2)** | **Existing file mode, or tempfile default (0600) for new** | **`chmod` staged file before `persist`** | **`src/harness/hooks.rs::write_settings` (new US2 surface)** |
 | **Agent file write** | **Same (Phase 6 / US1)** | **Same** | **`src/harness/rules_file.rs::write_standalone` (reused for agents)** |
+| **Guardrails target write (US3)** | **Existing file mode, or tempfile default for new** | **`chmod` staged file before `persist`** | **`src/harness/rules_file.rs::atomic_write` (reused for guardrails)** |
 | Project marker write | Same | Same | `src/util/atomic_dir.rs::land_directory` (chmod 0o700 before keep) |
 
 **Protection Against**: Silent permission downgrade (0o600 → 0o644) when a rewrite via `NamedTempFile::persist` doesn't preserve existing mode. Relevant for sensitive config files; tests verify via `tests/security_hardening.rs`.
@@ -692,9 +792,12 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 - Exit 43: `HookSpecParseError` (malformed / unparsable `hooks/hooks.json`, non-UTF-8 paths)
 - Exit 44: `HookSettingsWriteFailed` (failure to read/merge/write `.claude/settings.local.json`)
 
+**Phase 6 / US3 additions**:
+- Exit 46: `GuardrailsWriteFailed` (failed guardrails render/write to rules files or Cursor sibling, marker-injection violation in plugin body, symlink refusal on guardrails source or target)
+
 See `specs/005-phase-5-commands-prompts/contracts/exit-codes-p5.md` + `specs/006-phase-6-hooks-agents/contracts/exit-codes-p6.md` for full enumeration.
 
 ---
 
 *This document defines security controls. Update when security posture changes.*
-*Last refreshed 2026-05-29 against Phase 6 / US2 real hooks code (incremental update); Phase 5 Polish baseline (1172 tests, 147 suites); hooks JSON read/rewrite, settings file merge, UTF-8 validation, and atomic write discipline all verified; 0 security findings from US2 reviewer pass.*
+*Last refreshed 2026-05-29 against Phase 6 / US3 guardrails + rules-file correction (incremental update); Phase 5 Polish baseline (1172 tests, 147 suites); guardrails body marker-injection validation, rules-file correction (Claude.md), guardrails atomic write discipline, and symlink refusal all verified; 0 security findings from US3 reviewer pass.*
