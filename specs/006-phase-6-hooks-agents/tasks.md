@@ -226,7 +226,7 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T116 [US4] Run codebase mapping for Phase 6 changes (`/sdd:map incremental`).
 - [X] T117 [US4] Review `retro/P6.md`; extract learnings to `CLAUDE.md` (conservative).
 - [X] T118 [GIT] Commit: `docs(phase-6): US4 closeout — mapping + retro`.
-- [ ] T119 [GIT] Push; PR with US4 summary; verify CI; report PR ready status.
+- [X] T119 [GIT] Push; PR with US4 summary; verify CI; report PR ready status. (PR #135 squash-merged to main @ 39153b2.)
 
 **Checkpoint**: Personas reach harnesses without native agents.
 
@@ -238,8 +238,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Independent test**: Privileged agent emitted intact by default + listed in the doctor privilege report; with `strip_plugin_agent_privileges` on (workspace/global), the same agent is emitted without the three fields; doctor accurately reports all subsystems and `--fix` repairs only safe cases. (SC-009, SC-010)
 
-- [ ] T120 Create `specs/006-phase-6-hooks-agents/retro/P7.md` from template.
-- [ ] T121 [GIT] Commit: `docs(phase-6): init P7 retro`.
+- [X] T120 Create `specs/006-phase-6-hooks-agents/retro/P7.md` from template.
+- [X] T121 [GIT] Commit: `docs(phase-6): init P7 retro`.
 - [ ] T122 [US5] Add `strip_plugin_agent_privileges: bool` (default false) to the three settings structs in `src/settings/mod.rs`, reusing the scalar priority-walk resolver (FR-052/053) (use devs:rust-dev agent).
 - [ ] T123 [US5] Implement privilege passthrough (default) + strip-when-set for `hooks`/`mcpServers`/`permissionMode` in claude-code agent emission in `src/harness/claude_code.rs` (FR-050/052) (use devs:rust-dev agent).
 - [ ] T124 [GIT] Commit: `feat(phase-6): plugin-agent privilege passthrough + strip setting`.
