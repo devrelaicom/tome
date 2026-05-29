@@ -284,9 +284,30 @@ pub trait HarnessModule: Send + Sync {
 
     /// Translate a canonical agent into this harness's native form (FR-030,
     /// FR-032). Only ever called when `supports_native_agents()` is `true`;
-    /// non-supporting harnesses need no override. The default panics
-    /// loudly to surface a dispatch bug rather than emit a bogus file.
-    fn translate_agent(&self, _canonical: &agents::CanonicalAgent) -> agents::TranslatedAgent {
+    /// non-supporting harnesses need no override.
+    ///
+    /// `clashes` is the workspace clash flag for this agent's `<name>`
+    /// (FR-041): when `true`, two or more enabled plugins hold the same
+    /// name, so the displayed/registered name is plugin-prefixed
+    /// (`<plugin>-<name>`). The on-disk filename stays `<plugin>__<name>`
+    /// regardless. Chunk C computes the flag once per sync from the shared
+    /// clash-set SSOT ([`crate::index::skills::agent_name_clash_set`]) and
+    /// passes it per agent.
+    ///
+    /// The plugin/catalog provenance the filename needs lives on
+    /// [`agents::CanonicalAgent`] itself (`plugin`, `catalog`), so the
+    /// signature needs only the clash flag beyond the canonical.
+    ///
+    /// Returns `Result` because translation can fail (e.g. a body that
+    /// cannot be rendered into the target format) → `AgentTranslationFailed`
+    /// (exit 45). The default panics loudly to surface a dispatch bug rather
+    /// than emit a bogus file — it is only reached if a `GuardrailsOnly`
+    /// harness is wrongly asked to translate.
+    fn translate_agent(
+        &self,
+        _canonical: &agents::CanonicalAgent,
+        _clashes: bool,
+    ) -> Result<agents::TranslatedAgent, crate::error::TomeError> {
         unreachable!(
             "translate_agent called on a harness without native agent support: {}",
             self.name()

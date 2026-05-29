@@ -2,7 +2,7 @@
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 Foundational)
+> **Last Updated**: 2026-05-29 (Phase 6 US1 — native agents)
 
 ## Test Framework
 
@@ -33,7 +33,7 @@
 
 ```
 tests/
-├── *.rs                         # Integration test files (153 total as of Phase 6 Foundational)
+├── *.rs                         # Integration test files (161+ total as of Phase 6 US1)
 ├── common/
 │   ├── mod.rs                   # Shared harness: ToolEnv, Fixture, guards
 │   └── ...                      # (exported helpers)
@@ -66,16 +66,21 @@ tests/
 | **Security & hardening** | `security_hardening.rs` | File perms, symlink refusal (1 file) |
 | **Error & exit codes** | `exit_codes*.rs`, `error_messages.rs` | Exit code coverage, Display impl (2 files) |
 | **Substitution** (Phase 5) | `substitution_*.rs`, `entry_*.rs` | Variable expansion, argument coercion (8 files) |
+| **Agent translation** (Phase 6) | `agent_translate_*.rs`, `agent_*.rs` | Per-harness native agents (8 files) |
 | **Misc** | `path_validation.rs`, `atomic_dir.rs`, etc. | Phase 1 foundational (10 files) |
 
-**Total**: 153 test files across 153 suites; 1194+ tests pass (Phase 6 Foundational: Phase 5 Polish 1193 → 1194+, +1 new test suite).
+**Total**: 161+ test files across 161+ suites; 1200+ tests pass (Phase 6 US1: Phase 6 Foundational 1194 → 1200+, +8 agent test files).
 
-**Phase 6 Foundational additions**:
-- `tests/entry_kind_agent_indexing.rs` — Verify `EntryKind::Agent` widening integrates with count surfaces (storage + doctor + plugin show) without schema drift regression
-- `tests/schema_migration_p6.rs` — Pin the marker-only `kind` domain migration (v3 → v4)
-- `tests/harness_trait_p6.rs` — Exercise Phase 6 hook + agent dispatch via configurable `StubHarness` builder
-- Extensions to `tests/exit_codes.rs` — New Phase 6 exit code variants (43–46)
-- Extensions to `tests/doctor_json.rs` — Added `agents` field to `EntryCountsByKind` wire shape pin
+**Phase 6 US1 additions**:
+- `tests/agent_translate_claude_code.rs` — Claude Code native-agent translation (MarkdownYaml format, model alias map, dropped field tracking)
+- `tests/agent_translate_codex.rs` — Codex native-agent translation (TOML format, triple-quoted developer_instructions, model drop)
+- `tests/agent_translate_cursor.rs` — Cursor native-agent translation (MarkdownYaml format, empty model alias drop)
+- `tests/agent_translate_opencode.rs` — OpenCode native-agent translation (MarkdownYaml format, fully-qualified model ids, plugin-prefixed names)
+- `tests/agent_naming_clash.rs` — Agent name-clash display naming (same filename regardless; displayed name only on clash)
+- `tests/agent_removal.rs` — Orphan agent cleanup and per-plugin removal (plugin_of_owned_file ownership split)
+- `tests/agent_path_traversal.rs` — Path-traversal defence via is_safe_agent_name (S-1)
+- Extensions to `tests/entry_kind_agent_indexing.rs` — Verify `EntryKind::Agent` widening integrates with storage + queries without schema drift
+- Extensions to `tests/harness_sync_stub.rs` — Native-agent emit/orphan-removal/idempotence via mtime capture, symlink refusal (exit 7), forward-progress (exit 45), multi-harness fan-out
 
 ## Test Patterns
 
@@ -272,6 +277,79 @@ fn harness_with_hook_settings_returns_path() {
 
 **Pattern** (Phase 6 Foundational F3): `StubHarness` evolved from a unit struct to a `#[derive(Default)]` struct. The `Default` impl produces safe defaults (trait safe defaults for all methods). Builder setters (`with_*`) flip capabilities without spelling out the whole struct. Used in `tests/harness_trait_p6.rs` to exercise hook + agent dispatch paths.
 
+### Phase 6: Direct Per-Harness `translate_agent` Unit Tests
+
+When testing a harness's agent translation without the full CLI/sync stack, call the harness's `translate_agent` method directly:
+
+```rust
+// tests/agent_translate_codex.rs
+#[test]
+fn body_lands_in_triple_quoted_developer_instructions() {
+    let agent = read_only_agent();
+    let t = CODEX.translate_agent(&agent, false).expect("translate");
+
+    // Parse the rendered TOML and read the value back
+    let doc: toml_edit::DocumentMut = t.rendered.parse().expect("parse");
+    assert_eq!(
+        doc["developer_instructions"].as_str(),
+        Some(agent.body.as_str()),
+        "developer_instructions holds the body verbatim",
+    );
+}
+```
+
+**Pattern** (Phase 6 US1): Harness modules implement `HarnessModule::translate_agent`, which takes a `CanonicalAgent` and a clash-set boolean. Direct calls avoid spinning up CLI, project markers, sync orchestration — tests remain fast and narrowly focused. Supports quick iteration on format/field-mapping details. Used for per-harness contract coverage.
+
+### Phase 6: Full-Stack Agent Sync Tests via `sync_project` + Override
+
+When testing the complete agent pipeline (enable → index → sync), use the library API with harness override:
+
+```rust
+// tests/agent_naming_clash.rs
+#[test]
+fn clash_applies_plugin_prefix_to_display_name() {
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(ClaudeCode)]);
+    let fx = Fixture::build("test-workspace");
+
+    // Insert two agents with the same `name` from different plugins
+    insert_enabled_agent_row(&paths, "test-workspace", "cat", "pluginA", "reviewer", ...);
+    insert_enabled_agent_row(&paths, "test-workspace", "cat", "pluginB", "reviewer", ...);
+
+    let outcome = sync::sync_project(&fx.project, &fx.deps()).expect("sync");
+    
+    // Both files exist on disk with plugin-prefixed display names
+    let a_rules = std::fs::read_to_string(&fx.project.join("CLAUDE_CODE_RULES.md"))?;
+    assert!(a_rules.contains("name: pluginA-reviewer"));
+    assert!(a_rules.contains("name: pluginB-reviewer"));
+}
+```
+
+**Pattern** (Phase 6 US1): Tests that verify end-to-end agent sync behavior must install a real harness module (not `StubHarness`, which lacks translation semantics), seed agent rows in the index, and call `sync_project`. The `OVERRIDE_MUTEX` serializes concurrent override access. Used for integration-layer tests like clash handling, orphan cleanup, removal.
+
+### Phase 6: Byte-Stable JSON Pins for Agent Dropped-Fields
+
+When testing agent translation, verify the `dropped_fields` vector is recorded correctly and byte-stable:
+
+```rust
+// tests/agent_translate_codex.rs
+#[test]
+fn model_is_dropped_and_recorded() {
+    let t = CODEX
+        .translate_agent(&read_only_agent(), false)
+        .expect("translate");
+
+    // Recorded for the doctor surface
+    assert!(
+        t.dropped_fields.contains(&"model".to_owned()),
+        "dropped model must be recorded; got {:?}",
+        t.dropped_fields,
+    );
+}
+```
+
+**Pattern** (Phase 6 US1 / T053 placeholder): Every translation result carries a `dropped_fields: Vec<String>` describing which frontmatter keys were dropped during the field-map. Byte-stable JSON pin tests verify field order and presence for `TranslatedAgent` serialization (when agents are stored in doctor diagnostics).
+
 ## Test Data
 
 ### Fixtures
@@ -336,7 +414,7 @@ Test-only deterministic harness implementation in `src/harness/stub.rs`, configu
 | `EMBEDDER_OVERRIDE` | `EmbedderGuard` | Stub embedder in tests |
 | `RERANKER_OVERRIDE` | `RerankerGuard` | Stub reranker in tests |
 | `SUMMARISER_OVERRIDE` | `SummariserOverrideGuard` | Stub summariser (Phase 4) |
-| `HARNESS_MODULES_OVERRIDE` | `HarnessModulesGuard` | Synthetic harness registry |
+| `HARNESS_MODULES_OVERRIDE` | `HarnessModulesGuard` | Synthetic harness registry (Phase 6) |
 | `MIGRATIONS_OVERRIDE` | `MigrationsGuard` | Synthetic schema migrations |
 | `SUBSTITUTION_CLOCK_OVERRIDE` | `ClockOverrideGuard` | Fixed system clock (Phase 5) |
 | `PLUGIN_DATA_DIR_OVERRIDE` | `PluginDataDirGuard` | Plugin data directory (Phase 5) |
@@ -353,10 +431,11 @@ All defined in `tests/common/mod.rs` with RAII drop guards.
 | Library API | 100% on public surface | ✓ | Unit tests in modules |
 | Error Display | All variants | ✓ | `tests/error_messages.rs` |
 | JSON wire shapes | Byte-stable pins | ✓ | `tests/*_json_shape.rs` (Phase 4+) |
+| Agent translation | Per-harness contract | ✓ | `tests/agent_translate_*.rs` (Phase 6 US1) |
 
 **Exclusions**: ONNX inference (real model load excluded; library `fastembed` tests own path), real model downloads (fabricated fixtures instead), MCP protocol purity (deferred T093–T095).
 
-**Phase 6 Foundational**: Exit codes 43–46 (Phase 6 hooks + agents) are covered in `tests/exit_codes.rs`. New JSON wire shape `EntryCountsByKind` with `agents` field pinned in `tests/doctor_json.rs`. Schema migration marker-only pattern verified in `tests/schema_migration_p6.rs`. Entry kind widening integration tested in `tests/entry_kind_agent_indexing.rs`.
+**Phase 6 US1**: Exit codes 43–46 (Phase 6 hooks + agents) are covered in `tests/exit_codes.rs`. New JSON wire shape `TranslatedAgent` with `dropped_fields` pinned in per-harness translation tests. Agent indexing integrated with `EntryKind::Agent` variant verified in `tests/entry_kind_agent_indexing.rs`. Agent removal (orphan + per-plugin) logic tested in `tests/agent_removal.rs`. Path-traversal defence (S-1) verified in `tests/agent_path_traversal.rs`.
 
 ## Test Categories by Purpose
 
@@ -383,6 +462,7 @@ Tests for previously fixed bugs, linked to phase retros:
 | Phase 5 US3 | `retro/P5.md` | `entry_kind_indexing.rs` (Entry kind + collision handling) |
 | Phase 5 US5 | (current) | `doctor_phase5_surface_creates_no_dirs` (FR-124 read-only invariant) |
 | Phase 6 Foundational F2 | (current) | `entry_kind_agent_indexing.rs` (Agent row integration; schema drift prevention) |
+| Phase 6 US1 S-1 | (current) | `agent_path_traversal.rs` (Index-time gate blocks ../../../../tmp/evil) |
 
 ### Invariant Tests
 
@@ -399,6 +479,10 @@ Tests that verify core properties hold:
 | Exact-count pins | `plugin_show_p5.rs`, `doctor_p5.rs`, `doctor_json.rs` | Deterministic fixture counts stay exact (Phase 5 Polish + Phase 6) |
 | Canonical enum dispatch | `entry_kind_agent_indexing.rs` | Exhaustive match on `EntryKind` surfaces schema drift (Phase 6 F2) |
 | Marker migration | `schema_migration_p6.rs` | Version bump advances without DDL (Phase 6 Foundational) |
+| Filename provenance | `agent_removal.rs` | `<plugin>__<name>` is the sole provenance rule (Phase 6 US1) |
+| Agent embedding skip | `entry_kind_agent_indexing.rs` | Agent rows are never embedded; queries filter on `embedding IS NOT NULL` (Phase 6 US1) |
+| Path-traversal defence | `agent_path_traversal.rs` | Attacker-controlled `name: ../../../../tmp/evil` rejected at index time (S-1) |
+| Display name clash | `agent_naming_clash.rs` | Two agents with same `<name>` show plugin-prefixed display names (FR-041) |
 
 ### Phase 5: Truncation Boundary Tests
 
@@ -424,6 +508,25 @@ Tests that verify deterministic entity counts and collection states (US5.b + Pol
 | `doctor_p5.rs::pending_re_embedding_zero_when_no_files_touched()` | Zero re-embeds when nothing changed (GAP-2, Polish) | Zero-state assertion |
 
 **Rationale** (Polish phase learnings): The zero-state and empty-section invariant tests catch "off-by-one forgot to reset" bugs. Phase 5 Polish T-W1 introduced the pattern; now applied to pending counts and empty arrays. Together with positive tests, this three-case coverage (positive/negative/zero/empty) becomes the canonical pattern for deterministic fixtures.
+
+### Phase 6: Agent Translation Contract Tests
+
+Tests that verify each harness's agent format and field-mapping contract (US1):
+
+| Test | Harness | Checks |
+|------|---------|--------|
+| `agent_translate_claude_code.rs::body_lands_in_frontmatter()` | Claude Code | MarkdownYaml format; frontmatter keys; model pass-through |
+| `agent_translate_codex.rs::body_lands_in_triple_quoted_developer_instructions()` | Codex | TOML format; developer_instructions triple-quote; model DROP |
+| `agent_translate_cursor.rs::format_and_filename_match_contract()` | Cursor | MarkdownYaml format; model DROP (no alias) |
+| `agent_translate_opencode.rs::model_maps_to_qualified_anthropic_id()` | OpenCode | MarkdownYaml format; `opus` → `anthropic/claude-opus-4.7`; display name override |
+
+**Pattern** (Phase 6 US1): Each harness has a `translate_agent` test file verifying the contract (`contracts/agent-translation.md` SC-001 row). Direct calls to `HarnessModule::translate_agent` with hand-crafted `CanonicalAgent` fixtures. Tests verify:
+- Format (MarkdownYaml or Toml)
+- Filename (always `<plugin>__<name>.<ext>`)
+- Body placement (frontmatter vs triple-quoted)
+- Model mapping (same-vendor-only)
+- Dropped-fields vector
+- Read-only inference (tools → sandbox_mode or not)
 
 ## CI Integration
 
@@ -498,6 +601,9 @@ fn doctor_p5_surface_creates_no_dirs() { ... }
 
 #[test]
 fn entry_kind_agent_injected_rows_counted_correctly() { ... }
+
+#[test]
+fn agent_path_traversal_rejected_at_index_time() { ... }
 ```
 
 ### Minimal External I/O

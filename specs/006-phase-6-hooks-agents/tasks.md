@@ -86,55 +86,55 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Independent test**: Enable a plugin with an `agents/` dir in a workspace whose effective list includes claude-code/codex/cursor/opencode; assert each harness's agent dir holds `<plugin>__<name>.<ext>` in the right format/body location; assert model mapping + dropped fields; disable removes exactly `<plugin>__*`; re-sync is a no-op. (SC-001, SC-002, SC-003)
 
-- [ ] T027 Create `specs/006-phase-6-hooks-agents/retro/P3.md` from template.
-- [ ] T028 [GIT] Commit: `docs(phase-6): init P3 retro`.
+- [X] T027 Create `specs/006-phase-6-hooks-agents/retro/P3.md` from template.
+- [X] T028 [GIT] Commit: `docs(phase-6): init P3 retro`.
 
 ### Agent indexing
 
-- [ ] T029 [US1] Walk `agents/*.md` in `src/plugin/components.rs` alongside skills/ and commands/ (use devs:rust-dev agent).
-- [ ] T030 [US1] Insert agent rows in `src/index/skills.rs` with `kind='agent'`, `searchable=0`, `user_invocable=0`, embedding skipped; name = frontmatter `name` else filename stem; description = else first non-empty body line (use devs:rust-dev agent).
-- [ ] T031 [US1] Plumb agent kind through enable/disable/reindex in `src/plugin/lifecycle.rs` (use devs:rust-dev agent).
-- [ ] T032 [US1] Add the workspace-scoped clash-set query (≥2 enabled agent rows sharing `<name>`) in `src/index/skills.rs`, computed once per sync (FR-072) (use devs:rust-dev agent).
-- [ ] T033 [GIT] Commit: `feat(phase-6): index plugin agents (kind=agent, non-searchable)`.
+- [X] T029 [US1] Walk `agents/*.md` in `src/plugin/components.rs` alongside skills/ and commands/ (use devs:rust-dev agent).
+- [X] T030 [US1] Insert agent rows in `src/index/skills.rs` with `kind='agent'`, `searchable=0`, `user_invocable=0`, embedding skipped; name = frontmatter `name` else filename stem; description = else first non-empty body line (use devs:rust-dev agent).
+- [X] T031 [US1] Plumb agent kind through enable/disable/reindex in `src/plugin/lifecycle.rs` (use devs:rust-dev agent).
+- [X] T032 [US1] Add the workspace-scoped clash-set query (≥2 enabled agent rows sharing `<name>`) in `src/index/skills.rs`, computed once per sync (FR-072) (use devs:rust-dev agent).
+- [X] T033 [GIT] Commit: `feat(phase-6): index plugin agents (kind=agent, non-searchable)`.
 
 ### Translation core + naming + removal
 
-- [ ] T034 [US1] Create `src/harness/agents.rs`: `CanonicalAgent` parse (frontmatter + body), the per-harness emit dispatch, and the `<plugin>__<name>.<ext>` filename builder (sole provenance) (use devs:rust-dev agent).
-- [ ] T035 [US1] Add the same-vendor `ModelAliasTable` in `src/harness/agents.rs` per `contracts/agent-translation.md` (opus→opencode `anthropic/claude-opus-4.7`; opus→codex drop; inherit→drop everywhere); unmapped ⇒ drop (use devs:rust-dev agent).
-- [ ] T036 [US1] Implement the read-only-intent inference rule (from tool allowlist/disallowed-tools) in `src/harness/agents.rs` (FR-036) (use devs:rust-dev agent).
-- [ ] T037 [US1] Implement displayed/registered name logic (clean `<name>`; `<plugin>-<name>` only on clash) in `src/harness/agents.rs` (FR-041) (use devs:rust-dev agent).
-- [ ] T038 [US1] Implement removal glob `<plugin>__*.<ext>` per agent dir in `src/harness/agents.rs` (FR-043) (use devs:rust-dev agent).
-- [ ] T039 [GIT] Commit: `feat(phase-6): agent translation core + model-alias table + naming/removal`.
+- [X] T034 [US1] Create `src/harness/agents.rs`: `CanonicalAgent` parse (frontmatter + body), the per-harness emit dispatch, and the `<plugin>__<name>.<ext>` filename builder (sole provenance) (use devs:rust-dev agent).
+- [X] T035 [US1] Add the same-vendor `ModelAliasTable` in `src/harness/agents.rs` per `contracts/agent-translation.md` (opus→opencode `anthropic/claude-opus-4.7`; opus→codex drop; inherit→drop everywhere); unmapped ⇒ drop (use devs:rust-dev agent).
+- [X] T036 [US1] Implement the read-only-intent inference rule (from tool allowlist/disallowed-tools) in `src/harness/agents.rs` (FR-036) (use devs:rust-dev agent).
+- [X] T037 [US1] Implement displayed/registered name logic (clean `<name>`; `<plugin>-<name>` only on clash) in `src/harness/agents.rs` (FR-041) (use devs:rust-dev agent).
+- [X] T038 [US1] Implement removal glob `<plugin>__*.<ext>` per agent dir in `src/harness/agents.rs` (FR-043) (use devs:rust-dev agent).
+- [X] T039 [GIT] Commit: `feat(phase-6): agent translation core + model-alias table + naming/removal`.
 
 ### Per-harness translation
 
-- [ ] T040 [P] [US1] Implement `translate_agent` + `agent_dir`/`agent_format`/`supports_native_agents` for claude-code (MD+YAML, `.claude/agents/`) in `src/harness/claude_code.rs` (use devs:rust-dev agent).
-- [ ] T041 [P] [US1] Implement Codex agent emission (TOML, `developer_instructions` triple-quoted body via `toml_edit`, `.codex/agents/`) in `src/harness/codex.rs` (use devs:rust-dev agent).
-- [ ] T042 [P] [US1] Implement Cursor agent emission (MD+YAML, `.cursor/agents/`) in `src/harness/cursor.rs` (use devs:rust-dev agent).
-- [ ] T043 [P] [US1] Implement OpenCode agent emission (MD+YAML, `.opencode/agent/`, `mode: subagent` default, filename-derived name, first-non-empty-line description fallback) in `src/harness/opencode.rs` (use devs:rust-dev agent).
-- [ ] T044 [US1] Wire agent reconciliation into `src/harness/sync.rs` (emit present, remove orphaned), preserving the hooks→guardrails→agents order skeleton (use devs:rust-dev agent).
-- [ ] T045 [GIT] Commit: `feat(phase-6): per-harness native agent emission + sync reconciliation`.
+- [X] T040 [P] [US1] Implement `translate_agent` + `agent_dir`/`agent_format`/`supports_native_agents` for claude-code (MD+YAML, `.claude/agents/`) in `src/harness/claude_code.rs` (use devs:rust-dev agent).
+- [X] T041 [P] [US1] Implement Codex agent emission (TOML, `developer_instructions` triple-quoted body via `toml_edit`, `.codex/agents/`) in `src/harness/codex.rs` (use devs:rust-dev agent).
+- [X] T042 [P] [US1] Implement Cursor agent emission (MD+YAML, `.cursor/agents/`) in `src/harness/cursor.rs` (use devs:rust-dev agent).
+- [X] T043 [P] [US1] Implement OpenCode agent emission (MD+YAML, `.opencode/agent/`, `mode: subagent` default, filename-derived name, first-non-empty-line description fallback) in `src/harness/opencode.rs` (use devs:rust-dev agent).
+- [X] T044 [US1] Wire agent reconciliation into `src/harness/sync.rs` (emit present, remove orphaned), preserving the hooks→guardrails→agents order skeleton (use devs:rust-dev agent).
+- [X] T045 [GIT] Commit: `feat(phase-6): per-harness native agent emission + sync reconciliation`.
 
 ### Tests (US1)
 
-- [ ] T046 [P] [US1] `tests/agent_translate_claude_code.rs` — emission + field passthrough + privilege passthrough default (use devs:rust-dev agent).
-- [ ] T047 [P] [US1] `tests/agent_translate_codex.rs` — TOML `developer_instructions` body + `model: opus` dropped (use devs:rust-dev agent).
-- [ ] T048 [P] [US1] `tests/agent_translate_cursor.rs` — MD+YAML + dropped unsupported field logged (use devs:rust-dev agent).
-- [ ] T049 [P] [US1] `tests/agent_translate_opencode.rs` — `mode: subagent`, filename name, `model: opus`→`anthropic/claude-opus-4.7` (use devs:rust-dev agent).
-- [ ] T050 [P] [US1] `tests/agent_naming_clash.rs` — two plugins, same agent name → both files namespaced, displayed names prefixed (use devs:rust-dev agent).
-- [ ] T051 [P] [US1] `tests/agent_removal.rs` — disable removes `<plugin>__*` only; other plugins' agents remain (use devs:rust-dev agent).
-- [ ] T052 [P] [US1] Extend `tests/entry_kind_agent_indexing.rs` — end-to-end enable → agent row present, searchable=0 (use devs:rust-dev agent).
-- [ ] T053 [P] [US1] JSON wire-shape pin for the agent `dropped_fields` doctor sub-record (placeholder until US5 doctor lands; assert shape) in `tests/agent_translate_claude_code.rs` (use devs:rust-dev agent).
-- [ ] T054 [GIT] Commit: `test(phase-6): US1 native agent translation + naming + removal`.
+- [X] T046 [P] [US1] `tests/agent_translate_claude_code.rs` — emission + field passthrough + privilege passthrough default (use devs:rust-dev agent).
+- [X] T047 [P] [US1] `tests/agent_translate_codex.rs` — TOML `developer_instructions` body + `model: opus` dropped (use devs:rust-dev agent).
+- [X] T048 [P] [US1] `tests/agent_translate_cursor.rs` — MD+YAML + dropped unsupported field logged (use devs:rust-dev agent).
+- [X] T049 [P] [US1] `tests/agent_translate_opencode.rs` — `mode: subagent`, filename name, `model: opus`→`anthropic/claude-opus-4.7` (use devs:rust-dev agent).
+- [X] T050 [P] [US1] `tests/agent_naming_clash.rs` — two plugins, same agent name → both files namespaced, displayed names prefixed (use devs:rust-dev agent).
+- [X] T051 [P] [US1] `tests/agent_removal.rs` — disable removes `<plugin>__*` only; other plugins' agents remain (use devs:rust-dev agent).
+- [X] T052 [P] [US1] Extend `tests/entry_kind_agent_indexing.rs` — end-to-end enable → agent row present, searchable=0 (use devs:rust-dev agent). (Done in chunk A alongside indexing.)
+- [X] T053 [P] [US1] JSON wire-shape pin for the agent `dropped_fields` doctor sub-record (placeholder until US5 doctor lands; assert shape) in `tests/agent_translate_claude_code.rs` (use devs:rust-dev agent).
+- [X] T054 [GIT] Commit: `test(phase-6): US1 native agent translation + naming + removal`.
 
 ### US1 closeout
 
-- [ ] T055 [US1] 4-reviewer parallel pass (contract / Rust-lens / test / security) against the merged US1 surface; write `review/us1-findings.md` + `review/us1-disposition.md`.
-- [ ] T056 [US1] Apply US1 blockers + selected majors (use devs:rust-dev agent).
-- [ ] T057 [GIT] Commit: `fix(phase-6): apply US1 reviewer findings`.
-- [ ] T058 [US1] Run codebase mapping for Phase 3 changes (`/sdd:map incremental`).
-- [ ] T059 [US1] Review `retro/P3.md`; extract critical learnings to `CLAUDE.md` (conservative).
-- [ ] T060 [GIT] Commit: `docs(phase-6): US1 closeout — mapping + retro`.
+- [X] T055 [US1] 4-reviewer parallel pass (contract / Rust-lens / test / security) against the merged US1 surface; write `review/us1-findings.md` + `review/us1-disposition.md`.
+- [X] T056 [US1] Apply US1 blockers + selected majors (use devs:rust-dev agent).
+- [X] T057 [GIT] Commit: `fix(phase-6): apply US1 reviewer findings`.
+- [X] T058 [US1] Run codebase mapping for Phase 3 changes (`/sdd:map incremental`).
+- [X] T059 [US1] Review `retro/P3.md`; extract critical learnings to `CLAUDE.md` (conservative).
+- [X] T060 [GIT] Commit: `docs(phase-6): US1 closeout — mapping + retro`.
 - [ ] T061 [GIT] Push; create/update PR with US1 summary; verify CI; report PR ready status.
 
 **Checkpoint**: Native agents work end-to-end across the four harnesses. MVP-deliverable.

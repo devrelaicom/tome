@@ -193,19 +193,30 @@ impl HarnessModule for StubHarness {
         self.agent_format
     }
 
-    fn translate_agent(&self, canonical: &CanonicalAgent) -> TranslatedAgent {
-        self.translation.clone().unwrap_or_else(|| {
+    fn translate_agent(
+        &self,
+        canonical: &CanonicalAgent,
+        clashes: bool,
+    ) -> Result<TranslatedAgent, crate::error::TomeError> {
+        Ok(self.translation.clone().unwrap_or_else(|| {
             // Minimal deterministic translation when no canned result is
             // supplied: echo the canonical name + body into a Markdown body.
+            // Honours `clashes` so dispatch tests can assert the displayed
+            // name is plugin-prefixed without a canned result.
             let format = self.agent_format.unwrap_or(AgentFormat::MarkdownYaml);
+            let displayed_name = if clashes {
+                format!("{}-{}", canonical.plugin, canonical.name)
+            } else {
+                canonical.name.clone()
+            };
             TranslatedAgent {
                 dir: PathBuf::from(".stub/agents"),
-                filename: format!("stub__{}.md", canonical.name),
-                displayed_name: canonical.name.clone(),
+                filename: format!("{}__{}.md", canonical.plugin, canonical.name),
+                displayed_name,
                 format,
                 rendered: canonical.body.clone(),
                 dropped_fields: Vec::new(),
             }
-        })
+        }))
     }
 }

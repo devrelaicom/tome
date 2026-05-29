@@ -393,6 +393,316 @@ fn effective_list_empty_is_noop() {
 //    omits `harnesses`, the workspace's `settings.toml` declares it.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 9. Native agents: a StubHarness with native-agent support emits one file
+//    per enabled agent, removes files for plugins no longer enabled, and a
+//    re-sync with no change rewrites nothing (Phase 6 / US1, FR-030/043/081).
+// ---------------------------------------------------------------------------
+
+/// Seed a manifest-less catalog enrolment plus an on-disk source agent
+/// `.md`, returning the catalog name + URL. The agent body lives at
+/// `<cache_dir_for(url)>/<plugin>/agents/<name>.md` so
+/// `resolve_entry_body_path` (manifest-less fallback) finds it.
+fn seed_agent_source(paths: &tome::paths::Paths, plugin: &str, name: &str, body: &str) -> String {
+    let url = format!("https://example.test/{plugin}.git");
+    let cache = paths.cache_dir_for(&url);
+    let agent_dir = cache.join(plugin).join("agents");
+    std::fs::create_dir_all(&agent_dir).expect("create agent source dir");
+    std::fs::write(agent_dir.join(format!("{name}.md")), body).expect("write source agent");
+    url
+}
+
+/// Insert an enabled `agent`-kind row for `(catalog, plugin, name)` enrolled
+/// in `workspace`, pointing at the catalog-relative `agents/<name>.md` path.
+fn insert_enabled_agent_row(
+    paths: &tome::paths::Paths,
+    workspace: &str,
+    catalog: &str,
+    plugin: &str,
+    name: &str,
+) {
+    let conn = rusqlite::Connection::open(&paths.index_db).expect("open rw");
+    conn.execute(
+        "INSERT INTO skills
+            (catalog, plugin, name, kind, description, plugin_version,
+             path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+         VALUES (?1, ?2, ?3, 'agent', 'desc', '0.0.0', ?4, 'h', 0, 0, NULL, '1970-01-01T00:00:00Z')",
+        rusqlite::params![catalog, plugin, name, format!("agents/{name}.md")],
+    )
+    .expect("insert agent row");
+    let skill_id: i64 = conn
+        .query_row(
+            "SELECT id FROM skills WHERE catalog=?1 AND plugin=?2 AND kind='agent' AND name=?3",
+            rusqlite::params![catalog, plugin, name],
+            |r| r.get(0),
+        )
+        .expect("agent id");
+    let ws_id: i64 = conn
+        .query_row(
+            "SELECT id FROM workspaces WHERE name = ?1",
+            rusqlite::params![workspace],
+            |r| r.get(0),
+        )
+        .expect("ws id");
+    conn.execute(
+        "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+        rusqlite::params![ws_id, skill_id],
+    )
+    .expect("enrol agent");
+}
+
+#[test]
+fn native_agents_emit_orphan_removal_and_idempotence() {
+    use tome::harness::AgentFormat;
+
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(
+        StubHarness::default().with_native_agents(AgentFormat::MarkdownYaml),
+    )]);
+
+    let fx = Fixture::build("test-workspace", Some("harnesses = [\"stub\"]"));
+
+    // Seed catalog enrolment "cat" + two source agents under two plugins.
+    let url_a = seed_agent_source(
+        &fx.paths,
+        "plugin-a",
+        "reviewer",
+        "---\nname: reviewer\ndescription: Reviews code\n---\nYou review code.\n",
+    );
+    let url_b = seed_agent_source(
+        &fx.paths,
+        "plugin-b",
+        "builder",
+        "---\nname: builder\ndescription: Builds things\n---\nYou build.\n",
+    );
+    // Enrol both catalogs (one per plugin URL) for the workspace.
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw");
+    for (cat, url) in [("cat-a", &url_a), ("cat-b", &url_b)] {
+        tome::index::workspace_catalogs::insert(&conn, "test-workspace", cat, url, "main")
+            .expect("enrol catalog");
+    }
+    drop(conn);
+    insert_enabled_agent_row(&fx.paths, "test-workspace", "cat-a", "plugin-a", "reviewer");
+    insert_enabled_agent_row(&fx.paths, "test-workspace", "cat-b", "plugin-b", "builder");
+
+    // ----- sync 1: both agents emitted -----
+    let outcome = sync::sync_project(&fx.project, &fx.deps(false)).expect("sync 1");
+    let agent_dir = fx.project.join(".stub/agents");
+    let file_a = agent_dir.join("plugin-a__reviewer.md");
+    let file_b = agent_dir.join("plugin-b__builder.md");
+    assert!(file_a.is_file(), "plugin-a agent emitted");
+    assert!(file_b.is_file(), "plugin-b agent emitted");
+    let agent_changes = outcome
+        .added
+        .iter()
+        .filter(|c| c.subsystem == SyncSubsystem::Agents)
+        .count();
+    assert_eq!(agent_changes, 2, "two agent files added on first sync");
+
+    // ----- sync 2: idempotent (no rewrite) -----
+    let a_mtime = mtime(&file_a);
+    std::thread::sleep(Duration::from_millis(1100));
+    let outcome2 = sync::sync_project(&fx.project, &fx.deps(false)).expect("sync 2");
+    assert!(
+        outcome2
+            .added
+            .iter()
+            .chain(&outcome2.updated)
+            .all(|c| c.subsystem != SyncSubsystem::Agents),
+        "idempotent re-sync must not add/update agent files",
+    );
+    assert_eq!(mtime(&file_a), a_mtime, "agent file mtime must not advance");
+
+    // ----- sync 3: disable plugin-b's agent → its file is removed -----
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw");
+    conn.execute(
+        "DELETE FROM workspace_skills WHERE skill_id IN
+            (SELECT id FROM skills WHERE plugin = 'plugin-b')",
+        [],
+    )
+    .expect("disable plugin-b agent");
+    drop(conn);
+
+    let outcome3 = sync::sync_project(&fx.project, &fx.deps(false)).expect("sync 3");
+    assert!(file_a.is_file(), "plugin-a agent survives");
+    assert!(
+        !file_b.exists(),
+        "plugin-b agent file removed after disable (FR-043)",
+    );
+    let removed_agents = outcome3
+        .removed
+        .iter()
+        .filter(|c| c.subsystem == SyncSubsystem::Agents)
+        .count();
+    assert_eq!(removed_agents, 1, "exactly one agent file removed");
+}
+
+// ---------------------------------------------------------------------------
+// 9b. T-1: symlink refusal on an agent write → exit 7, target not overwritten.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg(unix)]
+fn agent_write_through_symlink_is_refused_exit_7() {
+    use tome::harness::AgentFormat;
+
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(
+        StubHarness::default().with_native_agents(AgentFormat::MarkdownYaml),
+    )]);
+
+    let fx = Fixture::build("test-workspace", Some("harnesses = [\"stub\"]"));
+
+    let url = seed_agent_source(
+        &fx.paths,
+        "plugin-a",
+        "reviewer",
+        "---\nname: reviewer\ndescription: Reviews code\n---\nYou review.\n",
+    );
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw");
+    tome::index::workspace_catalogs::insert(&conn, "test-workspace", "cat-a", &url, "main")
+        .expect("enrol catalog");
+    drop(conn);
+    insert_enabled_agent_row(&fx.paths, "test-workspace", "cat-a", "plugin-a", "reviewer");
+
+    // Pre-plant a symlink at the agent target. The write path must refuse to
+    // follow it rather than clobber whatever it points at.
+    let agent_dir = fx.project.join(".stub/agents");
+    std::fs::create_dir_all(&agent_dir).expect("create agent dir");
+    let decoy = fx.project.join("decoy.md");
+    std::fs::write(&decoy, "ORIGINAL DECOY CONTENT\n").expect("write decoy");
+    let target = agent_dir.join("plugin-a__reviewer.md");
+    std::os::unix::fs::symlink(&decoy, &target).expect("plant symlink");
+
+    let err = sync::sync_project(&fx.project, &fx.deps(false)).expect_err("symlink must refuse");
+    assert_eq!(
+        err.exit_code(),
+        7,
+        "symlink refusal surfaces exit 7; got {err:?}"
+    );
+
+    // The decoy the symlink pointed at is untouched.
+    let decoy_body = std::fs::read_to_string(&decoy).expect("read decoy");
+    assert_eq!(
+        decoy_body, "ORIGINAL DECOY CONTENT\n",
+        "the symlink target must NOT be overwritten",
+    );
+    // The planted symlink is still a symlink (not replaced by a regular file).
+    let meta = std::fs::symlink_metadata(&target).expect("stat target");
+    assert!(
+        meta.file_type().is_symlink(),
+        "the agent target must remain the planted symlink",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 9c. T-4: agent forward-progress — one corrupt source + one good agent.
+//     The good agent emits AND the sync returns exit 45 (FR-084).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agent_forward_progress_one_corrupt_one_good() {
+    use tome::harness::AgentFormat;
+
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(
+        StubHarness::default().with_native_agents(AgentFormat::MarkdownYaml),
+    )]);
+
+    let fx = Fixture::build("test-workspace", Some("harnesses = [\"stub\"]"));
+
+    // Good agent.
+    let url_a = seed_agent_source(
+        &fx.paths,
+        "plugin-a",
+        "reviewer",
+        "---\nname: reviewer\ndescription: Reviews code\n---\nYou review.\n",
+    );
+    // Corrupt agent: a well-formed source row is enabled, then the on-disk
+    // source is overwritten with malformed frontmatter (no closing delimiter)
+    // — the post-enable source-corruption edge (C-4). `prepare_agent` fails
+    // for this one with exit 45 but the good agent still emits.
+    let url_b = seed_agent_source(
+        &fx.paths,
+        "plugin-b",
+        "builder",
+        "---\nname: builder\nno closing delimiter here\n",
+    );
+
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw");
+    for (cat, url) in [("cat-a", &url_a), ("cat-b", &url_b)] {
+        tome::index::workspace_catalogs::insert(&conn, "test-workspace", cat, url, "main")
+            .expect("enrol catalog");
+    }
+    drop(conn);
+    insert_enabled_agent_row(&fx.paths, "test-workspace", "cat-a", "plugin-a", "reviewer");
+    insert_enabled_agent_row(&fx.paths, "test-workspace", "cat-b", "plugin-b", "builder");
+
+    let err = sync::sync_project(&fx.project, &fx.deps(false))
+        .expect_err("a corrupt agent source must surface an error");
+    assert_eq!(
+        err.exit_code(),
+        45,
+        "corrupt agent source → AgentTranslationFailed (exit 45); got {err:?}",
+    );
+
+    // Forward progress: the GOOD agent emitted despite the corrupt sibling.
+    let good = fx.project.join(".stub/agents/plugin-a__reviewer.md");
+    assert!(
+        good.is_file(),
+        "the well-formed agent must emit despite the corrupt sibling (FR-084)",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 9d. T-3: multi-harness single-sync fan-out — two native harnesses each get
+//     the enabled agent file in their own dir.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agent_fans_out_to_multiple_native_harnesses() {
+    use tome::harness::AgentFormat;
+
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    // Two distinct native harnesses: the real ClaudeCode + a native stub.
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(tome::harness::claude_code::CLAUDE_CODE),
+        Box::new(StubHarness::default().with_native_agents(AgentFormat::MarkdownYaml)),
+    ]);
+
+    let fx = Fixture::build(
+        "test-workspace",
+        Some("harnesses = [\"stub\", \"claude-code\"]"),
+    );
+
+    let url = seed_agent_source(
+        &fx.paths,
+        "plugin-a",
+        "reviewer",
+        "---\nname: reviewer\ndescription: Reviews code\n---\nYou review code.\n",
+    );
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw");
+    tome::index::workspace_catalogs::insert(&conn, "test-workspace", "cat-a", &url, "main")
+        .expect("enrol catalog");
+    drop(conn);
+    insert_enabled_agent_row(&fx.paths, "test-workspace", "cat-a", "plugin-a", "reviewer");
+
+    sync::sync_project(&fx.project, &fx.deps(false)).expect("sync");
+
+    // Stub dir gets the file (echoes the body via the stub translation).
+    let stub_file = fx.project.join(".stub/agents/plugin-a__reviewer.md");
+    assert!(stub_file.is_file(), "stub harness got the agent file");
+
+    // Claude Code dir gets the file with real MD+YAML frontmatter.
+    let cc_file = fx.project.join(".claude/agents/plugin-a__reviewer.md");
+    assert!(cc_file.is_file(), "claude-code harness got the agent file");
+    let cc_body = std::fs::read_to_string(&cc_file).expect("read cc agent");
+    assert!(
+        cc_body.starts_with("---\n") && cc_body.contains("name: reviewer"),
+        "claude-code agent carries MD+YAML frontmatter:\n{cc_body}",
+    );
+}
+
 #[test]
 fn workspace_settings_supply_harness_list_when_marker_omits_key() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());

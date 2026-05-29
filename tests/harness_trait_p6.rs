@@ -137,6 +137,8 @@ fn stub_overrides_expose_new_capabilities() {
 fn stub_translate_agent_round_trips_body() {
     let h = StubHarness::default().with_native_agents(AgentFormat::MarkdownYaml);
     let canonical = CanonicalAgent {
+        catalog: "cat".into(),
+        plugin: "myplugin".into(),
         name: "reviewer".into(),
         description: Some("a reviewer".into()),
         body: "You are a careful reviewer.".into(),
@@ -147,10 +149,22 @@ fn stub_translate_agent_round_trips_body() {
         mcp_servers: None,
         permission_mode: None,
     };
-    let translated = h.translate_agent(&canonical);
+    // `clashes = false` → the displayed name stays the clean `<name>`.
+    let translated = h
+        .translate_agent(&canonical, false)
+        .expect("stub translation succeeds");
     assert_eq!(translated.displayed_name, "reviewer");
+    assert_eq!(translated.filename, "myplugin__reviewer.md");
     assert_eq!(translated.rendered, "You are a careful reviewer.");
     assert_eq!(translated.format, AgentFormat::MarkdownYaml);
+
+    // `clashes = true` → the displayed name is plugin-prefixed; the filename
+    // stays `<plugin>__<name>` regardless (FR-041).
+    let clashed = h
+        .translate_agent(&canonical, true)
+        .expect("stub translation succeeds");
+    assert_eq!(clashed.displayed_name, "myplugin-reviewer");
+    assert_eq!(clashed.filename, "myplugin__reviewer.md");
 }
 
 #[test]
