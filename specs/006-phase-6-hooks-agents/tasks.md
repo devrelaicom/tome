@@ -44,10 +44,10 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 ### F1 — Error codes 43–46 (`contracts/exit-codes-p6.md`)
 
-- [ ] T005 Add four `TomeError` variants (illustrative names `HookSpecParseError`, `HookSettingsWriteFailed`, `AgentTranslationFailed`, `GuardrailsWriteFailed`) in `src/error.rs` (use devs:rust-dev agent).
-- [ ] T006 Map the four variants to exit codes 43, 44, 45, 46 in the `ExitCode` mapping in `src/error.rs`; add the `// Phase 6 — hooks + agents (codes 43–46)` cluster comment (use devs:rust-dev agent).
-- [ ] T007 [P] Extend `tests/exit_codes.rs` with variant→code assertions for 43–46 (use devs:rust-dev agent).
-- [ ] T008 [GIT] Commit: `feat(phase-6): pre-allocate hooks/agents error variants + exit codes 43–46`.
+- [X] T005 Add four `TomeError` variants (illustrative names `HookSpecParseError`, `HookSettingsWriteFailed`, `AgentTranslationFailed`, `GuardrailsWriteFailed`) in `src/error.rs` (use devs:rust-dev agent).
+- [X] T006 Map the four variants to exit codes 43, 44, 45, 46 in the `ExitCode` mapping in `src/error.rs`; add the `// Phase 6 — hooks + agents (codes 43–46)` cluster comment (use devs:rust-dev agent).
+- [X] T007 [P] Extend `tests/exit_codes.rs` with variant→code assertions for 43–46 (use devs:rust-dev agent).
+- [X] T008 [GIT] Commit: `feat(phase-6): pre-allocate hooks/agents error variants + exit codes 43–46`.
 
 ### F2 — `EntryKind::Agent` widening (load-bearing, FR-070a)
 
