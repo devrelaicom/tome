@@ -99,12 +99,12 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 ### Translation core + naming + removal
 
-- [ ] T034 [US1] Create `src/harness/agents.rs`: `CanonicalAgent` parse (frontmatter + body), the per-harness emit dispatch, and the `<plugin>__<name>.<ext>` filename builder (sole provenance) (use devs:rust-dev agent).
-- [ ] T035 [US1] Add the same-vendor `ModelAliasTable` in `src/harness/agents.rs` per `contracts/agent-translation.md` (opus→opencode `anthropic/claude-opus-4.7`; opus→codex drop; inherit→drop everywhere); unmapped ⇒ drop (use devs:rust-dev agent).
-- [ ] T036 [US1] Implement the read-only-intent inference rule (from tool allowlist/disallowed-tools) in `src/harness/agents.rs` (FR-036) (use devs:rust-dev agent).
-- [ ] T037 [US1] Implement displayed/registered name logic (clean `<name>`; `<plugin>-<name>` only on clash) in `src/harness/agents.rs` (FR-041) (use devs:rust-dev agent).
-- [ ] T038 [US1] Implement removal glob `<plugin>__*.<ext>` per agent dir in `src/harness/agents.rs` (FR-043) (use devs:rust-dev agent).
-- [ ] T039 [GIT] Commit: `feat(phase-6): agent translation core + model-alias table + naming/removal`.
+- [X] T034 [US1] Create `src/harness/agents.rs`: `CanonicalAgent` parse (frontmatter + body), the per-harness emit dispatch, and the `<plugin>__<name>.<ext>` filename builder (sole provenance) (use devs:rust-dev agent).
+- [X] T035 [US1] Add the same-vendor `ModelAliasTable` in `src/harness/agents.rs` per `contracts/agent-translation.md` (opus→opencode `anthropic/claude-opus-4.7`; opus→codex drop; inherit→drop everywhere); unmapped ⇒ drop (use devs:rust-dev agent).
+- [X] T036 [US1] Implement the read-only-intent inference rule (from tool allowlist/disallowed-tools) in `src/harness/agents.rs` (FR-036) (use devs:rust-dev agent).
+- [X] T037 [US1] Implement displayed/registered name logic (clean `<name>`; `<plugin>-<name>` only on clash) in `src/harness/agents.rs` (FR-041) (use devs:rust-dev agent).
+- [X] T038 [US1] Implement removal glob `<plugin>__*.<ext>` per agent dir in `src/harness/agents.rs` (FR-043) (use devs:rust-dev agent).
+- [X] T039 [GIT] Commit: `feat(phase-6): agent translation core + model-alias table + naming/removal`.
 
 ### Per-harness translation
 

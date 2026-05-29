@@ -1,15 +1,45 @@
-//! Canonical + translated agent types (data-model §4).
+//! Canonical + translated agent types and the harness-agnostic translation
+//! machinery (data-model §4, `contracts/agent-translation.md`).
 //!
-//! **Skeleton.** F3 lands the type definitions the `HarnessModule`
-//! `translate_agent` method signature needs; the parsing of `agents/*.md`
-//! into a [`CanonicalAgent`], the per-harness translation rules, the model
-//! alias table, and the clash-set machinery are all US1 (T034) work. The
-//! types are real (not placeholders) so US1 fleshes out behaviour without
-//! reshaping the public surface.
+//! This module owns the SHARED building blocks every per-harness
+//! `translate_agent` impl reuses:
+//!
+//! * [`CanonicalAgent::parse`] — parse a plugin's `agents/<name>.md` (YAML
+//!   frontmatter + Markdown body) into a [`CanonicalAgent`].
+//! * [`agent_filename`] — the sole provenance mechanism, `<plugin>__<name>.<ext>`
+//!   (R-19 single source of truth; no provenance frontmatter key).
+//! * [`render_markdown_yaml`] / [`render_codex_toml`] — the two render
+//!   primitives (Markdown+YAML body, and a triple-quoted
+//!   `developer_instructions` Codex-TOML string built via `toml_edit`).
+//! * [`map_model`] — the same-vendor-only model alias table (FR-034/037).
+//! * [`infer_read_only`] — read-only intent inference (FR-036).
+//! * [`displayed_name`] — clean vs clash-prefixed displayed name (FR-041).
+//! * [`is_owned_agent_file`] / [`owned_agent_files`] — the `<plugin>__*.<ext>`
+//!   removal key (FR-043).
+//!
+//! The per-harness `translate_agent` impls (which directory, which format,
+//! which fields survive the field map) and the sync reconciliation are the
+//! NEXT chunk. The types and helpers here are stable so that chunk wires in
+//! without reshaping the public surface.
+//!
+//! ## `dead_code` allowance
+//!
+//! The translation helpers below (`agent_filename`, the render primitives,
+//! `map_model`, `infer_read_only`, `displayed_name`, the removal-glob
+//! helpers) have no production caller YET — their first non-test consumer is
+//! the per-harness `translate_agent` + sync-reconciliation slice (chunk C),
+//! landing later in US1. The module-level `allow(dead_code)` keeps these
+//! building blocks co-located with the types they operate on rather than
+//! splitting them out when that slice lands, mirroring the same discipline
+//! applied to [`crate::index::skills::agent_name_clash_set`] (the clash-set
+//! SSOT, also written ahead of its first consumer). Unit tests in this
+//! module exercise every helper, so the allowance masks no untested code.
+#![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::AgentFormat;
+use crate::error::TomeError;
 
 /// A plugin's source agent, parsed from `<plugin>/agents/<name>.md`
 /// (data-model §4). The privileged fields (`hooks`, `mcp_servers`,
@@ -18,8 +48,20 @@ use super::AgentFormat;
 /// FR-052). `serde_json::Value` keeps the privileged blobs opaque — Tome
 /// neither interprets nor validates their internal shape, it only forwards
 /// or drops them wholesale.
+///
+/// `plugin` is carried on the canonical so the per-harness
+/// [`super::HarnessModule::translate_agent`] impls can build the
+/// `<plugin>__<name>` filename and the clash-prefixed displayed name
+/// without threading plugin context through a separate parameter. `catalog`
+/// is retained because the clash-set SSOT keys identity on
+/// `(catalog, plugin)`; chunk C needs it when it computes per-agent display
+/// names from the workspace clash set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalAgent {
+    /// Owning catalog (clash-set identity is keyed on `(catalog, plugin)`).
+    pub catalog: String,
+    /// Owning plugin — the `<plugin>` half of `<plugin>__<name>`.
+    pub plugin: String,
     /// Frontmatter `name`, else the filename stem.
     pub name: String,
     /// Frontmatter `description`, if present.
@@ -59,4 +101,645 @@ pub struct TranslatedAgent {
     /// Frontmatter fields dropped during translation, recorded for
     /// diagnostics (FR-032 / FR-034 / FR-036).
     pub dropped_fields: Vec<String>,
+}
+
+/// The frontmatter subset Tome reads off a source agent `.md`.
+///
+/// Parses leniently — third-party plugin input, so unknown keys are
+/// tolerated (the strictness boundary, FR-013a, applies only to Tome-owned
+/// inputs). Recognised keys cover Claude Code's canonical agent frontmatter
+/// vocabulary; everything else is silently dropped by `serde_yaml` and (per
+/// FR-032) never forwarded on the assumption a harness tolerates it.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct AgentFrontmatter {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    tools: Option<Vec<String>>,
+    /// Claude Code spells this `disallowedTools` (camelCase); accept that and
+    /// the snake_case alias for robustness.
+    #[serde(default, rename = "disallowedTools", alias = "disallowed_tools")]
+    disallowed_tools: Option<Vec<String>>,
+    #[serde(default)]
+    hooks: Option<serde_json::Value>,
+    #[serde(default, rename = "mcpServers", alias = "mcp_servers")]
+    mcp_servers: Option<serde_json::Value>,
+    #[serde(default, rename = "permissionMode", alias = "permission_mode")]
+    permission_mode: Option<String>,
+}
+
+impl CanonicalAgent {
+    /// Parse a source agent `.md` into a [`CanonicalAgent`].
+    ///
+    /// `contents` is the raw file text; `catalog`, `plugin`, and
+    /// `filename_stem` supply the provenance context the body cannot. `name`
+    /// resolves to the frontmatter `name` when present and non-empty, else
+    /// the filename stem (FR-040 / data-model §4).
+    ///
+    /// Reuses the same frontmatter/body split as `SKILL.md`
+    /// ([`crate::plugin::frontmatter`]) — agents differ only in *which*
+    /// frontmatter fields they carry, not in the delimiter grammar.
+    ///
+    /// Malformed frontmatter (missing delimiters, or invalid YAML between
+    /// them) maps to [`TomeError::AgentTranslationFailed`] (exit 45): unlike
+    /// `SKILL.md`'s two-mode handling, a malformed agent is always a hard
+    /// failure for that agent — there is no partial-skip fallback because
+    /// the translated file would be meaningless without its frontmatter.
+    pub fn parse(
+        catalog: &str,
+        plugin: &str,
+        filename_stem: &str,
+        contents: &str,
+    ) -> Result<Self, TomeError> {
+        // `agent_label` is the diagnostic identity carried on the error so
+        // the doctor / sync surfaces can name the offending agent.
+        let agent_label = format!("{catalog}/{plugin}/{filename_stem}");
+
+        // Reuse the SKILL.md delimiter/body split. We parse the YAML
+        // ourselves into `AgentFrontmatter` (the agent vocabulary), so we
+        // only borrow the splitter, not the skill struct.
+        let path = Path::new(filename_stem);
+        let parsed = crate::plugin::frontmatter::parse_skill_frontmatter_str(path, contents)
+            .map_err(|_| TomeError::AgentTranslationFailed {
+                agent: agent_label.clone(),
+            })?;
+
+        // Re-extract the raw YAML block to deserialize the agent vocabulary.
+        // `parse_skill_frontmatter_str` already validated the delimiters and
+        // that the block is valid YAML for the skill struct; re-parsing into
+        // the agent struct can still fail if a recognised agent key carries
+        // the wrong YAML type (e.g. `tools: 7`).
+        let stripped = contents.strip_prefix('\u{FEFF}').unwrap_or(contents);
+        let yaml_block =
+            split_frontmatter_block(stripped).ok_or_else(|| TomeError::AgentTranslationFailed {
+                agent: agent_label.clone(),
+            })?;
+
+        let fm: AgentFrontmatter = if yaml_block.trim().is_empty() {
+            AgentFrontmatter::default()
+        } else {
+            serde_yaml::from_str(yaml_block).map_err(|_| TomeError::AgentTranslationFailed {
+                agent: agent_label.clone(),
+            })?
+        };
+
+        let name = match fm.name.as_deref().map(str::trim) {
+            Some(s) if !s.is_empty() => s.to_owned(),
+            _ => filename_stem.to_owned(),
+        };
+
+        Ok(Self {
+            catalog: catalog.to_owned(),
+            plugin: plugin.to_owned(),
+            name,
+            description: fm
+                .description
+                .map(|d| d.trim().to_owned())
+                .filter(|d| !d.is_empty()),
+            body: parsed.body,
+            model: fm
+                .model
+                .map(|m| m.trim().to_owned())
+                .filter(|m| !m.is_empty()),
+            tools: fm.tools,
+            disallowed_tools: fm.disallowed_tools,
+            hooks: fm.hooks,
+            mcp_servers: fm.mcp_servers,
+            permission_mode: fm
+                .permission_mode
+                .map(|p| p.trim().to_owned())
+                .filter(|p| !p.is_empty()),
+        })
+    }
+}
+
+/// Re-extract just the YAML block from a frontmatter document, reusing the
+/// SKILL.md splitter's grammar. Returns `None` when delimiters are absent.
+///
+/// `parse_skill_frontmatter_str` owns the splitter but only exposes the
+/// parsed skill struct + body, not the raw YAML; this private helper mirrors
+/// its split so the agent parser can deserialize the agent vocabulary off
+/// the same byte range. The duplication is minimal and avoids widening the
+/// frontmatter module's public surface for one extra consumer.
+fn split_frontmatter_block(contents: &str) -> Option<&str> {
+    let after_open = {
+        let (first_line, rest) = match contents.find('\n') {
+            Some(idx) => (&contents[..idx], &contents[idx + 1..]),
+            None => (contents, ""),
+        };
+        let trimmed = first_line.trim_end_matches(['\r', ' ', '\t']);
+        if trimmed == "---" {
+            rest
+        } else {
+            return None;
+        }
+    };
+    // Find the closing `---` line.
+    let bytes = after_open.as_bytes();
+    let mut line_start = 0usize;
+    while line_start <= bytes.len() {
+        let nl = bytes[line_start..].iter().position(|b| *b == b'\n');
+        let line_end = match nl {
+            Some(off) => line_start + off,
+            None => bytes.len(),
+        };
+        let line = &after_open[line_start..line_end];
+        if line.trim_end_matches(['\r', ' ', '\t']) == "---" {
+            return Some(&after_open[..line_start]);
+        }
+        match nl {
+            Some(_) => line_start = line_end + 1,
+            None => break,
+        }
+    }
+    None
+}
+
+/// File extension for a harness [`AgentFormat`].
+pub(crate) fn agent_extension(format: AgentFormat) -> &'static str {
+    match format {
+        AgentFormat::MarkdownYaml => "md",
+        AgentFormat::Toml => "toml",
+    }
+}
+
+/// Build the agent filename — `<plugin>__<name>.<ext>` (FR-040, R-19).
+///
+/// This is the SOLE provenance mechanism: Tome adds no provenance
+/// frontmatter key (an unknown key risks breaking a harness parser). The
+/// double underscore separator distinguishes the Tome-owned prefix from a
+/// single-underscore name. Every harness's removal glob and emission path
+/// route through this one builder.
+pub(crate) fn agent_filename(plugin: &str, name: &str, ext: &str) -> String {
+    format!("{plugin}__{name}.{ext}")
+}
+
+/// Render a Markdown-with-YAML-frontmatter agent file.
+///
+/// `frontmatter` is an ordered slice of `(key, value)` pairs — Tome does not
+/// take a direct dependency on an insertion-ordered map type, so the
+/// per-harness caller expresses key order positionally and this writer
+/// preserves it verbatim. An empty slice renders an empty `---\n---\n`
+/// header followed by the body — callers that want no frontmatter at all
+/// should special-case that upstream.
+///
+/// The body is appended verbatim after the closing delimiter. A single
+/// newline separates the header from the body; the body's own leading
+/// whitespace is preserved.
+pub(crate) fn render_markdown_yaml(
+    frontmatter: &[(String, serde_yaml::Value)],
+    body: &str,
+) -> String {
+    let mut out = String::new();
+    out.push_str("---\n");
+    if !frontmatter.is_empty() {
+        // Build a YAML mapping preserving the slice order, then serialise.
+        // `serde_yaml::Mapping` keeps key order as inserted.
+        let mut map = serde_yaml::Mapping::new();
+        for (k, v) in frontmatter {
+            map.insert(serde_yaml::Value::String(k.clone()), v.clone());
+        }
+        // `serde_yaml::to_string` of a mapping never fails for owned Values.
+        let yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(map)).unwrap_or_default();
+        out.push_str(&yaml);
+    }
+    out.push_str("---\n");
+    out.push_str(body);
+    out
+}
+
+/// Render a Codex agent TOML document with the body in a triple-quoted
+/// `developer_instructions` string (FR-033, R-14).
+///
+/// Built via `toml_edit` (the existing dep) so quoting and escaping are the
+/// library's, never hand-rolled. `toml_edit`'s default string
+/// representation promotes any value containing a newline to a multiline
+/// basic string (`"""…"""`) — see `toml_write::TomlStringBuilder::as_default`
+/// — which is exactly the triple-quoted form the contract mandates. Agent
+/// bodies are multi-line Markdown, so the promotion is reliable; a body that
+/// happens to be a single line would render as a regular basic string, which
+/// is still valid TOML for the same value.
+///
+/// `scalars` carries the additional top-level keys (e.g. `name`,
+/// `description`, `model`) as an ordered `(key, value)` slice; they are
+/// written before `developer_instructions` so the prose block lands last.
+pub(crate) fn render_codex_toml(scalars: &[(String, String)], body: &str) -> String {
+    use toml_edit::{DocumentMut, value};
+
+    let mut doc = DocumentMut::new();
+    for (k, v) in scalars {
+        doc[k.as_str()] = value(v.as_str());
+    }
+    doc["developer_instructions"] = value(body);
+    doc.to_string()
+}
+
+/// Per-harness model alias table — SAME-VENDOR ONLY (FR-034/037, R-8).
+///
+/// `map_model(harness, source)` returns the harness-native identifier for a
+/// canonical model value, or `None` to DROP the field (harness default
+/// inherited). Cross-vendor mapping is FORBIDDEN: `opus → codex` is `None`,
+/// never an OpenAI id. `inherit` drops everywhere. Any source value with no
+/// same-vendor target for the harness drops.
+///
+/// This is the named artefact SC-002 verifies against; the table is pinned
+/// in `contracts/agent-translation.md`.
+///
+/// Ecosystem caveat: the exact harness-native identifiers are confirmed
+/// against current harness docs at implementation time; the *policy*
+/// (same-vendor-only, drop-on-no-target) is fixed.
+pub(crate) fn map_model(harness: &str, source: &str) -> Option<String> {
+    // `inherit` is always dropped — there is no native "inherit the caller's
+    // model" value that ports across harnesses.
+    if source == "inherit" {
+        return None;
+    }
+    match harness {
+        // Claude Code is the canonical vendor: the aliases pass through
+        // verbatim (they ARE Claude Code's native identifiers).
+        "claude-code" => match source {
+            "opus" | "sonnet" | "haiku" => Some(source.to_owned()),
+            // Any other value: Claude Code supports its own native ids, so
+            // we pass an unrecognised value through unchanged rather than
+            // dropping a legitimate Claude Code model id we don't enumerate.
+            other => Some(other.to_owned()),
+        },
+        // Codex is OpenAI-vendored: no Anthropic alias maps. DROP always.
+        "codex" => None,
+        // Cursor: drop unless a same-vendor Anthropic id exists. We do not
+        // currently enumerate Cursor's Anthropic identifiers, so every
+        // Anthropic-vendored source drops for now (documented gap; the
+        // policy slot is here so chunk C / a later slice can fill the
+        // same-vendor ids without touching callers).
+        "cursor" => None,
+        // OpenCode is multi-vendor and namespaces models `<vendor>/<id>`;
+        // the Anthropic aliases map to their fully-qualified same-vendor ids.
+        "opencode" => match source {
+            "opus" => Some("anthropic/claude-opus-4.7".to_owned()),
+            "sonnet" => Some("anthropic/claude-sonnet-4.7".to_owned()),
+            "haiku" => Some("anthropic/claude-haiku-4.7".to_owned()),
+            _ => None,
+        },
+        // Unknown harness: drop conservatively.
+        _ => None,
+    }
+}
+
+/// Tools classified as write / edit / execute for read-only inference
+/// (FR-036). Matched case-insensitively against the agent's tool posture.
+///
+/// The classification covers Claude Code's built-in mutating tools plus the
+/// shell/execution surface. A tool not in this set is treated as read-only
+/// (e.g. `Read`, `Grep`, `Glob`, `WebFetch`, `WebSearch`). The set is
+/// intentionally conservative: anything that writes a file, edits a file, or
+/// runs arbitrary commands counts as a write/edit/execute-class tool.
+const WRITE_EDIT_EXECUTE_TOOLS: &[&str] = &[
+    "write",     // create/overwrite a file
+    "edit",      // surgical file edit
+    "multiedit", // batched file edits
+    "notebookedit",
+    "bash",    // arbitrary shell execution
+    "execute", // generic execution alias
+    "run",     // generic run alias
+];
+
+/// Returns true when `tool` is a write/edit/execute-class tool (FR-036).
+fn is_write_edit_execute(tool: &str) -> bool {
+    let lower = tool.trim().to_ascii_lowercase();
+    WRITE_EDIT_EXECUTE_TOOLS.contains(&lower.as_str())
+}
+
+/// Infer read-only intent from an agent's tool posture (FR-036).
+///
+/// **Rule**: an agent is read-only when its effective tool set contains no
+/// write/edit/execute-class tool — i.e. the allowlist (if present) excludes
+/// every such tool, OR the disallowed list denies all of them.
+///
+/// Return semantics:
+/// * `Some(true)`  — provably read-only.
+/// * `Some(false)` — provably NOT read-only (a write/edit/execute tool is
+///   present in the allowlist).
+/// * `None`        — indeterminate (no allowlist and the disallowed list
+///   does not deny the full write/edit/execute set, or both are absent).
+///   The caller DROPS the field and inherits the harness default.
+///
+/// The allowlist is authoritative when present: a `tools` allowlist fully
+/// describes the agent's posture, so we decide purely from it. With no
+/// allowlist, we can only conclude read-only when the disallowed list denies
+/// *every* write/edit/execute tool we classify; a partial deny is an
+/// indeterminate (mixed) posture → `None`.
+pub(crate) fn infer_read_only(
+    tools: Option<&[String]>,
+    disallowed: Option<&[String]>,
+) -> Option<bool> {
+    if let Some(allow) = tools {
+        // Allowlist present: read-only iff it grants no write/edit/execute
+        // tool.
+        let grants_mutating = allow.iter().any(|t| is_write_edit_execute(t));
+        return Some(!grants_mutating);
+    }
+
+    // No allowlist. We can only conclude read-only if the disallowed list
+    // denies the entire write/edit/execute class; otherwise the posture is
+    // indeterminate (the agent may use a mutating tool we did not see
+    // denied).
+    if let Some(deny) = disallowed {
+        let denied: std::collections::HashSet<String> =
+            deny.iter().map(|t| t.trim().to_ascii_lowercase()).collect();
+        let denies_all = WRITE_EDIT_EXECUTE_TOOLS.iter().all(|t| denied.contains(*t));
+        if denies_all {
+            return Some(true);
+        }
+    }
+    None
+}
+
+/// Resolve the displayed / registered agent name (FR-041).
+///
+/// Uses the clean `<name>` normally, and the plugin-prefixed
+/// `<plugin>-<name>` form ONLY when `clashes` is true (two or more enabled
+/// plugins in the workspace hold the same `<name>`). The on-disk filename
+/// stays `<plugin>__<name>` regardless of clash; this governs only the
+/// human-facing / harness-registered display name.
+///
+/// OpenCode derives its agent name from the filename and so always shows
+/// `<plugin>__<name>` — that override is a chunk-C concern; this helper just
+/// exposes the clean-vs-clash distinction every other harness uses.
+pub(crate) fn displayed_name(plugin: &str, name: &str, clashes: bool) -> String {
+    if clashes {
+        format!("{plugin}-{name}")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// Returns true when `filename` is a Tome-owned agent file for `plugin` —
+/// i.e. it matches `<plugin>__*.<any-ext>` (FR-043).
+///
+/// This is the per-plugin removal key. The match is on the `<plugin>__`
+/// prefix and the presence of a non-empty stem after it; the extension is
+/// not constrained here so a single scan can find both `.md` and `.toml`
+/// owned files. Callers that need a specific extension filter on it
+/// separately.
+pub(crate) fn is_owned_agent_file(filename: &str, plugin: &str) -> bool {
+    let prefix = format!("{plugin}__");
+    let Some(rest) = filename.strip_prefix(&prefix) else {
+        return false;
+    };
+    // Require a non-empty stem before the extension dot so a bare
+    // `<plugin>__.md` (no agent name) does not match.
+    match rest.rsplit_once('.') {
+        Some((stem, _ext)) => !stem.is_empty(),
+        None => false,
+    }
+}
+
+/// Scan `dir` and return the paths of every Tome-owned agent file for
+/// `plugin` (`<plugin>__*.<ext>`), per FR-043's removal contract.
+///
+/// A missing directory yields an empty `Vec` (nothing to remove) rather than
+/// an error — removal is reconciliation, and an absent agent dir simply
+/// means no owned files exist yet. Any other I/O error is surfaced as
+/// [`TomeError::Io`]. Entries are returned sorted for deterministic
+/// removal/reporting order.
+pub(crate) fn owned_agent_files(dir: &Path, plugin: &str) -> Result<Vec<PathBuf>, TomeError> {
+    let read = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(TomeError::Io(e)),
+    };
+    let mut out = Vec::new();
+    for entry in read {
+        let entry = entry.map_err(TomeError::Io)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if is_owned_agent_file(name, plugin) {
+            out.push(entry.path());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent_md(name: &str, extra: &str, body: &str) -> String {
+        format!("---\nname: {name}\n{extra}---\n{body}")
+    }
+
+    #[test]
+    fn agent_filename_is_double_underscore_provenance() {
+        assert_eq!(
+            agent_filename("midnight-expert", "reviewer", "md"),
+            "midnight-expert__reviewer.md"
+        );
+        assert_eq!(
+            agent_filename("midnight-expert", "reviewer", "toml"),
+            "midnight-expert__reviewer.toml"
+        );
+    }
+
+    #[test]
+    fn map_model_same_vendor_only() {
+        // opus → opencode is the same-vendor Anthropic id.
+        assert_eq!(
+            map_model("opencode", "opus").as_deref(),
+            Some("anthropic/claude-opus-4.7")
+        );
+        assert_eq!(
+            map_model("opencode", "sonnet").as_deref(),
+            Some("anthropic/claude-sonnet-4.7")
+        );
+        assert_eq!(
+            map_model("opencode", "haiku").as_deref(),
+            Some("anthropic/claude-haiku-4.7")
+        );
+        // opus → codex is DROP, never an OpenAI id.
+        assert_eq!(map_model("codex", "opus"), None);
+        // claude-code passes the alias through verbatim.
+        assert_eq!(map_model("claude-code", "opus").as_deref(), Some("opus"));
+        // cursor drops Anthropic aliases (no enumerated same-vendor id yet).
+        assert_eq!(map_model("cursor", "opus"), None);
+    }
+
+    #[test]
+    fn map_model_inherit_drops_everywhere() {
+        for harness in ["claude-code", "codex", "cursor", "opencode"] {
+            assert_eq!(
+                map_model(harness, "inherit"),
+                None,
+                "inherit must drop for {harness}"
+            );
+        }
+    }
+
+    #[test]
+    fn never_cross_vendor_model() {
+        // SC-002: no emitted file ever carries a cross-vendor id. codex is
+        // OpenAI-vendored — every Anthropic source must drop.
+        for source in ["opus", "sonnet", "haiku", "inherit", "something-else"] {
+            assert_eq!(
+                map_model("codex", source),
+                None,
+                "codex must never carry an Anthropic-sourced model ({source})"
+            );
+        }
+    }
+
+    #[test]
+    fn infer_read_only_allowlist_no_mutating_is_read_only() {
+        let tools = vec!["Read".to_owned(), "Grep".to_owned(), "Glob".to_owned()];
+        assert_eq!(infer_read_only(Some(&tools), None), Some(true));
+    }
+
+    #[test]
+    fn infer_read_only_allowlist_with_write_is_not_read_only() {
+        let tools = vec!["Read".to_owned(), "Edit".to_owned()];
+        assert_eq!(infer_read_only(Some(&tools), None), Some(false));
+        let tools = vec!["Bash".to_owned()];
+        assert_eq!(infer_read_only(Some(&tools), None), Some(false));
+    }
+
+    #[test]
+    fn infer_read_only_no_allowlist_is_indeterminate() {
+        // Neither posture present → indeterminate (drop).
+        assert_eq!(infer_read_only(None, None), None);
+        // Partial deny → still indeterminate.
+        let deny = vec!["Bash".to_owned()];
+        assert_eq!(infer_read_only(None, Some(&deny)), None);
+    }
+
+    #[test]
+    fn infer_read_only_full_deny_is_read_only() {
+        // Deny every write/edit/execute tool → provably read-only.
+        let deny: Vec<String> = WRITE_EDIT_EXECUTE_TOOLS
+            .iter()
+            .map(|t| t.to_string())
+            .collect();
+        assert_eq!(infer_read_only(None, Some(&deny)), Some(true));
+    }
+
+    #[test]
+    fn displayed_name_clean_vs_clash() {
+        assert_eq!(displayed_name("myplugin", "reviewer", false), "reviewer");
+        assert_eq!(
+            displayed_name("myplugin", "reviewer", true),
+            "myplugin-reviewer"
+        );
+    }
+
+    #[test]
+    fn parse_round_trip_full_frontmatter() {
+        let src = agent_md(
+            "reviewer",
+            "description: Reviews code\nmodel: opus\ntools:\n  - Read\n  - Grep\ndisallowedTools:\n  - Bash\npermissionMode: ask\n",
+            "You are a careful reviewer.\nBe thorough.\n",
+        );
+        let agent = CanonicalAgent::parse("cat", "myplugin", "reviewer", &src)
+            .expect("well-formed agent parses");
+        assert_eq!(agent.catalog, "cat");
+        assert_eq!(agent.plugin, "myplugin");
+        assert_eq!(agent.name, "reviewer");
+        assert_eq!(agent.description.as_deref(), Some("Reviews code"));
+        assert_eq!(agent.model.as_deref(), Some("opus"));
+        assert_eq!(
+            agent.tools.as_deref(),
+            Some(&["Read".to_owned(), "Grep".to_owned()][..])
+        );
+        assert_eq!(
+            agent.disallowed_tools.as_deref(),
+            Some(&["Bash".to_owned()][..])
+        );
+        assert_eq!(agent.permission_mode.as_deref(), Some("ask"));
+        assert!(agent.body.contains("careful reviewer"));
+    }
+
+    #[test]
+    fn parse_name_falls_back_to_filename_stem() {
+        // No `name` key → filename stem is used.
+        let src = "---\ndescription: x\n---\nbody\n";
+        let agent = CanonicalAgent::parse("cat", "myplugin", "my-agent", src).expect("parses");
+        assert_eq!(agent.name, "my-agent");
+    }
+
+    #[test]
+    fn parse_malformed_frontmatter_is_exit_45() {
+        // No closing delimiter → malformed → AgentTranslationFailed (45).
+        let src = "---\nname: oops\nno closing delimiter here\n";
+        let err = CanonicalAgent::parse("cat", "myplugin", "oops", src)
+            .expect_err("malformed frontmatter must fail");
+        assert!(matches!(err, TomeError::AgentTranslationFailed { .. }));
+        assert_eq!(err.exit_code(), 45);
+    }
+
+    #[test]
+    fn parse_wrong_typed_field_is_exit_45() {
+        // `tools` declared as a scalar instead of a list → YAML type error
+        // when deserialised into the agent struct → exit 45.
+        let src = "---\nname: x\ntools: 7\n---\nbody\n";
+        let err = CanonicalAgent::parse("cat", "myplugin", "x", src)
+            .expect_err("wrong-typed field must fail");
+        assert!(matches!(err, TomeError::AgentTranslationFailed { .. }));
+    }
+
+    #[test]
+    fn codex_toml_puts_body_in_triple_quoted_developer_instructions() {
+        let scalars = vec![
+            ("name".to_owned(), "reviewer".to_owned()),
+            ("description".to_owned(), "Reviews code".to_owned()),
+        ];
+        let body = "You are a careful reviewer.\nBe thorough.\n";
+        let rendered = render_codex_toml(&scalars, body);
+        assert!(
+            rendered.contains("developer_instructions = \"\"\""),
+            "body must land in a triple-quoted developer_instructions string:\n{rendered}"
+        );
+        assert!(rendered.contains("name = \"reviewer\""));
+        assert!(rendered.contains("careful reviewer"));
+        // Round-trips back to a parseable TOML document with the body intact.
+        let doc: toml_edit::DocumentMut = rendered.parse().expect("valid TOML");
+        assert_eq!(
+            doc["developer_instructions"].as_str(),
+            Some("You are a careful reviewer.\nBe thorough.\n")
+        );
+    }
+
+    #[test]
+    fn markdown_yaml_preserves_key_order_and_body() {
+        let fm = vec![
+            (
+                "name".to_owned(),
+                serde_yaml::Value::String("reviewer".to_owned()),
+            ),
+            (
+                "description".to_owned(),
+                serde_yaml::Value::String("Reviews code".to_owned()),
+            ),
+        ];
+        let rendered = render_markdown_yaml(&fm, "Body text here.\n");
+        assert!(rendered.starts_with("---\n"));
+        // `name` is emitted before `description` (insertion order).
+        let name_at = rendered.find("name:").expect("name present");
+        let desc_at = rendered.find("description:").expect("description present");
+        assert!(name_at < desc_at, "key order must be preserved");
+        assert!(rendered.ends_with("Body text here.\n"));
+    }
+
+    #[test]
+    fn is_owned_agent_file_matches_prefix() {
+        assert!(is_owned_agent_file("myplugin__reviewer.md", "myplugin"));
+        assert!(is_owned_agent_file("myplugin__reviewer.toml", "myplugin"));
+        // Different plugin.
+        assert!(!is_owned_agent_file("other__reviewer.md", "myplugin"));
+        // Single underscore is not the provenance separator.
+        assert!(!is_owned_agent_file("myplugin_reviewer.md", "myplugin"));
+        // Empty stem.
+        assert!(!is_owned_agent_file("myplugin__.md", "myplugin"));
+    }
 }
