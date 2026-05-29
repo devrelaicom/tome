@@ -276,10 +276,10 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T146 [GIT] Commit: `docs(review): Phase 6 phase-wide reviewer findings + disposition`.
 - [X] T147 Apply phase-wide blockers + selected majors (use devs:rust-dev agent).
 - [X] T148 [GIT] Commit: `fix(phase-6): apply phase-wide reviewer findings`.
-- [ ] T149 [P] Add `tests/harness_sync_p6_idempotence.rs` — hooks+guardrails+agents idempotent across a re-sync (mtime capture pattern) (use devs:rust-dev agent).
-- [ ] T150 [P] Add `tests/entry_e2e_p6.rs` — enable → reconcile all sinks → assert hooks/guardrails/agents/persona end-to-end (use devs:rust-dev agent).
-- [ ] T151 Evaluate cap-std hardening across the four new file sinks (`openat`/`O_NOFOLLOW`) per the Phase 5 P8 security backlog; apply or document deferral (use devs:rust-dev agent).
-- [ ] T152 [GIT] Commit: `test(phase-6): idempotence + e2e + security hardening`.
+- [X] T149 [P] Add `tests/harness_sync_p6_idempotence.rs` — hooks+guardrails+agents idempotent across a re-sync (mtime capture pattern) (use devs:rust-dev agent).
+- [X] T150 [P] Add `tests/entry_e2e_p6.rs` — enable → reconcile all sinks → assert hooks/guardrails/agents/persona end-to-end (use devs:rust-dev agent).
+- [X] T151 Evaluate cap-std hardening across the four new file sinks (`openat`/`O_NOFOLLOW`) per the Phase 5 P8 security backlog; apply or document deferral (use devs:rust-dev agent).
+- [X] T152 [GIT] Commit: `test(phase-6): idempotence + e2e + security hardening`.
 - [ ] T153 Update `README.md` (Phase 6 surface) + `CHANGELOG.md` (`[0.6.0]` entry: hooks, guardrails, agents, personas, Phase 4 correction; exit codes 43–46; no new deps; test delta).
 - [ ] T154 Bump `Cargo.toml` `0.5.0` → `0.6.0`; constitution check (PASS, no amendment).
 - [ ] T155 [GIT] Commit: `chore(release): v0.6.0 — version bump, CHANGELOG, README`.

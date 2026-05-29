@@ -202,6 +202,72 @@ Phase 6 / US5 privilege governance + doctor extensions code review (incremental 
 | O(Agents×Plugins) | Performance | Privilege-grouping computation is O(agents×plugins) bounded by privileged-agent count (order-preserving iteration); acceptable for typical catalogs (<100 agents, <10 plugins) | Phase 6+ polish if profiling shows impact |
 | Idempotent --fix | Efficiency | Phase 6 `--fix` re-sync heuristic re-runs on any present region/enabled agent (idempotent + safe, needless-work only); could tighten iteration in v0.6+ | Phase 6+ / v0.6+ if time permits |
 
+## Phase 6 / Polish (P8) — phase-wide review + cap-std evaluation
+
+Phase-wide 4-reviewer pass (contract / Rust-lens / test / security) over the
+COMPLETE Phase 6 surface, dispatched after US1–US5 merged — catches cross-US
+drift the per-US passes structurally could not see (the Phase 5 P8 lesson).
+Outcome: **0 BLOCKER, 2 MAJOR (both fixed), security clean.** Findings +
+disposition in `specs/006-phase-6-hooks-agents/review/{findings,disposition}.md`.
+
+- **CON-1 (MAJOR, fixed)** — the `settings.local.json` symlink refusal emitted
+  exit 7 while the parallel guardrails-target case had been reconciled to 46
+  (US3 C3-1); per the authoritative `exit-codes-p6.md`, a write-guard failure on
+  the dedicated settings sink is exit 44. Fixed: `hooks.rs::refuse_symlink_settings`
+  now returns `HookSettingsWriteFailed` (44); contract + tests aligned. The
+  hooks.json SOURCE read deliberately stays exit 7 (US2 C2-3/T2-6).
+- **TEST-1 (MAJOR, fixed)** — no test exercised the multi-sink `first_error`
+  precedence (hooks 43 > guardrails 46 > agents 45) when more than one sink fails
+  in one sync; a reorder of the checks would pass every existing test. Added
+  `tests/harness_sync_p6_first_error.rs`.
+- **MINORs applied (T148)** — CON-2/CON-3 (exit-codes-p6.md code-7 reuse row
+  clarified: GUARDRAILS.md source → 46; agents/*.md is 7 at index, 45 at sync);
+  CON-5 (`HarnessDecision` field-order comment); SEC-1 (agent verbatim-body
+  trust-assumption comment + `body_with_frontmatter_delimiter_does_not_inject_fields`
+  regression test); SEC-2 (`compute_plugins_with_hooks_json` fail-safe-swallow
+  comment); TEST-2/TEST-3/TEST-4 (DoctorReport envelope order pin; order-sensitive
+  Guardrails + Persona report pins; SubsystemHealth + RulesCopyState wire pins).
+
+### T151 — cap-std / `O_NOFOLLOW` hardening across the four file sinks: DEFERRED (v0.6.0)
+
+Evaluated across all four Phase 6 file sinks (hooks `settings.local.json`,
+guardrails in-file regions + the Cursor sibling, agent files). Decision: **DEFER**
+— consolidates and re-confirms TD-062-US1-P6 / SEC-019-US5-P5 / the Phase-5 C-1
+deferral at the v0.6.0 boundary.
+
+> Symlink refusal on the four Phase 6 file sinks is final-node-only; an
+> intermediate directory being a symlink is not checked, leaving a narrow TOCTOU
+> window before the open/rename. Accepted for v0.6.0: the Phase 6 constitution
+> gate forbids the new top-level dependency `cap-std` that the clean fix
+> (capability-based `openat`/`O_NOFOLLOW` directory walk) would require, and the
+> residual risk is low under Tome's trust model — the operator explicitly owns
+> and creates the project and harness directory trees, plugin content never
+> supplies directory path components (only the final filename, validated as a
+> single safe segment by `is_safe_agent_name` and re-asserted via
+> `target.parent() == Some(dir)`), and an attacker able to swap an
+> intermediate-directory symlink mid-sync already holds the operator's filesystem
+> privileges. Current mitigations (final-node symlink refusal, atomic
+> tempfile + same-FS rename, mode preservation, fail-closed non-UTF-8 handling)
+> are adequate; the exposure matches the pre-existing Phase 4 discipline and
+> introduces no new symlink-exposure class. Revisit when an unrelated need
+> justifies the `cap-std` dependency (with a constitution amendment) or if Tome's
+> trust model extends to syncing into operator-shared or untrusted directories.
+
+A no-new-dep `O_NOFOLLOW`-on-final-open route was considered and rejected: it only
+hardens the final node (already covered by the `symlink_metadata` check), so it
+buys no intermediate-dir protection — the real win wants the cap-std `Dir`
+abstraction, gated by the no-new-top-level-dep constitution rule.
+
+### Carried forward to v0.6+ (non-blocking)
+
+| # | Category | Description | Target |
+|---|----------|-------------|--------|
+| RUST-1 | Efficiency | `reconcile_hooks` enumerates enabled plugins 3× per sync + opens a second read-only DB handle in the hooks pass; needless-work only (all read-only, deterministic). Companion to R5-3. | v0.6+ |
+| RUST-2 | Efficiency | `reconcile_guardrails` per-path dedup re-filters all snapshots O(harnesses²); bounded by the ~4 fixed harnesses; cosmetic vs `group_by_path`. | v0.6+ |
+| GAP-1 | Test | Exit codes 9, 26–29 lack e2e CLI coverage (MCP-internal; needs an in-process MCP test harness). | v0.6+ |
+| ProjectBindingState pin | Test | `SubsystemHealth` + `RulesCopyState` got byte-stable pins (TEST-4); `ProjectBindingState` is a struct (carries `WorkspaceName` + nested `RulesCopyState`), so its pin is deferred. | v0.6+ |
+| TD-061 / TD-063 / TD-064 / TD-065 / R5-3 | Mixed | Re-confirmed deferred under full-phase assembly: per-agent shrink stale file; stale hook-entry removal gap under the no-sidecar model; `compose_in_file` per-line rebuild; doctor prompts-collision `expose_personas=false` baseline; `--fix` re-sync heuristic. | v0.6+ |
+
 ## Performance Concerns
 
 Known performance issues:
