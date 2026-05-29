@@ -272,8 +272,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 - [X] T143 Create `specs/006-phase-6-hooks-agents/retro/P8.md` from template.
 - [X] T144 [GIT] Commit: `docs(phase-6): init P8 retro`.
-- [ ] T145 Phase-wide 4-reviewer parallel pass (contract / Rust-lens / test / security) against the full Phase 6 surface; consolidate `review/findings.md` + `review/disposition.md` (reviewers read the us{1..5}-disposition docs first).
-- [ ] T146 [GIT] Commit: `docs(review): Phase 6 phase-wide reviewer findings + disposition`.
+- [X] T145 Phase-wide 4-reviewer parallel pass (contract / Rust-lens / test / security) against the full Phase 6 surface; consolidate `review/findings.md` + `review/disposition.md` (reviewers read the us{1..5}-disposition docs first).
+- [X] T146 [GIT] Commit: `docs(review): Phase 6 phase-wide reviewer findings + disposition`.
 - [ ] T147 Apply phase-wide blockers + selected majors (use devs:rust-dev agent).
 - [ ] T148 [GIT] Commit: `fix(phase-6): apply phase-wide reviewer findings`.
 - [ ] T149 [P] Add `tests/harness_sync_p6_idempotence.rs` — hooks+guardrails+agents idempotent across a re-sync (mtime capture pattern) (use devs:rust-dev agent).
