@@ -365,6 +365,133 @@ fn get_wraps_and_substitutes() {
         text.contains("While acting as the reviewer persona, you must: be thorough"),
         "free-form args resolved into the template's $ARGUMENTS; got: {text:?}",
     );
+    // (4) T4-2: the agent frontmatter must be STRIPPED — a regression that
+    //     wrapped the raw file would leak the `name:`/`description:` lines
+    //     and the YAML fences into the conversational body.
+    assert!(
+        !text.contains("name: reviewer"),
+        "frontmatter `name:` line absent from the rendered body; got: {text:?}",
+    );
+    assert!(
+        !text.contains("description: Reviewer."),
+        "frontmatter `description:` line absent from the rendered body; got: {text:?}",
+    );
+    assert!(
+        !text.contains("---"),
+        "the YAML frontmatter fences are stripped; got: {text:?}",
+    );
+}
+
+#[test]
+fn get_resolves_plugin_version_builtin() {
+    // C4-1 regression: `${TOME_PLUGIN_VERSION}` must resolve to the agent's
+    // real plugin version (from the `plugin.json` `version` field threaded
+    // through `EnabledAgent.plugin_version`), NOT an empty string. The
+    // fixture's plugin.json declares `"version": "1.0.0"`.
+    let agent = "---\nname: reviewer\ndescription: Reviewer.\n---\nRunning under v${TOME_PLUGIN_VERSION}.\n";
+    let plugins = [PluginSpec {
+        name: "plug",
+        agents: &[("reviewer", agent)],
+        commands: &[],
+    }];
+    let (_tmp, paths) = stage("acme", &plugins);
+    let state = build_state(&paths);
+
+    let text = invoke_get(state, "reviewer-persona", None).expect("prompts/get ok");
+
+    assert!(
+        text.contains("Running under v1.0.0."),
+        "${{TOME_PLUGIN_VERSION}} resolves to the real version inside the persona body; got: {text:?}",
+    );
+    assert!(
+        !text.contains("Running under v."),
+        "the version built-in is not empty; got: {text:?}",
+    );
+}
+
+#[test]
+fn long_agent_name_persona_suffix_preserved() {
+    // C4-2 / T4-4: an agent whose name is longer than the 48-char override
+    // budget must still derive a persona slug that ENDS in `-persona` (the
+    // suffix is load-bearing for the user-facing `<name>-persona` shape).
+    let long_name = "a".repeat(80);
+    let agent = format!("---\nname: {long_name}\ndescription: Long.\n---\nBody.\n");
+    let plugins = [PluginSpec {
+        name: "plug",
+        agents: &[("long-agent", agent.as_str())],
+        commands: &[],
+    }];
+    let (_tmp, paths) = stage("acme", &plugins);
+
+    let registry = build(&paths, true);
+    let names = descriptor_names(&registry);
+
+    let persona = names
+        .iter()
+        .find(|n| n.ends_with("-persona") && *n != prompts::DROP_PERSONA_NAME)
+        .unwrap_or_else(|| panic!("an agent persona is present; got {names:?}"));
+    assert!(
+        persona.ends_with("-persona"),
+        "the persona slug terminates in `-persona` even for a long name; got {persona:?}",
+    );
+    assert!(
+        persona.chars().count() <= 48,
+        "the persona slug stays within the override cap; got {} chars: {persona:?}",
+        persona.chars().count(),
+    );
+}
+
+#[test]
+fn persona_path_unresolvable_warns_and_skips() {
+    // T4-3: with personas ON, if one agent's `.md` is deleted after enable,
+    // the registry still builds; the surviving agent's persona + the
+    // reserved drop-persona are present, and the broken one is absent.
+    let reviewer = "---\nname: reviewer\ndescription: Reviewer.\n---\nReview.\n";
+    let planner = "---\nname: planner\ndescription: Planner.\n---\nPlan.\n";
+    let plugins = [
+        PluginSpec {
+            name: "plug-a",
+            agents: &[("reviewer", reviewer)],
+            commands: &[],
+        },
+        PluginSpec {
+            name: "plug-b",
+            agents: &[("planner", planner)],
+            commands: &[],
+        },
+    ];
+    let (tmp, paths) = stage("acme", &plugins);
+
+    // Corrupt `planner`'s source on disk (truncate the frontmatter so the
+    // parse fails) after it was indexed + enrolled. The registry build
+    // re-parses from disk, so this triggers the warn-and-skip path.
+    let planner_md = tmp
+        .path()
+        .join("catalog")
+        .join("plug-b")
+        .join("agents")
+        .join("planner.md");
+    fs::write(
+        &planner_md,
+        "---\nname: planner\nThis is broken: no closing fence\n",
+    )
+    .expect("corrupt planner frontmatter");
+
+    let registry = build(&paths, true);
+    let names = descriptor_names(&registry);
+
+    assert!(
+        names.contains(&"reviewer-persona".to_owned()),
+        "the surviving agent's persona is present; got {names:?}",
+    );
+    assert!(
+        names.contains(&prompts::DROP_PERSONA_NAME.to_owned()),
+        "the reserved drop-persona is still present; got {names:?}",
+    );
+    assert!(
+        !names.contains(&"planner-persona".to_owned()),
+        "the broken agent's persona is skipped; got {names:?}",
+    );
 }
 
 #[test]

@@ -30,6 +30,7 @@ pub mod composition;
 pub mod edit;
 pub mod parser;
 pub mod resolver;
+pub mod scopes;
 
 pub use composition::CompositionRef;
 pub use resolver::{EffectiveHarness, EffectiveHarnessList, ScopeKind, resolve_effective_list};

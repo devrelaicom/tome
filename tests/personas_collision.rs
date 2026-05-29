@@ -276,9 +276,15 @@ fn union_namespace() {
     // A persona slug and a command's derived name collide in the SINGLE
     // shared namespace. Agent `reviewer` → persona slug `reviewer-persona`;
     // a command with `prompt_name: reviewer-persona` derives to the same
-    // name. The persona's empty `indexed_at` sorts it first, so it keeps
-    // the base name and the command is counter-suffixed — proving the two
-    // share one collision namespace rather than living in parallel ones.
+    // name. The agent + command are enabled in the same `lifecycle::enable`
+    // call so they share an `indexed_at`; the tie-break then falls to the
+    // identity tuple `(catalog, plugin, kind, name)` where kind `agent`
+    // sorts before `command` — so the persona keeps the base name and the
+    // command is counter-suffixed. R4-1: this is the REAL `indexed_at`
+    // tie-break (NOT the persona's old empty-seed always-wins behaviour);
+    // the `indexed_at_decides_persona_vs_command_collision` test below
+    // pins the case where an earlier command beats the persona. The point
+    // here is the SHARED namespace: one bucket, two members.
     let agent = "---\nname: reviewer\ndescription: Reviewer.\n---\nReview.\n";
     let cmd = "---\nname: cmd\ndescription: Collides with the persona slug.\nprompt_name: reviewer-persona\n---\nbody\n";
     let plugins = [PluginSpec {
@@ -306,7 +312,7 @@ fn union_namespace() {
     assert_eq!(
         base.persona,
         tome::mcp::prompts::PersonaRole::Agent,
-        "the agent persona wins the base name (empty indexed_at sorts first)",
+        "the agent persona wins the base name (same indexed_at → kind `agent` < `command` tuple tie-break)",
     );
     let suffixed = registry
         .lookup("reviewer-persona2")
@@ -325,5 +331,70 @@ fn union_namespace() {
             .any(|c| c.base_name == "reviewer-persona" && c.entries.len() == 2),
         "a single collision bucket spans the persona + command; got {:?}",
         registry.collisions,
+    );
+}
+
+#[test]
+fn indexed_at_decides_persona_vs_command_collision() {
+    // R4-1: a `<name>-persona` is NOT automatically the collision winner —
+    // it carries the agent's REAL `indexed_at` and tie-breaks by
+    // `indexed_at ASC` like every other entry (FR-062). Here a command's
+    // `indexed_at` is backdated EARLIER than the agent's, so the COMMAND
+    // wins the base `reviewer-persona` name and the persona is
+    // counter-suffixed — the case the old empty-seed bug made impossible.
+    let agent = "---\nname: reviewer\ndescription: Reviewer.\n---\nReview.\n";
+    let cmd = "---\nname: cmd\ndescription: Collides with the persona slug.\nprompt_name: reviewer-persona\n---\nbody\n";
+    let plugins = [PluginSpec {
+        name: "plug",
+        agents: &[("reviewer", agent)],
+        commands: &[("cmd", cmd)],
+    }];
+    let (_tmp, paths) = stage("acme", &plugins);
+
+    // Force the timestamps: command earlier, agent later. Both rows were
+    // indexed in the same enable call (identical `indexed_at`), so we
+    // separate them explicitly to exercise the `indexed_at ASC` arm rather
+    // than the tuple fallback.
+    {
+        let conn = open_index(&paths);
+        conn.execute(
+            "UPDATE skills SET indexed_at = '2026-01-01T00:00:00Z' WHERE kind = 'command' AND name = 'cmd'",
+            [],
+        )
+        .expect("backdate command");
+        conn.execute(
+            "UPDATE skills SET indexed_at = '2026-06-01T00:00:00Z' WHERE kind = 'agent' AND name = 'reviewer'",
+            [],
+        )
+        .expect("forward-date agent");
+    }
+
+    let registry = build(&paths);
+    let got = names(&registry);
+
+    assert!(
+        got.contains(&"reviewer-persona".to_owned()),
+        "the earlier-indexed command keeps the base name; got {got:?}",
+    );
+    assert!(
+        got.contains(&"reviewer-persona2".to_owned()),
+        "the later-indexed persona is counter-suffixed; got {got:?}",
+    );
+
+    let base = registry
+        .lookup("reviewer-persona")
+        .expect("base reviewer-persona present");
+    assert_eq!(
+        base.persona,
+        tome::mcp::prompts::PersonaRole::None,
+        "the EARLIER command wins the base name — the persona does NOT automatically win (R4-1)",
+    );
+    let suffixed = registry
+        .lookup("reviewer-persona2")
+        .expect("suffixed persona present");
+    assert_eq!(
+        suffixed.persona,
+        tome::mcp::prompts::PersonaRole::Agent,
+        "the later-indexed agent persona is the counter-suffixed entry",
     );
 }

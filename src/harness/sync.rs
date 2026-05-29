@@ -44,7 +44,7 @@ use crate::harness::{
     with_effective_modules,
 };
 use crate::paths::Paths;
-use crate::settings::{self, GlobalSettings, WorkspaceSettings, resolve_effective_list};
+use crate::settings::{GlobalSettings, WorkspaceSettings, resolve_effective_list};
 use crate::workspace::WorkspaceName;
 
 // =====================================================================
@@ -185,7 +185,12 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // 1. Read the three settings layers.
     // -----------------------------------------------------------------
     let marker_path = Paths::project_marker_config(project_root);
-    let marker = read_project_marker(&marker_path)?;
+    // The project marker is REQUIRED here (sync only runs on a bound
+    // project) — route through the canonical `read_project_marker` whose
+    // classification splits IO (exit 7) from parse (exit 70). This is the
+    // not-Option form; `settings::scopes::load_project_marker` is the
+    // Option-wrapping form used by the layered-walk consumers.
+    let marker = crate::settings::parser::read_project_marker(&marker_path)?;
 
     let workspace_settings = read_workspace_settings(deps)?;
     let global_settings = read_global_settings(deps)?;
@@ -490,43 +495,18 @@ where
 // =====================================================================
 // Settings reads
 // =====================================================================
-
-// Polish R-M5: project-marker reader consolidated to
-// `settings::parser::read_project_marker`. The local wrapper used to
-// map both IO and parse failures to `WorkspaceMalformed`; the canonical
-// helper now splits IO -> `TomeError::Io` (exit 7) vs parse ->
-// `WorkspaceMalformed` (exit 70), which is the semantically accurate
-// classification.
-use crate::settings::parser::read_project_marker;
+//
+// R4-2: the workspace + global loaders are promoted to
+// `settings::scopes` (the single source for the NotFound/parse-error
+// arms). These thin wrappers adapt the orchestrator's `SyncDeps` shape
+// to the promoted loaders' `(paths, workspace_name)` parameters.
 
 fn read_workspace_settings(deps: &SyncDeps<'_>) -> Result<Option<WorkspaceSettings>, TomeError> {
-    let path = deps.paths.workspace_settings_file(deps.workspace_name);
-    match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
-        Ok(body) => settings::parser::parse_workspace(&body)
-            .map(Some)
-            .map_err(|e| TomeError::WorkspaceMalformed {
-                path: path.clone(),
-                reason: format!("parse workspace settings: {e}"),
-            }),
-        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
+    crate::settings::scopes::load_workspace_settings(deps.paths, deps.workspace_name)
 }
 
 fn read_global_settings(deps: &SyncDeps<'_>) -> Result<GlobalSettings, TomeError> {
-    let path = &deps.paths.global_settings_file;
-    match crate::util::bounded_read_to_string(path, crate::util::TOME_CONFIG_MAX) {
-        Ok(body) => {
-            settings::parser::parse_global(&body).map_err(|e| TomeError::WorkspaceMalformed {
-                path: path.clone(),
-                reason: format!("parse global settings: {e}"),
-            })
-        }
-        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(GlobalSettings::default())
-        }
-        Err(e) => Err(e),
-    }
+    crate::settings::scopes::load_global_settings(deps.paths)
 }
 
 // =====================================================================

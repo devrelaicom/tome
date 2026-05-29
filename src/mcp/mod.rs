@@ -289,49 +289,21 @@ fn build_prompt_registry(
 /// workspace's `settings.toml` (if present), and the global
 /// `settings.toml` (if present), then resolves the scalar. This is the
 /// scalar resolver — NOT the `harnesses` composition grammar.
-fn resolve_expose_personas(scope: &ResolvedScope, paths: &Paths) -> Result<bool, TomeError> {
-    use crate::settings::{parser, resolve_scalar_with};
+///
+/// `#[doc(hidden)] pub` so the FR-067 startup-scope integration test
+/// (`tests/personas_startup_scope.rs`) can drive the on-disk
+/// project→workspace→global resolution directly. Test seam only —
+/// production callers reach it through [`build_prompt_registry`].
+#[doc(hidden)]
+pub fn resolve_expose_personas(scope: &ResolvedScope, paths: &Paths) -> Result<bool, TomeError> {
+    use crate::settings::{resolve_scalar_with, scopes};
 
-    let project_marker = match scope.project_root.as_deref() {
-        Some(root) => {
-            let marker_path = Paths::project_marker_config(root);
-            match parser::read_project_marker(&marker_path) {
-                Ok(pm) => Some(pm),
-                Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(e),
-            }
-        }
-        None => None,
-    };
-
-    let workspace_settings =
-        {
-            let path = paths.workspace_settings_file(scope.scope.name());
-            match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
-                Ok(body) => Some(parser::parse_workspace(&body).map_err(|e| {
-                    TomeError::WorkspaceMalformed {
-                        path: path.clone(),
-                        reason: format!("parse workspace settings: {e}"),
-                    }
-                })?),
-                Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
-                Err(e) => return Err(e),
-            }
-        };
-
-    let global_settings = {
-        let path = &paths.global_settings_file;
-        match crate::util::bounded_read_to_string(path, crate::util::TOME_CONFIG_MAX) {
-            Ok(body) => parser::parse_global(&body).map_err(|e| TomeError::WorkspaceMalformed {
-                path: path.clone(),
-                reason: format!("parse global settings: {e}"),
-            })?,
-            Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-                crate::settings::GlobalSettings::default()
-            }
-            Err(e) => return Err(e),
-        }
-    };
+    // R4-2: the three scope-loaders are promoted to `settings::scopes`;
+    // this resolver no longer carries its own copy of the
+    // NotFound/parse-error arms.
+    let project_marker = scopes::load_project_marker(scope.project_root.as_deref())?;
+    let workspace_settings = scopes::load_workspace_settings(paths, scope.scope.name())?;
+    let global_settings = scopes::load_global_settings(paths)?;
 
     Ok(resolve_scalar_with(
         project_marker.as_ref(),

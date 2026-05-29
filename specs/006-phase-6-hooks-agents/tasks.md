@@ -221,8 +221,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T111 [P] [US4] JSON wire-shape pins for the persona `PromptDescriptor` entries (`tests/personas.rs`) (use devs:rust-dev agent).
 - [X] T112 [GIT] Commit: `test(phase-6): US4 personas + collision + wire pins`.
 - [X] T113 [US4] 4-reviewer pass; write `review/us4-findings.md` + `review/us4-disposition.md`.
-- [ ] T114 [US4] Apply US4 blockers + selected majors (use devs:rust-dev agent).
-- [ ] T115 [GIT] Commit: `fix(phase-6): apply US4 reviewer findings`.
+- [X] T114 [US4] Apply US4 blockers + selected majors (use devs:rust-dev agent).
+- [X] T115 [GIT] Commit: `fix(phase-6): apply US4 reviewer findings`.
 - [ ] T116 [US4] Run codebase mapping for Phase 6 changes (`/sdd:map incremental`).
 - [ ] T117 [US4] Review `retro/P6.md`; extract learnings to `CLAUDE.md` (conservative).
 - [ ] T118 [GIT] Commit: `docs(phase-6): US4 closeout — mapping + retro`.

@@ -39,7 +39,7 @@ use crate::index::skills::{
 };
 use crate::index::workspaces::resolve_id_required;
 use crate::mcp::prompt_collision::{CollisionRecord, EntryIdentity, resolve_collisions};
-use crate::mcp::prompt_name::derive_name;
+use crate::mcp::prompt_name::{derive_name, derive_suffixed_name};
 use crate::mcp::state::McpState;
 use crate::paths::Paths;
 use crate::plugin::frontmatter::parse_skill_frontmatter;
@@ -551,6 +551,11 @@ impl PromptRegistry {
     /// prefix is applied HERE, before the collision pass; the Phase 5
     /// counter-suffix backstop fires only on residual collisions.
     ///
+    /// R4-1: each agent persona carries the agent's REAL `indexed_at`, so
+    /// a `<name>-persona` colliding with a command/skill tie-breaks by
+    /// `indexed_at ASC` exactly like any other entry (FR-062). The empty
+    /// `indexed_at` seed is reserved for `drop-persona` ONLY.
+    ///
     /// `drop-persona` is seeded with an empty `indexed_at` + empty
     /// `(catalog, plugin)` so it sorts first in any collision bucket
     /// (the resolver tie-breaks on `indexed_at ASC` then the identity
@@ -611,21 +616,27 @@ impl PromptRegistry {
 
             // FR-061: clash prefix applied here, before the collision
             // pass. `<plugin>-<name>-persona` for clashing agents,
-            // `<name>-persona` otherwise. Sanitised through the Phase 5
-            // name machinery as a final backstop.
+            // `<name>-persona` otherwise. C4-2: derive through
+            // `derive_suffixed_name` so the `-persona` suffix is preserved
+            // even when the base is long (the prior whole-override
+            // truncation amputated it).
             let base = if clash_set.contains(&agent.name) {
                 format!("{}-{}", agent.plugin, agent.name)
             } else {
                 agent.name.clone()
             };
-            let derived = derive_name(&base, "persona", Some(&format!("{base}-persona")));
+            let derived = derive_suffixed_name(&base, "persona");
 
+            // R4-1: carry the agent's REAL `indexed_at` so a colliding
+            // `<name>-persona` tie-breaks by `indexed_at ASC` like every
+            // other entry (FR-062) — NOT the over-broad empty seed that
+            // belongs only to `drop-persona`.
             identities.push(EntryIdentity {
                 catalog: agent.catalog.clone(),
                 plugin: agent.plugin.clone(),
                 kind: EntryKind::Agent,
                 name: agent.name.clone(),
-                indexed_at: String::new(),
+                indexed_at: agent.indexed_at.clone(),
                 derived_name: derived,
             });
 
@@ -646,7 +657,9 @@ impl PromptRegistry {
                     arguments: Vec::new(),
                     argument_hint: None,
                     body_uses_arguments: true,
-                    plugin_version: String::new(),
+                    // C4-1: thread the agent's real plugin version so
+                    // `${TOME_PLUGIN_VERSION}` resolves in the persona body.
+                    plugin_version: agent.plugin_version,
                     persona: PersonaRole::Agent,
                     display_name,
                 },
