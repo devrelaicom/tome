@@ -86,8 +86,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Independent test**: Enable a plugin with an `agents/` dir in a workspace whose effective list includes claude-code/codex/cursor/opencode; assert each harness's agent dir holds `<plugin>__<name>.<ext>` in the right format/body location; assert model mapping + dropped fields; disable removes exactly `<plugin>__*`; re-sync is a no-op. (SC-001, SC-002, SC-003)
 
-- [ ] T027 Create `specs/006-phase-6-hooks-agents/retro/P3.md` from template.
-- [ ] T028 [GIT] Commit: `docs(phase-6): init P3 retro`.
+- [X] T027 Create `specs/006-phase-6-hooks-agents/retro/P3.md` from template.
+- [X] T028 [GIT] Commit: `docs(phase-6): init P3 retro`.
 
 ### Agent indexing
 
