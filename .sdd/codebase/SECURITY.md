@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 / US4 personas; incremental update)
+> **Last Updated**: 2026-05-29 (Phase 6 / US5 privilege governance + doctor extensions; incremental update)
 
 ## Overview
 
@@ -50,6 +50,7 @@ Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, wo
 40. Phase 6 / US2 additions (REAL HOOKS — THIRD-PARTY JSON WRITE SURFACE): Plugin-supplied `hooks/hooks.json` read on plugin enable with two-variable rewrite (`${CLAUDE_PLUGIN_ROOT}` + `${CLAUDE_PLUGIN_DATA}` → absolute paths); UTF-8 validation (fail-closed exit 44) prevents non-UTF-8 install paths from emitting U+FFFD-corrupted hook commands. Hooks merged into project's `.claude/settings.local.json` (gitignored, never committed) by deep structural-equality match (idempotent, never duplicates user-edited copy). Settings file read/write atomic, symlink-refusing, mode-preserving; 1 MiB read-cap enforced. Trust gate is operator's explicit `tome plugin enable`; Tome never auto-enables. Parent `.claude/` created 0700 on Unix when absent. Hook JSON rewrite is targeted two-token textual substitution only (NOT full Phase 5 substitution pipeline per NFR-007); syntax-valid textual replacement handles double-slash in paths safely. On disable, hooks re-derived and structurally-matching entries removed only (no sidecar ownership tracking; user-edited copy stays). 0 security findings from US2 reviewer pass.
 41. Phase 6 / US3 additions (GUARDRAILS SOFT FALLBACK + RULES-FILE CORRECTION): Plugin-shipped `hooks/GUARDRAILS.md` body copied verbatim into per-plugin marker regions in harness rules files; body validation enforces marker-injection defence (`body_contains_marker_line`): any line matching guardrails START/END regex or `tome:begin/end` block-marker regex rejected (exit 46, naming source) closing region-escape (persistent prose injection outside Tome's markers), file-wedge (exit-46-forever DoS), and rules-block corruption; loud-but-isolated (sibling plugins still reconcile). Guardrails write/delete targets (CLAUDE.md/AGENTS.md/GEMINI.md/Cursor sibling) atomic, symlink-refusing (exit 46 for guardrails targets per exit-codes-p6.md), mode-preserving. Path composition uses no attacker-influenced text in filesystem paths; `<catalog>:<plugin>` flows only into marker TEXT. Claude Code rules-include block and guardrails now land in `CLAUDE.md` (Phase 4 correction: was AGENTS.md) — same atomic/symlink/mode discipline, Claude Code now reads a file it actually reads; AGENTS.md shared across other harnesses resolves same `.tome/RULES.md` with no content duplication. 0 security findings from US3 reviewer pass.
 42. Phase 6 / US4 additions (AGENT PERSONAS AS MCP PROMPTS): Double opt-in model for persona exposure: operator explicitly enables plugins via `tome plugin enable` (first gate), then optionally sets `expose_agents_as_personas = true` in project/workspace/global settings scope and MCP server is launched (second gate). Personas OFF by default (`expose_agents_as_personas` unset or `false`). Persona path introduces NO new substitution surface: agent bodies undergo identical Phase 5 `build_context_for_entry` + unified-regex substitution (COMBINED_RE) as non-persona entries; no Stage 4 appendage. Wrapped body (frontend layer) is LLM-context-only prose template (not re-parsed file); body text immutable after substitution. Persona MCP prompts folded into Phase 5 collision namespace (same `resolve_collisions` deduplication); drop-persona reserved (empty catalog/plugin/indexed_at sort) ensuring unhijackable insertion point. Persona name validation reuses agent-name checks at index time (safe path segment, no traversal). No security findings from US4 reviewer pass.
+43. Phase 6 / US5 additions (PRIVILEGE GOVERNANCE + DOCTOR EXTENSIONS): **Privilege-escalation audit integrity (FR-051)**: the doctor `PrivilegeEscalationReport` reads each enabled agent's SOURCE `.md` (`CanonicalAgent::parse`) and lists those carrying `hooks`/`mcpServers`/`permissionMode`, REGARDLESS of `strip_plugin_agent_privileges` (the strip is a per-emission clone; the shared canonical the audit reads is never mutated — borrow-checker-enforced). A security-conscious admin always sees what a plugin ships even when Tome strips it on emit. **`strip_plugin_agent_privileges` is config governance, not an enforcement boundary** — the trust boundary remains plugin-enable time; the report still surfaces escalation. **`tome doctor --fix` write safety**: re-runs the idempotent `sync_project` with `force=false`; never removes a non-structural-match (user-edited) hook, never deletes user content (rules-file text outside markers; agents not matching `<plugin>__*`), refuses symlinks on every write/delete (single-path `remove_file`, no `remove_dir_all`). Hooks drift is reported, not auto-fixed. **Read-only doctor (FR-124)**: the five Phase 6 check fns + `build_phase6_surfaces` perform no writes / no dir creation. 0 security findings from US5 reviewer pass.
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
@@ -510,16 +511,100 @@ pub(crate) fn plugin_of_owned_file(filename: &str) -> Option<&str> {
 }
 ```
 
-### Privileged Field Passthrough
+### Privileged Field Passthrough & Governance (Phase 6 / US5)
 
 | Control | Implementation | Location |
 |---------|----------------|----------|
 | **Default passthrough** | Privileged fields (`hooks`, `mcp_servers`, `permission_mode`) forwarded to Claude Code intact | `src/harness/agents.rs::CanonicalAgent` carries all three as opaque `serde_json::Value` |
 | **In-file audit trail** | Each field written to emitted agent file; operators can inspect via `cat .claude/agents/<name>.md` | Transparency by design (FR-050) |
 | **Opt-out stripping** | `strip_plugin_agent_privileges` setting (US5) drops all three fields on Claude Code agent emission | Operator control; governance responsibility to decide when to trust plugin-supplied hooks |
-| **Doctor privilege report** | US5 surfaces `PrivilegeEscalationReport` listing all installed agents carrying privileged fields | Audit visibility for operator decisions |
+| **Privilege escalation report (US5)** | Doctor command surface `PrivilegeEscalationReport` listing all installed agents carrying privileged fields | Audit visibility: reads EACH ENABLED AGENT'S SOURCE `.md` via `CanonicalAgent::parse`, surfaces those with `hooks`/`mcpServers`/`permissionMode`, REGARDLESS of `strip_plugin_agent_privileges` setting (the strip is a per-emission clone; shared canonical never mutated — borrow-checker-enforced) |
 
-**Security Model**: Trust boundary is at plugin enable time — operator explicitly authorizes the plugin and accepts whatever privileges it declares. The passthrough is intentional (FR-050: a capability advantage). Future `PrivilegeEscalationReport` (US5) surfaces what was accepted, supporting governance workflows.
+**Security Model**: Trust boundary is at plugin enable time — operator explicitly authorizes the plugin and accepts whatever privileges it declares. The passthrough is intentional (FR-050: a capability advantage). The `PrivilegeEscalationReport` surfaces what was accepted, supporting governance workflows. **Admin visibility guarantee**: A security-conscious admin can always see what a plugin ships (via the report reading source files) even when Tome strips it on emit (local copy mutation). The strip is config governance only, not an enforcement boundary.
+
+## Doctor Command Security (Phase 6 / US5)
+
+### Privilege-Escalation Audit
+
+| Control | Implementation | Guarantee |
+|---------|----------------|-----------|
+| **Read-only audit** | `PrivilegeEscalationReport` reads each enabled agent's SOURCE `.md` (canonical form) | No mutations to shared canonical; audit data is truth as shipped by plugin |
+| **Stripping transparency** | Report surfaces privileges REGARDLESS of `strip_plugin_agent_privileges` setting | Admin always sees what plugin declared, independent of emission-time stripping |
+| **Escalation listing** | Report lists all agents with `hooks`, `mcp_servers`, or `permission_mode` fields non-empty | Structured output for governance decisions and attestation |
+| **Exit code** | Privilege escalation report emitted on `tome doctor` (read-only); no exit-code failure | Diagnostic only; non-blocking |
+
+**Code Location** (`src/doctor/mod.rs` + `src/doctor/checks.rs`):
+```rust
+/// PrivilegeEscalationReport reads each enabled agent SOURCE canonical form
+/// and lists those with privileged fields, regardless of strip setting.
+pub struct PrivilegeEscalationReport {
+    pub enabled_agents_with_privileges: Vec<PrivilegedAgentInfo>,
+}
+
+pub struct PrivilegedAgentInfo {
+    pub plugin: String,
+    pub agent_name: String,
+    pub has_hooks: bool,
+    pub has_mcp_servers: bool,
+    pub has_permission_mode: bool,
+}
+```
+
+### `--fix` Write Safety
+
+| Control | Implementation | Guarantee |
+|---------|----------------|-----------|
+| **Idempotent re-sync** | `tome doctor --fix` re-runs `sync_project(workspace, project, force=false)` | Same harness sync pipeline; no new logic; idempotence verified by existing tests |
+| **User-edited hook preservation** | Hooks re-derived; only structurally-matching ones removed (via deep equality) | User-edited copy (changed post-Tome-write) preserved on disable; no data loss (NFR-003) |
+| **User-edited rules content preservation** | Rules-file text outside Tome marker pairs never touched | User-authored guardrails regions and prose remain intact; only marked regions reconciled |
+| **Agent removal scope** | Only agents matching `<plugin>__*` pattern (via `plugin_of_owned_file`) removed on plugin disable | Stale agents left until plugin fully disabled; US5 doctor removes via `PrivilegeEscalationReport` listing orphans |
+| **Symlink refusal on every write** | All file writes (rules, hooks, agents, guardrails) refuse symlinks before operation | Exit 46 for guardrails; exit 7 for others; no write-through-symlinks allowed |
+| **No directory deletion** | `--fix` uses single-path `remove_file` for file-removal only; never `remove_dir_all` | Files removed individually; directories never force-deleted (defensive: prevent cascading accidents) |
+| **Hooks drift reported, not auto-fixed** | Doctor surfaces stale hook entries in `HooksReport`; does not auto-remove | Operator reviews before manual cleanup; prevents silent orphaning of operator-intended hooks |
+
+**Code Location** (`src/doctor/fixes.rs::apply_one_fix`):
+```rust
+/// Apply one suggested fix (e.g., re-sync harness, re-download model).
+/// Re-runs idempotent sync_project; never removes non-structural-match hooks;
+/// never deletes user content outside markers.
+pub fn apply_one_fix(
+    fix: &SuggestedFix,
+    workspace: &WorkspaceName,
+    project_root: &Path,
+) -> Result<(), TomeError> {
+    match fix {
+        SuggestedFix::ReSyncHarness { harness, enabled } => {
+            // Re-run same harness sync logic; idempotent
+            sync_project(workspace, project_root, Some(harness), force=false)?;
+        }
+        // ... other fix types ...
+    }
+    Ok(())
+}
+```
+
+### Read-Only Doctor (FR-124)
+
+| Control | Implementation | Guarantee |
+|---------|----------------|-----------|
+| **No writes by default** | Five check functions + `build_phase6_surfaces` perform only reads | No file writes; no directory creation; no state mutation |
+| **`--fix` opt-in** | Repairs only applied when user explicitly passes `--fix` flag | Diagnostic-by-default posture; user controls when mutations happen |
+| **Pre-flight compute** | `build_phase6_surfaces` constructs reports without touching disk | All surfaces computed from in-memory state (index, settings, harness detection) |
+| **Harness detection** | Non-parsing directory probe (look for `claude_code.toml`, etc.) | Never parses harness configs; no IO errors from parse failures; read-only detection |
+
+**Code Location** (`src/doctor/checks.rs`):
+```rust
+/// Build all Phase 6 check surfaces without writing.
+pub fn build_phase6_surfaces(...) -> Result<Phase6Surfaces, TomeError> {
+    let mut surfaces = Phase6Surfaces::default();
+    // Read-only: construct from index + settings + harness detection
+    surfaces.privilege_escalation = report_privilege_escalation(&index)?;  // Read-only
+    surfaces.persona = build_persona_report(&index, settings)?;           // Read-only
+    surfaces.hooks = report_hooks_state(&project)?;                       // Read-only
+    // No writes; no dir creation
+    Ok(surfaces)
+}
+```
 
 ## Substitution Engine Security (Phase 5 / US2–US3, CRITICAL)
 
@@ -824,4 +909,4 @@ See `specs/005-phase-5-commands-prompts/contracts/exit-codes-p5.md` + `specs/006
 ---
 
 *This document defines security controls. Update when security posture changes.*
-*Last refreshed 2026-05-29 against Phase 6 / US4 personas (incremental update); 0 security findings from US4 reviewer pass. US4 introduces double opt-in (plugin enable + expose_agents_as_personas setting), no new substitution surface (reuses Phase 5 unified-regex), reuses agent-name validation at index time, reuses entry body-path validation at render time. Phase 6 / US3 guardrails + rules-file correction verified end-to-end; guardrails body marker-injection validation, rules-file correction (Claude.md), guardrails atomic write discipline, and symlink refusal all verified. All Phase 5 feature work critical security invariants (no-rescan, truncation DoS, path traversal, resource walk hardening) verified end-to-end; 0 HIGH / 0 MEDIUM / 0 LOW security findings from full Phase 5 audit.*
+*Last refreshed 2026-05-29 against Phase 6 / US5 privilege governance + doctor extensions (incremental update); 0 security findings from US5 reviewer pass. US5 introduces: PrivilegeEscalationReport (reads enabled agents' source canonical forms, surfaces privileged fields REGARDLESS of strip_plugin_agent_privileges setting); read-only doctor (no writes by default, --fix opt-in); `--fix` write safety (idempotent re-sync, user-edited hook/rules preservation, single-path remove_file discipline, no remove_dir_all). Phase 6 / US1–US4 all verified; Phase 5 feature work critical security invariants (no-rescan, truncation DoS, path traversal, resource walk hardening) all verified end-to-end; 0 HIGH / 0 MEDIUM / 0 LOW security findings from full Phase 5 audit.*

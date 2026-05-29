@@ -257,9 +257,9 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T136 [US5] 4-reviewer pass; write `review/us5-findings.md` + `review/us5-disposition.md`.
 - [X] T137 [US5] Apply US5 blockers + selected majors (use devs:rust-dev agent).
 - [X] T138 [GIT] Commit: `fix(phase-6): apply US5 reviewer findings`.
-- [ ] T139 [US5] Run codebase mapping for Phase 7 changes (`/sdd:map incremental`).
-- [ ] T140 [US5] Review `retro/P7.md`; extract learnings to `CLAUDE.md` (conservative).
-- [ ] T141 [GIT] Commit: `docs(phase-6): US5 closeout — mapping + retro`.
+- [X] T139 [US5] Run codebase mapping for Phase 7 changes (`/sdd:map incremental`).
+- [X] T140 [US5] Review `retro/P7.md`; extract learnings to `CLAUDE.md` (conservative).
+- [X] T141 [GIT] Commit: `docs(phase-6): US5 closeout — mapping + retro`.
 - [ ] T142 [GIT] Push; PR with US5 summary; verify CI; report PR ready status.
 
 **Checkpoint**: All five user stories feature-complete. Only Polish remains.

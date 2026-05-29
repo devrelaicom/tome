@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and patterns for Tome (Rust CLI).
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 US4 — agent personas via MCP prompts)
+> **Last Updated**: 2026-05-29 (Phase 6 US5 — privilege governance + doctor extensions)
 
 ## Code Style
 
@@ -908,6 +908,148 @@ When extending a row-projection struct for a new consumer (e.g., personas added 
 ```
 
 **Rationale** (US4 M-1): The persona path needed `plugin_version` + `indexed_at` for collision tie-breaking (matching command/skill behaviour), but early iterations omitted these columns from the persona query, silently degrading substitution + collision logic. Including the full column set ensures future paths consume the same data shape. Applied in `src/index/skills.rs::enabled_agents_for_workspace` (persona query includes plugin_version + indexed_at); verified in `tests/personas_collision.rs` (clash detection + name rendering consistent with commands/skills).
+
+### Phase 6 US5: Read-Only Doctor Projection Over Production Reconcilers
+
+A doctor check function re-reads the same on-disk/source/index state the writer produced (never writing, never creating dirs — FR-124), reusing the harness read helpers rather than re-deriving:
+
+```rust
+// src/doctor/checks.rs::build_hooks_report (Phase 6 US5)
+pub fn build_hooks_report(
+    paths: &Paths,
+    project_root: &Path,
+    workspace: &WorkspaceName,
+    conn: &rusqlite::Connection,
+) -> Result<HooksReport, TomeError> {
+    // Read the existing settings.local.json hooks object (read-only)
+    let settings_path = project_root.join(".claude").join("settings.local.json");
+    let existing_hooks = read_settings_hooks(&settings_path);
+    
+    // For each enabled plugin, re-derive what hooks WOULD be merged
+    // (same rewrite + same data as the write path)
+    let enabled = crate::index::skills::enabled_plugins_for_workspace(conn, workspace.as_str())?;
+    for (catalog, plugin) in &enabled {
+        let rewritten = match crate::harness::hooks::read_rewritten_entries(...) {
+            Ok(Some(h)) if !h.is_empty() => h,
+            _ => continue,  // Read-only, skip parse failures (not abort)
+        };
+        
+        // Check each re-derived entry against the actual file
+        // (no write side-effects, only observation)
+        for (event, entries) in &rewritten.events {
+            let present = existing_hooks.as_ref()
+                .and_then(|h| h.get(event))
+                .and_then(|v| v.as_array());
+            // Tally matches (contributed) vs mismatches (missing)
+        }
+    }
+}
+```
+
+**Rationale** (FR-124 / US5.a pattern): The read-only doctor surface never creates directories, never runs the full `sync_project` orchestrator, never writes files. Instead, it re-reads the same computed state the write path produces (`read_rewritten_entries`, `read_guardrails_source`, enabled plugins from the index) and compares against actual on-disk state. This projection pattern reuses the harness modules' read paths as single sources of truth, avoiding duplication of re-derivation logic. Applied to hooks (US2), guardrails (US3), agents (US1), personas (US4), and privilege escalation (US5) reports. Verified in `tests/doctor_p6.rs` (report presence + correctness) and `tests/doctor_p6.rs::read_only_creates_no_dirs` (exact-count proof of read-only guarantee).
+
+### Phase 6 US5: `--fix` via the Idempotent `sync_project`
+
+A repair that re-runs the orchestrator inherits its write safety (structural-match-only hook removal, marker-bounded guardrails, `<plugin>__*`-only agent removal, symlink refusal) — no new destructive op:
+
+```rust
+// src/commands/doctor.rs::apply_fix (US5.b)
+match suggested_fix.fix_type {
+    FixType::RefreshHooks => {
+        // Call the same sync path the write side uses
+        let outcome = crate::harness::sync::sync_project(&project_root, &deps)?;
+        // Hooks are idempotently merged on re-run (no duplicate)
+        Ok(FixOutcome::Success)
+    }
+    FixType::RefreshGuardrails => {
+        // Re-run sync: reconcile_guardrails overwrites in-place (idempotent)
+        let outcome = crate::harness::sync::sync_project(&project_root, &deps)?;
+        Ok(FixOutcome::Success)
+    }
+    // Similar for agents, personas
+}
+```
+
+**Discipline**: The `--fix` surface doesn't implement new destructive logic. Instead, it re-invokes `sync_project`, which is already proven idempotent and safe (structural-match + atomic writes + symlink refusal). This enforces that every fixable scenario (stale report, drift due to manual edits) is resolvable by the same deterministic writer. Used in `src/commands/doctor.rs` for US5.b safe-case fixes; verified in `tests/doctor_p6.rs::fix_rerenders_hooks_idempotently` and similar (re-sync after fix leaves final state stable).
+
+### Phase 6 US5: Refresh All Affected Report Surfaces After Shared Side-Effecting Fix
+
+Gate the post-fix surface refresh on "the operation ran", not "my branch ran it" (the C5-1 lesson — a combined fix left a stale report):
+
+```rust
+// src/commands/doctor.rs::run_with_fix (US5.b)
+pub fn run_with_fix(...) -> Result<DoctorOutput, TomeError> {
+    let mut outcome = assemble_report(&paths, &scope, ...)?;
+    
+    if fix_applies {
+        // Run the fix (sync_project)
+        apply_fix(&project, &deps)?;
+        
+        // CRITICAL: re-assemble the report from scratch (not update fields)
+        // because `sync_project` may have fixed hooks, guardrails, agents, AND personas.
+        // A combined fix that (say) adds real JSON hooks REQUIRES re-derivation of
+        // the suppression state for guardrails (FR-016).
+        outcome = assemble_report(&paths, &scope, ...)?;  // Fresh read
+    }
+    
+    Ok(outcome)
+}
+```
+
+**Rationale** (C5-1 from Phase 5 closeout): A single user-invoked `doctor --fix` may trigger multiple subsystem fixes (e.g., refresh hooks AND guardrails when `sync_project` runs). The post-fix report must re-assemble from on-disk state, not patch existing fields, because the two subsystems interact (e.g., hooks suppression affects guardrails region presence, FR-013/FR-016). Verified in `tests/doctor_p6.rs::fix_gates_refresh_on_operation_not_branch` (combined fix re-renders all affected surfaces).
+
+### Phase 6 US5: Privilege Strip via Per-Emission Clone
+
+Keeps the audit source intact (borrow checker enforces the shared canonical is immutable), so the privilege-escalation audit sees the unstripped source (FR-051):
+
+```rust
+// src/harness/agents.rs::emit_claude_code_agent (US5.a)
+pub fn emit_claude_code_agent(
+    canonical: &CanonicalAgent,  // Audit sees the unstripped source
+    strip: bool,
+) -> Result<String, TomeError> {
+    let mut to_emit = canonical.clone();  // Clone for emission
+    
+    if strip {
+        // Strip privileged fields on the CLONE only
+        to_emit.hooks = None;
+        to_emit.mcp_servers = None;
+        to_emit.permission_mode = None;
+    }
+    
+    // Emit the (potentially stripped) clone
+    render_frontmatter(&to_emit)
+}
+```
+
+**Rationale** (FR-051 / US5.a pattern): The privilege report and the actual agent emission are decoupled. The audit path reads `canonical` (never stripped), so it always sees the actual source fields and can report accurately. The emission path works on a cloned version that may be stripped. The borrow checker enforces that the audit and strip branches are independent. Used in `src/harness/agents.rs::emit_claude_code_agent` (emit path) and `src/doctor/checks.rs::build_privilege_escalation_report` (audit path); verified in `tests/agent_privilege.rs` (strip setting doesn't affect audit, only emission).
+
+### Phase 6 US5: Emit-Only `Serialize` Reports Appended LAST + `skip_serializing_if`
+
+Emit-only `Serialize` reports appended LAST + `skip_serializing_if = "Option::is_none"` preserve byte-stable JSON pins:
+
+```rust
+// src/doctor/report.rs
+#[derive(Serialize)]
+pub struct DoctorOutput {
+    // Phase 4 + Phase 5 fields
+    #[serde(flatten)]
+    pub overall: DoctorClassification,
+    pub catalogs: Vec<CatalogCacheHealth>,
+    
+    // Phase 6 US1/US2/US3/US4 fields (appended in order)
+    pub hooks: Option<HooksReport>,
+    pub guardrails: Option<GuardrailsReport>,
+    pub agents: Option<AgentsReport>,
+    pub personas: Option<PersonasReport>,
+    
+    // Phase 6 US5 field (appended LAST)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privilege_escalation: Option<PrivilegeEscalationReport>,
+}
+```
+
+**Rationale** (Phase 5 / Phase 6 pattern): Emit-only types never deserialize, so no `deny_unknown_fields`. For JSON wire-shape byte stability across versions, new optional fields must be appended at the end and use `skip_serializing_if` to omit null values, preserving existing JSON bytes when the new field is absent. Applied to all Phase 6 doctor reports; verified in `tests/doctor_*_json_shape.rs` (byte-stable pins for every wire shape).
 
 ## Comments & Documentation
 

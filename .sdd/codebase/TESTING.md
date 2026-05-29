@@ -2,7 +2,7 @@
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 US4 — agent personas via MCP prompts)
+> **Last Updated**: 2026-05-29 (Phase 6 US5 — privilege governance + doctor extensions)
 
 ## Test Framework
 
@@ -33,7 +33,7 @@
 
 ```
 tests/
-├── *.rs                         # Integration test files (175+ total as of Phase 6 US4)
+├── *.rs                         # Integration test files (175+ total as of Phase 6 US5)
 ├── common/
 │   ├── mod.rs                   # Shared harness: ToolEnv, Fixture, guards
 │   └── ...                      # (exported helpers)
@@ -70,17 +70,21 @@ tests/
 | **Hooks integration** (Phase 6 US2) | `hooks_rewrite.rs`, `hooks_merge.rs` | Path-variable rewriting, config merging (2 files) |
 | **Guardrails & rules-file** (Phase 6 US3) | `guardrails_*.rs`, `rules_file_*.rs` | Guardrails regions, rules-file placement (6 files) |
 | **Agent personas** (Phase 6 US4) | `personas.rs`, `personas_collision.rs`, `personas_startup_scope.rs` | Persona prompts, toggle, startup resolution (3 files) |
-| **Settings** (Phase 6 US4) | `settings_p6.rs`, `settings_*.rs` | Scalar resolution, layering, first-declarer-wins (15+ files) |
+| **Settings** (Phase 6) | `settings_p6.rs`, `settings_*.rs` | Scalar resolution, layering, first-declarer-wins (15+ files) |
+| **Doctor extensions** (Phase 6 US5) | `doctor_p6.rs`, `doctor_p6_json_shape.rs`, `doctor_json.rs` | Hooks/guardrails/agents/personas/privilege reports (3 files) |
 | **Misc** | `path_validation.rs`, `atomic_dir.rs`, etc. | Phase 1 foundational (10 files) |
 
-**Total**: 175+ test files across 175+ suites; 1250+ tests pass (Phase 6 US4 adds 5 new files + extensions).
+**Total**: 175+ test files across 175+ suites; 1250+ tests pass (Phase 6 US5 adds 3 new files + extensions).
 
-**Phase 6 US4 additions**:
-- `tests/personas.rs` — Agent personas via MCP prompts toggle + rendering; prompts/list + prompts/get with template-wrapping + substitution + arguments (FR-060/062/064)
-- `tests/personas_collision.rs` — Clash detection on agent `<name>` field; display name rendering (clash-prefix on clashing agents only); shared collision namespace with commands/skills (FR-061)
-- `tests/personas_startup_scope.rs` — Startup resolution of `expose_agents_as_personas` setting from on-disk project marker + workspace + global settings via `settings::scopes` loaders (FR-067)
-- `tests/settings_p6.rs` — First-declarer-wins scalar resolution (`resolve_scalar` / `resolve_scalar_with`); default `false` when absent; project `false` overrides global `true`; fall-through to global (FR-053, R-12)
-- Extensions to `tests/mcp_prompts_json_shape.rs` — Byte-stable JSON pin for persona descriptors in prompts/list envelope + persona response in prompts/get envelope (T111)
+**Phase 6 US5 additions**:
+- `tests/doctor_p6.rs` — Full matrix of Phase 6 doctor surfaces: hooks report (contributed/missing per event/plugin), guardrails report (present/orphaned/suppressed), agents report (per-harness presence), personas report (toggle on/off), privilege-escalation report (grouped by plugin + field); `--fix` re-renders each surface idempotently; read-only creates no directories (exact-count proof per FR-124)
+- `tests/doctor_p6_json_shape.rs` — Byte-stable JSON pin for doctor `HooksReport`, `GuardrailsReport`, `AgentsReport`, `PersonasReport`, `PrivilegeEscalationReport` emitted in `DoctorOutput` (wire-shape change contract: appended LAST, `skip_serializing_if` on optional fields)
+- `tests/plugin_show_p6.rs` — Extended `plugin show` for agents: lists agent rows per plugin, shows `hooks.json`/`GUARDRAILS.md` presence, displays resolved persona name (clash-prefixed if applicable)
+- `tests/plugin_show_p6_json_shape.rs` — Byte-stable JSON pin for agent entries in `plugin show` output (agent list includes name + display name + presence flags)
+- `tests/agent_privilege.rs` — Privilege escalation audit unchanged when strip setting on; stripping only affects emission, not source; privilege report sees unstripped source
+- Extensions to `tests/doctor_*.rs` — Confirm doctor surfaces created atomically, re-readable on re-run, hooks/guardrails/agents/personas all render when conditions met
+- Extensions to `tests/exit_codes_e2e.rs` — Exit 45 (AgentTranslationFailed) via `workspace use` with agent `name: ../../../../tmp/evil`; exit 46 (GuardrailsWriteFailed) via symlinked guardrails target during sync
+- Extensions to `tests/settings_*.rs` — `strip_plugin_agent_privileges` setting; first-declarer-wins resolution; default `false` when absent
 
 ## Test Patterns
 
@@ -578,6 +582,163 @@ fn unknown_key_rejected_deny_unknown_fields() {
 
 **Pattern** (Phase 6 US4): Unit tests for settings struct parse + layering. Verify `Option<bool>` field presence/absence, strict strictness enforcement (NFR-010), correct resolver wiring for both the value and the absence case. Used for first-declarer-wins + default-false pinning.
 
+### Phase 6 US5: Doctor Read-Only Projection Tests
+
+When testing doctor surfaces, verify they re-read state without writing directories (FR-124 read-only invariant):
+
+```rust
+// tests/doctor_p6.rs
+#[test]
+fn doctor_p6_surface_creates_no_dirs() {
+    // Pre-stage on-disk state: enabled plugins, hooks/guardrails/agents/personas configured
+    let fix = Fixture::build("test-workspace");
+    env.cmd().args(["plugin", "enable", &plugin_id]).output().unwrap();
+    
+    // Count files before doctor
+    let before_count = count_all_files(&fix.home);
+    
+    // Run doctor (read-only projection)
+    let out = env.cmd().args(["doctor", "--json"]).output().unwrap();
+    assert!(out.status.success());
+    
+    // Count files after — exact match proves read-only (no .tome/data dir creation)
+    let after_count = count_all_files(&fix.home);
+    assert_eq!(before_count, after_count, "doctor must not create any directories");
+}
+
+#[test]
+fn doctor_hooks_report_shows_contributed_and_missing() {
+    // Plugin has hooks, enable it
+    let fix = Fixture::with_hooks();
+    env.cmd().args(["plugin", "enable", &fix.plugin_id]).output().unwrap();
+    
+    // Run doctor
+    let out = env.cmd().args(["doctor", "--json"]).output().unwrap();
+    let report: DoctorOutput = serde_json::from_slice(&out.stdout).unwrap();
+    
+    // Hooks report present
+    assert!(report.hooks.is_some(), "hooks report created");
+    let hooks = report.hooks.unwrap();
+    
+    // Plugin entry shows contributed count (hooks in file)
+    // and missing count (hooks not in file)
+    assert_eq!(hooks.plugins.len(), 1);
+    assert_eq!(hooks.plugins[0].plugin, fix.plugin_id);
+    assert!(hooks.plugins[0].contributed.len() > 0 || hooks.plugins[0].missing.len() > 0);
+}
+
+#[test]
+fn doctor_privilege_report_groups_by_plugin() {
+    // Plugin with privileged agent fields
+    let fix = Fixture::with_privileged_agent();
+    env.cmd().args(["plugin", "enable", &fix.plugin_id]).output().unwrap();
+    
+    // Run doctor
+    let out = env.cmd().args(["doctor", "--json"]).output().unwrap();
+    let report: DoctorOutput = serde_json::from_slice(&out.stdout).unwrap();
+    
+    // Privilege report present and grouped
+    assert!(report.privilege_escalation.is_some());
+    let priv_report = report.privilege_escalation.unwrap();
+    assert_eq!(priv_report.plugins.len(), 1);
+    let plugin_entry = &priv_report.plugins[0];
+    
+    // Agent entry includes fields (hooks, mcpServers, permissionMode)
+    assert!(plugin_entry.agents[0].fields.contains(&"hooks".to_owned()));
+}
+
+#[test]
+fn doctor_fix_rerenders_hooks_idempotently() {
+    let fix = Fixture::with_hooks();
+    env.cmd().args(["plugin", "enable", &fix.plugin_id]).output().unwrap();
+    
+    // Run doctor --fix hooks
+    let out = env.cmd().args(["doctor", "--fix"]).output().unwrap();
+    assert!(out.status.success());
+    
+    // Re-run doctor (no changes)
+    let out2 = env.cmd().args(["doctor", "--json"]).output().unwrap();
+    let report2: DoctorOutput = serde_json::from_slice(&out2.stdout).unwrap();
+    
+    // Hooks report shows same counts as before (idempotent)
+    assert_eq!(report2.hooks.as_ref().unwrap().plugins[0].missing.len(), 0);
+}
+```
+
+**Pattern** (Phase 6 US5 / FR-124): Library-API tests for doctor check functions. Each check function is read-only: re-reads the state the sync path produced, compares against actual on-disk, records observations in a report. Tests verify: hooks/guardrails/agents/personas reports render when conditions met, privilege-escalation groups correctly, `--fix` re-renders idempotently, and exact-count file-count assertion proves no directory creation. Covered in `tests/doctor_p6.rs`.
+
+### Phase 6 US5: Doctor Byte-Stable JSON Pins
+
+When testing doctor output, pin byte-stable JSON shapes for every emitted report type:
+
+```rust
+// tests/doctor_p6_json_shape.rs
+#[test]
+fn hooks_report_wire_shape_byte_stable() {
+    // Deterministic fixture: one plugin, two hooks events
+    let fix = Fixture::with_deterministic_hooks();
+    
+    let report = build_hooks_report(&paths, &project, &workspace, &conn).unwrap();
+    let json = serde_json::to_string(&report).unwrap();
+    
+    // Pin the exact byte sequence (alphabetical field order, compact formatting)
+    assert_eq!(json, r#"{"plugins":[{"catalog":"test-cat","plugin":"test-plugin","contributed":[{"count":2,"event":"onCreateFile"}],"missing":[]}]}"#);
+}
+
+#[test]
+fn privilege_escalation_report_appended_last_in_doctor_output() {
+    // Privilege report is a Phase 6 US5 addition; pin its position LAST
+    let output = DoctorOutput { ... };
+    let json = serde_json::to_string(&output).unwrap();
+    
+    // Extract the JSON and verify field order: hooks, guardrails, agents, personas, privilege_escalation
+    let obj = serde_json::from_str::<serde_json::Value>(&json).unwrap();
+    let keys: Vec<&str> = obj.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+    let priv_index = keys.iter().position(|&k| k == "privilege_escalation");
+    let persona_index = keys.iter().position(|&k| k == "personas");
+    
+    assert!(priv_index > persona_index, "privilege_escalation appended after personas");
+}
+```
+
+**Pattern** (Phase 6 US5 / wire-shape pins): Byte-stable JSON pins for every new Phase 6 doctor report type. The doctor `HooksReport`, `GuardrailsReport`, `AgentsReport`, `PersonasReport`, and `PrivilegeEscalationReport` are appended LAST to `DoctorOutput` to preserve existing bytes. Tests verify field order, serialization format, and `skip_serializing_if` behavior. Covered in `tests/doctor_p6_json_shape.rs`.
+
+### Phase 6 US5: Privilege Strip + Audit Separation Tests
+
+When testing privilege escalation, verify that stripping affects emission only, not the audit source:
+
+```rust
+// tests/agent_privilege.rs
+#[test]
+fn privilege_strip_only_affects_emission_not_audit() {
+    let fix = Fixture::with_privileged_agent();
+    let paths = setup_paths(&fix);
+    let conn = index::open(&paths)?;
+    
+    // Enable agent with privileged fields
+    lifecycle::enable(&plugin_id, &deps, false)?;
+    
+    // Audit reads unstripped source
+    let priv_report = build_privilege_escalation_report(&paths, &workspace, &conn)?;
+    assert_eq!(priv_report.plugins[0].agents[0].fields.len(), 3);  // hooks + mcpServers + permissionMode
+    
+    // Emit with strip = true
+    let canonical = CanonicalAgent::parse(...)?;
+    let emitted_yaml = emit_claude_code_agent(&canonical, true)?;  // strip = true
+    
+    // Emitted YAML has no privileged fields
+    assert!(!emitted_yaml.contains("hooks:"));
+    assert!(!emitted_yaml.contains("mcpServers:"));
+    assert!(!emitted_yaml.contains("permissionMode:"));
+    
+    // Re-run audit (source unchanged, still reports privileged fields)
+    let priv_report2 = build_privilege_escalation_report(&paths, &workspace, &conn)?;
+    assert_eq!(priv_report2.plugins[0].agents[0].fields.len(), 3);
+}
+```
+
+**Pattern** (Phase 6 US5 / FR-051): Privilege audit and strip are decoupled. The audit path reads the unstripped source (canonical agent frontmatter as-is) and reports which fields are present. The emission path works on a clone that may be stripped before rendering. Tests verify the two paths stay independent: stripping the emission doesn't affect the audit, and the audit always sees the true source. Covered in `tests/agent_privilege.rs`.
+
 ## Test Data
 
 ### Fixtures
@@ -664,10 +825,11 @@ All defined in `tests/common/mod.rs` with RAII drop guards.
 | Guardrails regions | Rendering, validation, atomicity | ✓ | `tests/guardrails_*.rs` (Phase 6 US3) |
 | Agent personas | Toggle, rendering, substitution, collision | ✓ | `tests/personas*.rs` (Phase 6 US4) |
 | Settings scalar resolution | First-declarer-wins, layering, defaults | ✓ | `tests/settings_p6.rs` + `tests/personas_startup_scope.rs` (Phase 6 US4) |
+| Doctor extensions | Hooks/guardrails/agents/personas/privilege reports; --fix idempotence | ✓ | `tests/doctor_p6.rs`, `tests/doctor_p6_json_shape.rs` (Phase 6 US5) |
 
 **Exclusions**: ONNX inference (real model load excluded; library `fastembed` tests own path), real model downloads (fabricated fixtures instead), MCP protocol purity (deferred T093–T095).
 
-**Phase 6 US4**: Persona toggle on/off via library API (`PromptRegistry::build_for_workspace`). Persona rendering via `prompts/get`: template-wrapping + frontmatter stripping + Phase 5 substitution + argument pipeline. Collision detection + clash-prefix naming. Startup scope resolution from on-disk settings via `settings::scopes` loaders + `resolve_scalar_with` resolver. Settings struct parse + strictness (`deny_unknown_fields`). Byte-stable JSON pins for persona descriptors in prompts/list + persona response envelope (T111). All tested via library API (no CLI spin-up for persona tests, matching `mcp_prompts.rs` pattern).
+**Phase 6 US5**: Doctor read-only projection via library API (no CLI spin-up for report tests, matching `doctor_p5.rs` pattern). Direct calls to `build_hooks_report`, `build_guardrails_report`, `build_agents_report`, `build_personas_report`, `build_privilege_escalation_report`. JSON shapes byte-stable via pins. `--fix` idempotence via re-invocation of `sync_project`. Privilege strip/audit separation verified. All tested via library API (no CLI spawn for report detail tests, matching established patterns).
 
 ## Test Categories by Purpose
 
@@ -697,6 +859,8 @@ Tests for previously fixed bugs, linked to phase retros:
 | Phase 6 US1 S-1 | (current) | `agent_path_traversal.rs` (Index-time gate blocks ../../../../tmp/evil) |
 | Phase 6 US3 B-1 | (current) | `guardrails_marker_injection.rs` (Fail-closed marker validation) |
 | Phase 6 US4 R-4-2 | (current) | `personas_startup_scope.rs` (Single-source-of-truth scope-loaders) |
+| Phase 6 US5 FR-124 | (current) | `doctor_p6.rs::surface_creates_no_dirs` (Read-only invariant proof) |
+| Phase 6 US5 FR-051 | (current) | `agent_privilege.rs` (Audit/strip separation) |
 
 ### Invariant Tests
 
@@ -723,6 +887,10 @@ Tests that verify core properties hold:
 | Persona toggle + rendering | `personas.rs` | Toggle on/off includes/excludes personas; body wrapped + substituted (FR-060/062/064) |
 | Persona collision | `personas_collision.rs` | Clashing persona names are prefixed; drop-persona reserved (FR-061/063) |
 | Settings scalar resolution | `settings_p6.rs` | First-declarer-wins walk; project/workspace/global layering (FR-053) |
+| Doctor read-only | `doctor_p6.rs` | Report generation creates no directories (exact-count file count proof) (FR-124) |
+| Doctor privilege report | `doctor_p6.rs` | Privilege report groups by plugin, lists privileged fields (FR-051) |
+| Doctor byte-stable output | `doctor_*_json_shape.rs` | Wire-shape pins for all Phase 6 reports (appended LAST, `skip_serializing_if`) (Phase 6 US5) |
+| Privilege strip idempotence | `agent_privilege.rs` | Strip setting only affects emission, not audit source (FR-051) |
 
 ### Phase 5: Truncation Boundary Tests
 
@@ -999,6 +1167,12 @@ fn persona_toggle_off_excludes_personas() { ... }
 
 #[test]
 fn expose_personas_project_overrides_global() { ... }
+
+#[test]
+fn doctor_p6_surface_creates_no_dirs() { ... }
+
+#[test]
+fn privilege_strip_only_affects_emission_not_audit() { ... }
 ```
 
 ### Minimal External I/O
