@@ -2,7 +2,7 @@
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 US3 — guardrails + rules-file correction)
+> **Last Updated**: 2026-05-29 (Phase 6 US4 — agent personas via MCP prompts)
 
 ## Test Framework
 
@@ -33,7 +33,7 @@
 
 ```
 tests/
-├── *.rs                         # Integration test files (170+ total as of Phase 6 US3)
+├── *.rs                         # Integration test files (175+ total as of Phase 6 US4)
 ├── common/
 │   ├── mod.rs                   # Shared harness: ToolEnv, Fixture, guards
 │   └── ...                      # (exported helpers)
@@ -69,19 +69,18 @@ tests/
 | **Agent translation** (Phase 6 US1) | `agent_translate_*.rs`, `agent_*.rs` | Per-harness native agents (8 files) |
 | **Hooks integration** (Phase 6 US2) | `hooks_rewrite.rs`, `hooks_merge.rs` | Path-variable rewriting, config merging (2 files) |
 | **Guardrails & rules-file** (Phase 6 US3) | `guardrails_*.rs`, `rules_file_*.rs` | Guardrails regions, rules-file placement (6 files) |
+| **Agent personas** (Phase 6 US4) | `personas.rs`, `personas_collision.rs`, `personas_startup_scope.rs` | Persona prompts, toggle, startup resolution (3 files) |
+| **Settings** (Phase 6 US4) | `settings_p6.rs`, `settings_*.rs` | Scalar resolution, layering, first-declarer-wins (15+ files) |
 | **Misc** | `path_validation.rs`, `atomic_dir.rs`, etc. | Phase 1 foundational (10 files) |
 
-**Total**: 170+ test files across 170+ suites; 1200+ tests pass (Phase 6 US3 builds on US1/US2 + 6 new files).
+**Total**: 175+ test files across 175+ suites; 1250+ tests pass (Phase 6 US4 adds 5 new files + extensions).
 
-**Phase 6 US3 additions**:
-- `tests/guardrails_render.rs` — Guardrails region rendering, lexicographic ordering, overwrite-in-place, new-append, orphan-removal, idempotence (FR-011/014)
-- `tests/guardrails_suppression.rs` — Guardrails suppression per harness when that plugin ships real JSON hooks (FR-013); cross-file invariant: suppressed harness skips guardrails region, non-suppressed writes it
-- `tests/guardrails_marker_injection.rs` — Fail-closed marker validation (B-1): three crafted bodies each containing managed markers (guardrails START/END + tome:begin/end block) each rejected (exit 46); sibling plugin region renders; re-sync convergent
-- `tests/rules_file_block_in_existing.rs` — `BlockInExistingFile` strategy: owned `tome:begin/end` block in developer-authored file preserves content outside markers (Phase 4 blocks tested indirectly via US1/US2)
-- `tests/rules_file_standalone.rs` — `StandaloneFile` strategy: Tome owns complete file; removal deletes the file; atomicity on write failure
-- `tests/rules_file_claude_correction.rs` — Phase 4 correction (FR-020/021/022, T083): Claude Code rules candidate set is now `CLAUDE.md` > `.claude/CLAUDE.md` (NOT `AGENTS.md`); projects with multi-harness config write blocks to both `CLAUDE.md` (claude-code) and `AGENTS.md` (codex) in same sync
-- Extensions to `tests/atomicity.rs` — Guardrails mid-write atomicity (T3-2): mid-write failure on in-file guardrails region leaves file byte-for-byte unchanged (old region intact, no partial)
-- Extensions to `tests/exit_codes_e2e.rs` — Exit 46 coverage: `guardrails_write_through_symlink_exits_46` (library-API unix-only); e2e exit 43 coverage already via hooks tests; exit 44 library-API-only
+**Phase 6 US4 additions**:
+- `tests/personas.rs` — Agent personas via MCP prompts toggle + rendering; prompts/list + prompts/get with template-wrapping + substitution + arguments (FR-060/062/064)
+- `tests/personas_collision.rs` — Clash detection on agent `<name>` field; display name rendering (clash-prefix on clashing agents only); shared collision namespace with commands/skills (FR-061)
+- `tests/personas_startup_scope.rs` — Startup resolution of `expose_agents_as_personas` setting from on-disk project marker + workspace + global settings via `settings::scopes` loaders (FR-067)
+- `tests/settings_p6.rs` — First-declarer-wins scalar resolution (`resolve_scalar` / `resolve_scalar_with`); default `false` when absent; project `false` overrides global `true`; fall-through to global (FR-053, R-12)
+- Extensions to `tests/mcp_prompts_json_shape.rs` — Byte-stable JSON pin for persona descriptors in prompts/list envelope + persona response in prompts/get envelope (T111)
 
 ## Test Patterns
 
@@ -412,6 +411,173 @@ fn block_overwrites_in_place_preserves_surrounding_content() {
 
 **Pattern** (Phase 6 US3 / T081): Library-API tests for `rules_file::{write_block_in_file, write_standalone_file}`. Tests verify marker preservation, idempotence short-circuit (no rewrite if bytes match), symlink refusal (exit 7), atomic write semantics. Used for verifying `BlockInExistingFile` and `StandaloneFile` strategies per `contracts/rules-file-integration.md` (FR-525).
 
+### Phase 6 US4: Agent Personas via MCP Prompts
+
+When testing agent personas without full CLI integration, build the prompt registry directly with `expose_personas` enabled:
+
+```rust
+// tests/personas.rs
+#[test]
+fn persona_toggle_off_excludes_personas() {
+    let fix = Fixture::build_sample();
+    let env = ToolEnv::new();
+    
+    // Enable plugins with agents, expose_personas = false (default)
+    lifecycle::enable(&plugin_id, &deps, false).unwrap();
+    
+    // Open index and build registry with personas OFF
+    let conn = index::open(&paths, ...);
+    let registry = PromptRegistry::build_for_workspace(&conn, &paths, false).unwrap();
+    
+    // No persona prompts in the list
+    assert!(!registry.prompts.iter().any(|p| p.name.ends_with("-persona")));
+}
+
+#[test]
+fn persona_toggle_on_includes_personas() {
+    let fix = Fixture::build_sample();
+    
+    // Enable plugins with agents, expose_personas = true
+    lifecycle::enable(&plugin_id, &deps, false).unwrap();
+    
+    // Open index and build registry with personas ON
+    let conn = index::open(&paths, ...);
+    let registry = PromptRegistry::build_for_workspace(&conn, &paths, true).unwrap();
+    
+    // Agent personas + drop-persona in the list
+    assert!(registry.prompts.iter().any(|p| p.name == "reviewer-persona"));
+    assert!(registry.prompts.iter().any(|p| p.name == "drop-persona"));
+}
+
+#[test]
+fn persona_body_is_template_wrapped_with_substitution() {
+    let fix = Fixture::build_sample();
+    let env = ToolEnv::new();
+    
+    lifecycle::enable(&plugin_id, &deps, false).unwrap();
+    let conn = index::open(&paths, ...);
+    let registry = PromptRegistry::build_for_workspace(&conn, &paths, true).unwrap();
+    
+    // Get persona prompt response
+    let resp = registry.get_prompt("reviewer-persona", &[], &conn, ...).unwrap();
+    
+    // Body is wrapped in role-assumption template
+    assert!(resp.messages[0].content[0].text.contains("Assume the `reviewer` agent persona"));
+    // Frontmatter is stripped (no YAML delimiters)
+    assert!(!resp.messages[0].content[0].text.contains("---"));
+    // Phase 5 substitution applied (e.g., $now → timestamp)
+    assert!(resp.messages[0].content[0].text.contains("2026-05-29"));
+}
+
+#[test]
+fn persona_prompts_join_collision_namespace() {
+    let fix = Fixture::build_sample_with_clash();  // Two plugins, agent name clash
+    let env = ToolEnv::new();
+    
+    lifecycle::enable(&plugin_a_id, &deps, false).unwrap();
+    lifecycle::enable(&plugin_b_id, &deps, false).unwrap();
+    
+    let conn = index::open(&paths, ...);
+    let registry = PromptRegistry::build_for_workspace(&conn, &paths, true).unwrap();
+    
+    // Clashing personas are plugin-prefixed
+    assert!(registry.prompts.iter().any(|p| p.name == "pluginA-reviewer-persona"));
+    assert!(registry.prompts.iter().any(|p| p.name == "pluginB-reviewer-persona"));
+    // Non-clashing persona keeps clean name
+    assert!(registry.prompts.iter().any(|p| p.name == "other-persona"));
+    // drop-persona is reserved and unique (once, unnamespaced)
+    assert_eq!(
+        registry.prompts.iter().filter(|p| p.name == "drop-persona").count(),
+        1,
+        "drop-persona appears exactly once"
+    );
+}
+```
+
+**Pattern** (Phase 6 US4): Library-API tests for persona prompts. Tests verify toggle on/off, template-wrapping + substitution + arguments, frontmatter stripping, collision clash-prefix, drop-persona uniqueness + reservation. Registry is built in-process with fixture agents; the persona path is tested separately from the command/skill path (no folding). Covers `contracts/agent-personas.md` (FR-060–FR-065).
+
+### Phase 6 US4: Startup Scope Resolution for Settings
+
+When testing settings resolution during MCP startup, call the scope-loaders directly and apply the resolver:
+
+```rust
+// tests/personas_startup_scope.rs
+#[test]
+fn expose_personas_resolved_from_project_workspace_global() {
+    let dir = TempDir::new().unwrap();
+    let paths = Paths::new(&dir.path());
+    
+    // Seed on-disk settings: global = false, workspace = true, project = <absent>
+    write_global_settings(&paths, Some(false)).unwrap();
+    write_workspace_settings(&paths, "test-ws", Some(true)).unwrap();
+    
+    // Load and resolve (project absent falls through to workspace)
+    let project = scopes::load_project_marker(None).unwrap();
+    let workspace = scopes::load_workspace_settings(&paths, &WorkspaceName::parse("test-ws")?).unwrap();
+    let global = scopes::load_global_settings(&paths).unwrap();
+    
+    let resolved = resolve_scalar_with(
+        project.as_ref(),
+        workspace.as_ref(),
+        &global,
+        |p| p.expose_agents_as_personas,
+        |w| w.expose_agents_as_personas,
+        |g| g.expose_agents_as_personas,
+    );
+    
+    assert!(resolved, "workspace true overrides global false when project absent");
+}
+
+#[test]
+fn expose_personas_project_overrides_global() {
+    // Project = false, global = true → resolved = false
+    let resolved = resolve_scalar_with(..., Some(false), Some(true), Some(true));
+    assert!(!resolved, "project false overrides global true");
+}
+```
+
+**Pattern** (Phase 6 US4 / R-4-2): Direct tests of `settings::scopes` loaders + `resolve_scalar_with` resolver. Tests verify first-declarer-wins walk, fall-through to next scope, default `false` when all absent. Scope-loader errors (parse failure → `WorkspaceMalformed`, NotFound → `Ok(None)` or default) tested via boundary conditions. Covers `contracts/settings-p6.md` (FR-053, FR-067).
+
+### Phase 6 US4: Settings Struct Parse + Strictness
+
+When testing Phase 6 scalar settings fields on the three Tome-owned settings structs, verify parse behavior + strictness:
+
+```rust
+// tests/settings_p6.rs
+#[test]
+fn expose_agents_as_personas_parses_and_defaults() {
+    let toml_str = r#"
+        name = "test-workspace"
+        expose_agents_as_personas = true
+    "#;
+    let ws: WorkspaceSettings = toml::from_str(toml_str).unwrap();
+    assert_eq!(ws.expose_agents_as_personas, Some(true));
+}
+
+#[test]
+fn expose_agents_as_personas_absent_parses_as_none() {
+    let toml_str = r#"
+        name = "test-workspace"
+    "#;
+    let ws: WorkspaceSettings = toml::from_str(toml_str).unwrap();
+    assert_eq!(ws.expose_agents_as_personas, None);
+}
+
+#[test]
+fn unknown_key_rejected_deny_unknown_fields() {
+    // Phase 6 adds `expose_agents_as_personas` but does NOT loosen strictness
+    let toml_str = r#"
+        name = "test-workspace"
+        expose_agents_as_personas = true
+        unknown_future_key = "should fail"
+    "#;
+    let result: Result<WorkspaceSettings, _> = toml::from_str(toml_str);
+    assert!(result.is_err(), "unknown keys rejected (deny_unknown_fields)");
+}
+```
+
+**Pattern** (Phase 6 US4): Unit tests for settings struct parse + layering. Verify `Option<bool>` field presence/absence, strict strictness enforcement (NFR-010), correct resolver wiring for both the value and the absence case. Used for first-declarer-wins + default-false pinning.
+
 ## Test Data
 
 ### Fixtures
@@ -496,10 +662,12 @@ All defined in `tests/common/mod.rs` with RAII drop guards.
 | Agent translation | Per-harness contract | ✓ | `tests/agent_translate_*.rs` (Phase 6 US1) |
 | Hooks rewrite & merge | Boundary + integration | ✓ | `tests/hooks_*.rs` (Phase 6 US2) |
 | Guardrails regions | Rendering, validation, atomicity | ✓ | `tests/guardrails_*.rs` (Phase 6 US3) |
+| Agent personas | Toggle, rendering, substitution, collision | ✓ | `tests/personas*.rs` (Phase 6 US4) |
+| Settings scalar resolution | First-declarer-wins, layering, defaults | ✓ | `tests/settings_p6.rs` + `tests/personas_startup_scope.rs` (Phase 6 US4) |
 
 **Exclusions**: ONNX inference (real model load excluded; library `fastembed` tests own path), real model downloads (fabricated fixtures instead), MCP protocol purity (deferred T093–T095).
 
-**Phase 6 US3**: Exit codes 46 (guardrails write failure) covered in `tests/exit_codes.rs` symlink-refusal path (unix-only) + atomicity injection test. Guardrails region rendering tested via `guardrails_render.rs` (idempotence, ordering, in-place-update, new-append, orphan-removal). Fail-closed marker validation (B-1) tested in `guardrails_marker_injection.rs` (three crafted bodies each rejected; sibling renders). Suppression tested in `guardrails_suppression.rs` (cross-file invariant). Phase 4 correction tested in `rules_file_claude_correction.rs` (claude-code candidate set = CLAUDE.md, not AGENTS.md). Rules-file strategies tested directly via `rules_file_block_in_existing.rs` and `rules_file_standalone.rs`.
+**Phase 6 US4**: Persona toggle on/off via library API (`PromptRegistry::build_for_workspace`). Persona rendering via `prompts/get`: template-wrapping + frontmatter stripping + Phase 5 substitution + argument pipeline. Collision detection + clash-prefix naming. Startup scope resolution from on-disk settings via `settings::scopes` loaders + `resolve_scalar_with` resolver. Settings struct parse + strictness (`deny_unknown_fields`). Byte-stable JSON pins for persona descriptors in prompts/list + persona response envelope (T111). All tested via library API (no CLI spin-up for persona tests, matching `mcp_prompts.rs` pattern).
 
 ## Test Categories by Purpose
 
@@ -528,6 +696,7 @@ Tests for previously fixed bugs, linked to phase retros:
 | Phase 6 Foundational F2 | (current) | `entry_kind_agent_indexing.rs` (Agent row integration; schema drift prevention) |
 | Phase 6 US1 S-1 | (current) | `agent_path_traversal.rs` (Index-time gate blocks ../../../../tmp/evil) |
 | Phase 6 US3 B-1 | (current) | `guardrails_marker_injection.rs` (Fail-closed marker validation) |
+| Phase 6 US4 R-4-2 | (current) | `personas_startup_scope.rs` (Single-source-of-truth scope-loaders) |
 
 ### Invariant Tests
 
@@ -551,6 +720,9 @@ Tests that verify core properties hold:
 | Guardrails region ordering | `guardrails_render.rs` | Regions rendered in lex order; overwrite-in-place deterministic (FR-014) |
 | Guardrails marker validation | `guardrails_marker_injection.rs` | Any managed-marker line in body rejected (B-1 fail-closed) |
 | Rules-file idempotence | `rules_file_block_in_existing.rs`, `rules_file_standalone.rs` | Re-write with no change rewrites nothing (FR-525) |
+| Persona toggle + rendering | `personas.rs` | Toggle on/off includes/excludes personas; body wrapped + substituted (FR-060/062/064) |
+| Persona collision | `personas_collision.rs` | Clashing persona names are prefixed; drop-persona reserved (FR-061/063) |
+| Settings scalar resolution | `settings_p6.rs` | First-declarer-wins walk; project/workspace/global layering (FR-053) |
 
 ### Phase 5: Truncation Boundary Tests
 
@@ -821,6 +993,12 @@ fn agent_path_traversal_rejected_at_index_time() { ... }
 
 #[test]
 fn guardrails_marker_injection_stray_end_rejected() { ... }
+
+#[test]
+fn persona_toggle_off_excludes_personas() { ... }
+
+#[test]
+fn expose_personas_project_overrides_global() { ... }
 ```
 
 ### Minimal External I/O
