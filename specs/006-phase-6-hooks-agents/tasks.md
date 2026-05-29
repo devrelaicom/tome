@@ -164,7 +164,7 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T076 [US2] Run codebase mapping for Phase 4 changes (`/sdd:map incremental`).
 - [X] T077 [US2] Review `retro/P4.md`; extract learnings to `CLAUDE.md` (conservative).
 - [X] T078 [GIT] Commit: `docs(phase-6): US2 closeout — mapping + retro`.
-- [ ] T079 [GIT] Push; PR with US2 summary; verify CI; report PR ready status.
+- [X] T079 [GIT] Push; PR with US2 summary; verify CI; report PR ready status. (PR #133 squash-merged to main @ a991312.)
 
 **Checkpoint**: Real hooks enforce on Claude Code.
 
@@ -176,8 +176,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Independent test**: Enable a `GUARDRAILS.md`-only plugin across all five harnesses → region in `CLAUDE.md`, shared `AGENTS.md`, Cursor sibling; a both-shipping plugin → region in `AGENTS.md`, absent from `CLAUDE.md`; disable removes only its region; re-sync overwrites in place; the rules-include block is in `CLAUDE.md` not `AGENTS.md`. (SC-006, SC-007)
 
-- [ ] T080 Create `specs/006-phase-6-hooks-agents/retro/P5.md` from template.
-- [ ] T081 [GIT] Commit: `docs(phase-6): init P5 retro`.
+- [X] T080 Create `specs/006-phase-6-hooks-agents/retro/P5.md` from template.
+- [X] T081 [GIT] Commit: `docs(phase-6): init P5 retro`.
 - [ ] T082 [US3] Correct claude-code rules-file candidate list to `CLAUDE.md` > `.claude/CLAUDE.md` (drop `AGENTS.md`) in `src/harness/claude_code.rs` (FR-020/022) (use devs:rust-dev agent).
 - [ ] T083 [P] [US3] `tests/rules_file_claude_correction.rs` — block lands in `CLAUDE.md`, AGENTS.md project keeps one block, both resolve `.tome/RULES.md` (use devs:rust-dev agent).
 - [ ] T084 [GIT] Commit: `fix(phase-6): Claude Code rules sink is CLAUDE.md, not AGENTS.md`.
