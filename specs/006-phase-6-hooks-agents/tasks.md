@@ -161,9 +161,9 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T073 [US2] 4-reviewer pass; write `review/us2-findings.md` + `review/us2-disposition.md`.
 - [X] T074 [US2] Apply US2 blockers + selected majors (use devs:rust-dev agent).
 - [X] T075 [GIT] Commit: `fix(phase-6): apply US2 reviewer findings`.
-- [ ] T076 [US2] Run codebase mapping for Phase 4 changes (`/sdd:map incremental`).
-- [ ] T077 [US2] Review `retro/P4.md`; extract learnings to `CLAUDE.md` (conservative).
-- [ ] T078 [GIT] Commit: `docs(phase-6): US2 closeout — mapping + retro`.
+- [X] T076 [US2] Run codebase mapping for Phase 4 changes (`/sdd:map incremental`).
+- [X] T077 [US2] Review `retro/P4.md`; extract learnings to `CLAUDE.md` (conservative).
+- [X] T078 [GIT] Commit: `docs(phase-6): US2 closeout — mapping + retro`.
 - [ ] T079 [GIT] Push; PR with US2 summary; verify CI; report PR ready status.
 
 **Checkpoint**: Real hooks enforce on Claude Code.

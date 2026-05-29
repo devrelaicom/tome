@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 / US1 native agents; incremental update)
+> **Last Updated**: 2026-05-29 (Phase 6 / US2 real hooks; incremental update)
 
 ## Overview
 
@@ -47,6 +47,7 @@ Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, wo
 37. Phase 5 / US5 additions (CLOSURE OF PHASE 5 FEATURE WORK): Per-entry invocability flags (`user_invocable` column); `tome plugin show` displays command entries + resource enumeration (5-cap per directory + sentinels); doctor `--fix` extends to summariser re-download (5th repair class); symbolic link skip in `walk_resources` for resource enumeration; `Paths::plugin_data_root()` unified singleton source eliminates layout-drift risk; 0 security findings from Phase 5 / US5 reviewer pass
 38. Phase 5 / Polish additions: All Phase 5 feature work critical security invariants (no-rescan, truncation DoS, path traversal, resource walk hardening) verified end-to-end; **0 HIGH / 0 MEDIUM / 0 LOW** security findings from full Phase 5 audit; 4 critical blockers fixed across US1–US5; `validate_db_stored_path` promoted as single SSOT for path-traversal boundary checks across all entry-body-reading surfaces; Paths::plugin_data_root() unified singleton verified across all callers; all Phase 5 contracts (exit-codes-p5, substitution-engine, mcp-tools-p5, entry-schema-p5) ratified
 39. Phase 6 / US1 additions (NATIVE AGENTS): Plugin-supplied agent names validated as single safe path segment before becoming a filename (`is_safe_agent_name`); path-traversal vector closed (frontmatter `name: ../../evil` rejected before storing). Defence-in-depth: `target.parent() == Some(dir)` assertion before every agent write. Agent file writes reuse atomic, symlink-refusing, mode-preserving discipline (`write_standalone`). Plugin removal is literal prefix match (`plugin_of_owned_file`), not glob, scoped to directory walk. Privileged-field passthrough (hooks/mcpServers/permissionMode → `.claude/agents/`) is the intended FR-050 default, auditable in-file; striping opt-out (US5) surfaces privilege escalation report in doctor.
+40. Phase 6 / US2 additions (REAL HOOKS — THIRD-PARTY JSON WRITE SURFACE): Plugin-supplied `hooks/hooks.json` read on plugin enable with two-variable rewrite (`${CLAUDE_PLUGIN_ROOT}` + `${CLAUDE_PLUGIN_DATA}` → absolute paths); UTF-8 validation (fail-closed exit 44) prevents non-UTF-8 install paths from emitting U+FFFD-corrupted hook commands. Hooks merged into project's `.claude/settings.local.json` (gitignored, never committed) by deep structural-equality match (idempotent, never duplicates user-edited copy). Settings file read/write atomic, symlink-refusing, mode-preserving; 1 MiB read-cap enforced. Trust gate is operator's explicit `tome plugin enable`; Tome never auto-enables. Parent `.claude/` created 0700 on Unix when absent. Hook JSON rewrite is targeted two-token textual substitution only (NOT full Phase 5 substitution pipeline per NFR-007); syntax-valid textual replacement handles double-slash in paths safely. On disable, hooks re-derived and structurally-matching entries removed only (no sidecar ownership tracking; user-edited copy stays). 0 security findings from US2 reviewer pass.
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
@@ -211,6 +212,37 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 
 **Purpose**: Project paths are the PK for workspace binding; UTF-8 validation prevents lossy round-trip through DB and silent data loss (R-B1 security blocker fix).
 
+### Plugin Hooks JSON Validation (Phase 6 / US2)
+
+| Layer | Control | Implementation | Purpose |
+|-------|---------|----------------|---------|
+| **Presence check** | `hooks/hooks.json` is optional | Returns `Ok(None)` when absent (benign fall-through to guardrails) | `src/harness/hooks.rs::read_rewritten_entries` |
+| **Read-size cap** | Bounded read at 1 MiB | `HARNESS_MCP_MAX` enforced by `crate::util::bounded_read_to_string` | Prevents DoS via huge hooks files |
+| **JSON parse** | `serde_json::from_str` validation | Returns `HookSpecParseError` (exit 43) on malformed JSON | `src/harness/hooks.rs::read_rewritten_entries` |
+| **Structure shape** | Top-level object keyed by event; each value an array of entries | Returns `HookSpecParseError` if not object-of-arrays | Validates expected nested shape |
+| **UTF-8 path guard** | Non-UTF8 install paths fail closed, exit 44 | `non_utf8_guard(&plugin_root, &error_path)` prevents U+FFFD in hook commands | `src/harness/hooks.rs::non_utf8_guard` |
+| **Two-variable rewrite** | Targeted textual substitution of `${CLAUDE_PLUGIN_ROOT}` + `${CLAUDE_PLUGIN_DATA}` only | Every other `${CLAUDE_*}` left verbatim for Claude Code to resolve | `src/harness/hooks.rs::rewrite_string_leaves` |
+| **Rewrite scope** | String leaves in JSON tree only; keys and scalars untouched | Prevents accidental structural alteration | Recursive walk via `rewrite_string_leaves` |
+| **Settings file read** | Bounded read at 1 MiB (`HARNESS_MCP_MAX`) | Prevents DoS via huge settings files | `src/harness/hooks.rs::load_settings` |
+| **Deep equality match** | Structural identity via `serde_json::Value` equality | Idempotent merge (no duplicate user-edited copy) and precise removal (stale edits left in place) | `src/harness/hooks.rs::append_if_absent`, `remove_from_settings` |
+
+**Validation Algorithm** (`src/harness/hooks.rs::read_rewritten_entries`):
+1. **Refuse symlink**: `refuse_symlink(&source)?` at read entry point
+2. **Bounded read**: `bounded_read_to_string(..., HARNESS_MCP_MAX)` (1 MiB cap)
+3. **Parse**: `serde_json::from_str(&body)` or `HookSpecParseError`
+4. **Shape check**: `doc.as_object_mut()` then iterate event keys
+5. **Array check**: Each value must be an array
+6. **Rewrite**: For each entry, `rewrite_string_leaves(&mut rewritten, plugin_root_str, plugin_data_str)`
+7. **UTF-8 guard**: `non_utf8_guard(plugin_root, plugin_root)?` prevents non-UTF-8 paths (exit 44)
+
+**Trust Model**: The trust gate is the operator's explicit `tome plugin enable` — Tome never auto-enables. Hooks are attacker-controlled JSON from the plugin's `hooks/hooks.json`, but only enabled plugins' hooks are merged into settings. The two-variable rewrite is a targeted, syntax-safe textual substitution that handles standard path patterns; no full substitution pipeline re-enters (NFR-007). The merged hooks execute under Claude Code's native hook protocol (outside Tome's scope).
+
+**Examples of rewrite safety**:
+- `/path//double/slash` → `/path//double/slash` (double-slash preserved; safe as part of path string)
+- `${CLAUDE_PLUGIN_ROOT}/script.sh` → `/installed/root/script.sh` (correct)
+- `${CLAUDE_PLUGIN_DATA}/cache` → `/home/user/.tome/plugin-data/<cat>/<plugin>/cache` (correct)
+- `${CLAUDE_SESSION_ID}` → `${CLAUDE_SESSION_ID}` (left verbatim; Claude Code resolves at runtime)
+
 ### Manifest Strictness
 
 | Rule | Implementation | Enforcement |
@@ -219,7 +251,7 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | **Compile-time check** | Every Tome-owned Deserialize struct preceded by attribute | Verified by structural grep test |
 | **Test enforcement** | `tests/manifest_strictness.rs` — assertion on 100% coverage | Test fails if any struct lacks attribute |
 | **Phase 4 US4 audit** | T098n extended to `SummariserRegistry`, `CachedSummaries` (with deny check); `src/summarise/registry.rs::SUMMARISER_ENTRY` manually audited | Phase 4 complete; all Tome-owned types verified; zero missing |
-| **Lenient third-party inputs** | `plugin.json` and `SKILL.md` frontmatter parsed without `deny_unknown_fields` (FR-013a) | Forward-compatible with upstream schema additions |
+| **Lenient third-party inputs** | `plugin.json` and `SKILL.md` frontmatter parsed without `deny_unknown_fields` (FR-013a); hooks JSON also lenient on forward-compat | Forward-compatible with upstream schema additions |
 | **Coverage** | Strict targets: `CatalogManifest`, `Owner`, `PluginDeclaration`, `Config`, `CatalogEntry`, `ModelManifest`, `ModelKind`, `WorkspaceName`, `ProjectMarkerConfig`, all Phase 4 additions | Mandatory, no exceptions |
 
 ### Harness Configuration Validation (Phase 4 / US1.b + US5 + Polish)
@@ -240,6 +272,62 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | Control | Implementation | Purpose |
 |---------|----------------|---------|
 | **MCP query length cap** | 4096 chars enforced at search_skills input boundary (FR-555) | `src/mcp/tools/search_skills.rs::106` validates before expensive compute |
+
+## Real Hooks Settings File Write Security (Phase 6 / US2)
+
+### File Target & Scope
+
+| Control | Implementation | Guarantee |
+|---------|----------------|-----------|
+| **Settings file target** | Project's machine-local `.claude/settings.local.json` (gitignored) | Only local, machine-specific file written; committed `.claude/settings.json` never touched (FR-002) |
+| **Parent directory** | `.claude/` created 0700 on Unix when absent; mode not changed if exists | Secure parent owned by user, readable/writable by user only |
+| **Hook settings path** | Only Claude Code harness (via `m.hooks_strategy() == RealJson`) participates | Every other harness is `GuardrailsOnly`; no real-hooks participation for non-Claude-Code |
+
+### Atomic Hooks Write Discipline
+
+| Layer | Control | Guarantee |
+|-------|---------|-----------|
+| **Symlink refusal** | `refuse_symlink_settings(target)?` checks target before read/write | Exit 7 (Io); prevents writing through symlinks to `.claude/` system files |
+| **Read → load settings document** | Existing file read as JSON object; missing file creates empty hooks object | Idempotent: second write with no change produces identical file |
+| **Merge/Remove operation** | Deep structural-equality match using `serde_json::Value` | Idempotent: no duplicate appends, exact-match removal, user-edited copy preserved (NFR-003) |
+| **Atomic persist** | Write to tempfile via `write_settings(target, &doc)` → POSIX rename | Crash mid-write leaves no partial file; same-FS rename is atomic |
+| **Mode preservation** | Parent `.claude/` mode preserved (typically 0700); file created with tempfile default (0600 on Unix) or existing mode if rewrite | Permissions not silently downgraded |
+
+**Code Location** (`src/harness/hooks.rs`):
+```rust
+/// Merge hooks into settings.local.json, atomic + mode-preserving + symlink-refusing.
+pub fn merge_into_settings(target: &Path, hooks: &RewrittenHooks) -> Result<bool, TomeError> {
+    refuse_symlink_settings(target)?;  // Exit 7 if symlink
+    let (mut doc, existed) = load_settings(target)?;
+    // ... merge logic with deep equality match ...
+    if !existed || changed {
+        write_settings(target, &doc)?;  // Atomic persist
+    }
+    Ok(changed)
+}
+```
+
+### Hook Entry Merge & Removal
+
+| Operation | Mechanism | Ownership |
+|-----------|-----------|-----------|
+| **Add (enabled plugin)** | For each event, append entry to array **only if no deep-equal entry exists** | `append_if_absent(hooks_obj, event, entry)` checks `serde_json::Value` equality |
+| **Remove (disabled plugin)** | Re-derive plugin's rewritten entries, remove **only structurally-matching entries** by deep equality | Non-matching entries (user-edited post-Tome-write) left in place |
+| **Empty pruning** | After removal, prune empty event arrays; otherwise-empty `hooks` object left | Container structure preserved for idempotence |
+
+**Trust Model** (NFR-003): Ownership is **re-derivation + structural match only** — no sidecar provenance marker. A hook the user hand-edited after Tome wrote it no longer matches the re-derived entry and is conservatively left in place on removal. Tome never deletes a hook it cannot prove it owns.
+
+**Example**: Plugin ships `hooks.json` with a `"postToolUse"` entry at enable time. Tome appends it to `settings.local.json`. User edits that entry (changes the command slightly). Later, plugin is disabled. Tome re-derives what it would have appended, finds no exact match (because user edited it), and leaves the entry in place. The user's hook remains active.
+
+### Credentials in Hooks
+
+| Surface | Scrubbing | Location |
+|---------|-----------|----------|
+| **Settings file reads** | No special scrubbing (operators manage secrets) | Hooks content is from trusted `plugin.json` sources; secret tokens in hook commands are operator-determined |
+| **Error chains** | Error messages from hooks read/write/merge scrubbed via `scrub_credentials` regex | `src/harness/hooks.rs` error paths |
+| **MCP log** | Harness sync errors scrubbed before JSON logging | `src/mcp/` log output |
+
+**Design note**: The rewritten hooks become literal executed commands — if a hook command contains a secret (e.g., an API key), that secret is operator-supplied, not Tome's responsibility to scrub. The trust model assumes operators deliberately include secrets in hooks when that's correct for their use case.
 
 ## Agent File Write Security (Phase 6 / US1)
 
@@ -521,6 +609,7 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 | **Rules file write** | Block-insertion or standalone | Symlink refused; atomic persist |
 | **Settings edits** | `toml_edit` via `write_atomic` | Mode preserved; symlinks refused |
 | **Agent file write** | `write_standalone` (Phase 6 / US1) | Symlink refused; atomic persist; mode preserved |
+| **Hooks settings write** | Read → merge → write via `write_settings` (Phase 6 / US2) | Atomic persist; mode preserved; idempotent |
 | **Model downloads** | Stream-to-partial → rename | Cleanup closure ensures partial removed on checksum mismatch |
 
 ### Symlink Refusal (Defense in Depth)
@@ -531,12 +620,13 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 | Harness rules file | Write-back symlink check | Exit 7 | `src/harness/rules_file.rs::refuse_symlink` |
 | Harness MCP config | Write-back symlink check | Exit 7 | `src/harness/mcp_config.rs::refuse_symlink` |
 | Atomic dir landing | Staging path symlink refusal | Exit 7 | `src/util/atomic_dir.rs::refuse_symlink` |
+| **Hooks settings file (US2)** | **Write-back symlink check** | **Exit 7** | **`src/harness/hooks.rs::refuse_symlink_settings` (new US2 surface)** |
 | **Agent file write** | **Write-back symlink check (Phase 6 / US1)** | **Exit 7** | **`src/harness/rules_file.rs::refuse_symlink` (reused for agents)** |
 | MCP get_skill walk | Directory symlink skip | Silent skip | `src/mcp/tools/get_skill.rs` (`is_symlink()` filter) |
 | Doctor orphan cleanup | Symlink-skip in sweep | Silent skip | `src/doctor/orphan_cleanup.rs::sweep_one` (symlink_metadata check) |
 | **MCP plugin show resource walk** | **Directory symlink skip (Phase 5 / US5)** | **Silent skip** | **`src/mcp/tools/plugin_show.rs::walk_resources` (`is_symlink()` filter; US5 new surface)** |
 
-**Threat Model**: Hostile catalog clones `skills/creds → ~/.ssh/id_rsa`, operator runs `tome plugin enable` → would leak SSH key via skill content. **Mitigation**: symlink skip in MCP `get_skill` walk + symlink refusal on writes + resource enumeration skip in `plugin_show`. Phase 6 US1 extends to agent file writes: symlink refusal before emitting to `.claude/agents/`.
+**Threat Model**: Hostile catalog clones `skills/creds → ~/.ssh/id_rsa`, operator runs `tome plugin enable` → would leak SSH key via skill content. **Mitigation**: symlink skip in MCP `get_skill` walk + symlink refusal on writes + resource enumeration skip in `plugin_show`. Phase 6 US1 extends to agent file writes: symlink refusal before emitting to `.claude/agents/`. Phase 6 US2 extends to hooks settings file writes: symlink refusal before reading/writing `.claude/settings.local.json`.
 
 ### File Mode Preservation
 
@@ -545,6 +635,7 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 | Harness config rewrite | `symlink_metadata(target)` before write | `chmod` staged tempfile before `persist` | `src/catalog/store.rs::write_atomic` (unified) |
 | Workspace settings edit | Same | Same | `src/settings/edit.rs::save_settings` (via `write_atomic`) |
 | Rules file rewrite | Same | Same | `src/harness/rules_file.rs::atomic_write` (via `write_atomic`) |
+| **Hooks settings file (US2)** | **Existing file mode, or tempfile default (0600) for new** | **`chmod` staged file before `persist`** | **`src/harness/hooks.rs::write_settings` (new US2 surface)** |
 | **Agent file write** | **Same (Phase 6 / US1)** | **Same** | **`src/harness/rules_file.rs::write_standalone` (reused for agents)** |
 | Project marker write | Same | Same | `src/util/atomic_dir.rs::land_directory` (chmod 0o700 before keep) |
 
@@ -597,9 +688,13 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 **Phase 6 / US1 additions**:
 - Exit 45: `AgentTranslationFailed` (malformed agent frontmatter, unsafe agent name, target-directory escape)
 
+**Phase 6 / US2 additions**:
+- Exit 43: `HookSpecParseError` (malformed / unparsable `hooks/hooks.json`, non-UTF-8 paths)
+- Exit 44: `HookSettingsWriteFailed` (failure to read/merge/write `.claude/settings.local.json`)
+
 See `specs/005-phase-5-commands-prompts/contracts/exit-codes-p5.md` + `specs/006-phase-6-hooks-agents/contracts/exit-codes-p6.md` for full enumeration.
 
 ---
 
 *This document defines security controls. Update when security posture changes.*
-*Last refreshed 2026-05-29 against Phase 6 / US1 native agents code (incremental update); Phase 5 Polish baseline (1172 tests, 147 suites); agent name validation, atomic write discipline, privilege passthrough, and literal prefix removal all verified.*
+*Last refreshed 2026-05-29 against Phase 6 / US2 real hooks code (incremental update); Phase 5 Polish baseline (1172 tests, 147 suites); hooks JSON read/rewrite, settings file merge, UTF-8 validation, and atomic write discipline all verified; 0 security findings from US2 reviewer pass.*
