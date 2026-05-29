@@ -186,10 +186,10 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T087 [US3] Implement per-file reconciliation in `src/harness/guardrails.rs`: deterministic placement (rules block first, then regions in lexicographic `<catalog>:<plugin>` order), overwrite-in-place, orphan removal, Cursor sibling deletion when empty; atomic write + mode-preservation + symlink-refusal (FR-011/014/015) (use devs:rust-dev agent).
 - [X] T088 [US3] Implement the Claude Code suppression predicate (plugin ships `hooks.json` ⇒ no `CLAUDE.md` region) and the hooks→guardrails ordering + both suppression transitions in `src/harness/sync.rs` (FR-013/016) (use devs:rust-dev agent).
 - [X] T089 [GIT] Commit: `feat(phase-6): GUARDRAILS.md per-plugin regions + suppression`.
-- [ ] T090 [P] [US3] `tests/guardrails_render.rs` — region in CLAUDE.md/AGENTS.md/Cursor sibling; two plugins → two regions; disable removes only one; re-sync in place (use devs:rust-dev agent).
-- [ ] T091 [P] [US3] `tests/guardrails_suppression.rs` — both-shipping plugin suppressed on CLAUDE.md present on AGENTS.md; both start/stop-hooks transitions (use devs:rust-dev agent).
-- [ ] T092 [P] [US3] Extend `tests/exit_codes_e2e.rs` — guardrails write failure → exit 46 (use devs:rust-dev agent).
-- [ ] T093 [GIT] Commit: `test(phase-6): US3 guardrails render + suppression + correction`.
+- [X] T090 [P] [US3] `tests/guardrails_render.rs` — region in CLAUDE.md/AGENTS.md/Cursor sibling; two plugins → two regions; disable removes only one; re-sync in place (use devs:rust-dev agent).
+- [X] T091 [P] [US3] `tests/guardrails_suppression.rs` — both-shipping plugin suppressed on CLAUDE.md present on AGENTS.md; both start/stop-hooks transitions (use devs:rust-dev agent).
+- [X] T092 [P] [US3] Extend `tests/exit_codes_e2e.rs` — guardrails write failure → exit 46 (use devs:rust-dev agent).
+- [X] T093 [GIT] Commit: `test(phase-6): US3 guardrails render + suppression + correction`.
 - [ ] T094 [US3] 4-reviewer pass; write `review/us3-findings.md` + `review/us3-disposition.md`.
 - [ ] T095 [US3] Apply US3 blockers + selected majors (use devs:rust-dev agent).
 - [ ] T096 [GIT] Commit: `fix(phase-6): apply US3 reviewer findings`.

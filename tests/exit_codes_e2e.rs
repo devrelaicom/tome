@@ -83,6 +83,17 @@
 //! the binary; the merge/remove tests in `tests/hooks_merge.rs` and the
 //! exit-code unit in `tests/exit_codes.rs` cover it, per the established
 //! e2e split (cf. codes 44/46 in `contracts/exit-codes-p6.md` §"Discipline").
+//!
+//! Phase 6 / US3 addition (guardrails sink). Code 46
+//! (`GuardrailsWriteFailed`) stays library-API-only, per the same split — an
+//! IO/render failure on a rules-file target or the Cursor sibling is not
+//! cheaply forced through the binary. It is covered here via the
+//! `guardrails`-module symlink-refusal path (a symlinked in-file target
+//! surfaces exit 46) and by the exit-code unit in `tests/exit_codes.rs`:
+//!
+//! | Code | Variant                       | Tested via                                  |
+//! |------|-------------------------------|---------------------------------------------|
+//! | 46   | GuardrailsWriteFailed         | `guardrails_write_through_symlink_exits_46` (lib, unix) |
 
 mod common;
 
@@ -1051,5 +1062,42 @@ fn workspace_use_malformed_hooks_exits_43() {
     assert!(
         !project.join(".claude/settings.local.json").exists(),
         "settings.local.json must not be written when the hook source is malformed",
+    );
+}
+
+// =====================================================================
+// Phase 6 / US3 — guardrails write failure → exit 46 (library-API).
+// =====================================================================
+
+/// A symlinked in-file guardrails target is refused before any write; the
+/// failure surfaces `GuardrailsWriteFailed` (exit 46), naming the file.
+#[test]
+#[cfg(unix)]
+fn guardrails_write_through_symlink_exits_46() {
+    use std::collections::BTreeMap;
+    use tome::harness::guardrails;
+
+    let dir = TempDir::new().expect("tempdir");
+    let decoy = dir.path().join("decoy.md");
+    fs::write(&decoy, "ORIGINAL\n").expect("write decoy");
+    let target = dir.path().join("CLAUDE.md");
+    std::os::unix::fs::symlink(&decoy, &target).expect("plant symlink");
+
+    let mut desired = BTreeMap::new();
+    desired.insert("cat:plug".to_string(), "be careful\n".to_string());
+
+    let err = guardrails::reconcile_in_file_region(&target, &desired)
+        .expect_err("symlinked guardrails target must be refused");
+    assert_eq!(
+        err.exit_code(),
+        46,
+        "guardrails write through a symlink → exit 46; got {err:?}"
+    );
+
+    // The decoy the symlink pointed at is untouched.
+    assert_eq!(
+        fs::read_to_string(&decoy).unwrap(),
+        "ORIGINAL\n",
+        "the symlink target must NOT be overwritten"
     );
 }
