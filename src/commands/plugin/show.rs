@@ -101,9 +101,52 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
         last_indexed_at: last_indexed_at_dt,
     };
 
+    // Phase 6 / US5 (FR-083): hooks/guardrails presence booleans (read-only
+    // fs existence checks against the on-disk plugin tree) + per-agent
+    // resolved persona name when `expose_agents_as_personas` resolves true.
+    let ships_hooks_json = plugin_dir.join("hooks").join("hooks.json").is_file();
+    let ships_guardrails_md = plugin_dir.join("hooks").join("GUARDRAILS.md").is_file();
+
+    // Persona names mirror the US4 derivation: clash-prefixed
+    // `<plugin>-<name>` base for an agent name held by ≥2 enabled plugins,
+    // `<name>` otherwise, then the `-persona` suffix. Computed only when the
+    // flag resolves true at the scope; never invokes substitution.
+    let expose_personas = crate::mcp::resolve_expose_personas(scope, &paths).unwrap_or(false);
+    if expose_personas && !agents.is_empty() {
+        let clash_set =
+            crate::index::skills::agent_name_clash_set(&conn, scope.scope.name().as_str())
+                .unwrap_or_default();
+        for a in &mut agents {
+            let clash_prefixed = clash_set.contains(&a.name);
+            let base = if clash_prefixed {
+                format!("{}-{}", id.plugin, a.name)
+            } else {
+                a.name.clone()
+            };
+            a.persona_name = Some(crate::mcp::prompt_name::derive_suffixed_name(
+                &base, "persona",
+            ));
+        }
+    }
+
     match mode {
-        Mode::Human => emit_human(&record, &agg, &skills, &commands, &agents),
-        Mode::Json => emit_json(&record, &skills, &commands, &agents),
+        Mode::Human => emit_human(
+            &record,
+            &agg,
+            &skills,
+            &commands,
+            &agents,
+            ships_hooks_json,
+            ships_guardrails_md,
+        ),
+        Mode::Json => emit_json(
+            &record,
+            &skills,
+            &commands,
+            &agents,
+            ships_hooks_json,
+            ships_guardrails_md,
+        ),
     }
 }
 
@@ -129,6 +172,12 @@ struct EntryView {
     /// Frontmatter `argument-hint` text, surfaced verbatim.
     #[serde(skip_serializing_if = "Option::is_none")]
     argument_hint: Option<String>,
+    /// Phase 6 / US5 (FR-083): the resolved `<name>-persona` slug for an
+    /// agent entry, populated only when `expose_agents_as_personas`
+    /// resolves true at the scope. `None` for non-agent entries and when
+    /// personas are off — absent from the JSON wire in that case.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    persona_name: Option<String>,
 }
 
 /// Pull every enabled-or-indexed entry for `(catalog, plugin)` from
@@ -210,6 +259,8 @@ fn list_entries(
             prompt_name,
             arguments,
             argument_hint,
+            // Filled in by the caller when personas resolve true (FR-083).
+            persona_name: None,
         });
     }
     Ok(out)
@@ -221,6 +272,8 @@ fn emit_human(
     skills: &[EntryView],
     commands: &[EntryView],
     agents: &[EntryView],
+    ships_hooks_json: bool,
+    ships_guardrails_md: bool,
 ) -> Result<(), TomeError> {
     let mut out = std::io::stdout().lock();
     writeln!(out, "Plugin:       {}", record.id)?;
@@ -283,6 +336,19 @@ fn emit_human(
     }
     writeln!(out, "{table}")?;
 
+    // Phase 6 / US5 (FR-083): hooks / guardrails ship-presence booleans.
+    writeln!(out)?;
+    writeln!(
+        out,
+        "Ships hooks/hooks.json:    {}",
+        if ships_hooks_json { "yes" } else { "no" }
+    )?;
+    writeln!(
+        out,
+        "Ships hooks/GUARDRAILS.md: {}",
+        if ships_guardrails_md { "yes" } else { "no" }
+    )?;
+
     // Phase 5 / US5.b: per-section listing.
     if !skills.is_empty() {
         writeln!(out)?;
@@ -335,6 +401,11 @@ fn write_entry_line<W: Write>(out: &mut W, e: &EntryView) -> std::io::Result<()>
     if !e.description.is_empty() {
         writeln!(out, "    description: {}", e.description)?;
     }
+    // Phase 6 / US5 (FR-083): resolved persona name for an agent entry,
+    // present only when `expose_agents_as_personas` resolves true.
+    if let Some(persona) = &e.persona_name {
+        writeln!(out, "    persona: {persona}")?;
+    }
     // Argument disclosure differs by entry kind:
     //   * Named arguments declared → list them.
     //   * No declared args but the entry surface allows catch-all `args`
@@ -357,7 +428,12 @@ fn emit_json(
     skills: &[EntryView],
     commands: &[EntryView],
     agents: &[EntryView],
+    ships_hooks_json: bool,
+    ships_guardrails_md: bool,
 ) -> Result<(), TomeError> {
+    // Phase 6 / US5 (FR-083): the envelope gains two ship-presence booleans;
+    // the per-agent `persona_name` rides on each `EntryView` (skip-if-none,
+    // so the wire shape is unchanged when personas are off).
     #[derive(Serialize)]
     struct Envelope<'a> {
         #[serde(flatten)]
@@ -365,12 +441,16 @@ fn emit_json(
         skills: &'a [EntryView],
         commands: &'a [EntryView],
         agents: &'a [EntryView],
+        ships_hooks_json: bool,
+        ships_guardrails_md: bool,
     }
     let env = Envelope {
         record,
         skills,
         commands,
         agents,
+        ships_hooks_json,
+        ships_guardrails_md,
     };
     crate::output::write_json(&env)
 }

@@ -532,6 +532,14 @@ pub(crate) fn plugin_of_owned_file(filename: &str) -> Option<&str> {
     Some(plugin)
 }
 
+/// Public re-export of [`plugin_of_owned_file`] for the US5 doctor
+/// read-only surface (`crate::doctor::checks`), which lives outside the
+/// `harness` module and so cannot reach the `pub(crate)` original. The
+/// ownership split rule stays single-sourced — this is a thin forwarder.
+pub fn plugin_of_owned_file_pub(filename: &str) -> Option<&str> {
+    plugin_of_owned_file(filename)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

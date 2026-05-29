@@ -77,6 +77,7 @@
 //! | Code | Variant                       | Tested via                                   |
 //! |------|-------------------------------|----------------------------------------------|
 //! | 43   | HookSpecParseError            | `workspace_use_malformed_hooks_exits_43`     |
+//! | 45   | AgentTranslationFailed        | `workspace_use_malformed_agent_exits_45`     |
 //!
 //! Code 44 (`HookSettingsWriteFailed`) stays library-API-only — an IO
 //! failure on `.claude/settings.local.json` is not cheaply forced through
@@ -1062,6 +1063,98 @@ fn workspace_use_malformed_hooks_exits_43() {
     assert!(
         !project.join(".claude/settings.local.json").exists(),
         "settings.local.json must not be written when the hook source is malformed",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 / US5 / T134: a malformed enabled agent surfaces exit 45
+// (`AgentTranslationFailed`) through the binary. `tome workspace use` binds the
+// project and runs sync; the agents pass re-translates the enabled agent's
+// source `.md` for the claude-code harness and fails on the malformed
+// frontmatter. This mirrors the exit-43 hooks split: the sync/translation path
+// is the binary-reachable surface, and a malformed agent is forced through it
+// cheaply (sync doesn't load ONNX).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn workspace_use_malformed_agent_exits_45() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+    seed_workspace_with_registry_seeds(&paths, "test-ws");
+
+    // claude-code supports native agents → the sync agents pass translates.
+    fs::write(
+        &paths.global_settings_file,
+        "harnesses = [\"claude-code\"]\n",
+    )
+    .expect("write global settings");
+
+    // Plant a MALFORMED agent source (no frontmatter delimiters at all) under
+    // the plugin's on-disk root (manifest-less fallback:
+    // `<cache_dir_for(url)>/<plugin>/agents/<name>.md`), then enrol the catalog
+    // and insert an enabled `agent`-kind row pointing at it.
+    let url = "https://example.test/plugin-a.git";
+    let cache = paths.cache_dir_for(url);
+    let agent_dir = cache.join("plugin-a").join("agents");
+    fs::create_dir_all(&agent_dir).expect("create agent dir");
+    fs::write(
+        agent_dir.join("broken.md"),
+        "this agent file has no frontmatter at all\n",
+    )
+    .expect("write malformed agent");
+
+    {
+        let conn = rusqlite::Connection::open(&paths.index_db).expect("rusqlite open rw");
+        tome::index::workspace_catalogs::insert(&conn, "test-ws", "cat-a", url, "main")
+            .expect("enrol catalog");
+        conn.execute(
+            "INSERT INTO skills
+                (catalog, plugin, name, kind, description, plugin_version,
+                 path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+             VALUES ('cat-a', 'plugin-a', 'broken', 'agent', 'd', '0.0.0',
+                     'agents/broken.md', 'h', 0, 0, NULL, '1970-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("insert agent row");
+        let skill_id: i64 = conn
+            .query_row(
+                "SELECT id FROM skills WHERE catalog='cat-a' AND plugin='plugin-a' AND kind='agent'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("agent id");
+        let ws_id: i64 = conn
+            .query_row(
+                "SELECT id FROM workspaces WHERE name = 'test-ws'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("ws id");
+        conn.execute(
+            "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+            rusqlite::params![ws_id, skill_id],
+        )
+        .expect("enrol agent");
+    }
+
+    let project = env.home_path().join("project");
+    fs::create_dir_all(&project).expect("create project");
+
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["workspace", "use", "test-ws"])
+        .output()
+        .expect("spawn workspace use");
+
+    assert_eq!(
+        out.status.code(),
+        Some(45),
+        "expected exit 45 AgentTranslationFailed, got {:?}, stdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
     );
 }
 

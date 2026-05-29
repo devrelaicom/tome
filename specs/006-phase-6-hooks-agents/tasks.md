@@ -226,7 +226,7 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T116 [US4] Run codebase mapping for Phase 6 changes (`/sdd:map incremental`).
 - [X] T117 [US4] Review `retro/P6.md`; extract learnings to `CLAUDE.md` (conservative).
 - [X] T118 [GIT] Commit: `docs(phase-6): US4 closeout — mapping + retro`.
-- [ ] T119 [GIT] Push; PR with US4 summary; verify CI; report PR ready status.
+- [X] T119 [GIT] Push; PR with US4 summary; verify CI; report PR ready status. (PR #135 squash-merged to main @ 39153b2.)
 
 **Checkpoint**: Personas reach harnesses without native agents.
 
@@ -238,28 +238,28 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Independent test**: Privileged agent emitted intact by default + listed in the doctor privilege report; with `strip_plugin_agent_privileges` on (workspace/global), the same agent is emitted without the three fields; doctor accurately reports all subsystems and `--fix` repairs only safe cases. (SC-009, SC-010)
 
-- [ ] T120 Create `specs/006-phase-6-hooks-agents/retro/P7.md` from template.
-- [ ] T121 [GIT] Commit: `docs(phase-6): init P7 retro`.
-- [ ] T122 [US5] Add `strip_plugin_agent_privileges: bool` (default false) to the three settings structs in `src/settings/mod.rs`, reusing the scalar priority-walk resolver (FR-052/053) (use devs:rust-dev agent).
-- [ ] T123 [US5] Implement privilege passthrough (default) + strip-when-set for `hooks`/`mcpServers`/`permissionMode` in claude-code agent emission in `src/harness/claude_code.rs` (FR-050/052) (use devs:rust-dev agent).
-- [ ] T124 [GIT] Commit: `feat(phase-6): plugin-agent privilege passthrough + strip setting`.
-- [ ] T125 [US5] Implement `HooksReport`, `GuardrailsReport`, `AgentsReport`, `PrivilegeEscalationReport`, `PersonaReport` (emit-only `Serialize`) in `src/doctor/` (FR-090) (use devs:rust-dev agent).
-- [ ] T126 [US5] Wire the five reports into `assemble_report` in `src/commands/doctor.rs` (human + JSON), `None` only on `GlobalFallback` scope where applicable (use devs:rust-dev agent).
-- [ ] T127 [US5] Implement `--fix` safe repairs (re-render stale guardrails, re-emit missing agents, remove orphaned `<plugin>__*`); never remove a non-matching hook, never delete user content (FR-091) in `src/doctor/fixes.rs` (use devs:rust-dev agent).
-- [ ] T128 [US5] Extend `tome plugin show` in `src/commands/plugin/show.rs`: list agents + hooks.json/GUARDRAILS.md presence + resolved persona name when personas on (FR-083) (use devs:rust-dev agent).
-- [ ] T129 [GIT] Commit: `feat(phase-6): doctor hooks/guardrails/agents/personas/privilege reports + --fix + plugin show`.
-- [ ] T130 [P] [US5] `tests/agent_privilege.rs` — passthrough default; strip when set; doctor privilege report (use devs:rust-dev agent).
-- [ ] T131 [P] [US5] `tests/doctor_p6.rs` — all five report surfaces + `--fix` safe cases + read-only-by-default invariant (use devs:rust-dev agent).
-- [ ] T132 [P] [US5] `tests/doctor_json.rs` extensions — byte-stable JSON pins for the five new records (use devs:rust-dev agent).
-- [ ] T133 [P] [US5] `tests/plugin_show_p6.rs` — agents listed + hooks/guardrails presence + persona name; JSON shape pin (use devs:rust-dev agent).
-- [ ] T134 [P] [US5] Extend `tests/exit_codes_e2e.rs` — agent translation failure → exit 45 (use devs:rust-dev agent).
-- [ ] T135 [GIT] Commit: `test(phase-6): US5 privilege + doctor + plugin show + wire pins`.
-- [ ] T136 [US5] 4-reviewer pass; write `review/us5-findings.md` + `review/us5-disposition.md`.
-- [ ] T137 [US5] Apply US5 blockers + selected majors (use devs:rust-dev agent).
-- [ ] T138 [GIT] Commit: `fix(phase-6): apply US5 reviewer findings`.
-- [ ] T139 [US5] Run codebase mapping for Phase 7 changes (`/sdd:map incremental`).
-- [ ] T140 [US5] Review `retro/P7.md`; extract learnings to `CLAUDE.md` (conservative).
-- [ ] T141 [GIT] Commit: `docs(phase-6): US5 closeout — mapping + retro`.
+- [X] T120 Create `specs/006-phase-6-hooks-agents/retro/P7.md` from template.
+- [X] T121 [GIT] Commit: `docs(phase-6): init P7 retro`.
+- [X] T122 [US5] Add `strip_plugin_agent_privileges: bool` (default false) to the three settings structs in `src/settings/mod.rs`, reusing the scalar priority-walk resolver (FR-052/053) (use devs:rust-dev agent).
+- [X] T123 [US5] Implement privilege passthrough (default) + strip-when-set for `hooks`/`mcpServers`/`permissionMode` in claude-code agent emission in `src/harness/claude_code.rs` (FR-050/052) (use devs:rust-dev agent).
+- [X] T124 [GIT] Commit: `feat(phase-6): plugin-agent privilege passthrough + strip setting`.
+- [X] T125 [US5] Implement `HooksReport`, `GuardrailsReport`, `AgentsReport`, `PrivilegeEscalationReport`, `PersonaReport` (emit-only `Serialize`) in `src/doctor/` (FR-090) (use devs:rust-dev agent).
+- [X] T126 [US5] Wire the five reports into `assemble_report` in `src/commands/doctor.rs` (human + JSON), `None` only on `GlobalFallback` scope where applicable (use devs:rust-dev agent).
+- [X] T127 [US5] Implement `--fix` safe repairs (re-render stale guardrails, re-emit missing agents, remove orphaned `<plugin>__*`); never remove a non-matching hook, never delete user content (FR-091) in `src/doctor/fixes.rs` (use devs:rust-dev agent).
+- [X] T128 [US5] Extend `tome plugin show` in `src/commands/plugin/show.rs`: list agents + hooks.json/GUARDRAILS.md presence + resolved persona name when personas on (FR-083) (use devs:rust-dev agent).
+- [X] T129 [GIT] Commit: `feat(phase-6): doctor hooks/guardrails/agents/personas/privilege reports + --fix + plugin show`.
+- [X] T130 [P] [US5] `tests/agent_privilege.rs` — passthrough default; strip when set; doctor privilege report (use devs:rust-dev agent).
+- [X] T131 [P] [US5] `tests/doctor_p6.rs` — all five report surfaces + `--fix` safe cases + read-only-by-default invariant (use devs:rust-dev agent).
+- [X] T132 [P] [US5] `tests/doctor_json.rs` extensions — byte-stable JSON pins for the five new records (use devs:rust-dev agent). (Landed as `tests/doctor_p6_json_shape.rs`.)
+- [X] T133 [P] [US5] `tests/plugin_show_p6.rs` — agents listed + hooks/guardrails presence + persona name; JSON shape pin (use devs:rust-dev agent).
+- [X] T134 [P] [US5] Extend `tests/exit_codes_e2e.rs` — agent translation failure → exit 45 (use devs:rust-dev agent).
+- [X] T135 [GIT] Commit: `test(phase-6): US5 privilege + doctor + plugin show + wire pins`.
+- [X] T136 [US5] 4-reviewer pass; write `review/us5-findings.md` + `review/us5-disposition.md`.
+- [X] T137 [US5] Apply US5 blockers + selected majors (use devs:rust-dev agent).
+- [X] T138 [GIT] Commit: `fix(phase-6): apply US5 reviewer findings`.
+- [X] T139 [US5] Run codebase mapping for Phase 7 changes (`/sdd:map incremental`).
+- [X] T140 [US5] Review `retro/P7.md`; extract learnings to `CLAUDE.md` (conservative).
+- [X] T141 [GIT] Commit: `docs(phase-6): US5 closeout — mapping + retro`.
 - [ ] T142 [GIT] Push; PR with US5 summary; verify CI; report PR ready status.
 
 **Checkpoint**: All five user stories feature-complete. Only Polish remains.

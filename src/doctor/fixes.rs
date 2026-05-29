@@ -155,6 +155,15 @@ pub fn apply(report: &mut DoctorReport, ctx: &FixContext<'_>) -> usize {
     // Dedup: dispatch the harness sync exactly once if any harness fix
     // was queued. Every queued harness fix counts as one attempt so the
     // residual-classification accounting matches the per-fix model.
+    //
+    // C5-1: track whether ANY project-context `sync_project` succeeded
+    // during this pass — from EITHER the harness-fixes branch below OR the
+    // Phase 6 branch. The Phase 6 project surfaces are refreshed once after
+    // the dispatch, gated on that flag, so a HarnessRules/HarnessMcp fix
+    // (which already re-renders guardrails + re-emits agents through the
+    // same orchestrator) doesn't leave `report.hooks`/`guardrails`/`agents`
+    // showing stale pre-repair state (FR-091).
+    let mut project_sync_succeeded = false;
     if !harness_fixes.is_empty() {
         attempts += harness_fixes.len();
         // S-M2: only enable the force path when one of the in-play
@@ -169,6 +178,7 @@ pub fn apply(report: &mut DoctorReport, ctx: &FixContext<'_>) -> usize {
                 "doctor --fix: harness sync attempt failed; report retained pre-repair state",
             );
         } else {
+            project_sync_succeeded = true;
             // Re-run the per-harness probe so both rules + mcp reflect
             // the post-sync state.
             if let (Some(list), Some(binding)) = (
@@ -187,7 +197,112 @@ pub fn apply(report: &mut DoctorReport, ctx: &FixContext<'_>) -> usize {
         }
     }
 
+    // FR-091: Phase 6 safe repairs (re-render stale guardrails regions,
+    // re-emit missing agent files, remove orphaned `<plugin>__*` agent
+    // files). These surfaces are informational — they never produce a
+    // `SuggestedFix`, so they don't trigger the harness-fixes branch above.
+    // But `--fix` still repairs them by re-running the per-project sync
+    // orchestrator (idempotent per FR-525): it re-renders drifted
+    // guardrails, re-emits missing agents, and removes orphans, while the
+    // hooks merge only ever appends/removes structural matches — it NEVER
+    // strips a non-matching/user-edited hook (NFR-003) nor deletes
+    // user-authored content (rules-file text outside Tome markers,
+    // hand-written agents not matching `<plugin>__*`). Hooks DRIFT
+    // (expected-but-missing) is reported, not auto-fixed — re-merge on the
+    // next sync is the remediation. Run the sync once if it has not already
+    // run for the harness-fixes branch and there is repairable Phase 6
+    // drift in a project context. NEVER force here (the Phase 6 surfaces do
+    // not consent to overriding user-owned MCP entries).
+    if !project_sync_succeeded
+        && ctx.scope.project_root.is_some()
+        && phase6_has_repairable_drift(report)
+    {
+        attempts += 1;
+        if let Err(e) = repair_harness_sync_with(ctx, false) {
+            warn!(
+                subsystem = "harness-sync",
+                error = %e,
+                "doctor --fix: Phase 6 guardrails/agents sync attempt failed; \
+                 report retained pre-repair state",
+            );
+        } else {
+            project_sync_succeeded = true;
+        }
+    }
+
+    // C5-1: refresh the three project-relative Phase 6 surfaces once after
+    // ANY successful project-context sync — whether it was the
+    // harness-fixes branch (HarnessRules/HarnessMcp) or the Phase 6 branch
+    // that triggered it. The orchestrator re-renders guardrails, re-emits
+    // agents, and re-merges hooks regardless of which fix class invoked it,
+    // so the post-`--fix` report must reflect that post-repair state. The
+    // full re-assemble path is heavier than needed; refresh just the three
+    // project-relative surfaces via their read-only checks.
+    if project_sync_succeeded {
+        refresh_phase6_project_surfaces(report, ctx);
+    }
+
     attempts
+}
+
+/// `true` when the report's Phase 6 surfaces carry drift that the safe
+/// re-sync repairs: any present/orphaned guardrails region, any agent file
+/// present-or-orphaned. Hooks drift is intentionally excluded (reported, not
+/// auto-fixed). A surface that is `None` (outside-project) contributes
+/// nothing.
+fn phase6_has_repairable_drift(report: &DoctorReport) -> bool {
+    let guardrails_drift = report
+        .guardrails
+        .as_ref()
+        .is_some_and(|g| g.files.iter().any(|f| !f.present.is_empty()));
+    let agents_drift = report.agents.as_ref().is_some_and(|a| {
+        a.harnesses
+            .iter()
+            .any(|h| !h.present.is_empty() || !h.orphaned.is_empty())
+    });
+    // Even with no on-disk regions/files yet, a workspace with enabled
+    // plugins that ship guardrails/agents should have them emitted. The
+    // surfaces only list what is already on disk, so also re-sync when the
+    // index has enabled agents (the report's entry_counts captures this).
+    let pending_agent_emission = report.entry_counts.as_ref().is_some_and(|c| c.agents > 0);
+    guardrails_drift || agents_drift || pending_agent_emission
+}
+
+/// Re-build the three project-relative Phase 6 surfaces (hooks / guardrails
+/// / agents) after a `--fix` re-sync so the post-repair report reflects the
+/// re-rendered / re-emitted / orphan-removed state. Read-only — the same
+/// check functions the assembler runs. A re-open / per-surface failure
+/// leaves the pre-repair surface in place.
+fn refresh_phase6_project_surfaces(report: &mut DoctorReport, ctx: &FixContext<'_>) {
+    let Some(project_root) = ctx.scope.project_root.as_deref() else {
+        return;
+    };
+    if !ctx.paths.index_db.is_file() {
+        return;
+    }
+    let conn = match index::open_read_only(&ctx.paths.index_db) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, "doctor --fix: re-open for Phase 6 refresh failed; retaining surfaces");
+            return;
+        }
+    };
+    let workspace = ctx.scope.scope.name();
+    if let Ok(r) =
+        crate::doctor::checks::build_hooks_report(ctx.paths, project_root, workspace, &conn)
+    {
+        report.hooks = Some(r);
+    }
+    if let Ok(r) =
+        crate::doctor::checks::build_guardrails_report(ctx.paths, project_root, workspace, &conn)
+    {
+        report.guardrails = Some(r);
+    }
+    if let Ok(r) =
+        crate::doctor::checks::build_agents_report(ctx.paths, project_root, workspace, &conn)
+    {
+        report.agents = Some(r);
+    }
 }
 
 fn apply_one(

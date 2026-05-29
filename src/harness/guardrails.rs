@@ -107,6 +107,19 @@ pub fn region_key(catalog: &str, plugin: &str) -> String {
     format!("{catalog}:{plugin}")
 }
 
+/// Parse the `<catalog>:<plugin>` keys of every well-formed guardrails
+/// region present in `contents`, in source order. Used by the US5 doctor
+/// read-only surface to report which regions are on disk. A malformed
+/// region structure (a stray END with no open START) yields an empty vec —
+/// the doctor surface reports nothing rather than erroring; the sync /
+/// `--fix` path is where a malformed file surfaces.
+pub fn present_region_keys(contents: &str) -> Vec<String> {
+    match rules_file::find_marker_regions(guardrails_spec(), contents) {
+        Ok(regions) => regions.into_iter().map(|r| r.key).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Read a plugin's `hooks/GUARDRAILS.md` body verbatim.
 ///
 /// Returns `Ok(None)` when the plugin ships no `GUARDRAILS.md` (it

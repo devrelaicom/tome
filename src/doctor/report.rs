@@ -435,6 +435,163 @@ pub struct EntryCountsByKind {
     pub pending_re_embedding: u32,
 }
 
+// --- Phase 6 doctor extensions (US5) -------------------------------------
+//
+// Five new emit-only `Serialize` records, appended LAST on [`DoctorReport`]
+// as `Option<...>` with `skip_serializing_if = "Option::is_none"` so the
+// Phase 1-5 byte-stable JSON wire pins are preserved when absent (Phase 4/5
+// convention). Each is populated only when the resolved scope is a known
+// workspace; `None` under `GlobalFallback` / outside-project modes. The
+// persona report is additionally `None` whenever `expose_agents_as_personas`
+// resolves false at the doctor scope. Contract:
+// `contracts/doctor-extensions-p6.md`.
+//
+// All five are READ-ONLY surfaces (FR-124): the check functions only
+// `fs::read` / `read_dir` / query the index — they never create a directory
+// nor invoke the substitution layer.
+
+/// A `<catalog>:<plugin>` provenance pair carried by the guardrails +
+/// privilege-escalation reports. The display form is `<catalog>:<plugin>`
+/// (the same key the guardrails marker regions use), but the structured
+/// fields stay separate on the wire so JSON consumers don't re-split a
+/// colon-joined string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CatalogPlugin {
+    pub catalog: String,
+    pub plugin: String,
+}
+
+/// One hook event entry contributed (or expected-but-missing) for a plugin
+/// on Claude Code. `event` is the event key (`PreToolUse`, …); `count` is
+/// the number of rewritten entries under that event. The full rewritten
+/// JSON is intentionally NOT carried — it embeds machine-absolute paths and
+/// would bloat the report; the count is the auditable signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookEventEntry {
+    pub event: String,
+    pub count: usize,
+}
+
+/// Per-plugin hooks contribution + drift. `contributed` are the rewritten
+/// hook entries Tome found structurally present in `settings.local.json`;
+/// `missing` are plugin-derived entries Tome expected but could not find
+/// (drift from a user edit — reported, never auto-fixed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookPluginEntry {
+    pub catalog: String,
+    pub plugin: String,
+    pub contributed: Vec<HookEventEntry>,
+    pub missing: Vec<HookEventEntry>,
+}
+
+/// Phase 6 hooks surface (Claude Code only). Per enabled plugin shipping a
+/// `hooks/hooks.json`: what Tome contributed to `.claude/settings.local.json`
+/// and what drifted. Empty `plugins` when no enabled plugin ships hooks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HooksReport {
+    pub plugins: Vec<HookPluginEntry>,
+}
+
+/// Per-target-file guardrails region state. `present` are the regions Tome
+/// found on disk; `orphaned` are present regions whose plugin is no longer
+/// enabled (or whose harness is gone); `suppressed` are plugins whose
+/// Claude Code `CLAUDE.md` region is suppressed because the plugin ships
+/// real JSON hooks (FR-013).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GuardrailsFileEntry {
+    pub path: std::path::PathBuf,
+    pub present: Vec<CatalogPlugin>,
+    pub orphaned: Vec<CatalogPlugin>,
+    pub suppressed: Vec<CatalogPlugin>,
+}
+
+/// Phase 6 guardrails surface. One entry per harness guardrails target
+/// (in-file region or Cursor sibling) that exists on disk or that an
+/// enabled plugin would contribute to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GuardrailsReport {
+    pub files: Vec<GuardrailsFileEntry>,
+}
+
+/// One frontmatter field dropped during agent translation for a harness,
+/// recorded informationally (FR-032 / FR-034 / FR-036). `agent` is the
+/// `<plugin>__<name>` filename stem; `fields` are the dropped frontmatter
+/// keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DroppedFieldEntry {
+    pub agent: String,
+    pub fields: Vec<String>,
+}
+
+/// Per-harness native-agent surface. `present` are the `<plugin>__*` agent
+/// files Tome owns on disk; `orphaned` are owned files whose plugin is no
+/// longer enabled (removable under `--fix`); `dropped_fields` records
+/// per-agent field drops during translation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentHarnessEntry {
+    pub harness: String,
+    pub present: Vec<String>,
+    pub orphaned: Vec<String>,
+    pub dropped_fields: Vec<DroppedFieldEntry>,
+}
+
+/// Phase 6 agents surface. One entry per native-supporting harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AgentsReport {
+    pub harnesses: Vec<AgentHarnessEntry>,
+}
+
+/// One agent carrying privilege-escalation fields. `name` is the agent's
+/// `<name>`; `fields` lists which of `hooks` / `mcpServers` /
+/// `permissionMode` the SOURCE agent declares (read regardless of
+/// `strip_plugin_agent_privileges`, FR-051).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PrivilegeAgentEntry {
+    pub name: String,
+    pub fields: Vec<String>,
+}
+
+/// Per-plugin privilege-escalation grouping.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PrivilegePluginEntry {
+    pub catalog: String,
+    pub plugin: String,
+    pub agents: Vec<PrivilegeAgentEntry>,
+}
+
+/// Phase 6 privilege-escalation surface (FR-051). Installed agents carrying
+/// any of `hooks` / `mcpServers` / `permissionMode`, grouped by plugin, so
+/// the escalation surface is auditable REGARDLESS of the
+/// `strip_plugin_agent_privileges` setting's value (the audit reads the
+/// agent SOURCE, never the emission clone). Empty `plugins` when no enabled
+/// agent declares a privileged field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PrivilegeEscalationReport {
+    pub plugins: Vec<PrivilegePluginEntry>,
+}
+
+/// One persona prompt the MCP server would expose for the resolved
+/// workspace. `resolved_persona_name` is the derived `<name>-persona` slug
+/// (or `<plugin>-<name>-persona` for a clashing agent); `clash_prefixed`
+/// records whether the plugin-prefixed form was used (FR-061).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PersonaEntry {
+    pub catalog: String,
+    pub plugin: String,
+    pub agent_name: String,
+    pub resolved_persona_name: String,
+    pub clash_prefixed: bool,
+}
+
+/// Phase 6 personas surface. Populated only when `expose_agents_as_personas`
+/// resolves true at the doctor scope (otherwise the whole report is `None`).
+/// `drop_persona` is always the reserved `drop-persona` name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PersonaReport {
+    pub personas: Vec<PersonaEntry>,
+    pub drop_persona: String,
+}
+
 /// Full doctor report. Field order matches `contracts/doctor.md` +
 /// `contracts/doctor-extensions-p4.md` so the rendered JSON is
 /// deterministic.
@@ -508,6 +665,26 @@ pub struct DoctorReport {
     /// `None` outside a workspace context.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entry_counts: Option<EntryCountsByKind>,
+    /// Phase 6 / US5: Claude Code hooks contribution + drift. `None`
+    /// outside a workspace context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HooksReport>,
+    /// Phase 6 / US5: guardrails region state per target file. `None`
+    /// outside a workspace context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guardrails: Option<GuardrailsReport>,
+    /// Phase 6 / US5: native-agent file state per harness. `None` outside
+    /// a workspace context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agents: Option<AgentsReport>,
+    /// Phase 6 / US5: privilege-escalation audit (FR-051). `None` outside
+    /// a workspace context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privilege_escalation: Option<PrivilegeEscalationReport>,
+    /// Phase 6 / US5: persona surface. `None` outside a workspace context
+    /// OR when `expose_agents_as_personas` resolves false at the scope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub personas: Option<PersonaReport>,
     pub overall: DoctorClassification,
     pub suggested_fixes: Vec<SuggestedFix>,
 }

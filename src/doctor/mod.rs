@@ -187,6 +187,27 @@ pub fn assemble_report(
     let (prompts, orphan_data_dirs, entry_counts) =
         build_phase5_surfaces(scope, paths).unwrap_or((None, None, None));
 
+    // ---- Phase 6 / US5 additions ------------------------------------
+    //
+    // Same `GlobalFallback`/no-DB gating as Phase 5 (mirrors
+    // `build_phase5_surfaces`). The three project-relative surfaces
+    // (hooks / guardrails / agents) additionally require a resolved
+    // project root; the privilege-escalation + persona surfaces only
+    // need the DB + workspace. Persona is `None` when
+    // `expose_agents_as_personas` resolves false at the doctor scope.
+    //
+    // FR-124 read-only invariant: every check function under
+    // `build_phase6_surfaces` only `fs::read`s / `read_dir`s / queries the
+    // index. Persona names are derived from frontmatter + entry rows
+    // without invoking substitution or creating any directory.
+    let Phase6Surfaces {
+        hooks,
+        guardrails,
+        agents,
+        privilege_escalation,
+        personas,
+    } = build_phase6_surfaces(scope, paths).unwrap_or_default();
+
     let suggested_fixes = build_suggested_fixes(
         &embedder,
         &reranker,
@@ -229,9 +250,118 @@ pub fn assemble_report(
         prompts,
         orphan_data_dirs,
         entry_counts,
+        hooks,
+        guardrails,
+        agents,
+        privilege_escalation,
+        personas,
         overall,
         suggested_fixes,
     })
+}
+
+/// The five Phase 6 / US5 doctor surfaces. All `None` under
+/// `GlobalFallback` / no-DB; the three project-relative surfaces are also
+/// `None` without a resolved project root; `personas` is additionally
+/// `None` when `expose_agents_as_personas` resolves false at the scope.
+#[derive(Default)]
+struct Phase6Surfaces {
+    hooks: Option<report::HooksReport>,
+    guardrails: Option<report::GuardrailsReport>,
+    agents: Option<report::AgentsReport>,
+    privilege_escalation: Option<report::PrivilegeEscalationReport>,
+    personas: Option<report::PersonaReport>,
+}
+
+/// Resolve the five Phase 6 surfaces for the active scope, mirroring
+/// [`build_phase5_surfaces`]'s `GlobalFallback` + no-DB + read-only-DB
+/// gating. Returns the all-`None` default when the scope is `GlobalFallback`
+/// or the index DB is absent / unopenable.
+fn build_phase6_surfaces(
+    scope: &ResolvedScope,
+    paths: &Paths,
+) -> Result<Phase6Surfaces, TomeError> {
+    use crate::workspace::ScopeSource;
+    if matches!(scope.source, ScopeSource::GlobalFallback) {
+        return Ok(Phase6Surfaces::default());
+    }
+    if !paths.index_db.is_file() {
+        return Ok(Phase6Surfaces::default());
+    }
+
+    let conn = match crate::index::open_read_only(&paths.index_db) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "doctor phase 6 surfaces: open_read_only failed; emitting None");
+            return Ok(Phase6Surfaces::default());
+        }
+    };
+
+    let workspace_name = scope.scope.name();
+    let mut out = Phase6Surfaces::default();
+
+    // Project-relative surfaces (hooks / guardrails / agents) require a
+    // resolved project root — without one there is no `.claude/` or
+    // harness target to inspect, so they stay `None` (outside-project
+    // mode). Each surface degrades to `None` on its own error rather than
+    // failing the whole doctor pass.
+    if let Some(project_root) = scope.project_root.as_deref() {
+        out.hooks = match checks::build_hooks_report(paths, project_root, workspace_name, &conn) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::warn!(error = %e, "doctor: build_hooks_report failed; emitting None");
+                None
+            }
+        };
+        out.guardrails = match checks::build_guardrails_report(
+            paths,
+            project_root,
+            workspace_name,
+            &conn,
+        ) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::warn!(error = %e, "doctor: build_guardrails_report failed; emitting None");
+                None
+            }
+        };
+        out.agents = match checks::build_agents_report(paths, project_root, workspace_name, &conn) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::warn!(error = %e, "doctor: build_agents_report failed; emitting None");
+                None
+            }
+        };
+    }
+
+    out.privilege_escalation = match checks::build_privilege_escalation_report(
+        paths,
+        workspace_name,
+        &conn,
+    ) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            tracing::warn!(error = %e, "doctor: build_privilege_escalation_report failed; emitting None");
+            None
+        }
+    };
+
+    // Persona surface only when `expose_agents_as_personas` resolves true.
+    // The resolver swallows malformed-settings errors to `false` here so
+    // doctor never crashes; the dedicated settings/binding surfaces
+    // classify a malformed marker.
+    let expose = crate::mcp::resolve_expose_personas(scope, paths).unwrap_or(false);
+    if expose {
+        out.personas = match checks::build_persona_report(workspace_name, &conn) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                tracing::warn!(error = %e, "doctor: build_persona_report failed; emitting None");
+                None
+            }
+        };
+    }
+
+    Ok(out)
 }
 
 /// Resolve the three Phase 5 surfaces (`prompts`, `orphan_data_dirs`,

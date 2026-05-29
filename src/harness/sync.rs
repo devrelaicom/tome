@@ -195,6 +195,21 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     let workspace_settings = read_workspace_settings(deps)?;
     let global_settings = read_global_settings(deps)?;
 
+    // Resolve the `strip_plugin_agent_privileges` scalar ONCE per sync, against
+    // the same project → workspace → global scopes (first-declarer-wins, R-12),
+    // reusing the US4 closure resolver verbatim (one new call site, no second
+    // resolver). The resolved bool governs only the Claude Code agent EMISSION
+    // clone below — it never touches the agent source, so the US5 doctor
+    // privilege audit still sees the original privileged fields (FR-050/052).
+    let strip_agent_privileges = crate::settings::resolve_scalar_with(
+        Some(&marker),
+        workspace_settings.as_ref(),
+        &global_settings,
+        |p| p.strip_plugin_agent_privileges,
+        |w| w.strip_plugin_agent_privileges,
+        |g| g.strip_plugin_agent_privileges,
+    );
+
     // -----------------------------------------------------------------
     // 2. Compute the effective list.
     //
@@ -389,6 +404,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         deps,
         &effective_names,
         &snapshots,
+        strip_agent_privileges,
         &mut outcome,
     )?;
 
@@ -1170,6 +1186,7 @@ fn reconcile_agents(
     deps: &SyncDeps<'_>,
     effective_names: &HashSet<String>,
     snapshots: &[HarnessSnapshot],
+    strip_agent_privileges: bool,
     outcome: &mut SyncOutcome,
 ) -> Result<AgentReconciliation, TomeError> {
     let mut recon = AgentReconciliation {
@@ -1246,7 +1263,15 @@ fn reconcile_agents(
                 continue;
             };
             let action = if m.supports_native_agents() && is_live {
-                emit_agents_for_harness(*m, &dir, &prepared, &enabled_plugins, outcome, &mut recon)
+                emit_agents_for_harness(
+                    *m,
+                    &dir,
+                    &prepared,
+                    &enabled_plugins,
+                    strip_agent_privileges,
+                    outcome,
+                    &mut recon,
+                )
             } else {
                 // Non-live or non-supporting: remove all Tome-owned files.
                 cleanup_all_owned_agents(name, &dir, outcome, &mut recon)
@@ -1315,6 +1340,7 @@ fn emit_agents_for_harness(
     dir: &Path,
     prepared: &[PreparedAgent],
     enabled_plugins: &HashSet<String>,
+    strip_agent_privileges: bool,
     outcome: &mut SyncOutcome,
     recon: &mut AgentReconciliation,
 ) -> Action {
@@ -1322,8 +1348,28 @@ fn emit_agents_for_harness(
     let mut updated = false;
     let mut removed = false;
 
+    // The strip applies to Claude Code emission only (FR-052): it is the sole
+    // harness that carries the privileged `hooks` / `mcpServers` /
+    // `permissionMode` fields — the others drop them during translation, so the
+    // setting is a no-op for them and we skip the per-agent clone there.
+    let strip_here = strip_agent_privileges && m.name() == "claude-code";
+
     for agent in prepared {
-        let translated = match m.translate_agent(&agent.canonical, agent.clashes) {
+        // Strip on a per-emission CLONE so the shared `prepared` canonical (the
+        // privilege-audit source the US5 doctor reads) is never mutated. The
+        // clear is a no-op for an agent carrying none of the three fields.
+        let emit_canonical;
+        let canonical = if strip_here {
+            let mut c = agent.canonical.clone();
+            c.hooks = None;
+            c.mcp_servers = None;
+            c.permission_mode = None;
+            emit_canonical = c;
+            &emit_canonical
+        } else {
+            &agent.canonical
+        };
+        let translated = match m.translate_agent(canonical, agent.clashes) {
             Ok(t) => t,
             Err(e) => {
                 if recon.first_error.is_none() {

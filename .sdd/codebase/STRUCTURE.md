@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-29
-> **Last Updated**: 2026-06-04 (Phase 6 / US4; settings/scopes.rs NEW SSOT for canonical scope loaders; prompts.rs persona identities appending + persona-role dispatch; PersonaRole enum + display_name + plugin_version caching on PromptEntry; resolve_expose_personas startup-scope resolution in mcp/mod.rs; index/skills.rs agent queries extended with plugin_version + indexed_at projection)
+> **Last Updated**: 2026-06-05 (Phase 6 / US5; doctor/report.rs five new emit-only reports (HooksReport, GuardrailsReport, AgentsReport, PrivilegeEscalationReport, PersonaReport); doctor/checks.rs five new read-only check functions; doctor/mod.rs build_phase6_surfaces() with GlobalFallback + persona-flag gating; doctor/fixes.rs re-sync after project-level repairs; harness/sync.rs strip_plugin_agent_privileges scalar resolution + per-agent emission clone; settings/mod.rs strip_plugin_agent_privileges Option<bool> fields on three layers + resolve_scalar_with reuse; commands/plugin/show.rs privilege indicator annotations)
 
 ## Directory Layout
 
@@ -76,17 +76,17 @@ tome/
 │   │   ├── remove.rs                   # Phase 4: Workspace removal with 5-step cascade (US2)
 │   │   └── sync.rs                     # Phase 4: Central RULES.md sync to projects (US2)
 │   │
-│   ├── doctor/                         # Diagnostic + auto-repair (Phase 3 US4 + Phase 4 US5 + Phase 5 US5 + Phase 6 skeleton + US1 agent integration + US2 hooks integration + US3 guardrails integration)
-│   │   ├── mod.rs                      # assemble_report + re_assemble entry
-│   │   ├── checks.rs                   # check_catalogs, check_index, check_drift, check_workspace_registry + Phase 5 / US5: build_prompts_report, count_entries_by_kind, detect_orphan_data_dirs (all read-only); Phase 6/US1: agent diagnostics integrated; Phase 6/US2: hooks diagnostics skeleton; Phase 6/US3: guardrails diagnostics skeleton
+│   ├── doctor/                         # Diagnostic + auto-repair (Phase 3 US4 + Phase 4 US5 + Phase 5 US5 + Phase 6 skeleton + US1 agent integration + US2 hooks integration + US3 guardrails integration + US5 privilege audit + reporting)
+│   │   ├── mod.rs                      # assemble_report + build_phase6_surfaces (GlobalFallback + persona-flag gating) + re_assemble entry
+│   │   ├── checks.rs                   # check_catalogs, check_index, check_drift, check_workspace_registry + Phase 5 / US5: build_prompts_report, count_entries_by_kind, detect_orphan_data_dirs (all read-only); Phase 6/US1: agent diagnostics integrated; Phase 6/US2: hooks diagnostics skeleton; Phase 6/US3: guardrails diagnostics skeleton; Phase 6/US5: five new read-only checks (check_hooks, check_guardrails, check_agents, check_privilege_escalation, check_personas)
 │   │   ├── harness_detect.rs           # Probe ~/.claude/, ~/.codex/, ~/.cursor/, ~/.gemini/, ~/.opencode/
-│   │   ├── report.rs                   # DoctorReport + Subsystem (typed 11-variant enum) + SubsystemHealth + Phase 5 / US5: PromptsReport, EntryCountsByKind, OrphanDataDirReport; Phase 6/US1: agent count integrated
-│   │   ├── fixes.rs                    # apply + apply_one (subsystem routing) + per-subsystem repair handlers
+│   │   ├── report.rs                   # DoctorReport + Subsystem (typed 11-variant enum) + SubsystemHealth + Phase 5 / US5: PromptsReport, EntryCountsByKind, OrphanDataDirReport; Phase 6/US1: agent count integrated; Phase 6/US2: HooksReport skeleton; Phase 6/US3: GuardrailsReport skeleton; Phase 6/US5: HooksReport, GuardrailsReport, AgentsReport (five emit-only reports appended as Option<T>)
+│   │   ├── fixes.rs                    # apply + apply_one (subsystem routing) + per-subsystem repair handlers; Phase 6/US5: after project-sync repair, re-run Phase 6 checks to capture post-sync privilege/agent/persona state
 │   │   ├── binding.rs                  # Phase 4 US5: check_binding (T366) — marker well-formedness + RULES.md drift
 │   │   ├── harness_integration.rs      # Phase 4 US5: check_harness_integration (T367) — per-harness rules/mcp checks
 │   │   └── orphan_cleanup.rs           # Phase 4 US5: cleanup_stale_staging_dirs (FR-410) — 1-hour age gate
 │   │
-│   ├── harness/                        # Phase 4+: Per-harness trait + sync orchestrator + composition; Phase 6: trait extension for hooks/guardrails/agents; US1: native agent translation fully wired; US2: real hooks reconciliation fully wired; US3: guardrails rendering fully wired; US4: no new harness methods
+│   ├── harness/                        # Phase 4+: Per-harness trait + sync orchestrator + composition; Phase 6: trait extension for hooks/guardrails/agents; US1: native agent translation fully wired; US2: real hooks reconciliation fully wired; US3: guardrails rendering fully wired; US4: agent personas; US5: privilege governance scalar + per-agent emission clone
 │   │   ├── mod.rs                      # HarnessModule trait (Phase 4: 8 methods; Phase 6 Foundational: +7 new methods all safe-by-default); SUPPORTED_HARNESSES registry; shape enums (HooksStrategy, GuardrailsPlacement, GuardrailsTarget, AgentFormat)
 │   │   ├── guardrails.rs               # **Phase 6 / US3 COMPLETE** Guardrails prose soft-fallback SSOT: read_guardrails_source (verbatim body + marker-shape validation, fail-closed), region_key, marker renderers; marker regions per plugin with FR-013 Claude Code suppression (hooks_present filter); used by sync 3a subsystem
 │   │   ├── hooks.rs                    # **Phase 6 / US2 COMPLETE** Hooks parsing + rewrite SSOT: read_rewritten_entries, targeted two-variable rewrite (${CLAUDE_PLUGIN_ROOT}/${CLAUDE_PLUGIN_DATA} → absolute; other ${CLAUDE_*} verbatim), merge_into_settings (idempotent append), remove_from_settings (structural removal), ownership model (re-derivation + deep-equal), atomic writes (symlink-refusing, mode-preserving)
@@ -98,11 +98,11 @@ tome/
 │   │   ├── opencode.rs                 # OpenCode harness impl; Phase 6/US1: translate_agent() override with <plugin>__<name> display, agent_dir(), agent_format() wired; Phase 6/US3: guardrails_target() in-file AGENTS.md
 │   │   ├── rules_file.rs               # **Phase 6 / US3 COMPLETE** Generalised marker engine (not just Phase 4 `tome:begin/end`): MarkerSpec (parameterised regex pair + render funcs), MarkerRegion, find_marker_regions, compose_in_file (lex-merge, deterministic order, orphan removal, atomic write); refuse_symlink/atomic_write promoted to pub(crate); used by guardrails 3a subsystem
 │   │   ├── mcp_config.rs               # JSON + TOML MCP config read/write primitives
-│   │   ├── sync.rs                     # Phase 4: Sync orchestrator (per-project harness writes); Phase 6/US1: reconcile_agents pass (3c subsystem) fully integrated; Phase 6/US2: reconcile_hooks pass (3b subsystem) fully integrated; Phase 6/US3: reconcile_guardrails pass (3a subsystem) fully integrated BEFORE hooks BEFORE agents; clash set computation (FR-072); forward progress (FR-084); hooks suppression set computation for Claude Code
+│   │   ├── sync.rs                     # Phase 4: Sync orchestrator (per-project harness writes); Phase 6/US1: reconcile_agents pass (3c subsystem) fully integrated; Phase 6/US2: reconcile_hooks pass (3b subsystem) fully integrated; Phase 6/US3: reconcile_guardrails pass (3a subsystem) fully integrated BEFORE hooks BEFORE agents; clash set computation (FR-072); forward progress (FR-084); hooks suppression set computation for Claude Code; **Phase 6/US5**: strip_plugin_agent_privileges scalar resolved ONCE per sync via resolve_scalar_with(), passed to reconcile_agents(); emit_agents_for_harness() creates per-agent clone on Claude Code only, strips three privilege fields on clone (source canonical unmodified), clone passed to translate_agent()
 │   │   └── stub.rs                     # StubHarnessModule for test injection; Phase 6: extended with agent/hook/guardrails method overrides for testing; US1: agent translation test overrides; US2: hooks parsing test overrides; US3: guardrails rendering test overrides
 │   │
-│   ├── settings/                       # Phase 4: Layered harness composition; Phase 6 / US4: scalar settings resolver + canonical scope loaders
-│   │   ├── mod.rs                      # Type defs (ProjectMarkerConfig, WorkspaceSettings, GlobalSettings); resolve_scalar() / resolve_scalar_with() first-declarer-wins scalar resolvers for expose_agents_as_personas (FR-053, R-12)
+│   ├── settings/                       # Phase 4: Layered harness composition; Phase 6 / US4: scalar settings resolver + canonical scope loaders; Phase 6/US5: strip_plugin_agent_privileges scalar added
+│   │   ├── mod.rs                      # Type defs (ProjectMarkerConfig, WorkspaceSettings, GlobalSettings); resolve_scalar() / resolve_scalar_with() first-declarer-wins scalar resolvers for expose_agents_as_personas (FR-053, R-12) + strip_plugin_agent_privileges (US5 reuse); ProjectMarkerConfig/WorkspaceSettings/GlobalSettings each gain strip_plugin_agent_privileges: Option<bool> field
 │   │   ├── parser.rs                   # TOML deserialization (strict)
 │   │   ├── composition.rs              # CompositionRef + reference parsing
 │   │   ├── resolver.rs                 # Resolve effective harness list (priority walk + composition refs + ScopeProvider trait)
@@ -126,7 +126,7 @@ tome/
 │   │   │   ├── enable.rs               # `tome plugin enable <id>` + trigger regenerate (Phase 5: commands + skills; Phase 6/US1: agents fully integrated)
 │   │   │   ├── disable.rs              # `tome plugin disable <id> [--force]` + trigger regenerate
 │   │   │   ├── list.rs                 # `tome plugin list` (Phase 5 / US5: per-kind entry counts; Phase 6/US1: agent count)
-│   │   │   ├── show.rs                 # `tome plugin show <id>` (Phase 5 / US5: ~228 lines extended for searchable/invocable annotations + kind grouping; Phase 6/US1: Agents section)
+│   │   │   ├── show.rs                 # `tome plugin show <id>` (Phase 5 / US5: ~228 lines extended for searchable/invocable annotations + kind grouping; Phase 6/US1: Agents section; Phase 6/US5: privilege indicator annotations in agent rows if strip_plugin_agent_privileges can be resolved)
 │   │   │   └── interactive.rs          # Bare `tome plugin` → three-level TUI
 │   │   ├── models/                     # `tome models` subcommands
 │   │   │   ├── mod.rs                  # Dispatcher + shared helpers
@@ -154,7 +154,7 @@ tome/
 │   │   │   ├── remove.rs               # `tome harness remove <name> [--scope]` — delete from settings + trigger regenerate
 │   │   │   ├── info.rs                 # `tome harness info` — per-harness details + detection
 │   │   │   └── sync.rs                 # `tome harness sync [--force]` — reconcile filesystem; Phase 6/US4: uses scope loaders
-│   │   ├── doctor.rs                   # `tome doctor [--fix] [--verify] [--force]` (Phase 5 / US5: renders extended report with prompts + entry-kind counts + orphan data-dirs; Phase 6/US1: agent integration; Phase 6/US2: hooks skeleton; Phase 6/US3: guardrails skeleton)
+│   │   ├── doctor.rs                   # `tome doctor [--fix] [--verify] [--force]` (Phase 5 / US5: renders extended report with prompts + entry-kind counts + orphan data-dirs; Phase 6/US1: agent integration; Phase 6/US2: hooks skeleton; Phase 6/US3: guardrails skeleton; Phase 6/US5: calls build_phase6_surfaces() to populate five new reports)
 │   │   └── mcp.rs                      # `tome mcp` entry point
 │   │
 │   ├── presentation/                   # Output formatting + TUI
@@ -170,7 +170,7 @@ tome/
 │   │   ├── atomic_dir.rs               # Atomic directory landing (tempfile + rename); STAGING_PREFIX constant (FR-410)
 │   │   └── io.rs                       # Phase 4 Polish: bounded_read_to_string + per-class caps
 │   │
-│   └── mcp/                            # MCP server (async island, Phase 3+; Phase 5: prompts + US4 three-tier discovery + US5 read-only extensions + Polish: substitution_helpers; Phase 6/US1: agent rows excluded from search/prompts per FR-070a; Phase 6/US2: hooks excluded from prompts; Phase 6/US3: guardrails excluded from prompts; Phase 6/US4: agent personas appended to Phase 5 registry + persona-role dispatch in prompts/get)
+│   └── mcp/                            # MCP server (async island, Phase 3+; Phase 5: prompts + US4 three-tier discovery + US5 read-only extensions + Polish: substitution_helpers; Phase 6/US1: agent rows excluded from search/prompts per FR-070a; Phase 6/US2: hooks excluded from prompts; Phase 6/US3: guardrails excluded from prompts; Phase 6/US4: agent personas appended to Phase 5 registry + persona-role dispatch in prompts/get; Phase 6/US5: no changes)
 │       ├── mod.rs                      # Sync entry point: run(); Phase 6/US4: resolve_expose_personas() for startup-scope flag resolution
 │       ├── runtime.rs                  # Single-threaded tokio builder
 │       ├── log.rs                      # 10 MiB rotate JSON file logger (contract-formatted for tool logs)
@@ -190,7 +190,7 @@ tome/
 │
 ├── tests/                              # Integration tests (access library as external crate)
 │   ├── catalog_*.rs                    # Catalog add/remove/update tests
-│   ├── plugin_*.rs                     # Plugin enable/disable/list/show/interactive (Phase 5: commands coverage + US5 annotations; Phase 6/US1: agent entry-kind + translation tests; Phase 6/US2: hooks tests; Phase 6/US3: guardrails tests)
+│   ├── plugin_*.rs                     # Plugin enable/disable/list/show/interactive (Phase 5: commands coverage + US5 annotations; Phase 6/US1: agent entry-kind + translation tests; Phase 6/US2: hooks tests; Phase 6/US3: guardrails tests; Phase 6/US5: privilege governance tests)
 │   ├── models_*.rs                     # Model download/list/remove
 │   ├── query.rs                        # Query + strict mode + rerank
 │   ├── reindex.rs                      # Reindex all/per-catalog/per-plugin
@@ -198,7 +198,7 @@ tome/
 │   ├── workspace_*.rs                  # Workspace info/init/binding/sync/list/rename/remove tests (US1–US2)
 │   ├── harness_*.rs                    # Phase 4 US3: Harness list/use/remove/info/sync/composition tests; Phase 6: harness_trait_p6.rs for trait extension; US1: harness_agents_*.rs for translation + sync; US2: harness_hooks_*.rs for parsing + sync; US3: harness_guardrails_*.rs for rendering + sync
 │   ├── summariser_*.rs                 # Phase 4 US4: Summariser triggers, forward progress, cache, registry tests
-│   ├── doctor*.rs                      # Phase 4 US5: Doctor assembly + fixes + binding + harness integration + orphan cleanup; Phase 5 / US5: prompts report + entry counts + orphan data-dirs; Phase 6/US1: agent integration tests; Phase 6/US2: hooks skeleton tests; Phase 6/US3: guardrails skeleton tests
+│   ├── doctor*.rs                      # Phase 4 US5: Doctor assembly + fixes + binding + harness integration + orphan cleanup; Phase 5 / US5: prompts report + entry counts + orphan data-dirs; Phase 6/US1: agent integration tests; Phase 6/US2: hooks skeleton tests; Phase 6/US3: guardrails skeleton tests; Phase 6/US5: privilege governance tests + doctor reporting tests (doctor_privilege_escalation, doctor_hooks_report, doctor_guardrails_report, doctor_agents_report, doctor_personas_report)
 │   ├── mcp_*.rs                        # MCP server lifecycle + tools + log rotation + tool description (US4.b) + prompts (US1.b) + Phase 5 / US4–US5: get_skill_info tests + read-only extensions; Phase 6/US1: agent exclusion tests; Phase 6/US2: hooks excluded; Phase 6/US3: guardrails excluded; Phase 6/US4: personas_startup_scope, personas_registry_building, personas_prompts_get
 │   ├── substitution_*.rs               # Phase 5: Substitution engine tests (skeleton, builtins, env, arguments, data-dir, e2e)
 │   ├── entry_kind_agent_indexing.rs    # **Phase 6 Foundational NEW** Agent entry-kind indexing + schema widening tests
@@ -218,6 +218,13 @@ tome/
 │   ├── personas_scalar_resolver.rs     # **Phase 6 / US4 NEW** resolve_scalar() / resolve_scalar_with() first-declarer-wins behavior (FR-053, R-12)
 │   ├── personas_registry_building.rs   # **Phase 6 / US4 NEW** Agent persona identity appending (clash prefix, reserved drop-persona, unified collision namespace, FR-066)
 │   ├── personas_prompts_get.rs         # **Phase 6 / US4 NEW** Persona-role dispatch in prompts/get (template wrapping, substitution, display_name resolution)
+│   ├── privilege_governance_scalar.rs  # **Phase 6 / US5 NEW** resolve_scalar_with() reuse for strip_plugin_agent_privileges (second scalar added via closure parameter, one call site in sync_project(), R-12)
+│   ├── privilege_emission_clone.rs     # **Phase 6 / US5 NEW** Per-agent per-emission clone in emit_agents_for_harness() applied to Claude Code only — source canonical never mutated, preserving audit surface
+│   ├── doctor_privilege_escalation.rs  # **Phase 6 / US5 NEW** Doctor check: agents with privilege fields (hooks/mcp_servers/permission_mode != null) + resolved strip flag
+│   ├── doctor_hooks_report.rs          # **Phase 6 / US5 NEW** Doctor check: per-plugin hooks.json presence/parseability
+│   ├── doctor_guardrails_report.rs     # **Phase 6 / US5 NEW** Doctor check: per-plugin GUARDRAILS.md presence/body validity + orphan detection
+│   ├── doctor_agents_report.rs         # **Phase 6 / US5 NEW** Doctor check: per-plugin enabled agent count
+│   ├── doctor_personas_report.rs       # **Phase 6 / US5 NEW** Doctor check: enabled persona count (gated on expose_agents_as_personas=true)
 │   ├── entry_e2e.rs                    # Phase 5 / US3 NEW: Full enable → search → get → prompts pipeline with argument substitution + Phase 5 / US5: invocability visibility; Phase 6/US1: agent rows excluded
 │   ├── exit_codes.rs                   # Exit code matrix validation; Phase 6: +4 new codes (43–46)
 │   ├── manifest_strictness.rs          # Strict/lenient parsing guards
@@ -242,8 +249,8 @@ tome/
 │   └── codebase/
 │       ├── STACK.md                    # Technologies + versions
 │       ├── INTEGRATIONS.md             # External APIs + services
-│       ├── ARCHITECTURE.md             # System design + patterns (Phase 6 / US4: scalar settings resolver for expose_agents_as_personas + startup-scope resolution; persona identities appended to Phase 5 registry in collision namespace; persona-role path in prompts/get with template wrapping + substitution; PersonaRole enum discriminator)
-│       ├── STRUCTURE.md                # Directory layout (Phase 6 / US4: settings/scopes.rs NEW SSOT for canonical scope loaders; prompts.rs persona identities appending + persona-role dispatch; PromptEntry display_name + plugin_version caching; resolve_expose_personas in mcp/mod.rs; agent queries extended with plugin_version + indexed_at projection)
+│       ├── ARCHITECTURE.md             # System design + patterns (Phase 6 / US5: privilege governance scalar resolver + per-agent emission clone; five doctor reporting surfaces with read-only checks; doctor build gating; post-fix re-check flow)
+│       ├── STRUCTURE.md                # Directory layout (Phase 6 / US5: doctor/report.rs five new emit-only reports; doctor/checks.rs five new read-only check functions; doctor/mod.rs build_phase6_surfaces(); doctor/fixes.rs re-sync after project repairs; harness/sync.rs privilege scalar + emission clone; settings/mod.rs strip_plugin_agent_privileges fields + resolve_scalar_with reuse; commands/plugin/show.rs privilege annotations)
 │       ├── CONVENTIONS.md              # Naming + code style
 │       ├── TESTING.md                  # Test strategy + patterns
 │       ├── SECURITY.md                 # Auth + authorization
@@ -284,13 +291,13 @@ tome/
 │   │   ├── review/ (Phase 5 reviewer findings + disposition per US)
 │   │   ├── retro/ (P3–P8 retrospectives)
 │   │   └── quickstart.md
-│   └── 006-phase-6-hooks-agents/           # Phase 6 (Foundational + US1–US4 complete; spec + plan + contracts + research + retro complete)
+│   └── 006-phase-6-hooks-agents/           # Phase 6 (Foundational + US1–US5 complete; spec + plan + contracts + research + retro complete)
 │       ├── spec.md
 │       ├── plan.md
 │       ├── research.md (20 R-decisions)
-│       ├── data-model.md (v4 schema marker, HooksStrategy, GuardrailsTarget, GuardrailsPlacement, AgentFormat, CanonicalAgent, TranslatedAgent, agent clash-set, enabled-agent enumeration, RewrittenHooks, ownership model, MarkerSpec, MarkerRegion, PersonaRole, PersonaIdentity, etc.)
-│       ├── contracts/ (9+ contracts: exit-codes-p6, schema-migration-p6, entry-schema-p6, harness-modules-p6, hooks-reconciliation, guardrails-prose, agent-translation, agent-sync, agent-indexing, agent-personas, etc.)
-│       ├── retro/ (P2–P4 retrospectives)
+│       ├── data-model.md (v4 schema marker, HooksStrategy, GuardrailsTarget, GuardrailsPlacement, AgentFormat, CanonicalAgent, TranslatedAgent, agent clash-set, enabled-agent enumeration, RewrittenHooks, ownership model, MarkerSpec, MarkerRegion, PersonaRole, PersonaIdentity, PrivilegeEscalationReport, HooksReport, GuardrailsReport, AgentsReport, PersonaReport, etc.)
+│       ├── contracts/ (9+ contracts: exit-codes-p6, schema-migration-p6, entry-schema-p6, harness-modules-p6, hooks-reconciliation, guardrails-prose, agent-translation, agent-sync, agent-indexing, agent-personas, privilege-governance, etc.)
+│       ├── retro/ (P2–P5 retrospectives)
 │       └── quickstart.md
 │
 ├── PRDs/                               # Product requirement documents
@@ -305,8 +312,8 @@ tome/
 ├── Cargo.lock                          # Dependency lock
 ├── build.rs                            # sqlite-vec C extension compilation
 ├── CONSTITUTION.md                     # v1.3.0 — constraints + trade-offs (Phase 4 §Paths amendment; no Phase 5 amendments; no Phase 6 amendments)
-├── CLAUDE.md                           # Project context for Claude Code (Phase 6: Foundational + US1–US4 complete)
-└── CHANGELOG.md                        # Version history (v0.1.0–v0.5.0 shipped; Phase 6 US1–US4 in development)
+├── CLAUDE.md                           # Project context for Claude Code (Phase 6: Foundational + US1–US5 complete)
+└── CHANGELOG.md                        # Version history (v0.1.0–v0.5.0 shipped; Phase 6 US1–US5 in development)
 ```
 
 ## Key Directories
@@ -319,39 +326,52 @@ tome/
 | `plugin/` | Plugin metadata, lifecycle (Phase 5: commands + arguments + when_to_use + user_invocable; Phase 6/US1: agents enumeration + lifecycle + frontmatter parsing) | `manifest.rs`, `frontmatter.rs`, `identity.rs` (EntryKind + Agent variant + canonical from_str), `components.rs` (list_command_files, list_agent_files), `lifecycle.rs` (collect_pending_agents) |
 | `index/` | SQLite + sqlite-vec index (Phase 5: v3 schema with when_to_use; Polish: validate_db_stored_path SSOT; Phase 6: v4 marker migration, agent rows with searchable=false/user_invocable=false; US1: agent queries wired; US2: enabled_plugins_for_workspace query wired; US4: agent queries extended with plugin_version + indexed_at) | `db.rs`, `schema.rs` (v4 marker), `migrations.rs` (v3→v4), `skills.rs` (agent queries: agent_name_clash_set, enabled_agents_for_workspace, enabled_plugins_for_workspace; US4: projections extended; US2 hooks enumeration), `query.rs` (Phase 5 / US4: when_to_use embeddings) |
 | `mcp/` | MCP server + Phase 5 prompts + three-tier discovery + read-only extensions + Polish: substitution_helpers; Phase 6/US1: agent rows excluded per FR-070a; Phase 6/US2: hooks excluded; Phase 6/US3: guardrails excluded; Phase 6/US4: agent personas appended to registry in collision namespace + persona-role dispatch in prompts/get | `prompts.rs` (PromptRegistry, PersonaRole enum, persona identity appending, persona-role dispatch), `prompt_name.rs` (derive_suffixed_name for personas), `prompt_collision.rs` (unified namespace for personas + skills/commands), `substitution_helpers.rs` (build_context_for_entry SSOT), `mod.rs` (resolve_expose_personas startup-scope), `tools/` (search_skills, get_skill_info, get_skill) |
-| `doctor/` | Health check + auto-repair (Phase 5 / US5: read-only extensions; Phase 6/US1: agent count integrated; Phase 6/US2: hooks skeleton; Phase 6/US3: guardrails skeleton) | `checks.rs` (count_entries_by_kind extended for agent count; hooks/guardrails checks skeleton), `report.rs` (agent counts; hooks/guardrails skeleton), fixes.rs |
+| `doctor/` | Health check + auto-repair (Phase 5 / US5: read-only extensions; Phase 6/US1: agent count integrated; Phase 6/US2: hooks skeleton; Phase 6/US3: guardrails skeleton; Phase 6/US5: five new read-only reports + check functions) | `checks.rs` (five new US5 check functions: check_hooks, check_guardrails, check_agents, check_privilege_escalation, check_personas; all query-only), `report.rs` (five new US5 emit-only reports: HooksReport, GuardrailsReport, AgentsReport, PrivilegeEscalationReport, PersonaReport), `mod.rs` (build_phase6_surfaces with GlobalFallback + persona-flag gating), `fixes.rs` (re-run Phase 6 checks after project-sync repairs) |
 | `catalog/` | Catalog registry, git ops | `manifest.rs`, `store.rs`, `git.rs` |
 | `embedding/` | Text embedding + reranking | `fastembed.rs`, `stub.rs`, `download.rs` |
 | `workspace/` | Scope resolution, binding, lifecycle (Phase 5 / US2: rename relocation) | `scope.rs`, `binding.rs`, `init.rs`, `rename.rs`, `remove.rs`, `regen_summary.rs` |
-| `settings/` | Phase 4: Layered composition; Phase 6 / US4: scalar resolver + scope loaders SSOT | `mod.rs` (resolve_scalar / resolve_scalar_with, ProjectMarkerConfig/WorkspaceSettings/GlobalSettings with expose_agents_as_personas), `scopes.rs` (NEW: load_project_marker, load_workspace_settings, load_global_settings SSOT), `parser.rs`, `resolver.rs` (composition engine), `edit.rs` |
-| `harness/` | Phase 4: Harness abstraction + sync; Phase 6 Foundational: trait extension for hooks/guardrails/agents; US1: native agent translation fully wired; US2: real hooks parsing + sync fully wired; US3: guardrails rendering + marker engine fully wired; US4: no new harness methods | `mod.rs` (trait +7 new methods safe-by-default; shape enums), `guardrails.rs` (verbatim body read, marker validation, per-plugin region rendering SSOT), `hooks.rs` (RewrittenHooks, read_rewritten_entries, merge/remove semantics, atomic writes, two-variable rewrite SSOT), `agents.rs` (CanonicalAgent::parse, translation SSOT, model-alias, naming, render primitives), 5 harness impls (translate_agent overrides + US2: hooks_strategy / hook_settings_path + US3: guardrails_target), `rules_file.rs` (MarkerSpec/MarkerRegion, find_marker_regions, compose_in_file, parameterised marker engine for both Phase 4 `tome:begin/end` + guardrails), `sync.rs` (reconcile_guardrails 3a + reconcile_hooks 3b + reconcile_agents 3c passes), `mcp_config.rs`, `stub.rs` |
-| `commands/` | CLI subcommand entry points (Phase 5 / US5: show + list extended; Phase 6/US1: agent integration; Phase 6/US2: hooks integration skeleton; Phase 6/US3: guardrails integration skeleton; Phase 6/US4: scope loaders used in harness list/sync) | Per-command modules + dispatchers |
+| `settings/` | Phase 4: Layered composition; Phase 6 / US4: scalar resolver + scope loaders SSOT; Phase 6/US5: strip_plugin_agent_privileges fields added + resolve_scalar_with reuse | `mod.rs` (resolve_scalar / resolve_scalar_with for expose_agents_as_personas + strip_plugin_agent_privileges, ProjectMarkerConfig/WorkspaceSettings/GlobalSettings with both Option<bool> fields), `scopes.rs` (NEW: load_project_marker, load_workspace_settings, load_global_settings SSOT), `parser.rs`, `resolver.rs` (composition engine), `edit.rs` |
+| `harness/` | Phase 4: Harness abstraction + sync; Phase 6 Foundational: trait extension for hooks/guardrails/agents; US1: native agent translation fully wired; US2: real hooks parsing + sync fully wired; US3: guardrails rendering + marker engine fully wired; US4: agent personas; US5: privilege governance scalar + per-agent emission clone | `mod.rs` (trait +7 new methods safe-by-default; shape enums), `guardrails.rs` (verbatim body read, marker validation, per-plugin region rendering SSOT), `hooks.rs` (RewrittenHooks, read_rewritten_entries, merge/remove semantics, atomic writes, two-variable rewrite SSOT), `agents.rs` (CanonicalAgent::parse, translation SSOT, model-alias, naming, render primitives), 5 harness impls (translate_agent overrides + US2: hooks_strategy / hook_settings_path + US3: guardrails_target), `rules_file.rs` (MarkerSpec/MarkerRegion, find_marker_regions, compose_in_file, parameterised marker engine for both Phase 4 `tome:begin/end` + guardrails), `sync.rs` (reconcile_guardrails 3a + reconcile_hooks 3b + reconcile_agents 3c passes; US5: strip_plugin_agent_privileges scalar resolution + per-agent emission clone in emit_agents_for_harness), `mcp_config.rs`, `stub.rs` |
+| `commands/` | CLI subcommand entry points (Phase 5 / US5: show + list extended; Phase 6/US1: agent integration; Phase 6/US2: hooks integration skeleton; Phase 6/US3: guardrails integration skeleton; Phase 6/US4: scope loaders used in harness list/sync; Phase 6/US5: privilege annotations in show if resolvable) | Per-command modules + dispatchers |
 | `presentation/` | Output formatting + TUI | `tables.rs`, `prompt.rs`, `colour.rs` |
 | `util/` | Shared utilities | `atomic_dir.rs` (tempfile + rename), `io.rs` (bounded read) |
 | `paths.rs` | Phase 4 single-root layout; Phase 5: data-dir accessors; Polish: plugin_data_root() SSOT | `home_root()`, `Paths struct`, `plugin_data_root()` SSOT, `plugin_data_dir_for()`, `workspace_data_dir_for()` |
 
-### `src/settings/scopes.rs` — Settings Scope Loaders (Phase 6 / US4 NEW)
+### `src/settings/` — Settings + Privilege Governance (Phase 6 / US4–US5)
 
-| Function | Purpose | Contract |
-|----------|---------|----------|
-| `load_project_marker()` | Load project marker from `<project>/.tome/config.toml` | `Ok(None)` when absent; parse failure → exit 70; IO → exit 7 |
-| `load_workspace_settings()` | Load workspace settings from `<root>/workspaces/<name>/settings.toml` | `Ok(None)` when absent; parse failure → exit 70 |
-| `load_global_settings()` | Load global settings from `<root>/settings.toml` | Absent file → `GlobalSettings::default()`; parse failure → exit 70 |
+| Type/Function | Purpose | Phase |
+|----------|---------|-------|
+| `resolve_scalar(project: Option<bool>, workspace: Option<bool>, global: Option<bool>) → bool` | First-declarer-wins priority walk for `Option<bool>` settings | US4 |
+| `resolve_scalar_with(project, workspace, global, project_field, workspace_field, global_field) → bool` | Closure-based form for reusable scalar resolution (eliminates second function) | US4, US5 |
+| `ProjectMarkerConfig::expose_agents_as_personas: Option<bool>` | Per-project persona-exposure flag | US4 |
+| `ProjectMarkerConfig::strip_plugin_agent_privileges: Option<bool>` | Per-project agent privilege-stripping flag | US5 |
+| `WorkspaceSettings::expose_agents_as_personas: Option<bool>` | Per-workspace persona-exposure flag | US4 |
+| `WorkspaceSettings::strip_plugin_agent_privileges: Option<bool>` | Per-workspace agent privilege-stripping flag | US5 |
+| `GlobalSettings::expose_agents_as_personas: Option<bool>` | Global persona-exposure flag | US4 |
+| `GlobalSettings::strip_plugin_agent_privileges: Option<bool>` | Global agent privilege-stripping flag | US5 |
 
-### `src/mcp/prompts.rs` — Agent Personas (Phase 6 / US4)
+### `src/doctor/` — Health Diagnostics + Privilege Audit (Phase 6 / US5)
 
-| Type/Function | Purpose | Details |
-|----------|---------|---------|
-| `PersonaRole` enum | Discriminates Phase 5 command/skill from Phase 6 persona variants | `None` (Phase 5 path), `Agent` (persona-role path with template), `Drop` (fixed body) |
-| `PromptEntry::persona` | Persona role for dispatch in `prompts/get` | Added in US4; drives routing to template-wrapping vs body-reading path |
-| `PromptEntry::display_name` | Agent's display name (frontmatter `name`, else filename stem) | Empty for non-persona entries; used in persona template rendering |
-| `PromptEntry::plugin_version` | Cached from DB for `${TOME_PLUGIN_VERSION}` substitution in persona body | Already present since Polish; extended in US4 to persona entries |
-| `build_for_workspace()` | Build registry: Phase 5 skills/commands + (if expose_personas) agent personas + drop-persona | Appends persona identities after Phase 5 query; folds into SINGLE collision namespace |
-| `collect_persona_identities()` | Append one `<name>-persona` identity per enabled agent + `drop-persona` | Clash prefix applied before collision pass; drop-persona reserved via empty indexed_at seed |
+| Function | Purpose | Return Type |
+|----------|---------|-------------|
+| `check_hooks(scope, paths) → Result<HooksReport>` | Per-plugin hooks.json status (present/absent/parse-error) | HooksReport option |
+| `check_guardrails(scope, paths) → Result<GuardrailsReport>` | Per-plugin GUARDRAILS.md status (present/absent/invalid) | GuardrailsReport option |
+| `check_agents(scope, paths) → Result<AgentsReport>` | Per-plugin enabled agent count | AgentsReport option |
+| `check_privilege_escalation(scope, paths) → Result<PrivilegeEscalationReport>` | Agents with privilege fields + resolved strip flag | PrivilegeEscalationReport option |
+| `check_personas(scope, paths) → Result<PersonaReport>` | Enabled agent persona count (if expose=true) | PersonaReport option |
+| `build_phase6_surfaces(scope, paths) → Result<Phase6Surfaces>` | Build five reports; gate to None on GlobalFallback + persona=false | Phase6Surfaces with optional fields |
+
+### `src/harness/sync.rs` — Privilege Governance Flow (Phase 6 / US5)
+
+| Step | Function | Role |
+|------|----------|------|
+| 1 | `resolve_scalar_with()` | Resolve `strip_plugin_agent_privileges` scalar ONCE per sync (project → workspace → global) |
+| 2 | `reconcile_agents()` | Pass bool to `emit_agents_for_harness()` |
+| 3 | `emit_agents_for_harness()` | Apply stripping ONLY to Claude Code: clone per agent, clear three privilege fields on clone, leave source canonical unmodified |
 
 ## Module Boundaries
 
-### Where to Add New Code (Phase 6 / US4)
+### Where to Add New Code (Phase 6 / US5)
 
 | If you're adding... | Put it in... | Pattern |
 |---------------------|--------------|---------|
@@ -373,63 +393,80 @@ tome/
 | Persona registry building | `src/mcp/prompts.rs` | `collect_persona_identities()` fully wired in US4; appends identities to shared Phase 5 registry before collision pass |
 | Persona dispatch in prompts/get | `src/mcp/prompts.rs` | `PersonaRole` dispatch in `prompts/get` handler fully wired in US4; wraps agent body in template, applies Phase 5 substitution |
 | Scalar settings field | `src/settings/mod.rs` | Add Option<bool> field to ProjectMarkerConfig / WorkspaceSettings / GlobalSettings; call `resolve_scalar_with()` with field accessor; reuses resolver for second scalars (e.g., US5's `strip_plugin_agent_privileges`) |
+| Privilege governance | `src/harness/sync.rs` | `strip_plugin_agent_privileges` scalar resolved ONCE in `sync_project()` via `resolve_scalar_with()`, passed to `reconcile_agents()`, applied per-agent per-emission clone in `emit_agents_for_harness()` for Claude Code only (source canonical unmodified) |
 | Entry-kind exhaustive match | `src/commands/plugin/{mod,list,show}.rs`, `src/doctor/{checks,report}.rs`, `src/plugin/frontmatter.rs` | All matches extended to handle `EntryKind::Agent` in US1; defence-in-depth via canonical `from_str()` |
-| Agent doctor check | `src/doctor/checks.rs` | Stub extends to real checks in US5 (agent/hook/guardrails diagnostics) |
-| Hooks doctor check | `src/doctor/checks.rs` | Skeleton in US2; full implementation in US5 |
-| Guardrails doctor check | `src/doctor/checks.rs` | Skeleton in US3; full implementation in later phase |
+| Doctor privilege check | `src/doctor/checks.rs` | `check_privilege_escalation()` fully wired in US5 (query agents with privilege fields + resolve strip scalar) |
+| Doctor hooks check | `src/doctor/checks.rs` | `check_hooks()` fully wired in US5 (enumerate per-plugin hooks.json files) |
+| Doctor guardrails check | `src/doctor/checks.rs` | `check_guardrails()` fully wired in US5 (enumerate per-plugin GUARDRAILS.md files) |
+| Doctor agents check | `src/doctor/checks.rs` | `check_agents()` fully wired in US5 (query enabled agents per-plugin) |
+| Doctor personas check | `src/doctor/checks.rs` | `check_personas()` fully wired in US5 (count enabled agent personas if expose=true) |
 | Agent visibility | `src/commands/plugin/{show,list}.rs` | Consult agent rows from index; filter per invariants (searchable=false, user_invocable=false always) |
-| Hooks visibility | `src/commands/plugin/{show,list}.rs` | US3 guardrails will surface hooks in doctor; US2 no display |
-| Guardrails visibility | `src/commands/plugin/{show,list}.rs` | US3 guardrails will surface guardrails status in doctor; not surfaced in show/list |
+| Hooks visibility | `src/commands/plugin/{show,list}.rs` | US5 doctor surfaces hooks; no display in show/list |
+| Guardrails visibility | `src/commands/plugin/{show,list}.rs` | US5 doctor surfaces guardrails; no display in show/list |
 | Hook reconciliation sink | `src/harness/sync.rs` + per-harness impl | US2 hooks reconciliation complete in sync.rs; US3 wires guardrails (3a) BEFORE hooks (3b) |
 | Guardrails rendering sink | `src/harness/sync.rs` + per-harness impl | US3 guardrails reconciliation complete in sync.rs; runs BEFORE hooks (3b) before agents (3c) |
+| Agent rendering sink | `src/harness/sync.rs` + per-harness impl | US1 agent translation complete; US5 applies privilege stripping to Claude Code only per emission |
 | New marker family | `src/harness/rules_file.rs` + `src/harness/{new}.rs` | Parameterised `MarkerSpec` + `find_marker_regions()` + `compose_in_file()` support any marker family (used by Phase 4 `tome:begin/end` + guardrails in US3) |
 | New substitution stage | `src/substitution/{stage}.rs` | Phase 5 complete; no new stages needed |
-| Schema change | `src/index/{schema,migrations}.rs` | v4 marker in Foundational, no backfill; agent rows use existing kind column; US1–US2–US3–US4 indexing complete |
+| Schema change | `src/index/{schema,migrations}.rs` | v4 marker in Foundational, no backfill; agent rows use existing kind column; US1–US2–US3–US4–US5 indexing complete |
 | Exit code | `src/error.rs` + `tests/exit_codes.rs` | Phase 6 codes 43–46 all wired in Foundational + US1–US2–US3 (43: hook parse, 44: hook write, 45: agent translation, 46: guardrails write) |
-| Persona test | `tests/personas_*.rs` | Four test files for US4: personas_startup_scope, personas_scalar_resolver, personas_registry_building, personas_prompts_get |
+| Privilege test | `tests/privilege_*.rs` | Two test files for US5: privilege_governance_scalar, privilege_emission_clone |
+| Doctor privilege test | `tests/doctor_privilege_escalation.rs` | Doctor privilege-escalation check + post-fix re-check flow |
+| Doctor reporting test | `tests/doctor_{hooks,guardrails,agents,personas}_report.rs` | Four test files for US5 doctor reporting surfaces |
 
 ### Key Patterns
 
-#### Settings Scalar Resolver Pattern (Phase 6 / FR-053, R-12)
+#### Privilege Governance Pattern (Phase 6 / US5)
 
-First-declarer-wins `bool` setting walk:
+Resolve scalar ONCE per sync:
 ```rust
-resolve_scalar(
-    project.and_then(|p| p.expose_agents_as_personas),
-    workspace.and_then(|w| w.expose_agents_as_personas),
-    global.expose_agents_as_personas,
-)
+let strip_agent_privileges = crate::settings::resolve_scalar_with(
+    Some(&marker),
+    workspace_settings.as_ref(),
+    &global_settings,
+    |p| p.strip_plugin_agent_privileges,
+    |w| w.strip_plugin_agent_privileges,
+    |g| g.strip_plugin_agent_privileges,
+);
 ```
 
-Reusable closure form for new scalars:
+Apply per-agent per-emission (Claude Code only):
 ```rust
-resolve_scalar_with(
-    project, workspace, &global,
-    |p| p.expose_agents_as_personas,
-    |w| w.expose_agents_as_personas,
-    |g| g.expose_agents_as_personas,
-)
+let emit_canonical;
+let canonical = if strip_here {
+    let mut c = agent.canonical.clone();
+    c.hooks = None;
+    c.mcp_servers = None;
+    c.permission_mode = None;
+    emit_canonical = c;
+    &emit_canonical
+} else {
+    &agent.canonical
+};
 ```
 
-#### Persona Registry Building Pattern (Phase 6 / US4)
+#### Doctor Reporting Pattern (Phase 6 / US5)
 
-1. Query enabled user-invocable entries (skills/commands only)
-2. If `expose_personas=true`: append persona identities (one per agent + drop-persona)
-3. Resolve collisions over unified namespace (Phase 5 collision resolver reused)
-4. Render persona entries with `PersonaRole::Agent` / `PersonaRole::Drop` discriminator
-
-#### Persona Dispatch in prompts/get (Phase 6 / US4)
-
+Gate on GlobalFallback + additional flag:
 ```rust
-match entry.persona {
-    PersonaRole::None => { /* Phase 5 body-reading path */ }
-    PersonaRole::Agent => { /* Frontmatter-strip, template-wrap, apply substitution */ }
-    PersonaRole::Drop => { /* Fixed body, no file */ }
+let Phase6Surfaces {
+    hooks,
+    guardrails,
+    agents,
+    privilege_escalation,
+    personas,
+} = build_phase6_surfaces(scope, paths).unwrap_or_default();
+```
+
+Read-only check: query index/filesystem only, no mutations:
+```rust
+pub fn check_privilege_escalation(...) -> Result<PrivilegeEscalationReport> {
+    // Query agents with privilege fields from index
+    // Resolve strip scalar via canonical scope loaders
+    // Record in report
 }
 ```
 
-Template is fixed per contract; wraps agent body (frontmatter-stripped) with role-assumption tags and `$ARGUMENTS` placeholder; Phase 5 substitution applied (no parallel substitution path per NFR-007).
-
 ---
 
-*This document shows WHERE code lives. Updated 2026-06-04 against Phase 6 / US4 COMPLETE (settings/scopes.rs NEW SSOT for canonical scope loaders; prompts.rs persona identities appending + persona-role dispatch; PersonaRole enum + display_name + plugin_version caching on PromptEntry; resolve_expose_personas startup-scope resolution in mcp/mod.rs; index/skills.rs agent queries extended with plugin_version + indexed_at projection). Test suites: Phase 5 baseline + entry_kind_agent_indexing, harness_trait_p6, schema_migration_p6, exit_codes + US1: agent_translation, agent_sync_reconciliation, agent_indexing_lifecycle, agent_e2e + US2: hooks_parsing, hooks_merge_remove, hooks_sync_reconciliation + US3: guardrails_parsing, guardrails_reconciliation, guardrails_marker_engine, phase6_correction_claude_code.* + US4: personas_startup_scope, personas_scalar_resolver, personas_registry_building, personas_prompts_get*
+*This document shows WHERE code lives. Updated 2026-06-05 against Phase 6 / US5 COMPLETE (doctor/report.rs five new emit-only reports (HooksReport, GuardrailsReport, AgentsReport, PrivilegeEscalationReport, PersonaReport); doctor/checks.rs five new read-only check functions; doctor/mod.rs build_phase6_surfaces() with GlobalFallback + persona-flag gating; doctor/fixes.rs re-sync after project-level repairs; harness/sync.rs strip_plugin_agent_privileges scalar resolution + per-agent emission clone; settings/mod.rs strip_plugin_agent_privileges Option<bool> fields on three layers + resolve_scalar_with reuse; commands/plugin/show.rs privilege indicator annotations). Test suites: Phase 5 baseline + entry_kind_agent_indexing, harness_trait_p6, schema_migration_p6, exit_codes + US1: agent_translation, agent_sync_reconciliation, agent_indexing_lifecycle, agent_e2e + US2: hooks_parsing, hooks_merge_remove, hooks_sync_reconciliation + US3: guardrails_parsing, guardrails_reconciliation, guardrails_marker_engine, phase6_correction_claude_code.* + US4: personas_startup_scope, personas_scalar_resolver, personas_registry_building, personas_prompts_get* + US5: privilege_governance_scalar, privilege_emission_clone, doctor_privilege_escalation, doctor_hooks_report, doctor_guardrails_report, doctor_agents_report, doctor_personas_report*

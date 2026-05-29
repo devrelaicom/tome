@@ -55,6 +55,7 @@ fn ws(name: &str, harnesses: Option<Vec<String>>) -> WorkspaceSettings {
         catalogs: Vec::new(),
         harnesses,
         expose_agents_as_personas: None,
+        strip_plugin_agent_privileges: None,
     }
 }
 
@@ -63,6 +64,7 @@ fn project(workspace: &str, harnesses: Option<Vec<String>>) -> ProjectMarkerConf
         workspace: WorkspaceName::parse(workspace).expect("test workspace name parses"),
         harnesses,
         expose_agents_as_personas: None,
+        strip_plugin_agent_privileges: None,
     }
 }
 
@@ -77,6 +79,7 @@ fn plain_include() {
     let global = GlobalSettings {
         harnesses: Some(vec!["claude-code".to_owned()]),
         expose_agents_as_personas: None,
+        strip_plugin_agent_privileges: None,
     };
     let result = resolve_effective_list(None, None, &global, &stub).expect("resolves");
     assert_eq!(
@@ -96,6 +99,7 @@ fn exclude_subtracts_from_union() {
     let global = GlobalSettings {
         harnesses: Some(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]),
         expose_agents_as_personas: None,
+        strip_plugin_agent_privileges: None,
     };
     let result =
         resolve_effective_list(Some(&proj), Some(&ws_settings), &global, &stub).expect("resolves");
@@ -165,6 +169,7 @@ fn global_ref() {
     let global = GlobalSettings {
         harnesses: Some(vec!["z".to_owned()]),
         expose_agents_as_personas: None,
+        strip_plugin_agent_privileges: None,
     };
     let result =
         resolve_effective_list(None, Some(&ws_settings), &global, &stub).expect("resolves");
@@ -214,6 +219,7 @@ fn explicit_add_and_remove_combined() {
     let global = GlobalSettings {
         harnesses: Some(vec!["x".to_owned()]),
         expose_agents_as_personas: None,
+        strip_plugin_agent_privileges: None,
     };
     let result =
         resolve_effective_list(Some(&proj), Some(&ws_settings), &global, &stub).expect("resolves");
@@ -237,6 +243,7 @@ fn order_of_entries_does_not_affect_membership() {
     let global = GlobalSettings {
         harnesses: Some(vec!["g1".to_owned(), "g2".to_owned()]),
         expose_agents_as_personas: None,
+        strip_plugin_agent_privileges: None,
     };
 
     let proj_a = project(
