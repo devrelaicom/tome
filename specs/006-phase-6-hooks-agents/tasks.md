@@ -178,9 +178,9 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 - [X] T080 Create `specs/006-phase-6-hooks-agents/retro/P5.md` from template.
 - [X] T081 [GIT] Commit: `docs(phase-6): init P5 retro`.
-- [ ] T082 [US3] Correct claude-code rules-file candidate list to `CLAUDE.md` > `.claude/CLAUDE.md` (drop `AGENTS.md`) in `src/harness/claude_code.rs` (FR-020/022) (use devs:rust-dev agent).
-- [ ] T083 [P] [US3] `tests/rules_file_claude_correction.rs` — block lands in `CLAUDE.md`, AGENTS.md project keeps one block, both resolve `.tome/RULES.md` (use devs:rust-dev agent).
-- [ ] T084 [GIT] Commit: `fix(phase-6): Claude Code rules sink is CLAUDE.md, not AGENTS.md`.
+- [X] T082 [US3] Correct claude-code rules-file candidate list to `CLAUDE.md` > `.claude/CLAUDE.md` (drop `AGENTS.md`) in `src/harness/claude_code.rs` (FR-020/022) (use devs:rust-dev agent).
+- [X] T083 [P] [US3] `tests/rules_file_claude_correction.rs` — block lands in `CLAUDE.md`, AGENTS.md project keeps one block, both resolve `.tome/RULES.md` (use devs:rust-dev agent).
+- [X] T084 [GIT] Commit: `fix(phase-6): Claude Code rules sink is CLAUDE.md, not AGENTS.md`.
 - [ ] T085 [US3] Create `src/harness/guardrails.rs`: verbatim `GUARDRAILS.md` read; marker region render (`<!-- START GUARDRAILS: <catalog>:<plugin> -->` … `END`); reuse the `rules_file.rs` region find/replace generalised to a parameterised marker pair (use devs:rust-dev agent).
 - [ ] T086 [US3] Implement per-harness `guardrails_target` (claude-code→CLAUDE.md; codex/opencode→AGENTS.md; gemini→AGENTS.md else GEMINI.md; cursor→`.cursor/rules/TOME_GUARDRAILS.md` sibling) across the five harness modules (use devs:rust-dev agent).
 - [ ] T087 [US3] Implement per-file reconciliation in `src/harness/guardrails.rs`: deterministic placement (rules block first, then regions in lexicographic `<catalog>:<plugin>` order), overwrite-in-place, orphan removal, Cursor sibling deletion when empty; atomic write + mode-preservation + symlink-refusal (FR-011/014/015) (use devs:rust-dev agent).

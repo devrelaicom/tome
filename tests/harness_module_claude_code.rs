@@ -61,42 +61,51 @@ fn detect_returns_false_when_claude_is_a_file() {
 }
 
 // ---------------------------------------------------------------------------
-// rules_file_target() — precedence ladder per research §R-8.
+// rules_file_target() — corrected precedence ladder (Phase 6 / FR-020/021/022).
+//
+// AGENTS.md is NO LONGER a claude-code candidate: Claude Code does not
+// natively read it. The candidate set is CLAUDE.md > .claude/CLAUDE.md.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn rules_file_target_falls_back_to_agents_md_when_no_files_exist() {
+fn rules_file_target_falls_back_to_claude_md_when_no_files_exist() {
     let project = TempDir::new().unwrap();
     let target = CLAUDE_CODE.rules_file_target(project.path());
     assert_eq!(
         target,
-        project.path().join("AGENTS.md"),
-        "no candidate files → fallback to AGENTS.md"
+        project.path().join("CLAUDE.md"),
+        "no candidate files → fallback to CLAUDE.md (never AGENTS.md)"
     );
 }
 
 #[test]
-fn rules_file_target_prefers_existing_agents_md_over_claude_md() {
+fn rules_file_target_ignores_agents_md_uses_claude_md() {
+    // Phase 6 correction: even with an AGENTS.md present, claude-code targets
+    // CLAUDE.md — AGENTS.md is not in its candidate set.
     let project = TempDir::new().unwrap();
     fs::write(project.path().join("AGENTS.md"), b"").unwrap();
     fs::write(project.path().join("CLAUDE.md"), b"").unwrap();
     let target = CLAUDE_CODE.rules_file_target(project.path());
     assert_eq!(
         target,
-        project.path().join("AGENTS.md"),
-        "AGENTS.md wins over CLAUDE.md when both exist"
+        project.path().join("CLAUDE.md"),
+        "CLAUDE.md wins; AGENTS.md is not a candidate"
     );
 }
 
 #[test]
-fn rules_file_target_uses_claude_md_when_agents_md_missing() {
+fn rules_file_target_ignores_agents_md_falls_back_to_claude_md() {
+    // Only AGENTS.md exists → claude-code STILL targets CLAUDE.md (creating
+    // it), because AGENTS.md is not a candidate. This is the substance of the
+    // correction (FR-021): a project's rules-include block must not land where
+    // Claude Code cannot see it.
     let project = TempDir::new().unwrap();
-    fs::write(project.path().join("CLAUDE.md"), b"").unwrap();
+    fs::write(project.path().join("AGENTS.md"), b"").unwrap();
     let target = CLAUDE_CODE.rules_file_target(project.path());
     assert_eq!(
         target,
         project.path().join("CLAUDE.md"),
-        "no AGENTS.md, only CLAUDE.md → use CLAUDE.md"
+        "AGENTS.md alone must NOT be selected — fall back to CLAUDE.md"
     );
 }
 

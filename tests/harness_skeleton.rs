@@ -189,8 +189,8 @@ fn detect_is_filesystem_existence_only() {
 
 #[test]
 fn rules_file_target_picks_existing_candidate() {
-    // Claude Code's precedence is AGENTS.md > CLAUDE.md > .claude/CLAUDE.md.
-    // When only CLAUDE.md exists, that one wins.
+    // Claude Code's corrected precedence is CLAUDE.md > .claude/CLAUDE.md
+    // (Phase 6 / FR-020 — AGENTS.md removed). When CLAUDE.md exists, it wins.
     let tmp = tempfile::tempdir().expect("tempdir");
     std::fs::write(tmp.path().join("CLAUDE.md"), "developer-authored").expect("write CLAUDE.md");
 
@@ -203,13 +203,13 @@ fn rules_file_target_picks_existing_candidate() {
 
 #[test]
 fn rules_file_target_falls_back_to_first_preference() {
-    // No candidate exists yet → fall back to AGENTS.md so the sync
-    // algorithm has a default landing spot.
+    // No candidate exists yet → fall back to CLAUDE.md (never AGENTS.md, the
+    // Phase 6 correction) so the sync algorithm has a default landing spot.
     let tmp = tempfile::tempdir().expect("tempdir");
     let h = lookup("claude-code").unwrap();
     assert_eq!(
         h.rules_file_target(tmp.path()),
-        tmp.path().join("AGENTS.md")
+        tmp.path().join("CLAUDE.md")
     );
 }
 
