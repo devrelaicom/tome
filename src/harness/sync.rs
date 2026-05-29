@@ -748,17 +748,32 @@ fn reconcile_hooks(
                 c, deps.paths, workspace, catalog, plugin,
             ) {
                 Ok(p) => p,
-                // A plugin whose on-disk root cannot be resolved (catalog
-                // cache evicted) has no readable hooks — skip it rather than
-                // fail the whole sync. Removal of stale entries it once owned
-                // requires the rewritten entries, which we cannot re-derive
-                // without the source; this is the documented consequence of an
-                // evicted cache (the US5 doctor surfaces orphans).
+                // STALE-REMOVAL GAP (R2-1), arm (a): catalog cache evicted.
+                // A plugin whose on-disk root cannot be resolved has no
+                // readable hooks — skip it rather than fail the whole sync.
+                //
+                // The same gap exists in arm (b) below: when the plugin still
+                // exists but its `hooks/hooks.json` is gone, `read_rewritten_
+                // entries` returns `Ok(None)` and the plugin is likewise dropped
+                // from `prepared`. In BOTH arms, ownership is structural
+                // re-derivation with no sidecar (NFR-003): removal of a
+                // previously-written `settings.local.json` entry needs the
+                // source to re-derive the deep-equal entry. So if claude-code
+                // later goes non-live or the plugin is removed, those plugins'
+                // earlier-written entries cannot be re-derived for removal and
+                // persist in `settings.local.json`. There is no clean fix under
+                // the no-sidecar model; the US5 doctor `HooksReport` is the
+                // surfacing path for these orphaned entries.
                 Err(_) => continue,
             };
             let plugin_data = deps.paths.plugin_data_dir_for(catalog, plugin);
             match crate::harness::hooks::read_rewritten_entries(&plugin_root, &plugin_data) {
                 Ok(Some(hooks)) if !hooks.is_empty() => prepared.push(hooks),
+                // Arm (b) of the stale-removal gap (see above): an enabled
+                // plugin whose `hooks/hooks.json` is now absent (or empty) is
+                // dropped here, and its previously-written entries cannot be
+                // re-derived for removal — they persist until the US5 doctor
+                // surfaces and reconciles them.
                 Ok(_) => {}
                 Err(e) => {
                     if recon.first_error.is_none() {

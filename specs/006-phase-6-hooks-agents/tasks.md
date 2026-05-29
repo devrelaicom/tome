@@ -159,8 +159,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T071 [P] [US2] Extend `tests/exit_codes_e2e.rs` — malformed `hooks.json` → exit 43; settings write failure → exit 44 (use devs:rust-dev agent).
 - [X] T072 [GIT] Commit: `test(phase-6): US2 hooks merge + rewrite + exit codes`.
 - [X] T073 [US2] 4-reviewer pass; write `review/us2-findings.md` + `review/us2-disposition.md`.
-- [ ] T074 [US2] Apply US2 blockers + selected majors (use devs:rust-dev agent).
-- [ ] T075 [GIT] Commit: `fix(phase-6): apply US2 reviewer findings`.
+- [X] T074 [US2] Apply US2 blockers + selected majors (use devs:rust-dev agent).
+- [X] T075 [GIT] Commit: `fix(phase-6): apply US2 reviewer findings`.
 - [ ] T076 [US2] Run codebase mapping for Phase 4 changes (`/sdd:map incremental`).
 - [ ] T077 [US2] Review `retro/P4.md`; extract learnings to `CLAUDE.md` (conservative).
 - [ ] T078 [GIT] Commit: `docs(phase-6): US2 closeout — mapping + retro`.

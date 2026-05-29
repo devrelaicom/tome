@@ -86,8 +86,12 @@ pub fn read_rewritten_entries(
         return Err(TomeError::HookSpecParseError { path: source });
     };
 
-    let plugin_root_str = plugin_root.to_string_lossy();
-    let plugin_data_str = plugin_data.to_string_lossy();
+    // Fail closed on a non-UTF-8 rewrite target. These values become
+    // LOAD-BEARING text inside an executed hook command; `to_string_lossy`
+    // would substitute a U+FFFD-corrupted path, emitting a silently-broken
+    // command rather than refusing. Surface exit 44 instead (R2-2).
+    let plugin_root_str = non_utf8_guard(plugin_root, plugin_root)?;
+    let plugin_data_str = non_utf8_guard(plugin_data, plugin_root)?;
 
     let mut events: Vec<(String, Vec<JsonValue>)> = Vec::with_capacity(obj.len());
     for (event, value) in obj.iter() {
@@ -97,7 +101,7 @@ pub fn read_rewritten_entries(
         let mut entries = Vec::with_capacity(arr.len());
         for entry in arr {
             let mut rewritten = entry.clone();
-            rewrite_string_leaves(&mut rewritten, &plugin_root_str, &plugin_data_str);
+            rewrite_string_leaves(&mut rewritten, plugin_root_str, plugin_data_str);
             entries.push(rewritten);
         }
         events.push((event.clone(), entries));
@@ -120,6 +124,23 @@ impl RewrittenHooks {
     pub fn is_empty(&self) -> bool {
         self.events.iter().all(|(_, entries)| entries.is_empty())
     }
+}
+
+/// Return `path` as `&str`, or fail closed with exit 44 when it is not valid
+/// UTF-8. The rewritten value is injected into an executed hook command, so a
+/// non-UTF-8 install path must be refused rather than `to_string_lossy`'d into
+/// a U+FFFD-corrupted command (R2-2). `error_path` names the offending plugin
+/// root in the surfaced [`TomeError::HookSettingsWriteFailed`].
+fn non_utf8_guard<'a>(path: &'a Path, error_path: &Path) -> Result<&'a str, TomeError> {
+    path.to_str().ok_or_else(|| {
+        settings_write_failed(
+            error_path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("non-UTF-8 hook rewrite target path: {}", path.display()),
+            ),
+        )
+    })
 }
 
 /// Recursively rewrite the two recognised `${CLAUDE_*}` tokens in every
@@ -507,6 +528,36 @@ mod tests {
             !hooks.contains_key("PreToolUse"),
             "empty event array must be pruned"
         );
+    }
+
+    // A non-UTF-8 path can only be constructed from raw bytes on Unix; gate
+    // the construction on Linux per project convention.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn non_utf8_rewrite_target_is_refused_exit_44() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // 0xFF is never valid UTF-8.
+        let bad = Path::new(OsStr::from_bytes(b"/tmp/\xff/plugin"));
+        let good = Path::new("/tmp/data");
+
+        // Non-UTF-8 plugin_root → refused.
+        let err = non_utf8_guard(bad, bad).expect_err("non-UTF-8 root must refuse");
+        assert_eq!(
+            err.exit_code(),
+            44,
+            "non-UTF-8 target → exit 44; got {err:?}"
+        );
+        match &err {
+            TomeError::HookSettingsWriteFailed { source, .. } => {
+                assert_eq!(source.kind(), std::io::ErrorKind::InvalidData);
+            }
+            other => panic!("expected HookSettingsWriteFailed, got {other:?}"),
+        }
+
+        // A valid UTF-8 path passes through unchanged.
+        assert_eq!(non_utf8_guard(good, good).expect("utf-8 ok"), "/tmp/data");
     }
 
     #[test]

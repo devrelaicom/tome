@@ -137,6 +137,38 @@ fn absent_hooks_file_is_none() {
     assert!(result.is_none(), "a plugin with no hooks.json yields None");
 }
 
+// ---------------------------------------------------------------------------
+// T2-6: a symlinked hook SOURCE (`hooks/hooks.json`) is refused → exit 7,
+//       mirroring the settings-write symlink refusal.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg(unix)]
+fn symlinked_hook_source_is_refused_exit_7() {
+    let tmp = TempDir::new().unwrap();
+    let plugin_root = tmp.path().join("install/linked");
+    let plugin_data = tmp.path().join("data/linked");
+
+    // Plant a real hooks.json elsewhere, then symlink the source path to it.
+    let decoy = tmp.path().join("decoy-hooks.json");
+    std::fs::write(
+        &decoy,
+        r#"{ "PreToolUse": [ { "matcher": "Bash", "hooks": [] } ] }"#,
+    )
+    .unwrap();
+    let hooks_dir = plugin_root.join("hooks");
+    std::fs::create_dir_all(&hooks_dir).unwrap();
+    std::os::unix::fs::symlink(&decoy, hooks_dir.join("hooks.json")).expect("plant symlink");
+
+    let err = hooks::read_rewritten_entries(&plugin_root, &plugin_data)
+        .expect_err("a symlinked source must be refused");
+    assert_eq!(
+        err.exit_code(),
+        7,
+        "symlinked source refusal → exit 7; got {err:?}"
+    );
+}
+
 #[test]
 fn malformed_hooks_file_is_exit_43() {
     let tmp = TempDir::new().unwrap();

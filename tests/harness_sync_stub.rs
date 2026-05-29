@@ -861,6 +861,66 @@ fn real_hooks_merge_idempotence_and_removal_for_claude_code() {
     assert_eq!(removed_hooks, 1, "one hooks change recorded on removal");
 }
 
+// ---------------------------------------------------------------------------
+// 10b. T2-2: hooks forward-progress — one valid + one malformed plugin.
+//      The good plugin's rewritten entry lands in settings.local.json AND the
+//      sync returns exit 43 (HookSpecParseError) for the malformed sibling
+//      (FR-084). Mirrors `agent_forward_progress_one_corrupt_one_good`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hooks_forward_progress_one_malformed_one_good() {
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard =
+        HarnessModulesGuard::install(vec![Box::new(tome::harness::claude_code::CLAUDE_CODE)]);
+
+    let fx = Fixture::build("test-workspace", Some("harnesses = [\"claude-code\"]"));
+
+    // Good plugin: a well-formed hooks.json.
+    let url_a = seed_hooks_source(
+        &fx.paths,
+        "plugin-a",
+        r#"{ "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/guard.sh" } ] } ] }"#,
+    );
+    // Malformed plugin: unparsable JSON → HookSpecParseError (exit 43).
+    let url_b = seed_hooks_source(&fx.paths, "plugin-b", "{ this is not valid json");
+
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw");
+    for (cat, url) in [("cat-a", &url_a), ("cat-b", &url_b)] {
+        tome::index::workspace_catalogs::insert(&conn, "test-workspace", cat, url, "main")
+            .expect("enrol catalog");
+    }
+    drop(conn);
+    insert_enabled_skill_row(&fx.paths, "test-workspace", "cat-a", "plugin-a");
+    insert_enabled_skill_row(&fx.paths, "test-workspace", "cat-b", "plugin-b");
+
+    let err = sync::sync_project(&fx.project, &fx.deps(false))
+        .expect_err("a malformed hooks source must surface an error");
+    assert_eq!(
+        err.exit_code(),
+        43,
+        "malformed hooks source → HookSpecParseError (exit 43); got {err:?}"
+    );
+
+    // Forward progress: the GOOD plugin's entry merged despite the malformed
+    // sibling (FR-084).
+    let local = fx.project.join(".claude/settings.local.json");
+    assert!(
+        local.is_file(),
+        "settings.local.json created by the good plugin"
+    );
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&local).unwrap()).unwrap();
+    let cmd = doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("good plugin's command string present");
+    let plugin_root = fx.paths.cache_dir_for(&url_a).join("plugin-a");
+    assert!(
+        cmd.starts_with(&*plugin_root.to_string_lossy()),
+        "the well-formed plugin's hook merged despite the malformed sibling: {cmd}"
+    );
+}
+
 #[test]
 fn workspace_settings_supply_harness_list_when_marker_omits_key() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
