@@ -158,7 +158,7 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T070 [P] [US2] `tests/hooks_merge.rs` — add/idempotence/user-edit-preservation/dedup/create-if-absent/prune (use devs:rust-dev agent).
 - [X] T071 [P] [US2] Extend `tests/exit_codes_e2e.rs` — malformed `hooks.json` → exit 43; settings write failure → exit 44 (use devs:rust-dev agent).
 - [X] T072 [GIT] Commit: `test(phase-6): US2 hooks merge + rewrite + exit codes`.
-- [ ] T073 [US2] 4-reviewer pass; write `review/us2-findings.md` + `review/us2-disposition.md`.
+- [X] T073 [US2] 4-reviewer pass; write `review/us2-findings.md` + `review/us2-disposition.md`.
 - [ ] T074 [US2] Apply US2 blockers + selected majors (use devs:rust-dev agent).
 - [ ] T075 [GIT] Commit: `fix(phase-6): apply US2 reviewer findings`.
 - [ ] T076 [US2] Run codebase mapping for Phase 4 changes (`/sdd:map incremental`).
