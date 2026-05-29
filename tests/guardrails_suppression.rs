@@ -177,10 +177,15 @@ fn both_shipping_plugin_suppressed_on_claude_md_present_on_agents() {
 #[test]
 fn both_transitions_in_one_sync() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard =
-        HarnessModulesGuard::install(vec![Box::new(tome::harness::claude_code::CLAUDE_CODE)]);
+    // claude-code (CLAUDE.md, suppresses) + codex (shared AGENTS.md, never
+    // suppresses) — so we can assert suppression is CLAUDE.md-only and that
+    // BOTH plugins' regions persist on AGENTS.md across both transitions (T3-3).
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(tome::harness::claude_code::CLAUDE_CODE),
+        Box::new(tome::harness::codex::CODEX),
+    ]);
 
-    let fx = Fixture::build("test-ws", "\"claude-code\"");
+    let fx = Fixture::build("test-ws", "\"claude-code\", \"codex\"");
 
     // plugin-starts: ships GUARDRAILS.md only at first; gains hooks.json later.
     write_guardrails(&fx.paths, "plugin-starts", "starts rules\n");
@@ -209,6 +214,13 @@ fn both_transitions_in_one_sync() {
         "stops suppressed initially (ships hooks.json):\n{claude}"
     );
 
+    // AGENTS.md (codex, no suppression): BOTH regions present from the start.
+    let agents = std::fs::read_to_string(fx.project.join("AGENTS.md")).unwrap();
+    assert!(
+        agents.contains(m_starts) && agents.contains(m_stops),
+        "both plugins' regions present on the shared AGENTS.md (no codex suppression):\n{agents}"
+    );
+
     // ----- transition both plugins, then sync 2 -----
     // plugin-starts BEGINS shipping hooks.json → region removed, hooks merge.
     write_hooks_json(&fx.paths, "plugin-starts", HOOKS_JSON);
@@ -224,6 +236,18 @@ fn both_transitions_in_one_sync() {
     assert!(
         claude.contains(m_stops),
         "plugin-stops region re-rendered once it stops shipping hooks.json:\n{claude}"
+    );
+
+    // AGENTS.md (codex): suppression is CLAUDE.md-only, so BOTH plugins'
+    // regions remain on the shared file through both transitions (T3-3).
+    let agents = std::fs::read_to_string(fx.project.join("AGENTS.md")).unwrap();
+    assert!(
+        agents.contains(m_starts),
+        "plugin-starts region must persist on AGENTS.md across the transition:\n{agents}"
+    );
+    assert!(
+        agents.contains(m_stops),
+        "plugin-stops region must persist on AGENTS.md across the transition:\n{agents}"
     );
 
     // plugin-starts's hooks now merged into settings.local.json.

@@ -191,8 +191,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T092 [P] [US3] Extend `tests/exit_codes_e2e.rs` — guardrails write failure → exit 46 (use devs:rust-dev agent).
 - [X] T093 [GIT] Commit: `test(phase-6): US3 guardrails render + suppression + correction`.
 - [X] T094 [US3] 4-reviewer pass; write `review/us3-findings.md` + `review/us3-disposition.md`.
-- [ ] T095 [US3] Apply US3 blockers + selected majors (use devs:rust-dev agent).
-- [ ] T096 [GIT] Commit: `fix(phase-6): apply US3 reviewer findings`.
+- [X] T095 [US3] Apply US3 blockers + selected majors (use devs:rust-dev agent).
+- [X] T096 [GIT] Commit: `fix(phase-6): apply US3 reviewer findings`.
 - [ ] T097 [US3] Run codebase mapping for Phase 5 changes (`/sdd:map incremental`).
 - [ ] T098 [US3] Review `retro/P5.md`; extract learnings to `CLAUDE.md` (conservative).
 - [ ] T099 [GIT] Commit: `docs(phase-6): US3 closeout — mapping + retro`.

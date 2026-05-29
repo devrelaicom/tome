@@ -67,6 +67,31 @@ fn guardrails_spec() -> &'static MarkerSpec {
     })
 }
 
+/// The compiled guardrails START regex. Compiled once. Shared with the
+/// body-validation scan in [`read_guardrails_source`] so the literal lives in
+/// exactly one place (`START_REGEX`).
+fn start_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(START_REGEX).expect("guardrails START regex compiles"))
+}
+
+/// The compiled key-agnostic guardrails END regex. Compiled once. Shared with
+/// the body-validation scan in [`read_guardrails_source`].
+fn end_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(END_REGEX).expect("guardrails END regex compiles"))
+}
+
+/// The compiled `tome:begin/end` block-marker regex (owned by `rules_file`).
+/// Reused here so a guardrails body cannot smuggle a Phase 4 rules-block
+/// marker into the merged file.
+fn block_marker_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(rules_file::BLOCK_MARKER_REGEX).expect("rules block marker regex compiles")
+    })
+}
+
 /// Render the canonical START marker line for `key` (`<catalog>:<plugin>`).
 fn begin_marker(key: &str) -> String {
     format!("<!-- START GUARDRAILS: {key} -->")
@@ -88,16 +113,45 @@ pub fn region_key(catalog: &str, plugin: &str) -> String {
 /// contributes no region). The source is bounded-read and symlink-refused;
 /// Tome NEVER parses the body. A read failure other than "absent" surfaces
 /// [`TomeError::GuardrailsWriteFailed`] (exit 46) naming the source file.
+///
+/// # Fail-closed marker validation (B-1)
+///
+/// The body is copied **verbatim** between Tome's managed markers and is
+/// re-parsed on every sync. A body line that itself looks like a guardrails
+/// START / END marker, or like a Phase 4 `tome:begin/end` block marker, would
+/// let a plugin escape its own region, wedge the file (a stray END makes the
+/// next parse fail), or corrupt the rules block. Escaping the body is wrong
+/// (it is contractually verbatim), so the honest defence is refusal: any such
+/// line surfaces [`TomeError::GuardrailsWriteFailed`] (exit 46) naming the
+/// source. The reconcile loop records this on its forward-progress error slot
+/// and keeps reconciling sibling plugins (FR-084).
 pub fn read_guardrails_source(plugin_root: &Path) -> Result<Option<String>, TomeError> {
     let source = plugin_root.join("hooks").join("GUARDRAILS.md");
     rules_file::refuse_symlink(&source).map_err(|_| TomeError::GuardrailsWriteFailed {
         path: source.clone(),
     })?;
-    match crate::util::bounded_read_to_string(&source, crate::util::HARNESS_RULES_MAX) {
-        Ok(body) => Ok(Some(body)),
-        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(TomeError::GuardrailsWriteFailed { path: source }),
+    let body = match crate::util::bounded_read_to_string(&source, crate::util::HARNESS_RULES_MAX) {
+        Ok(body) => body,
+        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(TomeError::GuardrailsWriteFailed { path: source }),
+    };
+
+    if body_contains_marker_line(&body) {
+        return Err(TomeError::GuardrailsWriteFailed { path: source });
     }
+    Ok(Some(body))
+}
+
+/// Whether any line of a verbatim guardrails body is itself a managed marker:
+/// a guardrails START or END line, or a `tome:begin/end` block marker. Uses
+/// the same compiled regexes the reconciler parses with, so the scan and the
+/// parse can never disagree about what counts as a marker.
+fn body_contains_marker_line(body: &str) -> bool {
+    body.split('\n').any(|line| {
+        start_regex().is_match(line)
+            || end_regex().is_match(line)
+            || block_marker_regex().is_match(line)
+    })
 }
 
 /// Whether a guardrails reconciliation changed the target on disk.
@@ -150,7 +204,10 @@ pub fn reconcile_in_file_region(
     }
 
     let prior = existing.clone().unwrap_or_default();
-    let new_contents = compose_in_file(&prior, desired)?;
+    let Composed {
+        contents: new_contents,
+        prior_had_regions,
+    } = compose_in_file(target, &prior, desired)?;
 
     if existing.as_deref() == Some(new_contents.as_str()) {
         return Ok(GuardrailsAction::LeftAlone);
@@ -162,7 +219,7 @@ pub fn reconcile_in_file_region(
         }
     })?;
 
-    Ok(classify(existing.is_some(), &prior, desired))
+    Ok(classify(existing.is_some(), prior_had_regions, desired))
 }
 
 /// Reconcile the Cursor standalone sibling (`TOME_GUARDRAILS.md`).
@@ -219,20 +276,35 @@ pub fn reconcile_standalone_sibling(
     })
 }
 
+/// The product of an in-file compose: the new contents plus whether the prior
+/// contents already held guardrails regions (so [`classify`] need not re-parse).
+#[derive(Debug)]
+struct Composed {
+    contents: String,
+    prior_had_regions: bool,
+}
+
 /// Build the new contents for an in-file target: preserve everything outside
 /// guardrails regions, overwrite surviving regions in place, drop orphaned
 /// regions (with their preceding blank separator), and append brand-new
 /// regions in lexicographic key order.
+///
+/// `target` is threaded through purely so a parse failure of the EXISTING
+/// contents names the real file in [`TomeError::GuardrailsWriteFailed`] — this
+/// is the most likely failure (a hand-mangled or marker-poisoned region) and
+/// an empty path would be a useless diagnostic.
 fn compose_in_file(
+    target: &Path,
     existing: &str,
     desired: &BTreeMap<String, String>,
-) -> Result<String, TomeError> {
+) -> Result<Composed, TomeError> {
     let spec = guardrails_spec();
     let regions = rules_file::find_marker_regions(spec, existing).map_err(|_| {
         TomeError::GuardrailsWriteFailed {
-            path: std::path::PathBuf::new(),
+            path: target.to_path_buf(),
         }
     })?;
+    let prior_had_regions = !regions.is_empty();
 
     let lines: Vec<&str> = existing.split('\n').collect();
 
@@ -290,22 +362,29 @@ fn compose_in_file(
         body.push('\n');
     }
 
-    Ok(body)
+    Ok(Composed {
+        contents: body,
+        prior_had_regions,
+    })
 }
 
 /// Classify the on-disk change for an in-file target after a write.
-fn classify(existed: bool, prior: &str, desired: &BTreeMap<String, String>) -> GuardrailsAction {
+///
+/// `prior_had_regions` is the parse result already computed by
+/// [`compose_in_file`]; reusing it avoids a second full parse (and the
+/// swallowed-error it would require).
+fn classify(
+    existed: bool,
+    prior_had_regions: bool,
+    desired: &BTreeMap<String, String>,
+) -> GuardrailsAction {
     if !existed {
         return GuardrailsAction::Created;
     }
     // The file existed; whether this is an update or a removal depends on
     // whether any region survives in the new content. If `desired` is empty
     // and the prior had regions, this was a pure removal.
-    let spec = guardrails_spec();
-    let had_regions = rules_file::find_marker_regions(spec, prior)
-        .map(|r| !r.is_empty())
-        .unwrap_or(false);
-    if desired.is_empty() && had_regions {
+    if desired.is_empty() && prior_had_regions {
         GuardrailsAction::Removed
     } else {
         GuardrailsAction::Updated
@@ -323,9 +402,18 @@ mod tests {
             .collect()
     }
 
+    /// Test shim: compose against a dummy target and return only the contents.
+    /// The target path only matters for the parse-error diagnostic (R3-1),
+    /// which these compose tests never trigger.
+    fn compose(existing: &str, desired: &BTreeMap<String, String>) -> String {
+        compose_in_file(Path::new("CLAUDE.md"), existing, desired)
+            .unwrap()
+            .contents
+    }
+
     #[test]
     fn compose_appends_region_to_empty_file() {
-        let out = compose_in_file("", &desired(&[("cat:plug", "be careful")])).unwrap();
+        let out = compose("", &desired(&[("cat:plug", "be careful")]));
         assert!(out.contains("<!-- START GUARDRAILS: cat:plug -->"));
         assert!(out.contains("be careful"));
         assert!(out.contains("<!-- END GUARDRAILS: cat:plug -->"));
@@ -334,7 +422,7 @@ mod tests {
     #[test]
     fn compose_preserves_user_prose_and_tome_block() {
         let prior = "# my rules\n\n<!-- tome:begin -->\n@.tome/RULES.md\n<!-- tome:end -->\n";
-        let out = compose_in_file(prior, &desired(&[("cat:plug", "x")])).unwrap();
+        let out = compose(prior, &desired(&[("cat:plug", "x")]));
         assert!(out.contains("# my rules"));
         assert!(out.contains("<!-- tome:begin -->"));
         assert!(out.contains("<!-- START GUARDRAILS: cat:plug -->"));
@@ -344,7 +432,7 @@ mod tests {
     fn compose_overwrites_body_in_place_not_duplicated() {
         let prior =
             "<!-- START GUARDRAILS: cat:plug -->\nold body\n<!-- END GUARDRAILS: cat:plug -->\n";
-        let out = compose_in_file(prior, &desired(&[("cat:plug", "new body")])).unwrap();
+        let out = compose(prior, &desired(&[("cat:plug", "new body")]));
         assert!(out.contains("new body"));
         assert!(!out.contains("old body"));
         // Exactly one START marker — not duplicated.
@@ -357,14 +445,14 @@ mod tests {
     #[test]
     fn compose_removes_orphaned_region() {
         let prior = "<!-- START GUARDRAILS: cat:gone -->\nbye\n<!-- END GUARDRAILS: cat:gone -->\n";
-        let out = compose_in_file(prior, &desired(&[])).unwrap();
+        let out = compose(prior, &desired(&[]));
         assert!(!out.contains("cat:gone"));
         assert!(!out.contains("bye"));
     }
 
     #[test]
     fn compose_orders_new_regions_lexicographically() {
-        let out = compose_in_file("", &desired(&[("cat:zeta", "z"), ("cat:alpha", "a")])).unwrap();
+        let out = compose("", &desired(&[("cat:zeta", "z"), ("cat:alpha", "a")]));
         let alpha = out.find("cat:alpha").unwrap();
         let zeta = out.find("cat:zeta").unwrap();
         assert!(
@@ -376,13 +464,114 @@ mod tests {
     #[test]
     fn compose_is_idempotent_on_second_pass() {
         let d = desired(&[("cat:a", "body a"), ("cat:b", "body b")]);
-        let first = compose_in_file("", &d).unwrap();
-        let second = compose_in_file(&first, &d).unwrap();
+        let first = compose("", &d);
+        let second = compose(&first, &d);
         assert_eq!(first, second, "second compose must be byte-identical");
+    }
+
+    #[test]
+    fn compose_reports_prior_had_regions() {
+        let prior = "<!-- START GUARDRAILS: cat:plug -->\nx\n<!-- END GUARDRAILS: cat:plug -->\n";
+        let with_regions = compose_in_file(Path::new("CLAUDE.md"), prior, &desired(&[])).unwrap();
+        assert!(
+            with_regions.prior_had_regions,
+            "a prior with a region must report prior_had_regions = true"
+        );
+        let no_regions =
+            compose_in_file(Path::new("CLAUDE.md"), "# just prose\n", &desired(&[])).unwrap();
+        assert!(
+            !no_regions.prior_had_regions,
+            "a prior without regions must report prior_had_regions = false"
+        );
+    }
+
+    #[test]
+    fn compose_parse_error_names_the_target() {
+        // A stray END line with no open START is malformed; the error must
+        // carry the real target path, not an empty PathBuf (R3-1).
+        let prior = "<!-- END GUARDRAILS: cat:plug -->\n";
+        let err = compose_in_file(Path::new("CLAUDE.md"), prior, &desired(&[]))
+            .expect_err("a stray END must be malformed");
+        match err {
+            TomeError::GuardrailsWriteFailed { path } => {
+                assert_eq!(path, Path::new("CLAUDE.md"), "error must name the target");
+            }
+            other => panic!("expected GuardrailsWriteFailed, got {other:?}"),
+        }
     }
 
     #[test]
     fn region_key_joins_catalog_and_plugin() {
         assert_eq!(region_key("cat", "plug"), "cat:plug");
+    }
+
+    // ----- B-1: fail-closed marker validation in the source body -----
+
+    #[test]
+    fn body_with_guardrails_start_line_is_rejected() {
+        assert!(body_contains_marker_line(
+            "ok\n<!-- START GUARDRAILS: x:y -->\nmore\n"
+        ));
+    }
+
+    #[test]
+    fn body_with_guardrails_end_line_is_rejected() {
+        assert!(body_contains_marker_line(
+            "prose\n<!-- END GUARDRAILS: c:p -->\n"
+        ));
+    }
+
+    #[test]
+    fn body_with_tome_block_marker_is_rejected() {
+        assert!(body_contains_marker_line("intro\n<!-- tome:begin -->\n"));
+        assert!(body_contains_marker_line("intro\n<!-- tome:end -->\n"));
+    }
+
+    #[test]
+    fn body_with_marker_and_trailing_whitespace_is_rejected() {
+        // The marker regexes tolerate trailing whitespace; the scan must too.
+        assert!(body_contains_marker_line(
+            "<!-- START GUARDRAILS: x:y -->   \n"
+        ));
+    }
+
+    #[test]
+    fn ordinary_body_passes_validation() {
+        let body = "---\ntitle: My rules\n---\n# Heading\n@some/include\nBe careful.   \n";
+        assert!(
+            !body_contains_marker_line(body),
+            "a body with frontmatter, a heading, an include, and trailing ws is fine"
+        );
+    }
+
+    #[test]
+    fn read_source_rejects_marker_poisoned_body() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).expect("mkdir hooks");
+        std::fs::write(
+            hooks.join("GUARDRAILS.md"),
+            "be careful\n<!-- END GUARDRAILS: c:p -->\n",
+        )
+        .expect("write source");
+
+        let err = read_guardrails_source(dir.path()).expect_err("poisoned body must be rejected");
+        match err {
+            TomeError::GuardrailsWriteFailed { path } => {
+                assert_eq!(path, hooks.join("GUARDRAILS.md"), "error names the source");
+            }
+            other => panic!("expected GuardrailsWriteFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_source_accepts_clean_body() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).expect("mkdir hooks");
+        std::fs::write(hooks.join("GUARDRAILS.md"), "be careful with deletes\n")
+            .expect("write source");
+        let body = read_guardrails_source(dir.path()).expect("clean body reads");
+        assert_eq!(body.as_deref(), Some("be careful with deletes\n"));
     }
 }
