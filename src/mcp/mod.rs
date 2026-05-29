@@ -271,7 +271,48 @@ fn build_prompt_registry(
     paths: &Paths,
 ) -> Result<prompts::PromptRegistry, TomeError> {
     let conn = crate::index::db::open_read_only(&paths.index_db)?;
-    prompts::PromptRegistry::build_for_workspace(scope.scope.name(), paths, &conn)
+    // FR-067: the `expose_agents_as_personas` toggle's effective value is
+    // read from the MCP server's SINGLE startup scope — the running
+    // server is not project-bound, so project-scope layering of this key
+    // has no effect on a running server (documented in
+    // `contracts/agent-personas.md`). We resolve it once here, at
+    // startup, via the first-declarer-wins scalar walk over the same
+    // (project, workspace, global) settings the harness sync consults.
+    let expose_personas = resolve_expose_personas(scope, paths)?;
+    prompts::PromptRegistry::build_for_workspace(scope.scope.name(), paths, &conn, expose_personas)
+}
+
+/// Resolve `expose_agents_as_personas` for the MCP server startup scope
+/// via the Phase 6 first-declarer-wins scalar walk (FR-053 / FR-067).
+///
+/// Loads the project marker (if the scope has a project root), the bound
+/// workspace's `settings.toml` (if present), and the global
+/// `settings.toml` (if present), then resolves the scalar. This is the
+/// scalar resolver — NOT the `harnesses` composition grammar.
+///
+/// `#[doc(hidden)] pub` so the FR-067 startup-scope integration test
+/// (`tests/personas_startup_scope.rs`) can drive the on-disk
+/// project→workspace→global resolution directly. Test seam only —
+/// production callers reach it through [`build_prompt_registry`].
+#[doc(hidden)]
+pub fn resolve_expose_personas(scope: &ResolvedScope, paths: &Paths) -> Result<bool, TomeError> {
+    use crate::settings::{resolve_scalar_with, scopes};
+
+    // R4-2: the three scope-loaders are promoted to `settings::scopes`;
+    // this resolver no longer carries its own copy of the
+    // NotFound/parse-error arms.
+    let project_marker = scopes::load_project_marker(scope.project_root.as_deref())?;
+    let workspace_settings = scopes::load_workspace_settings(paths, scope.scope.name())?;
+    let global_settings = scopes::load_global_settings(paths)?;
+
+    Ok(resolve_scalar_with(
+        project_marker.as_ref(),
+        workspace_settings.as_ref(),
+        &global_settings,
+        |p| p.expose_agents_as_personas,
+        |w| w.expose_agents_as_personas,
+        |g| g.expose_agents_as_personas,
+    ))
 }
 
 /// Resolve the OS shutdown signal future, returning the contract's

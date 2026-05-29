@@ -17,6 +17,7 @@ fn ws(name: &str, harnesses: Option<Vec<String>>) -> WorkspaceSettings {
         summaries: None,
         catalogs: Vec::new(),
         harnesses,
+        expose_agents_as_personas: None,
     }
 }
 
@@ -24,6 +25,7 @@ fn project(workspace: &str, harnesses: Option<Vec<String>>) -> ProjectMarkerConf
     ProjectMarkerConfig {
         workspace: WorkspaceName::parse(workspace).expect("test workspace name parses"),
         harnesses,
+        expose_agents_as_personas: None,
     }
 }
 

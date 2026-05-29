@@ -207,7 +207,7 @@ pub fn build_prompts_report(
     paths: &Paths,
     conn: &rusqlite::Connection,
 ) -> Result<PromptsReport, TomeError> {
-    let registry = PromptRegistry::build_for_workspace(workspace, paths, conn)?;
+    let registry = PromptRegistry::build_for_workspace(workspace, paths, conn, false)?;
     let prompts = registry.descriptors();
     let collisions = registry.collisions.clone();
     Ok(PromptsReport {

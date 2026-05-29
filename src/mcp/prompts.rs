@@ -34,10 +34,12 @@ use serde_json::json;
 use tracing::{error, info, warn};
 
 use crate::error::TomeError;
-use crate::index::skills::resolve_entry_body_path;
+use crate::index::skills::{
+    agent_name_clash_set, enabled_agents_for_workspace, resolve_entry_body_path,
+};
 use crate::index::workspaces::resolve_id_required;
 use crate::mcp::prompt_collision::{CollisionRecord, EntryIdentity, resolve_collisions};
-use crate::mcp::prompt_name::derive_name;
+use crate::mcp::prompt_name::{derive_name, derive_suffixed_name};
 use crate::mcp::state::McpState;
 use crate::paths::Paths;
 use crate::plugin::frontmatter::parse_skill_frontmatter;
@@ -116,6 +118,70 @@ fn truncate_description(s: &str) -> String {
 const CATCHALL_DEFAULT_DESCRIPTION: &str =
     "Optional free-form input passed to the entry as a single positional argument.";
 
+// --- Agent personas (Phase 6 / FR-060–FR-067) -----------------------------
+
+/// The single global, unnamespaced, reserved persona-drop prompt name.
+/// Exposed exactly once when `expose_agents_as_personas` is on. See
+/// `contracts/agent-personas.md` § `drop-persona`.
+pub const DROP_PERSONA_NAME: &str = "drop-persona";
+
+/// The `drop-persona` prompt body, reproduced verbatim from PRD §2.4 /
+/// `contracts/agent-personas.md`.
+const DROP_PERSONA_BODY: &str =
+    "Stop acting as any assumed persona and return to your default behaviour\nand personality.";
+
+/// `description` for a `<name>-persona` prompt. Phrased to make the
+/// advisory-state caveat (FR-065) explicit on the `prompts/list` surface:
+/// a persona is conversational context, not the isolation a native
+/// subagent provides.
+fn persona_description(display_name: &str) -> String {
+    format!(
+        "Assume the `{display_name}` agent persona (advisory conversational context, not enforced configuration — the agent may drift or ignore it; not the isolation a native subagent provides)."
+    )
+}
+
+/// `description` for the reserved `drop-persona` prompt.
+const DROP_PERSONA_DESCRIPTION: &str =
+    "Stop acting as any assumed agent persona and return to default behaviour.";
+
+/// The role an entry plays on the prompt surface. Phase 5 entries are
+/// [`PersonaRole::None`]; Phase 6 adds the two persona shapes that the
+/// `prompts/get` path resolves through the template-wrapping branch
+/// rather than the command/skill body path (FR-064).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersonaRole {
+    /// A Phase 5 command/skill prompt — rendered via the unchanged
+    /// command/skill body path.
+    None,
+    /// An agent exposed as a `<name>-persona` prompt — body is
+    /// frontmatter-stripped, template-wrapped, then substituted.
+    Agent,
+    /// The reserved global `drop-persona` prompt — fixed body, no
+    /// on-disk file, no substitution.
+    Drop,
+}
+
+/// Wrap an agent's (already substitution-applied) body in the
+/// role-assumption template, reproduced verbatim from PRD §2.4 /
+/// `contracts/agent-personas.md` § "Persona prompt body".
+///
+/// `display_name` is the agent's frontmatter `name` (else filename stem,
+/// read before stripping); `persona_name` is the derived persona slug
+/// (`<name>-persona` or `<plugin>-<name>-persona`) used for the wrapping
+/// tag. `$ARGUMENTS` is left in place for the Phase 5 substitution
+/// pipeline to resolve (Stage 3 + the `ARGUMENTS:` append fallback) —
+/// the template is the *only* thing the persona path adds; substitution
+/// itself is the shared pipeline (NFR-007, no parallel path).
+fn wrap_persona_body(display_name: &str, persona_name: &str, body: &str) -> String {
+    format!(
+        "Assume the following {display_name} persona until instructed otherwise.\n\n\
+         <{persona_name}>\n\
+         {body}\n\
+         </{persona_name}>\n\n\
+         While acting as the {display_name} persona, you must: $ARGUMENTS"
+    )
+}
+
 /// Does `body` reference the bare `$ARGUMENTS` placeholder? Used only to
 /// decide whether the catch-all `args` argument is surfaced in
 /// `prompts/list` (per `contracts/mcp-prompts.md § Argument schema
@@ -164,6 +230,14 @@ pub struct PromptEntry {
     /// reviewer pass (R-M3) — pre-US1.d the prompts/get hot path opened
     /// a second read-only DB connection per request to fetch this.
     pub plugin_version: String,
+    /// Phase 6: the persona role of this entry. [`PersonaRole::None`] for
+    /// Phase 5 command/skill prompts; the two persona variants take the
+    /// template-wrapping `prompts/get` branch (FR-064).
+    pub persona: PersonaRole,
+    /// Phase 6: the agent's display name (`<Name>` in the persona
+    /// template) — frontmatter `name`, else filename stem. Empty for
+    /// non-persona entries. For the `Drop` role this is unused.
+    pub display_name: String,
 }
 
 impl PromptEntry {
@@ -176,6 +250,30 @@ impl PromptEntry {
     /// the registry HashMap key e.g. `"my-plugin__fix-issue2"` — the
     /// post-collision final name advertised to the host.
     pub fn descriptor(&self, prompt_name: String) -> PromptDescriptor {
+        // Phase 6 persona paths derive their argument schema directly —
+        // they bypass the Phase 5 named/catch-all derivation below.
+        match self.persona {
+            PersonaRole::Agent => {
+                // Case B (catch-all `args`, optional) — the persona
+                // template always carries `$ARGUMENTS`.
+                let args = vec![
+                    PromptArgument::new("args")
+                        .with_description(CATCHALL_DEFAULT_DESCRIPTION)
+                        .with_required(false),
+                ];
+                return PromptDescriptor::new(
+                    prompt_name,
+                    Some(self.description.clone()),
+                    Some(args),
+                );
+            }
+            PersonaRole::Drop => {
+                // The reserved drop-persona prompt takes no arguments.
+                return PromptDescriptor::new(prompt_name, Some(self.description.clone()), None);
+            }
+            PersonaRole::None => {}
+        }
+
         let arguments = if !self.arguments.is_empty() {
             // Case A — named arguments. All required strings per FR-070,
             // declaration order preserved.
@@ -237,6 +335,7 @@ impl PromptRegistry {
         workspace_name: &WorkspaceName,
         paths: &Paths,
         conn: &Connection,
+        expose_personas: bool,
     ) -> Result<Self, TomeError> {
         let workspace_id = resolve_id_required(conn, workspace_name)?;
 
@@ -381,8 +480,28 @@ impl PromptRegistry {
                     argument_hint,
                     body_uses_arguments,
                     plugin_version: row.plugin_version,
+                    persona: PersonaRole::None,
+                    display_name: String::new(),
                 },
             );
+        }
+
+        // Phase 6 (FR-060–FR-067): when `expose_agents_as_personas` is on
+        // (resolved against the server startup scope), append one
+        // `<name>-persona` identity per enabled agent plus the reserved
+        // `drop-persona`, folding them into the SINGLE Phase 5 collision
+        // namespace (FR-066) below. The persona path is parallel to the
+        // command/skill query above (agents are `user_invocable = 0`, so
+        // they are NOT in that query) — see `contracts/agent-personas.md`
+        // § Emission path.
+        if expose_personas {
+            Self::collect_persona_identities(
+                workspace_name,
+                paths,
+                conn,
+                &mut identities,
+                &mut hydrated,
+            )?;
         }
 
         let (resolved, collisions) = resolve_collisions(&identities);
@@ -416,6 +535,173 @@ impl PromptRegistry {
             by_name,
             collisions,
         })
+    }
+
+    /// Append persona identities (one `<name>-persona` per enabled agent
+    /// plus the reserved `drop-persona`) into the shared `identities` /
+    /// `hydrated` collections so they participate in the SINGLE Phase 5
+    /// collision pass over the union namespace (FR-066). Agents are
+    /// `user_invocable = 0`, so they are absent from the command/skill
+    /// query — this is the parallel persona path (FR-064).
+    ///
+    /// Name derivation (FR-061): `<name>-persona` normally,
+    /// `<plugin>-<name>-persona` only for agents whose `<name>` clashes
+    /// across two or more enabled plugins (the FR-072 clash set, reused
+    /// via [`crate::index::skills::agent_name_clash_set`]). The clash
+    /// prefix is applied HERE, before the collision pass; the Phase 5
+    /// counter-suffix backstop fires only on residual collisions.
+    ///
+    /// R4-1: each agent persona carries the agent's REAL `indexed_at`, so
+    /// a `<name>-persona` colliding with a command/skill tie-breaks by
+    /// `indexed_at ASC` exactly like any other entry (FR-062). The empty
+    /// `indexed_at` seed is reserved for `drop-persona` ONLY.
+    ///
+    /// `drop-persona` is seeded with an empty `indexed_at` + empty
+    /// `(catalog, plugin)` so it sorts first in any collision bucket
+    /// (the resolver tie-breaks on `indexed_at ASC` then the identity
+    /// tuple). That guarantees the reservation: if a command/skill/
+    /// persona derives to `drop-persona`, the OTHER entry is
+    /// counter-suffixed and `drop-persona` keeps the base name.
+    fn collect_persona_identities(
+        workspace_name: &WorkspaceName,
+        paths: &Paths,
+        conn: &Connection,
+        identities: &mut Vec<EntryIdentity>,
+        hydrated: &mut HashMap<(String, String, EntryKind, String), PromptEntry>,
+    ) -> Result<(), TomeError> {
+        let clash_set = agent_name_clash_set(conn, workspace_name.as_str())?;
+        let agents = enabled_agents_for_workspace(conn, workspace_name.as_str())?;
+
+        for agent in agents {
+            let path = match resolve_entry_body_path(
+                conn,
+                paths,
+                workspace_name.as_str(),
+                &agent.catalog,
+                &agent.plugin,
+                &agent.path,
+            ) {
+                Ok(p) => p,
+                Err(err) => {
+                    warn!(
+                        target: "tome::mcp::prompts",
+                        catalog = %agent.catalog,
+                        plugin = %agent.plugin,
+                        name = %agent.name,
+                        reason = %err,
+                        "skipping persona: agent dir not resolvable on disk",
+                    );
+                    continue;
+                }
+            };
+
+            // Re-parse to recover the display name (frontmatter `name`,
+            // read BEFORE stripping; else the row name = filename stem).
+            let parsed = match parse_skill_frontmatter(&path) {
+                Ok(p) => p,
+                Err(err) => {
+                    warn!(
+                        target: "tome::mcp::prompts",
+                        catalog = %agent.catalog,
+                        plugin = %agent.plugin,
+                        name = %agent.name,
+                        path = %path.display(),
+                        reason = %err,
+                        "skipping persona: agent frontmatter unreadable on disk",
+                    );
+                    continue;
+                }
+            };
+            let (display_name, _) = parsed.resolved_name(&agent.name);
+
+            // FR-061: clash prefix applied here, before the collision
+            // pass. `<plugin>-<name>-persona` for clashing agents,
+            // `<name>-persona` otherwise. C4-2: derive through
+            // `derive_suffixed_name` so the `-persona` suffix is preserved
+            // even when the base is long (the prior whole-override
+            // truncation amputated it).
+            let base = if clash_set.contains(&agent.name) {
+                format!("{}-{}", agent.plugin, agent.name)
+            } else {
+                agent.name.clone()
+            };
+            let derived = derive_suffixed_name(&base, "persona");
+
+            // R4-1: carry the agent's REAL `indexed_at` so a colliding
+            // `<name>-persona` tie-breaks by `indexed_at ASC` like every
+            // other entry (FR-062) — NOT the over-broad empty seed that
+            // belongs only to `drop-persona`.
+            identities.push(EntryIdentity {
+                catalog: agent.catalog.clone(),
+                plugin: agent.plugin.clone(),
+                kind: EntryKind::Agent,
+                name: agent.name.clone(),
+                indexed_at: agent.indexed_at.clone(),
+                derived_name: derived,
+            });
+
+            hydrated.insert(
+                (
+                    agent.catalog.clone(),
+                    agent.plugin.clone(),
+                    EntryKind::Agent,
+                    agent.name.clone(),
+                ),
+                PromptEntry {
+                    catalog: agent.catalog,
+                    plugin: agent.plugin,
+                    name: agent.name,
+                    kind: EntryKind::Agent,
+                    description: truncate_description(&persona_description(&display_name)),
+                    path,
+                    arguments: Vec::new(),
+                    argument_hint: None,
+                    body_uses_arguments: true,
+                    // C4-1: thread the agent's real plugin version so
+                    // `${TOME_PLUGIN_VERSION}` resolves in the persona body.
+                    plugin_version: agent.plugin_version,
+                    persona: PersonaRole::Agent,
+                    display_name,
+                },
+            );
+        }
+
+        // The reserved global `drop-persona` (FR-063), exposed exactly
+        // once. Seeded to sort first in any collision bucket so it wins
+        // the base name (the reservation). No on-disk file; fixed body.
+        let drop_key = (
+            String::new(),
+            String::new(),
+            EntryKind::Agent,
+            DROP_PERSONA_NAME.to_owned(),
+        );
+        identities.push(EntryIdentity {
+            catalog: String::new(),
+            plugin: String::new(),
+            kind: EntryKind::Agent,
+            name: DROP_PERSONA_NAME.to_owned(),
+            indexed_at: String::new(),
+            derived_name: DROP_PERSONA_NAME.to_owned(),
+        });
+        hydrated.insert(
+            drop_key,
+            PromptEntry {
+                catalog: String::new(),
+                plugin: String::new(),
+                name: DROP_PERSONA_NAME.to_owned(),
+                kind: EntryKind::Agent,
+                description: DROP_PERSONA_DESCRIPTION.to_owned(),
+                path: PathBuf::new(),
+                arguments: Vec::new(),
+                argument_hint: None,
+                body_uses_arguments: false,
+                plugin_version: String::new(),
+                persona: PersonaRole::Drop,
+                display_name: String::new(),
+            },
+        );
+
+        Ok(())
     }
 
     /// Look up an entry by its final prompt name.
@@ -571,6 +857,18 @@ fn render_for_get(
     prompt_name: &str,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<String, TomeError> {
+    // Phase 6: persona paths diverge from the command/skill body path.
+    match entry.persona {
+        PersonaRole::Drop => {
+            // Fixed body, no on-disk file, no substitution, no args.
+            return Ok(DROP_PERSONA_BODY.to_owned());
+        }
+        PersonaRole::Agent => {
+            return render_persona_for_get(state, entry, prompt_name, arguments);
+        }
+        PersonaRole::None => {}
+    }
+
     // (2) Use the absolute body path cached on the PromptEntry at
     // registry build time. R-M4 (US1.d reviewer pass): pre-US1.d this
     // re-opened a read-only DB connection, re-ran `resolve_entry_body_path`
@@ -616,6 +914,57 @@ fn render_for_get(
     // split per the substitution-engine contract; the boundary mapping
     // here had been collapsing both into one `TomeError` variant.
     substitution::render(&body, &context).map_err(|e| match e {
+        SubstitutionError::PluginDataDirCreationFailed { path, source } => {
+            TomeError::PluginDataDirWriteFailed { path, source }
+        }
+        SubstitutionError::WorkspaceDataDirCreationFailed { path, source } => {
+            TomeError::WorkspaceDataDirWriteFailed { path, source }
+        }
+        SubstitutionError::InvalidArgumentFrontmatter { file, reason } => {
+            TomeError::InvalidArgumentFrontmatter { file, reason }
+        }
+        SubstitutionError::PromptArgumentMismatch { expected, supplied } => {
+            TomeError::PromptArgumentMismatch { expected, supplied }
+        }
+    })
+}
+
+/// Render an agent-persona `prompts/get` (FR-062). Strips the agent
+/// frontmatter, wraps the body in the role-assumption template, then runs
+/// the SAME Phase 5 [`substitution::render`] pipeline — there is NO
+/// parallel substitution path (NFR-007). The template embeds
+/// `$ARGUMENTS`, so Stage 3 of the pipeline resolves the single catch-all
+/// `args`; when the caller supplies input the template doesn't consume,
+/// the pipeline's documented `ARGUMENTS:` append fallback applies.
+fn render_persona_for_get(
+    state: &McpState,
+    entry: &PromptEntry,
+    prompt_name: &str,
+    arguments: Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<String, TomeError> {
+    let body_path = entry.path.clone();
+
+    // Strip the agent frontmatter — `parsed.body` is the post-strip body.
+    let parsed = parse_skill_frontmatter(&body_path).map_err(|err| {
+        TomeError::SkillFrontmatterParseError {
+            file: body_path.clone(),
+            message: err.to_string(),
+        }
+    })?;
+
+    // Wrap in the role-assumption template (verbatim from the contract).
+    // `$ARGUMENTS` is left for the shared pipeline to resolve.
+    let wrapped = wrap_persona_body(&entry.display_name, prompt_name, &parsed.body);
+
+    // The persona prompt schema is the single catch-all `args` (Case B),
+    // so `declared_args` is empty and caller args map through the
+    // catch-all path exactly as a Phase 5 catch-all prompt.
+    let declared_args: Vec<String> = Vec::new();
+    let args = map_caller_arguments(prompt_name, arguments, &declared_args)?;
+
+    let context = build_get_context(state, entry, body_path, declared_args, args)?;
+
+    substitution::render(&wrapped, &context).map_err(|e| match e {
         SubstitutionError::PluginDataDirCreationFailed { path, source } => {
             TomeError::PluginDataDirWriteFailed { path, source }
         }

@@ -203,8 +203,8 @@ fn list_returns_empty_for_empty_workspace() {
     let _ = open_index(&paths);
 
     let conn = open_index(&paths);
-    let registry =
-        PromptRegistry::build_for_workspace(&global(), &paths, &conn).expect("build registry");
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
+        .expect("build registry");
     assert!(registry.by_name.is_empty());
     assert!(registry.collisions.is_empty());
     assert!(registry.descriptors().is_empty());
@@ -218,8 +218,8 @@ fn list_excludes_skills_by_default() {
     let (_tmp, paths) = stage_workspace_with(&[("only-skill", skill_body)], &[]);
 
     let conn = open_index(&paths);
-    let registry =
-        PromptRegistry::build_for_workspace(&global(), &paths, &conn).expect("build registry");
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
+        .expect("build registry");
     assert!(
         registry.by_name.is_empty(),
         "skills with default user_invocable=false must be excluded; got {:?}",
@@ -234,8 +234,8 @@ fn list_includes_commands_by_default() {
     let (_tmp, paths) = stage_workspace_with(&[], &[("fix-issue", cmd_body)]);
 
     let conn = open_index(&paths);
-    let registry =
-        PromptRegistry::build_for_workspace(&global(), &paths, &conn).expect("build registry");
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
+        .expect("build registry");
     let descriptors = registry.descriptors();
     assert_eq!(descriptors.len(), 1, "one command becomes one prompt");
     assert_eq!(descriptors[0].name, "plug__fix-issue");
@@ -255,8 +255,8 @@ fn list_includes_both_kinds_when_skill_opts_in() {
     );
 
     let conn = open_index(&paths);
-    let registry =
-        PromptRegistry::build_for_workspace(&global(), &paths, &conn).expect("build registry");
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
+        .expect("build registry");
     let names: Vec<String> = registry
         .descriptors()
         .iter()
@@ -278,8 +278,8 @@ Run a deploy for $1 from $2 to $3
     let (_tmp, paths) = stage_workspace_with(&[], &[("deploy", cmd_body)]);
 
     let conn = open_index(&paths);
-    let registry =
-        PromptRegistry::build_for_workspace(&global(), &paths, &conn).expect("build registry");
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
+        .expect("build registry");
     let descriptors = registry.descriptors();
     assert_eq!(descriptors.len(), 1);
     let args = descriptors[0]
@@ -310,8 +310,8 @@ Please fix issue $ARGUMENTS
     let (_tmp, paths) = stage_workspace_with(&[], &[("fix-issue", cmd_body)]);
 
     let conn = open_index(&paths);
-    let registry =
-        PromptRegistry::build_for_workspace(&global(), &paths, &conn).expect("build registry");
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
+        .expect("build registry");
     let descriptors = registry.descriptors();
     let args = descriptors[0]
         .arguments
@@ -338,8 +338,8 @@ Do a thing.
     let (_tmp, paths) = stage_workspace_with(&[], &[("bare", cmd_body)]);
 
     let conn = open_index(&paths);
-    let registry =
-        PromptRegistry::build_for_workspace(&global(), &paths, &conn).expect("build registry");
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
+        .expect("build registry");
     let descriptors = registry.descriptors();
     assert!(
         descriptors[0].arguments.is_none(),
@@ -370,7 +370,7 @@ Do a thing.
 /// a name to look up).
 fn build_state_for_prompts(paths: &tome::paths::Paths) -> Arc<McpState> {
     let conn = open_index(paths);
-    let registry = PromptRegistry::build_for_workspace(&global(), paths, &conn)
+    let registry = PromptRegistry::build_for_workspace(&global(), paths, &conn, false)
         .expect("build prompt registry");
     drop(conn);
 
@@ -586,7 +586,7 @@ fn registry_build_skips_entry_with_missing_body_file() {
     std::fs::remove_file(&gone_path).expect("delete body file");
 
     let conn = open_index(&paths);
-    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn)
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
         .expect("registry build must succeed when one body file is missing");
 
     let names: Vec<String> = registry
@@ -619,7 +619,7 @@ fn registry_build_skips_entry_with_malformed_frontmatter() {
     std::fs::write(&bad_path, "no frontmatter delimiters here\n").expect("rewrite body");
 
     let conn = open_index(&paths);
-    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn)
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
         .expect("registry build must succeed when one frontmatter is malformed");
 
     let names: Vec<String> = registry
@@ -642,8 +642,8 @@ fn description_truncated_at_300_chars_with_ellipsis() {
     let (_tmp, paths) = stage_workspace_with(&[], &[("chatty", cmd_body.as_str())]);
 
     let conn = open_index(&paths);
-    let registry =
-        PromptRegistry::build_for_workspace(&global(), &paths, &conn).expect("build registry");
+    let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
+        .expect("build registry");
     let desc = registry.descriptors()[0]
         .description
         .clone()

@@ -74,6 +74,46 @@ pub fn sanitise_trunc(input: &str, max: usize) -> String {
     truncated.trim_end_matches('_').to_owned()
 }
 
+/// Derive a `<base>-<suffix>` persona-style prompt name that always ends
+/// in `-<suffix>`, applying the Phase 5 sanitisation and keeping the
+/// whole thing within [`OVERRIDE_MAX`] chars.
+///
+/// Phase 6 / US4 (C4-2): the prior `derive_name(base, "persona",
+/// Some("{base}-persona"))` routed the whole `<base>-persona` override
+/// through [`sanitise_trunc`] at 48 chars, which amputates the `-persona`
+/// suffix for a long base (e.g. `…-perso`). The user-facing contract is
+/// that a persona prompt is named `<name>-persona`; the suffix is
+/// load-bearing. So we sanitise the suffix, reserve room for it (plus the
+/// single joining `-`), then truncate ONLY the base portion to fill the
+/// remainder — the result is sanitised end-to-end and always terminates
+/// in `-<suffix>`.
+///
+/// When the sanitised suffix alone already meets or exceeds the budget
+/// (degenerate / not expected in practice — `persona` is 7 chars) the
+/// suffix is returned truncated on its own; correctness of the tail
+/// shape is preserved over including any base characters.
+pub fn derive_suffixed_name(base: &str, suffix: &str) -> String {
+    let suffix = sanitise_trunc(suffix, OVERRIDE_MAX);
+    if suffix.is_empty() {
+        // No usable suffix — fall back to a plain truncated base.
+        return sanitise_trunc(base, OVERRIDE_MAX);
+    }
+    // Budget for the base = total cap minus the suffix and the joining
+    // `-`. `saturating_sub` keeps us safe if the suffix consumed it all.
+    let suffix_len = suffix.chars().count();
+    let base_budget = OVERRIDE_MAX.saturating_sub(suffix_len + 1);
+    if base_budget == 0 {
+        // Nothing left for the base — emit the suffix alone (still a
+        // valid, suffix-terminated slug, just with no base).
+        return suffix;
+    }
+    let base = sanitise_trunc(base, base_budget);
+    if base.is_empty() {
+        return suffix;
+    }
+    format!("{base}-{suffix}")
+}
+
 /// Derive the Tome-side prompt name for an entry.
 ///
 /// When `name_override` is `Some`, the override replaces BOTH portions —
@@ -137,6 +177,39 @@ mod tests {
         assert_eq!(
             derive_name("midnight-expert", "fix-issue", Some("review-my-pr")),
             "review-my-pr"
+        );
+    }
+
+    #[test]
+    fn suffixed_name_short_base_keeps_full_shape() {
+        assert_eq!(
+            derive_suffixed_name("reviewer", "persona"),
+            "reviewer-persona"
+        );
+    }
+
+    #[test]
+    fn suffixed_name_preserves_suffix_for_long_base() {
+        // A base longer than the 48-char budget must NOT amputate the
+        // `-persona` suffix (C4-2). The base is truncated to fill the
+        // remainder; the slug always terminates in `-persona`.
+        let long_base = "a".repeat(80);
+        let name = derive_suffixed_name(&long_base, "persona");
+        assert!(name.ends_with("-persona"), "suffix preserved; got {name:?}",);
+        assert!(
+            name.chars().count() <= OVERRIDE_MAX,
+            "within the override cap; got {} chars: {name:?}",
+            name.chars().count(),
+        );
+        // base budget = 48 - (7 + 1) = 40 `a`s, then `-persona`.
+        assert_eq!(name, format!("{}-persona", "a".repeat(40)));
+    }
+
+    #[test]
+    fn suffixed_name_sanitises_base() {
+        assert_eq!(
+            derive_suffixed_name("My Plugin.Name", "persona"),
+            "my_plugin_name-persona",
         );
     }
 }

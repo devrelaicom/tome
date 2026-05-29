@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and patterns for Tome (Rust CLI).
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 US3 — guardrails + rules-file correction)
+> **Last Updated**: 2026-05-29 (Phase 6 US4 — agent personas via MCP prompts)
 
 ## Code Style
 
@@ -27,7 +27,7 @@ All three enforce at the pre-commit hook (`.githooks/pre-commit`) before commits
 | Max line length | 100 chars (soft; clippy tunable) |
 | Comments | Explain *why*, not *what* (readers know Rust) |
 
-**Strictness boundary** (FR-013a): `#[serde(deny_unknown_fields)]` applies to Tome-owned inputs (`config.toml`, model manifests, index `meta` rows). Third-party inputs (SKILL.md YAML frontmatter, `plugin.json` metadata, agent frontmatter) parse leniently — enforced by `tests/manifest_strictness.rs` grep guard.
+**Strictness boundary** (FR-013a): `#[serde(deny_unknown_fields)]` applies to Tome-owned inputs (`config.toml`, model manifests, index `meta` rows, settings structs). Third-party inputs (SKILL.md YAML frontmatter, `plugin.json` metadata, agent frontmatter) parse leniently — enforced by `tests/manifest_strictness.rs` grep guard.
 
 ## Naming Conventions
 
@@ -45,7 +45,7 @@ All three enforce at the pre-commit hook (`.githooks/pre-commit`) before commits
 | Type | Convention | Example |
 |------|------------|---------|
 | Variables | snake_case | `catalog_name`, `plugin_id`, `is_enabled` |
-| Constants | SCREAMING_SNAKE_CASE | `MAX_RETRIES`, `LONG_MAX_CHARS`, `MCP_SLASH_PREFIX` |
+| Constants | SCREAMING_SNAKE_CASE | `MAX_RETRIES`, `LONG_MAX_CHARS`, `MCP_SLASH_PREFIX`, `DROP_PERSONA_NAME` |
 | Functions | snake_case, verb-prefix | `enable_plugin`, `resolve_plugin_dir`, `assemble_report` |
 | Structs | PascalCase | `TomeError`, `Config`, `Fixture` |
 | Enums | PascalCase, variants as items | `ScopeKind`, `CompositionErrorKind`, `EntryKind` |
@@ -53,6 +53,8 @@ All three enforce at the pre-commit hook (`.githooks/pre-commit`) before commits
 | Type aliases | PascalCase or semantic | `ResolvedScope`, `SubstitutionContext` |
 
 **Phase 5 constant promotion pattern**: String literals that appear across multiple modules become constants at their first cross-module consumer. Example: `MCP_SLASH_PREFIX = "/mcp__"` defined in `src/mcp/mod.rs` once, consumed by `commands/doctor.rs` (establishes rule-of-3).
+
+**Phase 6 US4 constant promotion**: `DROP_PERSONA_NAME = "drop-persona"` defined once in `src/mcp/prompts.rs`, consumed by `mcp::state` and prompt-collision detection (`src/mcp/prompt_collision.rs`).
 
 ### Phase 5: Stringly-Typed Enum Dispatch Pattern
 
@@ -254,6 +256,10 @@ When a helper function is reused at 3+ call sites, promote it to `pub` or move i
 - `body_has_bare_arguments()` — promoted to `pub` in `src/substitution/mod.rs` for use in `prompts/get` + `get_skill` MCP tools (US3.d R-M1)
 - `build_context_for_entry()` — extracted to `src/substitution/context.rs` at Polish M-2 to serve both `prompts.rs::build_get_context` and `get_skill.rs::build_substitution_context`
 - `validate_db_stored_path()` — extracted to `src/index/skills.rs` at Polish M-4 to serve both `resolve_entry_body_path` and `commands/plugin/show.rs::list_entries`
+
+**Phase 6 US4 examples**:
+- `settings::scopes` module — canonical scope-loaders (`load_project_marker`, `load_workspace_settings`, `load_global_settings`) single-sourced from prior triplicate copies in `commands::harness::list`, `harness::sync`, and MCP server startup (R-4-2). Each resolver consistent error classification + reason strings.
+- `resolve_scalar` + `resolve_scalar_with` — first-declarer-wins scalar resolver for Phase 6 boolean settings (FR-053, R-12). The generic closure form (`resolve_scalar_with`) enables reuse for both `expose_agents_as_personas` and `strip_plugin_agent_privileges` (US5) without duplication.
 
 ### Single-Source-of-Truth for Length Windows
 
@@ -819,6 +825,90 @@ fn compose_in_file(target: &Path, desired: &BTreeMap<String, String>) -> Result<
 
 **Discipline**: Within a file: the `tome:begin/end` block is rendered first, then guardrails regions in lexicographic `<catalog>:<plugin>` order (FR-014). Existing regions are overwritten between their markers in place (never duplicated, never reordered); new regions are appended in lex order; orphaned regions are removed. A re-sync with no change rewrites nothing (idempotence via short-circuit compare, FR-525). Used in `src/harness/guardrails.rs::reconcile_in_file_region`, verified in `tests/guardrails_render.rs` (region placement, lexicographic order, overwrite-in-place, new-append, orphan-removal, idempotence).
 
+### Phase 6 US4: First-Declarer-Wins Scalar Settings Resolver
+
+When resolving a Phase 6 boolean setting (e.g., `expose_agents_as_personas`, `strip_plugin_agent_privileges`) across project → workspace → global scopes, apply a first-declarer-wins priority walk where the nearest scope that declares the field wins:
+
+```rust
+// src/settings/mod.rs (FR-053, R-12)
+pub fn resolve_scalar(
+    project: Option<bool>,
+    workspace: Option<bool>,
+    global: Option<bool>,
+) -> bool {
+    project.or(workspace).or(global).unwrap_or(false)
+}
+
+// Closure-based form for generic field accessors
+pub fn resolve_scalar_with<FP, FW, FG>(
+    project: Option<&ProjectMarkerConfig>,
+    workspace: Option<&WorkspaceSettings>,
+    global: &GlobalSettings,
+    project_field: FP,
+    workspace_field: FW,
+    global_field: FG,
+) -> bool
+where
+    FP: Fn(&ProjectMarkerConfig) -> Option<bool>,
+    FW: Fn(&WorkspaceSettings) -> Option<bool>,
+    FG: Fn(&GlobalSettings) -> Option<bool>,
+{
+    resolve_scalar(
+        project.and_then(project_field),
+        workspace.and_then(workspace_field),
+        global_field(global),
+    )
+}
+```
+
+**Discipline**: This is deliberately NOT the `harnesses` composition grammar (`resolve_effective_list`): there is no list to union/subtract and no `[workspace]` / `[global]` / `!name` references. A project `false` simply overrides a global `true`. The closure form (`resolve_scalar_with`) enables reuse for multiple scalar settings (presently `expose_agents_as_personas`; US5 adds `strip_plugin_agent_privileges`) without code duplication — a new scalar adds a one-line call site extracting its field. Applied in `src/settings/mod.rs` (FR-053); verified in `tests/settings_p6.rs` (default/layering/first-declarer-wins behaviour).
+
+### Phase 6 US4: SSOT Scope-Loaders for Settings Composition
+
+When resolving the project marker + workspace settings + global settings triple, use canonical scope-loaders from `src/settings/scopes.rs` rather than triplicating the resolution logic:
+
+```rust
+// src/settings/scopes.rs — three functions with consistent error classification
+pub(crate) fn load_project_marker(project_root: Option<&Path>) -> Result<Option<ProjectMarkerConfig>, TomeError> { ... }
+pub(crate) fn load_workspace_settings(paths: &Paths, workspace_name: &WorkspaceName) -> Result<Option<WorkspaceSettings>, TomeError> { ... }
+pub(crate) fn load_global_settings(paths: &Paths) -> Result<GlobalSettings, TomeError> { ... }
+```
+
+**Rationale** (R-4-2 / rule-of-3): The three loaders were previously duplicated verbatim across `commands::harness::list`, `harness::sync`, and the MCP server's persona-option startup resolver. Each copy carried the same error classification (`NotFound` → `Ok(None)`, parse error → `WorkspaceMalformed`) and the same reason strings. They live here once, `pub(crate)`, so every consumer resolves the (project, workspace, global) settings triple through a single source of truth. Documented in module-level docs with error-mapping contract. Applied to: `commands/harness/list.rs`, `harness/sync.rs`, `mcp/state.rs::resolve_expose_personas`; verified in `tests/personas_startup_scope.rs` (startup scope resolution from on-disk settings).
+
+### Phase 6 US4: Parallel Prompt Path on the Phase 5 Registry
+
+When exposing agent personas as MCP prompts, use a parallel prompt-builder path alongside Phase 5's command and skill prompts, consuming the same `build_context_for_entry` + substitution/argument pipeline but with persona-specific template wrapping:
+
+```rust
+// src/mcp/prompts.rs — persona role variant
+pub enum PersonaRole {
+    None,            // Phase 5 command/skill
+    DropPersona,     // Global drop-persona prompt
+    AssumePersona,   // Agent <name>-persona prompt
+}
+
+// Persona template wrapping (distinct from command/skill body path)
+// Merges agent body with agent name + role-assumption template
+// Applies Phase 5 substitution + argument pipeline
+// Returns wrapped body for MCP prompt response
+```
+
+**Discipline**: Personas join the single collision namespace alongside commands/skills (shared `drop-persona` name reserved, clash-prefix logic extended to personas). The registry's prompt-builder indexes agent rows at startup (same query as the sync path but with different column projection). The persona template-wrapping path forks from the command/skill path at the body-rendering stage, consuming the same `build_context_for_entry` + substitution (no parallel substitution pipeline — NFR-007 preserved). Applied in `src/mcp/prompts.rs` (FR-062 / FR-064); verified in `tests/personas.rs` (prompts/list + prompts/get persona rendering with substitution/arguments) and `tests/mcp_prompts_json_shape.rs::persona_response_is_byte_stable` (T111 wire-shape pin).
+
+### Phase 6 US4: Full Column Projection on Row Queries for Multiple Consumers
+
+When extending a row-projection struct for a new consumer (e.g., personas added to the prompt registry), mirror the sibling query's full column set even if only a subset is locally used:
+
+```rust
+// src/index/skills.rs — persona query includes full column set
+// SELECT id, name, description, indexed_at, plugin_id, ...
+// This mirrors the command/skill query, ensuring personas
+// can access plugin_version + indexed_at for collision tie-break
+```
+
+**Rationale** (US4 M-1): The persona path needed `plugin_version` + `indexed_at` for collision tie-breaking (matching command/skill behaviour), but early iterations omitted these columns from the persona query, silently degrading substitution + collision logic. Including the full column set ensures future paths consume the same data shape. Applied in `src/index/skills.rs::enabled_agents_for_workspace` (persona query includes plugin_version + indexed_at); verified in `tests/personas_collision.rs` (clash detection + name rendering consistent with commands/skills).
+
 ## Comments & Documentation
 
 | Type | Format | Usage |
@@ -898,7 +988,7 @@ Capability-oriented: each module owns one cohesive feature.
 | `embedding` | Embedder/Reranker traits, FastembedEmbedder impl |
 | `presentation` | CLI tables, spinners, colour, prompts |
 | `workspace` | Workspace lifecycle, binding, resolution, scope |
-| `settings` | Layered settings composition, TOML edit |
+| `settings` | Layered settings composition, TOML edit, scalar resolution |
 | `harness` | Per-harness module integration, rules-file + MCP-config + agent translation + hooks merge + guardrails |
 | `doctor` | System diagnostics, suggested fixes |
 | `mcp` | Async MCP server (only async island) |
@@ -917,7 +1007,7 @@ See `TESTING.md` for detailed test patterns, but core conventions:
 
 ## Strictness at Boundaries
 
-- **Input strictness**: `#[serde(deny_unknown_fields)]` on Tome-owned inputs.
+- **Input strictness**: `#[serde(deny_unknown_fields)]` on Tome-owned inputs (including settings structs).
 - **Output leniency**: third-party JSON and YAML parsed leniently. Output `Serialize` types do NOT carry `#[serde(deny_unknown_fields)]` (Phase 5: consistency pattern established).
 - **Credentials scrubbed**: all error chains + model URLs sanitized before logging.
 - **Symlink refusal**: symlink paths refused at every read/write entry point.

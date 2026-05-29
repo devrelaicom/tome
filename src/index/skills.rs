@@ -366,6 +366,19 @@ pub struct EnabledAgent {
     /// The `skills.path` column — catalog-relative body path
     /// (`agents/<name>.md`).
     pub path: String,
+    /// The `skills.plugin_version` column (`plugin.json` `version`).
+    /// Phase 6 / US4 (C4-1): threaded onto the persona `PromptEntry` so
+    /// `${TOME_PLUGIN_VERSION}` resolves in a persona body — the
+    /// command/skill registry query already selects this, so the persona
+    /// path mirrors it rather than substituting an empty string.
+    pub plugin_version: String,
+    /// The `skills.indexed_at` column (RFC 3339). Phase 6 / US4 (R4-1):
+    /// threaded onto the persona `EntryIdentity` so a `<name>-persona`
+    /// colliding with a command/skill tie-breaks by `indexed_at ASC` like
+    /// every other entry (FR-062) instead of unconditionally winning the
+    /// base name. Only the reserved `drop-persona` keeps an empty
+    /// `indexed_at` (its documented first-sort reservation).
+    pub indexed_at: String,
 }
 
 /// Every `agent`-kind row enabled in `workspace_name`, ordered by
@@ -382,7 +395,7 @@ pub fn enabled_agents_for_workspace(
 ) -> Result<Vec<EnabledAgent>, TomeError> {
     let mut stmt = conn
         .prepare(
-            "SELECT s.catalog, s.plugin, s.name, s.path
+            "SELECT s.catalog, s.plugin, s.name, s.path, s.plugin_version, s.indexed_at
              FROM skills AS s
              JOIN workspace_skills AS ws ON ws.skill_id = s.id
              JOIN workspaces       AS w  ON w.id = ws.workspace_id
@@ -399,6 +412,8 @@ pub fn enabled_agents_for_workspace(
                 plugin: row.get(1)?,
                 name: row.get(2)?,
                 path: row.get(3)?,
+                plugin_version: row.get(4)?,
+                indexed_at: row.get(5)?,
             })
         })
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query enabled agents: {e}")))?;

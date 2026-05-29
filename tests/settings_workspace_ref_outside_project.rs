@@ -53,6 +53,7 @@ fn ws(name: &str, harnesses: Option<Vec<String>>) -> WorkspaceSettings {
         summaries: None,
         catalogs: Vec::new(),
         harnesses,
+        expose_agents_as_personas: None,
     }
 }
 
@@ -60,6 +61,7 @@ fn project(workspace: &str, harnesses: Option<Vec<String>>) -> ProjectMarkerConf
     ProjectMarkerConfig {
         workspace: WorkspaceName::parse(workspace).expect("test workspace name parses"),
         harnesses,
+        expose_agents_as_personas: None,
     }
 }
 
@@ -87,6 +89,7 @@ fn workspace_ref_in_global_settings_returns_error() {
     let stub = StubScope::new();
     let global = GlobalSettings {
         harnesses: Some(vec!["[workspace]".to_owned()]),
+        expose_agents_as_personas: None,
     };
     let err = resolve_effective_list(None, None, &global, &stub).expect_err("must reject");
     match err {

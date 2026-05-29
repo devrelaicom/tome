@@ -133,7 +133,7 @@ fn build_state(paths: &tome::paths::Paths) -> Arc<McpState> {
     )
     .unwrap();
     let registry =
-        PromptRegistry::build_for_workspace(&WorkspaceName::global(), paths, &conn).unwrap();
+        PromptRegistry::build_for_workspace(&WorkspaceName::global(), paths, &conn, false).unwrap();
     drop(conn);
 
     let embedder_entry = lookup("bge-small-en-v1.5").expect("registry has embedder");

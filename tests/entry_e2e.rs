@@ -204,7 +204,7 @@ fn build_state(paths: &tome::paths::Paths, registry: PromptRegistry) -> Arc<McpS
 
 fn build_registry(paths: &tome::paths::Paths) -> PromptRegistry {
     let conn = open_index(paths);
-    PromptRegistry::build_for_workspace(&WorkspaceName::global(), paths, &conn)
+    PromptRegistry::build_for_workspace(&WorkspaceName::global(), paths, &conn, false)
         .expect("build prompt registry")
 }
 

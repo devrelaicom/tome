@@ -18,7 +18,7 @@ use crate::error::TomeError;
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
 use crate::presentation::tables;
-use crate::settings::parser::{parse_global, parse_workspace};
+use crate::settings::parser::parse_workspace;
 use crate::settings::resolver::{EffectiveHarness, resolve_effective_list};
 use crate::settings::{GlobalSettings, ProjectMarkerConfig, WorkspaceSettings};
 use crate::workspace::{ResolvedScope, WorkspaceName};
@@ -165,51 +165,23 @@ pub(crate) fn load_global_settings_for_use(paths: &Paths) -> Result<GlobalSettin
     load_global_settings(paths)
 }
 
+// R4-2: the three scope-loaders are promoted to `settings::scopes` (the
+// single source for the NotFound/parse-error arms). These thin wrappers
+// adapt the `ResolvedScope` shape this command surface holds to the
+// promoted loaders' (project_root, workspace_name) parameters.
 fn load_project_marker(scope: &ResolvedScope) -> Result<Option<ProjectMarkerConfig>, TomeError> {
-    let Some(project_root) = scope.project_root.as_deref() else {
-        return Ok(None);
-    };
-    let path = Paths::project_marker_config(project_root);
-    // Polish R-M5: route through `settings::parser::read_project_marker`
-    // for the read+parse pair; absent marker collapses to `Ok(None)`
-    // here (caller-side Option-wrapping convention).
-    match crate::settings::parser::read_project_marker(&path) {
-        Ok(pm) => Ok(Some(pm)),
-        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
+    crate::settings::scopes::load_project_marker(scope.project_root.as_deref())
 }
 
 fn load_workspace_settings(
     scope: &ResolvedScope,
     paths: &Paths,
 ) -> Result<Option<WorkspaceSettings>, TomeError> {
-    let path = paths.workspace_settings_file(scope.scope.name());
-    let body = match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
-        Ok(b) => b,
-        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-    };
-    let ws = parse_workspace(&body).map_err(|e| TomeError::WorkspaceMalformed {
-        path: path.clone(),
-        reason: format!("parse workspace settings: {e}"),
-    })?;
-    Ok(Some(ws))
+    crate::settings::scopes::load_workspace_settings(paths, scope.scope.name())
 }
 
 fn load_global_settings(paths: &Paths) -> Result<GlobalSettings, TomeError> {
-    let path = &paths.global_settings_file;
-    let body = match crate::util::bounded_read_to_string(path, crate::util::TOME_CONFIG_MAX) {
-        Ok(b) => b,
-        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(GlobalSettings::default());
-        }
-        Err(e) => return Err(e),
-    };
-    parse_global(&body).map_err(|e| TomeError::WorkspaceMalformed {
-        path: path.clone(),
-        reason: format!("parse global settings: {e}"),
-    })
+    crate::settings::scopes::load_global_settings(paths)
 }
 
 fn emit_human(outcome: &HarnessListOutcome) -> Result<(), TomeError> {

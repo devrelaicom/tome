@@ -19,6 +19,7 @@ fn ws(name: &str, harnesses: Option<Vec<String>>) -> WorkspaceSettings {
         summaries: None,
         catalogs: Vec::new(),
         harnesses,
+        expose_agents_as_personas: None,
     }
 }
 
@@ -26,6 +27,7 @@ fn project(workspace: &str, harnesses: Option<Vec<String>>) -> ProjectMarkerConf
     ProjectMarkerConfig {
         workspace: WorkspaceName::parse(workspace).expect("test workspace name parses"),
         harnesses,
+        expose_agents_as_personas: None,
     }
 }
 
@@ -57,6 +59,7 @@ fn workspace_ref_to_undeclared_workspace_resolves_to_empty_not_global() {
         // list, it would surface these globals — that would be the bug
         // FR-449 forbids.
         harnesses: Some(vec!["claude-code".to_owned(), "codex".to_owned()]),
+        expose_agents_as_personas: None,
     };
 
     let result =
@@ -98,6 +101,7 @@ fn workspace_ref_with_global_in_it_does_not_recurse_through_workspace_effective_
     let ws_settings = ws("ws", Some(vec!["[global]".to_owned()]));
     let global = GlobalSettings {
         harnesses: Some(vec!["claude-code".to_owned()]),
+        expose_agents_as_personas: None,
     };
 
     let result =

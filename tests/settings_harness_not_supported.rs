@@ -24,6 +24,7 @@ fn ws(name: &str, harnesses: Option<Vec<String>>) -> WorkspaceSettings {
         summaries: None,
         catalogs: Vec::new(),
         harnesses,
+        expose_agents_as_personas: None,
     }
 }
 
@@ -31,6 +32,7 @@ fn project(workspace: &str, harnesses: Option<Vec<String>>) -> ProjectMarkerConf
     ProjectMarkerConfig {
         workspace: WorkspaceName::parse(workspace).expect("test workspace name parses"),
         harnesses,
+        expose_agents_as_personas: None,
     }
 }
 
@@ -73,6 +75,7 @@ fn unsupported_name_in_global_settings_returns_error() {
     let stub = StubScope::new();
     let global = GlobalSettings {
         harnesses: Some(vec!["yet-another-bad-name".to_owned()]),
+        expose_agents_as_personas: None,
     };
     let err =
         resolve_effective_list(None, None, &global, &stub).expect_err("must reject unsupported");
@@ -98,6 +101,7 @@ fn fake_then_exclamation_fake_still_errors_per_entry() {
     let stub = StubScope::new();
     let global = GlobalSettings {
         harnesses: Some(vec!["fake".to_owned(), "!fake".to_owned()]),
+        expose_agents_as_personas: None,
     };
     let err =
         resolve_effective_list(None, None, &global, &stub).expect_err("must reject inclusion");
@@ -114,6 +118,7 @@ fn supported_name_resolves_cleanly() {
     let stub = StubScope::new();
     let global = GlobalSettings {
         harnesses: Some(vec!["claude-code".to_owned()]),
+        expose_agents_as_personas: None,
     };
     let result = resolve_effective_list(None, None, &global, &stub).expect("must resolve");
     let names: Vec<&str> = result.harnesses.iter().map(|h| h.name.as_str()).collect();

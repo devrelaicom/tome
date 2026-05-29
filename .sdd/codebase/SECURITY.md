@@ -2,11 +2,11 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 / US3 guardrails + rules correction; incremental update)
+> **Last Updated**: 2026-05-29 (Phase 6 / US4 personas; incremental update)
 
 ## Overview
 
-Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, workspace settings, project bindings, workspace summarisation, command/prompt entries, agent translations, and harness synchronisation across multiple coding harnesses. As a synchronous, file-based tool without user authentication, security focuses on:
+Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, workspace settings, project bindings, workspace summarisation, command/prompt entries, agent translations, agent personas as MCP prompts, and harness synchronisation across multiple coding harnesses. As a synchronous, file-based tool without user authentication, security focuses on:
 
 1. Preventing path traversal and directory-escape attacks via plugin source paths, plugin identities, workspace names, project paths, entry body paths, agent names, and harness configurations
 2. UTF-8 validation for project paths stored in the central DB (primary key constraint)
@@ -49,6 +49,7 @@ Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, wo
 39. Phase 6 / US1 additions (NATIVE AGENTS): Plugin-supplied agent names validated as single safe path segment before becoming a filename (`is_safe_agent_name`); path-traversal vector closed (frontmatter `name: ../../evil` rejected before storing). Defence-in-depth: `target.parent() == Some(dir)` assertion before every agent write. Agent file writes reuse atomic, symlink-refusing, mode-preserving discipline (`write_standalone`). Plugin removal is literal prefix match (`plugin_of_owned_file`), not glob, scoped to directory walk. Privileged-field passthrough (hooks/mcpServers/permissionMode → `.claude/agents/`) is the intended FR-050 default, auditable in-file; striping opt-out (US5) surfaces privilege escalation report in doctor.
 40. Phase 6 / US2 additions (REAL HOOKS — THIRD-PARTY JSON WRITE SURFACE): Plugin-supplied `hooks/hooks.json` read on plugin enable with two-variable rewrite (`${CLAUDE_PLUGIN_ROOT}` + `${CLAUDE_PLUGIN_DATA}` → absolute paths); UTF-8 validation (fail-closed exit 44) prevents non-UTF-8 install paths from emitting U+FFFD-corrupted hook commands. Hooks merged into project's `.claude/settings.local.json` (gitignored, never committed) by deep structural-equality match (idempotent, never duplicates user-edited copy). Settings file read/write atomic, symlink-refusing, mode-preserving; 1 MiB read-cap enforced. Trust gate is operator's explicit `tome plugin enable`; Tome never auto-enables. Parent `.claude/` created 0700 on Unix when absent. Hook JSON rewrite is targeted two-token textual substitution only (NOT full Phase 5 substitution pipeline per NFR-007); syntax-valid textual replacement handles double-slash in paths safely. On disable, hooks re-derived and structurally-matching entries removed only (no sidecar ownership tracking; user-edited copy stays). 0 security findings from US2 reviewer pass.
 41. Phase 6 / US3 additions (GUARDRAILS SOFT FALLBACK + RULES-FILE CORRECTION): Plugin-shipped `hooks/GUARDRAILS.md` body copied verbatim into per-plugin marker regions in harness rules files; body validation enforces marker-injection defence (`body_contains_marker_line`): any line matching guardrails START/END regex or `tome:begin/end` block-marker regex rejected (exit 46, naming source) closing region-escape (persistent prose injection outside Tome's markers), file-wedge (exit-46-forever DoS), and rules-block corruption; loud-but-isolated (sibling plugins still reconcile). Guardrails write/delete targets (CLAUDE.md/AGENTS.md/GEMINI.md/Cursor sibling) atomic, symlink-refusing (exit 46 for guardrails targets per exit-codes-p6.md), mode-preserving. Path composition uses no attacker-influenced text in filesystem paths; `<catalog>:<plugin>` flows only into marker TEXT. Claude Code rules-include block and guardrails now land in `CLAUDE.md` (Phase 4 correction: was AGENTS.md) — same atomic/symlink/mode discipline, Claude Code now reads a file it actually reads; AGENTS.md shared across other harnesses resolves same `.tome/RULES.md` with no content duplication. 0 security findings from US3 reviewer pass.
+42. Phase 6 / US4 additions (AGENT PERSONAS AS MCP PROMPTS): Double opt-in model for persona exposure: operator explicitly enables plugins via `tome plugin enable` (first gate), then optionally sets `expose_agents_as_personas = true` in project/workspace/global settings scope and MCP server is launched (second gate). Personas OFF by default (`expose_agents_as_personas` unset or `false`). Persona path introduces NO new substitution surface: agent bodies undergo identical Phase 5 `build_context_for_entry` + unified-regex substitution (COMBINED_RE) as non-persona entries; no Stage 4 appendage. Wrapped body (frontend layer) is LLM-context-only prose template (not re-parsed file); body text immutable after substitution. Persona MCP prompts folded into Phase 5 collision namespace (same `resolve_collisions` deduplication); drop-persona reserved (empty catalog/plugin/indexed_at sort) ensuring unhijackable insertion point. Persona name validation reuses agent-name checks at index time (safe path segment, no traversal). No security findings from US4 reviewer pass.
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
@@ -287,6 +288,29 @@ A guardrails body that itself contains a line resembling a managed marker (a gua
 - The reconciler continues to process sibling plugins' guardrails normally (loud-but-isolated error handling per FR-084).
 - The error surfaces with the source file path in the exit message.
 - User-authored guardrails regions in rules files are not affected (they are outside the Tome-managed marker pairs and are never re-parsed).
+
+### Agent Personas Validation (Phase 6 / US4)
+
+| Layer | Control | Implementation | Purpose |
+|-------|---------|----------------|---------|
+| **Opt-in gate (first)** | Operator explicitly enables plugin | `tome plugin enable` is the trust boundary | `src/commands/plugin/enable.rs` |
+| **Opt-in gate (second)** | `expose_agents_as_personas` setting resolved at MCP startup | First-declarer-wins scalar walk (project → workspace → global, default false) | `src/mcp/mod.rs::resolve_expose_personas` |
+| **Setting structure** | Three scopes carry `expose_agents_as_personas: Option<bool>` field | `GlobalSettings`, `WorkspaceSettings`, `ProjectMarkerConfig` all carry field | `src/settings/mod.rs` (all with `deny_unknown_fields`) |
+| **Scalar resolution** | Single read at startup; no per-request re-resolution | `resolve_scalar_with` first-declarer-wins walk | `src/mcp/mod.rs::resolve_expose_personas` (called once during `build_prompt_registry`) |
+| **Startup scope** | MCP server resolved against (project_root, workspace, global) at launch time | Non-project-scoped running server ignores project-scope value for subsequent requests | `src/mcp/mod.rs::build_prompt_registry` + contract `agent-personas.md` § Startup Scope |
+| **Persona name validation** | Agent names already validated at index time as single safe path segment | Persona prompts reuse agent identities; no new name validation surface | `src/harness/agents.rs::is_safe_agent_name` (Phase 6 / US1) |
+| **Body re-read protection** | Agent body re-read at persona-render time path-validated via `resolve_entry_body_path` | Path validation rejects `..` traversal and absolute paths (identical to non-persona entries) | `src/mcp/prompts.rs::wrap_persona_body` calls `resolve_entry_body_path` |
+| **Substitution boundary** | Persona bodies undergo SAME Phase 5 `build_context_for_entry` + unified-regex substitution as non-persona entries | NO new substitution surface; `COMBINED_RE` single-pass enforces no-rescan invariant (NFR-007) for persona bodies too | `src/mcp/prompts.rs::collect_persona_identities` → `build_context_for_entry` |
+| **Collision namespace** | Personas folded into Phase 5 `resolve_collisions` deduplication | `<name>-persona` or `<plugin>-<name>-persona` + drop-persona in single namespace | `src/mcp/prompt_collision.rs::resolve_collisions` |
+| **Drop-persona reservation** | Global `drop-persona` reserved prompt inserted after agent loop | Empty catalog/plugin/indexed_at sort ensures agents process first; drop-persona appended last (unhijackable) | `src/mcp/prompts.rs::collect_persona_identities` → append drop-persona in `BTreeMap` (sorted iteration) |
+| **Templating** | Persona body wrapped in role-assumption template at render time | Template is pure text (not re-parsed file); body immutable after substitution | `src/mcp/prompts.rs::wrap_persona_body` (lines 175–181) |
+
+**Trust Model** (Phase 6 / US4): 
+1. **Double opt-in**: Operator enables plugin (explicit trust); operator enables personas via settings (explicit feature gate)
+2. **No new substitution surface**: Agent body → `build_context_for_entry` → unified-regex substitution (identical to Phase 5 non-persona entries)
+3. **Path validation**: Body re-read at render time reuses `resolve_entry_body_path` (validates against `..` traversal, absolute paths)
+4. **Limitation (acceptable)**: A persona body containing text that resembles the role-template closing tag (`</persona_name>`) could confuse the LLM context (in-band limitation, not a re-parsed file like guardrails). Documented as caveat in prompt description.
+5. **0 security findings from US4 reviewer pass**.
 
 ### Manifest Strictness
 
@@ -800,4 +824,4 @@ See `specs/005-phase-5-commands-prompts/contracts/exit-codes-p5.md` + `specs/006
 ---
 
 *This document defines security controls. Update when security posture changes.*
-*Last refreshed 2026-05-29 against Phase 6 / US3 guardrails + rules-file correction (incremental update); Phase 5 Polish baseline (1172 tests, 147 suites); guardrails body marker-injection validation, rules-file correction (Claude.md), guardrails atomic write discipline, and symlink refusal all verified; 0 security findings from US3 reviewer pass.*
+*Last refreshed 2026-05-29 against Phase 6 / US4 personas (incremental update); 0 security findings from US4 reviewer pass. US4 introduces double opt-in (plugin enable + expose_agents_as_personas setting), no new substitution surface (reuses Phase 5 unified-regex), reuses agent-name validation at index time, reuses entry body-path validation at render time. Phase 6 / US3 guardrails + rules-file correction verified end-to-end; guardrails body marker-injection validation, rules-file correction (Claude.md), guardrails atomic write discipline, and symlink refusal all verified. All Phase 5 feature work critical security invariants (no-rescan, truncation DoS, path traversal, resource walk hardening) verified end-to-end; 0 HIGH / 0 MEDIUM / 0 LOW security findings from full Phase 5 audit.*
