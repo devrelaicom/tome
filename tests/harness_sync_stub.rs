@@ -85,7 +85,7 @@ impl Fixture {
 }
 
 fn install_stub() -> HarnessModulesGuard {
-    HarnessModulesGuard::install(vec![Box::new(StubHarness)])
+    HarnessModulesGuard::install(vec![Box::new(StubHarness::default())])
 }
 
 fn mtime(path: &Path) -> SystemTime {

@@ -21,12 +21,16 @@ use time::OffsetDateTime;
 
 use crate::error::TomeError;
 
-/// The schema version Tome's compiled-in code understands. Phase 5 bumps
+/// The schema version Tome's compiled-in code understands. Phase 5 bumped
 /// this to 3 (entry-kind unification: `skills.kind` column + widened
 /// unique constraint plus new `searchable` / `user_invocable` /
-/// `when_to_use` columns). Bumping further requires a matching
-/// `Migration` row in [`crate::index::migrations`].
-pub const SCHEMA_VERSION: u32 = 3;
+/// `when_to_use` columns). Phase 6 bumps to 4 via a *marker-only*
+/// migration (entry-schema-p6.md): the `kind` column is free-text TEXT so
+/// admitting `'agent'` needs no DDL — the migration exists solely to keep
+/// the schema version monotonic and auditable so doctor's schema check and
+/// the migration registry agree the `kind` domain widened. Bumping further
+/// requires a matching `Migration` row in [`crate::index::migrations`].
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// The privileged seeded workspace name, present after every bootstrap and
 /// migration. Phase 4's lifecycle paths route un-bound operations through

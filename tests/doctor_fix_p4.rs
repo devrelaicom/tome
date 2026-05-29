@@ -403,7 +403,7 @@ fn binding_broken_orphan_workspace_is_not_auto_fixable_with_force() {
 #[test]
 fn drifted_harness_rules_fix_resyncs() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
@@ -481,7 +481,7 @@ fn drifted_harness_rules_fix_resyncs() {
 #[test]
 fn missing_harness_mcp_fix_resyncs() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
@@ -553,7 +553,7 @@ fn missing_harness_mcp_fix_resyncs() {
 #[test]
 fn user_owned_harness_mcp_fix_without_force_leaves_user_entry() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);
@@ -637,7 +637,7 @@ fn user_owned_harness_mcp_fix_without_force_leaves_user_entry() {
 #[test]
 fn user_owned_harness_mcp_fix_force_rewrites_to_tome_owned() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
-    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness)]);
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
 
     let env = ToolEnv::new();
     let paths = paths_for(&env);

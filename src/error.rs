@@ -158,6 +158,35 @@ pub enum TomeError {
     InvalidArgumentFrontmatter { file: PathBuf, reason: String },
 
     // -----------------------------------------------------------------------
+    // Phase 6 — hooks + agents (codes 43–46).
+    //
+    // The PRD's first draft proposed 30–33 but those collide with the
+    // model-on-disk cluster (`ModelMissing` 30 … `ModelRegistrationParseError`
+    // 33) and 34–37 are the inference/vector cluster. Per
+    // `contracts/exit-codes-p6.md` (research R-1) Phase 6 claims the first
+    // free contiguous run, 43–46 — same reassignment precedent as the
+    // Phase 4 summariser (proposed 20 → shipped 24) and the Phase 5 cluster
+    // (proposed 21–23 → shipped 25–29).
+    // -----------------------------------------------------------------------
+    #[error("hook spec parse error in {}: malformed or unparsable hooks.json", path.display())]
+    HookSpecParseError { path: PathBuf },
+
+    // `source` is auto-recognised by thiserror as the error source; we do
+    // NOT use `#[from]` here — that would clash with the existing `Io`
+    // variant's blanket `From<std::io::Error>`.
+    #[error("hook settings write failed at {}: {source}", path.display())]
+    HookSettingsWriteFailed {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("agent translation failed: {agent}")]
+    AgentTranslationFailed { agent: String },
+
+    #[error("guardrails write failed at {}", path.display())]
+    GuardrailsWriteFailed { path: PathBuf },
+
+    // -----------------------------------------------------------------------
     // Phase 2 — plugin lifecycle (codes 20–23).
     // -----------------------------------------------------------------------
     #[error("plugin `{0}` is not installed under any registered catalog")]
@@ -381,6 +410,13 @@ impl TomeError {
             Self::EntryNotFound { .. } => 27,
             Self::SubstitutionFailed { .. } => 28,
             Self::InvalidArgumentFrontmatter { .. } => 29,
+            // 43–46 — Phase 6 hooks + agents. PRD-proposed 30–33 collided
+            // with the model-on-disk cluster; reassigned to the first free
+            // contiguous run (contracts/exit-codes-p6.md, research R-1).
+            Self::HookSpecParseError { .. } => 43,
+            Self::HookSettingsWriteFailed { .. } => 44,
+            Self::AgentTranslationFailed { .. } => 45,
+            Self::GuardrailsWriteFailed { .. } => 46,
             // 20–23 — plugin lifecycle
             Self::PluginNotFound(_) => 20,
             Self::PluginAlreadyInState { .. } => 21,
@@ -451,6 +487,11 @@ impl TomeError {
             Self::EntryNotFound { .. } => "entry_not_found",
             Self::SubstitutionFailed { .. } => "substitution_failed",
             Self::InvalidArgumentFrontmatter { .. } => "invalid_argument_frontmatter",
+            // Phase 6 — hooks + agents
+            Self::HookSpecParseError { .. } => "hook_spec_parse_error",
+            Self::HookSettingsWriteFailed { .. } => "hook_settings_write_failed",
+            Self::AgentTranslationFailed { .. } => "agent_translation_failed",
+            Self::GuardrailsWriteFailed { .. } => "guardrails_write_failed",
             Self::PluginNotFound(_) => "plugin_not_found",
             Self::PluginAlreadyInState { .. } => "plugin_already_in_state",
             Self::PluginManifestParseError { .. } => "plugin_manifest_parse_error",

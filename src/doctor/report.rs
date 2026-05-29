@@ -429,6 +429,9 @@ pub struct OrphanDataDirReport {
 pub struct EntryCountsByKind {
     pub skills: u32,
     pub commands: u32,
+    /// Phase 6: agent-kind entries enrolled in the workspace. Always
+    /// non-searchable; never embedded (entry-schema-p6.md).
+    pub agents: u32,
     pub pending_re_embedding: u32,
 }
 

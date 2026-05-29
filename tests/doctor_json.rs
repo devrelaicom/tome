@@ -395,6 +395,7 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
         entry_counts: Some(EntryCountsByKind {
             skills: 12,
             commands: 3,
+            agents: 2,
             pending_re_embedding: 1,
         }),
         overall: DoctorClassification::Ok,
@@ -422,9 +423,10 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
     assert_eq!(wd.len(), 1);
     assert_eq!(wd[0], "/tmp/orphan/w");
 
-    // Entry counts: { skills: N, commands: M, pending_re_embedding: K }
+    // Entry counts: { skills: N, commands: M, agents: A, pending_re_embedding: K }
     let c = &json["entry_counts"];
     assert_eq!(c["skills"], 12);
     assert_eq!(c["commands"], 3);
+    assert_eq!(c["agents"], 2);
     assert_eq!(c["pending_re_embedding"], 1);
 }

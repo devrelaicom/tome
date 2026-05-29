@@ -32,6 +32,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+pub mod agents;
 pub mod claude_code;
 pub mod codex;
 pub mod cursor;
@@ -100,6 +101,51 @@ pub enum McpConfigFormat {
     /// `serde_json` with the `preserve_order` feature.
     Json,
     /// `toml_edit` (comment- and order-preserving).
+    Toml,
+}
+
+/// How Tome reconciles a plugin's `hooks/hooks.json` for a harness
+/// (data-model §2). Only Claude Code returns `RealJson`; every other
+/// harness is `GuardrailsOnly`, falling back to the prose `GUARDRAILS.md`
+/// region (FR-001, FR-013).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HooksStrategy {
+    /// Merge rewritten hook entries into the harness's machine-local
+    /// settings file (`.claude/settings.local.json`).
+    RealJson,
+    /// No native hook support — render the plugin's `GUARDRAILS.md` prose
+    /// into the harness's guardrails target instead.
+    GuardrailsOnly,
+}
+
+/// Where a harness's guardrails region lands (data-model §3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardrailsPlacement {
+    /// A marker-delimited region inside an existing rules file (e.g.
+    /// `CLAUDE.md`, `AGENTS.md`). Content outside the markers is preserved.
+    InFileRegion { file: PathBuf },
+    /// A fully Tome-owned standalone file (Cursor's
+    /// `.cursor/rules/TOME_GUARDRAILS.md`). Deleted when no plugin
+    /// contributes.
+    StandaloneSibling { file: PathBuf },
+}
+
+/// The resolved guardrails sink for one harness (data-model §3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuardrailsTarget {
+    pub placement: GuardrailsPlacement,
+    /// `true` only for Claude Code (FR-013): when a plugin ships real JSON
+    /// hooks, its `CLAUDE.md` guardrails region is suppressed in favour of
+    /// the merged hooks.
+    pub suppress_if_hooks_present: bool,
+}
+
+/// Serialisation format for a harness's native agent files (data-model
+/// §4). `claude-code` / `cursor` / `opencode` use Markdown-with-YAML
+/// frontmatter; `codex` uses TOML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentFormat {
+    MarkdownYaml,
     Toml,
 }
 
@@ -183,6 +229,69 @@ pub trait HarnessModule: Send + Sync {
     /// `"mcp_servers"`. Returned as a `&'static str` because the value
     /// is a compile-time constant per harness.
     fn mcp_parent_key(&self) -> &'static str;
+
+    // -----------------------------------------------------------------------
+    // Phase 6 — hooks, guardrails, native agents (harness-modules-p6.md).
+    //
+    // Every default makes a brand-new harness *safe-by-default*:
+    // guardrails-only, no real hooks, no native agents. The five real
+    // harness modules inherit these defaults until US1/US2/US3 override
+    // them — so adding them here keeps the existing harness tests green.
+    // -----------------------------------------------------------------------
+
+    /// How Tome reconciles plugin hooks for this harness (FR-001, FR-013).
+    /// Default: no native hook support (prose guardrails fallback only).
+    fn hooks_strategy(&self) -> HooksStrategy {
+        HooksStrategy::GuardrailsOnly
+    }
+
+    /// Machine-local settings file the `RealJson` strategy merges hooks
+    /// into (FR-002). `None` for every `GuardrailsOnly` harness. Only
+    /// Claude Code overrides this (`.claude/settings.local.json`).
+    fn hook_settings_path(&self, _project_root: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    /// The harness's guardrails sink (FR-011, FR-012). Default: an in-file
+    /// region on the harness's own rules-file target, with no
+    /// hooks-driven suppression.
+    fn guardrails_target(&self, project_root: &Path) -> GuardrailsTarget {
+        GuardrailsTarget {
+            placement: GuardrailsPlacement::InFileRegion {
+                file: self.rules_file_target(project_root),
+            },
+            suppress_if_hooks_present: false,
+        }
+    }
+
+    /// Whether this harness emits native translated agents (FR-030).
+    /// Default `false`; Gemini and the Phase 2 harnesses stay `false`.
+    fn supports_native_agents(&self) -> bool {
+        false
+    }
+
+    /// Directory native agent files land in (FR-031). `None` unless
+    /// `supports_native_agents()`.
+    fn agent_dir(&self, _project_root: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    /// Native agent serialisation format (FR-030, FR-033). `None` unless
+    /// `supports_native_agents()`.
+    fn agent_format(&self) -> Option<AgentFormat> {
+        None
+    }
+
+    /// Translate a canonical agent into this harness's native form (FR-030,
+    /// FR-032). Only ever called when `supports_native_agents()` is `true`;
+    /// non-supporting harnesses need no override. The default panics
+    /// loudly to surface a dispatch bug rather than emit a bogus file.
+    fn translate_agent(&self, _canonical: &agents::CanonicalAgent) -> agents::TranslatedAgent {
+        unreachable!(
+            "translate_agent called on a harness without native agent support: {}",
+            self.name()
+        )
+    }
 }
 
 /// Registered harness modules in lexicographic order of `name()`.

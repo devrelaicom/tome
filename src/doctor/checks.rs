@@ -449,9 +449,9 @@ pub fn count_entries_by_kind(
         ))
     })?;
 
-    // Per-kind counts via SQL aggregate. `kind` is the schema-v3 column;
-    // it is always present + always one of `skill` / `command`.
-    let (skills, commands): (u32, u32) = {
+    // Per-kind counts via SQL aggregate. `kind` is the schema-v3 column,
+    // widened in schema v4 to also admit `agent` (entry-schema-p6.md).
+    let (skills, commands, agents): (u32, u32, u32) = {
         let mut stmt = tx
             .prepare(
                 "SELECT s.kind, COUNT(*)
@@ -473,6 +473,7 @@ pub fn count_entries_by_kind(
             })?;
         let mut skills = 0u32;
         let mut commands = 0u32;
+        let mut agents = 0u32;
         for r in rows {
             let (kind_text, n) = r.map_err(|e| {
                 TomeError::IndexIntegrityCheckFailure(format!("collect entry_counts row: {e}"))
@@ -496,9 +497,10 @@ pub fn count_entries_by_kind(
             match kind {
                 crate::plugin::identity::EntryKind::Skill => skills = n_u32,
                 crate::plugin::identity::EntryKind::Command => commands = n_u32,
+                crate::plugin::identity::EntryKind::Agent => agents = n_u32,
             }
         }
-        (skills, commands)
+        (skills, commands, agents)
     };
 
     // pending_re_embedding: for each enabled entry, compare source-file
@@ -575,6 +577,7 @@ pub fn count_entries_by_kind(
     Ok(EntryCountsByKind {
         skills,
         commands,
+        agents,
         pending_re_embedding: pending,
     })
 }

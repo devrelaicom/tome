@@ -105,8 +105,16 @@ pub enum SegmentRejection {
 /// `kind` column whose serde representation matches the lowercase strings
 /// written to disk by the schema-v3 migration.
 ///
+/// Phase 6 widens the domain again with `Agent` (sourced from
+/// `<plugin>/agents/<name>.md`). Agent rows are always non-searchable and
+/// never user-invocable; see `entry-schema-p6.md`. Every exhaustive match
+/// over this enum was widened in lockstep (FR-070a) — a catch-all would
+/// re-hide schema drift, the very failure the canonical-enum-dispatch
+/// discipline guards against.
+///
 /// See `specs/005-phase-5-commands-prompts/contracts/entry-schema-p5.md`
-/// for the authoritative shape.
+/// (skill/command) and `specs/006-phase-6-hooks-agents/contracts/entry-schema-p6.md`
+/// (agent) for the authoritative shape.
 #[derive(
     Debug,
     Clone,
@@ -122,6 +130,7 @@ pub enum SegmentRejection {
 pub enum EntryKind {
     Skill,
     Command,
+    Agent,
 }
 
 impl EntryKind {
@@ -130,6 +139,7 @@ impl EntryKind {
         match self {
             Self::Skill => "skill",
             Self::Command => "command",
+            Self::Agent => "agent",
         }
     }
 }
@@ -147,7 +157,21 @@ impl FromStr for EntryKind {
         match s {
             "skill" => Ok(Self::Skill),
             "command" => Ok(Self::Command),
+            "agent" => Ok(Self::Agent),
             other => Err(format!("unknown entry kind: {other}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EntryKind;
+
+    #[test]
+    fn agent_kind_round_trips() {
+        let parsed: EntryKind = "agent".parse().expect("`agent` must parse");
+        assert_eq!(parsed, EntryKind::Agent);
+        assert_eq!(EntryKind::Agent.as_str(), "agent");
+        assert_eq!(EntryKind::Agent.to_string(), "agent");
     }
 }

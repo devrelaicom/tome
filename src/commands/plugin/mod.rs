@@ -228,6 +228,9 @@ pub(crate) struct IndexAggregate {
 pub(crate) struct PerKindCounts {
     pub skills: u32,
     pub commands: u32,
+    /// Phase 6: agent-kind entries enrolled in the workspace. Always
+    /// non-searchable, never prompts (entry-schema-p6.md).
+    pub agents: u32,
 }
 
 pub(crate) fn per_kind_counts_for_plugin(
@@ -277,6 +280,7 @@ pub(crate) fn per_kind_counts_for_plugin(
         match kind {
             crate::plugin::identity::EntryKind::Skill => out.skills = n_u32,
             crate::plugin::identity::EntryKind::Command => out.commands = n_u32,
+            crate::plugin::identity::EntryKind::Agent => out.agents = n_u32,
         }
     }
     Ok(out)

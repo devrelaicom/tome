@@ -39,39 +39,39 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Purpose**: Pre-allocate the closed-set error codes, land the load-bearing `EntryKind` widening BEFORE any agent row can exist, and stand up the extended `HarnessModule` trait surface. No user story can proceed correctly until F2 lands.
 
-- [ ] T003 Create `specs/006-phase-6-hooks-agents/retro/P2.md` from the retro template.
-- [ ] T004 [GIT] Commit: `docs(phase-6): init P2 retro`.
+- [X] T003 Create `specs/006-phase-6-hooks-agents/retro/P2.md` from the retro template.
+- [X] T004 [GIT] Commit: `docs(phase-6): init P2 retro`.
 
 ### F1 — Error codes 43–46 (`contracts/exit-codes-p6.md`)
 
-- [ ] T005 Add four `TomeError` variants (illustrative names `HookSpecParseError`, `HookSettingsWriteFailed`, `AgentTranslationFailed`, `GuardrailsWriteFailed`) in `src/error.rs` (use devs:rust-dev agent).
-- [ ] T006 Map the four variants to exit codes 43, 44, 45, 46 in the `ExitCode` mapping in `src/error.rs`; add the `// Phase 6 — hooks + agents (codes 43–46)` cluster comment (use devs:rust-dev agent).
-- [ ] T007 [P] Extend `tests/exit_codes.rs` with variant→code assertions for 43–46 (use devs:rust-dev agent).
-- [ ] T008 [GIT] Commit: `feat(phase-6): pre-allocate hooks/agents error variants + exit codes 43–46`.
+- [X] T005 Add four `TomeError` variants (illustrative names `HookSpecParseError`, `HookSettingsWriteFailed`, `AgentTranslationFailed`, `GuardrailsWriteFailed`) in `src/error.rs` (use devs:rust-dev agent).
+- [X] T006 Map the four variants to exit codes 43, 44, 45, 46 in the `ExitCode` mapping in `src/error.rs`; add the `// Phase 6 — hooks + agents (codes 43–46)` cluster comment (use devs:rust-dev agent).
+- [X] T007 [P] Extend `tests/exit_codes.rs` with variant→code assertions for 43–46 (use devs:rust-dev agent).
+- [X] T008 [GIT] Commit: `feat(phase-6): pre-allocate hooks/agents error variants + exit codes 43–46`.
 
 ### F2 — `EntryKind::Agent` widening (load-bearing, FR-070a)
 
-- [ ] T009 Add the `Agent` variant to `EntryKind` in `src/plugin/identity.rs`; extend `FromStr`/`Display` with `"agent"` (use devs:rust-dev agent).
-- [ ] T010 Widen every exhaustive `match EntryKind` site to handle `Agent` (per-kind count aggregation in `src/commands/plugin/mod.rs` + `src/commands/plugin/show.rs`; the doctor entry-count surface in `src/doctor/checks.rs`); no catch-all — preserve canonical-enum-dispatch (use devs:rust-dev agent).
-- [ ] T011 [P] Add a unit test in `src/plugin/identity.rs` for `EntryKind::Agent` round-trip (`FromStr`/`Display`) (use devs:rust-dev agent).
-- [ ] T012 [P] Add `tests/entry_kind_agent_indexing.rs` asserting an indexed `kind='agent'` row does not break `plugin list`/`plugin show`/`doctor` per-kind counts (use devs:rust-dev agent).
-- [ ] T013 Register a marker-only schema migration (bump schema version; no DDL/data change) in `src/index/migrations.rs` so the migration registry + doctor schema check agree the `kind` domain widened (research R-11) (use devs:rust-dev agent).
-- [ ] T014 [P] Extend `tests/schema_migration_*.rs` with a test that the marker migration applies and bumps the version (use devs:rust-dev agent).
-- [ ] T015 [GIT] Commit: `feat(phase-6): widen EntryKind with Agent variant + marker migration`.
+- [X] T009 Add the `Agent` variant to `EntryKind` in `src/plugin/identity.rs`; extend `FromStr`/`Display` with `"agent"` (use devs:rust-dev agent).
+- [X] T010 Widen every exhaustive `match EntryKind` site to handle `Agent` (per-kind count aggregation in `src/commands/plugin/mod.rs` + `src/commands/plugin/show.rs`; the doctor entry-count surface in `src/doctor/checks.rs`); no catch-all — preserve canonical-enum-dispatch (use devs:rust-dev agent).
+- [X] T011 [P] Add a unit test in `src/plugin/identity.rs` for `EntryKind::Agent` round-trip (`FromStr`/`Display`) (use devs:rust-dev agent).
+- [X] T012 [P] Add `tests/entry_kind_agent_indexing.rs` asserting an indexed `kind='agent'` row does not break `plugin list`/`plugin show`/`doctor` per-kind counts (use devs:rust-dev agent).
+- [X] T013 Register a marker-only schema migration (bump schema version; no DDL/data change) in `src/index/migrations.rs` so the migration registry + doctor schema check agree the `kind` domain widened (research R-11) (use devs:rust-dev agent).
+- [X] T014 [P] Extend `tests/schema_migration_*.rs` with a test that the marker migration applies and bumps the version (use devs:rust-dev agent).
+- [X] T015 [GIT] Commit: `feat(phase-6): widen EntryKind with Agent variant + marker migration`.
 
 ### F3 — `HarnessModule` trait + `StubHarness` skeleton
 
-- [ ] T016 Add the `HooksStrategy`, `GuardrailsTarget`/`GuardrailsPlacement`, and `AgentFormat` types in `src/harness/mod.rs` (use devs:rust-dev agent).
-- [ ] T017 Extend the `HarnessModule` trait in `src/harness/mod.rs` with `hooks_strategy`, `hook_settings_path`, `guardrails_target`, `supports_native_agents`, `agent_dir`, `agent_format`, `translate_agent`, with safe defaults (`GuardrailsOnly` / `None` / `false`) (use devs:rust-dev agent).
-- [ ] T018 Implement the new trait methods on `StubHarness` in `src/harness/stub.rs` for test injection (use devs:rust-dev agent).
-- [ ] T019 [P] Add `tests/harness_trait_p6.rs` exercising the default impls + `StubHarness` overrides via `HARNESS_MODULES_OVERRIDE` (use devs:rust-dev agent).
-- [ ] T020 [GIT] Commit: `feat(phase-6): extend HarnessModule trait + StubHarness for hooks/guardrails/agents`.
+- [X] T016 Add the `HooksStrategy`, `GuardrailsTarget`/`GuardrailsPlacement`, and `AgentFormat` types in `src/harness/mod.rs` (use devs:rust-dev agent).
+- [X] T017 Extend the `HarnessModule` trait in `src/harness/mod.rs` with `hooks_strategy`, `hook_settings_path`, `guardrails_target`, `supports_native_agents`, `agent_dir`, `agent_format`, `translate_agent`, with safe defaults (`GuardrailsOnly` / `None` / `false`) (use devs:rust-dev agent).
+- [X] T018 Implement the new trait methods on `StubHarness` in `src/harness/stub.rs` for test injection (use devs:rust-dev agent).
+- [X] T019 [P] Add `tests/harness_trait_p6.rs` exercising the default impls + `StubHarness` overrides via `HARNESS_MODULES_OVERRIDE` (use devs:rust-dev agent).
+- [X] T020 [GIT] Commit: `feat(phase-6): extend HarnessModule trait + StubHarness for hooks/guardrails/agents`.
 
 ### Foundational closeout
 
-- [ ] T021 Run codebase mapping for Phase 2 changes (`/sdd:map incremental`).
-- [ ] T022 Review `retro/P2.md` and extract critical learnings to `CLAUDE.md` (conservative).
-- [ ] T023 [GIT] Commit: `docs(phase-6): P2 closeout — mapping + retro`.
+- [X] T021 Run codebase mapping for Phase 2 changes (`/sdd:map incremental`).
+- [X] T022 Review `retro/P2.md` and extract critical learnings to `CLAUDE.md` (conservative).
+- [X] T023 [GIT] Commit: `docs(phase-6): P2 closeout — mapping + retro`.
 - [ ] T024 [GIT] Push branch to origin (ensure pre-push hooks pass).
 - [ ] T025 [GIT] Create/update PR to main with Phase 2 summary.
 - [ ] T026 [GIT] Verify all CI checks pass; report PR ready status.

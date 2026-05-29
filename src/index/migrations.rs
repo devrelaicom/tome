@@ -48,7 +48,10 @@ pub struct Migration {
 /// indices, and seeds the privileged `global` workspace row. Phase 5 /
 /// US1.a registers the second: `phase_5_v2_to_v3` widens the `skills`
 /// identity tuple with a `kind` discriminator and adds the new
-/// `searchable`, `user_invocable`, and `when_to_use` columns.
+/// `searchable`, `user_invocable`, and `when_to_use` columns. Phase 6
+/// registers the third: `phase_6_v3_to_v4`, a marker-only no-op that
+/// advances the version because the free-text `kind` column already admits
+/// the new `'agent'` value without DDL (entry-schema-p6.md).
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         from: 1,
@@ -61,6 +64,12 @@ pub const MIGRATIONS: &[Migration] = &[
         to: 3,
         name: "phase5_entry_kind_unification",
         apply: phase_5_v2_to_v3,
+    },
+    Migration {
+        from: 3,
+        to: 4,
+        name: "phase6_kind_domain_agent_marker",
+        apply: phase_6_v3_to_v4,
     },
 ];
 
@@ -272,6 +281,18 @@ fn phase_5_v2_to_v3(tx: &Transaction) -> Result<(), TomeError> {
         TomeError::IndexIntegrityCheckFailure(format!("phase_5_v2_to_v3: rebuild skills: {e}"))
     })?;
 
+    Ok(())
+}
+
+/// The schema v3 → v4 migration body (Phase 6). A documented **no-op
+/// marker**: the `skills.kind` column is free-text TEXT, so admitting the
+/// new `'agent'` domain value needs no DDL and no data backfill
+/// (entry-schema-p6.md § "Schema migration"). The migration exists only to
+/// advance the version monotonically so doctor's schema check and the
+/// migration registry agree the `kind` domain widened. `apply_pending`
+/// records `meta.schema_version = 4` after this returns `Ok`; the body
+/// itself touches nothing.
+fn phase_6_v3_to_v4(_tx: &Transaction) -> Result<(), TomeError> {
     Ok(())
 }
 

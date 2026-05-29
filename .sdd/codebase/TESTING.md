@@ -2,7 +2,7 @@
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-27 (Phase 5 Polish complete, v0.5.0)
+> **Last Updated**: 2026-05-29 (Phase 6 Foundational)
 
 ## Test Framework
 
@@ -33,7 +33,7 @@
 
 ```
 tests/
-├── *.rs                         # Integration test files (151 total as of Phase 5 Polish)
+├── *.rs                         # Integration test files (153 total as of Phase 6 Foundational)
 ├── common/
 │   ├── mod.rs                   # Shared harness: ToolEnv, Fixture, guards
 │   └── ...                      # (exported helpers)
@@ -58,7 +58,7 @@ tests/
 | **Models & embedding** | `models_*.rs`, `embedding_*.rs` | Download, list, remove (6 files) |
 | **Workspace lifecycle** | `workspace_*.rs` | Init, rename, remove, sync (12 files) |
 | **Harness integration** | `harness_*.rs` | Use, list, remove, sync (12 files) |
-| **Index & schema** | `index_*.rs`, `schema_migration_*.rs` | Database, migrations (6 files) |
+| **Index & schema** | `index_*.rs`, `schema_migration_*.rs` | Database, migrations (7 files) |
 | **Doctor & diagnostics** | `doctor_*.rs` | Report, fixes, orphan cleanup (7 files) |
 | **MCP server** | `mcp_*.rs` | Server lifecycle, tools, log format (10 files) |
 | **Concurrency & atomicity** | `concurrency.rs`, `atomicity.rs` | Lock contention, interrupts (4 files) |
@@ -68,11 +68,14 @@ tests/
 | **Substitution** (Phase 5) | `substitution_*.rs`, `entry_*.rs` | Variable expansion, argument coercion (8 files) |
 | **Misc** | `path_validation.rs`, `atomic_dir.rs`, etc. | Phase 1 foundational (10 files) |
 
-**Total**: 151 test files across 151 suites; 1193 tests pass (Phase 5 Polish: 954 → 1193, +239 tests across +24 suites).
+**Total**: 153 test files across 153 suites; 1194+ tests pass (Phase 6 Foundational: Phase 5 Polish 1193 → 1194+, +1 new test suite).
 
-**Phase 5 expansion**: 
-- US1.a–US4.d: +218 tests
-- Polish phase: +21 tests (exact-count pins + dormant-state + zero-state invariants + test coverage gap fills)
+**Phase 6 Foundational additions**:
+- `tests/entry_kind_agent_indexing.rs` — Verify `EntryKind::Agent` widening integrates with count surfaces (storage + doctor + plugin show) without schema drift regression
+- `tests/schema_migration_p6.rs` — Pin the marker-only `kind` domain migration (v3 → v4)
+- `tests/harness_trait_p6.rs` — Exercise Phase 6 hook + agent dispatch via configurable `StubHarness` builder
+- Extensions to `tests/exit_codes.rs` — New Phase 6 exit code variants (43–46)
+- Extensions to `tests/doctor_json.rs` — Added `agents` field to `EntryCountsByKind` wire shape pin
 
 ## Test Patterns
 
@@ -243,6 +246,32 @@ fn plugin_data_dir_isolates_per_plugin() {
 
 **Patterns**: `PluginDataDirGuard`, `WorkspaceDataDirGuard` (Phase 5 US2 data-model changes).
 
+### Phase 6: Test-Configurable Test Double (StubHarness Builder)
+
+When a test double needs to drive different capability combinations, use the builder pattern with `Default`:
+
+```rust
+#[test]
+fn harness_with_native_agents_registers_directory() {
+    let harness = StubHarness::default()
+        .with_native_agents(AgentFormat::MarkdownYaml);
+    
+    // harness::supports_native_agents() returns true
+    // harness::agent_dir() returns Some(<project>/.stub/agents)
+    assert!(harness.supports_native_agents());
+}
+
+#[test]
+fn harness_with_hook_settings_returns_path() {
+    let harness = StubHarness::default().with_hook_settings();
+    
+    // harness::hook_settings_path() returns Some(<project>/.stub/settings.local.json)
+    assert!(harness.hook_settings_path(Path::new("/project")).is_some());
+}
+```
+
+**Pattern** (Phase 6 Foundational F3): `StubHarness` evolved from a unit struct to a `#[derive(Default)]` struct. The `Default` impl produces safe defaults (trait safe defaults for all methods). Builder setters (`with_*`) flip capabilities without spelling out the whole struct. Used in `tests/harness_trait_p6.rs` to exercise hook + agent dispatch paths.
+
 ## Test Data
 
 ### Fixtures
@@ -296,6 +325,10 @@ Similar pattern to embedder; deterministic ranking by vector sum.
 
 Deterministic text summarization (returns fixed text) instead of loading Qwen2.5 model. Override via `SUMMARISER_OVERRIDE` slot.
 
+### Stub Harness (Phase 6)
+
+Test-only deterministic harness implementation in `src/harness/stub.rs`, configurable via builder pattern. Override via `HARNESS_MODULES_OVERRIDE` slot.
+
 ### Test-Only Injection Points
 
 | Slot | Override Guard | Used For |
@@ -323,7 +356,7 @@ All defined in `tests/common/mod.rs` with RAII drop guards.
 
 **Exclusions**: ONNX inference (real model load excluded; library `fastembed` tests own path), real model downloads (fabricated fixtures instead), MCP protocol purity (deferred T093–T095).
 
-**Phase 5 Polish note**: Exit codes 9, 25-29 are partially deferred from e2e CLI coverage. Code 9 (`PluginDataDirWriteFailed`) is MCP-only; codes 25, 26-29 are narrow scaffolding or MCP-internal. All six are covered at the library API level via `tests/exit_codes.rs` and MCP tool tests (`tests/mcp_prompts*.rs`, `tests/mcp_get_skill*.rs`). v0.6+ unifies them via `tests/exit_codes_e2e_mcp.rs` once an in-process MCP test harness exists.
+**Phase 6 Foundational**: Exit codes 43–46 (Phase 6 hooks + agents) are covered in `tests/exit_codes.rs`. New JSON wire shape `EntryCountsByKind` with `agents` field pinned in `tests/doctor_json.rs`. Schema migration marker-only pattern verified in `tests/schema_migration_p6.rs`. Entry kind widening integration tested in `tests/entry_kind_agent_indexing.rs`.
 
 ## Test Categories by Purpose
 
@@ -349,6 +382,7 @@ Tests for previously fixed bugs, linked to phase retros:
 | Phase 4 US3 | `retro/P5.md` | `workspace_commands.rs` (Scope isolation) |
 | Phase 5 US3 | `retro/P5.md` | `entry_kind_indexing.rs` (Entry kind + collision handling) |
 | Phase 5 US5 | (current) | `doctor_phase5_surface_creates_no_dirs` (FR-124 read-only invariant) |
+| Phase 6 Foundational F2 | (current) | `entry_kind_agent_indexing.rs` (Agent row integration; schema drift prevention) |
 
 ### Invariant Tests
 
@@ -362,7 +396,9 @@ Tests that verify core properties hold:
 | Atomicity | `atomicity.rs` | Partial failures leave committed state |
 | JSON wire shape | `*_json_shape.rs` | Serialization is deterministic + byte-stable |
 | Read-only invariant | `doctor_p5.rs` | `doctor assemble_report` creates no directories (Phase 5 US5.a) |
-| Exact-count pins | `plugin_show_p5.rs`, `doctor_p5.rs` | Deterministic fixture counts stay exact (Phase 5 Polish) |
+| Exact-count pins | `plugin_show_p5.rs`, `doctor_p5.rs`, `doctor_json.rs` | Deterministic fixture counts stay exact (Phase 5 Polish + Phase 6) |
+| Canonical enum dispatch | `entry_kind_agent_indexing.rs` | Exhaustive match on `EntryKind` surfaces schema drift (Phase 6 F2) |
+| Marker migration | `schema_migration_p6.rs` | Version bump advances without DDL (Phase 6 Foundational) |
 
 ### Phase 5: Truncation Boundary Tests
 
@@ -459,6 +495,9 @@ fn harness_use_composition_error_exits_17() { ... }
 
 #[test]
 fn doctor_p5_surface_creates_no_dirs() { ... }
+
+#[test]
+fn entry_kind_agent_injected_rows_counted_correctly() { ... }
 ```
 
 ### Minimal External I/O

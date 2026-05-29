@@ -364,6 +364,39 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
             29,
             "invalid_argument_frontmatter",
         ),
+        // 43–46 — Phase 6 hooks + agents (pre-allocated by F1 — no
+        // production wiring yet; see contracts/exit-codes-p6.md). The
+        // PRD-proposed 30–33 collided with the model-on-disk cluster, so
+        // F1 claims the first free contiguous run.
+        (
+            TomeError::HookSpecParseError {
+                path: PathBuf::from("plugins/foo/hooks/hooks.json"),
+            },
+            43,
+            "hook_spec_parse_error",
+        ),
+        (
+            TomeError::HookSettingsWriteFailed {
+                path: PathBuf::from("/proj/.claude/settings.local.json"),
+                source: dummy_io_error(),
+            },
+            44,
+            "hook_settings_write_failed",
+        ),
+        (
+            TomeError::AgentTranslationFailed {
+                agent: "midnight-expert/compact-dev/reviewer".into(),
+            },
+            45,
+            "agent_translation_failed",
+        ),
+        (
+            TomeError::GuardrailsWriteFailed {
+                path: PathBuf::from("/proj/.cursor/rules/TOME_GUARDRAILS.md"),
+            },
+            46,
+            "guardrails_write_failed",
+        ),
     ]
 }
 
@@ -430,6 +463,10 @@ fn exhaustive_match_compile_check() {
             TomeError::EntryNotFound { .. } => 27,
             TomeError::SubstitutionFailed { .. } => 28,
             TomeError::InvalidArgumentFrontmatter { .. } => 29,
+            TomeError::HookSpecParseError { .. } => 43,
+            TomeError::HookSettingsWriteFailed { .. } => 44,
+            TomeError::AgentTranslationFailed { .. } => 45,
+            TomeError::GuardrailsWriteFailed { .. } => 46,
             TomeError::PluginNotFound(_) => 20,
             TomeError::PluginAlreadyInState { .. } => 21,
             TomeError::PluginManifestParseError { .. } => 22,

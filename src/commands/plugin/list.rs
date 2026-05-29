@@ -221,18 +221,27 @@ fn emit_human(rows: &[Row]) -> Result<(), TomeError> {
     Ok(())
 }
 
-/// Format the Phase 5 entries cell per
-/// `contracts/catalog-and-plugin-extensions-p5.md` § `tome plugin list`:
-/// - `(N skills, M commands)` when both kinds are present.
-/// - `(N skills)` when only skills are present.
-/// - `(M commands)` when only commands are present.
-/// - `—` when no entries are enrolled in this workspace.
+/// Format the entries cell per
+/// `contracts/catalog-and-plugin-extensions-p5.md` § `tome plugin list`,
+/// widened in Phase 6 to surface agent-kind entries. Each present kind
+/// contributes a `<n> <kind>s` fragment, joined by `, ` and wrapped in
+/// parentheses; `—` when nothing is enrolled. Building the list of present
+/// fragments avoids a combinatorial match over the three counts.
 fn format_entries_cell(per_kind: &PerKindCounts) -> String {
-    match (per_kind.skills, per_kind.commands) {
-        (0, 0) => "—".to_owned(),
-        (s, 0) => format!("({s} skills)"),
-        (0, c) => format!("({c} commands)"),
-        (s, c) => format!("({s} skills, {c} commands)"),
+    let mut parts: Vec<String> = Vec::with_capacity(3);
+    if per_kind.skills > 0 {
+        parts.push(format!("{} skills", per_kind.skills));
+    }
+    if per_kind.commands > 0 {
+        parts.push(format!("{} commands", per_kind.commands));
+    }
+    if per_kind.agents > 0 {
+        parts.push(format!("{} agents", per_kind.agents));
+    }
+    if parts.is_empty() {
+        "—".to_owned()
+    } else {
+        format!("({})", parts.join(", "))
     }
 }
 
