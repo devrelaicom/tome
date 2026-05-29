@@ -518,6 +518,7 @@ mod tests {
         let stub = StubScope::new();
         let global = GlobalSettings {
             harnesses: Some(vec!["claude-code".to_owned(), "codex".to_owned()]),
+            expose_agents_as_personas: None,
         };
         let result = resolve_effective_list(None, None, &global, &stub).unwrap();
         assert_eq!(result.harnesses.len(), 2);
@@ -534,6 +535,7 @@ mod tests {
             summaries: None,
             catalogs: Vec::new(),
             harnesses: Some(vec!["[workspace]".to_owned()]),
+            expose_agents_as_personas: None,
         };
         let err = resolve_effective_list(None, Some(&ws), &empty_global(), &stub).expect_err("err");
         assert!(matches!(

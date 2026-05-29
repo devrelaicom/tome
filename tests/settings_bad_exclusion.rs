@@ -43,6 +43,7 @@ fn ws(name: &str, harnesses: Option<Vec<String>>) -> WorkspaceSettings {
         summaries: None,
         catalogs: Vec::new(),
         harnesses,
+        expose_agents_as_personas: None,
     }
 }
 
@@ -50,6 +51,7 @@ fn project(workspace: &str, harnesses: Option<Vec<String>>) -> ProjectMarkerConf
     ProjectMarkerConfig {
         workspace: WorkspaceName::parse(workspace).expect("test workspace name parses"),
         harnesses,
+        expose_agents_as_personas: None,
     }
 }
 
@@ -59,6 +61,7 @@ fn bracketed_global_exclusion_returns_bad_exclusion() {
     let stub = StubScope::new();
     let global = GlobalSettings {
         harnesses: Some(vec!["![global]".to_owned()]),
+        expose_agents_as_personas: None,
     };
     let err = resolve_effective_list(None, None, &global, &stub).expect_err("must reject");
     match err {
@@ -78,6 +81,7 @@ fn bracketed_workspace_exclusion_returns_bad_exclusion() {
     let stub = StubScope::new();
     let global = GlobalSettings {
         harnesses: Some(vec!["![workspace]".to_owned()]),
+        expose_agents_as_personas: None,
     };
     let err = resolve_effective_list(None, None, &global, &stub).expect_err("must reject");
     match err {
@@ -94,6 +98,7 @@ fn bracketed_named_workspace_exclusion_returns_bad_exclusion() {
     let stub = StubScope::new();
     let global = GlobalSettings {
         harnesses: Some(vec!["![workspaces.foo]".to_owned()]),
+        expose_agents_as_personas: None,
     };
     let err = resolve_effective_list(None, None, &global, &stub).expect_err("must reject");
     match err {
@@ -152,6 +157,7 @@ fn malformed_bracketed_refs_are_rejected() {
     for input in cases {
         let global = GlobalSettings {
             harnesses: Some(vec![input.to_owned()]),
+            expose_agents_as_personas: None,
         };
         let err = resolve_effective_list(None, None, &global, &stub)
             .expect_err("malformed bracketed ref must error");

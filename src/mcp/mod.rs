@@ -271,7 +271,76 @@ fn build_prompt_registry(
     paths: &Paths,
 ) -> Result<prompts::PromptRegistry, TomeError> {
     let conn = crate::index::db::open_read_only(&paths.index_db)?;
-    prompts::PromptRegistry::build_for_workspace(scope.scope.name(), paths, &conn)
+    // FR-067: the `expose_agents_as_personas` toggle's effective value is
+    // read from the MCP server's SINGLE startup scope — the running
+    // server is not project-bound, so project-scope layering of this key
+    // has no effect on a running server (documented in
+    // `contracts/agent-personas.md`). We resolve it once here, at
+    // startup, via the first-declarer-wins scalar walk over the same
+    // (project, workspace, global) settings the harness sync consults.
+    let expose_personas = resolve_expose_personas(scope, paths)?;
+    prompts::PromptRegistry::build_for_workspace(scope.scope.name(), paths, &conn, expose_personas)
+}
+
+/// Resolve `expose_agents_as_personas` for the MCP server startup scope
+/// via the Phase 6 first-declarer-wins scalar walk (FR-053 / FR-067).
+///
+/// Loads the project marker (if the scope has a project root), the bound
+/// workspace's `settings.toml` (if present), and the global
+/// `settings.toml` (if present), then resolves the scalar. This is the
+/// scalar resolver — NOT the `harnesses` composition grammar.
+fn resolve_expose_personas(scope: &ResolvedScope, paths: &Paths) -> Result<bool, TomeError> {
+    use crate::settings::{parser, resolve_scalar_with};
+
+    let project_marker = match scope.project_root.as_deref() {
+        Some(root) => {
+            let marker_path = Paths::project_marker_config(root);
+            match parser::read_project_marker(&marker_path) {
+                Ok(pm) => Some(pm),
+                Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+            }
+        }
+        None => None,
+    };
+
+    let workspace_settings =
+        {
+            let path = paths.workspace_settings_file(scope.scope.name());
+            match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
+                Ok(body) => Some(parser::parse_workspace(&body).map_err(|e| {
+                    TomeError::WorkspaceMalformed {
+                        path: path.clone(),
+                        reason: format!("parse workspace settings: {e}"),
+                    }
+                })?),
+                Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+            }
+        };
+
+    let global_settings = {
+        let path = &paths.global_settings_file;
+        match crate::util::bounded_read_to_string(path, crate::util::TOME_CONFIG_MAX) {
+            Ok(body) => parser::parse_global(&body).map_err(|e| TomeError::WorkspaceMalformed {
+                path: path.clone(),
+                reason: format!("parse global settings: {e}"),
+            })?,
+            Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                crate::settings::GlobalSettings::default()
+            }
+            Err(e) => return Err(e),
+        }
+    };
+
+    Ok(resolve_scalar_with(
+        project_marker.as_ref(),
+        workspace_settings.as_ref(),
+        &global_settings,
+        |p| p.expose_agents_as_personas,
+        |w| w.expose_agents_as_personas,
+        |g| g.expose_agents_as_personas,
+    ))
 }
 
 /// Resolve the OS shutdown signal future, returning the contract's

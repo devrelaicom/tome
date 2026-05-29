@@ -34,6 +34,58 @@ pub mod resolver;
 pub use composition::CompositionRef;
 pub use resolver::{EffectiveHarness, EffectiveHarnessList, ScopeKind, resolve_effective_list};
 
+/// First-declarer-wins priority walk for a Phase 6 scalar `bool` setting
+/// (FR-053, R-12). The nearest scope that **declares** the field
+/// (`Some(v)`) wins — project, then workspace, then global; an absent
+/// key (`None`) at a scope falls through to the next. When no scope
+/// declares the field the default is `false`.
+///
+/// This is deliberately NOT the `harnesses` composition grammar
+/// (`resolve_effective_list`): there is no list to union/subtract and no
+/// `[workspace]` / `[global]` / `!name` references — a project `false`
+/// simply overrides a global `true` (`settings-p6.md`).
+///
+/// The three arguments are the field's already-extracted value at each
+/// scope, in priority order. Call sites extract via a per-scope accessor
+/// (e.g. `project.map(|p| p.expose_agents_as_personas).flatten()`); the
+/// extraction is the "field accessor" seam, so a second Phase 6 scalar
+/// (US5's `strip_plugin_agent_privileges`) reuses this resolver verbatim
+/// by passing its own field's three values. See [`resolve_scalar_with`]
+/// for the closure-based form that takes the structs directly.
+pub fn resolve_scalar(
+    project: Option<bool>,
+    workspace: Option<bool>,
+    global: Option<bool>,
+) -> bool {
+    project.or(workspace).or(global).unwrap_or(false)
+}
+
+/// Closure-based form of [`resolve_scalar`]: takes the three settings
+/// scopes plus one field accessor per scope and applies the
+/// first-declarer-wins walk. Keeps the resolver generic over the field
+/// being resolved (the accessor is the only thing that changes between
+/// `expose_agents_as_personas` and US5's `strip_plugin_agent_privileges`),
+/// so a second scalar adds a one-line call site, not a second resolver.
+pub fn resolve_scalar_with<FP, FW, FG>(
+    project: Option<&ProjectMarkerConfig>,
+    workspace: Option<&WorkspaceSettings>,
+    global: &GlobalSettings,
+    project_field: FP,
+    workspace_field: FW,
+    global_field: FG,
+) -> bool
+where
+    FP: Fn(&ProjectMarkerConfig) -> Option<bool>,
+    FW: Fn(&WorkspaceSettings) -> Option<bool>,
+    FG: Fn(&GlobalSettings) -> Option<bool>,
+{
+    resolve_scalar(
+        project.and_then(project_field),
+        workspace.and_then(workspace_field),
+        global_field(global),
+    )
+}
+
 /// Contents of `<root>/workspaces/<name>/settings.toml`.
 ///
 /// Mirrors data-model §6. The `name` field MUST match the on-disk
@@ -52,6 +104,13 @@ pub struct WorkspaceSettings {
     /// empty, which opts out of the priority walk entirely).
     #[serde(default)]
     pub harnesses: Option<Vec<String>>,
+    /// Phase 6 (FR-060/FR-067): expose each enabled agent as a
+    /// `<name>-persona` MCP prompt plus one global `drop-persona`. `None`
+    /// = key absent (fall through to the next scope in the
+    /// first-declarer-wins walk); `Some(v)` = declared at this scope and
+    /// terminates the walk. See `agent-personas.md` / `settings-p6.md`.
+    #[serde(default)]
+    pub expose_agents_as_personas: Option<bool>,
 }
 
 /// Cached short + long summaries with their generation timestamp.
@@ -144,6 +203,10 @@ pub struct ProjectMarkerConfig {
     /// here; the parser does not validate them — the resolver does.
     #[serde(default)]
     pub harnesses: Option<Vec<String>>,
+    /// Phase 6 (FR-060/FR-067): see [`WorkspaceSettings::expose_agents_as_personas`].
+    /// Declared here it wins the first-declarer-wins walk (nearest scope).
+    #[serde(default)]
+    pub expose_agents_as_personas: Option<bool>,
 }
 
 /// Contents of `<root>/settings.toml` (global Tome settings).
@@ -155,4 +218,55 @@ pub struct ProjectMarkerConfig {
 pub struct GlobalSettings {
     #[serde(default)]
     pub harnesses: Option<Vec<String>>,
+    /// Phase 6 (FR-060/FR-067): see [`WorkspaceSettings::expose_agents_as_personas`].
+    /// Declared at global scope it is the org-wide default when nearer
+    /// scopes leave the key absent.
+    #[serde(default)]
+    pub expose_agents_as_personas: Option<bool>,
+}
+
+#[cfg(test)]
+mod scalar_resolver_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_false_when_nowhere_declared() {
+        assert!(!resolve_scalar(None, None, None));
+    }
+
+    #[test]
+    fn project_declaration_wins_over_global() {
+        // project `false` overrides global `true` — the defining behaviour.
+        assert!(!resolve_scalar(Some(false), None, Some(true)));
+        assert!(resolve_scalar(Some(true), None, Some(false)));
+    }
+
+    #[test]
+    fn workspace_wins_when_project_absent() {
+        assert!(resolve_scalar(None, Some(true), Some(false)));
+        assert!(!resolve_scalar(None, Some(false), Some(true)));
+    }
+
+    #[test]
+    fn falls_through_to_global() {
+        assert!(resolve_scalar(None, None, Some(true)));
+        assert!(!resolve_scalar(None, None, Some(false)));
+    }
+
+    #[test]
+    fn closure_form_threads_the_accessor() {
+        let global = GlobalSettings {
+            harnesses: None,
+            expose_agents_as_personas: Some(true),
+        };
+        let resolved = resolve_scalar_with(
+            None,
+            None,
+            &global,
+            |p| p.expose_agents_as_personas,
+            |w| w.expose_agents_as_personas,
+            |g| g.expose_agents_as_personas,
+        );
+        assert!(resolved);
+    }
 }

@@ -391,8 +391,9 @@ fn seed_catalog_enrolment(paths: &tome::paths::Paths, catalog_root: &Path, catal
 
 fn build_state_for_prompts(paths: &tome::paths::Paths) -> Arc<McpState> {
     let conn = open_index(paths);
-    let registry = PromptRegistry::build_for_workspace(&WorkspaceName::global(), paths, &conn)
-        .expect("build prompt registry");
+    let registry =
+        PromptRegistry::build_for_workspace(&WorkspaceName::global(), paths, &conn, false)
+            .expect("build prompt registry");
     drop(conn);
 
     let embedder_entry = lookup("bge-small-en-v1.5").expect("registry has embedder");

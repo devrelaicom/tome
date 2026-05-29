@@ -210,12 +210,12 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 - [X] T101 Create `specs/006-phase-6-hooks-agents/retro/P6.md` from template.
 - [X] T102 [GIT] Commit: `docs(phase-6): init P6 retro`.
-- [ ] T103 [US4] Add `expose_agents_as_personas: bool` (default false) to `GlobalSettings`/`WorkspaceSettings`/`ProjectMarkerConfig` in `src/settings/mod.rs`; add the first-declarer-wins scalar priority-walk resolver (project→workspace→global), distinct from the `harnesses` composition grammar (FR-053/060) (use devs:rust-dev agent).
-- [ ] T104 [US4] Implement the persona registry in `src/mcp/prompts.rs`: build `<name>-persona` entries from enabled agent rows when the flag (resolved against the server startup scope, FR-067) is on; reuse `build_context_for_entry` + the Phase 5 substitution pipeline (use devs:rust-dev agent).
-- [ ] T105 [US4] Implement persona name resolution (`<name>` from frontmatter name else filename stem; `<plugin>-<name>-persona` only on clash) and the role-assumption body wrapper + single catch-all `args` + ARGUMENTS fallback in `src/mcp/prompts.rs` (FR-061/062) (use devs:rust-dev agent).
-- [ ] T106 [US4] Add the reserved global `drop-persona` prompt and fold persona derived names into the single Phase 5 collision namespace (union of command+skill+persona; agent-clash prefix before counter-suffix backstop) in `src/mcp/prompts.rs` + `src/mcp/prompt_collision.rs` (FR-063/066) (use devs:rust-dev agent).
-- [ ] T107 [US4] Document the advisory-state caveat (persona is context, not enforced) in the prompt description + user docs (FR-065).
-- [ ] T108 [GIT] Commit: `feat(phase-6): agent personas as MCP prompts + drop-persona`.
+- [X] T103 [US4] Add `expose_agents_as_personas: bool` (default false) to `GlobalSettings`/`WorkspaceSettings`/`ProjectMarkerConfig` in `src/settings/mod.rs`; add the first-declarer-wins scalar priority-walk resolver (project→workspace→global), distinct from the `harnesses` composition grammar (FR-053/060) (use devs:rust-dev agent).
+- [X] T104 [US4] Implement the persona registry in `src/mcp/prompts.rs`: build `<name>-persona` entries from enabled agent rows when the flag (resolved against the server startup scope, FR-067) is on; reuse `build_context_for_entry` + the Phase 5 substitution pipeline (use devs:rust-dev agent).
+- [X] T105 [US4] Implement persona name resolution (`<name>` from frontmatter name else filename stem; `<plugin>-<name>-persona` only on clash) and the role-assumption body wrapper + single catch-all `args` + ARGUMENTS fallback in `src/mcp/prompts.rs` (FR-061/062) (use devs:rust-dev agent).
+- [X] T106 [US4] Add the reserved global `drop-persona` prompt and fold persona derived names into the single Phase 5 collision namespace (union of command+skill+persona; agent-clash prefix before counter-suffix backstop) in `src/mcp/prompts.rs` + `src/mcp/prompt_collision.rs` (FR-063/066) (use devs:rust-dev agent).
+- [X] T107 [US4] Document the advisory-state caveat (persona is context, not enforced) in the prompt description + user docs (FR-065).
+- [X] T108 [GIT] Commit: `feat(phase-6): agent personas as MCP prompts + drop-persona`.
 - [ ] T109 [P] [US4] `tests/personas.rs` — off→none; on→`<name>-persona` + one `drop-persona`; `prompts/get` body wrap + substitution + args (use devs:rust-dev agent).
 - [ ] T110 [P] [US4] `tests/personas_collision.rs` — clash prefixing; `drop-persona` reserved vs a colliding command; collision-namespace union (use devs:rust-dev agent).
 - [ ] T111 [P] [US4] JSON wire-shape pins for the persona `PromptDescriptor` entries (`tests/personas.rs`) (use devs:rust-dev agent).

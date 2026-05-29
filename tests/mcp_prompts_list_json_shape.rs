@@ -130,7 +130,8 @@ fn prompts_list_payload_is_byte_stable_for_two_entry_fixture() {
     )
     .unwrap();
     let registry =
-        PromptRegistry::build_for_workspace(&WorkspaceName::global(), &paths, &conn).unwrap();
+        PromptRegistry::build_for_workspace(&WorkspaceName::global(), &paths, &conn, false)
+            .unwrap();
 
     let descriptors = registry.descriptors();
     let serialised = serde_json::to_value(&descriptors).expect("serialise");

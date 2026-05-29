@@ -38,6 +38,7 @@ fn ws(name: &str, harnesses: Option<Vec<String>>) -> WorkspaceSettings {
         summaries: None,
         catalogs: Vec::new(),
         harnesses,
+        expose_agents_as_personas: None,
     }
 }
 
@@ -45,6 +46,7 @@ fn project(workspace: &str, harnesses: Option<Vec<String>>) -> ProjectMarkerConf
     ProjectMarkerConfig {
         workspace: WorkspaceName::parse(workspace).expect("test workspace name parses"),
         harnesses,
+        expose_agents_as_personas: None,
     }
 }
 
@@ -58,6 +60,7 @@ fn global_declares_list_no_project_no_workspace_effective_from_global() {
     let stub = StubScope::new();
     let global = GlobalSettings {
         harnesses: Some(vec!["a".to_owned()]),
+        expose_agents_as_personas: None,
     };
     let result = resolve_effective_list(None, None, &global, &stub).expect("resolves");
     assert_eq!(names(&result.harnesses), vec!["a"]);
@@ -76,6 +79,7 @@ fn workspace_declares_list_no_project_effective_from_workspace_global_not_consul
     let ws_settings = ws("a", Some(vec!["b".to_owned()]));
     let global = GlobalSettings {
         harnesses: Some(vec!["should-not-appear".to_owned()]),
+        expose_agents_as_personas: None,
     };
     let result =
         resolve_effective_list(None, Some(&ws_settings), &global, &stub).expect("resolves");
@@ -96,6 +100,7 @@ fn workspace_with_explicit_global_ref_unions() {
     let ws_settings = ws("a", Some(vec!["b".to_owned(), "[global]".to_owned()]));
     let global = GlobalSettings {
         harnesses: Some(vec!["a".to_owned()]),
+        expose_agents_as_personas: None,
     };
     let result =
         resolve_effective_list(None, Some(&ws_settings), &global, &stub).expect("resolves");
@@ -115,6 +120,7 @@ fn project_declares_list_workspace_global_ignored_unless_referenced() {
     let ws_settings = ws("ws", Some(vec!["b".to_owned()]));
     let global = GlobalSettings {
         harnesses: Some(vec!["c".to_owned()]),
+        expose_agents_as_personas: None,
     };
     let result =
         resolve_effective_list(Some(&proj), Some(&ws_settings), &global, &stub).expect("resolves");
@@ -134,6 +140,7 @@ fn empty_list_at_any_scope_terminates_walk_with_empty_effective() {
     let ws_settings = ws("ws", Some(Vec::new()));
     let global = GlobalSettings {
         harnesses: Some(vec!["should-not-appear".to_owned()]),
+        expose_agents_as_personas: None,
     };
     let result =
         resolve_effective_list(None, Some(&ws_settings), &global, &stub).expect("resolves");
