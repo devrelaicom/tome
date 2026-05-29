@@ -216,10 +216,10 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T106 [US4] Add the reserved global `drop-persona` prompt and fold persona derived names into the single Phase 5 collision namespace (union of command+skill+persona; agent-clash prefix before counter-suffix backstop) in `src/mcp/prompts.rs` + `src/mcp/prompt_collision.rs` (FR-063/066) (use devs:rust-dev agent).
 - [X] T107 [US4] Document the advisory-state caveat (persona is context, not enforced) in the prompt description + user docs (FR-065).
 - [X] T108 [GIT] Commit: `feat(phase-6): agent personas as MCP prompts + drop-persona`.
-- [ ] T109 [P] [US4] `tests/personas.rs` — off→none; on→`<name>-persona` + one `drop-persona`; `prompts/get` body wrap + substitution + args (use devs:rust-dev agent).
-- [ ] T110 [P] [US4] `tests/personas_collision.rs` — clash prefixing; `drop-persona` reserved vs a colliding command; collision-namespace union (use devs:rust-dev agent).
-- [ ] T111 [P] [US4] JSON wire-shape pins for the persona `PromptDescriptor` entries (`tests/personas.rs`) (use devs:rust-dev agent).
-- [ ] T112 [GIT] Commit: `test(phase-6): US4 personas + collision + wire pins`.
+- [X] T109 [P] [US4] `tests/personas.rs` — off→none; on→`<name>-persona` + one `drop-persona`; `prompts/get` body wrap + substitution + args (use devs:rust-dev agent).
+- [X] T110 [P] [US4] `tests/personas_collision.rs` — clash prefixing; `drop-persona` reserved vs a colliding command; collision-namespace union (use devs:rust-dev agent).
+- [X] T111 [P] [US4] JSON wire-shape pins for the persona `PromptDescriptor` entries (`tests/personas.rs`) (use devs:rust-dev agent).
+- [X] T112 [GIT] Commit: `test(phase-6): US4 personas + collision + wire pins`.
 - [ ] T113 [US4] 4-reviewer pass; write `review/us4-findings.md` + `review/us4-disposition.md`.
 - [ ] T114 [US4] Apply US4 blockers + selected majors (use devs:rust-dev agent).
 - [ ] T115 [GIT] Commit: `fix(phase-6): apply US4 reviewer findings`.
