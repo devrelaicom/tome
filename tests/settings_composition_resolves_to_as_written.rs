@@ -20,6 +20,7 @@ fn ws(name: &str, harnesses: Option<Vec<String>>) -> WorkspaceSettings {
         catalogs: Vec::new(),
         harnesses,
         expose_agents_as_personas: None,
+        strip_plugin_agent_privileges: None,
     }
 }
 
@@ -28,6 +29,7 @@ fn project(workspace: &str, harnesses: Option<Vec<String>>) -> ProjectMarkerConf
         workspace: WorkspaceName::parse(workspace).expect("test workspace name parses"),
         harnesses,
         expose_agents_as_personas: None,
+        strip_plugin_agent_privileges: None,
     }
 }
 
@@ -60,6 +62,7 @@ fn workspace_ref_to_undeclared_workspace_resolves_to_empty_not_global() {
         // FR-449 forbids.
         harnesses: Some(vec!["claude-code".to_owned(), "codex".to_owned()]),
         expose_agents_as_personas: None,
+        strip_plugin_agent_privileges: None,
     };
 
     let result =
@@ -102,6 +105,7 @@ fn workspace_ref_with_global_in_it_does_not_recurse_through_workspace_effective_
     let global = GlobalSettings {
         harnesses: Some(vec!["claude-code".to_owned()]),
         expose_agents_as_personas: None,
+        strip_plugin_agent_privileges: None,
     };
 
     let result =

@@ -112,6 +112,14 @@ pub struct WorkspaceSettings {
     /// terminates the walk. See `agent-personas.md` / `settings-p6.md`.
     #[serde(default)]
     pub expose_agents_as_personas: Option<bool>,
+    /// Phase 6 (FR-050/FR-052/FR-053): strip the privileged `hooks` /
+    /// `mcpServers` / `permissionMode` frontmatter from emitted Claude Code
+    /// agent files. `None` = key absent (fall through to the next scope in
+    /// the first-declarer-wins walk); `Some(v)` = declared at this scope and
+    /// terminates the walk. Resolved at agent-emission (sync) time; see
+    /// `settings-p6.md`.
+    #[serde(default)]
+    pub strip_plugin_agent_privileges: Option<bool>,
 }
 
 /// Cached short + long summaries with their generation timestamp.
@@ -208,6 +216,11 @@ pub struct ProjectMarkerConfig {
     /// Declared here it wins the first-declarer-wins walk (nearest scope).
     #[serde(default)]
     pub expose_agents_as_personas: Option<bool>,
+    /// Phase 6 (FR-050/FR-052/FR-053): see
+    /// [`WorkspaceSettings::strip_plugin_agent_privileges`]. Declared here it
+    /// wins the first-declarer-wins walk (nearest scope).
+    #[serde(default)]
+    pub strip_plugin_agent_privileges: Option<bool>,
 }
 
 /// Contents of `<root>/settings.toml` (global Tome settings).
@@ -224,6 +237,12 @@ pub struct GlobalSettings {
     /// scopes leave the key absent.
     #[serde(default)]
     pub expose_agents_as_personas: Option<bool>,
+    /// Phase 6 (FR-050/FR-052/FR-053): see
+    /// [`WorkspaceSettings::strip_plugin_agent_privileges`]. Declared at
+    /// global scope it is the org-wide default when nearer scopes leave the
+    /// key absent — a security-conscious user enforces the strip org-wide here.
+    #[serde(default)]
+    pub strip_plugin_agent_privileges: Option<bool>,
 }
 
 #[cfg(test)]
@@ -259,6 +278,7 @@ mod scalar_resolver_tests {
         let global = GlobalSettings {
             harnesses: None,
             expose_agents_as_personas: Some(true),
+            strip_plugin_agent_privileges: None,
         };
         let resolved = resolve_scalar_with(
             None,
