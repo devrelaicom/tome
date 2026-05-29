@@ -87,6 +87,7 @@ Deep per-phase / per-US detail lives in the retros (`specs/*/retro/P*.md`) and g
 - **Canonical enum dispatch** over stringly-typed `match kind.as_str()` — surfaces schema drift as `IndexIntegrityCheckFailure`.
 - **Byte-stable JSON wire-shape pin tests** for emit-only `Serialize` records (no `deny_unknown_fields` — boundary is inputs only).
 - **Marker-only migration for free-text domain widening** — when a free-text TEXT column admits a new value (no DDL needed), register a `Migration` whose `apply` is a documented no-op that only advances `SCHEMA_VERSION`, so the migration registry + doctor's schema check stay monotonic and auditable (P6/F2: `kind` domain widened to `agent`, v3→v4).
+- **Validate third-party strings as a safe path segment before composing them into a path** — reject empty/NUL/`/`/`\`/`.`/`..`/leading-dot and require exactly one `Component::Normal` at the *boundary*, then add a defensive `target.parent() == Some(dir)` check at the write site (`harness::agents::is_safe_agent_name`, P6/US1 — closed a path-traversal via plugin-supplied agent `name`). Applies wherever plugin/frontmatter-supplied text becomes a filename.
 - **Per-US closeout discipline** — 4-reviewer parallel pass (contract / Rust-lens / test / security) dispatched in ONE message; findings + disposition committed *before* applying fixes; then `/sdd:map incremental` refresh + retro fill + this CLAUDE.md update.
 
 ## Common Commands

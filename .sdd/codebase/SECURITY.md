@@ -2,13 +2,13 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-27 (Phase 5 / Polish complete; v0.5.0; 0 HIGH/MEDIUM/LOW security findings from full Phase 5 reviewer pass)
+> **Last Updated**: 2026-05-29 (Phase 6 / US1 native agents; incremental update)
 
 ## Overview
 
-Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, workspace settings, project bindings, workspace summarisation, command/prompt entries, and harness synchronisation across multiple coding harnesses. As a synchronous, file-based tool without user authentication, security focuses on:
+Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, workspace settings, project bindings, workspace summarisation, command/prompt entries, agent translations, and harness synchronisation across multiple coding harnesses. As a synchronous, file-based tool without user authentication, security focuses on:
 
-1. Preventing path traversal and directory-escape attacks via plugin source paths, plugin identities, workspace names, project paths, entry body paths, and harness configurations
+1. Preventing path traversal and directory-escape attacks via plugin source paths, plugin identities, workspace names, project paths, entry body paths, agent names, and harness configurations
 2. UTF-8 validation for project paths stored in the central DB (primary key constraint)
 3. Integrity verification for downloaded model artefacts (SHA-256 checksums across three inference runtimes: embedder, reranker, summariser)
 4. Symlink refusal on all workspace/project/harness file writes (defence in depth)
@@ -46,6 +46,7 @@ Tome is a Rust CLI (and MCP server) for managing plugin catalogs, embeddings, wo
 36. Phase 5 / US4 additions (DoS MITIGATION): MCP `search_skills` description truncation via bounded O(max) `char_indices` walk (US4.d-1 S-M1 HIGH fix); eliminated O(n) full-string traversal that created meaningful CPU amplifier when caller-controlled `description_max_chars` (0–100,000 cap) × `top_k` results (1–100) × multi-KB descriptions ran over full input; walk stops after `max+1` chars, no reallocation in truncation path; no full-string traversal in no-truncation path
 37. Phase 5 / US5 additions (CLOSURE OF PHASE 5 FEATURE WORK): Per-entry invocability flags (`user_invocable` column); `tome plugin show` displays command entries + resource enumeration (5-cap per directory + sentinels); doctor `--fix` extends to summariser re-download (5th repair class); symbolic link skip in `walk_resources` for resource enumeration; `Paths::plugin_data_root()` unified singleton source eliminates layout-drift risk; 0 security findings from Phase 5 / US5 reviewer pass
 38. Phase 5 / Polish additions: All Phase 5 feature work critical security invariants (no-rescan, truncation DoS, path traversal, resource walk hardening) verified end-to-end; **0 HIGH / 0 MEDIUM / 0 LOW** security findings from full Phase 5 audit; 4 critical blockers fixed across US1–US5; `validate_db_stored_path` promoted as single SSOT for path-traversal boundary checks across all entry-body-reading surfaces; Paths::plugin_data_root() unified singleton verified across all callers; all Phase 5 contracts (exit-codes-p5, substitution-engine, mcp-tools-p5, entry-schema-p5) ratified
+39. Phase 6 / US1 additions (NATIVE AGENTS): Plugin-supplied agent names validated as single safe path segment before becoming a filename (`is_safe_agent_name`); path-traversal vector closed (frontmatter `name: ../../evil` rejected before storing). Defence-in-depth: `target.parent() == Some(dir)` assertion before every agent write. Agent file writes reuse atomic, symlink-refusing, mode-preserving discipline (`write_standalone`). Plugin removal is literal prefix match (`plugin_of_owned_file`), not glob, scoped to directory walk. Privileged-field passthrough (hooks/mcpServers/permissionMode → `.claude/agents/`) is the intended FR-050 default, auditable in-file; striping opt-out (US5) surfaces privilege escalation report in doctor.
 
 Security controls are enforced in code, tests, and CI—documented in `CONSTITUTION.md` and `specs/` contracts.
 
@@ -117,6 +118,32 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 5. **Reject absolute paths**: `segment.starts_with('/')` or `segment.starts_with('\\')` (Unix and Windows)
 
 **Purpose**: Ensure plugin identities (`<catalog>/<plugin>`) are safe to compose into filesystem paths and cannot escape intended directory bounds.
+
+### Agent Name Validation (Phase 6 / US1)
+
+| Layer | Validation | Rules |
+|-------|-----------|-------|
+| **Index-time gate** | `is_safe_agent_name` validates before storing | `src/harness/agents.rs::is_safe_agent_name` |
+| **Rejection criteria** | Single safe path segment: no `/`, `\`, `..`, `.`, leading `.`, NUL, or components > 1 | See FR-S-1 |
+| **Mechanism** | `Path::components()` produces exactly one `Component::Normal` equal to the input | Robust backstop guards platform-specific separator behaviors |
+| **Exit code** | Validation failure at enable time returns `AgentTranslationFailed` (exit 45) | Prevents storing invalid `name` in index |
+| **Testing** | Negative-case corpus for traversal, separators, NUL | Phase 6 US1 integration tests |
+
+**Validation Algorithm** (`src/harness/agents.rs`, lines 267–294):
+1. **Reject empty**: `name.is_empty()`
+2. **Reject NUL**: `name.contains('\u{0}')` (invalid in POSIX/Windows paths)
+3. **Reject separators**: `name.contains('/')` or `name.contains('\\')`
+4. **Reject traversal**: `name == "."` or `name == ".."` or `name.starts_with('.')`
+5. **Robust backstop**: `Path::components()` must yield exactly one `Normal` component equal to input
+
+**Purpose**: The emitted filename is `<plugin>__<name>.<ext>` joined to harness agent dir; a hostile `name` like `../../../../tmp/evil` would escape the directory unless blocked at index time.
+
+**Examples of rejections**:
+- `../../../../tmp/evil` → Rejected (contains `/` and traversal)
+- `..` → Rejected (parent directory)
+- `.hidden` → Rejected (leading dot)
+- `a\b` → Rejected (backslash separator)
+- `evil\u{0}` → Rejected (NUL byte)
 
 ### Entry Body-File Path Validation (Phase 5 / US1)
 
@@ -213,6 +240,78 @@ The credential scrubber applies four ordered regex patterns to every byte stream
 | Control | Implementation | Purpose |
 |---------|----------------|---------|
 | **MCP query length cap** | 4096 chars enforced at search_skills input boundary (FR-555) | `src/mcp/tools/search_skills.rs::106` validates before expensive compute |
+
+## Agent File Write Security (Phase 6 / US1)
+
+### Safe Name Gate
+
+| Control | Implementation | Guarantee |
+|---------|----------------|-----------|
+| **Index-time validation** | `is_safe_agent_name(name)` at parse time (exit 45 on fail) | Prevents storing invalid names in canonical agent struct |
+| **Single safe segment** | `Path::components()` yields exactly one `Component::Normal` | Robust platform-independent check; no traversal tokens, separators, or NUL |
+| **Filename composition** | `agent_filename(plugin, name, ext) → "<plugin>__<name>.<ext>"` | Double underscore provenance; filename is deterministic from validated name |
+
+### Atomic Write Discipline
+
+| Layer | Control | Guarantee |
+|-------|---------|-----------|
+| **Symlink refusal** | `refuse_symlink(target)` check before write | Exit 7; prevents writing through symlinks to unintended locations |
+| **Atomic persist** | `write_standalone` via `tempfile` + POSIX rename | Crash mid-write leaves no partial file; same-FS rename is atomic |
+| **Mode preservation** | Capture existing mode; chmod staged file before rename | Permissions preserved; no downgrade on rewrite |
+| **Directory assertion** | `target.parent() == Some(dir)` verified before every write | Defence-in-depth: name validation alone isn't trusted; final target is checked |
+
+**Code Location** (`src/harness/sync.rs`, lines 840–855):
+```rust
+let target = dir.join(&translated.filename);
+// S-1 defence-in-depth: the agent `name` is validated as a single
+// safe path segment at index time, but assert here too that the
+// joined target stays directly inside `dir`.
+if target.parent() != Some(dir) {
+    if recon.first_error.is_none() {
+        recon.first_error = Some(TomeError::AgentTranslationFailed {
+            agent: format!("{}/{}", agent.canonical.plugin, agent.canonical.name),
+        });
+    }
+    continue;  // Never write outside `dir`
+}
+match write_agent_file(&target, &translated.rendered) { ... }
+```
+
+### Plugin Ownership & Removal
+
+| Control | Implementation | Purpose |
+|---------|----------------|---------|
+| **Provenance mechanism** | `<plugin>__<name>.<ext>` double-underscore separator (FR-040, R-19) | No ambiguity; no provenance frontmatter key (avoids harness parser confusion) |
+| **Inverse recovery** | `plugin_of_owned_file(filename) → Option<&str>` (SSOT) | Single source of truth for ownership; reconciliation consumes this for both per-plugin removal and orphan cleanup (FR-043) |
+| **Literal prefix match** | Split on `__`, validate non-empty plugin and stem, return plugin prefix | NOT a shell glob; scoped to `read_dir` entries only; cannot escape directory or widen to other plugins |
+| **Removal scope** | Per-plugin removal iterates owned files, filters by literal prefix | Orphaned `<oldplugin>__<name>` files left until full plugin disable (US5 doctor `--fix` removes via `PrivilegeEscalationReport`) |
+
+**Code Location** (`src/harness/agents.rs`, lines 522–533):
+```rust
+pub(crate) fn plugin_of_owned_file(filename: &str) -> Option<&str> {
+    let (plugin, rest) = filename.split_once("__")?;
+    if plugin.is_empty() {
+        return None;
+    }
+    // Require a non-empty `<name>` before the extension dot.
+    let stem = rest.rsplit_once('.').map(|(s, _)| s).unwrap_or(rest);
+    if stem.is_empty() {
+        return None;
+    }
+    Some(plugin)
+}
+```
+
+### Privileged Field Passthrough
+
+| Control | Implementation | Location |
+|---------|----------------|----------|
+| **Default passthrough** | Privileged fields (`hooks`, `mcp_servers`, `permission_mode`) forwarded to Claude Code intact | `src/harness/agents.rs::CanonicalAgent` carries all three as opaque `serde_json::Value` |
+| **In-file audit trail** | Each field written to emitted agent file; operators can inspect via `cat .claude/agents/<name>.md` | Transparency by design (FR-050) |
+| **Opt-out stripping** | `strip_plugin_agent_privileges` setting (US5) drops all three fields on Claude Code agent emission | Operator control; governance responsibility to decide when to trust plugin-supplied hooks |
+| **Doctor privilege report** | US5 surfaces `PrivilegeEscalationReport` listing all installed agents carrying privileged fields | Audit visibility for operator decisions |
+
+**Security Model**: Trust boundary is at plugin enable time — operator explicitly authorizes the plugin and accepts whatever privileges it declares. The passthrough is intentional (FR-050: a capability advantage). Future `PrivilegeEscalationReport` (US5) surfaces what was accepted, supporting governance workflows.
 
 ## Substitution Engine Security (Phase 5 / US2–US3, CRITICAL)
 
@@ -421,6 +520,7 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 | **Harness config write** | `toml_edit` via `write_atomic` | Mode preserved; symlinks refused; tmpfile POSIX-rename |
 | **Rules file write** | Block-insertion or standalone | Symlink refused; atomic persist |
 | **Settings edits** | `toml_edit` via `write_atomic` | Mode preserved; symlinks refused |
+| **Agent file write** | `write_standalone` (Phase 6 / US1) | Symlink refused; atomic persist; mode preserved |
 | **Model downloads** | Stream-to-partial → rename | Cleanup closure ensures partial removed on checksum mismatch |
 
 ### Symlink Refusal (Defense in Depth)
@@ -431,11 +531,12 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 | Harness rules file | Write-back symlink check | Exit 7 | `src/harness/rules_file.rs::refuse_symlink` |
 | Harness MCP config | Write-back symlink check | Exit 7 | `src/harness/mcp_config.rs::refuse_symlink` |
 | Atomic dir landing | Staging path symlink refusal | Exit 7 | `src/util/atomic_dir.rs::refuse_symlink` |
+| **Agent file write** | **Write-back symlink check (Phase 6 / US1)** | **Exit 7** | **`src/harness/rules_file.rs::refuse_symlink` (reused for agents)** |
 | MCP get_skill walk | Directory symlink skip | Silent skip | `src/mcp/tools/get_skill.rs` (`is_symlink()` filter) |
 | Doctor orphan cleanup | Symlink-skip in sweep | Silent skip | `src/doctor/orphan_cleanup.rs::sweep_one` (symlink_metadata check) |
 | **MCP plugin show resource walk** | **Directory symlink skip (Phase 5 / US5)** | **Silent skip** | **`src/mcp/tools/plugin_show.rs::walk_resources` (`is_symlink()` filter; US5 new surface)** |
 
-**Threat Model**: Hostile catalog clones `skills/creds → ~/.ssh/id_rsa`, operator runs `tome plugin enable` → would leak SSH key via skill content. **Mitigation**: symlink skip in MCP `get_skill` walk + symlink refusal on writes + resource enumeration skip in `plugin_show`.
+**Threat Model**: Hostile catalog clones `skills/creds → ~/.ssh/id_rsa`, operator runs `tome plugin enable` → would leak SSH key via skill content. **Mitigation**: symlink skip in MCP `get_skill` walk + symlink refusal on writes + resource enumeration skip in `plugin_show`. Phase 6 US1 extends to agent file writes: symlink refusal before emitting to `.claude/agents/`.
 
 ### File Mode Preservation
 
@@ -444,6 +545,7 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 | Harness config rewrite | `symlink_metadata(target)` before write | `chmod` staged tempfile before `persist` | `src/catalog/store.rs::write_atomic` (unified) |
 | Workspace settings edit | Same | Same | `src/settings/edit.rs::save_settings` (via `write_atomic`) |
 | Rules file rewrite | Same | Same | `src/harness/rules_file.rs::atomic_write` (via `write_atomic`) |
+| **Agent file write** | **Same (Phase 6 / US1)** | **Same** | **`src/harness/rules_file.rs::write_standalone` (reused for agents)** |
 | Project marker write | Same | Same | `src/util/atomic_dir.rs::land_directory` (chmod 0o700 before keep) |
 
 **Protection Against**: Silent permission downgrade (0o600 → 0o644) when a rewrite via `NamedTempFile::persist` doesn't preserve existing mode. Relevant for sensitive config files; tests verify via `tests/security_hardening.rs`.
@@ -492,9 +594,12 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 - Exit 28: `SubstitutionFailed` (body-path traversal, env var issues)
 - Exit 29: `InvalidArgumentFrontmatter` (arguments list DoS cap, etc.)
 
-See `specs/005-phase-5-commands-prompts/contracts/exit-codes-p5.md` for full enumeration.
+**Phase 6 / US1 additions**:
+- Exit 45: `AgentTranslationFailed` (malformed agent frontmatter, unsafe agent name, target-directory escape)
+
+See `specs/005-phase-5-commands-prompts/contracts/exit-codes-p5.md` + `specs/006-phase-6-hooks-agents/contracts/exit-codes-p6.md` for full enumeration.
 
 ---
 
 *This document defines security controls. Update when security posture changes.*
-*Last refreshed 2026-05-27 against Phase 5 / Polish complete source (1172 tests passing, ~147 suites); 0 HIGH/MEDIUM/LOW security findings from full Phase 5 reviewer pass; 4 critical blockers fixed across US1–US5; all Phase 5 contracts ratified.*
+*Last refreshed 2026-05-29 against Phase 6 / US1 native agents code (incremental update); Phase 5 Polish baseline (1172 tests, 147 suites); agent name validation, atomic write discipline, privilege passthrough, and literal prefix removal all verified.*

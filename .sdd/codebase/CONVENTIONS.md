@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and patterns for Tome (Rust CLI).
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 Foundational)
+> **Last Updated**: 2026-05-29 (Phase 6 US1 — native agents)
 
 ## Code Style
 
@@ -27,7 +27,7 @@ All three enforce at the pre-commit hook (`.githooks/pre-commit`) before commits
 | Max line length | 100 chars (soft; clippy tunable) |
 | Comments | Explain *why*, not *what* (readers know Rust) |
 
-**Strictness boundary** (FR-013a): `#[serde(deny_unknown_fields)]` applies to Tome-owned inputs (`config.toml`, model manifests, index `meta` rows). Third-party inputs (SKILL.md YAML frontmatter, `plugin.json` metadata) parse leniently — enforced by `tests/manifest_strictness.rs` grep guard.
+**Strictness boundary** (FR-013a): `#[serde(deny_unknown_fields)]` applies to Tome-owned inputs (`config.toml`, model manifests, index `meta` rows). Third-party inputs (SKILL.md YAML frontmatter, `plugin.json` metadata, agent frontmatter) parse leniently — enforced by `tests/manifest_strictness.rs` grep guard.
 
 ## Naming Conventions
 
@@ -64,12 +64,14 @@ let kind = stored_kind.parse::<EntryKind>()?;
 match kind {
     EntryKind::Skill => { ... },
     EntryKind::Command => { ... },
+    EntryKind::Agent => { ... },
 }
 
 // Bad: stringly-typed dispatch
 match kind.as_str() {
     "skill" => { ... },
     "command" => { ... },
+    "agent" => { ... },
     _ => { ... },  // Unknown branches are error-prone
 }
 ```
@@ -459,6 +461,137 @@ Migration {
 
 **Used in**: `tests/schema_migration_p6.rs` pins the production marker migration. Discovered at Phase 6 Foundational when `EntryKind` was widened to include `Agent` variant but the index schema remained at version 3.
 
+### Phase 6: Validate Third-Party Names as a Single Safe Path Segment (S-1)
+
+When a plugin-supplied name (e.g., agent `name` frontmatter field) will be composed into a filesystem path, validate it at the boundary before storing or emitting:
+
+```rust
+// src/harness/agents.rs::is_safe_agent_name
+pub(crate) fn is_safe_agent_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    // NUL can never appear in a valid path component
+    if name.contains('\u{0}') {
+        return false;
+    }
+    // Reject separators on either platform
+    if name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    // Explicit traversal / dotfile rejection
+    if name == "." || name == ".." || name.starts_with('.') {
+        return false;
+    }
+    // Robust backstop: exactly one `Component::Normal` equal to the name
+    let mut comps = Path::new(name).components();
+    match (comps.next(), comps.next()) {
+        (Some(std::path::Component::Normal(seg)), None) => seg == std::ffi::OsStr::new(name),
+        _ => false,
+    }
+}
+```
+
+The emitted filename `<plugin>__<name>.<ext>` is joined onto each harness's agent dir; an attacker-controlled `name` like `../../../../tmp/evil` would otherwise escape. **Index-time gate**: a `name` that fails `is_safe_agent_name` maps to `TomeError::AgentTranslationFailed` (exit 45) with no row stored. Paired with a defensive `target.parent() == Some(dir)` check at the write site (`sync` reconciliation). Applied at `src/plugin/lifecycle.rs::enable_plugin_atomic` before the agent row is inserted.
+
+**Used in**: `tests/agent_path_traversal.rs` (S-1 defence), `tests/agent_naming_clash.rs` (name as the `<name>` half of `<plugin>__<name>`).
+
+### Phase 6: Same-Vendor-Only Model Alias Table
+
+Never cross-vendor when translating a plugin agent's `model` field to a harness-native identifier. Use per-harness policy slots even when identifiers aren't enumerated:
+
+```rust
+// src/harness/agents.rs::map_model
+pub(crate) fn map_model(harness: &str, source: &str) -> Option<String> {
+    if source == "inherit" {
+        return None;  // No "inherit" across harnesses
+    }
+    match harness {
+        "claude-code" => Some(source.to_owned()),  // Canonical vendor: pass through
+        "codex" => None,  // OpenAI-vendored: no Anthropic alias maps
+        "cursor" => None,  // Drop (no enumerated Anthropic ids yet)
+        "opencode" => match source {
+            "opus" => Some("anthropic/claude-opus-4.7".to_owned()),
+            "sonnet" => Some("anthropic/claude-sonnet-4.7".to_owned()),
+            "haiku" => Some("anthropic/claude-haiku-4.7".to_owned()),
+            _ => None,
+        },
+        _ => None,  // Unknown harness: drop conservatively
+    }
+}
+```
+
+**Contract**: pinned in `contracts/agent-translation.md` (SC-002). The policy is fixed; harness-native identifiers are confirmed at implementation time. Drop-on-no-target is intentional — an Anthropic-sourced `model: opus` → Codex yields `None` (Codex never gets an Anthropic id). Verified in `tests/agent_translate_*.rs`.
+
+### Phase 6: `plugin_of_owned_file` as Single Source of Truth
+
+The inverse of the `<plugin>__<name>.<ext>` filename builder, `plugin_of_owned_file` is the sole provenance rule consumed by both agent emission and cleanup:
+
+```rust
+// src/harness/agents.rs::plugin_of_owned_file
+pub(crate) fn plugin_of_owned_file(filename: &str) -> Option<&str> {
+    let (plugin, rest) = filename.split_once("__")?;
+    if plugin.is_empty() {
+        return None;
+    }
+    // Require a non-empty `<name>` before the extension dot
+    let stem = rest.rsplit_once('.').map(|(s, _)| s).unwrap_or(rest);
+    if stem.is_empty() {
+        return None;
+    }
+    Some(plugin)
+}
+```
+
+The double-underscore separator (`__`) distinguishes Tome-owned agent files from user or harness files containing a single underscore. Every harness's removal glob and sync reconciliation's per-plugin and orphan-cleanup passes route through this one accessor. **Rationale** (instance of helper visibility rule-of-3): establishes a single query point so the ownership rule is never re-rolled across call sites (FR-043).
+
+**Used in**: `src/harness/sync.rs` (both removal passes), `tests/agent_removal.rs` (ownership verification).
+
+### Phase 6: Embedding-Skip via `Option<&[f32]>` + `embed_unless_agent` Predicate
+
+When indexing entries that include agents alongside skills (both live in the same database), skip embedding for agent rows and preserve the embedding column as a predicate decision point:
+
+```rust
+// src/index/skills.rs::embed_unless_agent
+fn embed_unless_agent<F>(
+    pending: &PendingSkill,
+    embed: &mut F,
+) -> Result<Option<Vec<f32>>, TomeError>
+where
+    F: FnMut(&str) -> Result<Vec<f32>, TomeError>,
+{
+    if pending.kind == EntryKind::Agent {
+        return Ok(None);  // Agents are never embedded
+    }
+    let vector = embed(&embedding_text(...))?;
+    Ok(Some(vector))
+}
+```
+
+The embedding column is `BLOB` or `NULL`; agent rows carry `NULL` (never a vector). The predicate is single-sourced in `embed_unless_agent` so both the enable path and later reindex operations use the same rule. **Rationale**: agents are not searchable (FR-063); queries filter on `embedding IS NOT NULL` to exclude them. Documented in `contracts/agent-translation.md` (FR-063).
+
+**Used in**: `src/index/skills.rs` (enable + reindex paths), verified in `tests/entry_kind_agent_indexing.rs` (agents absent from search results).
+
+### Phase 6: Content-Driven Codex TOML Triple-Quoting via `toml_edit`
+
+When rendering Codex agent files in TOML format with multi-line bodies, use `toml_edit` to render the body in a triple-quoted `developer_instructions` string. The library automatically promotes multi-line strings to the multiline basic form (`"""…"""`):
+
+```rust
+// src/harness/agents.rs::render_codex_toml
+pub(crate) fn render_codex_toml(scalars: &[(String, String)], body: &str) -> String {
+    use toml_edit::{DocumentMut, value};
+
+    let mut doc = DocumentMut::new();
+    for (k, v) in scalars {
+        doc[k.as_str()] = value(v.as_str());
+    }
+    doc["developer_instructions"] = value(body);  // Automatically triple-quoted if multiline
+    doc.to_string()
+}
+```
+
+**Discipline**: Never hand-roll TOML quoting or escaping. `toml_edit`'s `value()` function's default string representation promotes any value containing a newline to `"""…"""` — exactly the triple-quoted form the contract mandates (FR-033 / R-14). Agent bodies are Markdown (multi-line), so the promotion is reliable and deterministic. Verified in `tests/agent_translate_codex.rs::body_lands_in_triple_quoted_developer_instructions`.
+
 ## Comments & Documentation
 
 | Type | Format | Usage |
@@ -539,7 +672,7 @@ Capability-oriented: each module owns one cohesive feature.
 | `presentation` | CLI tables, spinners, colour, prompts |
 | `workspace` | Workspace lifecycle, binding, resolution, scope |
 | `settings` | Layered settings composition, TOML edit |
-| `harness` | Per-harness module integration, rules-file + MCP-config |
+| `harness` | Per-harness module integration, rules-file + MCP-config + agent translation |
 | `doctor` | System diagnostics, suggested fixes |
 | `mcp` | Async MCP server (only async island) |
 | `substitution` | Hand-rolled variable substitution (Phase 5) |

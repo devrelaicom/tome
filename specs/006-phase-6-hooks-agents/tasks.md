@@ -132,9 +132,9 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T055 [US1] 4-reviewer parallel pass (contract / Rust-lens / test / security) against the merged US1 surface; write `review/us1-findings.md` + `review/us1-disposition.md`.
 - [X] T056 [US1] Apply US1 blockers + selected majors (use devs:rust-dev agent).
 - [X] T057 [GIT] Commit: `fix(phase-6): apply US1 reviewer findings`.
-- [ ] T058 [US1] Run codebase mapping for Phase 3 changes (`/sdd:map incremental`).
-- [ ] T059 [US1] Review `retro/P3.md`; extract critical learnings to `CLAUDE.md` (conservative).
-- [ ] T060 [GIT] Commit: `docs(phase-6): US1 closeout — mapping + retro`.
+- [X] T058 [US1] Run codebase mapping for Phase 3 changes (`/sdd:map incremental`).
+- [X] T059 [US1] Review `retro/P3.md`; extract critical learnings to `CLAUDE.md` (conservative).
+- [X] T060 [GIT] Commit: `docs(phase-6): US1 closeout — mapping + retro`.
 - [ ] T061 [GIT] Push; create/update PR with US1 summary; verify CI; report PR ready status.
 
 **Checkpoint**: Native agents work end-to-end across the four harnesses. MVP-deliverable.
