@@ -39,8 +39,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Purpose**: Pre-allocate the closed-set error codes, land the load-bearing `EntryKind` widening BEFORE any agent row can exist, and stand up the extended `HarnessModule` trait surface. No user story can proceed correctly until F2 lands.
 
-- [ ] T003 Create `specs/006-phase-6-hooks-agents/retro/P2.md` from the retro template.
-- [ ] T004 [GIT] Commit: `docs(phase-6): init P2 retro`.
+- [X] T003 Create `specs/006-phase-6-hooks-agents/retro/P2.md` from the retro template.
+- [X] T004 [GIT] Commit: `docs(phase-6): init P2 retro`.
 
 ### F1 — Error codes 43–46 (`contracts/exit-codes-p6.md`)
 
