@@ -196,7 +196,7 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T097 [US3] Run codebase mapping for Phase 5 changes (`/sdd:map incremental`).
 - [X] T098 [US3] Review `retro/P5.md`; extract learnings to `CLAUDE.md` (conservative).
 - [X] T099 [GIT] Commit: `docs(phase-6): US3 closeout — mapping + retro`.
-- [ ] T100 [GIT] Push; PR with US3 summary; verify CI; report PR ready status.
+- [X] T100 [GIT] Push; PR with US3 summary; verify CI; report PR ready status. (PR #134 squash-merged to main @ 9fac54f.)
 
 **Checkpoint**: Guardrails degrade honestly everywhere; Claude Code reads its rules.
 
@@ -208,8 +208,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Independent test**: Off (default) → no persona prompts; on → each agent appears as `<name>-persona` (clash-prefixed where required) + one `drop-persona`; `prompts/get` returns the wrapped frontmatter-stripped body with Phase 5 substitution + a free-form `args`. (SC-008)
 
-- [ ] T101 Create `specs/006-phase-6-hooks-agents/retro/P6.md` from template.
-- [ ] T102 [GIT] Commit: `docs(phase-6): init P6 retro`.
+- [X] T101 Create `specs/006-phase-6-hooks-agents/retro/P6.md` from template.
+- [X] T102 [GIT] Commit: `docs(phase-6): init P6 retro`.
 - [ ] T103 [US4] Add `expose_agents_as_personas: bool` (default false) to `GlobalSettings`/`WorkspaceSettings`/`ProjectMarkerConfig` in `src/settings/mod.rs`; add the first-declarer-wins scalar priority-walk resolver (project→workspace→global), distinct from the `harnesses` composition grammar (FR-053/060) (use devs:rust-dev agent).
 - [ ] T104 [US4] Implement the persona registry in `src/mcp/prompts.rs`: build `<name>-persona` entries from enabled agent rows when the flag (resolved against the server startup scope, FR-067) is on; reuse `build_context_for_entry` + the Phase 5 substitution pipeline (use devs:rust-dev agent).
 - [ ] T105 [US4] Implement persona name resolution (`<name>` from frontmatter name else filename stem; `<plugin>-<name>-persona` only on clash) and the role-assumption body wrapper + single catch-all `args` + ARGUMENTS fallback in `src/mcp/prompts.rs` (FR-061/062) (use devs:rust-dev agent).
