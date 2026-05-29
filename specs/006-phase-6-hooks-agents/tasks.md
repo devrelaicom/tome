@@ -135,7 +135,7 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T058 [US1] Run codebase mapping for Phase 3 changes (`/sdd:map incremental`).
 - [X] T059 [US1] Review `retro/P3.md`; extract critical learnings to `CLAUDE.md` (conservative).
 - [X] T060 [GIT] Commit: `docs(phase-6): US1 closeout — mapping + retro`.
-- [ ] T061 [GIT] Push; create/update PR with US1 summary; verify CI; report PR ready status.
+- [X] T061 [GIT] Push; create/update PR with US1 summary; verify CI; report PR ready status. (PR #132 squash-merged to main @ fa8b25f.)
 
 **Checkpoint**: Native agents work end-to-end across the four harnesses. MVP-deliverable.
 
@@ -147,8 +147,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Independent test**: Enable a hook-shipping plugin in a claude-code project; assert `settings.local.json` has the rewritten hook (plugin-root absolute, other `${CLAUDE_*}` intact); re-sync adds no duplicate; user-identical hook not duplicated; disable removes only structural matches; committed settings file never written. (SC-004, SC-005)
 
-- [ ] T062 Create `specs/006-phase-6-hooks-agents/retro/P4.md` from template.
-- [ ] T063 [GIT] Commit: `docs(phase-6): init P4 retro`.
+- [X] T062 Create `specs/006-phase-6-hooks-agents/retro/P4.md` from template.
+- [X] T063 [GIT] Commit: `docs(phase-6): init P4 retro`.
 - [ ] T064 [US2] Create `src/harness/hooks.rs`: read `hooks/hooks.json` (`serde_json`), targeted two-variable rewrite (`${CLAUDE_PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_DATA}` → absolute; all other `${CLAUDE_*}` verbatim) over string leaves via `regex` (use devs:rust-dev agent).
 - [ ] T065 [US2] Implement structural-match merge (add): append under event only if no deep-equal entry exists; create `settings.local.json` with a single `hooks` object if absent; atomic write + mode-preservation + symlink-refusal (FR-002/004) (use devs:rust-dev agent).
 - [ ] T066 [US2] Implement structural-match removal in `src/harness/hooks.rs`: remove deep-equal entries, skip non-matches; prune empty event arrays; keep empty `hooks` object (FR-005/006) (use devs:rust-dev agent).
