@@ -70,6 +70,19 @@
 //! pre-flight against `contracts/exit-codes.md` is auditable in one
 //! place. Phase 11 / post-v0.2.0 can revisit any of them as the
 //! library-API surface for `tome query` matures.
+//!
+//! Phase 6 / US2 addition (CLI binary coverage for the hooks sink — bind +
+//! sync against a malformed `hooks/hooks.json`):
+//!
+//! | Code | Variant                       | Tested via                                   |
+//! |------|-------------------------------|----------------------------------------------|
+//! | 43   | HookSpecParseError            | `workspace_use_malformed_hooks_exits_43`     |
+//!
+//! Code 44 (`HookSettingsWriteFailed`) stays library-API-only — an IO
+//! failure on `.claude/settings.local.json` is not cheaply forced through
+//! the binary; the merge/remove tests in `tests/hooks_merge.rs` and the
+//! exit-code unit in `tests/exit_codes.rs` cover it, per the established
+//! e2e split (cf. codes 44/46 in `contracts/exit-codes-p6.md` §"Discipline").
 
 mod common;
 
@@ -942,5 +955,101 @@ fn workspace_init_with_unwritable_parent_dir_exits_7() {
         out.status.code(),
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6 / US2 / T071: a malformed plugin `hooks/hooks.json` surfaces exit 43
+// through the binary. `tome workspace use` binds the project and runs sync;
+// the hooks pass reads the malformed source for an enabled plugin and fails
+// with `HookSpecParseError` (43). The committed settings.json is never written.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn workspace_use_malformed_hooks_exits_43() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+    seed_workspace_with_registry_seeds(&paths, "test-ws");
+
+    // claude-code is the only effective harness (the sole RealJson harness).
+    fs::write(
+        &paths.global_settings_file,
+        "harnesses = [\"claude-code\"]\n",
+    )
+    .expect("write global settings");
+
+    // Seed a catalog enrolment + an enabled `skill` row for `plugin-a`, and
+    // plant a MALFORMED `hooks/hooks.json` under the plugin's on-disk root
+    // (manifest-less fallback: `<cache_dir_for(url)>/<plugin>/...`).
+    let url = "https://example.test/plugin-a.git";
+    let cache = paths.cache_dir_for(url);
+    let hooks_dir = cache.join("plugin-a").join("hooks");
+    fs::create_dir_all(&hooks_dir).expect("create hooks dir");
+    fs::write(hooks_dir.join("hooks.json"), "{ not valid json").expect("write malformed hooks");
+
+    {
+        // Raw read-write connection — `open_read_only` cannot INSERT, and the
+        // schema is already bootstrapped by `seed_workspace_with_registry_seeds`.
+        let conn = rusqlite::Connection::open(&paths.index_db).expect("rusqlite open rw");
+        tome::index::workspace_catalogs::insert(&conn, "test-ws", "cat-a", url, "main")
+            .expect("enrol catalog");
+        // An enabled `skill`-kind row so the plugin shows up in the
+        // enabled-plugin enumeration the hooks pass walks.
+        conn.execute(
+            "INSERT INTO skills
+                (catalog, plugin, name, kind, description, plugin_version,
+                 path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+             VALUES ('cat-a', 'plugin-a', 'demo', 'skill', 'd', '0.0.0',
+                     'skills/demo/SKILL.md', 'h', 1, 0, NULL, '1970-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("insert skill row");
+        let skill_id: i64 = conn
+            .query_row(
+                "SELECT id FROM skills WHERE catalog='cat-a' AND plugin='plugin-a'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("skill id");
+        let ws_id: i64 = conn
+            .query_row(
+                "SELECT id FROM workspaces WHERE name = 'test-ws'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("ws id");
+        conn.execute(
+            "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+            rusqlite::params![ws_id, skill_id],
+        )
+        .expect("enrol skill");
+    }
+
+    let project = env.home_path().join("project");
+    fs::create_dir_all(&project).expect("create project");
+
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["workspace", "use", "test-ws"])
+        .output()
+        .expect("spawn workspace use");
+
+    assert_eq!(
+        out.status.code(),
+        Some(43),
+        "expected exit 43 HookSpecParseError, got {:?}, stdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // The hooks pass must never have written the local settings file — the
+    // malformed source fails before any merge. (`.claude/settings.json` is the
+    // separate MCP-config sink and may legitimately exist from the MCP write.)
+    assert!(
+        !project.join(".claude/settings.local.json").exists(),
+        "settings.local.json must not be written when the hook source is malformed",
     );
 }

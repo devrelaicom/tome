@@ -154,10 +154,10 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T066 [US2] Implement structural-match removal in `src/harness/hooks.rs`: remove deep-equal entries, skip non-matches; prune empty event arrays; keep empty `hooks` object (FR-005/006) (use devs:rust-dev agent).
 - [X] T067 [US2] Set `hooks_strategy() = RealJson` + `hook_settings_path()` for claude-code in `src/harness/claude_code.rs`; wire hooks reconciliation as the first step in `src/harness/sync.rs` (use devs:rust-dev agent).
 - [X] T068 [GIT] Commit: `feat(phase-6): real Claude Code hooks merge into settings.local.json`.
-- [ ] T069 [P] [US2] `tests/hooks_rewrite.rs` — two-variable rewrite; other `${CLAUDE_*}` untouched (use devs:rust-dev agent).
-- [ ] T070 [P] [US2] `tests/hooks_merge.rs` — add/idempotence/user-edit-preservation/dedup/create-if-absent/prune (use devs:rust-dev agent).
-- [ ] T071 [P] [US2] Extend `tests/exit_codes_e2e.rs` — malformed `hooks.json` → exit 43; settings write failure → exit 44 (use devs:rust-dev agent).
-- [ ] T072 [GIT] Commit: `test(phase-6): US2 hooks merge + rewrite + exit codes`.
+- [X] T069 [P] [US2] `tests/hooks_rewrite.rs` — two-variable rewrite; other `${CLAUDE_*}` untouched (use devs:rust-dev agent).
+- [X] T070 [P] [US2] `tests/hooks_merge.rs` — add/idempotence/user-edit-preservation/dedup/create-if-absent/prune (use devs:rust-dev agent).
+- [X] T071 [P] [US2] Extend `tests/exit_codes_e2e.rs` — malformed `hooks.json` → exit 43; settings write failure → exit 44 (use devs:rust-dev agent).
+- [X] T072 [GIT] Commit: `test(phase-6): US2 hooks merge + rewrite + exit codes`.
 - [ ] T073 [US2] 4-reviewer pass; write `review/us2-findings.md` + `review/us2-disposition.md`.
 - [ ] T074 [US2] Apply US2 blockers + selected majors (use devs:rust-dev agent).
 - [ ] T075 [GIT] Commit: `fix(phase-6): apply US2 reviewer findings`.

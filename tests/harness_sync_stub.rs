@@ -703,6 +703,164 @@ fn agent_fans_out_to_multiple_native_harnesses() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// 10. Real hooks (Phase 6 / US2): claude-code merges an enabled plugin's
+//     rewritten hooks into `.claude/settings.local.json` (never settings.json),
+//     idempotent re-sync rewrites nothing, and dropping claude-code from the
+//     effective list removes the owned entry + prunes the empty event.
+// ---------------------------------------------------------------------------
+
+/// Seed a manifest-less catalog enrolment plus an on-disk plugin
+/// `hooks/hooks.json`, returning the catalog URL. The hooks live at
+/// `<cache_dir_for(url)>/<plugin>/hooks/hooks.json` so the hooks pass's
+/// `plugin_root_dir` (manifest-less fallback) finds them.
+fn seed_hooks_source(paths: &tome::paths::Paths, plugin: &str, body: &str) -> String {
+    let url = format!("https://example.test/{plugin}.git");
+    let cache = paths.cache_dir_for(&url);
+    let hooks_dir = cache.join(plugin).join("hooks");
+    std::fs::create_dir_all(&hooks_dir).expect("create hooks source dir");
+    std::fs::write(hooks_dir.join("hooks.json"), body).expect("write source hooks.json");
+    url
+}
+
+/// Insert an enabled `skill`-kind row for `(catalog, plugin)` so the plugin
+/// shows up in the workspace's enabled-plugin enumeration.
+fn insert_enabled_skill_row(
+    paths: &tome::paths::Paths,
+    workspace: &str,
+    catalog: &str,
+    plugin: &str,
+) {
+    let conn = rusqlite::Connection::open(&paths.index_db).expect("open rw");
+    conn.execute(
+        "INSERT INTO skills
+            (catalog, plugin, name, kind, description, plugin_version,
+             path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+         VALUES (?1, ?2, 'demo', 'skill', 'd', '0.0.0',
+                 'skills/demo/SKILL.md', 'h', 1, 0, NULL, '1970-01-01T00:00:00Z')",
+        rusqlite::params![catalog, plugin],
+    )
+    .expect("insert skill row");
+    let skill_id: i64 = conn
+        .query_row(
+            "SELECT id FROM skills WHERE catalog=?1 AND plugin=?2 AND kind='skill'",
+            rusqlite::params![catalog, plugin],
+            |r| r.get(0),
+        )
+        .expect("skill id");
+    let ws_id: i64 = conn
+        .query_row(
+            "SELECT id FROM workspaces WHERE name = ?1",
+            rusqlite::params![workspace],
+            |r| r.get(0),
+        )
+        .expect("ws id");
+    conn.execute(
+        "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+        rusqlite::params![ws_id, skill_id],
+    )
+    .expect("enrol skill");
+}
+
+#[test]
+fn real_hooks_merge_idempotence_and_removal_for_claude_code() {
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard =
+        HarnessModulesGuard::install(vec![Box::new(tome::harness::claude_code::CLAUDE_CODE)]);
+
+    let mut fx = Fixture::build("test-workspace", Some("harnesses = [\"claude-code\"]"));
+
+    let url = seed_hooks_source(
+        &fx.paths,
+        "plugin-a",
+        r#"{ "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/guard.sh --root ${CLAUDE_PROJECT_DIR}" } ] } ] }"#,
+    );
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw");
+    tome::index::workspace_catalogs::insert(&conn, "test-workspace", "cat-a", &url, "main")
+        .expect("enrol catalog");
+    drop(conn);
+    insert_enabled_skill_row(&fx.paths, "test-workspace", "cat-a", "plugin-a");
+
+    // ----- sync 1: hooks merged into settings.local.json -----
+    let outcome = sync::sync_project(&fx.project, &fx.deps(false)).expect("sync 1");
+    let local = fx.project.join(".claude/settings.local.json");
+    assert!(
+        local.is_file(),
+        "settings.local.json created by the hooks merge"
+    );
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&local).unwrap()).unwrap();
+    let cmd = doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("command string");
+    // PLUGIN_ROOT resolved to an absolute path; PROJECT_DIR left verbatim.
+    let plugin_root = fx.paths.cache_dir_for(&url).join("plugin-a");
+    assert!(
+        cmd.starts_with(&*plugin_root.to_string_lossy()),
+        "PLUGIN_ROOT resolved: {cmd}"
+    );
+    assert!(
+        cmd.contains("${CLAUDE_PROJECT_DIR}"),
+        "PROJECT_DIR verbatim: {cmd}"
+    );
+
+    let hook_changes = outcome
+        .added
+        .iter()
+        .filter(|c| c.subsystem == SyncSubsystem::Hooks)
+        .count();
+    assert_eq!(hook_changes, 1, "one hooks change recorded on first sync");
+
+    // ----- sync 2: idempotent (no rewrite) -----
+    let m1 = mtime(&local);
+    std::thread::sleep(Duration::from_millis(1100));
+    let outcome2 = sync::sync_project(&fx.project, &fx.deps(false)).expect("sync 2");
+    assert!(
+        outcome2
+            .added
+            .iter()
+            .chain(&outcome2.updated)
+            .all(|c| c.subsystem != SyncSubsystem::Hooks),
+        "idempotent re-sync must not touch hooks",
+    );
+    assert_eq!(
+        mtime(&local),
+        m1,
+        "settings.local.json mtime must not advance"
+    );
+
+    // ----- sync 3: drop claude-code → owned hook removed, event pruned -----
+    fx.workspace = WorkspaceName::parse("test-workspace").unwrap();
+    std::fs::write(
+        fx.project.join(".tome/config.toml"),
+        "workspace = \"test-workspace\"\nharnesses = []\n",
+    )
+    .unwrap();
+
+    let outcome3 = sync::sync_project(&fx.project, &fx.deps(false)).expect("sync 3");
+    let doc3: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&local).unwrap()).unwrap();
+    assert!(
+        doc3["hooks"]
+            .as_object()
+            .unwrap()
+            .get("PreToolUse")
+            .is_none(),
+        "the owned hook is removed and its empty event pruned (FR-005/006): {doc3}"
+    );
+    assert!(
+        doc3.as_object().unwrap().contains_key("hooks"),
+        "the otherwise-empty hooks object is left in place"
+    );
+    let removed_hooks = outcome3
+        .removed
+        .iter()
+        .filter(|c| c.subsystem == SyncSubsystem::Hooks)
+        .count();
+    assert_eq!(removed_hooks, 1, "one hooks change recorded on removal");
+}
+
 #[test]
 fn workspace_settings_supply_harness_list_when_marker_omits_key() {
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
