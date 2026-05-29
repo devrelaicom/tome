@@ -2,7 +2,7 @@
 
 > **Purpose**: Document directory layout, module boundaries, and where to add new code.
 > **Generated**: 2026-05-29
-> **Last Updated**: 2026-06-05 (Phase 6 / US5; doctor/report.rs five new emit-only reports (HooksReport, GuardrailsReport, AgentsReport, PrivilegeEscalationReport, PersonaReport); doctor/checks.rs five new read-only check functions; doctor/mod.rs build_phase6_surfaces() with GlobalFallback + persona-flag gating; doctor/fixes.rs re-sync after project-level repairs; harness/sync.rs strip_plugin_agent_privileges scalar resolution + per-agent emission clone; settings/mod.rs strip_plugin_agent_privileges Option<bool> fields on three layers + resolve_scalar_with reuse; commands/plugin/show.rs privilege indicator annotations)
+> **Last Updated**: 2026-06-05 (Phase 6 Polish / v0.6.0; three new integration tests: harness_sync_p6_idempotence.rs, entry_e2e_p6.rs, harness_sync_p6_first_error.rs; integration test suite count: 151 → 176)
 
 ## Directory Layout
 
@@ -188,7 +188,7 @@ tome/
 │           ├── get_skill_info.rs       # Phase 5 / US4 NEW: get_skill_info middle-tier tool (full description + when_to_use + 5-cap resource enumeration; Polish: uses build_context_for_entry SSOT; Phase 6/US1: agent rows excluded per FR-070a)
 │           └── get_skill.rs            # get_skill tool (metadata + components); Phase 6/US1: agent rows excluded from prompts, MCP discovery per FR-070a
 │
-├── tests/                              # Integration tests (access library as external crate)
+├── tests/                              # Integration tests (access library as external crate; **Polish: 176 suites total**, up from 151 at US5)
 │   ├── catalog_*.rs                    # Catalog add/remove/update tests
 │   ├── plugin_*.rs                     # Plugin enable/disable/list/show/interactive (Phase 5: commands coverage + US5 annotations; Phase 6/US1: agent entry-kind + translation tests; Phase 6/US2: hooks tests; Phase 6/US3: guardrails tests; Phase 6/US5: privilege governance tests)
 │   ├── models_*.rs                     # Model download/list/remove
@@ -196,7 +196,7 @@ tome/
 │   ├── reindex.rs                      # Reindex all/per-catalog/per-plugin
 │   ├── status.rs                       # Status command + health checks
 │   ├── workspace_*.rs                  # Workspace info/init/binding/sync/list/rename/remove tests (US1–US2)
-│   ├── harness_*.rs                    # Phase 4 US3: Harness list/use/remove/info/sync/composition tests; Phase 6: harness_trait_p6.rs for trait extension; US1: harness_agents_*.rs for translation + sync; US2: harness_hooks_*.rs for parsing + sync; US3: harness_guardrails_*.rs for rendering + sync
+│   ├── harness_*.rs                    # Phase 4 US3: Harness list/use/remove/info/sync/composition tests; Phase 6: harness_trait_p6.rs for trait extension; US1: harness_agents_*.rs for translation + sync; US2: harness_hooks_*.rs for parsing + sync; US3: harness_guardrails_*.rs for rendering + sync; **Polish NEW**: harness_sync_p6_idempotence.rs, harness_sync_p6_first_error.rs
 │   ├── summariser_*.rs                 # Phase 4 US4: Summariser triggers, forward progress, cache, registry tests
 │   ├── doctor*.rs                      # Phase 4 US5: Doctor assembly + fixes + binding + harness integration + orphan cleanup; Phase 5 / US5: prompts report + entry counts + orphan data-dirs; Phase 6/US1: agent integration tests; Phase 6/US2: hooks skeleton tests; Phase 6/US3: guardrails skeleton tests; Phase 6/US5: privilege governance tests + doctor reporting tests (doctor_privilege_escalation, doctor_hooks_report, doctor_guardrails_report, doctor_agents_report, doctor_personas_report)
 │   ├── mcp_*.rs                        # MCP server lifecycle + tools + log rotation + tool description (US4.b) + prompts (US1.b) + Phase 5 / US4–US5: get_skill_info tests + read-only extensions; Phase 6/US1: agent exclusion tests; Phase 6/US2: hooks excluded; Phase 6/US3: guardrails excluded; Phase 6/US4: personas_startup_scope, personas_registry_building, personas_prompts_get
@@ -225,7 +225,7 @@ tome/
 │   ├── doctor_guardrails_report.rs     # **Phase 6 / US5 NEW** Doctor check: per-plugin GUARDRAILS.md presence/body validity + orphan detection
 │   ├── doctor_agents_report.rs         # **Phase 6 / US5 NEW** Doctor check: per-plugin enabled agent count
 │   ├── doctor_personas_report.rs       # **Phase 6 / US5 NEW** Doctor check: enabled persona count (gated on expose_agents_as_personas=true)
-│   ├── entry_e2e.rs                    # Phase 5 / US3 NEW: Full enable → search → get → prompts pipeline with argument substitution + Phase 5 / US5: invocability visibility; Phase 6/US1: agent rows excluded
+│   ├── entry_e2e.rs                    # Phase 5 / US3 NEW: Full enable → search → get → prompts pipeline with argument substitution + Phase 5 / US5: invocability visibility; Phase 6/US1: agent rows excluded; **Polish NEW**: entry_e2e_p6.rs
 │   ├── exit_codes.rs                   # Exit code matrix validation; Phase 6: +4 new codes (43–46)
 │   ├── manifest_strictness.rs          # Strict/lenient parsing guards
 │   ├── atomicity.rs                    # Interrupt-injection tests (SIGINT mid-op)
@@ -249,8 +249,8 @@ tome/
 │   └── codebase/
 │       ├── STACK.md                    # Technologies + versions
 │       ├── INTEGRATIONS.md             # External APIs + services
-│       ├── ARCHITECTURE.md             # System design + patterns (Phase 6 / US5: privilege governance scalar resolver + per-agent emission clone; five doctor reporting surfaces with read-only checks; doctor build gating; post-fix re-check flow)
-│       ├── STRUCTURE.md                # Directory layout (Phase 6 / US5: doctor/report.rs five new emit-only reports; doctor/checks.rs five new read-only check functions; doctor/mod.rs build_phase6_surfaces(); doctor/fixes.rs re-sync after project repairs; harness/sync.rs privilege scalar + emission clone; settings/mod.rs strip_plugin_agent_privileges fields + resolve_scalar_with reuse; commands/plugin/show.rs privilege annotations)
+│       ├── ARCHITECTURE.md             # System design + patterns (Phase 6 Polish / v0.6.0: fixed sink order with precedence test + idempotence test + e2e test)
+│       ├── STRUCTURE.md                # Directory layout (Phase 6 Polish / v0.6.0: three new integration tests; suite count 151 → 176)
 │       ├── CONVENTIONS.md              # Naming + code style
 │       ├── TESTING.md                  # Test strategy + patterns
 │       ├── SECURITY.md                 # Auth + authorization
@@ -308,12 +308,12 @@ tome/
 │   ├── phase-5.md
 │   └── phase-6.md
 │
-├── Cargo.toml                          # Package definition (MSRV 1.93, v0.5.0)
+├── Cargo.toml                          # Package definition (MSRV 1.93, v0.6.0)
 ├── Cargo.lock                          # Dependency lock
 ├── build.rs                            # sqlite-vec C extension compilation
 ├── CONSTITUTION.md                     # v1.3.0 — constraints + trade-offs (Phase 4 §Paths amendment; no Phase 5 amendments; no Phase 6 amendments)
 ├── CLAUDE.md                           # Project context for Claude Code (Phase 6: Foundational + US1–US5 complete)
-└── CHANGELOG.md                        # Version history (v0.1.0–v0.5.0 shipped; Phase 6 US1–US5 in development)
+└── CHANGELOG.md                        # Version history (v0.1.0–v0.5.0 shipped; Phase 6 US1–US5 + Polish (v0.6.0) in development)
 ```
 
 ## Key Directories
@@ -413,6 +413,9 @@ tome/
 | Privilege test | `tests/privilege_*.rs` | Two test files for US5: privilege_governance_scalar, privilege_emission_clone |
 | Doctor privilege test | `tests/doctor_privilege_escalation.rs` | Doctor privilege-escalation check + post-fix re-check flow |
 | Doctor reporting test | `tests/doctor_{hooks,guardrails,agents,personas}_report.rs` | Four test files for US5 doctor reporting surfaces |
+| Idempotence test | `tests/harness_sync_p6_idempotence.rs` | Polish: Pin idempotence contract (FR-525) — re-sync with no input changes writes zero bytes |
+| Sink-order precedence test | `tests/harness_sync_p6_first_error.rs` | Polish: Pin exit-code precedence (hooks 43 > guardrails 46 > agents 45) |
+| End-to-end feature test | `tests/entry_e2e_p6.rs` | Polish: Validate full enable → search → get → prompts pipeline with Phase 6 features (privilege stripping, persona exposure, agent enable) |
 
 ### Key Patterns
 
@@ -469,4 +472,4 @@ pub fn check_privilege_escalation(...) -> Result<PrivilegeEscalationReport> {
 
 ---
 
-*This document shows WHERE code lives. Updated 2026-06-05 against Phase 6 / US5 COMPLETE (doctor/report.rs five new emit-only reports (HooksReport, GuardrailsReport, AgentsReport, PrivilegeEscalationReport, PersonaReport); doctor/checks.rs five new read-only check functions; doctor/mod.rs build_phase6_surfaces() with GlobalFallback + persona-flag gating; doctor/fixes.rs re-sync after project-level repairs; harness/sync.rs strip_plugin_agent_privileges scalar resolution + per-agent emission clone; settings/mod.rs strip_plugin_agent_privileges Option<bool> fields on three layers + resolve_scalar_with reuse; commands/plugin/show.rs privilege indicator annotations). Test suites: Phase 5 baseline + entry_kind_agent_indexing, harness_trait_p6, schema_migration_p6, exit_codes + US1: agent_translation, agent_sync_reconciliation, agent_indexing_lifecycle, agent_e2e + US2: hooks_parsing, hooks_merge_remove, hooks_sync_reconciliation + US3: guardrails_parsing, guardrails_reconciliation, guardrails_marker_engine, phase6_correction_claude_code.* + US4: personas_startup_scope, personas_scalar_resolver, personas_registry_building, personas_prompts_get* + US5: privilege_governance_scalar, privilege_emission_clone, doctor_privilege_escalation, doctor_hooks_report, doctor_guardrails_report, doctor_agents_report, doctor_personas_report*
+*This document shows WHERE code lives. Updated 2026-06-05 against Phase 6 Polish / v0.6.0 (three new integration tests: harness_sync_p6_idempotence.rs, entry_e2e_p6.rs, harness_sync_p6_first_error.rs; integration test suite count: 151 → 176; fixed sink order guardrails → hooks → agents with precedence-pinned exit codes). Test suites: Phase 5 baseline + entry_kind_agent_indexing, harness_trait_p6, schema_migration_p6, exit_codes + US1: agent_translation, agent_sync_reconciliation, agent_indexing_lifecycle, agent_e2e + US2: hooks_parsing, hooks_merge_remove, hooks_sync_reconciliation + US3: guardrails_parsing, guardrails_reconciliation, guardrails_marker_engine, phase6_correction_claude_code.* + US4: personas_startup_scope, personas_registry_building, personas_prompts_get, personas_scalar_resolver* + US5: privilege_governance_scalar_resolver, privilege_emission_clone, doctor_privilege_escalation, doctor_hooks_report, doctor_guardrails_report, doctor_agents_report, doctor_personas_report* + Polish: harness_sync_p6_idempotence, harness_sync_p6_first_error, entry_e2e_p6*

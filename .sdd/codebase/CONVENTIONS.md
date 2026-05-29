@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and patterns for Tome (Rust CLI).
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 US5 — privilege governance + doctor extensions)
+> **Last Updated**: 2026-05-29 (Phase 6 Polish / v0.6.0)
 
 ## Code Style
 
@@ -447,6 +447,28 @@ let harness = StubHarness::default()
 ```
 
 **Discipline**: `Default` produces a safe baseline (safe defaults on all trait methods); builder methods enable specific capabilities for the test case. All field defaults remain backward-compatible with the original behaviour. Used in `tests/harness_trait_p6.rs` to exercise Phase 6 hook + agent dispatch without binding to production harness modules.
+
+### Phase 6: Reusable Multi-Sink Testing Pattern
+
+A single `StubHarness` configured `RealJson` + `with_hook_settings()` + `with_native_agents()` drives all three Phase 6 sinks (hooks, guardrails, agents) at once. The default in-file guardrails region has `suppress_if_hooks_present: false`, so guardrails renders even with hooks present. One enabled `agent`-kind row surfaces the plugin in the hooks + guardrails enumerations (DISTINCT catalog/plugin):
+
+```rust
+// Phase 6 Polish pattern: multi-sink testing with one harness config
+let harness = StubHarness::default()
+    .with_hook_settings()
+    .with_native_agents(AgentFormat::MarkdownYaml);
+
+// Enables comprehensive end-to-end testing without multi-harness fixtures
+let outcome = sync::sync_project(&project, &deps)?;
+
+// Verify all three sinks land and are consistent:
+// - Hooks in settings.local.json
+// - Guardrails body between markers
+// - Agent files in directory
+// - Persona registry (if expose_personas enabled)
+```
+
+**Used in**: `tests/harness_sync_p6_idempotence.rs` (multi-sink idempotence), `tests/entry_e2e_p6.rs` (enable → sync → assert all four surfaces), `tests/harness_sync_p6_first_error.rs` (multi-sink forward-progress).
 
 ### Phase 6: Marker-Only Migration Pattern
 
@@ -1146,6 +1168,12 @@ See `TESTING.md` for detailed test patterns, but core conventions:
 - **Common helpers in `tests/common/mod.rs`**: `ToolEnv`, `Fixture`, guard patterns.
 - **Isolation via TempDir**: every test gets fresh `$HOME` and XDG layout.
 - **No real I/O by default**: models, embedders, git clones fabricated or stubbed.
+
+### Pre-Commit Chain Discipline
+
+The pre-commit hook runs **in sequence**: `cargo fmt --check` → `typos` → `cargo clippy`. All three must pass before commit succeeds.
+
+**Critical**: `cargo test` (no `-D warnings`) is NOT a substitute for the clippy gate. The `clippy` command with `--all-targets -- -D warnings` rejects doc-comment lints (e.g. `doc_lazy_continuation`) that `cargo test` ignores. Pre-run `cargo clippy` before committing new test files to catch lint violations early (pre-commit prevents them from landing).
 
 ## Strictness at Boundaries
 

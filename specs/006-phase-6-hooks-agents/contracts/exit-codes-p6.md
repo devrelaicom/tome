@@ -47,7 +47,7 @@ Where a Phase 6 failure mode maps cleanly onto an existing closed-set variant, P
 | Code | Existing variant | Phase 6 site |
 |---|---|---|
 | 2 | clap usage error | New `--json` flags / settings deserialisation; agent-emission CLI surface argument errors |
-| 7 | `Io` | Generic filesystem reads/writes outside the four dedicated sinks (e.g. reading a plugin's `agents/*.md` source, `GUARDRAILS.md`); atomic-write IO that is not the local Claude settings file or a guardrails target |
+| 7 | `Io` | Generic filesystem reads/writes outside the four dedicated sinks (e.g. reading a plugin's `agents/*.md` source at *index* time — during `harness sync`, agent source/parse failures surface as **45**, and a `GUARDRAILS.md` source read failure as **46** per the B-1 marker/symlink decision); atomic-write IO that is not the local Claude settings file (→ 44) or a guardrails target (→ 46) |
 | 13 | `WorkspaceNotFound` | Persona toggle resolved against an unknown startup scope; sync against an unknown workspace (carryover) |
 | 70 | `WorkspaceMalformed` | Parse failure on Tome-owned settings (the two new `bool` fields), distinct from third-party plugin inputs which surface as 43/45 |
 | 73 | `SchemaVersionTooNew` | Read-only DB open against a future schema (carryover) |

@@ -260,7 +260,7 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T139 [US5] Run codebase mapping for Phase 7 changes (`/sdd:map incremental`).
 - [X] T140 [US5] Review `retro/P7.md`; extract learnings to `CLAUDE.md` (conservative).
 - [X] T141 [GIT] Commit: `docs(phase-6): US5 closeout — mapping + retro`.
-- [ ] T142 [GIT] Push; PR with US5 summary; verify CI; report PR ready status.
+- [X] T142 [GIT] Push; PR with US5 summary; verify CI; report PR ready status.
 
 **Checkpoint**: All five user stories feature-complete. Only Polish remains.
 
@@ -270,23 +270,23 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Purpose**: Phase-wide review (catches cross-US drift the per-US passes can't — Phase 5 P8 lesson), test gaps, security hardening, docs, and the v0.6.0 cut.
 
-- [ ] T143 Create `specs/006-phase-6-hooks-agents/retro/P8.md` from template.
-- [ ] T144 [GIT] Commit: `docs(phase-6): init P8 retro`.
-- [ ] T145 Phase-wide 4-reviewer parallel pass (contract / Rust-lens / test / security) against the full Phase 6 surface; consolidate `review/findings.md` + `review/disposition.md` (reviewers read the us{1..5}-disposition docs first).
-- [ ] T146 [GIT] Commit: `docs(review): Phase 6 phase-wide reviewer findings + disposition`.
-- [ ] T147 Apply phase-wide blockers + selected majors (use devs:rust-dev agent).
-- [ ] T148 [GIT] Commit: `fix(phase-6): apply phase-wide reviewer findings`.
-- [ ] T149 [P] Add `tests/harness_sync_p6_idempotence.rs` — hooks+guardrails+agents idempotent across a re-sync (mtime capture pattern) (use devs:rust-dev agent).
-- [ ] T150 [P] Add `tests/entry_e2e_p6.rs` — enable → reconcile all sinks → assert hooks/guardrails/agents/persona end-to-end (use devs:rust-dev agent).
-- [ ] T151 Evaluate cap-std hardening across the four new file sinks (`openat`/`O_NOFOLLOW`) per the Phase 5 P8 security backlog; apply or document deferral (use devs:rust-dev agent).
-- [ ] T152 [GIT] Commit: `test(phase-6): idempotence + e2e + security hardening`.
-- [ ] T153 Update `README.md` (Phase 6 surface) + `CHANGELOG.md` (`[0.6.0]` entry: hooks, guardrails, agents, personas, Phase 4 correction; exit codes 43–46; no new deps; test delta).
-- [ ] T154 Bump `Cargo.toml` `0.5.0` → `0.6.0`; constitution check (PASS, no amendment).
-- [ ] T155 [GIT] Commit: `chore(release): v0.6.0 — version bump, CHANGELOG, README`.
-- [ ] T156 Run final codebase mapping (`/sdd:map incremental`, 4 parallel mappers, all 8 docs).
-- [ ] T157 Review `retro/P8.md`; extract critical learnings to `CLAUDE.md` (conservative); update the current-phase line + Recent Changes for the v0.6.0 cut.
-- [ ] T158 [GIT] Commit: `docs(phase-6): Phase 6 closeout — mappers, retro P8, CLAUDE.md`.
-- [ ] T159 [GIT] Push; create/update PR with the full Phase 6 summary; verify all CI checks pass; report PR ready status. (The v0.6.0 git tag + `cargo publish` are USER-RESERVED — do not run them.)
+- [X] T143 Create `specs/006-phase-6-hooks-agents/retro/P8.md` from template.
+- [X] T144 [GIT] Commit: `docs(phase-6): init P8 retro`.
+- [X] T145 Phase-wide 4-reviewer parallel pass (contract / Rust-lens / test / security) against the full Phase 6 surface; consolidate `review/findings.md` + `review/disposition.md` (reviewers read the us{1..5}-disposition docs first).
+- [X] T146 [GIT] Commit: `docs(review): Phase 6 phase-wide reviewer findings + disposition`.
+- [X] T147 Apply phase-wide blockers + selected majors (use devs:rust-dev agent).
+- [X] T148 [GIT] Commit: `fix(phase-6): apply phase-wide reviewer findings`.
+- [X] T149 [P] Add `tests/harness_sync_p6_idempotence.rs` — hooks+guardrails+agents idempotent across a re-sync (mtime capture pattern) (use devs:rust-dev agent).
+- [X] T150 [P] Add `tests/entry_e2e_p6.rs` — enable → reconcile all sinks → assert hooks/guardrails/agents/persona end-to-end (use devs:rust-dev agent).
+- [X] T151 Evaluate cap-std hardening across the four new file sinks (`openat`/`O_NOFOLLOW`) per the Phase 5 P8 security backlog; apply or document deferral (use devs:rust-dev agent).
+- [X] T152 [GIT] Commit: `test(phase-6): idempotence + e2e + security hardening`.
+- [X] T153 Update `README.md` (Phase 6 surface) + `CHANGELOG.md` (`[0.6.0]` entry: hooks, guardrails, agents, personas, Phase 4 correction; exit codes 43–46; no new deps; test delta).
+- [X] T154 Bump `Cargo.toml` `0.5.0` → `0.6.0`; constitution check (PASS, no amendment).
+- [X] T155 [GIT] Commit: `chore(release): v0.6.0 — version bump, CHANGELOG, README`.
+- [X] T156 Run final codebase mapping (`/sdd:map incremental`, 4 parallel mappers, all 8 docs).
+- [X] T157 Review `retro/P8.md`; extract critical learnings to `CLAUDE.md` (conservative); update the current-phase line + Recent Changes for the v0.6.0 cut.
+- [X] T158 [GIT] Commit: `docs(phase-6): Phase 6 closeout — mappers, retro P8, CLAUDE.md`.
+- [X] T159 [GIT] Push; create/update PR with the full Phase 6 summary; verify all CI checks pass; report PR ready status. (The v0.6.0 git tag + `cargo publish` are USER-RESERVED — do not run them.)
 
 **Checkpoint**: Phase 6 shipped (v0.6.0). Hooks + agents complete.
 

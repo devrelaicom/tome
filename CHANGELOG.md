@@ -4,6 +4,72 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-05-29
+
+### Phase 6 additions
+
+User-visible
+
+- **Real Claude Code hooks.** A plugin's `hooks/hooks.json` is rewritten
+  (`${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` → absolute paths;
+  `${CLAUDE_PROJECT_DIR}` / `${CLAUDE_SESSION_ID}` left verbatim) and merged
+  into `.claude/settings.local.json` by deep structural equality. Removal
+  re-derives + structural-matches, so a hook you hand-edit is never deleted;
+  the committed `settings.json` is never touched.
+
+- **`GUARDRAILS.md` prose fallback.** A plugin's `hooks/GUARDRAILS.md` renders
+  as a per-plugin marker region in each harness's rules file (Claude Code
+  suppresses it when the plugin also ships hooks), or as a fully-Tome-owned
+  Cursor sibling (`.cursor/rules/TOME_GUARDRAILS.md`, deleted when empty). A
+  verbatim body containing a managed-marker line is refused (exit 46).
+
+- **Native agent translation across four harnesses.** A plugin's
+  `agents/<name>.md` is translated to each harness's native agent format
+  (claude-code / codex / cursor / opencode); Gemini CLI has no native-agent
+  support and is skipped. Agents are indexed (`kind='agent'`) but never
+  embedded or returned by `search_skills`.
+
+- **Optional agent-as-MCP-prompt personas (off by default).** With
+  `expose_agents_as_personas = true` (resolved at the MCP startup scope), each
+  enabled agent is also exposed as an MCP prompt persona, plus a reserved
+  `drop-persona`. Double opt-in; an advisory caveat rides the prompt surface.
+
+- **Phase 4 rules-file correction.** Claude Code's rules sink is now
+  `CLAUDE.md` (with `.claude/CLAUDE.md` fallback), not `AGENTS.md`.
+
+- **`tome harness sync`** now reconciles all three new sinks (hooks →
+  guardrails → agents, fixed order) with per-plugin forward progress and a
+  deterministic first-error precedence. **`tome doctor`** gains five read-only
+  Phase 6 reports (hooks / guardrails / agents / privilege-escalation /
+  personas); `--fix` repairs only the safe derivable cases. **`tome plugin
+  show`** lists agents + `hooks.json` / `GUARDRAILS.md` presence + the resolved
+  persona name.
+
+- **Plugin-agent privilege governance.** Privileged agent fields
+  (`hooks` / `mcpServers` / `permissionMode`) pass through to Claude Code by
+  default, are auditable via doctor's privilege-escalation report (which always
+  reads the unstripped source), and are strippable via the opt-in layered
+  `strip_plugin_agent_privileges` setting.
+
+### Internal additions
+
+- **Four new exit codes (43–46)** — `HookSpecParseError` (43),
+  `HookSettingsWriteFailed` (44), `AgentTranslationFailed` (45),
+  `GuardrailsWriteFailed` (46). Closed-enum discipline preserved (no
+  `Other`/`Unknown` arm).
+
+- **`EntryKind` gains an `Agent` variant**; schema migrates v3 → v4 via a
+  marker-only no-op (the free-text `kind` column admits `agent` with no DDL).
+
+- **No new top-level dependency and no new top-level module** — `hooks.rs`,
+  `guardrails.rs`, `agents.rs` live inside `src/harness/`; the persona registry
+  reuses the Phase 5 prompt machinery. Leanest phase since Phase 1.
+
+- **Test suite** grew from 151 to 175 integration suites (+24); ≈1427 test
+  functions. Every new emit-only type carries a byte-stable JSON wire-shape pin
+  (NFR-011); a phase-wide 4-reviewer pass over the assembled surface returned 0
+  blockers and a clean security result.
+
 ## [0.5.0] — 2026-05-27
 
 ### Phase 5 additions

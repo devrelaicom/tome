@@ -2,7 +2,7 @@
 
 > **Purpose**: Document authentication, authorization, security controls, and vulnerability status.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 / US5 privilege governance + doctor extensions; incremental update)
+> **Last Updated**: 2026-05-29 (Phase 6 / Polish — 4-reviewer pass, exit code 44 fix applied, v0.6.0)
 
 ## Overview
 
@@ -357,7 +357,7 @@ A guardrails body that itself contains a line resembling a managed marker (a gua
 
 | Layer | Control | Guarantee |
 |-------|---------|-----------|
-| **Symlink refusal** | `refuse_symlink_settings(target)?` checks target before read/write | Exit 7 (Io); prevents writing through symlinks to `.claude/` system files |
+| **Symlink refusal** | `refuse_symlink_settings(target)?` checks target before read/write | Exit 44 (HookSettingsWriteFailed); prevents writing through symlinks to `.claude/` system files |
 | **Read → load settings document** | Existing file read as JSON object; missing file creates empty hooks object | Idempotent: second write with no change produces identical file |
 | **Merge/Remove operation** | Deep structural-equality match using `serde_json::Value` | Idempotent: no duplicate appends, exact-match removal, user-edited copy preserved (NFR-003) |
 | **Atomic persist** | Write to tempfile via `write_settings(target, &doc)` → POSIX rename | Crash mid-write leaves no partial file; same-FS rename is atomic |
@@ -367,7 +367,7 @@ A guardrails body that itself contains a line resembling a managed marker (a gua
 ```rust
 /// Merge hooks into settings.local.json, atomic + mode-preserving + symlink-refusing.
 pub fn merge_into_settings(target: &Path, hooks: &RewrittenHooks) -> Result<bool, TomeError> {
-    refuse_symlink_settings(target)?;  // Exit 7 if symlink
+    refuse_symlink_settings(target)?;  // Exit 44 if symlink
     let (mut doc, existed) = load_settings(target)?;
     // ... merge logic with deep equality match ...
     if !existed || changed {
@@ -826,7 +826,7 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 | Harness rules file | Write-back symlink check | Exit 7 | `src/harness/rules_file.rs::refuse_symlink` |
 | Harness MCP config | Write-back symlink check | Exit 7 | `src/harness/mcp_config.rs::refuse_symlink` |
 | Atomic dir landing | Staging path symlink refusal | Exit 7 | `src/util/atomic_dir.rs::refuse_symlink` |
-| **Hooks settings file (US2)** | **Write-back symlink check** | **Exit 7** | **`src/harness/hooks.rs::refuse_symlink_settings` (new US2 surface)** |
+| **Hooks settings file (US2)** | **Write-back symlink check** | **Exit 44** | **`src/harness/hooks.rs::refuse_symlink_settings` (US2 C3-1 fix: exit 44, not 7)** |
 | **Agent file write** | **Write-back symlink check (Phase 6 / US1)** | **Exit 7** | **`src/harness/rules_file.rs::refuse_symlink` (reused for agents)** |
 | **Guardrails source read (US3)** | **Source file symlink check** | **Exit 46** | **`src/harness/guardrails.rs::read_guardrails_source` (new US3 surface)** |
 | **Guardrails target write (US3)** | **Target file symlink check** | **Exit 46** | **`src/harness/guardrails.rs::reconcile_in_file_region` + `reconcile_standalone_sibling` (new US3 surfaces)** |
@@ -834,7 +834,7 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 | Doctor orphan cleanup | Symlink-skip in sweep | Silent skip | `src/doctor/orphan_cleanup.rs::sweep_one` (symlink_metadata check) |
 | **MCP plugin show resource walk** | **Directory symlink skip (Phase 5 / US5)** | **Silent skip** | **`src/mcp/tools/plugin_show.rs::walk_resources` (`is_symlink()` filter; US5 new surface)** |
 
-**Threat Model**: Hostile catalog clones `skills/creds → ~/.ssh/id_rsa`, operator runs `tome plugin enable` → would leak SSH key via skill content. **Mitigation**: symlink skip in MCP `get_skill` walk + symlink refusal on writes + resource enumeration skip in `plugin_show`. Phase 6 US1 extends to agent file writes: symlink refusal before emitting to `.claude/agents/`. Phase 6 US2 extends to hooks settings file writes: symlink refusal before reading/writing `.claude/settings.local.json`. Phase 6 US3 extends to guardrails source reads and target writes: symlink refusal for both directions, exit 46 dedicated to guardrails failures.
+**Threat Model**: Hostile catalog clones `skills/creds → ~/.ssh/id_rsa`, operator runs `tome plugin enable` → would leak SSH key via skill content. **Mitigation**: symlink skip in MCP `get_skill` walk + symlink refusal on writes + resource enumeration skip in `plugin_show`. Phase 6 US1 extends to agent file writes: symlink refusal before emitting to `.claude/agents/`. Phase 6 US2 extends to hooks settings file writes: symlink refusal before reading/writing `.claude/settings.local.json` with dedicated exit code 44. Phase 6 US3 extends to guardrails source reads and target writes: symlink refusal for both directions, exit 46 dedicated to guardrails failures.
 
 ### File Mode Preservation
 
@@ -898,8 +898,8 @@ Result: "Hello, world!\n\nARGUMENTS: foo bar"
 - Exit 45: `AgentTranslationFailed` (malformed agent frontmatter, unsafe agent name, target-directory escape)
 
 **Phase 6 / US2 additions**:
-- Exit 43: `HookSpecParseError` (malformed / unparsable `hooks/hooks.json`, non-UTF-8 paths)
-- Exit 44: `HookSettingsWriteFailed` (failure to read/merge/write `.claude/settings.local.json`)
+- Exit 43: `HookSpecParseError` (malformed / unparsable `hooks/hooks.json`)
+- Exit 44: `HookSettingsWriteFailed` (failure to read/merge/write `.claude/settings.local.json`, symlink refusal, non-UTF-8 paths)
 
 **Phase 6 / US3 additions**:
 - Exit 46: `GuardrailsWriteFailed` (failed guardrails render/write to rules files or Cursor sibling, marker-injection violation in plugin body, symlink refusal on guardrails source or target)
@@ -909,4 +909,4 @@ See `specs/005-phase-5-commands-prompts/contracts/exit-codes-p5.md` + `specs/006
 ---
 
 *This document defines security controls. Update when security posture changes.*
-*Last refreshed 2026-05-29 against Phase 6 / US5 privilege governance + doctor extensions (incremental update); 0 security findings from US5 reviewer pass. US5 introduces: PrivilegeEscalationReport (reads enabled agents' source canonical forms, surfaces privileged fields REGARDLESS of strip_plugin_agent_privileges setting); read-only doctor (no writes by default, --fix opt-in); `--fix` write safety (idempotent re-sync, user-edited hook/rules preservation, single-path remove_file discipline, no remove_dir_all). Phase 6 / US1–US4 all verified; Phase 5 feature work critical security invariants (no-rescan, truncation DoS, path traversal, resource walk hardening) all verified end-to-end; 0 HIGH / 0 MEDIUM / 0 LOW security findings from full Phase 5 audit.*
+*Last refreshed 2026-05-29 (Phase 6 / Polish — v0.6.0). Phase 6 / US1–US5 all verified; Phase 5 feature work critical security invariants verified end-to-end; 0 HIGH / 0 MEDIUM / 0 LOW security findings from US5 reviewer pass. Phase 6 / Polish 4-reviewer pass returned 0 BLOCKER, 2 MAJOR (both fixed: CON-1 exit code 44 applied, TEST-1 multi-sink first_error test added). v0.6.0 marks completion of Phase 6 (hooks + agents + guardrails + doctor extensions); Phase 6 Polish applies cap-std evaluation DEFER decision to v0.6.0+ per constitution gate (no new top-level deps). All Phase 6 critical security controls implemented and tested.*

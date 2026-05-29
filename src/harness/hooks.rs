@@ -405,12 +405,22 @@ fn refuse_symlink(target: &Path) -> Result<(), TomeError> {
     }
 }
 
-/// Refuse to write through a symlinked settings file (FR contract:
-/// "refuse to write through a symlink … exit 7"). Distinct from
-/// [`refuse_symlink`] only in that a symlink here is the settings target,
-/// not the source.
+/// Refuse to write through a symlinked settings file. `settings.local.json` is a
+/// dedicated Phase 6 sink, so a symlink here surfaces as exit 44
+/// (`HookSettingsWriteFailed`), reconciled with exit-codes-p6.md and the parallel
+/// guardrails-target → 46 decision (code 7 is reserved for IO that is *not* the
+/// local Claude settings file).
 fn refuse_symlink_settings(target: &Path) -> Result<(), TomeError> {
-    refuse_symlink(target)
+    match std::fs::symlink_metadata(target) {
+        Ok(meta) if meta.file_type().is_symlink() => Err(settings_write_failed(
+            target,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("refusing to write through symlink: {}", target.display()),
+            ),
+        )),
+        Ok(_) | Err(_) => Ok(()),
+    }
 }
 
 /// Map a write-path IO failure to the exit-44 variant naming the file.
