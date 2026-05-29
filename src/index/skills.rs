@@ -327,11 +327,9 @@ pub fn enabled_plugins_for_catalog(
 /// display / logging without a follow-up sort.
 ///
 // Landed in the agent-indexing slice as the SSOT for clash detection; its
-// first non-test consumer is the native-translation / persona-naming slice
-// later in US1. `allow(dead_code)` keeps the query co-located with the
-// agent-row writers it depends on rather than splitting it out when that
-// slice lands.
-#[allow(dead_code)]
+// first non-test consumer is the harness sync's native-translation
+// reconciliation (`crate::harness::sync`), which computes the clash flag
+// once per sync and threads it per agent into `translate_agent`.
 pub(crate) fn agent_name_clash_set(
     conn: &Connection,
     workspace_name: &str,
@@ -353,6 +351,59 @@ pub(crate) fn agent_name_clash_set(
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query clash set: {e}")))?;
     rows.collect::<Result<_, _>>()
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect clash set: {e}")))
+}
+
+/// One enabled agent row, projected for the harness sync's native-agent
+/// reconciliation (Phase 6 / US1). Carries the provenance identity plus
+/// the catalog-relative source body path so the caller can resolve the
+/// on-disk `.md` via [`resolve_entry_body_path`] and parse it into a
+/// `CanonicalAgent`.
+#[derive(Debug, Clone)]
+pub struct EnabledAgent {
+    pub catalog: String,
+    pub plugin: String,
+    pub name: String,
+    /// The `skills.path` column — catalog-relative body path
+    /// (`agents/<name>.md`).
+    pub path: String,
+}
+
+/// Every `agent`-kind row enabled in `workspace_name`, ordered by
+/// `(catalog, plugin, name)` for deterministic emission (Phase 6 / US1).
+///
+/// "Enabled" means a `workspace_skills` row joins the agent to the
+/// workspace — the same enrolment junction the clash-set query consults.
+/// The harness sync uses this to enumerate which agents to translate and
+/// emit; the ordering keeps the per-file `added`/`updated`/`removed`
+/// outcome stable across runs.
+pub fn enabled_agents_for_workspace(
+    conn: &Connection,
+    workspace_name: &str,
+) -> Result<Vec<EnabledAgent>, TomeError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.catalog, s.plugin, s.name, s.path
+             FROM skills AS s
+             JOIN workspace_skills AS ws ON ws.skill_id = s.id
+             JOIN workspaces       AS w  ON w.id = ws.workspace_id
+             WHERE s.kind = 'agent' AND w.name = ?1
+             ORDER BY s.catalog, s.plugin, s.name",
+        )
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("prepare enabled agents: {e}"))
+        })?;
+    let rows = stmt
+        .query_map(params![workspace_name], |row| {
+            Ok(EnabledAgent {
+                catalog: row.get(0)?,
+                plugin: row.get(1)?,
+                name: row.get(2)?,
+                path: row.get(3)?,
+            })
+        })
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query enabled agents: {e}")))?;
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect enabled agents: {e}")))
 }
 
 /// DELETE every `workspace_skills` row for `(workspace_name, plugin)`. The

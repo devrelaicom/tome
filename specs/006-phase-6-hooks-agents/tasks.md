@@ -108,12 +108,12 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 ### Per-harness translation
 
-- [ ] T040 [P] [US1] Implement `translate_agent` + `agent_dir`/`agent_format`/`supports_native_agents` for claude-code (MD+YAML, `.claude/agents/`) in `src/harness/claude_code.rs` (use devs:rust-dev agent).
-- [ ] T041 [P] [US1] Implement Codex agent emission (TOML, `developer_instructions` triple-quoted body via `toml_edit`, `.codex/agents/`) in `src/harness/codex.rs` (use devs:rust-dev agent).
-- [ ] T042 [P] [US1] Implement Cursor agent emission (MD+YAML, `.cursor/agents/`) in `src/harness/cursor.rs` (use devs:rust-dev agent).
-- [ ] T043 [P] [US1] Implement OpenCode agent emission (MD+YAML, `.opencode/agent/`, `mode: subagent` default, filename-derived name, first-non-empty-line description fallback) in `src/harness/opencode.rs` (use devs:rust-dev agent).
-- [ ] T044 [US1] Wire agent reconciliation into `src/harness/sync.rs` (emit present, remove orphaned), preserving the hooks→guardrails→agents order skeleton (use devs:rust-dev agent).
-- [ ] T045 [GIT] Commit: `feat(phase-6): per-harness native agent emission + sync reconciliation`.
+- [X] T040 [P] [US1] Implement `translate_agent` + `agent_dir`/`agent_format`/`supports_native_agents` for claude-code (MD+YAML, `.claude/agents/`) in `src/harness/claude_code.rs` (use devs:rust-dev agent).
+- [X] T041 [P] [US1] Implement Codex agent emission (TOML, `developer_instructions` triple-quoted body via `toml_edit`, `.codex/agents/`) in `src/harness/codex.rs` (use devs:rust-dev agent).
+- [X] T042 [P] [US1] Implement Cursor agent emission (MD+YAML, `.cursor/agents/`) in `src/harness/cursor.rs` (use devs:rust-dev agent).
+- [X] T043 [P] [US1] Implement OpenCode agent emission (MD+YAML, `.opencode/agent/`, `mode: subagent` default, filename-derived name, first-non-empty-line description fallback) in `src/harness/opencode.rs` (use devs:rust-dev agent).
+- [X] T044 [US1] Wire agent reconciliation into `src/harness/sync.rs` (emit present, remove orphaned), preserving the hooks→guardrails→agents order skeleton (use devs:rust-dev agent).
+- [X] T045 [GIT] Commit: `feat(phase-6): per-harness native agent emission + sync reconciliation`.
 
 ### Tests (US1)
 

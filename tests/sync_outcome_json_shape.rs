@@ -11,9 +11,10 @@
 //! - `SyncOutcome` field order: `added` / `updated` / `removed` /
 //!   `leave_alones` / `decisions`.
 //! - `SyncChange` field order: `harness` / `subsystem` / `path`.
-//! - `SyncSubsystem` snake_case: `rules` / `mcp`.
+//! - `SyncSubsystem` snake_case: `rules` / `mcp` / `agents`.
 //! - `HarnessDecision` field order: `harness` / `in_effective_list` /
-//!   `rules_action` / `mcp_action`.
+//!   `rules_action` / `mcp_action` / `agents_action` (Phase 6 / US1 adds
+//!   `agents_action` LAST so the existing prefix order is unchanged).
 //! - `Action` snake_case: `created` / `updated` / `removed` /
 //!   `left_alone`.
 
@@ -45,12 +46,13 @@ fn sync_outcome_json_wire_shape_is_byte_stable_unix() {
             in_effective_list: true,
             rules_action: Action::Created,
             mcp_action: Action::LeftAlone,
+            agents_action: Action::Created,
         }],
     };
     let json = serde_json::to_string(&outcome).expect("serialise");
     assert_eq!(
         json,
-        r#"{"added":[{"harness":"claude-code","subsystem":"rules","path":"/proj/.claude/CLAUDE.md"}],"updated":[{"harness":"codex","subsystem":"mcp","path":"/home/u/.codex/config.toml"}],"removed":[{"harness":"cursor","subsystem":"rules","path":"/proj/AGENTS.md"}],"leave_alones":2,"decisions":[{"harness":"claude-code","in_effective_list":true,"rules_action":"created","mcp_action":"left_alone"}]}"#,
+        r#"{"added":[{"harness":"claude-code","subsystem":"rules","path":"/proj/.claude/CLAUDE.md"}],"updated":[{"harness":"codex","subsystem":"mcp","path":"/home/u/.codex/config.toml"}],"removed":[{"harness":"cursor","subsystem":"rules","path":"/proj/AGENTS.md"}],"leave_alones":2,"decisions":[{"harness":"claude-code","in_effective_list":true,"rules_action":"created","mcp_action":"left_alone","agents_action":"created"}]}"#,
     );
 }
 
@@ -89,6 +91,10 @@ fn sync_subsystem_snake_case_wire_shape() {
         serde_json::to_string(&SyncSubsystem::Mcp).unwrap(),
         "\"mcp\""
     );
+    assert_eq!(
+        serde_json::to_string(&SyncSubsystem::Agents).unwrap(),
+        "\"agents\""
+    );
 }
 
 #[test]
@@ -121,11 +127,12 @@ fn harness_decision_field_order_is_pinned() {
         in_effective_list: false,
         rules_action: Action::Removed,
         mcp_action: Action::LeftAlone,
+        agents_action: Action::LeftAlone,
     };
     let json = serde_json::to_string(&decision).unwrap();
     assert_eq!(
         json,
-        r#"{"harness":"x","in_effective_list":false,"rules_action":"removed","mcp_action":"left_alone"}"#,
+        r#"{"harness":"x","in_effective_list":false,"rules_action":"removed","mcp_action":"left_alone","agents_action":"left_alone"}"#,
     );
 }
 
