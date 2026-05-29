@@ -138,8 +138,10 @@ fn absent_hooks_file_is_none() {
 }
 
 // ---------------------------------------------------------------------------
-// T2-6: a symlinked hook SOURCE (`hooks/hooks.json`) is refused → exit 7,
-//       mirroring the settings-write symlink refusal.
+// T2-6: a symlinked hook SOURCE (`hooks/hooks.json`) is refused → exit 7.
+//       The source read deliberately stays generic Io (exit 7); only the
+//       settings.local.json write TARGET is the dedicated exit-44 sink. The
+//       two paths are distinct on purpose (see CON-1 / exit-codes-p6.md).
 // ---------------------------------------------------------------------------
 
 #[test]

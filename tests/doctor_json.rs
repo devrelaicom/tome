@@ -440,3 +440,142 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
     assert_eq!(c["agents"], 2);
     assert_eq!(c["pending_re_embedding"], 1);
 }
+
+// TEST-2: with all five Phase 6 fields PRESENT, pin their "appended LAST"
+// envelope ORDER. The minimal pin above sets them to `None`, so
+// `skip_serializing_if` elides them and nothing freezes their position. Use
+// `to_string` + byte offsets (NOT `to_value`, which is key-order-insensitive)
+// to prove `hooks` < `guardrails` < `agents` < `privilege_escalation` <
+// `personas`, and that all five follow `entry_counts` (NFR-011).
+#[test]
+fn doctor_json_phase6_fields_appended_last_in_order() {
+    use tome::commands::status::{IndexHealth, ModelHealth};
+    use tome::doctor::report::{
+        AgentsReport, EntryCountsByKind, GuardrailsReport, HooksReport, PersonaReport,
+        PrivilegeEscalationReport, WorkspaceRegistryStatus,
+    };
+    use tome::doctor::{CatalogCacheHealth, DoctorClassification, DoctorReport};
+    use tome::index::meta::DriftStatus;
+    use tome::workspace::{ScopeKind, WorkspaceInfo, scope::ScopeSource};
+
+    let report = DoctorReport {
+        tome_version: env!("CARGO_PKG_VERSION").to_owned(),
+        workspace: WorkspaceInfo {
+            scope: ScopeKind::Global,
+            path: None,
+            source: ScopeSource::Flag,
+            catalogs: 0,
+            plugins_total: 0,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            schema_version: None,
+            embedder: None,
+            enrolled_catalogs: Vec::new(),
+            enabled_plugins: Vec::new(),
+            bound_projects: Vec::new(),
+            summary_cache: None,
+        },
+        project_binding: None,
+        embedder: ModelHealth {
+            name: "bge-small-en-v1.5".to_owned(),
+            version: "1.5".to_owned(),
+            state: "ok".to_owned(),
+        },
+        reranker: ModelHealth {
+            name: "bge-reranker-base".to_owned(),
+            version: "1".to_owned(),
+            state: "ok".to_owned(),
+        },
+        summariser: ModelHealth {
+            name: "qwen2.5-0.5b-instruct".to_owned(),
+            version: "2.5".to_owned(),
+            state: "ok".to_owned(),
+        },
+        index: IndexHealth {
+            present: false,
+            schema_version: None,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            size_bytes: 0,
+            integrity_ok: true,
+        },
+        drift: DriftStatus::None,
+        catalogs: Vec::<CatalogCacheHealth>::new(),
+        workspace_registry: WorkspaceRegistryStatus {
+            present: false,
+            tracked: 0,
+        },
+        harnesses: Vec::new(),
+        effective_harness_list: None,
+        harness_rules: Vec::new(),
+        harness_mcp: Vec::new(),
+        detected_uninstalled_harnesses: Vec::new(),
+        prompts: None,
+        orphan_data_dirs: None,
+        // `entry_counts` is the last pre-Phase-6 field; the five below must all
+        // serialise after it.
+        entry_counts: Some(EntryCountsByKind {
+            skills: 0,
+            commands: 0,
+            agents: 0,
+            pending_re_embedding: 0,
+        }),
+        // Minimal-but-Some sub-values so `skip_serializing_if` does NOT elide
+        // them and their positions are pinned.
+        hooks: Some(HooksReport {
+            plugins: Vec::new(),
+        }),
+        guardrails: Some(GuardrailsReport { files: Vec::new() }),
+        agents: Some(AgentsReport {
+            harnesses: Vec::new(),
+        }),
+        privilege_escalation: Some(PrivilegeEscalationReport {
+            plugins: Vec::new(),
+        }),
+        personas: Some(PersonaReport {
+            personas: Vec::new(),
+            drop_persona: "drop-persona".to_owned(),
+        }),
+        overall: DoctorClassification::Ok,
+        suggested_fixes: Vec::new(),
+    };
+
+    let json = serde_json::to_string(&report).expect("serialise");
+    // Match each TOP-LEVEL key by its object-open form (`"key":{`). All six are
+    // objects on the wire, so this disambiguates from a same-named scalar field
+    // nested elsewhere (e.g. `entry_counts` carries its own `"agents":0`).
+    let at = |key: &str| {
+        let needle = format!("\"{key}\":{{");
+        json.find(&needle)
+            .unwrap_or_else(|| panic!("missing {needle}: {json}"))
+    };
+
+    let entry_counts = at("entry_counts");
+    let hooks = at("hooks");
+    let guardrails = at("guardrails");
+    let agents = at("agents");
+    let privilege = at("privilege_escalation");
+    let personas = at("personas");
+
+    // All five Phase 6 fields follow `entry_counts` …
+    for (label, pos) in [
+        ("hooks", hooks),
+        ("guardrails", guardrails),
+        ("agents", agents),
+        ("privilege_escalation", privilege),
+        ("personas", personas),
+    ] {
+        assert!(
+            entry_counts < pos,
+            "`{label}` must serialise after `entry_counts`: {json}"
+        );
+    }
+    // … in the documented appended-LAST order.
+    assert!(hooks < guardrails, "hooks < guardrails: {json}");
+    assert!(guardrails < agents, "guardrails < agents: {json}");
+    assert!(agents < privilege, "agents < privilege_escalation: {json}");
+    assert!(
+        privilege < personas,
+        "privilege_escalation < personas: {json}"
+    );
+}

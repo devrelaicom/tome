@@ -274,8 +274,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T144 [GIT] Commit: `docs(phase-6): init P8 retro`.
 - [X] T145 Phase-wide 4-reviewer parallel pass (contract / Rust-lens / test / security) against the full Phase 6 surface; consolidate `review/findings.md` + `review/disposition.md` (reviewers read the us{1..5}-disposition docs first).
 - [X] T146 [GIT] Commit: `docs(review): Phase 6 phase-wide reviewer findings + disposition`.
-- [ ] T147 Apply phase-wide blockers + selected majors (use devs:rust-dev agent).
-- [ ] T148 [GIT] Commit: `fix(phase-6): apply phase-wide reviewer findings`.
+- [X] T147 Apply phase-wide blockers + selected majors (use devs:rust-dev agent).
+- [X] T148 [GIT] Commit: `fix(phase-6): apply phase-wide reviewer findings`.
 - [ ] T149 [P] Add `tests/harness_sync_p6_idempotence.rs` — hooks+guardrails+agents idempotent across a re-sync (mtime capture pattern) (use devs:rust-dev agent).
 - [ ] T150 [P] Add `tests/entry_e2e_p6.rs` — enable → reconcile all sinks → assert hooks/guardrails/agents/persona end-to-end (use devs:rust-dev agent).
 - [ ] T151 Evaluate cap-std hardening across the four new file sinks (`openat`/`O_NOFOLLOW`) per the Phase 5 P8 security backlog; apply or document deferral (use devs:rust-dev agent).

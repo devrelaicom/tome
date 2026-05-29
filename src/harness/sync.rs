@@ -118,6 +118,10 @@ pub enum SyncSubsystem {
 /// `with_effective_modules`, regardless of whether it's in the
 /// effective list — the field set lets `tome harness sync --json`
 /// callers reason about cleanup as well as additions.
+///
+/// Serialized Phase 6 field order is `agents_action`, `hooks_action`,
+/// `guardrails_action` — merge chronology (each appended LAST as US1→US2→US3
+/// landed), distinct from the hooks→guardrails→agents sink *processing* order.
 #[derive(Debug, Clone, Serialize)]
 pub struct HarnessDecision {
     pub harness: String,
@@ -762,6 +766,14 @@ fn reconcile_hooks(
     // participates in real hooks (e.g. claude-code is GuardrailsOnly in a
     // synthetic registry) — the guardrails pass still needs it. It is
     // independent of the merge/remove work below.
+    //
+    // SEC-2: this `unwrap_or_default` is an INTENTIONAL exception to the
+    // propagate-on-existing-DB rule the reconcilers follow. Collapsing an
+    // unopenable DB to empty here only un-suppresses guardrails — Claude Code
+    // renders one extra (redundant) prose region, corrected on the next
+    // successful sync. That is fail-SAFE, unlike `reconcile_agents` where an
+    // empty enabled set would mass-delete state (fail-dangerous), so there the
+    // same error MUST propagate.
     recon.plugins_with_hooks_json = compute_plugins_with_hooks_json(deps).unwrap_or_default();
 
     // Fast exit: no harness participates in real hooks → no merge/remove work.

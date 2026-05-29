@@ -91,7 +91,7 @@ Every write to `settings.local.json` follows the Phase 4 atomic-write discipline
 
 1. Read the existing file (or start from `{"hooks": {}}` if absent).
 2. Construct the merged/pruned `serde_json::Value` in memory.
-3. **Refuse to write through a symlink** — `symlink_metadata` check on the target before writing; exit 7 (`Io`) if the target is a symlink.
+3. **Refuse to write through a symlink** — `symlink_metadata` check on the target before writing; exit 44 (`HookSettingsWriteFailed`) if the target is a symlink — a write-guard on the dedicated settings sink, reconciled with the authoritative [exit-codes-p6.md](./exit-codes-p6.md) (matching the parallel guardrails-target → 46 decision; code 7 is reserved for IO that is *not* the local Claude settings file).
 4. Serialise to a sibling temp file on the same filesystem; preserve the existing file's mode (capture via `symlink_metadata`, chmod the staged temp before persist; new files get 0600 on Unix); fsync; atomic rename onto the target.
 
 A failure at any read/merge/write step surfaces **exit 44** (hook settings-file read/merge/write failure). The write is all-or-nothing: a failure never leaves a partially-written settings file (FR-084).
@@ -114,4 +114,4 @@ Both codes are pinned in [exit-codes-p6.md](./exit-codes-p6.md) (FR-092). Neithe
 - **Path rewrite**: `${CLAUDE_PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_DATA}` resolved to absolute paths; `${CLAUDE_PROJECT_DIR}`/`${CLAUDE_SESSION_ID}` left verbatim (FR-003, SC-004).
 - **Pruning**: removing a plugin's only hook for an event prunes the empty array but leaves the `hooks` object (FR-006).
 - **Malformed source**: an unparsable `hooks.json` surfaces exit 43 and does not corrupt `settings.local.json`.
-- **Symlink refusal**: a symlinked `settings.local.json` is refused (exit 7).
+- **Symlink refusal**: a symlinked `settings.local.json` is refused (exit 44 — a write-guard on the dedicated settings sink, per exit-codes-p6.md).

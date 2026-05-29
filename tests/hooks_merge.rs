@@ -340,9 +340,12 @@ fn merge_into_wrong_type_hooks_value_is_exit_44_original_intact() {
 }
 
 // ---------------------------------------------------------------------------
-// T2-1: symlink refusal on the settings.local.json write → exit 7, for BOTH
-//       the merge and remove paths. The decoy the symlink points at is left
-//       intact and the target stays a symlink (not replaced).
+// T2-1: symlink refusal on the settings.local.json write → exit 44, for BOTH
+//       the merge and remove paths. settings.local.json is a dedicated Phase 6
+//       sink, so a symlinked target surfaces HookSettingsWriteFailed (exit 44),
+//       not the generic Io (exit 7) used for the hooks.json SOURCE read. The
+//       decoy the symlink points at is left intact and the target stays a
+//       symlink (not replaced).
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
@@ -358,7 +361,15 @@ fn assert_symlink_refused(op: impl FnOnce(&Path) -> Result<bool, tome::error::To
     std::os::unix::fs::symlink(&decoy, &local).expect("plant symlink");
 
     let err = op(&local).expect_err("symlink target must be refused");
-    assert_eq!(err.exit_code(), 7, "symlink refusal → exit 7; got {err:?}");
+    assert_eq!(
+        err.exit_code(),
+        44,
+        "symlink refusal → exit 44; got {err:?}"
+    );
+    assert!(
+        matches!(&err, tome::error::TomeError::HookSettingsWriteFailed { .. }),
+        "the settings.local.json sink uses HookSettingsWriteFailed; got {err:?}"
+    );
 
     // The decoy is untouched and the target is still a symlink.
     assert_eq!(
@@ -375,7 +386,7 @@ fn assert_symlink_refused(op: impl FnOnce(&Path) -> Result<bool, tome::error::To
 
 #[test]
 #[cfg(unix)]
-fn merge_through_symlinked_settings_is_refused_exit_7() {
+fn merge_through_symlinked_settings_is_refused_exit_44() {
     assert_symlink_refused(|local| {
         hooks::merge_into_settings(local, &one("PreToolUse", entry("/abs/g.sh")))
     });
@@ -383,7 +394,7 @@ fn merge_through_symlinked_settings_is_refused_exit_7() {
 
 #[test]
 #[cfg(unix)]
-fn remove_through_symlinked_settings_is_refused_exit_7() {
+fn remove_through_symlinked_settings_is_refused_exit_44() {
     assert_symlink_refused(|local| {
         hooks::remove_from_settings(local, &one("PreToolUse", entry("/abs/g.sh")))
     });
