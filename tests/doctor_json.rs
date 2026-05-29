@@ -258,6 +258,11 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
         prompts: None,
         orphan_data_dirs: None,
         entry_counts: None,
+        hooks: None,
+        guardrails: None,
+        agents: None,
+        privilege_escalation: None,
+        personas: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -398,6 +403,11 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
             agents: 2,
             pending_re_embedding: 1,
         }),
+        hooks: None,
+        guardrails: None,
+        agents: None,
+        privilege_escalation: None,
+        personas: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };

@@ -582,6 +582,497 @@ pub fn count_entries_by_kind(
     })
 }
 
+// -------------------------------------------------------------------------
+// Phase 6 / US5 — read-only doctor surfaces (hooks / guardrails / agents /
+// privilege-escalation / personas). Per FR-124 every function below only
+// reads: `fs::read` / `read_dir` / index queries. None create a directory
+// nor invoke the substitution layer. Contract:
+// `contracts/doctor-extensions-p6.md`.
+// -------------------------------------------------------------------------
+
+use crate::doctor::report::{
+    AgentHarnessEntry, AgentsReport, CatalogPlugin, DroppedFieldEntry, GuardrailsFileEntry,
+    GuardrailsReport, HookEventEntry, HookPluginEntry, HooksReport, PersonaEntry, PersonaReport,
+    PrivilegeAgentEntry, PrivilegeEscalationReport, PrivilegePluginEntry,
+};
+
+/// Build the Phase 6 hooks surface (Claude Code only). For each enabled
+/// plugin shipping a `hooks/hooks.json`, re-derive its rewritten entries and
+/// compare them against the project's `.claude/settings.local.json` by deep
+/// structural equality — the SAME ownership test the sync merge uses
+/// (NFR-003). An entry found in the file is `contributed`; a re-derived
+/// entry with no structural match is `missing` (drift from a user edit).
+///
+/// Read-only: `fs::read` of the source + the settings file only. The
+/// `settings.local.json` is parsed but never written.
+pub fn build_hooks_report(
+    paths: &Paths,
+    project_root: &Path,
+    workspace: &WorkspaceName,
+    conn: &rusqlite::Connection,
+) -> Result<HooksReport, TomeError> {
+    let settings_path = project_root.join(".claude").join("settings.local.json");
+    // Parse the existing settings hooks object once (read-only). A missing
+    // file means everything re-derived counts as `missing` (the merge would
+    // create it on next sync).
+    let existing_hooks = read_settings_hooks(&settings_path);
+
+    let enabled = crate::index::skills::enabled_plugins_for_workspace(conn, workspace.as_str())?;
+    let mut plugins: Vec<HookPluginEntry> = Vec::new();
+    for (catalog, plugin) in &enabled {
+        let plugin_root = match crate::index::skills::plugin_root_dir(
+            conn,
+            paths,
+            workspace.as_str(),
+            catalog,
+            plugin,
+        ) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let plugin_data = paths.plugin_data_dir_for(catalog, plugin);
+        let rewritten =
+            match crate::harness::hooks::read_rewritten_entries(&plugin_root, &plugin_data) {
+                Ok(Some(h)) if !h.is_empty() => h,
+                // No hooks.json (or empty) → plugin contributes nothing. A
+                // parse failure is surfaced by the sync path (exit 43); the
+                // read-only doctor surface skips it rather than aborting.
+                _ => continue,
+            };
+
+        let mut contributed: Vec<HookEventEntry> = Vec::new();
+        let mut missing: Vec<HookEventEntry> = Vec::new();
+        for (event, entries) in &rewritten.events {
+            let present_in_file = existing_hooks
+                .as_ref()
+                .and_then(|h| h.get(event))
+                .and_then(serde_json::Value::as_array);
+            let mut found = 0usize;
+            let mut gone = 0usize;
+            for entry in entries {
+                let matched = present_in_file
+                    .map(|arr| arr.iter().any(|existing| existing == entry))
+                    .unwrap_or(false);
+                if matched {
+                    found += 1;
+                } else {
+                    gone += 1;
+                }
+            }
+            if found > 0 {
+                contributed.push(HookEventEntry {
+                    event: event.clone(),
+                    count: found,
+                });
+            }
+            if gone > 0 {
+                missing.push(HookEventEntry {
+                    event: event.clone(),
+                    count: gone,
+                });
+            }
+        }
+
+        if !contributed.is_empty() || !missing.is_empty() {
+            plugins.push(HookPluginEntry {
+                catalog: catalog.clone(),
+                plugin: plugin.clone(),
+                contributed,
+                missing,
+            });
+        }
+    }
+
+    Ok(HooksReport { plugins })
+}
+
+/// Read the `hooks` object out of a `settings.local.json`, returning `None`
+/// when the file is absent / unparsable / lacks a `hooks` object. Read-only.
+fn read_settings_hooks(path: &Path) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let body = crate::util::bounded_read_to_string(path, crate::util::HARNESS_MCP_MAX).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&body).ok()?;
+    value
+        .as_object()
+        .and_then(|o| o.get("hooks"))
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+}
+
+/// Build the Phase 6 guardrails surface. For each effective harness's
+/// guardrails target, parse the existing marker regions on disk
+/// (`present`), classify any region whose plugin is no longer enabled as
+/// `orphaned`, and record plugins suppressed for Claude Code because they
+/// ship real JSON hooks (`suppressed`, FR-013).
+///
+/// Read-only: `fs::read` of each target only; marker parsing never writes.
+/// Shared targets (e.g. `AGENTS.md` across two harnesses) are reported once.
+pub fn build_guardrails_report(
+    paths: &Paths,
+    project_root: &Path,
+    workspace: &WorkspaceName,
+    conn: &rusqlite::Connection,
+) -> Result<GuardrailsReport, TomeError> {
+    use std::collections::BTreeSet;
+
+    // The set of `<catalog>:<plugin>` keys for enabled plugins, and the
+    // subset that contribute a `GUARDRAILS.md` body.
+    let enabled = crate::index::skills::enabled_plugins_for_workspace(conn, workspace.as_str())?;
+    let mut enabled_keys: BTreeSet<String> = BTreeSet::new();
+    let mut plugins_with_hooks_json: BTreeSet<String> = BTreeSet::new();
+    for (catalog, plugin) in &enabled {
+        let key = crate::harness::guardrails::region_key(catalog, plugin);
+        enabled_keys.insert(key.clone());
+        if let Ok(plugin_root) =
+            crate::index::skills::plugin_root_dir(conn, paths, workspace.as_str(), catalog, plugin)
+            && plugin_root.join("hooks").join("hooks.json").exists()
+        {
+            plugins_with_hooks_json.insert(key);
+        }
+    }
+
+    let mut files: Vec<GuardrailsFileEntry> = Vec::new();
+    let mut seen_paths: BTreeSet<std::path::PathBuf> = BTreeSet::new();
+
+    crate::harness::with_effective_modules(|mods| {
+        for m in mods {
+            let target = m.guardrails_target(project_root);
+            let (file, suppress_flag) = match &target.placement {
+                crate::harness::GuardrailsPlacement::InFileRegion { file }
+                | crate::harness::GuardrailsPlacement::StandaloneSibling { file } => {
+                    (file.clone(), target.suppress_if_hooks_present)
+                }
+            };
+            if !seen_paths.insert(file.clone()) {
+                continue;
+            }
+
+            let present_keys = parse_guardrails_region_keys(&file);
+            if present_keys.is_empty() {
+                // No regions on disk → only report the file if a plugin
+                // would suppress into it (informational); otherwise skip to
+                // keep the report lean.
+                continue;
+            }
+
+            let mut present: Vec<CatalogPlugin> = Vec::new();
+            let mut orphaned: Vec<CatalogPlugin> = Vec::new();
+            let mut suppressed: Vec<CatalogPlugin> = Vec::new();
+            for key in &present_keys {
+                let Some(cp) = split_region_key(key) else {
+                    continue;
+                };
+                present.push(cp.clone());
+                if !enabled_keys.contains(key) {
+                    orphaned.push(cp.clone());
+                }
+                if suppress_flag && plugins_with_hooks_json.contains(key) {
+                    suppressed.push(cp);
+                }
+            }
+
+            files.push(GuardrailsFileEntry {
+                path: file,
+                present,
+                orphaned,
+                suppressed,
+            });
+        }
+    });
+
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(GuardrailsReport { files })
+}
+
+/// Parse the present guardrails region keys (`<catalog>:<plugin>`) from a
+/// target file. Returns an empty vec when the file is absent / unparsable.
+/// Read-only — bounded read + marker scan.
+fn parse_guardrails_region_keys(path: &Path) -> Vec<String> {
+    let body = match crate::util::bounded_read_to_string(path, crate::util::HARNESS_RULES_MAX) {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    crate::harness::guardrails::present_region_keys(&body)
+}
+
+/// Split a `<catalog>:<plugin>` provenance key. The catalog half has no
+/// colon (matching the guardrails marker grammar); everything after the
+/// first colon is the plugin.
+fn split_region_key(key: &str) -> Option<CatalogPlugin> {
+    let (catalog, plugin) = key.split_once(':')?;
+    if catalog.is_empty() || plugin.is_empty() {
+        return None;
+    }
+    Some(CatalogPlugin {
+        catalog: catalog.to_owned(),
+        plugin: plugin.to_owned(),
+    })
+}
+
+/// Build the Phase 6 agents surface. For each native-supporting harness,
+/// enumerate the `<plugin>__*` files Tome owns in its `agent_dir`
+/// (`present`), classify owned files whose plugin is no longer enabled as
+/// `orphaned`, and re-translate each enabled agent to record dropped fields.
+///
+/// Read-only: `read_dir` of each agent dir + re-translation in memory (no
+/// file is written). The clash set + canonical parses mirror the sync path.
+pub fn build_agents_report(
+    paths: &Paths,
+    project_root: &Path,
+    workspace: &WorkspaceName,
+    conn: &rusqlite::Connection,
+) -> Result<AgentsReport, TomeError> {
+    use std::collections::HashSet;
+
+    let clash_set = crate::index::skills::agent_name_clash_set(conn, workspace.as_str())?;
+    let enabled = crate::index::skills::enabled_agents_for_workspace(conn, workspace.as_str())?;
+    let enabled_plugins: HashSet<String> = enabled.iter().map(|a| a.plugin.clone()).collect();
+
+    // Parse each enabled agent once into a CanonicalAgent + clash flag. A
+    // parse failure (post-enable source corruption) is skipped here — the
+    // sync path surfaces it as exit 45; the read-only doctor report omits
+    // the unparsable agent rather than aborting.
+    let mut prepared: Vec<(crate::harness::agents::CanonicalAgent, bool)> = Vec::new();
+    for row in &enabled {
+        let abs = match crate::index::skills::resolve_entry_body_path(
+            conn,
+            paths,
+            workspace.as_str(),
+            &row.catalog,
+            &row.plugin,
+            &row.path,
+        ) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let Ok(contents) =
+            crate::util::bounded_read_to_string(&abs, crate::util::HARNESS_RULES_MAX)
+        else {
+            continue;
+        };
+        let stem = abs
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&row.name);
+        let Ok(canonical) = crate::harness::agents::CanonicalAgent::parse(
+            &row.catalog,
+            &row.plugin,
+            stem,
+            &contents,
+        ) else {
+            continue;
+        };
+        let clashes = clash_set.contains(&canonical.name);
+        prepared.push((canonical, clashes));
+    }
+
+    let mut harnesses: Vec<AgentHarnessEntry> = Vec::new();
+    crate::harness::with_effective_modules(|mods| {
+        for m in mods {
+            if !m.supports_native_agents() {
+                continue;
+            }
+            let Some(dir) = m.agent_dir(project_root) else {
+                continue;
+            };
+
+            // Owned `<plugin>__*` files on disk.
+            let owned = list_owned_agent_files(&dir);
+            let mut present: Vec<String> = Vec::new();
+            let mut orphaned: Vec<String> = Vec::new();
+            for filename in &owned {
+                present.push(filename.clone());
+                if let Some(plugin) = crate::harness::agents::plugin_of_owned_file_pub(filename)
+                    && !enabled_plugins.contains(plugin)
+                {
+                    orphaned.push(filename.clone());
+                }
+            }
+
+            // Dropped fields from re-translation (informational).
+            let mut dropped_fields: Vec<DroppedFieldEntry> = Vec::new();
+            for (canonical, clashes) in &prepared {
+                if let Ok(translated) = m.translate_agent(canonical, *clashes)
+                    && !translated.dropped_fields.is_empty()
+                {
+                    let stem = translated
+                        .filename
+                        .rsplit_once('.')
+                        .map(|(s, _)| s.to_owned())
+                        .unwrap_or_else(|| translated.filename.clone());
+                    dropped_fields.push(DroppedFieldEntry {
+                        agent: stem,
+                        fields: translated.dropped_fields.clone(),
+                    });
+                }
+            }
+
+            present.sort();
+            orphaned.sort();
+            dropped_fields.sort_by(|a, b| a.agent.cmp(&b.agent));
+            harnesses.push(AgentHarnessEntry {
+                harness: m.name().to_owned(),
+                present,
+                orphaned,
+                dropped_fields,
+            });
+        }
+    });
+
+    harnesses.sort_by(|a, b| a.harness.cmp(&b.harness));
+    Ok(AgentsReport { harnesses })
+}
+
+/// Enumerate the Tome-owned `<plugin>__*` agent filenames in `dir`. Skips
+/// symlinks and non-files (S-M6 defence-in-depth). Read-only.
+fn list_owned_agent_files(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(it) => it,
+        Err(_) => return out,
+    };
+    for de in entries.flatten() {
+        let p = de.path();
+        let Ok(meta) = std::fs::symlink_metadata(&p) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if crate::harness::agents::plugin_of_owned_file_pub(name).is_some() {
+            out.push(name.to_owned());
+        }
+    }
+    out
+}
+
+/// Build the Phase 6 privilege-escalation surface (FR-051). Re-parse every
+/// enabled agent's SOURCE `.md` and group those carrying any of `hooks` /
+/// `mcpServers` / `permissionMode` by plugin. Read REGARDLESS of
+/// `strip_plugin_agent_privileges` — the audit reads the source agent, never
+/// the (possibly-stripped) emission clone, so the escalation surface stays
+/// auditable.
+///
+/// Read-only: `fs::read` of each agent source only.
+pub fn build_privilege_escalation_report(
+    paths: &Paths,
+    workspace: &WorkspaceName,
+    conn: &rusqlite::Connection,
+) -> Result<PrivilegeEscalationReport, TomeError> {
+    let enabled = crate::index::skills::enabled_agents_for_workspace(conn, workspace.as_str())?;
+
+    // Preserve enumeration order (catalog, plugin, name) while grouping by
+    // (catalog, plugin). A `Vec` keyed scan keeps the wire order stable.
+    let mut plugins: Vec<PrivilegePluginEntry> = Vec::new();
+    for row in &enabled {
+        let abs = match crate::index::skills::resolve_entry_body_path(
+            conn,
+            paths,
+            workspace.as_str(),
+            &row.catalog,
+            &row.plugin,
+            &row.path,
+        ) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let Ok(contents) =
+            crate::util::bounded_read_to_string(&abs, crate::util::HARNESS_RULES_MAX)
+        else {
+            continue;
+        };
+        let stem = abs
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&row.name);
+        let Ok(canonical) = crate::harness::agents::CanonicalAgent::parse(
+            &row.catalog,
+            &row.plugin,
+            stem,
+            &contents,
+        ) else {
+            continue;
+        };
+
+        let mut fields: Vec<String> = Vec::new();
+        if canonical.hooks.is_some() {
+            fields.push("hooks".to_owned());
+        }
+        if canonical.mcp_servers.is_some() {
+            fields.push("mcpServers".to_owned());
+        }
+        if canonical.permission_mode.is_some() {
+            fields.push("permissionMode".to_owned());
+        }
+        if fields.is_empty() {
+            continue;
+        }
+
+        let agent = PrivilegeAgentEntry {
+            name: canonical.name.clone(),
+            fields,
+        };
+        match plugins
+            .iter_mut()
+            .find(|p| p.catalog == row.catalog && p.plugin == row.plugin)
+        {
+            Some(existing) => existing.agents.push(agent),
+            None => plugins.push(PrivilegePluginEntry {
+                catalog: row.catalog.clone(),
+                plugin: row.plugin.clone(),
+                agents: vec![agent],
+            }),
+        }
+    }
+
+    Ok(PrivilegeEscalationReport { plugins })
+}
+
+/// Build the Phase 6 personas surface. Enumerate one persona per enabled
+/// agent with its resolved `<name>-persona` slug (or
+/// `<plugin>-<name>-persona` for a clashing agent, FR-061), reusing the US4
+/// clash set + name derivation. Read-only: persona names are derived from
+/// frontmatter + entry rows WITHOUT invoking substitution or creating any
+/// directory.
+///
+/// Only called when `expose_agents_as_personas` resolves true at the doctor
+/// scope; the assembler maps a false flag to `None` on `DoctorReport`.
+pub fn build_persona_report(
+    workspace: &WorkspaceName,
+    conn: &rusqlite::Connection,
+) -> Result<PersonaReport, TomeError> {
+    let clash_set = crate::index::skills::agent_name_clash_set(conn, workspace.as_str())?;
+    let enabled = crate::index::skills::enabled_agents_for_workspace(conn, workspace.as_str())?;
+
+    let mut personas: Vec<PersonaEntry> = Vec::new();
+    for row in &enabled {
+        let clash_prefixed = clash_set.contains(&row.name);
+        // FR-061 name derivation, mirroring `prompts::collect_persona_identities`:
+        // `<plugin>-<name>` base for a clash, `<name>` otherwise, then the
+        // `-persona` suffix via the shared `derive_suffixed_name`.
+        let base = if clash_prefixed {
+            format!("{}-{}", row.plugin, row.name)
+        } else {
+            row.name.clone()
+        };
+        let resolved_persona_name = crate::mcp::prompt_name::derive_suffixed_name(&base, "persona");
+        personas.push(PersonaEntry {
+            catalog: row.catalog.clone(),
+            plugin: row.plugin.clone(),
+            agent_name: row.name.clone(),
+            resolved_persona_name,
+            clash_prefixed,
+        });
+    }
+
+    Ok(PersonaReport {
+        personas,
+        drop_persona: crate::mcp::prompts::DROP_PERSONA_NAME.to_owned(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

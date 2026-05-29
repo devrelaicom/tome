@@ -335,6 +335,123 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         writeln!(out)?;
     }
 
+    // Phase 6 / US5: hooks contribution + drift (Claude Code).
+    if let Some(h) = &report.hooks
+        && !h.plugins.is_empty()
+    {
+        writeln!(out, "Hooks (Claude Code):")?;
+        for p in &h.plugins {
+            for c in &p.contributed {
+                writeln!(
+                    out,
+                    "  {ok} {}:{} {} x{} contributed",
+                    p.catalog, p.plugin, c.event, c.count,
+                )?;
+            }
+            for m in &p.missing {
+                writeln!(
+                    out,
+                    "  {warn} {}:{} {} x{} expected but missing (drift; re-merges on next sync)",
+                    p.catalog, p.plugin, m.event, m.count,
+                )?;
+            }
+        }
+        writeln!(out)?;
+    }
+
+    // Phase 6 / US5: guardrails regions per file.
+    if let Some(g) = &report.guardrails
+        && !g.files.is_empty()
+    {
+        writeln!(out, "Guardrails regions:")?;
+        for f in &g.files {
+            writeln!(out, "  {}", f.path.display())?;
+            for cp in &f.present {
+                let suppressed = f
+                    .suppressed
+                    .iter()
+                    .any(|s| s.catalog == cp.catalog && s.plugin == cp.plugin);
+                let orphaned = f
+                    .orphaned
+                    .iter()
+                    .any(|o| o.catalog == cp.catalog && o.plugin == cp.plugin);
+                let (glyph, suffix) = if orphaned {
+                    (&info, "  (orphaned)")
+                } else if suppressed {
+                    (&info, "  (suppressed by hooks)")
+                } else {
+                    (&ok, "")
+                };
+                writeln!(out, "    {glyph} {}:{}{suffix}", cp.catalog, cp.plugin)?;
+            }
+        }
+        writeln!(out)?;
+    }
+
+    // Phase 6 / US5: native agent files per harness.
+    if let Some(a) = &report.agents
+        && !a.harnesses.is_empty()
+    {
+        writeln!(out, "Native agents:")?;
+        for h in &a.harnesses {
+            writeln!(
+                out,
+                "  {} ({} present, {} orphaned)",
+                harness_display_name(&h.harness),
+                h.present.len(),
+                h.orphaned.len(),
+            )?;
+            for orphan in &h.orphaned {
+                writeln!(out, "    {warn} {orphan} (orphaned)")?;
+            }
+            for d in &h.dropped_fields {
+                writeln!(out, "    {info} {} dropped: {:?}", d.agent, d.fields)?;
+            }
+        }
+        writeln!(out)?;
+    }
+
+    // Phase 6 / US5: privilege-escalation audit (FR-051).
+    if let Some(p) = &report.privilege_escalation
+        && !p.plugins.is_empty()
+    {
+        writeln!(
+            out,
+            "Privileged agents (carry hooks/mcpServers/permissionMode):"
+        )?;
+        for plug in &p.plugins {
+            for ag in &plug.agents {
+                writeln!(
+                    out,
+                    "  {warn} {}:{}/{} → {:?}",
+                    plug.catalog, plug.plugin, ag.name, ag.fields,
+                )?;
+            }
+        }
+        writeln!(out)?;
+    }
+
+    // Phase 6 / US5: persona surface (only present when personas are on).
+    if let Some(p) = &report.personas {
+        writeln!(out, "Agent personas (expose_agents_as_personas on):")?;
+        for persona in &p.personas {
+            let clash = if persona.clash_prefixed {
+                "  (clash-prefixed)"
+            } else {
+                ""
+            };
+            writeln!(
+                out,
+                "  {}{}{}",
+                crate::mcp::MCP_SLASH_PREFIX,
+                persona.resolved_persona_name,
+                clash,
+            )?;
+        }
+        writeln!(out, "  {}{}", crate::mcp::MCP_SLASH_PREFIX, p.drop_persona)?;
+        writeln!(out)?;
+    }
+
     if !report.suggested_fixes.is_empty() {
         writeln!(out, "Suggested fixes:")?;
         for f in &report.suggested_fixes {

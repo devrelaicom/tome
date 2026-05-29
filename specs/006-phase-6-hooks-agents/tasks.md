@@ -243,11 +243,11 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T122 [US5] Add `strip_plugin_agent_privileges: bool` (default false) to the three settings structs in `src/settings/mod.rs`, reusing the scalar priority-walk resolver (FR-052/053) (use devs:rust-dev agent).
 - [X] T123 [US5] Implement privilege passthrough (default) + strip-when-set for `hooks`/`mcpServers`/`permissionMode` in claude-code agent emission in `src/harness/claude_code.rs` (FR-050/052) (use devs:rust-dev agent).
 - [X] T124 [GIT] Commit: `feat(phase-6): plugin-agent privilege passthrough + strip setting`.
-- [ ] T125 [US5] Implement `HooksReport`, `GuardrailsReport`, `AgentsReport`, `PrivilegeEscalationReport`, `PersonaReport` (emit-only `Serialize`) in `src/doctor/` (FR-090) (use devs:rust-dev agent).
-- [ ] T126 [US5] Wire the five reports into `assemble_report` in `src/commands/doctor.rs` (human + JSON), `None` only on `GlobalFallback` scope where applicable (use devs:rust-dev agent).
-- [ ] T127 [US5] Implement `--fix` safe repairs (re-render stale guardrails, re-emit missing agents, remove orphaned `<plugin>__*`); never remove a non-matching hook, never delete user content (FR-091) in `src/doctor/fixes.rs` (use devs:rust-dev agent).
-- [ ] T128 [US5] Extend `tome plugin show` in `src/commands/plugin/show.rs`: list agents + hooks.json/GUARDRAILS.md presence + resolved persona name when personas on (FR-083) (use devs:rust-dev agent).
-- [ ] T129 [GIT] Commit: `feat(phase-6): doctor hooks/guardrails/agents/personas/privilege reports + --fix + plugin show`.
+- [X] T125 [US5] Implement `HooksReport`, `GuardrailsReport`, `AgentsReport`, `PrivilegeEscalationReport`, `PersonaReport` (emit-only `Serialize`) in `src/doctor/` (FR-090) (use devs:rust-dev agent).
+- [X] T126 [US5] Wire the five reports into `assemble_report` in `src/commands/doctor.rs` (human + JSON), `None` only on `GlobalFallback` scope where applicable (use devs:rust-dev agent).
+- [X] T127 [US5] Implement `--fix` safe repairs (re-render stale guardrails, re-emit missing agents, remove orphaned `<plugin>__*`); never remove a non-matching hook, never delete user content (FR-091) in `src/doctor/fixes.rs` (use devs:rust-dev agent).
+- [X] T128 [US5] Extend `tome plugin show` in `src/commands/plugin/show.rs`: list agents + hooks.json/GUARDRAILS.md presence + resolved persona name when personas on (FR-083) (use devs:rust-dev agent).
+- [X] T129 [GIT] Commit: `feat(phase-6): doctor hooks/guardrails/agents/personas/privilege reports + --fix + plugin show`.
 - [ ] T130 [P] [US5] `tests/agent_privilege.rs` — passthrough default; strip when set; doctor privilege report (use devs:rust-dev agent).
 - [ ] T131 [P] [US5] `tests/doctor_p6.rs` — all five report surfaces + `--fix` safe cases + read-only-by-default invariant (use devs:rust-dev agent).
 - [ ] T132 [P] [US5] `tests/doctor_json.rs` extensions — byte-stable JSON pins for the five new records (use devs:rust-dev agent).
