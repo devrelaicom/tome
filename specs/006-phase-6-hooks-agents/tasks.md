@@ -117,15 +117,15 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 ### Tests (US1)
 
-- [ ] T046 [P] [US1] `tests/agent_translate_claude_code.rs` — emission + field passthrough + privilege passthrough default (use devs:rust-dev agent).
-- [ ] T047 [P] [US1] `tests/agent_translate_codex.rs` — TOML `developer_instructions` body + `model: opus` dropped (use devs:rust-dev agent).
-- [ ] T048 [P] [US1] `tests/agent_translate_cursor.rs` — MD+YAML + dropped unsupported field logged (use devs:rust-dev agent).
-- [ ] T049 [P] [US1] `tests/agent_translate_opencode.rs` — `mode: subagent`, filename name, `model: opus`→`anthropic/claude-opus-4.7` (use devs:rust-dev agent).
-- [ ] T050 [P] [US1] `tests/agent_naming_clash.rs` — two plugins, same agent name → both files namespaced, displayed names prefixed (use devs:rust-dev agent).
-- [ ] T051 [P] [US1] `tests/agent_removal.rs` — disable removes `<plugin>__*` only; other plugins' agents remain (use devs:rust-dev agent).
+- [X] T046 [P] [US1] `tests/agent_translate_claude_code.rs` — emission + field passthrough + privilege passthrough default (use devs:rust-dev agent).
+- [X] T047 [P] [US1] `tests/agent_translate_codex.rs` — TOML `developer_instructions` body + `model: opus` dropped (use devs:rust-dev agent).
+- [X] T048 [P] [US1] `tests/agent_translate_cursor.rs` — MD+YAML + dropped unsupported field logged (use devs:rust-dev agent).
+- [X] T049 [P] [US1] `tests/agent_translate_opencode.rs` — `mode: subagent`, filename name, `model: opus`→`anthropic/claude-opus-4.7` (use devs:rust-dev agent).
+- [X] T050 [P] [US1] `tests/agent_naming_clash.rs` — two plugins, same agent name → both files namespaced, displayed names prefixed (use devs:rust-dev agent).
+- [X] T051 [P] [US1] `tests/agent_removal.rs` — disable removes `<plugin>__*` only; other plugins' agents remain (use devs:rust-dev agent).
 - [X] T052 [P] [US1] Extend `tests/entry_kind_agent_indexing.rs` — end-to-end enable → agent row present, searchable=0 (use devs:rust-dev agent). (Done in chunk A alongside indexing.)
-- [ ] T053 [P] [US1] JSON wire-shape pin for the agent `dropped_fields` doctor sub-record (placeholder until US5 doctor lands; assert shape) in `tests/agent_translate_claude_code.rs` (use devs:rust-dev agent).
-- [ ] T054 [GIT] Commit: `test(phase-6): US1 native agent translation + naming + removal`.
+- [X] T053 [P] [US1] JSON wire-shape pin for the agent `dropped_fields` doctor sub-record (placeholder until US5 doctor lands; assert shape) in `tests/agent_translate_claude_code.rs` (use devs:rust-dev agent).
+- [X] T054 [GIT] Commit: `test(phase-6): US1 native agent translation + naming + removal`.
 
 ### US1 closeout
 
