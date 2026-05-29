@@ -17,7 +17,8 @@ use crate::harness::agents::{
     self, CanonicalAgent, TranslatedAgent, agent_extension, agent_filename,
 };
 use crate::harness::{
-    AgentFormat, BlockBodyStyle, HarnessModule, McpConfigFormat, RulesFileStrategy,
+    AgentFormat, BlockBodyStyle, GuardrailsPlacement, GuardrailsTarget, HarnessModule,
+    McpConfigFormat, RulesFileStrategy,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Cursor.
@@ -65,6 +66,23 @@ impl HarnessModule for Cursor {
 
     fn mcp_parent_key(&self) -> &'static str {
         "mcpServers"
+    }
+
+    // -- Guardrails fallback (FR-011, FR-012, FR-015) -----------------------
+
+    /// Cursor owns a fully Tome-managed standalone sibling for guardrails,
+    /// `TOME_GUARDRAILS.md` — DISTINCT from the Phase 4 skills sibling
+    /// (`TOME_SKILLS.md`). Each plugin is still individually marker-wrapped
+    /// inside it so per-plugin removal works; the file is deleted entirely
+    /// when no plugin contributes (FR-015). No hooks-driven suppression
+    /// (Cursor has no native JSON hooks).
+    fn guardrails_target(&self, project_root: &Path) -> GuardrailsTarget {
+        GuardrailsTarget {
+            placement: GuardrailsPlacement::StandaloneSibling {
+                file: project_root.join(".cursor/rules/TOME_GUARDRAILS.md"),
+            },
+            suppress_if_hooks_present: false,
+        }
     }
 
     // -- Native agents (FR-030–FR-032, FR-036) ------------------------------

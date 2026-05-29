@@ -233,7 +233,11 @@ fn compose_block_write(existing: &str, body: &str) -> Result<String, TomeError> 
 
 /// Refuse to write through a symlink. Returns Ok if the path is absent
 /// or a regular file/dir; Err if it's a symlink.
-fn refuse_symlink(target: &Path) -> Result<(), TomeError> {
+///
+/// Promoted to `pub(crate)` so the guardrails writer (`guardrails.rs`)
+/// reuses the same symlink-refusal discipline rather than re-implementing
+/// the `symlink_metadata` check.
+pub(crate) fn refuse_symlink(target: &Path) -> Result<(), TomeError> {
     match std::fs::symlink_metadata(target) {
         Ok(meta) if meta.file_type().is_symlink() => Err(TomeError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -250,7 +254,10 @@ fn refuse_symlink(target: &Path) -> Result<(), TomeError> {
 /// any developer-set mode bits (e.g. group-readable workspaces) across
 /// the rewrite. If `target` is absent, the tempfile's libc-default mode
 /// (typically 0o600) wins.
-fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), TomeError> {
+///
+/// Promoted to `pub(crate)` so the guardrails writer (`guardrails.rs`)
+/// reuses the same atomic-rename + mode-preservation discipline.
+pub(crate) fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), TomeError> {
     let parent = target
         .parent()
         .ok_or_else(|| TomeError::Io(std::io::Error::other("rules-file path has no parent")))?;
@@ -420,6 +427,147 @@ pub fn remove_standalone(target: &Path) -> Result<(), TomeError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(TomeError::Io(e)),
     }
+}
+
+// =====================================================================
+// Parameterised marker regions (Phase 6 / US3, R-5, R-19)
+//
+// The `tome:begin/end` block above is the single Tome rules-include
+// block. Guardrails (US3) need MANY managed regions on the same file —
+// one per plugin — each delimited by its own keyed marker pair:
+//
+//   <!-- START GUARDRAILS: <catalog>:<plugin> -->
+//   <verbatim body>
+//   <!-- END GUARDRAILS: <catalog>:<plugin> -->
+//
+// This section generalises the block find/replace to a parameterised
+// marker pair so guardrails regions coexist with the `tome:begin/end`
+// block without collision. The guardrails module (`guardrails.rs`) owns
+// the GUARDRAILS-specific regex strings + ordering; this engine is the
+// reusable line-anchored find / replace / remove machinery.
+// =====================================================================
+
+/// A marker-delimited region keyed by an opaque provenance string (for
+/// guardrails, the `<catalog>:<plugin>` text captured from the START
+/// marker). Line indices are into the `\n`-split contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkerRegion {
+    pub key: String,
+    pub begin_line: usize,
+    pub end_line: usize,
+    pub body: String,
+}
+
+/// The compiled START / END regex pair for one family of keyed regions.
+///
+/// `start` MUST expose a capture group named `key` whose value is the
+/// region's provenance key; `end` is matched by reconstructing the exact
+/// END marker for that key (so a START for key A followed by an END for
+/// key B is malformed — markers cannot interleave).
+pub struct MarkerSpec {
+    start: Regex,
+    /// Builds the canonical END-marker line for `key` (no trailing
+    /// newline), used both to emit and to verify a matched END belongs to
+    /// the currently-open START.
+    end_for: fn(&str) -> String,
+    /// Builds the canonical START-marker line for `key`.
+    begin_for: fn(&str) -> String,
+    /// Matches any END marker line (key-agnostic) so a stray / mismatched
+    /// END is detected rather than silently treated as body text.
+    end_any: Regex,
+}
+
+impl MarkerSpec {
+    /// Construct a spec from the START regex (must capture `key`), an
+    /// END-any regex, and two closures rendering the canonical
+    /// begin/end marker lines for a key.
+    pub fn new(
+        start: Regex,
+        end_any: Regex,
+        begin_for: fn(&str) -> String,
+        end_for: fn(&str) -> String,
+    ) -> Self {
+        Self {
+            start,
+            end_for,
+            begin_for,
+            end_any,
+        }
+    }
+
+    fn start_key(&self, line: &str) -> Option<String> {
+        self.start
+            .captures(line)
+            .and_then(|c| c.name("key").map(|m| m.as_str().to_string()))
+    }
+}
+
+/// Find ALL well-formed keyed regions in `contents`, in document order.
+///
+/// Mismatched markers (a START whose matching END never appears, an END
+/// with no open START, a START before the prior region's END, or an END
+/// whose key differs from the open START) are malformed → `Err`. This
+/// mirrors `find_all_blocks`'s strictness so a hand-mangled region fails
+/// loudly rather than silently dropping content.
+pub fn find_marker_regions(
+    spec: &MarkerSpec,
+    contents: &str,
+) -> Result<Vec<MarkerRegion>, TomeError> {
+    let lines: Vec<&str> = contents.split('\n').collect();
+    let mut regions = Vec::new();
+    let mut open: Option<(usize, String)> = None;
+    for (idx, line) in lines.iter().enumerate() {
+        if let Some(key) = spec.start_key(line) {
+            if open.is_some() {
+                return Err(malformed_region("nested START marker"));
+            }
+            open = Some((idx, key));
+            continue;
+        }
+        if spec.end_any.is_match(line) {
+            let (begin, key) = open
+                .take()
+                .ok_or_else(|| malformed_region("END marker without matching START"))?;
+            // The matched END must be exactly the canonical END for the open
+            // key — an interleaved/mismatched key is malformed.
+            if *line != (spec.end_for)(&key) && line.trim_end() != (spec.end_for)(&key) {
+                return Err(malformed_region("END marker key does not match open START"));
+            }
+            let body = if idx > begin + 1 {
+                lines[(begin + 1)..idx].join("\n")
+            } else {
+                String::new()
+            };
+            regions.push(MarkerRegion {
+                key,
+                begin_line: begin,
+                end_line: idx,
+                body,
+            });
+        }
+    }
+    if open.is_some() {
+        return Err(malformed_region("START marker without matching END"));
+    }
+    Ok(regions)
+}
+
+fn malformed_region(reason: &str) -> TomeError {
+    TomeError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("malformed marker region: {reason}"),
+    ))
+}
+
+/// Render the canonical region payload for `key` with `body` between the
+/// markers (no trailing newline — the composer adds line joins).
+pub fn format_marker_region(spec: &MarkerSpec, key: &str, body: &str) -> String {
+    format!(
+        "{}\n{}\n{}",
+        (spec.begin_for)(key),
+        body,
+        (spec.end_for)(key)
+    )
 }
 
 #[cfg(test)]
