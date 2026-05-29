@@ -514,6 +514,40 @@ pub fn resolve_entry_body_path(
     let stored = PathBuf::from(stored_path);
     validate_db_stored_path(&stored)?;
 
+    let plugin_dir = plugin_root_dir(conn, paths, workspace_name, catalog, plugin)?;
+    if !plugin_dir.is_dir() {
+        return Err(TomeError::EntryNotFound {
+            catalog: catalog.to_owned(),
+            plugin: plugin.to_owned(),
+            name: stored_path.to_owned(),
+            kind: "entry".to_owned(),
+        });
+    }
+    Ok(plugin_dir.join(&stored))
+}
+
+/// Resolve the absolute on-disk root of an installed plugin —
+/// `<catalog-cache>/<source>` (manifest declaration) or
+/// `<catalog-cache>/<plugin>` (manifest-less / flat fallback).
+///
+/// This is the `${CLAUDE_PLUGIN_ROOT}` target value the Phase 6 hooks
+/// rewrite resolves against (Phase 5's `${TOME_PLUGIN_DIR}` value). It is
+/// the shared prefix [`resolve_entry_body_path`] joins the catalog-relative
+/// body path onto; promoted to its own helper at the second consumer
+/// (single-source-of-truth promotion) so the hooks writer and the entry-body
+/// resolver agree on what "plugin root" means.
+///
+/// Unlike [`resolve_entry_body_path`] this does NOT assert the directory
+/// exists — the caller decides whether an absent plugin root is an error
+/// (the hooks pass treats a plugin with no `hooks/hooks.json` as a benign
+/// no-op).
+pub fn plugin_root_dir(
+    conn: &Connection,
+    paths: &Paths,
+    workspace_name: &str,
+    catalog: &str,
+    plugin: &str,
+) -> Result<PathBuf, TomeError> {
     let catalog_path =
         workspace_catalogs::resolve_catalog_path(conn, paths, workspace_name, catalog)?;
     let plugin_dir = match read_catalog_manifest(&catalog_path) {
@@ -525,15 +559,44 @@ pub fn resolve_entry_body_path(
             .unwrap_or_else(|| catalog_path.join(plugin)),
         None => catalog_path.join(plugin),
     };
-    if !plugin_dir.is_dir() {
-        return Err(TomeError::EntryNotFound {
-            catalog: catalog.to_owned(),
-            plugin: plugin.to_owned(),
-            name: stored_path.to_owned(),
-            kind: "entry".to_owned(),
-        });
-    }
-    Ok(plugin_dir.join(&stored))
+    Ok(plugin_dir)
+}
+
+/// Every `(catalog, plugin)` pair with at least one entry enabled in
+/// `workspace_name`, ordered by `(catalog, plugin)` for deterministic
+/// reconciliation (Phase 6 / US2).
+///
+/// "Enabled" means a `workspace_skills` row joins one of the plugin's
+/// entries to the workspace — the same enrolment junction the agent and
+/// clash-set queries consult. The hooks sync uses this to enumerate which
+/// plugins' `hooks/hooks.json` to read; the ordering keeps the per-event
+/// merge outcome stable across runs.
+pub fn enabled_plugins_for_workspace(
+    conn: &Connection,
+    workspace_name: &str,
+) -> Result<Vec<(String, String)>, TomeError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT s.catalog, s.plugin
+             FROM skills AS s
+             JOIN workspace_skills AS ws ON ws.skill_id = s.id
+             JOIN workspaces       AS w  ON w.id = ws.workspace_id
+             WHERE w.name = ?1
+             ORDER BY s.catalog, s.plugin",
+        )
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("prepare enabled plugins ws: {e}"))
+        })?;
+    let rows = stmt
+        .query_map(params![workspace_name], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("query enabled plugins ws: {e}"))
+        })?;
+    rows.collect::<Result<_, _>>().map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!("collect enabled plugins ws: {e}"))
+    })
 }
 
 /// Refuse absolute paths and `..` components in DB-stored relative

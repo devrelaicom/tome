@@ -149,11 +149,11 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 - [X] T062 Create `specs/006-phase-6-hooks-agents/retro/P4.md` from template.
 - [X] T063 [GIT] Commit: `docs(phase-6): init P4 retro`.
-- [ ] T064 [US2] Create `src/harness/hooks.rs`: read `hooks/hooks.json` (`serde_json`), targeted two-variable rewrite (`${CLAUDE_PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_DATA}` → absolute; all other `${CLAUDE_*}` verbatim) over string leaves via `regex` (use devs:rust-dev agent).
-- [ ] T065 [US2] Implement structural-match merge (add): append under event only if no deep-equal entry exists; create `settings.local.json` with a single `hooks` object if absent; atomic write + mode-preservation + symlink-refusal (FR-002/004) (use devs:rust-dev agent).
-- [ ] T066 [US2] Implement structural-match removal in `src/harness/hooks.rs`: remove deep-equal entries, skip non-matches; prune empty event arrays; keep empty `hooks` object (FR-005/006) (use devs:rust-dev agent).
-- [ ] T067 [US2] Set `hooks_strategy() = RealJson` + `hook_settings_path()` for claude-code in `src/harness/claude_code.rs`; wire hooks reconciliation as the first step in `src/harness/sync.rs` (use devs:rust-dev agent).
-- [ ] T068 [GIT] Commit: `feat(phase-6): real Claude Code hooks merge into settings.local.json`.
+- [X] T064 [US2] Create `src/harness/hooks.rs`: read `hooks/hooks.json` (`serde_json`), targeted two-variable rewrite (`${CLAUDE_PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_DATA}` → absolute; all other `${CLAUDE_*}` verbatim) over string leaves via `regex` (use devs:rust-dev agent).
+- [X] T065 [US2] Implement structural-match merge (add): append under event only if no deep-equal entry exists; create `settings.local.json` with a single `hooks` object if absent; atomic write + mode-preservation + symlink-refusal (FR-002/004) (use devs:rust-dev agent).
+- [X] T066 [US2] Implement structural-match removal in `src/harness/hooks.rs`: remove deep-equal entries, skip non-matches; prune empty event arrays; keep empty `hooks` object (FR-005/006) (use devs:rust-dev agent).
+- [X] T067 [US2] Set `hooks_strategy() = RealJson` + `hook_settings_path()` for claude-code in `src/harness/claude_code.rs`; wire hooks reconciliation as the first step in `src/harness/sync.rs` (use devs:rust-dev agent).
+- [X] T068 [GIT] Commit: `feat(phase-6): real Claude Code hooks merge into settings.local.json`.
 - [ ] T069 [P] [US2] `tests/hooks_rewrite.rs` — two-variable rewrite; other `${CLAUDE_*}` untouched (use devs:rust-dev agent).
 - [ ] T070 [P] [US2] `tests/hooks_merge.rs` — add/idempotence/user-edit-preservation/dedup/create-if-absent/prune (use devs:rust-dev agent).
 - [ ] T071 [P] [US2] Extend `tests/exit_codes_e2e.rs` — malformed `hooks.json` → exit 43; settings write failure → exit 44 (use devs:rust-dev agent).

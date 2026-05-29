@@ -106,6 +106,9 @@ pub enum SyncSubsystem {
     /// Native agent files (Phase 6 / US1). One change per agent file
     /// written or removed under the harness's `agent_dir`.
     Agents,
+    /// Real Claude Code hooks (Phase 6 / US2). One change per
+    /// `settings.local.json` whose `hooks` object Tome merged into or pruned.
+    Hooks,
 }
 
 /// Per-harness decision record. Populated for every harness in
@@ -124,6 +127,12 @@ pub struct HarnessDecision {
     /// `LeftAlone` when nothing changed or the harness has no native-agent
     /// support. Per-file granularity lives in `added`/`updated`/`removed`.
     pub agents_action: Action,
+    /// Phase 6 / US2: the hooks reconciliation action for this harness.
+    /// `Created` when `settings.local.json` was created, `Updated` when its
+    /// `hooks` object was merged into or pruned, `LeftAlone` otherwise (a
+    /// `GuardrailsOnly` harness, or no on-disk change). Appended LAST so the
+    /// byte-stable JSON pin only gains a trailing field.
+    pub hooks_action: Action,
 }
 
 /// What happened to one subsystem (rules-file or MCP config) for one
@@ -309,20 +318,35 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
             in_effective_list: is_live,
             rules_action,
             mcp_action,
-            // Backfilled by the agents reconciliation pass below.
+            // Backfilled by the hooks + agents reconciliation passes below.
             agents_action: Action::LeftAlone,
+            hooks_action: Action::LeftAlone,
         });
     }
 
     // -----------------------------------------------------------------
-    // 3c. Agents (Phase 6 / US1).
+    // 3c. Hooks (Phase 6 / US2) — FIRST among the Phase 6 sinks.
     //
-    // The canonical per-harness order is hooks → guardrails → agents
-    // (hooks + guardrails land in US2/US3); agents is the last sink for
-    // now. Native-agent reconciliation runs as one pass after the
-    // rules/MCP loop because `translate_agent` dispatches through the
-    // registry guard, and the DB enumeration + clash-set query are shared
-    // across every harness (computed once per sync, FR-072).
+    // The canonical per-harness order is hooks → guardrails → agents.
+    // Real-hook reconciliation runs as one pass after the rules/MCP loop
+    // (guardrails is US3). Only `RealJson` harnesses with a settings path
+    // participate; the enabled-plugin enumeration is shared across every
+    // such harness (computed once per sync).
+    // -----------------------------------------------------------------
+    let hooks_recon = reconcile_hooks(deps, &effective_names, &snapshots, &mut outcome)?;
+    for decision in &mut outcome.decisions {
+        if let Some(action) = hooks_recon.actions.get(&decision.harness) {
+            decision.hooks_action = *action;
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // 3d. Agents (Phase 6 / US1).
+    //
+    // Native-agent reconciliation runs as one pass after hooks because
+    // `translate_agent` dispatches through the registry guard, and the DB
+    // enumeration + clash-set query are shared across every harness
+    // (computed once per sync, FR-072).
     // -----------------------------------------------------------------
     let agents_recon = reconcile_agents(
         project_root,
@@ -341,6 +365,11 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
 
     if let Some(clash) = first_clash {
         return Err(clash);
+    }
+    // Surface the first hooks failure before the agents one, mirroring the
+    // hooks → agents sink order (the earlier sink's error wins).
+    if let Some(hooks_err) = hooks_recon.first_error {
+        return Err(hooks_err);
     }
     if let Some(agent_err) = agents_recon.first_error {
         return Err(agent_err);
@@ -369,6 +398,10 @@ struct HarnessSnapshot {
     /// re-derived under the registry guard at dispatch time (the trait
     /// dispatch for `translate_agent` already holds the guard).
     supports_native_agents: bool,
+    /// Phase 6 / US2: the harness's machine-local hook settings file, when it
+    /// has a `RealJson` hooks strategy. `None` for every `GuardrailsOnly`
+    /// harness (no real-hook participation; the guardrails fallback is US3).
+    hook_settings_path: Option<PathBuf>,
 }
 
 fn collect_harness_snapshots(project_root: &Path, deps: &SyncDeps<'_>) -> Vec<HarnessSnapshot> {
@@ -389,6 +422,13 @@ fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) ->
         mcp_format: m.mcp_config_format(),
         mcp_parent_key: m.mcp_parent_key(),
         supports_native_agents: m.supports_native_agents(),
+        // Only a `RealJson` harness with a settings path participates in real
+        // hooks. A `GuardrailsOnly` harness — even one that returns a settings
+        // path — is a no-op here and falls back to guardrails (US3).
+        hook_settings_path: match m.hooks_strategy() {
+            crate::harness::HooksStrategy::RealJson => m.hook_settings_path(project_root),
+            crate::harness::HooksStrategy::GuardrailsOnly => None,
+        },
     }
 }
 
@@ -631,6 +671,191 @@ fn clean_mcp_for_harness(snap: &HarnessSnapshot) -> Result<Action, TomeError> {
     }
     mcp_config::remove_entry(&snap.mcp_path, snap.mcp_format, snap.mcp_parent_key)?;
     Ok(Action::Removed)
+}
+
+// =====================================================================
+// Real-hooks reconciliation (Phase 6 / US2)
+// =====================================================================
+
+/// Result of the real-hooks reconciliation pass. Mirrors
+/// [`AgentReconciliation`]: a per-harness aggregate action map keyed on
+/// `name()`, plus the FIRST failure encountered (forward progress).
+struct HooksReconciliation {
+    actions: std::collections::HashMap<String, Action>,
+    first_error: Option<TomeError>,
+}
+
+/// Reconcile real Claude Code hooks for every harness (FR-001–FR-006,
+/// FR-084).
+///
+/// One pass after the rules/MCP loop, FIRST among the Phase 6 sinks:
+///
+/// * A live `RealJson` harness with a settings path gets every enabled
+///   plugin's `hooks/hooks.json` read + path-rewritten + merged into its
+///   `settings.local.json` (structural-match append, idempotent).
+/// * A non-live `RealJson` harness has every enabled plugin's rewritten
+///   entries removed from `settings.local.json` (the project no longer wants
+///   Claude Code, so Tome cleans up the hooks it can prove it owns).
+/// * A `GuardrailsOnly` harness (`hook_settings_path == None` after the
+///   strategy gate) is a no-op — the guardrails fallback is US3.
+///
+/// The enabled-plugin enumeration + each plugin's rewritten entries are
+/// computed ONCE per sync and shared across every participating harness. A
+/// malformed `hooks.json` (exit 43) or a settings write failure (exit 44)
+/// for one plugin/harness is recorded but does not abort the pass (FR-084
+/// forward progress): sibling plugins/harnesses still reconcile.
+fn reconcile_hooks(
+    deps: &SyncDeps<'_>,
+    effective_names: &HashSet<String>,
+    snapshots: &[HarnessSnapshot],
+    outcome: &mut SyncOutcome,
+) -> Result<HooksReconciliation, TomeError> {
+    let mut recon = HooksReconciliation {
+        actions: std::collections::HashMap::new(),
+        first_error: None,
+    };
+
+    // Fast exit: no harness participates in real hooks → nothing to do.
+    if !snapshots.iter().any(|s| s.hook_settings_path.is_some()) {
+        return Ok(recon);
+    }
+
+    // Open the central DB read-only to enumerate enabled plugins. A genuinely
+    // absent DB means no enabled plugins (no hooks to merge, nothing owned to
+    // remove). An EXISTING-yet-unopenable DB must PROPAGATE its error here,
+    // before any settings write — never collapse to an empty list, which
+    // would make the removal path strip every owned hook for a live harness.
+    let conn = if deps.paths.index_db.exists() {
+        Some(crate::index::open_read_only(&deps.paths.index_db)?)
+    } else {
+        None
+    };
+
+    let workspace = deps.workspace_name.as_str();
+    let enabled = match &conn {
+        Some(c) => crate::index::skills::enabled_plugins_for_workspace(c, workspace)?,
+        None => Vec::new(),
+    };
+
+    // Read + rewrite each enabled plugin's hooks ONCE. A parse failure is
+    // recorded on the forward-progress `first_error`; the plugin is skipped
+    // (its sibling plugins still reconcile, loud-but-isolated). Plugins with
+    // no `hooks/hooks.json` contribute nothing.
+    let mut prepared: Vec<crate::harness::hooks::RewrittenHooks> = Vec::new();
+    if let Some(c) = &conn {
+        for (catalog, plugin) in &enabled {
+            let plugin_root = match crate::index::skills::plugin_root_dir(
+                c, deps.paths, workspace, catalog, plugin,
+            ) {
+                Ok(p) => p,
+                // A plugin whose on-disk root cannot be resolved (catalog
+                // cache evicted) has no readable hooks — skip it rather than
+                // fail the whole sync. Removal of stale entries it once owned
+                // requires the rewritten entries, which we cannot re-derive
+                // without the source; this is the documented consequence of an
+                // evicted cache (the US5 doctor surfaces orphans).
+                Err(_) => continue,
+            };
+            let plugin_data = deps.paths.plugin_data_dir_for(catalog, plugin);
+            match crate::harness::hooks::read_rewritten_entries(&plugin_root, &plugin_data) {
+                Ok(Some(hooks)) if !hooks.is_empty() => prepared.push(hooks),
+                Ok(_) => {}
+                Err(e) => {
+                    if recon.first_error.is_none() {
+                        recon.first_error = Some(e);
+                    }
+                }
+            }
+        }
+    }
+
+    for snap in snapshots {
+        let Some(settings_path) = &snap.hook_settings_path else {
+            // GuardrailsOnly (or no settings path) → no-op for hooks.
+            recon.actions.insert(snap.name.clone(), Action::LeftAlone);
+            continue;
+        };
+        let is_live = effective_names.contains(&snap.name);
+        let action = if is_live {
+            merge_hooks_for_harness(&snap.name, settings_path, &prepared, outcome, &mut recon)
+        } else {
+            remove_hooks_for_harness(&snap.name, settings_path, &prepared, outcome, &mut recon)
+        };
+        recon.actions.insert(snap.name.clone(), action);
+    }
+
+    Ok(recon)
+}
+
+/// Merge every prepared plugin's rewritten hooks into one live harness's
+/// `settings.local.json`. Returns the aggregate [`Action`]. A write failure
+/// for one plugin is recorded on `recon.first_error`; the rest still merge.
+fn merge_hooks_for_harness(
+    name: &str,
+    settings_path: &Path,
+    prepared: &[crate::harness::hooks::RewrittenHooks],
+    outcome: &mut SyncOutcome,
+    recon: &mut HooksReconciliation,
+) -> Action {
+    let pre_existed = settings_path.exists();
+    let mut changed = false;
+    for hooks in prepared {
+        match crate::harness::hooks::merge_into_settings(settings_path, hooks) {
+            Ok(true) => changed = true,
+            Ok(false) => {}
+            Err(e) => {
+                if recon.first_error.is_none() {
+                    recon.first_error = Some(e);
+                }
+            }
+        }
+    }
+    if changed {
+        let action = if pre_existed {
+            Action::Updated
+        } else {
+            Action::Created
+        };
+        record_action(outcome, name, SyncSubsystem::Hooks, settings_path, action);
+        action
+    } else {
+        Action::LeftAlone
+    }
+}
+
+/// Remove every prepared plugin's rewritten hooks from one non-live
+/// harness's `settings.local.json` (the harness left the effective list).
+fn remove_hooks_for_harness(
+    name: &str,
+    settings_path: &Path,
+    prepared: &[crate::harness::hooks::RewrittenHooks],
+    outcome: &mut SyncOutcome,
+    recon: &mut HooksReconciliation,
+) -> Action {
+    let mut changed = false;
+    for hooks in prepared {
+        match crate::harness::hooks::remove_from_settings(settings_path, hooks) {
+            Ok(true) => changed = true,
+            Ok(false) => {}
+            Err(e) => {
+                if recon.first_error.is_none() {
+                    recon.first_error = Some(e);
+                }
+            }
+        }
+    }
+    if changed {
+        record_action(
+            outcome,
+            name,
+            SyncSubsystem::Hooks,
+            settings_path,
+            Action::Removed,
+        );
+        Action::Removed
+    } else {
+        Action::LeftAlone
+    }
 }
 
 // =====================================================================
