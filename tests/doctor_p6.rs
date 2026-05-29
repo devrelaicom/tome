@@ -1,15 +1,16 @@
-//! Phase 6 / US5 — doctor extensions smoke tests (FIRST cut).
+//! Phase 6 / US5 — doctor extensions full contract matrix (T131).
 //!
-//! Proves each of the five new doctor surfaces (hooks / guardrails / agents /
-//! privilege-escalation / personas) populates for a bound project with
-//! enabled agents shipping hooks/guardrails/privileged-fields, that they are
-//! `None` outside a project (`GlobalFallback`), that the persona surface is
-//! `None` when the toggle is off, that the read-only pass creates no
-//! directories (FR-124), and one `--fix` happy path that re-emits agents +
-//! re-renders guardrails + removes an orphan.
+//! Covers each of the five new doctor surfaces (hooks / guardrails / agents /
+//! privilege-escalation / personas) per `doctor-extensions-p6.md` § Tests:
+//! the per-report drift matrices, the read-only invariant (FR-124), the
+//! outside-project `None`-everywhere case, and the `--fix` repair classes.
 //!
-//! The comprehensive suite (per-report drift matrices, JSON wire pins,
-//! `plugin show` shape) is the next chunk; this is the compile-and-works cut.
+//! Most cases assert the read-only check functions directly against a
+//! PRE-STAGED on-disk state (planted marker regions, `settings.local.json`
+//! hooks, `<plugin>__*` agent files) rather than running the real
+//! `sync_project` — the rules-file path triggers summarisation/index work and
+//! costs ~60-70s per sync. Only the `--fix` re-emit case exercises a real sync,
+//! where the end-to-end re-emit/orphan-removal IS the point.
 
 mod common;
 
@@ -19,15 +20,25 @@ use std::path::Path;
 use tempfile::TempDir;
 use tome::doctor::{self};
 use tome::embedding::stub::StubEmbedder;
+use tome::harness::claude_code::CLAUDE_CODE;
 use tome::index::{self, OpenOptions};
 use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
 use tome::workspace::{ResolvedScope, Scope, ScopeSource, WorkspaceName};
 
 use common::{
-    HomeGuard, config_with_catalog, fabricate_models, lifecycle_paths, stub_embedder_seed,
-    stub_reranker_seed, stub_summariser_seed,
+    HarnessModulesGuard, HomeGuard, config_with_catalog, fabricate_models, lifecycle_paths,
+    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
+
+/// Process-global mutex serialising tests that install a
+/// `HarnessModulesGuard` — the override slot is a single process-global
+/// `RwLock` and cargo runs `#[test]` cases on multiple threads.
+static OVERRIDE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn open_ro(paths: &tome::paths::Paths) -> rusqlite::Connection {
+    index::open_read_only(&paths.index_db).expect("open_read_only")
+}
 
 fn open_index(paths: &tome::paths::Paths) -> rusqlite::Connection {
     index::open(
@@ -388,5 +399,391 @@ fn fix_reemits_and_removes_orphan_agents() {
     assert!(
         user_file.exists(),
         "--fix must NEVER delete a user-authored, non-Tome-owned file"
+    );
+}
+
+// ===========================================================================
+// T131 — per-report drift matrices (read-only check fns, pre-staged state).
+// ===========================================================================
+
+/// Build a `<catalog>:<plugin>` guardrails marker region (matching
+/// `guardrails::region_key` + the canonical START/END marker grammar).
+fn guardrails_region(catalog: &str, plugin: &str, body: &str) -> String {
+    format!(
+        "<!-- START GUARDRAILS: {catalog}:{plugin} -->\n{body}\n<!-- END GUARDRAILS: {catalog}:{plugin} -->\n"
+    )
+}
+
+#[test]
+fn hooks_report_contributed_and_drift() {
+    // Compute the plugin's post-rewrite hook entries directly (no sync), write
+    // them into `.claude/settings.local.json`, then DROP one so the re-derived
+    // entry has no structural match → it surfaces as `missing` (drift). The
+    // sibling stays `contributed`.
+    let (tmp, paths) = stage();
+    let project_root = tmp.path();
+    write_project_marker(project_root);
+
+    // The stage fixture ships a single-event hooks.json (PreToolUse). Add a
+    // second event so we have a sibling that stays contributed while we drift
+    // the first. Rewrite via the production reader so the entries match what
+    // `build_hooks_report` re-derives byte-for-byte.
+    let conn = open_ro(&paths);
+    let plugin_root = tome::index::skills::plugin_root_dir(&conn, &paths, "global", "acme", "plug")
+        .expect("plugin root");
+    // Append a PostToolUse event to the plugin's hooks.json so the report has
+    // two events to classify.
+    fs::write(
+        plugin_root.join("hooks").join("hooks.json"),
+        r#"{"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/guard.sh"}]}],
+            "PostToolUse": [{"matcher": "Write", "hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/post.sh"}]}]}"#,
+    )
+    .unwrap();
+
+    let plugin_data = paths.plugin_data_dir_for("acme", "plug");
+    let rewritten = tome::harness::hooks::read_rewritten_entries(&plugin_root, &plugin_data)
+        .expect("read rewritten")
+        .expect("hooks present");
+
+    // Write a settings.local.json carrying ONLY the PostToolUse entries — the
+    // PreToolUse entry is intentionally absent (user removed it → drift).
+    let mut hooks_obj = serde_json::Map::new();
+    for (event, entries) in &rewritten.events {
+        if event == "PreToolUse" {
+            continue; // drop → drift
+        }
+        hooks_obj.insert(event.clone(), serde_json::Value::Array(entries.clone()));
+    }
+    let settings = serde_json::json!({ "hooks": hooks_obj });
+    let claude_dir = project_root.join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    fs::write(
+        claude_dir.join("settings.local.json"),
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let report = tome::doctor::checks::build_hooks_report(
+        &paths,
+        project_root,
+        &WorkspaceName::global(),
+        &conn,
+    )
+    .expect("hooks report");
+
+    let plug = report
+        .plugins
+        .iter()
+        .find(|p| p.plugin == "plug")
+        .expect("plug present");
+    assert!(
+        plug.contributed
+            .iter()
+            .any(|e| e.event == "PostToolUse" && e.count == 1),
+        "PostToolUse stays contributed; got {plug:?}",
+    );
+    assert!(
+        plug.missing
+            .iter()
+            .any(|e| e.event == "PreToolUse" && e.count == 1),
+        "the user-removed PreToolUse entry surfaces as missing (drift); got {plug:?}",
+    );
+}
+
+#[test]
+fn guardrails_report_present_orphan_suppressed() {
+    // Plant a CLAUDE.md with two regions: the enabled `acme:plug` (which ships
+    // real hooks → suppressed on Claude Code) and an orphan `gone:ghost`
+    // (plugin not enabled). Install ONLY claude-code so the target is
+    // deterministic.
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(CLAUDE_CODE)]);
+
+    let (tmp, paths) = stage();
+    let project_root = tmp.path();
+    write_project_marker(project_root);
+
+    let body = format!(
+        "{}{}",
+        guardrails_region("acme", "plug", "Be careful."),
+        guardrails_region("gone", "ghost", "Stale region."),
+    );
+    fs::write(project_root.join("CLAUDE.md"), body).unwrap();
+
+    let conn = open_ro(&paths);
+    let report = tome::doctor::checks::build_guardrails_report(
+        &paths,
+        project_root,
+        &WorkspaceName::global(),
+        &conn,
+    )
+    .expect("guardrails report");
+
+    assert_eq!(report.files.len(), 1, "one target file (CLAUDE.md)");
+    let file = &report.files[0];
+    // Both regions are present on disk.
+    assert!(
+        file.present
+            .iter()
+            .any(|cp| cp.catalog == "acme" && cp.plugin == "plug"),
+        "acme:plug present; got {file:?}",
+    );
+    assert!(
+        file.present
+            .iter()
+            .any(|cp| cp.catalog == "gone" && cp.plugin == "ghost"),
+        "gone:ghost present; got {file:?}",
+    );
+    // The not-enabled plugin's region is orphaned.
+    assert!(
+        file.orphaned
+            .iter()
+            .any(|cp| cp.catalog == "gone" && cp.plugin == "ghost"),
+        "gone:ghost orphaned; got {file:?}",
+    );
+    assert!(
+        !file.orphaned.iter().any(|cp| cp.plugin == "plug"),
+        "the enabled plugin is NOT orphaned; got {file:?}",
+    );
+    // The enabled plugin ships real hooks → its CLAUDE.md region is suppressed.
+    assert!(
+        file.suppressed
+            .iter()
+            .any(|cp| cp.catalog == "acme" && cp.plugin == "plug"),
+        "acme:plug suppressed (ships real hooks, FR-013); got {file:?}",
+    );
+}
+
+#[test]
+fn agents_report_present_orphan_dropped() {
+    // Plant `<plugin>__*` agent files directly in the claude-code agent dir:
+    // the enabled `plug__reviewer.md` (present) and an orphan
+    // `ghost__gone.md` (plugin not enabled → orphaned). The privileged
+    // `permissionMode` field on the enabled agent is dropped during
+    // claude-code translation? No — Claude Code passes those through. To
+    // exercise `dropped_fields` we rely on the source agent's frontmatter
+    // being re-translated; Claude Code keeps all three, so dropped_fields is
+    // empty here. The present/orphaned split is the load-bearing assertion.
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(CLAUDE_CODE)]);
+
+    let (tmp, paths) = stage();
+    let project_root = tmp.path();
+    write_project_marker(project_root);
+
+    let agent_dir = project_root.join(".claude").join("agents");
+    fs::create_dir_all(&agent_dir).unwrap();
+    fs::write(
+        agent_dir.join("plug__reviewer.md"),
+        "---\nname: reviewer\n---\nReview carefully.\n",
+    )
+    .unwrap();
+    fs::write(
+        agent_dir.join("ghost__gone.md"),
+        "---\nname: gone\n---\nstale\n",
+    )
+    .unwrap();
+    // A user-authored, non-`<plugin>__*` file must NOT appear in either list.
+    fs::write(agent_dir.join("my-handwritten.md"), "hand written\n").unwrap();
+
+    let conn = open_ro(&paths);
+    let report = tome::doctor::checks::build_agents_report(
+        &paths,
+        project_root,
+        &WorkspaceName::global(),
+        &conn,
+    )
+    .expect("agents report");
+
+    let cc = report
+        .harnesses
+        .iter()
+        .find(|h| h.harness == "claude-code")
+        .expect("claude-code harness entry");
+
+    assert!(
+        cc.present.iter().any(|f| f == "plug__reviewer.md"),
+        "enabled agent file present; got {cc:?}",
+    );
+    assert!(
+        cc.present.iter().any(|f| f == "ghost__gone.md"),
+        "orphan owned file is present on disk; got {cc:?}",
+    );
+    assert!(
+        !cc.present.iter().any(|f| f == "my-handwritten.md"),
+        "a non-`<plugin>__*` user file is NOT a Tome-owned present file; got {cc:?}",
+    );
+    assert!(
+        cc.orphaned.iter().any(|f| f == "ghost__gone.md"),
+        "the not-enabled plugin's file is orphaned; got {cc:?}",
+    );
+    assert!(
+        !cc.orphaned.iter().any(|f| f == "plug__reviewer.md"),
+        "the enabled plugin's file is NOT orphaned; got {cc:?}",
+    );
+}
+
+#[test]
+fn fix_rerenders_stale_guardrails() {
+    // A real-sync `--fix` case: plant a STALE guardrails region for the
+    // enabled plugin in a harness that does NOT suppress (we install a stub
+    // GuardrailsOnly harness via codex so the region is rendered, not
+    // suppressed). After `--fix` the region body matches the plugin's current
+    // GUARDRAILS.md. We use codex (GuardrailsOnly, in-file AGENTS.md region).
+    let (tmp, paths) = stage();
+    let home = TempDir::new().unwrap();
+    let _home = HomeGuard::install(home.path());
+    let project_root = tmp.path();
+    write_project_marker(project_root);
+
+    // The stage fixture's catalog cache is a symlink to a non-git dir, so
+    // doctor would classify it Missing/NotARepo and `--fix` would try to
+    // RE-CLONE it — destroying the cache the guardrails re-render reads from.
+    // Plant a `.git/` in the symlinked catalog so doctor classifies it Ok and
+    // the catalog repair never fires. (The guardrails re-render IS the
+    // subject under test; the catalog repair is incidental noise.)
+    fs::create_dir_all(tmp.path().join("catalog").join(".git")).unwrap();
+
+    // Declare codex so sync emits a guardrails region (codex is
+    // GuardrailsOnly — no hook suppression — so the region renders).
+    let ws_settings = paths.workspace_settings_file(&WorkspaceName::global());
+    fs::create_dir_all(ws_settings.parent().unwrap()).unwrap();
+    fs::write(&ws_settings, "name = \"global\"\nharnesses = [\"codex\"]\n").unwrap();
+
+    let workspace = WorkspaceName::global();
+    let deps = tome::harness::sync::SyncDeps {
+        paths: &paths,
+        home_root: home.path(),
+        workspace_name: &workspace,
+        force: false,
+    };
+    tome::harness::sync::sync_project(project_root, &deps).expect("initial sync");
+
+    // Codex's guardrails target is its rules-file (AGENTS.md). Find the file
+    // that now carries the region and corrupt the body between the markers.
+    let agents_md = project_root.join("AGENTS.md");
+    assert!(agents_md.is_file(), "codex guardrails landed in AGENTS.md");
+    let before = fs::read_to_string(&agents_md).unwrap();
+    assert!(
+        before.contains("START GUARDRAILS: acme:plug"),
+        "the plugin's region was rendered; got:\n{before}",
+    );
+    // Stomp the body inside the region while leaving the markers intact.
+    let stale = before.replace("Be careful with destructive operations.", "STALE HAND EDIT");
+    fs::write(&agents_md, &stale).unwrap();
+
+    // doctor --fix re-runs the idempotent sync → re-renders the region body.
+    let scope = project_scope(project_root);
+    let mut report = doctor::assemble_report(&scope, &paths, home.path(), false).expect("assemble");
+    let ctx = doctor::fixes::FixContext {
+        paths: &paths,
+        scope: &scope,
+        home: home.path(),
+        force: false,
+    };
+    let _ = doctor::fixes::apply(&mut report, &ctx);
+
+    let after = fs::read_to_string(&agents_md).unwrap();
+    assert!(
+        after.contains("Be careful with destructive operations."),
+        "--fix re-renders the stale guardrails body; got:\n{after}",
+    );
+    assert!(
+        !after.contains("STALE HAND EDIT"),
+        "the stale body is overwritten between the markers; got:\n{after}",
+    );
+}
+
+#[test]
+fn fix_never_removes_unowned_hook() {
+    // A user-edited hook entry in `.claude/settings.local.json` does NOT
+    // structurally match any re-derived plugin entry, so `--fix` (which only
+    // appends/removes structural matches) MUST leave it in place (NFR-003).
+    let (tmp, paths) = stage();
+    let home = TempDir::new().unwrap();
+    let _home = HomeGuard::install(home.path());
+    let project_root = tmp.path();
+    write_project_marker(project_root);
+    // Keep the catalog cache healthy so the plugin's real hooks ARE derived
+    // and merged — the user hook surviving ALONGSIDE them is the point.
+    fs::create_dir_all(tmp.path().join("catalog").join(".git")).unwrap();
+
+    let ws_settings = paths.workspace_settings_file(&WorkspaceName::global());
+    fs::create_dir_all(ws_settings.parent().unwrap()).unwrap();
+    fs::write(
+        &ws_settings,
+        "name = \"global\"\nharnesses = [\"claude-code\"]\n",
+    )
+    .unwrap();
+
+    // Seed a USER-OWNED hook entry that no plugin would derive.
+    let claude_dir = project_root.join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    let user_hook = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [
+                {"matcher": "Read", "hooks": [{"type": "command", "command": "/my/own/script.sh"}]}
+            ]
+        }
+    });
+    let settings_path = claude_dir.join("settings.local.json");
+    fs::write(
+        &settings_path,
+        serde_json::to_string_pretty(&user_hook).unwrap(),
+    )
+    .unwrap();
+
+    let scope = project_scope(project_root);
+    let mut report = doctor::assemble_report(&scope, &paths, home.path(), false).expect("assemble");
+    let ctx = doctor::fixes::FixContext {
+        paths: &paths,
+        scope: &scope,
+        home: home.path(),
+        force: false,
+    };
+    let _ = doctor::fixes::apply(&mut report, &ctx);
+
+    let after = fs::read_to_string(&settings_path).expect("settings.local.json survives");
+    assert!(
+        after.contains("/my/own/script.sh"),
+        "--fix must NEVER remove a hook it cannot prove it owns; got:\n{after}",
+    );
+}
+
+#[test]
+fn fix_never_deletes_user_content() {
+    // `--fix` must not delete rules-file text outside Tome markers. Plant a
+    // CLAUDE.md with hand-written prose plus a Tome guardrails region; after
+    // `--fix` the hand-written prose survives verbatim.
+    let (tmp, paths) = stage();
+    let home = TempDir::new().unwrap();
+    let _home = HomeGuard::install(home.path());
+    let project_root = tmp.path();
+    write_project_marker(project_root);
+    fs::create_dir_all(tmp.path().join("catalog").join(".git")).unwrap();
+
+    let ws_settings = paths.workspace_settings_file(&WorkspaceName::global());
+    fs::create_dir_all(ws_settings.parent().unwrap()).unwrap();
+    fs::write(&ws_settings, "name = \"global\"\nharnesses = [\"codex\"]\n").unwrap();
+
+    // Hand-written content the user owns, outside any Tome marker.
+    let agents_md = project_root.join("AGENTS.md");
+    let user_prose = "# My project notes\n\nThese are MY notes, hands off.\n";
+    fs::write(&agents_md, user_prose).unwrap();
+
+    let scope = project_scope(project_root);
+    let mut report = doctor::assemble_report(&scope, &paths, home.path(), false).expect("assemble");
+    let ctx = doctor::fixes::FixContext {
+        paths: &paths,
+        scope: &scope,
+        home: home.path(),
+        force: false,
+    };
+    let _ = doctor::fixes::apply(&mut report, &ctx);
+
+    let after = fs::read_to_string(&agents_md).expect("AGENTS.md survives");
+    assert!(
+        after.contains("These are MY notes, hands off."),
+        "--fix must preserve user-authored text outside Tome markers; got:\n{after}",
     );
 }

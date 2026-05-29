@@ -248,12 +248,12 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T127 [US5] Implement `--fix` safe repairs (re-render stale guardrails, re-emit missing agents, remove orphaned `<plugin>__*`); never remove a non-matching hook, never delete user content (FR-091) in `src/doctor/fixes.rs` (use devs:rust-dev agent).
 - [X] T128 [US5] Extend `tome plugin show` in `src/commands/plugin/show.rs`: list agents + hooks.json/GUARDRAILS.md presence + resolved persona name when personas on (FR-083) (use devs:rust-dev agent).
 - [X] T129 [GIT] Commit: `feat(phase-6): doctor hooks/guardrails/agents/personas/privilege reports + --fix + plugin show`.
-- [ ] T130 [P] [US5] `tests/agent_privilege.rs` — passthrough default; strip when set; doctor privilege report (use devs:rust-dev agent).
-- [ ] T131 [P] [US5] `tests/doctor_p6.rs` — all five report surfaces + `--fix` safe cases + read-only-by-default invariant (use devs:rust-dev agent).
-- [ ] T132 [P] [US5] `tests/doctor_json.rs` extensions — byte-stable JSON pins for the five new records (use devs:rust-dev agent).
-- [ ] T133 [P] [US5] `tests/plugin_show_p6.rs` — agents listed + hooks/guardrails presence + persona name; JSON shape pin (use devs:rust-dev agent).
-- [ ] T134 [P] [US5] Extend `tests/exit_codes_e2e.rs` — agent translation failure → exit 45 (use devs:rust-dev agent).
-- [ ] T135 [GIT] Commit: `test(phase-6): US5 privilege + doctor + plugin show + wire pins`.
+- [X] T130 [P] [US5] `tests/agent_privilege.rs` — passthrough default; strip when set; doctor privilege report (use devs:rust-dev agent).
+- [X] T131 [P] [US5] `tests/doctor_p6.rs` — all five report surfaces + `--fix` safe cases + read-only-by-default invariant (use devs:rust-dev agent).
+- [X] T132 [P] [US5] `tests/doctor_json.rs` extensions — byte-stable JSON pins for the five new records (use devs:rust-dev agent). (Landed as `tests/doctor_p6_json_shape.rs`.)
+- [X] T133 [P] [US5] `tests/plugin_show_p6.rs` — agents listed + hooks/guardrails presence + persona name; JSON shape pin (use devs:rust-dev agent).
+- [X] T134 [P] [US5] Extend `tests/exit_codes_e2e.rs` — agent translation failure → exit 45 (use devs:rust-dev agent).
+- [X] T135 [GIT] Commit: `test(phase-6): US5 privilege + doctor + plugin show + wire pins`.
 - [ ] T136 [US5] 4-reviewer pass; write `review/us5-findings.md` + `review/us5-disposition.md`.
 - [ ] T137 [US5] Apply US5 blockers + selected majors (use devs:rust-dev agent).
 - [ ] T138 [GIT] Commit: `fix(phase-6): apply US5 reviewer findings`.

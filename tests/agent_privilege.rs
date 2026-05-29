@@ -347,3 +347,89 @@ fn strip_claude_code_only() {
     // The stub never carried the privileged fields regardless of the flag.
     assert_no_privileged(&body);
 }
+
+// ---------------------------------------------------------------------------
+// T130 — doctor privilege report. The `PrivilegeEscalationReport` audits the
+// agent SOURCE, so a privileged agent appears grouped by plugin with its
+// `fields` REGARDLESS of `strip_plugin_agent_privileges` (FR-051). We assert
+// against `build_privilege_escalation_report` directly (no sync) so the
+// matrix stays fast.
+// ---------------------------------------------------------------------------
+
+/// Open the central DB read-only — the surface the doctor report uses.
+fn open_ro(paths: &tome::paths::Paths) -> rusqlite::Connection {
+    tome::index::open_read_only(&paths.index_db).expect("open_read_only")
+}
+
+#[test]
+fn doctor_privilege_report_groups_privileged_agent_by_plugin() {
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let fx = Fixture::build("ws", "\"claude-code\"", None, None);
+    let url = seed_agent_source(&fx.paths, "plugin-a", "reviewer", PRIVILEGED_AGENT);
+    enrol_and_enable_agent(&fx.paths, "ws", "cat-a", &url, "plugin-a", "reviewer");
+
+    let conn = open_ro(&fx.paths);
+    let report =
+        tome::doctor::checks::build_privilege_escalation_report(&fx.paths, &fx.workspace, &conn)
+            .expect("privilege report");
+
+    assert_eq!(
+        report.plugins.len(),
+        1,
+        "one plugin with a privileged agent"
+    );
+    let plug = &report.plugins[0];
+    assert_eq!(plug.catalog, "cat-a");
+    assert_eq!(plug.plugin, "plugin-a");
+    assert_eq!(plug.agents.len(), 1);
+    assert_eq!(plug.agents[0].name, "reviewer");
+    // All three privileged fields recorded, in canonical order.
+    assert_eq!(
+        plug.agents[0].fields,
+        vec![
+            "hooks".to_owned(),
+            "mcpServers".to_owned(),
+            "permissionMode".to_owned()
+        ],
+        "all three privileged fields recorded from the source",
+    );
+}
+
+#[test]
+fn doctor_privilege_report_unchanged_when_strip_enabled() {
+    // The report reads the SOURCE agent, never the emission clone (FR-051),
+    // so enabling `strip_plugin_agent_privileges` must NOT shrink the audit.
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let fx = Fixture::build(
+        "ws",
+        "\"claude-code\"",
+        Some("strip_plugin_agent_privileges = true"),
+        None,
+    );
+    let url = seed_agent_source(&fx.paths, "plugin-a", "reviewer", PRIVILEGED_AGENT);
+    enrol_and_enable_agent(&fx.paths, "ws", "cat-a", &url, "plugin-a", "reviewer");
+
+    let conn = open_ro(&fx.paths);
+    let report =
+        tome::doctor::checks::build_privilege_escalation_report(&fx.paths, &fx.workspace, &conn)
+            .expect("privilege report");
+
+    assert_eq!(
+        report.plugins.len(),
+        1,
+        "strip does not affect the source-reading audit",
+    );
+    let agent = &report.plugins[0].agents[0];
+    assert_eq!(agent.name, "reviewer");
+    assert_eq!(
+        agent.fields,
+        vec![
+            "hooks".to_owned(),
+            "mcpServers".to_owned(),
+            "permissionMode".to_owned()
+        ],
+        "the full privileged field set is auditable even with strip on",
+    );
+}

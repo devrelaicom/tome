@@ -1,10 +1,11 @@
-//! Phase 6 / US5 — `tome plugin show` extensions smoke test (FIRST cut).
+//! Phase 6 / US5 — `tome plugin show` extensions (FR-083, T133).
 //!
-//! Asserts the FR-083 additions to the `--json` envelope: the
-//! `ships_hooks_json` / `ships_guardrails_md` presence booleans, and that an
-//! agent entry appears in the `agents` array. The full matrix (persona-name
-//! surfacing under the toggle, human-mode rendering, byte-stable JSON pin) is
-//! the next chunk.
+//! Asserts the additions to both output paths: the `ships_hooks_json` /
+//! `ships_guardrails_md` presence booleans, the per-plugin `agents` array
+//! (displayed name), and the per-agent `persona_name` — present only when
+//! `expose_agents_as_personas` resolves true at the scope, absent otherwise.
+//! Human-mode rendering of the same surfaces is exercised too. The byte-stable
+//! JSON wire-pin lives in `tests/plugin_show_p6_json_shape.rs`.
 
 mod common;
 
@@ -132,5 +133,93 @@ fn shows_agents_and_hooks_guardrails_presence_booleans() {
     assert!(
         reviewer.get("persona_name").is_none(),
         "persona_name absent when expose_agents_as_personas is off; got {reviewer:?}"
+    );
+}
+
+/// Turn on `expose_agents_as_personas` at the global scope so the bare-CLI
+/// `plugin show` (which resolves to global fallback) surfaces persona names.
+fn enable_personas(fx: &Fixture) {
+    let paths = paths_for(&fx.env);
+    fs::write(
+        &paths.global_settings_file,
+        "expose_agents_as_personas = true\n",
+    )
+    .expect("write global settings");
+}
+
+fn show_human(fx: &Fixture) -> String {
+    let out = fx
+        .env
+        .cmd()
+        .args(["plugin", "show", "acme/plug"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn agent_persona_name_surfaces_when_personas_on() {
+    let fx = setup();
+    enable_personas(&fx);
+
+    let json = show_json(&fx);
+    let agents = json["agents"].as_array().expect("agents array present");
+    let reviewer = agents
+        .iter()
+        .find(|a| a["name"] == "reviewer")
+        .expect("reviewer present");
+    // The single non-clashing agent derives `<name>-persona`.
+    assert_eq!(
+        reviewer["persona_name"], "reviewer-persona",
+        "persona_name present + derived when toggle on; got {reviewer:?}",
+    );
+}
+
+#[test]
+fn human_mode_renders_ship_booleans_agents_and_persona() {
+    let fx = setup();
+    enable_personas(&fx);
+
+    let text = show_human(&fx);
+    assert!(
+        text.contains("Ships hooks/hooks.json:    yes"),
+        "human mode shows hooks presence; got:\n{text}",
+    );
+    assert!(
+        text.contains("Ships hooks/GUARDRAILS.md: yes"),
+        "human mode shows guardrails presence; got:\n{text}",
+    );
+    assert!(
+        text.contains("Agents (1):"),
+        "human mode lists the Agents section; got:\n{text}",
+    );
+    assert!(
+        text.contains("reviewer"),
+        "the agent's displayed name appears; got:\n{text}",
+    );
+    assert!(
+        text.contains("persona: reviewer-persona"),
+        "human mode shows the resolved persona name when the toggle is on; got:\n{text}",
+    );
+}
+
+#[test]
+fn human_mode_omits_persona_when_off() {
+    let fx = setup();
+    // No personas toggle.
+
+    let text = show_human(&fx);
+    assert!(
+        text.contains("Agents (1):"),
+        "the Agents section still renders; got:\n{text}",
+    );
+    assert!(
+        !text.contains("persona:"),
+        "no persona line when the toggle is off; got:\n{text}",
     );
 }
