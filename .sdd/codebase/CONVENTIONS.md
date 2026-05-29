@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and patterns for Tome (Rust CLI).
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-27 (Phase 5 Polish complete, v0.5.0)
+> **Last Updated**: 2026-05-29 (Phase 6 Foundational)
 
 ## Code Style
 
@@ -76,6 +76,30 @@ match kind.as_str() {
 
 **Rationale** (Phase 5 Polish M-3): Schema-column enums should round-trip through type-safe parsing. The Unknown case surfaces as `IndexIntegrityCheckFailure` (exit 51) — a clear signal to the user that their database schema is ahead of the running binary. Used in `doctor/checks.rs`, `commands/plugin/show.rs`, and future entry-kind dispatch sites.
 
+### Phase 6: Canonical-Enum Dispatch (Exhaustive Matching Without Catch-All)
+
+When matching on enum types that may grow (e.g., `EntryKind` now admits `Skill`, `Command`, `Agent`), use exhaustive pattern matching without a catch-all (`_ => `) arm:
+
+```rust
+// Good: compiler enforces when new variants are added
+match kind {
+    EntryKind::Skill => count.skills = n,
+    EntryKind::Command => count.commands = n,
+    EntryKind::Agent => count.agents = n,
+}
+
+// Bad: allows silent miscount if variant is added later
+match kind {
+    EntryKind::Skill => count.skills = n,
+    EntryKind::Command => count.commands = n,
+    _ => count.unknown += n,  // Silent on new variants
+}
+```
+
+**Rationale** (Phase 6 Foundational F2): When the compiler adds a missing-arm error, it's a hard signal to review all consumers of that type. The exhaustive discipline surfaces schema drift as `IndexIntegrityCheckFailure` (exit 51) rather than silently miscounting or skipping entity types. Every exhaustive `match EntryKind` site was widened by hand (no automated macro expansion) to include the new `Agent` variant.
+
+**Applied to**: `src/doctor/checks.rs` (entry count accumulators), `src/commands/plugin/mod.rs` (JSON serialization), `src/commands/plugin/show.rs` (display grouping), `src/plugin/frontmatter.rs` (user-invocable defaults), `src/plugin/lifecycle.rs` (entry creation factories).
+
 ## Error Handling
 
 ### Error Pattern: Closed Enum with Exit Codes
@@ -90,6 +114,7 @@ Tome uses a **closed `TomeError` enum** — every error variant has an enumerate
 - Phase 3: codes 60–75 (MCP, doctor, schema migration)
 - Phase 4: codes 13–20 (workspace, harness, composition)
 - Phase 5: codes 9, 21–26 (substitution, commands, prompts, data dirs)
+- Phase 6: codes 43–46 (hooks, agents, guardrails)
 
 **Contract reference**: `specs/00X-phase-Y-*/contracts/exit-codes-p*.md` per phase.
 
@@ -398,6 +423,41 @@ fn doctor_p5_surface_creates_no_dirs() {
 ```
 
 **Rationale**: Masks off-by-one regressions better than `>=` checks. Phase 5 US5.a extended this: exact entry counts (`assert_eq!(counts.skills, 4)`) prevent silent mutations.
+
+### Phase 6: Test-Configurable Test Double Pattern
+
+The `StubHarness` test double in `src/harness/stub.rs` evolved from a unit struct to a `#[derive(Default)]` struct with optional config fields and builder setters (`with_*`). This allows tests to drive different harness capabilities without spelling out the full struct:
+
+```rust
+// Old pattern (unit struct, not configurable)
+let harness = StubHarness;
+
+// New pattern (configurable via Default + builder)
+let harness = StubHarness::default()
+    .with_hook_settings()
+    .with_native_agents(AgentFormat::MarkdownYaml);
+```
+
+**Discipline**: `Default` produces a safe baseline (safe defaults on all trait methods); builder methods enable specific capabilities for the test case. All field defaults remain backward-compatible with the original behaviour. Used in `tests/harness_trait_p6.rs` to exercise Phase 6 hook + agent dispatch without binding to production harness modules.
+
+### Phase 6: Marker-Only Migration Pattern
+
+A registered `Migration` whose `apply` function is a documented no-op, used solely to advance `SCHEMA_VERSION` when a column's domain widens (e.g., `kind` text enum from `{'skill', 'command'}` to `{'skill', 'command', 'agent'}`). No DDL, no backfill — just the version bump for audit and `doctor` schema consistency checks.
+
+```rust
+// src/index/migrations.rs
+Migration {
+    from_version: 3,
+    to_version: 4,
+    description: "Phase 6: widen 'kind' domain to admit 'agent'",
+    apply: |_conn| {
+        // No-op apply; domain widening needs no DDL on TEXT columns
+        Ok(())
+    },
+}
+```
+
+**Used in**: `tests/schema_migration_p6.rs` pins the production marker migration. Discovered at Phase 6 Foundational when `EntryKind` was widened to include `Agent` variant but the index schema remained at version 3.
 
 ## Comments & Documentation
 

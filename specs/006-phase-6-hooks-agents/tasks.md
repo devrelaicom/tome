@@ -69,9 +69,9 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 ### Foundational closeout
 
-- [ ] T021 Run codebase mapping for Phase 2 changes (`/sdd:map incremental`).
-- [ ] T022 Review `retro/P2.md` and extract critical learnings to `CLAUDE.md` (conservative).
-- [ ] T023 [GIT] Commit: `docs(phase-6): P2 closeout — mapping + retro`.
+- [X] T021 Run codebase mapping for Phase 2 changes (`/sdd:map incremental`).
+- [X] T022 Review `retro/P2.md` and extract critical learnings to `CLAUDE.md` (conservative).
+- [X] T023 [GIT] Commit: `docs(phase-6): P2 closeout — mapping + retro`.
 - [ ] T024 [GIT] Push branch to origin (ensure pre-push hooks pass).
 - [ ] T025 [GIT] Create/update PR to main with Phase 2 summary.
 - [ ] T026 [GIT] Verify all CI checks pass; report PR ready status.
