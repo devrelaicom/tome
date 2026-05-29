@@ -62,36 +62,13 @@ mod claude_code_tests {
         assert!(!CLAUDE_CODE.detect(home.path()));
     }
 
-    // Precedence: AGENTS.md > CLAUDE.md > .claude/CLAUDE.md, fallback AGENTS.md.
+    // Corrected precedence (Phase 6 / FR-020/021/022):
+    // CLAUDE.md > .claude/CLAUDE.md, fallback CLAUDE.md. AGENTS.md is NOT a
+    // candidate — Claude Code does not natively read it.
 
     #[test]
-    fn rules_file_target_fallback_is_agents_md() {
+    fn rules_file_target_fallback_is_claude_md() {
         let project = TempDir::new().unwrap();
-        assert_eq!(
-            CLAUDE_CODE.rules_file_target(project.path()),
-            project.path().join("AGENTS.md"),
-        );
-    }
-
-    #[test]
-    fn rules_file_target_top_wins_when_all_three_exist() {
-        let project = TempDir::new().unwrap();
-        fs::write(project.path().join("AGENTS.md"), b"").unwrap();
-        fs::write(project.path().join("CLAUDE.md"), b"").unwrap();
-        fs::create_dir(project.path().join(".claude")).unwrap();
-        fs::write(project.path().join(".claude/CLAUDE.md"), b"").unwrap();
-        assert_eq!(
-            CLAUDE_CODE.rules_file_target(project.path()),
-            project.path().join("AGENTS.md"),
-        );
-    }
-
-    #[test]
-    fn rules_file_target_second_wins_when_top_missing() {
-        let project = TempDir::new().unwrap();
-        fs::write(project.path().join("CLAUDE.md"), b"").unwrap();
-        fs::create_dir(project.path().join(".claude")).unwrap();
-        fs::write(project.path().join(".claude/CLAUDE.md"), b"").unwrap();
         assert_eq!(
             CLAUDE_CODE.rules_file_target(project.path()),
             project.path().join("CLAUDE.md"),
@@ -99,7 +76,32 @@ mod claude_code_tests {
     }
 
     #[test]
-    fn rules_file_target_third_wins_when_top_and_second_missing() {
+    fn rules_file_target_ignores_agents_md_top_is_claude_md() {
+        let project = TempDir::new().unwrap();
+        fs::write(project.path().join("AGENTS.md"), b"").unwrap();
+        fs::write(project.path().join("CLAUDE.md"), b"").unwrap();
+        fs::create_dir(project.path().join(".claude")).unwrap();
+        fs::write(project.path().join(".claude/CLAUDE.md"), b"").unwrap();
+        assert_eq!(
+            CLAUDE_CODE.rules_file_target(project.path()),
+            project.path().join("CLAUDE.md"),
+            "CLAUDE.md wins; AGENTS.md is not a candidate",
+        );
+    }
+
+    #[test]
+    fn rules_file_target_falls_back_when_only_agents_md_exists() {
+        // AGENTS.md alone must NOT be selected (substance of the correction).
+        let project = TempDir::new().unwrap();
+        fs::write(project.path().join("AGENTS.md"), b"").unwrap();
+        assert_eq!(
+            CLAUDE_CODE.rules_file_target(project.path()),
+            project.path().join("CLAUDE.md"),
+        );
+    }
+
+    #[test]
+    fn rules_file_target_nested_wins_when_top_missing() {
         let project = TempDir::new().unwrap();
         fs::create_dir(project.path().join(".claude")).unwrap();
         fs::write(project.path().join(".claude/CLAUDE.md"), b"").unwrap();

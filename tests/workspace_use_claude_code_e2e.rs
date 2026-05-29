@@ -164,8 +164,9 @@ fn read_json(path: &Path) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// 1. Happy path: bind + sync writes the marker, AGENTS.md block, and
-//    .claude/settings.json entry.
+// 1. Happy path: bind + sync writes the marker, CLAUDE.md block, and
+//    .claude/settings.json entry. (Phase 6 correction: claude-code's rules
+//    sink is CLAUDE.md, not AGENTS.md.)
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -189,20 +190,25 @@ fn bind_then_sync_writes_claude_code_artefacts() {
         "marker RULES.md must mirror the workspace RULES.md; got: {rules_body}"
     );
 
-    // 3. AGENTS.md exists and carries the AtInclude block.
-    let agents_md = fx.project_path.join("AGENTS.md");
-    let agents_body = fs::read_to_string(&agents_md).unwrap();
+    // 3. CLAUDE.md exists and carries the AtInclude block (Phase 6
+    //    correction — never AGENTS.md for claude-code).
+    let claude_md = fx.project_path.join("CLAUDE.md");
+    let claude_body = fs::read_to_string(&claude_md).unwrap();
     assert!(
-        agents_body.contains("<!-- tome:begin -->"),
-        "AGENTS.md must carry begin marker; got: {agents_body}"
+        claude_body.contains("<!-- tome:begin -->"),
+        "CLAUDE.md must carry begin marker; got: {claude_body}"
     );
     assert!(
-        agents_body.contains("<!-- tome:end -->"),
-        "AGENTS.md must carry end marker; got: {agents_body}"
+        claude_body.contains("<!-- tome:end -->"),
+        "CLAUDE.md must carry end marker; got: {claude_body}"
     );
     assert!(
-        agents_body.contains("@.tome/RULES.md"),
-        "AGENTS.md block must @-include the marker RULES.md; got: {agents_body}"
+        claude_body.contains("@.tome/RULES.md"),
+        "CLAUDE.md block must @-include the marker RULES.md; got: {claude_body}"
+    );
+    assert!(
+        !fx.project_path.join("AGENTS.md").exists(),
+        "AGENTS.md must NOT be created for claude-code (Phase 6 correction)"
     );
 
     // 4. .claude/settings.json carries the canonical Tome MCP entry.
@@ -224,7 +230,7 @@ fn bind_then_sync_writes_claude_code_artefacts() {
 
 // ---------------------------------------------------------------------------
 // 2. Rebind: switching to a different workspace updates the --workspace arg
-//    and leaves the AGENTS.md block body unchanged (path is unchanged).
+//    and leaves the CLAUDE.md block body unchanged (path is unchanged).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -267,24 +273,24 @@ fn rebind_to_different_workspace_updates_mcp_args() {
         "args must reference the new workspace"
     );
 
-    // AGENTS.md block body unchanged — the @-include path doesn't depend
+    // CLAUDE.md block body unchanged — the @-include path doesn't depend
     // on the workspace name.
-    let agents_body = fs::read_to_string(fx.project_path.join("AGENTS.md")).unwrap();
-    assert!(agents_body.contains("@.tome/RULES.md"));
+    let claude_body = fs::read_to_string(fx.project_path.join("CLAUDE.md")).unwrap();
+    assert!(claude_body.contains("@.tome/RULES.md"));
 }
 
 // ---------------------------------------------------------------------------
-// 3. Pre-existing AGENTS.md: original content preserved verbatim, block
-//    appended.
+// 3. Pre-existing CLAUDE.md: original content preserved verbatim, block
+//    appended. (Phase 6 correction: claude-code's rules sink is CLAUDE.md.)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn existing_agents_md_preserves_surrounding_content() {
+fn existing_claude_md_preserves_surrounding_content() {
     let original = "# My rules\n\nSee below.\n";
-    let fx = Fixture::build_with_existing("test-ws", &[("AGENTS.md", original)]);
+    let fx = Fixture::build_with_existing("test-ws", &[("CLAUDE.md", original)]);
     fx.bind_then_sync();
 
-    let body = fs::read_to_string(fx.project_path.join("AGENTS.md")).unwrap();
+    let body = fs::read_to_string(fx.project_path.join("CLAUDE.md")).unwrap();
     assert!(
         body.contains("# My rules"),
         "original heading must survive; got: {body}"
@@ -348,7 +354,7 @@ fn existing_claude_settings_json_preserves_other_entries() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Idempotent re-sync: a second sync (no bind) leaves AGENTS.md and
+// 5. Idempotent re-sync: a second sync (no bind) leaves CLAUDE.md and
 //    .claude/settings.json mtimes unchanged (FR-525).
 // ---------------------------------------------------------------------------
 
@@ -357,10 +363,10 @@ fn idempotent_resync_no_disk_changes() {
     let fx = Fixture::build("test-ws");
     fx.bind_then_sync();
 
-    let agents_md = fx.project_path.join("AGENTS.md");
+    let claude_md = fx.project_path.join("CLAUDE.md");
     let settings = fx.project_path.join(".claude/settings.json");
 
-    let agents_mtime_1 = mtime(&agents_md);
+    let agents_mtime_1 = mtime(&claude_md);
     let settings_mtime_1 = mtime(&settings);
 
     // Wait long enough for mtime granularity (HFS+/APFS = 1s; ext4 = ms).
@@ -387,9 +393,9 @@ fn idempotent_resync_no_disk_changes() {
     );
 
     assert_eq!(
-        mtime(&agents_md),
+        mtime(&claude_md),
         agents_mtime_1,
-        "AGENTS.md mtime must not advance on idempotent re-sync"
+        "CLAUDE.md mtime must not advance on idempotent re-sync"
     );
     assert_eq!(
         mtime(&settings),
@@ -401,9 +407,9 @@ fn idempotent_resync_no_disk_changes() {
 // ---------------------------------------------------------------------------
 // 6. Nested CLAUDE.md (.claude/CLAUDE.md): the AtInclude path is computed
 //    relative to the harness's rules-file target. With only
-//    `.claude/CLAUDE.md` pre-existing, claude-code's precedence ladder
-//    (AGENTS.md > CLAUDE.md > .claude/CLAUDE.md) picks the nested file,
-//    and the `@`-include must traverse up one level.
+//    `.claude/CLAUDE.md` pre-existing, claude-code's corrected precedence
+//    ladder (CLAUDE.md > .claude/CLAUDE.md) picks the nested file, and the
+//    `@`-include must traverse up one level.
 // ---------------------------------------------------------------------------
 
 #[test]

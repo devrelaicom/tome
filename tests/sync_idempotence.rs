@@ -124,12 +124,13 @@ fn cross_harness_resync_is_byte_for_byte_idempotent() {
     )
     .expect("first sync");
 
-    let agents_md = fx.project_path.join("AGENTS.md");
+    // Phase 6 correction: claude-code's rules sink is CLAUDE.md, not AGENTS.md.
+    let claude_md = fx.project_path.join("CLAUDE.md");
     let claude_settings = fx.project_path.join(".claude/settings.json");
     let stub_rules = fx.project_path.join("STUB_RULES.md");
     let stub_mcp = fx.project_path.join("stub.mcp.json");
 
-    for path in [&agents_md, &claude_settings, &stub_rules, &stub_mcp] {
+    for path in [&claude_md, &claude_settings, &stub_rules, &stub_mcp] {
         assert!(
             path.is_file(),
             "expected {} to exist after first sync",
@@ -137,7 +138,7 @@ fn cross_harness_resync_is_byte_for_byte_idempotent() {
         );
     }
 
-    let agents_mtime_1 = mtime(&agents_md);
+    let agents_mtime_1 = mtime(&claude_md);
     let claude_mtime_1 = mtime(&claude_settings);
     let stub_rules_mtime_1 = mtime(&stub_rules);
     let stub_mcp_mtime_1 = mtime(&stub_mcp);
@@ -171,9 +172,9 @@ fn cross_harness_resync_is_byte_for_byte_idempotent() {
     );
 
     assert_eq!(
-        mtime(&agents_md),
+        mtime(&claude_md),
         agents_mtime_1,
-        "AGENTS.md mtime advanced on idempotent re-sync",
+        "CLAUDE.md mtime advanced on idempotent re-sync",
     );
     assert_eq!(
         mtime(&claude_settings),

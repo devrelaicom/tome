@@ -175,9 +175,9 @@ fn cascade_step5_refcount_cleans_unreferenced_catalog_cache() {
 }
 
 /// T-M3 (a): Step 1 must remove a Tome-owned rules-file block via the
-/// `BlockInExistingFile` strategy. Pre-populate `<project>/AGENTS.md`
-/// (claude-code's target) with a block; cascade with --force; assert
-/// the block is gone but the file still exists.
+/// `BlockInExistingFile` strategy. Pre-populate `<project>/CLAUDE.md`
+/// (claude-code's corrected target, Phase 6 / FR-020) with a block; cascade
+/// with --force; assert the block is gone but the file still exists.
 #[test]
 fn cascade_step1_removes_rules_block_via_block_in_existing_file_strategy() {
     let tmp = TempDir::new().unwrap();
@@ -189,15 +189,15 @@ fn cascade_step1_removes_rules_block_via_block_in_existing_file_strategy() {
     std::fs::create_dir_all(&project).expect("create project");
     seed_bound_project(&paths, "mine", &project);
 
-    // claude-code's rules target is `<project>/AGENTS.md` with strategy
-    // `BlockInExistingFile`. Pre-populate with developer content + a
-    // Tome-owned block.
-    let agents_md = project.join("AGENTS.md");
-    std::fs::write(&agents_md, "# Project guidelines\n\nKeep it tidy.\n").expect("seed AGENTS.md");
-    rules_file::write_block(&agents_md, "TOME OWNED BODY", BlockBodyStyle::AtInclude)
+    // claude-code's rules target is `<project>/CLAUDE.md` (Phase 6
+    // correction — never AGENTS.md) with strategy `BlockInExistingFile`.
+    // Pre-populate with developer content + a Tome-owned block.
+    let claude_md = project.join("CLAUDE.md");
+    std::fs::write(&claude_md, "# Project guidelines\n\nKeep it tidy.\n").expect("seed CLAUDE.md");
+    rules_file::write_block(&claude_md, "tome-owned body", BlockBodyStyle::AtInclude)
         .expect("write Tome block");
 
-    let pre = std::fs::read_to_string(&agents_md).expect("read pre");
+    let pre = std::fs::read_to_string(&claude_md).expect("read pre");
     assert!(
         pre.contains("<!-- tome:begin -->"),
         "Tome block should be present pre-cascade: {pre}",
@@ -212,8 +212,8 @@ fn cascade_step1_removes_rules_block_via_block_in_existing_file_strategy() {
 
     // The file is still on disk (developer-authored content stays);
     // the Tome block is gone.
-    assert!(agents_md.is_file(), "AGENTS.md should still exist");
-    let post = std::fs::read_to_string(&agents_md).expect("read post");
+    assert!(claude_md.is_file(), "CLAUDE.md should still exist");
+    let post = std::fs::read_to_string(&claude_md).expect("read post");
     assert!(
         !post.contains("<!-- tome:begin -->"),
         "Tome block should be removed by cascade Step 1: {post}",

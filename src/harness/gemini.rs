@@ -8,6 +8,10 @@
 //! - Strategy: `BlockInExistingFile`, body style `AtInclude`.
 //! - MCP config: `~/.gemini/settings.json` (global).
 //! - Parent key: `"mcpServers"`.
+//! - Guardrails target (Phase 6): `AGENTS.md` preferred else `GEMINI.md`,
+//!   in-file region, no suppression — the trait default (`InFileRegion` on
+//!   the rules-file target) yields exactly this, so no `guardrails_target`
+//!   override is needed (FR-012).
 
 use std::path::{Path, PathBuf};
 

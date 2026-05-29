@@ -84,7 +84,7 @@ Every write to a rules-file target or the Cursor sibling follows the Phase 4 ato
 
 1. Read the existing file into memory (for in-file regions; the sibling is fully Tome-owned).
 2. Construct the new content (region inserted / overwritten-in-place / removed).
-3. **Refuse to write through a symlink** — `symlink_metadata` check on the target before writing; exit 7 (`Io`) if the target is a symlink.
+3. **Refuse to write through a symlink** — `symlink_metadata` check on the target before writing; exit 46 (`GuardrailsWriteFailed`) if the target is a symlink. (This aligns with the authoritative [exit-codes-p6.md](./exit-codes-p6.md): code 7 explicitly excludes a guardrails target, and a guardrails-target IO/symlink failure surfaces as 46, not 7.)
 4. Write to a sibling temp file on the same filesystem; preserve the existing file's mode (new files 0644 on Unix for in-file targets; the Cursor sibling created at 0644); fsync; atomic rename onto the target.
 
 Each individual file write stays all-or-nothing: a failure never leaves partially-written guardrails state between markers (FR-084). A render or write failure for a rules file or the standalone sibling surfaces **exit 46** (guardrails render/write failure); the message names the file. Per the forward-progress discipline (FR-084, R-13), a failure on one harness/sink does not roll back sinks already reconciled in the same sync.
@@ -106,5 +106,5 @@ Pinned in [exit-codes-p6.md](./exit-codes-p6.md) (FR-092). Reuses no occupied co
 - **Overwrite in place + idempotence**: re-sync with changed source content overwrites between existing markers; re-sync with unchanged content rewrites nothing (FR-014, NFR-001, SC-006).
 - **Suppression transitions**: a plugin that begins shipping `hooks.json` has its `CLAUDE.md` region removed while hooks merge; a plugin that ceases has its hooks removed while the region re-renders — both in one sync (FR-016).
 - **Cursor sibling deletion**: when the last contributing plugin is disabled, `TOME_GUARDRAILS.md` is deleted entirely (FR-015, SC-006).
-- **Symlink refusal**: a symlinked target is refused (exit 7).
+- **Symlink refusal**: a symlinked target is refused (exit 46; aligns with the authoritative [exit-codes-p6.md](./exit-codes-p6.md), where a guardrails-target IO/symlink failure surfaces as `GuardrailsWriteFailed` 46, not `Io` 7).
 - **Atomicity**: an injected write failure surfaces exit 46 and leaves no partial region between markers.

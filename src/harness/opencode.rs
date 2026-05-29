@@ -11,6 +11,10 @@
 //! - MCP config: `<project>/opencode.json` (per-project, no dot
 //!   prefix).
 //! - Parent key: `"mcpServers"`.
+//! - Guardrails target (Phase 6): `AGENTS.md` in-file region, no
+//!   suppression — the trait default (`InFileRegion` on the rules-file
+//!   target) is exactly correct, so no `guardrails_target` override is
+//!   needed (FR-012). Shares the `AGENTS.md` file with codex / gemini.
 
 use std::path::{Path, PathBuf};
 

@@ -2,7 +2,7 @@
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 US2 — real Claude Code hooks)
+> **Last Updated**: 2026-05-29 (Phase 6 US3 — guardrails + rules-file correction)
 
 ## Test Framework
 
@@ -33,7 +33,7 @@
 
 ```
 tests/
-├── *.rs                         # Integration test files (161+ total as of Phase 6 US1)
+├── *.rs                         # Integration test files (170+ total as of Phase 6 US3)
 ├── common/
 │   ├── mod.rs                   # Shared harness: ToolEnv, Fixture, guards
 │   └── ...                      # (exported helpers)
@@ -66,27 +66,22 @@ tests/
 | **Security & hardening** | `security_hardening.rs` | File perms, symlink refusal (1 file) |
 | **Error & exit codes** | `exit_codes*.rs`, `error_messages.rs` | Exit code coverage, Display impl (2 files) |
 | **Substitution** (Phase 5) | `substitution_*.rs`, `entry_*.rs` | Variable expansion, argument coercion (8 files) |
-| **Agent translation** (Phase 6) | `agent_translate_*.rs`, `agent_*.rs` | Per-harness native agents (8 files) |
+| **Agent translation** (Phase 6 US1) | `agent_translate_*.rs`, `agent_*.rs` | Per-harness native agents (8 files) |
+| **Hooks integration** (Phase 6 US2) | `hooks_rewrite.rs`, `hooks_merge.rs` | Path-variable rewriting, config merging (2 files) |
+| **Guardrails & rules-file** (Phase 6 US3) | `guardrails_*.rs`, `rules_file_*.rs` | Guardrails regions, rules-file placement (6 files) |
 | **Misc** | `path_validation.rs`, `atomic_dir.rs`, etc. | Phase 1 foundational (10 files) |
 
-**Total**: 161+ test files across 161+ suites; 1200+ tests pass (Phase 6 Foundational → US1/US2: 1200+, +8 agent files + 2 hooks files).
+**Total**: 170+ test files across 170+ suites; 1200+ tests pass (Phase 6 US3 builds on US1/US2 + 6 new files).
 
-**Phase 6 US1 additions**:
-- `tests/agent_translate_claude_code.rs` — Claude Code native-agent translation (MarkdownYaml format, model alias map, dropped field tracking)
-- `tests/agent_translate_codex.rs` — Codex native-agent translation (TOML format, triple-quoted developer_instructions, model drop)
-- `tests/agent_translate_cursor.rs` — Cursor native-agent translation (MarkdownYaml format, empty model alias drop)
-- `tests/agent_translate_opencode.rs` — OpenCode native-agent translation (MarkdownYaml format, fully-qualified model ids, plugin-prefixed names)
-- `tests/agent_naming_clash.rs` — Agent name-clash display naming (same filename regardless; displayed name only on clash)
-- `tests/agent_removal.rs` — Orphan agent cleanup and per-plugin removal (plugin_of_owned_file ownership split)
-- `tests/agent_path_traversal.rs` — Path-traversal defence via is_safe_agent_name (S-1)
-- Extensions to `tests/entry_kind_agent_indexing.rs` — Verify `EntryKind::Agent` widening integrates with storage + queries without schema drift
-- Extensions to `tests/harness_sync_stub.rs` — Native-agent emit/orphan-removal/idempotence via mtime capture, symlink refusal (exit 7), forward-progress (exit 45), multi-harness fan-out
-
-**Phase 6 US2 additions**:
-- `tests/hooks_rewrite.rs` — Two-token hooks path-variable rewriting (FR-003, R-4); rewrite targets (`${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` → absolute paths); other tokens left verbatim; only string VALUES rewritten (keys untouched); absent hooks.json → None; symlinked source → exit 7; malformed JSON → exit 43.
-- `tests/hooks_merge.rs` — Structural-match merge/removal/pruning of hooks into `.claude/settings.local.json` (FR-002/004/005/006); create-if-absent (committed `settings.json` never touched); idempotent re-add via deep-equal (mtime stable); user-authored dedup; user-edit preservation on removal; multi-plugin multi-event merge + re-merge; prune-empty-event while keeping `hooks` object; removal against absent file is no-op; malformed settings → exit 44, original intact; symlink refusal (both merge + remove) → exit 7.
-- Extensions to `tests/harness_sync_stub.rs` — Hooks forward-progress (one valid + one malformed plugin in same sync; malformed is skipped, good continues), symlink refusal on settings write → exit 7, multi-plugin merge in one pass + idempotence.
-- Extensions to `tests/exit_codes_e2e.rs` — `workspace_use_malformed_hooks_exits_43` validates malformed `hooks/hooks.json` surfaces exit 43 (exit 44 tested library-API-only in `hooks_merge.rs`).
+**Phase 6 US3 additions**:
+- `tests/guardrails_render.rs` — Guardrails region rendering, lexicographic ordering, overwrite-in-place, new-append, orphan-removal, idempotence (FR-011/014)
+- `tests/guardrails_suppression.rs` — Guardrails suppression per harness when that plugin ships real JSON hooks (FR-013); cross-file invariant: suppressed harness skips guardrails region, non-suppressed writes it
+- `tests/guardrails_marker_injection.rs` — Fail-closed marker validation (B-1): three crafted bodies each containing managed markers (guardrails START/END + tome:begin/end block) each rejected (exit 46); sibling plugin region renders; re-sync convergent
+- `tests/rules_file_block_in_existing.rs` — `BlockInExistingFile` strategy: owned `tome:begin/end` block in developer-authored file preserves content outside markers (Phase 4 blocks tested indirectly via US1/US2)
+- `tests/rules_file_standalone.rs` — `StandaloneFile` strategy: Tome owns complete file; removal deletes the file; atomicity on write failure
+- `tests/rules_file_claude_correction.rs` — Phase 4 correction (FR-020/021/022, T083): Claude Code rules candidate set is now `CLAUDE.md` > `.claude/CLAUDE.md` (NOT `AGENTS.md`); projects with multi-harness config write blocks to both `CLAUDE.md` (claude-code) and `AGENTS.md` (codex) in same sync
+- Extensions to `tests/atomicity.rs` — Guardrails mid-write atomicity (T3-2): mid-write failure on in-file guardrails region leaves file byte-for-byte unchanged (old region intact, no partial)
+- Extensions to `tests/exit_codes_e2e.rs` — Exit 46 coverage: `guardrails_write_through_symlink_exits_46` (library-API unix-only); e2e exit 43 coverage already via hooks tests; exit 44 library-API-only
 
 ## Test Patterns
 
@@ -356,6 +351,67 @@ fn model_is_dropped_and_recorded() {
 
 **Pattern** (Phase 6 US1 / T053 placeholder): Every translation result carries a `dropped_fields: Vec<String>` describing which frontmatter keys were dropped during the field-map. Byte-stable JSON pin tests verify field order and presence for `TranslatedAgent` serialization (when agents are stored in doctor diagnostics).
 
+### Phase 6: Direct Guardrails Region Tests via Library API
+
+When testing guardrails rendering and marker validation without the full CLI sync, call guardrails APIs directly with in-memory file targets:
+
+```rust
+// tests/guardrails_render.rs
+#[test]
+fn regions_rendered_in_lexicographic_order() {
+    let dir = TempDir::new().unwrap();
+    let target = dir.path().join("CLAUDE.md");
+
+    // Seed initial content
+    std::fs::write(&target, "# my rules\n").unwrap();
+
+    // Reconcile with regions in non-lex order (z before a)
+    let mut desired = BTreeMap::new();
+    desired.insert("cat:z-plugin".to_string(), "z rules\n".to_string());
+    desired.insert("cat:a-plugin".to_string(), "a rules\n".to_string());
+
+    guardrails::reconcile_in_file_region(&target, &desired).expect("reconcile");
+
+    let result = std::fs::read_to_string(&target).unwrap();
+    // Verify a-plugin region comes before z-plugin
+    let a_pos = result.find("cat:a-plugin").expect("a present");
+    let z_pos = result.find("cat:z-plugin").expect("z present");
+    assert!(a_pos < z_pos, "regions rendered in lex order");
+}
+```
+
+**Pattern** (Phase 6 US3 / T3-1): Library-API tests for `guardrails::reconcile_in_file_region` and `rules_file::compose_in_file`. Direct calls avoid spinning up CLI + harness modules — tests focus on reconciliation logic, idempotence, marker validation. Used for verifying region ordering, overwrite-in-place, new-append, orphan-removal, and idempotence. Covers `contracts/guardrails.md` (FR-011/014/015).
+
+### Phase 6: Rules-File Strategy Tests via Direct Library Calls
+
+When testing rules-file block or standalone strategies, call the appropriate writer directly:
+
+```rust
+// tests/rules_file_block_in_existing.rs
+#[test]
+fn block_overwrites_in_place_preserves_surrounding_content() {
+    let dir = TempDir::new().unwrap();
+    let target = dir.path().join("RULES.md");
+
+    // Seed existing file with content outside the block
+    let initial = "# Header\n\n<!-- tome:begin -->\n<!-- tome:end -->\n\nFooter\n";
+    std::fs::write(&target, initial).unwrap();
+
+    // Update the block content
+    rules_file::write_block_in_file(&target, "new body\n").unwrap();
+
+    let result = std::fs::read_to_string(&target).unwrap();
+    assert!(result.contains("# Header"), "header preserved");
+    assert!(result.contains("new body"), "body updated");
+    assert!(result.contains("Footer"), "footer preserved");
+    // Verify markers still present with newline discipline
+    assert!(result.contains("<!-- tome:begin -->"), "begin marker present");
+    assert!(result.contains("<!-- tome:end -->"), "end marker present");
+}
+```
+
+**Pattern** (Phase 6 US3 / T081): Library-API tests for `rules_file::{write_block_in_file, write_standalone_file}`. Tests verify marker preservation, idempotence short-circuit (no rewrite if bytes match), symlink refusal (exit 7), atomic write semantics. Used for verifying `BlockInExistingFile` and `StandaloneFile` strategies per `contracts/rules-file-integration.md` (FR-525).
+
 ## Test Data
 
 ### Fixtures
@@ -438,10 +494,12 @@ All defined in `tests/common/mod.rs` with RAII drop guards.
 | Error Display | All variants | ✓ | `tests/error_messages.rs` |
 | JSON wire shapes | Byte-stable pins | ✓ | `tests/*_json_shape.rs` (Phase 4+) |
 | Agent translation | Per-harness contract | ✓ | `tests/agent_translate_*.rs` (Phase 6 US1) |
+| Hooks rewrite & merge | Boundary + integration | ✓ | `tests/hooks_*.rs` (Phase 6 US2) |
+| Guardrails regions | Rendering, validation, atomicity | ✓ | `tests/guardrails_*.rs` (Phase 6 US3) |
 
 **Exclusions**: ONNX inference (real model load excluded; library `fastembed` tests own path), real model downloads (fabricated fixtures instead), MCP protocol purity (deferred T093–T095).
 
-**Phase 6 US1**: Exit codes 43–46 (Phase 6 hooks + agents) are covered in `tests/exit_codes.rs`. New JSON wire shape `TranslatedAgent` with `dropped_fields` pinned in per-harness translation tests. Agent indexing integrated with `EntryKind::Agent` variant verified in `tests/entry_kind_agent_indexing.rs`. Agent removal (orphan + per-plugin) logic tested in `tests/agent_removal.rs`. Path-traversal defence (S-1) verified in `tests/agent_path_traversal.rs`.
+**Phase 6 US3**: Exit codes 46 (guardrails write failure) covered in `tests/exit_codes.rs` symlink-refusal path (unix-only) + atomicity injection test. Guardrails region rendering tested via `guardrails_render.rs` (idempotence, ordering, in-place-update, new-append, orphan-removal). Fail-closed marker validation (B-1) tested in `guardrails_marker_injection.rs` (three crafted bodies each rejected; sibling renders). Suppression tested in `guardrails_suppression.rs` (cross-file invariant). Phase 4 correction tested in `rules_file_claude_correction.rs` (claude-code candidate set = CLAUDE.md, not AGENTS.md). Rules-file strategies tested directly via `rules_file_block_in_existing.rs` and `rules_file_standalone.rs`.
 
 ## Test Categories by Purpose
 
@@ -469,6 +527,7 @@ Tests for previously fixed bugs, linked to phase retros:
 | Phase 5 US5 | (current) | `doctor_phase5_surface_creates_no_dirs` (FR-124 read-only invariant) |
 | Phase 6 Foundational F2 | (current) | `entry_kind_agent_indexing.rs` (Agent row integration; schema drift prevention) |
 | Phase 6 US1 S-1 | (current) | `agent_path_traversal.rs` (Index-time gate blocks ../../../../tmp/evil) |
+| Phase 6 US3 B-1 | (current) | `guardrails_marker_injection.rs` (Fail-closed marker validation) |
 
 ### Invariant Tests
 
@@ -489,6 +548,9 @@ Tests that verify core properties hold:
 | Agent embedding skip | `entry_kind_agent_indexing.rs` | Agent rows are never embedded; queries filter on `embedding IS NOT NULL` (Phase 6 US1) |
 | Path-traversal defence | `agent_path_traversal.rs` | Attacker-controlled `name: ../../../../tmp/evil` rejected at index time (S-1) |
 | Display name clash | `agent_naming_clash.rs` | Two agents with same `<name>` show plugin-prefixed display names (FR-041) |
+| Guardrails region ordering | `guardrails_render.rs` | Regions rendered in lex order; overwrite-in-place deterministic (FR-014) |
+| Guardrails marker validation | `guardrails_marker_injection.rs` | Any managed-marker line in body rejected (B-1 fail-closed) |
+| Rules-file idempotence | `rules_file_block_in_existing.rs`, `rules_file_standalone.rs` | Re-write with no change rewrites nothing (FR-525) |
 
 ### Phase 5: Truncation Boundary Tests
 
@@ -588,6 +650,97 @@ Tests that verify real Claude Code hooks path-variable rewriting and config file
 
 **Pattern** (Phase 6 US2 / T-3): E2E exit code test for exit 43 (HookSpecParseError). Exit 44 (HookSettingsWriteFailed) tested library-API-only in `hooks_merge.rs` (IO failures not cheaply forced through CLI). Contract: `contracts/exit-codes-p6.md` § "Discipline" (codes 43/44 split between e2e and library).
 
+### Phase 6: Guardrails Rendering and Validation Tests (US3)
+
+Tests that verify guardrails region rendering, marker validation, and atomicity (US3):
+
+#### Guardrails Render Tests (`tests/guardrails_render.rs`)
+
+| Test | Checks |
+|------|--------|
+| `regions_rendered_in_lexicographic_order()` | Multiple guardrails regions rendered in lex order of key (`<catalog>:<plugin>`) |
+| `new_region_appended_in_lex_order()` | New desired keys appended AFTER existing regions, in lex order |
+| `existing_region_overwritten_in_place()` | Changed body for existing key: region between markers rewritten in place (no move) |
+| `orphaned_region_removed()` | Key in file but not desired: region removed entirely |
+| `idempotent_re_sync_rewrites_nothing()` | Re-run with same desired map: file bytes unchanged (short-circuit compare) |
+| `multiple_harnesses_regions_on_same_file()` | `AGENTS.md` holds regions for both codex and opencode; ordering deterministic |
+
+**Pattern** (Phase 6 US3 / T3-1): Library-API tests for `guardrails::reconcile_in_file_region`. Direct calls to the reconciler with `BTreeMap<String, String>` of desired regions. Tests verify idempotence (FR-525), deterministic lexicographic ordering (FR-014), in-place overwrite (no shuffling), new-append, orphan-removal. Verified in `contracts/guardrails.md` (FR-011/014/015).
+
+#### Guardrails Suppression Tests (`tests/guardrails_suppression.rs`)
+
+| Test | Checks |
+|------|--------|
+| `suppressed_harness_skips_guardrails_region()` | Harness key in suppression map → `reconcile_in_file_region` not called for that harness |
+| `non_suppressed_writes_region()` | Harness key not in suppression map → `reconcile_in_file_region` called; region written |
+| `agents_md_not_corrupted_when_claude_code_suppressed()` | Claude Code suppressed but codex not: `AGENTS.md` holds codex region only; `CLAUDE.md` holds claude-code hooks-via-@include; cross-file invariant holds |
+
+**Pattern** (Phase 6 US3 / T3-3): Full-stack tests via `sync_project` with two harnesses (claude-code + codex), suppression applied to claude-code (because it shipped hooks JSON). Verify codex guardrails region lands in `AGENTS.md` while claude-code skips its region (FR-013). Harness suppression computed by the sync orchestrator based on the hooks set (a per-plugin per-harness calculation).
+
+#### Guardrails Marker Injection Tests (`tests/guardrails_marker_injection.rs`)
+
+| Test | Checks |
+|------|--------|
+| `body_with_guardrails_start_marker_rejected()` | GUARDRAILS.md body contains `<!-- START GUARDRAILS: … -->` line → rejected (exit 46) |
+| `body_with_guardrails_end_marker_rejected()` | GUARDRAILS.md body contains `<!-- END GUARDRAILS: … -->` line → rejected (exit 46) |
+| `body_with_tome_block_marker_rejected()` | GUARDRAILS.md body contains `<!-- tome:begin -->` or `<!-- tome:end -->` line → rejected (exit 46) |
+| `sibling_plugin_region_renders_despite_crafted_body()` | One plugin has crafted (rejected) GUARDRAILS.md; sibling plugin with valid body still renders; re-sync convergent |
+
+**Pattern** (Phase 6 US3 / T3-2 B-1): Library-API tests for fail-closed marker validation. Fixture seeds three plugins: one with each marker type in the body, plus a valid sibling. `sync_project` via `reconcile_guardrails` reads all three sources; the three with markers surface exit 46 and record error in forward-progress slot; the valid plugin's region renders. Re-sync on the same fixture returns cleanly (idempotent). Verified in `contracts/guardrails.md` (FR-084, fail-closed refusal on body-escape attempt).
+
+#### Guardrails Atomicity Tests (extensions to `tests/atomicity.rs`)
+
+| Test | Checks |
+|------|--------|
+| `guardrails_in_file_write_failure_leaves_target_byte_unchanged()` | Mid-write failure (read-only parent prevents sibling tempfile creation) on in-file guardrails target leaves file byte-for-byte unchanged |
+
+**Pattern** (Phase 6 US3 / T3-2): Interrupt-injection test. Fixture seeds an existing guardrails region in a target file, then attempts a `reconcile_in_file_region` call with a changed body. The parent directory is made read-only so the atomic write (sibling tempfile creation) fails after the desired body is computed. Verifies the failure surfaces exit 46 + the file is byte-for-byte intact (old region in place, no partial update). Restored to read-write before cleanup.
+
+### Phase 6: Rules-File Strategy Tests (US3)
+
+Tests that verify rules-file block and standalone strategies, Phase 4 correction (US3):
+
+#### Rules-File Block Tests (`tests/rules_file_block_in_existing.rs`)
+
+| Test | Checks |
+|------|--------|
+| `block_overwrites_in_place_preserves_surrounding_content()` | `BlockInExistingFile`: block updated, content outside markers unchanged |
+| `block_inserted_into_empty_file()` | Empty target file: block inserted with correct markers and newline discipline |
+| `idempotent_write_rewrites_nothing()` | Body unchanged: file bytes match desired; write short-circuits (no rewrite) |
+| `symlinked_target_is_refused_exit_7()` | Symlinked target path rejected before write → exit 7 (Unix only) |
+| `malformed_block_markers_detected_and_rejected()` | Nested `begin` or unmatched `end` in file → rejected (IO variant, not TomeError) |
+
+**Pattern** (Phase 6 US3 / T081): Library-API tests for `rules_file::write_block_in_file`. Direct calls avoid CLI spin-up. Tests verify marker preservation, content outside markers stays intact, symlink refusal (exit 7), atomic write semantics, idempotence. Covers `BlockInExistingFile` strategy per `contracts/rules-file-integration.md` (FR-525).
+
+#### Rules-File Standalone Tests (`tests/rules_file_standalone.rs`)
+
+| Test | Checks |
+|------|--------|
+| `standalone_file_created_if_absent()` | Target absent: file created with marker-wrapped body |
+| `standalone_file_replaced_entirely()` | Target exists: file replaced (not merged) |
+| `standalone_file_removal_deletes_file()` | `RulesFileStrategy::StandaloneFile`: removal deletes the file entirely |
+| `idempotent_write_rewrites_nothing()` | Body unchanged: write short-circuits |
+| `symlinked_target_is_refused_exit_7()` | Symlinked target path rejected before write → exit 7 (Unix only) |
+
+**Pattern** (Phase 6 US3 / T082): Library-API tests for `rules_file::write_standalone_file` and removal. Direct calls verify file creation/replacement, symlink refusal (exit 7), atomic semantics, idempotence, removal deletion. Covers `StandaloneFile` strategy per `contracts/rules-file-integration.md` (FR-525).
+
+#### Phase 4 Rules-File Correction Tests (`tests/rules_file_claude_correction.rs`)
+
+| Test | Checks |
+|------|--------|
+| `rules_block_lands_in_claude_md_not_agents_md()` | Claude Code harness candidate set: `CLAUDE.md` first; `AGENTS.md` skipped entirely (Phase 4 correction FR-020) |
+| `agents_md_used_for_codex_blocks_claude_md_for_claude_code()` | Multi-harness project: codex writes `AGENTS.md`; claude-code writes `CLAUDE.md` (not both to AGENTS) |
+| `both_blocks_resolve_same_project_rules_via_include()` | Both `CLAUDE.md` (claude-code) and `AGENTS.md` (codex) use `@`-includes to the same `.tome/RULES.md` |
+
+**Pattern** (Phase 6 US3 / T083): Full-stack tests via `sync_project` driving real `claude-code` and `codex` harness modules. Fixtures create multi-harness projects with `.tome/RULES.md` and verify the correct target files are written per harness. Tests the Phase 4 correction that moves claude-code from `AGENTS.md` → `CLAUDE.md` (FR-020/021/022).
+
+#### Rules-File Exit Code Tests (extensions to `tests/exit_codes_e2e.rs`)
+
+| Test | Checks |
+|------|--------|
+| `guardrails_write_through_symlink_exits_46()` | Symlinked in-file guardrails target during sync → exit 46 (library-API, Unix only) |
+
+**Pattern** (Phase 6 US3 / T-4): E2E exit code coverage for exit 46 (GuardrailsWriteFailed). Symlink refusal path exercises the fail-closed pattern cheaply. IO/render failures on rules-file targets tested library-API-only (not cheaply forced through CLI).
 
 ## CI Integration
 
@@ -665,6 +818,9 @@ fn entry_kind_agent_injected_rows_counted_correctly() { ... }
 
 #[test]
 fn agent_path_traversal_rejected_at_index_time() { ... }
+
+#[test]
+fn guardrails_marker_injection_stray_end_rejected() { ... }
 ```
 
 ### Minimal External I/O

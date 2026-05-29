@@ -204,3 +204,78 @@ fn migration_abort_mid_transaction_leaves_schema_version_and_data_unchanged() {
         "v1_partial must not exist on disk after rollback",
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6 / US3 — guardrails atomicity (T3-2).
+// ---------------------------------------------------------------------------
+
+/// A mid-write failure on an in-file guardrails target that already holds a
+/// region surfaces exit 46 AND leaves the file byte-for-byte unchanged (the
+/// old region intact, no partial region between markers).
+///
+/// Injection: a target that already holds a region, with its PARENT directory
+/// made read-only so the atomic write (sibling tempfile creation in the parent)
+/// fails after the desired body has been computed. The symlink-refusal path is
+/// not involved — this exercises the actual atomic-write path.
+#[test]
+#[cfg(unix)]
+fn guardrails_in_file_write_failure_leaves_target_byte_unchanged() {
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::PermissionsExt;
+    use tome::harness::guardrails;
+
+    let dir = TempDir::new().unwrap();
+    let target = dir.path().join("CLAUDE.md");
+
+    // Seed an existing region via a successful first reconcile.
+    let mut desired = BTreeMap::new();
+    desired.insert("cat:plug".to_string(), "original guardrails\n".to_string());
+    guardrails::reconcile_in_file_region(&target, &desired).expect("seed region");
+    let before = fs::read(&target).expect("read seeded target");
+
+    // Make the parent directory read-only so the sibling tempfile cannot be
+    // created → the atomic write fails mid-reconcile.
+    let parent = target.parent().unwrap();
+    let original_mode = fs::metadata(parent).unwrap().permissions().mode();
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o500)).expect("chmod parent ro");
+
+    // Reconcile with a CHANGED body so a write is actually attempted.
+    let mut changed = BTreeMap::new();
+    changed.insert("cat:plug".to_string(), "updated guardrails\n".to_string());
+    let result = guardrails::reconcile_in_file_region(&target, &changed);
+
+    // Restore permissions before any assertion can early-return (so the
+    // TempDir can clean up).
+    fs::set_permissions(parent, fs::Permissions::from_mode(original_mode)).expect("restore perms");
+
+    let err = result.expect_err("a write into a read-only parent must fail");
+    assert_eq!(
+        err.exit_code(),
+        46,
+        "a guardrails write failure → exit 46; got {err:?}"
+    );
+
+    // The file is byte-for-byte unchanged — old region intact, no partial
+    // region between markers.
+    let after = fs::read(&target).expect("read target after failed write");
+    assert_eq!(
+        before, after,
+        "target must be byte-for-byte unchanged after a failed write"
+    );
+    let after_text = String::from_utf8(after).expect("utf-8");
+    assert!(
+        after_text.contains("original guardrails"),
+        "the old region body must survive:\n{after_text}"
+    );
+    assert!(
+        !after_text.contains("updated guardrails"),
+        "no partial new region must be written:\n{after_text}"
+    );
+    assert_eq!(
+        after_text
+            .matches("<!-- START GUARDRAILS: cat:plug -->")
+            .count(),
+        1,
+        "exactly one START marker — no torn duplicate:\n{after_text}"
+    );
+}

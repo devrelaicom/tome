@@ -164,7 +164,7 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T076 [US2] Run codebase mapping for Phase 4 changes (`/sdd:map incremental`).
 - [X] T077 [US2] Review `retro/P4.md`; extract learnings to `CLAUDE.md` (conservative).
 - [X] T078 [GIT] Commit: `docs(phase-6): US2 closeout — mapping + retro`.
-- [ ] T079 [GIT] Push; PR with US2 summary; verify CI; report PR ready status.
+- [X] T079 [GIT] Push; PR with US2 summary; verify CI; report PR ready status. (PR #133 squash-merged to main @ a991312.)
 
 **Checkpoint**: Real hooks enforce on Claude Code.
 
@@ -176,26 +176,26 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Independent test**: Enable a `GUARDRAILS.md`-only plugin across all five harnesses → region in `CLAUDE.md`, shared `AGENTS.md`, Cursor sibling; a both-shipping plugin → region in `AGENTS.md`, absent from `CLAUDE.md`; disable removes only its region; re-sync overwrites in place; the rules-include block is in `CLAUDE.md` not `AGENTS.md`. (SC-006, SC-007)
 
-- [ ] T080 Create `specs/006-phase-6-hooks-agents/retro/P5.md` from template.
-- [ ] T081 [GIT] Commit: `docs(phase-6): init P5 retro`.
-- [ ] T082 [US3] Correct claude-code rules-file candidate list to `CLAUDE.md` > `.claude/CLAUDE.md` (drop `AGENTS.md`) in `src/harness/claude_code.rs` (FR-020/022) (use devs:rust-dev agent).
-- [ ] T083 [P] [US3] `tests/rules_file_claude_correction.rs` — block lands in `CLAUDE.md`, AGENTS.md project keeps one block, both resolve `.tome/RULES.md` (use devs:rust-dev agent).
-- [ ] T084 [GIT] Commit: `fix(phase-6): Claude Code rules sink is CLAUDE.md, not AGENTS.md`.
-- [ ] T085 [US3] Create `src/harness/guardrails.rs`: verbatim `GUARDRAILS.md` read; marker region render (`<!-- START GUARDRAILS: <catalog>:<plugin> -->` … `END`); reuse the `rules_file.rs` region find/replace generalised to a parameterised marker pair (use devs:rust-dev agent).
-- [ ] T086 [US3] Implement per-harness `guardrails_target` (claude-code→CLAUDE.md; codex/opencode→AGENTS.md; gemini→AGENTS.md else GEMINI.md; cursor→`.cursor/rules/TOME_GUARDRAILS.md` sibling) across the five harness modules (use devs:rust-dev agent).
-- [ ] T087 [US3] Implement per-file reconciliation in `src/harness/guardrails.rs`: deterministic placement (rules block first, then regions in lexicographic `<catalog>:<plugin>` order), overwrite-in-place, orphan removal, Cursor sibling deletion when empty; atomic write + mode-preservation + symlink-refusal (FR-011/014/015) (use devs:rust-dev agent).
-- [ ] T088 [US3] Implement the Claude Code suppression predicate (plugin ships `hooks.json` ⇒ no `CLAUDE.md` region) and the hooks→guardrails ordering + both suppression transitions in `src/harness/sync.rs` (FR-013/016) (use devs:rust-dev agent).
-- [ ] T089 [GIT] Commit: `feat(phase-6): GUARDRAILS.md per-plugin regions + suppression`.
-- [ ] T090 [P] [US3] `tests/guardrails_render.rs` — region in CLAUDE.md/AGENTS.md/Cursor sibling; two plugins → two regions; disable removes only one; re-sync in place (use devs:rust-dev agent).
-- [ ] T091 [P] [US3] `tests/guardrails_suppression.rs` — both-shipping plugin suppressed on CLAUDE.md present on AGENTS.md; both start/stop-hooks transitions (use devs:rust-dev agent).
-- [ ] T092 [P] [US3] Extend `tests/exit_codes_e2e.rs` — guardrails write failure → exit 46 (use devs:rust-dev agent).
-- [ ] T093 [GIT] Commit: `test(phase-6): US3 guardrails render + suppression + correction`.
-- [ ] T094 [US3] 4-reviewer pass; write `review/us3-findings.md` + `review/us3-disposition.md`.
-- [ ] T095 [US3] Apply US3 blockers + selected majors (use devs:rust-dev agent).
-- [ ] T096 [GIT] Commit: `fix(phase-6): apply US3 reviewer findings`.
-- [ ] T097 [US3] Run codebase mapping for Phase 5 changes (`/sdd:map incremental`).
-- [ ] T098 [US3] Review `retro/P5.md`; extract learnings to `CLAUDE.md` (conservative).
-- [ ] T099 [GIT] Commit: `docs(phase-6): US3 closeout — mapping + retro`.
+- [X] T080 Create `specs/006-phase-6-hooks-agents/retro/P5.md` from template.
+- [X] T081 [GIT] Commit: `docs(phase-6): init P5 retro`.
+- [X] T082 [US3] Correct claude-code rules-file candidate list to `CLAUDE.md` > `.claude/CLAUDE.md` (drop `AGENTS.md`) in `src/harness/claude_code.rs` (FR-020/022) (use devs:rust-dev agent).
+- [X] T083 [P] [US3] `tests/rules_file_claude_correction.rs` — block lands in `CLAUDE.md`, AGENTS.md project keeps one block, both resolve `.tome/RULES.md` (use devs:rust-dev agent).
+- [X] T084 [GIT] Commit: `fix(phase-6): Claude Code rules sink is CLAUDE.md, not AGENTS.md`.
+- [X] T085 [US3] Create `src/harness/guardrails.rs`: verbatim `GUARDRAILS.md` read; marker region render (`<!-- START GUARDRAILS: <catalog>:<plugin> -->` … `END`); reuse the `rules_file.rs` region find/replace generalised to a parameterised marker pair (use devs:rust-dev agent).
+- [X] T086 [US3] Implement per-harness `guardrails_target` (claude-code→CLAUDE.md; codex/opencode→AGENTS.md; gemini→AGENTS.md else GEMINI.md; cursor→`.cursor/rules/TOME_GUARDRAILS.md` sibling) across the five harness modules (use devs:rust-dev agent).
+- [X] T087 [US3] Implement per-file reconciliation in `src/harness/guardrails.rs`: deterministic placement (rules block first, then regions in lexicographic `<catalog>:<plugin>` order), overwrite-in-place, orphan removal, Cursor sibling deletion when empty; atomic write + mode-preservation + symlink-refusal (FR-011/014/015) (use devs:rust-dev agent).
+- [X] T088 [US3] Implement the Claude Code suppression predicate (plugin ships `hooks.json` ⇒ no `CLAUDE.md` region) and the hooks→guardrails ordering + both suppression transitions in `src/harness/sync.rs` (FR-013/016) (use devs:rust-dev agent).
+- [X] T089 [GIT] Commit: `feat(phase-6): GUARDRAILS.md per-plugin regions + suppression`.
+- [X] T090 [P] [US3] `tests/guardrails_render.rs` — region in CLAUDE.md/AGENTS.md/Cursor sibling; two plugins → two regions; disable removes only one; re-sync in place (use devs:rust-dev agent).
+- [X] T091 [P] [US3] `tests/guardrails_suppression.rs` — both-shipping plugin suppressed on CLAUDE.md present on AGENTS.md; both start/stop-hooks transitions (use devs:rust-dev agent).
+- [X] T092 [P] [US3] Extend `tests/exit_codes_e2e.rs` — guardrails write failure → exit 46 (use devs:rust-dev agent).
+- [X] T093 [GIT] Commit: `test(phase-6): US3 guardrails render + suppression + correction`.
+- [X] T094 [US3] 4-reviewer pass; write `review/us3-findings.md` + `review/us3-disposition.md`.
+- [X] T095 [US3] Apply US3 blockers + selected majors (use devs:rust-dev agent).
+- [X] T096 [GIT] Commit: `fix(phase-6): apply US3 reviewer findings`.
+- [X] T097 [US3] Run codebase mapping for Phase 5 changes (`/sdd:map incremental`).
+- [X] T098 [US3] Review `retro/P5.md`; extract learnings to `CLAUDE.md` (conservative).
+- [X] T099 [GIT] Commit: `docs(phase-6): US3 closeout — mapping + retro`.
 - [ ] T100 [GIT] Push; PR with US3 summary; verify CI; report PR ready status.
 
 **Checkpoint**: Guardrails degrade honestly everywhere; Claude Code reads its rules.

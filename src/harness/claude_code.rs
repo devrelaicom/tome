@@ -3,8 +3,11 @@
 //! Per research §R-8:
 //!
 //! - Per-user dir: `~/.claude/`.
-//! - Rules-file target: `AGENTS.md` > `CLAUDE.md` > `.claude/CLAUDE.md`
-//!   (first existing wins; falls back to `AGENTS.md` if none exist).
+//! - Rules-file target: `CLAUDE.md` > `.claude/CLAUDE.md` (first existing
+//!   wins; creates `CLAUDE.md` when none exist). Phase 6 correction
+//!   (FR-020/021/022): Claude Code does not natively read `AGENTS.md`, so
+//!   `AGENTS.md` is no longer a candidate — its rules-include block (and
+//!   guardrails region) land in `CLAUDE.md`.
 //! - Strategy: `BlockInExistingFile`, body style `AtInclude`.
 //! - MCP config: `<project>/.claude/settings.json` (per-project).
 //! - Parent key: `"mcpServers"`.
@@ -16,7 +19,8 @@ use crate::harness::agents::{
     self, CanonicalAgent, TranslatedAgent, agent_extension, agent_filename,
 };
 use crate::harness::{
-    AgentFormat, BlockBodyStyle, HarnessModule, HooksStrategy, McpConfigFormat, RulesFileStrategy,
+    AgentFormat, BlockBodyStyle, GuardrailsPlacement, GuardrailsTarget, HarnessModule,
+    HooksStrategy, McpConfigFormat, RulesFileStrategy,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Claude Code.
@@ -49,16 +53,22 @@ impl HarnessModule for ClaudeCode {
     }
 
     fn rules_file_target(&self, project_root: &Path) -> PathBuf {
-        // Precedence: AGENTS.md > CLAUDE.md > .claude/CLAUDE.md. First
-        // existing candidate wins; fall back to AGENTS.md if none exist
-        // (the sync algorithm will create it on first write).
-        for candidate in ["AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md"] {
+        // Precedence: CLAUDE.md > .claude/CLAUDE.md. First existing candidate
+        // wins; fall back to CLAUDE.md if none exist (the sync algorithm will
+        // create it on first write).
+        //
+        // Phase 6 correction (FR-020/021/022): AGENTS.md MUST NOT appear in
+        // this candidate set — Claude Code does not natively read it, so a
+        // rules-include block written there would be invisible. Codex / Gemini
+        // / OpenCode keep sharing AGENTS.md; both that block and this CLAUDE.md
+        // block resolve the same `.tome/RULES.md`.
+        for candidate in ["CLAUDE.md", ".claude/CLAUDE.md"] {
             let p = project_root.join(candidate);
             if p.exists() {
                 return p;
             }
         }
-        project_root.join("AGENTS.md")
+        project_root.join("CLAUDE.md")
     }
 
     fn rules_file_strategy(&self) -> RulesFileStrategy {
@@ -94,6 +104,21 @@ impl HarnessModule for ClaudeCode {
     /// never the committed `settings.json`.
     fn hook_settings_path(&self, project_root: &Path) -> Option<PathBuf> {
         Some(project_root.join(".claude/settings.local.json"))
+    }
+
+    // -- Guardrails fallback (FR-011, FR-012, FR-013) -----------------------
+
+    /// Claude Code's guardrails region lands in `CLAUDE.md` (the corrected
+    /// rules-file target, never `AGENTS.md`). It is the ONLY harness that
+    /// suppresses a plugin's region when that plugin ships real JSON hooks
+    /// (FR-013): the merged hooks supersede the prose fallback.
+    fn guardrails_target(&self, project_root: &Path) -> GuardrailsTarget {
+        GuardrailsTarget {
+            placement: GuardrailsPlacement::InFileRegion {
+                file: self.rules_file_target(project_root),
+            },
+            suppress_if_hooks_present: true,
+        }
     }
 
     // -- Native agents (FR-030–FR-032, FR-050) ------------------------------

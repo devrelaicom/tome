@@ -9,6 +9,10 @@
 //!   support).
 //! - Parent key: `"mcp_servers"` — snake_case is the documented TOML
 //!   convention here, distinct from the JSON harnesses' `"mcpServers"`.
+//! - Guardrails target (Phase 6): `AGENTS.md` in-file region, no
+//!   hooks-driven suppression — the trait default (`InFileRegion` on the
+//!   rules-file target, `suppress_if_hooks_present = false`) is exactly
+//!   correct, so no `guardrails_target` override is needed (FR-012).
 
 use std::path::{Path, PathBuf};
 
