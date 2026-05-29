@@ -280,9 +280,9 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T150 [P] Add `tests/entry_e2e_p6.rs` — enable → reconcile all sinks → assert hooks/guardrails/agents/persona end-to-end (use devs:rust-dev agent).
 - [X] T151 Evaluate cap-std hardening across the four new file sinks (`openat`/`O_NOFOLLOW`) per the Phase 5 P8 security backlog; apply or document deferral (use devs:rust-dev agent).
 - [X] T152 [GIT] Commit: `test(phase-6): idempotence + e2e + security hardening`.
-- [ ] T153 Update `README.md` (Phase 6 surface) + `CHANGELOG.md` (`[0.6.0]` entry: hooks, guardrails, agents, personas, Phase 4 correction; exit codes 43–46; no new deps; test delta).
-- [ ] T154 Bump `Cargo.toml` `0.5.0` → `0.6.0`; constitution check (PASS, no amendment).
-- [ ] T155 [GIT] Commit: `chore(release): v0.6.0 — version bump, CHANGELOG, README`.
+- [X] T153 Update `README.md` (Phase 6 surface) + `CHANGELOG.md` (`[0.6.0]` entry: hooks, guardrails, agents, personas, Phase 4 correction; exit codes 43–46; no new deps; test delta).
+- [X] T154 Bump `Cargo.toml` `0.5.0` → `0.6.0`; constitution check (PASS, no amendment).
+- [X] T155 [GIT] Commit: `chore(release): v0.6.0 — version bump, CHANGELOG, README`.
 - [ ] T156 Run final codebase mapping (`/sdd:map incremental`, 4 parallel mappers, all 8 docs).
 - [ ] T157 Review `retro/P8.md`; extract critical learnings to `CLAUDE.md` (conservative); update the current-phase line + Recent Changes for the v0.6.0 cut.
 - [ ] T158 [GIT] Commit: `docs(phase-6): Phase 6 closeout — mappers, retro P8, CLAUDE.md`.

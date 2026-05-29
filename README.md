@@ -2,7 +2,7 @@
 
 A Rust CLI (and eventually an MCP server) that makes Claude Code's plugin ecosystem work across other agentic coding harnesses — Cursor, Codex, Gemini CLI, OpenCode, and friends.
 
-> **Status: pre-release, Phase 5 shipped (v0.5.0).** Tome manages **catalogs** (Git-hosted plugin collections), **plugins** (enable them locally, build a semantic skill index, search it), **named workspaces** (central storage under `<home>/.tome/workspaces/<name>/`, projects bind via `.tome/config.toml` pointers), **rules-file + MCP-config integration into five harnesses** (Claude Code, Codex CLI, Cursor, Gemini CLI, OpenCode), and ships an **MCP server** so harnesses can query the index over the Model Context Protocol. Phase 5 added **commands as first-class entries** alongside skills (`commands/<name>.md`), exposed **user-invocable entries as MCP prompts** (host-side slash commands), shipped a hand-rolled **variable substitution layer** (12 built-ins + env passthrough + Claude Code-compatible argument substitution), added a **middle-tier `get_skill_info` MCP discovery tool**, extended `tome doctor` with Phase 5 surfaces (prompts report, orphan data dirs, entry counts by kind, `pending_re_embedding`), and now embeds `when_to_use` frontmatter for semantic search.
+> **Status: pre-release, Phase 6 shipped (v0.6.0).** Tome manages **catalogs** (Git-hosted plugin collections), **plugins** (enable them locally, build a semantic skill index, search it), **named workspaces** (central storage under `<home>/.tome/workspaces/<name>/`, projects bind via `.tome/config.toml` pointers), **rules-file + MCP-config integration into five harnesses** (Claude Code, Codex CLI, Cursor, Gemini CLI, OpenCode), and ships an **MCP server** so harnesses can query the index over the Model Context Protocol. Phase 5 added **commands as first-class entries** alongside skills (`commands/<name>.md`), exposed **user-invocable entries as MCP prompts** (host-side slash commands), shipped a hand-rolled **variable substitution layer** (12 built-ins + env passthrough + Claude Code-compatible argument substitution), added a **middle-tier `get_skill_info` MCP discovery tool**, extended `tome doctor` with Phase 5 surfaces (prompts report, orphan data dirs, entry counts by kind, `pending_re_embedding`), and now embeds `when_to_use` frontmatter for semantic search. Phase 6 closes out hooks + agents: **real Claude Code hooks** (a plugin's `hooks/hooks.json` rewritten + structural-match-merged into `.claude/settings.local.json`), a **`GUARDRAILS.md` prose fallback** rendered as per-plugin marker regions in each harness's rules file (or a Tome-owned Cursor sibling), **native agent translation** across four harnesses (Claude Code, Codex, Cursor, OpenCode), **optional agent-as-MCP-prompt personas** (off by default), and the **Phase 4 rules-file correction** making Claude Code's rules sink `CLAUDE.md` (not `AGENTS.md`).
 
 ## Install
 
@@ -51,7 +51,7 @@ tome --workspace my-project plugin enable ...  # explicitly target the workspace
 tome harness                                   # list shipped harness modules
 tome harness use claude-code --scope workspace # add claude-code to the workspace settings
 tome harness list                              # effective list with source-chain
-tome harness sync                              # re-run integration sweep for bound project
+tome harness sync                              # re-run sweep: rules + MCP + hooks + guardrails + agents (Phase 6)
 
 # Diagnostic (Phase 4) — broad doctor with auto-repair
 tome doctor                                    # models + index + catalogs + drift + harnesses
@@ -60,7 +60,7 @@ tome doctor --fix --force                      # also overrides user-owned MCP e
 tome doctor --verify --json                    # re-hash all model artefacts + structured report
 
 # MCP server — Model Context Protocol over stdio
-tome mcp                                       # advertises search_skills + get_skill
+tome mcp                                       # search_skills + get_skill + get_skill_info + prompts (+ optional agent personas)
                                                # diagnostics → ~/.tome/logs/mcp.log (JSON-lines)
 ```
 
@@ -89,6 +89,8 @@ Every Tome-owned path lives under **`<home>/.tome/`** (constitution v1.3.0 §Pat
 - **Phase 2 specification:** [`specs/002-phase-2-plugins-index/`](./specs/002-phase-2-plugins-index/)
 - **Phase 3 specification:** [`specs/003-phase-3-mcp-workspaces/`](./specs/003-phase-3-mcp-workspaces/)
 - **Phase 4 specification:** [`specs/004-phase-4-refactor-harnesses/`](./specs/004-phase-4-refactor-harnesses/)
+- **Phase 5 specification:** [`specs/005-phase-5-commands-prompts/`](./specs/005-phase-5-commands-prompts/)
+- **Phase 6 specification:** [`specs/006-phase-6-hooks-agents/`](./specs/006-phase-6-hooks-agents/)
 - **Contributor on-ramp:** [`CONTRIBUTING.md`](./CONTRIBUTING.md)
 
 ## Licence
