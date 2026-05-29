@@ -38,7 +38,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::Serialize;
 
 use crate::error::TomeError;
-use crate::harness::agents::CanonicalAgent;
+use crate::harness::agents::{self, CanonicalAgent};
 use crate::harness::{
     BlockBodyStyle, HarnessModule, RulesFileStrategy, mcp_config, rules_file,
     with_effective_modules,
@@ -689,10 +689,14 @@ fn reconcile_agents(
     }
 
     // Open the central DB read-only to enumerate enabled agents + the clash
-    // set. An absent / unopenable DB means no enabled agents — emission is
-    // empty, but cleanup still runs (orphan removal does not need the DB).
+    // set. R-1: a GENUINELY ABSENT DB means no enabled agents — emission is
+    // empty and cleanup still runs (orphan removal does not need the DB). But
+    // an EXISTING-yet-unopenable DB (SchemaTooNew/busy/vec-ext) must
+    // PROPAGATE its error here, BEFORE the destructive cleanup pass — never
+    // collapse to `None`, which would empty `enabled_plugins` and make the
+    // cleanup delete every emitted `<plugin>__*` file for live harnesses.
     let conn = if deps.paths.index_db.exists() {
-        crate::index::open_read_only(&deps.paths.index_db).ok()
+        Some(crate::index::open_read_only(&deps.paths.index_db)?)
     } else {
         None
     };
@@ -765,6 +769,13 @@ fn reconcile_agents(
 /// the body (bounded), and parses the frontmatter. Any failure maps to
 /// [`TomeError::AgentTranslationFailed`] (exit 45) so the sync surfaces the
 /// offending agent.
+///
+/// C-4: a parse failure HERE is a post-enable source-corruption edge — the
+/// agent enabled cleanly (a malformed agent cannot enable; `lifecycle`
+/// rejects it at index time) but its source was corrupted afterwards. The
+/// failure is recorded on the forward-progress `first_error` path; the
+/// prior-sync file (if any) is left in place — loud-but-isolated. The US5
+/// `doctor --fix` removes orphaned `<plugin>__*` files.
 fn prepare_agent(
     conn: &rusqlite::Connection,
     paths: &Paths,
@@ -827,6 +838,20 @@ fn emit_agents_for_harness(
             }
         };
         let target = dir.join(&translated.filename);
+        // S-1 defence-in-depth: the agent `name` is validated as a single
+        // safe path segment at index time, but assert here too that the
+        // joined target stays directly inside `dir` (no `ParentDir`/separator
+        // component snuck through the filename). A failed assert records
+        // `AgentTranslationFailed` on the forward-progress path and SKIPS the
+        // write — never write outside `dir`.
+        if target.parent() != Some(dir) {
+            if recon.first_error.is_none() {
+                recon.first_error = Some(TomeError::AgentTranslationFailed {
+                    agent: format!("{}/{}", agent.canonical.plugin, agent.canonical.name),
+                });
+            }
+            continue;
+        }
         match write_agent_file(&target, &translated.rendered) {
             Ok(AgentWrite::Created) => {
                 wrote = true;
@@ -964,11 +989,12 @@ fn removed_disabled_owned(
             continue;
         };
         // A Tome-owned file is `<plugin>__<name>.<ext>`. Recover `<plugin>`
-        // and check whether it is still enabled.
-        let Some(plugin) = owned_plugin_of(file_name) else {
+        // via the agents-module SSOT split and check whether it is still
+        // enabled.
+        let Some(plugin) = agents::plugin_of_owned_file(file_name) else {
             continue;
         };
-        if !enabled_plugins.contains(&plugin) {
+        if !enabled_plugins.contains(plugin) {
             out.push(entry.path());
         }
     }
@@ -991,28 +1017,12 @@ fn all_owned_in_dir(dir: &Path) -> Result<Vec<PathBuf>, TomeError> {
         let Some(file_name) = file_name.to_str() else {
             continue;
         };
-        if owned_plugin_of(file_name).is_some() {
+        if agents::plugin_of_owned_file(file_name).is_some() {
             out.push(entry.path());
         }
     }
     out.sort();
     Ok(out)
-}
-
-/// Recover the `<plugin>` prefix from a Tome-owned agent filename
-/// `<plugin>__<name>.<ext>`, or `None` when the name is not Tome-owned
-/// (no `__` separator, or an empty stem after it).
-fn owned_plugin_of(file_name: &str) -> Option<String> {
-    let (plugin, rest) = file_name.split_once("__")?;
-    if plugin.is_empty() {
-        return None;
-    }
-    // Require a non-empty `<name>` before the extension dot.
-    let stem = rest.rsplit_once('.').map(|(s, _)| s).unwrap_or(rest);
-    if stem.is_empty() {
-        return None;
-    }
-    Some(plugin.to_owned())
 }
 
 /// Outcome of an atomic agent-file write.
@@ -1023,9 +1033,10 @@ enum AgentWrite {
 }
 
 /// Write one translated agent file atomically, reusing the rules-file
-/// writer's discipline (symlink refusal + mode preservation + 0700 parent
-/// dirs + idempotent no-op when bytes already match). Classifies the result
-/// so the per-file `added`/`updated`/`leave_alones` bookkeeping is accurate.
+/// writer's discipline (symlink refusal + mode preservation +
+/// umask-governed `create_dir_all` of the parent + idempotent no-op when
+/// bytes already match). Classifies the result so the per-file
+/// `added`/`updated`/`leave_alones` bookkeeping is accurate.
 fn write_agent_file(target: &Path, rendered: &str) -> Result<AgentWrite, TomeError> {
     let prior = match crate::util::bounded_read_to_string(target, crate::util::HARNESS_RULES_MAX) {
         Ok(s) => Some(s),
@@ -1038,7 +1049,8 @@ fn write_agent_file(target: &Path, rendered: &str) -> Result<AgentWrite, TomeErr
         Some(_) => AgentWrite::Updated,
     };
     // `write_standalone` is idempotent + atomic + symlink-refusing + creates
-    // the parent dir 0700 — exactly the agent-file discipline.
+    // the parent dir via umask-governed `create_dir_all` — exactly the
+    // agent-file discipline.
     rules_file::write_standalone(target, rendered)?;
     Ok(classification)
 }

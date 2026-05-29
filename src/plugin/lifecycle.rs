@@ -755,6 +755,20 @@ fn collect_agent_entries(
 
         // `name` = frontmatter `name` else filename stem.
         let (name, name_fallback) = parsed.resolved_name(&agent.name);
+
+        // S-1: the resolved `name` becomes the `<name>` half of the emitted
+        // `<plugin>__<name>.<ext>` filename, which sync joins onto each
+        // harness's agent dir. An attacker plugin shipping `name:
+        // ../../../../tmp/evil` would escape that dir, so reject any `name`
+        // that is not a single safe path segment BEFORE storing the row.
+        // This is the index-time gate; `reconcile_agents` re-asserts a
+        // defence-in-depth `target.parent()` check at write time.
+        if !crate::harness::agents::is_safe_agent_name(&name) {
+            return Err(TomeError::AgentTranslationFailed {
+                agent: agent.path.display().to_string(),
+            });
+        }
+
         if name_fallback {
             warnings.push(format!(
                 "name fallback applied for {}: using filename `{}`",

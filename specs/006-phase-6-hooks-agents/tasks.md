@@ -130,8 +130,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 ### US1 closeout
 
 - [X] T055 [US1] 4-reviewer parallel pass (contract / Rust-lens / test / security) against the merged US1 surface; write `review/us1-findings.md` + `review/us1-disposition.md`.
-- [ ] T056 [US1] Apply US1 blockers + selected majors (use devs:rust-dev agent).
-- [ ] T057 [GIT] Commit: `fix(phase-6): apply US1 reviewer findings`.
+- [X] T056 [US1] Apply US1 blockers + selected majors (use devs:rust-dev agent).
+- [X] T057 [GIT] Commit: `fix(phase-6): apply US1 reviewer findings`.
 - [ ] T058 [US1] Run codebase mapping for Phase 3 changes (`/sdd:map incremental`).
 - [ ] T059 [US1] Review `retro/P3.md`; extract critical learnings to `CLAUDE.md` (conservative).
 - [ ] T060 [GIT] Commit: `docs(phase-6): US1 closeout — mapping + retro`.

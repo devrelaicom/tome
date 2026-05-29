@@ -328,6 +328,165 @@ fn malformed_agent_frontmatter_fails_with_exit_45() {
     );
 }
 
+/// Lay out a one-plugin catalog under `root` carrying ONE skill and ONE
+/// agent, both named `name`. Returns the catalog root. Used to prove that a
+/// same-name skill + agent produce two non-shadowing rows (kind is part of
+/// the identity, FR-070a).
+fn write_skill_and_agent_catalog(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let catalog_root = root.join("mixed-catalog");
+    let plugin_dir = catalog_root.join("plugin-mix");
+    std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::create_dir_all(plugin_dir.join("agents")).unwrap();
+    let skill_dir = plugin_dir.join("skills").join(name);
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(
+        catalog_root.join("tome-catalog.toml"),
+        "name = \"mixed-catalog\"\nversion = \"0.1.0\"\n\n[[plugins]]\nname = \"plugin-mix\"\nsource = \"./plugin-mix\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        plugin_dir.join(".claude-plugin").join("plugin.json"),
+        "{\"name\": \"plugin-mix\", \"version\": \"1.0.0\"}",
+    )
+    .unwrap();
+    // A searchable skill named `name`.
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: A searchable skill.\n---\nSkill body.\n"),
+    )
+    .unwrap();
+    // An agent ALSO named `name`.
+    std::fs::write(
+        plugin_dir.join("agents").join(format!("{name}.md")),
+        format!("---\nname: {name}\ndescription: A non-searchable agent.\n---\nAgent body.\n"),
+    )
+    .unwrap();
+    catalog_root
+}
+
+/// T-5 / FR-070: an enabled agent never appears in the real `search_skills`
+/// (KNN) path — it carries no embedding row AND `searchable=0`.
+#[test]
+fn agents_absent_from_search() {
+    use tome::embedding::Embedder;
+    use tome::index::query::QueryFilters;
+    use tome::index::skills::embedding_text;
+    use tome::index::{OpenOptions, knn};
+    use tome::plugin::identity::EntryKind;
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_all_registry_models(&paths);
+
+    let fixture_tmp = TempDir::new().unwrap();
+    let catalog_root = write_skill_and_agent_catalog(fixture_tmp.path(), "code-reviewer");
+    let cli_config = config_with_catalog("mixed-catalog", &catalog_root);
+    write_config_for_cli(&paths, &cli_config);
+
+    let embedder = StubEmbedder::new();
+    let deps = LifecycleDeps {
+        paths: &paths,
+        scope: &global_scope(),
+        config: &cli_config,
+        embedder: &embedder,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
+        allow_model_download: false,
+    };
+    let id: PluginId = "mixed-catalog/plugin-mix".parse().unwrap();
+    lifecycle::enable(&id, &deps).expect("enable plugin-mix");
+
+    let conn = tome::index::open(
+        &paths.index_db,
+        &OpenOptions {
+            embedder: stub_embedder_seed(),
+            reranker: stub_reranker_seed(),
+            summariser: stub_summariser_seed(),
+        },
+    )
+    .expect("open central db");
+
+    // Query with the agent's OWN embedding text — if agents were searchable
+    // it would be the top hit. It must not appear at all.
+    let query_vec = embedder
+        .embed(&embedding_text(
+            "code-reviewer",
+            "A non-searchable agent.",
+            None,
+        ))
+        .expect("embed query");
+    let hits = knn(&conn, "global", &query_vec, 50, &QueryFilters::default()).expect("knn");
+
+    assert!(
+        hits.iter().all(|c| c.kind != EntryKind::Agent),
+        "no agent may appear in search results; got {:?}",
+        hits.iter().map(|c| (&c.name, c.kind)).collect::<Vec<_>>(),
+    );
+    // The searchable skill of the same name IS present.
+    assert!(
+        hits.iter()
+            .any(|c| c.name == "code-reviewer" && c.kind == EntryKind::Skill),
+        "the searchable skill must still be findable",
+    );
+}
+
+/// T-5 / FR-070a: a plugin shipping a skill `foo` AND an agent `foo` produces
+/// TWO distinct rows — the kind is part of the row identity, so neither
+/// shadows the other.
+#[test]
+fn same_name_skill_and_agent_produce_two_rows() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_all_registry_models(&paths);
+
+    let fixture_tmp = TempDir::new().unwrap();
+    let catalog_root = write_skill_and_agent_catalog(fixture_tmp.path(), "foo");
+    let cli_config = config_with_catalog("mixed-catalog", &catalog_root);
+    write_config_for_cli(&paths, &cli_config);
+
+    let embedder = StubEmbedder::new();
+    let deps = LifecycleDeps {
+        paths: &paths,
+        scope: &global_scope(),
+        config: &cli_config,
+        embedder: &embedder,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
+        allow_model_download: false,
+    };
+    let id: PluginId = "mixed-catalog/plugin-mix".parse().unwrap();
+    lifecycle::enable(&id, &deps).expect("enable plugin-mix");
+
+    let conn = open_central(&paths);
+    let rows: Vec<(String, i64)> = {
+        let mut stmt = conn
+            .prepare("SELECT kind, searchable FROM skills WHERE name = 'foo' ORDER BY kind")
+            .unwrap();
+        let mapped = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+            .unwrap();
+        mapped.collect::<Result<Vec<_>, _>>().unwrap()
+    };
+
+    assert_eq!(
+        rows.len(),
+        2,
+        "skill `foo` + agent `foo` must produce two non-shadowing rows; got {rows:?}",
+    );
+    assert!(
+        rows.iter().any(|(k, s)| k == "agent" && *s == 0),
+        "the agent row exists and is non-searchable; got {rows:?}",
+    );
+    assert!(
+        rows.iter().any(|(k, s)| k == "skill" && *s == 1),
+        "the skill row exists and is searchable; got {rows:?}",
+    );
+}
+
 #[test]
 fn per_kind_counts_include_agents() {
     let fx = enable_with_injected_agent();

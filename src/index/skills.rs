@@ -798,20 +798,12 @@ where
                 id
             }
             _ => {
-                // Phase 6 / US1: agents are never embedded — skip the
-                // embedder call entirely and write no `skill_embeddings`
-                // row. `newly_embedded` counts only kinds that actually
-                // produced a vector (skills + commands).
-                let embedding = if skill.kind == EntryKind::Agent {
-                    None
-                } else {
-                    let vector = embed(&embedding_text(
-                        &skill.name,
-                        &skill.description,
-                        skill.when_to_use.as_deref(),
-                    ))?;
-                    Some(vector)
-                };
+                // Phase 6 / US1: agents are never embedded — route through
+                // `embed_unless_agent` so the "never embed agents" predicate
+                // is single-sourced with the reindex path. `newly_embedded`
+                // counts only kinds that actually produced a vector (skills +
+                // commands).
+                let embedding = embed_unless_agent(skill, &mut embed)?;
                 let id = upsert_skill(&tx, skill, &hash, embedding.as_deref(), &now)?;
                 if embedding.is_some() {
                     newly_embedded = newly_embedded.saturating_add(1);

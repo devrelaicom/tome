@@ -14,27 +14,15 @@
 //! * [`map_model`] — the same-vendor-only model alias table (FR-034/037).
 //! * [`infer_read_only`] — read-only intent inference (FR-036).
 //! * [`displayed_name`] — clean vs clash-prefixed displayed name (FR-041).
-//! * [`is_owned_agent_file`] / [`owned_agent_files`] — the `<plugin>__*.<ext>`
-//!   removal key (FR-043).
+//! * [`is_safe_agent_name`] — the S-1 single-safe-path-segment gate applied
+//!   at index time before a `name` is stored.
+//! * [`plugin_of_owned_file`] — the inverse of [`agent_filename`]; the SSOT
+//!   `<plugin>__*.<ext>` ownership split consumed by the sync reconciliation
+//!   for both the per-plugin removal and orphan-cleanup passes (FR-043).
 //!
 //! The per-harness `translate_agent` impls (which directory, which format,
-//! which fields survive the field map) and the sync reconciliation are the
-//! NEXT chunk. The types and helpers here are stable so that chunk wires in
-//! without reshaping the public surface.
-//!
-//! ## `dead_code` allowance
-//!
-//! The translation helpers below (`agent_filename`, the render primitives,
-//! `map_model`, `infer_read_only`, `displayed_name`, the removal-glob
-//! helpers) have no production caller YET — their first non-test consumer is
-//! the per-harness `translate_agent` + sync-reconciliation slice (chunk C),
-//! landing later in US1. The module-level `allow(dead_code)` keeps these
-//! building blocks co-located with the types they operate on rather than
-//! splitting them out when that slice lands, mirroring the same discipline
-//! applied to [`crate::index::skills::agent_name_clash_set`] (the clash-set
-//! SSOT, also written ahead of its first consumer). Unit tests in this
-//! module exercise every helper, so the allowance masks no untested code.
-#![allow(dead_code)]
+//! which fields survive the field map) and the sync reconciliation consume
+//! these helpers; the public surface here is the harness-agnostic core.
 
 use std::path::{Path, PathBuf};
 
@@ -259,6 +247,52 @@ fn split_frontmatter_block(contents: &str) -> Option<&str> {
     None
 }
 
+/// Validate that an agent `name` is a single safe path segment (S-1).
+///
+/// The emitted filename is `<plugin>__<name>.<ext>` and sync joins it onto
+/// the harness agent dir, so an attacker-controlled `name` such as
+/// `../../../../tmp/evil` would escape the directory. This is the index-time
+/// gate: a `name` must resolve to exactly one `Component::Normal` and carry
+/// no `/`, `\`, NUL, leading `.`, or `.`/`..` traversal token. On rejection
+/// the caller maps to [`TomeError::AgentTranslationFailed`] (exit 45).
+///
+/// Mirrors the `identity::validate_segment` discipline but is stricter on
+/// two fronts the plugin-id path does not face: an embedded NUL (invalid in
+/// any POSIX/Windows path component) and an embedded backslash (a Windows
+/// separator that `identity::validate_segment` only rejects as a *leading*
+/// char). The single-`Component::Normal` check is the robust backstop —
+/// anything that decomposes into more than one component, or into a
+/// `ParentDir`/`CurDir`/`RootDir`/`Prefix`, is rejected regardless of how it
+/// is spelled on the host platform.
+pub(crate) fn is_safe_agent_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    // NUL can never appear in a valid path component and would truncate the
+    // path at the syscall boundary on Unix.
+    if name.contains('\u{0}') {
+        return false;
+    }
+    // Reject separators on either platform up front. `Path::components`
+    // already splits on `/` (and on `\` on Windows), but checking here keeps
+    // the rejection platform-independent so a `\`-bearing name is refused on
+    // Unix too.
+    if name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    // Explicit traversal / dotfile rejection (matches identity::validate_segment).
+    if name == "." || name == ".." || name.starts_with('.') {
+        return false;
+    }
+    // The robust backstop: the name must decompose into exactly one
+    // `Component::Normal` equal to itself.
+    let mut comps = Path::new(name).components();
+    match (comps.next(), comps.next()) {
+        (Some(std::path::Component::Normal(seg)), None) => seg == std::ffi::OsStr::new(name),
+        _ => false,
+    }
+}
+
 /// File extension for a harness [`AgentFormat`].
 pub(crate) fn agent_extension(format: AgentFormat) -> &'static str {
     match format {
@@ -477,52 +511,25 @@ pub(crate) fn displayed_name(plugin: &str, name: &str, clashes: bool) -> String 
     }
 }
 
-/// Returns true when `filename` is a Tome-owned agent file for `plugin` —
-/// i.e. it matches `<plugin>__*.<any-ext>` (FR-043).
+/// Recover the `<plugin>` prefix from a Tome-owned agent filename
+/// `<plugin>__<name>.<ext>`, or `None` when the filename is not Tome-owned
+/// (no `__` separator, an empty plugin prefix, or an empty `<name>` stem).
 ///
-/// This is the per-plugin removal key. The match is on the `<plugin>__`
-/// prefix and the presence of a non-empty stem after it; the extension is
-/// not constrained here so a single scan can find both `.md` and `.toml`
-/// owned files. Callers that need a specific extension filter on it
-/// separately.
-pub(crate) fn is_owned_agent_file(filename: &str, plugin: &str) -> bool {
-    let prefix = format!("{plugin}__");
-    let Some(rest) = filename.strip_prefix(&prefix) else {
-        return false;
-    };
-    // Require a non-empty stem before the extension dot so a bare
-    // `<plugin>__.md` (no agent name) does not match.
-    match rest.rsplit_once('.') {
-        Some((stem, _ext)) => !stem.is_empty(),
-        None => false,
+/// This is the inverse of [`agent_filename`] and the single source of truth
+/// for the `<plugin>__` ownership split — the sync reconciliation consumes
+/// it for both the per-plugin removal pass and the orphan-cleanup pass so
+/// the split rule is never re-rolled (FR-043).
+pub(crate) fn plugin_of_owned_file(filename: &str) -> Option<&str> {
+    let (plugin, rest) = filename.split_once("__")?;
+    if plugin.is_empty() {
+        return None;
     }
-}
-
-/// Scan `dir` and return the paths of every Tome-owned agent file for
-/// `plugin` (`<plugin>__*.<ext>`), per FR-043's removal contract.
-///
-/// A missing directory yields an empty `Vec` (nothing to remove) rather than
-/// an error — removal is reconciliation, and an absent agent dir simply
-/// means no owned files exist yet. Any other I/O error is surfaced as
-/// [`TomeError::Io`]. Entries are returned sorted for deterministic
-/// removal/reporting order.
-pub(crate) fn owned_agent_files(dir: &Path, plugin: &str) -> Result<Vec<PathBuf>, TomeError> {
-    let read = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(TomeError::Io(e)),
-    };
-    let mut out = Vec::new();
-    for entry in read {
-        let entry = entry.map_err(TomeError::Io)?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if is_owned_agent_file(name, plugin) {
-            out.push(entry.path());
-        }
+    // Require a non-empty `<name>` before the extension dot.
+    let stem = rest.rsplit_once('.').map(|(s, _)| s).unwrap_or(rest);
+    if stem.is_empty() {
+        return None;
     }
-    out.sort();
-    Ok(out)
+    Some(plugin)
 }
 
 #[cfg(test)]
@@ -732,14 +739,38 @@ mod tests {
     }
 
     #[test]
-    fn is_owned_agent_file_matches_prefix() {
-        assert!(is_owned_agent_file("myplugin__reviewer.md", "myplugin"));
-        assert!(is_owned_agent_file("myplugin__reviewer.toml", "myplugin"));
-        // Different plugin.
-        assert!(!is_owned_agent_file("other__reviewer.md", "myplugin"));
+    fn plugin_of_owned_file_recovers_prefix() {
+        assert_eq!(
+            plugin_of_owned_file("myplugin__reviewer.md"),
+            Some("myplugin")
+        );
+        assert_eq!(
+            plugin_of_owned_file("myplugin__reviewer.toml"),
+            Some("myplugin")
+        );
         // Single underscore is not the provenance separator.
-        assert!(!is_owned_agent_file("myplugin_reviewer.md", "myplugin"));
+        assert_eq!(plugin_of_owned_file("myplugin_reviewer.md"), None);
+        // Empty plugin prefix.
+        assert_eq!(plugin_of_owned_file("__reviewer.md"), None);
         // Empty stem.
-        assert!(!is_owned_agent_file("myplugin__.md", "myplugin"));
+        assert_eq!(plugin_of_owned_file("myplugin__.md"), None);
+    }
+
+    #[test]
+    fn is_safe_agent_name_rejects_traversal_and_separators() {
+        // Well-formed single segments are accepted.
+        assert!(is_safe_agent_name("reviewer"));
+        assert!(is_safe_agent_name("my-agent_v2"));
+        // Path traversal in every spelling is rejected.
+        assert!(!is_safe_agent_name("../../../../tmp/evil"));
+        assert!(!is_safe_agent_name(".."));
+        assert!(!is_safe_agent_name("."));
+        assert!(!is_safe_agent_name("a/b"));
+        assert!(!is_safe_agent_name("a\\b"));
+        // Absolute, leading-dot, NUL, and empty are rejected.
+        assert!(!is_safe_agent_name("/etc/passwd"));
+        assert!(!is_safe_agent_name(".hidden"));
+        assert!(!is_safe_agent_name("evil\u{0}name"));
+        assert!(!is_safe_agent_name(""));
     }
 }

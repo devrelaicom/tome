@@ -78,3 +78,58 @@ fn unsupported_privileged_field_is_dropped_and_recorded() {
         t.dropped_fields,
     );
 }
+
+/// T-2 / C-2: an indeterminate posture (no `tools`, no `disallowedTools`)
+/// emits NO `readonly` key and records no harness target-name drop.
+#[test]
+fn indeterminate_posture_omits_readonly_key() {
+    let agent = CanonicalAgent {
+        tools: None,
+        disallowed_tools: None,
+        hooks: None,
+        ..agent()
+    };
+    let t = CURSOR.translate_agent(&agent, false).expect("translate");
+    assert!(
+        !t.rendered.contains("readonly:"),
+        "indeterminate posture must inherit Cursor's default (no readonly key):\n{}",
+        t.rendered,
+    );
+    // C-2: the harness target name is never recorded as a dropped field.
+    assert!(
+        !t.dropped_fields.contains(&"readonly".to_owned()),
+        "harness target name must NOT appear in dropped_fields; got {:?}",
+        t.dropped_fields,
+    );
+}
+
+/// T-2 / C-2: an explicit not-read-only allowlist emits NO `readonly` key.
+/// Cursor KEEPS the `tools` allowlist verbatim, so no source field is dropped
+/// for the read-only intent and the harness target name is never recorded.
+#[test]
+fn not_read_only_allowlist_omits_readonly_and_keeps_tools() {
+    let agent = CanonicalAgent {
+        tools: Some(vec!["Read".into(), "Edit".into()]),
+        disallowed_tools: None,
+        hooks: None,
+        ..agent()
+    };
+    let t = CURSOR.translate_agent(&agent, false).expect("translate");
+    assert!(
+        !t.rendered.contains("readonly:"),
+        "not-read-only allowlist must not assert readonly:\n{}",
+        t.rendered,
+    );
+    // The allowlist itself is carried through verbatim.
+    assert!(
+        t.rendered.contains("tools:"),
+        "Cursor keeps the tools allowlist:\n{}",
+        t.rendered,
+    );
+    // C-2: the harness target name is never recorded as a dropped field.
+    assert!(
+        !t.dropped_fields.contains(&"readonly".to_owned()),
+        "harness target name must NOT appear in dropped_fields; got {:?}",
+        t.dropped_fields,
+    );
+}

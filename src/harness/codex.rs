@@ -106,19 +106,21 @@ impl HarnessModule for Codex {
         }
 
         // Read-only intent → `sandbox_mode = "read-only"`. Indeterminate /
-        // not-read-only → drop (inherit the harness default).
-        match agents::infer_read_only(
+        // not-read-only → no `sandbox_mode` key (inherit the harness
+        // default). C-2: when the intent is NOT reconstructed we record the
+        // canonical SOURCE field(s) (`tools` / `disallowedTools`) below, not
+        // the harness target name `sandbox_mode` — those source fields drop
+        // wholesale for Codex regardless of read-only inference, so the drop
+        // is already captured.
+        //
+        // C-1: only read-only *intent* is reconstructed here; a non-read-only
+        // restrictive `tools` allowlist is dropped (full allowlist→sandbox
+        // scoping is deferred).
+        if let Some(true) = agents::infer_read_only(
             canonical.tools.as_deref(),
             canonical.disallowed_tools.as_deref(),
         ) {
-            Some(true) => {
-                scalars.push(("sandbox_mode".to_owned(), "read-only".to_owned()));
-            }
-            _ => {
-                if canonical.tools.is_some() || canonical.disallowed_tools.is_some() {
-                    dropped.push("sandbox_mode".to_owned());
-                }
-            }
+            scalars.push(("sandbox_mode".to_owned(), "read-only".to_owned()));
         }
 
         // Tool posture + privileged fields have no Codex dialect carrier.

@@ -102,3 +102,58 @@ fn read_only_posture_maps_to_sandbox_mode() {
         t.rendered,
     );
 }
+
+/// T-2 / C-2: an indeterminate tool posture (neither `tools` nor
+/// `disallowedTools`) emits NO `sandbox_mode` key, and records no harness
+/// target-name drop.
+#[test]
+fn indeterminate_posture_omits_sandbox_mode() {
+    let agent = CanonicalAgent {
+        tools: None,
+        disallowed_tools: None,
+        ..read_only_agent()
+    };
+    let t = CODEX.translate_agent(&agent, false).expect("translate");
+    let doc: toml_edit::DocumentMut = t.rendered.parse().expect("parse");
+    assert!(
+        doc.get("sandbox_mode").is_none(),
+        "indeterminate posture must inherit the harness default (no sandbox_mode):\n{}",
+        t.rendered,
+    );
+    // C-2: the harness target name is never recorded as a dropped field.
+    assert!(
+        !t.dropped_fields.contains(&"sandbox_mode".to_owned()),
+        "harness target name must NOT appear in dropped_fields; got {:?}",
+        t.dropped_fields,
+    );
+}
+
+/// T-2 / C-2: an explicit not-read-only allowlist (grants a write/edit tool)
+/// emits NO `sandbox_mode` key, and the canonical SOURCE field `tools` is
+/// recorded in `dropped_fields` (Codex drops the allowlist wholesale).
+#[test]
+fn not_read_only_allowlist_records_source_field() {
+    let agent = CanonicalAgent {
+        tools: Some(vec!["Read".into(), "Edit".into()]),
+        disallowed_tools: None,
+        ..read_only_agent()
+    };
+    let t = CODEX.translate_agent(&agent, false).expect("translate");
+    let doc: toml_edit::DocumentMut = t.rendered.parse().expect("parse");
+    assert!(
+        doc.get("sandbox_mode").is_none(),
+        "not-read-only allowlist must not assert read-only sandbox:\n{}",
+        t.rendered,
+    );
+    // C-2: the SOURCE field (`tools`) is recorded, NOT the target name.
+    assert!(
+        t.dropped_fields.contains(&"tools".to_owned()),
+        "canonical source field `tools` must be recorded; got {:?}",
+        t.dropped_fields,
+    );
+    assert!(
+        !t.dropped_fields.contains(&"sandbox_mode".to_owned()),
+        "harness target name must NOT appear in dropped_fields; got {:?}",
+        t.dropped_fields,
+    );
+}

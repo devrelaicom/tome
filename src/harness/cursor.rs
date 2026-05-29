@@ -122,19 +122,20 @@ impl HarnessModule for Cursor {
         }
 
         // Read-only intent → `readonly: true`. Indeterminate / not-read-only
-        // → drop (inherit Cursor's default).
-        match agents::infer_read_only(
+        // → no `readonly` key (inherit Cursor's default). C-2: Cursor KEEPS
+        // the `tools` allowlist verbatim and records `disallowedTools` as a
+        // drop below, so when the read-only intent is not reconstructed the
+        // responsible canonical SOURCE fields are already accounted for — we
+        // do NOT record the harness target name `readonly`.
+        //
+        // C-1: only read-only *intent* is reconstructed; a non-read-only
+        // restrictive `tools` allowlist is carried through as-is, not
+        // translated into a finer-grained permission model.
+        if let Some(true) = agents::infer_read_only(
             canonical.tools.as_deref(),
             canonical.disallowed_tools.as_deref(),
         ) {
-            Some(true) => {
-                frontmatter.push(("readonly".to_owned(), serde_yaml::Value::Bool(true)));
-            }
-            _ => {
-                if canonical.tools.is_some() || canonical.disallowed_tools.is_some() {
-                    dropped.push("readonly".to_owned());
-                }
-            }
+            frontmatter.push(("readonly".to_owned(), serde_yaml::Value::Bool(true)));
         }
 
         // No Cursor carrier for these.

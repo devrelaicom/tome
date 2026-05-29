@@ -101,6 +101,64 @@ fn description_falls_back_to_placeholder_when_body_empty() {
     );
 }
 
+/// T-2 / C-2: an indeterminate posture (no `tools`, no `disallowedTools`)
+/// emits NO `permission` block and records no harness target-name drop.
+#[test]
+fn indeterminate_posture_omits_permission_block() {
+    let agent = CanonicalAgent {
+        tools: None,
+        disallowed_tools: None,
+        ..base("reviewer", "First line.\n")
+    };
+    let t = OPENCODE.translate_agent(&agent, false).expect("translate");
+    assert!(
+        !t.rendered.contains("permission:"),
+        "indeterminate posture must inherit OpenCode's default (no permission block):\n{}",
+        t.rendered,
+    );
+    // C-2: the harness target name is never recorded as a dropped field.
+    assert!(
+        !t.dropped_fields.contains(&"permission".to_owned()),
+        "harness target name must NOT appear in dropped_fields; got {:?}",
+        t.dropped_fields,
+    );
+    // No source tool fields present → nothing to record either.
+    assert!(
+        !t.dropped_fields.contains(&"tools".to_owned()),
+        "no source tool field present, so none recorded; got {:?}",
+        t.dropped_fields,
+    );
+}
+
+/// T-2 / C-2: an explicit not-read-only allowlist emits NO `permission`
+/// block, and the canonical SOURCE field `tools` is recorded in
+/// `dropped_fields` (OpenCode records the source field nowhere else).
+#[test]
+fn not_read_only_allowlist_records_source_field() {
+    let agent = CanonicalAgent {
+        tools: Some(vec!["Read".into(), "Edit".into()]),
+        disallowed_tools: None,
+        ..base("reviewer", "First line.\n")
+    };
+    let t = OPENCODE.translate_agent(&agent, false).expect("translate");
+    assert!(
+        !t.rendered.contains("permission:"),
+        "not-read-only allowlist must not assert a read-only permission block:\n{}",
+        t.rendered,
+    );
+    // C-2: the SOURCE field (`tools`) is recorded, NOT the target name.
+    assert!(
+        t.dropped_fields.contains(&"tools".to_owned()),
+        "canonical source field `tools` must be recorded; got {:?}",
+        t.dropped_fields,
+    );
+    assert!(
+        !t.dropped_fields.contains(&"permission".to_owned()),
+        "harness target name must NOT appear in dropped_fields; got {:?}",
+        t.dropped_fields,
+    );
+}
+
 #[test]
 fn source_description_wins_over_body_fallback() {
     // When the source DOES carry a description, it takes precedence over the

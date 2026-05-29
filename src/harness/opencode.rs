@@ -127,8 +127,16 @@ impl HarnessModule for OpenCode {
         }
 
         // Read-only intent → per-tool `permission` block (edit/bash → deny).
-        // A not-read-only or indeterminate posture drops the permission
-        // expression (OpenCode inherits its default).
+        // A not-read-only or indeterminate posture inherits OpenCode's
+        // default. C-2: when the intent is NOT reconstructed, record the
+        // canonical SOURCE field(s) responsible (`tools` / `disallowedTools`)
+        // — NOT the harness target name `permission` — so the US5 doctor's
+        // `DroppedFieldEntry` names the source. OpenCode records these source
+        // fields nowhere else, so we record them here on the drop path.
+        //
+        // C-1: only read-only *intent* is reconstructed; a non-read-only
+        // restrictive `tools` allowlist is dropped (full allowlist→per-tool
+        // permission translation is deferred).
         match agents::infer_read_only(
             canonical.tools.as_deref(),
             canonical.disallowed_tools.as_deref(),
@@ -146,8 +154,11 @@ impl HarnessModule for OpenCode {
                 frontmatter.push(("permission".to_owned(), serde_yaml::Value::Mapping(perm)));
             }
             _ => {
-                if canonical.tools.is_some() || canonical.disallowed_tools.is_some() {
-                    dropped.push("permission".to_owned());
+                if canonical.tools.is_some() {
+                    dropped.push("tools".to_owned());
+                }
+                if canonical.disallowed_tools.is_some() {
+                    dropped.push("disallowedTools".to_owned());
                 }
             }
         }
