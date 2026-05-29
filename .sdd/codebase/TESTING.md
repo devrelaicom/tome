@@ -2,7 +2,7 @@
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 US5 — privilege governance + doctor extensions)
+> **Last Updated**: 2026-05-29 (Phase 6 Polish / v0.6.0)
 
 ## Test Framework
 
@@ -33,7 +33,7 @@
 
 ```
 tests/
-├── *.rs                         # Integration test files (175+ total as of Phase 6 US5)
+├── *.rs                         # Integration test files (175+ total as of Phase 6 Polish / v0.6.0)
 ├── common/
 │   ├── mod.rs                   # Shared harness: ToolEnv, Fixture, guards
 │   └── ...                      # (exported helpers)
@@ -72,19 +72,16 @@ tests/
 | **Agent personas** (Phase 6 US4) | `personas.rs`, `personas_collision.rs`, `personas_startup_scope.rs` | Persona prompts, toggle, startup resolution (3 files) |
 | **Settings** (Phase 6) | `settings_p6.rs`, `settings_*.rs` | Scalar resolution, layering, first-declarer-wins (15+ files) |
 | **Doctor extensions** (Phase 6 US5) | `doctor_p6.rs`, `doctor_p6_json_shape.rs`, `doctor_json.rs` | Hooks/guardrails/agents/personas/privilege reports (3 files) |
+| **Phase 6 Polish** | `harness_sync_p6_idempotence.rs`, `entry_e2e_p6.rs`, `harness_sync_p6_first_error.rs` | Multi-sink sync, end-to-end flows, forward-progress (3 files) |
 | **Misc** | `path_validation.rs`, `atomic_dir.rs`, etc. | Phase 1 foundational (10 files) |
 
-**Total**: 175+ test files across 175+ suites; 1250+ tests pass (Phase 6 US5 adds 3 new files + extensions).
+**Total**: 175+ test files across 175+ suites; ≈1427 test functions (Phase 6 US5 adds 24 tests in 3 new Polish files + extensions).
 
-**Phase 6 US5 additions**:
-- `tests/doctor_p6.rs` — Full matrix of Phase 6 doctor surfaces: hooks report (contributed/missing per event/plugin), guardrails report (present/orphaned/suppressed), agents report (per-harness presence), personas report (toggle on/off), privilege-escalation report (grouped by plugin + field); `--fix` re-renders each surface idempotently; read-only creates no directories (exact-count proof per FR-124)
-- `tests/doctor_p6_json_shape.rs` — Byte-stable JSON pin for doctor `HooksReport`, `GuardrailsReport`, `AgentsReport`, `PersonasReport`, `PrivilegeEscalationReport` emitted in `DoctorOutput` (wire-shape change contract: appended LAST, `skip_serializing_if` on optional fields)
-- `tests/plugin_show_p6.rs` — Extended `plugin show` for agents: lists agent rows per plugin, shows `hooks.json`/`GUARDRAILS.md` presence, displays resolved persona name (clash-prefixed if applicable)
-- `tests/plugin_show_p6_json_shape.rs` — Byte-stable JSON pin for agent entries in `plugin show` output (agent list includes name + display name + presence flags)
-- `tests/agent_privilege.rs` — Privilege escalation audit unchanged when strip setting on; stripping only affects emission, not source; privilege report sees unstripped source
-- Extensions to `tests/doctor_*.rs` — Confirm doctor surfaces created atomically, re-readable on re-run, hooks/guardrails/agents/personas all render when conditions met
-- Extensions to `tests/exit_codes_e2e.rs` — Exit 45 (AgentTranslationFailed) via `workspace use` with agent `name: ../../../../tmp/evil`; exit 46 (GuardrailsWriteFailed) via symlinked guardrails target during sync
-- Extensions to `tests/settings_*.rs` — `strip_plugin_agent_privileges` setting; first-declarer-wins resolution; default `false` when absent
+**Phase 6 Polish additions**:
+- `tests/harness_sync_p6_idempotence.rs` — Multi-sink idempotence: one `StubHarness` (RealJson hooks + `with_hook_settings()` + `with_native_agents()` + default non-suppressing in-file guardrails region) drives all three Phase 6 sinks; a second `sync_project` is a byte-for-byte no-op proved by capturing each sink output's mtime before a >1s sleep and asserting it is unchanged (the load-bearing "rewrites-identical-bytes" guard beyond empty added/updated).
+- `tests/entry_e2e_p6.rs` — Enable → one sync → assert all four surfaces (hooks command PLUGIN_ROOT-resolved, guardrails region body between markers, agent file, persona registry); persona toggle resolved end-to-end from on-disk workspace `settings.toml` via `resolve_expose_personas` (not a literal).
+- `tests/harness_sync_p6_first_error.rs` — Multi-sink first_error precedence (hooks 43 > guardrails 46 > agents 45) + forward progress; one failing component per plugin alongside a healthy plugin that lands in all three sinks.
+- Also: TEST-2 added a full `DoctorReport` envelope field-ORDER pin (`doctor_json.rs`); TEST-3 converted the GuardrailsReport + PersonaReport pins from order-insensitive `to_value` to order-sensitive `to_string` literals; TEST-4 added `SubsystemHealth` + `RulesCopyState` wire pins.
 
 ## Test Patterns
 
@@ -701,7 +698,7 @@ fn privilege_escalation_report_appended_last_in_doctor_output() {
 }
 ```
 
-**Pattern** (Phase 6 US5 / wire-shape pins): Byte-stable JSON pins for every new Phase 6 doctor report type. The doctor `HooksReport`, `GuardrailsReport`, `AgentsReport`, `PersonasReport`, and `PrivilegeEscalationReport` are appended LAST to `DoctorOutput` to preserve existing bytes. Tests verify field order, serialization format, and `skip_serializing_if` behavior. Covered in `tests/doctor_p6_json_shape.rs`.
+**Pattern** (Phase 6 US5 / wire-shape pins): Byte-stable JSON pins for every new Phase 6 doctor report type. The doctor `HooksReport`, `GuardrailsReport`, `AgentsReport`, `PersonasReport`, and `PrivilegeEscalationReport` are appended LAST to `DoctorOutput` to preserve existing JSON bytes. Tests verify field order, serialization format, and `skip_serializing_if` behavior. Covered in `tests/doctor_p6_json_shape.rs`.
 
 ### Phase 6 US5: Privilege Strip + Audit Separation Tests
 
@@ -826,10 +823,15 @@ All defined in `tests/common/mod.rs` with RAII drop guards.
 | Agent personas | Toggle, rendering, substitution, collision | ✓ | `tests/personas*.rs` (Phase 6 US4) |
 | Settings scalar resolution | First-declarer-wins, layering, defaults | ✓ | `tests/settings_p6.rs` + `tests/personas_startup_scope.rs` (Phase 6 US4) |
 | Doctor extensions | Hooks/guardrails/agents/personas/privilege reports; --fix idempotence | ✓ | `tests/doctor_p6.rs`, `tests/doctor_p6_json_shape.rs` (Phase 6 US5) |
+| Multi-sink idempotence | Phase 6 Polish cross-US testing | ✓ | `tests/harness_sync_p6_idempotence.rs` (Phase 6 Polish) |
+| End-to-end flows | Enable → sync → verify all surfaces | ✓ | `tests/entry_e2e_p6.rs` (Phase 6 Polish) |
+| Forward-progress | Multi-sink error isolation | ✓ | `tests/harness_sync_p6_first_error.rs` (Phase 6 Polish) |
 
 **Exclusions**: ONNX inference (real model load excluded; library `fastembed` tests own path), real model downloads (fabricated fixtures instead), MCP protocol purity (deferred T093–T095).
 
 **Phase 6 US5**: Doctor read-only projection via library API (no CLI spin-up for report tests, matching `doctor_p5.rs` pattern). Direct calls to `build_hooks_report`, `build_guardrails_report`, `build_agents_report`, `build_personas_report`, `build_privilege_escalation_report`. JSON shapes byte-stable via pins. `--fix` idempotence via re-invocation of `sync_project`. Privilege strip/audit separation verified. All tested via library API (no CLI spawn for report detail tests, matching established patterns).
+
+**Phase 6 Polish**: Three new cross-US suites test multi-sink orchestration, end-to-end enable→sync→verify, and multi-sink first-error precedence. `StubHarness` with `RealJson` + `with_hook_settings()` + `with_native_agents()` drives all three sinks without CLI spin-up, enabling comprehensive idempotence + forward-progress verification.
 
 ## Test Categories by Purpose
 
@@ -861,6 +863,7 @@ Tests for previously fixed bugs, linked to phase retros:
 | Phase 6 US4 R-4-2 | (current) | `personas_startup_scope.rs` (Single-source-of-truth scope-loaders) |
 | Phase 6 US5 FR-124 | (current) | `doctor_p6.rs::surface_creates_no_dirs` (Read-only invariant proof) |
 | Phase 6 US5 FR-051 | (current) | `agent_privilege.rs` (Audit/strip separation) |
+| Phase 6 Polish | (current) | `harness_sync_p6_idempotence.rs`, `entry_e2e_p6.rs`, `harness_sync_p6_first_error.rs` (Multi-sink orchestration) |
 
 ### Invariant Tests
 
@@ -891,6 +894,9 @@ Tests that verify core properties hold:
 | Doctor privilege report | `doctor_p6.rs` | Privilege report groups by plugin, lists privileged fields (FR-051) |
 | Doctor byte-stable output | `doctor_*_json_shape.rs` | Wire-shape pins for all Phase 6 reports (appended LAST, `skip_serializing_if`) (Phase 6 US5) |
 | Privilege strip idempotence | `agent_privilege.rs` | Strip setting only affects emission, not audit source (FR-051) |
+| Multi-sink idempotence | `harness_sync_p6_idempotence.rs` | Hooks + guardrails + agents all idempotent on re-sync (Phase 6 Polish) |
+| End-to-end surfaces | `entry_e2e_p6.rs` | All four surfaces present after enable → sync (Phase 6 Polish) |
+| Multi-sink forward-progress | `harness_sync_p6_first_error.rs` | One failing sink doesn't block others; first_error recorded (Phase 6 Polish) |
 
 ### Phase 5: Truncation Boundary Tests
 
@@ -1173,6 +1179,15 @@ fn doctor_p6_surface_creates_no_dirs() { ... }
 
 #[test]
 fn privilege_strip_only_affects_emission_not_audit() { ... }
+
+#[test]
+fn harness_sync_p6_idempotent_reruns_rewrite_nothing() { ... }
+
+#[test]
+fn entry_e2e_p6_enable_sync_renders_all_surfaces() { ... }
+
+#[test]
+fn harness_sync_p6_first_error_multi_sink_precedence() { ... }
 ```
 
 ### Minimal External I/O

@@ -283,10 +283,10 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T153 Update `README.md` (Phase 6 surface) + `CHANGELOG.md` (`[0.6.0]` entry: hooks, guardrails, agents, personas, Phase 4 correction; exit codes 43–46; no new deps; test delta).
 - [X] T154 Bump `Cargo.toml` `0.5.0` → `0.6.0`; constitution check (PASS, no amendment).
 - [X] T155 [GIT] Commit: `chore(release): v0.6.0 — version bump, CHANGELOG, README`.
-- [ ] T156 Run final codebase mapping (`/sdd:map incremental`, 4 parallel mappers, all 8 docs).
-- [ ] T157 Review `retro/P8.md`; extract critical learnings to `CLAUDE.md` (conservative); update the current-phase line + Recent Changes for the v0.6.0 cut.
-- [ ] T158 [GIT] Commit: `docs(phase-6): Phase 6 closeout — mappers, retro P8, CLAUDE.md`.
-- [ ] T159 [GIT] Push; create/update PR with the full Phase 6 summary; verify all CI checks pass; report PR ready status. (The v0.6.0 git tag + `cargo publish` are USER-RESERVED — do not run them.)
+- [X] T156 Run final codebase mapping (`/sdd:map incremental`, 4 parallel mappers, all 8 docs).
+- [X] T157 Review `retro/P8.md`; extract critical learnings to `CLAUDE.md` (conservative); update the current-phase line + Recent Changes for the v0.6.0 cut.
+- [X] T158 [GIT] Commit: `docs(phase-6): Phase 6 closeout — mappers, retro P8, CLAUDE.md`.
+- [X] T159 [GIT] Push; create/update PR with the full Phase 6 summary; verify all CI checks pass; report PR ready status. (The v0.6.0 git tag + `cargo publish` are USER-RESERVED — do not run them.)
 
 **Checkpoint**: Phase 6 shipped (v0.6.0). Hooks + agents complete.
 

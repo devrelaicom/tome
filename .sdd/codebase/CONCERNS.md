@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 / US5 privilege governance + doctor extensions; incremental update)
+> **Last Updated**: 2026-05-29 (Phase 6 / Polish — v0.6.0; 0 BLOCKER, 2 MAJOR fixed)
 
 ## Technical Debt
 
@@ -210,16 +210,20 @@ drift the per-US passes structurally could not see (the Phase 5 P8 lesson).
 Outcome: **0 BLOCKER, 2 MAJOR (both fixed), security clean.** Findings +
 disposition in `specs/006-phase-6-hooks-agents/review/{findings,disposition}.md`.
 
-- **CON-1 (MAJOR, fixed)** — the `settings.local.json` symlink refusal emitted
-  exit 7 while the parallel guardrails-target case had been reconciled to 46
-  (US3 C3-1); per the authoritative `exit-codes-p6.md`, a write-guard failure on
-  the dedicated settings sink is exit 44. Fixed: `hooks.rs::refuse_symlink_settings`
-  now returns `HookSettingsWriteFailed` (44); contract + tests aligned. The
-  hooks.json SOURCE read deliberately stays exit 7 (US2 C2-3/T2-6).
-- **TEST-1 (MAJOR, fixed)** — no test exercised the multi-sink `first_error`
-  precedence (hooks 43 > guardrails 46 > agents 45) when more than one sink fails
-  in one sync; a reorder of the checks would pass every existing test. Added
-  `tests/harness_sync_p6_first_error.rs`.
+- **CON-1 (MAJOR, FIXED)** — the `settings.local.json` symlink refusal (US2
+  `refuse_symlink_settings`) was emitting exit 7 while the parallel
+  guardrails-target case had been reconciled to 46 (US3 C3-1). Per the
+  authoritative `exit-codes-p6.md`, a write-guard failure on the dedicated
+  settings sink is exit 44 (`HookSettingsWriteFailed`). Fixed: `hooks.rs`
+  `refuse_symlink_settings` now returns `HookSettingsWriteFailed` (44) on
+  symlink detection; contract + tests aligned. The hooks.json SOURCE read
+  deliberately stays exit 7 (US2 C2-3/T2-6 — read path remains generic IO
+  error; write path gets dedicated exit code).
+- **TEST-1 (MAJOR, FIXED)** — no test exercised the multi-sink `first_error`
+  precedence (hooks 43 > guardrails 46 > agents 45) when more than one sink
+  fails in one sync. Added `tests/harness_sync_p6_first_error.rs` covering:
+  hooks fail + guardrails fail (hooks wins); guardrails fail + agents fail
+  (guardrails wins); all three fail (hooks wins).
 - **MINORs applied (T148)** — CON-2/CON-3 (exit-codes-p6.md code-7 reuse row
   clarified: GUARDRAILS.md source → 46; agents/*.md is 7 at index, 45 at sync);
   CON-5 (`HarnessDecision` field-order comment); SEC-1 (agent verbatim-body
@@ -250,13 +254,14 @@ deferral at the v0.6.0 boundary.
 > tempfile + same-FS rename, mode preservation, fail-closed non-UTF-8 handling)
 > are adequate; the exposure matches the pre-existing Phase 4 discipline and
 > introduces no new symlink-exposure class. Revisit when an unrelated need
-> justifies the `cap-std` dependency (with a constitution amendment) or if Tome's
-> trust model extends to syncing into operator-shared or untrusted directories.
+> justifies the `cap-std` dependency (with a constitution amendment) or if
+> Tome's trust model extends to syncing into operator-shared or untrusted
+> directories.
 
-A no-new-dep `O_NOFOLLOW`-on-final-open route was considered and rejected: it only
-hardens the final node (already covered by the `symlink_metadata` check), so it
-buys no intermediate-dir protection — the real win wants the cap-std `Dir`
-abstraction, gated by the no-new-top-level-dep constitution rule.
+A no-new-dep `O_NOFOLLOW`-on-final-open route was considered and rejected: it
+only hardens the final node (already covered by the `symlink_metadata` check),
+so it buys no intermediate-dir protection — the real win wants the cap-std
+`Dir` abstraction, gated by the no-new-top-level-dep constitution rule.
 
 ### Carried forward to v0.6+ (non-blocking)
 
@@ -334,6 +339,5 @@ Dependencies that may need attention:
 
 ---
 
-
 *This document tracks what needs attention. Update when concerns are resolved or discovered.*
-*Last refreshed 2026-05-29 against Phase 6 / US5 privilege governance + doctor extensions (incremental update). Phase 5 Polish baseline (1172 tests, 147 suites). US5 adds: PrivilegeEscalationReport (reads enabled agents' source canonical forms, surfaces privileged fields REGARDLESS of strip_plugin_agent_privileges setting); read-only doctor (no writes by default, --fix opt-in); `--fix` write safety (idempotent re-sync, user-edited hook/rules preservation, single-path remove_file discipline). TD-065-US4-P6 UPDATED to reflect US5 PersonaReport integration (doctor now personas-aware, persona list in separate report). Two low-priority accepted notes: O(agents×plugins) privilege-grouping acceptable for typical catalogs; Phase 6 `--fix` re-sync heuristic idempotent + safe. All Phase 6 / US1–US4 security findings zero (0 HIGH/MEDIUM/LOW); Phase 5 feature work critical security invariants all verified end-to-end.*
+*Last refreshed 2026-05-29 (Phase 6 / Polish — v0.6.0). 0 BLOCKER, 2 MAJOR (both fixed); security clean. Phase 6 / US1–US5 all verified; Phase 5 feature work critical security invariants all verified end-to-end. Exit code 44 applied to hooks settings symlink refusal (CON-1). Multi-sink first_error precedence test added (TEST-1). All Phase 6 critical security controls implemented and tested. v0.6.0 marks completion of Phase 6 (hooks + agents + guardrails + doctor extensions). Phase 6 Polish applies cap-std evaluation DEFER decision to v0.6.0+ per constitution gate (no new top-level deps).*
