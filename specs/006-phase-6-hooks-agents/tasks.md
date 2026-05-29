@@ -260,7 +260,7 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T139 [US5] Run codebase mapping for Phase 7 changes (`/sdd:map incremental`).
 - [X] T140 [US5] Review `retro/P7.md`; extract learnings to `CLAUDE.md` (conservative).
 - [X] T141 [GIT] Commit: `docs(phase-6): US5 closeout — mapping + retro`.
-- [ ] T142 [GIT] Push; PR with US5 summary; verify CI; report PR ready status.
+- [X] T142 [GIT] Push; PR with US5 summary; verify CI; report PR ready status.
 
 **Checkpoint**: All five user stories feature-complete. Only Polish remains.
 
@@ -270,8 +270,8 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Purpose**: Phase-wide review (catches cross-US drift the per-US passes can't — Phase 5 P8 lesson), test gaps, security hardening, docs, and the v0.6.0 cut.
 
-- [ ] T143 Create `specs/006-phase-6-hooks-agents/retro/P8.md` from template.
-- [ ] T144 [GIT] Commit: `docs(phase-6): init P8 retro`.
+- [X] T143 Create `specs/006-phase-6-hooks-agents/retro/P8.md` from template.
+- [X] T144 [GIT] Commit: `docs(phase-6): init P8 retro`.
 - [ ] T145 Phase-wide 4-reviewer parallel pass (contract / Rust-lens / test / security) against the full Phase 6 surface; consolidate `review/findings.md` + `review/disposition.md` (reviewers read the us{1..5}-disposition docs first).
 - [ ] T146 [GIT] Commit: `docs(review): Phase 6 phase-wide reviewer findings + disposition`.
 - [ ] T147 Apply phase-wide blockers + selected majors (use devs:rust-dev agent).
