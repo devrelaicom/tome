@@ -51,13 +51,13 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 ### F2 — `EntryKind::Agent` widening (load-bearing, FR-070a)
 
-- [ ] T009 Add the `Agent` variant to `EntryKind` in `src/plugin/identity.rs`; extend `FromStr`/`Display` with `"agent"` (use devs:rust-dev agent).
-- [ ] T010 Widen every exhaustive `match EntryKind` site to handle `Agent` (per-kind count aggregation in `src/commands/plugin/mod.rs` + `src/commands/plugin/show.rs`; the doctor entry-count surface in `src/doctor/checks.rs`); no catch-all — preserve canonical-enum-dispatch (use devs:rust-dev agent).
-- [ ] T011 [P] Add a unit test in `src/plugin/identity.rs` for `EntryKind::Agent` round-trip (`FromStr`/`Display`) (use devs:rust-dev agent).
-- [ ] T012 [P] Add `tests/entry_kind_agent_indexing.rs` asserting an indexed `kind='agent'` row does not break `plugin list`/`plugin show`/`doctor` per-kind counts (use devs:rust-dev agent).
-- [ ] T013 Register a marker-only schema migration (bump schema version; no DDL/data change) in `src/index/migrations.rs` so the migration registry + doctor schema check agree the `kind` domain widened (research R-11) (use devs:rust-dev agent).
-- [ ] T014 [P] Extend `tests/schema_migration_*.rs` with a test that the marker migration applies and bumps the version (use devs:rust-dev agent).
-- [ ] T015 [GIT] Commit: `feat(phase-6): widen EntryKind with Agent variant + marker migration`.
+- [X] T009 Add the `Agent` variant to `EntryKind` in `src/plugin/identity.rs`; extend `FromStr`/`Display` with `"agent"` (use devs:rust-dev agent).
+- [X] T010 Widen every exhaustive `match EntryKind` site to handle `Agent` (per-kind count aggregation in `src/commands/plugin/mod.rs` + `src/commands/plugin/show.rs`; the doctor entry-count surface in `src/doctor/checks.rs`); no catch-all — preserve canonical-enum-dispatch (use devs:rust-dev agent).
+- [X] T011 [P] Add a unit test in `src/plugin/identity.rs` for `EntryKind::Agent` round-trip (`FromStr`/`Display`) (use devs:rust-dev agent).
+- [X] T012 [P] Add `tests/entry_kind_agent_indexing.rs` asserting an indexed `kind='agent'` row does not break `plugin list`/`plugin show`/`doctor` per-kind counts (use devs:rust-dev agent).
+- [X] T013 Register a marker-only schema migration (bump schema version; no DDL/data change) in `src/index/migrations.rs` so the migration registry + doctor schema check agree the `kind` domain widened (research R-11) (use devs:rust-dev agent).
+- [X] T014 [P] Extend `tests/schema_migration_*.rs` with a test that the marker migration applies and bumps the version (use devs:rust-dev agent).
+- [X] T015 [GIT] Commit: `feat(phase-6): widen EntryKind with Agent variant + marker migration`.
 
 ### F3 — `HarnessModule` trait + `StubHarness` skeleton
 

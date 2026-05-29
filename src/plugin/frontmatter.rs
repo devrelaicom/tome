@@ -184,13 +184,17 @@ impl SkillFrontmatter {
 
     /// Resolved `user_invocable` value per `contracts/frontmatter-p5.md`
     /// § Resolved defaults. Defaults depend on `kind`: skills default to
-    /// `false`, commands default to `true`. An explicit value in
-    /// frontmatter overrides the default.
+    /// `false`, commands default to `true`; an explicit frontmatter value
+    /// overrides those two. Agents are special-cased (entry-schema-p6.md):
+    /// they are NEVER user-invocable — there is no frontmatter flag to
+    /// flip an agent into a prompt, so we ignore any author override and
+    /// return `false` before consulting `self.user_invocable`.
     pub fn resolved_user_invocable(&self, kind: EntryKind) -> bool {
-        self.user_invocable.unwrap_or(match kind {
-            EntryKind::Skill => false,
-            EntryKind::Command => true,
-        })
+        match kind {
+            EntryKind::Agent => false,
+            EntryKind::Skill => self.user_invocable.unwrap_or(false),
+            EntryKind::Command => self.user_invocable.unwrap_or(true),
+        }
     }
 }
 

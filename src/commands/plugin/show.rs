@@ -81,10 +81,12 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
     )?;
     let mut skills: Vec<EntryView> = Vec::new();
     let mut commands: Vec<EntryView> = Vec::new();
+    let mut agents: Vec<EntryView> = Vec::new();
     for e in entries {
         match e.kind {
             EntryKind::Skill => skills.push(e),
             EntryKind::Command => commands.push(e),
+            EntryKind::Agent => agents.push(e),
         }
     }
 
@@ -100,8 +102,8 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
     };
 
     match mode {
-        Mode::Human => emit_human(&record, &agg, &skills, &commands),
-        Mode::Json => emit_json(&record, &skills, &commands),
+        Mode::Human => emit_human(&record, &agg, &skills, &commands, &agents),
+        Mode::Json => emit_json(&record, &skills, &commands, &agents),
     }
 }
 
@@ -218,6 +220,7 @@ fn emit_human(
     agg: &super::IndexAggregate,
     skills: &[EntryView],
     commands: &[EntryView],
+    agents: &[EntryView],
 ) -> Result<(), TomeError> {
     let mut out = std::io::stdout().lock();
     writeln!(out, "Plugin:       {}", record.id)?;
@@ -295,6 +298,13 @@ fn emit_human(
             write_entry_line(&mut out, e)?;
         }
     }
+    if !agents.is_empty() {
+        writeln!(out)?;
+        writeln!(out, "Agents ({}):", agents.len())?;
+        for e in agents {
+            write_entry_line(&mut out, e)?;
+        }
+    }
 
     Ok(())
 }
@@ -346,6 +356,7 @@ fn emit_json(
     record: &PluginRecord,
     skills: &[EntryView],
     commands: &[EntryView],
+    agents: &[EntryView],
 ) -> Result<(), TomeError> {
     #[derive(Serialize)]
     struct Envelope<'a> {
@@ -353,11 +364,13 @@ fn emit_json(
         record: &'a PluginRecord,
         skills: &'a [EntryView],
         commands: &'a [EntryView],
+        agents: &'a [EntryView],
     }
     let env = Envelope {
         record,
         skills,
         commands,
+        agents,
     };
     crate::output::write_json(&env)
 }

@@ -330,6 +330,7 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         writeln!(out, "Entry counts:")?;
         writeln!(out, "  Skills:               {}", c.skills)?;
         writeln!(out, "  Commands:             {}", c.commands)?;
+        writeln!(out, "  Agents:               {}", c.agents)?;
         writeln!(out, "  Pending re-embedding: {}", c.pending_re_embedding,)?;
         writeln!(out)?;
     }
