@@ -2,7 +2,7 @@
 
 > **Purpose**: Document code style, naming conventions, error handling, and patterns for Tome (Rust CLI).
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 US1 — native agents)
+> **Last Updated**: 2026-05-29 (Phase 6 US2 — real Claude Code hooks)
 
 ## Code Style
 
@@ -592,6 +592,162 @@ pub(crate) fn render_codex_toml(scalars: &[(String, String)], body: &str) -> Str
 
 **Discipline**: Never hand-roll TOML quoting or escaping. `toml_edit`'s `value()` function's default string representation promotes any value containing a newline to `"""…"""` — exactly the triple-quoted form the contract mandates (FR-033 / R-14). Agent bodies are Markdown (multi-line), so the promotion is reliable and deterministic. Verified in `tests/agent_translate_codex.rs::body_lands_in_triple_quoted_developer_instructions`.
 
+### Phase 6: `reconcile_<sink>` Template for Sync Orchestration (US2)
+
+When writing a harness sync reconciliation function (hooks, agents, guardrails), follow the `reconcile_hooks` / `reconcile_agents` template in `src/harness/sync.rs`:
+
+```rust
+fn reconcile_hooks(
+    deps: &SyncDeps<'_>,
+    effective_names: &HashSet<String>,
+    snapshots: &[HarnessSnapshot],
+    outcome: &mut SyncOutcome,
+) -> Result<HooksReconciliation, TomeError> {
+    // 1. Open the central DB read-only (propagate the error for an EXISTING DB;
+    //    never .ok()-swallow a non-absent database).
+    let conn = if deps.paths.index_db.exists() {
+        Some(crate::index::open_read_only(&deps.paths.index_db)?)
+    } else {
+        None
+    };
+
+    // 2. Compute shared inputs once (enabled plugins, rewritten hooks, etc.).
+    let workspace = deps.workspace_name.as_str();
+    let enabled = match &conn {
+        Some(c) => crate::index::skills::enabled_plugins_for_workspace(c, workspace)?,
+        None => Vec::new(),
+    };
+
+    // 3. Per-harness loop with an actions map + first_error forward-progress.
+    let mut actions: HashMap<String, Action> = HashMap::new();
+    let mut first_error: Option<TomeError> = None;
+
+    for snap in snapshots {
+        // A write failure on harness A doesn't stop harness B from being processed.
+        match process_harness(snap, &effective_names, &enabled) {
+            Ok(action) => { actions.insert(snap.name.clone(), action); },
+            Err(e) if first_error.is_none() => {
+                first_error = Some(e);
+                actions.insert(snap.name.clone(), Action::LeftAlone);
+            }
+            Err(_) => {
+                actions.insert(snap.name.clone(), Action::LeftAlone);
+            }
+        }
+    }
+
+    // 4. Append the new SyncSubsystem variant LAST so the byte-stable JSON pin
+    //    only gains a trailing field (Hooks appended after Agents).
+    let recon = HooksReconciliation { actions, first_error };
+    Ok(recon)
+}
+```
+
+**Discipline**: The template ensures proper error propagation (abort on existing DB, forward-progress on per-harness failures), single computation of shared inputs, and byte-stable JSON ordering (new `SyncSubsystem::Hooks` field appended to `HarnessDecision` LAST). Used in `src/harness/sync.rs` at lines 707+ (reconcile_hooks) and 913+ (reconcile_agents); verified in `tests/harness_sync_stub.rs` (hooks forward-progress test).
+
+### Phase 6: Targeted Two-Token Rewrite via Fixed-Needle `str::replace` (US2)
+
+When rewriting path variables in JSON hook specifications, use fixed-needle `str::replace` (not the Phase 5 substitution pipeline, which violates NFR-007) over JSON string VALUES only (keys untouched):
+
+```rust
+// src/harness/hooks.rs::rewrite_string_leaves
+fn rewrite_string_leaves(value: &mut serde_json::Value, plugin_root: &str, plugin_data: &str) {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.contains("${CLAUDE_PLUGIN_ROOT}") {
+                *s = s.replace("${CLAUDE_PLUGIN_ROOT}", plugin_root);
+            }
+            if s.contains("${CLAUDE_PLUGIN_DATA}") {
+                *s = s.replace("${CLAUDE_PLUGIN_DATA}", plugin_data);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                rewrite_string_leaves(item, plugin_root, plugin_data);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            // Only the VALUES are rewritten; keys stay verbatim.
+            for (_k, v) in map.iter_mut() {
+                rewrite_string_leaves(v, plugin_root, plugin_data);
+            }
+        }
+        _ => {}  // Numbers / booleans / null carry no rewritable text.
+    }
+}
+```
+
+**Discipline**: Exactly two tokens (`${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}`); all other `${CLAUDE_*}` left verbatim (Claude Code resolves them). Fixed-needle `replace` is ReDoS-free and **cannot** accidentally match a longer variable name (e.g., `${CLAUDE_PLUGIN_ROOTX}` survives as `<root>X`, harmless because no such variable exists). Applied only to JSON string leaves (contract FR-003, R-4). Verified in `tests/hooks_rewrite.rs`.
+
+### Phase 6: Structural-Deep-Equal Ownership for Config Merges (US2)
+
+When merging hooks or other entries into a configuration file, establish ownership solely by re-derivation + deep-equal comparison, with no sidecar provenance marker (NFR-003):
+
+```rust
+// src/harness/hooks.rs::merge_into_settings
+fn append_if_absent(
+    hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
+    event: &str,
+    entry: &serde_json::Value,
+) -> bool {
+    let arr = hooks_obj
+        .entry(event.to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if !arr.is_array() {
+        *arr = serde_json::Value::Array(Vec::new());
+    }
+    let Some(items) = arr.as_array_mut() else {
+        return false;
+    };
+    // Idempotent: add only if no deep-equal entry exists.
+    if items.iter().any(|existing| existing == entry) {
+        return false;
+    }
+    items.push(entry.clone());
+    true
+}
+
+// src/harness/hooks.rs::remove_from_settings
+fn remove_if_present(
+    hooks_obj: &mut serde_json::Map<String, serde_json::Value>,
+    event: &str,
+    entry: &serde_json::Value,
+) -> bool {
+    let Some(items) = hooks_obj.get_mut(event).and_then(serde_json::Value::as_array_mut) else {
+        return false;
+    };
+    let before = items.len();
+    // Removal deletes only the deep-equal entry (never user-edited).
+    items.retain(|existing| existing != entry);
+    before != items.len()
+}
+```
+
+**Discipline**: A user-edited hook no longer matches its deep-equal source after Tome wrote it — it is never deleted. Symmetrically, on add, a user-authored entry identical to Tome's re-derivation counts as present and is not duplicated. The contract mandates no sidecar (FR-004, FR-005, NFR-003). Verified in `tests/hooks_merge.rs` (user-edited preservation, idempotence, dedup).
+
+### Phase 6: Fail Closed on Non-UTF-8 Load-Bearing Paths (US2)
+
+When a path becomes an executed command or load-bearing data, fail closed (exit 44) on non-UTF-8 paths rather than silently corrupting the path via `to_string_lossy`:
+
+```rust
+// src/harness/hooks.rs::non_utf8_guard
+fn non_utf8_guard<'a>(path: &'a Path, error_path: &Path) -> Result<&'a str, TomeError> {
+    path.to_str().ok_or_else(|| {
+        // The rewritten value becomes a hook COMMAND; U+FFFD corruption
+        // silently breaks the hook instead of refusing (R2-2).
+        settings_write_failed(
+            error_path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("non-UTF-8 hook rewrite target path: {}", path.display()),
+            ),
+        )
+    })
+}
+```
+
+**Rationale** (R2-2): Hook paths become command-line arguments in executed hooks. Non-UTF-8 paths with `to_string_lossy` substitution create silently-broken commands rather than failing early. Applied at `src/harness/hooks.rs::read_rewritten_entries` before rewrite, surfacing `TomeError::HookSettingsWriteFailed` (exit 44). Verified in `tests/hooks_merge.rs` (wrong-type settings → exit 44).
+
 ## Comments & Documentation
 
 | Type | Format | Usage |
@@ -672,7 +828,7 @@ Capability-oriented: each module owns one cohesive feature.
 | `presentation` | CLI tables, spinners, colour, prompts |
 | `workspace` | Workspace lifecycle, binding, resolution, scope |
 | `settings` | Layered settings composition, TOML edit |
-| `harness` | Per-harness module integration, rules-file + MCP-config + agent translation |
+| `harness` | Per-harness module integration, rules-file + MCP-config + agent translation + hooks merge |
 | `doctor` | System diagnostics, suggested fixes |
 | `mcp` | Async MCP server (only async island) |
 | `substitution` | Hand-rolled variable substitution (Phase 5) |

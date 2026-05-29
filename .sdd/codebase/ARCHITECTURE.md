@@ -2,11 +2,11 @@
 
 > **Purpose**: Document system design, patterns, component relationships, and data flow.
 > **Generated**: 2026-05-29
-> **Last Updated**: 2026-05-30 (Phase 6 US1; native agent translation core with per-harness emission; sync reconciliation; agent indexing + lifecycle integration)
+> **Last Updated**: 2026-05-31 (Phase 6 US2; real Claude Code hooks: JSON merge/remove into settings.local.json with targeted variable rewrite; sync reconciliation 3b subsystem)
 
 ## Architecture Overview
 
-Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, workspace-scoped plugin enablement, comprehensive health diagnostics with auto-repair, command indexing and MCP prompts capability, variable substitution engine with four-stage single-pass rendering pipeline, three-tier MCP discovery flow with middle-tier metadata fetching, per-entry invocability flags with read-only doctor extensions, and **Phase 6 US1 COMPLETE** native agent translation pipeline: canonical agent parsing from `<plugin>/agents/<name>.md`, per-harness translation rules (model alias table, field mapping, format rendering), sync reconciliation with clash-set handling and orphan cleanup, and agent indexing as non-searchable/non-invocable entries.
+Tome is a Rust CLI tool and MCP server that manages plugin ecosystems across coding harnesses (Claude Code, Cursor, Gemini CLI, Codex, OpenCode). It provides a centralized index for skill discovery and reranking, multi-workspace support with per-project bindings, harness composition management, workspace-scoped plugin enablement, comprehensive health diagnostics with auto-repair, command indexing and MCP prompts capability, variable substitution engine with four-stage single-pass rendering pipeline, three-tier MCP discovery flow with middle-tier metadata fetching, per-entry invocability flags with read-only doctor extensions, **Phase 6 US1 COMPLETE** native agent translation pipeline, and **Phase 6 US2 COMPLETE** real Claude Code hooks: JSON-based hook entries from `<plugin>/hooks/hooks.json` with targeted two-variable rewrite (`${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}`) and deep-equal structural merge/remove into the machine-local `.claude/settings.local.json`.
 
 The architecture is **monolithic with layered structure** split across two execution contexts:
 - **CLI layer** — sync command dispatcher + lifecycle orchestrator
@@ -20,6 +20,13 @@ Phase 6 **US1 COMPLETE** — native agent translation pipeline:
 - **Sync reconciliation (3c subsystem)** — `reconcile_agents()` enumerates enabled agents per-workspace, computes clash set once (FR-072), parses canonicals, dispatches per-harness translation, atomically writes `<plugin>__<name>.<ext>` (symlink-refusing, mode-preserving), removes orphaned `<plugin>__*` for non-live/non-supporting harnesses; forward progress on failure (FR-084); new `SyncSubsystem::Agents` discriminator in outcome
 - **Agent indexing** — `list_agent_files()` walks `agents/*.md`; `collect_agent_entries()` parses frontmatter + validates names; agent rows inserted with `kind='agent'`, `searchable=false`, `user_invocable=false` per FR-070a; `agent_name_clash_set()` / `enabled_agents_for_workspace()` queries support sync reconciliation
 - **Agent lifecycle** — Phase 5's `enable` / `disable` / `reindex` pipelines extended: agent collection happens after command collection; agent entry-kind is exhaustively matched alongside skill/command in doctor + plugin show/list; agent presence tracked in component counts
+
+Phase 6 **US2 COMPLETE** — real Claude Code hooks (JSON merge into settings.local.json):
+- **Hooks parsing pipeline** — `read_rewritten_entries()` reads a plugin's `<plugin>/hooks/hooks.json`, validates top-level object shape, applies **targeted two-variable rewrite** only (`${CLAUDE_PLUGIN_ROOT}` → absolute plugin root, `${CLAUDE_PLUGIN_DATA}` → plugin data dir; all other `${CLAUDE_*}` tokens left verbatim per NFR-007), returns `RewrittenHooks` event-keyed entries; malformed/unreadable files → exit 43
+- **Hooks merge/remove semantics** — `merge_into_settings()` idempotently appends rewritten entries under event keys via deep `serde_json::Value` equality (never duplicates user-authored identical entries per FR-004); creates `settings.local.json` with `{"hooks": {}}` when absent (FR-002); `remove_from_settings()` removes matching entries only, prunes empty event arrays (FR-005/FR-006), leaves non-matching/user-edited entries in place (ownership = re-derivation + structural match per NFR-003)
+- **Sync reconciliation (3b subsystem)** — `reconcile_hooks()` enumerates enabled plugins per-workspace, reads + rewrites each plugin's hooks once, dispatches merge/remove to live/non-live harnesses, records per-file changes in `SyncOutcome` with `SyncSubsystem::Hooks` discriminator; forward progress on parse failures (FR-084); only Claude Code harness participates (`RealJson` strategy); every other harness is `GuardrailsOnly` fallback (US3)
+- **Atomic write discipline** — All writes to `settings.local.json` use atomic tempfile + rename (symlink-refusing, mode-preserving), target the machine-local gitignored file never the committed `settings.json` (FR-002 contract)
+- **Two-variable rewrite mechanism** — Textual replace of exactly two fixed needle tokens (`${CLAUDE_PLUGIN_ROOT}`, `${CLAUDE_PLUGIN_DATA}`) in every JSON string leaf (keys/numbers/booleans/nulls untouched per FR-003), never touches unrecognized `${CLAUDE_*}` tokens (left for Claude Code runtime resolution), fails closed on non-UTF-8 rewrite targets (exit 44, R2-2)
 
 ## Architecture Pattern
 
@@ -36,8 +43,54 @@ Phase 6 **US1 COMPLETE** — native agent translation pipeline:
 | Phase 5 Polish — Single-source-of-truth accessors | `plugin_data_root()` for process-wide root; `workspace_data_dir_for()` for workspace-scoped paths; `validate_db_stored_path()` as canonical boundary-check helper; `build_context_for_entry()` as shared MCP context builder |
 | Phase 5 Polish — Stringly-typed dispatch rejection | Six sites use canonical `EntryKind::from_str()` + exhaustive match instead of substring patterns; defence-in-depth for schema drift |
 | Phase 6 / US1 — Native agent translation | Agent parsing SSOT in `src/harness/agents.rs` (`CanonicalAgent::parse`, `agent_filename`, `plugin_of_owned_file` provenance split, `map_model` alias table, `infer_read_only`, `displayed_name`, render primitives); per-harness `translate_agent()` overrides in five harness impls; sync reconciliation pass (3c) computes clash set once, parses enabled agents, dispatches translation, writes atomically, removes orphaned files; forward progress on agent translation failures |
+| Phase 6 / US2 — Real Claude Code hooks | Hooks parsing SSOT in `src/harness/hooks.rs` (`read_rewritten_entries`, targeted two-variable rewrite, merge/remove semantics); only Claude Code harness participates (`RealJson` strategy); sync reconciliation pass (3b subsystem) enumerates enabled plugins once, rewrites hooks once, dispatches merge/remove per harness (live vs non-live), records per-file granularity in outcome; atomic writes to machine-local `settings.local.json` (never committed `settings.json`); forward progress on parse failures |
 
 ## Core Components
+
+### Real Claude Code Hooks (`src/harness/hooks.rs`)
+
+- **Purpose**: Phase 6 / US2 — Read a plugin's `hooks/hooks.json`, rewrite two path variables, merge/remove entries into `.claude/settings.local.json` (only Claude Code harness)
+- **Location**: `src/harness/hooks.rs`
+- **Public functions** (the SSOT for hooks rewriting):
+  - `read_rewritten_entries(plugin_root, plugin_data) → Result<Option<RewrittenHooks>>` — Read and rewrite a plugin's `<plugin>/hooks/hooks.json`; validates top-level object shape (event-keyed arrays); applies targeted two-variable rewrite to every JSON string leaf; returns `RewrittenHooks` or `Ok(None)` when absent; malformed/unreadable → exit 43
+  - `merge_into_settings(target, hooks) → Result<bool>` — Merge rewritten hooks into `<project>/.claude/settings.local.json`, appending each entry under its event only when no deep-equal entry exists (idempotent per FR-004); creates file + parent dir (0700) when absent (FR-002); atomic, mode-preserving, symlink-refusing; returns `true` on change, `false` on no-op; any failure → exit 44
+  - `remove_from_settings(target, hooks) → Result<bool>` — Remove matching hooks from `settings.local.json` by deep structural equality, prune empty event arrays (FR-005/FR-006); non-matching/user-edited entries left in place (ownership = re-derivation + structural match per NFR-003); missing file is no-op; returns `true` on change; any failure → exit 44
+- **Types**:
+  - `RewrittenHooks` — Event-keyed entries post-rewrite: `Vec<(String, Vec<JsonValue>)>` where each `JsonValue` is a fully-rewritten hook object
+- **Two-variable rewrite** (FR-003, R-4):
+  - `${CLAUDE_PLUGIN_ROOT}` → absolute installed-plugin root (no relative path)
+  - `${CLAUDE_PLUGIN_DATA}` → `~/.tome/plugin-data/<catalog>/<plugin>/`
+  - Every other `${CLAUDE_*}` token (e.g., `${CLAUDE_PROJECT_DIR}`, `${CLAUDE_SESSION_ID}`) left verbatim — Claude Code resolves at runtime
+  - Rewrite applied to JSON string leaves only; keys, numbers, booleans, nulls untouched
+  - Non-UTF-8 rewrite targets fail closed (exit 44, R2-2)
+- **Ownership model** (NFR-003): No provenance marker or sidecar — ownership established solely by re-derivation + deep `serde_json::Value` equality. A hook the user hand-edited after Tome wrote it no longer matches and is left in place; Tome never deletes a hook it cannot prove it owns.
+
+### Sync Reconciliation — Hooks Subsystem (3b) (`src/harness/sync.rs`)
+
+- **Purpose**: Phase 6 / US2 — Orchestrate real-hooks merge/remove across all harnesses; runs BEFORE agents reconciliation (sink order: hooks → agents)
+- **Location**: `src/harness/sync.rs` (`reconcile_hooks()` + helpers)
+- **Algorithm**:
+  1. **Fast exit**: If no harness has a settings path (all `GuardrailsOnly`), return (no hooks participation)
+  2. **DB enumeration**: Open central DB read-only; enumerate enabled plugins for workspace (shared across all `RealJson` harnesses)
+  3. **Hooks parsing**: For each enabled plugin, resolve root dir, read + rewrite hooks once (forward progress on parse failure per FR-084); plugins with no `hooks/hooks.json` contribute nothing
+  4. **Per-harness dispatch**: For each harness with a settings path:
+     - If **live** (in effective list): `merge_into_settings()` appends rewritten entries
+     - If **non-live** (not in effective list): `remove_from_settings()` removes matching entries
+  5. **Result tracking**: Record per-file granularity in `SyncOutcome` (added/updated/removed) with `SyncSubsystem::Hooks` discriminator; aggregate per-harness action in `HarnessDecision::hooks_action`
+- **Data structures**:
+  - `HarnessSnapshot::hook_settings_path` — `Some(path)` for `RealJson` harnesses, `None` for `GuardrailsOnly`
+  - `SyncOutcome::added/updated/removed` — Records per-settings-file changes with `SyncSubsystem::Hooks`
+  - `HarnessDecision::hooks_action` — Aggregate action per harness (Created/Updated/Removed/LeftAlone)
+- **Forward progress** (FR-084): Parse failures recorded as first error; plugin is skipped; sibling plugins still reconcile; surface error after all harnesses processed
+
+### Claude Code Harness Extensions (`src/harness/claude_code.rs`)
+
+- **Purpose**: Phase 6 / US2 — Implement real-hooks strategy for Claude Code (only harness with `RealJson` support)
+- **Location**: `src/harness/claude_code.rs`
+- **Trait method overrides**:
+  - `hooks_strategy() → HooksStrategy` — Returns `HooksStrategy::RealJson` (only Claude Code)
+  - `hook_settings_path(project_root) → Option<PathBuf>` — Returns `<project>/.claude/settings.local.json` (machine-local, gitignored)
+- **Contract**: Rewritten hooks carry machine-specific absolute paths (from the two-variable rewrite), so they land only in `settings.local.json`, never the committed `settings.json` (FR-002)
 
 ### Agent Translation Core (`src/harness/agents.rs`)
 
@@ -120,7 +173,7 @@ Phase 6 **US1 COMPLETE** — native agent translation pipeline:
 |-------|----------------|------------|---------------|
 | CLI | Argument parsing, mode dispatch, error formatting | Commands | Database, embedder directly |
 | Commands | Command logic, outcome assembly, emit wrappers | Business logic (workspace, plugin, harness, settings, summarise, doctor, substitution) | Database directly (via deps) |
-| Business logic | Policy (binding, lifecycle, sync, substitution, diagnostics, harness trait dispatch, agent translation) | Index, catalog, plugin, settings, embedding, summarise, substitution, harness | CLI, presentation |
+| Business logic | Policy (binding, lifecycle, sync, substitution, diagnostics, harness trait dispatch, agent translation, hooks rewriting) | Index, catalog, plugin, settings, embedding, summarise, substitution, harness | CLI, presentation |
 | Data access | Queries, writes, transactions | Index, config, catalog on-disk | Commands, business logic |
 | Persistence | SQLite, filesystem, git | Raw operations | Higher layers |
 
@@ -139,7 +192,8 @@ Phase 6 **US1 COMPLETE** — native agent translation pipeline:
 - **Phase 5 Polish**: Single-source-of-truth accessors established: `plugin_data_root()` for process-wide data root; `workspace_data_dir_for()` for workspace-scoped paths; `validate_db_stored_path()` for boundary checks; `build_context_for_entry()` for shared MCP context (eliminates ~50 LOC cross-handler duplication)
 - **Phase 6 Foundational**: Harness trait extension follows safe-by-default pattern; all seven new methods have impls that do not alter harness discovery or sync until US1–US3 override them; trait methods never called except during sync + settings composition (wired post-Foundational)
 - **Phase 6 / US1**: Agent translation core (`src/harness/agents.rs`) is the harness-agnostic SSOT for parsing, validation, filename provenance, model alias table, read-only inference, and render primitives; per-harness `translate_agent()` overrides call these helpers; sync reconciliation (`reconcile_agents`) computes clash set once per pass and delegates translation dispatch; agent indexing enforces invariants (searchable=false, user_invocable=false, non-searchable queries) at MCP discovery time; forward progress (FR-084) on agent translation failures allows rest of sync to complete
+- **Phase 6 / US2**: Hooks rewriting core (`src/harness/hooks.rs`) is the harness-agnostic SSOT for parsing, two-variable rewrite, merge/remove semantics; only Claude Code harness participates (`RealJson` strategy); sync reconciliation (`reconcile_hooks`) enumerates enabled plugins once, rewrites once, dispatches merge/remove per harness (runs BEFORE agents as 3b subsystem); ownership model is re-derivation + structural equality with no provenance marker; forward progress (FR-084) on parse failures allows remaining plugins/harnesses to reconcile; all writes atomic + symlink-refusing, target machine-local `settings.local.json` only
 
 ---
 
-*This document describes HOW the system is organized at Phase 6 / US1 COMPLETE (native agent translation pipeline end-to-end: parsing, per-harness translation, sync reconciliation, indexing, display). Test suites: Phase 5 baseline + entry_kind_agent_indexing, harness_trait_p6, schema_migration_p6, exit_codes + US1: agent_translation, agent_sync_reconciliation, agent_indexing_lifecycle, agent_e2e (translation through display).*
+*This document describes HOW the system is organized at Phase 6 / US2 COMPLETE (real Claude Code hooks: parsing, two-variable rewrite, merge/remove semantics, sync reconciliation 3b subsystem integrated before agents 3c). Test suites: Phase 5 baseline + entry_kind_agent_indexing, harness_trait_p6, schema_migration_p6, exit_codes + US1: agent_translation, agent_sync_reconciliation, agent_indexing_lifecycle, agent_e2e + US2: hooks_parsing, hooks_merge_remove, hooks_sync_reconciliation.*

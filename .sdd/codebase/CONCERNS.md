@@ -2,7 +2,7 @@
 
 > **Purpose**: Document technical debt, known risks, bugs, fragile areas, and improvement opportunities.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 / US1 native agents; incremental update)
+> **Last Updated**: 2026-05-29 (Phase 6 / US2 real hooks; incremental update)
 
 ## Technical Debt
 
@@ -46,6 +46,7 @@ Items to address when working in the area:
 | TD-060-P5 | Phase 5 / Polish entry-body-path validation singleton | `validate_db_stored_path` promoted as single SSOT for path-traversal validation; all 4 entry-body-reading surfaces now use unified validator | Code clarity | Low | Previously, `resolve_entry_body_path` (substitution) was distinct from MCP tools' inline path handling. US5 Polish refactor consolidates to single `src/index/skills.rs::validate_db_stored_path` function. All call sites verified: `prompts/get`, `get_skill`, `plugin show`, substitution resolver | ✅ Phase 5 / Polish complete; validation unified |
 | TD-061-US1-P6 | Phase 6 / US1 per-agent removal stale files | Per-agent removal within enabled plugin whose agent set shrinks leaves stale `<plugin>__<oldname>` file until full plugin disable | Feature completeness | Low | Documented under FR-043 literal prefix match semantics; defensible (orphaned agent files persist until plugin fully disabled). US5 `doctor --fix` removes orphans via reconciliation. Not blocking; acceptable trade-off per phase specification | Phase 6+ polish if time permits |
 | TD-062-US1-P6 | Phase 6 / US1 symlink refusal depth | Symlink refusal on agent file writes is final-node-only (intermediate-dir symlink not checked) | Path traversal defense-in-depth | Low | Pre-existing Phase 4 discipline (consistent with rules file, MCP config); harness agent dir is operator-controlled. Hardening via cap-std / O_NOFOLLOW deferred to v0.6+ per roadmap | Phase 6+ / v0.6+ via cap-std |
+| TD-063-US2-P6 | Phase 6 / US2 stale hook-entry removal gap (`src/harness/sync.rs::reconcile_hooks`) | When an enabled plugin is dropped from `prepared` — arm (a): catalog cache evicted so `plugin_root_dir` errors; arm (b): `read_rewritten_entries` returns `Ok(None)` because `hooks/hooks.json` is gone — its previously-written `settings.local.json` entries cannot be re-derived for removal, so they persist and keep executing | Feature completeness | Medium | Ownership is structural re-derivation with no sidecar (NFR-003); removal needs the source to re-derive the deep-equal entry. No clean fix under the no-sidecar model. Both arms documented inline in `reconcile_hooks`. US5 doctor `HooksReport` is the surfacing path for these orphaned entries | Phase 6 / US5 doctor follow-up |
 
 ### Low Priority
 
@@ -107,6 +108,7 @@ Code areas that are brittle or risky to modify:
 | `src/catalog/manifest.rs::validate_source` | Path canonicalization behavior differs across platforms (symlinks, case sensitivity); one test failure can indicate subtle cross-platform issue | Test on both Linux and macOS (CI covers both); `tests/path_validation.rs` has Unix-specific symlink tests |
 | `src/index/skills.rs::validate_db_stored_path` (Phase 5 Polish SSOT) | Path validation unified SSOT for all entry-body-reading surfaces; removal or modification breaks 4 call sites (substitution, MCP get_skill, MCP get_plugin_info, plugin show) | Critical: do not remove or weaken validation. All call sites must use this function exclusively. Test with all 4 paths simultaneously in integration tests. Phase 5 / Polish: verified across all 4 sites; zero bypasses |
 | `src/catalog/store.rs::write_atomic` (Phase 4 US2.d-1 + US4 + US5 + Phase 5) | Unified atomic-write surface now used by all workspace/project/harness/settings/doctor file writers; mode preservation + symlink refusal are critical security boundaries | Do not remove mode-preservation or symlink-refusal checks; test with `tests/security_hardening.rs` on every platform. Verify callers use this surface exclusively |
+| `src/harness/hooks.rs` (Phase 6 / US2, NEW) | **Real hooks merge/remove via deep structural-equality match; two-variable rewrite handles plugin-root and data-dir paths; symlink refusal + mode preservation + atomic write on `settings.local.json` write** | **CRITICAL**: Do not weaken symlink refusal or remove atomic-write discipline. Test with `tests/security_hardening.rs` + real hooks fixtures. Verify UTF-8 guard on install paths (fail-closed exit 44). Removal must re-derive entries to identify structurally-matching ones — do not add a sidecar provenance marker (violates NFR-003). Merger and remover must pass through `refuse_symlink_settings` + `load_settings` + write via `write_settings` | Phase 6 / US2 complete; hooks merge/remove tested in integration suite |
 | `src/embedding/download.rs::download_model` | HTTP stream and checksum verification are separate; cleanup closure ensures both failure paths clean `.partial/` (lines 77–87) | Pipeline closure must wrap full download→verify→rename chain; any new step must be inside closure to maintain atomicity guarantee |
 | `src/presentation/prompt.rs::require_terminal()` | TTY check runs on both stdin and stdout; must catch non-TTY in both dimensions to prevent prompt corruption via piped output | Always call `require_terminal()` at flow entry before any prompt; test with `Command::new()` (no pty) to verify short-circuit |
 | `src/commands/plugin/{enable,disable,interactive}.rs` | Non-TTY pointer-message-then-error pattern appears at 3+ sites | Pattern consolidation would yield cleaner code; worth folding in when 4th occurrence appears |
@@ -178,6 +180,10 @@ Phase 6 / US1 native agents code review (incremental update at US1 closeout) pro
 | TD-061 | Rust | Per-agent stale files on name removal within enabled plugin (defensible under literal FR-043; US5 doctor --fix removes orphans) | Phase 6+ polish if time permits |
 | TD-062 | Security | Intermediate-dir symlink check (final-node-only per Phase 4 discipline; cap-std/O_NOFOLLOW hardening deferred v0.6+) | Phase 6+ / v0.6+ |
 
+## Phase 6 / US2 Deferred Findings
+
+Phase 6 / US2 real hooks code review (incremental update at US2 closeout) produced **0 HIGH/MEDIUM/LOW** security findings. Hooks JSON read/rewrite, settings file merge/remove, UTF-8 validation, and atomic write discipline all verified. No additional deferrals beyond TD-063-US2-P6 (stale hook-entry removal gap, surfaced as US5 doctor HooksReport).
+
 ## Performance Concerns
 
 Known performance issues:
@@ -227,6 +233,7 @@ Dependencies that may need attention:
 | `llama-cpp-2` | 0.1.x (Phase 4–5, minor-pinned) | Summariser inference runtime; C++ static link | Pre-1.0 crate; monitor for API churn; test on every minor bump; CPU-only features enforced; US4 first production use (C-B1 real hash) | Active / Pre-1.0 |
 | `toml_edit` | 0.25.x (Phase 4–5, minor-pinned) | Comment-preserving TOML edits for harness config + workspace marker preservation | Monitor for breaking changes; no known security issues. Used in critical US2 marker-preservation path (T-B1 fix) and US3 settings-edit (S-M3 fix) | Active |
 | `encoding_rs` | 0.8.x (Phase 4–5, direct) | Decode llama-cpp-2 token output to UTF-8 | MPL 2.0; no known security issues; used for model output decoding only | Stable |
+| `serde_json` | 1.x (Phase 6 / US2, direct) | JSON parsing for hooks (Phase 6 / US2 new direct use) | Stable ecosystem crate; `preserve_order` feature used for order preservation on re-write | Active |
 | `serde_yaml` | 0.9.x (Phase 5 US1–US5, direct) | YAML parser for skill/command frontmatter | Monitor for parse safety / panic issues on pathological input; bounded-read cap (256 KiB) + hard argument cap (256 entries) mitigate blast radius | Active; pre-existing as transitive dep |
 | `time` | 0.3.x (Phase 5 US2–US5) | Clock + timestamp formatting for substitution built-ins | Monitor for format-string safety; used for deterministic test seams (`SUBSTITUTION_CLOCK_OVERRIDE`) | Stable |
 
@@ -244,4 +251,4 @@ Dependencies that may need attention:
 ---
 
 *This document tracks what needs attention. Update when concerns are resolved or discovered.*
-*Last refreshed 2026-05-29 against Phase 6 / US1 native agents code (incremental update); Phase 5 Polish baseline (1172 tests, 147 suites); agent validation, atomic write, privilege passthrough, and literal ownership recovery all verified; 0 security findings.*
+*Last refreshed 2026-05-29 against Phase 6 / US2 real hooks code (incremental update); Phase 5 Polish baseline (1172 tests, 147 suites); hooks JSON read/rewrite, settings file merge, UTF-8 validation, and atomic write discipline all verified; 0 security findings from US2 reviewer pass. TD-063-US2-P6 (stale hook-entry removal gap) preserved per reviewer deferral; US5 doctor HooksReport is the surfacing path.*

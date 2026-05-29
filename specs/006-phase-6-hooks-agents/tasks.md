@@ -135,7 +135,7 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T058 [US1] Run codebase mapping for Phase 3 changes (`/sdd:map incremental`).
 - [X] T059 [US1] Review `retro/P3.md`; extract critical learnings to `CLAUDE.md` (conservative).
 - [X] T060 [GIT] Commit: `docs(phase-6): US1 closeout — mapping + retro`.
-- [ ] T061 [GIT] Push; create/update PR with US1 summary; verify CI; report PR ready status.
+- [X] T061 [GIT] Push; create/update PR with US1 summary; verify CI; report PR ready status. (PR #132 squash-merged to main @ fa8b25f.)
 
 **Checkpoint**: Native agents work end-to-end across the four harnesses. MVP-deliverable.
 
@@ -147,23 +147,23 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 
 **Independent test**: Enable a hook-shipping plugin in a claude-code project; assert `settings.local.json` has the rewritten hook (plugin-root absolute, other `${CLAUDE_*}` intact); re-sync adds no duplicate; user-identical hook not duplicated; disable removes only structural matches; committed settings file never written. (SC-004, SC-005)
 
-- [ ] T062 Create `specs/006-phase-6-hooks-agents/retro/P4.md` from template.
-- [ ] T063 [GIT] Commit: `docs(phase-6): init P4 retro`.
-- [ ] T064 [US2] Create `src/harness/hooks.rs`: read `hooks/hooks.json` (`serde_json`), targeted two-variable rewrite (`${CLAUDE_PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_DATA}` → absolute; all other `${CLAUDE_*}` verbatim) over string leaves via `regex` (use devs:rust-dev agent).
-- [ ] T065 [US2] Implement structural-match merge (add): append under event only if no deep-equal entry exists; create `settings.local.json` with a single `hooks` object if absent; atomic write + mode-preservation + symlink-refusal (FR-002/004) (use devs:rust-dev agent).
-- [ ] T066 [US2] Implement structural-match removal in `src/harness/hooks.rs`: remove deep-equal entries, skip non-matches; prune empty event arrays; keep empty `hooks` object (FR-005/006) (use devs:rust-dev agent).
-- [ ] T067 [US2] Set `hooks_strategy() = RealJson` + `hook_settings_path()` for claude-code in `src/harness/claude_code.rs`; wire hooks reconciliation as the first step in `src/harness/sync.rs` (use devs:rust-dev agent).
-- [ ] T068 [GIT] Commit: `feat(phase-6): real Claude Code hooks merge into settings.local.json`.
-- [ ] T069 [P] [US2] `tests/hooks_rewrite.rs` — two-variable rewrite; other `${CLAUDE_*}` untouched (use devs:rust-dev agent).
-- [ ] T070 [P] [US2] `tests/hooks_merge.rs` — add/idempotence/user-edit-preservation/dedup/create-if-absent/prune (use devs:rust-dev agent).
-- [ ] T071 [P] [US2] Extend `tests/exit_codes_e2e.rs` — malformed `hooks.json` → exit 43; settings write failure → exit 44 (use devs:rust-dev agent).
-- [ ] T072 [GIT] Commit: `test(phase-6): US2 hooks merge + rewrite + exit codes`.
-- [ ] T073 [US2] 4-reviewer pass; write `review/us2-findings.md` + `review/us2-disposition.md`.
-- [ ] T074 [US2] Apply US2 blockers + selected majors (use devs:rust-dev agent).
-- [ ] T075 [GIT] Commit: `fix(phase-6): apply US2 reviewer findings`.
-- [ ] T076 [US2] Run codebase mapping for Phase 4 changes (`/sdd:map incremental`).
-- [ ] T077 [US2] Review `retro/P4.md`; extract learnings to `CLAUDE.md` (conservative).
-- [ ] T078 [GIT] Commit: `docs(phase-6): US2 closeout — mapping + retro`.
+- [X] T062 Create `specs/006-phase-6-hooks-agents/retro/P4.md` from template.
+- [X] T063 [GIT] Commit: `docs(phase-6): init P4 retro`.
+- [X] T064 [US2] Create `src/harness/hooks.rs`: read `hooks/hooks.json` (`serde_json`), targeted two-variable rewrite (`${CLAUDE_PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_DATA}` → absolute; all other `${CLAUDE_*}` verbatim) over string leaves via `regex` (use devs:rust-dev agent).
+- [X] T065 [US2] Implement structural-match merge (add): append under event only if no deep-equal entry exists; create `settings.local.json` with a single `hooks` object if absent; atomic write + mode-preservation + symlink-refusal (FR-002/004) (use devs:rust-dev agent).
+- [X] T066 [US2] Implement structural-match removal in `src/harness/hooks.rs`: remove deep-equal entries, skip non-matches; prune empty event arrays; keep empty `hooks` object (FR-005/006) (use devs:rust-dev agent).
+- [X] T067 [US2] Set `hooks_strategy() = RealJson` + `hook_settings_path()` for claude-code in `src/harness/claude_code.rs`; wire hooks reconciliation as the first step in `src/harness/sync.rs` (use devs:rust-dev agent).
+- [X] T068 [GIT] Commit: `feat(phase-6): real Claude Code hooks merge into settings.local.json`.
+- [X] T069 [P] [US2] `tests/hooks_rewrite.rs` — two-variable rewrite; other `${CLAUDE_*}` untouched (use devs:rust-dev agent).
+- [X] T070 [P] [US2] `tests/hooks_merge.rs` — add/idempotence/user-edit-preservation/dedup/create-if-absent/prune (use devs:rust-dev agent).
+- [X] T071 [P] [US2] Extend `tests/exit_codes_e2e.rs` — malformed `hooks.json` → exit 43; settings write failure → exit 44 (use devs:rust-dev agent).
+- [X] T072 [GIT] Commit: `test(phase-6): US2 hooks merge + rewrite + exit codes`.
+- [X] T073 [US2] 4-reviewer pass; write `review/us2-findings.md` + `review/us2-disposition.md`.
+- [X] T074 [US2] Apply US2 blockers + selected majors (use devs:rust-dev agent).
+- [X] T075 [GIT] Commit: `fix(phase-6): apply US2 reviewer findings`.
+- [X] T076 [US2] Run codebase mapping for Phase 4 changes (`/sdd:map incremental`).
+- [X] T077 [US2] Review `retro/P4.md`; extract learnings to `CLAUDE.md` (conservative).
+- [X] T078 [GIT] Commit: `docs(phase-6): US2 closeout — mapping + retro`.
 - [ ] T079 [GIT] Push; PR with US2 summary; verify CI; report PR ready status.
 
 **Checkpoint**: Real hooks enforce on Claude Code.

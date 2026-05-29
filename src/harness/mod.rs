@@ -37,6 +37,7 @@ pub mod claude_code;
 pub mod codex;
 pub mod cursor;
 pub mod gemini;
+pub mod hooks;
 pub mod mcp_config;
 pub mod opencode;
 pub mod rules_file;

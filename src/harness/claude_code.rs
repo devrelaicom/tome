@@ -16,7 +16,7 @@ use crate::harness::agents::{
     self, CanonicalAgent, TranslatedAgent, agent_extension, agent_filename,
 };
 use crate::harness::{
-    AgentFormat, BlockBodyStyle, HarnessModule, McpConfigFormat, RulesFileStrategy,
+    AgentFormat, BlockBodyStyle, HarnessModule, HooksStrategy, McpConfigFormat, RulesFileStrategy,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Claude Code.
@@ -79,6 +79,21 @@ impl HarnessModule for ClaudeCode {
 
     fn mcp_parent_key(&self) -> &'static str {
         "mcpServers"
+    }
+
+    // -- Real hooks (FR-001, FR-002) ----------------------------------------
+
+    /// Claude Code is the only harness with native JSON hook support — its
+    /// plugins' `hooks/hooks.json` merges into the machine-local settings.
+    fn hooks_strategy(&self) -> HooksStrategy {
+        HooksStrategy::RealJson
+    }
+
+    /// The local, gitignored settings file (FR-002). Rewritten hooks carry
+    /// machine-specific absolute paths, so they land in `settings.local.json`,
+    /// never the committed `settings.json`.
+    fn hook_settings_path(&self, project_root: &Path) -> Option<PathBuf> {
+        Some(project_root.join(".claude/settings.local.json"))
     }
 
     // -- Native agents (FR-030–FR-032, FR-050) ------------------------------

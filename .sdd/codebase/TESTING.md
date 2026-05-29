@@ -2,7 +2,7 @@
 
 > **Purpose**: Document test frameworks, patterns, organization, and coverage requirements.
 > **Generated**: 2026-05-27
-> **Last Updated**: 2026-05-29 (Phase 6 US1 — native agents)
+> **Last Updated**: 2026-05-29 (Phase 6 US2 — real Claude Code hooks)
 
 ## Test Framework
 
@@ -69,7 +69,7 @@ tests/
 | **Agent translation** (Phase 6) | `agent_translate_*.rs`, `agent_*.rs` | Per-harness native agents (8 files) |
 | **Misc** | `path_validation.rs`, `atomic_dir.rs`, etc. | Phase 1 foundational (10 files) |
 
-**Total**: 161+ test files across 161+ suites; 1200+ tests pass (Phase 6 US1: Phase 6 Foundational 1194 → 1200+, +8 agent test files).
+**Total**: 161+ test files across 161+ suites; 1200+ tests pass (Phase 6 Foundational → US1/US2: 1200+, +8 agent files + 2 hooks files).
 
 **Phase 6 US1 additions**:
 - `tests/agent_translate_claude_code.rs` — Claude Code native-agent translation (MarkdownYaml format, model alias map, dropped field tracking)
@@ -81,6 +81,12 @@ tests/
 - `tests/agent_path_traversal.rs` — Path-traversal defence via is_safe_agent_name (S-1)
 - Extensions to `tests/entry_kind_agent_indexing.rs` — Verify `EntryKind::Agent` widening integrates with storage + queries without schema drift
 - Extensions to `tests/harness_sync_stub.rs` — Native-agent emit/orphan-removal/idempotence via mtime capture, symlink refusal (exit 7), forward-progress (exit 45), multi-harness fan-out
+
+**Phase 6 US2 additions**:
+- `tests/hooks_rewrite.rs` — Two-token hooks path-variable rewriting (FR-003, R-4); rewrite targets (`${CLAUDE_PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_DATA}` → absolute paths); other tokens left verbatim; only string VALUES rewritten (keys untouched); absent hooks.json → None; symlinked source → exit 7; malformed JSON → exit 43.
+- `tests/hooks_merge.rs` — Structural-match merge/removal/pruning of hooks into `.claude/settings.local.json` (FR-002/004/005/006); create-if-absent (committed `settings.json` never touched); idempotent re-add via deep-equal (mtime stable); user-authored dedup; user-edit preservation on removal; multi-plugin multi-event merge + re-merge; prune-empty-event while keeping `hooks` object; removal against absent file is no-op; malformed settings → exit 44, original intact; symlink refusal (both merge + remove) → exit 7.
+- Extensions to `tests/harness_sync_stub.rs` — Hooks forward-progress (one valid + one malformed plugin in same sync; malformed is skipped, good continues), symlink refusal on settings write → exit 7, multi-plugin merge in one pass + idempotence.
+- Extensions to `tests/exit_codes_e2e.rs` — `workspace_use_malformed_hooks_exits_43` validates malformed `hooks/hooks.json` surfaces exit 43 (exit 44 tested library-API-only in `hooks_merge.rs`).
 
 ## Test Patterns
 
@@ -527,6 +533,61 @@ Tests that verify each harness's agent format and field-mapping contract (US1):
 - Model mapping (same-vendor-only)
 - Dropped-fields vector
 - Read-only inference (tools → sandbox_mode or not)
+
+### Phase 6: Hooks Rewrite and Merge Tests (US2)
+
+Tests that verify real Claude Code hooks path-variable rewriting and config file merging (US2):
+
+#### Hooks Rewrite Tests (`tests/hooks_rewrite.rs`)
+
+| Test | Checks |
+|------|--------|
+| `resolves_plugin_root_and_data_leaves_others_verbatim()` | Two tokens resolved to absolute paths; `${CLAUDE_PROJECT_DIR}` / `${CLAUDE_SESSION_ID}` left verbatim |
+| `only_string_values_rewritten_keys_untouched()` | Non-string scalars (numbers) untouched; token-looking keys preserved verbatim; only VALUES rewritten |
+| `absent_hooks_file_is_none()` | Plugin with no `hooks/hooks.json` yields `Ok(None)` (benign fall-through) |
+| `symlinked_hook_source_is_refused_exit_7()` | Symlinked source path rejected → exit 7 (Unix only) |
+| `malformed_hooks_file_is_exit_43()` | Invalid JSON in `hooks/hooks.json` → exit 43, error names the file |
+
+**Pattern** (Phase 6 US2 / T069): Library-API tests for `harness::hooks::read_rewritten_entries`. Fixed-needle `str::replace` (not regex, not Phase 5 substitution pipeline) rewrites exactly two tokens in string VALUES only. Keys and non-string scalars survive. Contract: `contracts/hooks-integration.md` § "Path-variable rewriting" (FR-003, R-4).
+
+#### Hooks Merge and Removal Tests (`tests/hooks_merge.rs`)
+
+| Test | Checks |
+|------|--------|
+| `create_if_absent_never_touches_committed_settings()` | Creates `settings.local.json` + `.claude/` (0700); committed `settings.json` never written |
+| `idempotent_re_add_is_deep_equal_skip_no_rewrite()` | Deep-equal entry already present → skip, mtime stable |
+| `user_authored_identical_entry_not_duplicated()` | User-authored entry matching deep-equal entry not duplicated (FR-004) |
+| `user_edited_entry_preserved_on_removal()` | Non-matching (user-edited) entry left in place on removal (NFR-003) |
+| `removal_prunes_empty_event_but_keeps_hooks_object()` | Empty event array pruned (FR-006); empty `hooks` object kept |
+| `removal_against_absent_file_is_noop()` | Removing from absent file is a no-op; no file created |
+| `multi_plugin_merge_in_one_pass_then_idempotent()` | Two plugins merge in separate calls; re-merge is deep-equal skip, mtime stable |
+| `multi_event_removal_prunes_only_the_target_event()` | Multi-event settings: remove event A, event B + user entries survive |
+| `merge_into_wrong_type_settings_is_exit_44_original_intact()` | Malformed (wrong-type) settings → exit 44, original file byte-for-byte intact |
+| `merge_into_wrong_type_hooks_value_is_exit_44_original_intact()` | `hooks` value wrong type → exit 44, original intact |
+| `merge_through_symlinked_settings_is_refused_exit_7()` | Symlink target for merge → exit 7, decoy untouched (Unix only) |
+| `remove_through_symlinked_settings_is_refused_exit_7()` | Symlink target for remove → exit 7, decoy untouched (Unix only) |
+| `merge_preserves_unrelated_user_keys_and_appends()` | User keys (`"model": "opus"`) preserved; distinct hook appended to event |
+
+**Pattern** (Phase 6 US2 / T070): Library-API tests for `harness::hooks::{merge_into_settings, remove_from_settings}`. Structural-match (deep-equal) ownership: add only if absent; remove only if present (no sidecar provenance, NFR-003). Create-if-absent on merge (settings.local.json, never settings.json). Mtime stability on idempotent operations. Contract: `contracts/hooks-integration.md` § "Merge semantics" / "Removal semantics" (FR-002/004/005/006).
+
+#### Hooks Sync Tests (extensions to `tests/harness_sync_stub.rs`)
+
+| Test | Checks |
+|------|--------|
+| `hooks_forward_progress_one_malformed_one_good()` | One malformed plugin skipped; good plugin's hooks merge continues; first error recorded |
+| `merge_through_symlinked_settings_is_refused_exit_7()` | Symlink refusal during sync hooks merge → exit 7 |
+| `multi_plugin_hooks_merge_in_one_pass()` | Multi-plugin hooks from enabled plugins all merge into one `settings.local.json` in a single pass |
+
+**Pattern** (Phase 6 US2 / T2-2): Full-stack sync tests via `sync_project` with `StubHarness` override. Forward-progress: one plugin with malformed `hooks.json` is skipped (error recorded in `first_error`); sibling plugins' hooks continue to merge. Symlink refusal on settings write. Multi-plugin merge via `reconcile_hooks` passes all enabled plugins' rewritten hooks in one call, idempotent on re-sync. Mirrors agent forward-progress pattern (T-4).
+
+#### Hooks Exit Code Tests (extensions to `tests/exit_codes_e2e.rs`)
+
+| Test | Checks |
+|------|--------|
+| `workspace_use_malformed_hooks_exits_43()` | Malformed `hooks/hooks.json` during `workspace use` → exit 43 |
+
+**Pattern** (Phase 6 US2 / T-3): E2E exit code test for exit 43 (HookSpecParseError). Exit 44 (HookSettingsWriteFailed) tested library-API-only in `hooks_merge.rs` (IO failures not cheaply forced through CLI). Contract: `contracts/exit-codes-p6.md` § "Discipline" (codes 43/44 split between e2e and library).
+
 
 ## CI Integration
 
