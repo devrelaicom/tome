@@ -254,7 +254,7 @@ Single Rust project: `src/`, `tests/` at repo root. No workspace split.
 - [X] T133 [P] [US5] `tests/plugin_show_p6.rs` — agents listed + hooks/guardrails presence + persona name; JSON shape pin (use devs:rust-dev agent).
 - [X] T134 [P] [US5] Extend `tests/exit_codes_e2e.rs` — agent translation failure → exit 45 (use devs:rust-dev agent).
 - [X] T135 [GIT] Commit: `test(phase-6): US5 privilege + doctor + plugin show + wire pins`.
-- [ ] T136 [US5] 4-reviewer pass; write `review/us5-findings.md` + `review/us5-disposition.md`.
+- [X] T136 [US5] 4-reviewer pass; write `review/us5-findings.md` + `review/us5-disposition.md`.
 - [ ] T137 [US5] Apply US5 blockers + selected majors (use devs:rust-dev agent).
 - [ ] T138 [GIT] Commit: `fix(phase-6): apply US5 reviewer findings`.
 - [ ] T139 [US5] Run codebase mapping for Phase 7 changes (`/sdd:map incremental`).
