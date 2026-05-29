@@ -155,7 +155,15 @@ pub fn apply(report: &mut DoctorReport, ctx: &FixContext<'_>) -> usize {
     // Dedup: dispatch the harness sync exactly once if any harness fix
     // was queued. Every queued harness fix counts as one attempt so the
     // residual-classification accounting matches the per-fix model.
-    let mut harness_sync_ran = false;
+    //
+    // C5-1: track whether ANY project-context `sync_project` succeeded
+    // during this pass — from EITHER the harness-fixes branch below OR the
+    // Phase 6 branch. The Phase 6 project surfaces are refreshed once after
+    // the dispatch, gated on that flag, so a HarnessRules/HarnessMcp fix
+    // (which already re-renders guardrails + re-emits agents through the
+    // same orchestrator) doesn't leave `report.hooks`/`guardrails`/`agents`
+    // showing stale pre-repair state (FR-091).
+    let mut project_sync_succeeded = false;
     if !harness_fixes.is_empty() {
         attempts += harness_fixes.len();
         // S-M2: only enable the force path when one of the in-play
@@ -170,7 +178,7 @@ pub fn apply(report: &mut DoctorReport, ctx: &FixContext<'_>) -> usize {
                 "doctor --fix: harness sync attempt failed; report retained pre-repair state",
             );
         } else {
-            harness_sync_ran = true;
+            project_sync_succeeded = true;
             // Re-run the per-harness probe so both rules + mcp reflect
             // the post-sync state.
             if let (Some(list), Some(binding)) = (
@@ -205,7 +213,9 @@ pub fn apply(report: &mut DoctorReport, ctx: &FixContext<'_>) -> usize {
     // run for the harness-fixes branch and there is repairable Phase 6
     // drift in a project context. NEVER force here (the Phase 6 surfaces do
     // not consent to overriding user-owned MCP entries).
-    if !harness_sync_ran && ctx.scope.project_root.is_some() && phase6_has_repairable_drift(report)
+    if !project_sync_succeeded
+        && ctx.scope.project_root.is_some()
+        && phase6_has_repairable_drift(report)
     {
         attempts += 1;
         if let Err(e) = repair_harness_sync_with(ctx, false) {
@@ -216,12 +226,20 @@ pub fn apply(report: &mut DoctorReport, ctx: &FixContext<'_>) -> usize {
                  report retained pre-repair state",
             );
         } else {
-            // Re-build the Phase 6 surfaces so the post-repair report
-            // reflects the re-render / re-emit / orphan-removal. The full
-            // re-assemble path is heavier than needed; refresh just the
-            // three project-relative surfaces via their read-only checks.
-            refresh_phase6_project_surfaces(report, ctx);
+            project_sync_succeeded = true;
         }
+    }
+
+    // C5-1: refresh the three project-relative Phase 6 surfaces once after
+    // ANY successful project-context sync — whether it was the
+    // harness-fixes branch (HarnessRules/HarnessMcp) or the Phase 6 branch
+    // that triggered it. The orchestrator re-renders guardrails, re-emits
+    // agents, and re-merges hooks regardless of which fix class invoked it,
+    // so the post-`--fix` report must reflect that post-repair state. The
+    // full re-assemble path is heavier than needed; refresh just the three
+    // project-relative surfaces via their read-only checks.
+    if project_sync_succeeded {
+        refresh_phase6_project_surfaces(report, ctx);
     }
 
     attempts

@@ -701,8 +701,12 @@ fn read_settings_hooks(path: &Path) -> Option<serde_json::Map<String, serde_json
 /// Build the Phase 6 guardrails surface. For each effective harness's
 /// guardrails target, parse the existing marker regions on disk
 /// (`present`), classify any region whose plugin is no longer enabled as
-/// `orphaned`, and record plugins suppressed for Claude Code because they
-/// ship real JSON hooks (`suppressed`, FR-013).
+/// `orphaned`, and record the steady-state set of plugins suppressed for
+/// the Claude Code target because they ship real JSON hooks (`suppressed`,
+/// FR-013). `suppressed` is derived from the enabled set (plugins shipping
+/// BOTH `hooks/GUARDRAILS.md` AND `hooks/hooks.json`) independent of on-disk
+/// region presence — the region is intentionally absent because the real
+/// hooks supersede the prose fallback.
 ///
 /// Read-only: `fs::read` of each target only; marker parsing never writes.
 /// Shared targets (e.g. `AGENTS.md` across two harnesses) are reported once.
@@ -714,19 +718,33 @@ pub fn build_guardrails_report(
 ) -> Result<GuardrailsReport, TomeError> {
     use std::collections::BTreeSet;
 
-    // The set of `<catalog>:<plugin>` keys for enabled plugins, and the
-    // subset that contribute a `GUARDRAILS.md` body.
+    // C5-2 / R5-2: `suppressed` is a STEADY-STATE audit, not a drift
+    // artifact. For the Claude Code (`suppress_if_hooks_present`) target,
+    // it lists enabled plugins that ship BOTH a `hooks/GUARDRAILS.md` prose
+    // body AND a `hooks/hooks.json`: the real JSON hooks supersede the prose
+    // fallback, so Tome intentionally does NOT render the plugin's region
+    // into `CLAUDE.md` (FR-013). That region is therefore expected to be
+    // ABSENT on disk — so `suppressed` must be derived from the enabled set
+    // independent of on-disk region presence, not intersected with the
+    // (necessarily empty) `present_keys`.
     let enabled = crate::index::skills::enabled_plugins_for_workspace(conn, workspace.as_str())?;
     let mut enabled_keys: BTreeSet<String> = BTreeSet::new();
-    let mut plugins_with_hooks_json: BTreeSet<String> = BTreeSet::new();
+    // Enabled plugins shipping BOTH GUARDRAILS.md + hooks.json → suppressed
+    // for the Claude Code target. Preserve `(catalog, plugin)` enumeration
+    // order so the emitted `suppressed` list is stable.
+    let mut suppressed_candidates: Vec<CatalogPlugin> = Vec::new();
     for (catalog, plugin) in &enabled {
-        let key = crate::harness::guardrails::region_key(catalog, plugin);
-        enabled_keys.insert(key.clone());
+        enabled_keys.insert(crate::harness::guardrails::region_key(catalog, plugin));
         if let Ok(plugin_root) =
             crate::index::skills::plugin_root_dir(conn, paths, workspace.as_str(), catalog, plugin)
-            && plugin_root.join("hooks").join("hooks.json").exists()
         {
-            plugins_with_hooks_json.insert(key);
+            let hooks_dir = plugin_root.join("hooks");
+            if hooks_dir.join("GUARDRAILS.md").exists() && hooks_dir.join("hooks.json").exists() {
+                suppressed_candidates.push(CatalogPlugin {
+                    catalog: catalog.clone(),
+                    plugin: plugin.clone(),
+                });
+            }
         }
     }
 
@@ -746,27 +764,30 @@ pub fn build_guardrails_report(
                 continue;
             }
 
+            // `present` / `orphaned` are the ON-DISK regions: regions Tome
+            // wrote that are still parseable. `suppressed` is the
+            // steady-state audit above, gated to the suppress target only
+            // (Claude Code). A file with neither on-disk regions nor any
+            // suppressed plugin contributes nothing.
             let present_keys = parse_guardrails_region_keys(&file);
-            if present_keys.is_empty() {
-                // No regions on disk → only report the file if a plugin
-                // would suppress into it (informational); otherwise skip to
-                // keep the report lean.
+            let suppressed: Vec<CatalogPlugin> = if suppress_flag {
+                suppressed_candidates.clone()
+            } else {
+                Vec::new()
+            };
+            if present_keys.is_empty() && suppressed.is_empty() {
                 continue;
             }
 
             let mut present: Vec<CatalogPlugin> = Vec::new();
             let mut orphaned: Vec<CatalogPlugin> = Vec::new();
-            let mut suppressed: Vec<CatalogPlugin> = Vec::new();
             for key in &present_keys {
                 let Some(cp) = split_region_key(key) else {
                     continue;
                 };
                 present.push(cp.clone());
                 if !enabled_keys.contains(key) {
-                    orphaned.push(cp.clone());
-                }
-                if suppress_flag && plugins_with_hooks_json.contains(key) {
-                    suppressed.push(cp);
+                    orphaned.push(cp);
                 }
             }
 

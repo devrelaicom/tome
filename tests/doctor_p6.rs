@@ -21,6 +21,7 @@ use tempfile::TempDir;
 use tome::doctor::{self};
 use tome::embedding::stub::StubEmbedder;
 use tome::harness::claude_code::CLAUDE_CODE;
+use tome::harness::codex::CODEX;
 use tome::index::{self, OpenOptions};
 use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
@@ -113,6 +114,45 @@ fn stage() -> (TempDir, tome::paths::Paths) {
 
     seed_catalog_enrolment(&paths, &catalog_root, "acme");
     (tmp, paths)
+}
+
+/// Insert an enabled `agent`-kind skills row for `(catalog, plugin, name)`
+/// into the `global` workspace, pointing at the catalog-relative `path`.
+/// The pre-staged-state pattern: no real sync, no embedding — just the rows
+/// the read-only doctor surfaces consult.
+fn seed_enabled_agent(
+    paths: &tome::paths::Paths,
+    catalog: &str,
+    plugin: &str,
+    name: &str,
+    path: &str,
+) {
+    let conn = open_index(paths);
+    conn.execute(
+        "INSERT INTO skills
+            (catalog, plugin, name, kind, description, plugin_version,
+             path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+         VALUES (?1, ?2, ?3, 'agent', 'desc', '0.0.0', ?4, 'h', 0, 0, NULL, '1970-01-01T00:00:00Z')",
+        rusqlite::params![catalog, plugin, name, path],
+    )
+    .expect("insert agent row");
+    let skill_id: i64 = conn
+        .query_row(
+            "SELECT id FROM skills WHERE catalog=?1 AND plugin=?2 AND kind='agent' AND name=?3",
+            rusqlite::params![catalog, plugin, name],
+            |r| r.get(0),
+        )
+        .expect("agent id");
+    let ws_id: i64 = conn
+        .query_row("SELECT id FROM workspaces WHERE name = 'global'", [], |r| {
+            r.get(0)
+        })
+        .expect("global ws id");
+    conn.execute(
+        "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+        rusqlite::params![ws_id, skill_id],
+    )
+    .expect("enrol agent");
 }
 
 fn seed_catalog_enrolment(paths: &tome::paths::Paths, catalog_root: &Path, catalog_name: &str) {
@@ -487,6 +527,246 @@ fn hooks_report_contributed_and_drift() {
             .iter()
             .any(|e| e.event == "PreToolUse" && e.count == 1),
         "the user-removed PreToolUse entry surfaces as missing (drift); got {plug:?}",
+    );
+}
+
+#[test]
+fn hooks_report_within_event_drift_is_entry_identity() {
+    // T5-1: within-EVENT drift proves entry-identity (not event) granularity.
+    // The plugin's `PreToolUse` array carries TWO distinct entries. The
+    // settings.local.json carries one of them verbatim (structural match →
+    // contributed) plus a HAND-EDITED copy of the other (no deep-equal →
+    // missing). The SAME `PreToolUse` event must therefore appear in BOTH
+    // `contributed` (count 1) and `missing` (count 1). A buggy event-
+    // granularity impl (matching on the event key alone) would collapse this
+    // to a single bucket and fail.
+    let (tmp, paths) = stage();
+    let project_root = tmp.path();
+    write_project_marker(project_root);
+
+    let conn = open_ro(&paths);
+    let plugin_root = tome::index::skills::plugin_root_dir(&conn, &paths, "global", "acme", "plug")
+        .expect("plugin root");
+    // Two distinct entries under the single `PreToolUse` event.
+    fs::write(
+        plugin_root.join("hooks").join("hooks.json"),
+        r#"{"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/a.sh"}]},
+            {"matcher": "Write", "hooks": [{"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/b.sh"}]}
+        ]}"#,
+    )
+    .unwrap();
+
+    let plugin_data = paths.plugin_data_dir_for("acme", "plug");
+    let rewritten = tome::harness::hooks::read_rewritten_entries(&plugin_root, &plugin_data)
+        .expect("read rewritten")
+        .expect("hooks present");
+
+    // Build a settings.local.json `PreToolUse` array carrying the FIRST
+    // re-derived entry verbatim plus a HAND-EDITED clone of the second (so
+    // the second won't structurally match what the report re-derives).
+    let pre = rewritten
+        .events
+        .iter()
+        .find(|(event, _)| event == "PreToolUse")
+        .map(|(_, entries)| entries.clone())
+        .expect("PreToolUse re-derived");
+    assert_eq!(pre.len(), 2, "two re-derived PreToolUse entries");
+    let mut edited = pre[1].clone();
+    // Mutate the matcher so the entry no longer deep-equals the re-derived one.
+    if let Some(obj) = edited.as_object_mut() {
+        obj.insert(
+            "matcher".to_owned(),
+            serde_json::Value::String("Edit".to_owned()),
+        );
+    }
+    let settings = serde_json::json!({
+        "hooks": { "PreToolUse": [pre[0].clone(), edited] }
+    });
+    let claude_dir = project_root.join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    fs::write(
+        claude_dir.join("settings.local.json"),
+        serde_json::to_string_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let report = tome::doctor::checks::build_hooks_report(
+        &paths,
+        project_root,
+        &WorkspaceName::global(),
+        &conn,
+    )
+    .expect("hooks report");
+
+    let plug = report
+        .plugins
+        .iter()
+        .find(|p| p.plugin == "plug")
+        .expect("plug present");
+    assert!(
+        plug.contributed
+            .iter()
+            .any(|e| e.event == "PreToolUse" && e.count == 1),
+        "the verbatim entry surfaces as PreToolUse contributed (count 1); got {plug:?}",
+    );
+    assert!(
+        plug.missing
+            .iter()
+            .any(|e| e.event == "PreToolUse" && e.count == 1),
+        "the hand-edited entry surfaces as PreToolUse missing (count 1); got {plug:?}",
+    );
+}
+
+#[test]
+fn agents_report_dropped_fields_populated_for_codex() {
+    // T5-2: a real non-empty `dropped_fields` through Codex translation.
+    // Codex drops `model` + `tools` (no OpenAI dialect carrier), so an
+    // enabled agent carrying both surfaces a `DroppedFieldEntry` naming them.
+    // Pre-staged state (no real sync): install ONLY codex and seed a tuned
+    // agent row directly.
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(CODEX)]);
+
+    let (tmp, paths) = stage();
+    let project_root = tmp.path();
+    write_project_marker(project_root);
+
+    // Add a second agent source carrying `model:` + `tools:` to the plugin,
+    // then enable it (direct DB insert — the pre-staged-state pattern).
+    let plugin_agents = tmp.path().join("catalog").join("plug").join("agents");
+    fs::write(
+        plugin_agents.join("tuned.md"),
+        "---\nname: tuned\ndescription: Tuned.\nmodel: opus\ntools:\n  - Read\n  - Grep\n---\nTuned body.\n",
+    )
+    .unwrap();
+    seed_enabled_agent(&paths, "acme", "plug", "tuned", "agents/tuned.md");
+
+    let conn = open_ro(&paths);
+    let report = tome::doctor::checks::build_agents_report(
+        &paths,
+        project_root,
+        &WorkspaceName::global(),
+        &conn,
+    )
+    .expect("agents report");
+
+    let cx = report
+        .harnesses
+        .iter()
+        .find(|h| h.harness == "codex")
+        .expect("codex harness entry");
+    let dropped = cx
+        .dropped_fields
+        .iter()
+        .find(|d| d.agent == "plug__tuned")
+        .unwrap_or_else(|| panic!("plug__tuned dropped_fields recorded; got {cx:?}"));
+    assert!(
+        dropped.fields.contains(&"model".to_owned()),
+        "codex drops `model`; got {dropped:?}",
+    );
+    assert!(
+        dropped.fields.contains(&"tools".to_owned()),
+        "codex drops `tools`; got {dropped:?}",
+    );
+}
+
+#[test]
+fn persona_report_clash_prefixes_same_named_agents() {
+    // T5-3: two enabled agents both named `reviewer` from two different
+    // plugins → the clash set marks both, and the doctor PersonaReport
+    // resolves the prefixed `<plugin>-reviewer-persona` slug with
+    // `clash_prefixed == true`.
+    let (tmp, paths) = stage();
+    // The stage fixture already enabled `acme/plug` with a `reviewer` agent.
+    // Add a second plugin `plug2` also shipping a `reviewer` agent and enable
+    // it (direct DB insert) so the two collide.
+    let plug2_agents = tmp.path().join("catalog").join("plug2").join("agents");
+    fs::create_dir_all(&plug2_agents).unwrap();
+    fs::write(
+        plug2_agents.join("reviewer.md"),
+        "---\nname: reviewer\ndescription: Other reviewer.\n---\nReview too.\n",
+    )
+    .unwrap();
+    seed_enabled_agent(&paths, "acme", "plug2", "reviewer", "agents/reviewer.md");
+
+    let conn = open_ro(&paths);
+    let report = tome::doctor::checks::build_persona_report(&WorkspaceName::global(), &conn)
+        .expect("persona report");
+
+    // Both `reviewer` agents clash → both prefixed.
+    let clashed: Vec<_> = report
+        .personas
+        .iter()
+        .filter(|p| p.agent_name == "reviewer")
+        .collect();
+    assert_eq!(
+        clashed.len(),
+        2,
+        "two reviewer personas; got {:?}",
+        report.personas
+    );
+    assert!(
+        clashed.iter().all(|p| p.clash_prefixed),
+        "both reviewer personas clash-prefixed; got {clashed:?}",
+    );
+    assert!(
+        clashed
+            .iter()
+            .any(|p| p.resolved_persona_name == "plug-reviewer-persona"),
+        "plug-reviewer-persona derived; got {clashed:?}",
+    );
+    assert!(
+        clashed
+            .iter()
+            .any(|p| p.resolved_persona_name == "plug2-reviewer-persona"),
+        "plug2-reviewer-persona derived; got {clashed:?}",
+    );
+}
+
+#[test]
+fn guardrails_suppressed_is_steady_state_with_no_region_on_disk() {
+    // T5-4 / C5-2: a plugin shipping BOTH GUARDRAILS.md + hooks.json, enabled
+    // for Claude Code, appears in the CLAUDE.md GuardrailsReport.suppressed
+    // EVEN WITH NO region on disk (the steady-state correctly-synced case —
+    // the real hooks supersede the prose, so the region is intentionally
+    // absent). It must NOT appear in `present`.
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(CLAUDE_CODE)]);
+
+    let (tmp, paths) = stage();
+    let project_root = tmp.path();
+    write_project_marker(project_root);
+    // Deliberately DO NOT write any CLAUDE.md / region on disk.
+    assert!(
+        !project_root.join("CLAUDE.md").exists(),
+        "no region on disk for the steady-state case",
+    );
+
+    let conn = open_ro(&paths);
+    let report = tome::doctor::checks::build_guardrails_report(
+        &paths,
+        project_root,
+        &WorkspaceName::global(),
+        &conn,
+    )
+    .expect("guardrails report");
+
+    assert_eq!(
+        report.files.len(),
+        1,
+        "the CLAUDE.md target reports for the suppressed plugin; got {report:?}",
+    );
+    let file = &report.files[0];
+    assert!(
+        file.suppressed
+            .iter()
+            .any(|cp| cp.catalog == "acme" && cp.plugin == "plug"),
+        "acme:plug suppressed in steady state (ships GUARDRAILS.md + hooks.json); got {file:?}",
+    );
+    assert!(
+        file.present.is_empty(),
+        "no region is present on disk; got {file:?}",
     );
 }
 
