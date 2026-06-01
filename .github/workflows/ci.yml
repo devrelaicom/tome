@@ -8,6 +8,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # The ~175 integration-test binaries each statically embed ONNX Runtime +
+  # llama.cpp + SQLite; with full debuginfo they grew large enough that
+  # `cargo build --all-targets` exhausted the runner disk and the linker died
+  # with SIGBUS (collect2: ld terminated with signal 7). line-tables-only keeps
+  # file:line backtraces while cutting most of the per-binary debuginfo.
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
 
 jobs:
   test:
@@ -19,19 +25,21 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         toolchain: [stable, msrv]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      # The ubuntu/stable job alone builds debug (all-targets, all-features) +
-      # test + a release build for the size check, compiling the heavy C/C++
-      # deps (ort, llama-cpp-2, sqlite-vec, bundled SQLite) into two profiles.
-      # That exhausts the runner's free root disk ("No space left on device"
-      # during cargo build). Reclaim the large preinstalled SDKs we never use.
+      # ubuntu/stable also runs a release build for the size check, so the
+      # heavy C/C++ deps (ort, llama-cpp-2, sqlite-vec, bundled SQLite) compile
+      # into two profiles AND link into ~175 test binaries — exhausting the
+      # runner's free root disk (first "No space left", then a linker SIGBUS).
+      # Reclaim every large preinstalled SDK we never use so linking has room.
       - name: Free disk space (Linux runners)
         if: runner.os == 'Linux'
         shell: bash
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+            /usr/local/.ghcup /opt/hostedtoolcache /usr/local/share/boost \
+            /usr/local/share/powershell /usr/share/swift
+          sudo docker image prune --all --force || true
           df -h /
 
       - name: Read MSRV from Cargo.toml
