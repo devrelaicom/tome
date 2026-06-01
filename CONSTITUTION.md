@@ -75,7 +75,7 @@ Tokens, SSH keys, credential-helper output, and anything Git emits that looks cr
 
 **PRs.** Small batches. A PR that changes more than ~400 lines or touches more than two modules should be split unless there's a clear reason it can't be.
 
-**Release tooling** is deferred until there is something to release beyond `cargo install --path .`. When that day comes, this constitution gets amended first.
+**Release tooling.** Tome distributes a public beta. The following release tooling is authorised: a **`cargo-dist`-driven release pipeline** producing per-platform archives with checksums; **prebuilt-binary distribution** for Linux + macOS (x86_64 + aarch64); a **Homebrew tap** (`aaronbassett/homebrew-tap`) updated via a **least-privilege cross-owner PAT** (never logged, per principle XIII); and **`crates.io` publish under the crate name `tome-mcp`** (the `tome` command name is preserved via `[[bin]]`, the crates.io name `tome` being permanently unavailable). Release workflows are subject to the same gates as CI (fmt, clippy `-D warnings`, `cargo-deny`, version-pinned actions) and build `--locked` against the committed `Cargo.lock`. The shipped artifacts carry an aggregated third-party-licence notice covering the cargo dependency graph and the statically-linked / vendored native components. `cargo publish`, release tagging, and tap-PR merges remain deliberate maintainer actions, never automated.
 
 ## Governance
 
@@ -93,6 +93,8 @@ This constitution supersedes ad-hoc practice. Where it conflicts with PRD detail
 
 ## Amendment log
 
+- **v1.4.0 (2026-06-01)** — Rewrote the Development-Workflow §Release tooling clause from a deferral to an authorisation of the public-beta release set (cargo-dist pipeline, prebuilt-binary distribution for Linux+macOS, a cross-owner-PAT Homebrew tap, crates.io publish under `tome-mcp`), subject to the existing CI gates + `--locked`. Driven by Phase 7 (beta hardening + public release); the crates.io name `tome` is permanently owned/yanked so the crate is renamed while the command stays `tome`. MINOR bump — materially expanded Development-Workflow guidance. The 24-hour cooling-off does not apply (Development Workflow is not a NON-NEGOTIABLE Core Principle per §Governance).
+
 - **v1.3.0 (2026-05-22)** — Rewrote the `## Operational Constraints` §Paths block to drop the `directories` crate citation and consolidate Tome-owned paths under `<home>/.tome/`. Driven by Phase 4 spec §FR-300 / FR-302 / FR-303 (central-architecture refactor: single home root, single SQLite DB, named workspaces, project-binding pointers) and the v1.2.0 aspirational/implemented mismatch (no Phase 1/2/3 code ever called `directories::ProjectDirs`). MINOR bump — materially expanded guidance in an Operational Constraint. The 24-hour cooling-off period does not apply (Operational Constraints are not NON-NEGOTIABLE principles per §Governance).
 
-**Version**: 1.3.0 | **Ratified**: 2026-05-11 | **Last Amended**: 2026-05-22
+**Version**: 1.4.0 | **Ratified**: 2026-05-11 | **Last Amended**: 2026-06-01
