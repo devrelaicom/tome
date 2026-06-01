@@ -85,6 +85,17 @@ encoding_rs = "0.8"
 # `toml` crate via `serde`. Minor-pinned per research §R-5.
 toml_edit = "0.25"
 
+# Phase 7 — promoted from transitive (via tempfile's `default`/`fs` feature and
+# crossterm←comfy-table) to a direct dep under the constitution §Complexity-budget
+# "make-it-explicit" rule (precedent: filetime, encoding_rs). `cargo tree -i rustix`
+# resolves a single `1.1.4` and `tempfile` already enables `rustix/fs`, so this
+# adds ZERO new packages (NFR-004) and stays on the licence allowlist.
+# Provides `openat`/`openat2` for the FR-007 symlink-safe write primitive: the
+# intermediate-component walk that the deferred final-node-only `O_NOFOLLOW`
+# half-measure could never offer (research §R-1). `version = "1"` matches the
+# locked 1.1.4; `fs` is the feature the primitive needs (already enabled).
+rustix = { version = "1", features = ["fs"] }
+
 [build-dependencies]
 # Compile vendored sqlite-vec amalgamation against rusqlite's bundled SQLite.
 cc = "1"

@@ -3499,6 +3499,7 @@ dependencies = [
  "rexpect",
  "rmcp",
  "rusqlite",
+ "rustix",
  "schemars",
  "semver",
  "serde",
