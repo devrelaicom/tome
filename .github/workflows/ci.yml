@@ -19,7 +19,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         toolchain: [stable, msrv]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The ubuntu/stable job alone builds debug (all-targets, all-features) +
       # test + a release build for the size check, compiling the heavy C/C++
