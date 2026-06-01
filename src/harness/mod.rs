@@ -41,6 +41,10 @@ pub mod guardrails;
 pub mod hooks;
 pub mod mcp_config;
 pub mod opencode;
+/// Per-sink reconcilers (hooks / guardrails / agents) extracted from `sync`
+/// in Phase 7 (FR-011). Crate-internal: the orchestrator and the doctor are
+/// the only callers.
+pub(crate) mod reconcile;
 pub mod rules_file;
 pub mod stub;
 pub mod sync;
