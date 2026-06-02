@@ -231,20 +231,18 @@ fn compose_block_write(existing: &str, body: &str) -> Result<String, TomeError> 
     Ok(emitted.join("\n"))
 }
 
-/// Refuse to write through a symlink. Returns Ok if the path is absent
-/// or a regular file/dir; Err if it's a symlink.
+/// Refuse to write through a symlinked component. Returns Ok if no existing
+/// component (below the trusted anchor) is a symlink — including an absent
+/// path; Err if a symlinked component is found.
 ///
-/// Promoted to `pub(crate)` so the guardrails writer (`guardrails.rs`)
-/// reuses the same symlink-refusal discipline rather than re-implementing
-/// the `symlink_metadata` check.
+/// Delegates to the SSOT guard (`util::symlink_safe`) so the rules-file sink
+/// gets the intermediate-component hardening (FR-007), not just the final-node
+/// check. A refusal maps to `TomeError::Io` (exit 7) — the dedicated code this
+/// sink already used. Promoted to `pub(crate)` so the guardrails writer
+/// (`guardrails.rs`) reuses the same discipline; guardrails re-maps the
+/// returned error onto exit 46 at its call sites.
 pub(crate) fn refuse_symlink(target: &Path) -> Result<(), TomeError> {
-    match std::fs::symlink_metadata(target) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(TomeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("refusing to write through symlink: {}", target.display()),
-        ))),
-        Ok(_) | Err(_) => Ok(()),
-    }
+    crate::util::refuse_symlinked_component(target).map_err(TomeError::Io)
 }
 
 /// Atomic write: temp file in same dir → fsync → rename.

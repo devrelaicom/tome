@@ -104,16 +104,11 @@ pub fn write_atomic(target: &Path, bytes: &[u8]) -> Result<(), TomeError> {
     // a hostile actor could still aim a pre-existing symlink at e.g.
     // `~/.ssh/authorized_keys` and have our `set_permissions` follow it
     // before we rename — explicit refusal is cleaner than relying on
-    // the rename's no-follow semantics.
-    match std::fs::symlink_metadata(target) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            return Err(TomeError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("refusing to write through symlink: {}", target.display()),
-            )));
-        }
-        _ => {}
-    }
+    // the rename's no-follow semantics. Delegates to the SSOT guard
+    // (`util::symlink_safe`) so the registry sink also refuses a symlinked
+    // INTERMEDIATE component (FR-007), not just the final node. Refusal →
+    // `TomeError::Io` (exit 7), this sink's existing dedicated code.
+    crate::util::refuse_symlinked_component(target).map_err(TomeError::Io)?;
 
     // Mode preservation: capture the prior file's mode (if any) so we can
     // reapply it after the atomic rename. Absent target → fall through to

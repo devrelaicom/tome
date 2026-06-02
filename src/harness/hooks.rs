@@ -393,34 +393,23 @@ fn ensure_hooks_object<'a>(
 // Atomic write + symlink refusal
 // =====================================================================
 
-/// Refuse to read or write through a symlinked hook source. Mirrors
-/// `mcp_config::refuse_symlink` — a symlink surfaces as `Io` (exit 7).
+/// Refuse to read through a symlinked hook source (a plugin's `hooks.json`).
+/// Delegates to the SSOT guard (`util::symlink_safe`) for intermediate-component
+/// hardening (FR-007); a symlink surfaces as `Io` (exit 7), the dedicated code
+/// for reading non-sink third-party content.
 fn refuse_symlink(target: &Path) -> Result<(), TomeError> {
-    match std::fs::symlink_metadata(target) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(TomeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("refusing to read through symlink: {}", target.display()),
-        ))),
-        Ok(_) | Err(_) => Ok(()),
-    }
+    crate::util::refuse_symlinked_component(target).map_err(TomeError::Io)
 }
 
 /// Refuse to write through a symlinked settings file. `settings.local.json` is a
-/// dedicated Phase 6 sink, so a symlink here surfaces as exit 44
+/// dedicated Phase 6 sink, so a symlinked component here surfaces as exit 44
 /// (`HookSettingsWriteFailed`), reconciled with exit-codes-p6.md and the parallel
 /// guardrails-target → 46 decision (code 7 is reserved for IO that is *not* the
-/// local Claude settings file).
+/// local Claude settings file). Delegates to the SSOT guard so the intermediate-
+/// component hardening (FR-007) lands here too, then re-maps the refusal onto
+/// this sink's dedicated exit-44 variant — never a regression to generic `Io`.
 fn refuse_symlink_settings(target: &Path) -> Result<(), TomeError> {
-    match std::fs::symlink_metadata(target) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(settings_write_failed(
-            target,
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("refusing to write through symlink: {}", target.display()),
-            ),
-        )),
-        Ok(_) | Err(_) => Ok(()),
-    }
+    crate::util::refuse_symlinked_component(target).map_err(|e| settings_write_failed(target, e))
 }
 
 /// Map a write-path IO failure to the exit-44 variant naming the file.

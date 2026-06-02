@@ -86,20 +86,17 @@ impl TomeEntry {
     }
 }
 
-/// Refuse to write through a symlink. Returns Ok if the path is absent
-/// or a regular file/dir; Err if it's a symlink. Mirrors the
-/// `rules_file.rs` discipline (FR-7 carry-over from Phase 3 P8 PR-F).
+/// Refuse to read or write through a symlinked component. Returns Ok if no
+/// existing component (below the trusted anchor) is a symlink — including an
+/// absent path; Err if a symlinked component is found.
+///
+/// Delegates to the SSOT guard (`util::symlink_safe`) so the MCP-config sink
+/// gets the intermediate-component hardening (FR-007), not just the final-node
+/// check it had before. A refusal maps to `TomeError::Io` (exit 7) — the
+/// dedicated code this sink already used (code 7 covers IO that is not one of
+/// the dedicated Phase 6 sinks).
 fn refuse_symlink(target: &Path) -> Result<(), TomeError> {
-    match std::fs::symlink_metadata(target) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(TomeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "refusing to read or write through symlink: {}",
-                target.display()
-            ),
-        ))),
-        Ok(_) | Err(_) => Ok(()),
-    }
+    crate::util::refuse_symlinked_component(target).map_err(TomeError::Io)
 }
 
 /// Map an arbitrary error into `TomeError::Io(InvalidData)` with the
