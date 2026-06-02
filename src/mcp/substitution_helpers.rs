@@ -15,10 +15,28 @@
 //! plugin_root resolver), this is the single seam to update.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::paths::Paths;
 use crate::substitution::{self, ArgumentValues, SubstitutionContext, SubstitutionError};
 use crate::workspace::WorkspaceName;
+
+/// Test-only seam (R-16 convention) forcing the `SubstitutionContext`
+/// builder below to omit a required field so `.build()` fails with
+/// [`SubstitutionError::InvalidArgumentFrontmatter`] — the *only* way the
+/// builder errors. Production callers always supply every field, so the
+/// builder-failure → `TomeError::SubstitutionFailed` (exit 28) wrap in
+/// [`crate::mcp::prompts::build_get_context`] / get_skill's
+/// `build_substitution_context` is otherwise unreachable through fixtures
+/// (the `prompts/get` + `get_skill` render paths never miss a field).
+/// FR-012 / GAP-1 exercise that wrap end-to-end through the real server.
+///
+/// Defaults to `false`; flipped by `tests/exit_codes_e2e_mcp.rs` via the
+/// `ForceContextBuildFailureGuard` RAII guard (set on `new()`, cleared on
+/// `Drop`). No-op in prod — gated behind this slot which nothing in
+/// `src/` ever sets.
+#[doc(hidden)]
+pub static FORCE_CONTEXT_BUILD_FAILURE: AtomicBool = AtomicBool::new(false);
 
 /// Build the `SubstitutionContext` for an MCP-driven entry render.
 ///
@@ -61,7 +79,7 @@ pub fn build_context_for_entry(
 
     let clock = substitution::current_clock();
 
-    SubstitutionContext::builder()
+    let mut builder = SubstitutionContext::builder()
         .catalog_name(catalog)
         .plugin_name(plugin)
         .plugin_version(plugin_version)
@@ -72,7 +90,18 @@ pub fn build_context_for_entry(
         .workspace_name(workspace_name.as_str().to_owned())
         .clock(clock)
         .args(args)
-        .declared_args(declared_args)
-        .paths(paths)
-        .build()
+        .declared_args(declared_args);
+
+    // Test seam (FR-012 / GAP-1): when the slot is set, skip the required
+    // `paths` setter so `.build()` returns the builder's missing-field
+    // error — the genuine source the callers wrap as exit 28. The branch
+    // is dead in production (the slot is never set in `src/`); the test
+    // that does set it serialises every render on a mutex so the flip is
+    // never observed by a concurrent render. `SeqCst` matches the
+    // test-side store ordering.
+    if !FORCE_CONTEXT_BUILD_FAILURE.load(Ordering::SeqCst) {
+        builder = builder.paths(paths);
+    }
+
+    builder.build()
 }
