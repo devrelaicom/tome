@@ -2,7 +2,9 @@
 
 mod add;
 mod list;
-mod remove;
+// `pub` so the `#[doc(hidden)]` test-injection seam `AFTER_PRELOCK_READ_HOOK`
+// (F-REMOVE-TOCTOU) is reachable from `tests/`; the surface is doc-hidden.
+pub mod remove;
 mod show;
 mod source;
 pub mod update;
