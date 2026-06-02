@@ -9,7 +9,7 @@
 //! ONLY THEN applies the JOIN/WHERE filters. If `>= k` vectors that are
 //! *nearer* than a genuine match get excluded by those filters, the match
 //! never enters the candidate window and the result is silently short. A
-//! naive fixed-multiplier over-fetch (`k = top_k * 8`) papers over small
+//! naive fixed-multiplier over-fetch (`k = top_k * 4`) papers over small
 //! cases but still loses a match pushed far enough down the neighbour
 //! ordering — only a geometric *widen* loop, bounded by the global
 //! embeddings count, is correct.
@@ -195,14 +195,14 @@ fn run_knn(conn: &Connection, top_k: u32) -> Vec<Candidate> {
 
 /// CORE REGRESSION (FR-001). The corpus is sized so that the 5 genuine
 /// matches sit at neighbour ranks 61..=65 behind 60 nearer decoys. A naive
-/// `k = top_k * 8 = 40` over-fetch never reaches them → 0 matches survive
+/// `k = top_k * 4 = 20` over-fetch never reaches them → 0 matches survive
 /// the catalog filter under the buggy implementation. Only the widen loop,
 /// growing `k` past the 65-vector universe, recovers all five.
 #[test]
 fn filtered_knn_returns_top_k_despite_many_nearer_excluded_vectors() {
     let (_tmp, conn) = fresh_index();
     let top_k = 5u32;
-    let n_decoys = 60; // >> top_k * 8 (= 40): defeats any fixed multiplier
+    let n_decoys = 60; // >> top_k * 4 (= 20): defeats the fixed over-fetch
     let match_names = build_corpus(&conn, n_decoys, top_k as usize);
 
     let hits = run_knn(&conn, top_k);

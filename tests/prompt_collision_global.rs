@@ -12,8 +12,11 @@
 //! dropped one user-invocable entry (absent from `prompts/list`,
 //! unresolvable on `prompts/get`).
 //!
-//! `resolve_collisions` is sync + pure, so we drive it directly — the
-//! in-process MCP harness (FR-012) does not exist yet.
+//! `resolve_collisions` is sync + pure, so this suite drives it directly to
+//! exercise the global-taken-set algorithm in isolation. End-to-end
+//! `prompts/list` + `prompts/get` coverage over the running server lives in
+//! `tests/exit_codes_e2e_mcp.rs` via the in-process MCP harness (FR-012,
+//! `tests/common/mcp_harness.rs`).
 
 use std::collections::HashSet;
 
