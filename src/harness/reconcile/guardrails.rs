@@ -4,7 +4,8 @@
 //! `reconcile/` decomposition). The logic is unchanged: this module owns the
 //! one-pass guardrails reconciler plus its private helpers (the prepared-body
 //! type, the target-path projection, and the `GuardrailsAction` → [`Action`]
-//! mapping). It reuses the shared [`record_action`] bookkeeping the
+//! mapping). It reuses the shared
+//! [`record_action`](crate::harness::reconcile::record_action) bookkeeping the
 //! orchestrator and the other sink reconcilers also call.
 //!
 //! See [`crate::harness::reconcile`] for the fixed sink order and the
@@ -14,7 +15,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use crate::error::TomeError;
-use crate::harness::reconcile::agents::record_action;
+use crate::harness::reconcile::record_action;
 use crate::harness::sync::{Action, HarnessSnapshot, SyncDeps, SyncOutcome, SyncSubsystem};
 
 // =====================================================================

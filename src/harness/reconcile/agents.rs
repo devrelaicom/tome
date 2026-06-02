@@ -3,9 +3,9 @@
 //! Extracted verbatim from the `sync.rs` orchestrator in Phase 7 (FR-011, the
 //! `reconcile/` decomposition). The logic is unchanged: this module owns the
 //! one-pass native-agent reconciler plus its private helpers (per-agent parse,
-//! emission, owned-file cleanup, the atomic single-file writer) and the shared
-//! [`record_action`] bookkeeping the orchestrator and the other sink
-//! reconcilers also call.
+//! emission, owned-file cleanup, the atomic single-file writer). It reuses the
+//! shared [`record_action`](crate::harness::reconcile::record_action)
+//! bookkeeping the orchestrator and the other sink reconcilers also call.
 //!
 //! See [`crate::harness::reconcile`] for the fixed sink order and the
 //! first-error precedence the orchestrator enforces across the three sinks.
@@ -15,9 +15,8 @@ use std::path::{Path, PathBuf};
 
 use crate::error::TomeError;
 use crate::harness::agents::{self, CanonicalAgent};
-use crate::harness::sync::{
-    Action, HarnessSnapshot, SyncChange, SyncDeps, SyncOutcome, SyncSubsystem,
-};
+use crate::harness::reconcile::record_action;
+use crate::harness::sync::{Action, HarnessSnapshot, SyncDeps, SyncOutcome, SyncSubsystem};
 use crate::harness::{HarnessModule, rules_file, with_effective_modules};
 use crate::paths::Paths;
 
@@ -473,31 +472,188 @@ fn write_agent_file(target: &Path, rendered: &str) -> Result<AgentWrite, TomeErr
     Ok(classification)
 }
 
-// =====================================================================
-// Bookkeeping
-// =====================================================================
+#[cfg(test)]
+mod tests {
+    // `super::*` already brings `Paths`, `SyncDeps`, `SyncOutcome`,
+    // `HashSet`, `HarnessModule`, `reconcile_agents`, etc. into scope; only
+    // the test-specific seams are imported here.
+    use super::*;
+    use crate::harness::{AgentFormat, StubHarness};
+    use crate::index::{self, MetaSeed, OpenOptions};
+    use crate::workspace::WorkspaceName;
+    use tempfile::TempDir;
 
-/// Record one on-disk change against the running [`SyncOutcome`].
-///
-/// Shared across every sink reconciler (agents/hooks/guardrails) and the
-/// orchestrator's rules/MCP loop — `pub(crate)` so the still-in-`sync.rs`
-/// callers can reuse the one bookkeeping path.
-pub(crate) fn record_action(
-    outcome: &mut SyncOutcome,
-    harness: &str,
-    subsystem: SyncSubsystem,
-    path: &Path,
-    action: Action,
-) {
-    let change = SyncChange {
-        harness: harness.to_string(),
-        subsystem,
-        path: path.to_path_buf(),
-    };
-    match action {
-        Action::Created => outcome.added.push(change),
-        Action::Updated => outcome.updated.push(change),
-        Action::Removed => outcome.removed.push(change),
-        Action::LeftAlone => outcome.leave_alones += 1,
+    fn stub_seed() -> MetaSeed {
+        MetaSeed {
+            name: "stub".into(),
+            version: "0".into(),
+        }
+    }
+
+    /// Bootstrap an on-disk central DB at `paths.index_db`. `index::open`
+    /// registers the vec0 extension + seeds the privileged `global`
+    /// workspace, so the agents reconciler's read-only re-open later sees a
+    /// genuine DB (not a hand-rolled `meta`-only fixture).
+    fn bootstrap_db(paths: &Paths) {
+        index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: stub_seed(),
+                reranker: stub_seed(),
+                summariser: stub_seed(),
+            },
+        )
+        .expect("bootstrap central index db");
+    }
+
+    /// Insert one enabled `agent`-kind row under the `global` workspace so
+    /// the enabled set the reconciler WOULD enumerate is non-empty. A
+    /// swallowed open error would collapse exactly this set to empty.
+    fn insert_enabled_agent(paths: &Paths, catalog: &str, plugin: &str, name: &str) {
+        let conn = rusqlite::Connection::open(&paths.index_db).expect("open rw");
+        conn.execute(
+            "INSERT INTO skills
+                (catalog, plugin, name, kind, description, plugin_version,
+                 path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+             VALUES (?1, ?2, ?3, 'agent', 'd', '0.0.0', ?4, 'h', 0, 0, NULL, '1970-01-01T00:00:00Z')",
+            rusqlite::params![catalog, plugin, name, format!("agents/{name}.md")],
+        )
+        .expect("insert agent row");
+        let skill_id: i64 = conn
+            .query_row(
+                "SELECT id FROM skills WHERE catalog=?1 AND plugin=?2 AND kind='agent' AND name=?3",
+                rusqlite::params![catalog, plugin, name],
+                |r| r.get(0),
+            )
+            .expect("agent skill id");
+        let ws_id: i64 = conn
+            .query_row("SELECT id FROM workspaces WHERE name = 'global'", [], |r| {
+                r.get(0)
+            })
+            .expect("global ws id");
+        conn.execute(
+            "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+            rusqlite::params![ws_id, skill_id],
+        )
+        .expect("enrol agent in global");
+    }
+
+    /// Corrupt the EXISTING DB so `open_read_only` fails deterministically:
+    /// store a `schema_version` one above the compiled `SCHEMA_VERSION`,
+    /// which the read-only open gate rejects with `SchemaTooNew` (exit 52).
+    /// The file still exists, so the reconciler takes the
+    /// "existing-but-unopenable" branch — the one the safeguard must
+    /// PROPAGATE rather than collapse to an empty enabled set.
+    fn poison_schema_version_too_new(paths: &Paths) {
+        let conn = rusqlite::Connection::open(&paths.index_db).expect("open rw for poison");
+        let too_new = index::SCHEMA_VERSION + 1;
+        conn.execute(
+            "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+            rusqlite::params![too_new.to_string()],
+        )
+        .expect("bump schema_version");
+    }
+
+    /// Direct unit guard for the AGENTS-sink mass-delete safeguard
+    /// (agents.rs ~L86-87): an EXISTING-but-unopenable central DB must make
+    /// `reconcile_agents` return `Err` (the propagated open error), NOT `Ok`
+    /// with an empty enabled set — because an empty set drives the cleanup
+    /// pass to mass-delete every owned `<plugin>__*` file for a live
+    /// native-supporting harness.
+    ///
+    /// This sink is unit-tested DIRECTLY because the orchestrator masks it:
+    /// `reconcile_guardrails` opens the same DB unconditionally and earlier
+    /// in the fixed sink order, so an integration test through
+    /// `sync_project` can never isolate the agents open-propagation — the
+    /// guardrails sink aborts the sync first. See the doc-comment on
+    /// `tests/harness_sync_mass_delete_safeguard.rs` for the
+    /// orchestrator-level invariant this complements.
+    #[test]
+    fn existing_unopenable_db_propagates_and_preserves_owned_agent_file() {
+        let home = TempDir::new().expect("home tempdir");
+        let paths = Paths::from_root(home.path().join(".tome"));
+        std::fs::create_dir_all(&paths.root).expect("create tome root");
+
+        let project = home.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project root");
+
+        // A live native-supporting stub: its `agent_dir` is
+        // `<project>/.stub/agents` and it would emit `<plugin>__<name>.md`.
+        let stub = StubHarness::default().with_native_agents(AgentFormat::MarkdownYaml);
+
+        // Pre-seed a Tome-owned `<plugin>__*` agent file under the stub's
+        // agent_dir — the artefact a swallowed open error would mass-delete.
+        let agent_dir = stub
+            .agent_dir(&project)
+            .expect("native-supporting stub yields an agent_dir");
+        std::fs::create_dir_all(&agent_dir).expect("create stub agent_dir");
+        let owned = agent_dir.join("plugin-keep__reviewer.md");
+        std::fs::write(&owned, "---\nname: reviewer\n---\nbody\n").expect("seed owned agent file");
+        assert!(owned.is_file(), "precondition: owned file seeded");
+
+        // Bootstrap a genuine central DB, enable one healthy agent, then
+        // poison it so the read-only open fails with SchemaTooNew (exit 52).
+        bootstrap_db(&paths);
+        insert_enabled_agent(&paths, "cat-keep", "plugin-keep", "reviewer");
+        assert!(
+            paths.index_db.exists(),
+            "precondition: the central DB exists (drives the existing-but-unopenable branch)"
+        );
+        poison_schema_version_too_new(&paths);
+
+        let workspace = WorkspaceName::global();
+        let deps = SyncDeps {
+            paths: &paths,
+            home_root: home.path(),
+            workspace_name: &workspace,
+            force: false,
+        };
+
+        // Build a faithful snapshot via the same path the orchestrator uses
+        // (one native-supporting harness ⇒ the agents reconciler runs past
+        // its fast-exit and reaches the DB open). No `HARNESS_MODULES_OVERRIDE`
+        // install is needed: the override is only consulted by the
+        // `with_effective_modules` dispatch that runs AFTER a successful open,
+        // and here the open fails first.
+        let snapshots = vec![crate::harness::sync::snapshot_for_test(
+            &stub,
+            &project,
+            home.path(),
+        )];
+        let effective_names: HashSet<String> = std::iter::once(stub.name().to_string()).collect();
+        let mut outcome = SyncOutcome::default();
+
+        let result = reconcile_agents(
+            &project,
+            &deps,
+            &effective_names,
+            &snapshots,
+            false,
+            &mut outcome,
+        );
+
+        // (a) The open error PROPAGATES as `Err` with exit 52 — proving it
+        //     was not `.ok()`-swallowed into an empty enabled set. Match
+        //     manually rather than `expect_err` (the `Ok` payload,
+        //     `AgentReconciliation`, is intentionally not `Debug`).
+        let err = match result {
+            Ok(_) => panic!(
+                "an existing-but-unopenable DB must propagate (Err), not return Ok with empties"
+            ),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.exit_code(),
+            52,
+            "propagated SchemaTooNew (exit 52) proves the open error was not swallowed; got {err:?}"
+        );
+
+        // (b) The pre-seeded owned file STILL EXISTS — a swallowed open error
+        //     would have emptied the enabled set and the cleanup pass would
+        //     have mass-deleted it.
+        assert!(
+            owned.is_file(),
+            "the owned agent file must NOT be mass-deleted when the DB open errors"
+        );
     }
 }
