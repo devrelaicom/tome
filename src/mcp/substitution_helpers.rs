@@ -95,8 +95,11 @@ pub fn build_context_for_entry(
     // Test seam (FR-012 / GAP-1): when the slot is set, skip the required
     // `paths` setter so `.build()` returns the builder's missing-field
     // error — the genuine source the callers wrap as exit 28. The branch
-    // is dead in production (the slot is never set in `src/`).
-    if !FORCE_CONTEXT_BUILD_FAILURE.load(Ordering::Relaxed) {
+    // is dead in production (the slot is never set in `src/`); the test
+    // that does set it serialises every render on a mutex so the flip is
+    // never observed by a concurrent render. `SeqCst` matches the
+    // test-side store ordering.
+    if !FORCE_CONTEXT_BUILD_FAILURE.load(Ordering::SeqCst) {
         builder = builder.paths(paths);
     }
 

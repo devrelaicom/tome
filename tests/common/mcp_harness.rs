@@ -368,11 +368,18 @@ impl McpHarness {
     /// `prompts::handle_get` (the exact fn each route closure forwards
     /// to). `Ok` carries the rendered response; `Err` carries the
     /// `McpError` envelope the route would return on the wire.
+    ///
+    /// Holds [`CONTEXT_SEAM_MUTEX`] for the call so it can never overlap a
+    /// render driven by [`Self::prompts_get_forcing_context_failure`]
+    /// (which flips a process-global builder-failure flag). Cargo runs the
+    /// tests in this binary in parallel threads; without this lock a
+    /// sibling test's render could observe that flag mid-build.
     pub fn prompts_get(
         &self,
         name: &str,
         arguments: Option<Map<String, Value>>,
     ) -> Result<PromptGetResponse, McpError> {
+        let _seam = lock_context_seam();
         self.rt.block_on(prompts::handle_get(
             self.state(),
             name.to_owned(),
@@ -395,19 +402,53 @@ impl McpHarness {
         }
     }
 
+    /// Drive `prompts/get` with the context-builder seam tripped for the
+    /// duration of the call (FR-012 / GAP-1, exit 28). Set the
+    /// process-global [`FORCE_CONTEXT_BUILD_FAILURE`] flag, render, then
+    /// clear it — all while holding [`CONTEXT_SEAM_MUTEX`], so the flag is
+    /// never observable by a concurrent sibling render. Returns the
+    /// `McpError` the live route surfaces (expected `substitution_failed`
+    /// → exit 28).
+    ///
+    /// Pairing set + render + clear inside the one lock all renders share
+    /// is the race-free shape (an RAII guard that merely set/cleared the
+    /// flag would still leak the flip across the gap between flip and the
+    /// next render's lock acquisition).
+    pub fn prompts_get_forcing_context_failure(
+        &self,
+        name: &str,
+        arguments: Option<Map<String, Value>>,
+    ) -> Result<PromptGetResponse, McpError> {
+        let _seam = lock_context_seam();
+        // RAII so a panic mid-render still clears the flag before the lock
+        // is released to the next render.
+        let _flag = ForceContextBuildFailureFlag::set();
+        self.rt.block_on(prompts::handle_get(
+            self.state(),
+            name.to_owned(),
+            arguments,
+        ))
+    }
+
     /// `tools/call get_skill` — drive the live `get_skill` tool end-to-end
     /// via `get_skill::handle` (the exact fn the `#[tool]` method
-    /// delegates to).
+    /// delegates to). Serialised on [`CONTEXT_SEAM_MUTEX`] for the same
+    /// reason as [`Self::prompts_get`] (its render path also builds a
+    /// `SubstitutionContext`).
     pub fn call_get_skill(&self, input: get_skill::Input) -> Result<get_skill::Output, McpError> {
+        let _seam = lock_context_seam();
         self.rt.block_on(get_skill::handle(self.state(), input))
     }
 
     /// `tools/call search_skills` — drive the live `search_skills` tool
-    /// end-to-end via `search_skills::handle`.
+    /// end-to-end via `search_skills::handle`. (search_skills never builds
+    /// a substitution context, but the lock is cheap and keeps every
+    /// render-bearing harness call uniformly serialised.)
     pub fn call_search_skills(
         &self,
         input: search_skills::Input,
     ) -> Result<search_skills::Output, McpError> {
+        let _seam = lock_context_seam();
         self.rt.block_on(search_skills::handle(self.state(), input))
     }
 }
@@ -489,34 +530,56 @@ pub fn mcp_error_exit_code(err: &McpError) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// Code-28 builder-failure seam guard (FR-012 / GAP-1).
+// Render serialisation + the code-28 builder-failure seam (FR-012 / GAP-1).
+//
+// Cargo runs the tests in a single test binary across parallel threads.
+// The `prompts/get` + `get_skill` render paths build a
+// `SubstitutionContext` via the production `build_context_for_entry`,
+// which consults the process-global
+// `tome::mcp::substitution_helpers::FORCE_CONTEXT_BUILD_FAILURE` flag.
+// The exit-28 test must flip that flag for ONE render — but a concurrent
+// sibling render would otherwise observe the flip and fail spuriously.
+//
+// `CONTEXT_SEAM_MUTEX` serialises every render-bearing harness call (this
+// is the `HOME_MUTEX` / `OVERRIDE_MUTEX` idiom from `tests/common/mod.rs`
+// + `tests/harness_sync_stub.rs`). The exit-28 path sets the flag,
+// renders, and clears it — all WITHIN the held lock — so the flip is
+// invisible to every other render, which serialises behind the same lock.
 // ---------------------------------------------------------------------------
 
-/// RAII guard flipping
-/// [`tome::mcp::substitution_helpers::FORCE_CONTEXT_BUILD_FAILURE`] on,
-/// restoring `false` on drop (surviving panics). While installed, the
-/// `prompts/get` + `get_skill` render paths' `SubstitutionContext`
-/// builder omits a required field, so `.build()` fails and the caller
-/// wraps it as `TomeError::SubstitutionFailed` (exit 28) — the genuine
-/// production wrap, otherwise unreachable through fixtures.
-///
-/// Single-threaded harness drives one render at a time, so the
-/// process-global flag needs no extra serialisation here; tests that
-/// drive renders concurrently against this slot would have to add their
-/// own.
-pub struct ForceContextBuildFailureGuard;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
-impl ForceContextBuildFailureGuard {
-    pub fn install() -> Self {
+/// Process-global serialisation lock for render-bearing harness calls.
+static CONTEXT_SEAM_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Acquire [`CONTEXT_SEAM_MUTEX`], recovering from a poisoned mutex (a
+/// panic in one render must not cascade into the next render's setup).
+fn lock_context_seam() -> MutexGuard<'static, ()> {
+    CONTEXT_SEAM_MUTEX
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// RAII flag-flip for
+/// [`tome::mcp::substitution_helpers::FORCE_CONTEXT_BUILD_FAILURE`]:
+/// `true` on [`Self::set`], `false` on drop (surviving panics). Private —
+/// only [`McpHarness::prompts_get_forcing_context_failure`] uses it, and
+/// only while holding [`CONTEXT_SEAM_MUTEX`], so the flip never races a
+/// concurrent render.
+struct ForceContextBuildFailureFlag;
+
+impl ForceContextBuildFailureFlag {
+    fn set() -> Self {
         tome::mcp::substitution_helpers::FORCE_CONTEXT_BUILD_FAILURE
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Self
     }
 }
 
-impl Drop for ForceContextBuildFailureGuard {
+impl Drop for ForceContextBuildFailureFlag {
     fn drop(&mut self) {
         tome::mcp::substitution_helpers::FORCE_CONTEXT_BUILD_FAILURE
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }

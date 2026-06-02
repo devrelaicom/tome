@@ -45,8 +45,8 @@ use tome::plugin::lifecycle::{self, LifecycleDeps};
 use tome::workspace::{Scope, WorkspaceName};
 
 use common::mcp_harness::{
-    ForceContextBuildFailureGuard, McpHarness, StagedWorkspace, mcp_error_exit_code,
-    mcp_error_slug, seed_catalog_enrolment, write_plugin,
+    McpHarness, StagedWorkspace, mcp_error_exit_code, mcp_error_slug, seed_catalog_enrolment,
+    write_plugin,
 };
 use common::{
     config_with_catalog, fabricate_models, lifecycle_paths, stub_embedder_seed, stub_reranker_seed,
@@ -218,9 +218,10 @@ fn prompts_get_context_build_failure_exits_28() {
 
     // Seam ON: the render path's context builder omits a required field,
     // so `.build()` fails and `build_get_context` wraps it as exit 28.
-    let _guard = ForceContextBuildFailureGuard::install();
+    // The harness sets + clears the process-global flag WITHIN the render
+    // serialisation lock, so this never races a concurrent sibling render.
     let err = harness
-        .prompts_get("plug__plain", None)
+        .prompts_get_forcing_context_failure("plug__plain", None)
         .expect_err("context-build failure must surface SubstitutionFailed");
 
     assert_eq!(
