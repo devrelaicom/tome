@@ -27,12 +27,11 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::catalog::manifest::CatalogManifest;
-use crate::commands::plugin::registry_seeds;
 use crate::doctor::report::{
     CatalogCacheHealth, CatalogCacheState, EntryCountsByKind, OrphanDataDirReport, PromptsReport,
 };
 use crate::error::TomeError;
-use crate::index::{self, OpenOptions, workspace_catalogs};
+use crate::index::{self, workspace_catalogs};
 use crate::mcp::prompts::PromptRegistry;
 use crate::paths::Paths;
 use crate::workspace::{Scope, WorkspaceName};
@@ -56,16 +55,30 @@ pub fn check_catalogs(paths: &Paths, scope: &Scope) -> Result<Vec<CatalogCacheHe
     let workspace_name = scope.name().as_str();
 
     let enrolments = if paths.index_db.is_file() {
-        let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
-        let conn = index::open(
-            &paths.index_db,
-            &OpenOptions {
-                embedder: embedder_seed,
-                reranker: reranker_seed,
-                summariser: summariser_seed,
-            },
-        )?;
-        workspace_catalogs::list_for_workspace(&conn, workspace_name).unwrap_or_default()
+        // FR-002 / F-DOCTOR-RW read-only contract: `tome doctor` (no `--fix`)
+        // must NOT migrate an unlocked DB nor take the advisory lock during a
+        // health check. `index::open` does both (runs `apply_pending` + would
+        // be wrapped by callers under the lock for writes), so it cannot be
+        // used here. `open_read_only` skips bootstrap + migration + the
+        // lock, and refuses a future schema with `SchemaTooNew` (exit 52)
+        // rather than the migrating `index::open`'s `SchemaVersionTooNew`
+        // (exit 73). Swallow EITHER open/schema error into an empty
+        // enrolment list so the read-only check degrades rather than aborts
+        // on a stale OR a future schema — mirroring `mod.rs`'s `check_index`
+        // (`unwrap_or_else`) and the Phase 5/6 `open_read_only` match arms.
+        // `--fix`'s lock-held `repair_schema` is unaffected.
+        match index::open_read_only(&paths.index_db) {
+            Ok(conn) => {
+                workspace_catalogs::list_for_workspace(&conn, workspace_name).unwrap_or_default()
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "doctor: open_read_only(index) failed during catalog check; degrading to empty enrolment list",
+                );
+                Vec::new()
+            }
+        }
     } else {
         Vec::new()
     };
@@ -1097,7 +1110,11 @@ pub fn build_persona_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::workspace_catalogs;
+    // `seed_enrolment` below bootstraps a DB via the migrating `index::open`
+    // (a legitimate test seeder, NOT the read-only contract surface), so it
+    // needs the seeds + `OpenOptions` the production path no longer imports.
+    use crate::commands::plugin::registry_seeds;
+    use crate::index::{OpenOptions, workspace_catalogs};
     use crate::workspace::Scope;
     use tempfile::TempDir;
 
