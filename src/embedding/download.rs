@@ -14,9 +14,12 @@
 //!    `entry.aux_urls` positionally — e.g. `tokenizer.json` + the optional
 //!    fastembed config files) into the same `.partial/` directory. These are
 //!    not checksum-verified (the registry only pins the primary's size +
-//!    sha), consistent with `verify`'s design. Doing this BEFORE the rename
-//!    keeps the all-or-nothing landing: a failed aux fetch leaves the
-//!    `.partial/` tree, which the error arm removes.
+//!    sha), consistent with `verify`'s design, so each aux stream is bounded
+//!    by [`AUX_FILE_MAX`] (64 MiB) to deny an unbounded sidecar from a
+//!    compromised pinned host (over-cap → [`TomeError::ModelCorrupt`]).
+//!    Doing this BEFORE the rename keeps the all-or-nothing landing: a
+//!    failed (or over-cap) aux fetch leaves the `.partial/` tree, which the
+//!    error arm removes.
 //! 5. `fsync` each file, then rename the `.partial/` directory to its final
 //!    name. The rename is the atomicity boundary — readers either see the
 //!    old directory (or none) or the new one, never a half-extracted state.
@@ -40,6 +43,74 @@ use crate::embedding::registry::{ModelEntry, ModelManifest};
 use crate::error::TomeError;
 
 const STREAM_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Byte cap for an auxiliary model file (tokenizer/config sidecar).
+///
+/// Aux files (`entry.files[1..]`, fetched from `entry.aux_urls`) carry no
+/// pinned size and are NOT SHA-256-verified, unlike the primary artefact —
+/// so without a cap a compromised or MITM'd pinned host could stream an
+/// unbounded sidecar and exhaust memory/disk (P9 MAJOR-2). 64 MiB is
+/// deliberately generous: the largest real aux file is the bge-reranker
+/// `tokenizer.json` at ~17 MiB, so this leaves comfortable headroom while
+/// still bounding the worst case. Over-cap surfaces as
+/// [`TomeError::ModelCorrupt`] (exit 31, reusing the existing variant) and
+/// the staged `.partial/` directory is removed by `download_model`'s
+/// error-cleanup closure.
+///
+/// The primary artefact needs no analogous cap here: its `entry.size_bytes`
+/// pin + post-stream SHA-256 verify already make an over-long or tampered
+/// body fail closed.
+const AUX_FILE_MAX: u64 = 64 * 1024 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override for [`AUX_FILE_MAX`]. When `Some`, the aux-file
+    /// streamer enforces this value instead of the 64 MiB production cap,
+    /// so a deterministic unit test can prove the over-cap abort + partial
+    /// cleanup against a tiny served body rather than 64 MiB of bytes.
+    ///
+    /// Mirrors the `thread_local! RefCell<Option<_>>` + RAII-guard injection
+    /// pattern used elsewhere (`summarise::trigger::SUMMARISER_OVERRIDE`).
+    /// Gated behind `cfg(test)`: this fix's test lives in the same crate
+    /// (`#[cfg(test)] mod tests` below), so no published-API exposure is
+    /// needed and the override compiles out of release builds entirely.
+    static AUX_FILE_MAX_OVERRIDE: std::cell::RefCell<Option<u64>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The effective aux-file cap: the test override when installed, else the
+/// production [`AUX_FILE_MAX`]. In release builds this is a constant.
+#[inline]
+fn aux_file_max() -> u64 {
+    #[cfg(test)]
+    {
+        if let Some(v) = AUX_FILE_MAX_OVERRIDE.with(|slot| *slot.borrow()) {
+            return v;
+        }
+    }
+    AUX_FILE_MAX
+}
+
+/// RAII guard installing a tiny [`AUX_FILE_MAX_OVERRIDE`] for one test, then
+/// clearing it on drop (including on panic). Lets a deterministic test prove
+/// the over-cap abort against a small served body instead of 64 MiB.
+#[cfg(test)]
+struct AuxCapOverrideGuard;
+
+#[cfg(test)]
+impl AuxCapOverrideGuard {
+    fn install(max_bytes: u64) -> Self {
+        AUX_FILE_MAX_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(max_bytes));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for AuxCapOverrideGuard {
+    fn drop(&mut self) {
+        AUX_FILE_MAX_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
 
 /// Download `entry` into `model_root`. The final installed location is
 /// `model_root/<entry.name>/...` and the manifest path is
@@ -110,10 +181,23 @@ pub fn download_model(
         for (local_name, url) in entry.files.iter().skip(1).zip(entry.aux_urls.iter()) {
             // Aux files are not checksum-verified (the registry pins only the
             // primary's size + sha); `None` progress because there is no
-            // pinned size to drive a bar against. Scrubbing is preserved —
-            // `stream_url_to_partial` runs the URL + reqwest error chain
-            // through the credential scrubber exactly as the primary fetch.
-            stream_url_to_partial(url, &partial_dir.join(local_name), None, None)?;
+            // pinned size to drive a bar against. Because they are unverified
+            // and unsized, the stream is byte-capped (`AUX_FILE_MAX`) so a
+            // compromised pinned host cannot serve an unbounded sidecar.
+            // Scrubbing is preserved — `stream_url_to_partial` runs the URL +
+            // reqwest error chain through the credential scrubber exactly as
+            // the primary fetch.
+            stream_url_to_partial(
+                url,
+                &partial_dir.join(local_name),
+                None,
+                None,
+                Some(AuxCap {
+                    max_bytes: aux_file_max(),
+                    model: entry.name,
+                    file: local_name,
+                }),
+            )?;
         }
 
         if final_dir.exists() {
@@ -145,22 +229,43 @@ fn stream_to_partial(
     dest: &Path,
     byte_progress: Option<&dyn Fn(u64, u64)>,
 ) -> Result<String, TomeError> {
+    // No `AuxCap` for the primary: its pinned `size_bytes` + post-stream
+    // SHA-256 verify already bound and authenticate the body.
     stream_url_to_partial(
         entry.source_url,
         dest,
         Some(entry.size_bytes),
         byte_progress,
+        None,
     )
+}
+
+/// Byte-cap descriptor for an unverified, unsized auxiliary file fetch.
+/// Carries the model + file names so an over-cap abort can surface a
+/// precise [`TomeError::ModelCorrupt`] message.
+struct AuxCap<'a> {
+    max_bytes: u64,
+    model: &'a str,
+    file: &'a str,
 }
 
 /// Stream an arbitrary `(url, dest)` pair through a `Sha256`, returning the
 /// streaming digest. Used for both the primary artefact (size known, progress
-/// driven) and the non-primary aux files (size unknown, `None` progress).
+/// driven, no `aux_cap`) and the non-primary aux files (size unknown, `None`
+/// progress, byte-capped via `aux_cap`).
 ///
 /// `total_for_progress` is the byte count reported to `byte_progress` as the
 /// second argument; the network's `Content-Length` is intentionally NOT
 /// consulted (it can disagree with the registry pin for redirected URLs and
 /// the pin is authoritative). When `None`, `byte_progress` is not invoked.
+///
+/// `aux_cap`, when `Some`, bounds the streamed body: once cumulative bytes
+/// written would exceed `aux_cap.max_bytes`, the stream aborts with
+/// [`TomeError::ModelCorrupt`] (the partially written file is left in the
+/// `.partial/` dir for `download_model`'s error-cleanup closure to remove).
+/// The primary path passes `None` because its `size_bytes` pin + SHA-256
+/// verify already bound and authenticate the body; the `Content-Length`
+/// remains untrusted on both paths.
 ///
 /// CREDENTIAL SCRUBBING: `reqwest::Error::Display` and the status-line message
 /// reproduce the failing URL verbatim, which can include presigned-URL query
@@ -171,6 +276,7 @@ fn stream_url_to_partial(
     dest: &Path,
     total_for_progress: Option<u64>,
     byte_progress: Option<&dyn Fn(u64, u64)>,
+    aux_cap: Option<AuxCap<'_>>,
 ) -> Result<String, TomeError> {
     let mut response = reqwest::blocking::get(url).map_err(|e| {
         TomeError::Io(std::io::Error::other(scrub_for_diag(&format!(
@@ -197,9 +303,24 @@ fn stream_url_to_partial(
         if n == 0 {
             break;
         }
+        written = written.saturating_add(n as u64);
+        // Enforce the aux byte cap BEFORE writing this chunk, so an
+        // unbounded sidecar from a compromised pinned host can never grow
+        // the on-disk partial past the cap (memory stays bounded by the
+        // fixed-size `buf` regardless). The over-cap error names the model
+        // + file and reuses the existing `ModelCorrupt` variant (exit 31) —
+        // no new error variant / exit code.
+        if let Some(cap) = &aux_cap
+            && written > cap.max_bytes
+        {
+            let mib = cap.max_bytes / (1024 * 1024);
+            return Err(TomeError::ModelCorrupt {
+                model: cap.model.to_owned(),
+                detail: format!("{} exceeded the {} MiB aux-file cap", cap.file, mib),
+            });
+        }
         hasher.update(&buf[..n]);
         file.write_all(&buf[..n]).map_err(TomeError::Io)?;
-        written = written.saturating_add(n as u64);
         if let (Some(cb), Some(total)) = (byte_progress, total_for_progress) {
             cb(written, total);
         }
@@ -282,4 +403,161 @@ pub fn sha256_file(path: &Path) -> Result<String, TomeError> {
 /// redacted before the message lands in `TomeError`.
 fn scrub_for_diag(text: &str) -> String {
     git::scrub_to_string(text.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::thread;
+    use tempfile::TempDir;
+
+    /// Sequential one-shot HTTP server: serves `responses` in order, one per
+    /// accepted connection (the downloader opens a fresh connection per
+    /// `reqwest::blocking::get`). Returns the bound base URL; callers append
+    /// the per-file path. Mirrors the hand-rolled server in
+    /// `tests/model_download.rs` but serves more than one request so we can
+    /// satisfy the primary fetch + the aux fetch.
+    fn spawn_sequential_server(responses: Vec<Vec<u8>>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+        let addr = listener.local_addr().expect("local_addr");
+        thread::spawn(move || {
+            for response in responses {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut sink = [0u8; 4096];
+                        let _ = stream.read(&mut sink);
+                        let _ = stream.write_all(&response);
+                        let _ = stream.flush();
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn http_200(body: &[u8]) -> Vec<u8> {
+        let mut out = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    /// Leak a two-file (primary + one aux) entry whose URLs point at `base`.
+    /// `ModelEntry`'s `&'static str` fields force the leak; bounded by the
+    /// test binary's lifetime, which is fine for a fixture.
+    fn two_file_entry(base: &str, primary_sha: String, primary_size: u64) -> &'static ModelEntry {
+        let primary_url = format!("{base}/model.onnx");
+        let aux_url = format!("{base}/tokenizer.json");
+        // Leak the aux-URL *slice* (not just the strings) so it satisfies the
+        // `&'static [&'static str]` field; a bare `&[Box::leak(..)]` would be
+        // a temporary freed at the end of the statement.
+        let aux_urls: &'static [&'static str] =
+            Box::leak(vec![&*Box::leak(aux_url.into_boxed_str())].into_boxed_slice());
+        Box::leak(Box::new(ModelEntry {
+            name: "test-aux-cap-model",
+            version: "1",
+            kind: crate::embedding::registry::ModelKind::Embedder,
+            source_url: Box::leak(primary_url.into_boxed_str()),
+            sha256: Box::leak(primary_sha.into_boxed_str()),
+            size_bytes: primary_size,
+            licence: "MIT",
+            files: &["model.onnx", "tokenizer.json"],
+            aux_urls,
+        }))
+    }
+
+    /// An aux body that exceeds a tiny injected cap must abort the download
+    /// with `ModelCorrupt` (naming the file + the MiB cap) and remove the
+    /// staged `.partial/` dir — the unverified, unsized sidecar is bounded.
+    #[test]
+    fn oversized_aux_file_aborts_with_model_corrupt_and_cleans_partial() {
+        // 1 MiB cap; the served aux body is 3 MiB → over-cap.
+        let _guard = AuxCapOverrideGuard::install(1024 * 1024);
+
+        let primary = b"PRIMARY-ONNX-BYTES";
+        let oversized_aux = vec![0xCDu8; 3 * 1024 * 1024];
+        // The downloader fetches the primary first, then the aux: serve in
+        // that order.
+        let base = spawn_sequential_server(vec![http_200(primary), http_200(&oversized_aux)]);
+        let entry = two_file_entry(&base, sha256_hex(primary), primary.len() as u64);
+        let root = TempDir::new().expect("tempdir");
+
+        let err = download_model(entry, root.path(), None)
+            .expect_err("over-cap aux fetch must abort the download");
+        match err {
+            TomeError::ModelCorrupt { model, detail } => {
+                assert_eq!(model, "test-aux-cap-model");
+                assert!(
+                    detail.contains("tokenizer.json") && detail.contains("aux-file cap"),
+                    "over-cap detail should name the file + the cap, got: {detail}"
+                );
+                assert!(
+                    detail.contains("1 MiB"),
+                    "over-cap detail should report the (injected) cap in MiB, got: {detail}"
+                );
+            }
+            other => panic!("expected ModelCorrupt on over-cap aux, got {other:?}"),
+        }
+
+        // The over-cap abort must leave nothing behind: the staged dir is
+        // removed by `download_model`'s error-cleanup closure, and the model
+        // never lands in its final directory.
+        let partial = root.path().join("test-aux-cap-model.partial");
+        assert!(
+            !partial.exists(),
+            "partial dir leaked after over-cap aux abort: {}",
+            partial.display()
+        );
+        let final_dir = root.path().join("test-aux-cap-model");
+        assert!(
+            !final_dir.exists(),
+            "final dir created despite over-cap aux abort: {}",
+            final_dir.display()
+        );
+    }
+
+    /// An aux body within the cap completes normally — the cap is a ceiling,
+    /// not a floor, and the happy path is unaffected.
+    #[test]
+    fn within_cap_aux_file_completes() {
+        let _guard = AuxCapOverrideGuard::install(1024 * 1024);
+
+        let primary = b"PRIMARY-ONNX-BYTES";
+        let small_aux = vec![0xEFu8; 4096];
+        let base = spawn_sequential_server(vec![http_200(primary), http_200(&small_aux)]);
+        let entry = two_file_entry(&base, sha256_hex(primary), primary.len() as u64);
+        let root = TempDir::new().expect("tempdir");
+
+        let manifest =
+            download_model(entry, root.path(), None).expect("within-cap download should succeed");
+        assert_eq!(manifest.name, "test-aux-cap-model");
+
+        let aux_path = root
+            .path()
+            .join("test-aux-cap-model")
+            .join("tokenizer.json");
+        let written = std::fs::read(&aux_path).expect("aux file present after success");
+        assert_eq!(written, small_aux);
+    }
+
+    /// The production cap is the documented, generous-but-bounded 64 MiB —
+    /// guards against an accidental edit shrinking it below the largest real
+    /// aux file (the bge-reranker tokenizer at ~17 MiB) or removing the bound.
+    #[test]
+    fn production_aux_cap_is_64_mib() {
+        assert_eq!(AUX_FILE_MAX, 64 * 1024 * 1024);
+        // Sanity: comfortably above the largest real aux file (~17 MiB).
+        // A `const` assertion so the headroom guarantee is checked at
+        // compile time (and clippy doesn't flag a const-folded `assert!`).
+        const _: () = assert!(AUX_FILE_MAX > 17 * 1024 * 1024);
+    }
 }
