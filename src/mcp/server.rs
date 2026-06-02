@@ -86,6 +86,16 @@ impl Server {
         &self.tool_router
     }
 
+    /// Read-only borrow of the per-session [`PromptRouter`] — the exact
+    /// object `ServerHandler::list_prompts` reads (`list_all()`) and
+    /// `get_prompt` dispatches through. Symmetric with
+    /// [`Self::tool_router_ref`]; the in-process MCP test harness
+    /// (Phase 7 / FR-012) drives `prompts/list` through it so the
+    /// assertion sees the same router the live server advertises.
+    pub fn prompt_router_ref(&self) -> &PromptRouter<Self> {
+        &self.prompt_router
+    }
+
     /// Read-only borrow of the per-session `McpState`. Required by the
     /// `prompts/get` route handlers (US1.c): the rmcp `PromptContext`
     /// hands the handler `&Server` rather than the inner state, so the

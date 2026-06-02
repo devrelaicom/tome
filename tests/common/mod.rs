@@ -8,6 +8,11 @@
 
 #![allow(dead_code)] // each test file uses a subset of these helpers
 
+/// In-process MCP test harness (Phase 7 / FR-012). Constructs + drives a
+/// real `mcp::server::Server` over a staged workspace using the
+/// StubEmbedder — see [`mcp_harness::McpHarness`].
+pub mod mcp_harness;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
