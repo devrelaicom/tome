@@ -77,6 +77,8 @@ pub const SUMMARISER_ENTRY: ModelEntry = ModelEntry {
     size_bytes: SUMMARISER_SIZE_BYTES,
     licence: "Apache-2.0",
     files: &["model.gguf"],
+    // Single-file model: the GGUF carries its own tokenizer. No aux files.
+    aux_urls: &[],
 };
 
 /// Look up the summariser registry entry. Convenience wrapper over

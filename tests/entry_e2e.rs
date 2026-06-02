@@ -225,6 +225,7 @@ static STUB_EMBEDDER_ENTRY: ModelEntry = ModelEntry {
     size_bytes: 0,
     licence: "MIT",
     files: &[],
+    aux_urls: &[],
 };
 
 static STUB_RERANKER_ENTRY: ModelEntry = ModelEntry {
@@ -236,6 +237,7 @@ static STUB_RERANKER_ENTRY: ModelEntry = ModelEntry {
     size_bytes: 0,
     licence: "MIT",
     files: &[],
+    aux_urls: &[],
 };
 
 /// State builder for tests that invoke `search_skills::handle`. Uses

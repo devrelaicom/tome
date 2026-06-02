@@ -27,7 +27,15 @@ pub struct ModelEntry {
     pub size_bytes: u64,
     pub licence: &'static str,
     /// Relative paths inside the model directory once installation completes.
+    /// `files[0]` is the primary artefact (fetched from [`source_url`]);
+    /// `files[1..]` are the non-primary files, fetched from [`aux_urls`].
     pub files: &'static [&'static str],
+    /// Remote URLs for the non-primary files (`files[1..]`) in the SAME
+    /// ORDER. The primary file's URL is [`source_url`]. Single-file models
+    /// (the summariser) use `&[]`. The positional `files[1..]` ↔ `aux_urls`
+    /// pairing is enforced by `model_registry_invariant` (a fast test) and a
+    /// `debug_assert!` in `download::download_model`.
+    pub aux_urls: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,7 +75,26 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
         sha256: "51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431",
         size_bytes: 66_465_124,
         licence: "MIT",
-        files: &["model.onnx", "tokenizer.json"],
+        // tokenizer.json is REQUIRED — fastembed's `build_tokenizer_files`
+        // reads it via `read_required`; without it `FastembedEmbedder::load`
+        // returns ModelMissing. config.json / special_tokens_map.json /
+        // tokenizer_config.json are the standard fastembed layout, read via
+        // `read_optional`; we ship them so truncation length + special-token
+        // handling match upstream. All five are pinned, verified 200 upstream.
+        files: &[
+            "model.onnx",
+            "tokenizer.json",
+            "config.json",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+        ],
+        // Positional with files[1..].
+        aux_urls: &[
+            "https://huggingface.co/qdrant/bge-small-en-v1.5-onnx-Q/resolve/main/tokenizer.json",
+            "https://huggingface.co/qdrant/bge-small-en-v1.5-onnx-Q/resolve/main/config.json",
+            "https://huggingface.co/qdrant/bge-small-en-v1.5-onnx-Q/resolve/main/special_tokens_map.json",
+            "https://huggingface.co/qdrant/bge-small-en-v1.5-onnx-Q/resolve/main/tokenizer_config.json",
+        ],
     },
     // Source moved: BAAI/bge-reranker-base no longer hosts a quantised ONNX
     // (only fp32 model.onnx remains upstream). The onnx-community group is
@@ -81,7 +108,25 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
         sha256: "46a1bb4cf46ff1e300d27589d620141fbf04fc0eaf8e7bb6dea5e044475ff387",
         size_bytes: 279_252_659,
         licence: "MIT",
-        files: &["model.onnx", "tokenizer.json"],
+        // Same layout as the embedder above. All four non-primary files were
+        // verified 200 at the onnx-community mirror's /resolve/main/ base.
+        // NOTE: the primary .onnx lives under /onnx/, but tokenizer + config
+        // files live at the repo root (no /onnx/ prefix) — hence the URLs
+        // here are NOT just `source_url`'s dir + filename.
+        files: &[
+            "model.onnx",
+            "tokenizer.json",
+            "config.json",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+        ],
+        // Positional with files[1..].
+        aux_urls: &[
+            "https://huggingface.co/onnx-community/bge-reranker-base-ONNX/resolve/main/tokenizer.json",
+            "https://huggingface.co/onnx-community/bge-reranker-base-ONNX/resolve/main/config.json",
+            "https://huggingface.co/onnx-community/bge-reranker-base-ONNX/resolve/main/special_tokens_map.json",
+            "https://huggingface.co/onnx-community/bge-reranker-base-ONNX/resolve/main/tokenizer_config.json",
+        ],
     },
     // Phase 4 — Summariser. The SHA-256 and size below were computed
     // against the canonical Hugging Face artefact (download via
@@ -103,6 +148,8 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
         size_bytes: 491_400_032,
         licence: "Apache-2.0",
         files: &["model.gguf"],
+        // Single-file model: the GGUF carries its own tokenizer. No aux files.
+        aux_urls: &[],
     },
 ];
 
