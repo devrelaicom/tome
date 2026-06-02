@@ -30,12 +30,21 @@ pub fn run(args: CatalogAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
     let paths = Paths::resolve()?;
     let workspace_name = scope.scope.name().as_str().to_owned();
     let url = source::resolve(&args.source)?;
-    let cache_dir = paths.cache_dir_for(&url);
 
     // Scrub credentials at the boundary. Phase 1 stored the user's typed
     // URL into config.toml; F11b stores it into workspace_catalogs.url.
     // Same scrubbing discipline either way.
     let scrubbed_url = scrub_to_string(url.as_bytes());
+
+    // F-CACHE-KEY: key the cache dir + reuse refcount by the SCRUBBED URL,
+    // because that is the URL we STORE and every reader (show / update /
+    // remove + the reuse path below) resolves by. The raw `url` is kept
+    // only for `clone_shallow`, which needs the credentials/SSH form for
+    // auth. Keying the cache by the raw URL here would land the clone under
+    // a different content-address than readers compute (for any source
+    // where scrubbing changes the URL — SSH, `user:token@`), orphaning the
+    // clone on disk and breaking reuse/refcount.
+    let cache_dir = paths.cache_dir_for(&scrubbed_url);
 
     let clone_ref = args.ref_.as_deref();
     let pinned_ref = clone_ref.unwrap_or("main").to_owned();
@@ -64,7 +73,7 @@ pub fn run(args: CatalogAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
         // already references this URL via the junction table. The Phase 3
         // `cache_dir.exists()` shortcut is not sufficient on its own —
         // it would silently adopt an orphan directory.
-        let refs = workspace_catalogs::refcount_by_url(&conn, &url)?;
+        let refs = workspace_catalogs::refcount_by_url(&conn, &scrubbed_url)?;
         let reuse_existing = cache_dir.exists() && refs > 0;
 
         let (manifest, _tempdir_guard) = if reuse_existing {
@@ -98,6 +107,8 @@ pub fn run(args: CatalogAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
 
             let display_source = scrub_to_string(args.source.as_bytes());
             let git = Git::new(&display_source);
+            // Clone with the RAW url — it carries the credentials / SSH form
+            // git needs for auth. Only the cache key + stored URL are scrubbed.
             git.clone_shallow(&url, &clone_dest, clone_ref)?;
 
             let manifest_path = clone_dest.join("tome-catalog.toml");
