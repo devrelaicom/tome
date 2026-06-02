@@ -71,9 +71,25 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
         name: "bge-small-en-v1.5",
         version: "1.5",
         kind: ModelKind::Embedder,
-        source_url: "https://huggingface.co/qdrant/bge-small-en-v1.5-onnx-Q/resolve/main/model_optimized.onnx",
-        sha256: "51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431",
-        size_bytes: 66_465_124,
+        // CPU-COMPATIBLE PIN (F-MODEL-ONNX-CPU, Phase 7): the previous pin —
+        // qdrant's `bge-small-en-v1.5-onnx-Q/model_optimized.onnx` — ships an
+        // `ort_config.json` with `optimize_for_gpu:true` / `fp16:true` /
+        // transformer-specific graph fusions. On Tome's CPU-only `ort` stack
+        // `FastembedEmbedder::embed` failed at inference with
+        // `Missing Input: encoder.layer.0.attention.output.LayerNorm.weight`
+        // inside a fused `SkipLayerNormalization` op, so `tome query` + the MCP
+        // `search_skills` tool returned errors despite a successful `load`.
+        // Xenova/bge-small-en-v1.5 is the canonical self-contained CPU INT8
+        // graph (the same publisher fastembed-rs uses for this model); no
+        // `ort_config.json`, plain dynamic-quantised ops that run on CPU `ort`.
+        // sha256 below is the COMPUTED digest of the downloaded artefact
+        // (`shasum -a 256`); it matches the upstream-claimed value. The entry
+        // NAME + VERSION are unchanged so the index `meta`/`MetaSeed` identity
+        // is preserved (no index drift); only source_url/sha256/size_bytes and
+        // the aux_urls were re-pinned. The `files` local-name set is unchanged.
+        source_url: "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/onnx/model_quantized.onnx",
+        sha256: "6c9c6101a956d62dfb5e7190c538226c0c5bb9cb27b651234b6df063ee7dbfe4",
+        size_bytes: 34_014_426,
         licence: "MIT",
         // tokenizer.json is REQUIRED — fastembed's `build_tokenizer_files`
         // reads it via `read_required`; without it `FastembedEmbedder::load`
@@ -88,12 +104,14 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
             "special_tokens_map.json",
             "tokenizer_config.json",
         ],
-        // Positional with files[1..].
+        // Positional with files[1..]. The primary .onnx lives under /onnx/;
+        // the tokenizer + config files live at the Xenova repo root (no /onnx/
+        // prefix) — hence these URLs are NOT just `source_url`'s dir + filename.
         aux_urls: &[
-            "https://huggingface.co/qdrant/bge-small-en-v1.5-onnx-Q/resolve/main/tokenizer.json",
-            "https://huggingface.co/qdrant/bge-small-en-v1.5-onnx-Q/resolve/main/config.json",
-            "https://huggingface.co/qdrant/bge-small-en-v1.5-onnx-Q/resolve/main/special_tokens_map.json",
-            "https://huggingface.co/qdrant/bge-small-en-v1.5-onnx-Q/resolve/main/tokenizer_config.json",
+            "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/tokenizer.json",
+            "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/config.json",
+            "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/special_tokens_map.json",
+            "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main/tokenizer_config.json",
         ],
     },
     // Source moved: BAAI/bge-reranker-base no longer hosts a quantised ONNX
