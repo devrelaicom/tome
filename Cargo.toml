@@ -1,5 +1,11 @@
 [package]
-name = "tome"
+# Phase 7 / FR-017: the crate is *published* as `tome-mcp` (the bare `tome`
+# name is taken on crates.io), but the installed command and the internal lib
+# crate both stay `tome`. The `[lib]` + `[[bin]]` sections below pin those two
+# names so the package rename touches zero use-sites: ~180 `use tome::...`
+# references across src/ + tests/ keep resolving (lib name = "tome"), and the
+# built/installed binary stays `target/release/tome` (bin name = "tome").
+name = "tome-mcp"
 version = "0.6.0"
 edition = "2024"
 rust-version = "1.93"
@@ -9,6 +15,17 @@ repository = "https://github.com/devrelaicom/tome"
 readme = "README.md"
 categories = ["command-line-utilities", "development-tools"]
 keywords = ["claude-code", "plugins", "ai", "cli"]
+
+# Keep the library crate name `tome` despite the `tome-mcp` package rename, so
+# every `use tome::...` site stays valid with no edits (FR-017).
+[lib]
+name = "tome"
+
+# Keep the installed command `tome` (target/release/tome). The CI binary-size
+# gate and `env!("CARGO_BIN_EXE_tome")` test invocations key off this name.
+[[bin]]
+name = "tome"
+path = "src/main.rs"
 
 [dependencies]
 # Phase 1 — unchanged
