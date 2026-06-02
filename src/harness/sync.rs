@@ -278,12 +278,28 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
             // The "live" decision for a shared path is OR-of-live across
             // every harness that targets it: as long as ANY harness in
             // the effective list still wants this path, the block stays.
-            let any_live = rules_targets_by_path
+            let live_sharers: Vec<&HarnessSnapshot> = rules_targets_by_path
                 .get(&snap.rules_path)
-                .map(|sharers| sharers.iter().any(|s| effective_names.contains(&s.name)))
-                .unwrap_or(false);
+                .map(|sharers| {
+                    sharers
+                        .iter()
+                        .copied()
+                        .filter(|s| effective_names.contains(&s.name))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let any_live = !live_sharers.is_empty();
             if any_live {
-                let body = compute_rules_body(snap, project_root)?;
+                // Lowest-common-denominator body style across the group sharing
+                // this rules path (F-RULES-OPENCODE, §R-8 — mirrors the
+                // guardrails reconciler's union-across-sharers). If ANY live
+                // sharer requires `Inline` (OpenCode, which has no `@`-include
+                // support and would read `@.tome/RULES.md` as prose), the inline
+                // body is written so EVERY sharer receives the real rules.
+                // Include-capable harnesses resolve an inline body correctly, so
+                // inline is the safe LCD; an include-only group stays AtInclude.
+                let style = group_body_style(&live_sharers);
+                let body = compute_rules_body(style, &snap.rules_path, project_root)?;
                 let action = write_rules_for_path(snap, &body)?;
                 record_action(
                     &mut outcome,
@@ -558,20 +574,53 @@ fn read_global_settings(deps: &SyncDeps<'_>) -> Result<GlobalSettings, TomeError
 // Rules-file dispatch
 // =====================================================================
 
-/// Compute the block body for one snapshot. The result is the bytes
-/// that will land between the `<!-- tome:begin -->` / `<!-- tome:end -->`
-/// markers for `BlockInExistingFile`, or the full file contents for
-/// `StandaloneFile`.
+/// Lowest-common-denominator body style across the live harnesses sharing one
+/// rules path (F-RULES-OPENCODE, §R-8).
+///
+/// `Inline` wins the moment ANY live sharer requires it: an inline body is the
+/// only form every sharer can consume, because a not-include-capable harness
+/// (OpenCode) reads a `@.tome/RULES.md` directive as literal prose. An
+/// include-capable harness resolves an inline body without issue, so `Inline`
+/// is the safe floor; a group with no inline sharer keeps `AtInclude`.
+///
+/// `block_body_style()` is the source of truth — no harness name is hard-coded.
+/// Mirrors the union-across-sharers in
+/// [`crate::harness::reconcile::guardrails::reconcile_guardrails`].
+fn group_body_style(live_sharers: &[&HarnessSnapshot]) -> BlockBodyStyle {
+    if live_sharers
+        .iter()
+        .any(|s| s.block_body_style == BlockBodyStyle::Inline)
+    {
+        BlockBodyStyle::Inline
+    } else {
+        BlockBodyStyle::AtInclude
+    }
+}
+
+/// Compute the block body for the given resolved [`BlockBodyStyle`]. The result
+/// is the bytes that will land between the `<!-- tome:begin -->` /
+/// `<!-- tome:end -->` markers for `BlockInExistingFile`, or the full file
+/// contents for `StandaloneFile`.
+///
+/// `style` is the GROUP's lowest-common-denominator style (see
+/// [`group_body_style`]), NOT necessarily the writing snapshot's own — a shared
+/// path with any inline sharer is written inline so every sharer can read it.
 ///
 /// Returns an error if reading the project marker's `RULES.md` fails
 /// for any reason other than `NotFound` — absent is fine (US2 / US4
 /// own the file, sync is robust to its absence), but a permissions or
 /// I/O failure must surface rather than silently produce an empty block.
-fn compute_rules_body(snap: &HarnessSnapshot, project_root: &Path) -> Result<String, TomeError> {
-    match snap.block_body_style {
+fn compute_rules_body(
+    style: BlockBodyStyle,
+    rules_path: &Path,
+    project_root: &Path,
+) -> Result<String, TomeError> {
+    match style {
         BlockBodyStyle::AtInclude => {
             let project_rules = Paths::project_marker_rules(project_root);
-            let parent = snap.rules_path.parent().unwrap_or(Path::new(""));
+            // All sharers of a group target the same `rules_path` (the grouping
+            // key), so the include directive's relative path is unambiguous.
+            let parent = rules_path.parent().unwrap_or(Path::new(""));
             let relative = relative_path(parent, &project_rules);
             Ok(format!("@{}", relative.display()))
         }
