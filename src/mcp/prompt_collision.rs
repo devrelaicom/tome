@@ -85,14 +85,29 @@ pub fn resolve_collisions(
     let mut out: Vec<(String, EntryIdentity)> = Vec::with_capacity(entries.len());
     let mut collisions: Vec<CollisionRecord> = Vec::new();
 
-    for (base, mut members) in buckets {
-        if members.len() == 1 {
-            out.push((base, members.pop().expect("len == 1")));
-            continue;
-        }
+    // FR-004 (F-MCP-PROMPT-COLLISION): final names are assigned against ONE
+    // global taken-set spanning every candidate — not per-bucket — so a
+    // counter suffix minted in one bucket can never collide with a base name
+    // (or another suffix) produced by a different bucket. The pre-fix code
+    // suffixed losers as `{base}{idx+1}` without re-checking that string
+    // against other buckets, so `foo`+`foo` (→ `foo`, `foo2`) alongside a
+    // standalone `foo2` produced TWO `foo2`s; the terminal `by_name.insert`
+    // in `prompts.rs` then silently dropped one user-invocable entry.
+    //
+    // Two passes are required to honour "first-in-insertion-order keeps the
+    // base name" globally: a bucket's winner must hold its base even if an
+    // EARLIER-processed bucket would otherwise mint that string as a loser
+    // suffix. Bucket keys (derived names) are unique, so every winner's base
+    // is free among winners — Pass 1 claims them all; Pass 2 then suffixes
+    // losers `{base}{n}` (n from 2) advancing until free against the full
+    // taken-set, so a legitimate standalone owner of `{base}{n}` is never
+    // overwritten.
+    let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        // Tie-break: indexed_at ASC, then (catalog, plugin, kind, name).
-        // `kind.as_str()` gives the wire-stable lowercase string.
+    // Tie-break each bucket once: indexed_at ASC, then (catalog, plugin,
+    // kind, name). `kind.as_str()` gives the wire-stable lowercase string.
+    // After sorting, idx 0 is the winner that keeps the base name.
+    for members in buckets.values_mut() {
         members.sort_by(|a, b| {
             a.indexed_at
                 .cmp(&b.indexed_at)
@@ -101,21 +116,55 @@ pub fn resolve_collisions(
                 .then_with(|| a.kind.as_str().cmp(b.kind.as_str()))
                 .then_with(|| a.name.cmp(&b.name))
         });
+    }
+
+    // Pass 1 — reserve every winner's base name. Unique across buckets by
+    // construction, so each reservation is collision-free.
+    for (base, members) in &buckets {
+        if let Some(winner) = members.first() {
+            taken.insert(base.clone());
+            out.push((base.clone(), winner.clone()));
+        }
+    }
+
+    // Pass 2 — assign losers against the populated taken-set, advancing the
+    // counter suffix until a free candidate is found, and recording the
+    // ACTUAL assigned name (FR-121 / SC-004: doctor must report the true
+    // resolution, never the naive `{base}{idx+1}`).
+    for (base, members) in buckets {
+        let winner = match members.first() {
+            Some(w) => w.clone(),
+            None => continue,
+        };
+        if members.len() == 1 {
+            // Singleton bucket: winner already emitted in Pass 1, no record.
+            continue;
+        }
 
         let mut record_entries: Vec<ResolvedCollisionEntry> = Vec::with_capacity(members.len());
-        for (idx, identity) in members.into_iter().enumerate() {
-            let final_name = if idx == 0 {
-                base.clone()
-            } else {
-                // Counter-suffix starts at 2 — first loser is index 1.
-                format!("{base}{}", idx + 1)
-            };
-            out.push((final_name.clone(), identity.clone()));
+        // Winner first — holds the base name (reserved in Pass 1).
+        record_entries.push(ResolvedCollisionEntry {
+            identity: winner,
+            final_name: base.clone(),
+        });
+
+        for identity in members.into_iter().skip(1) {
+            // Counter-suffix starts at 2; advance and RE-CHECK each candidate
+            // against the same global set before settling on the first free.
+            let mut n = 2usize;
+            let mut candidate = format!("{base}{n}");
+            while taken.contains(&candidate) {
+                n += 1;
+                candidate = format!("{base}{n}");
+            }
+            taken.insert(candidate.clone());
+            out.push((candidate.clone(), identity.clone()));
             record_entries.push(ResolvedCollisionEntry {
                 identity,
-                final_name,
+                final_name: candidate,
             });
         }
+
         collisions.push(CollisionRecord {
             base_name: base,
             entries: record_entries,
