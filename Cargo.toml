@@ -31,6 +31,27 @@ documentation = "https://github.com/devrelaicom/tome"
 categories = ["command-line-utilities", "development-tools"]
 keywords = ["claude-code", "mcp", "plugins", "ai", "cli"]
 
+# Crate-tarball allowlist SCAFFOLDING (FR-024 / research §R-18).
+#
+# This `exclude` currently trims only the release-tooling configs introduced
+# alongside the cargo-dist pipeline — they have no place in the *published
+# library* crate. The FULL trim of the process/working-tree artifacts
+# (`specs/`, `.sdd/`, `review/`, `retro/`, `CLAUDE.md`, the two `*.local.json`
+# dev-state files) lands in the REL5 Polish slice as the FINAL step, paired
+# with `git rm --cached` untracking — it is intentionally NOT done here so the
+# in-flight hardening PRs keep reviewing against those tracked artifacts.
+#
+# INVARIANT: this list MUST NOT exclude `vendor/sqlite-vec/**` or `build.rs`,
+# so the crate still builds from the tarball alone (verified via
+# `cargo package --list`). `THIRD-PARTY-LICENSES` is intentionally kept in the
+# tarball (it is the binary-redistribution notice for the published crate).
+exclude = [
+    "dist-workspace.toml",
+    "about.toml",
+    "about.hbs",
+    "/.github/",
+]
+
 # Best-effort docs.rs configuration. See the `documentation` note above: the
 # docs.rs build is expected to fail today because of `ort`'s build-time ONNX
 # Runtime download, which no config-only lever here can suppress. Kept so the
@@ -158,3 +179,12 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 opt-level = 3
+
+# Phase 7 / FR-018: the profile `cargo-dist` builds the prebuilt release
+# binaries with. Inherits the size-tuned `release` profile above
+# (strip=symbols, panic=abort, codegen-units=1, opt-level=3) so the
+# distributed binaries stay under the 50 MB cap (FR-020 / NFR-001); `lto` is
+# restated because cargo-dist manages this table.
+[profile.dist]
+inherits = "release"
+lto = "thin"
