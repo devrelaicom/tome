@@ -124,6 +124,21 @@ fn validate_semantic(m: &CatalogManifest, file: &Path) -> Result<(), ManifestInv
             key: "name".into(),
         });
     }
+    // F-WS-TOML-NEWLINE (FR-005): the catalog `name` is copied verbatim into
+    // a workspace's settings.toml (and other Tome-owned files). A newline or
+    // other control char in the recognised VALUE is malformed input — reject
+    // it at the boundary (§IV permits validating recognised field VALUES even
+    // though UNKNOWN fields stay lenient). Reusing `MissingField { key:
+    // "name" }` keeps the closed error set + exit code intact: a name that is
+    // structurally unusable is, for our purposes, the same failure class as an
+    // absent one. This stops the poison at ingest; the toml_edit emission in
+    // `workspace::init` is the defence-in-depth for names already in the DB.
+    if m.name.chars().any(is_rejected_control_char) {
+        return Err(ManifestInvalid::MissingField {
+            file: file.to_path_buf(),
+            key: "name".into(),
+        });
+    }
     if m.description.trim().is_empty() {
         return Err(ManifestInvalid::MissingField {
             file: file.to_path_buf(),
@@ -152,6 +167,15 @@ fn validate_semantic(m: &CatalogManifest, file: &Path) -> Result<(), ManifestInv
         }
     }
     Ok(())
+}
+
+/// True for any Unicode control character — C0 (incl. `\n`, `\r`, `\t`, NUL,
+/// BEL), DEL, and the C1 block. These never legitimately appear in a catalog
+/// name and are the smuggling vector that can wedge a re-parsed Tome-owned
+/// file (settings.toml). The check is intentionally broader than just newline
+/// so no other line-/string-terminating control slips through.
+fn is_rejected_control_char(c: char) -> bool {
+    c.is_control()
 }
 
 fn looks_like_email(s: &str) -> bool {

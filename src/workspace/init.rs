@@ -228,46 +228,67 @@ pub fn init(
 pub const RULES_MD_PLACEHOLDER: &str =
     "<!-- No summary yet — run `tome workspace regen-summary <name>` to populate. -->\n";
 
-/// Render the initial `<root>/workspaces/<name>/settings.toml`. The
-/// shape is the Phase 4 [`crate::settings::WorkspaceSettings`] but
-/// emitted hand-rolled to keep the formatting human-friendly (TOML
-/// arrays of tables). Includes a commented-out `[summaries]` header
-/// placeholder — `regen-summary` writes the real `[summaries]` table
-/// (with `short`, `long`, `generated_at`) when it runs. Writing the
-/// header as a comment keeps the file parseable by the strict
-/// `WorkspaceSettings` deserialiser (an empty `[summaries]` table fails
-/// `deny_unknown_fields` on the required `CachedSummaries` fields).
+/// Render the initial `<root>/workspaces/<name>/settings.toml`.
+///
+/// The shape mirrors the Phase 4 [`crate::settings::WorkspaceSettings`]
+/// (a top-level `name` plus a `[[catalogs]]` array of tables). It is
+/// emitted via [`toml_edit::DocumentMut`] — the same comment/order-
+/// preserving path that [`crate::workspace::rename`] and
+/// [`crate::workspace::regen_summary`] use — rather than hand-rolled, so
+/// that ANY string value is correctly quoted/escaped. This is the
+/// defence-in-depth half of F-WS-TOML-NEWLINE (FR-005): a catalog name
+/// already poisoned with a newline/control char in the DB (e.g. copied
+/// by `--inherit-global` from a pre-existing global enrolment, which
+/// bypasses the manifest boundary in [`crate::catalog::manifest`]) now
+/// emits PARSEABLE toml instead of bricking every later read with exit-70
+/// `WorkspaceMalformed`.
+///
+/// The `# [summaries]` header is written as a leading comment on the
+/// document rather than a real `[summaries]` table: the strict
+/// `WorkspaceSettings` deserialiser rejects an empty `[summaries]` table
+/// because [`crate::settings::CachedSummaries`]' fields are required.
+/// `regen-summary` later inserts the real table.
 fn render_settings_toml(name: &str, catalogs: &[workspace_catalogs::CatalogEnrolment]) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("name = \"{}\"\n", escape_toml_basic(name)));
-    out.push('\n');
-    out.push_str("# [summaries]  -- populated by `tome workspace regen-summary`\n");
-    for entry in catalogs {
-        out.push_str("\n[[catalogs]]\n");
-        out.push_str(&format!(
-            "name = \"{}\"\n",
-            escape_toml_basic(&entry.catalog_name)
-        ));
-        out.push_str(&format!("url = \"{}\"\n", escape_toml_basic(&entry.url)));
-        out.push_str(&format!(
-            "ref = \"{}\"\n",
-            escape_toml_basic(&entry.pinned_ref)
-        ));
-    }
-    out
-}
+    const SUMMARIES_COMMENT: &str =
+        "# [summaries]  -- populated by `tome workspace regen-summary`\n";
 
-/// Minimal TOML basic-string escape: backslash + double-quote are the
-/// only metacharacters that show up in workspace names / catalog
-/// metadata in practice. The `WorkspaceName` newtype already restricts
-/// the name's charset; catalog URLs may contain neither character.
-fn escape_toml_basic(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut doc = toml_edit::DocumentMut::new();
+    doc["name"] = toml_edit::value(name);
+
+    if catalogs.is_empty() {
+        // No catalog tables follow, so the comment is the document's
+        // trailing content (a blank line then the comment).
+        doc.set_trailing(format!("\n{SUMMARIES_COMMENT}"));
+        return doc.to_string();
+    }
+
+    // With catalogs present, the comment must sit between `name` and the
+    // first `[[catalogs]]` table. toml_edit models that as the leading
+    // decor (prefix) of the array-of-tables item: a blank line, the
+    // comment, then the blank line that normally precedes a table.
+    let mut array = toml_edit::ArrayOfTables::new();
+    for entry in catalogs {
+        let mut t = toml_edit::Table::new();
+        t["name"] = toml_edit::value(entry.catalog_name.as_str());
+        t["url"] = toml_edit::value(entry.url.as_str());
+        t["ref"] = toml_edit::value(entry.pinned_ref.as_str());
+        array.push(t);
+    }
+    if let Some(first) = array.get_mut(0) {
+        first
+            .decor_mut()
+            .set_prefix(format!("\n{SUMMARIES_COMMENT}\n"));
+    }
+    doc.as_table_mut()
+        .insert("catalogs", toml_edit::Item::ArrayOfTables(array));
+
+    doc.to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::parser::parse_workspace;
 
     #[test]
     fn render_settings_with_no_catalogs() {
@@ -276,6 +297,11 @@ mod tests {
             body,
             "name = \"ws\"\n\n# [summaries]  -- populated by `tome workspace regen-summary`\n",
         );
+        // The strict deserialiser must accept the emitted shape.
+        let parsed = parse_workspace(&body).expect("parse emitted settings");
+        assert_eq!(parsed.name.as_str(), "ws");
+        assert!(parsed.catalogs.is_empty());
+        assert!(parsed.summaries.is_none());
     }
 
     #[test]
@@ -306,5 +332,26 @@ name = \"b\"\n\
 url = \"https://example.com/b\"\n\
 ref = \"v1\"\n";
         assert_eq!(body, expected);
+        let parsed = parse_workspace(&body).expect("parse emitted settings");
+        assert_eq!(parsed.name.as_str(), "test-ws");
+        assert_eq!(parsed.catalogs.len(), 2);
+        assert_eq!(parsed.catalogs[0].name, "a");
+        assert_eq!(parsed.catalogs[1].r#ref, "v1");
+    }
+
+    /// F-WS-TOML-NEWLINE: a poisoned catalog name (newline) must emit
+    /// parseable toml even though it bypassed the manifest boundary.
+    #[test]
+    fn render_settings_escapes_poisoned_catalog_name() {
+        let entries = vec![workspace_catalogs::CatalogEnrolment {
+            workspace_name: "global".into(),
+            catalog_name: "evil\nname = \"x\"".into(),
+            url: "https://example.com/a".into(),
+            pinned_ref: "main".into(),
+        }];
+        let body = render_settings_toml("ws", &entries);
+        let parsed = parse_workspace(&body).expect("poisoned name still parses");
+        assert_eq!(parsed.catalogs.len(), 1);
+        assert_eq!(parsed.catalogs[0].name, "evil\nname = \"x\"");
     }
 }
