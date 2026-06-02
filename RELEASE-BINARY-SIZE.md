@@ -17,6 +17,7 @@ stat -c '%s' target/release/tome      # Linux
 | v0.3.0   | macOS arm64        | ~23 100 000 | ~22.0   | Phase 3 close, post-PR-H polish phase                                   |
 | v0.4.0-rc | macOS arm64       | 27 595 936  | 26.31   | Phase 4 / Polish PR-E (post S-M1–S-M7 + T-M8 + T416 + T419)             |
 | v0.5.0-dev / F2 | macOS arm64  | 27 595 888  | 26.31   | Phase 5 / F1+F2 (5 new TomeError variants pre-allocated; `regex` already direct from Phase 1's catalog::git scrubber — no real promotion needed) |
+| v0.6.0   | macOS arm64        | 28 071 936  | 26.77   | Phase 7 / REL1 post crate-rename `tome-mcp`; functionally identical binary; under the 50 MB cap |
 
 ## Phase 5 size accounting
 

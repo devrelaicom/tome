@@ -13,8 +13,31 @@ license = "MIT OR Apache-2.0"
 description = "Cross-harness plugin catalog manager for AI coding assistants."
 repository = "https://github.com/devrelaicom/tome"
 readme = "README.md"
+authors = ["Aaron Bassett <aaronbassett@gmail.com>"]
+# Live project site (Netlify). The planned custom domain is not live yet, so the
+# homepage points at the deployed site URL — a URL that resolves today (FR-025).
+homepage = "https://tome-mcp.netlify.app/"
+# docs.rs builds in a network-isolated sandbox, so `ort`'s default
+# `download-binaries` feature (pulled transitively by `fastembed`) cannot fetch
+# ONNX Runtime at build time and the docs build fails (research §R-16, PKG-2).
+# A config-only fix is not available: docs.rs's [package.metadata.docs.rs] table
+# exposes no env/rustc-env key to set ORT_STRATEGY/ORT_LIB_LOCATION, and the
+# offending feature is a *transitive* default we cannot disable from this
+# manifest without making the embedder an optional feature (invasive, out of
+# scope). So `documentation` points at the repository — the §R-16 acceptable
+# floor ("the field resolves"). The metadata block below is retained as a
+# best-effort should docs.rs's ONNX handling ever change.
+documentation = "https://github.com/devrelaicom/tome"
 categories = ["command-line-utilities", "development-tools"]
-keywords = ["claude-code", "plugins", "ai", "cli"]
+keywords = ["claude-code", "mcp", "plugins", "ai", "cli"]
+
+# Best-effort docs.rs configuration. See the `documentation` note above: the
+# docs.rs build is expected to fail today because of `ort`'s build-time ONNX
+# Runtime download, which no config-only lever here can suppress. Kept so the
+# build is well-formed (single host target, full API surface) if that changes.
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
 
 # Keep the library crate name `tome` despite the `tome-mcp` package rename, so
 # every `use tome::...` site stays valid with no edits (FR-017).
