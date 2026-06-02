@@ -31,25 +31,41 @@ documentation = "https://github.com/devrelaicom/tome"
 categories = ["command-line-utilities", "development-tools"]
 keywords = ["claude-code", "mcp", "plugins", "ai", "cli"]
 
-# Crate-tarball allowlist SCAFFOLDING (FR-024 / research §R-18).
+# Crate-tarball allowlist (FR-024 / research §R-18) — REL5 final form.
 #
-# This `exclude` currently trims only the release-tooling configs introduced
-# alongside the cargo-dist pipeline — they have no place in the *published
-# library* crate. The FULL trim of the process/working-tree artifacts
-# (`specs/`, `.sdd/`, `review/`, `retro/`, `CLAUDE.md`, the two `*.local.json`
-# dev-state files) lands in the REL5 Polish slice as the FINAL step, paired
-# with `git rm --cached` untracking — it is intentionally NOT done here so the
-# in-flight hardening PRs keep reviewing against those tracked artifacts.
+# An `include` allowlist (NOT an `exclude` blocklist) is the robust shape: only
+# the listed paths ship, so the process/working-tree artifacts — `specs/`,
+# `.sdd/`, `review/`, `retro/`, `CLAUDE.md`, the two `*.local.json` dev-state
+# files, `tests/`, `.github/`, `dist-workspace.toml`, `about.{toml,hbs}` — are
+# excluded by omission and cannot silently leak into the published tarball even
+# as new top-level files appear. Paired with the `git rm --cached` untracking
+# in this same slice (the internal artifacts are now also gitignored).
 #
-# INVARIANT: this list MUST NOT exclude `vendor/sqlite-vec/**` or `build.rs`,
-# so the crate still builds from the tarball alone (verified via
-# `cargo package --list`). `THIRD-PARTY-LICENSES` is intentionally kept in the
-# tarball (it is the binary-redistribution notice for the published crate).
-exclude = [
-    "dist-workspace.toml",
-    "about.toml",
-    "about.hbs",
-    "/.github/",
+# INVARIANT: this list MUST include `vendor/**` and `build.rs`, so the crate
+# still builds standalone from the tarball alone — `vendor/sqlite-vec` (the
+# `.c`/`.h` amalgamation + its LICENSE) is compiled by `build.rs` against
+# rusqlite's bundled SQLite. Verified via `cargo package --list` +
+# `cargo publish --dry-run --locked`. `SECURITY.md` ships (FR-022 disclosure
+# channel); `THIRD-PARTY-LICENSES` ships (the aggregated dependency-licence
+# notice — the binary-redistribution notice carried over from the prior
+# scaffold). `CONSTITUTION.md` is the tracked governance doc but is internal to
+# the repo, not a crate-essential, so it is intentionally NOT shipped.
+# NOTE: include/exclude use gitignore-style globs — an unanchored `SECURITY.md`
+# matches `**/SECURITY.md` (it would pull in `.sdd/codebase/SECURITY.md` and
+# `.githooks/README.md`). The single-file entries are therefore root-anchored
+# with a leading `/`; `src/`, `build.rs`, and `vendor/` are anchored by shape.
+include = [
+    "/src/**",
+    "/build.rs",
+    "/vendor/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/SECURITY.md",
+    "/THIRD-PARTY-LICENSES",
+    "/LICENSE-APACHE",
+    "/LICENSE-MIT",
 ]
 
 # Best-effort docs.rs configuration. See the `documentation` note above: the
