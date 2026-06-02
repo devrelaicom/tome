@@ -38,7 +38,12 @@ pub fn run(args: CatalogShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<(
 
     let cache_dir = paths.cache_dir_for(&enrolment.url);
     let manifest_path = cache_dir.join("tome-catalog.toml");
-    let manifest_bytes = std::fs::read(&manifest_path).map_err(TomeError::Io)?;
+    // Third-party manifest: cap the read at PLUGIN_MANIFEST_MAX (FR-006,
+    // F-PLUGIN-MANIFEST-DOS). `bounded_read` returns `TomeError::Io` on both
+    // genuine I/O failures and an over-cap file, preserving this site's
+    // existing exit-7 contract without an unbounded read.
+    let manifest_bytes =
+        crate::util::bounded_read(&manifest_path, crate::util::PLUGIN_MANIFEST_MAX)?;
     let manifest = CatalogManifest::parse_and_validate(&manifest_path, &cache_dir, &manifest_bytes)
         .map_err(TomeError::ManifestInvalid)?;
 

@@ -116,7 +116,10 @@ fn emit_json(enrolments: &[CatalogEnrolment], paths: &Paths) -> Result<(), TomeE
 
 fn read_plugin_count(cache_dir: &std::path::Path) -> Option<usize> {
     let manifest_path = cache_dir.join("tome-catalog.toml");
-    let bytes = std::fs::read(&manifest_path).ok()?;
+    // Third-party manifest, best-effort count: cap at PLUGIN_MANIFEST_MAX
+    // (FR-006). An over-cap file is `Err` → `.ok()?` → None, the same
+    // fallback an unreadable/unparsable manifest takes here.
+    let bytes = crate::util::bounded_read(&manifest_path, crate::util::PLUGIN_MANIFEST_MAX).ok()?;
     let m = CatalogManifest::parse_and_validate(&manifest_path, cache_dir, &bytes).ok()?;
     Some(m.plugins.len())
 }

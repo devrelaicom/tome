@@ -329,7 +329,11 @@ fn refresh_one(target: &RefreshTarget, cache_dir: &Path, mode: Mode) -> Result<b
     };
 
     let manifest_path = cache_dir.join("tome-catalog.toml");
-    let manifest_bytes = std::fs::read(&manifest_path).map_err(TomeError::Io)?;
+    // Third-party manifest: cap at PLUGIN_MANIFEST_MAX (FR-006,
+    // F-PLUGIN-MANIFEST-DOS). `bounded_read` preserves the exit-7 `Io`
+    // contract for both real I/O errors and an over-cap file.
+    let manifest_bytes =
+        crate::util::bounded_read(&manifest_path, crate::util::PLUGIN_MANIFEST_MAX)?;
     let manifest = CatalogManifest::parse_and_validate(&manifest_path, cache_dir, &manifest_bytes)
         .map_err(TomeError::ManifestInvalid)?;
 
@@ -348,7 +352,10 @@ fn refresh_one(target: &RefreshTarget, cache_dir: &Path, mode: Mode) -> Result<b
 /// chosen alias through the refresh loop (the URL is the key now).
 fn display_name_from_cache(cache_dir: &Path) -> Option<String> {
     let manifest_path = cache_dir.join("tome-catalog.toml");
-    let bytes = std::fs::read(&manifest_path).ok()?;
+    // Third-party manifest, best-effort display name: cap at
+    // PLUGIN_MANIFEST_MAX (FR-006). An over-cap file is `Err` → `.ok()?` →
+    // None, the same fallback an unreadable/unparsable manifest takes here.
+    let bytes = crate::util::bounded_read(&manifest_path, crate::util::PLUGIN_MANIFEST_MAX).ok()?;
     let m = CatalogManifest::parse_and_validate(&manifest_path, cache_dir, &bytes).ok()?;
     Some(m.name)
 }

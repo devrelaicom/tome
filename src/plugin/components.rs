@@ -167,7 +167,11 @@ fn list_entry_files(plugin_dir: &Path, subdir: &str) -> Vec<EntryFile> {
 /// unreadable, or malformed file yields 0 — this is a counts-only helper,
 /// not a strict validator.
 fn count_mcp_servers(path: &Path) -> u32 {
-    let Ok(bytes) = std::fs::read(path) else {
+    // `.mcp.json` is third-party plugin content; cap the read at
+    // PLUGIN_MANIFEST_MAX (FR-006, F-PLUGIN-MANIFEST-DOS). An over-cap file
+    // is `Err`, folding into the same I/O-tolerant 0 an unreadable file
+    // already yields here — never an unbounded read of a hostile file.
+    let Ok(bytes) = crate::util::bounded_read(path, crate::util::PLUGIN_MANIFEST_MAX) else {
         return 0;
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
