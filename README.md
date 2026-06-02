@@ -65,14 +65,14 @@ Tome downloads three pinned models on demand into `<home>/.tome/models/`. Each d
 | `bge-reranker-base` | Reranker | ONNX | ~279 MB | MIT |
 | `qwen2.5-0.5b-instruct` (Q4_K_M) | Workspace summariser | GGUF | ~491 MB | Apache-2.0 |
 
-- The **embedder + reranker (~313 MB total)** download on the first `tome plugin enable`, because both are needed to index and search.
-- The **summariser (~491 MB)** downloads only the first time you generate a workspace summary (`tome workspace regen-summary`), so you don't pay for it unless you use it.
+- The first `tome plugin enable` on a fresh machine prompts to download **all three pinned models — embedder + reranker + summariser, ~804 MB total** (run with `--yes` to skip the prompt). The model-presence check is registry-wide: any model missing from `<home>/.tome/models/` is offered up front, so the summariser is fetched here too, not deferred.
+- Once the summariser is on disk it is used to generate workspace summaries. If you decline it at enable time, summary generation (e.g. on enable, or via `tome workspace regen-summary`) is silently skipped until the model is present; everything else — indexing and search — still works with just the embedder + reranker.
 
 `tome models list` shows what is installed; add `--verify` to re-hash each artefact against its pinned SHA-256.
 
 ## Getting started
 
-The walkthrough below uses the public **Midnight Expert** catalog as a concrete example; swap the source for any Git-hosted catalog (an `owner/repo` shorthand, a full Git URL, or a `file://` path to a local clone). The first `tome plugin enable` downloads the embedder + reranker (~313 MB) — that step needs a network connection and a little patience.
+The walkthrough below uses the public **Midnight Expert** catalog as a concrete example; swap the source for any Git-hosted catalog (an `owner/repo` shorthand, a full Git URL, or a `file://` path to a local clone). On a fresh machine the first `tome plugin enable` prompts to download all three pinned models (~804 MB total — see [Models](#models)); that step needs a network connection and a little patience.
 
 ```sh
 # 1. Register a catalog (owner/repo shorthand, a Git URL, or a file:// path).

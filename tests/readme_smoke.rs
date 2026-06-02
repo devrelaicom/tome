@@ -12,12 +12,13 @@
 //! ## Why the model-dependent commands are split out
 //!
 //! `tome plugin enable` and `tome query` load the real `FastembedEmbedder`,
-//! which needs ~313 MB of ONNX model artefacts on disk. Downloading those in
-//! the fast path would make the suite slow, non-deterministic, and
-//! network-dependent — exactly what a CI smoke test must not be. So the fast
-//! path covers their CLI wiring (`--help` parses + exits 0); the real
-//! end-to-end run lives in a single `#[ignore]`d test that a human can opt into
-//! with `cargo test --test readme_smoke -- --ignored`.
+//! and on a fresh machine `enable`'s registry-wide model-presence gate offers
+//! to download every pinned model — embedder + reranker + summariser, ~804 MB
+//! total. Downloading those in the fast path would make the suite slow,
+//! non-deterministic, and network-dependent — exactly what a CI smoke test
+//! must not be. So the fast path covers their CLI wiring (`--help` parses +
+//! exits 0); the real end-to-end run lives in a single `#[ignore]`d test that a
+//! human can opt into with `cargo test --test readme_smoke -- --ignored`.
 //!
 //! Every other getting-started command is exercised end-to-end against the
 //! fixture with fabricated (sparse, free) model manifests so the
@@ -254,10 +255,11 @@ fn getting_started_workspace_and_harness_flow_resolves() {
 
 #[test]
 fn getting_started_model_dependent_commands_parse() {
-    // `tome plugin enable`, `tome query`, and `tome mcp` all need the real
-    // embedder (~313 MB ONNX) or run a long-lived server, so the fast path
-    // covers their CLI wiring: `--help` parses and exits 0. The real
-    // end-to-end run is the `#[ignore]`d test below.
+    // `tome plugin enable`, `tome query`, and `tome mcp` all load the real
+    // embedder, prompt to download every pinned model (~804 MB on a fresh
+    // machine), or run a long-lived server, so the fast path covers their CLI
+    // wiring: `--help` parses and exits 0. The real end-to-end run is the
+    // `#[ignore]`d test below.
     let env = ToolEnv::new();
     for (label, args) in [
         ("plugin enable --help", &["plugin", "enable", "--help"][..]),
@@ -270,8 +272,10 @@ fn getting_started_model_dependent_commands_parse() {
 }
 
 /// Full end-to-end of the model-dependent getting-started commands against the
-/// fixture, downloading the REAL embedder + reranker (~313 MB). Excluded from
-/// the default run for CI speed + determinism; opt in with:
+/// fixture. This test does NOT fabricate model manifests, so the registry-wide
+/// presence gate in `plugin enable --yes` downloads every pinned model — the
+/// embedder + reranker + summariser, ~804 MB total. Excluded from the default
+/// run for CI speed + determinism; opt in with:
 ///
 /// ```sh
 /// cargo test --test readme_smoke -- --ignored
@@ -281,7 +285,7 @@ fn getting_started_model_dependent_commands_parse() {
 /// asserting each resolves against the published model artefacts (SC-008's
 /// strongest form).
 #[test]
-#[ignore = "downloads ~313 MB of ONNX models; run explicitly with --ignored"]
+#[ignore = "downloads ~804 MB of pinned models (embedder + reranker + summariser); run explicitly with --ignored"]
 fn getting_started_plugin_enable_and_query_with_real_models() {
     let fix = Fixture::build_from(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sample-plugin-catalog"),
@@ -305,8 +309,9 @@ fn getting_started_plugin_enable_and_query_with_real_models() {
     );
     fs::write(&paths.global_config_file, cfg).expect("seed config.toml");
 
-    // `tome plugin enable <catalog>/<plugin> --yes` — downloads models on first
-    // run, then indexes. `--yes` allows the download from this non-TTY context.
+    // `tome plugin enable <catalog>/<plugin> --yes` — the registry-wide
+    // presence gate downloads all three pinned models on first run, then
+    // indexes. `--yes` allows the download from this non-TTY context.
     let enable = env
         .cmd()
         .args(["plugin", "enable", &format!("{CATALOG}/{PLUGIN}"), "--yes"])
