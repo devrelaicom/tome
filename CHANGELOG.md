@@ -72,6 +72,69 @@ User-visible
   (NFR-011); a phase-wide 4-reviewer pass over the assembled surface returned 0
   blockers and a clean security result.
 
+### Phase 7 — beta hardening + public release
+
+This release also bundles the Phase 7 beta-hardening work. It is Tome's first
+public-release entry; the crate will be published to crates.io as **`tome-mcp`**
+(the bare `tome` name is already taken) while the command you run stays
+**`tome`** (the library and binary names are unchanged); `cargo install
+tome-mcp` (or `brew install <tap>/tome`) builds and installs the `tome`
+binary.
+
+Bug fixes
+
+- **Real-model semantic search now works end-to-end.** Two stacked,
+  pre-existing blockers — caught the first time the real-model recall gate ran,
+  having hidden behind stub-only testing since Phase 2 — left `tome query` /
+  MCP `search_skills` non-functional on a real install: (1) `tome models
+  download` fetched only the primary `.onnx` and never the required
+  `tokenizer.json`, so the embedder couldn't load; (2) the pinned embedder
+  artefact was a GPU/fp16 ONNX that failed CPU inference. Fixed by downloading
+  every required model file and re-pinning the embedder to a CPU-compatible
+  INT8 artefact. Real-model recall is now verified (SC-001).
+- **Filtered KNN returns the right number of results.** A query scoped by
+  `--catalog` / `--plugin` (or restricted by workspace / `searchable`) could
+  silently return fewer than `min(top_k, matches)` when many *nearer* vectors
+  were excluded by the post-filter. The candidate window now over-fetches and
+  geometrically widens up to the corpus size.
+- **`tome doctor` is read-only and degrades gracefully.** It opens the index
+  read-only and reports (rather than aborting) on a schema mismatch.
+- **SSH / credential-bearing catalog URLs round-trip.** The on-disk catalog
+  cache and its refcount are keyed by the *scrubbed* URL, matching what the
+  registry stores.
+- **MCP prompt names never collide.** Names are assigned against a single
+  global taken-set, so a counter-suffixed name in one bucket can no longer
+  shadow a base name from another and silently drop an entry.
+- **Workspace `settings.toml` is written via `toml_edit`** and rejects control
+  characters in catalog names.
+- **Every third-party read is bounded** by a per-class size cap.
+- **Symlink-safe writes across all sinks.** A single guard refuses to write
+  through a symlink (including a symlinked intermediate path component) for
+  every harness sink, each surfacing its own exit code.
+- **OpenCode receives Tome's rules.** When any harness sharing a rules file
+  needs the inline body, it is now written.
+- **`tome catalog remove --force` re-derives its cascade inside the advisory
+  lock**, closing a TOCTOU window.
+- **Correctness cleanups:** a config-parse failure exits 5; a failed hook
+  reconcile fails closed (exit 44); a duplicate `(kind, name)` is warned and
+  truthfully counted.
+
+Internal
+
+- **`harness/sync.rs` decomposed** into `src/harness/reconcile/{hooks,
+  guardrails,agents}.rs` behind a thin orchestrator — behaviour-preserving
+  (sink order and first-error precedence byte-identical).
+- **In-process MCP test harness** (`tests/common/mcp_harness.rs` +
+  `tests/exit_codes_e2e_mcp.rs`) drives the running server end-to-end (closes
+  the prior `prompts/list` + `prompts/get` coverage gap).
+- **Release wrapper, wired but not triggered:** a cargo-dist pipeline producing
+  prebuilt Linux + macOS binaries, a Homebrew tap, and a third-party-licence
+  bundle; crate discovery metadata + docs.rs config; a README front door and a
+  `SECURITY.md`. The publish, the version tag, and the tap merge are reserved
+  for a maintainer.
+
+No new exit codes, no schema change, and no new top-level dependency.
+
 ## [0.5.0] — 2026-05-27
 
 ### Phase 5 additions
