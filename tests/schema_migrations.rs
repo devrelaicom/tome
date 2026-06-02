@@ -53,6 +53,45 @@ fn current_schema_version_is_none_before_bootstrap() {
 }
 
 #[test]
+fn meta_table_present_but_schema_version_row_missing_is_corruption_not_fresh() {
+    // FR-015 (F-BOOT-META-DIAG): a `meta` table that EXISTS but is missing
+    // its `schema_version` row is a CORRUPTION case, distinct from a fresh DB
+    // (no `meta` table at all). The blanket `.ok()` previously collapsed both
+    // to `Ok(None)` → "fresh DB" → a misleading "table meta already exists" on
+    // re-bootstrap. The distinction must be explicit and reuse the existing
+    // `IndexIntegrityCheckFailure` variant (exit 51) — no new code.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("index.db");
+
+    // Bootstrap a real DB, then delete only the `schema_version` row so the
+    // `meta` table is present but the version row is gone.
+    {
+        let conn = open(&path, &options()).expect("bootstrap");
+        conn.execute("DELETE FROM meta WHERE key = 'schema_version'", [])
+            .expect("delete schema_version row");
+    }
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let err = current_schema_version(&conn)
+        .expect_err("meta-present-but-version-missing must be corruption, not Ok(None)");
+    assert_eq!(
+        err.exit_code(),
+        51,
+        "corruption must surface IndexIntegrityCheckFailure (exit 51), got {} from {err:?}",
+        err.exit_code(),
+    );
+    match err {
+        TomeError::IndexIntegrityCheckFailure(msg) => {
+            assert!(
+                msg.contains("schema_version"),
+                "diagnostic must name the missing row, got: {msg}",
+            );
+        }
+        other => panic!("expected IndexIntegrityCheckFailure, got {other:?}"),
+    }
+}
+
+#[test]
 fn current_schema_version_matches_compiled_after_bootstrap() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("index.db");

@@ -186,6 +186,67 @@ fn same_name_different_kind_produces_two_rows() {
     );
 }
 
+/// FR-013 (F-PLUGIN-NAME-COLLISION): a single plugin declaring two entries
+/// that resolve to the same `(kind, name)` must be detected, warned, and the
+/// reported "N indexed" count must reflect rows ACTUALLY written — not the
+/// inflated declared count. Two command files (`dup-a.md`, `dup-b.md`) both
+/// carry frontmatter `name: dup`, so they collapse onto one
+/// `(command, dup)` row under the `(catalog, plugin, kind, name)` unique
+/// identity. Without the fix `total_skills` reports 2 while only 1 row exists.
+#[test]
+fn intra_plugin_duplicate_kind_name_warns_and_counts_written_rows() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+
+    let catalog_root = tmp.path().join("catalog");
+    fs::create_dir_all(&catalog_root).unwrap();
+    let config = config_with_catalog("acme", &catalog_root);
+    // Two distinct files, identical resolved `(kind=command, name=dup)`.
+    write_plugin_with_kinds(
+        &catalog_root,
+        "plug",
+        &[],
+        &[
+            ("dup-a", &good_command("dup", "first declaration")),
+            ("dup-b", &good_command("dup", "second declaration")),
+        ],
+    );
+
+    let embedder = StubEmbedder::new();
+    let scope = tome::workspace::Scope(tome::workspace::WorkspaceName::global());
+    let deps = build_deps(&paths, &config, &embedder, &scope);
+    let id: PluginId = "acme/plug".parse().unwrap();
+    let outcome = lifecycle::enable(&id, &deps).expect("enable with a duplicate");
+
+    // Only one row is actually written, so the reported counts must say one.
+    assert_eq!(
+        count_by_kind(&paths, "command"),
+        1,
+        "the duplicate (kind, name) collapses to a single row",
+    );
+    assert_eq!(
+        outcome.summary.total_skills, 1,
+        "total must count rows written, not the declared count (got {})",
+        outcome.summary.total_skills,
+    );
+    assert_eq!(
+        outcome.summary.newly_embedded, 1,
+        "exactly one row was embedded, not two",
+    );
+
+    // The duplicate must be surfaced as a warning (the impl also tracing::warn!s).
+    assert!(
+        outcome
+            .warnings
+            .iter()
+            .any(|w| w.to_lowercase().contains("duplicate") && w.contains("dup")),
+        "expected a duplicate warning naming `dup`, got {:?}",
+        outcome.warnings,
+    );
+}
+
 #[test]
 fn enable_synchronises_both_kinds_into_workspace_skills_junction() {
     let tmp = TempDir::new().unwrap();

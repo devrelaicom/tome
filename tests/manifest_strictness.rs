@@ -409,3 +409,33 @@ last_synced = "2026-01-01T00:00:00Z"
     let cfg2: Config = toml::from_str(&back).expect("re-parse");
     assert_eq!(cfg, cfg2);
 }
+
+/// FR-014 (F-CONFIG-GENERIC-ERR): a malformed `~/.tome/config.toml` must
+/// surface the specific manifest/TOML-parse failure (`ManifestInvalid::TomlParse`,
+/// exit 5) naming the file — not a generic `Internal`/exit 1. `store::load`
+/// is the single read path every command + the MCP server route config
+/// through, so the truthful exit code matters across the whole surface.
+#[test]
+fn malformed_config_toml_surfaces_manifest_invalid_exit_5() {
+    use tome::catalog::store;
+    use tome::error::TomeError;
+
+    let temp = TempDir::new().unwrap();
+    let config_file = temp.path().join("config.toml");
+    // Syntactically broken TOML: an unterminated array-of-tables header.
+    fs::write(&config_file, "this is = = not valid toml [[").unwrap();
+
+    let err = store::load(&config_file).expect_err("malformed config must fail");
+    assert_eq!(
+        err.exit_code(),
+        5,
+        "malformed config.toml must exit 5 (ManifestInvalid), got {} from {err:?}",
+        err.exit_code(),
+    );
+    match &err {
+        TomeError::ManifestInvalid(ManifestInvalid::TomlParse { file, .. }) => {
+            assert_eq!(file, &config_file, "the error must name the offending file");
+        }
+        other => panic!("expected ManifestInvalid::TomlParse, got {other:?}"),
+    }
+}

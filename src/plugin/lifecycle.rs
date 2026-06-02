@@ -608,7 +608,48 @@ fn collect_pending_skills(
     collect_skill_entries(id, plugin_dir, plugin_version, warnings, &mut pending)?;
     collect_command_entries(id, plugin_dir, plugin_version, warnings, &mut pending)?;
     collect_agent_entries(id, plugin_dir, plugin_version, warnings, &mut pending)?;
+    dedupe_pending_by_identity(id, &mut pending, warnings);
     Ok(pending)
+}
+
+/// Drop later entries that share a `(kind, name)` with an earlier one in the
+/// same plugin, keeping the first (deterministic — each `collect_*` walk is
+/// name-sorted) and warning per discarded duplicate (FR-013).
+///
+/// Why dedupe here rather than in the index layer: the `skills` table's
+/// `(catalog, plugin, kind, name)` unique index would otherwise let a second
+/// declaration silently `ON CONFLICT`-overwrite the first, so the "N indexed"
+/// count over-reported the declared total while only one row was written. The
+/// `skill_embeddings` vec0 virtual table forbids `ON CONFLICT`/`INSERT OR
+/// REPLACE` (DELETE-then-INSERT only), so the truthful path is to never hand
+/// the writer a duplicate — making `total_skills`/`newly_embedded` count rows
+/// actually written. A duplicate is a recoverable plugin-author footgun, so it
+/// is a warning, not a hard error (R-20).
+fn dedupe_pending_by_identity(
+    id: &PluginId,
+    pending: &mut Vec<PendingSkill>,
+    warnings: &mut Vec<String>,
+) {
+    let mut seen: std::collections::HashSet<(EntryKind, String)> = std::collections::HashSet::new();
+    pending.retain(|p| {
+        if seen.insert((p.kind, p.name.clone())) {
+            return true;
+        }
+        let message = format!(
+            "duplicate entry skipped in {id}: {} `{}` is declared more than once; \
+             keeping the first and ignoring the rest",
+            p.kind.as_str(),
+            p.name,
+        );
+        warn!(
+            plugin = %id,
+            kind = p.kind.as_str(),
+            name = %p.name,
+            "duplicate (kind, name) within plugin; keeping first, ignoring duplicate",
+        );
+        warnings.push(message);
+        false
+    });
 }
 
 /// Walk `<plugin_dir>/skills/*/SKILL.md` and append one [`PendingSkill`]

@@ -311,8 +311,17 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
-/// Read `meta.schema_version`. Returns `None` if the `meta` table itself
-/// does not exist (fresh DB); returns `Some(version)` otherwise.
+/// Read `meta.schema_version`. Returns `None` only when the `meta` table
+/// itself does not exist (a genuinely fresh DB → the caller bootstraps).
+/// Returns `Some(version)` when the row is present and parses.
+///
+/// FR-015 (F-BOOT-META-DIAG): a `meta` table that EXISTS but is **missing**
+/// its `schema_version` row is corruption, NOT a fresh DB — distinguished
+/// explicitly here rather than collapsed to `None` by a blanket `.ok()`.
+/// The old behaviour mis-routed a half-written DB into the bootstrap path,
+/// which then failed with a misleading "table meta already exists". Both the
+/// missing-row and unparsable-value cases reuse the existing
+/// [`TomeError::IndexIntegrityCheckFailure`] (exit 51); no new variant/code.
 pub fn current_schema_version(conn: &Connection) -> Result<Option<u32>, TomeError> {
     let meta_exists: bool = conn
         .query_row(
@@ -327,25 +336,39 @@ pub fn current_schema_version(conn: &Connection) -> Result<Option<u32>, TomeErro
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("probe meta table: {e}")))?;
 
     if !meta_exists {
+        // Genuinely fresh DB: no `meta` table at all. The caller bootstraps.
         return Ok(None);
     }
 
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'schema_version'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .ok();
+    // The `meta` table exists, so a missing `schema_version` row is corruption
+    // (a half-bootstrapped or tampered DB), explicitly distinct from the
+    // fresh-DB case above. A query error other than "no rows" is likewise a
+    // real failure to surface — neither is swallowed into `Ok(None)`.
+    let raw: String = match conn.query_row(
+        "SELECT value FROM meta WHERE key = 'schema_version'",
+        [],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(value) => value,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            return Err(TomeError::IndexIntegrityCheckFailure(
+                "meta table exists but the `schema_version` row is missing \
+                 (database is corrupt, not fresh)"
+                    .to_string(),
+            ));
+        }
+        Err(e) => {
+            return Err(TomeError::IndexIntegrityCheckFailure(format!(
+                "read meta.schema_version: {e}"
+            )));
+        }
+    };
 
-    match raw {
-        None => Ok(None),
-        Some(s) => s.parse::<u32>().map(Some).map_err(|_| {
-            TomeError::IndexIntegrityCheckFailure(format!(
-                "meta.schema_version is not an integer: `{s}`"
-            ))
-        }),
-    }
+    raw.parse::<u32>().map(Some).map_err(|_| {
+        TomeError::IndexIntegrityCheckFailure(format!(
+            "meta.schema_version is not an integer: `{raw}`"
+        ))
+    })
 }
 
 /// Walk every registered migration step from `current` up to `target`. Each

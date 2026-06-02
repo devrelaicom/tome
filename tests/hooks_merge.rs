@@ -427,3 +427,48 @@ fn merge_preserves_unrelated_user_keys_and_appends() {
         "Tome's entry appended alongside the user's"
     );
 }
+
+/// FR-015 (F-HOOKS-COERCE): a pre-existing `hooks.<event>` value that is NOT
+/// an array must be **rejected** with the existing settings-write error
+/// (exit 44, `HookSettingsWriteFailed`), never silently coerced to `[]`.
+/// Coercion would destroy a user's hand-edited value — asymmetric with the
+/// module's otherwise fail-closed discipline (`load_settings`/`ensure_hooks_object`
+/// already fail closed on a wrong-typed value). The on-disk file must be left
+/// untouched (no partial write).
+#[test]
+fn non_array_event_value_is_rejected_exit_44_and_file_untouched() {
+    use tome::error::TomeError;
+
+    let tmp = TempDir::new().unwrap();
+    let claude = tmp.path().join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+    let local = claude.join("settings.local.json");
+
+    // A user (or a foreign tool) wrote a non-array value under an event key.
+    let pre = json!({
+        "hooks": { "PreToolUse": "definitely not an array" }
+    });
+    let pre_text = serde_json::to_string_pretty(&pre).unwrap();
+    std::fs::write(&local, &pre_text).unwrap();
+
+    let err = hooks::merge_into_settings(&local, &one("PreToolUse", entry("/abs/g.sh")))
+        .expect_err("non-array event value must be rejected, not coerced");
+    assert_eq!(
+        err.exit_code(),
+        44,
+        "non-array hooks event value must exit 44, got {} from {err:?}",
+        err.exit_code(),
+    );
+    assert!(
+        matches!(err, TomeError::HookSettingsWriteFailed { .. }),
+        "expected HookSettingsWriteFailed, got {err:?}",
+    );
+
+    // Fail closed: the on-disk file is byte-for-byte unchanged (the user's
+    // value was NOT clobbered with `[]`).
+    let after = std::fs::read_to_string(&local).unwrap();
+    assert_eq!(
+        after, pre_text,
+        "the user's non-array value must be preserved on disk, not coerced",
+    );
+}
