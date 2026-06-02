@@ -538,12 +538,13 @@ fn native_agents_emit_orphan_removal_and_idempotence() {
 }
 
 // ---------------------------------------------------------------------------
-// 9b. T-1: symlink refusal on an agent write → exit 7, target not overwritten.
+// 9b. T-1: symlink refusal on an agent write → exit 45
+//     (TomeError::AgentTranslationFailed), target not overwritten.
 // ---------------------------------------------------------------------------
 
 #[test]
 #[cfg(unix)]
-fn agent_write_through_symlink_is_refused_exit_7() {
+fn agent_write_through_symlink_is_refused_exit_45() {
     use tome::harness::AgentFormat;
 
     let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
@@ -577,8 +578,8 @@ fn agent_write_through_symlink_is_refused_exit_7() {
     let err = sync::sync_project(&fx.project, &fx.deps(false)).expect_err("symlink must refuse");
     assert_eq!(
         err.exit_code(),
-        7,
-        "symlink refusal surfaces exit 7; got {err:?}"
+        45,
+        "agents-sink symlink refusal surfaces exit 45 (AgentTranslationFailed); got {err:?}"
     );
 
     // The decoy the symlink pointed at is untouched.
