@@ -10,6 +10,7 @@
 //! `CatalogNotFound` (FR-367 benign-race outcome).
 
 use std::io::{BufRead, Write};
+use std::sync::RwLock;
 
 use serde::Serialize;
 use tracing::warn;
@@ -49,11 +50,15 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
 
     // Enabled-plugin pre-check is cheap (single SELECT DISTINCT). The
     // lock isn't taken yet — readers don't block writers, and the worst
-    // outcome is reporting a stale enabled list. The cascade itself
-    // re-reads under the lock.
-    let enabled_plugins = enabled_plugins_for_catalog(&conn, &workspace_name, &args.name)?;
-    if !enabled_plugins.is_empty() && !args.force {
-        let plugins_qualified = enabled_plugins
+    // outcome is reporting a stale enabled list in the advisory
+    // `CatalogHasEnabledPlugins` error / `--force` prompt. This snapshot
+    // is used ONLY for that pre-lock advisory; the cascade below
+    // re-derives the enabled set from the connection opened under the
+    // lock (F-REMOVE-TOCTOU) so a `plugin enable` racing into the window
+    // between here and the lock is not missed.
+    let prelock_enabled_plugins = enabled_plugins_for_catalog(&conn, &workspace_name, &args.name)?;
+    if !prelock_enabled_plugins.is_empty() && !args.force {
+        let plugins_qualified = prelock_enabled_plugins
             .iter()
             .map(|p| format!("{}/{}", args.name, p))
             .collect();
@@ -89,6 +94,12 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
     let mut cascade_records: Vec<CascadeRecord> = Vec::new();
     let cache_path_for_lock = cache_path.clone();
 
+    // Test-only seam (no-op in production): a concurrent `plugin enable`
+    // may land here — after the stale-tolerant pre-lock read, before the
+    // lock is taken. The cascade below must observe such an enable; see
+    // F-REMOVE-TOCTOU and `tests/catalog_remove_toctou.rs`.
+    fire_after_prelock_read_hook();
+
     // Acquire the advisory lock across the cascade-disable + DELETE +
     // cache cleanup (FR-366). Per-step rusqlite work runs inline rather
     // than calling cascade_disable_for_catalog (which acquires its own
@@ -103,6 +114,18 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
                 summariser: summariser_seed,
             },
         )?;
+
+        // Re-derive the cascade input UNDER THE LOCK (F-REMOVE-TOCTOU).
+        // The pre-lock snapshot drove the advisory `--force` decision but
+        // is stale by now: a concurrent `plugin enable` (also serialising
+        // on `index.lock`) may have enrolled a NEW plugin in this catalog
+        // since. Cascading the stale Vec would leave that plugin enabled
+        // against a catalog row we are about to delete — a ghost-enabled
+        // plugin. Re-reading from the under-lock connection makes the
+        // cascade input the current enabled set: either the enable landed
+        // first (and we disable it here) or it lands after our DELETE (and
+        // observes the row gone) — never a ghost.
+        let enabled_plugins = enabled_plugins_for_catalog(&conn, &workspace_name, &args.name)?;
 
         if !enabled_plugins.is_empty() {
             // Cascade-disable inline: drop each plugin's
@@ -190,6 +213,37 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
     };
     emit(mode, &removed_rec, &cascade_records)?;
     Ok(())
+}
+
+/// Test-only seam fired exactly once, **after** the stale-tolerant
+/// pre-lock enabled-plugin read and **before** [`acquire_lock`] — i.e.
+/// inside the TOCTOU window this command must close (F-REMOVE-TOCTOU).
+///
+/// Integration tests under `tests/` cannot reach `#[cfg(test)]` hooks
+/// (they consume the library as an external crate). Per the project
+/// convention for test injection — `#[doc(hidden)] pub static` + an RAII
+/// guard in the consuming test — this slot lets a test deterministically
+/// simulate a concurrent `plugin enable` landing in the window (enrolling
+/// a *new* plugin in the catalog) so the cascade's re-read under the lock
+/// can be asserted without a flaky cross-process race.
+///
+/// Production never sets the slot; [`fire_after_prelock_read_hook`]
+/// collapses to a no-op on every real invocation, so the single-process
+/// happy path is byte-for-byte unchanged.
+#[doc(hidden)]
+#[allow(clippy::type_complexity)]
+pub static AFTER_PRELOCK_READ_HOOK: RwLock<Option<Box<dyn Fn() + Send + Sync>>> = RwLock::new(None);
+
+/// Invoke [`AFTER_PRELOCK_READ_HOOK`] if a test installed one. A poisoned
+/// lock is recovered rather than propagated — a panicking hook in one
+/// test must not wedge the slot for the next.
+fn fire_after_prelock_read_hook() {
+    let guard = AFTER_PRELOCK_READ_HOOK
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(hook) = guard.as_ref() {
+        hook();
+    }
 }
 
 fn prompt_yes_no(prompt: &str) -> Result<bool, TomeError> {
