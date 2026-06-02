@@ -378,6 +378,27 @@ fn cleanup_all_owned_agents(
     match all_owned_in_dir(dir) {
         Ok(paths) => {
             for path in paths {
+                // CON-1: a symlink refusal on this owned-file removal is the
+                // agents sink's concern → exit 45 (AgentTranslationFailed),
+                // never generic `Io` (7). Mirror the live-removal path
+                // (`emit_agents_for_harness`): run the SSOT guard (FR-007)
+                // explicitly and map its refusal onto the agents variant before
+                // `remove_standalone` performs the unlink (it re-checks via the
+                // same guard, idempotent here). Without this pre-check the
+                // refusal would flow through `remove_standalone`'s `refuse_symlink`
+                // → `Io` (7), the very asymmetry MAJOR-1 flagged.
+                if crate::util::refuse_symlinked_component(&path).is_err() {
+                    if recon.first_error.is_none() {
+                        let label = path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("agent")
+                            .to_string();
+                        recon.first_error =
+                            Some(TomeError::AgentTranslationFailed { agent: label });
+                    }
+                    continue;
+                }
                 match rules_file::remove_standalone(&path) {
                     Ok(()) => {
                         any_removed = true;
@@ -782,5 +803,72 @@ mod tests {
         .expect("clean agent write must succeed");
         assert_eq!(out, AgentWrite::Created);
         assert!(target.is_file());
+    }
+
+    // -----------------------------------------------------------------------
+    // CON-1 (phase-wide review MAJOR-1): the agents sink's orphan-CLEANUP path
+    // (`cleanup_all_owned_agents`, the non-live / non-supporting harness branch)
+    // must refuse a symlinked owned file with the SAME dedicated exit code (45 /
+    // AgentTranslationFailed) the LIVE-removal path uses — never a regression to
+    // generic `Io` (7). Before the fix this path called `remove_standalone`
+    // directly, whose `refuse_symlink` mapped the refusal to `Io` (7): same
+    // logical operation (refuse to unlink a symlinked Tome-owned agent file),
+    // two different exit codes depending on whether the harness was live. The
+    // live-removal path (`emit_agents_for_harness`) already pre-checks via
+    // `refuse_symlinked_component` → 45; this proves the cleanup path now mirrors
+    // it. Reuses the existing fixture style (real tempdir + `std::os::unix` symlink,
+    // canonicalised base) and drives the private cleanup fn directly.
+    #[cfg(unix)]
+    #[test]
+    fn agents_cleanup_refuses_symlinked_owned_file_with_exit_45() {
+        use std::os::unix::fs::symlink;
+        let root = TempDir::new().expect("tempdir");
+        let base = root.path().canonicalize().expect("canonicalize");
+        let dir = base.join("agents");
+        std::fs::create_dir(&dir).expect("mkdir agents");
+
+        // A Tome-owned agent file (`<plugin>__<name>.md`) for a now non-live /
+        // non-supporting harness — the orphan the cleanup pass is meant to
+        // unlink — is planted as a SYMLINK to a decoy outside the dir. Refusing
+        // to unlink through it is the agents sink's concern → exit 45.
+        std::fs::write(base.join("decoy.md"), b"x").expect("write decoy");
+        let owned = dir.join("plugin-gone__reviewer.md");
+        symlink(base.join("decoy.md"), &owned).expect("symlink owned agent file");
+        assert!(
+            agents::plugin_of_owned_file("plugin-gone__reviewer.md").is_some(),
+            "precondition: the planted name is recognised as a Tome-owned agent file"
+        );
+
+        let mut outcome = SyncOutcome::default();
+        let mut recon = AgentReconciliation {
+            actions: std::collections::HashMap::new(),
+            first_error: None,
+        };
+        let action = cleanup_all_owned_agents("stub", &dir, &mut outcome, &mut recon);
+
+        // The refusal is recorded on the forward-progress `first_error` (the
+        // shape this fn already uses) and must carry the agents-sink dedicated
+        // code 45, NOT generic `Io` (7).
+        let err = recon
+            .first_error
+            .expect("symlinked owned file must be refused and recorded as first_error");
+        assert_eq!(
+            err.exit_code(),
+            45,
+            "agents cleanup-removal refusal must map to AgentTranslationFailed (45), not Io (7); got {err:?}"
+        );
+        assert!(
+            matches!(err, TomeError::AgentTranslationFailed { .. }),
+            "expected AgentTranslationFailed, got {err:?}"
+        );
+        // Fail-closed: the symlink is NOT removed (the unlink was refused), and
+        // its decoy target is untouched.
+        assert!(
+            owned.symlink_metadata().is_ok(),
+            "the symlinked owned file must NOT be unlinked (fail-closed refusal)"
+        );
+        assert!(base.join("decoy.md").is_file(), "decoy target untouched");
+        // No removal succeeded → the aggregate action is LeftAlone, not Removed.
+        assert_eq!(action, Action::LeftAlone);
     }
 }
