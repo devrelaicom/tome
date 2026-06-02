@@ -90,6 +90,8 @@ fn entry_for(url: String, sha256: String, size: u64) -> &'static ModelEntry {
         size_bytes: size,
         licence: "MIT",
         files: &["model.onnx"],
+        // Single-file fixture: no non-primary files, so no aux fetch.
+        aux_urls: &[],
     }))
 }
 

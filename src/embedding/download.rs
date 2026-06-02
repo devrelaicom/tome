@@ -10,10 +10,17 @@
 //! 3. On EOF, hex-compare the streaming digest against the registry's
 //!    pinned hash. Mismatch → `ModelChecksumMismatch` (exit 32) and remove
 //!    `.partial/`.
-//! 4. `fsync` the file, then rename the `.partial/` directory to its final
+//! 4. Stream every non-primary file (`entry.files[1..]`, fetched from
+//!    `entry.aux_urls` positionally — e.g. `tokenizer.json` + the optional
+//!    fastembed config files) into the same `.partial/` directory. These are
+//!    not checksum-verified (the registry only pins the primary's size +
+//!    sha), consistent with `verify`'s design. Doing this BEFORE the rename
+//!    keeps the all-or-nothing landing: a failed aux fetch leaves the
+//!    `.partial/` tree, which the error arm removes.
+//! 5. `fsync` each file, then rename the `.partial/` directory to its final
 //!    name. The rename is the atomicity boundary — readers either see the
 //!    old directory (or none) or the new one, never a half-extracted state.
-//! 5. Write `manifest.json` atomically via `tempfile::NamedTempFile`.
+//! 6. Write `manifest.json` atomically via `tempfile::NamedTempFile`.
 //!
 //! Network and IO errors map to [`TomeError::Io`] (exit 7); checksum failures
 //! map to [`TomeError::ModelChecksumMismatch`] (exit 32); a placeholder
@@ -39,8 +46,12 @@ const STREAM_CHUNK_SIZE: usize = 64 * 1024;
 /// `model_root/<entry.name>/manifest.json`.
 ///
 /// The HTTP `entry.source_url` MUST point at the **primary** artefact (the
-/// ONNX model file). Other files in `entry.files` are not downloaded here;
-/// future per-file downloads will reuse this same atomic-rename strategy.
+/// ONNX model file). Every non-primary file in `entry.files[1..]` is fetched
+/// from `entry.aux_urls` (positionally) into the same staging directory
+/// before the atomic rename, so a successful call leaves a COMPLETE, loadable
+/// model directory — `FastembedEmbedder::load` needs `tokenizer.json`, which
+/// is a non-primary file. Single-file models (the summariser) have an empty
+/// `aux_urls` and this loop is a no-op.
 ///
 /// `byte_progress` is an optional callback invoked once after every
 /// streamed chunk with `(bytes_so_far, total_bytes)`. `total_bytes` is
@@ -81,6 +92,30 @@ pub fn download_model(
         let observed_hash =
             stream_to_partial(entry, &partial_dir.join(primary_filename), byte_progress)?;
         verify_checksum(entry, &observed_hash)?;
+
+        // Fetch every non-primary file (tokenizer.json + optional fastembed
+        // config files) BEFORE the rename, so the landed directory is
+        // complete-or-absent. `entry.aux_urls` pairs positionally with
+        // `entry.files[1..]`; the invariant `files.len() == 1 + aux_urls.len()`
+        // is checked by the `model_registry_invariant` test. The
+        // `debug_assert!` catches a future edit that breaks the pairing for an
+        // entry that actually reaches this path (stub entries never do).
+        debug_assert!(
+            entry.files.len() == 1 + entry.aux_urls.len(),
+            "model `{}`: files ({}) must be 1 + aux_urls ({}) — positional zip drift",
+            entry.name,
+            entry.files.len(),
+            entry.aux_urls.len(),
+        );
+        for (local_name, url) in entry.files.iter().skip(1).zip(entry.aux_urls.iter()) {
+            // Aux files are not checksum-verified (the registry pins only the
+            // primary's size + sha); `None` progress because there is no
+            // pinned size to drive a bar against. Scrubbing is preserved —
+            // `stream_url_to_partial` runs the URL + reqwest error chain
+            // through the credential scrubber exactly as the primary fetch.
+            stream_url_to_partial(url, &partial_dir.join(local_name), None, None)?;
+        }
+
         if final_dir.exists() {
             std::fs::remove_dir_all(&final_dir).map_err(TomeError::Io)?;
         }
@@ -101,16 +136,43 @@ pub fn download_model(
     }
 }
 
+/// Stream `entry.source_url` (the primary artefact) into `dest`, returning the
+/// streaming SHA-256 for `verify_checksum`. Thin wrapper over
+/// [`stream_url_to_partial`] that supplies the primary's pinned size for the
+/// progress bar.
 fn stream_to_partial(
     entry: &ModelEntry,
     dest: &Path,
     byte_progress: Option<&dyn Fn(u64, u64)>,
 ) -> Result<String, TomeError> {
-    // `reqwest::Error::Display` reproduces the failing URL verbatim, which
-    // can include presigned-URL query parameters carrying credentials. Run
-    // both the error message and the (non-error) status-line message
-    // through the credential scrubber before they reach `TomeError`.
-    let mut response = reqwest::blocking::get(entry.source_url).map_err(|e| {
+    stream_url_to_partial(
+        entry.source_url,
+        dest,
+        Some(entry.size_bytes),
+        byte_progress,
+    )
+}
+
+/// Stream an arbitrary `(url, dest)` pair through a `Sha256`, returning the
+/// streaming digest. Used for both the primary artefact (size known, progress
+/// driven) and the non-primary aux files (size unknown, `None` progress).
+///
+/// `total_for_progress` is the byte count reported to `byte_progress` as the
+/// second argument; the network's `Content-Length` is intentionally NOT
+/// consulted (it can disagree with the registry pin for redirected URLs and
+/// the pin is authoritative). When `None`, `byte_progress` is not invoked.
+///
+/// CREDENTIAL SCRUBBING: `reqwest::Error::Display` and the status-line message
+/// reproduce the failing URL verbatim, which can include presigned-URL query
+/// parameters carrying credentials. Both are run through the credential
+/// scrubber before reaching `TomeError` — this MUST hold for aux fetches too.
+fn stream_url_to_partial(
+    url: &str,
+    dest: &Path,
+    total_for_progress: Option<u64>,
+    byte_progress: Option<&dyn Fn(u64, u64)>,
+) -> Result<String, TomeError> {
+    let mut response = reqwest::blocking::get(url).map_err(|e| {
         TomeError::Io(std::io::Error::other(scrub_for_diag(&format!(
             "HTTP get failed: {e}"
         ))))
@@ -118,14 +180,13 @@ fn stream_to_partial(
 
     if !response.status().is_success() {
         return Err(TomeError::Io(std::io::Error::other(scrub_for_diag(
-            &format!("HTTP {} fetching {}", response.status(), entry.source_url),
+            &format!("HTTP {} fetching {}", response.status(), url),
         ))));
     }
 
     let mut file = File::create(dest).map_err(TomeError::Io)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; STREAM_CHUNK_SIZE];
-    let total = entry.size_bytes;
     let mut written: u64 = 0;
 
     loop {
@@ -139,7 +200,7 @@ fn stream_to_partial(
         hasher.update(&buf[..n]);
         file.write_all(&buf[..n]).map_err(TomeError::Io)?;
         written = written.saturating_add(n as u64);
-        if let Some(cb) = byte_progress {
+        if let (Some(cb), Some(total)) = (byte_progress, total_for_progress) {
             cb(written, total);
         }
     }
