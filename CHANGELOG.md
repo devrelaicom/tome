@@ -74,8 +74,9 @@ User-visible
 
 ### Phase 7 — beta hardening + public release
 
-This release also bundles the Phase 7 beta-hardening work. Tome is now
-published to crates.io as **`tome-mcp`** while the command you run stays
+This release also bundles the Phase 7 beta-hardening work. It is Tome's first
+public-release entry; the crate will be published to crates.io as **`tome-mcp`**
+(the bare `tome` name is already taken) while the command you run stays
 **`tome`** (the library and binary names are unchanged); `cargo install
 tome-mcp` (or `brew install <tap>/tome`) builds and installs the `tome`
 binary.
