@@ -1,0 +1,382 @@
+name: Release
+
+# Tag-triggered ONLY. This workflow is DORMANT on pull requests and on pushes
+# to main — those are covered by ci.yml / security.yml. It runs exclusively
+# when an operator pushes a version tag (`vMAJOR.MINOR.PATCH`), which is a
+# user-reserved action (FR-019: the tag, the `cargo publish`, and the tap-PR
+# merge are the operator's, never the pipeline's). Building the artifacts and
+# wiring the publish/tap steps is automated here; *triggering* a release is not.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+# Least privilege at the workflow level. The crates.io publish and the
+# cross-owner Homebrew-tap push use operator-provided SECRETS (a registry
+# token and a least-privilege PAT), not this workflow's GITHUB_TOKEN, so the
+# default token only needs to create the GitHub Release in *this* repo.
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # The exact cargo-dist version the pipeline is pinned to. Must match
+  # `cargo-dist-version` in dist-workspace.toml (reproducibility / NFR-008).
+  DIST_VERSION: "0.32.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Gate — identical quality bar to ci.yml / security.yml (NFR-010). A failure
+  # here stops the whole release before any artifact is built or published.
+  # ---------------------------------------------------------------------------
+  gate:
+    name: Gate (fmt / clippy / cargo-deny)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-gate
+          cache-bin: false
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+
+      - name: cargo deny check
+        run: cargo deny check
+
+  # ---------------------------------------------------------------------------
+  # Detect which operator secrets exist, WITHOUT ever exposing their values.
+  # `secrets.*` is not usable in a job-level `if:`, so we reduce each secret to
+  # a boolean (`!= ''`) here and gate the dormant publish jobs on these
+  # outputs. The token values themselves are never printed (§XIII / NFR-010).
+  # ---------------------------------------------------------------------------
+  secret-preflight:
+    name: Detect operator secrets (dormant-job gating)
+    runs-on: ubuntu-latest
+    outputs:
+      has_cargo_token: ${{ steps.detect.outputs.has_cargo_token }}
+      has_tap_token: ${{ steps.detect.outputs.has_tap_token }}
+    steps:
+      - id: detect
+        env:
+          # Reduced to booleans only; the raw secret never enters a command,
+          # an output, or a log line.
+          HAS_CARGO_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+          HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        run: |
+          echo "has_cargo_token=${HAS_CARGO_TOKEN}" >> "$GITHUB_OUTPUT"
+          echo "has_tap_token=${HAS_TAP_TOKEN}" >> "$GITHUB_OUTPUT"
+          echo "crates.io publish enabled: ${HAS_CARGO_TOKEN}"
+          echo "Homebrew tap push enabled: ${HAS_TAP_TOKEN}"
+
+  # ---------------------------------------------------------------------------
+  # Per-target build + self-containment verification (FR-018 / SC-007 / FR-020).
+  # Each target builds in its own job against its own runner, then we inspect
+  # the produced binary's dynamic dependencies and assert no application-
+  # specific inference sidecar (libonnxruntime) leaked, and that the stripped
+  # binary stays under the 50 MB cap. Builds are `--locked` via
+  # dist-workspace.toml's `cargo-build-args` (NFR-008).
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.target }}
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            inspect: ldd
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+            inspect: ldd
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            inspect: otool
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            inspect: otool
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-build-${{ matrix.target }}
+          cache-bin: false
+
+      # Pinned cargo-dist installer (DIST_VERSION). cargo-dist owns the archive
+      # + checksum generation; the `--locked` flag flows through from
+      # dist-workspace.toml's cargo-build-args.
+      - name: Install cargo-dist (pinned)
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
+
+      - name: Build local artifacts (dist build --locked via config)
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          dist build --artifacts=local --target="${TARGET}" \
+            --tag="${GITHUB_REF_NAME}" --output-format=json > dist-manifest.json
+          cat dist-manifest.json
+
+      # Self-containment gate (SC-007 / FR-018): the built binary MUST NOT
+      # dynamically depend on an application-specific inference sidecar. ONNX
+      # Runtime (ort download-binaries), llama.cpp (llama-cpp-2) and the
+      # vendored sqlite-vec are all statically linked, so libonnxruntime (or
+      # any libonnx*/onnxruntime) appearing in the dynamic-dependency list
+      # means the static-link contract regressed. Linking the platform's own
+      # libc / libstdc++ / libgcc is acceptable ("self-contained" = no app
+      # sidecar). Linux additionally targets the Ubuntu-22.04 glibc baseline
+      # (2.35) so the binary runs across mainstream distributions.
+      - name: Verify self-contained (no inference sidecar)
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          INSPECT: ${{ matrix.inspect }}
+        run: |
+          set -euo pipefail
+          bin="target/${TARGET}/dist/tome"
+          if [ ! -x "$bin" ]; then
+            # Some profiles land the binary at target/dist/; fall back.
+            bin="$(find target -type f -name tome -path '*dist*' | head -1)"
+          fi
+          echo "Inspecting dynamic dependencies of: $bin"
+          if [ "${INSPECT}" = "ldd" ]; then
+            deps="$(ldd "$bin" || true)"
+          else
+            deps="$(otool -L "$bin" || true)"
+          fi
+          echo "$deps"
+          # Case-insensitive scan for an ONNX / inference sidecar.
+          if echo "$deps" | grep -Eiq 'onnxruntime|libonnx'; then
+            echo "::error::Self-containment violated: an ONNX inference sidecar is dynamically linked on ${TARGET} (FR-018/SC-007). ONNX Runtime must stay statically linked via ort's download-binaries."
+            exit 1
+          fi
+          echo "OK: no application-specific inference sidecar dynamically linked."
+
+      # Size gate (FR-020 / SC-009 / NFR-001): the stripped release binary
+      # must stay under the documented 50 MB cap on every target.
+      - name: Assert binary under 50 MB
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bin="target/${TARGET}/dist/tome"
+          if [ ! -x "$bin" ]; then
+            bin="$(find target -type f -name tome -path '*dist*' | head -1)"
+          fi
+          if [ "$(uname)" = "Darwin" ]; then
+            size=$(stat -f%z "$bin")
+          else
+            size=$(stat -c%s "$bin")
+          fi
+          limit=52428800
+          mb=$(awk "BEGIN { printf \"%.2f\", $size / 1048576 }")
+          echo "release binary (${TARGET}): ${mb} MB ($size bytes, limit $limit)"
+          if [ "$size" -ge "$limit" ]; then
+            echo "::error::Release binary ${mb} MB exceeds the 50 MB cap on ${TARGET} (FR-020/NFR-001)"
+            exit 1
+          fi
+
+      - name: Upload local artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-local-${{ matrix.target }}
+          path: |
+            target/distrib/*.tar.xz
+            target/distrib/*.tar.xz.sha256
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Global artifacts (FR-019): the shell installer, the Homebrew formula, and
+  # the unified checksum — produced once per app — plus the aggregated
+  # THIRD-PARTY-LICENSES bundle (cargo dependency graph + the statically-linked
+  # native components ONNX Runtime / llama.cpp / vendored sqlite-vec).
+  # ---------------------------------------------------------------------------
+  global:
+    name: Global artifacts + licence bundle
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-global
+          cache-bin: false
+
+      - name: Install cargo-dist (pinned)
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            "https://github.com/axodotdev/cargo-dist/releases/download/v${DIST_VERSION}/cargo-dist-installer.sh" | sh
+
+      - name: Build global artifacts (installer + formula + checksum)
+        shell: bash
+        run: |
+          dist build --artifacts=global \
+            --tag="${GITHUB_REF_NAME}" --output-format=json > global-manifest.json
+          cat global-manifest.json
+
+      # Regenerate THIRD-PARTY-LICENSES from the cargo graph and append the
+      # native-component notices. The repo ships a committed copy; this step
+      # re-derives it at release time so a tagged artifact carries an
+      # up-to-date bundle. The committed `about.toml` reuses the cargo-deny
+      # licence allowlist (NFR-007).
+      - name: Install cargo-about (pinned via --locked)
+        run: cargo install --locked --features cli cargo-about
+
+      - name: Regenerate THIRD-PARTY-LICENSES
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo about generate about.hbs > THIRD-PARTY-LICENSES.cargo.txt
+          # Re-assemble: cargo-graph licences + the appended native notices
+          # block kept under version control (everything after the marker).
+          marker='## Native components linked outside the cargo dependency graph'
+          {
+            cat THIRD-PARTY-LICENSES.cargo.txt
+            echo
+            awk "/^${marker}\$/{p=1} p" THIRD-PARTY-LICENSES
+          } > THIRD-PARTY-LICENSES.regenerated
+          mv THIRD-PARTY-LICENSES.regenerated THIRD-PARTY-LICENSES
+          rm -f THIRD-PARTY-LICENSES.cargo.txt
+          echo "Regenerated THIRD-PARTY-LICENSES ($(wc -l < THIRD-PARTY-LICENSES) lines)"
+
+      - name: Upload global artifacts + licence bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-global
+          path: |
+            target/distrib/*.sh
+            target/distrib/*.rb
+            target/distrib/sha256.sum
+            THIRD-PARTY-LICENSES
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Create the GitHub Release and attach every per-platform archive, its
+  # checksum, the installer, and the THIRD-PARTY-LICENSES bundle (FR-019).
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    needs: [build, global]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: dist-artifacts
+          merge-multiple: true
+
+      - name: Create release with artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist-artifacts/*
+
+  # ---------------------------------------------------------------------------
+  # DORMANT — crates.io publish (FR-019, user-reserved). Runs only once the
+  # operator sets the CARGO_REGISTRY_TOKEN secret. The token is consumed by
+  # `cargo publish` via the env var ONLY; it is never echoed or written to a
+  # log/output (§XIII / NFR-010). Publishing is `--locked` (NFR-008).
+  # ---------------------------------------------------------------------------
+  publish-crates-io:
+    name: Publish to crates.io (dormant until secret set)
+    needs: [gate, build, secret-preflight]
+    if: needs.secret-preflight.outputs.has_cargo_token == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo publish (--locked)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
+  # ---------------------------------------------------------------------------
+  # DORMANT — push the Homebrew formula to the cross-owner tap
+  # `aaronbassett/homebrew-tap` (FR-019, research §R-14). Runs only once the
+  # operator sets a least-privilege PAT (HOMEBREW_TAP_TOKEN) scoped to write
+  # only the tap repo. The PAT is passed to the checkout action's `token`
+  # input ONLY; it is never echoed, never interpolated into a run-step
+  # command, and never written to a log (§XIII / NFR-010).
+  # ---------------------------------------------------------------------------
+  publish-homebrew-tap:
+    name: Push formula to Homebrew tap (dormant until PAT set)
+    needs: [global, release, secret-preflight]
+    if: needs.secret-preflight.outputs.has_tap_token == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download global artifacts (the generated formula)
+        uses: actions/download-artifact@v4
+        with:
+          name: artifacts-global
+          path: global-artifacts
+
+      - name: Checkout the tap repo (cross-owner, PAT-authenticated)
+        uses: actions/checkout@v5
+        with:
+          repository: aaronbassett/homebrew-tap
+          # Least-privilege operator PAT (tap-repo write only). Consumed by the
+          # action's token input; never logged.
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+          persist-credentials: true
+
+      - name: Stage + commit the formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p homebrew-tap/Formula
+          cp global-artifacts/tome.rb homebrew-tap/Formula/tome.rb
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- Formula/tome.rb; then
+            echo "Formula unchanged; nothing to push."
+            exit 0
+          fi
+          git add Formula/tome.rb
+          git commit -m "tome ${GITHUB_REF_NAME}"
+          # Push uses the credentials persisted by actions/checkout (the PAT);
+          # the token is never referenced on this command line.
+          git push origin HEAD

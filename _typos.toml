@@ -22,4 +22,9 @@ extend-exclude = [
     "target/",
     "specs/**/contracts/*.toml",
     "vendor/",
+    # Generated licence aggregate (FR-019): verbatim third-party licence text +
+    # crate names (e.g. pdf-rs's "contributers", the `writeable` crate) that the
+    # typos lint mis-flags and which MUST stay byte-accurate. Same rationale as
+    # excluding vendor/.
+    "THIRD-PARTY-LICENSES",
 ]
