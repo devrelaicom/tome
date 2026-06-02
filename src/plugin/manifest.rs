@@ -58,11 +58,20 @@ impl PluginAuthor {
 
 /// Read and parse a `plugin.json` from disk. Returns a structured error that
 /// maps to exit code 22 at the command boundary.
+///
+/// `plugin.json` is third-party (FR-013a); an oversized file must not be
+/// read into memory unbounded. The read is capped at
+/// [`crate::util::PLUGIN_MANIFEST_MAX`] (FR-006, F-PLUGIN-MANIFEST-DOS) — an
+/// over-cap file fails as a `PluginManifestParseError`, the same class this
+/// site already produces for a missing or malformed manifest.
 pub fn parse_plugin_manifest(path: &Path) -> Result<PluginManifest, TomeError> {
-    let bytes = std::fs::read(path).map_err(|cause| TomeError::PluginManifestParseError {
-        file: path.to_path_buf(),
-        message: format!("could not read file: {cause}"),
-    })?;
+    let bytes =
+        crate::util::bounded_read(path, crate::util::PLUGIN_MANIFEST_MAX).map_err(|cause| {
+            TomeError::PluginManifestParseError {
+                file: path.to_path_buf(),
+                message: format!("could not read file: {cause}"),
+            }
+        })?;
 
     parse_plugin_manifest_bytes(path, &bytes)
 }

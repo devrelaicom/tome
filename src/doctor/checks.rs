@@ -184,7 +184,13 @@ fn classify_clone(path: &Path) -> CatalogCacheState {
         return CatalogCacheState::NotARepo;
     }
     let manifest_path = path.join("tome-catalog.toml");
-    let Ok(bytes) = std::fs::read(&manifest_path) else {
+    // `tome-catalog.toml` is third-party; cap the read at PLUGIN_MANIFEST_MAX
+    // (FR-006, F-PLUGIN-MANIFEST-DOS). An over-cap file is `Err`, folding
+    // into the same `ManifestInvalid` an unreadable manifest already yields
+    // — doctor reports it as a problem, never silently OK after an
+    // unbounded read.
+    let Ok(bytes) = crate::util::bounded_read(&manifest_path, crate::util::PLUGIN_MANIFEST_MAX)
+    else {
         return CatalogCacheState::ManifestInvalid;
     };
     // We deliberately use lenient parsing — doctor only reports whether

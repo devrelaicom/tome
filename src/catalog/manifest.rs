@@ -43,7 +43,12 @@ pub struct PluginDeclaration {
 /// matching `tome plugin list`'s lenient handling of broken catalog state.
 pub fn read_catalog_manifest(catalog_path: &Path) -> Option<CatalogManifest> {
     let manifest_path = catalog_path.join("tome-catalog.toml");
-    let bytes = std::fs::read(&manifest_path).ok()?;
+    // `tome-catalog.toml` is third-party; cap the read at PLUGIN_MANIFEST_MAX
+    // (FR-006, F-PLUGIN-MANIFEST-DOS). An over-cap file is `Err` from
+    // `bounded_read`, so `.ok()?` folds it into the same None / "invalid or
+    // unreadable" path an unparsable manifest already takes here — never a
+    // silent acceptance of a multi-GiB file as a clean manifest.
+    let bytes = crate::util::bounded_read(&manifest_path, crate::util::PLUGIN_MANIFEST_MAX).ok()?;
     CatalogManifest::parse_and_validate(&manifest_path, catalog_path, &bytes).ok()
 }
 

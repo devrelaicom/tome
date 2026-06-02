@@ -78,15 +78,21 @@ pub fn run(args: CatalogAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
 
         let (manifest, _tempdir_guard) = if reuse_existing {
             let manifest_path = cache_dir.join("tome-catalog.toml");
-            let manifest_bytes = std::fs::read(&manifest_path).map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => {
-                    TomeError::ManifestInvalid(crate::error::ManifestInvalid::TomlParse {
-                        file: manifest_path.clone(),
-                        message: "cached catalog has no tome-catalog.toml".to_string(),
-                    })
-                }
-                _ => TomeError::Io(e),
-            })?;
+            // Third-party manifest: cap at PLUGIN_MANIFEST_MAX (FR-006,
+            // F-PLUGIN-MANIFEST-DOS). Preserve the NotFound → "no manifest"
+            // mapping; an over-cap file falls to the `_` arm and surfaces as
+            // exit-7 `Io`, never an unbounded read.
+            let manifest_bytes =
+                crate::util::bounded_read(&manifest_path, crate::util::PLUGIN_MANIFEST_MAX)
+                    .map_err(|e| match &e {
+                        TomeError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+                            TomeError::ManifestInvalid(crate::error::ManifestInvalid::TomlParse {
+                                file: manifest_path.clone(),
+                                message: "cached catalog has no tome-catalog.toml".to_string(),
+                            })
+                        }
+                        _ => e,
+                    })?;
             let manifest =
                 CatalogManifest::parse_and_validate(&manifest_path, &cache_dir, &manifest_bytes)
                     .map_err(TomeError::ManifestInvalid)?;
@@ -112,15 +118,21 @@ pub fn run(args: CatalogAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
             git.clone_shallow(&url, &clone_dest, clone_ref)?;
 
             let manifest_path = clone_dest.join("tome-catalog.toml");
-            let manifest_bytes = std::fs::read(&manifest_path).map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => {
-                    TomeError::ManifestInvalid(crate::error::ManifestInvalid::TomlParse {
-                        file: manifest_path.clone(),
-                        message: "no tome-catalog.toml at the catalog root".to_string(),
-                    })
-                }
-                _ => TomeError::Io(e),
-            })?;
+            // Third-party manifest: cap at PLUGIN_MANIFEST_MAX (FR-006,
+            // F-PLUGIN-MANIFEST-DOS). Preserve the NotFound → "no manifest"
+            // mapping; an over-cap file falls to the `_` arm and surfaces as
+            // exit-7 `Io`, never an unbounded read.
+            let manifest_bytes =
+                crate::util::bounded_read(&manifest_path, crate::util::PLUGIN_MANIFEST_MAX)
+                    .map_err(|e| match &e {
+                        TomeError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
+                            TomeError::ManifestInvalid(crate::error::ManifestInvalid::TomlParse {
+                                file: manifest_path.clone(),
+                                message: "no tome-catalog.toml at the catalog root".to_string(),
+                            })
+                        }
+                        _ => e,
+                    })?;
             let manifest =
                 CatalogManifest::parse_and_validate(&manifest_path, &clone_dest, &manifest_bytes)
                     .map_err(TomeError::ManifestInvalid)?;
