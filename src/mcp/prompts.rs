@@ -527,6 +527,17 @@ impl PromptRegistry {
                 identity.name,
             );
             if let Some(entry) = hydrated.remove(&key) {
+                // FR-004: `resolve_collisions` assigns every final name
+                // against one global taken-set, so each name is unique and
+                // this insert never overwrites a prior user-invocable entry.
+                // The assert guards that invariant against future drift — a
+                // silent overwrite here would drop an entry from prompts/list
+                // and make it unresolvable on prompts/get.
+                debug_assert!(
+                    !by_name.contains_key(&final_name),
+                    "duplicate final prompt name `{final_name}` — \
+                     resolve_collisions must guarantee global uniqueness",
+                );
                 by_name.insert(final_name, entry);
             }
         }
