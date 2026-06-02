@@ -54,10 +54,20 @@ pub fn check_harness_integration(
     for harness in &effective_list.harnesses {
         let (rules_health, mcp_health) = with_effective_modules(|modules| {
             match modules.iter().find(|m| m.name() == harness.name) {
-                Some(module) => (
-                    check_rules_file(*module, project_root),
-                    check_mcp_config(*module, project_root, home, workspace_name),
-                ),
+                Some(module) => {
+                    // The rules-body style is a GROUP decision (union across
+                    // every LIVE sharer of this rules path), mirroring the
+                    // writer's `harness::sync::group_body_style`. Resolve it
+                    // here — inside the registry guard, where the live sharer
+                    // modules are visible — and pass it down, rather than
+                    // re-entering `with_effective_modules` from `expected_body`
+                    // (the guard is non-reentrant; see its doc comment).
+                    let style = group_body_style(*module, modules, effective_list, project_root);
+                    (
+                        check_rules_file(*module, project_root, style),
+                        check_mcp_config(*module, project_root, home, workspace_name),
+                    )
+                }
                 // Harness in the effective list but not in the
                 // effective registry — should be impossible (resolver
                 // validates) but be defensive.
@@ -79,6 +89,7 @@ pub fn check_harness_integration(
 fn check_rules_file(
     module: &dyn crate::harness::HarnessModule,
     project_root: &Path,
+    style: BlockBodyStyle,
 ) -> SubsystemHealth {
     let target = module.rules_file_target(project_root);
     match module.rules_file_strategy() {
@@ -104,8 +115,12 @@ fn check_rules_file(
                 Ok(None) => return SubsystemHealth::Broken,
                 Err(_) => return SubsystemHealth::Broken,
             };
-            // Expected body per the harness's BlockBodyStyle.
-            let expected = expected_body(module, project_root);
+            // Expected body per the GROUP's resolved BlockBodyStyle (union
+            // across live sharers; see `group_body_style`). `target` is this
+            // module's rules-file path; every group sharer targets the same
+            // path, so it is the writer's `rules_path` grouping key — pass it
+            // for the AtInclude relative-path computation.
+            let expected = expected_body(style, &target, project_root);
             if block.body == expected {
                 SubsystemHealth::Ok
             } else {
@@ -115,17 +130,59 @@ fn check_rules_file(
     }
 }
 
-/// Compute the expected block body for `module`. Mirrors the production
-/// `harness::sync::compute_rules_body` shape but without the I/O error
-/// propagation — read failures collapse to empty bodies, which makes
-/// the doctor check `Drift` against any existing non-empty block (the
-/// correct user-facing outcome).
-fn expected_body(module: &dyn crate::harness::HarnessModule, project_root: &Path) -> String {
-    match module.block_body_style() {
+/// Resolve the GROUP body style for `module`'s rules path: the union across
+/// every LIVE sharer of that path. This is the doctor-side mirror of the
+/// writer's [`crate::harness::sync::group_body_style`] — both must agree, or
+/// `doctor` reports a permanent false-positive `Drift` (the writer lands the
+/// group's inline body into a shared file while doctor expects the single
+/// module's own AtInclude style, and `--fix` re-runs the same writer so it
+/// never converges).
+///
+/// `modules` is the registry slice (already under the `with_effective_modules`
+/// guard at the call site); `effective_list` names the live harnesses. A
+/// sharer is any module whose `rules_file_target` equals `module`'s AND whose
+/// name is in the effective list — the same path-equality + OR-of-live grouping
+/// the writer applies. `Inline` wins the moment any live sharer requires it
+/// (an include-incapable harness, e.g. OpenCode, would read `@.tome/RULES.md`
+/// as prose); an include-only group stays `AtInclude`.
+fn group_body_style(
+    module: &dyn crate::harness::HarnessModule,
+    modules: &[&dyn crate::harness::HarnessModule],
+    effective_list: &EffectiveHarnessList,
+    project_root: &Path,
+) -> BlockBodyStyle {
+    let target = module.rules_file_target(project_root);
+    let any_inline = modules.iter().any(|m| {
+        effective_list.harnesses.iter().any(|h| h.name == m.name())
+            && m.rules_file_target(project_root) == target
+            && m.block_body_style() == BlockBodyStyle::Inline
+    });
+    if any_inline {
+        BlockBodyStyle::Inline
+    } else {
+        BlockBodyStyle::AtInclude
+    }
+}
+
+/// Compute the expected block body for the resolved GROUP `style`. Mirrors the
+/// production `harness::sync::compute_rules_body` shape but without the I/O
+/// error propagation — read failures collapse to empty bodies, which makes the
+/// doctor check `Drift` against any existing non-empty block (the correct
+/// user-facing outcome).
+///
+/// `style` is the GROUP's lowest-common-denominator style (see
+/// [`group_body_style`]), NOT the single module's own — a shared path with any
+/// inline sharer renders inline, matching exactly what the writer wrote.
+///
+/// `rules_target` is the harness's rules-file path (the group's shared path);
+/// the AtInclude relative-path is computed from its parent, mirroring the
+/// writer's `compute_rules_body`, which keys the include directive off the
+/// shared `rules_path`.
+fn expected_body(style: BlockBodyStyle, rules_target: &Path, project_root: &Path) -> String {
+    match style {
         BlockBodyStyle::AtInclude => {
             let rules_path = crate::paths::Paths::project_marker_rules(project_root);
-            let target = module.rules_file_target(project_root);
-            let parent = target.parent().unwrap_or(Path::new(""));
+            let parent = rules_target.parent().unwrap_or(Path::new(""));
             format!("@{}", relative_path(parent, &rules_path).display())
         }
         BlockBodyStyle::Inline => {

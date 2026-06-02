@@ -20,17 +20,22 @@
 //! `Inline`, the inline body is written. Include-capable harnesses resolve an
 //! inline body correctly (inline is the LCD), so they stay green.
 //!
-//! These tests drive the REAL harness modules (Codex, Gemini, OpenCode) via
-//! the `HARNESS_MODULES_OVERRIDE` seam, because those three genuinely share
-//! `AGENTS.md` and exercise the production grouping. `block_body_style()` is
-//! the source of truth — no harness name is hard-coded here.
+//! These tests drive the REAL harness modules (Codex, Gemini, OpenCode),
+//! because those three genuinely share `AGENTS.md` and exercise the production
+//! grouping. `block_body_style()` is the source of truth — no harness name is
+//! hard-coded here. The writer-side cases scope the registry to two modules via
+//! the `HARNESS_MODULES_OVERRIDE` seam; the doctor-side regression cases at the
+//! bottom run against the unmodified `SUPPORTED_HARNESSES` (the effective list
+//! from the project marker — not the override — drives which sharers are live).
 
 mod common;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use common::{HarnessModulesGuard, ToolEnv, paths_for, seed_workspace};
+use common::{
+    HarnessModulesGuard, ToolEnv, fabricate_all_registry_models, paths_for, seed_workspace,
+};
 use tempfile::TempDir;
 use tome::harness::sync::{self, SyncDeps};
 use tome::workspace::WorkspaceName;
@@ -199,5 +204,107 @@ fn include_only_group_keeps_at_include() {
         body.trim_end(),
         INCLUDE_LINE,
         "an include-only group must keep the `@.tome/RULES.md` directive; got:\n{body}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cross-module regression: `tome doctor` must mirror the writer's
+// union-across-sharers when projecting the expected rules body.
+//
+// The writer makes the body style a GROUP decision (Inline if ANY live sharer
+// needs it), so a shared `AGENTS.md` between an include-capable harness (Codex)
+// and OpenCode receives the INLINE body. If doctor's projection still computed
+// the expected body from each module's OWN `block_body_style()`, the
+// include-capable sharer would expect `@.tome/RULES.md`, read the inline body
+// on disk, and report a PERMANENT false-positive `Drift` (`--fix` re-runs the
+// same writer, so it never converges). These tests drive the REAL production
+// registry (no `HARNESS_MODULES_OVERRIDE`): both sharers must read back `Ok`.
+// ---------------------------------------------------------------------------
+
+/// Run `sync_project` then `doctor::assemble_report` against the same bound
+/// project, and assert every per-harness rules subsystem reports `Ok` (never
+/// `Drift`). `expect_harnesses` is asserted to be exactly the effective rules
+/// set doctor reports on.
+fn assert_doctor_sees_no_drift_after_sync(harnesses_toml: &str, expect_harnesses: &[&str]) {
+    use tome::doctor::{self, SubsystemHealth};
+    use tome::workspace::{ResolvedScope, Scope, ScopeSource};
+
+    // No override is installed here — doctor + sync resolve against the real
+    // `SUPPORTED_HARNESSES`. We still hold `OVERRIDE_MUTEX` so an
+    // override-installing test in this file can't clobber the registry view
+    // mid-run (the slot is process-global).
+    let _lock = OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+
+    let fx = Fixture::build("test-workspace", harnesses_toml);
+    // `assemble_report` reads model state; fabricate so the report is clean and
+    // the only signal under test is the per-harness rules health.
+    fabricate_all_registry_models(&fx.paths);
+
+    // Writer side: lands the (inline, because OpenCode shares the path) body.
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync");
+
+    // Doctor side: read-only projection over the same on-disk state.
+    let scope = ResolvedScope {
+        scope: Scope(fx.workspace.clone()),
+        source: ScopeSource::ProjectMarker,
+        project_root: Some(fx.project.clone()),
+    };
+    let report = doctor::assemble_report(&scope, &fx.paths, fx._home.path(), false)
+        .expect("assemble doctor report");
+
+    let mut names: Vec<&str> = report
+        .harness_rules
+        .iter()
+        .map(|h| h.harness.as_str())
+        .collect();
+    names.sort_unstable();
+    let mut expected: Vec<&str> = expect_harnesses.to_vec();
+    expected.sort_unstable();
+    assert_eq!(
+        names, expected,
+        "doctor should report rules health for exactly the effective harnesses; got {:#?}",
+        report.harness_rules,
+    );
+
+    for entry in &report.harness_rules {
+        assert_eq!(
+            entry.health,
+            SubsystemHealth::Ok,
+            "doctor rules health for `{}` must be Ok — the writer landed the GROUP's \
+             inline body into the shared file, so doctor's projection must expect inline \
+             too (no false-positive Drift). Full rules report:\n{:#?}",
+            entry.harness,
+            report.harness_rules,
+        );
+    }
+}
+
+#[test]
+fn doctor_no_drift_for_opencode_codex_shared_agents_md() {
+    // Codex (AtInclude) shares AGENTS.md with OpenCode (Inline). Before the
+    // doctor-side fix, Codex's check expected `@.tome/RULES.md` and saw the
+    // inline body → Drift. After the fix it resolves the group style (Inline).
+    assert_doctor_sees_no_drift_after_sync(
+        "harnesses = [\"codex\", \"opencode\"]",
+        &["codex", "opencode"],
+    );
+}
+
+#[test]
+fn doctor_no_drift_for_opencode_gemini_shared_agents_md() {
+    // Gemini (AtInclude, AGENTS.md fallback) shares with OpenCode (Inline).
+    assert_doctor_sees_no_drift_after_sync(
+        "harnesses = [\"gemini\", \"opencode\"]",
+        &["gemini", "opencode"],
+    );
+}
+
+#[test]
+fn doctor_include_only_group_stays_ok() {
+    // Control: an include-only group (Codex + Gemini) keeps the AtInclude body
+    // on both sides — writer and doctor agree on `@.tome/RULES.md`, no Drift.
+    assert_doctor_sees_no_drift_after_sync(
+        "harnesses = [\"codex\", \"gemini\"]",
+        &["codex", "gemini"],
     );
 }
