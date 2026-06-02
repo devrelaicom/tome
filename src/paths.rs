@@ -130,7 +130,8 @@ impl Paths {
     /// Content-addressed catalog clone directory. The sha256(url) hex
     /// digest gives every distinct catalog URL its own directory under
     /// [`Paths::catalogs_dir`]. Refcounting across workspaces lives in
-    /// `catalog::store::reference_count` (Phase 3 / US3.b).
+    /// `index::workspace_catalogs::refcount_by_url` — a clone is removed
+    /// only once no workspace still references its URL.
     pub fn cache_dir_for(&self, url: &str) -> PathBuf {
         let mut h = Sha256::new();
         h.update(url.as_bytes());

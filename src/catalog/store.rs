@@ -14,8 +14,6 @@ use tempfile::NamedTempFile;
 
 use crate::config::Config;
 use crate::error::TomeError;
-use crate::paths::Paths;
-use crate::workspace::{Scope, WorkspaceName};
 
 pub fn load(config_file: &Path) -> Result<Config, TomeError> {
     match crate::util::bounded_read_to_string(config_file, crate::util::TOME_CONFIG_MAX) {
@@ -42,37 +40,6 @@ pub fn save(config_file: &Path, config: &Config) -> Result<(), TomeError> {
     let text =
         toml::to_string_pretty(config).map_err(|e| TomeError::Internal(anyhow::Error::new(e)))?;
     write_atomic(config_file, text.as_bytes())
-}
-
-/// Enumerate every scope whose `config.toml` currently references the
-/// catalog URL. Used by `tome catalog remove` to decide whether the
-/// on-disk clone at `paths.cache_dir_for(url)` is still needed after the
-/// resolved scope drops it.
-///
-/// Phase 4 / F2a transitional behaviour: with the XDG-separated paths
-/// gone and the `workspaces.txt` opt-in registry deleted, this function
-/// only walks the central global `config.toml`. The Phase 3 per-workspace
-/// `.tome/config.toml` enumeration is dropped here; F11 reintroduces
-/// proper workspace-aware reference counting via the `workspace_catalogs`
-/// junction table once the central DB schema is in place.
-///
-/// URL equality is exact-string match. Callers must pass the same
-/// scrubbed-and-resolved URL the catalog was registered with.
-///
-/// ## Concurrency / TOCTOU
-///
-/// The reference-count read is **not** taken under any lock. The TOCTOU
-/// profile is unchanged from Phase 3: see the Phase 3 retro notes on
-/// `catalog::store::reference_count` for the full discussion.
-pub fn reference_count(url: &str, paths: &Paths) -> Vec<Scope> {
-    let mut refs = Vec::new();
-    if let Ok(global) = load(&paths.global_config_file)
-        && global.catalogs.values().any(|e| e.url == url)
-    {
-        // F11 rewires this onto the workspace_catalogs junction.
-        refs.push(Scope(WorkspaceName::global()));
-    }
-    refs
 }
 
 /// Write `bytes` to `target` atomically: write to a same-directory temp file,

@@ -42,12 +42,10 @@ pub struct Server {
     // rather than re-routing through a getter.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
-    /// Phase 5 / US1.b: per-session prompts router. Built once at
-    /// construction from the `McpState`'s `PromptRegistry`. The
-    /// `prompts/list` handler reads `list_all()`; the `prompts/get`
-    /// handler dispatches by name. Each route's `get` closure currently
-    /// returns `METHOD_NOT_FOUND` — US1.c lands the real substitution-
-    /// driven body render.
+    /// Per-session prompts router. Built once at construction from the
+    /// `McpState`'s `PromptRegistry`. The `prompts/list` handler reads
+    /// `list_all()`; the `prompts/get` handler dispatches by name into the
+    /// substitution-driven body render.
     prompt_router: PromptRouter<Self>,
 }
 
@@ -183,11 +181,9 @@ impl ServerHandler for Server {
         })
     }
 
-    /// Phase 5 / US1.b: `prompts/get` dispatches by name through the
-    /// per-session [`PromptRouter`]. US1.c replaces the per-route
-    /// `METHOD_NOT_FOUND` stub closures with substitution-driven body
-    /// renders; until then this surface advertises the capability but
-    /// every request resolves to `method_not_found`.
+    /// `prompts/get` dispatches by name through the per-session
+    /// [`PromptRouter`]; each route renders the entry body through the
+    /// substitution pipeline.
     async fn get_prompt(
         &self,
         request: GetPromptRequestParams,

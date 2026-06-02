@@ -30,7 +30,6 @@ pub enum MetaKey {
     SummariserName,
     SummariserVersion,
     CreatedAt,
-    LastWriterPid,
 }
 
 impl MetaKey {
@@ -44,7 +43,6 @@ impl MetaKey {
             Self::SummariserName => "summariser_name",
             Self::SummariserVersion => "summariser_version",
             Self::CreatedAt => "created_at",
-            Self::LastWriterPid => "last_writer_pid",
         }
     }
 }
