@@ -15,8 +15,8 @@
 mod common;
 
 use common::{
-    config_with_catalog, copy_sample_plugin_catalog, fabricate_models, lifecycle_paths,
-    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
+    config_with_catalog, copy_sample_plugin_catalog, enrol_catalog_symlinked, fabricate_models,
+    lifecycle_paths, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::cli::QueryArgs;
@@ -51,8 +51,14 @@ fn build_query_env() -> QueryEnv {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
+    // FF1: `lifecycle::enable` resolves the plugin dir from the DB enrolment
+    // now, so enrol the catalog + symlink the cache dir onto the on-disk
+    // fixture. The in-memory `config` is still built because the `query`
+    // command's own filter validation reads `config.catalogs` (its migration
+    // off config.toml is a later PR).
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
 
     let embedder = StubEmbedder::new();
     for plugin_name in ["plugin-alpha", "plugin-beta"] {

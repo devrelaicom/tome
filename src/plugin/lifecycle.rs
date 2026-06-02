@@ -81,6 +81,13 @@ pub struct LifecycleDeps<'a> {
     /// `scope.name()`; the central index database stays shared across
     /// every workspace, the per-workspace dimension is the junction row.
     pub scope: &'a crate::workspace::Scope,
+    /// Vestigial since the F11b catalog-enrolment migration to the DB:
+    /// `resolve_plugin_dir` now reads `workspace_catalogs`, so nothing in this
+    /// module consults `config`. Retained as a field (rather than removed) to
+    /// avoid churning ~30 construction sites in one bug-fix slice; callers may
+    /// pass `Config::default()`. Slated for removal when the remaining
+    /// `config.catalogs` readers (`plugin list`, `query`, the MCP tools) are
+    /// migrated off it.
     pub config: &'a Config,
     pub embedder: &'a dyn Embedder,
     pub embedder_seed: MetaSeed,
@@ -120,7 +127,13 @@ impl LifecycleDeps<'_> {
 /// indistinguishable from its pre-call state.
 pub fn enable(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<EnableOutcome, TomeError> {
     let started = Instant::now();
-    let plugin_dir = resolve_plugin_dir(id, deps.config)?;
+    // Catalog enrolment lives in the DB (F11b), not `config.toml`. Open a
+    // connection up front for the resolve; the seeds in `deps` match the
+    // identities `index::open` stamped, so this re-open is cheap and shares
+    // the same handle the already-enabled probe below uses indirectly.
+    let conn = open_for_lifecycle(deps)?;
+    let plugin_dir = resolve_plugin_dir(id, &conn, deps.workspace_name(), deps.paths)?;
+    drop(conn);
 
     // Step 2 — manifest parse. We don't *use* the parsed fields below (the
     // `plugin_version` we record per-skill is sourced from this manifest's
@@ -180,15 +193,25 @@ pub fn disable(
     id: &PluginId,
     paths: &Paths,
     scope: &crate::workspace::Scope,
-    config: &Config,
     embedder_seed: MetaSeed,
     reranker_seed: MetaSeed,
     summariser_seed: MetaSeed,
 ) -> Result<DisableOutcome, TomeError> {
     let started = Instant::now();
     // We still resolve the plugin directory to reject typos before touching
-    // the index — same exit-code surface as enable.
-    let _plugin_dir = resolve_plugin_dir(id, config)?;
+    // the index — same exit-code surface as enable. Resolution reads the
+    // catalog enrolment from the DB (F11b); open a connection before the lock
+    // since resolution is read-only.
+    let conn = index::open(
+        &paths.index_db.clone(),
+        &OpenOptions {
+            embedder: embedder_seed.clone(),
+            reranker: reranker_seed.clone(),
+            summariser: summariser_seed.clone(),
+        },
+    )?;
+    let _plugin_dir = resolve_plugin_dir(id, &conn, scope.name().as_str(), paths)?;
+    drop(conn);
 
     let lock = acquire_lock(&paths.index_lock.clone())?;
     let outcome = disable_locked(
@@ -233,7 +256,9 @@ pub fn reindex_plugin(
     force: bool,
 ) -> Result<ReindexOutcome, TomeError> {
     let started = Instant::now();
-    let plugin_dir = resolve_plugin_dir(id, deps.config)?;
+    let conn = open_for_lifecycle(deps)?;
+    let plugin_dir = resolve_plugin_dir(id, &conn, deps.workspace_name(), deps.paths)?;
+    drop(conn);
 
     let manifest_path = manifest_path_for(&plugin_dir);
     let manifest = parse_plugin_manifest(&manifest_path)?;
@@ -369,35 +394,46 @@ pub fn auto_disable_orphan(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<u3
 // Private helpers
 // -------------------------------------------------------------------------
 
-/// Resolve `<catalog>/<plugin>` against the registry and on-disk cache.
+/// Resolve `<catalog>/<plugin>` against the catalog enrolment and on-disk
+/// cache.
 ///
-/// Authoritative source is the catalog's `tome-catalog.toml`:
-/// `entry.path.join(&plugins[].source)` for the entry whose `name` matches
-/// `id.plugin`. The lookup is intentionally manifest-first so that catalogs
-/// declaring nested layouts (e.g. `source = "./plugins/foo"`) work uniformly
-/// across `enable`, `show`, and `list` (see also FR-008 and `query.md`).
+/// The catalog root is the content-addressed clone directory
+/// [`Paths::cache_dir_for`] keyed on the enrolment URL recorded in the
+/// `workspace_catalogs` table — the single source of truth since Phase 4 /
+/// F11b. `config.toml [catalogs]` is NEVER written in production (`tome
+/// catalog add` enrols only into the DB), so reading it here is a fresh-install
+/// bug: every read sees an empty map and fails with `CatalogNotFound`. The
+/// lookup therefore goes through the DB enrolment, mirroring
+/// `doctor::fixes::repair_catalog`.
 ///
-/// When `tome-catalog.toml` is absent or unparsable the resolver falls back
-/// to the flat layout `entry.path.join(&id.plugin)` — this preserves
-/// back-compat for library callers that construct catalog roots without a
-/// manifest (the `lifecycle.rs` in-module tests, hand-rolled fixtures, and
-/// the "I cloned a plugin into a bare directory" recovery path).
-pub fn resolve_plugin_dir(id: &PluginId, config: &Config) -> Result<PathBuf, TomeError> {
-    let entry = config
-        .catalogs
-        .get(&id.catalog)
+/// Below the catalog-root resolution the logic is manifest-first and
+/// unchanged: the catalog's `tome-catalog.toml` maps `id.plugin` to its
+/// declared `source` so nested layouts (e.g. `source = "./plugins/foo"`) work
+/// uniformly across `enable`, `disable`, `show`, and `reindex` (FR-008). When
+/// the manifest is absent or unparsable we fall back to the flat layout
+/// `<catalog_root>/<plugin>` — this preserves back-compat for fixtures that
+/// stage a bare plugin tree without a manifest and the "I cloned a plugin into
+/// a bare directory" recovery path.
+pub fn resolve_plugin_dir(
+    id: &PluginId,
+    conn: &rusqlite::Connection,
+    workspace_name: &str,
+    paths: &Paths,
+) -> Result<PathBuf, TomeError> {
+    let enrolment = crate::index::workspace_catalogs::find(conn, workspace_name, &id.catalog)?
         .ok_or_else(|| TomeError::CatalogNotFound(id.catalog.clone()))?;
+    let entry_path = paths.cache_dir_for(&enrolment.url);
 
-    let plugin_dir = match crate::catalog::manifest::read_catalog_manifest(&entry.path) {
+    let plugin_dir = match crate::catalog::manifest::read_catalog_manifest(&entry_path) {
         Some(manifest) => {
             let decl = manifest
                 .plugins
                 .iter()
                 .find(|p| p.name == id.plugin)
                 .ok_or_else(|| TomeError::PluginNotFound(id.to_string()))?;
-            entry.path.join(&decl.source)
+            entry_path.join(&decl.source)
         }
-        None => entry.path.join(&id.plugin),
+        None => entry_path.join(&id.plugin),
     };
 
     if !plugin_dir.is_dir() {
@@ -406,18 +442,28 @@ pub fn resolve_plugin_dir(id: &PluginId, config: &Config) -> Result<PathBuf, Tom
     Ok(plugin_dir)
 }
 
-/// Returns `true` when the index already contains at least one
-/// `(catalog, plugin)` row enrolled in the resolved workspace via
-/// `workspace_skills` (Phase 4 / F11a redefinition of "enabled").
-fn any_skill_enabled(deps: &LifecycleDeps<'_>, id: &PluginId) -> Result<bool, TomeError> {
-    let conn = index::open(
+/// Open the central index DB using the identity seeds carried in `deps`.
+/// Shared by the read-only probes (`resolve_plugin_dir`'s catalog lookup,
+/// `any_skill_enabled`) so they don't each re-spell the `OpenOptions`
+/// construction. The handle is write-capable (`index::open` is the
+/// bootstrap-on-first-touch path), but callers use it read-only and drop it
+/// before taking the advisory lock.
+fn open_for_lifecycle(deps: &LifecycleDeps<'_>) -> Result<rusqlite::Connection, TomeError> {
+    index::open(
         &deps.paths.index_db.clone(),
         &OpenOptions {
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
             summariser: deps.summariser_seed.clone(),
         },
-    )?;
+    )
+}
+
+/// Returns `true` when the index already contains at least one
+/// `(catalog, plugin)` row enrolled in the resolved workspace via
+/// `workspace_skills` (Phase 4 / F11a redefinition of "enabled").
+fn any_skill_enabled(deps: &LifecycleDeps<'_>, id: &PluginId) -> Result<bool, TomeError> {
+    let conn = open_for_lifecycle(deps)?;
     let count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM skills AS s
@@ -1013,9 +1059,7 @@ fn model_manifest_ok(paths: &Paths, entry: &ModelEntry) -> Result<bool, TomeErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::CatalogEntry;
     use crate::embedding::stub::StubEmbedder;
-    use std::collections::BTreeMap;
     use std::fs;
     use tempfile::TempDir;
     use time::OffsetDateTime;
@@ -1071,21 +1115,36 @@ mod tests {
         }
     }
 
-    /// Build a minimal `Config` with one catalog whose cache lives at
-    /// `catalog_root`.
-    fn config_with_catalog(catalog_name: &str, catalog_root: &Path) -> Config {
-        let mut catalogs = BTreeMap::new();
-        catalogs.insert(
-            catalog_name.to_owned(),
-            CatalogEntry {
-                name: catalog_name.to_owned(),
-                url: "https://example.invalid/repo".into(),
-                ref_: "main".into(),
-                path: catalog_root.to_path_buf(),
-                last_synced: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+    /// The vestigial `LifecycleDeps.config` field — resolution reads the DB
+    /// since F11b, so the catalog map is never consulted. Tests pass a default.
+    fn empty_config() -> Config {
+        Config::default()
+    }
+
+    /// Enrol `catalog_name` in the central DB for the privileged `global`
+    /// workspace and return the on-disk catalog root the resolver will use —
+    /// `paths.cache_dir_for(url)`. This is the production enrolment path
+    /// (`tome catalog add` writes only the DB, never `config.toml`); writing
+    /// the plugin tree under the returned root is what makes
+    /// `resolve_plugin_dir` find it.
+    ///
+    /// Opens (and bootstraps) the DB with the stub seeds so a later
+    /// `index::open` from `make_deps` re-opens without identity drift.
+    fn enrol_catalog(paths: &Path, catalog_name: &str) -> PathBuf {
+        let paths = test_paths(paths);
+        let url = format!("file://example.invalid/{catalog_name}");
+        let conn = index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: stub_seed(),
+                reranker: stub_reranker_seed(),
+                summariser: stub_summariser_seed(),
             },
-        );
-        Config { catalogs }
+        )
+        .expect("open index for catalog enrolment");
+        crate::index::workspace_catalogs::insert(&conn, "global", catalog_name, &url, "main")
+            .expect("enrol catalog in workspace_catalogs");
+        paths.cache_dir_for(&url)
     }
 
     /// Lay out a plugin on disk: `<catalog>/<plugin>/.claude-plugin/plugin.json`
@@ -1188,8 +1247,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         write_plugin(
             &catalog_root,
             "plug",
@@ -1223,8 +1282,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         write_plugin(
             &catalog_root,
             "plug",
@@ -1266,9 +1325,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
         fabricate_models(&paths);
-        let catalog_root = tmp.path().join("catalog");
+        // Catalog enrolled, but its cache dir is empty → the catalog lookup
+        // succeeds and resolution falls through to PluginNotFound.
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
         fs::create_dir_all(&catalog_root).unwrap();
-        let config = config_with_catalog("acme", &catalog_root);
+        let config = empty_config();
         let embedder = StubEmbedder::new();
         let deps = make_deps(&paths, &config, &embedder, false);
         let id: PluginId = "acme/ghost".parse().unwrap();
@@ -1285,8 +1346,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         // A SKILL.md with no `---` at all — delimiter failure, the whole
         // enable aborts and nothing is inserted.
         write_plugin(
@@ -1320,8 +1381,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         // Bad skill: delimiters present, but the YAML body is `:` which is
         // syntactically invalid YAML. Good skill: well-formed.
         write_plugin(
@@ -1363,8 +1424,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         // Empty name → directory-name fallback triggers a warning. The
         // description is present so only one fallback fires.
         write_plugin(
@@ -1401,8 +1462,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         write_plugin(
             &catalog_root,
             "plug",
@@ -1422,7 +1483,6 @@ mod tests {
             &id,
             &paths,
             test_scope(),
-            &config,
             stub_seed(),
             stub_reranker_seed(),
             stub_summariser_seed(),
@@ -1442,8 +1502,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         write_plugin(
             &catalog_root,
             "plug",
@@ -1459,7 +1519,6 @@ mod tests {
             &id,
             &paths,
             test_scope(),
-            &config,
             stub_seed(),
             stub_reranker_seed(),
             stub_summariser_seed(),
@@ -1470,7 +1529,6 @@ mod tests {
             &id,
             &paths,
             test_scope(),
-            &config,
             stub_seed(),
             stub_reranker_seed(),
             stub_summariser_seed(),
@@ -1493,8 +1551,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         // Note: we deliberately do NOT fabricate_models(&paths).
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         write_plugin(
             &catalog_root,
             "plug",
@@ -1599,8 +1657,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         write_plugin(
             &catalog_root,
             "plug",
@@ -1636,8 +1694,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         let plugin_dir = write_plugin(
             &catalog_root,
             "plug",
@@ -1686,8 +1744,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         let plugin_dir = write_plugin(
             &catalog_root,
             "plug",
@@ -1718,8 +1776,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         let plugin_dir = write_plugin(
             &catalog_root,
             "plug",
@@ -1756,8 +1814,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         write_plugin(
             &catalog_root,
             "plug",
@@ -1802,9 +1860,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = test_paths(tmp.path());
         fabricate_models(&paths);
-        let catalog_root = tmp.path().join("catalog");
+        // Catalog enrolled, but its cache dir is empty → the catalog lookup
+        // succeeds and resolution falls through to PluginNotFound.
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
         fs::create_dir_all(&catalog_root).unwrap();
-        let config = config_with_catalog("acme", &catalog_root);
+        let config = empty_config();
         let embedder = StubEmbedder::new();
         let deps = make_deps(&paths, &config, &embedder, false);
         let id: PluginId = "acme/ghost".parse().unwrap();
@@ -1821,8 +1881,8 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        let catalog_root = enrol_catalog(tmp.path(), "acme");
+        let config = empty_config();
         write_plugin(
             &catalog_root,
             "plug",
@@ -1850,8 +1910,9 @@ mod tests {
         fs::create_dir_all(&paths.root).unwrap();
         fabricate_models(&paths);
 
-        let catalog_root = tmp.path().join("catalog");
-        let config = config_with_catalog("acme", &catalog_root);
+        // `auto_disable_orphan` only deletes rows; it never resolves the
+        // plugin dir, so no catalog enrolment is required here.
+        let config = empty_config();
         let id: PluginId = "acme/ghost".parse().unwrap();
         let embedder = StubEmbedder::new();
         let deps = make_deps(&paths, &config, &embedder, false);

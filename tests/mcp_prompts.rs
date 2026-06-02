@@ -128,19 +128,16 @@ fn stage_workspace_with(
     let config = config_with_catalog("acme", &catalog_root);
     write_plugin(&catalog_root, "plug", skills, commands);
 
+    // FF1: the central-DB enrolment (+ the cache_dir symlink onto the on-disk
+    // fixture) must exist BEFORE `lifecycle::enable`, which now resolves the
+    // plugin dir from `workspace_catalogs` rather than the in-memory `Config`.
+    seed_catalog_enrolment(&paths, &catalog_root, "acme");
+
     let embedder = StubEmbedder::new();
     let scope = tome::workspace::Scope(global());
     let deps = build_deps(&paths, &config, &embedder, &scope);
     let id: PluginId = "acme/plug".parse().unwrap();
     lifecycle::enable(&id, &deps).expect("enable plugin");
-
-    // Seed the central DB's catalog enrolment so the
-    // PromptRegistry's resolve_catalog_path lookup finds a URL it can
-    // hash into `paths.cache_dir_for(url)`. The URL is constructed to
-    // hash into the same on-disk directory that hosts the catalog
-    // fixture, so the registry's `read_catalog_manifest(catalog_path)`
-    // + `catalog_path.join(plugin)` walk hits the real files.
-    seed_catalog_enrolment(&paths, &catalog_root, "acme");
 
     (tmp, paths)
 }

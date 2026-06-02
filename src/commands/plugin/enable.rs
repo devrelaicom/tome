@@ -24,7 +24,10 @@ use crate::plugin::lifecycle::{self, LifecycleDeps};
 use crate::presentation::{colour, progress, prompt};
 use crate::workspace::ResolvedScope;
 
-use super::{embedder_entry, human_mb, missing_models, registry_seeds, resolve_plugin_dir};
+use super::{
+    embedder_entry, human_mb, missing_models, open_index_for_read, registry_seeds,
+    resolve_plugin_dir,
+};
 
 pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let id = PluginId::from_str(&args.id)
@@ -36,8 +39,11 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     // Pre-check catalog + plugin existence so we can surface the right exit
     // code before doing any model work. Lifecycle re-checks this internally;
     // duplicating one cheap directory probe avoids wasting a multi-MB
-    // download on an obvious typo.
-    let _ = resolve_plugin_dir(&id, &config)?;
+    // download on an obvious typo. Resolution reads the catalog enrolment from
+    // the DB (F11b), so we open a read-only handle here.
+    let conn = open_index_for_read(&paths, &scope.scope)?;
+    let _ = resolve_plugin_dir(&id, &conn, scope.scope.name().as_str(), &paths)?;
+    drop(conn);
 
     // Model-presence handling — T074 UI side. The lifecycle's
     // `allow_model_download` boolean is always set to false because we own

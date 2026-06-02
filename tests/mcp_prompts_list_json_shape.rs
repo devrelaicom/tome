@@ -88,14 +88,14 @@ fn prompts_list_payload_is_byte_stable_for_two_entry_fixture() {
     let scope = tome::workspace::Scope(WorkspaceName::global());
     let deps = build_deps(&paths, &config, &embedder, &scope);
     let id: PluginId = "acme/p".parse().unwrap();
-    lifecycle::enable(&id, &deps).expect("enable");
 
     // Seed the central DB's catalog enrolment + symlink the URL's
     // hashed cache_dir to the on-disk fixture so the registry's
     // resolve_plugin_dir_for_row walk succeeds. See
     // `tests/mcp_prompts.rs::stage_workspace_with` for the full
     // discipline; the steps are inlined here so this single-test
-    // file stays self-contained.
+    // file stays self-contained. FF1: this must precede `lifecycle::enable`,
+    // which now resolves the plugin dir from `workspace_catalogs`.
     {
         let url = format!("file://{}", catalog_root.display());
         let conn = index::open(
@@ -119,6 +119,8 @@ fn prompts_list_payload_is_byte_stable_for_two_entry_fixture() {
             std::os::unix::fs::symlink(&catalog_root, &cache_dir).unwrap();
         }
     }
+
+    lifecycle::enable(&id, &deps).expect("enable");
 
     let conn = index::open(
         &paths.index_db,

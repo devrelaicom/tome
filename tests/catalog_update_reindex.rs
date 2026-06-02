@@ -10,8 +10,8 @@
 mod common;
 
 use common::{
-    config_with_catalog, copy_sample_plugin_catalog, fabricate_models, lifecycle_paths,
-    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
+    config_with_catalog, copy_sample_plugin_catalog, enrol_catalog_symlinked, fabricate_models,
+    lifecycle_paths, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::commands::catalog::update::reindex_catalog_plugins;
@@ -73,6 +73,9 @@ fn reindex_after_update_re_embeds_only_modified_skill() {
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // `resolve_plugin_dir` (DB-backed) sees in-place reindex mutations.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
 
     let embedder = StubEmbedder::new();
     let baseline = enable_alpha(&paths, &config, &embedder);
@@ -130,6 +133,9 @@ fn update_auto_disables_plugin_whose_upstream_directory_is_gone() {
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // `resolve_plugin_dir` (DB-backed) sees in-place reindex mutations.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
 
     let embedder = StubEmbedder::new();
     enable_alpha(&paths, &config, &embedder);
@@ -209,6 +215,9 @@ fn reindex_pass_unchanged_skills_does_no_embed_work() {
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // `resolve_plugin_dir` (DB-backed) sees in-place reindex mutations.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
 
     let embedder = StubEmbedder::new();
     let baseline = enable_alpha(&paths, &config, &embedder);

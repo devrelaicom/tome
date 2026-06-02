@@ -92,9 +92,11 @@ fn stage_with_agent() -> (TempDir, tome::paths::Paths) {
         allow_model_download: false,
     };
     let id: PluginId = "acme/plug".parse().unwrap();
+    // FF1: enrolment + cache symlink must precede enable (resolve_plugin_dir
+    // reads workspace_catalogs now, not the in-memory Config).
+    seed_catalog_enrolment(&paths, &catalog_root, "acme");
     lifecycle::enable(&id, &deps).expect("enable plug");
 
-    seed_catalog_enrolment(&paths, &catalog_root, "acme");
     (tmp, paths)
 }
 

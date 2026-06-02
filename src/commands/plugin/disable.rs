@@ -13,7 +13,6 @@ use std::str::FromStr;
 
 use serde::Serialize;
 
-use crate::catalog::store;
 use crate::cli::PluginDisableArgs;
 use crate::error::TomeError;
 use crate::output::{self, Mode};
@@ -22,18 +21,19 @@ use crate::plugin::PluginId;
 use crate::plugin::lifecycle::{self, DisableOutcome};
 use crate::workspace::ResolvedScope;
 
-use super::{registry_seeds, resolve_plugin_dir};
+use super::{open_index_for_read, registry_seeds, resolve_plugin_dir};
 
 pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let id = PluginId::from_str(&args.id)
         .map_err(|e| TomeError::Usage(format!("invalid plugin id `{}`: {e}", args.id)))?;
     let paths = Paths::resolve()?;
-    // F2a: single global config; F11 reintroduces workspace-aware view.
-    let config = store::load(&paths.global_config_file)?;
 
     // Surface CatalogNotFound / PluginNotFound before any prompt — typo on
-    // the address shouldn't waste the user's "y" keystroke.
-    let _ = resolve_plugin_dir(&id, &config)?;
+    // the address shouldn't waste the user's "y" keystroke. Resolution reads
+    // the catalog enrolment from the DB (F11b).
+    let conn = open_index_for_read(&paths, &scope.scope)?;
+    let _ = resolve_plugin_dir(&id, &conn, scope.scope.name().as_str(), &paths)?;
+    drop(conn);
 
     if !args.force {
         // Non-TTY without --force → exit 54 per FR-007 / FR-051. We emit the
@@ -76,7 +76,6 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
         &id,
         &paths,
         &scope.scope,
-        &config,
         embedder_seed,
         reranker_seed,
         summariser_seed,

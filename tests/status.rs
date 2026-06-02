@@ -9,7 +9,8 @@
 mod common;
 
 use common::{
-    ToolEnv, config_with_catalog, copy_sample_plugin_catalog, lifecycle_paths, paths_for,
+    ToolEnv, config_with_catalog, copy_sample_plugin_catalog, enrol_catalog_symlinked,
+    lifecycle_paths, paths_for,
 };
 use tempfile::TempDir;
 use tome::commands::plugin::registry_seeds;
@@ -57,6 +58,9 @@ fn status_healthy_with_models_and_index() {
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir so the DB-backed
+    // `resolve_plugin_dir` used by `enable_alpha` resolves the fixture.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
 
     let embedder = StubEmbedder::new();
     enable_alpha(&paths, &config, &embedder);
@@ -157,6 +161,9 @@ fn status_degraded_on_reranker_drift_in_meta() {
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir so the DB-backed
+    // `resolve_plugin_dir` used by `enable_alpha` resolves the fixture.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
     let embedder = StubEmbedder::new();
     enable_alpha(&paths, &config, &embedder);
 
@@ -200,6 +207,9 @@ fn status_unhealthy_on_embedder_drift() {
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir so the DB-backed
+    // `resolve_plugin_dir` used by `enable_alpha` resolves the fixture.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
     let embedder = StubEmbedder::new();
     enable_alpha(&paths, &config, &embedder);
 

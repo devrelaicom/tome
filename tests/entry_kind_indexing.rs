@@ -18,8 +18,8 @@ use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
 
 use common::{
-    config_with_catalog, fabricate_models, lifecycle_paths, stub_embedder_seed, stub_reranker_seed,
-    stub_summariser_seed,
+    config_with_catalog, enrol_catalog_symlinked, fabricate_models, lifecycle_paths,
+    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 
 fn build_deps<'a>(
@@ -110,6 +110,9 @@ fn both_directories_index_to_unified_table() {
     let catalog_root = tmp.path().join("catalog");
     fs::create_dir_all(&catalog_root).unwrap();
     let config = config_with_catalog("acme", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // the DB-backed `resolve_plugin_dir` resolves the fixture.
+    enrol_catalog_symlinked(&paths, "global", "acme", &catalog_root);
     write_plugin_with_kinds(
         &catalog_root,
         "plug",
@@ -147,6 +150,9 @@ fn same_name_different_kind_produces_two_rows() {
     let catalog_root = tmp.path().join("catalog");
     fs::create_dir_all(&catalog_root).unwrap();
     let config = config_with_catalog("acme", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // the DB-backed `resolve_plugin_dir` resolves the fixture.
+    enrol_catalog_symlinked(&paths, "global", "acme", &catalog_root);
     write_plugin_with_kinds(
         &catalog_root,
         "plug",
@@ -203,6 +209,9 @@ fn intra_plugin_duplicate_kind_name_warns_and_counts_written_rows() {
     let catalog_root = tmp.path().join("catalog");
     fs::create_dir_all(&catalog_root).unwrap();
     let config = config_with_catalog("acme", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // the DB-backed `resolve_plugin_dir` resolves the fixture.
+    enrol_catalog_symlinked(&paths, "global", "acme", &catalog_root);
     // Two distinct files, identical resolved `(kind=command, name=dup)`.
     write_plugin_with_kinds(
         &catalog_root,
@@ -257,6 +266,9 @@ fn enable_synchronises_both_kinds_into_workspace_skills_junction() {
     let catalog_root = tmp.path().join("catalog");
     fs::create_dir_all(&catalog_root).unwrap();
     let config = config_with_catalog("acme", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // the DB-backed `resolve_plugin_dir` resolves the fixture.
+    enrol_catalog_symlinked(&paths, "global", "acme", &catalog_root);
     write_plugin_with_kinds(
         &catalog_root,
         "plug",
@@ -332,6 +344,9 @@ fn frontmatter_when_to_use_round_trips_through_enable_to_db() {
     let catalog_root = tmp.path().join("catalog");
     fs::create_dir_all(&catalog_root).unwrap();
     let config = config_with_catalog("acme", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // the DB-backed `resolve_plugin_dir` resolves the fixture.
+    enrol_catalog_symlinked(&paths, "global", "acme", &catalog_root);
     let plugin_dir = catalog_root.join("plug");
     fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
     fs::write(
@@ -391,6 +406,9 @@ fn searchable_and_user_invocable_defaults_per_kind_persist_to_db() {
     let catalog_root = tmp.path().join("catalog");
     fs::create_dir_all(&catalog_root).unwrap();
     let config = config_with_catalog("acme", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // the DB-backed `resolve_plugin_dir` resolves the fixture.
+    enrol_catalog_symlinked(&paths, "global", "acme", &catalog_root);
     write_plugin_with_kinds(
         &catalog_root,
         "plug",
