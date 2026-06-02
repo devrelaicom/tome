@@ -16,5 +16,13 @@
 .claude/**/*.local.json
 .midnight-expert/
 
-# Per-feature scratch space (Phase 3 onward — see CLAUDE.md)
-specs/*/scratch/
+# Internal SDD / process artefacts (FR-024): untracked from version control but
+# kept in the working tree — the planning/closeout workflow reads them locally.
+# CONSTITUTION.md is deliberately NOT ignored (it is the tracked governance doc).
+# review/ + retro/ exist both at the repo root and under specs/*/ — the leading
+# slash anchors the root copies; the per-phase ones are covered by /specs/.
+/specs/
+/.sdd/
+/CLAUDE.md
+/review/
+/retro/
