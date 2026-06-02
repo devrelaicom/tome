@@ -269,7 +269,8 @@ fn emit_agents_for_harness(
             }
             continue;
         }
-        match write_agent_file(&target, &translated.rendered) {
+        let agent_label = format!("{}/{}", agent.canonical.plugin, agent.canonical.name);
+        match write_agent_file(&target, &translated.rendered, &agent_label) {
             Ok(AgentWrite::Created) => {
                 wrote = true;
                 record_action(
@@ -309,6 +310,23 @@ fn emit_agents_for_harness(
     match removed_disabled_owned(dir, enabled_plugins) {
         Ok(paths) => {
             for path in paths {
+                // Symlink refusal on this owned-file removal is the agents
+                // sink's concern → exit 45, never `Io` (7). Run the SSOT guard
+                // (FR-007) explicitly and map its refusal onto the agents
+                // variant; `remove_standalone` then performs the actual unlink
+                // (it re-checks via the same guard, idempotent here).
+                if crate::util::refuse_symlinked_component(&path).is_err() {
+                    if recon.first_error.is_none() {
+                        let label = path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("agent")
+                            .to_string();
+                        recon.first_error =
+                            Some(TomeError::AgentTranslationFailed { agent: label });
+                    }
+                    continue;
+                }
                 match rules_file::remove_standalone(&path) {
                     Ok(()) => {
                         removed = true;
@@ -443,6 +461,7 @@ fn all_owned_in_dir(dir: &Path) -> Result<Vec<PathBuf>, TomeError> {
 }
 
 /// Outcome of an atomic agent-file write.
+#[derive(Debug, PartialEq, Eq)]
 enum AgentWrite {
     Created,
     Updated,
@@ -450,11 +469,31 @@ enum AgentWrite {
 }
 
 /// Write one translated agent file atomically, reusing the rules-file
-/// writer's discipline (symlink refusal + mode preservation +
-/// umask-governed `create_dir_all` of the parent + idempotent no-op when
-/// bytes already match). Classifies the result so the per-file
-/// `added`/`updated`/`leave_alones` bookkeeping is accurate.
-fn write_agent_file(target: &Path, rendered: &str) -> Result<AgentWrite, TomeError> {
+/// writer's discipline (mode preservation + umask-governed `create_dir_all`
+/// of the parent + idempotent no-op when bytes already match). Classifies the
+/// result so the per-file `added`/`updated`/`leave_alones` bookkeeping is
+/// accurate.
+///
+/// Symlink refusal is the agents sink's dedicated concern: a symlinked
+/// component on the agent-file write path (intermediate dir OR the final node)
+/// surfaces [`TomeError::AgentTranslationFailed`] (exit 45), NOT generic `Io`
+/// (7). We therefore run the SSOT guard (`util::symlink_safe`, FR-007
+/// intermediate-component hardening) explicitly here and map its refusal onto
+/// the agents variant before delegating the bytes to `write_standalone` (which
+/// re-checks via the same SSOT guard — idempotent on an already-cleared path).
+fn write_agent_file(
+    target: &Path,
+    rendered: &str,
+    agent_label: &str,
+) -> Result<AgentWrite, TomeError> {
+    // Map the symlink refusal to THIS sink's dedicated exit code (45), never
+    // a regression to `Io` (7). Non-symlink IO from the read/write below keeps
+    // its own classification.
+    crate::util::refuse_symlinked_component(target).map_err(|_| {
+        TomeError::AgentTranslationFailed {
+            agent: agent_label.to_string(),
+        }
+    })?;
     let prior = match crate::util::bounded_read_to_string(target, crate::util::HARNESS_RULES_MAX) {
         Ok(s) => Some(s),
         Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -655,5 +694,93 @@ mod tests {
             owned.is_file(),
             "the owned agent file must NOT be mass-deleted when the DB open errors"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // FR-007: the agents sink refuses a symlinked component on its write path
+    // with its DEDICATED exit code (45 / AgentTranslationFailed), never a
+    // regression to generic `Io` (7). `write_agent_file` is the private write
+    // path that owns the symlink→45 mapping (the public `reconcile_agents`
+    // entry needs the full DB/registry plumbing; the dedicated-code mapping is
+    // proven here directly). The five sinks with PUBLIC writers (hooks → 44,
+    // guardrails → 46, rules/mcp/atomic_dir → 7) are proven in
+    // `tests/symlink_intermediate_guard.rs`. macOS exercises the portable
+    // `openat`+NOFOLLOW walk; Linux exercises `openat2(RESOLVE_NO_SYMLINKS)` —
+    // both via the one SSOT primitive.
+    #[cfg(unix)]
+    #[test]
+    fn agents_write_refuses_symlinked_intermediate_with_exit_45() {
+        use std::os::unix::fs::symlink;
+        let root = TempDir::new().expect("tempdir");
+        let base = root.path().canonicalize().expect("canonicalize");
+        let real_dir = base.join("real_agents");
+        std::fs::create_dir(&real_dir).expect("mkdir real_agents");
+        // link_agents -> real_agents; writing under link_agents/ traverses a
+        // symlinked INTERMEDIATE directory component.
+        symlink(&real_dir, base.join("link_agents")).expect("symlink intermediate");
+
+        let target = base.join("link_agents").join("plugin__reviewer.md");
+        let err = write_agent_file(
+            &target,
+            "---\nname: reviewer\n---\nbody\n",
+            "plugin/reviewer",
+        )
+        .expect_err("symlinked intermediate component must be refused");
+        assert_eq!(
+            err.exit_code(),
+            45,
+            "agents sink refusal must map to AgentTranslationFailed (45), not Io (7); got {err:?}"
+        );
+        assert!(
+            matches!(err, TomeError::AgentTranslationFailed { .. }),
+            "expected AgentTranslationFailed, got {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agents_write_refuses_symlinked_final_node_with_exit_45() {
+        use std::os::unix::fs::symlink;
+        let root = TempDir::new().expect("tempdir");
+        let base = root.path().canonicalize().expect("canonicalize");
+        let dir = base.join("agents");
+        std::fs::create_dir(&dir).expect("mkdir agents");
+        // The final node itself is a symlink (the prior final-node guarantee,
+        // now through the SSOT primitive).
+        std::fs::write(base.join("decoy.md"), b"x").expect("write decoy");
+        let target = dir.join("plugin__reviewer.md");
+        symlink(base.join("decoy.md"), &target).expect("symlink final node");
+
+        let err = write_agent_file(
+            &target,
+            "---\nname: reviewer\n---\nbody\n",
+            "plugin/reviewer",
+        )
+        .expect_err("symlinked final node must be refused");
+        assert_eq!(
+            err.exit_code(),
+            45,
+            "agents final-node refusal must map to 45; got {err:?}"
+        );
+    }
+
+    /// Sanity: a clean path through a real directory writes successfully and
+    /// classifies as Created — proves the guard does NOT reject normal writes.
+    #[cfg(unix)]
+    #[test]
+    fn agents_write_clean_path_succeeds() {
+        let root = TempDir::new().expect("tempdir");
+        let base = root.path().canonicalize().expect("canonicalize");
+        let dir = base.join("agents");
+        std::fs::create_dir(&dir).expect("mkdir agents");
+        let target = dir.join("plugin__reviewer.md");
+        let out = write_agent_file(
+            &target,
+            "---\nname: reviewer\n---\nbody\n",
+            "plugin/reviewer",
+        )
+        .expect("clean agent write must succeed");
+        assert_eq!(out, AgentWrite::Created);
+        assert!(target.is_file());
     }
 }

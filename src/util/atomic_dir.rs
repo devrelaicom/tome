@@ -243,20 +243,14 @@ where
     Ok(target.canonicalize()?)
 }
 
-/// Refuse to land through a symlink. Mirrors the three sibling atomic-
-/// write helpers in `catalog::store` and `harness::{rules_file,
-/// mcp_config}`. Missing path → no-op (the rename will create it).
+/// Refuse to land through a symlinked component. Delegates to the SSOT
+/// guard (`util::symlink_safe`) so this sink gets the intermediate-component
+/// hardening (FR-007), not just the final-node check it had before — and can
+/// never drift from its sibling sinks again. A refusal maps to
+/// `TomeError::Io` (exit 7), the dedicated code this directory-landing sink
+/// already used. Missing path → no-op (the rename will create it).
 fn refuse_symlink(path: &Path) -> Result<(), TomeError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(TomeError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "refusing to land directory through symlink: {}",
-                path.display()
-            ),
-        ))),
-        _ => Ok(()),
-    }
+    crate::util::refuse_symlinked_component(path).map_err(TomeError::Io)
 }
 
 /// Compute the `.old` sibling path. Uses `with_file_name` so dot-prefixed
