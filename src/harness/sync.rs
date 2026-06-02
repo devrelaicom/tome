@@ -39,9 +39,10 @@ use serde::Serialize;
 
 use crate::error::TomeError;
 // `record_action` is the shared bookkeeping path: the agents reconciler owns it
-// (Phase 7 / FR-011) and the orchestrator's rules/MCP loop plus the hooks and
-// guardrails reconcilers — still in this file for D.a — call it back.
+// (Phase 7 / FR-011) and the orchestrator's rules/MCP loop plus the hooks
+// reconciler — still in this file for D.c — call it back.
 use crate::harness::reconcile::agents::{reconcile_agents, record_action};
+use crate::harness::reconcile::guardrails::reconcile_guardrails;
 use crate::harness::{
     BlockBodyStyle, HarnessModule, RulesFileStrategy, mcp_config, rules_file,
     with_effective_modules,
@@ -453,7 +454,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
 /// field) so the per-sink reconcilers under [`crate::harness::reconcile`] can
 /// name it in their signatures after the Phase 7 decomposition (FR-011).
 pub(crate) struct HarnessSnapshot {
-    name: String,
+    pub(crate) name: String,
     rules_path: PathBuf,
     rules_strategy: RulesFileStrategy,
     block_body_style: BlockBodyStyle,
@@ -471,7 +472,7 @@ pub(crate) struct HarnessSnapshot {
     hook_settings_path: Option<PathBuf>,
     /// Phase 6 / US3: the harness's guardrails sink (in-file region or Cursor
     /// standalone sibling) plus its hooks-driven suppression flag.
-    guardrails_target: crate::harness::GuardrailsTarget,
+    pub(crate) guardrails_target: crate::harness::GuardrailsTarget,
 }
 
 fn collect_harness_snapshots(project_root: &Path, deps: &SyncDeps<'_>) -> Vec<HarnessSnapshot> {
@@ -975,192 +976,6 @@ fn remove_hooks_for_harness(
         Action::Removed
     } else {
         Action::LeftAlone
-    }
-}
-
-// =====================================================================
-// Guardrails reconciliation (Phase 6 / US3)
-// =====================================================================
-
-/// Result of the guardrails reconciliation pass. Mirrors the hooks/agents
-/// reconciliation shape: a per-harness aggregate action map keyed on
-/// `name()`, plus the FIRST failure encountered (forward progress).
-struct GuardrailsReconciliation {
-    actions: std::collections::HashMap<String, Action>,
-    first_error: Option<TomeError>,
-}
-
-/// One enabled plugin's guardrails source (its `GUARDRAILS.md` body) plus the
-/// `<catalog>:<plugin>` provenance key. Prepared once per sync, reused for
-/// every harness target.
-struct PreparedGuardrails {
-    key: String,
-    body: String,
-}
-
-/// Reconcile guardrails regions for every harness target (FR-011–FR-016,
-/// FR-084).
-///
-/// Runs as one pass AFTER hooks and BEFORE agents (the fixed sink order). For
-/// each harness's guardrails target — deduplicated by path so the shared
-/// `AGENTS.md` is written once — the desired region set is the union of every
-/// live harness contributing to that path, minus any plugin suppressed for
-/// that harness (Claude Code suppression, FR-013). A non-live harness whose
-/// target no path-sharing live harness wants has its regions removed.
-///
-/// The enabled-plugin enumeration + each plugin's `GUARDRAILS.md` body are
-/// computed ONCE and shared across harnesses. A read/render/write failure for
-/// one plugin/target is recorded on `first_error` but does not abort the pass
-/// (FR-084 forward progress).
-fn reconcile_guardrails(
-    deps: &SyncDeps<'_>,
-    effective_names: &HashSet<String>,
-    snapshots: &[HarnessSnapshot],
-    plugins_with_hooks_json: &HashSet<String>,
-    outcome: &mut SyncOutcome,
-) -> Result<GuardrailsReconciliation, TomeError> {
-    use crate::harness::GuardrailsPlacement;
-
-    let mut recon = GuardrailsReconciliation {
-        actions: std::collections::HashMap::new(),
-        first_error: None,
-    };
-
-    // Prepare every enabled plugin's GUARDRAILS.md body once (shared across
-    // harnesses). An EXISTING-yet-unopenable DB propagates; a genuinely absent
-    // DB means no enabled plugins (and thus removal-only reconciliation, which
-    // still runs so orphaned regions are cleaned up).
-    let conn = if deps.paths.index_db.exists() {
-        Some(crate::index::open_read_only(&deps.paths.index_db)?)
-    } else {
-        None
-    };
-    let workspace = deps.workspace_name.as_str();
-    let enabled = match &conn {
-        Some(c) => crate::index::skills::enabled_plugins_for_workspace(c, workspace)?,
-        None => Vec::new(),
-    };
-
-    let mut prepared: Vec<PreparedGuardrails> = Vec::new();
-    if let Some(c) = &conn {
-        for (catalog, plugin) in &enabled {
-            let plugin_root = match crate::index::skills::plugin_root_dir(
-                c, deps.paths, workspace, catalog, plugin,
-            ) {
-                Ok(p) => p,
-                // Catalog cache evicted: no readable GUARDRAILS.md — skip
-                // (its orphaned regions, if any, are removed by the absence
-                // from `desired`).
-                Err(_) => continue,
-            };
-            match crate::harness::guardrails::read_guardrails_source(&plugin_root) {
-                Ok(Some(body)) => prepared.push(PreparedGuardrails {
-                    key: crate::harness::guardrails::region_key(catalog, plugin),
-                    body,
-                }),
-                Ok(None) => {}
-                Err(e) => {
-                    if recon.first_error.is_none() {
-                        recon.first_error = Some(e);
-                    }
-                }
-            }
-        }
-    }
-
-    // Group snapshots by guardrails target path so a shared `AGENTS.md` is
-    // reconciled once. The first snapshot for a path "owns" the recorded
-    // action; the rest are LeftAlone.
-    let mut processed: HashSet<PathBuf> = HashSet::new();
-
-    for snap in snapshots {
-        let target_path = guardrails_target_path(&snap.guardrails_target.placement);
-        if !processed.insert(target_path.clone()) {
-            // Another harness already reconciled this shared path.
-            recon.actions.insert(snap.name.clone(), Action::LeftAlone);
-            continue;
-        }
-
-        // Build the desired region map as the union across every harness that
-        // shares this exact target path AND is in the effective list. Each
-        // contributing harness applies its own suppression flag.
-        let sharers: Vec<&HarnessSnapshot> = snapshots
-            .iter()
-            .filter(|s| guardrails_target_path(&s.guardrails_target.placement) == target_path)
-            .collect();
-        let any_live = sharers.iter().any(|s| effective_names.contains(&s.name));
-
-        let mut desired: BTreeMap<String, String> = BTreeMap::new();
-        if any_live {
-            for sharer in &sharers {
-                if !effective_names.contains(&sharer.name) {
-                    continue;
-                }
-                let suppress = sharer.guardrails_target.suppress_if_hooks_present;
-                for pg in &prepared {
-                    if suppress && plugins_with_hooks_json.contains(&pg.key) {
-                        continue;
-                    }
-                    desired.insert(pg.key.clone(), pg.body.clone());
-                }
-            }
-        }
-        // When no sharer is live, `desired` stays empty → removal of any
-        // existing regions / deletion of a Cursor sibling.
-
-        let result = match &snap.guardrails_target.placement {
-            GuardrailsPlacement::InFileRegion { file } => {
-                crate::harness::guardrails::reconcile_in_file_region(file, &desired)
-            }
-            GuardrailsPlacement::StandaloneSibling { file } => {
-                crate::harness::guardrails::reconcile_standalone_sibling(file, &desired)
-            }
-        };
-
-        let action = match result {
-            Ok(ga) => {
-                let action = guardrails_action_to_action(ga);
-                if action != Action::LeftAlone {
-                    record_action(
-                        outcome,
-                        &snap.name,
-                        SyncSubsystem::Guardrails,
-                        &target_path,
-                        action,
-                    );
-                }
-                action
-            }
-            Err(e) => {
-                if recon.first_error.is_none() {
-                    recon.first_error = Some(e);
-                }
-                Action::LeftAlone
-            }
-        };
-        recon.actions.insert(snap.name.clone(), action);
-    }
-
-    Ok(recon)
-}
-
-/// Extract the on-disk path a guardrails placement targets.
-fn guardrails_target_path(placement: &crate::harness::GuardrailsPlacement) -> PathBuf {
-    match placement {
-        crate::harness::GuardrailsPlacement::InFileRegion { file }
-        | crate::harness::GuardrailsPlacement::StandaloneSibling { file } => file.clone(),
-    }
-}
-
-/// Map a [`crate::harness::guardrails::GuardrailsAction`] to the sync
-/// orchestrator's [`Action`].
-fn guardrails_action_to_action(ga: crate::harness::guardrails::GuardrailsAction) -> Action {
-    use crate::harness::guardrails::GuardrailsAction as G;
-    match ga {
-        G::Created => Action::Created,
-        G::Updated => Action::Updated,
-        G::Removed => Action::Removed,
-        G::LeftAlone => Action::LeftAlone,
     }
 }
 

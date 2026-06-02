@@ -40,7 +40,8 @@
 //! behaviour-preservation risk of the decomposition and is carried into each
 //! module verbatim.
 //!
-//! For D.a only the agents sink has moved; guardrails and hooks follow in D.b /
-//! D.c, after which `sync.rs` re-exports each reconciler's entry point from here.
+//! After D.a (agents) and D.b (guardrails) the hooks sink follows in D.c,
+//! after which `sync.rs` re-exports each reconciler's entry point from here.
 
 pub(crate) mod agents;
+pub(crate) mod guardrails;
