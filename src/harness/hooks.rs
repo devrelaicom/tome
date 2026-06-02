@@ -206,7 +206,7 @@ pub fn merge_into_settings(target: &Path, hooks: &RewrittenHooks) -> Result<bool
         let hooks_obj = ensure_hooks_object(&mut doc, target)?;
         for (event, entries) in &hooks.events {
             for entry in entries {
-                if append_if_absent(hooks_obj, event, entry) {
+                if append_if_absent(hooks_obj, event, entry, target)? {
                     changed = true;
                 }
             }
@@ -268,27 +268,38 @@ pub fn remove_from_settings(target: &Path, hooks: &RewrittenHooks) -> Result<boo
 }
 
 /// Append `entry` under `event` in `hooks_obj` unless a deep-equal entry is
-/// already present there. Returns `true` when the entry was appended.
+/// already present there. Returns `Ok(true)` when the entry was appended,
+/// `Ok(false)` on an idempotent no-op.
+///
+/// Fails closed (exit 44, `HookSettingsWriteFailed`) when the event key
+/// already holds a NON-array value: silently replacing it with `[]` would
+/// destroy a user's (or a foreign tool's) hand-edited value, and is
+/// asymmetric with the rest of this module's fail-closed discipline
+/// (`load_settings`/`ensure_hooks_object` both refuse a wrong-typed value).
+/// An off-spec input is refused, never coerced (FR-015, §V fail-clear).
 fn append_if_absent(
     hooks_obj: &mut JsonMap<String, JsonValue>,
     event: &str,
     entry: &JsonValue,
-) -> bool {
+    target: &Path,
+) -> Result<bool, TomeError> {
     let arr = hooks_obj
         .entry(event.to_string())
         .or_insert_with(|| JsonValue::Array(Vec::new()));
-    // If the event key existed but was not an array, replace it with one.
-    if !arr.is_array() {
-        *arr = JsonValue::Array(Vec::new());
-    }
     let Some(items) = arr.as_array_mut() else {
-        return false;
+        return Err(settings_write_failed(
+            target,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("settings.local.json `hooks.{event}` value must be an array"),
+            ),
+        ));
     };
     if items.iter().any(|existing| existing == entry) {
-        return false;
+        return Ok(false);
     }
     items.push(entry.clone());
-    true
+    Ok(true)
 }
 
 /// Remove the deep-equal `entry` under `event` in `hooks_obj`. Returns
@@ -510,17 +521,40 @@ mod tests {
     fn append_if_absent_is_idempotent() {
         let mut hooks = JsonMap::new();
         let e = entry("/x/g.sh");
-        assert!(append_if_absent(&mut hooks, "PreToolUse", &e));
+        let target = Path::new("/tmp/settings.local.json");
+        assert!(append_if_absent(&mut hooks, "PreToolUse", &e, target).unwrap());
         // Second identical append is a no-op.
-        assert!(!append_if_absent(&mut hooks, "PreToolUse", &e));
+        assert!(!append_if_absent(&mut hooks, "PreToolUse", &e, target).unwrap());
         assert_eq!(hooks["PreToolUse"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn append_if_absent_refuses_non_array_event_value_exit_44() {
+        // A pre-existing non-array value must be refused, never coerced to `[]`
+        // (FR-015). The error names the offending sink with exit 44.
+        let mut hooks = JsonMap::new();
+        hooks.insert(
+            "PreToolUse".to_string(),
+            JsonValue::String("not an array".to_string()),
+        );
+        let e = entry("/x/g.sh");
+        let target = Path::new("/tmp/settings.local.json");
+        let err = append_if_absent(&mut hooks, "PreToolUse", &e, target)
+            .expect_err("non-array event value must be refused");
+        assert_eq!(err.exit_code(), 44, "expected exit 44, got {err:?}");
+        // The user's value is left untouched (not replaced with `[]`).
+        assert_eq!(
+            hooks["PreToolUse"],
+            JsonValue::String("not an array".to_string())
+        );
     }
 
     #[test]
     fn remove_then_prune_drops_empty_event() {
         let mut hooks = JsonMap::new();
         let e = entry("/x/g.sh");
-        append_if_absent(&mut hooks, "PreToolUse", &e);
+        let target = Path::new("/tmp/settings.local.json");
+        append_if_absent(&mut hooks, "PreToolUse", &e, target).unwrap();
         assert!(remove_if_present(&mut hooks, "PreToolUse", &e));
         prune_empty_event(&mut hooks, "PreToolUse");
         assert!(
@@ -563,7 +597,8 @@ mod tests {
     fn remove_skips_non_matching_entry() {
         let mut hooks = JsonMap::new();
         let user_edited = entry("/x/g.sh --extra-flag");
-        append_if_absent(&mut hooks, "PreToolUse", &user_edited);
+        let target = Path::new("/tmp/settings.local.json");
+        append_if_absent(&mut hooks, "PreToolUse", &user_edited, target).unwrap();
         // Tome's re-derived entry differs → not removed.
         let derived = entry("/x/g.sh");
         assert!(!remove_if_present(&mut hooks, "PreToolUse", &derived));

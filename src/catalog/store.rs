@@ -20,12 +20,16 @@ use crate::workspace::{Scope, WorkspaceName};
 pub fn load(config_file: &Path) -> Result<Config, TomeError> {
     match crate::util::bounded_read_to_string(config_file, crate::util::TOME_CONFIG_MAX) {
         Ok(text) => {
+            // A `config.toml` parse failure IS a manifest-parse failure — reuse
+            // the existing `ManifestInvalid::TomlParse` variant (exit 5), the
+            // same code catalog manifests use. Routing this through `Internal`
+            // (exit 1) violated specific-over-generic: `Internal`'s own doc
+            // forbids a named failure class collapsing into it (FR-014, R-19).
             let parsed: Config = toml::from_str(&text).map_err(|e| {
-                TomeError::Internal(anyhow::anyhow!(
-                    "config file `{}` is not valid: {}",
-                    config_file.display(),
-                    e
-                ))
+                TomeError::ManifestInvalid(crate::error::ManifestInvalid::TomlParse {
+                    file: config_file.to_path_buf(),
+                    message: e.to_string(),
+                })
             })?;
             Ok(parsed)
         }
