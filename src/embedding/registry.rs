@@ -9,8 +9,9 @@
 //!
 //! The pinned SHA-256 + size_bytes values below are real upstream artefact
 //! digests, fetched and verified at the start of Phase 3 (slice 1) against
-//! the canonical Hugging Face URLs. Downloads enforce both the pinned hash
-//! and pinned size; any drift surfaces as `ModelChecksumMismatch`.
+//! the canonical Hugging Face URLs. Downloads enforce the pinned SHA-256;
+//! any mismatch surfaces as `ModelChecksumMismatch`. `size_bytes` drives the
+//! progress-bar total and is not independently verified.
 //!
 //! Spec: data-model.md §7, research §R5.
 

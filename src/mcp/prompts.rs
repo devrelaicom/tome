@@ -783,8 +783,7 @@ fn get_prompt_future<'a, S>(
 ///    and the body content are fresh — the index doesn't carry these).
 /// 4. Map caller args → [`ArgumentValues`].
 /// 5. Build a [`SubstitutionContext`] (12 built-ins + clock + caller args).
-/// 6. Run [`substitution::render`] (F3 stub passes the body through
-///    unchanged; US2 + US3 wire real stages).
+/// 6. Run [`substitution::render`] (built-ins → env → arguments → tail).
 /// 7. Wrap in [`PromptGetResponse`] (rmcp `GetPromptResult`).
 ///
 /// `#[doc(hidden)] pub` so integration tests can exercise the handler
@@ -816,8 +815,8 @@ pub async fn handle_get(
 
     // (2-3-4-5-6) Body resolve + frontmatter re-parse + arg map + render
     // are all synchronous I/O / compute. Run on the blocking pool per the
-    // sync-boundary discipline (rusqlite is sync, std::fs is sync, the
-    // F3 substitution stub does no I/O but US2+US3 wire create_dir_all).
+    // sync-boundary discipline (rusqlite is sync, std::fs is sync, and the
+    // env-passthrough stage may create_dir_all the plugin data dir).
     let render_state = state.clone();
     let render_entry = entry.clone();
     let render_name = name.clone();

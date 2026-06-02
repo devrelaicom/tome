@@ -63,7 +63,7 @@ pub enum Command {
     Catalog(CatalogCommand),
     /// Manage plugins from registered catalogs. Run with no subcommand to
     /// drop into the interactive catalog → plugin → action browse flow
-    /// (FR-050; refuses on non-TTY per FR-051).
+    /// (refused on a non-TTY).
     Plugin(PluginArgs),
     /// Manage on-disk embedding / reranker model artefacts.
     #[command(subcommand)]
@@ -72,7 +72,7 @@ pub enum Command {
     Query(QueryArgs),
     /// Force re-embedding of one or many skills outside the
     /// `tome catalog update` schedule. Use for embedder upgrades or
-    /// integrity recovery. See `contracts/reindex.md`.
+    /// integrity recovery.
     Reindex(ReindexArgs),
     /// Report the health of every Phase 2 subsystem (models, index, drift).
     /// Exit 0 when everything is healthy; exit 1 on degraded or unhealthy.
@@ -85,8 +85,7 @@ pub enum Command {
     /// flag is intentionally ignored — the protocol IS the structured
     /// output.
     Mcp(McpArgs),
-    /// Inspect or create per-project workspaces. See
-    /// `contracts/workspace-info.md` and `contracts/workspace-init.md`.
+    /// Inspect or create per-project workspaces.
     Workspace(WorkspaceArgs),
     /// Comprehensive diagnostic. Reports every subsystem (workspace,
     /// models, index, drift, catalog caches, harnesses), classifies
@@ -96,13 +95,13 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Inspect and manage harness integrations (Claude Code, Codex,
     /// Cursor, Gemini, OpenCode). Run with no subcommand to enumerate
-    /// every supported harness. See `contracts/harness-commands.md`.
+    /// every supported harness.
     Harness(HarnessArgs),
 }
 
 /// Wraps the `harness` subcommand so the `command` field can be `None` —
 /// allowing bare `tome harness` to list every supported harness in
-/// tabular form (FR-520).
+/// tabular form.
 #[derive(Debug, clap::Args)]
 pub struct HarnessArgs {
     #[command(subcommand)]
@@ -128,7 +127,7 @@ pub enum HarnessCommand {
     /// targets, integration state, and source-of-scope.
     Info(HarnessInfoArgs),
     /// Reconcile the project's actual filesystem state against the
-    /// effective harness list. Byte-for-byte idempotent (FR-525).
+    /// effective harness list. Byte-for-byte idempotent.
     Sync,
 }
 
@@ -149,8 +148,8 @@ pub struct HarnessUseArgs {
     /// marker above CWD; use `workspace` or `global` outside a project).
     #[arg(long, default_value_t = HarnessScopeArg::Project, value_enum)]
     pub scope: HarnessScopeArg,
-    /// Override a harness-clash on the MCP config write (FR-502 →
-    /// exit 19 without override).
+    /// Override a harness-clash on the MCP config write (without it, a
+    /// clash exits 19).
     #[arg(long)]
     pub force: bool,
 }
@@ -312,8 +311,8 @@ pub struct WorkspaceInfoArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct WorkspaceInitArgs {
-    /// Workspace name. Must satisfy FR-347 (1–64 alphanumeric + hyphen /
-    /// underscore, no leading or trailing punctuation). The privileged
+    /// Workspace name: 1–64 alphanumeric characters plus hyphen /
+    /// underscore, with no leading or trailing punctuation. The privileged
     /// `global` workspace name is reserved.
     pub name: String,
     /// Seed the new workspace's catalogs from the global workspace's
@@ -333,9 +332,9 @@ pub struct WorkspaceRenameArgs {
     /// Existing workspace name. Refuses to rename the reserved `global`
     /// workspace (exit 15).
     pub old: String,
-    /// New workspace name. Must satisfy FR-347; must not collide with an
-    /// existing workspace (exit 14); cannot be the reserved `global`
-    /// (exit 15).
+    /// New workspace name. Must satisfy the workspace naming rule; must not
+    /// collide with an existing workspace (exit 14); cannot be the reserved
+    /// `global` (exit 15).
     pub new: String,
 }
 
@@ -351,9 +350,9 @@ pub struct WorkspaceRegenSummaryArgs {
 #[derive(Debug, clap::Args)]
 pub struct WorkspaceSyncArgs {
     /// Workspace whose central RULES.md should be propagated. Omit to
-    /// sync every workspace in the central registry. Must satisfy
-    /// FR-347 when present; unknown names surface as exit 13
-    /// (`WorkspaceNotFound`).
+    /// sync every workspace in the central registry. Must satisfy the
+    /// workspace naming rule when present; unknown names surface as
+    /// exit 13 (`WorkspaceNotFound`).
     pub name: Option<String>,
 }
 
@@ -380,7 +379,7 @@ pub struct ReindexArgs {
     /// to scope to one plugin.
     pub scope: Option<String>,
     /// Re-embed every in-scope skill regardless of `content_hash`. Used for
-    /// embedder upgrades (FR-016 recovery path) and integrity recovery.
+    /// embedder upgrades and integrity recovery.
     #[arg(long)]
     pub force: bool,
 }
@@ -539,7 +538,7 @@ pub struct PluginShowArgs {
 #[derive(Debug, clap::Args)]
 pub struct QueryArgs {
     /// The query text to search for. Embedded as-is — no name/description
-    /// composition is applied (cf. FR-014, query.md step 3).
+    /// composition is applied.
     pub text: String,
 
     /// Cap on returned results (post-rerank when reranking).

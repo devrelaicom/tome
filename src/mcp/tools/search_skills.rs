@@ -166,7 +166,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         ));
     }
 
-    // F2a: single global config; F11 reintroduces workspace-aware view.
+    // Enabled-catalog gating resolves against the single central config.
     let config = store::load(&state.paths.global_config_file).map_err(|e| {
         McpError::internal_error(
             format!("load config: {e}"),
