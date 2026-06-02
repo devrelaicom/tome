@@ -1,10 +1,43 @@
 # Tome
 
-A Rust CLI (and eventually an MCP server) that makes Claude Code's plugin ecosystem work across other agentic coding harnesses — Cursor, Codex, Gemini CLI, OpenCode, and friends.
+**Tome is a Rust CLI _and_ MCP server** that makes Claude Code's plugin ecosystem work across other agentic coding harnesses — Cursor, Codex CLI, Gemini CLI, OpenCode, and friends.
 
-> **Status: pre-release, Phase 6 shipped (v0.6.0).** Tome manages **catalogs** (Git-hosted plugin collections), **plugins** (enable them locally, build a semantic skill index, search it), **named workspaces** (central storage under `<home>/.tome/workspaces/<name>/`, projects bind via `.tome/config.toml` pointers), **rules-file + MCP-config integration into five harnesses** (Claude Code, Codex CLI, Cursor, Gemini CLI, OpenCode), and ships an **MCP server** so harnesses can query the index over the Model Context Protocol. Phase 5 added **commands as first-class entries** alongside skills (`commands/<name>.md`), exposed **user-invocable entries as MCP prompts** (host-side slash commands), shipped a hand-rolled **variable substitution layer** (12 built-ins + env passthrough + Claude Code-compatible argument substitution), added a **middle-tier `get_skill_info` MCP discovery tool**, extended `tome doctor` with Phase 5 surfaces (prompts report, orphan data dirs, entry counts by kind, `pending_re_embedding`), and now embeds `when_to_use` frontmatter for semantic search. Phase 6 closes out hooks + agents: **real Claude Code hooks** (a plugin's `hooks/hooks.json` rewritten + structural-match-merged into `.claude/settings.local.json`), a **`GUARDRAILS.md` prose fallback** rendered as per-plugin marker regions in each harness's rules file (or a Tome-owned Cursor sibling), **native agent translation** across four harnesses (Claude Code, Codex, Cursor, OpenCode), **optional agent-as-MCP-prompt personas** (off by default), and the **Phase 4 rules-file correction** making Claude Code's rules sink `CLAUDE.md` (not `AGENTS.md`).
+You register **catalogs** (Git-hosted collections of plugins), enable the **plugins** you want, and Tome builds a local semantic index of their skills and commands. From there you can search that index from the command line, organise work into named **workspaces**, and wire the whole thing into up to five coding harnesses — both as rules-file / MCP-config integration and as a live **MCP server** that exposes search and your plugins' user-invocable prompts over the Model Context Protocol.
+
+## What Tome does
+
+- **Catalogs → plugins → index.** `tome catalog add` registers a Git-hosted catalog; `tome plugin enable` indexes a plugin's skills and commands into a local SQLite + vector store. `tome query` runs semantic (KNN + reranker) search across everything enabled.
+- **Named workspaces.** Central storage lives under `<home>/.tome/workspaces/<name>/`; a project binds to a workspace with a tiny `.tome/config.toml` pointer, so different projects can see different sets of plugins.
+- **Harness integration across five harnesses.** Tome writes each harness's rules file and MCP-config entry (Claude Code, Codex CLI, Cursor, Gemini CLI, OpenCode), and propagates per-plugin guardrails, hooks, and agent translations where the harness supports them.
+- **An MCP server.** `tome mcp` runs a stdio Model Context Protocol server backed by the resolved workspace's index. It exposes `search_skills`, `get_skill`, and `get_skill_info` tools, plus your enabled plugins' user-invocable commands as MCP prompts (and, optionally, agent personas). This server shipped in Phase 3 — it is part of the tool today, not a roadmap item.
+
+## Supported platforms
+
+Linux and macOS, on both `x86_64` and `aarch64`. **Windows is untested** — it may build, but no support is offered and CI does not cover it.
+
+## Privacy / network
+
+**Tome has no telemetry.** It never phones home. The only network access is Git operations against the catalogs you explicitly register and one-time downloads of the pinned inference models (see [Models](#models)). Everything else — the index, embeddings, and summaries — is computed and stored locally under `<home>/.tome/`.
 
 ## Install
+
+### From crates.io
+
+The crate is published as `tome-mcp`; the installed binary is named `tome`:
+
+```sh
+cargo install tome-mcp
+```
+
+### From Homebrew
+
+Prebuilt binaries (produced by the cargo-dist release pipeline for Linux and macOS) are distributed through a Homebrew tap. Replace `<your-tap>` with the tap this project publishes to:
+
+```sh
+brew install <your-tap>/tome
+```
+
+### From source
 
 ```sh
 git clone https://github.com/devrelaicom/tome.git
@@ -12,93 +45,111 @@ cd tome
 cargo install --path .
 ```
 
-Requires Rust ≥ 1.93 and a system `git` on the executable path. On first plugin enable, Tome downloads two ONNX models (`bge-small-en-v1.5` + `bge-reranker-base`, ~325 MB total, MIT). On first workspace summariser invocation, Tome downloads the `qwen2.5-0.5b-instruct` GGUF (~400 MB, MIT). All models live in `<home>/.tome/models/`.
+### Build prerequisites
 
-## Quick example
+Building Tome from source (`cargo install tome-mcp` or `--path .`) needs:
+
+- **Rust ≥ 1.93** (the pinned MSRV; edition 2024) and a system **`git`** on the executable path.
+- **A C/C++ toolchain and CMake.** Tome statically links `llama.cpp` (via `llama-cpp-2`) and a vendored `sqlite-vec` extension, both compiled from source by `build.rs`.
+- A network connection at build time: the `ort` crate (ONNX Runtime) **downloads the ONNX Runtime shared library during the build**.
+
+The prebuilt Homebrew binaries ship with everything baked in, so they have none of the above build-time requirements.
+
+## Models
+
+Tome downloads three pinned models on demand into `<home>/.tome/models/`. Each download is verified against a pinned SHA-256; a mismatch aborts the install.
+
+| Model | Role | Format | Approx. size | Licence |
+|-------|------|--------|--------------|---------|
+| `bge-small-en-v1.5` (Xenova INT8) | Embedder | ONNX | ~34 MB | MIT |
+| `bge-reranker-base` | Reranker | ONNX | ~279 MB | MIT |
+| `qwen2.5-0.5b-instruct` (Q4_K_M) | Workspace summariser | GGUF | ~491 MB | Apache-2.0 |
+
+- The **embedder + reranker (~313 MB total)** download on the first `tome plugin enable`, because both are needed to index and search.
+- The **summariser (~491 MB)** downloads only the first time you generate a workspace summary (`tome workspace regen-summary`), so you don't pay for it unless you use it.
+
+`tome models list` shows what is installed; add `--verify` to re-hash each artefact against its pinned SHA-256.
+
+## Getting started
+
+The walkthrough below uses the public **Midnight Expert** catalog as a concrete example; swap the source for any Git-hosted catalog (an `owner/repo` shorthand, a full Git URL, or a `file://` path to a local clone). The first `tome plugin enable` downloads the embedder + reranker (~313 MB) — that step needs a network connection and a little patience.
 
 ```sh
-# Catalogs (Phase 1)
-tome catalog add midnight/midnight-experts
-tome catalog list
-tome catalog update
+# 1. Register a catalog (owner/repo shorthand, a Git URL, or a file:// path).
+tome catalog add devrelaicom/midnight-expert-tome
+tome catalog list                              # confirm it registered
 
-# Plugins (Phase 2)
-tome plugin enable midnight-experts/compact-expert
-tome plugin list
-tome plugin show midnight-experts/compact-expert
+# 2. See which plugins the catalog offers.
+tome catalog show midnight-expert-tome         # lists every plugin in the catalog
 
-# Or browse interactively
-tome plugin              # catalog → plugin → action
+# 3. Enable a plugin — indexes its skills/commands (downloads models on first run).
+tome plugin enable midnight-expert-tome/compact-expert
+tome plugin list                               # enabled plugins + per-plugin index status
 
-# Semantic search across enabled plugins
+# 4. Search the index semantically.
 tome query "how do I write a compact circuit"
 tome query "deploy a contract" --top-k 5 --json
 
-# Health check and maintenance
-tome status                              # ok / degraded / unhealthy + per-subsystem detail
-tome models list                         # what's installed; --verify rehashes against pinned SHA-256
-tome reindex midnight-experts            # rebuild the index for one catalog (or omit scope for all)
+# Health + maintenance
+tome status                                    # ok / degraded / unhealthy, per subsystem
+tome models list                               # installed models; --verify rehashes vs pinned SHA-256
+tome reindex                                   # rebuild the index for every enabled plugin
+```
 
-# Named workspaces (Phase 4) — central storage; projects bind via pointer
-tome workspace init my-project                 # creates ~/.tome/workspaces/my-project/
-tome workspace list                            # all workspaces + their counts
-tome workspace use my-project                  # bind the CWD project to the workspace
-                                               # writes .tome/config.toml marker; runs harness sync
-tome workspace regen-summary my-project        # runs the bundled local summariser
-tome --workspace my-project plugin enable ...  # explicitly target the workspace
+Organise work into named workspaces and wire Tome into your harnesses:
 
-# Harness integration (Phase 4) — declarative composition
-tome harness                                   # list shipped harness modules
-tome harness use claude-code --scope workspace # add claude-code to the workspace settings
-tome harness list                              # effective list with source-chain
-tome harness sync                              # re-run sweep: rules + MCP + hooks + guardrails + agents (Phase 6)
+```sh
+# Named workspaces — central storage; a project binds via a pointer.
+tome workspace init my-project              # creates ~/.tome/workspaces/my-project/
+tome workspace list                         # all workspaces + their counts
+tome workspace use my-project               # bind the current project; writes .tome/config.toml + runs sync
+tome --workspace my-project plugin enable midnight-expert-tome/compact-expert
 
-# Diagnostic (Phase 4) — broad doctor with auto-repair
-tome doctor                                    # models + index + catalogs + drift + harnesses
-tome doctor --fix                              # auto-repairs each Phase 4 subsystem
-tome doctor --fix --force                      # also overrides user-owned MCP entries
-tome doctor --verify --json                    # re-hash all model artefacts + structured report
+# Harness integration — declarative composition.
+tome harness                                # list the supported harnesses
+tome harness use claude-code                # add claude-code to the project's settings
+tome harness list                           # effective list with the source chain
+tome harness sync                           # reconcile rules + MCP config + hooks + guardrails + agents
 
-# MCP server — Model Context Protocol over stdio
-tome mcp                                       # search_skills + get_skill + get_skill_info + prompts (+ optional agent personas)
-                                               # diagnostics → ~/.tome/logs/mcp.log (JSON-lines)
+# Run as an MCP server (launched by your harness over stdio).
+tome mcp                                    # search_skills + get_skill + get_skill_info + prompts
+                                            # diagnostics → ~/.tome/logs/mcp.log (JSON-lines)
 ```
 
 ## Where things live
 
-Every Tome-owned path lives under **`<home>/.tome/`** (constitution v1.3.0 §Paths):
+Every Tome-owned path lives under **`<home>/.tome/`**:
 
-- `<home>/.tome/config.toml` — Tome's global config (strict, 0600 on Unix)
+- `<home>/.tome/config.toml` — Tome's global config (strict TOML, 0600 on Unix)
 - `<home>/.tome/settings.toml` — global harness composition settings
-- `<home>/.tome/index.db` — central SQLite + `sqlite-vec` (single DB; workspaces and catalog enrolments are junction-table-keyed)
+- `<home>/.tome/index.db` — central SQLite + `sqlite-vec` (one DB; workspaces and catalog enrolments are junction-table-keyed)
 - `<home>/.tome/index.lock` — single advisory lockfile
-- `<home>/.tome/catalogs/<sha>/` — shared catalog clones (reference-counted via the `workspace_catalogs` table)
-- `<home>/.tome/models/<name>/` — embedder, reranker, and summariser GGUF weights + `manifest.json` with pinned SHA-256
-- `<home>/.tome/workspaces/<name>/{settings.toml, RULES.md}` — per-workspace state (strict TOML; the local summariser writes `RULES.md` + the `[summaries]` cache)
+- `<home>/.tome/catalogs/<sha>/` — shared catalog clones (reference-counted)
+- `<home>/.tome/models/<name>/` — embedder, reranker, and summariser weights + `manifest.json` with the pinned SHA-256
+- `<home>/.tome/workspaces/<name>/{settings.toml, RULES.md}` — per-workspace state
 - `<home>/.tome/logs/mcp.log` (+ `mcp.log.1` rotation) — JSON-lines, 10 MiB cap, 0600 on Unix
 
 **Per project** (bound via `tome workspace use`):
 
-- `<project>/.tome/config.toml` — pointer marker: `workspace = "<name>"` only. No state; the source of truth is the central registry.
-- `<project>/.tome/RULES.md` — propagated from the workspace's RULES.md on every sync.
+- `<project>/.tome/config.toml` — a pointer marker (`workspace = "<name>"`); the central registry is the source of truth.
+- `<project>/.tome/RULES.md` — propagated from the workspace's `RULES.md` on every sync.
+
+## Security
+
+Tome makes **mechanical** safety guarantees but cannot vet catalog **content** — only add catalogs you trust. See [`SECURITY.md`](https://github.com/devrelaicom/tome/blob/main/SECURITY.md) for the full trust model and how to report a vulnerability.
 
 ## Documentation
 
-- **What Tome will do in each phase:** [`PRDs/`](./PRDs/)
-- **Project principles:** [`CONSTITUTION.md`](./CONSTITUTION.md)
-- **Phase 2 specification:** [`specs/002-phase-2-plugins-index/`](./specs/002-phase-2-plugins-index/)
-- **Phase 3 specification:** [`specs/003-phase-3-mcp-workspaces/`](./specs/003-phase-3-mcp-workspaces/)
-- **Phase 4 specification:** [`specs/004-phase-4-refactor-harnesses/`](./specs/004-phase-4-refactor-harnesses/)
-- **Phase 5 specification:** [`specs/005-phase-5-commands-prompts/`](./specs/005-phase-5-commands-prompts/)
-- **Phase 6 specification:** [`specs/006-phase-6-hooks-agents/`](./specs/006-phase-6-hooks-agents/)
-- **Contributor on-ramp:** [`CONTRIBUTING.md`](./CONTRIBUTING.md)
+- **Project principles:** [`CONSTITUTION.md`](https://github.com/devrelaicom/tome/blob/main/CONSTITUTION.md)
+- **Contributor on-ramp:** [`CONTRIBUTING.md`](https://github.com/devrelaicom/tome/blob/main/CONTRIBUTING.md)
+- **Security & trust model:** [`SECURITY.md`](https://github.com/devrelaicom/tome/blob/main/SECURITY.md)
 
 ## Licence
 
 Dual-licensed under either of:
 
-- Apache License, Version 2.0 ([`LICENSE-APACHE`](./LICENSE-APACHE))
-- MIT license ([`LICENSE-MIT`](./LICENSE-MIT))
+- Apache License, Version 2.0 ([`LICENSE-APACHE`](https://github.com/devrelaicom/tome/blob/main/LICENSE-APACHE))
+- MIT license ([`LICENSE-MIT`](https://github.com/devrelaicom/tome/blob/main/LICENSE-MIT))
 
 at your option.
 

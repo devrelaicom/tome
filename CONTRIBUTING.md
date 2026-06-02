@@ -63,7 +63,7 @@ The conventional-commit format powers our changelog. Squash-and-merge PRs must s
 
 ## Security
 
-If you spot a security issue (credential leak, path traversal, etc.), do not file a public issue. Email <security@example.invalid> instead (placeholder — update when published).
+If you spot a security issue (credential leak, path traversal, etc.), do not file a public issue. See [`SECURITY.md`](./SECURITY.md) for how to report it privately.
 
 ## Code of Conduct
 
