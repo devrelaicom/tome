@@ -53,9 +53,10 @@ fn build_query_env() -> QueryEnv {
 
     // FF1: `lifecycle::enable` resolves the plugin dir from the DB enrolment
     // now, so enrol the catalog + symlink the cache dir onto the on-disk
-    // fixture. The in-memory `config` is still built because the `query`
-    // command's own filter validation reads `config.catalogs` (its migration
-    // off config.toml is a later PR).
+    // fixture. FF2: `query` filter validation also resolves catalogs from the
+    // DB; the in-memory `config` is still built and threaded into the
+    // (now-vestigial) `QueryDeps.config` field to avoid churning the deps
+    // construction here.
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
 
