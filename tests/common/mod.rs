@@ -180,8 +180,12 @@ pub fn test_catalog_url(catalog_name: &str) -> String {
 ///
 /// The enrolment URL is `file://<catalog_root>`, so it is unique per test
 /// tree and independent of any in-memory `Config` the test still keeps for a
-/// not-yet-migrated command. Opens the DB with the **stub** seeds. Idempotent
-/// on the symlink. Unix-only symlink (the suite runs on macOS / Linux).
+/// not-yet-migrated command. Opens the DB with the **registry** seeds (via
+/// [`enrol_catalog_row`]) — a test that drives the stub-seed query path
+/// (`run_with_deps`, whose drift check would reject a registry-stamped `meta`)
+/// must bootstrap `meta` with the stub seeds *before* calling this, so this
+/// helper's open is a no-op reopen. Idempotent on the symlink. Unix-only
+/// symlink (the suite runs on macOS / Linux).
 pub fn enrol_catalog_symlinked(
     paths: &Paths,
     workspace_name: &str,
@@ -450,11 +454,24 @@ pub fn write_config_for_cli(paths: &Paths, config: &Config) {
     for entry in config.catalogs.values() {
         // FF1: `resolve_plugin_dir` now resolves the catalog root from the
         // enrolment URL via `cache_dir_for(url)`. The fixture tree lives at
-        // `entry.path`; stage a copy at the content-addressed clone dir so the
-        // CLI `plugin {show,disable,enable}` path finds it — mirroring the
-        // on-disk layout `tome catalog add` produces.
+        // `entry.path`; SYMLINK (not copy) the content-addressed clone dir
+        // onto it so the DB-resolved path and the fixture tree are the SAME
+        // inode tree. A copy snapshots at stage time and goes stale: a test
+        // that corrupts a plugin.json AFTER setup (exit_codes_e2e) or compares
+        // on-disk mtimes against `indexed_at` (doctor_p5) would otherwise see
+        // the pristine copy, not its own mutation. `remove_dir_all` does not
+        // follow symlinks, so each TempDir's cleanup unlinks the symlink
+        // without touching the shared fixture. Unix-only — matches the
+        // macOS + Linux test matrix.
         let cache_root = paths.cache_dir_for(&entry.url);
         if entry.path.is_dir() && !cache_root.exists() {
+            if let Some(parent) = cache_root.parent() {
+                std::fs::create_dir_all(parent).expect("create catalogs cache parent");
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&entry.path, &cache_root)
+                .expect("symlink catalog clone for cli tests");
+            #[cfg(not(unix))]
             copy_dir(&entry.path, &cache_root).expect("stage catalog clone for cli tests");
         }
         match tome::index::workspace_catalogs::insert(

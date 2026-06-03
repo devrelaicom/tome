@@ -58,6 +58,27 @@ fn build_query_env() -> QueryEnv {
     // off config.toml is a later PR).
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+
+    // Stamp the index `meta` with STUB seeds on the FIRST open, BEFORE
+    // `enrol_catalog_symlinked` (whose `enrol_catalog_row` opens with REGISTRY
+    // seeds). `index::open` only writes seeds when bootstrapping a fresh DB and
+    // ignores `OpenOptions` on a reopen, so this first open wins the stamp and
+    // the later registry-seeded open is a no-op for `meta`. This is required
+    // for `run_with_deps`: its `pipeline` runs drift detection comparing the
+    // stub `deps.embedder_seed` against the on-disk `meta` — a registry-stamped
+    // `meta` would hard-fail with `EmbedderNameDrift`. The direct `knn_*` tests
+    // don't hit this because `knn` skips drift detection.
+    drop(
+        index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: stub_embedder_seed(),
+                reranker: stub_reranker_seed(),
+                summariser: stub_summariser_seed(),
+            },
+        )
+        .expect("bootstrap index meta with stub seeds"),
+    );
     enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
 
     let embedder = StubEmbedder::new();
