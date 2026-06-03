@@ -164,16 +164,16 @@ fn plugin_loop(
         };
         match pick {
             PluginChoice::Back => return Ok(()),
-            PluginChoice::Plugin { id, .. } => view_loop(paths, scope, config, &id)?,
+            PluginChoice::Plugin { id, .. } => view_loop(paths, scope, &id)?,
         }
     }
 }
 
-fn view_loop(paths: &Paths, scope: &ResolvedScope, config: &Config, id: &PluginId) -> LoopFlow {
+fn view_loop(paths: &Paths, scope: &ResolvedScope, id: &PluginId) -> LoopFlow {
     loop {
         // Render the plugin view and capture the resolved status so the
         // action menu can offer the right verb without re-querying.
-        let status = render_plugin_view(paths, scope, config, id)?;
+        let status = render_plugin_view(paths, scope, id)?;
 
         let actions = build_action_menu(status);
         let pick = match prompt_select("Action", actions) {
@@ -189,7 +189,7 @@ fn view_loop(paths: &Paths, scope: &ResolvedScope, config: &Config, id: &PluginI
                 run_enable_action(scope, id)?;
             }
             ActionChoice::Disable => {
-                run_disable_action(paths, scope, config, id)?;
+                run_disable_action(paths, scope, id)?;
             }
         }
         // After a successful enable / disable, fall through and redraw.
@@ -376,13 +376,16 @@ fn build_action_menu(status: PluginStatus) -> Vec<ActionChoice> {
 fn render_plugin_view(
     paths: &Paths,
     scope: &ResolvedScope,
-    config: &Config,
     id: &PluginId,
 ) -> Result<PluginStatus, TomeError> {
-    let plugin_dir = resolve_plugin_dir(id, config)?;
+    // F11b: the catalog enrolment is read from the DB, so the read handle is
+    // opened before resolving the plugin directory and reused for the
+    // aggregate below. (The surrounding menu builders still consult
+    // `config.catalogs`; those readers migrate in a later slice.)
+    let conn = open_index_for_read(paths, &scope.scope)?;
+    let plugin_dir = resolve_plugin_dir(id, &conn, scope.scope.name().as_str(), paths)?;
     let manifest = parse_plugin_manifest(&manifest_path_for(&plugin_dir));
     let component_counts = count_components(&plugin_dir);
-    let conn = open_index_for_read(paths, &scope.scope)?;
     let agg = aggregate_for_plugin(&conn, scope.scope.name().as_str(), &id.catalog, &id.plugin)?;
 
     let status = match &manifest {
@@ -484,12 +487,7 @@ fn run_enable_action(scope: &ResolvedScope, id: &PluginId) -> Result<(), TomeErr
 /// per the contract: "On Disable: prompt to confirm, then run `plugin
 /// disable --force` equivalent"). Errors from disable propagate per
 /// contract — same exit codes as the (future) non-interactive form.
-fn run_disable_action(
-    paths: &Paths,
-    scope: &ResolvedScope,
-    config: &Config,
-    id: &PluginId,
-) -> LoopFlow {
+fn run_disable_action(paths: &Paths, scope: &ResolvedScope, id: &PluginId) -> LoopFlow {
     let confirmed = match prompt::confirm(&format!("Disable {id}?"), false) {
         Ok(v) => v,
         Err(TomeError::Interrupted) | Err(TomeError::NotATerminal) => {
@@ -507,7 +505,6 @@ fn run_disable_action(
         id,
         paths,
         &scope.scope,
-        config,
         embedder_seed,
         reranker_seed,
         summariser_seed,

@@ -9,8 +9,9 @@
 mod common;
 
 use common::{
-    ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models, lifecycle_paths,
-    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
+    ToolEnv, config_with_catalog, copy_sample_plugin_catalog, enrol_catalog_symlinked,
+    fabricate_models, lifecycle_paths, stub_embedder_seed, stub_reranker_seed,
+    stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::commands::reindex::{Scope, run_with_deps};
@@ -74,6 +75,9 @@ fn reindex_all_visits_every_enabled_plugin_zero_changes() {
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // `resolve_plugin_dir` (DB-backed) sees in-place reindex mutations.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
 
     let embedder = StubEmbedder::new();
     enable_alpha_and_beta(&paths, &config, &embedder);
@@ -113,6 +117,9 @@ fn reindex_one_plugin_re_embeds_only_modified_skill() {
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // `resolve_plugin_dir` (DB-backed) sees in-place reindex mutations.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
 
     let embedder = StubEmbedder::new();
     enable_alpha_and_beta(&paths, &config, &embedder);
@@ -168,6 +175,9 @@ fn reindex_re_embeds_when_only_when_to_use_changes() {
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // `resolve_plugin_dir` (DB-backed) sees in-place reindex mutations.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
 
     let embedder = StubEmbedder::new();
     enable_alpha_and_beta(&paths, &config, &embedder);
@@ -226,6 +236,9 @@ fn reindex_force_re_embeds_every_skill_in_scope() {
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // `resolve_plugin_dir` (DB-backed) sees in-place reindex mutations.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
 
     let embedder = StubEmbedder::new();
     enable_alpha_and_beta(&paths, &config, &embedder);
@@ -256,6 +269,9 @@ fn reindex_catalog_scope_visits_every_plugin_in_that_catalog() {
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol the catalog + symlink the cache dir onto the on-disk tree so
+    // `resolve_plugin_dir` (DB-backed) sees in-place reindex mutations.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
 
     let embedder = StubEmbedder::new();
     enable_alpha_and_beta(&paths, &config, &embedder);

@@ -104,21 +104,18 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
             let embedder_ref =
                 embedder.get_or_insert_with_result::<TomeError, _>(|| load_embedder(&paths))?;
 
-            // LifecycleDeps still carries a `config: &Config` field for
-            // back-compat — F11b makes catalog look-ups via the junction
-            // table, but the lifecycle layer hasn't been re-plumbed yet.
-            // Pass an empty Config; the lifecycle resolve_plugin_dir will
-            // be updated to consult `workspace_catalogs` in a follow-up.
-            // Until then, we synthesise a minimal Config with one entry
-            // so the catalog look-up resolves.
-            let synthetic_config = synthesise_config_for_catalog(&catalog_name, &cache_dir);
+            // F11b + FF1: `lifecycle::reindex_plugin` resolves the plugin
+            // directory from the `workspace_catalogs` enrolment, so the
+            // catalog root no longer has to be threaded through a synthetic
+            // `Config`. The field is vestigial; pass the default.
+            let config = Config::default();
             let ws_scope =
                 Scope(WorkspaceName::parse(&ws_name).unwrap_or_else(|_| WorkspaceName::global()));
             let (e_seed, r_seed, s_seed) = registry_seeds();
             let deps = LifecycleDeps {
                 paths: &paths,
                 scope: &ws_scope,
-                config: &synthetic_config,
+                config: &config,
                 embedder: embedder_ref,
                 embedder_seed: e_seed,
                 reranker_seed: r_seed,
@@ -168,30 +165,6 @@ pub type ResolvedScopeArg = crate::workspace::ResolvedScope;
 struct RefreshTarget {
     url: String,
     pinned_ref: String,
-}
-
-/// Synthesise a minimal `Config` so `lifecycle::reindex_plugin` can
-/// resolve the plugin directory via `resolve_plugin_dir`. F11b drops
-/// `config.toml` as the registry; the lifecycle layer hasn't yet been
-/// re-plumbed to consult `workspace_catalogs` directly. The synthesised
-/// entry mirrors the on-disk cache; consumers only read `.path`.
-fn synthesise_config_for_catalog(catalog_name: &str, cache_dir: &Path) -> Config {
-    use crate::config::CatalogEntry;
-    use std::collections::BTreeMap;
-    let mut catalogs = BTreeMap::new();
-    #[allow(deprecated)]
-    catalogs.insert(
-        catalog_name.to_owned(),
-        CatalogEntry {
-            name: catalog_name.to_owned(),
-            url: String::new(),
-            ref_: String::new(),
-            path: cache_dir.to_path_buf(),
-            last_synced: OffsetDateTime::now_utc(),
-        },
-    );
-    #[allow(deprecated)]
-    Config { catalogs }
 }
 
 trait GetOrInsertWithResult<T> {

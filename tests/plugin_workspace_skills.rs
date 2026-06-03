@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::sync::Barrier;
 
 use common::{
-    config_with_catalog, copy_sample_plugin_catalog, fabricate_models, lifecycle_paths,
-    seed_workspace, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
+    fabricate_models, lifecycle_paths, seed_workspace, stage_sample_catalog_in_db,
+    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::embedding::stub::StubEmbedder;
@@ -96,10 +96,13 @@ fn enable_in_workspace_a_does_not_affect_workspace_b() {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
-    let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
-    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
-
+    // FF1: enrol the catalog in the DB (+ stage the clone) for BOTH
+    // workspaces, the on-disk shape `tome catalog add` produces. `second`
+    // must exist before its enrolment, so it is seeded first.
+    stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
     seed_workspace(&paths, "second");
+    stage_sample_catalog_in_db(&paths, "second", "sample-plugin-catalog");
+    let config = tome::config::Config::default();
 
     let embedder = StubEmbedder::new();
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
@@ -133,10 +136,13 @@ fn disable_in_a_does_not_delete_shared_skills_row() {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
-    let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
-    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
-
+    // FF1: enrol the catalog in the DB (+ stage the clone) for BOTH
+    // workspaces, the on-disk shape `tome catalog add` produces. `second`
+    // must exist before its enrolment, so it is seeded first.
+    stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
     seed_workspace(&paths, "second");
+    stage_sample_catalog_in_db(&paths, "second", "sample-plugin-catalog");
+    let config = tome::config::Config::default();
     let embedder = StubEmbedder::new();
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
 
@@ -162,7 +168,6 @@ fn disable_in_a_does_not_delete_shared_skills_row() {
         &id,
         &paths,
         &global_scope,
-        &config,
         stub_embedder_seed(),
         stub_reranker_seed(),
         stub_summariser_seed(),
@@ -202,10 +207,13 @@ fn concurrent_enables_of_same_plugin_in_two_workspaces_both_succeed() {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
-    let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
-    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
-
+    // FF1: enrol the catalog in the DB (+ stage the clone) for BOTH
+    // workspaces, the on-disk shape `tome catalog add` produces. `second`
+    // must exist before its enrolment, so it is seeded first.
+    stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
     seed_workspace(&paths, "second");
+    stage_sample_catalog_in_db(&paths, "second", "sample-plugin-catalog");
+    let config = tome::config::Config::default();
 
     // One shared StubEmbedder so both threads see deterministic vectors.
     let embedder = Arc::new(StubEmbedder::new());
@@ -293,10 +301,13 @@ fn skills_rows_persist_after_disable_in_all_workspaces() {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
-    let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
-    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
-
+    // FF1: enrol the catalog in the DB (+ stage the clone) for BOTH
+    // workspaces, the on-disk shape `tome catalog add` produces. `second`
+    // must exist before its enrolment, so it is seeded first.
+    stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
     seed_workspace(&paths, "second");
+    stage_sample_catalog_in_db(&paths, "second", "sample-plugin-catalog");
+    let config = tome::config::Config::default();
     let embedder = StubEmbedder::new();
     let id: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
 
@@ -313,7 +324,6 @@ fn skills_rows_persist_after_disable_in_all_workspaces() {
         &id,
         &paths,
         &global_scope,
-        &config,
         stub_embedder_seed(),
         stub_reranker_seed(),
         stub_summariser_seed(),
@@ -323,7 +333,6 @@ fn skills_rows_persist_after_disable_in_all_workspaces() {
         &id,
         &paths,
         &second_scope,
-        &config,
         stub_embedder_seed(),
         stub_reranker_seed(),
         stub_summariser_seed(),

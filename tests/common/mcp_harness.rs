@@ -254,9 +254,10 @@ impl StagedWorkspace {
             allow_model_download: false,
         };
         let id: PluginId = "acme/plug".parse().unwrap();
-        lifecycle::enable(&id, &deps).expect("enable plugin");
-
+        // FF1: enrolment + cache symlink before enable — resolve_plugin_dir now
+        // reads workspace_catalogs, not the in-memory Config.
         seed_catalog_enrolment(&paths, &catalog_root, "acme");
+        lifecycle::enable(&id, &deps).expect("enable plugin");
 
         Self {
             tmp,

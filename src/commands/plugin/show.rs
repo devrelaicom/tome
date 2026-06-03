@@ -16,7 +16,6 @@ use std::str::FromStr;
 use comfy_table::{Cell, CellAlignment};
 use serde::Serialize;
 
-use crate::catalog::store;
 use crate::cli::PluginShowArgs;
 use crate::error::TomeError;
 use crate::mcp::prompt_name::derive_name;
@@ -37,14 +36,17 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
         .map_err(|e| TomeError::Usage(format!("invalid plugin id `{}`: {e}", args.id)))?;
 
     let paths = Paths::resolve()?;
-    let config = store::load(&paths.global_config_file)?;
-    let plugin_dir = resolve_plugin_dir(&id, &config)?;
+
+    // Catalog enrolment lives in the DB (F11b), so the read-only handle is
+    // opened before resolving the plugin directory; it is reused below for the
+    // index aggregate + per-entry listing.
+    let conn = open_index_for_read(&paths, &scope.scope)?;
+    let plugin_dir = resolve_plugin_dir(&id, &conn, scope.scope.name().as_str(), &paths)?;
 
     // Strict failure here: the contract says exit 22 on a malformed manifest.
     let manifest = parse_plugin_manifest(&manifest_path_for(&plugin_dir))?;
     let component_counts = count_components(&plugin_dir);
 
-    let conn = open_index_for_read(&paths, &scope.scope)?;
     let agg = aggregate_for_plugin(&conn, scope.scope.name().as_str(), &id.catalog, &id.plugin)?;
 
     let status = if agg.total == 0 {

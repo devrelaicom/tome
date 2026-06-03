@@ -15,8 +15,8 @@
 mod common;
 
 use common::{
-    config_with_catalog, copy_sample_plugin_catalog, fabricate_models, lifecycle_paths,
-    seed_workspace, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
+    config_with_catalog, copy_sample_plugin_catalog, enrol_catalog_symlinked, fabricate_models,
+    lifecycle_paths, seed_workspace, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::embedding::stub::StubEmbedder;
@@ -54,6 +54,9 @@ fn re_enable_same_plugin_in_second_workspace_does_not_invoke_embedder() {
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol the catalog (+ cache symlink) for `global`; the `second`
+    // workspace's enrolment is added once it is seeded below.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
 
     // Single embedder instance — its `call_count()` is the assertion target
     // across both enables.
@@ -84,6 +87,7 @@ fn re_enable_same_plugin_in_second_workspace_does_not_invoke_embedder() {
     // ---- seed a second workspace + enable into it ----------------------
     // US2's `tome workspace add` will own this step in production.
     seed_workspace(&paths, "second");
+    enrol_catalog_symlinked(&paths, "second", "sample-plugin-catalog", &catalog_root);
     let second_name = WorkspaceName::parse("second").expect("valid workspace name");
     let second_scope = Scope(second_name);
     let deps_second = LifecycleDeps {

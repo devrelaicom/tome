@@ -143,6 +143,10 @@ fn stage(catalog_name: &str, plugins: &[PluginSpec<'_>]) -> (TempDir, tome::path
     let embedder = StubEmbedder::new();
     let scope = Scope(global());
 
+    // FF1: enrolment + cache symlink must precede enable — resolve_plugin_dir
+    // reads workspace_catalogs now, not the in-memory Config.
+    seed_catalog_enrolment(&paths, &catalog_root, catalog_name);
+
     for plugin in plugins {
         let deps = LifecycleDeps {
             paths: &paths,
@@ -158,7 +162,6 @@ fn stage(catalog_name: &str, plugins: &[PluginSpec<'_>]) -> (TempDir, tome::path
         lifecycle::enable(&id, &deps).unwrap_or_else(|e| panic!("enable {}: {e:?}", plugin.name));
     }
 
-    seed_catalog_enrolment(&paths, &catalog_root, catalog_name);
     (tmp, paths)
 }
 

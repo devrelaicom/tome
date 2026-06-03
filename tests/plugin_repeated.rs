@@ -18,8 +18,9 @@
 mod common;
 
 use common::{
-    ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models, paths_for,
-    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed, write_config_for_cli,
+    ToolEnv, config_with_catalog, copy_sample_plugin_catalog, enrol_catalog_symlinked,
+    fabricate_models, paths_for, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
+    write_config_for_cli,
 };
 use tempfile::TempDir;
 use tome::embedding::stub::StubEmbedder;
@@ -36,6 +37,12 @@ fn enable_of_already_enabled_returns_plugin_already_in_state_via_library() {
 
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+
+    // FF1: `lifecycle::enable` resolves the plugin dir from the DB enrolment,
+    // not `config.toml`, so enrol the catalog + symlink the cache dir onto the
+    // on-disk fixture before enabling. The in-memory `config` is kept for the
+    // `LifecycleDeps` shape.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
 
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {

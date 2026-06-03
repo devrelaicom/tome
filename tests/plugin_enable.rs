@@ -13,7 +13,7 @@
 mod common;
 
 use common::{
-    config_with_catalog, copy_sample_plugin_catalog, fabricate_models, lifecycle_paths,
+    fabricate_models, lifecycle_paths, stage_catalog_dir_in_db, stage_sample_catalog_in_db,
     stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
@@ -30,12 +30,12 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
-    let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
-    // The lifecycle resolver looks for `<catalog.path>/<plugin>`. The
-    // fixture lays out plugin directories as immediate children of the
-    // catalog root, matching the on-disk convention `tome catalog add`
-    // records (entry.path = directory containing tome-catalog.toml).
-    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol via the DB + stage the clone in the content-addressed cache,
+    // the on-disk shape `tome catalog add` produces. `resolve_plugin_dir`
+    // reads the enrolment URL → `cache_dir_for(url)`; the fixture lays plugin
+    // directories out as immediate children of that catalog root.
+    stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+    let config = tome::config::Config::default();
 
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
@@ -121,8 +121,8 @@ fn enable_emits_fallback_warnings_for_missing_name_and_description() {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
-    let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
-    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+    let config = tome::config::Config::default();
 
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
@@ -164,8 +164,8 @@ fn enable_is_idempotent_rejecting_re_enable_with_plugin_already_in_state() {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
-    let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
-    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+    let config = tome::config::Config::default();
 
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
@@ -205,7 +205,14 @@ fn enable_resolves_nested_plugin_source_from_catalog_manifest() {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
-    let catalog_root = tmp.path().join("catalog");
+    // FF1: stage a bare clone at the content-addressed cache dir + enrol it,
+    // then build the nested tree there so `resolve_plugin_dir` reads it.
+    let catalog_root = stage_catalog_dir_in_db(
+        &paths,
+        "global",
+        "nested-test",
+        &tmp.path().join("nonexistent"),
+    );
     let plugin_dir = catalog_root.join("vendor/wrapped-alpha");
     std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
     std::fs::write(
@@ -238,7 +245,7 @@ source = "./vendor/wrapped-alpha"
 "#;
     std::fs::write(catalog_root.join("tome-catalog.toml"), toml).unwrap();
 
-    let config = config_with_catalog("nested-test", &catalog_root);
+    let config = tome::config::Config::default();
 
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
@@ -271,8 +278,10 @@ fn cheap_reenable_after_disable_invokes_embedder_zero_times() {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
-    let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
-    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // FF1: enrol via the DB + stage the clone in the content-addressed cache,
+    // mirroring `tome catalog add`. The catalog is NOT written to config.toml.
+    stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+    let config = tome::config::Config::default();
 
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {
@@ -304,7 +313,6 @@ fn cheap_reenable_after_disable_invokes_embedder_zero_times() {
         &id,
         &paths,
         &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
-        &config,
         stub_embedder_seed(),
         stub_reranker_seed(),
         stub_summariser_seed(),
@@ -333,8 +341,8 @@ fn enable_returns_model_missing_when_no_models_on_disk_and_download_disallowed()
     std::fs::create_dir_all(&paths.root).unwrap();
     // Deliberately skip fabricate_models — the model-presence gate must fire.
 
-    let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
-    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+    let config = tome::config::Config::default();
 
     let embedder = StubEmbedder::new();
     let deps = LifecycleDeps {

@@ -23,8 +23,8 @@
 mod common;
 
 use common::{
-    copy_sample_plugin_catalog, fabricate_models, lifecycle_paths, seed_workspace,
-    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
+    copy_sample_plugin_catalog, enrol_catalog_symlinked, fabricate_models, lifecycle_paths,
+    seed_workspace, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::commands::catalog::update::reindex_catalog_plugins;
@@ -102,25 +102,6 @@ fn skill_content_hash_for(
     .ok()
 }
 
-/// Mirror of the production `workspace_catalogs::insert` for tests —
-/// inserts an enrolment row for each (workspace, catalog_name, url).
-/// We don't go through the CLI binary because that would clone the
-/// fixture into the catalogs/ cache; for this test we want the
-/// catalog directory to remain in-place under the TempDir so we can
-/// mutate it after enable.
-fn insert_enrolment(paths: &tome::paths::Paths, workspace: &str, name: &str, url: &str) {
-    let conn = index::open(
-        &paths.index_db,
-        &OpenOptions {
-            embedder: stub_embedder_seed(),
-            reranker: stub_reranker_seed(),
-            summariser: stub_summariser_seed(),
-        },
-    )
-    .expect("open for enrolment insert");
-    workspace_catalogs::insert(&conn, workspace, name, url, "main").expect("insert enrolment");
-}
-
 #[test]
 fn catalog_update_reindexes_every_workspace_enabled_set() {
     let tmp = TempDir::new().unwrap();
@@ -132,7 +113,6 @@ fn catalog_update_reindexes_every_workspace_enabled_set() {
     // for upstream mutation. The Config points each workspace's
     // `lifecycle::resolve_plugin_dir` at this path.
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
-    let url = format!("file://{}", catalog_root.display());
     let config = config_pointing_at("sample-plugin-catalog", &catalog_root);
 
     // Seed BOTH workspaces in the central DB. `global` is bootstrapped
@@ -142,27 +122,28 @@ fn catalog_update_reindexes_every_workspace_enabled_set() {
 
     let embedder = StubEmbedder::new();
 
+    // FF1: `lifecycle::enable`/`reindex_plugin` resolve the plugin dir from the
+    // `workspace_catalogs` enrolment, so the enrolment (+ a symlink from the
+    // URL-hashed cache dir onto the in-place fixture, kept so the upstream
+    // mutation below is observed) MUST exist before enable. The symlink means
+    // we still mutate `catalog_root` directly.
+    let url = enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
+
     // Enable in `global` first (bootstraps + stamps meta with stub seeds).
     enable_in(&paths, &global_scope, &config, &embedder);
     let calls_after_global = embedder.call_count();
     assert_eq!(calls_after_global, 4, "global enable embeds 4 skills");
 
-    // Now seed `second` and enable there too. Cheap re-enable: same
-    // skill rows → zero embed calls.
+    // Now seed `second`, enrol it, and enable there too. Cheap re-enable:
+    // same skill rows → zero embed calls.
     seed_workspace(&paths, "second");
+    enrol_catalog_symlinked(&paths, "second", "sample-plugin-catalog", &catalog_root);
     enable_in(&paths, &second_scope, &config, &embedder);
     assert_eq!(
         embedder.call_count(),
         calls_after_global,
         "cross-workspace enable must NOT invoke the embedder",
     );
-
-    // Seed enrolment rows for both workspaces (catalog add normally
-    // does this via CLI). Order matters — we already used `index::open`
-    // above, so meta is stamped with stub seeds; subsequent opens are
-    // no-ops on meta.
-    insert_enrolment(&paths, "global", "sample-plugin-catalog", &url);
-    insert_enrolment(&paths, "second", "sample-plugin-catalog", &url);
 
     // Capture the pre-mutation content hash for skill-b in BOTH
     // workspaces. They must be identical (same shared skills row).

@@ -99,8 +99,9 @@ fn stage_one_command_workspace() -> (TempDir, tome::paths::Paths) {
     let scope = Scope(WorkspaceName::global());
     let deps = build_deps(&paths, &config, &embedder, &scope);
     let id: PluginId = "acme/p".parse().unwrap();
-    lifecycle::enable(&id, &deps).expect("enable plugin");
 
+    // FF1: enrolment + cache symlink must precede enable — resolve_plugin_dir
+    // reads workspace_catalogs now, not the in-memory Config.
     let url = format!("file://{}", catalog_root.display());
     let conn = index::open(
         &paths.index_db,
@@ -122,6 +123,8 @@ fn stage_one_command_workspace() -> (TempDir, tome::paths::Paths) {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&catalog_root, &cache_dir).unwrap();
     }
+
+    lifecycle::enable(&id, &deps).expect("enable plugin");
 
     (tmp, paths)
 }

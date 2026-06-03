@@ -93,10 +93,11 @@ fn stage_one_command_workspace() -> (TempDir, tome::paths::Paths) {
     let scope = Scope(WorkspaceName::global());
     let deps = build_deps(&paths, &config, &embedder, &scope);
     let id: PluginId = "acme/p".parse().unwrap();
-    lifecycle::enable(&id, &deps).expect("enable plugin");
 
     // Seed central DB catalog enrolment + symlink the URL-hashed cache
     // dir to the on-disk fixture so the registry's resolve walk works.
+    // FF1: this must precede `lifecycle::enable`, which now resolves the
+    // plugin dir from `workspace_catalogs`.
     let url = format!("file://{}", catalog_root.display());
     let conn = index::open(
         &paths.index_db,
@@ -118,6 +119,8 @@ fn stage_one_command_workspace() -> (TempDir, tome::paths::Paths) {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&catalog_root, &cache_dir).unwrap();
     }
+
+    lifecycle::enable(&id, &deps).expect("enable plugin");
 
     (tmp, paths)
 }

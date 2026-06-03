@@ -138,9 +138,10 @@ fn stage_workspace(
     let scope = tome::workspace::Scope(global());
     let deps = build_deps(&paths, &config, &embedder, &scope);
     let id: PluginId = "acme/plug".parse().unwrap();
-    lifecycle::enable(&id, &deps).expect("enable plugin");
-
+    // FF1: enrolment + cache symlink before enable — resolve_plugin_dir now
+    // reads workspace_catalogs, not the in-memory Config.
     seed_catalog_enrolment(&paths, &catalog_root, "acme");
+    lifecycle::enable(&id, &deps).expect("enable plugin");
     (tmp, paths)
 }
 

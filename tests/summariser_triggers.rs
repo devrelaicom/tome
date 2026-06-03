@@ -26,8 +26,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use common::{
-    config_with_catalog, fabricate_models, lifecycle_paths, stub_embedder_seed, stub_reranker_seed,
-    stub_summariser_seed,
+    fabricate_models, lifecycle_paths, stage_catalog_dir_in_db, stub_embedder_seed,
+    stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::config::Config;
@@ -91,9 +91,17 @@ fn seed_workspace_and_plugin(
     fabricate_models(&paths);
     workspace::init::init(WorkspaceName::parse(workspace_name).unwrap(), false, &paths)
         .expect("init workspace");
-    let catalog_root = tmp.path().join("catalog");
-    let config = config_with_catalog(catalog_name, &catalog_root);
+    // FF1: enrol the catalog for THIS workspace in the DB + stage a bare clone
+    // at the content-addressed cache dir, then lay the plugin out there so
+    // `resolve_plugin_dir` (which reads workspace_catalogs) finds it.
+    let catalog_root = stage_catalog_dir_in_db(
+        &paths,
+        workspace_name,
+        catalog_name,
+        &tmp.path().join("none"),
+    );
     write_plugin(&catalog_root, plugin_name, skills);
+    let config = Config::default();
     let id: PluginId = format!("{catalog_name}/{plugin_name}").parse().unwrap();
     let ws_name = WorkspaceName::parse(workspace_name).unwrap();
     (paths, config, id, ws_name)
@@ -149,7 +157,6 @@ fn disable_then_trigger_invokes_summariser() {
         &id,
         &paths,
         &scope,
-        &config,
         stub_embedder_seed(),
         stub_reranker_seed(),
         stub_summariser_seed(),

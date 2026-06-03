@@ -267,6 +267,12 @@ fn plugin_enable_with_illegal_argument_name_exits_29() {
         "---\nname: bad\ndescription: illegal arg name.\narguments: [Bad-Name]\n---\nbody $1\n";
     write_plugin(&catalog_root, "plug", &[], &[("bad", bad_cmd)]);
 
+    // FF1: `lifecycle::enable` resolves the plugin dir from the DB enrolment,
+    // so the catalog must be enrolled (and its cache dir symlinked onto the
+    // fixture) BEFORE the enable — otherwise the DB lookup fails with
+    // `CatalogNotFound` before the frontmatter gate this test targets.
+    seed_catalog_enrolment(&paths, &catalog_root, "acme");
+
     let embedder = StubEmbedder::new();
     let scope = Scope(WorkspaceName::global());
     let deps = LifecycleDeps {
@@ -296,8 +302,8 @@ fn plugin_enable_with_illegal_argument_name_exits_29() {
 
     // The barred entry never reached the index, so the MCP registry built
     // from this workspace is empty — i.e. `prompts/get` can never see a
-    // malformed-frontmatter entry. Prove that invariant end-to-end.
-    seed_catalog_enrolment(&paths, &catalog_root, "acme");
+    // malformed-frontmatter entry. Prove that invariant end-to-end. The
+    // catalog was already enrolled above (before the enable).
     let harness = McpHarness::new(&paths);
     assert!(
         harness.prompt_names().is_empty(),

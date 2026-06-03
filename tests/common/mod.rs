@@ -165,6 +165,125 @@ pub fn copy_sample_plugin_catalog(into: &TempDir, name: &str) -> PathBuf {
     dst
 }
 
+/// The deterministic `file://` enrolment URL a test uses for `catalog_name`.
+/// Mirrors what `tome catalog add` would record; `cache_dir_for(url)` is the
+/// on-disk clone root.
+pub fn test_catalog_url(catalog_name: &str) -> String {
+    format!("file://example.invalid/{catalog_name}")
+}
+
+/// Enrol `(workspace_name, catalog_name)` in the central DB and symlink the
+/// URL-hashed clone dir `cache_dir_for(url)` onto an EXISTING on-disk catalog
+/// tree at `catalog_root` (the production layout is a real clone; tests
+/// symlink so in-place mutations — `rewrite_skill`, `remove_skill`, refresh —
+/// are seen by `resolve_plugin_dir`, which reads `cache_dir_for(url)`).
+///
+/// The enrolment URL is `file://<catalog_root>`, so it is unique per test
+/// tree and independent of any in-memory `Config` the test still keeps for a
+/// not-yet-migrated command. Opens the DB with the **registry** seeds (via
+/// [`enrol_catalog_row`]) — a test that drives the stub-seed query path
+/// (`run_with_deps`, whose drift check would reject a registry-stamped `meta`)
+/// must bootstrap `meta` with the stub seeds *before* calling this, so this
+/// helper's open is a no-op reopen. Idempotent on the symlink. Unix-only
+/// symlink (the suite runs on macOS / Linux).
+pub fn enrol_catalog_symlinked(
+    paths: &Paths,
+    workspace_name: &str,
+    catalog_name: &str,
+    catalog_root: &Path,
+) -> String {
+    let url = format!("file://{}", catalog_root.display());
+    enrol_catalog_row(paths, workspace_name, catalog_name, &url);
+    let cache_dir = paths.cache_dir_for(&url);
+    if let Some(parent) = cache_dir.parent() {
+        std::fs::create_dir_all(parent).expect("create catalogs parent");
+    }
+    if !cache_dir.exists() {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(catalog_root, &cache_dir).expect("symlink catalog cache");
+        #[cfg(not(unix))]
+        copy_dir(catalog_root, &cache_dir).expect("copy catalog cache (non-unix)");
+    }
+    url
+}
+
+/// Insert one `(workspace_name, catalog_name) -> url` enrolment row, opening
+/// (and bootstrapping) the DB with the **registry** seeds.
+///
+/// Registry seeds (not stub) are stamped on the first open so this helper is
+/// safe to call *before* a test's own `lifecycle::enable`: `index::open`
+/// ignores `OpenOptions` on a reopen, so a stub-embedder enable still works
+/// against a registry-stamped `meta`, while drift-checking tests (`status`,
+/// `doctor`) — which expect the registry identity — see a consistent baseline.
+/// Mirrors the seed discipline already used by [`write_config_for_cli`].
+fn enrol_catalog_row(paths: &Paths, workspace_name: &str, catalog_name: &str, url: &str) {
+    let (e, r, s) = registry_seeds_for_test();
+    let conn = tome::index::open(
+        &paths.index_db,
+        &tome::index::OpenOptions {
+            embedder: e,
+            reranker: r,
+            summariser: s,
+        },
+    )
+    .expect("open index for catalog enrolment");
+    match tome::index::workspace_catalogs::insert(&conn, workspace_name, catalog_name, url, "main")
+    {
+        Ok(()) => {}
+        Err(tome::error::TomeError::CatalogAlreadyExists(_)) => {}
+        Err(e) => panic!("enrol catalog in workspace_catalogs failed: {e}"),
+    }
+}
+
+/// Stage the `sample-plugin-catalog` fixture the way production does (FF1):
+/// copy it into the content-addressed clone dir `paths.cache_dir_for(url)`
+/// and enrol `(workspace_name, catalog_name) -> url` into the
+/// `workspace_catalogs` table — never `config.toml`. This is the real
+/// `tome catalog add` shape, so `lifecycle::resolve_plugin_dir` (which reads
+/// the enrolment URL → cache dir) finds the plugin tree.
+///
+/// Returns the staged clone root (`cache_dir_for(url)`) so callers can do
+/// their on-disk work — `write_plugin`, `rewrite_skill`, `remove_skill` —
+/// against the directory resolution will actually read. The fixture copy is
+/// skipped if the clone already exists, so a second workspace enrolling the
+/// same catalog reuses it. Stamps `meta` with the **registry** seeds (see
+/// [`enrol_catalog_row`]).
+pub fn stage_sample_catalog_in_db(
+    paths: &Paths,
+    workspace_name: &str,
+    catalog_name: &str,
+) -> PathBuf {
+    stage_catalog_dir_in_db(
+        paths,
+        workspace_name,
+        catalog_name,
+        &sample_plugin_catalog_fixture(),
+    )
+}
+
+/// Like [`stage_sample_catalog_in_db`] but stages an arbitrary `source`
+/// directory (e.g. a per-test fixture skeleton) into the clone dir. When
+/// `source` is empty/absent the clone dir is created bare — callers that lay
+/// the tree out themselves via `write_plugin` pass a non-existent path.
+pub fn stage_catalog_dir_in_db(
+    paths: &Paths,
+    workspace_name: &str,
+    catalog_name: &str,
+    source: &Path,
+) -> PathBuf {
+    let url = test_catalog_url(catalog_name);
+    let cache_root = paths.cache_dir_for(&url);
+    if !cache_root.exists() {
+        if source.is_dir() {
+            copy_dir(source, &cache_root).expect("stage catalog clone");
+        } else {
+            std::fs::create_dir_all(&cache_root).expect("create bare catalog clone");
+        }
+    }
+    enrol_catalog_row(paths, workspace_name, catalog_name, &url);
+    cache_root
+}
+
 /// Build a `Paths` rooted entirely under `root`. Mirrors the helper used by
 /// `lifecycle::tests::test_paths` so integration tests never have to touch
 /// `$HOME` or environment variables. F2a collapses everything under one
@@ -311,8 +430,9 @@ pub fn config_with_catalog(catalog_name: &str, catalog_root: &Path) -> Config {
 /// (subsequent `index::open` calls ignore `opts`).
 pub fn write_config_for_cli(paths: &Paths, config: &Config) {
     std::fs::create_dir_all(&paths.root).expect("create tome root");
-    // Legacy: write config.toml so lifecycle's `resolve_plugin_dir`
-    // (still consults Config) finds the catalog path.
+    // Legacy: still written so the (PR-2/PR-3) commands that continue to read
+    // `config.toml [catalogs]` keep finding the catalog while their migration
+    // is pending. `resolve_plugin_dir` no longer consults it (FF1).
     #[allow(deprecated)]
     let body = toml::to_string_pretty(config).expect("serialise config");
     std::fs::write(&paths.global_config_file, body).expect("write config.toml");
@@ -332,6 +452,28 @@ pub fn write_config_for_cli(paths: &Paths, config: &Config) {
     .expect("open index db for catalog seed");
     #[allow(deprecated)]
     for entry in config.catalogs.values() {
+        // FF1: `resolve_plugin_dir` now resolves the catalog root from the
+        // enrolment URL via `cache_dir_for(url)`. The fixture tree lives at
+        // `entry.path`; SYMLINK (not copy) the content-addressed clone dir
+        // onto it so the DB-resolved path and the fixture tree are the SAME
+        // inode tree. A copy snapshots at stage time and goes stale: a test
+        // that corrupts a plugin.json AFTER setup (exit_codes_e2e) or compares
+        // on-disk mtimes against `indexed_at` (doctor_p5) would otherwise see
+        // the pristine copy, not its own mutation. `remove_dir_all` does not
+        // follow symlinks, so each TempDir's cleanup unlinks the symlink
+        // without touching the shared fixture. Unix-only — matches the
+        // macOS + Linux test matrix.
+        let cache_root = paths.cache_dir_for(&entry.url);
+        if entry.path.is_dir() && !cache_root.exists() {
+            if let Some(parent) = cache_root.parent() {
+                std::fs::create_dir_all(parent).expect("create catalogs cache parent");
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&entry.path, &cache_root)
+                .expect("symlink catalog clone for cli tests");
+            #[cfg(not(unix))]
+            copy_dir(&entry.path, &cache_root).expect("stage catalog clone for cli tests");
+        }
         match tome::index::workspace_catalogs::insert(
             &conn,
             "global",
