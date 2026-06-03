@@ -53,9 +53,10 @@ fn build_query_env() -> QueryEnv {
 
     // FF1: `lifecycle::enable` resolves the plugin dir from the DB enrolment
     // now, so enrol the catalog + symlink the cache dir onto the on-disk
-    // fixture. The in-memory `config` is still built because the `query`
-    // command's own filter validation reads `config.catalogs` (its migration
-    // off config.toml is a later PR).
+    // fixture. FF2: `query` filter validation also resolves catalogs from the
+    // DB; the in-memory `config` is still built and threaded into the
+    // (now-vestigial) `QueryDeps.config` field to avoid churning the deps
+    // construction here.
     let catalog_root = copy_sample_plugin_catalog(&tmp, "catalog");
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
 
@@ -458,4 +459,99 @@ fn run_with_deps_unknown_catalog_filter_returns_catalog_not_found() {
 
     let err = run_with_deps(args, deps, Mode::Json).expect_err("unknown catalog must error");
     assert!(matches!(err, tome::error::TomeError::CatalogNotFound(_)));
+}
+
+// ---- FF2: `--catalog`/`--plugin` filter validation reads the DB ----------
+//
+// `validate_filters` previously checked `config.catalogs`; on a fresh
+// install that map is empty, so any `--catalog`/`--plugin` filter on a
+// DB-enrolled catalog failed with `CatalogNotFound`/`PluginNotFound`. These
+// drive `run_with_deps` with an EMPTY in-memory `Config` (the `config`
+// field is now vestigial for validation) and a catalog enrolled ONLY in the
+// DB, proving validation resolves against `workspace_catalogs`.
+
+#[test]
+fn run_with_deps_catalog_plugin_filter_validates_against_db_not_config() {
+    let env = build_query_env();
+    let embedder = StubEmbedder::new();
+    let reranker = StubReranker::new();
+    let empty_config = Config::default();
+
+    let mut args = args_for("anything", 10);
+    args.no_rerank = false;
+    args.catalog = Some("sample-plugin-catalog".to_owned());
+    args.plugin = Some("plugin-beta".to_owned());
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope(WorkspaceName::global()),
+        // Empty config — validation must NOT depend on it. The catalog is
+        // enrolled in the DB by `build_query_env`'s `enrol_catalog_symlinked`.
+        config: &empty_config,
+        embedder: &embedder,
+        reranker: Some(&reranker),
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let outcome = run_with_deps(args, deps, Mode::Json)
+        .expect("catalog/plugin filter must validate against the DB enrolment, not config");
+    for hit in &outcome.results {
+        assert_eq!(hit.candidate.plugin, "plugin-beta");
+        assert_eq!(hit.candidate.catalog, "sample-plugin-catalog");
+    }
+}
+
+#[test]
+fn run_with_deps_unknown_catalog_filter_errors_against_db_with_empty_config() {
+    let env = build_query_env();
+    let embedder = StubEmbedder::new();
+    let empty_config = Config::default();
+
+    let mut args = args_for("anything", 5);
+    args.catalog = Some("does-not-exist".to_owned());
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope(WorkspaceName::global()),
+        config: &empty_config,
+        embedder: &embedder,
+        reranker: None,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let err = run_with_deps(args, deps, Mode::Json).expect_err("unknown catalog must error");
+    assert!(matches!(err, tome::error::TomeError::CatalogNotFound(_)));
+}
+
+#[test]
+fn run_with_deps_unknown_plugin_filter_errors_against_db_with_empty_config() {
+    // Known catalog (DB-enrolled) + unknown plugin → PluginNotFound,
+    // message scoped to `<catalog>/<plugin>` when both filters are set.
+    let env = build_query_env();
+    let embedder = StubEmbedder::new();
+    let empty_config = Config::default();
+
+    let mut args = args_for("anything", 5);
+    args.catalog = Some("sample-plugin-catalog".to_owned());
+    args.plugin = Some("ghost-plugin".to_owned());
+
+    let deps = QueryDeps {
+        paths: &env.paths,
+        scope: &Scope(WorkspaceName::global()),
+        config: &empty_config,
+        embedder: &embedder,
+        reranker: None,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+    };
+
+    let err = run_with_deps(args, deps, Mode::Json).expect_err("unknown plugin must error");
+    match err {
+        tome::error::TomeError::PluginNotFound(msg) => {
+            assert_eq!(msg, "sample-plugin-catalog/ghost-plugin");
+        }
+        other => panic!("expected PluginNotFound, got {other:?}"),
+    }
 }

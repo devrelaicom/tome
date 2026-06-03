@@ -39,7 +39,8 @@ use std::time::Duration;
 
 use common::{
     ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_models, paths_for,
-    stub_embedder_seed, stub_reranker_seed, stub_summariser_seed, write_config_for_cli,
+    stage_sample_catalog_in_db, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
+    write_config_for_cli,
 };
 use rexpect::session::{PtySession, spawn_command};
 use tempfile::TempDir;
@@ -78,6 +79,42 @@ fn setup_pre_enabled(catalog_name: &str) -> (ToolEnv, TempDir, Paths) {
     lifecycle::enable(&id, &deps).expect("pre-enable plugin-alpha");
 
     (env, fixture_tmp, paths)
+}
+
+/// FF2 no-config variant: same as [`setup_pre_enabled`] but the catalog is
+/// enrolled ONLY in the `workspace_catalogs` DB (the real `tome catalog add`
+/// shape) with NO `config.toml`. Before FF2, the interactive flow read
+/// `config.catalogs.is_empty()` and so reported "No catalogs registered" on
+/// a fresh install even after enrolment — the catalog/plugin menus never
+/// rendered. Proving the pty flow drives end-to-end here pins the migration.
+fn setup_pre_enabled_no_config(catalog_name: &str) -> (ToolEnv, Paths) {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+
+    // DB-only enrolment + staged clone — no config.toml.
+    stage_sample_catalog_in_db(&paths, "global", catalog_name);
+
+    let embedder = StubEmbedder::new();
+    let deps = LifecycleDeps {
+        paths: &paths,
+        scope: &tome::workspace::Scope(tome::workspace::WorkspaceName::global()),
+        config: &tome::config::Config::default(),
+        embedder: &embedder,
+        embedder_seed: stub_embedder_seed(),
+        reranker_seed: stub_reranker_seed(),
+        summariser_seed: stub_summariser_seed(),
+        allow_model_download: false,
+    };
+    let id: PluginId = format!("{catalog_name}/plugin-alpha").parse().unwrap();
+    lifecycle::enable(&id, &deps).expect("pre-enable plugin-alpha (no config)");
+
+    assert!(
+        !paths.global_config_file.exists(),
+        "this setup must run with NO config.toml",
+    );
+    (env, paths)
 }
 
 /// Send `bytes` to the pty and flush. `rexpect::PtySession::send` does NOT
@@ -216,6 +253,86 @@ fn interactive_disable_via_scripted_session_exits_zero_and_flips_state() {
     assert_eq!(
         enabled_after, 0,
         "every plugin-alpha skill row must have enabled=0 after interactive disable",
+    );
+}
+
+#[test]
+fn interactive_renders_db_enrolled_catalog_without_config_and_disables() {
+    // FF2: with the catalog enrolled ONLY in the DB (no config.toml), the
+    // interactive flow must still render the catalog + plugin menus and let
+    // the user disable. Before FF2 this hit the empty-config guard and
+    // printed "No catalogs registered", so "Pick a catalog" never appeared.
+    let catalog_name = "sample-plugin-catalog";
+    let (env, paths) = setup_pre_enabled_no_config(catalog_name);
+
+    let (total_before, enabled_before) = read_alpha_enabled_state(&paths);
+    assert!(
+        total_before > 0 && enabled_before == total_before,
+        "expected plugin-alpha fully enabled before drive; got {total_before}/{enabled_before}",
+    );
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tome"));
+    cmd.arg("plugin")
+        .env("HOME", env.home_path())
+        .env("XDG_CONFIG_HOME", env.home_path().join(".config"))
+        .env("XDG_DATA_HOME", env.home_path().join(".local/share"))
+        .env("NO_COLOR", "1")
+        .env_remove("TOME_LOG")
+        .env_remove("RUST_LOG");
+
+    let mut sess = spawn_command(cmd, Some(30_000)).expect("spawn tome plugin under pty");
+
+    // The catalog menu rendering at all is the FF2 proof — the DB-enrolled
+    // catalog is discovered with no config.toml.
+    sess.exp_string("Pick a catalog")
+        .expect("catalog selector prompt (DB-enrolled catalog discovered)");
+    press_enter(&mut sess);
+
+    sess.exp_string("Pick a plugin")
+        .expect("plugin browser prompt");
+    press_enter(&mut sess);
+
+    sess.exp_string("Plugin:").expect("plugin view header");
+    sess.exp_string("Action").expect("action prompt");
+    press_enter(&mut sess);
+
+    sess.exp_string("Disable sample-plugin-catalog/plugin-alpha?")
+        .expect("disable confirm prompt");
+    send_flush(&mut sess, "y\r");
+
+    sess.exp_string("disabled sample-plugin-catalog/plugin-alpha")
+        .expect("disable confirmation line");
+    sess.exp_string("Action")
+        .expect("redrawn action prompt after disable");
+    // Back out of the view loop (menu is now [Enable, Back]).
+    press_down(&mut sess);
+    press_enter(&mut sess);
+
+    // Plugin browser → Back (two plugins + Back).
+    sess.exp_string("Pick a plugin")
+        .expect("plugin browser re-rendered");
+    press_down(&mut sess);
+    press_down(&mut sess);
+    press_enter(&mut sess);
+
+    // Catalog selector → Quit.
+    sess.exp_string("Pick a catalog")
+        .expect("catalog selector re-rendered");
+    press_down(&mut sess);
+    press_enter(&mut sess);
+
+    sess.exp_eof().expect("clean EOF after Quit");
+    let status = sess.process().wait().expect("collect child status");
+    use rexpect::process::WaitStatus;
+    assert!(
+        matches!(status, WaitStatus::Exited(_, 0)),
+        "expected exit 0 on clean Quit; got {status:?}",
+    );
+
+    let (_total_after, enabled_after) = read_alpha_enabled_state(&paths);
+    assert_eq!(
+        enabled_after, 0,
+        "plugin-alpha must be disabled after the interactive flow",
     );
 }
 

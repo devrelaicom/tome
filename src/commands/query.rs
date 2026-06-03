@@ -16,7 +16,6 @@ use std::path::PathBuf;
 use comfy_table::{Cell, CellAlignment};
 use serde::Serialize;
 
-use crate::catalog::store;
 use crate::cli::QueryArgs;
 use crate::config::Config;
 use crate::embedding::fastembed::{FastembedEmbedder, FastembedReranker};
@@ -48,6 +47,10 @@ const SCORING_SIMILARITY: &str = "embedding-similarity";
 pub struct QueryDeps<'a> {
     pub paths: &'a Paths,
     pub scope: &'a Scope,
+    /// Vestigial since FF2 moved `--catalog`/`--plugin` validation onto the
+    /// `workspace_catalogs` DB — nothing in the query pipeline reads this.
+    /// Retained as a field to avoid churning the test construction sites in
+    /// this bug-fix slice; callers may pass `Config::default()`.
     pub config: &'a Config,
     pub embedder: &'a dyn Embedder,
     pub reranker: Option<&'a dyn Reranker>,
@@ -90,8 +93,10 @@ impl ScoringMode {
 
 pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    // F2a: single global config; F11 reintroduces workspace-aware view.
-    let config = store::load(&paths.global_config_file)?;
+    // FF2: `validate_filters` resolves catalogs from the `workspace_catalogs`
+    // DB now, so the command no longer reads `config.toml [catalogs]`. The
+    // vestigial `QueryDeps.config` field is populated with an empty default.
+    let config = Config::default();
 
     // Model presence — embedder always required, reranker required unless
     // `--no-rerank`. We check before constructing the heavy
@@ -193,11 +198,13 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
         return Err(TomeError::Usage("query text is empty".into()));
     }
 
-    // Validate filter flags before any model / DB work — these are cheap
-    // catalog-manifest reads and fail fast on typos.
-    validate_filters(args, deps.config)?;
-
     let conn = open_index_for_read(deps.paths, deps.scope)?;
+
+    // Validate filter flags before any model work — a cheap DB enrolment
+    // lookup plus at most one catalog-manifest read per catalog, failing
+    // fast on typos. FF2: catalog existence is resolved from
+    // `workspace_catalogs`, not `config.toml` (never written in production).
+    validate_filters(args, &conn, deps.scope.name().as_str(), deps.paths)?;
 
     // Drift detection. Embedder drift hard-fails (vectors are stale);
     // reranker drift only degrades quality, so we keep the value and
@@ -286,12 +293,25 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
     })
 }
 
-/// Validate `--catalog` / `--plugin` against the on-disk catalog manifests.
-/// Costs at most one TOML parse per registered catalog when a `--plugin`
-/// filter is set; bounded and cheap relative to the query itself.
-fn validate_filters(args: &QueryArgs, config: &Config) -> Result<(), TomeError> {
+/// Validate `--catalog` / `--plugin` against the `workspace_catalogs` DB
+/// enrolment + the on-disk catalog manifests.
+///
+/// FF2: catalog existence is resolved from the DB (`config.toml [catalogs]`
+/// is never written in production, so reading it failed every filter on a
+/// fresh install). Costs one enrolment lookup plus at most one TOML parse
+/// per enrolled catalog when a `--plugin` filter is set — bounded and cheap
+/// relative to the query itself. The `<catalog>/<plugin>` vs bare error
+/// message semantics are preserved.
+fn validate_filters(
+    args: &QueryArgs,
+    conn: &rusqlite::Connection,
+    workspace_name: &str,
+    paths: &Paths,
+) -> Result<(), TomeError> {
+    use crate::index::workspace_catalogs;
+
     if let Some(catalog) = args.catalog.as_deref()
-        && !config.catalogs.contains_key(catalog)
+        && workspace_catalogs::find(conn, workspace_name, catalog)?.is_none()
     {
         return Err(TomeError::CatalogNotFound(catalog.to_owned()));
     }
@@ -300,16 +320,19 @@ fn validate_filters(args: &QueryArgs, config: &Config) -> Result<(), TomeError> 
         return Ok(());
     };
 
-    let catalog_names: Vec<&str> = match args.catalog.as_deref() {
-        Some(c) => vec![c],
-        None => config.catalogs.keys().map(String::as_str).collect(),
+    // Resolve the set of enrolments to scan: the one named catalog (already
+    // confirmed to exist above), or every enrolment in the workspace when no
+    // `--catalog` was given.
+    let enrolments = match args.catalog.as_deref() {
+        Some(c) => workspace_catalogs::find(conn, workspace_name, c)?
+            .into_iter()
+            .collect(),
+        None => workspace_catalogs::list_for_workspace(conn, workspace_name)?,
     };
 
-    for name in &catalog_names {
-        let Some(entry) = config.catalogs.get(*name) else {
-            continue;
-        };
-        let Some(manifest) = read_catalog_manifest(&entry.path) else {
+    for enrolment in &enrolments {
+        let clone_dir = paths.cache_dir_for(&enrolment.url);
+        let Some(manifest) = read_catalog_manifest(&clone_dir) else {
             continue;
         };
         if manifest.plugins.iter().any(|p| p.name == plugin) {

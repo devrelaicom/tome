@@ -304,6 +304,85 @@ fn reindex_unknown_catalog_exits_3() {
     assert_eq!(out.status.code(), Some(3));
 }
 
+// ---- FF2: scoped reindex resolves the catalog from the DB enrolment ------
+//
+// `parse_scope` previously checked `config.catalogs` for catalog existence;
+// on a fresh install that map is empty, so `reindex <catalog>` and
+// `reindex <catalog>/<plugin>` failed with exit 3 even for a DB-enrolled
+// catalog. These drive the CLI binary against a catalog enrolled ONLY in
+// the DB (no config.toml) and assert the exit-code contract is preserved:
+// unknown catalog → 3, known catalog + unknown plugin → 20.
+
+#[test]
+fn reindex_catalog_scope_resolves_from_db_without_config() {
+    // A DB-enrolled catalog with no enabled plugins reindexes to a clean
+    // zero (exit 0, "Nothing to reindex") — the point is that the catalog
+    // RESOLVES (no exit 3), not that there is work to do.
+    let env = ToolEnv::new();
+    let paths = common::paths_for(&env);
+    common::stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+    assert!(
+        !paths.global_config_file.exists(),
+        "this test must run with NO config.toml",
+    );
+
+    let out = env
+        .cmd()
+        .args(["reindex", "sample-plugin-catalog"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "reindex <db-enrolled-catalog> must resolve (exit 0), not exit 3; stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Nothing to reindex"),
+        "no enabled plugins → clean zero",
+    );
+}
+
+#[test]
+fn reindex_known_catalog_unknown_plugin_exits_20_without_config() {
+    let env = ToolEnv::new();
+    let paths = common::paths_for(&env);
+    common::stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+
+    let out = env
+        .cmd()
+        .args(["reindex", "sample-plugin-catalog/ghost-plugin"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(20),
+        "known catalog + unknown plugin must be PluginNotFound (exit 20); stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+#[test]
+fn reindex_unknown_catalog_scoped_plugin_exits_3_without_config() {
+    // `<catalog>/<plugin>` where the catalog itself is unknown → exit 3,
+    // checked before plugin existence.
+    let env = ToolEnv::new();
+    let paths = common::paths_for(&env);
+    common::stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+
+    let out = env
+        .cmd()
+        .args(["reindex", "ghost-catalog/plugin-alpha"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "unknown catalog in a scoped id must remain CatalogNotFound (exit 3); stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
 #[test]
 fn reindex_invalid_scope_format_exits_2() {
     let env = ToolEnv::new();

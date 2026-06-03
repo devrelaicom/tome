@@ -102,7 +102,8 @@ use std::fs;
 
 use common::{
     ToolEnv, config_with_catalog, copy_sample_plugin_catalog, fabricate_all_registry_models,
-    paths_for, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed, write_config_for_cli,
+    paths_for, stage_sample_catalog_in_db, stub_embedder_seed, stub_reranker_seed,
+    stub_summariser_seed, write_config_for_cli,
 };
 use tempfile::TempDir;
 use tome::embedding::registry::MODEL_REGISTRY;
@@ -683,22 +684,22 @@ fn reindex_unknown_plugin_in_known_catalog_exits_20() {
     // minor #2: the `Reindex unknown plugin` → exit 20 path was not
     // covered. We register a catalog (no plugins enabled), then ask to
     // reindex a non-existent plugin scope.
-    let _tmp = TempDir::new().unwrap();
+    //
+    // FF2 (R2/#153 pattern): this test previously wrote `config.toml`
+    // directly with NO DB enrolment and so only passed because `parse_scope`
+    // read `config.catalogs` — it codified the bug. `reindex` now resolves
+    // catalog existence from the `workspace_catalogs` DB, so enrol the
+    // catalog there (the real `tome catalog add` shape). With the catalog
+    // KNOWN but `no-such-plugin` absent, the exit-20 PluginNotFound path is
+    // what we mean to exercise.
     let env = ToolEnv::new();
-    let tmpdir = TempDir::new().unwrap();
-    let catalog_root = copy_sample_plugin_catalog(&tmpdir, "sample-plugin-catalog");
-    let cfg = format!(
-        "[catalogs.sample-plugin-catalog]\n\
-         name = \"sample-plugin-catalog\"\n\
-         url = \"file://{path}\"\n\
-         ref = \"main\"\n\
-         path = \"{path}\"\n\
-         last_synced = \"2026-05-13T00:00:00Z\"\n",
-        path = catalog_root.display(),
-    );
     let paths = paths_for(&env);
     fs::create_dir_all(&paths.root).expect("config dir");
-    fs::write(&paths.global_config_file, cfg).expect("write config");
+    stage_sample_catalog_in_db(&paths, "global", "sample-plugin-catalog");
+    assert!(
+        !paths.global_config_file.exists(),
+        "this test must run with NO config.toml (DB enrolment only)",
+    );
 
     let out = env
         .cmd()
