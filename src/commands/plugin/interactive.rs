@@ -42,10 +42,9 @@
 use std::fmt;
 use std::io::Write;
 
-use crate::catalog::store;
 use crate::cli::PluginEnableArgs;
-use crate::config::Config;
 use crate::error::TomeError;
+use crate::index::workspace_catalogs;
 use crate::output::{self, Mode};
 use crate::paths::Paths;
 use crate::plugin::PluginStatus;
@@ -86,10 +85,16 @@ pub fn run(scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     }
 
     let paths = Paths::resolve()?;
-    // F2a: single global config; F11 reintroduces workspace-aware view.
-    let config = store::load(&paths.global_config_file)?;
 
-    if config.catalogs.is_empty() {
+    // FF2: catalog enrolment is sourced from the `workspace_catalogs` DB,
+    // not `config.toml [catalogs]` (never written in production → the
+    // interactive flow always reported "No catalogs registered" on a fresh
+    // install even after `tome catalog add`).
+    let conn = open_index_for_read(&paths, &scope.scope)?;
+    let enrolments = workspace_catalogs::list_for_workspace(&conn, scope.scope.name().as_str())?;
+    drop(conn);
+
+    if enrolments.is_empty() {
         let mut out = std::io::stdout().lock();
         writeln!(
             out,
@@ -98,7 +103,7 @@ pub fn run(scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
         return Ok(());
     }
 
-    catalog_loop(&paths, scope, &config)
+    catalog_loop(&paths, scope)
 }
 
 // ---------------------------------------------------------------------------
@@ -128,9 +133,9 @@ impl From<TomeError> for LoopExit {
 
 type LoopFlow = Result<(), LoopExit>;
 
-fn catalog_loop(paths: &Paths, scope: &ResolvedScope, config: &Config) -> Result<(), TomeError> {
+fn catalog_loop(paths: &Paths, scope: &ResolvedScope) -> Result<(), TomeError> {
     loop {
-        let menu = build_catalog_menu(paths, scope, config)?;
+        let menu = build_catalog_menu(paths, scope)?;
         let pick = match prompt_select("Pick a catalog", menu) {
             Ok(v) => v,
             Err(InteractiveExit::Quit) => return Ok(()),
@@ -138,7 +143,7 @@ fn catalog_loop(paths: &Paths, scope: &ResolvedScope, config: &Config) -> Result
         };
         match pick {
             CatalogChoice::Quit => return Ok(()),
-            CatalogChoice::Catalog { name, .. } => match plugin_loop(paths, scope, config, &name) {
+            CatalogChoice::Catalog { name, .. } => match plugin_loop(paths, scope, &name) {
                 Ok(()) => continue,
                 Err(LoopExit::Quit) => return Ok(()),
                 Err(LoopExit::Err(e)) => return Err(e),
@@ -147,16 +152,11 @@ fn catalog_loop(paths: &Paths, scope: &ResolvedScope, config: &Config) -> Result
     }
 }
 
-fn plugin_loop(
-    paths: &Paths,
-    scope: &ResolvedScope,
-    config: &Config,
-    catalog_name: &str,
-) -> LoopFlow {
+fn plugin_loop(paths: &Paths, scope: &ResolvedScope, catalog_name: &str) -> LoopFlow {
     loop {
         // Menu construction errors bubble up — same exit-code surface as
         // `tome plugin list`.
-        let menu = build_plugin_menu(paths, scope, config, catalog_name)?;
+        let menu = build_plugin_menu(paths, scope, catalog_name)?;
         let pick = match prompt_select(&format!("Pick a plugin in `{catalog_name}`"), menu) {
             Ok(v) => v,
             Err(InteractiveExit::Quit) => return Err(LoopExit::Quit),
@@ -229,25 +229,33 @@ impl fmt::Display for CatalogChoice {
 fn build_catalog_menu(
     paths: &Paths,
     scope: &ResolvedScope,
-    config: &Config,
 ) -> Result<Vec<CatalogChoice>, TomeError> {
     let conn = open_index_for_read(paths, &scope.scope)?;
     let workspace_name = scope.scope.name().as_str();
-    let mut out: Vec<CatalogChoice> = Vec::with_capacity(config.catalogs.len() + 1);
-    for (catalog_name, entry) in &config.catalogs {
-        let manifest = read_catalog_manifest(&entry.path);
+    // FF2: enumerate enrolments from the `workspace_catalogs` DB; the
+    // catalog clone root is the content-addressed `cache_dir_for(url)`.
+    let enrolments = workspace_catalogs::list_for_workspace(&conn, workspace_name)?;
+    let mut out: Vec<CatalogChoice> = Vec::with_capacity(enrolments.len() + 1);
+    for enrolment in &enrolments {
+        let clone_dir = paths.cache_dir_for(&enrolment.url);
+        let manifest = read_catalog_manifest(&clone_dir);
         let plugin_count = manifest.as_ref().map(|m| m.plugins.len()).unwrap_or(0);
         let mut enabled_count = 0usize;
         if let Some(manifest) = &manifest {
             for plugin in &manifest.plugins {
-                let agg = aggregate_for_plugin(&conn, workspace_name, catalog_name, &plugin.name)?;
+                let agg = aggregate_for_plugin(
+                    &conn,
+                    workspace_name,
+                    &enrolment.catalog_name,
+                    &plugin.name,
+                )?;
                 if agg.total > 0 && agg.enabled > 0 {
                     enabled_count += 1;
                 }
             }
         }
         out.push(CatalogChoice::Catalog {
-            name: catalog_name.clone(),
+            name: enrolment.catalog_name.clone(),
             plugin_count,
             enabled_count,
         });
@@ -292,25 +300,24 @@ impl fmt::Display for PluginChoice {
 fn build_plugin_menu(
     paths: &Paths,
     scope: &ResolvedScope,
-    config: &Config,
     catalog_name: &str,
 ) -> Result<Vec<PluginChoice>, TomeError> {
-    let entry = config
-        .catalogs
-        .get(catalog_name)
-        .ok_or_else(|| TomeError::CatalogNotFound(catalog_name.to_owned()))?;
-    let manifest = read_catalog_manifest(&entry.path);
     let conn = open_index_for_read(paths, &scope.scope)?;
     let workspace_name = scope.scope.name().as_str();
+    // FF2: resolve the catalog clone root from the DB enrolment URL.
+    let enrolment = workspace_catalogs::find(&conn, workspace_name, catalog_name)?
+        .ok_or_else(|| TomeError::CatalogNotFound(catalog_name.to_owned()))?;
+    let clone_dir = paths.cache_dir_for(&enrolment.url);
+    let manifest = read_catalog_manifest(&clone_dir);
 
     let mut out: Vec<PluginChoice> = Vec::new();
     if let Some(manifest) = manifest {
         for plugin in manifest.plugins {
             let id = PluginId {
-                catalog: entry.name.clone(),
+                catalog: enrolment.catalog_name.clone(),
                 plugin: plugin.name.clone(),
             };
-            let plugin_dir = entry.path.join(&plugin.source);
+            let plugin_dir = clone_dir.join(&plugin.source);
             let parsed = parse_plugin_manifest(&manifest_path_for(&plugin_dir)).ok();
             let agg = aggregate_for_plugin(&conn, workspace_name, &id.catalog, &id.plugin)?;
             let status = match &parsed {
@@ -380,8 +387,8 @@ fn render_plugin_view(
 ) -> Result<PluginStatus, TomeError> {
     // F11b: the catalog enrolment is read from the DB, so the read handle is
     // opened before resolving the plugin directory and reused for the
-    // aggregate below. (The surrounding menu builders still consult
-    // `config.catalogs`; those readers migrate in a later slice.)
+    // aggregate below. The surrounding menu builders read the same
+    // `workspace_catalogs` enrolment since FF2.
     let conn = open_index_for_read(paths, &scope.scope)?;
     let plugin_dir = resolve_plugin_dir(id, &conn, scope.scope.name().as_str(), paths)?;
     let manifest = parse_plugin_manifest(&manifest_path_for(&plugin_dir));

@@ -16,9 +16,7 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use crate::catalog::store;
 use crate::cli::ReindexArgs;
-use crate::config::Config;
 use crate::embedding::fastembed::FastembedEmbedder;
 use crate::error::TomeError;
 use crate::index::skills::ReindexSummary;
@@ -30,7 +28,7 @@ use crate::plugin::lifecycle::{self, LifecycleDeps};
 use crate::presentation::colour;
 use crate::workspace::ResolvedScope;
 
-use crate::commands::plugin::{embedder_entry, registry_seeds};
+use crate::commands::plugin::{embedder_entry, open_index_for_read, registry_seeds};
 
 // NOTE: this module's local `Scope` enum is the reindex *target* (all /
 // catalog / plugin). To avoid a name collision with the Phase 3
@@ -39,10 +37,8 @@ use crate::commands::plugin::{embedder_entry, registry_seeds};
 
 pub fn run(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    // F2a: single global config; F11 reintroduces workspace-aware view.
-    let config = store::load(&paths.global_config_file)?;
 
-    let scope = parse_scope(args.scope.as_deref(), &config, &paths, &ws.scope)?;
+    let scope = parse_scope(args.scope.as_deref(), &paths, &ws.scope)?;
     let plugins = resolve_targets(&scope, &paths, &ws.scope)?;
 
     if plugins.is_empty() {
@@ -57,6 +53,10 @@ pub fn run(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), Tome
 
     let embedder = load_embedder(&paths)?;
     let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
+    // `LifecycleDeps.config` is vestigial since the catalog-enrolment
+    // migration to the DB — `resolve_plugin_dir` reads `workspace_catalogs`
+    // and nothing in the lifecycle consults `config`. Pass an empty default.
+    let config = crate::config::Config::default();
     let deps = LifecycleDeps {
         paths: &paths,
         scope: &ws.scope,
@@ -102,17 +102,23 @@ impl Scope {
 
 fn parse_scope(
     raw: Option<&str>,
-    config: &Config,
     paths: &Paths,
     ws_scope: &crate::workspace::Scope,
 ) -> Result<Scope, TomeError> {
     let Some(s) = raw else {
         return Ok(Scope::All);
     };
+    // FF2: catalog existence is checked against the `workspace_catalogs` DB
+    // enrolment, not `config.toml [catalogs]` (never written in production →
+    // every scoped reindex failed with exit 3 on a fresh install). The
+    // exit-code contract is unchanged: unknown catalog → CatalogNotFound (3);
+    // known catalog + unknown plugin → PluginNotFound (20).
+    let conn = open_index_for_read(paths, ws_scope)?;
+    let workspace_name = ws_scope.name().as_str();
     if s.contains('/') {
         let id = PluginId::from_str(s)
             .map_err(|e| TomeError::Usage(format!("invalid plugin id `{s}`: {e}")))?;
-        if !config.catalogs.contains_key(&id.catalog) {
+        if index::workspace_catalogs::find(&conn, workspace_name, &id.catalog)?.is_none() {
             return Err(TomeError::CatalogNotFound(id.catalog));
         }
         // Plugin existence is enforced at the reindex step (PluginNotFound /
@@ -126,7 +132,7 @@ fn parse_scope(
         }
         Ok(Scope::Plugin(id))
     } else {
-        if !config.catalogs.contains_key(s) {
+        if index::workspace_catalogs::find(&conn, workspace_name, s)?.is_none() {
             return Err(TomeError::CatalogNotFound(s.to_owned()));
         }
         Ok(Scope::Catalog(s.to_owned()))

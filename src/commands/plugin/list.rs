@@ -11,9 +11,7 @@ use std::io::Write;
 use comfy_table::Cell;
 use serde::Serialize;
 
-use crate::catalog::store;
 use crate::cli::PluginListArgs;
-use crate::config::Config;
 use crate::error::TomeError;
 use crate::output::Mode;
 use crate::paths::Paths;
@@ -30,13 +28,14 @@ use super::{
 
 pub fn run(args: PluginListArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    // F2a: single global config; F11b reintroduces workspace-aware view
-    // of catalog enrolment. F11a already threads the resolved workspace
-    // through the per-plugin aggregate (`workspace_skills` join).
-    let config = store::load(&paths.global_config_file)?;
 
+    // FF2: catalog enrolment is sourced from the `workspace_catalogs` DB,
+    // not `config.toml [catalogs]` — the latter is never written in
+    // production (`tome catalog add` enrols only into the DB), so reading it
+    // here surfaced an empty list on a fresh install. F11a already threads
+    // the resolved workspace through the per-plugin aggregate.
     let conn = open_index_for_read(&paths, &scope.scope)?;
-    let rows = collect_rows(&config, &args, &conn, &paths, scope.scope.name().as_str())?;
+    let rows = collect_rows(&args, &conn, &paths, scope.scope.name().as_str())?;
 
     let filtered: Vec<Row> = if args.enabled_only {
         rows.into_iter()
@@ -69,38 +68,40 @@ struct Row {
 }
 
 fn collect_rows(
-    config: &Config,
     args: &PluginListArgs,
     conn: &rusqlite::Connection,
-    _paths: &Paths,
+    paths: &Paths,
     workspace_name: &str,
 ) -> Result<Vec<Row>, TomeError> {
+    use crate::index::workspace_catalogs;
+
     let mut out: Vec<Row> = Vec::new();
 
-    let catalog_iter: Vec<&str> = match &args.catalog {
-        Some(name) => {
-            if !config.catalogs.contains_key(name) {
-                return Err(TomeError::CatalogNotFound(name.clone()));
-            }
-            vec![name.as_str()]
-        }
-        None => config.catalogs.keys().map(String::as_str).collect(),
+    // FF2: catalog enrolment now comes from `workspace_catalogs`. A
+    // `--catalog <name>` filter resolves one enrolment (miss → exit 3); the
+    // bare form iterates every enrolment in the resolved workspace. The
+    // on-disk catalog root is the content-addressed clone dir derived from
+    // the enrolment URL, replacing the old `config.catalogs[name].path`.
+    let enrolments = match &args.catalog {
+        Some(name) => vec![
+            workspace_catalogs::find(conn, workspace_name, name)?
+                .ok_or_else(|| TomeError::CatalogNotFound(name.clone()))?,
+        ],
+        None => workspace_catalogs::list_for_workspace(conn, workspace_name)?,
     };
 
-    for catalog_name in catalog_iter {
-        let Some(entry) = config.catalogs.get(catalog_name) else {
-            continue;
-        };
-        let Some(manifest) = read_catalog_manifest(&entry.path) else {
+    for enrolment in &enrolments {
+        let clone_dir = paths.cache_dir_for(&enrolment.url);
+        let Some(manifest) = read_catalog_manifest(&clone_dir) else {
             continue;
         };
 
         for plugin in &manifest.plugins {
             let id = PluginId {
-                catalog: entry.name.clone(),
+                catalog: enrolment.catalog_name.clone(),
                 plugin: plugin.name.clone(),
             };
-            let plugin_dir = entry.path.join(&plugin.source);
+            let plugin_dir = clone_dir.join(&plugin.source);
 
             let row = build_row(&id, &plugin_dir, conn, workspace_name)?;
             out.push(row);
