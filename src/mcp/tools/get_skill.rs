@@ -46,8 +46,8 @@ pub struct Output {
 
 /// Pipeline:
 ///
-/// 1. Verify the resolved scope's config has the named catalog
-///    (`unknown_catalog` per contract).
+/// 1. Verify the resolved scope's `workspace_catalogs` DB enrolment has
+///    the named catalog (`unknown_catalog` per contract).
 /// 2. Look up `(catalog, plugin, name)` in the index. Distinguish
 ///    `unknown_plugin` (no rows for that catalog+plugin pair) from
 ///    `unknown_skill` (no row, or row exists but `enabled = 0`).
