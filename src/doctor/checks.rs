@@ -585,8 +585,17 @@ pub fn count_entries_by_kind(
             ) else {
                 continue;
             };
+            // Compare at full nanosecond precision on BOTH sides. `indexed_at`
+            // is stored at RFC3339 sub-second precision (`index::skills`) and
+            // `mtime` is nanosecond; truncating indexed_at to whole seconds
+            // (the previous `from_secs(unix_timestamp())`) false-positived
+            // every entry whose source mtime landed in the SAME wall-clock
+            // second as indexing — i.e. every freshly-enabled plugin on a fast
+            // filesystem (surfaced as a deterministic ubuntu/ext4 CI failure of
+            // `pending_re_embedding_zero_when_no_files_touched`, green on the
+            // slower macOS runner only by timing luck).
             let indexed_st = SystemTime::UNIX_EPOCH
-                + std::time::Duration::from_secs(indexed_dt.unix_timestamp().max(0) as u64);
+                + std::time::Duration::from_nanos(indexed_dt.unix_timestamp_nanos().max(0) as u64);
             if mtime > indexed_st {
                 pending = pending.saturating_add(1);
             }
