@@ -637,10 +637,12 @@ pub fn cache_dir_for(env: &ToolEnv, url: &str) -> PathBuf {
 /// to `None` on drop, surviving panics so a failing assertion can't
 /// leak the override into the next test binary entry.
 ///
-/// The override slot is a process-global `RwLock`; integration tests
-/// that install one must serialise via the `OVERRIDE_MUTEX` pattern
-/// documented in `tests/harness_sync_stub.rs` to avoid clobbering one
-/// another when cargo runs them in parallel.
+/// The override slot is a process-global `RwLock`. Because the integration
+/// test binaries are consolidated (many former `tests/*.rs` files now share
+/// one compiled binary), every test that installs an override must serialise
+/// on the single process-wide [`HARNESS_OVERRIDE_MUTEX`] for the whole time it
+/// holds one — otherwise co-resident tests clobber each other's modules in the
+/// single global slot. Acquire it before `HOME_MUTEX` if a test needs both.
 pub struct HarnessModulesGuard;
 
 impl HarnessModulesGuard {
@@ -659,6 +661,18 @@ impl Drop for HarnessModulesGuard {
             .expect("HARNESS_MODULES_OVERRIDE poisoned") = None;
     }
 }
+
+/// Process-wide serialisation lock for every test that installs into the
+/// single global `tome::harness::HARNESS_MODULES_OVERRIDE` slot (whether via
+/// [`HarnessModulesGuard`] or a direct write). One lock per consolidated test
+/// binary: hold it for the whole test body —
+/// `let _lock = crate::common::HARNESS_OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());`
+/// — so co-resident tests in the same binary serialise on the slot instead of
+/// clobbering one another. (Before consolidation each `tests/*.rs` file owned
+/// the slot exclusively as its own process and used a file-private mutex; now
+/// many files share one binary and must share this one lock.) Ordering rule:
+/// acquire this BEFORE `HOME_MUTEX` when a test needs both.
+pub static HARNESS_OVERRIDE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// `HarnessModule` whose `name()` is determined at construction. The
 /// name string is leaked via [`Box::leak`] so we can satisfy the
@@ -831,17 +845,28 @@ impl HomeGuard {
 // P5 retro lesson — a panic in one test must not cascade into setup
 // failures for the next.
 //
-// Unlike `HomeGuard`, these guards do not serialise against a process-
-// global lock: the override slots are per-substitution-layer and the
-// production code path consults them as read-only inputs once per
-// `render()` call. Tests that drive `render()` concurrently against
-// different override values would need to introduce their own
-// synchronisation; F3 ships no consumer that does this.
+// Because the integration-test binaries are consolidated (the substitution
+// tests that were once each their own process now share one binary), every test
+// that installs an override OR reads one back via `render()` must hold the
+// single process-wide [`SUBSTITUTION_OVERRIDE_MUTEX`] for its whole body —
+// including any assertion made AFTER a guard drops (e.g. that the slot cleared).
+// The guards themselves stay lock-free so one test can hold several at once
+// without self-deadlocking; the test-level lock is what serialises them. The
+// lock is separate from each slot's own value mutex, which the production
+// `render()` path locks only briefly, so holding it never blocks production.
 // ---------------------------------------------------------------------------
+
+/// Process-wide serialisation lock for every test that touches the substitution
+/// override slots. Hold it for the whole test body
+/// (`let _lock = crate::common::SUBSTITUTION_OVERRIDE_MUTEX.lock().unwrap_or_else(|e| e.into_inner());`)
+/// so co-resident tests in the consolidated binary don't clobber the single
+/// global slots that the production `render()` path reads.
+pub static SUBSTITUTION_OVERRIDE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Install a fixed clock value into
 /// [`tome::substitution::SUBSTITUTION_CLOCK_OVERRIDE`]. The slot is
-/// restored to `None` on drop.
+/// restored to `None` on drop. Callers serialise via
+/// [`SUBSTITUTION_OVERRIDE_MUTEX`] (held for the whole test body).
 pub struct ClockOverrideGuard;
 
 impl ClockOverrideGuard {
@@ -865,7 +890,8 @@ impl Drop for ClockOverrideGuard {
 
 /// Install a path into
 /// [`tome::substitution::PLUGIN_DATA_DIR_OVERRIDE`]. The slot is
-/// restored to `None` on drop.
+/// restored to `None` on drop. Callers serialise via
+/// [`SUBSTITUTION_OVERRIDE_MUTEX`] (held for the whole test body).
 pub struct PluginDataDirGuard;
 
 impl PluginDataDirGuard {
@@ -889,7 +915,8 @@ impl Drop for PluginDataDirGuard {
 
 /// Install a path into
 /// [`tome::substitution::WORKSPACE_DATA_DIR_OVERRIDE`]. The slot is
-/// restored to `None` on drop.
+/// restored to `None` on drop. Callers serialise via
+/// [`SUBSTITUTION_OVERRIDE_MUTEX`] (held for the whole test body).
 pub struct WorkspaceDataDirGuard;
 
 impl WorkspaceDataDirGuard {
