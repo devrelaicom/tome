@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{error, info};
 
-use crate::catalog::store;
 use crate::cli::QueryArgs;
 use crate::commands::query;
 use crate::embedding::Reranker;
@@ -166,21 +165,36 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         ));
     }
 
-    // Enabled-catalog gating resolves against the single central config.
-    let config = store::load(&state.paths.global_config_file).map_err(|e| {
-        McpError::internal_error(
-            format!("load config: {e}"),
-            Some(json!({ "code": "internal" })),
-        )
-    })?;
-
-    if let Some(catalog) = input.catalog.as_deref()
-        && !config.catalogs.contains_key(catalog)
-    {
-        return Err(McpError::invalid_params(
-            format!("catalog `{catalog}` is not enabled in the resolved scope"),
-            Some(json!({ "code": "unknown_catalog", "catalog": catalog })),
-        ));
+    // FF3: catalog existence resolves from the `workspace_catalogs` DB, not
+    // `config.toml [catalogs]` (never written in production → any `--catalog`
+    // filter returned `unknown_catalog` on a fresh install). Checked here,
+    // before the (expensive) reranker load, so an unknown catalog fails fast
+    // with the same envelope the query pipeline would later produce. The
+    // pipeline's own `validate_filters` (DB-backed since FF2) remains the
+    // backstop and additionally validates the `--plugin` filter.
+    if let Some(catalog) = input.catalog.as_deref() {
+        let paths = state.paths.clone();
+        let scope = state.scope.scope.clone();
+        let catalog_owned = catalog.to_owned();
+        let exists = tokio::task::spawn_blocking(move || {
+            let conn = crate::index::db::open_read_only(&paths.index_db)?;
+            crate::index::workspace_catalogs::find(&conn, scope.name().as_str(), &catalog_owned)
+                .map(|o| o.is_some())
+        })
+        .await
+        .map_err(|e| {
+            McpError::internal_error(
+                format!("catalog check join: {e}"),
+                Some(json!({ "code": "internal" })),
+            )
+        })?
+        .map_err(tome_to_mcp)?;
+        if !exists {
+            return Err(McpError::invalid_params(
+                format!("catalog `{catalog}` is not enabled in the resolved scope"),
+                Some(json!({ "code": "unknown_catalog", "catalog": catalog })),
+            ));
+        }
     }
 
     // Lazy-load the reranker. `tokio::sync::OnceCell::get_or_try_init`
@@ -232,6 +246,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     let reranker: Arc<dyn Reranker> = reranker_arc;
     let paths = state.paths.clone();
     let scope = state.scope.scope.clone();
+    // FF2: `QueryDeps.config` is vestigial — `query::pipeline` resolves
+    // `--catalog`/`--plugin` from the `workspace_catalogs` DB. Pass an empty
+    // default rather than reading the never-written `config.toml`.
+    let config = crate::config::Config::default();
 
     // The pipeline calls into `rusqlite` + `fastembed`, both sync.
     // Run on the blocking pool so the single-threaded reactor isn't

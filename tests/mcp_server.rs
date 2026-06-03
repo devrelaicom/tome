@@ -27,6 +27,7 @@ mod common;
 
 use std::sync::Arc;
 
+use common::mcp_harness::open_index;
 use common::{ToolEnv, paths_for};
 use tokio::sync::OnceCell;
 use tome::embedding::Reranker;
@@ -249,7 +250,11 @@ fn search_skills_returns_unknown_catalog_for_missing_name() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    std::fs::write(&paths.global_config_file, "[catalogs]\n").unwrap();
+    // FF3: catalog existence resolves from the `workspace_catalogs` DB, not
+    // config.toml. Bootstrap an empty index DB (the MCP preflight requires
+    // the DB to exist before any handler runs); `find` then returns None for
+    // the unenrolled catalog → `unknown_catalog`.
+    drop(open_index(&paths));
 
     let state = build_state(&env);
 
@@ -289,7 +294,11 @@ fn get_skill_returns_unknown_catalog_for_missing_name() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
-    std::fs::write(&paths.global_config_file, "[catalogs]\n").unwrap();
+    // FF3: catalog existence resolves from the `workspace_catalogs` DB, not
+    // config.toml. Bootstrap an empty index DB (the MCP preflight requires
+    // the DB to exist before any handler runs); `find` then returns None for
+    // the unenrolled catalog → `unknown_catalog`.
+    drop(open_index(&paths));
 
     let state = build_state(&env);
 
