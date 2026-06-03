@@ -108,11 +108,16 @@ static STUB_RERANKER_ENTRY: ModelEntry = ModelEntry {
 // Fixture staging.
 //
 // Factored from `tests/entry_e2e.rs::stage_workspace` (itself modelled on
-// `tests/mcp_prompts.rs::stage_workspace_with`). The decisive difference
-// from the `mcp_prompts.rs` variant is that this one PERSISTS
-// `config.toml` to disk via `catalog::store::save`, which
-// `get_skill::handle` requires (it calls `store::load(global_config_file)`
-// and returns `unknown_catalog` otherwise).
+// `tests/mcp_prompts.rs::stage_workspace_with`).
+//
+// FF3: this helper deliberately does NOT write `config.toml [catalogs]`.
+// Catalog enrolment lives ONLY in the `workspace_catalogs` DB (seeded via
+// `seed_catalog_enrolment`), which is the real `tome catalog add` shape.
+// The previous `catalog::store::save` here was a masking dual-write that
+// existed solely because `get_skill::handle` used to `store::load` the
+// config; both MCP tools now resolve catalogs from the DB, so removing the
+// write turns this whole staged corpus into an honest DB-only regression
+// guard (a fresh-install `unknown_catalog` would now surface in tests).
 //
 // Promotion to a shared `tests/common/` helper (this module) is the
 // "fifth consumer" fold the entry_e2e header anticipated: mcp_prompts,
@@ -206,8 +211,8 @@ pub fn seed_catalog_enrolment(paths: &Paths, catalog_root: &Path, catalog_name: 
 
 /// A staged workspace: one catalog (`acme`) holding one plugin (`plug`)
 /// with the supplied skills + commands, enabled + indexed via
-/// `lifecycle::enable`, `config.toml` persisted, and the catalog
-/// enrolment seeded.
+/// `lifecycle::enable`, and the catalog enrolment seeded into the
+/// `workspace_catalogs` DB (NO `config.toml` — DB-only, FF3).
 ///
 /// `tmp` MUST outlive the fixture (it owns the on-disk tree); the public
 /// fields let tests reach the catalog root for post-enable mutations
@@ -231,15 +236,10 @@ impl StagedWorkspace {
 
         let catalog_root = tmp.path().join("catalog");
         std::fs::create_dir_all(&catalog_root).unwrap();
+        // In-memory `Config` only — fed to `LifecycleDeps.config` below.
+        // NOT persisted to disk (FF3): catalog enrolment is DB-only.
         let config = config_with_catalog("acme", &catalog_root);
         write_plugin(&catalog_root, "plug", skills, commands);
-
-        // Persist config.toml so `get_skill::handle` (disk-loaded config)
-        // and `lifecycle::enable` (in-memory config) agree on the catalog.
-        if let Some(parent) = paths.global_config_file.parent() {
-            std::fs::create_dir_all(parent).expect("create config parent");
-        }
-        tome::catalog::store::save(&paths.global_config_file, &config).expect("save config");
 
         let embedder = StubEmbedder::new();
         let scope = Scope(WorkspaceName::global());

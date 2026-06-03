@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{error, info};
 
-use crate::catalog::store;
 use crate::error::TomeError;
 use crate::index::skills;
 use crate::mcp::state::McpState;
@@ -67,25 +66,12 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         ));
     }
 
-    // F2a: single global config; F11 reintroduces workspace-aware view.
-    let config = store::load(&state.paths.global_config_file)
-        .map_err(|e| internal(&input, started, e.to_string(), e.category()))?;
-
-    if !config.catalogs.contains_key(&input.catalog) {
-        return Err(emit_error(
-            &input,
-            started,
-            "unknown_catalog",
-            McpError::invalid_params(
-                format!(
-                    "catalog `{}` is not enabled in the resolved scope",
-                    input.catalog
-                ),
-                Some(json!({ "code": "unknown_catalog", "catalog": input.catalog })),
-            ),
-        ));
-    }
-
+    // FF3: catalog existence is resolved from the `workspace_catalogs` DB
+    // (inside `lookup_skill`, below), not `config.toml [catalogs]` — the
+    // latter is never written in production (`tome catalog add` enrols only
+    // into the DB), so reading it here returned `unknown_catalog` for every
+    // enrolled catalog on a fresh install.
+    //
     // The index read needs the resolved scope's DB. Run inside a
     // `spawn_blocking` so rusqlite doesn't block the runtime.
     let paths = state.paths.clone();
@@ -102,6 +88,20 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
 
     let hit = match lookup {
         LookupOutcome::Found(hit) => hit,
+        LookupOutcome::UnknownCatalog => {
+            return Err(emit_error(
+                &input,
+                started,
+                "unknown_catalog",
+                McpError::invalid_params(
+                    format!(
+                        "catalog `{}` is not enabled in the resolved scope",
+                        input.catalog
+                    ),
+                    Some(json!({ "code": "unknown_catalog", "catalog": input.catalog })),
+                ),
+            ));
+        }
         LookupOutcome::UnknownPlugin => {
             return Err(emit_error(
                 &input,
@@ -273,6 +273,7 @@ struct LookupHit {
 }
 
 enum LookupOutcome {
+    UnknownCatalog,
     Found(LookupHit),
     UnknownPlugin,
     UnknownSkill,
@@ -288,6 +289,14 @@ fn lookup_skill(
     let db_path = paths.index_db.clone();
     let conn = crate::index::db::open_read_only(&db_path)?;
     let workspace_name = scope.name().as_str();
+    // FF3: catalog existence resolves from `workspace_catalogs`, not
+    // `config.toml`. Checked FIRST so an unknown catalog takes precedence
+    // over unknown_plugin/unknown_skill — preserving the contract ordering
+    // the old `config.catalogs.contains_key` gate enforced before the
+    // index lookup.
+    if crate::index::workspace_catalogs::find(&conn, workspace_name, catalog)?.is_none() {
+        return Ok(LookupOutcome::UnknownCatalog);
+    }
     // Phase 5: `get_skill` defaults to the `Skill` kind (FR-084) — the
     // tool only surfaces skills, not commands.
     match skills::find(
