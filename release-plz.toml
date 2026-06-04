@@ -20,9 +20,11 @@
 git_tag_enable = true
 
 # Tag as `vX.Y.Z` to match release.yml's trigger `v[0-9]+.[0-9]+.[0-9]+*`.
-# Explicit because the package is named `tome-mcp` — without this, release-plz's
-# default workspace tag would be `tome-mcp-v{{ version }}`, which would NOT
-# match the trigger and the release pipeline would never fire.
+# For a single-crate repo this is already release-plz's default, but it's pinned
+# explicitly so the tag stays `vX.Y.Z` (and keeps firing release.yml) even if
+# the repo ever grows a Cargo `[workspace]` — at which point the default would
+# switch to the package-prefixed `tome-mcp-v{{ version }}`, which would NOT
+# match the trigger.
 git_tag_name = "v{{ version }}"
 
 # release.yml's `release` job creates the GitHub Release (with the binary
