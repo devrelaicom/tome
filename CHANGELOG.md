@@ -260,7 +260,7 @@ Test surface
 Binary size
 
 - 26.31 MiB on macOS arm64. Well under the 50 MiB cap (constitution
-  v1.2.0). Recorded in `RELEASE-BINARY-SIZE.md`.
+  v1.2.0).
 
 ## [0.3.0] — 2026-05-14
 
