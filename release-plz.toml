@@ -1,0 +1,60 @@
+# release-plz configuration.
+#
+# release-plz is the AUTOMATIC RELEASE FRONT-END: on every push to `main` it
+# maintains a "Release vX.Y.Z" PR (version bump in Cargo.toml/Cargo.lock +
+# CHANGELOG section regenerated from the Conventional Commits). Merging that PR
+# is the single approval gate; release-plz then pushes the `vX.Y.Z` git tag.
+#
+# The tag fires the existing, audited `.github/workflows/release.yml` (the
+# BACK-END), which builds the 4 prebuilt-binary targets, attaches the shell +
+# Homebrew installers + the licence bundle, creates the GitHub Release,
+# publishes to crates.io, and pushes the Homebrew formula.
+#
+# DIVISION OF LABOUR — release-plz tags ONLY; release.yml builds/publishes/
+# releases. This keeps `cargo publish` GATED BEHIND A GREEN 4-target build
+# (release.yml runs publish last), so a failed binary build can never leave a
+# published-but-binary-less version. Hence the three toggles below.
+
+[workspace]
+# Create + push the git tag (this is what triggers release.yml).
+git_tag_enable = true
+
+# Tag as `vX.Y.Z` to match release.yml's trigger `v[0-9]+.[0-9]+.[0-9]+*`.
+# Explicit because the package is named `tome-mcp` — without this, release-plz's
+# default workspace tag would be `tome-mcp-v{{ version }}`, which would NOT
+# match the trigger and the release pipeline would never fire.
+git_tag_name = "v{{ version }}"
+
+# release.yml's `release` job creates the GitHub Release (with the binary
+# artifacts attached). Don't let release-plz create a second one.
+git_release_enable = false
+
+# release.yml's gated `publish-crates-io` job runs `cargo publish` LAST, after
+# a green build. Don't let release-plz publish (it would publish before the
+# binaries are built). release-plz still READS the public registry to detect
+# the last released version for the changelog/bump — that needs no token.
+publish = false
+
+# Changelog generation (git-cliff). Conventional-Commit types map to readable,
+# grouped sections; pure-noise types (ci/build/test/style/chore + merge
+# commits) are skipped so the changelog reads as a user-facing release note,
+# not a raw commit log. The trailing catch-all routes any non-conventional
+# (pre-cog-enforcement) commit into "Other" so git-cliff never invents a group
+# from the subject line.
+[changelog]
+protect_breaking_commits = true
+commit_parsers = [
+    { message = "^feat", group = "Added" },
+    { message = "^fix", group = "Fixed" },
+    { message = "^perf", group = "Performance" },
+    { message = "^refactor", group = "Changed" },
+    { message = "^docs", group = "Documentation" },
+    { message = "^revert", group = "Reverted" },
+    { message = "^chore\\(deps\\)", group = "Dependencies" },
+    { message = "^(chore|ci|build|test|style)", skip = true },
+    { message = "^Merge", skip = true },
+    { message = ".*", group = "Other" },
+]
+
+
+
