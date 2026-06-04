@@ -1,0 +1,112 @@
+name: Release-plz
+
+# AUTOMATIC RELEASE FRONT-END (see release-plz.toml for the full rationale).
+#
+# On every push to `main`, release-plz maintains a "Release vX.Y.Z" PR (version
+# bump in Cargo.toml/Cargo.lock + CHANGELOG regenerated from the Conventional
+# Commits). Merging that PR is the single approval gate; release-plz then pushes
+# the `vX.Y.Z` git tag. That tag fires the existing, audited tag-triggered
+# `.github/workflows/release.yml` back-end (gate → build 4 targets → installer +
+# Homebrew formula + licence bundle → GitHub Release → `cargo publish` → tap
+# push). release-plz itself does NOT publish or create the GitHub Release
+# (`publish=false`, `git_release_enable=false` in release-plz.toml), so the
+# crates.io publish stays gated behind a green binary build.
+#
+# CRITICAL — TOKEN: the jobs authenticate with the operator-provided
+# RELEASE_PLZ_TOKEN (a fine-grained PAT with Contents + Pull-requests
+# read/write, or a GitHub App token), NOT the default GITHUB_TOKEN. A git tag
+# pushed using GITHUB_TOKEN CANNOT trigger another workflow's `on: push: tags`,
+# so without a PAT/App token the tag would be inert and release.yml would never
+# run. This is the one indispensable secret for the automation.
+#
+# DORMANCY: until RELEASE_PLZ_TOKEN is set, the `preflight` job reports the
+# automation as disabled and the two real jobs are skipped — so this workflow
+# stays GREEN and inert on every push to main (mirrors release.yml's
+# secret-preflight). The moment the operator adds the secret, it activates.
+
+on:
+  push:
+    branches: [main]
+
+# Least privilege at the workflow level; jobs grant exactly what they need.
+permissions: {}
+
+# Never run two release-plz passes against `main` concurrently (a release PR
+# update racing a tag push corrupts release-plz's view of the next version).
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Dormant-job gating. Skip the real jobs until the operator sets
+  # RELEASE_PLZ_TOKEN, so this workflow is green + inert before activation.
+  # (Secrets cannot be read in a job-level `if`, hence this preflight + output.)
+  # ---------------------------------------------------------------------------
+  preflight:
+    name: Detect operator token (dormant-job gating)
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.detect.outputs.enabled }}
+    steps:
+      - id: detect
+        env:
+          HAS_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
+        run: echo "enabled=$HAS_TOKEN" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Maintain the "Release vX.Y.Z" PR (version bump + CHANGELOG). Idempotent:
+  # re-runs update the open PR; no PR is created when there is nothing to release.
+  # ---------------------------------------------------------------------------
+  release-plz-pr:
+    name: Release-plz PR
+    needs: preflight
+    if: ${{ needs.preflight.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout (full history for the changelog)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz release-pr
+        uses: release-plz/action@v0.5.129
+        with:
+          command: release-pr
+        env:
+          # PAT/App token so the opened PR can trigger downstream workflows.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # When the release PR merges (the version in Cargo.toml is now ahead of the
+  # registry), push the `vX.Y.Z` tag. With publish=false / git_release_enable=
+  # false this ONLY creates + pushes the tag — which then triggers release.yml.
+  # On ordinary pushes (no release PR merged) this is a no-op.
+  # ---------------------------------------------------------------------------
+  release-plz-release:
+    name: Release-plz release (tag only)
+    needs: preflight
+    if: ${{ needs.preflight.outputs.enabled == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (full history for the changelog)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz release
+        uses: release-plz/action@v0.5.129
+        with:
+          command: release
+        env:
+          # PAT/App token so the pushed tag triggers release.yml (`push: tags`).
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
