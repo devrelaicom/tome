@@ -26,3 +26,16 @@
 /CLAUDE.md
 /review/
 /retro/
+
+# Internal PRDs + release/review audits: untracked but kept in the working tree
+# (same rationale as the SDD artefacts above — process docs, not public-repo
+# content). History is preserved; the planning/closeout workflow reads them
+# locally.
+/PRDs/
+/CODE-REVIEW.md
+/RELEASE-READINESS.md
+/RELEASE-BINARY-SIZE.md
+/constitution-review-report.md
+
+# Superpowers brainstorming design docs (process artefacts, kept locally).
+/docs/superpowers/

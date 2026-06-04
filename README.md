@@ -31,10 +31,10 @@ cargo install tome-mcp
 
 ### From Homebrew
 
-Prebuilt binaries (produced by the cargo-dist release pipeline for Linux and macOS) are distributed through a Homebrew tap. Replace `<your-tap>` with the tap this project publishes to:
+Prebuilt binaries (produced by the cargo-dist release pipeline for Linux and macOS) are distributed through a Homebrew tap:
 
 ```sh
-brew install <your-tap>/tome
+brew install aaronbassett/tap/tome
 ```
 
 ### From source
