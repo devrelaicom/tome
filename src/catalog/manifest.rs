@@ -183,7 +183,11 @@ fn is_rejected_control_char(c: char) -> bool {
     c.is_control()
 }
 
-fn looks_like_email(s: &str) -> bool {
+/// Cheap structural email check — a single `@`, non-empty local part, and a
+/// non-empty dotted domain. Promoted to `pub(crate)` at its second consumer
+/// (`TomePluginManifest` `author.email` validation, Phase 8) rather than
+/// duplicated — the established single-source-of-truth pattern.
+pub(crate) fn looks_like_email(s: &str) -> bool {
     // Cheap structural check — a single `@`, non-empty local part, non-empty
     // domain with at least one `.`. We do not verify deliverability.
     let mut parts = s.splitn(2, '@');

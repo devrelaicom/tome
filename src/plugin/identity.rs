@@ -45,7 +45,11 @@ impl FromStr for PluginId {
     }
 }
 
-fn validate_segment(segment: &str) -> Result<(), SegmentRejection> {
+/// Validate a single on-disk-safe path segment: non-empty, no embedded `/`,
+/// not `.`/`..`, no leading dot, not absolute. Promoted to `pub(crate)` at its
+/// second consumer (`TomePluginManifest` `name` validation, Phase 8) rather
+/// than duplicated — the established single-source-of-truth pattern.
+pub(crate) fn validate_segment(segment: &str) -> Result<(), SegmentRejection> {
     if segment.is_empty() {
         return Err(SegmentRejection::Empty);
     }
