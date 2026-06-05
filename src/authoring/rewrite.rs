@@ -20,7 +20,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::authoring::ir::{Diagnostic, Severity};
+use crate::authoring::ir::Diagnostic;
 
 // Rule ids — stable identifiers surfaced in `--json` findings and reused by the
 // lint registry's "residual harness-isms" rule.
@@ -218,6 +218,9 @@ pub fn is_unsupported_harness_ism(rule_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `Severity` is only referenced by assertions here, so it is a test-only
+    // import (importing it at module top would be unused in the non-test lib).
+    use crate::authoring::ir::Severity;
 
     fn rewrite(text: &str) -> RewriteOutcome {
         rewrite_body(text, RewriteOptions::default())
