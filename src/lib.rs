@@ -2,6 +2,7 @@
 //! consume this; the binary entry point in `src/main.rs` is a thin shell that
 //! delegates here.
 
+pub mod authoring;
 pub mod catalog;
 pub mod cli;
 pub mod commands;

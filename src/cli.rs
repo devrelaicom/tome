@@ -11,6 +11,8 @@
 //! default when no `--workspace` flag, `TOME_WORKSPACE` env var, or
 //! project marker is found.
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -97,6 +99,28 @@ pub enum Command {
     /// Cursor, Gemini, OpenCode). Run with no subcommand to enumerate
     /// every supported harness.
     Harness(HarnessArgs),
+    /// Author, convert, and validate standalone skills. `create` scaffolds a
+    /// new skill (wrapped in a minimal plugin by default; `--bare` for a
+    /// naked one), `convert` turns a foreign skill into the native format,
+    /// and `lint` validates a Tome skill for CI.
+    #[command(subcommand)]
+    Skill(SkillCommand),
+}
+
+/// `tome skill <subcommand>` — the third artifact level (skills have no other
+/// top-level command; `plugin show` still surfaces them read-only).
+#[derive(Debug, Subcommand)]
+pub enum SkillCommand {
+    /// Scaffold a new skill from a template. Wraps the skill in a minimal
+    /// plugin (`<P>:<NAME>`) by default; `--bare` emits a naked
+    /// `<NAME>/SKILL.md`.
+    Create(SkillCreateArgs),
+    /// Convert a foreign skill (native `SKILL.md` from Claude Code, Cursor,
+    /// OpenCode, Cline, or a generic Agent Skill) into a native Tome skill.
+    Convert(ConvertArgs),
+    /// Validate a Tome skill: manifest/structure correctness and residual
+    /// harness-specific leftovers. CI-ready exit codes.
+    Lint(LintArgs),
 }
 
 /// Wraps the `harness` subcommand so the `command` field can be `None` —
@@ -433,6 +457,13 @@ pub enum CatalogCommand {
     Update(CatalogUpdateArgs),
     /// Show the manifest and registration metadata for a catalog.
     Show(CatalogShowArgs),
+    /// Scaffold a new catalog from a template.
+    Create(CatalogCreateArgs),
+    /// Convert a Claude Code marketplace into a native Tome catalog (a copy;
+    /// the source is never modified).
+    Convert(ConvertArgs),
+    /// Validate a Tome catalog (and every plugin/skill it nests). CI-ready.
+    Lint(LintArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -496,6 +527,13 @@ pub enum PluginCommand {
     List(PluginListArgs),
     /// Show one plugin's metadata, component counts, and index status.
     Show(PluginShowArgs),
+    /// Scaffold a new plugin from a template.
+    Create(PluginCreateArgs),
+    /// Convert a Claude Code plugin (or a Codex project) into a native Tome
+    /// plugin (a copy; the source is never modified).
+    Convert(ConvertArgs),
+    /// Validate a Tome plugin (and every skill it nests). CI-ready.
+    Lint(LintArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -566,6 +604,141 @@ pub struct QueryArgs {
     /// Default is 0.0 with the reranker on, 0.5 with `--no-rerank`.
     #[arg(long = "min-score")]
     pub min_score: Option<f32>,
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8 — authoring & conversion (`create` / `convert` / `lint`).
+//
+// `--json` is the global flag (on `Cli`), so it is intentionally NOT redefined
+// per command. The three verbs share `ConvertArgs` / `LintArgs` across all
+// three artifact levels; only `create` differs per level (catalog has no
+// `--into`; skill adds `--bare` + `--plugin-name`). Mutually-exclusive flags
+// (`--output`/`--into`, `--template`/`--bare`) are enforced by clap
+// `conflicts_with` so the usage error is caught at parse time (exit 2).
+// ---------------------------------------------------------------------------
+
+/// `tome catalog create <NAME>`. No `--into` (a catalog is a top-level tree).
+#[derive(Debug, clap::Args)]
+pub struct CatalogCreateArgs {
+    /// Name of the new catalog; also the created directory name.
+    pub name: String,
+    /// Template to scaffold from: a reserved built-in name, a local directory,
+    /// a git URL, or an `owner/repo` shorthand. Defaults to the built-in.
+    #[arg(long)]
+    pub template: Option<String>,
+    /// Parent directory the new artifact lands under (as `<output>/<NAME>/`).
+    /// Defaults to the current directory.
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    /// Overwrite colliding files (only those files; never a directory wipe).
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// `tome plugin create <NAME>`.
+#[derive(Debug, clap::Args)]
+pub struct PluginCreateArgs {
+    /// Name of the new plugin; also the created directory name.
+    pub name: String,
+    /// Template to scaffold from (built-in name, local dir, git URL, or
+    /// `owner/repo`). Defaults to the built-in.
+    #[arg(long)]
+    pub template: Option<String>,
+    /// Parent directory the new artifact lands under. Mutually exclusive with
+    /// `--into`. Defaults to the current directory.
+    #[arg(long, conflicts_with = "into")]
+    pub output: Option<PathBuf>,
+    /// Inject the new plugin into an existing Tome catalog, registering it in
+    /// that catalog's `tome-catalog.toml`. Mutually exclusive with `--output`.
+    #[arg(long)]
+    pub into: Option<PathBuf>,
+    /// Overwrite colliding files (only those files; never a directory wipe).
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// `tome skill create <NAME>`. Wraps the skill in a minimal plugin by default.
+#[derive(Debug, clap::Args)]
+pub struct SkillCreateArgs {
+    /// Name of the new skill; also the created skill directory name.
+    pub name: String,
+    /// Template to scaffold from (built-in name, local dir, git URL, or
+    /// `owner/repo`). Defaults to the built-in. Errors with `--bare`.
+    #[arg(long, conflicts_with = "bare")]
+    pub template: Option<String>,
+    /// Emit a naked skill (`<NAME>/SKILL.md`) instead of wrapping it in a
+    /// minimal plugin. Alias for `--template bare-skill`.
+    #[arg(long)]
+    pub bare: bool,
+    /// Name of the wrapping plugin (default: `<NAME>`), giving the full skill
+    /// name `<plugin-name>:<NAME>`. Ignored with `--bare`.
+    #[arg(long = "plugin-name")]
+    pub plugin_name: Option<String>,
+    /// Parent directory the new artifact lands under. Mutually exclusive with
+    /// `--into`. Defaults to the current directory.
+    #[arg(long, conflicts_with = "into")]
+    pub output: Option<PathBuf>,
+    /// Inject the new skill into an existing Tome plugin (drops it into the
+    /// plugin's `skills/`). Mutually exclusive with `--output`.
+    #[arg(long)]
+    pub into: Option<PathBuf>,
+    /// Overwrite colliding files (only those files; never a directory wipe).
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Shared `convert` arguments across all three artifact levels.
+#[derive(Debug, clap::Args)]
+pub struct ConvertArgs {
+    /// Source to convert: a local path, an `owner/repo` shorthand, or a git
+    /// URL. Remote sources are fetched into a temp clone (cleaned up on every
+    /// exit path). The source is never modified.
+    pub source: String,
+    /// New name for the converted artifact (also settable via `--name`).
+    /// Defaults to `<source-name>-tome`. Supplying both the positional and
+    /// `--name` with different values is a usage error.
+    pub name: Option<String>,
+    /// New name for the converted artifact (same as the positional `<NAME>`).
+    #[arg(long = "name")]
+    pub name_flag: Option<String>,
+    /// Override source-format detection: claude-code | codex | cursor |
+    /// opencode | cline | agent-skills.
+    #[arg(long = "from")]
+    pub from: Option<String>,
+    /// Parent directory the converted copy lands under. Mutually exclusive
+    /// with `--into`. Defaults to the current directory.
+    #[arg(long, conflicts_with = "into")]
+    pub output: Option<PathBuf>,
+    /// Inject the converted artifact into an existing Tome artifact (type
+    /// auto-detected from its manifest). Mutually exclusive with `--output`.
+    #[arg(long)]
+    pub into: Option<PathBuf>,
+    /// Overwrite colliding files (only those files).
+    #[arg(long)]
+    pub force: bool,
+    /// Print the plan; create or modify zero files.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+    /// Abort (writing nothing) on anything Tome cannot represent.
+    #[arg(long)]
+    pub strict: bool,
+}
+
+/// Shared `lint` arguments across all three artifact levels.
+#[derive(Debug, clap::Args)]
+pub struct LintArgs {
+    /// The Tome artifact to validate (a local path).
+    pub source: String,
+    /// Apply mechanically-safe fixes (rewritable harness-isms, `name == dir`);
+    /// report fixed vs. still-manual.
+    #[arg(long)]
+    pub autofix: bool,
+    /// With `--autofix`, report would-be fixes but change nothing on disk.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+    /// Warnings also cause a non-zero exit (CI-strict).
+    #[arg(long)]
+    pub strict: bool,
 }
 
 impl Cli {

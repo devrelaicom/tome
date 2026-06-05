@@ -6,5 +6,6 @@ pub mod models;
 pub mod plugin;
 pub mod query;
 pub mod reindex;
+pub mod skill;
 pub mod status;
 pub mod workspace;

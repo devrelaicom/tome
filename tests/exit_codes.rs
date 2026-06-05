@@ -397,6 +397,56 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
             46,
             "guardrails_write_failed",
         ),
+        // 80–86 — Phase 8 authoring & conversion. A fresh contiguous decade
+        // (earlier blocks ran out of room); the lint verdict codes 85/86
+        // follow the QueryNoResultsStrict(40) "successful run, non-zero
+        // verdict" precedent. See contracts/exit-codes.md.
+        (
+            TomeError::PluginNotConverted {
+                path: PathBuf::from("catalogs/acme/plugins/foo"),
+            },
+            80,
+            "plugin_not_converted",
+        ),
+        (
+            TomeError::OutputExists {
+                path: PathBuf::from("./foo/SKILL.md"),
+            },
+            81,
+            "output_exists",
+        ),
+        (
+            TomeError::TemplateInvalid {
+                template: "acme/tome-skill-template".into(),
+                reason: "template file `SKILL.md` not found in the resolved template".into(),
+            },
+            82,
+            "template_invalid",
+        ),
+        (
+            TomeError::SourceFormatUnrecognized {
+                path: PathBuf::from("./some-dir"),
+            },
+            83,
+            "source_format_unrecognized",
+        ),
+        (
+            TomeError::ConversionUnsupportedStrict {
+                feature: "claude-code monitors/ directory".into(),
+            },
+            84,
+            "conversion_unsupported_strict",
+        ),
+        (
+            TomeError::ValidationFoundErrors { errors: 2 },
+            85,
+            "validation_found_errors",
+        ),
+        (
+            TomeError::ValidationStrictWarnings { warnings: 3 },
+            86,
+            "validation_strict_warnings",
+        ),
     ]
 }
 
@@ -493,6 +543,13 @@ fn exhaustive_match_compile_check() {
             TomeError::SchemaVersionTooNew { .. } => 73,
             TomeError::SchemaMigrationFailed { .. } => 74,
             TomeError::DoctorFixNotSafe { .. } => 75,
+            TomeError::PluginNotConverted { .. } => 80,
+            TomeError::OutputExists { .. } => 81,
+            TomeError::TemplateInvalid { .. } => 82,
+            TomeError::SourceFormatUnrecognized { .. } => 83,
+            TomeError::ConversionUnsupportedStrict { .. } => 84,
+            TomeError::ValidationFoundErrors { .. } => 85,
+            TomeError::ValidationStrictWarnings { .. } => 86,
         }
     }
 }

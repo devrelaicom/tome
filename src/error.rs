@@ -337,6 +337,66 @@ pub enum TomeError {
     DoctorFixNotSafe { subsystem: String },
 
     // -----------------------------------------------------------------------
+    // Phase 8 — authoring & conversion (codes 80–86).
+    //
+    // A contiguous block of seven NEW failure classes (principle II — new
+    // classes get new codes, none repurposed). Earlier blocks ran out of
+    // contiguous room (Phase 6 ends at 46; 50/60/70 clusters are taken), so
+    // Phase 8 starts a fresh decade at 80. The two `lint` verdict codes
+    // (85/86) follow the `QueryNoResultsStrict`(40) precedent — the command
+    // ran successfully; the *result* is non-zero — giving CI clean pass/fail
+    // semantics. See `specs/008-phase-8-authoring-conversion/contracts/exit-codes.md`.
+    // -----------------------------------------------------------------------
+    /// A plugin directory carries a legacy `.claude-plugin/plugin.json` but no
+    /// native `tome-plugin.toml`. The Phase 8 cutover reads only the latter;
+    /// this is the migration nudge (names the dir + the `convert` command).
+    #[error(
+        "plugin at {} is not converted: found legacy `.claude-plugin/plugin.json` but no `tome-plugin.toml`\nhint: run `tome plugin convert {}` to migrate it to the native format",
+        path.display(),
+        path.display()
+    )]
+    PluginNotConverted { path: PathBuf },
+
+    /// `create`/`convert` would write over an existing file and `--force` was
+    /// not given. Names the colliding path; `--force` overwrites only the
+    /// colliding files (never a directory wipe).
+    #[error(
+        "refusing to overwrite existing output at {}\nhint: pass --force to overwrite the colliding file(s)",
+        path.display()
+    )]
+    OutputExists { path: PathBuf },
+
+    /// A `--template` resolved (built-in name or fetched source) but could not
+    /// be used: missing template file, malformed minijinja, or a render error.
+    #[error("template `{template}` is unusable: {reason}")]
+    TemplateInvalid { template: String, reason: String },
+
+    /// `convert` could not auto-detect the source harness/level and no
+    /// `--from` override was supplied.
+    #[error(
+        "could not detect the source format at {}\nhint: pass --from <harness> (claude-code|codex|cursor|opencode|cline|agent-skills)",
+        path.display()
+    )]
+    SourceFormatUnrecognized { path: PathBuf },
+
+    /// `convert --strict` hit a feature Tome cannot represent. Nothing was
+    /// written (the abort happens before any emit).
+    #[error(
+        "conversion aborted under --strict at an unsupported feature: {feature}\nhint: drop --strict to convert with warnings instead (nothing was written)"
+    )]
+    ConversionUnsupportedStrict { feature: String },
+
+    /// `lint` found ≥1 error — the CI-fail verdict code. Verdict, not crash:
+    /// the run itself succeeded (cf. `QueryNoResultsStrict`).
+    #[error("validation found {errors} error(s)")]
+    ValidationFoundErrors { errors: usize },
+
+    /// `lint --strict` found warnings (and no errors) — the strict CI-fail
+    /// verdict code. Without `--strict`, warnings exit 0.
+    #[error("validation found {warnings} warning(s) under --strict (no errors)")]
+    ValidationStrictWarnings { warnings: usize },
+
+    // -----------------------------------------------------------------------
     // Internal — last-resort variant for panics caught at top level, etc.
     // No named failure above may collapse into this — that would defeat the
     // closed-set guarantee.
@@ -453,6 +513,17 @@ impl TomeError {
             Self::SchemaVersionTooNew { .. } => 73,
             Self::SchemaMigrationFailed { .. } => 74,
             Self::DoctorFixNotSafe { .. } => 75,
+            // 80–86 — Phase 8 authoring & conversion. A fresh contiguous
+            // decade; the lint verdict codes (85/86) follow the
+            // QueryNoResultsStrict(40) "successful run, non-zero verdict"
+            // precedent.
+            Self::PluginNotConverted { .. } => 80,
+            Self::OutputExists { .. } => 81,
+            Self::TemplateInvalid { .. } => 82,
+            Self::SourceFormatUnrecognized { .. } => 83,
+            Self::ConversionUnsupportedStrict { .. } => 84,
+            Self::ValidationFoundErrors { .. } => 85,
+            Self::ValidationStrictWarnings { .. } => 86,
         }
     }
 
@@ -518,6 +589,14 @@ impl TomeError {
             Self::SchemaVersionTooNew { .. } => "schema_too_new",
             Self::SchemaMigrationFailed { .. } => "schema_migration",
             Self::DoctorFixNotSafe { .. } => "doctor_fix_unsafe",
+            // Phase 8 — authoring & conversion
+            Self::PluginNotConverted { .. } => "plugin_not_converted",
+            Self::OutputExists { .. } => "output_exists",
+            Self::TemplateInvalid { .. } => "template_invalid",
+            Self::SourceFormatUnrecognized { .. } => "source_format_unrecognized",
+            Self::ConversionUnsupportedStrict { .. } => "conversion_unsupported_strict",
+            Self::ValidationFoundErrors { .. } => "validation_found_errors",
+            Self::ValidationStrictWarnings { .. } => "validation_strict_warnings",
         }
     }
 }
