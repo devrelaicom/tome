@@ -69,6 +69,7 @@ fn main() {
         }
         Command::Doctor(args) => commands::doctor::run(args, &scope, mode),
         Command::Harness(args) => commands::harness::run(args, &scope, mode),
+        Command::Skill(cmd) => commands::skill::run(cmd, &scope, mode),
     };
 
     match result {

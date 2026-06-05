@@ -4,9 +4,12 @@
 //! (`enable`, `list`, `show`) over the already-merged `plugin::lifecycle`
 //! library. The `disable` and bare-interactive forms belong to US2.
 
+mod convert;
+mod create;
 mod disable;
 mod enable;
 mod interactive;
+mod lint;
 mod list;
 mod show;
 
@@ -21,6 +24,9 @@ pub fn run(cmd: PluginCommand, scope: &ResolvedScope, mode: Mode) -> Result<(), 
         PluginCommand::Disable(args) => disable::run(args, scope, mode),
         PluginCommand::List(args) => list::run(args, scope, mode),
         PluginCommand::Show(args) => show::run(args, scope, mode),
+        PluginCommand::Create(args) => create::run(args, scope, mode),
+        PluginCommand::Convert(args) => convert::run(args, scope, mode),
+        PluginCommand::Lint(args) => lint::run(args, scope, mode),
     }
 }
 
