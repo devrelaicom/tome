@@ -326,6 +326,14 @@ fn hooks_and_guardrails_and_agents_reports_after_sync() {
     // reflect it: hooks contributed, a guardrails region (suppressed on
     // Claude Code because the plugin ships real hooks), and a native agent
     // file present.
+    //
+    // Uses the REAL production harness registry (claude-code). Hold the
+    // process-global override mutex so a concurrent `HarnessModulesGuard`
+    // test in this binary can't leak a stub set in and make `sync_project`
+    // report `claude-code` unsupported (pre-existing parallel race).
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let (tmp, paths) = stage();
     let home = TempDir::new().unwrap();
     let _home = HomeGuard::install(home.path());
@@ -384,6 +392,12 @@ fn fix_reemits_and_removes_orphan_agents() {
     // Sync once to emit the agent, then plant an orphan `<plugin>__*` file
     // for a plugin that is NOT enabled. `tome doctor --fix` re-runs the
     // idempotent sync which removes the orphan and re-emits the real agent.
+    //
+    // Real production registry (claude-code) — hold the override mutex so a
+    // concurrent stub-override test can't leak in (pre-existing parallel race).
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let (tmp, paths) = stage();
     let home = TempDir::new().unwrap();
     let _home = HomeGuard::install(home.path());

@@ -261,6 +261,8 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
         agents: None,
         privilege_escalation: None,
         personas: None,
+        legacy_model_manifests: Vec::new(),
+        unconverted_plugins: Vec::new(),
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -406,6 +408,8 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
         agents: None,
         privilege_escalation: None,
         personas: None,
+        legacy_model_manifests: Vec::new(),
+        unconverted_plugins: Vec::new(),
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -534,6 +538,8 @@ fn doctor_json_phase6_fields_appended_last_in_order() {
             personas: Vec::new(),
             drop_persona: "drop-persona".to_owned(),
         }),
+        legacy_model_manifests: Vec::new(),
+        unconverted_plugins: Vec::new(),
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
