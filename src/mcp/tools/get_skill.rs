@@ -433,6 +433,7 @@ fn build_substitution_context(
         input.name.clone(),
         skill_path.to_path_buf(),
         state.scope.scope.name(),
+        state.scope.project_root.clone(),
         state.paths.clone(),
         None,
         Vec::new(),

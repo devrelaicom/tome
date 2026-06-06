@@ -62,6 +62,7 @@ pub fn build_context_for_entry(
     entry_name: String,
     entry_path: PathBuf,
     workspace_name: &WorkspaceName,
+    project_root: Option<PathBuf>,
     paths: Paths,
     args: Option<ArgumentValues>,
     declared_args: Vec<String>,
@@ -77,6 +78,16 @@ pub fn build_context_for_entry(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| entry_dir.clone());
 
+    // `${TOME_PROJECT_DIR}` resolution (R6 / contracts/substitution-project-dir.md):
+    // the scope's project_root if present, else a fresh CWD marker-walk (which
+    // keeps the var resolving when the workspace was pinned via `--workspace`,
+    // so project_root is None — incl. some MCP launch configs). Canonicalised;
+    // None => the token passes through verbatim. Confined to context build —
+    // the layer's second sanctioned I/O touch.
+    let project_dir = project_root
+        .or_else(|| crate::workspace::resolution::walk_for_project_marker().map(|(root, _)| root))
+        .map(|p| p.canonicalize().unwrap_or(p));
+
     let clock = substitution::current_clock();
 
     let mut builder = SubstitutionContext::builder()
@@ -88,6 +99,7 @@ pub fn build_context_for_entry(
         .entry_dir(entry_dir)
         .plugin_root_dir(plugin_root_dir)
         .workspace_name(workspace_name.as_str().to_owned())
+        .project_dir(project_dir)
         .clock(clock)
         .args(args)
         .declared_args(declared_args);

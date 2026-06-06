@@ -48,6 +48,16 @@ pub(super) fn resolve_builtin(
         // Catalog scalar.
         "CATALOG_NAME" => ctx.catalog_name.clone(),
 
+        // Project-level path (Phase 8, R6). Resolved once at context-build time
+        // (`ResolvedScope.project_root` → fresh CWD marker-walk). When no
+        // project exists up-tree the token passes through VERBATIM (`Ok(None)`),
+        // never empty-string — so `${TOME_PROJECT_DIR}/run.sh` cannot collapse
+        // to the absolute root `/run.sh`.
+        "PROJECT_DIR" => match &ctx.project_dir {
+            Some(dir) => dir.to_string_lossy().into_owned(),
+            None => return Ok(None),
+        },
+
         // Workspace scalar + path.
         "WORKSPACE_NAME" => ctx.workspace_name.clone(),
         "WORKSPACE_DATA" => {
