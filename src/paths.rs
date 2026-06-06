@@ -160,9 +160,16 @@ impl Paths {
         Ok(self.models_dir.join(name))
     }
 
-    /// Per-model manifest path (the JSON file Tome writes after a
-    /// verified download).
+    /// Per-model manifest path (the native `manifest.toml` Tome writes after a
+    /// verified download). Phase 8 cutover: was `manifest.json`.
     pub fn model_manifest(&self, name: &str) -> Result<PathBuf, TomeError> {
+        Ok(self.model_path(name)?.join("manifest.toml"))
+    }
+
+    /// Legacy per-model manifest path (`manifest.json`). Read-only; used only
+    /// by `doctor` to detect and migrate a pre-cutover install. Production
+    /// model-load reads [`Self::model_manifest`] (`.toml`) exclusively.
+    pub fn model_manifest_legacy(&self, name: &str) -> Result<PathBuf, TomeError> {
         Ok(self.model_path(name)?.join("manifest.json"))
     }
 

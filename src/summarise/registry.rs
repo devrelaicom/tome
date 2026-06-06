@@ -12,7 +12,7 @@
 //! ```text
 //! <root>/models/qwen2.5-0.5b-instruct/
 //!     model.gguf       — the primary artefact (size pinned)
-//!     manifest.json    — strict, written atomically post-download
+//!     manifest.toml    — strict, written atomically post-download
 //! ```
 //!
 //! The `kind` is `ModelKind::Summariser` (added to the closed enum in F6

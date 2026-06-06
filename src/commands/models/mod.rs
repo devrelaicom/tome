@@ -64,7 +64,7 @@ impl ModelState {
     }
 }
 
-/// Read a model's `manifest.json` from disk. Returns `Ok(Some(_))` when the
+/// Read a model's `manifest.toml` from disk. Returns `Ok(Some(_))` when the
 /// manifest exists and parses; `Ok(None)` when missing; `Err` on a strict
 /// parse failure (manifest is Tome-owned, so unknown fields are rejected).
 pub fn read_manifest(
@@ -76,12 +76,7 @@ pub fn read_manifest(
         return Ok(None);
     }
     let bytes = std::fs::read(&manifest_path).map_err(TomeError::Io)?;
-    let manifest = serde_json::from_slice::<ModelManifest>(&bytes).map_err(|e| {
-        TomeError::ModelRegistrationParseError {
-            file: manifest_path,
-            message: e.to_string(),
-        }
-    })?;
+    let manifest = ModelManifest::from_toml_slice(&manifest_path, &bytes)?;
     Ok(Some(manifest))
 }
 

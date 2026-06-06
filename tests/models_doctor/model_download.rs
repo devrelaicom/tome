@@ -111,8 +111,8 @@ fn happy_path_writes_file_and_manifest() {
     let written = std::fs::read(&final_file).expect("final file present");
     assert_eq!(written, payload);
 
-    let manifest_path = root.path().join("test-model").join("manifest.json");
-    assert!(manifest_path.exists(), "manifest.json was not persisted");
+    let manifest_path = root.path().join("test-model").join("manifest.toml");
+    assert!(manifest_path.exists(), "manifest.toml was not persisted");
 
     // The .partial directory must be gone after a successful download.
     let partial = root.path().join("test-model.partial");
