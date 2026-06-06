@@ -33,6 +33,12 @@ pub struct SubstitutionContext {
     pub entry_dir: PathBuf,
     pub plugin_root_dir: PathBuf,
     pub workspace_name: String,
+    /// Resolved `${TOME_PROJECT_DIR}` (absolute + canonical), or `None` when no
+    /// project marker exists up-tree — in which case the token passes through
+    /// verbatim (never empty-string). Resolved once at context-build time
+    /// (R6 / contracts/substitution-project-dir.md); the substitution layer's
+    /// second sanctioned I/O touch, confined to construction.
+    pub project_dir: Option<PathBuf>,
     pub clock: time::OffsetDateTime,
 
     // Argument values + declarations
@@ -83,6 +89,7 @@ pub struct SubstitutionContextBuilder {
     entry_dir: Option<PathBuf>,
     plugin_root_dir: Option<PathBuf>,
     workspace_name: Option<String>,
+    project_dir: Option<PathBuf>,
     clock: Option<time::OffsetDateTime>,
     args: Option<ArgumentValues>,
     declared_args: Vec<String>,
@@ -127,6 +134,13 @@ impl SubstitutionContextBuilder {
 
     pub fn workspace_name(mut self, v: impl Into<String>) -> Self {
         self.workspace_name = Some(v.into());
+        self
+    }
+
+    /// Set the resolved `${TOME_PROJECT_DIR}` value (optional — `None` means
+    /// the token passes through verbatim). Defaults to `None` when unset.
+    pub fn project_dir(mut self, v: Option<PathBuf>) -> Self {
+        self.project_dir = v;
         self
     }
 
@@ -184,6 +198,8 @@ impl SubstitutionContextBuilder {
             workspace_name: self
                 .workspace_name
                 .map_or_else(|| missing("workspace_name"), Ok)?,
+            // Optional — defaults to None (token passes through verbatim).
+            project_dir: self.project_dir,
             clock: self.clock.map_or_else(|| missing("clock"), Ok)?,
             args: self.args,
             declared_args: self.declared_args,

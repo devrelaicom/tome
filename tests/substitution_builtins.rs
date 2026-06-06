@@ -69,6 +69,43 @@ fn skill_dir_resolves_to_entry_dir() {
     assert_eq!(out, "dir=/plugins/x/skills/hello");
 }
 
+// --- ${TOME_PROJECT_DIR} (Phase 8 / US1, contracts/substitution-project-dir.md)
+
+#[test]
+fn project_dir_resolves_when_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = ctx_builder(tmp.path())
+        .project_dir(Some(PathBuf::from("/work/my-project")))
+        .build()
+        .expect("builder");
+    let out = substitution::render("root=${TOME_PROJECT_DIR}/run.sh", &ctx).unwrap();
+    assert_eq!(out, "root=/work/my-project/run.sh");
+}
+
+#[test]
+fn project_dir_passes_through_verbatim_when_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    // No project_dir set (default None) → the token passes through VERBATIM,
+    // never empty-string, so `${TOME_PROJECT_DIR}/run.sh` cannot collapse to
+    // the absolute root `/run.sh`.
+    let out = substitution::render("root=${TOME_PROJECT_DIR}/run.sh", &ctx(tmp.path())).unwrap();
+    assert_eq!(out, "root=${TOME_PROJECT_DIR}/run.sh");
+}
+
+#[test]
+fn project_dir_single_sweep_not_rescanned() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A resolved project_dir that itself contains a `${TOME_*}` token must NOT
+    // re-enter the scanner (NFR-005 single-sweep): the resolved value emits in
+    // the single pass and the literal token survives.
+    let ctx = ctx_builder(tmp.path())
+        .project_dir(Some(PathBuf::from("/p/${TOME_PLUGIN_DIR}")))
+        .build()
+        .expect("builder");
+    let out = substitution::render("x=${TOME_PROJECT_DIR}", &ctx).unwrap();
+    assert_eq!(out, "x=/p/${TOME_PLUGIN_DIR}");
+}
+
 #[test]
 fn skill_path_resolves_to_entry_path() {
     let _lock = lock_overrides();

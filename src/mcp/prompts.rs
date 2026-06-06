@@ -1011,6 +1011,7 @@ fn build_get_context(
         entry.name.clone(),
         entry_path,
         state.scope.scope.name(),
+        state.scope.project_root.clone(),
         state.paths.clone(),
         args,
         declared_args,

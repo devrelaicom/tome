@@ -125,7 +125,12 @@ fn require_workspace_membership(name: &WorkspaceName, paths: &Paths) -> Result<(
 /// at the filesystem root. Non-`NotFound` IO errors from `try_exists`
 /// swallow and fall through to global with a debug log (per Phase 3
 /// discipline carried forward).
-fn walk_for_project_marker() -> Option<(PathBuf, PathBuf)> {
+///
+/// `pub(crate)` since Phase 8: the `${TOME_PROJECT_DIR}` built-in reuses this
+/// exact CWD-walk as its fresh-walk fallback (when `ResolvedScope.project_root`
+/// is `None`, e.g. a pinned `--workspace`). Promoted at the second consumer —
+/// the single-source-of-truth pattern.
+pub(crate) fn walk_for_project_marker() -> Option<(PathBuf, PathBuf)> {
     let mut here = std::env::current_dir().ok()?;
     loop {
         let marker = Paths::project_marker_config(&here);
