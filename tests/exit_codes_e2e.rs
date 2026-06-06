@@ -158,7 +158,7 @@ fn plugin_show_with_malformed_tome_plugin_toml_exits_22() {
 #[test]
 fn models_list_with_corrupt_manifest_exits_33() {
     // Setup: stage a fabricated model directory, then corrupt its
-    // manifest.json. `tome models list` reads the manifest and surfaces
+    // manifest.toml. `tome models list` reads the manifest and surfaces
     // a parse failure as exit 33 (`ModelRegistrationParseError`).
     let env = ToolEnv::new();
     let paths = paths_for(&env);
@@ -166,8 +166,8 @@ fn models_list_with_corrupt_manifest_exits_33() {
     fabricate_all_registry_models(&paths);
 
     let entry = MODEL_REGISTRY.first().expect("at least one model");
-    let manifest_path = paths.models_dir.join(entry.name).join("manifest.json");
-    fs::write(&manifest_path, b"{ broken json").expect("corrupt manifest");
+    let manifest_path = paths.models_dir.join(entry.name).join("manifest.toml");
+    fs::write(&manifest_path, b"this is = not = valid = toml").expect("corrupt manifest");
 
     let out = env.cmd().args(["models", "list"]).output().expect("spawn");
     assert_eq!(

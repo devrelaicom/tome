@@ -1000,7 +1000,7 @@ fn parse_one_entry(
 }
 
 /// Step 4 — confirm the embedder and reranker entries in `MODEL_REGISTRY`
-/// each have a readable `manifest.json` on disk. Missing models prompt a
+/// each have a readable `manifest.toml` on disk. Missing models prompt a
 /// download iff `allow_model_download` is set; otherwise we error with
 /// `ModelMissing` (exit 30).
 fn ensure_models_present(deps: &LifecycleDeps<'_>) -> Result<(), TomeError> {
@@ -1027,7 +1027,7 @@ fn ensure_models_present(deps: &LifecycleDeps<'_>) -> Result<(), TomeError> {
     Ok(())
 }
 
-/// Returns `Ok(true)` iff a parseable `manifest.json` for `entry` exists
+/// Returns `Ok(true)` iff a parseable `manifest.toml` for `entry` exists
 /// under `paths.models_dir`. A read or parse failure is treated as "model
 /// not installed" — the contract redirects the user to download.
 fn model_manifest_ok(paths: &Paths, entry: &ModelEntry) -> Result<bool, TomeError> {
@@ -1039,7 +1039,7 @@ fn model_manifest_ok(paths: &Paths, entry: &ModelEntry) -> Result<bool, TomeErro
         Ok(b) => b,
         Err(_) => return Ok(false),
     };
-    match serde_json::from_slice::<ModelManifest>(&bytes) {
+    match ModelManifest::from_toml_slice(&manifest_path, &bytes) {
         Ok(_) => Ok(true),
         Err(_) => Ok(false),
     }
@@ -1086,7 +1086,7 @@ mod tests {
         }
     }
 
-    /// Fabricate model dirs + manifest.json for every entry in
+    /// Fabricate model dirs + manifest.toml for every entry in
     /// `MODEL_REGISTRY`. We do NOT touch the network.
     fn fabricate_models(paths: &Paths) {
         for entry in MODEL_REGISTRY {
@@ -1103,8 +1103,11 @@ mod tests {
                 files: entry.files.iter().map(|s| (*s).to_owned()).collect(),
                 installed_at: OffsetDateTime::now_utc(),
             };
-            let body = serde_json::to_vec_pretty(&manifest).expect("serialise manifest");
-            fs::write(dir.join("manifest.json"), body).expect("write manifest");
+            let manifest_path = dir.join("manifest.toml");
+            let body = manifest
+                .to_toml(&manifest_path)
+                .expect("serialise manifest");
+            fs::write(&manifest_path, body).expect("write manifest");
         }
     }
 

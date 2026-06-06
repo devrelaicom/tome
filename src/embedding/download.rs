@@ -23,7 +23,7 @@
 //! 5. `fsync` each file, then rename the `.partial/` directory to its final
 //!    name. The rename is the atomicity boundary — readers either see the
 //!    old directory (or none) or the new one, never a half-extracted state.
-//! 6. Write `manifest.json` atomically via `tempfile::NamedTempFile`.
+//! 6. Write `manifest.toml` atomically via `tempfile::NamedTempFile`.
 //!
 //! Network and IO errors map to [`TomeError::Io`] (exit 7); checksum failures
 //! map to [`TomeError::ModelChecksumMismatch`] (exit 32); a placeholder
@@ -114,7 +114,7 @@ impl Drop for AuxCapOverrideGuard {
 
 /// Download `entry` into `model_root`. The final installed location is
 /// `model_root/<entry.name>/...` and the manifest path is
-/// `model_root/<entry.name>/manifest.json`.
+/// `model_root/<entry.name>/manifest.toml`.
 ///
 /// The HTTP `entry.source_url` MUST point at the **primary** artefact (the
 /// ONNX model file). Every non-primary file in `entry.files[1..]` is fetched
@@ -355,18 +355,13 @@ fn write_manifest(entry: &ModelEntry, final_dir: &Path) -> Result<ModelManifest,
         installed_at: OffsetDateTime::now_utc(),
     };
 
-    let body = serde_json::to_vec_pretty(&manifest).map_err(|e| {
-        TomeError::ModelRegistrationParseError {
-            file: final_dir.join("manifest.json"),
-            message: format!("serialise: {e}"),
-        }
-    })?;
+    let manifest_path: PathBuf = final_dir.join("manifest.toml");
+    let body = manifest.to_toml(&manifest_path)?;
 
     let temp = NamedTempFile::new_in(final_dir).map_err(TomeError::Io)?;
     let mut handle = temp.as_file();
-    handle.write_all(&body).map_err(TomeError::Io)?;
+    handle.write_all(body.as_bytes()).map_err(TomeError::Io)?;
     handle.sync_all().map_err(TomeError::Io)?;
-    let manifest_path: PathBuf = final_dir.join("manifest.json");
     temp.persist(&manifest_path)
         .map_err(|e| TomeError::Io(e.error))?;
 

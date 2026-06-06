@@ -4,8 +4,10 @@
 //! which model bytes are canonical.
 //!
 //! `ModelManifest` is the Tome-owned, strict on-disk record written into
-//! `${XDG_DATA_HOME}/tome/models/<name>/manifest.json` after a successful
-//! verified download (FR-013a, data-model §7).
+//! `${XDG_DATA_HOME}/tome/models/<name>/manifest.toml` after a successful
+//! verified download (FR-013a, data-model §7). Phase 8 moved this from
+//! `manifest.json` to TOML for consistency with `tome-plugin.toml`; a
+//! pre-cutover `manifest.json` is migrated by `doctor --fix`.
 //!
 //! The pinned SHA-256 + size_bytes values below are real upstream artefact
 //! digests, fetched and verified at the start of Phase 3 (slice 1) against
@@ -15,8 +17,12 @@
 //!
 //! Spec: data-model.md §7, research §R5.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
+
+use crate::error::TomeError;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ModelEntry {
@@ -63,6 +69,32 @@ pub struct ModelManifest {
     pub files: Vec<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub installed_at: OffsetDateTime,
+}
+
+impl ModelManifest {
+    /// Serialize to the on-disk **TOML** form (Phase 8 cutover — the model
+    /// manifest moves `manifest.json` → `manifest.toml` for consistency with
+    /// `tome-plugin.toml`; same fields, still strict). `installed_at` round-trips
+    /// as an RFC3339 string.
+    pub fn to_toml(&self, file: &Path) -> Result<String, TomeError> {
+        toml::to_string(self).map_err(|e| TomeError::ModelRegistrationParseError {
+            file: file.to_path_buf(),
+            message: format!("serialise: {e}"),
+        })
+    }
+
+    /// Parse from on-disk TOML bytes (strict, `deny_unknown_fields`).
+    pub fn from_toml_slice(file: &Path, bytes: &[u8]) -> Result<Self, TomeError> {
+        let text =
+            std::str::from_utf8(bytes).map_err(|e| TomeError::ModelRegistrationParseError {
+                file: file.to_path_buf(),
+                message: format!("not valid UTF-8: {e}"),
+            })?;
+        toml::from_str(text).map_err(|e| TomeError::ModelRegistrationParseError {
+            file: file.to_path_buf(),
+            message: e.to_string(),
+        })
+    }
 }
 
 /// Embedder + reranker the rest of Tome assumes are pinned. Hashes and sizes

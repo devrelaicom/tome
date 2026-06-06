@@ -101,7 +101,7 @@ fn remove_without_force_in_non_tty_exits_54_with_pointer_message() {
         "refused remove must not delete the model dir"
     );
     assert!(
-        model_dir.join("manifest.json").is_file(),
+        model_dir.join("manifest.toml").is_file(),
         "refused remove must not delete the manifest",
     );
 }

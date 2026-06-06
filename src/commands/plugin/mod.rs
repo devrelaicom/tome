@@ -44,7 +44,7 @@ pub fn run_interactive(scope: &ResolvedScope, mode: Mode) -> Result<(), TomeErro
 use crate::embedding::registry::{MODEL_REGISTRY, ModelEntry, ModelManifest};
 use crate::paths::Paths;
 
-/// Returns `Ok(true)` iff a parseable `manifest.json` for `entry` exists
+/// Returns `Ok(true)` iff a parseable `manifest.toml` for `entry` exists
 /// under `paths.models_dir`. Mirror of the private helper in
 /// `plugin::lifecycle::model_manifest_ok`; duplicated here so the CLI layer
 /// can decide whether to prompt-and-download before constructing the
@@ -59,7 +59,7 @@ pub(crate) fn model_manifest_ok(paths: &Paths, entry: &ModelEntry) -> bool {
     let Ok(bytes) = std::fs::read(&manifest_path) else {
         return false;
     };
-    serde_json::from_slice::<ModelManifest>(&bytes).is_ok()
+    ModelManifest::from_toml_slice(&manifest_path, &bytes).is_ok()
 }
 
 /// Enumerate registry entries whose on-disk manifest is missing or

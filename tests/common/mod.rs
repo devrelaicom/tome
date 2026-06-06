@@ -320,7 +320,7 @@ pub fn stub_summariser_seed() -> MetaSeed {
     }
 }
 
-/// Fabricate `manifest.json` for every entry in `MODEL_REGISTRY` so the
+/// Fabricate `manifest.toml` for every entry in `MODEL_REGISTRY` so the
 /// model-presence gate in `lifecycle::enable` is satisfied without a real
 /// download. Mirrors `src/plugin/lifecycle.rs::tests::fabricate_models`.
 pub fn fabricate_models(paths: &Paths) {
@@ -338,13 +338,16 @@ pub fn fabricate_models(paths: &Paths) {
             files: entry.files.iter().map(|s| (*s).to_owned()).collect(),
             installed_at: OffsetDateTime::now_utc(),
         };
-        let body = serde_json::to_vec_pretty(&manifest).expect("serialise manifest");
-        std::fs::write(dir.join("manifest.json"), body).expect("write manifest");
+        let manifest_path = dir.join("manifest.toml");
+        let body = manifest
+            .to_toml(&manifest_path)
+            .expect("serialise manifest");
+        std::fs::write(&manifest_path, body).expect("write manifest");
     }
 }
 
 /// Fabricate fully-installed registered models on disk: writes each
-/// entry's `manifest.json` AND a sparse artefact file sized to
+/// entry's `manifest.toml` AND a sparse artefact file sized to
 /// `entry.size_bytes`. Sparse files (`File::set_len`) take ~no disk
 /// space on Linux and macOS, so even the ~400 MB summariser fixture
 /// is essentially free. Auxiliary files (tokenizer.json etc.) get a
@@ -376,8 +379,11 @@ pub fn fabricate_installed_models(
             files: entry.files.iter().map(|s| (*s).to_owned()).collect(),
             installed_at: OffsetDateTime::now_utc(),
         };
-        let body = serde_json::to_vec_pretty(&manifest).expect("serialise manifest");
-        std::fs::write(dir.join("manifest.json"), body).expect("write manifest");
+        let manifest_path = dir.join("manifest.toml");
+        let body = manifest
+            .to_toml(&manifest_path)
+            .expect("serialise manifest");
+        std::fs::write(&manifest_path, body).expect("write manifest");
 
         for (i, file) in entry.files.iter().enumerate() {
             let path = dir.join(file);
