@@ -1,0 +1,3 @@
+name = "plugin-beta"
+version = "0.9.0"
+description = "Beta plugin used by Phase 3 plugin list / show tests."

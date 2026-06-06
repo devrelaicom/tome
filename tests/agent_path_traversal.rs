@@ -25,6 +25,14 @@ fn write_agent_catalog_with_name(root: &std::path::Path, agent_name: &str) -> st
     let catalog_root = root.join("evil-catalog");
     let plugin_dir = catalog_root.join("plugin-evil");
     std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join("tome-plugin.toml"),
+        format!(
+            "name = \"{}\"\nversion = \"1.0.0\"\n",
+            plugin_dir.file_name().unwrap().to_string_lossy()
+        ),
+    )
+    .unwrap();
     std::fs::create_dir_all(plugin_dir.join("agents")).unwrap();
     std::fs::write(
         catalog_root.join("tome-catalog.toml"),

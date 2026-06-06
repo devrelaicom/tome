@@ -16,7 +16,7 @@ use crate::error::TomeError;
 use crate::output::Mode;
 use crate::paths::Paths;
 use crate::plugin::components::count_components;
-use crate::plugin::manifest::{manifest_path_for, parse_plugin_manifest};
+use crate::plugin::manifest::read_plugin_manifest;
 use crate::plugin::{PluginId, PluginRecord, PluginStatus};
 use crate::presentation::{colour, tables};
 use crate::workspace::ResolvedScope;
@@ -122,8 +122,9 @@ fn build_row(
     conn: &rusqlite::Connection,
     workspace_name: &str,
 ) -> Result<Row, TomeError> {
-    // Lenient parse — failures fall through to `Unindexable`.
-    let manifest = parse_plugin_manifest(&manifest_path_for(plugin_dir)).ok();
+    // Lenient parse — failures (unconverted or malformed) fall through to
+    // `Unindexable` so `list` still renders the row.
+    let manifest = read_plugin_manifest(plugin_dir).ok();
     let component_counts = count_components(plugin_dir);
 
     let agg: IndexAggregate = aggregate_for_plugin(conn, workspace_name, &id.catalog, &id.plugin)?;
@@ -139,7 +140,7 @@ fn build_row(
             } else {
                 PluginStatus::Disabled
             };
-            (status, m.version.clone())
+            (status, Some(m.version.clone()))
         }
     };
 

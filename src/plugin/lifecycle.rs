@@ -38,7 +38,7 @@ use crate::plugin::frontmatter::{
     FrontmatterError, ParsedSkill, parse_skill_frontmatter, validate_argument_names,
 };
 use crate::plugin::identity::{EntryKind, PluginId};
-use crate::plugin::manifest::{manifest_path_for, parse_plugin_manifest};
+use crate::plugin::manifest::read_plugin_manifest;
 
 /// Result of a successful enable.
 #[derive(Debug, Clone)]
@@ -135,16 +135,13 @@ pub fn enable(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<EnableOutcome, 
     let plugin_dir = resolve_plugin_dir(id, &conn, deps.workspace_name(), deps.paths)?;
     drop(conn);
 
-    // Step 2 — manifest parse. We don't *use* the parsed fields below (the
-    // `plugin_version` we record per-skill is sourced from this manifest's
-    // `version` field), but reading it early gives us the right exit code
-    // (22) before we touch the index.
-    let manifest_path = manifest_path_for(&plugin_dir);
-    let manifest = parse_plugin_manifest(&manifest_path)?;
-    let plugin_version = manifest
-        .version
-        .clone()
-        .unwrap_or_else(|| "0.0.0".to_string());
+    // Step 2 — manifest parse. The `plugin_version` we record per-skill is
+    // sourced from this manifest's required `version` field. Reading it early
+    // gives the right exit code before we touch the index — 80
+    // (`PluginNotConverted`) for an unconverted legacy plugin, 22 for a
+    // malformed `tome-plugin.toml`.
+    let manifest = read_plugin_manifest(&plugin_dir)?;
+    let plugin_version = manifest.version.clone();
 
     // Step 3 — already-enabled check. We open the DB read-only-ish (the
     // bootstrap is idempotent on re-open) and look for any enabled row.
@@ -260,12 +257,8 @@ pub fn reindex_plugin(
     let plugin_dir = resolve_plugin_dir(id, &conn, deps.workspace_name(), deps.paths)?;
     drop(conn);
 
-    let manifest_path = manifest_path_for(&plugin_dir);
-    let manifest = parse_plugin_manifest(&manifest_path)?;
-    let plugin_version = manifest
-        .version
-        .clone()
-        .unwrap_or_else(|| "0.0.0".to_string());
+    let manifest = read_plugin_manifest(&plugin_dir)?;
+    let plugin_version = manifest.version.clone();
 
     let lock = acquire_lock(&deps.paths.index_lock.clone())?;
     let result = reindex_locked(id, &plugin_dir, &plugin_version, deps, force);
@@ -1147,8 +1140,11 @@ mod tests {
         paths.cache_dir_for(&url)
     }
 
-    /// Lay out a plugin on disk: `<catalog>/<plugin>/.claude-plugin/plugin.json`
-    /// + zero or more skills (each `(dir_name, skill_md_contents)`).
+    /// Lay out a plugin on disk: the native `tome-plugin.toml` (Phase 8 cutover
+    /// — the only manifest Tome reads) + a legacy `.claude-plugin/plugin.json`
+    /// (both-files coverage) + zero or more skills (each `(dir_name,
+    /// skill_md_contents)`). A `None` version defaults to `"0.0.0"`, matching
+    /// the pre-cutover enable default so version assertions are unchanged.
     fn write_plugin(
         catalog_root: &Path,
         plugin_name: &str,
@@ -1157,6 +1153,12 @@ mod tests {
     ) -> PathBuf {
         let plugin_dir = catalog_root.join(plugin_name);
         fs::create_dir_all(plugin_dir.join(".claude-plugin")).expect("plugin dir");
+        let version = plugin_version.unwrap_or("0.0.0");
+        fs::write(
+            plugin_dir.join("tome-plugin.toml"),
+            format!("name = \"{plugin_name}\"\nversion = \"{version}\"\n"),
+        )
+        .expect("write tome-plugin.toml");
         let version_line = plugin_version
             .map(|v| format!(", \"version\": \"{v}\""))
             .unwrap_or_default();

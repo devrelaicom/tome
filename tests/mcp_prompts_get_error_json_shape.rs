@@ -65,6 +65,14 @@ fn build_deps<'a>(
 fn write_plugin(catalog_root: &Path, plugin: &str, commands: &[(&str, &str)]) {
     let plugin_dir = catalog_root.join(plugin);
     fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join("tome-plugin.toml"),
+        format!(
+            "name = \"{}\"\nversion = \"1.0.0\"\n",
+            plugin_dir.file_name().unwrap().to_string_lossy()
+        ),
+    )
+    .unwrap();
     fs::write(
         plugin_dir.join(".claude-plugin").join("plugin.json"),
         format!(r#"{{"name": "{plugin}", "version": "1.0.0"}}"#),

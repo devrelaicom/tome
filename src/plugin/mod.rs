@@ -15,7 +15,10 @@ pub use components::ComponentCounts;
 pub use frontmatter::{FrontmatterError, ParsedSkill, SkillFrontmatter};
 pub use identity::{PluginId, PluginIdParseError, SegmentRejection};
 pub use lifecycle::{DisableOutcome, EnableOutcome, LifecycleDeps, disable, enable};
-pub use manifest::{PluginAuthor, PluginManifest, manifest_path_for, parse_plugin_manifest};
+pub use manifest::{
+    PluginAuthor, PluginManifest, TomeAuthor, TomePluginManifest, manifest_path_for,
+    parse_plugin_manifest, read_plugin_manifest, tome_manifest_path_for,
+};
 
 use time::OffsetDateTime;
 

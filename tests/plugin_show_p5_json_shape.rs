@@ -37,6 +37,14 @@ fn write_plugin_with(
 ) -> PathBuf {
     let plugin_dir = catalog_root.join(plugin_name);
     fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join("tome-plugin.toml"),
+        format!(
+            "name = \"{}\"\nversion = \"1.0.0\"\n",
+            plugin_dir.file_name().unwrap().to_string_lossy()
+        ),
+    )
+    .unwrap();
     fs::write(
         plugin_dir.join(".claude-plugin").join("plugin.json"),
         format!(r#"{{"name": "{plugin_name}", "version": "1.0.0"}}"#),

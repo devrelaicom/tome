@@ -156,9 +156,63 @@ pub struct TomeAuthor {
     pub email: Option<String>,
 }
 
+impl TomeAuthor {
+    /// Render as `Name <email>` when both are known, falling back to whichever
+    /// is present. Returns `None` if both fields are absent or empty. Mirrors
+    /// [`PluginAuthor::display`] so the display surfaces (`plugin show`/`list`/
+    /// interactive) read the native manifest the same way they read the legacy
+    /// one.
+    pub fn display(&self) -> Option<String> {
+        let name = self
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let email = self
+            .email
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match (name, email) {
+            (Some(n), Some(e)) => Some(format!("{n} <{e}>")),
+            (Some(n), None) => Some(n.to_owned()),
+            (None, Some(e)) => Some(e.to_owned()),
+            (None, None) => None,
+        }
+    }
+}
+
 /// Conventional location for the native manifest relative to the plugin dir.
 pub fn tome_manifest_path_for(plugin_dir: &Path) -> PathBuf {
     plugin_dir.join("tome-plugin.toml")
+}
+
+/// Read a plugin's manifest with Phase 8 **cutover** semantics: the native
+/// `<plugin>/tome-plugin.toml` is the *only* manifest read.
+///
+/// - `tome-plugin.toml` present → parse it (a plugin with **both** files →
+///   `tome-plugin.toml` wins; the legacy `plugin.json` is ignored).
+/// - `tome-plugin.toml` absent but `.claude-plugin/plugin.json` present → the
+///   plugin is *unconverted* → [`TomeError::PluginNotConverted`] (80), the
+///   migration nudge.
+/// - neither present → [`TomeError::PluginManifestParseError`] (22).
+///
+/// This is the single reader every lifecycle + display path now goes through
+/// (`contracts/manifest-cutover.md`). No `plugin.json` content is ever read.
+pub fn read_plugin_manifest(plugin_dir: &Path) -> Result<TomePluginManifest, TomeError> {
+    let tome_path = tome_manifest_path_for(plugin_dir);
+    if tome_path.is_file() {
+        return TomePluginManifest::read(plugin_dir);
+    }
+    if manifest_path_for(plugin_dir).is_file() {
+        return Err(TomeError::PluginNotConverted {
+            path: plugin_dir.to_path_buf(),
+        });
+    }
+    Err(TomeError::PluginManifestParseError {
+        file: tome_path,
+        message: "no `tome-plugin.toml` found".to_owned(),
+    })
 }
 
 impl TomePluginManifest {
