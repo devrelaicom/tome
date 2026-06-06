@@ -119,6 +119,16 @@ fn fake_then_exclamation_fake_still_errors_per_entry() {
 
 #[test]
 fn supported_name_resolves_cleanly() {
+    // Reads the production `SUPPORTED_HARNESSES` registry (expects `claude-code`
+    // to resolve). Hold the process-global override mutex so a concurrent
+    // override-installing test in this binary can't leak its
+    // `HARNESS_MODULES_OVERRIDE` (e.g. a stub `["alpha","beta"]` set) into this
+    // read — the guard's Drop restores the slot to `None`, so once we hold the
+    // lock the registry is the real one. (Pre-existing parallel-execution race
+    // surfaced by Phase 8's added test load.)
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let stub = StubScope::new();
     let global = GlobalSettings {
         harnesses: Some(vec!["claude-code".to_owned()]),

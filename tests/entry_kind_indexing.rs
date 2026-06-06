@@ -52,6 +52,14 @@ fn write_plugin_with_kinds(
 ) -> PathBuf {
     let plugin_dir = catalog_root.join(plugin_name);
     fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join("tome-plugin.toml"),
+        format!(
+            "name = \"{}\"\nversion = \"1.0.0\"\n",
+            plugin_dir.file_name().unwrap().to_string_lossy()
+        ),
+    )
+    .unwrap();
     fs::write(
         plugin_dir.join(".claude-plugin").join("plugin.json"),
         format!(r#"{{"name": "{plugin_name}", "version": "1.0.0"}}"#),
@@ -349,6 +357,14 @@ fn frontmatter_when_to_use_round_trips_through_enable_to_db() {
     enrol_catalog_symlinked(&paths, "global", "acme", &catalog_root);
     let plugin_dir = catalog_root.join("plug");
     fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join("tome-plugin.toml"),
+        format!(
+            "name = \"{}\"\nversion = \"1.0.0\"\n",
+            plugin_dir.file_name().unwrap().to_string_lossy()
+        ),
+    )
+    .unwrap();
     fs::write(
         plugin_dir.join(".claude-plugin").join("plugin.json"),
         r#"{"name": "plug", "version": "1.0.0"}"#,

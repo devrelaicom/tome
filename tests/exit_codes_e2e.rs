@@ -118,11 +118,12 @@ fn options() -> OpenOptions {
 }
 
 #[test]
-fn plugin_show_with_malformed_plugin_json_exits_22() {
-    // Setup: copy the sample-plugin-catalog fixture (which has real
-    // plugin.json files), register it via a hand-written config, then
-    // corrupt plugin-alpha's plugin.json. `tome plugin show` must
-    // surface the parse error as exit 22 (`PluginManifestParseError`).
+fn plugin_show_with_malformed_tome_plugin_toml_exits_22() {
+    // Setup: copy the sample-plugin-catalog fixture (whose plugins carry a
+    // native `tome-plugin.toml`), register it via a hand-written config, then
+    // corrupt plugin-alpha's `tome-plugin.toml`. Post-cutover `tome plugin
+    // show` reads ONLY the native manifest, so a malformed one must surface as
+    // exit 22 (`PluginManifestParseError`).
     let tmp = TempDir::new().unwrap();
     let env = ToolEnv::new();
     let paths = paths_for(&env);
@@ -132,16 +133,13 @@ fn plugin_show_with_malformed_plugin_json_exits_22() {
     let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
     write_config_for_cli(&paths, &config);
 
-    let pj = catalog_root
-        .join("plugin-alpha")
-        .join(".claude-plugin")
-        .join("plugin.json");
+    let manifest = catalog_root.join("plugin-alpha").join("tome-plugin.toml");
     assert!(
-        pj.is_file(),
-        "expected fixture plugin.json at {}",
-        pj.display()
+        manifest.is_file(),
+        "expected fixture tome-plugin.toml at {}",
+        manifest.display()
     );
-    fs::write(&pj, b"{ this is not valid json }").expect("write bad plugin.json");
+    fs::write(&manifest, b"this is = not valid = toml").expect("write bad tome-plugin.toml");
 
     let out = env
         .cmd()

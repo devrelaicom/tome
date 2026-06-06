@@ -50,7 +50,7 @@ use crate::paths::Paths;
 use crate::plugin::PluginStatus;
 use crate::plugin::components::count_components;
 use crate::plugin::lifecycle;
-use crate::plugin::manifest::{manifest_path_for, parse_plugin_manifest};
+use crate::plugin::manifest::read_plugin_manifest;
 use crate::plugin::{PluginId, PluginRecord};
 use crate::presentation::{colour, prompt};
 use crate::workspace::ResolvedScope;
@@ -318,7 +318,7 @@ fn build_plugin_menu(
                 plugin: plugin.name.clone(),
             };
             let plugin_dir = clone_dir.join(&plugin.source);
-            let parsed = parse_plugin_manifest(&manifest_path_for(&plugin_dir)).ok();
+            let parsed = read_plugin_manifest(&plugin_dir).ok();
             let agg = aggregate_for_plugin(&conn, workspace_name, &id.catalog, &id.plugin)?;
             let status = match &parsed {
                 None => PluginStatus::Unindexable,
@@ -330,7 +330,7 @@ fn build_plugin_menu(
                     }
                 }
             };
-            let version = parsed.as_ref().and_then(|m| m.version.clone());
+            let version = parsed.as_ref().map(|m| m.version.clone());
             out.push(PluginChoice::Plugin {
                 id,
                 version,
@@ -391,7 +391,7 @@ fn render_plugin_view(
     // `workspace_catalogs` enrolment since FF2.
     let conn = open_index_for_read(paths, &scope.scope)?;
     let plugin_dir = resolve_plugin_dir(id, &conn, scope.scope.name().as_str(), paths)?;
-    let manifest = parse_plugin_manifest(&manifest_path_for(&plugin_dir));
+    let manifest = read_plugin_manifest(&plugin_dir);
     let component_counts = count_components(&plugin_dir);
     let agg = aggregate_for_plugin(&conn, scope.scope.name().as_str(), &id.catalog, &id.plugin)?;
 
@@ -409,9 +409,7 @@ fn render_plugin_view(
     let manifest_ok = manifest.as_ref().ok();
     let record = PluginRecord {
         id: id.clone(),
-        version: manifest_ok
-            .and_then(|m| m.version.clone())
-            .unwrap_or_default(),
+        version: manifest_ok.map(|m| m.version.clone()).unwrap_or_default(),
         author: manifest_ok.and_then(|m| m.author.as_ref().and_then(|a| a.display())),
         description: manifest_ok.and_then(|m| m.description.clone()),
         last_upstream_change: None,

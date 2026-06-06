@@ -61,6 +61,14 @@ fn stage_with_agent() -> (TempDir, tome::paths::Paths) {
     let catalog_root = tmp.path().join("catalog");
     let plugin_dir = catalog_root.join("plug");
     fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join("tome-plugin.toml"),
+        format!(
+            "name = \"{}\"\nversion = \"1.0.0\"\n",
+            plugin_dir.file_name().unwrap().to_string_lossy()
+        ),
+    )
+    .unwrap();
     fs::create_dir_all(plugin_dir.join("agents")).unwrap();
     fs::write(
         catalog_root.join("tome-catalog.toml"),

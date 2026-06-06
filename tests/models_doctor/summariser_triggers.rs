@@ -61,6 +61,14 @@ fn good_skill_md(name: &str, description: &str) -> String {
 fn write_plugin(catalog_root: &Path, plugin_name: &str, skills: &[(&str, &str)]) {
     let plugin_dir = catalog_root.join(plugin_name);
     std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join("tome-plugin.toml"),
+        format!(
+            "name = \"{}\"\nversion = \"1.0.0\"\n",
+            plugin_dir.file_name().unwrap().to_string_lossy()
+        ),
+    )
+    .unwrap();
     let manifest = format!(r#"{{"name": "{plugin_name}", "version": "1.0.0"}}"#);
     std::fs::write(
         plugin_dir.join(".claude-plugin").join("plugin.json"),

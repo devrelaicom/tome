@@ -179,6 +179,14 @@ fn write_agent_catalog(
     let catalog_root = root.join("agent-catalog");
     let plugin_dir = catalog_root.join("plugin-ag");
     std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join("tome-plugin.toml"),
+        format!(
+            "name = \"{}\"\nversion = \"1.0.0\"\n",
+            plugin_dir.file_name().unwrap().to_string_lossy()
+        ),
+    )
+    .unwrap();
     std::fs::create_dir_all(plugin_dir.join("agents")).unwrap();
     std::fs::write(
         catalog_root.join("tome-catalog.toml"),
@@ -336,6 +344,14 @@ fn write_skill_and_agent_catalog(root: &std::path::Path, name: &str) -> std::pat
     let catalog_root = root.join("mixed-catalog");
     let plugin_dir = catalog_root.join("plugin-mix");
     std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin_dir.join("tome-plugin.toml"),
+        format!(
+            "name = \"{}\"\nversion = \"1.0.0\"\n",
+            plugin_dir.file_name().unwrap().to_string_lossy()
+        ),
+    )
+    .unwrap();
     std::fs::create_dir_all(plugin_dir.join("agents")).unwrap();
     let skill_dir = plugin_dir.join("skills").join(name);
     std::fs::create_dir_all(&skill_dir).unwrap();

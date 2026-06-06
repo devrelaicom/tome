@@ -139,10 +139,12 @@ pub fn open_index(paths: &Paths) -> rusqlite::Connection {
     .expect("open index db")
 }
 
-/// Write one plugin laid out on disk: `.claude-plugin/plugin.json`,
-/// `skills/<name>/SKILL.md` for each skill, `commands/<name>.md` for each
-/// command. `(name, body)` pairs carry the full file body (frontmatter +
-/// content) verbatim.
+/// Write one plugin laid out on disk: the native `tome-plugin.toml` (Phase 8
+/// cutover — the only manifest Tome reads) plus a legacy
+/// `.claude-plugin/plugin.json` (so both-files coverage holds and convert
+/// fixtures still have a CC manifest), `skills/<name>/SKILL.md` for each skill,
+/// and `commands/<name>.md` for each command. `(name, body)` pairs carry the
+/// full file body (frontmatter + content) verbatim.
 pub fn write_plugin(
     catalog_root: &Path,
     plugin_name: &str,
@@ -150,6 +152,13 @@ pub fn write_plugin(
     commands: &[(&str, &str)],
 ) {
     let plugin_dir = catalog_root.join(plugin_name);
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    // Native manifest (Phase 8 cutover) — what `read_plugin_manifest` reads.
+    std::fs::write(
+        plugin_dir.join("tome-plugin.toml"),
+        format!("name = \"{plugin_name}\"\nversion = \"1.0.0\"\n"),
+    )
+    .unwrap();
     std::fs::create_dir_all(plugin_dir.join(".claude-plugin")).unwrap();
     std::fs::write(
         plugin_dir.join(".claude-plugin").join("plugin.json"),

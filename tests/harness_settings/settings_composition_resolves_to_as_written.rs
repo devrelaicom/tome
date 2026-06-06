@@ -79,6 +79,12 @@ fn workspace_ref_to_undeclared_workspace_resolves_to_empty_not_global() {
 
 #[test]
 fn workspace_ref_with_global_in_it_does_not_recurse_through_workspace_effective_list() {
+    // Resolves against the production registry (expects `claude-code`); hold the
+    // override mutex so a concurrent override-installing test in this binary
+    // can't leak its `HARNESS_MODULES_OVERRIDE` in (pre-existing parallel race).
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     // Workspace W's directly-declared list is `["[global]"]`. Project
     // is bound to W and declares `["[workspace]"]`.
     //

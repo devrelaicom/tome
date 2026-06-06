@@ -24,7 +24,7 @@ use crate::paths::Paths;
 use crate::plugin::components::count_components;
 use crate::plugin::frontmatter::parse_skill_frontmatter;
 use crate::plugin::identity::EntryKind;
-use crate::plugin::manifest::{manifest_path_for, parse_plugin_manifest};
+use crate::plugin::manifest::read_plugin_manifest;
 use crate::plugin::{PluginId, PluginRecord, PluginStatus};
 use crate::presentation::{colour, tables};
 use crate::workspace::ResolvedScope;
@@ -43,8 +43,9 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
     let conn = open_index_for_read(&paths, &scope.scope)?;
     let plugin_dir = resolve_plugin_dir(&id, &conn, scope.scope.name().as_str(), &paths)?;
 
-    // Strict failure here: the contract says exit 22 on a malformed manifest.
-    let manifest = parse_plugin_manifest(&manifest_path_for(&plugin_dir))?;
+    // Strict failure here: exit 80 on an unconverted plugin, 22 on a malformed
+    // `tome-plugin.toml` (the cutover reader).
+    let manifest = read_plugin_manifest(&plugin_dir)?;
     let component_counts = count_components(&plugin_dir);
 
     let agg = aggregate_for_plugin(&conn, scope.scope.name().as_str(), &id.catalog, &id.plugin)?;
@@ -94,7 +95,7 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
 
     let record = PluginRecord {
         id: id.clone(),
-        version: manifest.version.clone().unwrap_or_default(),
+        version: manifest.version.clone(),
         author: manifest.author.as_ref().and_then(|a| a.display()),
         description: manifest.description.clone(),
         last_upstream_change: None,
