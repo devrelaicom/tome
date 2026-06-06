@@ -110,12 +110,15 @@ fn show_emits_full_metadata_and_component_counts_for_enabled_plugin() {
 }
 
 #[test]
-fn show_tolerates_extra_unknown_fields_in_plugin_json() {
-    // The fixture's plugin.json deliberately includes `keywords`,
-    // `homepage`, and `unknown_extra_field` — none of which are part of
-    // Tome's lenient PluginManifest schema. FR-013a requires the parser to
-    // ignore them silently. If this test fails, the manifest parser is no
-    // longer lenient.
+fn show_reads_native_manifest_ignoring_legacy_plugin_json() {
+    // Post-cutover (US1) `plugin show` reads ONLY `tome-plugin.toml`. The
+    // fixture's legacy `.claude-plugin/plugin.json` carries `keywords`,
+    // `homepage`, and `unknown_extra_field` — strict-rejected by the native
+    // schema, but never read by `show`, so they are simply irrelevant.
+    // `show` succeeds against the clean native manifest, and the surfaced
+    // `version` comes from `tome-plugin.toml` (US1 closeout TEST-M3: this
+    // previously claimed to test "lenient plugin.json parsing", which the
+    // cutover made tautological).
     let fixture_tmp = TempDir::new().unwrap();
     let env = ToolEnv::new();
     let _paths = setup(&env, &fixture_tmp);
@@ -132,8 +135,13 @@ fn show_tolerates_extra_unknown_fields_in_plugin_json() {
         .unwrap();
     assert!(
         out.status.success(),
-        "lenient parser regressed: {}",
+        "show must read the native manifest: {}",
         String::from_utf8_lossy(&out.stderr),
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+    assert_eq!(
+        v["version"], "1.2.3",
+        "version must come from the native tome-plugin.toml, got {v}"
     );
 }
 

@@ -216,3 +216,51 @@ impl ModelEntry {
         self.sha256.chars().all(|c| c == '0')
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// `ModelManifest::{to_toml, from_toml_slice}` round-trip, including the
+    /// RFC3339 `installed_at` with a NON-epoch instant (US1 closeout TEST-M6 —
+    /// the migration test only used `UNIX_EPOCH`, which can't catch a
+    /// formatting bug in non-trivial timestamps).
+    #[test]
+    fn model_manifest_toml_round_trips() {
+        let installed_at = OffsetDateTime::from_unix_timestamp(1_700_123_456).unwrap();
+        let manifest = ModelManifest {
+            name: "bge-small-en-v1.5".to_owned(),
+            version: "1.5".to_owned(),
+            kind: ModelKind::Embedder,
+            source_url: "https://example.com/m.onnx".to_owned(),
+            sha256: "abc123".to_owned(),
+            size_bytes: 34_014_426,
+            licence: "MIT".to_owned(),
+            files: vec!["model.onnx".to_owned(), "tokenizer.json".to_owned()],
+            installed_at,
+        };
+        let path = Path::new("manifest.toml");
+        let toml = manifest.to_toml(path).expect("serialise");
+        let back = ModelManifest::from_toml_slice(path, toml.as_bytes()).expect("parse");
+        assert_eq!(back.name, manifest.name);
+        assert_eq!(back.version, manifest.version);
+        assert_eq!(back.kind, manifest.kind);
+        assert_eq!(back.source_url, manifest.source_url);
+        assert_eq!(back.sha256, manifest.sha256);
+        assert_eq!(back.size_bytes, manifest.size_bytes);
+        assert_eq!(back.licence, manifest.licence);
+        assert_eq!(back.files, manifest.files);
+        assert_eq!(
+            back.installed_at, installed_at,
+            "RFC3339 timestamp must round-trip"
+        );
+    }
+
+    #[test]
+    fn model_manifest_rejects_unknown_field() {
+        // Tome-owned → strict (deny_unknown_fields).
+        let bad = "name=\"x\"\nversion=\"1\"\nkind=\"embedder\"\nsource_url=\"u\"\nsha256=\"h\"\nsize_bytes=1\nlicence=\"MIT\"\nfiles=[]\ninstalled_at=\"2026-01-01T00:00:00Z\"\nextra=true\n";
+        assert!(ModelManifest::from_toml_slice(Path::new("m.toml"), bad.as_bytes()).is_err());
+    }
+}

@@ -56,7 +56,9 @@ pub fn migrate_model_manifests(paths: &Paths) -> Result<Vec<String>, TomeError> 
             continue;
         }
         // Parse the legacy JSON (ModelManifest is Deserialize for both forms).
-        let bytes = std::fs::read(&json_path).map_err(TomeError::Io)?;
+        // Bounded read (parity with the project's bounded-read discipline) — the
+        // manifest is small and Tome-owned, but never slurp an unbounded file.
+        let bytes = crate::util::bounded_read(&json_path, crate::util::PLUGIN_MANIFEST_MAX)?;
         let manifest = serde_json::from_slice::<ModelManifest>(&bytes).map_err(|e| {
             TomeError::ModelRegistrationParseError {
                 file: json_path.clone(),
@@ -220,6 +222,36 @@ mod tests {
         assert!(
             !found.contains(&converted),
             "converted plugin must not be flagged"
+        );
+    }
+
+    #[test]
+    fn unconverted_plugins_via_catalog_manifest() {
+        // The PRIMARY (production) path: a readable `tome-catalog.toml` whose
+        // `plugins[].source` resolves the plugin dirs (not the shallow-scan
+        // fallback). A legacy plugin declared in the manifest must be flagged.
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cat");
+        std::fs::create_dir_all(&cache).unwrap();
+        // The declared plugin dir must exist before the manifest is read
+        // (catalog `validate_source` canonicalises it within the catalog root).
+        let legacy = cache.join("legacy");
+        std::fs::create_dir_all(legacy.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            legacy.join(".claude-plugin").join("plugin.json"),
+            r#"{"name":"legacy","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            cache.join("tome-catalog.toml"),
+            "name = \"cat\"\ndescription = \"d\"\nversion = \"0.1.0\"\n\n[owner]\nname = \"o\"\nemail = \"o@example.com\"\n\n[[plugins]]\nname = \"legacy\"\nsource = \"legacy\"\n",
+        )
+        .unwrap();
+
+        let found = unconverted_plugins(std::slice::from_ref(&cache));
+        assert!(
+            found.contains(&legacy),
+            "manifest-declared legacy plugin must be flagged via plugins[].source"
         );
     }
 }

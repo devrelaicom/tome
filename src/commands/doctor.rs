@@ -33,6 +33,27 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
         ))
     })?;
 
+    // Phase 8 cutover (US1 closeout MAJOR-1): migrate any legacy model
+    // `manifest.json` → `manifest.toml` BEFORE classification, so a pre-cutover
+    // install (model bytes present, only the legacy JSON) is seen as healthy
+    // and the model `--fix` never spuriously `remove_dir_all`s + re-downloads
+    // it — honouring the contract's "No re-download" guarantee. Only under
+    // `--fix` (read-only doctor must not mutate). A migration failure is
+    // warned, not propagated (FR-561); the legacy manifest then simply stays
+    // surfaced by `assemble_report` below.
+    if args.fix {
+        match doctor::cutover::migrate_model_manifests(&paths) {
+            Ok(migrated) if !migrated.is_empty() => tracing::info!(
+                count = migrated.len(),
+                "doctor --fix: migrated legacy model manifest.json → manifest.toml",
+            ),
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "doctor --fix: model manifest migration failed");
+            }
+        }
+    }
+
     let mut report = doctor::assemble_report(scope, &paths, &home, args.verify)?;
 
     if args.fix {
@@ -55,25 +76,6 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
             );
         }
         doctor::fixes::re_assemble(&mut report);
-
-        // Phase 8 cutover: migrate any legacy model `manifest.json` →
-        // `manifest.toml` (no re-download), then refresh the report's
-        // legacy-manifest list. Doctor never crashes (FR-561): a migration
-        // failure is warned, not propagated — the legacy manifest simply
-        // stays surfaced.
-        match doctor::cutover::migrate_model_manifests(&paths) {
-            Ok(migrated) if !migrated.is_empty() => {
-                tracing::info!(
-                    count = migrated.len(),
-                    "doctor --fix: migrated legacy model manifest.json → manifest.toml",
-                );
-                report.legacy_model_manifests = doctor::cutover::legacy_model_manifests(&paths);
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(error = %e, "doctor --fix: model manifest migration failed");
-            }
-        }
     }
 
     emit(&report, mode)?;
