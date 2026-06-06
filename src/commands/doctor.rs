@@ -55,6 +55,25 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
             );
         }
         doctor::fixes::re_assemble(&mut report);
+
+        // Phase 8 cutover: migrate any legacy model `manifest.json` →
+        // `manifest.toml` (no re-download), then refresh the report's
+        // legacy-manifest list. Doctor never crashes (FR-561): a migration
+        // failure is warned, not propagated — the legacy manifest simply
+        // stays surfaced.
+        match doctor::cutover::migrate_model_manifests(&paths) {
+            Ok(migrated) if !migrated.is_empty() => {
+                tracing::info!(
+                    count = migrated.len(),
+                    "doctor --fix: migrated legacy model manifest.json → manifest.toml",
+                );
+                report.legacy_model_manifests = doctor::cutover::legacy_model_manifests(&paths);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "doctor --fix: model manifest migration failed");
+            }
+        }
     }
 
     emit(&report, mode)?;
@@ -449,6 +468,28 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
             )?;
         }
         writeln!(out, "  {}{}", crate::mcp::MCP_SLASH_PREFIX, p.drop_persona)?;
+        writeln!(out)?;
+    }
+
+    // Phase 8 cutover surfaces.
+    if !report.legacy_model_manifests.is_empty() {
+        writeln!(out, "Legacy model manifests (pre-cutover manifest.json):")?;
+        for name in &report.legacy_model_manifests {
+            writeln!(
+                out,
+                "  {warn} {name}  (run `tome doctor --fix` to migrate to manifest.toml)",
+            )?;
+        }
+        writeln!(out)?;
+    }
+    if !report.unconverted_plugins.is_empty() {
+        writeln!(
+            out,
+            "Unconverted plugins (legacy plugin.json, no tome-plugin.toml):"
+        )?;
+        for p in &report.unconverted_plugins {
+            writeln!(out, "  {warn} {p}  (run `tome plugin convert <source>`)")?;
+        }
         writeln!(out)?;
     }
 

@@ -685,6 +685,17 @@ pub struct DoctorReport {
     /// OR when `expose_agents_as_personas` resolves false at the scope.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub personas: Option<PersonaReport>,
+    /// Phase 8 cutover: registry models still on a pre-cutover `manifest.json`
+    /// (native `manifest.toml` absent). `doctor --fix` migrates them in place
+    /// (no re-download). Omitted from JSON when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub legacy_model_manifests: Vec<String>,
+    /// Phase 8 cutover: enrolled-catalog plugin directories still carrying a
+    /// legacy `.claude-plugin/plugin.json` with no `tome-plugin.toml`.
+    /// Read-only — run `tome plugin convert`; never auto-fixed. Display paths,
+    /// sorted. Omitted from JSON when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unconverted_plugins: Vec<String>,
     pub overall: DoctorClassification,
     pub suggested_fixes: Vec<SuggestedFix>,
 }

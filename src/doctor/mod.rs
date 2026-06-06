@@ -12,6 +12,7 @@
 
 pub mod binding;
 pub mod checks;
+pub mod cutover;
 pub mod fixes;
 pub mod harness_detect;
 pub mod harness_integration;
@@ -231,6 +232,17 @@ pub fn assemble_report(
         &harness_mcp,
     );
 
+    // Phase 8 cutover surfaces (read-only). The migration of any legacy model
+    // `manifest.json` runs under `--fix` (in the command layer); the report
+    // here only surfaces what would be migrated / converted.
+    let legacy_model_manifests = cutover::legacy_model_manifests(paths);
+    let catalog_cache_roots: Vec<std::path::PathBuf> =
+        catalogs.iter().map(|c| c.cache_path.clone()).collect();
+    let unconverted_plugins = cutover::unconverted_plugins(&catalog_cache_roots)
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+
     Ok(DoctorReport {
         tome_version,
         workspace,
@@ -255,6 +267,8 @@ pub fn assemble_report(
         agents,
         privilege_escalation,
         personas,
+        legacy_model_manifests,
+        unconverted_plugins,
         overall,
         suggested_fixes,
     })
