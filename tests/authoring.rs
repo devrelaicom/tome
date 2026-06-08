@@ -4,6 +4,9 @@
 //! `cargo test --test authoring` runs the group; `cargo test cutover::` filters
 //! by member.
 
+#[path = "authoring/convert.rs"]
+mod convert;
+
 #[path = "authoring/cutover.rs"]
 mod cutover;
 

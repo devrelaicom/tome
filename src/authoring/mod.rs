@@ -20,6 +20,7 @@
 //! surface for these commands is an explicit fast-follow, out of scope this
 //! phase.
 
+pub mod convert;
 pub mod detect;
 pub mod emit;
 pub mod import;
