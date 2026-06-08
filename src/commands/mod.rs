@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod convert;
 pub mod doctor;
 pub mod harness;
 pub mod mcp;

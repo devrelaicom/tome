@@ -80,6 +80,9 @@ const MAX_SUPPORTING_FILES: usize = 4096;
 /// Cap total directories enumerated so a shallow-but-very-wide tree cannot turn
 /// the walk into unbounded work even when it stays under the file cap.
 const MAX_SUPPORTING_DIRS: usize = 4096;
+/// VCS metadata / OS junk never copied into a converted artifact. Relevant for
+/// bare native-skill sources whose root may be a git checkout.
+const SKIP_SUPPORTING_NAMES: &[&str] = &[".git", ".hg", ".svn", ".DS_Store"];
 
 /// Import a Claude Code plugin directory into a [`PluginIr`]. `default_name` is
 /// used when the manifest omits `name`; `source_path` is recorded for the
@@ -272,7 +275,11 @@ fn import_md_dir(
 /// Build a skill entry from `<rel_dir>/SKILL.md`, validating the emitted name,
 /// rewriting harness-isms, classifying dropped frontmatter, and collecting the
 /// directory's other files as supporting files.
-fn import_skill(
+///
+/// `pub(crate)` because the native-`SKILL.md` importers (Cursor/OpenCode/Cline/
+/// generic Agent Skills) reuse it for a *bare* skill source (`rel_dir = ""`),
+/// then apply any harness-specific supporting-path remap.
+pub(crate) fn import_skill(
     root: &UntrustedRoot,
     rel_dir: &Path,
     dir_name: &str,
@@ -409,6 +416,10 @@ fn collect_supporting(
         for child in root.list_dir(&dir)? {
             // Skip the entry's own SKILL.md (it is rendered, not copied).
             if depth == 0 && child.name == exclude {
+                continue;
+            }
+            // Never copy VCS metadata / OS junk into the converted artifact.
+            if SKIP_SUPPORTING_NAMES.contains(&child.name.as_str()) {
                 continue;
             }
             if child.is_dir {

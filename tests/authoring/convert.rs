@@ -179,3 +179,65 @@ fn level_mismatch_is_a_usage_error() {
     let err = run(&src, &config(out)).unwrap_err();
     assert_eq!(err.exit_code(), 2);
 }
+
+fn skill_config(output_dir: PathBuf, from: Option<&str>) -> ConvertConfig {
+    ConvertConfig {
+        level: ArtifactLevel::Skill,
+        from: from.map(str::to_owned),
+        new_name: None,
+        strict: false,
+        force: false,
+        dry_run: false,
+        output_dir,
+    }
+}
+
+#[test]
+fn converts_a_native_skill_to_a_naked_tome_skill() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("greeter");
+    fs::create_dir(&src).unwrap();
+    fs::write(
+        src.join("SKILL.md"),
+        "---\nname: greeter\ndescription: greets\n---\nUse ${CLAUDE_SKILL_DIR}/x\n",
+    )
+    .unwrap();
+    fs::create_dir(src.join("references")).unwrap();
+    fs::write(src.join("references/r.md"), b"ref").unwrap();
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let outcome = run(&src, &skill_config(out.clone(), None)).unwrap();
+    assert_eq!(outcome.final_name, "greeter-tome");
+
+    let target = out.join("greeter-tome");
+    let skill = fs::read_to_string(target.join("SKILL.md")).unwrap();
+    assert!(skill.contains("${TOME_SKILL_DIR}/x"), "{skill}");
+    // name == dir preserved through the rename.
+    assert!(skill.contains("name: greeter-tome"), "{skill}");
+    assert!(target.join("references/r.md").exists());
+}
+
+#[test]
+fn cline_skill_remaps_docs_to_references() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("clineskill");
+    fs::create_dir(&src).unwrap();
+    fs::write(
+        src.join("SKILL.md"),
+        "---\nname: clineskill\ndescription: d\n---\nbody\n",
+    )
+    .unwrap();
+    fs::create_dir(src.join("docs")).unwrap();
+    fs::write(src.join("docs/guide.md"), b"g").unwrap();
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let outcome = run(&src, &skill_config(out.clone(), Some("cline"))).unwrap();
+    let target = out.join(&outcome.final_name);
+    assert!(target.join("references/guide.md").exists());
+    assert!(
+        !target.join("docs").exists(),
+        "cline `docs/` must be remapped"
+    );
+}

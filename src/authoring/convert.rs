@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use crate::authoring::detect::{ArtifactLevel, SourceHarness, detect};
 use crate::authoring::emit::{EmitOptions, emit};
-use crate::authoring::import::claude_code;
+use crate::authoring::import::{claude_code, native_skill};
 use crate::authoring::ir::{Artifact, Diagnostic};
 use crate::authoring::lint::{self, LintReport};
 use crate::authoring::rewrite::is_unsupported_harness_ism;
@@ -151,9 +151,11 @@ fn import(
         (ArtifactLevel::Plugin, SourceHarness::Codex) => Err(TomeError::Usage(
             "Codex project conversion lands in a later slice; not yet supported".to_owned(),
         )),
-        (ArtifactLevel::Skill, _) => Err(TomeError::Usage(
-            "skill conversion lands in a later slice; not yet supported".to_owned(),
-        )),
+        (ArtifactLevel::Skill, harness) => Ok(Artifact::Skill(native_skill::import(
+            root,
+            harness,
+            source_root,
+        )?)),
         (ArtifactLevel::Catalog, _) => Err(TomeError::Usage(
             "catalog conversion lands in a later slice; not yet supported".to_owned(),
         )),
