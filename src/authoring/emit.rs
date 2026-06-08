@@ -71,6 +71,18 @@ pub fn emit(
 ) -> Result<EmitOutcome, TomeError> {
     let files = plan(artifact)?;
 
+    // Containment at the sink: every planned path MUST be a pure-relative path
+    // of `Normal` components, so `staged.join(rel)` / `target_dir.join(rel)`
+    // can never escape the artifact root. The IR carries source-derived names
+    // (a vendored plugin's own `name`, a marketplace `plugins[].name`) that the
+    // importers should validate, but the emitter does not trust the IR to be
+    // in-bounds — an absolute or `..`-bearing `rel` would otherwise redirect a
+    // write outside `target_dir` (SEC-1). This is the write-side analogue of
+    // `UntrustedRoot::resolve`'s read-side containment.
+    for f in &files {
+        ensure_in_bounds(&f.rel)?;
+    }
+
     if opts.dry_run {
         return Ok(EmitOutcome {
             root: target_dir.to_path_buf(),
@@ -83,6 +95,24 @@ pub fn emit(
     } else {
         land_fresh(target_dir, &files)
     }
+}
+
+/// Refuse a planned relative path that is not composed solely of `Normal`
+/// components (any `..`, absolute, root, or prefix component would let the
+/// subsequent `join` escape the artifact root). Fail-closed (`Io`/`InvalidInput`).
+fn ensure_in_bounds(rel: &Path) -> Result<(), TomeError> {
+    for comp in rel.components() {
+        if !matches!(comp, std::path::Component::Normal(_)) {
+            return Err(TomeError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "refusing to emit a path that escapes the artifact root: {}",
+                    rel.display()
+                ),
+            )));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

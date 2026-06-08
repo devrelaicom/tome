@@ -74,7 +74,15 @@ pub fn run(
         register_plugin_in_catalog(&catalog_manifest, &outcome.final_name)?;
     }
 
-    emit_report(&outcome, mode)
+    emit_report(&outcome, mode)?;
+
+    // Under `--dry-run --strict` the plan was reported above; now surface the
+    // would-be non-zero verdict (a real strict run aborted inside `convert::run`
+    // before any write, so this only fires for dry-run).
+    if let Some(feature) = outcome.strict_blocked {
+        return Err(TomeError::ConversionUnsupportedStrict { feature });
+    }
+    Ok(())
 }
 
 /// Resolve an `--into <DIR>` target to `(output_dir, register_in_catalog)`:
@@ -152,11 +160,14 @@ fn register_plugin_in_catalog(manifest_path: &Path, plugin_name: &str) -> Result
     write_atomic(manifest_path, doc.to_string().as_bytes())
 }
 
-/// Resolve a `SOURCE` to a local directory root. A local path is returned as-is
-/// (no temp clone); a remote `SOURCE` (`owner/repo`, git URL) is shallow-cloned
-/// into a [`tempfile::TempDir`] whose `Drop` cleans up on success, conversion
-/// error, `--strict` abort, and SIGINT-unwind (NFR-003). Credentials are
-/// scrubbed from the display source and every `git` error chain (`catalog::git`).
+/// Resolve a `SOURCE` to a local directory root. **An existing local path wins**
+/// (returned as-is, no temp clone); only a `SOURCE` that does not exist on disk
+/// is treated as remote (`owner/repo`, git URL) and shallow-cloned into a
+/// [`tempfile::TempDir`] whose `Drop` cleans up on success, conversion error,
+/// `--strict` abort, and SIGINT-unwind (NFR-003). The local-wins precedence
+/// means a CWD-relative directory named like an `owner/repo` shorthand shadows
+/// the remote — pass an explicit URL to force a clone. Credentials are scrubbed
+/// from the display source and every `git` error chain (`catalog::git`).
 fn resolve_source(source: &str) -> Result<(PathBuf, Option<tempfile::TempDir>), TomeError> {
     let path = Path::new(source);
     if path.exists() {
@@ -198,6 +209,7 @@ fn emit_report(outcome: &ConvertOutcome, mode: Mode) -> Result<(), TomeError> {
                 "errors": outcome.report.errors,
                 "warnings": outcome.report.warnings,
                 "infos": outcome.report.infos,
+                "strict_blocked": outcome.strict_blocked,
             }))?;
         }
         Mode::Human => {
@@ -224,6 +236,9 @@ fn emit_report(outcome: &ConvertOutcome, mode: Mode) -> Result<(), TomeError> {
                 outcome.report.warnings,
                 outcome.report.infos,
             );
+            if let Some(feature) = &outcome.strict_blocked {
+                println!("STRICT: would abort — {feature}");
+            }
         }
     }
     Ok(())
@@ -358,5 +373,45 @@ mod tests {
         // A second registration of the same plugin is a no-op (byte-identical).
         register_plugin_in_catalog(&manifest, "alpha").unwrap();
         assert_eq!(fs::read_to_string(&manifest).unwrap(), body);
+    }
+
+    #[test]
+    fn into_a_catalog_lands_the_plugin_and_registers_it() {
+        // The full `--into` composition (as `run` performs it): detect the
+        // target, convert into it, register in the catalog manifest.
+        let tmp = tempfile::tempdir().unwrap();
+        let cat = tmp.path().join("cat");
+        fs::create_dir(&cat).unwrap();
+        write_catalog_manifest(&cat);
+
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+        fs::write(
+            src.join(".claude-plugin/plugin.json"),
+            br#"{"name":"alpha","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let (output_dir, register) = into_target(&cat, ArtifactLevel::Plugin).unwrap();
+        let cfg = crate::authoring::convert::ConvertConfig {
+            level: ArtifactLevel::Plugin,
+            from: None,
+            new_name: None,
+            strict: false,
+            force: false,
+            dry_run: false,
+            output_dir,
+        };
+        let outcome = crate::authoring::convert::run(&src, &cfg).unwrap();
+        if let Some(manifest) = register {
+            register_plugin_in_catalog(&manifest, &outcome.final_name).unwrap();
+        }
+
+        assert!(
+            cat.join("alpha-tome/tome-plugin.toml").exists(),
+            "plugin landed under the catalog"
+        );
+        let manifest = fs::read_to_string(cat.join("tome-catalog.toml")).unwrap();
+        assert!(manifest.contains("name = \"alpha-tome\""), "{manifest}");
     }
 }

@@ -1,8 +1,7 @@
 //! `tome catalog convert <SOURCE>` — convert a Claude Code marketplace into a
-//! native Tome catalog. Thin shim over the shared [`crate::commands::convert`]
-//! wrapper at the catalog level. Catalog-level import (marketplace recursion +
-//! all-or-nothing staging) lands in a later US2 slice; until then the pipeline
-//! returns a clear deferral error rather than panicking.
+//! native Tome catalog (marketplace recursion: relative-path plugins vendored
+//! inline all-or-nothing, remote-source plugins warned-and-skipped). Thin shim
+//! over the shared [`crate::commands::convert`] wrapper at the catalog level.
 
 use crate::authoring::detect::ArtifactLevel;
 use crate::cli::ConvertArgs;

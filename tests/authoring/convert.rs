@@ -376,3 +376,188 @@ fn marketplace_with_a_broken_relative_plugin_is_all_or_nothing() {
         "a single plugin failure must land nothing (all-or-nothing)"
     );
 }
+
+// --- closeout-added coverage (US2 4-reviewer pass) -------------------------
+
+#[test]
+fn every_unsupported_component_type_warns_exactly_once() {
+    // SC-002: a warning for EVERY unsupported component type, exact count.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"p","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    for d in [
+        "monitors",
+        "themes",
+        "lsp",
+        "output-styles",
+        "channels",
+        "bin",
+        "hooks",
+    ] {
+        fs::create_dir(src.join(d)).unwrap();
+    }
+    fs::write(src.join("settings.json"), b"{}").unwrap();
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let outcome = run(&src, &config(out)).unwrap();
+    let count = outcome
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule_id == "convert/unsupported-component")
+        .count();
+    // 7 component dirs + settings.json.
+    assert_eq!(count, 8, "{:?}", outcome.report.diagnostics);
+}
+
+#[test]
+fn skill_convert_with_non_utf8_body_is_named_error_and_emits_nothing() {
+    // SC-012 / FR-011a: a non-UTF-8 body is a named, fail-closed error and
+    // produces no output (never lossy-decode-then-rewrite).
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("badskill");
+    fs::create_dir(&src).unwrap();
+    fs::write(src.join("SKILL.md"), [0xff, 0xfe, 0x00, 0x66]).unwrap();
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let err = run(&src, &skill_config(out.clone(), None)).unwrap_err();
+    assert_eq!(err.exit_code(), 7);
+    assert!(
+        !out.join("badskill-tome").exists(),
+        "a non-UTF-8 body must leave nothing on disk"
+    );
+}
+
+#[test]
+fn conversion_is_byte_stable_across_runs() {
+    // FR-027: re-running over unchanged input is byte-identical (whole tree,
+    // not just the serializer).
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_plugin_fixture(tmp.path());
+    let out1 = tmp.path().join("out1");
+    let out2 = tmp.path().join("out2");
+    fs::create_dir(&out1).unwrap();
+    fs::create_dir(&out2).unwrap();
+    run(&src, &config(out1.clone())).unwrap();
+    run(&src, &config(out2.clone())).unwrap();
+
+    let t1 = out1.join("demo-tome");
+    let t2 = out2.join("demo-tome");
+    for f in [
+        "tome-plugin.toml",
+        "skills/greet/SKILL.md",
+        "skills/greet/scripts/run.sh",
+        "commands/say.md",
+        ".mcp.json",
+    ] {
+        let a = fs::read(t1.join(f)).unwrap_or_else(|_| panic!("missing {f} in run1"));
+        let b = fs::read(t2.join(f)).unwrap_or_else(|_| panic!("missing {f} in run2"));
+        assert_eq!(a, b, "byte drift in {f}");
+    }
+}
+
+#[test]
+fn output_collision_is_81_without_force_and_overwrites_with_force() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_plugin_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    run(&src, &config(out.clone())).unwrap();
+    // Second run, same target, no --force → OutputExists(81).
+    let err = run(&src, &config(out.clone())).unwrap_err();
+    assert_eq!(err.exit_code(), 81);
+    // --force overwrites.
+    let mut cfg = config(out.clone());
+    cfg.force = true;
+    run(&src, &cfg).unwrap();
+}
+
+#[test]
+fn dry_run_strict_reports_the_plan_and_carries_the_verdict() {
+    // CON-1: `--dry-run --strict` does NOT abort; it carries the would-be
+    // verdict so the plan is still reported (the wrapper then exits 84).
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_plugin_fixture(tmp.path()); // has monitors/ (strict-blocking)
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let mut cfg = config(out.clone());
+    cfg.strict = true;
+    cfg.dry_run = true;
+
+    let outcome = run(&src, &cfg).unwrap();
+    assert!(
+        outcome.strict_blocked.is_some(),
+        "carries the would-be strict verdict"
+    );
+    assert!(
+        !outcome.written.is_empty(),
+        "still reports the planned files"
+    );
+    assert!(
+        !out.join("demo-tome").exists(),
+        "dry-run writes nothing even under --strict"
+    );
+}
+
+#[test]
+fn marketplace_with_a_traversal_plugin_name_is_refused_with_no_escape() {
+    // SEC-1: a vendored plugin whose own plugin.json `name` is a traversal
+    // payload must be refused, with nothing written anywhere.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("mkt");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/marketplace.json"),
+        br#"{"name":"m","owner":{"name":"o","email":"o@x.io"},"plugins":[{"name":"evil","source":"./evil"}]}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("evil/.claude-plugin")).unwrap();
+    fs::write(
+        src.join("evil/.claude-plugin/plugin.json"),
+        br#"{"name":"../../escaped","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let err = run(&src, &catalog_config(out.clone(), false)).unwrap_err();
+    assert_eq!(err.exit_code(), 7);
+    assert!(!out.join("m-tome").exists());
+    assert!(
+        !tmp.path().join("escaped").exists(),
+        "no traversal write outside the output dir"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_skill_child_aborts_the_convert() {
+    // A symlinked entry inside the plugin tree is refused at list time and
+    // aborts the whole convert (fail-closed), emitting nothing.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"p","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::create_dir(src.join("skills")).unwrap();
+    let outside = tmp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, src.join("skills/evil")).unwrap();
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let err = run(&src, &config(out.clone())).unwrap_err();
+    assert_eq!(err.exit_code(), 7);
+    assert!(!out.join("p-tome").exists());
+}
