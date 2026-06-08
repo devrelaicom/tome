@@ -16,4 +16,27 @@
 //! `cursor`/`opencode`/`cline`), `codex`.
 
 pub mod claude_code;
+pub mod codex;
 pub mod native_skill;
+
+/// Shared `convert` diagnostic rule ids — the single source of truth for the
+/// per-importer diagnostics, so the `--strict` blocking-set
+/// ([`crate::authoring::convert`]) and every importer agree on one stable
+/// vocabulary. Promoted here when Codex became the second consumer of the
+/// originally-CC-local set.
+pub mod rule {
+    // Manifest / project level.
+    pub const MISSING_VERSION: &str = "convert/missing-version";
+    pub const DROPPED_MANIFEST_FIELD: &str = "convert/dropped-manifest-field";
+    pub const UNSUPPORTED_MANIFEST_FIELD: &str = "convert/unsupported-manifest-field";
+    pub const UNSUPPORTED_COMPONENT: &str = "convert/unsupported-component";
+    // Entry / frontmatter level.
+    pub const DROPPED_FRONTMATTER: &str = "convert/dropped-frontmatter";
+    pub const TOOL_RESTRICTION_DROPPED: &str = "convert/tool-restriction-dropped";
+    pub const AGENT_LOSSY: &str = "convert/agent-lossy";
+    pub const SKIPPED_ENTRY: &str = "convert/skipped-entry";
+    pub const MALFORMED_MCP: &str = "convert/malformed-mcp-server";
+    // Codex (Tier-2 synthesis) specific.
+    pub const CODEX_SYNTHESIZED_VERSION: &str = "convert/codex-synthesized-version";
+    pub const CODEX_UNSUPPORTED: &str = "convert/codex-unsupported";
+}
