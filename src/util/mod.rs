@@ -16,7 +16,7 @@ pub mod symlink_safe;
 
 pub use atomic_dir::{land_directory, land_directory_with_replace};
 pub use io::{
-    HARNESS_MCP_MAX, HARNESS_RULES_MAX, PLUGIN_MANIFEST_MAX, TOME_CONFIG_MAX, bounded_read,
-    bounded_read_to_string,
+    ENTRY_BODY_MAX, HARNESS_MCP_MAX, HARNESS_RULES_MAX, PLUGIN_MANIFEST_MAX, TOME_CONFIG_MAX,
+    bounded_read, bounded_read_to_string,
 };
 pub use symlink_safe::refuse_symlinked_component;
