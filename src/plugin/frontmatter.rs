@@ -336,6 +336,26 @@ pub fn parse_skill_frontmatter_str(
     })
 }
 
+/// Extract the raw top-level frontmatter keys from a `SKILL.md`/command/agent
+/// body. Used by Phase 8 `convert` to warn on source frontmatter fields Tome
+/// does not model (`data-model.md §6`) — the authoritative modelled-field parse
+/// is [`parse_skill_frontmatter_str`]; this only feeds advisory diagnostics, so
+/// it is best-effort: an absent block or a non-mapping body yields an empty
+/// list rather than an error.
+pub fn frontmatter_keys(content: &str) -> Vec<String> {
+    let stripped = content.strip_prefix('\u{FEFF}').unwrap_or(content);
+    let Some((yaml, _body)) = split_frontmatter(stripped) else {
+        return Vec::new();
+    };
+    match serde_yaml::from_str::<serde_yaml::Mapping>(yaml) {
+        Ok(map) => map
+            .into_iter()
+            .filter_map(|(k, _)| k.as_str().map(str::to_owned))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Split `contents` into `(yaml_block, body)`. Returns `None` if either the
 /// opening or the closing `---` delimiter is missing.
 ///
