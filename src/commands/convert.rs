@@ -91,7 +91,12 @@ pub fn run(
 /// `<catalog>/<name>/` and registers in the catalog manifest; a skill injected
 /// into a plugin lands at `<plugin>/skills/<name>/` (no manifest edit — skills
 /// are discovered by directory).
-fn into_target(into: &Path, level: ArtifactLevel) -> Result<(PathBuf, Option<PathBuf>), TomeError> {
+///
+/// Shared with `create` (the SSOT for `--into` target detection).
+pub(crate) fn into_target(
+    into: &Path,
+    level: ArtifactLevel,
+) -> Result<(PathBuf, Option<PathBuf>), TomeError> {
     let catalog_manifest = into.join("tome-catalog.toml");
     let plugin_manifest = into.join("tome-plugin.toml");
 
@@ -126,7 +131,12 @@ fn into_target(into: &Path, level: ArtifactLevel) -> Result<(PathBuf, Option<Pat
 /// Register `plugin_name` in a catalog manifest's `plugins[]` array-of-tables
 /// via a comment/format-preserving `toml_edit` edit, landed atomically
 /// (`write_atomic`; NFR-011). Idempotent — a plugin already present is a no-op.
-fn register_plugin_in_catalog(manifest_path: &Path, plugin_name: &str) -> Result<(), TomeError> {
+///
+/// Shared with `create` (the SSOT for catalog `plugins[]` registration).
+pub(crate) fn register_plugin_in_catalog(
+    manifest_path: &Path,
+    plugin_name: &str,
+) -> Result<(), TomeError> {
     let body = bounded_read_to_string(manifest_path, TOME_CONFIG_MAX)?;
     let mut doc: toml_edit::DocumentMut = body.parse().map_err(|e| {
         TomeError::Usage(format!(
