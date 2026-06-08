@@ -4,9 +4,12 @@
 //! [`crate::authoring::convert::run`] does the I/O-bounded compute and returns a
 //! structured outcome; this module renders it per output mode.
 //!
-//! Slice scope (US2): **local** sources. Remote `SOURCE` fetching and `--into`
-//! injection land in later slices and currently return a clear usage error
-//! rather than a silent partial behaviour.
+//! `SOURCE` may be local or remote (`owner/repo` / git URL — shallow-cloned into
+//! a temp dir, [`resolve_source`]). `--output` lands the copy at
+//! `<output>/<name>/`; `--into` injects it into an existing Tome artifact
+//! (a plugin into a catalog, registering it in `plugins[]`; a skill into a
+//! plugin's `skills/`), auto-detected from the target's manifest
+//! ([`into_target`]).
 
 use std::path::{Path, PathBuf};
 
@@ -15,9 +18,11 @@ use serde_json::json;
 use crate::authoring::convert::{self, ConvertConfig, ConvertOutcome};
 use crate::authoring::detect::ArtifactLevel;
 use crate::catalog::git::{Git, scrub_to_string};
+use crate::catalog::store::write_atomic;
 use crate::cli::ConvertArgs;
 use crate::error::TomeError;
 use crate::output::{Mode, write_json};
+use crate::util::{TOME_CONFIG_MAX, bounded_read_to_string};
 use crate::workspace::ResolvedScope;
 
 /// Run a conversion for the given artifact `level`.
@@ -27,12 +32,6 @@ pub fn run(
     mode: Mode,
     level: ArtifactLevel,
 ) -> Result<(), TomeError> {
-    if args.into.is_some() {
-        return Err(TomeError::Usage(
-            "`--into` injection lands in a later slice; use `--output` for now".to_owned(),
-        ));
-    }
-
     // Resolve SOURCE to a local root: a local path is used in place; a remote
     // (`owner/repo`, git URL) is shallow-cloned into a temp dir whose `Drop`
     // guarantees cleanup on every exit path. `_clone` is held for the whole
@@ -41,7 +40,19 @@ pub fn run(
 
     let new_name =
         convert::resolve_requested_name(args.name.as_deref(), args.name_flag.as_deref())?;
-    let output_dir = args.output.unwrap_or_else(|| PathBuf::from("."));
+
+    // `--output` lands the copy at `<output>/<name>/`; `--into` injects it into
+    // an existing Tome artifact (a plugin into a catalog, a skill into a
+    // plugin), auto-detected from the target's manifest. The two are mutually
+    // exclusive (clap-enforced). `register` names the catalog manifest a
+    // plugin-into-catalog injection must register the new plugin in.
+    let (output_dir, register) = match &args.into {
+        Some(into) => into_target(into, level)?,
+        None => (
+            args.output.clone().unwrap_or_else(|| PathBuf::from(".")),
+            None,
+        ),
+    };
 
     let cfg = ConvertConfig {
         level,
@@ -54,7 +65,91 @@ pub fn run(
     };
 
     let outcome = convert::run(&source_root, &cfg)?;
+
+    // Register the injected plugin in the target catalog's `plugins[]` (atomic,
+    // comment-preserving, idempotent) — never under `--dry-run`.
+    if let Some(catalog_manifest) = register
+        && !outcome.dry_run
+    {
+        register_plugin_in_catalog(&catalog_manifest, &outcome.final_name)?;
+    }
+
     emit_report(&outcome, mode)
+}
+
+/// Resolve an `--into <DIR>` target to `(output_dir, register_in_catalog)`:
+/// auto-detect the target artifact from its manifest and pick where the
+/// converted copy lands. A plugin injected into a catalog lands at
+/// `<catalog>/<name>/` and registers in the catalog manifest; a skill injected
+/// into a plugin lands at `<plugin>/skills/<name>/` (no manifest edit — skills
+/// are discovered by directory).
+fn into_target(into: &Path, level: ArtifactLevel) -> Result<(PathBuf, Option<PathBuf>), TomeError> {
+    let catalog_manifest = into.join("tome-catalog.toml");
+    let plugin_manifest = into.join("tome-plugin.toml");
+
+    if catalog_manifest.is_file() {
+        match level {
+            ArtifactLevel::Plugin => Ok((into.to_path_buf(), Some(catalog_manifest))),
+            ArtifactLevel::Skill => Err(TomeError::Usage(
+                "`skill convert --into` targets a plugin, but a catalog was found".to_owned(),
+            )),
+            ArtifactLevel::Catalog => Err(TomeError::Usage(
+                "a catalog cannot be injected into another catalog".to_owned(),
+            )),
+        }
+    } else if plugin_manifest.is_file() {
+        match level {
+            ArtifactLevel::Skill => Ok((into.join("skills"), None)),
+            ArtifactLevel::Plugin => Err(TomeError::Usage(
+                "`plugin convert --into` targets a catalog, but a plugin was found".to_owned(),
+            )),
+            ArtifactLevel::Catalog => Err(TomeError::Usage(
+                "a catalog cannot be injected into a plugin".to_owned(),
+            )),
+        }
+    } else {
+        Err(TomeError::Usage(format!(
+            "no Tome artifact (tome-catalog.toml / tome-plugin.toml) found at --into target `{}`",
+            into.display()
+        )))
+    }
+}
+
+/// Register `plugin_name` in a catalog manifest's `plugins[]` array-of-tables
+/// via a comment/format-preserving `toml_edit` edit, landed atomically
+/// (`write_atomic`; NFR-011). Idempotent — a plugin already present is a no-op.
+fn register_plugin_in_catalog(manifest_path: &Path, plugin_name: &str) -> Result<(), TomeError> {
+    let body = bounded_read_to_string(manifest_path, TOME_CONFIG_MAX)?;
+    let mut doc: toml_edit::DocumentMut = body.parse().map_err(|e| {
+        TomeError::Usage(format!(
+            "catalog manifest {} is not valid TOML: {e}",
+            manifest_path.display()
+        ))
+    })?;
+
+    if doc.get("plugins").is_none() {
+        doc["plugins"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
+    }
+    let plugins = doc["plugins"].as_array_of_tables_mut().ok_or_else(|| {
+        TomeError::Usage(format!(
+            "catalog manifest {} `plugins` is not an array of tables; register the plugin manually",
+            manifest_path.display()
+        ))
+    })?;
+
+    let already = plugins
+        .iter()
+        .any(|t| t.get("name").and_then(|v| v.as_str()) == Some(plugin_name));
+    if already {
+        return Ok(());
+    }
+
+    let mut entry = toml_edit::Table::new();
+    entry["name"] = toml_edit::value(plugin_name);
+    entry["source"] = toml_edit::value(plugin_name);
+    plugins.push(entry);
+
+    write_atomic(manifest_path, doc.to_string().as_bytes())
 }
 
 /// Resolve a `SOURCE` to a local directory root. A local path is returned as-is
@@ -192,5 +287,76 @@ mod tests {
             !cloned_path.exists(),
             "the temp clone is cleaned up on drop"
         );
+    }
+
+    fn write_catalog_manifest(dir: &Path) {
+        fs::write(
+            dir.join("tome-catalog.toml"),
+            "name = \"c\"\nversion = \"0.0.0\"\ndescription = \"d\"\n\n[owner]\nname = \"o\"\nemail = \"o@x.io\"\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn into_target_routes_plugin_to_catalog_and_skill_to_plugin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cat = tmp.path().join("cat");
+        fs::create_dir(&cat).unwrap();
+        write_catalog_manifest(&cat);
+        let (out, register) = into_target(&cat, ArtifactLevel::Plugin).unwrap();
+        assert_eq!(out, cat);
+        assert_eq!(register, Some(cat.join("tome-catalog.toml")));
+
+        let plug = tmp.path().join("plug");
+        fs::create_dir(&plug).unwrap();
+        fs::write(
+            plug.join("tome-plugin.toml"),
+            "name = \"p\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+        let (out, register) = into_target(&plug, ArtifactLevel::Skill).unwrap();
+        assert_eq!(out, plug.join("skills"));
+        assert!(register.is_none());
+    }
+
+    #[test]
+    fn into_target_rejects_mismatch_and_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cat = tmp.path().join("cat");
+        fs::create_dir(&cat).unwrap();
+        write_catalog_manifest(&cat);
+        // A skill cannot be injected into a catalog.
+        assert_eq!(
+            into_target(&cat, ArtifactLevel::Skill)
+                .unwrap_err()
+                .exit_code(),
+            2
+        );
+        // A directory with no Tome manifest is not a valid --into target.
+        let empty = tmp.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        assert_eq!(
+            into_target(&empty, ArtifactLevel::Plugin)
+                .unwrap_err()
+                .exit_code(),
+            2
+        );
+    }
+
+    #[test]
+    fn register_plugin_in_catalog_appends_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = tmp.path().join("tome-catalog.toml");
+        write_catalog_manifest(tmp.path());
+
+        register_plugin_in_catalog(&manifest, "alpha").unwrap();
+        let body = fs::read_to_string(&manifest).unwrap();
+        assert!(body.contains("[[plugins]]"), "{body}");
+        assert!(body.contains("name = \"alpha\""), "{body}");
+        assert!(body.contains("source = \"alpha\""), "{body}");
+
+        // A second registration of the same plugin is a no-op (byte-identical).
+        register_plugin_in_catalog(&manifest, "alpha").unwrap();
+        assert_eq!(fs::read_to_string(&manifest).unwrap(), body);
     }
 }
