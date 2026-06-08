@@ -9,7 +9,7 @@ mod list;
 // (F-REMOVE-TOCTOU) is reachable from `tests/`; the surface is doc-hidden.
 pub mod remove;
 mod show;
-mod source;
+pub(crate) mod source;
 pub mod update;
 
 use crate::cli::CatalogCommand;
