@@ -1,9 +1,10 @@
 //! The `convert` pipeline: `detect → import → rewrite → lint → emit`.
 //!
 //! Turns a foreign artifact (a *local* source root) into a native Tome artifact
-//! — a copy; the source is never mutated. Remote `SOURCE` fetching (into a
-//! cleaned-up temp clone) and `--into` injection land in later slices; this
-//! pipeline operates on an already-local root.
+//! — a copy; the source is never mutated. This pipeline operates on an
+//! already-local root; remote `SOURCE` fetching (into a cleaned-up temp clone)
+//! and `--into` injection are the command wrapper's concern
+//! (`commands::convert`).
 //!
 //! ```text
 //! run(source_root, cfg)
@@ -16,8 +17,9 @@
 //!   → emit                           // deterministic, atomic landing
 //! ```
 //!
-//! The `--strict` gate runs **before** `emit`, so a strict abort leaves nothing
-//! on disk (the dry-run plan still reports it).
+//! The `--strict` gate runs **before** `emit`, so a real strict abort leaves
+//! nothing on disk; under `--dry-run` the would-be violation is carried in the
+//! outcome ([`ConvertOutcome::strict_blocked`]) so the plan is still reported.
 
 use std::path::{Path, PathBuf};
 
@@ -66,6 +68,11 @@ pub struct ConvertOutcome {
     /// Files written, relative to `target` (or planned, under `--dry-run`).
     pub written: Vec<PathBuf>,
     pub dry_run: bool,
+    /// Under `--dry-run --strict`, the message of the first unrepresentable
+    /// feature that WOULD abort a real run — so the plan is still reported and
+    /// the caller can surface the non-zero verdict (`Some` only when both
+    /// `--dry-run` and `--strict` are set and a blocking diagnostic was found).
+    pub strict_blocked: Option<String>,
 }
 
 /// Resolve the requested new name from the positional `<NAME>` and `--name`
@@ -100,11 +107,21 @@ pub fn run(source_root: &Path, cfg: &ConvertConfig) -> Result<ConvertOutcome, To
 
     let report = lint::run(&artifact, &lint::rules::all());
 
-    if cfg.strict
-        && let Some(d) = first_strict_blocking(&report)
+    // The `--strict` verdict: the first unrepresentable feature, if any.
+    let strict_blocked = if cfg.strict {
+        first_strict_blocking(&report).map(|d| d.message.clone())
+    } else {
+        None
+    };
+    // A REAL (non-dry-run) strict violation aborts BEFORE any write (84,
+    // nothing on disk). Under `--dry-run` the violation is instead carried in
+    // the outcome so the plan is still reported, and the caller surfaces the
+    // non-zero verdict afterwards (contract: dry-run "still reports it").
+    if let Some(feature) = &strict_blocked
+        && !cfg.dry_run
     {
         return Err(TomeError::ConversionUnsupportedStrict {
-            feature: d.message.clone(),
+            feature: feature.clone(),
         });
     }
 
@@ -127,6 +144,7 @@ pub fn run(source_root: &Path, cfg: &ConvertConfig) -> Result<ConvertOutcome, To
         report,
         written: outcome.written,
         dry_run: cfg.dry_run,
+        strict_blocked,
     })
 }
 
@@ -154,10 +172,13 @@ fn import(
             harness,
             source_root,
         )?)),
-        (ArtifactLevel::Catalog, _) => Ok(Artifact::Catalog(claude_code::import_marketplace(
-            root,
-            source_root,
-        )?)),
+        (ArtifactLevel::Catalog, SourceHarness::ClaudeCode) => Ok(Artifact::Catalog(
+            claude_code::import_marketplace(root, source_root)?,
+        )),
+        (ArtifactLevel::Catalog, other) => Err(TomeError::Usage(format!(
+            "catalog conversion from `{}` is not supported (only Claude Code marketplaces)",
+            other.as_str()
+        ))),
         (ArtifactLevel::Plugin, other) => Err(TomeError::Usage(format!(
             "plugin conversion from `{}` is not supported",
             other.as_str()
@@ -190,6 +211,11 @@ fn artifact_name(artifact: &Artifact) -> &str {
     }
 }
 
+/// Apply the new name to the **root** artifact only. For a catalog, the
+/// vendored child plugins intentionally keep their own names (the rename is the
+/// catalog's `<name>-tome`; a child plugin's directory + `plugins[]` entry use
+/// its own manifest name). Each child name is independently safe-segment
+/// validated by `import_marketplace`.
 fn set_artifact_name(artifact: &mut Artifact, name: &str) {
     match artifact {
         Artifact::Catalog(c) => c.name = name.to_owned(),

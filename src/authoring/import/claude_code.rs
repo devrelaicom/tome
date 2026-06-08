@@ -55,6 +55,20 @@ const MODELLED_FRONTMATTER: &[&str] = &[
 /// Frontmatter keys whose loss silently broadens capability — always a Warning.
 const TOOL_RESTRICTION_KEYS: &[&str] = &["allowed-tools", "disallowed-tools"];
 
+/// When an entry has no frontmatter `description`, fall back to this many
+/// characters of the (already-rewritten) body.
+const DESCRIPTION_FALLBACK_CHARS: usize = 500;
+
+/// Resolve an entry's description: the trimmed frontmatter value if non-empty,
+/// else a prefix of the **rewritten** body — so a fallback reflects the
+/// rewritten harness-isms (e.g. `$0`, not the source's `$1`).
+fn resolved_description(fm: &crate::plugin::frontmatter::SkillFrontmatter, body: &str) -> String {
+    match fm.description.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => s.to_owned(),
+        _ => body.chars().take(DESCRIPTION_FALLBACK_CHARS).collect(),
+    }
+}
+
 /// Unsupported component directories/files (FR-012, §8): present ⇒ Warning.
 const UNSUPPORTED_COMPONENTS: &[(&str, &str)] = &[
     ("monitors", "monitors"),
@@ -295,6 +309,12 @@ pub fn import_marketplace(
                     let default = pname.clone().unwrap_or_else(|| rel.clone());
                     // ALL-OR-NOTHING: propagate any single-plugin import failure.
                     let plugin = import_plugin(&plugin_root, &default, &plugin_abs)?;
+                    // The vendored plugin's own `name` (from its plugin.json)
+                    // becomes its emitted directory under the catalog, so it
+                    // MUST be a safe path segment — reject a `../…`/absolute
+                    // name before it reaches the emitter (SEC-1, defence-in-depth
+                    // alongside the emit-sink containment check).
+                    UntrustedRoot::validate_name(&plugin.name)?;
                     plugins.push(plugin);
                 }
                 PluginSource::Remote(kind) => diagnostics.push(Diagnostic::warning(
@@ -472,7 +492,7 @@ pub(crate) fn import_skill(
     classify_dropped_frontmatter(&content, EntryKind::Skill, &mut diagnostics);
     let rewritten = rewrite_body(&parsed.body, RewriteOptions::default());
     diagnostics.extend(rewritten.diagnostics);
-    let (description, _desc_fallback) = parsed.resolved_description();
+    let description = resolved_description(&parsed.frontmatter, &rewritten.text);
 
     let supporting_files = collect_supporting(root, rel_dir, "SKILL.md")?;
 
@@ -518,7 +538,7 @@ fn import_md_entry(
         },
     );
     diagnostics.extend(rewritten.diagnostics);
-    let (description, _) = parsed.resolved_description();
+    let description = resolved_description(&parsed.frontmatter, &rewritten.text);
 
     Ok(EntryIr {
         kind,
@@ -988,5 +1008,30 @@ mod tests {
         let none = parse_owner(None, &mut diags);
         assert_eq!(none.name, "unknown");
         assert!(!diags.is_empty());
+    }
+
+    #[test]
+    fn skill_without_description_falls_back_to_the_rewritten_body() {
+        let (_t, root) = cc_plugin(|base| {
+            fs::write(
+                base.join(".claude-plugin/plugin.json"),
+                br#"{"name":"p","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            fs::create_dir_all(base.join("skills/foo")).unwrap();
+            // No `description`; body carries a harness-ism that gets rewritten.
+            fs::write(
+                base.join("skills/foo/SKILL.md"),
+                "---\nname: foo\n---\nUse ${CLAUDE_PLUGIN_ROOT}/x\n",
+            )
+            .unwrap();
+        });
+        let p = import_plugin(&root, "p", Path::new("/src")).unwrap();
+        let desc = p.entries[0].description.as_deref().unwrap();
+        assert!(
+            desc.contains("${TOME_PLUGIN_DIR}/x"),
+            "fallback uses the rewritten body: {desc}"
+        );
+        assert!(!desc.contains("CLAUDE_PLUGIN_ROOT"));
     }
 }
