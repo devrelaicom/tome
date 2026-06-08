@@ -273,3 +273,106 @@ fn converts_a_codex_project_to_a_synthesized_plugin() {
     assert!(target.join("skills/helper/SKILL.md").exists());
     assert!(target.join(".mcp.json").exists());
 }
+
+/// Build a CC marketplace with one relative-path plugin + one remote plugin.
+fn cc_marketplace_fixture(tmp: &Path) -> PathBuf {
+    let src = tmp.join("mkt");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/marketplace.json"),
+        br#"{"name":"mkt","owner":{"name":"Owner","email":"o@x.io"},
+             "plugins":[{"name":"alpha","source":"./alpha"},
+                        {"name":"beta","source":{"source":"github","repo":"x/y"}}]}"#,
+    )
+    .unwrap();
+    // The relative-path plugin `alpha`.
+    fs::create_dir_all(src.join("alpha/.claude-plugin")).unwrap();
+    fs::write(
+        src.join("alpha/.claude-plugin/plugin.json"),
+        br#"{"name":"alpha","version":"1.2.0"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("alpha/skills/s")).unwrap();
+    fs::write(
+        src.join("alpha/skills/s/SKILL.md"),
+        "---\nname: s\ndescription: d\n---\nbody\n",
+    )
+    .unwrap();
+    src
+}
+
+fn catalog_config(output_dir: PathBuf, strict: bool) -> ConvertConfig {
+    ConvertConfig {
+        level: ArtifactLevel::Catalog,
+        from: None,
+        new_name: None,
+        strict,
+        force: false,
+        dry_run: false,
+        output_dir,
+    }
+}
+
+#[test]
+fn converts_a_marketplace_vendoring_relative_plugins_and_skipping_remote() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_marketplace_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let outcome = run(&src, &catalog_config(out.clone(), false)).unwrap();
+    assert_eq!(outcome.final_name, "mkt-tome");
+
+    let target = out.join("mkt-tome");
+    // The catalog manifest + the vendored relative plugin landed.
+    let cat = fs::read_to_string(target.join("tome-catalog.toml")).unwrap();
+    assert!(cat.contains("name = \"mkt-tome\""), "{cat}");
+    assert!(read_plugin_manifest(&target.join("alpha")).is_ok());
+    assert!(target.join("alpha/skills/s/SKILL.md").exists());
+    // The remote plugin was skipped + warned, not vendored.
+    assert!(!target.join("beta").exists());
+    assert!(
+        outcome
+            .report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "convert/remote-plugin-skipped")
+    );
+}
+
+#[test]
+fn strict_marketplace_hard_fails_on_a_remote_plugin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_marketplace_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let err = run(&src, &catalog_config(out.clone(), true)).unwrap_err();
+    assert_eq!(err.exit_code(), 84);
+    assert!(!out.join("mkt-tome").exists(), "strict abort lands nothing");
+}
+
+#[test]
+fn marketplace_with_a_broken_relative_plugin_is_all_or_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("mkt");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/marketplace.json"),
+        br#"{"name":"mkt","owner":{"name":"O","email":"o@x.io"},
+             "plugins":[{"name":"broken","source":"./broken"}]}"#,
+    )
+    .unwrap();
+    // `broken` has an invalid plugin.json → import fails → whole catalog aborts.
+    fs::create_dir_all(src.join("broken/.claude-plugin")).unwrap();
+    fs::write(src.join("broken/.claude-plugin/plugin.json"), b"{not json").unwrap();
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let err = run(&src, &catalog_config(out.clone(), false)).unwrap_err();
+    assert_eq!(err.exit_code(), 2);
+    assert!(
+        !out.join("mkt-tome").exists(),
+        "a single plugin failure must land nothing (all-or-nothing)"
+    );
+}

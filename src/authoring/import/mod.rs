@@ -39,4 +39,7 @@ pub mod rule {
     // Codex (Tier-2 synthesis) specific.
     pub const CODEX_SYNTHESIZED_VERSION: &str = "convert/codex-synthesized-version";
     pub const CODEX_UNSUPPORTED: &str = "convert/codex-unsupported";
+    // Catalog / marketplace level.
+    pub const REMOTE_PLUGIN_SKIPPED: &str = "convert/remote-plugin-skipped";
+    pub const CATALOG_SYNTHESIZED_FIELD: &str = "convert/catalog-synthesized-field";
 }

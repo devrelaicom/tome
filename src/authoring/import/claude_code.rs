@@ -23,10 +23,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::authoring::ir::{
-    Diagnostic, EntryIr, McpServerIr, McpTransport, PluginIr, Provenance, SupportingFile,
+    CatalogIr, Diagnostic, EntryIr, McpServerIr, McpTransport, PluginIr, Provenance, SupportingFile,
 };
 use crate::authoring::rewrite::{RewriteOptions, rewrite_body};
 use crate::authoring::untrusted::UntrustedRoot;
+use crate::catalog::manifest::Owner;
 use crate::error::TomeError;
 use crate::plugin::frontmatter::{frontmatter_keys, parse_skill_frontmatter_str};
 use crate::plugin::identity::EntryKind;
@@ -209,6 +210,188 @@ pub fn import_plugin(
         },
         diagnostics,
     })
+}
+
+/// Import a Claude Code marketplace (`.claude-plugin/marketplace.json` + the
+/// vendored plugin subdirectories it lists) into a [`CatalogIr`].
+///
+/// Relative-path plugins are imported and vendored inline; a failure converting
+/// **any** relative-path plugin aborts the whole conversion (the error is
+/// propagated, so `build_ir` returns before `emit` and nothing lands —
+/// all-or-nothing, FR-014a). Remote-source plugins (github/git/url/npm) are
+/// warned-and-skipped, and that warning is strict-blocking so `--strict`
+/// hard-fails them (FR-014).
+pub fn import_marketplace(
+    root: &UntrustedRoot,
+    source_path: &Path,
+) -> Result<CatalogIr, TomeError> {
+    let mut diagnostics = Vec::new();
+
+    let manifest_json = root.read_text(
+        Path::new(".claude-plugin/marketplace.json"),
+        PLUGIN_MANIFEST_MAX,
+    )?;
+    let value: serde_json::Value = serde_json::from_str(&manifest_json).map_err(|e| {
+        TomeError::Usage(format!(
+            "source .claude-plugin/marketplace.json is not valid JSON: {e}"
+        ))
+    })?;
+
+    let name = value
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            source_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("catalog")
+                .to_owned()
+        });
+    let description = match value.get("description").and_then(|v| v.as_str()) {
+        Some(d) if !d.trim().is_empty() => d.trim().to_owned(),
+        _ => {
+            diagnostics.push(Diagnostic::info(
+                rule::CATALOG_SYNTHESIZED_FIELD,
+                "marketplace has no `description`; synthesizing one",
+            ));
+            format!("Converted from the {name} Claude Code marketplace")
+        }
+    };
+    let version = match value.get("version").and_then(|v| v.as_str()).or_else(|| {
+        value
+            .get("metadata")
+            .and_then(|m| m.get("version"))
+            .and_then(|v| v.as_str())
+    }) {
+        Some(v) if !v.trim().is_empty() => v.trim().to_owned(),
+        _ => {
+            diagnostics.push(Diagnostic::warning(
+                rule::MISSING_VERSION,
+                "marketplace has no `version`; defaulting to `0.0.0`",
+            ));
+            "0.0.0".to_owned()
+        }
+    };
+    let owner = parse_owner(value.get("owner"), &mut diagnostics);
+
+    let mut plugins = Vec::new();
+    if let Some(arr) = value.get("plugins").and_then(|v| v.as_array()) {
+        for entry in arr {
+            let pname = entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            let label = pname.as_deref().unwrap_or("<unnamed>");
+            match classify_plugin_source(entry.get("source")) {
+                PluginSource::Relative(rel) => {
+                    // Validate the source path is in-root + symlink-safe, then
+                    // import the vendored plugin under its own sub-root.
+                    let plugin_abs = root.resolve(Path::new(&rel))?;
+                    let plugin_root = UntrustedRoot::open(&plugin_abs)?;
+                    let default = pname.clone().unwrap_or_else(|| rel.clone());
+                    // ALL-OR-NOTHING: propagate any single-plugin import failure.
+                    let plugin = import_plugin(&plugin_root, &default, &plugin_abs)?;
+                    plugins.push(plugin);
+                }
+                PluginSource::Remote(kind) => diagnostics.push(Diagnostic::warning(
+                    rule::REMOTE_PLUGIN_SKIPPED,
+                    format!(
+                        "plugin `{label}` has a remote source ({kind}); Tome catalogs are relative-path-only, so it is skipped"
+                    ),
+                )),
+                PluginSource::Malformed => diagnostics.push(Diagnostic::warning(
+                    rule::REMOTE_PLUGIN_SKIPPED,
+                    format!("plugin `{label}` has an unrecognized `source`; skipping it"),
+                )),
+            }
+        }
+    }
+
+    Ok(CatalogIr {
+        name,
+        version,
+        description,
+        owner,
+        plugins,
+        provenance: Provenance {
+            source_harness: "claude-code".to_owned(),
+            source_path: source_path.to_path_buf(),
+        },
+        diagnostics,
+    })
+}
+
+/// Classification of a marketplace `plugins[].source`.
+enum PluginSource {
+    /// A relative path within the marketplace repo (vendored inline).
+    Relative(String),
+    /// A remote source (github/git/url/npm); not representable in a Tome
+    /// catalog. The string is the remote kind, for the warning.
+    Remote(String),
+    /// An unrecognized/absent source.
+    Malformed,
+}
+
+/// A string `source` is a relative path; an object `source` is classified by
+/// its `source` type field (`local`/`relative` → vendor; anything else →
+/// remote).
+fn classify_plugin_source(source: Option<&serde_json::Value>) -> PluginSource {
+    match source {
+        Some(serde_json::Value::String(s)) => PluginSource::Relative(s.clone()),
+        Some(serde_json::Value::Object(o)) => match o.get("source").and_then(|v| v.as_str()) {
+            Some("local") | Some("relative") => match o.get("path").and_then(|v| v.as_str()) {
+                Some(p) => PluginSource::Relative(p.to_owned()),
+                None => PluginSource::Malformed,
+            },
+            Some(kind) => PluginSource::Remote(kind.to_owned()),
+            None => PluginSource::Malformed,
+        },
+        _ => PluginSource::Malformed,
+    }
+}
+
+/// Parse a CC marketplace `owner` (`{name, email}` object) into the required
+/// [`Owner`], synthesizing missing fields with a diagnostic (the Tome catalog
+/// manifest requires both).
+fn parse_owner(value: Option<&serde_json::Value>, diagnostics: &mut Vec<Diagnostic>) -> Owner {
+    let placeholder_email = "unknown@example.invalid";
+    if let Some(obj) = value.and_then(|v| v.as_object()) {
+        let name = obj
+            .get("name")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let email = obj
+            .get("email")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        if let (Some(name), Some(email)) = (name.clone(), email.clone()) {
+            return Owner { name, email };
+        }
+        diagnostics.push(Diagnostic::info(
+            rule::CATALOG_SYNTHESIZED_FIELD,
+            "marketplace `owner` is incomplete; synthesizing the missing field(s)",
+        ));
+        return Owner {
+            name: name.unwrap_or_else(|| "unknown".to_owned()),
+            email: email.unwrap_or_else(|| placeholder_email.to_owned()),
+        };
+    }
+    diagnostics.push(Diagnostic::info(
+        rule::CATALOG_SYNTHESIZED_FIELD,
+        "marketplace has no `owner`; synthesizing one",
+    ));
+    Owner {
+        name: "unknown".to_owned(),
+        email: placeholder_email.to_owned(),
+    }
 }
 
 /// Import each `skills/<name>/SKILL.md` directory into a skill [`EntryIr`].
@@ -761,5 +944,49 @@ mod tests {
         let b = parse_author(Some(&serde_json::json!("Just A Name"))).unwrap();
         assert_eq!(b.name.as_deref(), Some("Just A Name"));
         assert!(b.email.is_none());
+    }
+
+    #[test]
+    fn classify_plugin_source_distinguishes_relative_from_remote() {
+        // A string source is a relative (vendored) path.
+        assert!(matches!(
+            classify_plugin_source(Some(&serde_json::json!("./alpha"))),
+            PluginSource::Relative(p) if p == "./alpha"
+        ));
+        // A local object source uses its `path`.
+        assert!(matches!(
+            classify_plugin_source(Some(&serde_json::json!({"source":"local","path":"x"}))),
+            PluginSource::Relative(p) if p == "x"
+        ));
+        // Remote kinds are skipped.
+        assert!(matches!(
+            classify_plugin_source(Some(&serde_json::json!({"source":"github","repo":"o/r"}))),
+            PluginSource::Remote(k) if k == "github"
+        ));
+        // Absent / unrecognized → malformed.
+        assert!(matches!(
+            classify_plugin_source(None),
+            PluginSource::Malformed
+        ));
+        assert!(matches!(
+            classify_plugin_source(Some(&serde_json::json!({"no":"source"}))),
+            PluginSource::Malformed
+        ));
+    }
+
+    #[test]
+    fn parse_owner_synthesizes_missing_fields() {
+        let mut diags = Vec::new();
+        let full = parse_owner(
+            Some(&serde_json::json!({"name":"O","email":"o@x.io"})),
+            &mut diags,
+        );
+        assert_eq!(full.name, "O");
+        assert_eq!(full.email, "o@x.io");
+        assert!(diags.is_empty());
+
+        let none = parse_owner(None, &mut diags);
+        assert_eq!(none.name, "unknown");
+        assert!(!diags.is_empty());
     }
 }

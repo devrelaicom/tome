@@ -154,9 +154,10 @@ fn import(
             harness,
             source_root,
         )?)),
-        (ArtifactLevel::Catalog, _) => Err(TomeError::Usage(
-            "catalog conversion lands in a later slice; not yet supported".to_owned(),
-        )),
+        (ArtifactLevel::Catalog, _) => Ok(Artifact::Catalog(claude_code::import_marketplace(
+            root,
+            source_root,
+        )?)),
         (ArtifactLevel::Plugin, other) => Err(TomeError::Usage(format!(
             "plugin conversion from `{}` is not supported",
             other.as_str()
@@ -221,6 +222,7 @@ fn is_strict_blocking(rule_id: &str) -> bool {
             | cc::SKIPPED_ENTRY
             | cc::MALFORMED_MCP
             | cc::CODEX_UNSUPPORTED
+            | cc::REMOTE_PLUGIN_SKIPPED
     ) || is_unsupported_harness_ism(rule_id)
 }
 
