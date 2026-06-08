@@ -14,6 +14,7 @@
 //! Framework lands in Phase 2 (Foundational); concrete rules + autofix in
 //! Phase 5 (US3).
 
+pub mod parse;
 pub mod rules;
 
 use crate::authoring::ir::{Artifact, CatalogIr, Diagnostic, EntryIr, PluginIr, Severity};

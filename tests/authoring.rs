@@ -12,3 +12,6 @@ mod cutover;
 
 #[path = "authoring/detect.rs"]
 mod detect;
+
+#[path = "authoring/lint.rs"]
+mod lint;
