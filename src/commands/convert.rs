@@ -14,6 +14,7 @@ use serde_json::json;
 
 use crate::authoring::convert::{self, ConvertConfig, ConvertOutcome};
 use crate::authoring::detect::ArtifactLevel;
+use crate::catalog::git::{Git, scrub_to_string};
 use crate::cli::ConvertArgs;
 use crate::error::TomeError;
 use crate::output::{Mode, write_json};
@@ -32,15 +33,11 @@ pub fn run(
         ));
     }
 
-    // Local sources only this slice. A non-existent path is treated as a remote
-    // SOURCE, which is not yet fetched.
-    let source_path = Path::new(&args.source);
-    if !source_path.exists() {
-        return Err(TomeError::Usage(format!(
-            "source `{}` is not a local path; remote sources (owner/repo, git URL) land in a later slice",
-            args.source
-        )));
-    }
+    // Resolve SOURCE to a local root: a local path is used in place; a remote
+    // (`owner/repo`, git URL) is shallow-cloned into a temp dir whose `Drop`
+    // guarantees cleanup on every exit path. `_clone` is held for the whole
+    // conversion (NFR-003).
+    let (source_root, _clone) = resolve_source(&args.source)?;
 
     let new_name =
         convert::resolve_requested_name(args.name.as_deref(), args.name_flag.as_deref())?;
@@ -56,8 +53,29 @@ pub fn run(
         output_dir,
     };
 
-    let outcome = convert::run(source_path, &cfg)?;
+    let outcome = convert::run(&source_root, &cfg)?;
     emit_report(&outcome, mode)
+}
+
+/// Resolve a `SOURCE` to a local directory root. A local path is returned as-is
+/// (no temp clone); a remote `SOURCE` (`owner/repo`, git URL) is shallow-cloned
+/// into a [`tempfile::TempDir`] whose `Drop` cleans up on success, conversion
+/// error, `--strict` abort, and SIGINT-unwind (NFR-003). Credentials are
+/// scrubbed from the display source and every `git` error chain (`catalog::git`).
+fn resolve_source(source: &str) -> Result<(PathBuf, Option<tempfile::TempDir>), TomeError> {
+    let path = Path::new(source);
+    if path.exists() {
+        return Ok((path.to_path_buf(), None));
+    }
+    let url = crate::commands::catalog::source::resolve(source)?;
+    let tempdir = tempfile::Builder::new()
+        .prefix("tome-convert-")
+        .tempdir()
+        .map_err(TomeError::Io)?;
+    let clone_dest = tempdir.path().join("repo");
+    let git = Git::new(scrub_to_string(url.as_bytes()));
+    git.clone_shallow(&url, &clone_dest, None)?;
+    Ok((clone_dest, Some(tempdir)))
 }
 
 /// Render the conversion outcome: a human summary, or a JSONL action stream
@@ -114,4 +132,65 @@ fn emit_report(outcome: &ConvertOutcome, mode: Mode) -> Result<(), TomeError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+
+    /// Run a git subcommand in `dir`, asserting success (identity injected so CI
+    /// never prompts).
+    fn git(args: &[&str], dir: &Path) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "Tome Test")
+            .env("GIT_AUTHOR_EMAIL", "tests@tome.invalid")
+            .env("GIT_COMMITTER_NAME", "Tome Test")
+            .env("GIT_COMMITTER_EMAIL", "tests@tome.invalid")
+            .status()
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+        assert!(status.success(), "git {args:?} exited {status}");
+    }
+
+    #[test]
+    fn resolve_source_returns_a_local_path_without_cloning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, guard) = resolve_source(tmp.path().to_str().unwrap()).unwrap();
+        assert_eq!(root, tmp.path());
+        assert!(guard.is_none(), "a local path is not cloned");
+    }
+
+    #[test]
+    fn resolve_source_clones_a_remote_into_a_cleaned_up_tempdir() {
+        // A real local git repo, addressed by a `file://` URL so the path does
+        // not exist literally and the remote branch is taken.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        fs::write(
+            repo.join("SKILL.md"),
+            "---\nname: s\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        git(&["init", "-q", "-b", "main"], &repo);
+        git(&["add", "-A"], &repo);
+        git(&["commit", "-q", "-m", "init"], &repo);
+
+        let url = format!("file://{}", repo.display());
+        let cloned_path;
+        {
+            let (root, guard) = resolve_source(&url).unwrap();
+            assert!(guard.is_some(), "a remote source clones into a tempdir");
+            assert!(root.join("SKILL.md").exists(), "cloned content is present");
+            cloned_path = guard.as_ref().unwrap().path().to_path_buf();
+            // `guard` drops at the end of this scope.
+        }
+        assert!(
+            !cloned_path.exists(),
+            "the temp clone is cleaned up on drop"
+        );
+    }
 }
