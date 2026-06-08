@@ -14,3 +14,5 @@
 //!
 //! Populated in Phase 4 (US2): `claude_code`, `agent_skills` (+ thin
 //! `cursor`/`opencode`/`cline`), `codex`.
+
+pub mod claude_code;
