@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use super::{Rule, Scope};
 use crate::authoring::ir::{CatalogIr, Diagnostic, EntryIr, Fix, Location, PluginIr};
 use crate::authoring::rewrite::{self, RewriteOptions, rewrite_body, rewrite_known_vars};
-use crate::plugin::identity::{EntryKind, validate_segment};
+use crate::plugin::identity::{EntryKind, is_kebab, validate_segment};
 use crate::util::{ENTRY_BODY_MAX, bounded_read_to_string};
 
 /// Stable lint rule ids (also referenced by [`super::parse`]).
@@ -303,15 +303,6 @@ fn check_version(version: &str, d: &mut Vec<Diagnostic>) {
             format!("`version` `{version}` is not valid semver"),
         ));
     }
-}
-
-/// kebab-case: only `[a-z0-9-]`, no leading/trailing/double hyphen, non-empty.
-fn is_kebab(s: &str) -> bool {
-    if s.is_empty() || s.starts_with('-') || s.ends_with('-') || s.contains("--") {
-        return false;
-    }
-    s.bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 /// Structural email: exactly one `@` and a dotted, non-empty domain.

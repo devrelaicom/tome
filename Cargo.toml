@@ -182,12 +182,18 @@ rustix = { version = "1", features = ["fs"] }
 # NFR-007's binding constraint is the licence gate, which passes. Slimmed with
 # `default-features = false` + `builtins` (the standard filter set) — drops
 # `macros`/`multi_template`/`debug`/`deserialization` we don't use, keeping the
-# binary lean (NFR-008). minijinja's `{{ }}` delimiters do not collide with
+# binary lean (NFR-008). The `serde` feature is enabled (NOT `deserialization`)
+# so the `context!` macro can serialise our Rust scaffold values into template
+# `Value`s — serde is already a top-level dep, so this adds NO new crate and
+# `cargo-deny` stays green. minijinja's `{{ }}` delimiters do not collide with
 # Tome's runtime `${TOME_*}`/`$ARGUMENTS` tokens, so scaffold-time and run-time
 # substitution coexist. `cargo-generate` was rejected: it vendors libgit2 via
 # `git2` (principle XII violation) and pulls ~40 transitive crates against the
 # binary cap (research §R-2).
-minijinja = { version = "2.20", default-features = false, features = ["builtins"] }
+minijinja = { version = "2.20", default-features = false, features = [
+    "builtins",
+    "serde",
+] }
 
 [build-dependencies]
 # Compile vendored sqlite-vec amalgamation against rusqlite's bundled SQLite.

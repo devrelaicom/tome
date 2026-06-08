@@ -671,8 +671,10 @@ pub struct SkillCreateArgs {
     #[arg(long)]
     pub bare: bool,
     /// Name of the wrapping plugin (default: `<NAME>`), giving the full skill
-    /// name `<plugin-name>:<NAME>`. Ignored with `--bare`.
-    #[arg(long = "plugin-name")]
+    /// name `<plugin-name>:<NAME>`. Meaningless with `--bare` (no wrapping
+    /// plugin) or `--into` (the wrapping plugin already exists), so it is a
+    /// usage error to combine them rather than silently ignored.
+    #[arg(long = "plugin-name", conflicts_with_all = ["bare", "into"])]
     pub plugin_name: Option<String>,
     /// Parent directory the new artifact lands under. Mutually exclusive with
     /// `--into`. Defaults to the current directory.

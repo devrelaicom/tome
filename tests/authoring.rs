@@ -7,6 +7,9 @@
 #[path = "authoring/convert.rs"]
 mod convert;
 
+#[path = "authoring/create.rs"]
+mod create;
+
 #[path = "authoring/cutover.rs"]
 mod cutover;
 

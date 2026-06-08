@@ -69,6 +69,20 @@ pub(crate) fn validate_segment(segment: &str) -> Result<(), SegmentRejection> {
     Ok(())
 }
 
+/// kebab-case: only `[a-z0-9-]`, no leading/trailing/double hyphen, non-empty.
+///
+/// Single source of truth shared by the `create` scaffold (which *produces*
+/// names) and the `lint` rules (which *validate* them, P8 US3/US4). These two
+/// MUST agree — a drift would silently break "lint-clean by construction" — so
+/// the helper is promoted here rather than duplicated (the SSOT pattern).
+pub(crate) fn is_kebab(s: &str) -> bool {
+    if s.is_empty() || s.starts_with('-') || s.ends_with('-') || s.contains("--") {
+        return false;
+    }
+    s.bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PluginIdParseError {
     #[error("plugin id `{0}` must be `<catalog>/<plugin>`")]
