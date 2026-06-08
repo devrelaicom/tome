@@ -105,7 +105,11 @@ pub fn run(source_root: &Path, cfg: &ConvertConfig) -> Result<ConvertOutcome, To
     validate_new_name(&final_name)?;
     set_artifact_name(&mut artifact, &final_name);
 
-    let report = lint::run(&artifact, &lint::rules::all());
+    // `for_convert` omits the filesystem-structural rules: the IR's
+    // `source_path` still points at the foreign source tree here, so
+    // `UnsupportedComponents`/`EntryName` would re-flag what the importer already
+    // reported (under different rule ids) by reading the SOURCE, not the output.
+    let report = lint::run(&artifact, &lint::rules::for_convert());
 
     // The `--strict` verdict: the first unrepresentable feature, if any.
     let strict_blocked = if cfg.strict {
@@ -278,7 +282,9 @@ mod tests {
     #[test]
     fn validate_new_name_rejects_unsafe() {
         validate_new_name("my-plugin-tome").unwrap();
-        for bad in ["..", "a/b", "", ".hidden"] {
+        // Incl. the highest-risk `join` inputs the SEC-1 lesson flags: absolute
+        // and embedded-traversal names.
+        for bad in ["..", "a/b", "", ".hidden", "/etc", "a/../b", "\\abs"] {
             assert!(validate_new_name(bad).is_err(), "expected `{bad}` rejected");
         }
     }

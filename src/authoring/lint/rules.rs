@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use super::{Rule, Scope};
 use crate::authoring::ir::{CatalogIr, Diagnostic, EntryIr, Fix, Location, PluginIr};
 use crate::authoring::rewrite::{self, RewriteOptions, rewrite_body, rewrite_known_vars};
+use crate::catalog::manifest::looks_like_email;
 use crate::plugin::identity::{EntryKind, is_kebab, validate_segment};
 use crate::util::{ENTRY_BODY_MAX, bounded_read_to_string};
 
@@ -35,18 +36,40 @@ pub mod rule {
     pub const DESCRIPTION_TOO_LONG: &str = "lint/description-too-long";
     pub const UNSUPPORTED_COMPONENT: &str = "lint/unsupported-component";
     pub const RESIDUAL_HARNESS_ISM: &str = "lint/residual-harness-ism";
+    /// A source path the lint parser refused to read (an escaping or symlinked
+    /// component under the artifact root) — reported, never followed.
+    pub const UNSAFE_PATH: &str = "lint/unsafe-path";
 }
 
 /// Agent-Skills description length cap (§9).
 const DESCRIPTION_MAX: usize = 1024;
 
-/// The full rule registry shared by `convert` and `lint`.
+/// The full rule registry — used by `lint`, where the IR's `source_path` IS the
+/// native Tome artifact being validated.
 pub fn all() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(CatalogManifest),
         Box::new(PluginManifest),
         Box::new(UnsupportedComponents),
         Box::new(EntryName),
+        Box::new(EntryDescription),
+        Box::new(EntryHarnessIsms),
+    ]
+}
+
+/// The registry `convert` runs over a freshly-imported IR. It OMITS the
+/// filesystem-structural rules (`UnsupportedComponents`, `EntryName`) because on
+/// the convert path the IR's `source_path` still points at the FOREIGN source
+/// tree, not the Tome output: `UnsupportedComponents` would re-flag the same
+/// `monitors/`/`themes/` dirs the importer already reported as
+/// `convert/unsupported-component` (a double-finding under two rule ids), and
+/// `EntryName`'s `expected`/autofix path would be source-relative and meaningless
+/// (convert already enforces `name == dir` in the emitter). `lint` keeps
+/// [`all`]; only the convert pre-emit pass uses this subset.
+pub fn for_convert() -> Vec<Box<dyn Rule>> {
+    vec![
+        Box::new(CatalogManifest),
+        Box::new(PluginManifest),
         Box::new(EntryDescription),
         Box::new(EntryHarnessIsms),
     ]
@@ -72,7 +95,7 @@ impl Rule for CatalogManifest {
                 "catalog `owner` has no name or email",
             ));
         }
-        if !c.owner.email.trim().is_empty() && !is_structural_email(&c.owner.email) {
+        if !c.owner.email.trim().is_empty() && !looks_like_email(&c.owner.email) {
             d.push(Diagnostic::warning(
                 rule::OWNER_EMAIL_INVALID,
                 format!(
@@ -305,15 +328,6 @@ fn check_version(version: &str, d: &mut Vec<Diagnostic>) {
     }
 }
 
-/// Structural email: exactly one `@` and a dotted, non-empty domain.
-fn is_structural_email(s: &str) -> bool {
-    let mut parts = s.split('@');
-    let (Some(local), Some(domain), None) = (parts.next(), parts.next(), parts.next()) else {
-        return false;
-    };
-    !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
-}
-
 fn dir_kind(kind: EntryKind) -> &'static str {
     match kind {
         EntryKind::Skill => "directory",
@@ -517,9 +531,9 @@ mod tests {
         assert!(!is_kebab("My_Plugin"));
         assert!(!is_kebab("-x"));
         assert!(!is_kebab("a--b"));
-        assert!(is_structural_email("a@b.io"));
-        assert!(!is_structural_email("a@b"));
-        assert!(!is_structural_email("a@@b.io"));
+        assert!(looks_like_email("a@b.io"));
+        assert!(!looks_like_email("a@b"));
+        assert!(!looks_like_email("a@@b.io"));
     }
 
     #[test]

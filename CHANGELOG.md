@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Authoring & conversion
+
+- **`tome {catalog,plugin,skill} create <NAME>`** — scaffold a new native Tome
+  artifact from a built-in template, valid and lint-clean out of the box.
+  `tome skill create <name>` wraps the skill in a minimal plugin by default
+  (`--plugin-name <p>` sets the wrapping plugin → `p:<name>`; `--bare` emits a
+  naked skill). `--output <dir>` chooses where it lands; `--into <dir>` drops a
+  plugin into an existing catalog (registering it) or a skill into an existing
+  plugin.
+
+- **`tome {catalog,plugin,skill} convert <SOURCE>`** — convert a Claude Code
+  marketplace/plugin/skill, a Codex project, or a native `SKILL.md` from Cursor /
+  OpenCode / Cline / generic Agent Skills into the native Tome format. `SOURCE`
+  may be a local path, an `owner/repo` shorthand, or a Git URL (fetched into a
+  temp clone that is always cleaned up). Harness-isms are rewritten
+  (`${CLAUDE_*}` → `${TOME_*}`, legacy `$1..$9` → 0-based), and anything Tome
+  cannot represent (monitors, themes, LSP, output-styles, …) is reported as a
+  warning — or, with `--strict`, aborts before writing anything. `--dry-run`
+  prints the plan; `--from <harness>` overrides source-format detection.
+
+- **`tome {catalog,plugin,skill} lint <PATH>`** — validate a native Tome
+  artifact for CI: manifest validity, `name == directory`, missing descriptions,
+  residual harness-isms, and unsupported components, reporting every finding in
+  one run. `--strict` fails on warnings too; `--autofix` applies the
+  mechanically-safe fixes (harness-ism rewrites, `name == dir`). Exit codes are
+  CI-friendly (errors → 85, strict warnings → 86).
+
+- **Native manifest cutover.** Tome now reads a plugin's native
+  `tome-plugin.toml` (a legacy `plugin.json`-only plugin reports
+  `not converted` with a `convert` hint). The downloaded-model manifest is TOML;
+  `tome doctor --fix` migrates a legacy JSON manifest in place (no re-download).
+  A new `${TOME_PROJECT_DIR}` substitution built-in resolves to the project root.
+
 ## [0.5.0] — 2026-05-27
 
 ### Phase 5 additions

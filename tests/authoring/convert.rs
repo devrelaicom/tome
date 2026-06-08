@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use tome::authoring::convert::{ConvertConfig, run};
 use tome::authoring::detect::ArtifactLevel;
+use tome::authoring::lint::parse::parse_artifact;
 use tome::plugin::manifest::read_plugin_manifest;
 
 /// Write a representative CC plugin under `<tmp>/src` and return its path.
@@ -107,6 +108,45 @@ fn converts_a_cc_plugin_to_a_native_tome_plugin() {
             .diagnostics
             .iter()
             .any(|d| d.rule_id == "convert/tool-restriction-dropped")
+    );
+}
+
+#[test]
+fn converted_plugin_relints_clean_from_disk() {
+    // T-MAJOR-1 (phase-wide): convert lints the in-memory IR; this proves the
+    // EMITTED on-disk tree re-parses and re-lints clean — the convert→lint
+    // composition the quickstart headlines (and that `create` already pins).
+    // Uses a minimal CLEAN source (one skill w/ name+description+rewritable
+    // harness-ism; no unsupported dirs, no description-less command).
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"kit","version":"1.0.0","description":"a kit"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("skills/greet")).unwrap();
+    fs::write(
+        src.join("skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: greets the user\n---\nRun ${CLAUDE_PLUGIN_ROOT}/x\n",
+    )
+    .unwrap();
+
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    let target = out.join(&outcome.final_name);
+
+    // Re-parse + re-lint the EMITTED tree through the lenient lint parser.
+    let artifact = parse_artifact(&target).unwrap();
+    let report = tome::authoring::lint::run(&artifact, &tome::authoring::lint::rules::all());
+    assert_eq!(report.errors, 0, "errors: {:?}", report.diagnostics);
+    assert_eq!(report.warnings, 0, "warnings: {:?}", report.diagnostics);
+    // And the strict cutover reader accepts the emitted manifest.
+    assert_eq!(
+        read_plugin_manifest(&target).unwrap().name,
+        outcome.final_name
     );
 }
 

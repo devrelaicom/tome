@@ -231,6 +231,61 @@ fn malformed_entry_is_a_finding_not_an_abort() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn lint_refuses_a_symlinked_skill_child_and_does_not_read_out_of_tree() {
+    // SEC-MED-1 (phase-wide): the lint parse path must NOT follow a symlinked
+    // component (consistent with the convert read boundary). A malicious native
+    // plugin with a real `skills/` holding `evil -> /outside-skill` must not
+    // disclose the out-of-tree SKILL.md into a finding — the listing is refused
+    // and reported as `lint/unsafe-path`.
+    use std::os::unix::fs::symlink;
+    let tmp = tempfile::tempdir().unwrap();
+
+    // An out-of-tree skill dir whose description is a recognizable secret.
+    let outside = tmp.path().join("outside-skill");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(
+        outside.join("SKILL.md"),
+        "---\nname: evil\ndescription: TOP-SECRET-EXFIL\n---\nbody\n",
+    )
+    .unwrap();
+
+    // The artifact under lint: a real plugin with a real `skills/` dir whose
+    // child `evil` is a symlink to the out-of-tree skill dir.
+    let dir = tmp.path().join("p");
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("tome-plugin.toml"),
+        "name = \"p\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::create_dir(dir.join("skills")).unwrap();
+    symlink(&outside, dir.join("skills/evil")).unwrap();
+
+    let artifact = parse_artifact(&dir).unwrap();
+    let report = run(&artifact, &rules::all());
+
+    // The symlinked child makes the listing refuse → reported, not followed.
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "lint/unsafe-path"),
+        "expected a lint/unsafe-path finding: {:?}",
+        report.diagnostics
+    );
+    // The out-of-tree skill content never reached a finding (no disclosure).
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("TOP-SECRET-EXFIL")),
+        "out-of-tree content leaked into findings: {:?}",
+        report.diagnostics
+    );
+}
+
 #[test]
 fn findings_order_is_deterministic_across_runs() {
     let tmp = tempfile::tempdir().unwrap();

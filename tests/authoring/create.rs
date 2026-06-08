@@ -59,6 +59,25 @@ fn plugin_scaffold_lints_clean() {
 }
 
 #[test]
+fn plugin_scaffold_is_readable_by_the_strict_cutover_reader() {
+    // T-MAJOR-3 (phase-wide): "lints clean" goes through the LENIENT parser;
+    // this proves a scaffolded plugin also satisfies the STRICT cutover reader
+    // (read_plugin_manifest, deny_unknown_fields) — i.e. `tome plugin enable`
+    // would accept it (connects US4 create to US1 cutover, as convert already
+    // does).
+    let tmp = tempfile::tempdir().unwrap();
+    let root = scaffold_to_disk(tmp.path(), ArtifactLevel::Plugin, &params("toolkit"));
+    let manifest = tome::plugin::manifest::read_plugin_manifest(&root).unwrap();
+    assert_eq!(manifest.name, "toolkit");
+    assert_eq!(manifest.version, "0.1.0");
+
+    // Same for the default plugin-wrapped skill scaffold.
+    let skill_root = scaffold_to_disk(tmp.path(), ArtifactLevel::Skill, &params("review"));
+    let m2 = tome::plugin::manifest::read_plugin_manifest(&skill_root).unwrap();
+    assert_eq!(m2.name, "review");
+}
+
+#[test]
 fn default_skill_scaffold_is_plugin_wrapped_and_lints_clean() {
     // `skill create review` → plugin "review" + skills/review/SKILL.md (review:review).
     let tmp = tempfile::tempdir().unwrap();

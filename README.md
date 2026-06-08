@@ -10,6 +10,31 @@ You register **catalogs** (Git-hosted collections of plugins), enable the **plug
 - **Named workspaces.** Central storage lives under `<home>/.tome/workspaces/<name>/`; a project binds to a workspace with a tiny `.tome/config.toml` pointer, so different projects can see different sets of plugins.
 - **Harness integration across five harnesses.** Tome writes each harness's rules file and MCP-config entry (Claude Code, Codex CLI, Cursor, Gemini CLI, OpenCode), and propagates per-plugin guardrails, hooks, and agent translations where the harness supports them.
 - **An MCP server.** `tome mcp` runs a stdio Model Context Protocol server backed by the resolved workspace's index. It exposes `search_skills`, `get_skill`, and `get_skill_info` tools, plus your enabled plugins' user-invocable commands as MCP prompts (and, optionally, agent personas). This server shipped in Phase 3 — it is part of the tool today, not a roadmap item.
+- **Authoring & conversion.** `tome {catalog,plugin,skill} create` scaffolds a new, lint-clean artifact; `… convert` brings a Claude Code marketplace/plugin/skill, a Codex project, or a native `SKILL.md` (Cursor / OpenCode / Cline / Agent Skills) into the native Tome format, rewriting harness-isms and honestly flagging anything it can't represent; `… lint` validates an artifact for CI. See [Authoring & conversion](#authoring--conversion).
+
+## Authoring & conversion
+
+Tome artifacts are plain files: a plugin is a `tome-plugin.toml` plus `skills/<name>/SKILL.md`, `commands/<name>.md`, and `agents/<name>.md`; a catalog is a `tome-catalog.toml` plus its vendored plugins. Three command groups help you author and migrate them — each available at the `catalog`, `plugin`, and `skill` level.
+
+```sh
+# Scaffold a new, lint-clean artifact from a built-in template.
+tome skill create review                 # ./review/  : a plugin "review" wrapping skills/review/
+tome skill create review --plugin-name qa# full name qa:review
+tome skill create review --bare          # ./review/SKILL.md  (a naked skill)
+tome plugin create toolkit --into ./my-catalog   # scaffold + register in my-catalog/tome-catalog.toml
+
+# Convert an existing artifact from another harness into the native Tome format.
+tome plugin convert acme/cool-plugin             # owner/repo shorthand (shallow-cloned)
+tome skill convert ./path/to/some-skill          # a local native SKILL.md (auto-detected)
+tome plugin convert ./cc-plugin --dry-run        # print the plan; write nothing
+tome plugin convert ./cc-plugin --strict         # abort if anything can't be represented
+
+# Validate an artifact for CI (errors → exit 85; with --strict, warnings → 86).
+tome plugin lint ./toolkit
+tome plugin lint ./toolkit --strict --autofix    # apply mechanically-safe fixes
+```
+
+`convert` handles Claude Code marketplaces/plugins/skills, Codex projects, and native `SKILL.md` files from Cursor, OpenCode, Cline, and generic Agent Skills. It rewrites harness-isms (`${CLAUDE_PLUGIN_ROOT}` → `${TOME_PLUGIN_DIR}`, legacy `$1..$9` → 0-based) and reports anything Tome cannot represent — monitors, themes, LSP servers, output-styles, and the like — as warnings (or, under `--strict`, aborts before writing). The source is never modified; remote sources are fetched into a temp clone that is always cleaned up. The `--json` output is machine-readable for scripting (`convert` streams JSONL; `lint` and `create` emit a single object).
 
 ## Supported platforms
 
