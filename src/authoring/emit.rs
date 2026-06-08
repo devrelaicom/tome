@@ -223,13 +223,10 @@ fn plan_entry(
         content: PlannedContent::Text(entry_markdown(entry)),
     });
 
-    // Supporting files land under the entry's directory (skills only carry a
-    // directory; commands/agents are single files, so their supporting files
-    // are placed next to the entry's markdown).
-    let support_root = match entry.kind {
-        EntryKind::Skill => entry_root,
-        EntryKind::Command | EntryKind::Agent => entry_root,
-    };
+    // Supporting files land under the entry's directory: a skill's own dir, or
+    // (for the single-file command/agent kinds) the `commands/`/`agents/` dir
+    // next to the entry's markdown. `entry_root` already encodes this per kind.
+    let support_root = entry_root;
     for sf in &entry.supporting_files {
         files.push(PlannedFile {
             rel: support_root.join(&sf.relative),
@@ -621,5 +618,40 @@ mod tests {
             "keep me",
             "non-colliding files must survive --force"
         );
+    }
+
+    #[test]
+    fn refuses_an_ir_with_an_escaping_supporting_file_rel() {
+        // T-MAJOR-4 (phase-wide): `ensure_in_bounds` is the WRITE-side SEC-1
+        // defense-in-depth. Feed it the exact bug class it guards — an IR whose
+        // planned `rel` escapes the root (a `..`-bearing supporting-file rel, and
+        // an absolute one) — and assert it refuses with InvalidInput and lands
+        // nothing outside the target. (Upstream importers validate names; this
+        // guard is what holds when a *future* producer doesn't.)
+        use crate::authoring::ir::SupportingFile;
+        for bad_rel in ["../escaped.txt", "/tmp/escaped.txt"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let real_src = tmp.path().join("payload.txt");
+            std::fs::write(&real_src, b"x").unwrap();
+            let mut entry = skill_entry("review", "d", "# r\n");
+            entry.supporting_files.push(SupportingFile {
+                relative: PathBuf::from(bad_rel),
+                source: real_src,
+            });
+            let mut p = plugin_ir();
+            p.entries = vec![entry];
+
+            let target = tmp.path().join("toolkit");
+            let err = emit(&Artifact::Plugin(p), &target, EmitOptions::default()).unwrap_err();
+            assert_eq!(
+                err.exit_code(),
+                7,
+                "an escaping supporting-file rel must be refused ({bad_rel})"
+            );
+            // The refusal runs before any landing, so nothing was written: the
+            // target is uncreated and no sibling escaped.
+            assert!(!target.exists(), "no partial artifact landed ({bad_rel})");
+            assert!(!tmp.path().join("escaped.txt").exists());
+        }
     }
 }

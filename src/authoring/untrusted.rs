@@ -40,8 +40,13 @@
 //!    multi-GiB or non-UTF-8 file is refused, never slurped.
 //! 4. **Safe-segment validation on *emitted* names** — [`validate_name`] reuses
 //!    the project's `plugin::identity::validate_segment` so a source-supplied
-//!    name that becomes a *Tome* file/dir (a skill dir, a supporting-file name)
-//!    is a single safe segment before it is composed into a write path.
+//!    name that becomes a *Tome* file/dir (a skill dir, a command/agent stem,
+//!    the vendored plugin's own name) is a single safe segment before it is
+//!    composed into a write path. Supporting-file leaf names are not
+//!    `validate_name`-checked (a dot-prefixed support file is legal to copy);
+//!    their *containment* is guaranteed instead — by `list_dir`'s no-follow
+//!    single-segment names and the emit sink's `ensure_in_bounds` `Normal`-only
+//!    assertion.
 //!
 //! [`validate_name`]: UntrustedRoot::validate_name
 //!

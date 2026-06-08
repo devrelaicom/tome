@@ -18,12 +18,13 @@ use std::path::Path;
 use crate::authoring::ir::{
     Artifact, CatalogIr, Diagnostic, EntryIr, MappedFrontmatter, PluginIr, Provenance,
 };
+use crate::authoring::untrusted::UntrustedRoot;
 use crate::catalog::manifest::{Owner, validate_source};
 use crate::error::TomeError;
 use crate::plugin::frontmatter::parse_skill_frontmatter_str;
 use crate::plugin::identity::EntryKind;
 use crate::plugin::manifest::TomeAuthor;
-use crate::util::{ENTRY_BODY_MAX, PLUGIN_MANIFEST_MAX, TOME_CONFIG_MAX, bounded_read_to_string};
+use crate::util::{PLUGIN_MANIFEST_MAX, TOME_CONFIG_MAX};
 
 use super::rules::rule;
 
@@ -34,28 +35,43 @@ use super::rules::rule;
 /// [`TomeError::Usage`] if `root` holds no Tome artifact;
 /// [`TomeError::Io`] on an unreadable/over-cap file.
 pub fn parse_artifact(root: &Path) -> Result<Artifact, TomeError> {
-    if root.join("tome-catalog.toml").is_file() {
-        Ok(Artifact::Catalog(parse_catalog(root)?))
-    } else if root.join("tome-plugin.toml").is_file() {
-        Ok(Artifact::Plugin(parse_plugin(root)?))
-    } else if root.join("SKILL.md").is_file() {
+    // Route every read of the (untrusted) artifact tree through `UntrustedRoot`,
+    // exactly as the `convert` importers do: each path is resolved by a walk
+    // from the canonical root that refuses a symlinked component BEFORE any read,
+    // so a malicious native plugin (`skills/evil -> /outside`) can never disclose
+    // out-of-tree content into a finding. A failure to open the root as a
+    // directory is reported as "not a Tome artifact" (Usage 2), preserving the
+    // prior behaviour for a missing/non-dir path.
+    let Ok(ur) = UntrustedRoot::open(root) else {
+        return Err(not_an_artifact(root));
+    };
+    if ur.is_file(Path::new("tome-catalog.toml")) {
+        Ok(Artifact::Catalog(parse_catalog(&ur)?))
+    } else if ur.is_file(Path::new("tome-plugin.toml")) {
+        Ok(Artifact::Plugin(parse_plugin(&ur)?))
+    } else if ur.is_file(Path::new("SKILL.md")) {
         Ok(Artifact::Skill(parse_entry(
-            &root.join("SKILL.md"),
+            &ur,
+            Path::new("SKILL.md"),
             EntryKind::Skill,
             dir_name(root),
-        )?))
-    } else {
-        Err(TomeError::Usage(format!(
-            "`{}` is not a Tome artifact (expected tome-catalog.toml, tome-plugin.toml, or SKILL.md)",
-            root.display()
         )))
+    } else {
+        Err(not_an_artifact(root))
     }
 }
 
+fn not_an_artifact(root: &Path) -> TomeError {
+    TomeError::Usage(format!(
+        "`{}` is not a Tome artifact (expected tome-catalog.toml, tome-plugin.toml, or SKILL.md)",
+        root.display()
+    ))
+}
+
 /// Parse a catalog: `tome-catalog.toml` + its vendored relative-path plugins.
-fn parse_catalog(root: &Path) -> Result<CatalogIr, TomeError> {
+fn parse_catalog(ur: &UntrustedRoot) -> Result<CatalogIr, TomeError> {
     let mut diagnostics = Vec::new();
-    let body = bounded_read_to_string(&root.join("tome-catalog.toml"), TOME_CONFIG_MAX)?;
+    let body = ur.read_text(Path::new("tome-catalog.toml"), TOME_CONFIG_MAX)?;
     let value = parse_toml(&body, "tome-catalog.toml", &mut diagnostics);
 
     let name = str_field(value.as_ref(), "name");
@@ -78,6 +94,7 @@ fn parse_catalog(root: &Path) -> Result<CatalogIr, TomeError> {
             // BEFORE joining and reading — the resulting `source_path` flows into
             // `--autofix` writes, so an unvalidated source could redirect a write
             // outside the artifact tree.
+            let root = ur.root();
             let plugin_dir = match validate_source(root, &root.join("tome-catalog.toml"), source) {
                 Ok(p) => p,
                 Err(e) => {
@@ -88,7 +105,20 @@ fn parse_catalog(root: &Path) -> Result<CatalogIr, TomeError> {
                     continue;
                 }
             };
-            if !plugin_dir.join("tome-plugin.toml").is_file() {
+            // The vendored plugin is its own untrusted subtree — open a fresh
+            // guard rooted at it (validate_source already proved containment;
+            // this re-asserts symlink-safety for the plugin's own walk).
+            let plugin_ur = match UntrustedRoot::open(&plugin_dir) {
+                Ok(p) => p,
+                Err(_) => {
+                    diagnostics.push(Diagnostic::warning(
+                        rule::CATALOG_PLUGIN_MISSING,
+                        format!("catalog plugin source `{source}` is not a readable directory"),
+                    ));
+                    continue;
+                }
+            };
+            if !plugin_ur.is_file(Path::new("tome-plugin.toml")) {
                 diagnostics.push(Diagnostic::warning(
                     rule::CATALOG_PLUGIN_MISSING,
                     format!("catalog plugin source `{source}` has no tome-plugin.toml"),
@@ -97,7 +127,7 @@ fn parse_catalog(root: &Path) -> Result<CatalogIr, TomeError> {
             }
             // CON-1: never-halt — a per-plugin parse error is a finding, not an
             // abort that hides later plugins.
-            let plugin = match parse_plugin(&plugin_dir) {
+            let plugin = match parse_plugin(&plugin_ur) {
                 Ok(p) => p,
                 Err(e) => {
                     diagnostics.push(Diagnostic::error(
@@ -134,26 +164,26 @@ fn parse_catalog(root: &Path) -> Result<CatalogIr, TomeError> {
         description,
         owner,
         plugins,
-        provenance: Provenance::local("tome", root.to_path_buf()),
+        provenance: Provenance::local("tome", ur.root().to_path_buf()),
         diagnostics,
     })
 }
 
 /// Parse a plugin: `tome-plugin.toml` + its `skills/`/`commands/`/`agents/`.
-fn parse_plugin(plugin_dir: &Path) -> Result<PluginIr, TomeError> {
+fn parse_plugin(ur: &UntrustedRoot) -> Result<PluginIr, TomeError> {
     let mut diagnostics = Vec::new();
-    // CON-1: an over-cap / non-UTF-8 manifest read is a finding, not an abort.
-    let value =
-        match bounded_read_to_string(&plugin_dir.join("tome-plugin.toml"), PLUGIN_MANIFEST_MAX) {
-            Ok(body) => parse_toml(&body, "tome-plugin.toml", &mut diagnostics),
-            Err(e) => {
-                diagnostics.push(Diagnostic::error(
-                    rule::MANIFEST_INVALID,
-                    format!("could not read tome-plugin.toml: {e}"),
-                ));
-                None
-            }
-        };
+    // CON-1: an over-cap / non-UTF-8 manifest read (or a refused symlinked
+    // manifest) is a finding, not an abort.
+    let value = match ur.read_text(Path::new("tome-plugin.toml"), PLUGIN_MANIFEST_MAX) {
+        Ok(body) => parse_toml(&body, "tome-plugin.toml", &mut diagnostics),
+        Err(e) => {
+            diagnostics.push(Diagnostic::error(
+                rule::MANIFEST_INVALID,
+                format!("could not read tome-plugin.toml: {e}"),
+            ));
+            None
+        }
+    };
 
     let name = str_field(value.as_ref(), "name");
     let version = str_field(value.as_ref(), "version");
@@ -162,9 +192,21 @@ fn parse_plugin(plugin_dir: &Path) -> Result<PluginIr, TomeError> {
     let author = parse_author(value.as_ref().and_then(|v| v.get("author")));
 
     let mut entries = Vec::new();
-    parse_skill_entries(plugin_dir, &mut entries)?;
-    parse_md_entries(plugin_dir, "commands", EntryKind::Command, &mut entries)?;
-    parse_md_entries(plugin_dir, "agents", EntryKind::Agent, &mut entries)?;
+    parse_skill_entries(ur, &mut entries, &mut diagnostics);
+    parse_md_entries(
+        ur,
+        "commands",
+        EntryKind::Command,
+        &mut entries,
+        &mut diagnostics,
+    );
+    parse_md_entries(
+        ur,
+        "agents",
+        EntryKind::Agent,
+        &mut entries,
+        &mut diagnostics,
+    );
 
     Ok(PluginIr {
         name,
@@ -174,73 +216,104 @@ fn parse_plugin(plugin_dir: &Path) -> Result<PluginIr, TomeError> {
         license,
         entries,
         mcp_servers: Vec::new(),
-        provenance: Provenance::local("tome", plugin_dir.to_path_buf()),
+        provenance: Provenance::local("tome", ur.root().to_path_buf()),
         diagnostics,
     })
 }
 
-fn parse_skill_entries(plugin_dir: &Path, entries: &mut Vec<EntryIr>) -> Result<(), TomeError> {
-    let skills = plugin_dir.join("skills");
-    if !skills.is_dir() {
-        return Ok(());
+fn parse_skill_entries(
+    ur: &UntrustedRoot,
+    entries: &mut Vec<EntryIr>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let skills = Path::new("skills");
+    if !ur.is_dir(skills) {
+        return;
     }
-    for (name, path) in sorted_children(&skills)? {
-        if path.is_dir() {
-            let skill_md = path.join("SKILL.md");
-            if skill_md.is_file() {
-                entries.push(parse_entry(&skill_md, EntryKind::Skill, name)?);
+    // `list_dir` refuses a symlinked child outright (fail-closed); degrade that
+    // refusal to a finding so the rest of the plugin still lints (never-halt).
+    let children = match ur.list_dir(skills) {
+        Ok(c) => c,
+        Err(e) => {
+            diagnostics.push(Diagnostic::warning(
+                rule::UNSAFE_PATH,
+                format!("skipped `skills/` (refused an unsafe entry): {e}"),
+            ));
+            return;
+        }
+    };
+    for child in children {
+        if child.is_dir {
+            let skill_md = child.rel.join("SKILL.md");
+            if ur.is_file(&skill_md) {
+                entries.push(parse_entry(ur, &skill_md, EntryKind::Skill, child.name));
             }
         }
     }
-    Ok(())
 }
 
 fn parse_md_entries(
-    plugin_dir: &Path,
+    ur: &UntrustedRoot,
     sub: &str,
     kind: EntryKind,
     entries: &mut Vec<EntryIr>,
-) -> Result<(), TomeError> {
-    let dir = plugin_dir.join(sub);
-    if !dir.is_dir() {
-        return Ok(());
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let dir = Path::new(sub);
+    if !ur.is_dir(dir) {
+        return;
     }
-    for (name, path) in sorted_children(&dir)? {
-        if path.is_file()
-            && let Some(stem) = name.strip_suffix(".md")
-        {
-            entries.push(parse_entry(&path, kind, stem.to_owned())?);
-        }
-    }
-    Ok(())
-}
-
-/// Parse one entry file. A malformed entry yields an `EntryIr` carrying an
-/// error diagnostic (so the runner reports it) rather than aborting the lint.
-fn parse_entry(path: &Path, kind: EntryKind, dir_or_stem: String) -> Result<EntryIr, TomeError> {
-    // CON-1: an over-cap / non-UTF-8 entry read is a finding, not an abort.
-    let content = match bounded_read_to_string(path, ENTRY_BODY_MAX) {
+    let children = match ur.list_dir(dir) {
         Ok(c) => c,
         Err(e) => {
-            return Ok(EntryIr {
+            diagnostics.push(Diagnostic::warning(
+                rule::UNSAFE_PATH,
+                format!("skipped `{sub}/` (refused an unsafe entry): {e}"),
+            ));
+            return;
+        }
+    };
+    for child in children {
+        if !child.is_dir
+            && let Some(stem) = child.name.strip_suffix(".md")
+        {
+            entries.push(parse_entry(ur, &child.rel, kind, stem.to_owned()));
+        }
+    }
+}
+
+/// Parse one entry file (its path relative to the artifact root). A malformed OR
+/// unreadable/refused entry yields an `EntryIr` carrying an error diagnostic (so
+/// the runner reports it) rather than aborting the lint — the read is guarded by
+/// `UntrustedRoot::read_body`, which refuses a symlinked component before reading.
+fn parse_entry(ur: &UntrustedRoot, rel: &Path, kind: EntryKind, dir_or_stem: String) -> EntryIr {
+    // `source_path` is the resolved in-root absolute path (for Location +
+    // autofix Fix.path); `rel` was already proven `Normal`-only by the
+    // `is_file`/`list_dir` that reached here, so `root.join(rel)` is in-bounds.
+    let abs = ur.root().join(rel);
+    // CON-1: an over-cap / non-UTF-8 / refused read is a finding, not an abort.
+    let content = match ur.read_body(rel) {
+        Ok(c) => c,
+        Err(e) => {
+            return EntryIr {
                 kind,
                 name: dir_or_stem,
                 description: None,
                 frontmatter: MappedFrontmatter::default(),
                 body: String::new(),
                 supporting_files: Vec::new(),
-                source_path: path.to_path_buf(),
+                source_path: abs,
                 diagnostics: vec![Diagnostic::error(
                     rule::ENTRY_INVALID,
                     format!("could not read entry: {e}"),
                 )],
-            });
+            };
         }
     };
-    match parse_skill_frontmatter_str(path, &content) {
+    match parse_skill_frontmatter_str(&abs, &content) {
         Ok(parsed) => {
             let (name, _) = parsed.resolved_name(&dir_or_stem);
-            Ok(EntryIr {
+            EntryIr {
                 kind,
                 name,
                 // Raw frontmatter description (no body fallback — lint flags a
@@ -255,23 +328,23 @@ fn parse_entry(path: &Path, kind: EntryKind, dir_or_stem: String) -> Result<Entr
                 frontmatter: parsed.frontmatter,
                 body: parsed.body,
                 supporting_files: Vec::new(),
-                source_path: path.to_path_buf(),
+                source_path: abs,
                 diagnostics: Vec::new(),
-            })
+            }
         }
-        Err(e) => Ok(EntryIr {
+        Err(e) => EntryIr {
             kind,
             name: dir_or_stem,
             description: None,
             frontmatter: MappedFrontmatter::default(),
             body: String::new(),
             supporting_files: Vec::new(),
-            source_path: path.to_path_buf(),
+            source_path: abs,
             diagnostics: vec![Diagnostic::error(
                 rule::ENTRY_INVALID,
                 format!("entry frontmatter could not be parsed: {e}"),
             )],
-        }),
+        },
     }
 }
 
@@ -283,20 +356,6 @@ fn dir_name(root: &Path) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("skill")
         .to_owned()
-}
-
-/// Children of `dir` as `(name, path)`, sorted by name for deterministic
-/// findings order (FR-027).
-fn sorted_children(dir: &Path) -> Result<Vec<(String, std::path::PathBuf)>, TomeError> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir).map_err(TomeError::Io)? {
-        let entry = entry.map_err(TomeError::Io)?;
-        if let Some(name) = entry.file_name().to_str() {
-            out.push((name.to_owned(), entry.path()));
-        }
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
 }
 
 /// Parse a manifest body leniently, pushing an error diagnostic on a syntax

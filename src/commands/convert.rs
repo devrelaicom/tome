@@ -200,27 +200,9 @@ fn emit_report(outcome: &ConvertOutcome, mode: Mode) -> Result<(), TomeError> {
     match mode {
         Mode::Json => {
             for d in &outcome.report.diagnostics {
-                write_json(&json!({
-                    "type": "diagnostic",
-                    "severity": d.severity.as_str(),
-                    "rule": d.rule_id,
-                    "message": d.message,
-                }))?;
+                write_json(&convert_diagnostic_json(d))?;
             }
-            write_json(&json!({
-                "type": "result",
-                "harness": outcome.harness.as_str(),
-                "level": outcome.level.as_str(),
-                "source_name": outcome.source_name,
-                "final_name": outcome.final_name,
-                "target": outcome.target.display().to_string(),
-                "dry_run": outcome.dry_run,
-                "written": outcome.written.len(),
-                "errors": outcome.report.errors,
-                "warnings": outcome.report.warnings,
-                "infos": outcome.report.infos,
-                "strict_blocked": outcome.strict_blocked,
-            }))?;
+            write_json(&convert_result_json(outcome))?;
         }
         Mode::Human => {
             let verb = if outcome.dry_run {
@@ -254,11 +236,77 @@ fn emit_report(outcome: &ConvertOutcome, mode: Mode) -> Result<(), TomeError> {
     Ok(())
 }
 
+/// One `--json` JSONL diagnostic line (`type: "diagnostic"`).
+fn convert_diagnostic_json(d: &crate::authoring::ir::Diagnostic) -> serde_json::Value {
+    json!({
+        "type": "diagnostic",
+        "severity": d.severity.as_str(),
+        "rule": d.rule_id,
+        "message": d.message,
+    })
+}
+
+/// The final `--json` JSONL `result` line. Shape pinned by
+/// `convert_result_json_shape_is_pinned`.
+fn convert_result_json(outcome: &ConvertOutcome) -> serde_json::Value {
+    json!({
+        "type": "result",
+        "harness": outcome.harness.as_str(),
+        "level": outcome.level.as_str(),
+        "source_name": outcome.source_name,
+        "final_name": outcome.final_name,
+        "target": outcome.target.display().to_string(),
+        "dry_run": outcome.dry_run,
+        "written": outcome.written.len(),
+        "errors": outcome.report.errors,
+        "warnings": outcome.report.warnings,
+        "infos": outcome.report.infos,
+        "strict_blocked": outcome.strict_blocked,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+
+    #[test]
+    fn convert_result_json_shape_is_pinned() {
+        // T-MAJOR-2 (phase-wide): pin the `--json` JSONL `result` line shape, the
+        // richest of the three verbs' wire shapes (a `jq` consumer scripts it).
+        let outcome = ConvertOutcome {
+            harness: crate::authoring::detect::SourceHarness::ClaudeCode,
+            level: ArtifactLevel::Plugin,
+            source_name: "demo".to_owned(),
+            final_name: "demo-tome".to_owned(),
+            target: PathBuf::from("/out/demo-tome"),
+            report: crate::authoring::lint::LintReport::default(),
+            written: vec![PathBuf::from("tome-plugin.toml")],
+            dry_run: false,
+            strict_blocked: None,
+        };
+        let v = convert_result_json(&outcome);
+        assert_eq!(v["type"], "result");
+        assert_eq!(v["harness"], "claude-code");
+        assert_eq!(v["level"], "plugin");
+        assert_eq!(v["source_name"], "demo");
+        assert_eq!(v["final_name"], "demo-tome");
+        assert_eq!(v["target"], "/out/demo-tome");
+        assert_eq!(v["dry_run"], false);
+        assert_eq!(v["written"], 1);
+        assert_eq!(v["errors"], 0);
+        assert_eq!(v["warnings"], 0);
+        assert_eq!(v["infos"], 0);
+        assert!(v["strict_blocked"].is_null());
+
+        // A diagnostic line carries its own `type`.
+        let d = crate::authoring::ir::Diagnostic::warning("convert/x", "boom");
+        let dj = convert_diagnostic_json(&d);
+        assert_eq!(dj["type"], "diagnostic");
+        assert_eq!(dj["severity"], "warning");
+        assert_eq!(dj["rule"], "convert/x");
+    }
 
     /// Run a git subcommand in `dir`, asserting success (identity injected so CI
     /// never prompts).
