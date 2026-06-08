@@ -29,6 +29,7 @@ pub mod rule {
     pub const DUP_PLUGIN: &str = "lint/duplicate-plugin";
     pub const CATALOG_NAME_MISMATCH: &str = "lint/catalog-name-mismatch";
     pub const CATALOG_PLUGIN_MISSING: &str = "lint/catalog-plugin-missing";
+    pub const CATALOG_PLUGIN_INVALID: &str = "lint/catalog-plugin-source-invalid";
     pub const NAME_NOT_DIR: &str = "lint/name-not-dir";
     pub const DESCRIPTION_MISSING: &str = "lint/description-missing";
     pub const DESCRIPTION_TOO_LONG: &str = "lint/description-too-long";
@@ -122,6 +123,10 @@ impl Rule for UnsupportedComponents {
     fn check_plugin(&self, p: &PluginIr) -> Vec<Diagnostic> {
         let dir = &p.provenance.source_path;
         let mut d = Vec::new();
+        // NB: `hooks/` is intentionally NOT flagged — Tome supports
+        // `command`-type hooks, so a `hooks/` dir in a native Tome plugin is
+        // not unsupported (the convert importer's CC-`hooks/` warning is a
+        // separate, source-specific concern). (CON-3)
         for comp in [
             "monitors",
             "themes",
@@ -129,7 +134,6 @@ impl Rule for UnsupportedComponents {
             "output-styles",
             "channels",
             "bin",
-            "hooks",
         ] {
             if dir.join(comp).is_dir() {
                 d.push(Diagnostic::warning(
@@ -387,6 +391,7 @@ mod tests {
     use super::*;
     use crate::authoring::ir::{Artifact, MappedFrontmatter, Provenance, Severity};
     use crate::authoring::lint::run;
+    use crate::catalog::manifest::Owner;
     use std::fs;
     use std::path::PathBuf;
 
@@ -535,5 +540,77 @@ mod tests {
         assert!(replaced.ends_with("body\n"));
         let inserted = set_frontmatter_name("---\ndescription: d\n---\nbody\n", "new").unwrap();
         assert!(inserted.contains("name: new"));
+    }
+
+    #[test]
+    fn set_frontmatter_name_returns_none_for_crlf_or_no_frontmatter() {
+        // CRLF block isn't matched by the LF-anchored strip → no autofix.
+        assert!(set_frontmatter_name("---\r\nname: old\r\n---\r\nbody\r\n", "new").is_none());
+        // No frontmatter at all → no autofix (the diagnostic is still emitted).
+        assert!(set_frontmatter_name("just a body\n", "new").is_none());
+    }
+
+    #[test]
+    fn description_too_long_fires_at_the_boundary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("skills/foo");
+        fs::create_dir_all(&dir).unwrap();
+        let skill = dir.join("SKILL.md");
+        fs::write(&skill, "---\nname: foo\n---\nbody\n").unwrap();
+        let long: String = "x".repeat(DESCRIPTION_MAX + 1);
+        let e = entry(
+            EntryKind::Skill,
+            "foo",
+            skill.clone(),
+            Some(&long),
+            "body\n",
+        );
+        let d = run_plugin(plugin("p", "1.0.0", tmp.path().to_path_buf(), vec![e]));
+        assert!(has(&d, rule::DESCRIPTION_TOO_LONG));
+        // Exactly DESCRIPTION_MAX does NOT fire (false-positive guard).
+        let ok: String = "x".repeat(DESCRIPTION_MAX);
+        let e = entry(EntryKind::Skill, "foo", skill, Some(&ok), "body\n");
+        let d = run_plugin(plugin("p", "1.0.0", tmp.path().to_path_buf(), vec![e]));
+        assert!(!has(&d, rule::DESCRIPTION_TOO_LONG));
+    }
+
+    #[test]
+    fn command_name_must_match_its_file_stem() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("commands");
+        fs::create_dir_all(&dir).unwrap();
+        let cmd = dir.join("do.md");
+        fs::write(&cmd, "---\nname: wrong\ndescription: d\n---\nbody\n").unwrap();
+        // Command file stem is `do`, frontmatter name is `wrong`.
+        let e = entry(EntryKind::Command, "wrong", cmd, Some("d"), "body\n");
+        let d = run_plugin(plugin("p", "1.0.0", tmp.path().to_path_buf(), vec![e]));
+        assert!(has(&d, rule::NAME_NOT_DIR));
+    }
+
+    fn run_catalog(c: CatalogIr) -> Vec<Diagnostic> {
+        run(&Artifact::Catalog(c), &all()).diagnostics
+    }
+
+    #[test]
+    fn catalog_owner_email_and_duplicate_plugin_fire() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = CatalogIr {
+            name: "c".into(),
+            version: "1.0.0".into(),
+            description: "d".into(),
+            owner: Owner {
+                name: "o".into(),
+                email: "not-an-email".into(),
+            },
+            plugins: vec![
+                plugin("dup", "1.0.0", tmp.path().to_path_buf(), vec![]),
+                plugin("dup", "1.0.0", tmp.path().to_path_buf(), vec![]),
+            ],
+            provenance: Provenance::local("tome", tmp.path().to_path_buf()),
+            diagnostics: Vec::new(),
+        };
+        let d = run_catalog(c);
+        assert!(has(&d, rule::OWNER_EMAIL_INVALID));
+        assert!(has(&d, rule::DUP_PLUGIN));
     }
 }

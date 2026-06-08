@@ -69,31 +69,7 @@ fn emit_report(
     mode: Mode,
 ) -> Result<(), TomeError> {
     match mode {
-        Mode::Json => {
-            let findings: Vec<_> = report
-                .diagnostics
-                .iter()
-                .map(|d| {
-                    json!({
-                        "rule": d.rule_id,
-                        "severity": d.severity.as_str(),
-                        "message": d.message,
-                        "file": d.location.as_ref().map(|l| l.file.display().to_string()),
-                        "line": d.location.as_ref().and_then(|l| l.line),
-                        "autofixable": d.autofix.is_some(),
-                    })
-                })
-                .collect();
-            write_json(&json!({
-                "findings": findings,
-                "summary": {
-                    "errors": report.errors,
-                    "warnings": report.warnings,
-                    "infos": report.infos,
-                    "fixed": fixed,
-                },
-            }))?;
-        }
+        Mode::Json => write_json(&lint_json(report, fixed))?,
         Mode::Human => {
             for d in &report.diagnostics {
                 let loc = d
@@ -122,4 +98,73 @@ fn emit_report(
         }
     }
     Ok(())
+}
+
+/// Build the `--json` report object: a single `{ findings[], summary }`
+/// (distinct from `convert`'s JSONL stream).
+fn lint_json(report: &LintReport, fixed: usize) -> serde_json::Value {
+    let findings: Vec<_> = report
+        .diagnostics
+        .iter()
+        .map(|d| {
+            json!({
+                "rule": d.rule_id,
+                "severity": d.severity.as_str(),
+                "message": d.message,
+                "file": d.location.as_ref().map(|l| l.file.display().to_string()),
+                "line": d.location.as_ref().and_then(|l| l.line),
+                "autofixable": d.autofix.is_some(),
+            })
+        })
+        .collect();
+    json!({
+        "findings": findings,
+        "summary": {
+            "errors": report.errors,
+            "warnings": report.warnings,
+            "infos": report.infos,
+            "fixed": fixed,
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authoring::ir::{Diagnostic, Provenance};
+
+    #[test]
+    fn check_artifact_level_matches_and_rejects() {
+        let cat = Artifact::Catalog(crate::authoring::ir::CatalogIr {
+            name: "c".into(),
+            version: "1.0.0".into(),
+            description: "d".into(),
+            owner: crate::catalog::manifest::Owner {
+                name: "o".into(),
+                email: "o@x.io".into(),
+            },
+            plugins: Vec::new(),
+            provenance: Provenance::local("tome", std::path::PathBuf::from("c")),
+            diagnostics: Vec::new(),
+        });
+        assert!(check_artifact_level(&cat, ArtifactLevel::Catalog).is_ok());
+        // `plugin lint <catalog>` → Usage(2).
+        let err = check_artifact_level(&cat, ArtifactLevel::Plugin).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn lint_json_has_findings_and_summary_with_keys() {
+        let report = LintReport::from_diagnostics(vec![Diagnostic::error("lint/x", "boom").at(
+            crate::authoring::ir::Location::file(std::path::PathBuf::from("a/SKILL.md")),
+        )]);
+        let v = lint_json(&report, 3);
+        assert_eq!(v["summary"]["errors"], 1);
+        assert_eq!(v["summary"]["fixed"], 3);
+        let f = &v["findings"][0];
+        assert_eq!(f["rule"], "lint/x");
+        assert_eq!(f["severity"], "error");
+        assert_eq!(f["file"], "a/SKILL.md");
+        assert_eq!(f["autofixable"], false);
+    }
 }

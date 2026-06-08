@@ -18,7 +18,7 @@ use std::path::Path;
 use crate::authoring::ir::{
     Artifact, CatalogIr, Diagnostic, EntryIr, MappedFrontmatter, PluginIr, Provenance,
 };
-use crate::catalog::manifest::Owner;
+use crate::catalog::manifest::{Owner, validate_source};
 use crate::error::TomeError;
 use crate::plugin::frontmatter::parse_skill_frontmatter_str;
 use crate::plugin::identity::EntryKind;
@@ -74,7 +74,20 @@ fn parse_catalog(root: &Path) -> Result<CatalogIr, TomeError> {
             let Some(source) = decl.get("source").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let plugin_dir = root.join(source);
+            // SEC-1: validate the source is in-root (no `..`/absolute/URL/escape)
+            // BEFORE joining and reading — the resulting `source_path` flows into
+            // `--autofix` writes, so an unvalidated source could redirect a write
+            // outside the artifact tree.
+            let plugin_dir = match validate_source(root, &root.join("tome-catalog.toml"), source) {
+                Ok(p) => p,
+                Err(e) => {
+                    diagnostics.push(Diagnostic::warning(
+                        rule::CATALOG_PLUGIN_INVALID,
+                        format!("catalog plugin source `{source}` is invalid: {e}"),
+                    ));
+                    continue;
+                }
+            };
             if !plugin_dir.join("tome-plugin.toml").is_file() {
                 diagnostics.push(Diagnostic::warning(
                     rule::CATALOG_PLUGIN_MISSING,
@@ -82,8 +95,24 @@ fn parse_catalog(root: &Path) -> Result<CatalogIr, TomeError> {
                 ));
                 continue;
             }
-            let plugin = parse_plugin(&plugin_dir)?;
+            // CON-1: never-halt — a per-plugin parse error is a finding, not an
+            // abort that hides later plugins.
+            let plugin = match parse_plugin(&plugin_dir) {
+                Ok(p) => p,
+                Err(e) => {
+                    diagnostics.push(Diagnostic::error(
+                        rule::MANIFEST_INVALID,
+                        format!("could not lint plugin `{source}`: {e}"),
+                    ));
+                    continue;
+                }
+            };
             // §9 row 6: the declared name should match the plugin's own name.
+            // This is emitted at PARSE time (not as a registered `Rule`) on
+            // purpose: only the parser holds both the catalog declaration and
+            // the parsed plugin's name, and `convert` *produces* catalogs whose
+            // declaration always matches the vendored plugin's name, so the
+            // check is meaningful only for a hand-authored catalog (`lint`).
             if let Some(declared) = declared
                 && declared != plugin.name
             {
@@ -113,8 +142,18 @@ fn parse_catalog(root: &Path) -> Result<CatalogIr, TomeError> {
 /// Parse a plugin: `tome-plugin.toml` + its `skills/`/`commands/`/`agents/`.
 fn parse_plugin(plugin_dir: &Path) -> Result<PluginIr, TomeError> {
     let mut diagnostics = Vec::new();
-    let body = bounded_read_to_string(&plugin_dir.join("tome-plugin.toml"), PLUGIN_MANIFEST_MAX)?;
-    let value = parse_toml(&body, "tome-plugin.toml", &mut diagnostics);
+    // CON-1: an over-cap / non-UTF-8 manifest read is a finding, not an abort.
+    let value =
+        match bounded_read_to_string(&plugin_dir.join("tome-plugin.toml"), PLUGIN_MANIFEST_MAX) {
+            Ok(body) => parse_toml(&body, "tome-plugin.toml", &mut diagnostics),
+            Err(e) => {
+                diagnostics.push(Diagnostic::error(
+                    rule::MANIFEST_INVALID,
+                    format!("could not read tome-plugin.toml: {e}"),
+                ));
+                None
+            }
+        };
 
     let name = str_field(value.as_ref(), "name");
     let version = str_field(value.as_ref(), "version");
@@ -179,7 +218,25 @@ fn parse_md_entries(
 /// Parse one entry file. A malformed entry yields an `EntryIr` carrying an
 /// error diagnostic (so the runner reports it) rather than aborting the lint.
 fn parse_entry(path: &Path, kind: EntryKind, dir_or_stem: String) -> Result<EntryIr, TomeError> {
-    let content = bounded_read_to_string(path, ENTRY_BODY_MAX)?;
+    // CON-1: an over-cap / non-UTF-8 entry read is a finding, not an abort.
+    let content = match bounded_read_to_string(path, ENTRY_BODY_MAX) {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(EntryIr {
+                kind,
+                name: dir_or_stem,
+                description: None,
+                frontmatter: MappedFrontmatter::default(),
+                body: String::new(),
+                supporting_files: Vec::new(),
+                source_path: path.to_path_buf(),
+                diagnostics: vec![Diagnostic::error(
+                    rule::ENTRY_INVALID,
+                    format!("could not read entry: {e}"),
+                )],
+            });
+        }
+    };
     match parse_skill_frontmatter_str(path, &content) {
         Ok(parsed) => {
             let (name, _) = parsed.resolved_name(&dir_or_stem);

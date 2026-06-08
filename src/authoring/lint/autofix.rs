@@ -194,4 +194,81 @@ mod tests {
         assert_eq!(outcome.report.errors, 0);
         assert_eq!(outcome.report.warnings, 0);
     }
+
+    #[test]
+    fn autofix_resolves_fixables_and_leaves_manual_findings() {
+        // Autofixable (name!=dir + harness-ism) AND a non-autofixable (missing
+        // description). After autofix the fixables are gone; the manual remains.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("p");
+        fs::create_dir(&dir).unwrap();
+        fs::write(
+            dir.join("tome-plugin.toml"),
+            "name = \"p\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("skills/realdir")).unwrap();
+        // No `description` (manual) + name!=dir + harness-ism (both autofixable).
+        fs::write(
+            dir.join("skills/realdir/SKILL.md"),
+            "---\nname: wrong\n---\nUse ${CLAUDE_PLUGIN_ROOT}/x\n",
+        )
+        .unwrap();
+
+        let outcome = autofix(&dir, false).unwrap();
+        // Every autofixable finding is resolved.
+        assert_eq!(
+            outcome.report.autofixable().count(),
+            0,
+            "{:?}",
+            outcome.report.diagnostics
+        );
+        // The manual missing-description finding survives.
+        assert!(
+            outcome
+                .report
+                .diagnostics
+                .iter()
+                .any(|d| d.rule_id == "lint/description-missing"),
+            "{:?}",
+            outcome.report.diagnostics
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_failure_surfaces_a_finding_and_does_not_hang() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("p");
+        fs::create_dir(&dir).unwrap();
+        fs::write(
+            dir.join("tome-plugin.toml"),
+            "name = \"p\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        let skills = dir.join("skills/realdir");
+        fs::create_dir_all(&skills).unwrap();
+        fs::write(
+            skills.join("SKILL.md"),
+            "---\nname: wrong\ndescription: d\n---\nbody\n",
+        )
+        .unwrap();
+        // Make the skill dir read-only so the atomic temp-file write fails.
+        fs::set_permissions(&skills, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let outcome = autofix(&dir, false).unwrap(); // forward-progress: returns Ok
+        // Restore perms so the tempdir can be cleaned up.
+        fs::set_permissions(&skills, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            outcome
+                .report
+                .diagnostics
+                .iter()
+                .any(|d| d.rule_id == "lint/autofix-write-failed"),
+            "a write failure must surface as a finding: {:?}",
+            outcome.report.diagnostics
+        );
+    }
 }
