@@ -94,7 +94,7 @@ pub struct Detected {
 /// Pure structural detection: probe the root for the known markers. Returns
 /// `None` when no signal matches.
 fn detect_structural(root: &UntrustedRoot) -> Option<Detected> {
-    if root.is_file(Path::new("marketplace.json")) {
+    if root.is_file(Path::new(".claude-plugin/marketplace.json")) {
         return Some(Detected {
             harness: SourceHarness::ClaudeCode,
             level: ArtifactLevel::Catalog,
@@ -186,7 +186,8 @@ mod tests {
     #[test]
     fn detects_cc_marketplace_as_catalog() {
         let (_t, root) = root_with(|base| {
-            fs::write(base.join("marketplace.json"), b"{}").unwrap();
+            fs::create_dir(base.join(".claude-plugin")).unwrap();
+            fs::write(base.join(".claude-plugin/marketplace.json"), b"{}").unwrap();
         });
         let d = detect(&root, None, ArtifactLevel::Catalog).unwrap();
         assert_eq!(d.harness, SourceHarness::ClaudeCode);

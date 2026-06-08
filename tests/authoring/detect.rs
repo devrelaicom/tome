@@ -22,7 +22,8 @@ fn source(setup: impl FnOnce(&Path)) -> (tempfile::TempDir, UntrustedRoot) {
 #[test]
 fn detect_maps_cc_marketplace_to_catalog() {
     let (_t, root) = source(|base| {
-        fs::write(base.join("marketplace.json"), b"{}").unwrap();
+        fs::create_dir(base.join(".claude-plugin")).unwrap();
+        fs::write(base.join(".claude-plugin/marketplace.json"), b"{}").unwrap();
     });
     let d = detect(&root, None, ArtifactLevel::Catalog).unwrap();
     assert_eq!(d.harness, SourceHarness::ClaudeCode);
