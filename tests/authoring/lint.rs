@@ -133,3 +133,135 @@ fn catalog_lints_its_vendored_plugins_and_name_mismatch() {
         report.diagnostics
     );
 }
+
+// --- closeout-added coverage (US3 4-reviewer pass) -------------------------
+
+#[test]
+fn catalog_with_an_escaping_plugin_source_is_refused_not_followed() {
+    // SEC-1: a `plugins[].source` that escapes the catalog root must be refused
+    // (so it never reaches an --autofix write), reported as a finding.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("cat");
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("tome-catalog.toml"),
+        "name = \"c\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n[owner]\nname = \"o\"\nemail = \"o@x.io\"\n\n[[plugins]]\nname = \"evil\"\nsource = \"../escape\"\n",
+    )
+    .unwrap();
+    // A real plugin OUTSIDE the catalog root that an unvalidated join would reach.
+    fs::create_dir_all(tmp.path().join("escape")).unwrap();
+    fs::write(
+        tmp.path().join("escape/tome-plugin.toml"),
+        "name = \"escape\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+
+    let artifact = parse_artifact(&dir).unwrap();
+    let report = run(&artifact, &rules::all());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "lint/catalog-plugin-source-invalid"),
+        "escaping source must be a finding: {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn malformed_manifest_is_a_finding_not_an_abort() {
+    // The lenient-parse promise: a TOML syntax error is reported, and other
+    // findings still surface.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("p");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("tome-plugin.toml"), "name = \nversion =").unwrap();
+    // A skill with a real issue, to prove the run continues past the bad manifest.
+    fs::create_dir_all(dir.join("skills/foo")).unwrap();
+    fs::write(
+        dir.join("skills/foo/SKILL.md"),
+        "---\nname: foo\n---\nbody\n",
+    )
+    .unwrap();
+
+    let artifact = parse_artifact(&dir).unwrap();
+    let report = run(&artifact, &rules::all());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "lint/manifest-invalid"),
+        "{:?}",
+        report.diagnostics
+    );
+    // The skill's missing-description finding is still reported.
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "lint/description-missing"),
+        "{:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn malformed_entry_is_a_finding_not_an_abort() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("p");
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("tome-plugin.toml"),
+        "name = \"p\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("skills/bad")).unwrap();
+    // No frontmatter delimiters → ENTRY_INVALID, not an abort.
+    fs::write(dir.join("skills/bad/SKILL.md"), "no frontmatter here").unwrap();
+
+    let artifact = parse_artifact(&dir).unwrap();
+    let report = run(&artifact, &rules::all());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "lint/entry-invalid"),
+        "{:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn findings_order_is_deterministic_across_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("p");
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("tome-plugin.toml"),
+        "name = \"p\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    // Three skills created out of alpha order, each missing a description.
+    for name in ["gamma", "alpha", "beta"] {
+        fs::create_dir_all(dir.join(format!("skills/{name}"))).unwrap();
+        fs::write(
+            dir.join(format!("skills/{name}/SKILL.md")),
+            format!("---\nname: {name}\n---\nbody\n"),
+        )
+        .unwrap();
+    }
+    let seq = |r: &tome::authoring::lint::LintReport| {
+        r.diagnostics
+            .iter()
+            .map(|x| {
+                (
+                    x.rule_id,
+                    x.location.as_ref().map(|l| l.file.display().to_string()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let a = run(&parse_artifact(&dir).unwrap(), &rules::all());
+    let b = run(&parse_artifact(&dir).unwrap(), &rules::all());
+    assert_eq!(seq(&a), seq(&b), "findings order must be stable");
+}
