@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use crate::authoring::detect::{ArtifactLevel, SourceHarness, detect};
 use crate::authoring::emit::{EmitOptions, emit};
-use crate::authoring::import::{claude_code, native_skill};
+use crate::authoring::import::{claude_code, codex, native_skill};
 use crate::authoring::ir::{Artifact, Diagnostic};
 use crate::authoring::lint::{self, LintReport};
 use crate::authoring::rewrite::is_unsupported_harness_ism;
@@ -146,11 +146,9 @@ fn import(
                 source_root,
             )?))
         }
-        // Codex plugin synthesis, native-skill, and marketplace→catalog
-        // importers land in later US2 slices.
-        (ArtifactLevel::Plugin, SourceHarness::Codex) => Err(TomeError::Usage(
-            "Codex project conversion lands in a later slice; not yet supported".to_owned(),
-        )),
+        (ArtifactLevel::Plugin, SourceHarness::Codex) => {
+            Ok(Artifact::Plugin(codex::import_project(root, source_root)?))
+        }
         (ArtifactLevel::Skill, harness) => Ok(Artifact::Skill(native_skill::import(
             root,
             harness,
@@ -213,7 +211,7 @@ fn first_strict_blocking(report: &LintReport) -> Option<&Diagnostic> {
 }
 
 fn is_strict_blocking(rule_id: &str) -> bool {
-    use claude_code::rule as cc;
+    use crate::authoring::import::rule as cc;
     matches!(
         rule_id,
         cc::UNSUPPORTED_COMPONENT
@@ -222,6 +220,7 @@ fn is_strict_blocking(rule_id: &str) -> bool {
             | cc::TOOL_RESTRICTION_DROPPED
             | cc::SKIPPED_ENTRY
             | cc::MALFORMED_MCP
+            | cc::CODEX_UNSUPPORTED
     ) || is_unsupported_harness_ism(rule_id)
 }
 
@@ -258,7 +257,7 @@ mod tests {
 
     #[test]
     fn strict_blocking_classifies_rule_ids() {
-        use claude_code::rule as cc;
+        use crate::authoring::import::rule as cc;
         assert!(is_strict_blocking(cc::UNSUPPORTED_COMPONENT));
         assert!(is_strict_blocking(cc::TOOL_RESTRICTION_DROPPED));
         assert!(is_strict_blocking(

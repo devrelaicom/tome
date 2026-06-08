@@ -241,3 +241,35 @@ fn cline_skill_remaps_docs_to_references() {
         "cline `docs/` must be remapped"
     );
 }
+
+#[test]
+fn converts_a_codex_project_to_a_synthesized_plugin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("proj");
+    fs::create_dir(&src).unwrap();
+    fs::create_dir_all(src.join(".agents/skills/helper")).unwrap();
+    fs::write(
+        src.join(".agents/skills/helper/SKILL.md"),
+        "---\nname: helper\ndescription: h\n---\nbody\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("config.toml"),
+        "[mcp_servers.local]\ncommand = \"node\"\n",
+    )
+    .unwrap();
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    // `plugin convert` over a Codex project synthesizes a Tome plugin.
+    let outcome = run(&src, &config(out.clone())).unwrap();
+    assert_eq!(outcome.harness.as_str(), "codex");
+    assert_eq!(outcome.final_name, "proj-tome");
+
+    let target = out.join("proj-tome");
+    let manifest = read_plugin_manifest(&target).unwrap();
+    assert_eq!(manifest.name, "proj-tome");
+    assert_eq!(manifest.version, "0.0.0");
+    assert!(target.join("skills/helper/SKILL.md").exists());
+    assert!(target.join(".mcp.json").exists());
+}

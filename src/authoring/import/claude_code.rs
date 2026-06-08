@@ -33,18 +33,9 @@ use crate::plugin::identity::EntryKind;
 use crate::plugin::manifest::TomeAuthor;
 use crate::util::{HARNESS_MCP_MAX, PLUGIN_MANIFEST_MAX};
 
-/// Stable rule ids for the diagnostics this importer emits.
-pub mod rule {
-    pub const MISSING_VERSION: &str = "convert/missing-version";
-    pub const DROPPED_MANIFEST_FIELD: &str = "convert/dropped-manifest-field";
-    pub const UNSUPPORTED_MANIFEST_FIELD: &str = "convert/unsupported-manifest-field";
-    pub const UNSUPPORTED_COMPONENT: &str = "convert/unsupported-component";
-    pub const DROPPED_FRONTMATTER: &str = "convert/dropped-frontmatter";
-    pub const TOOL_RESTRICTION_DROPPED: &str = "convert/tool-restriction-dropped";
-    pub const AGENT_LOSSY: &str = "convert/agent-lossy";
-    pub const SKIPPED_ENTRY: &str = "convert/skipped-entry";
-    pub const MALFORMED_MCP: &str = "convert/malformed-mcp-server";
-}
+// The diagnostic rule ids this importer emits live in the shared
+// `super::rule` SSOT (promoted when Codex became the second consumer).
+use super::rule;
 
 /// Frontmatter keys Tome models 1:1 (kebab-case, matching `SkillFrontmatter`'s
 /// `rename_all`; the two snake exceptions carry explicit renames). Anything not
