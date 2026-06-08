@@ -16,3 +16,4 @@
 //! `cursor`/`opencode`/`cline`), `codex`.
 
 pub mod claude_code;
+pub mod native_skill;
