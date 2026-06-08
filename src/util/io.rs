@@ -21,6 +21,10 @@
 //!   entry but otherwise round-trip the existing content.
 //! - [`HARNESS_RULES_MAX`] (4 MiB): harness rules files (e.g. `CLAUDE.md`,
 //!   `AGENTS.md`); user-authored prose can run long.
+//! - [`ENTRY_BODY_MAX`] (1 MiB): the Markdown body of an untrusted entry
+//!   (`SKILL.md` / command / agent) being read by a Phase 8 `convert`
+//!   importer (R13). A body over 1 MiB is pathological for an LLM-facing
+//!   skill; the cap bounds a hostile source tree.
 //!
 //! ## Allocation behaviour
 //!
@@ -43,6 +47,9 @@ pub const HARNESS_MCP_MAX: u64 = 1024 * 1024;
 
 /// Cap for harness-owned rules files such as `CLAUDE.md` (4 MiB).
 pub const HARNESS_RULES_MAX: u64 = 4 * 1024 * 1024;
+
+/// Cap for the Markdown body of an untrusted entry being converted (1 MiB).
+pub const ENTRY_BODY_MAX: u64 = 1024 * 1024;
 
 /// Read a UTF-8 file into a `String`, refusing files larger than
 /// `max_bytes`.

@@ -6,3 +6,6 @@
 
 #[path = "authoring/cutover.rs"]
 mod cutover;
+
+#[path = "authoring/detect.rs"]
+mod detect;

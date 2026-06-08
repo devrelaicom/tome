@@ -27,3 +27,4 @@ pub mod ir;
 pub mod lint;
 pub mod rewrite;
 pub mod scaffold;
+pub mod untrusted;
