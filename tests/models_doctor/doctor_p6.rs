@@ -934,6 +934,13 @@ fn fix_rerenders_stale_guardrails() {
     // GuardrailsOnly harness via codex so the region is rendered, not
     // suppressed). After `--fix` the region body matches the plugin's current
     // GUARDRAILS.md. We use codex (GuardrailsOnly, in-file AGENTS.md region).
+    //
+    // Holds the override mutex (US1 closeout TEST-M1): this test installs a
+    // stub harness AND runs the real `--fix` resolver, so it must serialise
+    // against every other override-installer/reader in this binary.
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let (tmp, paths) = stage();
     let home = TempDir::new().unwrap();
     let _home = HomeGuard::install(home.path());
@@ -1003,6 +1010,12 @@ fn fix_never_removes_unowned_hook() {
     // A user-edited hook entry in `.claude/settings.local.json` does NOT
     // structurally match any re-derived plugin entry, so `--fix` (which only
     // appends/removes structural matches) MUST leave it in place (NFR-003).
+    //
+    // Real claude-code `--fix` resolver — hold the override mutex so a
+    // concurrent stub-override can't leak in (US1 closeout TEST-M1).
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let (tmp, paths) = stage();
     let home = TempDir::new().unwrap();
     let _home = HomeGuard::install(home.path());
@@ -1059,6 +1072,12 @@ fn fix_never_deletes_user_content() {
     // `--fix` must not delete rules-file text outside Tome markers. Plant a
     // CLAUDE.md with hand-written prose plus a Tome guardrails region; after
     // `--fix` the hand-written prose survives verbatim.
+    //
+    // Real claude-code `--fix` resolver — hold the override mutex so a
+    // concurrent stub-override can't leak in (US1 closeout TEST-M1).
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let (tmp, paths) = stage();
     let home = TempDir::new().unwrap();
     let _home = HomeGuard::install(home.path());

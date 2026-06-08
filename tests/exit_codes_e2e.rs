@@ -156,6 +156,53 @@ fn plugin_show_with_malformed_tome_plugin_toml_exits_22() {
 }
 
 #[test]
+fn plugin_show_on_unconverted_plugin_exits_80_with_convert_hint() {
+    // US1 closeout TEST-M5: the headline cutover UX. A plugin carrying only the
+    // legacy `.claude-plugin/plugin.json` (no `tome-plugin.toml`) is
+    // *unconverted* → `tome plugin show` exits 80 (PluginNotConverted) with a
+    // hint pointing at `tome plugin convert`.
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    write_config_for_cli(&paths, &config);
+
+    // Downgrade plugin-alpha to a pre-cutover (unconverted) plugin: delete the
+    // native manifest, leaving only the legacy `.claude-plugin/plugin.json`.
+    let native = catalog_root.join("plugin-alpha").join("tome-plugin.toml");
+    fs::remove_file(&native).expect("remove native manifest");
+    assert!(
+        catalog_root
+            .join("plugin-alpha")
+            .join(".claude-plugin")
+            .join("plugin.json")
+            .is_file(),
+        "legacy plugin.json must remain"
+    );
+
+    let out = env
+        .cmd()
+        .args(["plugin", "show", "sample-plugin-catalog/plugin-alpha"])
+        .output()
+        .expect("spawn");
+    assert_eq!(
+        out.status.code(),
+        Some(80),
+        "expected exit 80 PluginNotConverted, got {:?}, stderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("convert"),
+        "stderr must hint at conversion; got: {stderr}"
+    );
+}
+
+#[test]
 fn models_list_with_corrupt_manifest_exits_33() {
     // Setup: stage a fabricated model directory, then corrupt its
     // manifest.toml. `tome models list` reads the manifest and surfaces
