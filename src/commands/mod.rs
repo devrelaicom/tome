@@ -2,6 +2,7 @@ pub mod catalog;
 pub mod convert;
 pub mod doctor;
 pub mod harness;
+pub mod lint;
 pub mod mcp;
 pub mod models;
 pub mod plugin;

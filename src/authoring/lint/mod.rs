@@ -14,6 +14,7 @@
 //! Framework lands in Phase 2 (Foundational); concrete rules + autofix in
 //! Phase 5 (US3).
 
+pub mod autofix;
 pub mod parse;
 pub mod rules;
 
@@ -80,7 +81,7 @@ pub struct LintReport {
 }
 
 impl LintReport {
-    fn from_diagnostics(diagnostics: Vec<Diagnostic>) -> Self {
+    pub(crate) fn from_diagnostics(diagnostics: Vec<Diagnostic>) -> Self {
         let mut report = LintReport {
             diagnostics,
             ..Default::default()
