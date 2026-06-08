@@ -203,6 +203,20 @@ pub fn rewrite_body(text: &str, opts: RewriteOptions) -> RewriteOutcome {
     }
 }
 
+/// Apply ONLY the rewritable `${CLAUDE_*}` → `${TOME_*}` literal swaps (the §7
+/// table, no legacy-positional rewrite, no diagnostics). Used by `lint
+/// --autofix` to compute the corrected file bytes — the swaps are unambiguous
+/// tokens, safe to apply over a whole `SKILL.md` (frontmatter + body).
+pub fn rewrite_known_vars(text: &str) -> String {
+    let mut out = text.to_owned();
+    for (from, to, _rule) in REWRITES {
+        if out.contains(from) {
+            out = out.replace(from, to);
+        }
+    }
+    out
+}
+
 /// True for the rule ids that mean "Tome cannot represent this" — so
 /// `convert --strict` aborts and `lint` treats them as residual harness-isms.
 /// The four rewritable tokens are deliberately excluded (they are handled by
