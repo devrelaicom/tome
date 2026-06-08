@@ -17,7 +17,7 @@ use crate::authoring::detect::ArtifactLevel;
 use crate::authoring::ir::{Artifact, CatalogIr, EntryIr, MappedFrontmatter, PluginIr, Provenance};
 use crate::catalog::manifest::Owner;
 use crate::error::TomeError;
-use crate::plugin::identity::{EntryKind, validate_segment};
+use crate::plugin::identity::{EntryKind, is_kebab, validate_segment};
 use crate::plugin::manifest::TomeAuthor;
 
 const DEFAULT_VERSION: &str = "0.1.0";
@@ -180,7 +180,9 @@ fn description_for(params: &CreateParams) -> String {
 }
 
 /// Validate the artifact name is a safe path segment AND kebab-case, so the
-/// scaffolded artifact lints clean (and `name == dir` holds).
+/// scaffolded artifact lints clean (and `name == dir` holds). `is_kebab` is the
+/// shared SSOT in `plugin::identity` — the same predicate the lint rules use,
+/// so a scaffolded name can never be one lint would reject.
 fn validated_name(name: &str) -> Result<String, TomeError> {
     validate_segment(name).map_err(|kind| {
         TomeError::Usage(format!("`{name}` is not a valid artifact name: {kind}"))
@@ -191,15 +193,6 @@ fn validated_name(name: &str) -> Result<String, TomeError> {
         )));
     }
     Ok(name.to_owned())
-}
-
-/// kebab-case: only `[a-z0-9-]`, no leading/trailing/double hyphen, non-empty.
-fn is_kebab(s: &str) -> bool {
-    if s.is_empty() || s.starts_with('-') || s.ends_with('-') || s.contains("--") {
-        return false;
-    }
-    s.bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 #[cfg(test)]

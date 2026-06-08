@@ -75,6 +75,10 @@ pub fn run(req: CreateRequest, _scope: &ResolvedScope, mode: Mode) -> Result<(),
     };
     let into_existing_plugin = req.into.is_some() && register.is_none();
 
+    // `description`/`author_name` are reserved for the `--description`/`--author`
+    // flags (a fast-follow); there are no such flags yet, so they are `None`
+    // here and the scaffold falls back to its name-derived description +
+    // placeholder owner. NOT a wiring bug.
     let params = CreateParams {
         name: req.name.clone(),
         plugin_name: req.plugin_name.clone(),
@@ -131,16 +135,7 @@ fn emit_report(
     mode: Mode,
 ) -> Result<(), TomeError> {
     match mode {
-        Mode::Json => write_json(&json!({
-            "level": level.as_str(),
-            "name": final_name,
-            "root": outcome.root.display().to_string(),
-            "written": outcome
-                .written
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>(),
-        }))?,
+        Mode::Json => write_json(&create_json(level, final_name, outcome))?,
         Mode::Human => {
             println!(
                 "Created {} `{}` at {}",
@@ -154,6 +149,21 @@ fn emit_report(
         }
     }
     Ok(())
+}
+
+/// The `--json` created-files record (a single object; key order/shape pinned
+/// by `json_record_shape` below).
+fn create_json(level: ArtifactLevel, final_name: &str, outcome: &EmitOutcome) -> serde_json::Value {
+    json!({
+        "level": level.as_str(),
+        "name": final_name,
+        "root": outcome.root.display().to_string(),
+        "written": outcome
+            .written
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>(),
+    })
 }
 
 #[cfg(test)]
@@ -252,6 +262,7 @@ mod tests {
         )
         .unwrap();
 
+        let manifest_before = "name = \"toolkit\"\nversion = \"1.0.0\"\n";
         let mut r = req(ArtifactLevel::Skill, "review");
         r.into = Some(plug.clone());
         run(r, &scope(), Mode::Human).unwrap();
@@ -259,18 +270,30 @@ mod tests {
         assert!(plug.join("skills/review/SKILL.md").is_file());
         // No nested plugin manifest was emitted for the injected skill.
         assert!(!plug.join("skills/review/tome-plugin.toml").exists());
+        // The target plugin's manifest must NOT be edited — a skill is
+        // discovered by directory, never registered (T-MINOR-6).
+        assert_eq!(
+            std::fs::read_to_string(plug.join("tome-plugin.toml")).unwrap(),
+            manifest_before,
+            "skill-into-plugin must not touch the plugin manifest"
+        );
+    }
+
+    /// Build a catalog manifest with a leading hand-written comment.
+    fn write_catalog_with_comment(cat: &std::path::Path) {
+        std::fs::create_dir_all(cat).unwrap();
+        std::fs::write(
+            cat.join("tome-catalog.toml"),
+            "# hand-written comment\nname = \"c\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n[owner]\nname = \"o\"\nemail = \"o@x.io\"\n",
+        )
+        .unwrap();
     }
 
     #[test]
     fn plugin_into_a_catalog_lands_and_registers() {
         let tmp = tempfile::tempdir().unwrap();
         let cat = tmp.path().join("cat");
-        std::fs::create_dir_all(&cat).unwrap();
-        std::fs::write(
-            cat.join("tome-catalog.toml"),
-            "name = \"c\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n[owner]\nname = \"o\"\nemail = \"o@x.io\"\n",
-        )
-        .unwrap();
+        write_catalog_with_comment(&cat);
 
         let mut r = req(ArtifactLevel::Plugin, "toolkit");
         r.into = Some(cat.clone());
@@ -279,5 +302,146 @@ mod tests {
         assert!(cat.join("toolkit/tome-plugin.toml").is_file());
         let manifest = std::fs::read_to_string(cat.join("tome-catalog.toml")).unwrap();
         assert!(manifest.contains("name = \"toolkit\""), "{manifest}");
+    }
+
+    #[test]
+    fn plugin_into_catalog_preserves_comments_and_is_idempotent() {
+        // T-MAJOR-2: the catalog edit preserves the hand-written comment, and a
+        // second registration (force re-run) is a byte-identical no-op with a
+        // single plugin entry.
+        let tmp = tempfile::tempdir().unwrap();
+        let cat = tmp.path().join("cat");
+        write_catalog_with_comment(&cat);
+
+        let mut r = req(ArtifactLevel::Plugin, "toolkit");
+        r.into = Some(cat.clone());
+        run(r, &scope(), Mode::Human).unwrap();
+
+        let after_first = std::fs::read_to_string(cat.join("tome-catalog.toml")).unwrap();
+        assert!(
+            after_first.contains("# hand-written comment"),
+            "comment must survive toml_edit: {after_first}"
+        );
+
+        // Re-run with --force (the plugin dir already exists) → the catalog edit
+        // must be idempotent (no duplicate entry, byte-identical manifest).
+        let mut r2 = req(ArtifactLevel::Plugin, "toolkit");
+        r2.into = Some(cat.clone());
+        r2.force = true;
+        run(r2, &scope(), Mode::Human).unwrap();
+
+        let after_second = std::fs::read_to_string(cat.join("tome-catalog.toml")).unwrap();
+        assert_eq!(
+            after_first, after_second,
+            "second registration must be a byte-identical no-op"
+        );
+        assert_eq!(
+            after_second.matches("name = \"toolkit\"").count(),
+            1,
+            "exactly one plugin entry"
+        );
+    }
+
+    #[test]
+    fn into_a_target_without_a_manifest_is_a_usage_error_2() {
+        // T-MAJOR-4 / C-1: a bad --into target (no Tome manifest) is exit 2
+        // (the contract was corrected from the earlier 3/27).
+        let tmp = tempfile::tempdir().unwrap();
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let mut r = req(ArtifactLevel::Plugin, "toolkit");
+        r.into = Some(empty);
+        let err = run(r, &scope(), Mode::Human).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn force_re_create_preserves_unrelated_user_files() {
+        // T-MAJOR-3: --force overwrites only colliding files; a user file the
+        // artifact does not contribute survives, through the command path.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = req(ArtifactLevel::Plugin, "toolkit");
+        r.output = Some(tmp.path().to_path_buf());
+        run(r, &scope(), Mode::Human).unwrap();
+        std::fs::write(tmp.path().join("toolkit/NOTES.md"), b"keep me").unwrap();
+
+        let mut r2 = req(ArtifactLevel::Plugin, "toolkit");
+        r2.output = Some(tmp.path().to_path_buf());
+        r2.force = true;
+        run(r2, &scope(), Mode::Human).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("toolkit/NOTES.md")).unwrap(),
+            "keep me",
+        );
+    }
+
+    #[test]
+    fn template_default_selects_the_builtin() {
+        // T-MINOR-5: `--template default` is the built-in selector, not a remote
+        // fetch — it must succeed, not TemplateInvalid.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = req(ArtifactLevel::Plugin, "toolkit");
+        r.output = Some(tmp.path().to_path_buf());
+        r.template = Some("default".to_owned());
+        run(r, &scope(), Mode::Human).unwrap();
+        assert!(tmp.path().join("toolkit/tome-plugin.toml").is_file());
+    }
+
+    #[test]
+    fn json_record_has_level_name_root_and_written() {
+        // T-MAJOR-1: pin the --json created-files record shape.
+        use crate::authoring::emit::EmitOutcome;
+        let outcome = EmitOutcome {
+            root: std::path::PathBuf::from("/tmp/out/toolkit"),
+            written: vec![
+                std::path::PathBuf::from("tome-plugin.toml"),
+                std::path::PathBuf::from("skills/toolkit/SKILL.md"),
+            ],
+        };
+        let v = create_json(ArtifactLevel::Plugin, "toolkit", &outcome);
+        assert_eq!(v["level"], "plugin");
+        assert_eq!(v["name"], "toolkit");
+        assert_eq!(v["root"], "/tmp/out/toolkit");
+        assert_eq!(v["written"][0], "tome-plugin.toml");
+        assert_eq!(v["written"][1], "skills/toolkit/SKILL.md");
+    }
+
+    #[test]
+    fn clap_rejects_conflicting_flags_with_exit_2() {
+        // C-2: clap `conflicts_with` for --template+--bare, --output+--into,
+        // and --plugin-name+--bare → ArgumentConflict (exit 2).
+        use clap::Parser;
+        for argv in [
+            vec!["tome", "skill", "create", "x", "--template", "t", "--bare"],
+            vec![
+                "tome", "skill", "create", "x", "--output", "o", "--into", "i",
+            ],
+            vec![
+                "tome",
+                "skill",
+                "create",
+                "x",
+                "--plugin-name",
+                "p",
+                "--bare",
+            ],
+            vec![
+                "tome",
+                "skill",
+                "create",
+                "x",
+                "--plugin-name",
+                "p",
+                "--into",
+                "i",
+            ],
+        ] {
+            let err = crate::cli::Cli::try_parse_from(argv.clone()).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "expected a conflict for {argv:?}"
+            );
+        }
     }
 }
