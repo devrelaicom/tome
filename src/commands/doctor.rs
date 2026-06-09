@@ -64,6 +64,26 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
             force: args.force,
         };
         let _attempts = doctor::fixes::apply(&mut report, &ctx);
+
+        // Phase 9 / US4 (FR-032): repair meta-skill drift by re-running the
+        // idempotent `meta::install_skill` for every stale / missing-but-
+        // expected candidate (the SAME safe atomic symlink-checked path — NOT
+        // a bespoke writer). Forward-progress: a per-location failure is
+        // warned inside `repair` and the loop continues; the returned first
+        // error is logged but never aborts the doctor pass (FR-561). The
+        // report's `meta_skills` field is then re-projected (gated on "the
+        // repair ran") so it reflects post-repair on-disk state.
+        match doctor::meta_drift::repair(&home, scope) {
+            Ok(n) if n > 0 => {
+                tracing::info!(count = n, "doctor --fix: (re)installed meta skills");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "doctor --fix: meta-skill repair had failures");
+            }
+        }
+        report.meta_skills = doctor::meta_drift::check(&home, scope);
+
         // FR-410: sweep orphan `.tome.tmp.*` staging directories. Best-
         // effort — per-fix failures are warn'd inside `cleanup_stale_
         // staging_dirs`. We don't propagate the count to the report
@@ -491,6 +511,19 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         )?;
         for p in &report.unconverted_plugins {
             writeln!(out, "  {warn} {p}  (run `tome plugin convert <source>`)")?;
+        }
+        writeln!(out)?;
+    }
+
+    // Phase 9 / US4: meta-skill drift (stale / missing-but-expected only).
+    if !report.meta_skills.is_empty() {
+        writeln!(out, "Meta skills (drift):")?;
+        for m in &report.meta_skills {
+            writeln!(
+                out,
+                "  {warn} {} @ {} ({})  {}  (run `tome doctor --fix`)",
+                m.skill_id, m.harness, m.scope, m.state,
+            )?;
         }
         writeln!(out)?;
     }

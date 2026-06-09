@@ -16,6 +16,7 @@ pub mod cutover;
 pub mod fixes;
 pub mod harness_detect;
 pub mod harness_integration;
+pub mod meta_drift;
 pub mod orphan_cleanup;
 pub mod report;
 
@@ -33,8 +34,8 @@ use crate::workspace::ResolvedScope;
 
 pub use report::{
     CatalogCacheHealth, CatalogCacheState, DoctorClassification, DoctorReport, EntryCountsByKind,
-    HarnessPresence, HarnessSubsystemReport, OrphanDataDirReport, ProjectBindingState,
-    PromptsReport, RulesCopyState, Subsystem, SubsystemHealth, SuggestedFix,
+    HarnessPresence, HarnessSubsystemReport, MetaSkillDrift, OrphanDataDirReport,
+    ProjectBindingState, PromptsReport, RulesCopyState, Subsystem, SubsystemHealth, SuggestedFix,
 };
 
 /// Build a [`DoctorReport`] from the on-disk state. Read-only; never
@@ -243,6 +244,13 @@ pub fn assemble_report(
         .map(|p| p.display().to_string())
         .collect();
 
+    // Phase 9 / US4 meta-skill drift (read-only, FR-031). Re-derives the
+    // installer's (harness × scope) candidate set from the supported-harness
+    // set and probes each via the shared `meta::drift_probe`. Surfaces only the
+    // `stale` / `missing-but-expected` drift classes (empty when clean → the
+    // wire shape stays byte-stable). `--fix` repair lives in the command layer.
+    let meta_skills = meta_drift::check(home, scope);
+
     Ok(DoctorReport {
         tome_version,
         workspace,
@@ -269,6 +277,7 @@ pub fn assemble_report(
         personas,
         legacy_model_manifests,
         unconverted_plugins,
+        meta_skills,
         overall,
         suggested_fixes,
     })
