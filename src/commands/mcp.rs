@@ -13,7 +13,7 @@ use crate::output::Mode;
 use crate::paths::Paths;
 use crate::workspace::ResolvedScope;
 
-pub fn run(_args: McpArgs, scope: &ResolvedScope, _mode: Mode) -> Result<(), TomeError> {
+pub fn run(args: McpArgs, scope: &ResolvedScope, _mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    mcp::run(scope, &paths)
+    mcp::run(scope, &paths, args.harness)
 }

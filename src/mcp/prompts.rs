@@ -144,6 +144,38 @@ fn persona_description(display_name: &str) -> String {
 const DROP_PERSONA_DESCRIPTION: &str =
     "Stop acting as any assumed agent persona and return to default behaviour.";
 
+/// `prompts/list` description for a reserved meta-install prompt.
+fn meta_install_description(skill_id: &str) -> String {
+    format!(
+        "Install Tome's `{skill_id}` meta skill into this harness (a native guide that \
+         teaches the agent how to use Tome; it persists for future sessions), then follow it."
+    )
+}
+
+/// `prompts/get` body for a reserved meta-install prompt: a fixed `User`-role
+/// instruction to call the `meta` tool, then follow the now-installed skill.
+/// The `prompt_name` maps back to the embedded skill that declares it.
+fn meta_install_body(prompt_name: &str) -> String {
+    let resolved = crate::authoring::meta::all()
+        .iter()
+        .find(|s| s.prompt_name == Some(prompt_name))
+        .map(|s| s.id);
+    // In production a `MetaInstall` entry is only registered for a skill that
+    // declares this exact `prompt_name`, so the lookup always hits. Catch a
+    // future prompt_name↔skill drift in CI rather than silently misdirecting.
+    debug_assert!(
+        resolved.is_some(),
+        "meta-install prompt `{prompt_name}` maps to no embedded skill",
+    );
+    let skill_id = resolved.unwrap_or("convert-marketplace");
+    format!(
+        "Install Tome's `{skill_id}` meta skill into this harness, then follow it:\n\n\
+         1. Call the `meta` tool with `{{ \"action\": \"install\", \"skill_id\": \"{skill_id}\" }}`.\n\
+         2. After it reports success, follow the now-installed `{skill_id}` skill for the rest of \
+         the task. It persists on disk, so it is available in future sessions too."
+    )
+}
+
 /// The role an entry plays on the prompt surface. Phase 5 entries are
 /// [`PersonaRole::None`]; Phase 6 adds the two persona shapes that the
 /// `prompts/get` path resolves through the template-wrapping branch
@@ -159,6 +191,11 @@ pub enum PersonaRole {
     /// The reserved global `drop-persona` prompt — fixed body, no
     /// on-disk file, no substitution.
     Drop,
+    /// Phase 9 / US3: a reserved built-in prompt that installs an embedded
+    /// meta skill (the `convert-marketplace` skill declares
+    /// `add-tome-conversion-skill`). Fixed body that drives the `meta` tool;
+    /// no on-disk file, no arguments, no substitution.
+    MetaInstall,
 }
 
 /// Wrap an agent's (already substitution-applied) body in the
@@ -269,6 +306,10 @@ impl PromptEntry {
             }
             PersonaRole::Drop => {
                 // The reserved drop-persona prompt takes no arguments.
+                return PromptDescriptor::new(prompt_name, Some(self.description.clone()), None);
+            }
+            PersonaRole::MetaInstall => {
+                // The reserved meta-install prompt takes no arguments.
                 return PromptDescriptor::new(prompt_name, Some(self.description.clone()), None);
             }
             PersonaRole::None => {}
@@ -502,6 +543,50 @@ impl PromptRegistry {
                 &mut identities,
                 &mut hydrated,
             )?;
+        }
+
+        // Phase 9 / US3 (FR-027/FR-028): reserved built-in prompts for every
+        // embedded meta skill that declares a `prompt_name`. ALWAYS exposed
+        // (not gated on personas). Each is seeded with empty
+        // `(catalog, plugin, indexed_at)` so it sorts first in its collision
+        // bucket and WINS the base name — a colliding plugin entry is
+        // counter-suffixed, never the built-in. Same mechanism as
+        // `drop-persona`; no on-disk file, fixed `prompts/get` body.
+        for skill in crate::authoring::meta::all() {
+            let Some(prompt_name) = skill.prompt_name else {
+                continue;
+            };
+            let key = (
+                String::new(),
+                String::new(),
+                EntryKind::Skill,
+                prompt_name.to_owned(),
+            );
+            identities.push(EntryIdentity {
+                catalog: String::new(),
+                plugin: String::new(),
+                kind: EntryKind::Skill,
+                name: prompt_name.to_owned(),
+                indexed_at: String::new(),
+                derived_name: prompt_name.to_owned(),
+            });
+            hydrated.insert(
+                key,
+                PromptEntry {
+                    catalog: String::new(),
+                    plugin: String::new(),
+                    name: prompt_name.to_owned(),
+                    kind: EntryKind::Skill,
+                    description: truncate_description(&meta_install_description(skill.id)),
+                    path: PathBuf::new(),
+                    arguments: Vec::new(),
+                    argument_hint: None,
+                    body_uses_arguments: false,
+                    plugin_version: String::new(),
+                    persona: PersonaRole::MetaInstall,
+                    display_name: String::new(),
+                },
+            );
         }
 
         let (resolved, collisions) = resolve_collisions(&identities);
@@ -872,6 +957,10 @@ fn render_for_get(
         PersonaRole::Drop => {
             // Fixed body, no on-disk file, no substitution, no args.
             return Ok(DROP_PERSONA_BODY.to_owned());
+        }
+        PersonaRole::MetaInstall => {
+            // Fixed body driving the `meta` tool; no on-disk file, no args.
+            return Ok(meta_install_body(prompt_name));
         }
         PersonaRole::Agent => {
             return render_persona_for_get(state, entry, prompt_name, arguments);

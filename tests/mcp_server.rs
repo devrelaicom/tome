@@ -55,6 +55,7 @@ fn build_state(env: &ToolEnv) -> Arc<McpState> {
         embedder_entry,
         reranker_entry,
         prompt_registry: Arc::new(PromptRegistry::default()),
+        host_harness: None,
     })
 }
 

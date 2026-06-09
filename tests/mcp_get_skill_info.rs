@@ -207,6 +207,7 @@ fn build_state(paths: &tome::paths::Paths) -> Arc<McpState> {
         embedder_entry,
         reranker_entry,
         prompt_registry: Arc::new(PromptRegistry::default()),
+        host_harness: None,
     })
 }
 

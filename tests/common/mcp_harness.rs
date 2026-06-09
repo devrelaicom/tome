@@ -57,7 +57,7 @@ use tome::index::{self, OpenOptions};
 use tome::mcp::prompts::{self, PromptDescriptor, PromptGetResponse, PromptRegistry};
 use tome::mcp::server::Server;
 use tome::mcp::state::McpState;
-use tome::mcp::tools::{get_skill, search_skills};
+use tome::mcp::tools::{get_skill, meta, search_skills};
 use tome::paths::Paths;
 use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
@@ -322,19 +322,36 @@ impl McpHarness {
 
     /// Build the harness with a caller-supplied `PromptRegistry` (e.g.
     /// `PromptRegistry::default()` when only the tool surface is under
-    /// test).
+    /// test). Host harness is `None` (the `meta` tool then fails closed).
     pub fn with_registry(paths: &Paths, registry: PromptRegistry) -> Self {
+        Self::with_host(paths, registry, None, None)
+    }
+
+    /// Build the harness with a caller-supplied `PromptRegistry`, an explicit
+    /// `host_harness` (Phase 9 / US3 — the `meta` tool resolves its install
+    /// target from it; `None` fails closed), and an optional `project_root` on
+    /// the resolved scope (so the `meta` tool's PROJECT scope lands under a
+    /// controlled dir rather than the launch CWD).
+    pub fn with_host(
+        paths: &Paths,
+        registry: PromptRegistry,
+        host_harness: Option<String>,
+        project_root: Option<std::path::PathBuf>,
+    ) -> Self {
         let reranker: Arc<dyn Reranker> = Arc::new(StubReranker::new());
+        let mut scope = ResolvedScope::global_fallback();
+        scope.project_root = project_root;
         let state = Arc::new(McpState {
             embedder: Arc::new(StubEmbedder::new()),
             reranker: OnceCell::new_with(Some(reranker)),
-            scope: ResolvedScope::global_fallback(),
+            scope,
             paths: paths.clone(),
             // Stub identity entries so search_skills' drift check agrees
             // with the stub-seeded index `meta`.
             embedder_entry: &STUB_EMBEDDER_ENTRY,
             reranker_entry: &STUB_RERANKER_ENTRY,
             prompt_registry: Arc::new(registry),
+            host_harness,
         });
 
         // Build the REAL server — `Server::new` constructs the real
@@ -461,6 +478,13 @@ impl McpHarness {
         let _seam = lock_context_seam();
         self.rt.block_on(search_skills::handle(self.state(), input))
     }
+
+    /// `tools/call meta` — drive the live `meta` tool end-to-end via
+    /// `meta::handle` (Phase 9 / US3).
+    pub fn call_meta(&self, input: meta::Input) -> Result<meta::Output, McpError> {
+        let _seam = lock_context_seam();
+        self.rt.block_on(meta::handle(self.state(), input))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -522,6 +546,17 @@ pub fn mcp_error_exit_code(err: &McpError) -> i32 {
             file: PathBuf::from("/x"),
             message: "x".into(),
         },
+        // Phase 9 / US3 — the `meta` tool's slugs (1:1 with the CLI exit codes).
+        "meta_skill_not_found" => TomeError::MetaSkillNotFound {
+            id: "x".into(),
+            available: "x".into(),
+        },
+        "meta_install_failed" => TomeError::MetaInstallFailed {
+            skill_id: "x".into(),
+            dir: PathBuf::from("/x"),
+            source: std::io::Error::other("x"),
+        },
+        "no_harness_detected" => TomeError::NoHarnessDetected,
         other => panic!(
             "unrecognised MCP error slug `{other}` — extend mcp_error_exit_code \
              when wiring a new error class through the in-process harness",

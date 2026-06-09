@@ -746,12 +746,20 @@ fn write_mcp_for_harness(snap: &HarnessSnapshot, deps: &SyncDeps<'_>) -> Result<
         });
     }
 
+    // Phase 9 / US3 / FR-030: stamp `--harness <name>` so the running
+    // `tome mcp` server knows which harness hosts it (the built-in `meta`
+    // tool resolves the install target from it). It is a LATER arg, so the
+    // ownership marker (`command == "tome" && args[0] == "mcp"`) is
+    // preserved; an existing entry without it re-stamps as `Updated` on the
+    // next sync (idempotent thereafter).
     let expected = mcp_config::TomeEntry::new(
         "tome".to_string(),
         vec![
             "mcp".to_string(),
             "--workspace".to_string(),
             deps.workspace_name.as_str().to_string(),
+            "--harness".to_string(),
+            snap.name.clone(),
         ],
     );
 

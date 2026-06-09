@@ -68,7 +68,11 @@ const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// (exit 8). Pre-flight failures propagate as their specific Phase
 /// 1/2/3 `TomeError` variants — `main.rs` maps each to the right exit
 /// code per `contracts/exit-codes-p3.md` §"Specific-over-generic".
-pub fn run(scope: &ResolvedScope, paths: &Paths) -> Result<(), TomeError> {
+pub fn run(
+    scope: &ResolvedScope,
+    paths: &Paths,
+    host_harness: Option<String>,
+) -> Result<(), TomeError> {
     // Open the file log appender before anything else can fail. If this
     // errors, the harness sees a TomeError on stderr instead of a
     // silent log.
@@ -162,6 +166,7 @@ pub fn run(scope: &ResolvedScope, paths: &Paths) -> Result<(), TomeError> {
             embedder_entry: handle.embedder_entry,
             reranker_entry: handle.reranker_entry,
             prompt_registry: Arc::new(prompt_registry),
+            host_harness: host_harness.clone(),
         });
 
         let mut server = server::Server::new(state);
