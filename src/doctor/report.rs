@@ -599,10 +599,11 @@ pub struct PersonaReport {
 /// system's `meta_skills` Vec is empty and the byte-stable wire shape is
 /// preserved). See `doctor::meta_drift` for the emit policy + contract cite.
 ///
-/// `scope` is `"global"` | `"project"`; `state` is `"up-to-date"` |
-/// `"stale"` | `"missing-but-expected"` (the full classification vocabulary,
-/// though only the latter two ever land here). Plain `Serialize` struct,
-/// matching the sibling report record style.
+/// `scope` is `"global"` | `"project"`; `state` is only ever `"stale"` |
+/// `"missing-but-expected"` on the wire — `check()` omits `up-to-date` rows
+/// entirely (up-to-date is the absence of drift), so the wire never carries an
+/// `"up-to-date"` value here. Plain `Serialize` struct, matching the sibling
+/// report record style.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MetaSkillDrift {
     pub skill_id: String,

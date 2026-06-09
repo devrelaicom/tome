@@ -11,13 +11,14 @@
 //! logic and NO bespoke writer (contract `doctor-meta-drift.md` §Invariants).
 //!
 //! ## Read-only check (FR-031/031a/031b)
-//! - Candidate locations are re-derived from the supported-harness set (installs
-//!   are not indexed — NFR-003): for every embedded skill, every skill-capable
-//!   harness, at the requested scope.
-//! - GLOBAL: a row is emitted only for a **detected** harness (its dot-dir is
-//!   present via the existence-only [`crate::doctor::harness_detect::probe`]) —
-//!   the expectation source for `missing-but-expected` is a detected harness,
-//!   never a guess (FR-031a).
+//! - Candidate locations are re-derived the SAME way the installer targets
+//!   (installs are not indexed — NFR-003): [`candidates`] enumerates the
+//!   effective harness registry and detects via `HarnessModule::detect`, exactly
+//!   like [`crate::commands::meta`]'s `resolve_targets` (true SSOT — see the
+//!   doc comment on [`candidates`]).
+//! - GLOBAL: a row is emitted only for a **detected** harness (gated on the
+//!   harness's own `detect(&home)`) — the expectation source for
+//!   `missing-but-expected` is a detected harness, never a guess (FR-031a).
 //! - PROJECT: the `scope.project_root` IS the detection signal (we are inside
 //!   that project), so a row is emitted per skill-capable harness with a
 //!   resolvable project skill dir.
@@ -35,14 +36,12 @@
 //! `(skill_id, harness, scope)` for the `--json` wire-shape pins (contract
 //! §Read-only "BTreeMap-ordered").
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::authoring::meta::{self, DriftState};
-use crate::doctor::harness_detect;
 use crate::doctor::report::MetaSkillDrift;
 use crate::error::TomeError;
-use crate::harness::{HarnessModule, SUPPORTED_HARNESSES};
+use crate::harness::with_effective_modules;
 use crate::workspace::ResolvedScope;
 
 /// Wire string for the project scope.
@@ -61,64 +60,64 @@ struct Candidate {
 
 /// Re-derive the installer's candidate set for the active scope (FR-031a).
 ///
-/// PROJECT candidates are produced only when `scope.project_root` is `Some`;
-/// the project root's existence IS the detection signal. GLOBAL candidates are
-/// gated on the harness being detected under `home` (existence-only probe).
+/// The candidate set is derived **the exact way the installer targets** — this
+/// is the SSOT with [`crate::commands::meta`]'s `resolve_targets`:
+///
+/// - **All-harness enumeration** mirrors the installer's multi-harness
+///   targeting: it iterates the effective registry via [`with_effective_modules`]
+///   (so a test-injected `HARNESS_MODULES_OVERRIDE` is honoured) and skips any
+///   harness that does not consume native skills.
+/// - **Detection** is the harness's OWN `detect(&home)` — the same mechanism
+///   `resolve_targets` uses for the all-detected default — NOT a separate
+///   existence probe, so the two surfaces can never diverge.
+/// - **Both scopes are surveyed**: the installer can target project-default OR
+///   global-via-`--global` across invocations, so both are legitimate candidate
+///   locations. `meta_skills` is verdict-neutral (it never feeds `overall`), so
+///   surveying both never trips `degraded`.
+///
+/// PROJECT candidates are produced only when `scope.project_root` is `Some`
+/// (doctor must not invent a project root — it surveys the one it was given, if
+/// any). GLOBAL candidates are gated on the harness's `detect(&home)`.
 fn candidates(home: &Path, scope: &ResolvedScope) -> Vec<Candidate> {
     let mut out = Vec::new();
 
-    // The set of harnesses detected on this machine, by name (existence-only).
-    // Used as the `missing-but-expected` expectation source for GLOBAL scope.
-    let detected: BTreeSet<String> = harness_detect::probe(home)
-        .into_iter()
-        .filter(|p| p.present)
-        .map(|p| p.name)
-        .collect();
-
     for skill in meta::all() {
-        for module in SUPPORTED_HARNESSES {
-            if !module.supports_native_skills() {
-                continue;
-            }
-            let harness = module.name();
+        with_effective_modules(|mods| {
+            for m in mods {
+                if !m.supports_native_skills() {
+                    continue;
+                }
+                let harness = m.name();
 
-            // PROJECT scope: the project root is the detection signal.
-            if let Some(project_root) = scope.project_root.as_deref()
-                && let Some(dir) = project_skill_dir(*module, project_root)
-            {
-                out.push(Candidate {
-                    skill_id: skill.id,
-                    harness,
-                    scope: SCOPE_PROJECT,
-                    dir,
-                });
-            }
+                // PROJECT scope: a surveyed project root IS the detection signal.
+                if let Some(project_root) = scope.project_root.as_deref()
+                    && let Some(dir) = m.skill_dir(project_root)
+                {
+                    out.push(Candidate {
+                        skill_id: skill.id,
+                        harness,
+                        scope: SCOPE_PROJECT,
+                        dir,
+                    });
+                }
 
-            // GLOBAL scope: emit only for a DETECTED harness (FR-031a).
-            if detected.contains(harness)
-                && let Some(dir) = global_skill_dir(*module, home)
-            {
-                out.push(Candidate {
-                    skill_id: skill.id,
-                    harness,
-                    scope: SCOPE_GLOBAL,
-                    dir,
-                });
+                // GLOBAL scope: emit only for a harness the installer would
+                // itself detect (its own `detect(&home)`, FR-031a).
+                if m.detect(home)
+                    && let Some(dir) = m.skill_dir_global(home)
+                {
+                    out.push(Candidate {
+                        skill_id: skill.id,
+                        harness,
+                        scope: SCOPE_GLOBAL,
+                        dir,
+                    });
+                }
             }
-        }
+        });
     }
 
     out
-}
-
-/// Project skills root for a skill-capable harness (`None` if it has none).
-fn project_skill_dir(module: &dyn HarnessModule, project_root: &Path) -> Option<PathBuf> {
-    module.skill_dir(project_root)
-}
-
-/// Global/user skills root for a skill-capable harness (`None` if it has none).
-fn global_skill_dir(module: &dyn HarnessModule, home: &Path) -> Option<PathBuf> {
-    module.skill_dir_global(home)
 }
 
 /// Read-only meta-skill drift projection (FR-031). For every candidate
@@ -268,18 +267,34 @@ mod tests {
     }
 
     #[test]
-    fn rows_are_sorted_by_skill_harness_scope() {
+    fn rows_match_hand_written_sort_order() {
         let home = TempDir::new().unwrap();
-        // Detect every skill-capable harness so we get multiple rows to order.
-        for d in [".claude", ".cursor", ".codex", ".opencode"] {
-            std::fs::create_dir_all(home.path().join(d)).unwrap();
-        }
-        let rows = check(home.path(), &global_scope());
-        let mut sorted = rows.clone();
-        sorted.sort_by(|a, b| {
-            (&a.skill_id, &a.harness, &a.scope).cmp(&(&b.skill_id, &b.harness, &b.scope))
-        });
-        assert_eq!(rows, sorted, "rows must be deterministically sorted");
+        let project = TempDir::new().unwrap();
+        // Detect claude-code + cursor at GLOBAL scope; the surveyed project root
+        // adds PROJECT-scope rows for both. With one embedded skill, the
+        // hand-written `(skill_id, harness, scope)` order is fully determined:
+        // claude-code before cursor, and `global` before `project` per harness.
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+        std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+
+        let rows = check(home.path(), &project_scope(project.path()));
+        let observed: Vec<(&str, &str, &str)> = rows
+            .iter()
+            .filter(|r| r.harness == "claude-code" || r.harness == "cursor")
+            .map(|r| (r.skill_id.as_str(), r.harness.as_str(), r.scope.as_str()))
+            .collect();
+
+        // A LITERAL expected sequence — catches a comparator change, not just a
+        // missing sort call (a self-sort would pass any comparator).
+        assert_eq!(
+            observed,
+            [
+                ("convert-marketplace", "claude-code", "global"),
+                ("convert-marketplace", "claude-code", "project"),
+                ("convert-marketplace", "cursor", "global"),
+                ("convert-marketplace", "cursor", "project"),
+            ],
+        );
     }
 
     #[test]

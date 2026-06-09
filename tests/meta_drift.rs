@@ -8,7 +8,12 @@
 //! 1. install-then-corrupt-then-fix round trip (up-to-date → stale → repaired),
 //! 2. read-only default mutates nothing (mtime-stable, FR-124),
 //! 3. a malformed on-disk SKILL.md classifies `stale` (never a panic, FR-031b),
-//! 4. a detected skill-capable harness with NO install → `missing-but-expected`.
+//! 4. a detected skill-capable harness with NO install → `missing-but-expected`,
+//! 5. a positive `--json` wire-shape pin (all five fields incl. `dir`),
+//! 6. repair forward-progress: one symlink-refused harness, the other still
+//!    lands (first_error surfaced, no escape),
+//! 7. a hand-written sort order over ≥2 detected harnesses + both scopes,
+//! 8. a project-scope install → stale → `--fix` → up-to-date round trip.
 
 mod common;
 
@@ -30,6 +35,16 @@ fn global_scope() -> ResolvedScope {
         scope: Scope(WorkspaceName::global()),
         source: ScopeSource::GlobalFallback,
         project_root: None,
+    }
+}
+
+/// A project-marker scope carrying `project_root` — the only shape under which
+/// the doctor surveys PROJECT-scope candidates (it never invents a root).
+fn project_scope(project_root: &Path) -> ResolvedScope {
+    ResolvedScope {
+        scope: Scope(WorkspaceName::global()),
+        source: ScopeSource::ProjectMarker,
+        project_root: Some(project_root.to_path_buf()),
     }
 }
 
@@ -166,4 +181,208 @@ fn undetected_harness_emits_no_rows() {
         "no detected harness ⇒ empty drift projection (keeps wire shape stable): {:?}",
         report.meta_skills,
     );
+}
+
+/// Make cursor "detected" (existence-only, default `.cursor` dot-dir) and return
+/// its global skills root `<home>/.cursor/skills`.
+fn detect_cursor(home: &Path) -> PathBuf {
+    let skills = home.join(".cursor/skills");
+    std::fs::create_dir_all(&skills).unwrap();
+    skills
+}
+
+/// FIX 3 / Test MAJOR #8 (closes #6 `dir`): a POPULATED `meta_skills` row freezes
+/// the `--json` wire shape — exactly the five keys, the expected values, and the
+/// `.../skills` `dir` suffix for the (harness, scope) pair.
+#[test]
+fn populated_row_json_wire_shape_is_pinned() {
+    let (_root, home, paths) = setup();
+    // Detect claude-code, install NOTHING → exactly one missing-but-expected row.
+    detect_claude_code(home.path());
+
+    let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+    let row = cc_global_row(&report).expect("detected claude-code must produce a row");
+
+    let value = serde_json::to_value(row).expect("row serialises");
+    let obj = value.as_object().expect("row is a JSON object");
+
+    // EXACTLY the five documented keys — no more, no fewer.
+    let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["dir", "harness", "scope", "skill_id", "state"],
+        "the wire shape is exactly the five keys: {value}",
+    );
+
+    assert_eq!(obj["skill_id"], serde_json::json!("convert-marketplace"));
+    assert_eq!(obj["harness"], serde_json::json!("claude-code"));
+    assert_eq!(obj["scope"], serde_json::json!("global"));
+    assert_eq!(obj["state"], serde_json::json!("missing-but-expected"));
+
+    // `dir` is the claude-code/global skills root — ends with `.../.claude/skills`.
+    let dir = obj["dir"].as_str().expect("dir is a string");
+    let expected_suffix = Path::new(".claude").join("skills");
+    assert!(
+        dir.ends_with(expected_suffix.to_str().unwrap()),
+        "dir must end with the claude-code/global skills suffix: {dir}",
+    );
+}
+
+/// FIX 4 / Test MAJOR #10: repair forward-progress. TWO detected skill-capable
+/// harnesses; one harness's skills root traverses a SYMLINK so its
+/// `install_skill` is refused (MetaInstallFailed/88) while the other installs
+/// cleanly. `repair` surfaces the first error AND lands the healthy one (one
+/// failure never aborts the rest), and the symlinked one does not escape.
+#[cfg(unix)]
+#[test]
+fn repair_forward_progress_one_symlink_refused_other_lands() {
+    use std::os::unix::fs::symlink;
+
+    let (_root, home_dir, _paths) = setup();
+    // Canonicalise so the symlink-guard compares stable absolute components.
+    let home = home_dir.path().canonicalize().unwrap();
+
+    // cursor is "detected" + healthy → its global skills root is real.
+    detect_cursor(&home);
+
+    // claude-code is "detected" but its `.claude` dot-dir is a SYMLINK to an
+    // out-of-tree dir, so the global skills root traverses a symlinked
+    // component → install refused, no escape.
+    let outside = TempDir::new().unwrap();
+    symlink(outside.path(), home.join(".claude")).unwrap();
+
+    let scope = global_scope();
+
+    // Pre-repair: both harnesses report missing-but-expected (no install yet).
+    let before = doctor::meta_drift::check(&home, &scope);
+    assert!(
+        before
+            .iter()
+            .any(|r| r.harness == "claude-code" && r.state == "missing-but-expected"),
+        "claude-code/global is a candidate: {before:?}",
+    );
+    assert!(
+        before
+            .iter()
+            .any(|r| r.harness == "cursor" && r.state == "missing-but-expected"),
+        "cursor/global is a candidate: {before:?}",
+    );
+
+    // Repair: the claude-code symlink is refused (88), cursor still lands.
+    let err = doctor::meta_drift::repair(&home, &scope)
+        .expect_err("the symlinked harness must surface a first_error");
+    assert_eq!(err.exit_code(), 88, "first_error is MetaInstallFailed (88)");
+
+    // (b) forward-progress: the HEALTHY cursor skill landed on disk.
+    assert!(
+        home.join(".cursor/skills/convert-marketplace/SKILL.md")
+            .is_file(),
+        "cursor/global must install despite the claude-code failure",
+    );
+
+    // (c) the symlinked claude-code write did NOT escape the home tree.
+    assert!(
+        !outside.path().join("skills/convert-marketplace").exists(),
+        "no write escaped through the .claude symlink",
+    );
+}
+
+/// FIX 5 / Test Minor #7: a HAND-WRITTEN expected order over ≥2 detected
+/// harnesses AND both scopes — catches a comparator change, not just a missing
+/// `sort` call. With a single embedded skill (`convert-marketplace`), the rows
+/// sort `(skill_id, harness, scope)`, so claude-code precedes cursor and, within
+/// a harness, `global` precedes `project`.
+#[test]
+fn rows_match_hand_written_sort_order() {
+    let (_root, home, paths) = setup();
+    let project = TempDir::new().unwrap();
+    // Detect both claude-code and cursor at GLOBAL scope, plus a surveyed
+    // project root → PROJECT-scope candidates for the same two harnesses.
+    detect_claude_code(home.path());
+    detect_cursor(home.path());
+
+    let report =
+        doctor::assemble_report(&project_scope(project.path()), &paths, home.path(), false)
+            .unwrap();
+
+    // Restrict to the two harnesses under test, in the row order as emitted.
+    let observed: Vec<(&str, &str, &str)> = report
+        .meta_skills
+        .iter()
+        .filter(|r| r.harness == "claude-code" || r.harness == "cursor")
+        .map(|r| (r.skill_id.as_str(), r.harness.as_str(), r.scope.as_str()))
+        .collect();
+
+    let expected = [
+        ("convert-marketplace", "claude-code", "global"),
+        ("convert-marketplace", "claude-code", "project"),
+        ("convert-marketplace", "cursor", "global"),
+        ("convert-marketplace", "cursor", "project"),
+    ];
+    assert_eq!(
+        observed, expected,
+        "rows must match the hand-written (skill_id, harness, scope) order",
+    );
+}
+
+/// FIX 6 / Test Minor #9: a PROJECT-scope on-disk round trip mirroring the
+/// global one — install into the project skills dir, corrupt the stamp →
+/// `check` reports `stale` for the project row → `repair` → re-probe up-to-date.
+#[test]
+fn project_scope_install_corrupt_fix_round_trip() {
+    let (_root, home, paths) = setup();
+    let project = TempDir::new().unwrap();
+    let scope = project_scope(project.path());
+
+    // claude-code's PROJECT skills root is `<project>/.claude/skills`.
+    let skills = project.path().join(".claude/skills");
+    std::fs::create_dir_all(&skills).unwrap();
+    meta::install_skill(SKILL, &skills).expect("install into project scope");
+
+    // up-to-date ⇒ no claude-code/project drift row.
+    let report = doctor::assemble_report(&scope, &paths, home.path(), false).unwrap();
+    assert!(
+        !report
+            .meta_skills
+            .iter()
+            .any(|r| r.harness == "claude-code" && r.scope == "project"),
+        "fresh project install is up-to-date (absent): {:?}",
+        report.meta_skills,
+    );
+
+    // Corrupt the stamped revision → stale.
+    let skill_md = skills.join(SKILL).join("SKILL.md");
+    let original = std::fs::read_to_string(&skill_md).unwrap();
+    let bogus = original.replace(
+        &meta::find(SKILL).unwrap().revision.to_string(),
+        "deadbeefdeadbeef",
+    );
+    assert_ne!(bogus, original, "the corruption must change the stamp");
+    std::fs::write(&skill_md, &bogus).unwrap();
+
+    let report = doctor::assemble_report(&scope, &paths, home.path(), false).unwrap();
+    let row = report
+        .meta_skills
+        .iter()
+        .find(|r| r.harness == "claude-code" && r.scope == "project")
+        .expect("stale project row present after corruption");
+    assert_eq!(row.state, "stale");
+    assert_eq!(row.skill_id, SKILL);
+
+    // Repair, then re-probe up-to-date (absent).
+    let installed = doctor::meta_drift::repair(home.path(), &scope).expect("project repair");
+    assert!(installed >= 1, "claude-code/project re-install ran");
+
+    let report = doctor::assemble_report(&scope, &paths, home.path(), false).unwrap();
+    assert!(
+        !report
+            .meta_skills
+            .iter()
+            .any(|r| r.harness == "claude-code" && r.scope == "project"),
+        "after --fix the project row is up-to-date (absent): {:?}",
+        report.meta_skills,
+    );
+    let after = std::fs::read_to_string(&skill_md).unwrap();
+    assert!(after.contains(&meta::find(SKILL).unwrap().revision.to_string()));
 }
