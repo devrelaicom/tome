@@ -83,6 +83,20 @@ impl HarnessModule for Codex {
         Some(AgentFormat::Toml)
     }
 
+    // -- Native skills (Phase 9, harness-skill-emit.md) ---------------------
+
+    fn supports_native_skills(&self) -> bool {
+        true
+    }
+
+    fn skill_dir(&self, project_root: &Path) -> Option<PathBuf> {
+        Some(project_root.join(".codex/skills"))
+    }
+
+    fn skill_dir_global(&self, home: &Path) -> Option<PathBuf> {
+        Some(home.join(".codex/skills"))
+    }
+
     /// Codex is OpenAI-vendored TOML. It keeps `name` + `description`; the
     /// body lands in a triple-quoted `developer_instructions` string
     /// (FR-033, R-14). `model` always DROPs (no Anthropic alias maps to an

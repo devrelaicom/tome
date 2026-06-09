@@ -86,6 +86,23 @@ impl HarnessModule for OpenCode {
         Some(AgentFormat::MarkdownYaml)
     }
 
+    // -- Native skills (Phase 9, harness-skill-emit.md) ---------------------
+
+    fn supports_native_skills(&self) -> bool {
+        true
+    }
+
+    fn skill_dir(&self, project_root: &Path) -> Option<PathBuf> {
+        Some(project_root.join(".opencode/skills"))
+    }
+
+    fn skill_dir_global(&self, home: &Path) -> Option<PathBuf> {
+        // OpenCode's user-scope config lives under XDG `~/.config/opencode/`
+        // (the per-user dir it probes is `~/.opencode/`, but global skills land
+        // in the XDG config tree per the contract table).
+        Some(home.join(".config/opencode/skills"))
+    }
+
     /// OpenCode derives the agent name from the FILENAME, so the displayed
     /// name is ALWAYS `<plugin>__<name>` regardless of the workspace clash
     /// flag (FR-042 — the prefix cannot be hidden, an accepted wart).

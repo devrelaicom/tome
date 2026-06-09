@@ -99,6 +99,20 @@ impl HarnessModule for Cursor {
         Some(AgentFormat::MarkdownYaml)
     }
 
+    // -- Native skills (Phase 9, harness-skill-emit.md) ---------------------
+
+    fn supports_native_skills(&self) -> bool {
+        true
+    }
+
+    fn skill_dir(&self, project_root: &Path) -> Option<PathBuf> {
+        Some(project_root.join(".cursor/skills"))
+    }
+
+    fn skill_dir_global(&self, home: &Path) -> Option<PathBuf> {
+        Some(home.join(".cursor/skills"))
+    }
+
     /// Cursor uses Markdown + YAML frontmatter with the body in the file
     /// body. It keeps `name` + `description` + `tools`. `model` DROPs (no
     /// same-vendor Cursor Anthropic id is enumerated yet, FR-034). Read-only

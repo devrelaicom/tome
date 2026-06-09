@@ -319,6 +319,35 @@ pub trait HarnessModule: Send + Sync {
             self.name()
         )
     }
+
+    // -----------------------------------------------------------------------
+    // Phase 9 — native skill emit (harness-skill-emit.md, R-3).
+    //
+    // Symmetric to the Phase-6 agent methods above. Defaults make every
+    // harness — and any future one, and Gemini — safe-by-default: no native
+    // skills, no install target. The four supported harnesses override the
+    // dir methods with their OWN canonical `skills/` root (never a compat
+    // sibling). The format is always a `SKILL.md` folder, so unlike agents
+    // there is no format enum.
+    // -----------------------------------------------------------------------
+
+    /// Whether this harness consumes native `SKILL.md` skill folders. Default
+    /// `false`; Gemini and any future harness stay `false`.
+    fn supports_native_skills(&self) -> bool {
+        false
+    }
+
+    /// Project-scope skills root (`<project_root>/…/skills/`). `None` unless
+    /// `supports_native_skills()`.
+    fn skill_dir(&self, _project_root: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    /// Global/user-scope skills root (under `home`). `None` unless
+    /// `supports_native_skills()`.
+    fn skill_dir_global(&self, _home: &Path) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Registered harness modules in lexicographic order of `name()`.

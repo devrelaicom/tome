@@ -198,6 +198,12 @@ minijinja = { version = "2.20", default-features = false, features = [
 [build-dependencies]
 # Compile vendored sqlite-vec amalgamation against rusqlite's bundled SQLite.
 cc = "1"
+# Phase 9 — content-hash the embedded meta-skill assets at build time. Both are
+# already regular dependencies (see `[dependencies]`), so reusing them under
+# `[build-dependencies]` adds NO new package to Cargo.lock — `cargo deny check`
+# evaluates the same graph, and the "no new top-level dependency" invariant holds.
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 # Drive the interactive `tome plugin` browse flow through a real pty.
