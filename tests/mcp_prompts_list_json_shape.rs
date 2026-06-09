@@ -144,7 +144,21 @@ fn prompts_list_payload_is_byte_stable_for_two_entry_fixture() {
             .unwrap();
 
     let descriptors = registry.descriptors();
-    let serialised = serde_json::to_value(&descriptors).expect("serialise");
+    // Phase 9 / US3: the always-on reserved `add-tome-conversion-skill` built-in
+    // is present (it sorts first). Pin the PLUGIN-derived wire shape by filtering
+    // it out — keeping the pin decoupled from the built-in's description text —
+    // and assert its presence separately.
+    assert!(
+        descriptors
+            .iter()
+            .any(|d| d.name == "add-tome-conversion-skill"),
+        "reserved built-in must be advertised in prompts/list",
+    );
+    let plugin: Vec<_> = descriptors
+        .into_iter()
+        .filter(|d| d.name != "add-tome-conversion-skill")
+        .collect();
+    let serialised = serde_json::to_value(&plugin).expect("serialise");
 
     // Pinned JSON. The rmcp `Prompt` shape uses camelCase, but the
     // only camelCase fields in the post-cap output are absent / `None`
