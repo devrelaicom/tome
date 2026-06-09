@@ -105,6 +105,54 @@ pub enum Command {
     /// and `lint` validates a Tome skill for CI.
     #[command(subcommand)]
     Skill(SkillCommand),
+    /// Install Tome's own bundled "meta skills" — native `SKILL.md` guides
+    /// that teach an agent how to use Tome — into your detected harnesses.
+    #[command(subcommand)]
+    Meta(MetaCommand),
+}
+
+/// `tome meta <subcommand>` — manage Tome's bundled meta skills.
+#[derive(Debug, Subcommand)]
+pub enum MetaCommand {
+    /// List the bundled meta skills and their per-harness install status.
+    List(MetaListArgs),
+    /// Install a bundled meta skill into detected (or `--harness`-named)
+    /// harnesses at project (default) or `--global` scope.
+    Add(MetaAddArgs),
+    /// Remove an installed meta skill from the selected harnesses.
+    Remove(MetaRemoveArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct MetaListArgs {}
+
+#[derive(Debug, clap::Args)]
+pub struct MetaAddArgs {
+    /// The bundled skill id (e.g. `convert-marketplace`).
+    pub skill_id: String,
+    /// Target a specific harness (repeatable). Default: every detected
+    /// harness that consumes native skills.
+    #[arg(long = "harness")]
+    pub harnesses: Vec<String>,
+    /// Install into the user-level skills dir instead of the project.
+    #[arg(long)]
+    pub global: bool,
+    /// Re-write even when the on-disk copy is already at the current revision.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct MetaRemoveArgs {
+    /// The bundled skill id.
+    pub skill_id: String,
+    /// Target a specific harness (repeatable). Default: every detected
+    /// harness that consumes native skills.
+    #[arg(long = "harness")]
+    pub harnesses: Vec<String>,
+    /// Remove from the user-level skills dir instead of the project.
+    #[arg(long)]
+    pub global: bool,
 }
 
 /// `tome skill <subcommand>` — the third artifact level (skills have no other

@@ -453,6 +453,7 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
         (
             TomeError::MetaSkillNotFound {
                 id: "convert-marketplace".into(),
+                available: "convert-marketplace".into(),
             },
             87,
             "meta_skill_not_found",

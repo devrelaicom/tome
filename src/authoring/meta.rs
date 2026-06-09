@@ -107,9 +107,7 @@ pub enum RemoveOutcome {
 /// 5. Idempotent: replaces an existing same-id folder; an up-to-date no-`force`
 ///    no-op is the caller's concern (it checks the on-disk revision first).
 pub fn install_skill(skill_id: &str, target_dir: &Path) -> Result<InstalledAt, TomeError> {
-    let skill = find(skill_id).ok_or_else(|| TomeError::MetaSkillNotFound {
-        id: skill_id.to_owned(),
-    })?;
+    let skill = find(skill_id).ok_or_else(|| not_found(skill_id))?;
 
     // Defence-in-depth: the embedded id was validated safe at build time, so
     // this never fires in practice — but the path join below MUST use a proven
@@ -174,9 +172,7 @@ fn populate(skill: &EmbeddedMetaSkill, staged: &Path) -> Result<(), TomeError> {
 /// - Folder absent → [`RemoveOutcome::NotPresent`] (idempotent no-op).
 /// - Same symlink-safe guard as install; a refused/failed delete → 88.
 pub fn remove_skill(skill_id: &str, target_dir: &Path) -> Result<RemoveOutcome, TomeError> {
-    let skill = find(skill_id).ok_or_else(|| TomeError::MetaSkillNotFound {
-        id: skill_id.to_owned(),
-    })?;
+    let skill = find(skill_id).ok_or_else(|| not_found(skill_id))?;
     let skill_dir = target_dir.join(skill.id);
 
     if let Err(e) = refuse_symlinked_component(&skill_dir) {
@@ -345,6 +341,15 @@ fn is_delim(line: &str) -> bool {
 }
 
 // --- error helpers -----------------------------------------------------------
+
+/// Build a [`TomeError::MetaSkillNotFound`] (exit 87) whose message enumerates
+/// the bundled ids (FR-033). Shared by the compute path and the CLI.
+pub fn not_found(skill_id: &str) -> TomeError {
+    TomeError::MetaSkillNotFound {
+        id: skill_id.to_owned(),
+        available: all().iter().map(|s| s.id).collect::<Vec<_>>().join(", "),
+    }
+}
 
 /// Build a [`TomeError::MetaInstallFailed`] (exit 88) for a write-path failure.
 fn install_failed(skill_id: &str, dir: &Path, source: std::io::Error) -> TomeError {
