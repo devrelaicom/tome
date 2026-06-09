@@ -6,6 +6,7 @@ mod common;
 use common::mcp_harness::{McpHarness, StagedWorkspace, mcp_error_exit_code, mcp_error_slug};
 use common::{HomeGuard, ToolEnv, paths_for};
 use tempfile::TempDir;
+use tome::authoring::meta as meta_skill;
 use tome::mcp::prompts::PromptRegistry;
 use tome::mcp::tools::meta;
 
@@ -38,7 +39,16 @@ fn meta_tool_installs_to_stamped_host_harness() {
     assert_eq!(out.skill_id, "convert-marketplace");
     assert_eq!(out.installed_at.harness, "claude-code");
     assert_eq!(out.installed_at.scope, "global");
-    assert!(!out.installed_at.revision.is_empty(), "revision reported");
+    // The reported revision is the embedded skill's build-time revision, not
+    // just some non-empty string (US3 closeout MINOR-4: pin the Output-surface
+    // mapping end-to-end, not only `!is_empty()`).
+    let embedded_rev = meta_skill::find("convert-marketplace")
+        .expect("embedded skill present")
+        .revision;
+    assert_eq!(
+        out.installed_at.revision, embedded_rev,
+        "reported revision == the embedded build-time revision",
+    );
 
     // Lands in the host harness's global skills dir and persists to disk.
     let skill_md = env
@@ -50,6 +60,10 @@ fn meta_tool_installs_to_stamped_host_harness() {
     );
     let body = std::fs::read_to_string(&skill_md).unwrap();
     assert!(body.contains("tome_skill_revision"), "revision stamped");
+    assert!(
+        body.contains(embedded_rev),
+        "the on-disk stamp carries the same revision that was reported",
+    );
 }
 
 #[test]
@@ -93,6 +107,68 @@ fn meta_tool_unknown_skill_is_meta_skill_not_found() {
         mcp_error_exit_code(&err),
         87,
         "slug maps to the CLI's exit 87"
+    );
+    // US3 closeout MINOR-3: the unknown-skill check is before any I/O, so
+    // nothing is created — pin that ordering against a future reorder.
+    assert!(
+        !env.home_path().join(".claude/skills").exists(),
+        "an unknown skill writes nothing",
+    );
+}
+
+/// US3 closeout MAJOR-1(b): a stamped-but-unknown host harness name (e.g. a
+/// typo or a future harness this binary does not know) fails closed exactly
+/// like an unstamped host — `harness::lookup` returns None → exit 89, no write.
+#[test]
+fn meta_tool_unknown_host_harness_fails_closed() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    let _home = HomeGuard::install(env.home_path());
+    let harness = McpHarness::with_host(
+        &paths,
+        PromptRegistry::default(),
+        Some("bogus-harness".to_string()),
+        None,
+    );
+
+    let err = harness
+        .call_meta(install("convert-marketplace", meta::Scope::Global))
+        .expect_err("an unknown host harness must fail closed");
+    assert_eq!(mcp_error_slug(&err), "no_harness_detected");
+    assert_eq!(mcp_error_exit_code(&err), 89);
+    assert!(
+        !env.home_path().join(".claude/skills").exists(),
+        "nothing written for an unknown host harness",
+    );
+}
+
+/// US3 closeout MAJOR-1(c): a KNOWN host harness that does not consume native
+/// skills (Gemini — `supports_native_skills() == false`) also fails closed.
+/// This is the realistic miss: stamping `Some("gemini")` is a valid config,
+/// and the tool must refuse rather than mis-route to a non-existent sink.
+#[test]
+fn meta_tool_skill_incapable_host_fails_closed() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    let _home = HomeGuard::install(env.home_path());
+    let harness = McpHarness::with_host(
+        &paths,
+        PromptRegistry::default(),
+        Some("gemini".to_string()),
+        None,
+    );
+
+    let err = harness
+        .call_meta(install("convert-marketplace", meta::Scope::Global))
+        .expect_err("a skill-incapable host must fail closed");
+    assert_eq!(mcp_error_slug(&err), "no_harness_detected");
+    assert_eq!(mcp_error_exit_code(&err), 89);
+    // Gemini has no skills sink at any scope — nothing should be written
+    // anywhere under home.
+    assert!(
+        !env.home_path().join(".gemini").exists()
+            && !env.home_path().join(".claude/skills").exists(),
+        "nothing written for a skill-incapable host",
     );
 }
 
@@ -212,5 +288,20 @@ fn reserved_prompt_wins_collision_against_plugin_entry() {
     assert!(
         names.len() >= 2,
         "the colliding command is still advertised under a counter-suffixed name: {names:?}"
+    );
+    // US3 closeout MINOR-1: the command was SUFFIXED (counter-bumped), not
+    // dropped — the suffixed name must resolve to the command's OWN body, not
+    // the reserved one. Find the non-base name and confirm it serves the
+    // command's "Do a thing." body.
+    let suffixed = names
+        .iter()
+        .find(|n| n.as_str() != "add-tome-conversion-skill")
+        .expect("a counter-suffixed name exists");
+    let suffixed_body = harness
+        .prompts_get_text(suffixed, None)
+        .expect("get suffixed command");
+    assert!(
+        suffixed_body.contains("Do a thing."),
+        "the suffixed name serves the displaced command's own body, not the reserved one: {suffixed_body}"
     );
 }
