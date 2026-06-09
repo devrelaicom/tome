@@ -254,13 +254,18 @@ fn repair_forward_progress_one_symlink_refused_other_lands() {
 
     let scope = global_scope();
 
-    // Pre-repair: both harnesses report missing-but-expected (no install yet).
+    // Pre-repair: both harnesses are drift candidates (no install yet). After
+    // FIX C (the read-side symlink guard), the symlinked claude-code candidate is
+    // classified refreshable `stale` (the probe refuses to read THROUGH the
+    // symlinked `.claude` component) rather than `missing-but-expected`; cursor
+    // (a real dir, no install) stays `missing-but-expected`. Both are drift
+    // classes the repair attempts.
     let before = doctor::meta_drift::check(&home, &scope);
     assert!(
         before
             .iter()
-            .any(|r| r.harness == "claude-code" && r.state == "missing-but-expected"),
-        "claude-code/global is a candidate: {before:?}",
+            .any(|r| r.harness == "claude-code" && r.state == "stale"),
+        "claude-code/global is a (symlink-refused, refreshable-stale) candidate: {before:?}",
     );
     assert!(
         before
@@ -335,6 +340,11 @@ fn project_scope_install_corrupt_fix_round_trip() {
     let project = TempDir::new().unwrap();
     let scope = project_scope(project.path());
 
+    // FIX A: the doctor's PROJECT branch is now detect-gated like the installer —
+    // the harness must be detected under `home` for its project row to surface.
+    // Detect claude-code under `home` so `<project>/.claude/skills` is surveyed.
+    detect_claude_code(home.path());
+
     // claude-code's PROJECT skills root is `<project>/.claude/skills`.
     let skills = project.path().join(".claude/skills");
     std::fs::create_dir_all(&skills).unwrap();
@@ -385,4 +395,32 @@ fn project_scope_install_corrupt_fix_round_trip() {
     );
     let after = std::fs::read_to_string(&skill_md).unwrap();
     assert!(after.contains(&meta::find(SKILL).unwrap().revision.to_string()));
+}
+
+/// FIX A (Rust MAJOR, FR-031a): the doctor PROJECT branch is now detect-gated
+/// EXACTLY like the installer. A surveyed project root with NO detected harness
+/// under `home` must yield NO project `missing-but-expected` row — doctor must
+/// never write into an undetected harness's project dir (broader than `meta add`
+/// would). This is the SSOT-divergence the shared enumeration helper closes.
+#[test]
+fn project_scope_undetected_harness_emits_no_project_row() {
+    let (_root, home, paths) = setup();
+    // `home` is empty → claude-code (and every harness) is UNDETECTED, even
+    // though a project root is surveyed.
+    let project = TempDir::new().unwrap();
+
+    let report =
+        doctor::assemble_report(&project_scope(project.path()), &paths, home.path(), false)
+            .unwrap();
+    assert!(
+        !report.meta_skills.iter().any(|r| r.scope == "project"),
+        "an undetected harness must not produce a project drift row: {:?}",
+        report.meta_skills,
+    );
+    // And with nothing detected at all, the projection is entirely empty.
+    assert!(
+        report.meta_skills.is_empty(),
+        "no detected harness ⇒ empty drift projection: {:?}",
+        report.meta_skills,
+    );
 }

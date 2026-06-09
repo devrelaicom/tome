@@ -365,6 +365,70 @@ fn add_symlinked_component_is_88_forward_progress_no_escape() {
     );
 }
 
+/// FIX E (Test MAJOR-1): `meta remove` over a symlinked-component harness must
+/// surface its OWN refuse-symlinked-component guard (exit 88 via the same
+/// `MetaInstallFailed` mapping the install path uses), while still deleting the
+/// CLEAN harness's folder (forward-progress) and never deleting THROUGH the
+/// symlink.
+#[cfg(unix)]
+#[test]
+fn remove_symlinked_component_is_88_forward_progress_no_escape() {
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new().unwrap();
+    let _home = HomeGuard::install(home.path());
+    let _reg = HarnessModulesGuard::install(vec![stub("alpha", true), stub("beta", true)]);
+    // Canonicalise the project root so the symlink guard compares stable
+    // absolute components.
+    let project_dir = TempDir::new().unwrap();
+    let project = project_dir.path().canonicalize().unwrap();
+    let scope = project_scope(&project);
+
+    // Seed beta with a real install so forward-progress has something to delete.
+    meta::run(
+        MetaCommand::Add(add_args(vec!["beta".into()], false, false)),
+        &scope,
+        Mode::Human,
+    )
+    .expect("seed install into beta");
+    let beta_skill = project.join(".beta/skills/convert-marketplace");
+    assert!(beta_skill.is_dir(), "beta seeded");
+
+    // Replace alpha's `.alpha` dot-dir with a symlink to an out-of-tree dir. The
+    // out-of-tree dir holds a SENTINEL (but NOT the skill folder), so the remove
+    // target `<project>/.alpha/skills/convert-marketplace` traverses a symlinked
+    // intermediate component — the guard must refuse BEFORE any delete, and the
+    // sentinel behind the link must survive (no `remove_dir_all` escaped).
+    let outside = TempDir::new().unwrap();
+    let sentinel = outside.path().join("sentinel.txt");
+    std::fs::write(&sentinel, b"do not delete me").unwrap();
+    symlink(outside.path(), project.join(".alpha")).unwrap();
+
+    let err = meta::run(
+        MetaCommand::Remove(MetaRemoveArgs {
+            skill_id: SKILL.into(),
+            harnesses: vec![],
+            global: false,
+        }),
+        &scope,
+        Mode::Human,
+    )
+    .expect_err("symlinked alpha must fail the remove");
+    assert_eq!(err.exit_code(), 88, "symlinked-component remove → 88");
+    assert!(matches!(err, TomeError::MetaInstallFailed { .. }));
+
+    // Forward-progress: beta (clean) WAS deleted despite alpha's failure.
+    assert!(
+        !beta_skill.exists(),
+        "clean beta skill folder must be removed (forward-progress)",
+    );
+    // No escape: nothing behind the `.alpha` symlink was deleted.
+    assert!(
+        sentinel.is_file(),
+        "nothing was deleted through the .alpha symlink",
+    );
+}
+
 // --- spawned-binary JSON wire-shape pins (real claude-code harness) ----------
 
 /// Set up an isolated `$HOME` with `~/.claude/` so the real `claude-code`
