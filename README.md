@@ -11,6 +11,7 @@ You register **catalogs** (Git-hosted collections of plugins), enable the **plug
 - **Harness integration across five harnesses.** Tome writes each harness's rules file and MCP-config entry (Claude Code, Codex CLI, Cursor, Gemini CLI, OpenCode), and propagates per-plugin guardrails, hooks, and agent translations where the harness supports them.
 - **An MCP server.** `tome mcp` runs a stdio Model Context Protocol server backed by the resolved workspace's index. It exposes `search_skills`, `get_skill`, and `get_skill_info` tools, plus your enabled plugins' user-invocable commands as MCP prompts (and, optionally, agent personas). This server shipped in Phase 3 — it is part of the tool today, not a roadmap item.
 - **Authoring & conversion.** `tome {catalog,plugin,skill} create` scaffolds a new, lint-clean artifact; `… convert` brings a Claude Code marketplace/plugin/skill, a Codex project, or a native `SKILL.md` (Cursor / OpenCode / Cline / Agent Skills) into the native Tome format, rewriting harness-isms and honestly flagging anything it can't represent; `… lint` validates an artifact for CI. See [Authoring & conversion](#authoring--conversion).
+- **Meta skills.** `tome meta` installs Tome's own bundled, trusted `SKILL.md` guides — native skills that teach an agent how to use Tome itself — into your detected harnesses, so the guidance persists across sessions. See [Meta skills](#meta-skills).
 
 ## Authoring & conversion
 
@@ -35,6 +36,20 @@ tome plugin lint ./toolkit --strict --autofix    # apply mechanically-safe fixes
 ```
 
 `convert` handles Claude Code marketplaces/plugins/skills, Codex projects, and native `SKILL.md` files from Cursor, OpenCode, Cline, and generic Agent Skills. It rewrites harness-isms (`${CLAUDE_PLUGIN_ROOT}` → `${TOME_PLUGIN_DIR}`, legacy `$1..$9` → 0-based) and reports anything Tome cannot represent — monitors, themes, LSP servers, output-styles, and the like — as warnings (or, under `--strict`, aborts before writing). The source is never modified; remote sources are fetched into a temp clone that is always cleaned up. The `--json` output is machine-readable for scripting (`convert` streams JSONL; `lint` and `create` emit a single object).
+
+## Meta skills
+
+Tome ships its own curated, trusted **meta skills** — native `SKILL.md` guides, embedded in the binary, that teach an agent how to use Tome itself. Installing one drops the guide into a harness's skills directory so it persists for future sessions, in the harnesses that consume native skills (Claude Code, Cursor, Codex, OpenCode — not Gemini).
+
+```sh
+tome meta list                       # bundled meta skills + per-harness install status
+tome meta add convert-marketplace    # install into every detected skill-capable harness (project scope)
+tome meta add convert-marketplace --global          # install under your home instead
+tome meta add convert-marketplace --harness cursor  # target named harness(es) only
+tome meta remove convert-marketplace # remove the installed copy
+```
+
+The first bundled skill, **`convert-marketplace`**, walks an agent through converting a Claude Code marketplace into Tome: it drives `tome catalog convert` / `tome catalog lint` for the mechanical work, applies judgment to the unsupported residue, verifies the result, and **reports back for your confirmation before registering anything**. Installs land atomically and refuse to follow symlinks; `tome doctor` reports drift (a stale or missing install) and `tome doctor --fix` re-installs. From inside a running `tome mcp` server the host harness can install a meta skill via the built-in `meta` MCP tool.
 
 ## Supported platforms
 

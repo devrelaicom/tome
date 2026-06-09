@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Meta skills
+
+- **`tome meta {list,add,remove}`** — install Tome's own bundled, trusted
+  `SKILL.md` guides (native skills that teach an agent how to use Tome itself)
+  into the harnesses that consume native skills (Claude Code, Cursor, Codex,
+  OpenCode — not Gemini). `add` targets every detected skill-capable harness at
+  project scope by default (`--global` installs under your home; `--harness
+  <name>` targets named harnesses); installs land atomically and refuse to
+  follow symlinks. The first bundled skill, **`convert-marketplace`**, guides a
+  Claude Code marketplace → Tome conversion and reports back for confirmation
+  before registering anything.
+- **`tome doctor` meta-skill drift** — a read-only check reports a `stale` or
+  `missing-but-expected` install for every detected harness × scope the
+  installer would target; `tome doctor --fix` re-installs from the embedded
+  copy.
+- **MCP `meta` tool + `add-tome-conversion-skill` prompt** — from a running
+  `tome mcp` server, the host harness (stamped into the server's args at
+  `harness sync`) can install a meta skill; a reserved prompt drives it.
+
 ### Authoring & conversion
 
 - **`tome {catalog,plugin,skill} create <NAME>`** — scaffold a new native Tome
