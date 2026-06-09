@@ -407,9 +407,12 @@ pub enum TomeError {
     // `specs/009-phase-9-meta-skills/data-model.md` §4.
     // -----------------------------------------------------------------------
     /// `meta add`/`meta remove`/the MCP `meta` tool was given a skill id that
-    /// is not in the embedded registry.
-    #[error("no embedded meta skill with id `{id}`")]
-    MetaSkillNotFound { id: String },
+    /// is not in the embedded registry. `available` is the comma-joined list of
+    /// bundled ids (FR-033 — the message enumerates them, like
+    /// `SourceFormatUnrecognized` inlines its `--from` options); the producer
+    /// fills it from `authoring::meta::all()`.
+    #[error("no embedded meta skill with id `{id}`\navailable: {available}")]
+    MetaSkillNotFound { id: String, available: String },
 
     /// Staging/landing/symlink-guard failure while installing a meta skill
     /// (includes an unsafe skill id or a refused symlinked target component).

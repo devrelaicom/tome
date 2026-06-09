@@ -5,6 +5,7 @@ pub mod doctor;
 pub mod harness;
 pub mod lint;
 pub mod mcp;
+pub mod meta;
 pub mod models;
 pub mod plugin;
 pub mod query;

@@ -1240,3 +1240,52 @@ fn guardrails_write_through_symlink_exits_46() {
         "the symlink target must NOT be overwritten"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 9 / US1 — `tome meta` exit codes (87 unknown skill, 89 no harness).
+//
+// 88 (install/unsafe-path) is covered in-process in `tests/meta_cli.rs`
+// (`add_symlinked_component_is_88_forward_progress_no_escape`) — reproducing it
+// via the spawned binary needs the real harness AND a planted symlink, which the
+// synthetic-registry in-process test exercises far more directly.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn meta_add_unknown_skill_exits_87() {
+    // The skill-id lookup fails closed BEFORE target resolution, so an unknown
+    // id is 87 regardless of which harnesses are present.
+    let env = ToolEnv::new();
+    let cwd = TempDir::new().expect("isolated cwd");
+    let out = env
+        .cmd()
+        .current_dir(cwd.path())
+        .args(["meta", "add", "no-such-skill"])
+        .output()
+        .expect("spawn tome meta add");
+    assert_eq!(
+        out.status.code(),
+        Some(87),
+        "unknown skill id → 87; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn meta_add_no_harness_detected_exits_89() {
+    // Isolated $HOME with no harness dotdirs and a marker-less CWD → the
+    // all-detected default finds nothing → 89.
+    let env = ToolEnv::new();
+    let cwd = TempDir::new().expect("isolated cwd");
+    let out = env
+        .cmd()
+        .current_dir(cwd.path())
+        .args(["meta", "add", "convert-marketplace"])
+        .output()
+        .expect("spawn tome meta add");
+    assert_eq!(
+        out.status.code(),
+        Some(89),
+        "no detected harness → 89; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
