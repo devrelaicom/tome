@@ -410,6 +410,111 @@ mod tests {
         assert!(find("does-not-exist").is_none());
     }
 
+    /// US2 / SC-002: the `convert-marketplace` skill body encodes the five-step
+    /// workflow IN ORDER and carries the **unconditional** report-and-confirm
+    /// gate. A structural pin so an edit cannot silently drop the safety gate or
+    /// re-order the flow.
+    #[test]
+    fn convert_marketplace_encodes_ordered_workflow() {
+        let skill = find("convert-marketplace").expect("embedded");
+        let body = std::str::from_utf8(
+            skill
+                .files
+                .iter()
+                .find(|f| f.rel_path == "SKILL.md")
+                .unwrap()
+                .bytes,
+        )
+        .unwrap();
+
+        // The ordered workflow markers appear, in order.
+        let ordered = [
+            "## Step 1 — Inventory",
+            "## Step 2 — Mechanical conversion",
+            "## Step 3 — Judgment pass",
+            "## Step 4 — Verify",
+            "## Step 5 — Report, then STOP",
+            "## Step 6 — Confirmed registration",
+        ];
+        let mut last = 0usize;
+        for marker in ordered {
+            let at = body
+                .find(marker)
+                .unwrap_or_else(|| panic!("missing workflow step `{marker}`"));
+            assert!(at >= last, "step out of order: `{marker}`");
+            last = at;
+        }
+
+        // It DRIVES the Phase-8 CLI, not reimplements it (FR-024). Pin the
+        // CORRECT verbs (`catalog convert` / `catalog lint` — `lint` is a
+        // subcommand, not a top-level verb) so a regression to a non-existent
+        // command can't ship.
+        assert!(body.contains("tome catalog convert"));
+        assert!(
+            body.contains("tome catalog lint"),
+            "Step 4 uses the real `tome catalog lint` (not the non-existent `tome lint`)"
+        );
+
+        // The report-and-confirm gate is UNCONDITIONAL (SC-002): it fires even
+        // with zero unsupported components, registers nothing until confirmed.
+        assert!(
+            body.contains("**unconditional**"),
+            "gate marked unconditional"
+        );
+        assert!(
+            body.to_lowercase().contains("zero unsupported components"),
+            "gate explicitly fires on a clean conversion"
+        );
+        assert!(
+            body.contains("Register nothing yet") || body.contains("register nothing"),
+            "registers nothing before confirmation"
+        );
+        // T-5: pin the conjoined wait-for-confirmation phrase + the fail-closed
+        // decline branch, not two scattered tokens.
+        assert!(
+            body.contains("wait for an explicit answer"),
+            "waits for an explicit confirmation answer"
+        );
+        assert!(
+            body.to_lowercase().contains("nothing is registered")
+                && body.to_lowercase().contains("do not proceed"),
+            "decline branch is fail-closed (nothing registered, do not proceed)"
+        );
+
+        // T-3 / SC-002 security boundary: every workspace-MUTATING command lives
+        // AFTER the report-and-confirm gate (Step 6) — none leaks into Steps 1–5.
+        let step6 = body.find("## Step 6").expect("Step 6 present");
+        for cmd in [
+            "tome catalog add",
+            "tome plugin enable",
+            "tome workspace init",
+            "tome workspace use",
+        ] {
+            if let Some(at) = body.find(cmd) {
+                assert!(
+                    at > step6,
+                    "registration command `{cmd}` appears before the confirm gate (offset {at} < Step 6 {step6})"
+                );
+            }
+        }
+
+        // T-2: the rubric the body links to must actually ship (no dangling link).
+        assert!(
+            body.contains("references/unsupported-component-rubric.md"),
+            "Step 3 links the rubric"
+        );
+        assert!(
+            skill
+                .files
+                .iter()
+                .any(|f| f.rel_path == "references/unsupported-component-rubric.md"),
+            "the linked rubric file is embedded (no dangling link)"
+        );
+
+        // This skill declares its reserved MCP prompt (consumed by US3).
+        assert_eq!(skill.prompt_name, Some("add-tome-conversion-skill"));
+    }
+
     /// FR-005 / R-12: every embedded skill is lint-clean by construction —
     /// parsed to native IR and run through the full rule registry; fail on any
     /// error OR strict warning. This is the CI gate.
@@ -417,6 +522,26 @@ mod tests {
     fn every_embedded_skill_is_lint_clean() {
         let tmp = tempfile::tempdir().unwrap();
         for skill in all() {
+            // T-1: `parse_artifact` lints only the root `SKILL.md` (a bare-skill
+            // folder has no `skills/` subtree), so `references/` files are NOT
+            // run through the rule registry. Guard the shipped supporting files
+            // directly: every embedded file must be valid UTF-8 and under the
+            // body cap, so the install-time copy + any harness re-read is safe.
+            for f in skill.files {
+                assert!(
+                    std::str::from_utf8(f.bytes).is_ok(),
+                    "embedded file `{}` in `{}` is not valid UTF-8",
+                    f.rel_path,
+                    skill.id
+                );
+                assert!(
+                    f.bytes.len() as u64 <= ENTRY_BODY_MAX,
+                    "embedded file `{}` in `{}` exceeds the {ENTRY_BODY_MAX}-byte body cap",
+                    f.rel_path,
+                    skill.id
+                );
+            }
+
             let root = materialise(skill, tmp.path());
             let artifact = parse_artifact(&root)
                 .unwrap_or_else(|e| panic!("embedded skill `{}` failed to parse: {e}", skill.id));
