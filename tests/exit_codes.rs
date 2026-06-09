@@ -447,6 +447,29 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
             86,
             "validation_strict_warnings",
         ),
+        // 87–89 — Phase 9 meta skills. A dedicated install code (88) over `Io`
+        // (7), mirroring the agent sink precedent. See
+        // specs/009-phase-9-meta-skills/data-model.md §4.
+        (
+            TomeError::MetaSkillNotFound {
+                id: "convert-marketplace".into(),
+            },
+            87,
+            "meta_skill_not_found",
+        ),
+        (
+            TomeError::MetaInstallFailed {
+                skill_id: "convert-marketplace".into(),
+                dir: PathBuf::from("/proj/.claude/skills"),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "refusing to write through symlinked path component",
+                ),
+            },
+            88,
+            "meta_install_failed",
+        ),
+        (TomeError::NoHarnessDetected, 89, "no_harness_detected"),
     ]
 }
 
@@ -550,6 +573,9 @@ fn exhaustive_match_compile_check() {
             TomeError::ConversionUnsupportedStrict { .. } => 84,
             TomeError::ValidationFoundErrors { .. } => 85,
             TomeError::ValidationStrictWarnings { .. } => 86,
+            TomeError::MetaSkillNotFound { .. } => 87,
+            TomeError::MetaInstallFailed { .. } => 88,
+            TomeError::NoHarnessDetected => 89,
         }
     }
 }

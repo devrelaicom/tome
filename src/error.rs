@@ -397,6 +397,39 @@ pub enum TomeError {
     ValidationStrictWarnings { warnings: usize },
 
     // -----------------------------------------------------------------------
+    // Phase 9 — meta skills (codes 87–89).
+    //
+    // Three NEW failure classes (principle II — new classes get new codes,
+    // none repurposed), continuing the fresh decade Phase 8 opened at 80.
+    // `install` failures get a dedicated code (88) rather than collapsing to
+    // `Io` (7): the agent sink set the precedent of a sink-owned exit code
+    // over `Io` for native-file emit (P6/P8, CON-1). See
+    // `specs/009-phase-9-meta-skills/data-model.md` §4.
+    // -----------------------------------------------------------------------
+    /// `meta add`/`meta remove`/the MCP `meta` tool was given a skill id that
+    /// is not in the embedded registry.
+    #[error("no embedded meta skill with id `{id}`")]
+    MetaSkillNotFound { id: String },
+
+    /// Staging/landing/symlink-guard failure while installing a meta skill
+    /// (includes an unsafe skill id or a refused symlinked target component).
+    /// No write lands outside `dir`.
+    #[error("failed to install meta skill `{skill_id}` into {}: {source}", dir.display())]
+    MetaInstallFailed {
+        skill_id: String,
+        dir: PathBuf,
+        source: std::io::Error,
+    },
+
+    /// `meta add`/`meta remove` ran the all-detected default but found no
+    /// supported harness installed and no `--harness` was given; also the MCP
+    /// fail-closed when the host harness is unknown/unstamped.
+    #[error(
+        "no supported harness detected\nhint: install a supported harness (claude-code, cursor, codex, opencode) or pass --harness <name>"
+    )]
+    NoHarnessDetected,
+
+    // -----------------------------------------------------------------------
     // Internal — last-resort variant for panics caught at top level, etc.
     // No named failure above may collapse into this — that would defeat the
     // closed-set guarantee.
@@ -524,6 +557,11 @@ impl TomeError {
             Self::ConversionUnsupportedStrict { .. } => 84,
             Self::ValidationFoundErrors { .. } => 85,
             Self::ValidationStrictWarnings { .. } => 86,
+            // 87–89 — Phase 9 meta skills. A dedicated install code (88) over
+            // `Io` (7), mirroring the agent sink's dedicated-code precedent.
+            Self::MetaSkillNotFound { .. } => 87,
+            Self::MetaInstallFailed { .. } => 88,
+            Self::NoHarnessDetected => 89,
         }
     }
 
@@ -597,6 +635,10 @@ impl TomeError {
             Self::ConversionUnsupportedStrict { .. } => "conversion_unsupported_strict",
             Self::ValidationFoundErrors { .. } => "validation_found_errors",
             Self::ValidationStrictWarnings { .. } => "validation_strict_warnings",
+            // Phase 9 — meta skills
+            Self::MetaSkillNotFound { .. } => "meta_skill_not_found",
+            Self::MetaInstallFailed { .. } => "meta_install_failed",
+            Self::NoHarnessDetected => "no_harness_detected",
         }
     }
 }
