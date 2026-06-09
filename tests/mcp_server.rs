@@ -60,12 +60,11 @@ fn build_state(env: &ToolEnv) -> Arc<McpState> {
 }
 
 #[test]
-fn router_advertises_exactly_three_tools() {
-    // Phase 5 / US4.a: `get_skill_info` joins `search_skills` + `get_skill`
-    // as the middle-tier metadata + resource-enumeration surface. The
-    // ToolRouter's `list_all()` returns tools in registration order; the
-    // assertion sorts both sides to keep the check insensitive to that
-    // detail.
+fn router_advertises_exactly_four_tools() {
+    // Phase 5 / US4.a: `get_skill_info` joins `search_skills` + `get_skill`.
+    // Phase 9 / US3: the built-in `meta` tool joins them. The ToolRouter's
+    // `list_all()` returns tools in registration order; the assertion sorts both
+    // sides to keep the check insensitive to that detail.
     let mut names: Vec<String> = Server::tool_router()
         .list_all()
         .into_iter()
@@ -77,9 +76,10 @@ fn router_advertises_exactly_three_tools() {
         vec![
             "get_skill".to_string(),
             "get_skill_info".to_string(),
+            "meta".to_string(),
             "search_skills".to_string(),
         ],
-        "expected exactly the three contract-required tools, got {:?}",
+        "expected exactly the four contract-required tools, got {:?}",
         names,
     );
 }

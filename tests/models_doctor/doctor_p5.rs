@@ -91,11 +91,27 @@ fn prompts_surface_enumerates_with_collisions() {
         "in a known workspace (source=Flag) prompts must be populated, got None",
     );
     let prompts = report.prompts.as_ref().unwrap();
-    // Zero user-invocable entries in the sample catalog → empty list.
+    // Phase 9 / US3: the always-on reserved `add-tome-conversion-skill`
+    // built-in is enumerated by the prompts surface even with zero
+    // user-invocable plugin entries. Assert it is present, then filter it
+    // out before checking that the sample catalog contributed no prompts.
     assert!(
-        prompts.prompts.is_empty(),
-        "expected zero prompts, got {:?}",
-        prompts.prompts
+        prompts
+            .prompts
+            .iter()
+            .any(|p| p.name == "add-tome-conversion-skill"),
+        "reserved built-in must be enumerated by the prompts surface, got {:?}",
+        prompts.prompts,
+    );
+    let plugin_prompts: Vec<_> = prompts
+        .prompts
+        .iter()
+        .filter(|p| p.name != "add-tome-conversion-skill")
+        .collect();
+    // Zero user-invocable entries in the sample catalog → no plugin prompts.
+    assert!(
+        plugin_prompts.is_empty(),
+        "expected zero plugin-derived prompts, got {plugin_prompts:?}",
     );
     assert!(prompts.collisions.is_empty());
 }
