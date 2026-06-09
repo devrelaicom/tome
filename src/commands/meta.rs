@@ -43,7 +43,7 @@ pub fn run(cmd: MetaCommand, scope: &ResolvedScope, mode: Mode) -> Result<(), To
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scope {
+pub(crate) enum Scope {
     Project,
     Global,
 }
@@ -72,6 +72,56 @@ fn native_skill_harness_names() -> Vec<String> {
             .filter(|m| m.supports_native_skills())
             .map(|m| m.name().to_string())
             .collect()
+    })
+}
+
+/// Enumerate the `(harness_name, skills-root dir)` install targets for a SINGLE
+/// scope — the **one** SSOT every (harness × scope × dir) enumeration routes
+/// through (the installer `resolve_targets`, the `list` projection, and the
+/// doctor `meta_drift::candidates`). Promoted here at its second consumer rather
+/// than letting each surface hand-roll the gating + dir-resolution and drift.
+///
+/// Gating matches the installer exactly:
+/// - `explicit` non-empty → select the named harnesses (validated upstream as
+///   skill-capable; an unknown name simply matches nothing here);
+/// - `explicit` empty → select every harness the installer would itself detect
+///   via `m.detect(home)` (existence-only probe, FR-008a).
+///
+/// A harness that does not consume native skills (`!supports_native_skills()`)
+/// is always skipped. The skills root is `m.skill_dir(project_root)` for
+/// [`Scope::Project`] (requires a `project_root`) or `m.skill_dir_global(home)`
+/// for [`Scope::Global`]; a harness with no resolvable dir for the scope is
+/// dropped. Returned in effective-registry iteration order.
+pub(crate) fn skill_targets_for_scope(
+    home: &Path,
+    scope: Scope,
+    project_root: Option<&Path>,
+    explicit: &[String],
+) -> Vec<(&'static str, PathBuf)> {
+    let by_name = !explicit.is_empty();
+    with_effective_modules(|mods| {
+        let mut out = Vec::new();
+        for m in mods {
+            if !m.supports_native_skills() {
+                continue;
+            }
+            let selected = if by_name {
+                explicit.iter().any(|h| h == m.name())
+            } else {
+                m.detect(home)
+            };
+            if !selected {
+                continue;
+            }
+            let dir = match scope {
+                Scope::Project => project_root.and_then(|p| m.skill_dir(p)),
+                Scope::Global => m.skill_dir_global(home),
+            };
+            if let Some(dir) = dir {
+                out.push((m.name(), dir));
+            }
+        }
+        out
     })
 }
 
@@ -123,34 +173,17 @@ fn resolve_targets(
         }
     }
 
-    let targets = with_effective_modules(|mods| {
-        let mut out = Vec::new();
-        for m in mods {
-            if !m.supports_native_skills() {
-                continue;
-            }
-            let selected = if explicit {
-                harnesses.iter().any(|h| h == m.name())
-            } else {
-                m.detect(&home)
-            };
-            if !selected {
-                continue;
-            }
-            let dir = match install_scope {
-                Scope::Project => project_root.as_deref().and_then(|p| m.skill_dir(p)),
-                Scope::Global => m.skill_dir_global(&home),
-            };
-            if let Some(dir) = dir {
-                out.push(Target {
-                    harness: m.name().to_string(),
-                    scope: install_scope,
-                    dir,
-                });
-            }
-        }
-        out
-    });
+    // Build the targets from the SSOT enumeration helper (same gating the
+    // doctor `meta_drift::candidates` now uses).
+    let targets: Vec<Target> =
+        skill_targets_for_scope(&home, install_scope, project_root.as_deref(), harnesses)
+            .into_iter()
+            .map(|(harness, dir)| Target {
+                harness: harness.to_string(),
+                scope: install_scope,
+                dir,
+            })
+            .collect();
 
     if !explicit && targets.is_empty() {
         return Err(TomeError::NoHarnessDetected);

@@ -205,12 +205,31 @@ pub enum DriftState {
 /// Read is **bounded + UTF-8-fail-closed** (FR-031b): an over-cap, non-UTF-8,
 /// or marker-less file is treated as [`DriftState::Stale`] (refreshable), never
 /// a halt. An absent `SKILL.md` is [`DriftState::MissingButExpected`].
+///
+/// Read/write parity (P9 LOW-1, the P8 "route EVERY untrusted read through the
+/// one guard" pattern): the read is gated behind the SAME
+/// [`refuse_symlinked_component`] guard the write path runs. A symlinked
+/// component in `<dir>/<id>` is classified [`DriftState::Stale`] (refreshable —
+/// the subsequent install re-runs the full write guard and refuses/lands
+/// safely) rather than read through the link, so this probe can never disclose
+/// out-of-tree content. The honest posture mirrors the lint parser: a refusal
+/// degrades to a benign result, never a panic.
 pub fn drift_probe(skill_id: &str, dir: &Path) -> DriftState {
     let Some(skill) = find(skill_id) else {
         // Not an embedded skill — nothing to expect here.
         return DriftState::MissingButExpected;
     };
     let skill_md = dir.join(skill.id).join("SKILL.md");
+
+    // Read-side symlink guard: refuse to read THROUGH a symlinked component of
+    // the owned `<dir>/<id>` folder (the write path's `refuse_symlinked_component`
+    // analogue). A refusal degrades to refreshable `Stale` — never a read.
+    if refuse_symlinked_component(&skill_md).is_err() {
+        return DriftState::Stale {
+            installed_rev: None,
+            embedded_rev: skill.revision.to_owned(),
+        };
+    }
 
     match bounded_read_to_string(&skill_md, ENTRY_BODY_MAX) {
         Ok(content) => match extract_revision(&content) {
@@ -586,6 +605,41 @@ mod tests {
         assert!(skill_md.is_file());
     }
 
+    /// FIX H (Test Minor #4): the on-disk SKILL.md that `install_skill` LANDS —
+    /// after the `stamp_revision` serde_yaml frontmatter round-trip — still
+    /// parses as a valid native skill and stays lint-clean. Guards against the
+    /// stamp corrupting the frontmatter in a way the embedded-source lint gate
+    /// (`every_embedded_skill_is_lint_clean`, which lints the UNSTAMPED bytes)
+    /// would never see. Reuses the same parse + rule registry that gate uses.
+    #[test]
+    fn installed_stamped_skill_md_stays_lint_clean() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".claude/skills");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let at = install_skill("convert-marketplace", &root).expect("install");
+        // Lint the LANDED skill folder (the stamped on-disk bytes), not the
+        // embedded source — through the same parse + `rules::all()` as the CI gate.
+        let landed = at.skill_dir;
+        let artifact = parse_artifact(&landed)
+            .unwrap_or_else(|e| panic!("landed stamped SKILL.md failed to parse: {e}"));
+        let report = run(&artifact, &rules::all());
+        assert_eq!(
+            report.verdict(true),
+            Verdict::Clean,
+            "the stamped on-disk skill is not lint-clean: {} error(s), {} warning(s): {:?}",
+            report.errors,
+            report.warnings,
+            report.diagnostics,
+        );
+        // And the stamp the lint just saw is the embedded revision.
+        let on_disk = std::fs::read_to_string(landed.join("SKILL.md")).unwrap();
+        assert_eq!(
+            extract_revision(&on_disk).as_deref(),
+            Some(at.revision.as_str())
+        );
+    }
+
     #[test]
     fn install_unknown_skill_is_not_found() {
         let tmp = tempfile::tempdir().unwrap();
@@ -675,6 +729,44 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// FIX C (P9 LOW-1): a symlinked component on the way to `<dir>/<id>/SKILL.md`
+    /// is NOT read through — `drift_probe` classifies it refreshable `Stale`
+    /// (read/write containment parity), never disclosing the link target.
+    #[cfg(unix)]
+    #[test]
+    fn drift_probe_refuses_symlinked_component_as_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let skills = base.join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+
+        // Plant a REAL skill outside the skills root, with a DIFFERENT revision
+        // stamp, then point `<skills>/<id>` at it via a symlink. If the probe
+        // followed the link it would read that file (and could disclose its
+        // content / a non-`None` installed_rev); the guard must refuse first.
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            outside.join("SKILL.md"),
+            "---\nname: convert-marketplace\ndescription: d\nmetadata:\n  tome_skill_revision: deadbeefdeadbeef\n---\nbody\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&outside, skills.join("convert-marketplace")).unwrap();
+
+        // The link IS resolvable at the OS level …
+        assert!(skills.join("convert-marketplace/SKILL.md").exists());
+        // … but the probe refuses to read through the symlinked component and
+        // reports refreshable Stale with NO installed_rev (it never read the
+        // out-of-tree stamp).
+        assert_eq!(
+            drift_probe("convert-marketplace", &skills),
+            DriftState::Stale {
+                installed_rev: None,
+                embedded_rev: find("convert-marketplace").unwrap().revision.to_owned(),
+            },
+        );
     }
 
     // --- symlink safety (88, no escape) -----------------------------------

@@ -4,7 +4,6 @@
 //! exit-code layer.
 
 use std::io::Write;
-use std::path::PathBuf;
 
 use crate::cli::DoctorArgs;
 use crate::doctor::{self, DoctorClassification, DoctorReport};
@@ -27,11 +26,11 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     }
 
     let paths = Paths::resolve()?;
-    let home = home_dir().ok_or_else(|| {
-        TomeError::Io(std::io::Error::other(
-            "HOME is not set — cannot probe for harness directories",
-        ))
-    })?;
+    // Route HOME through the validated `home_root()` (rejects empty/non-absolute,
+    // exit 2) — the SAME resolver every meta write path uses, so doctor's
+    // harness-detection home and the installer's never diverge. `home_root()`
+    // already errors when HOME is unset, replacing the bespoke check here.
+    let home = crate::commands::harness::home_root()?;
 
     // Phase 8 cutover (US1 closeout MAJOR-1): migrate any legacy model
     // `manifest.json` → `manifest.toml` BEFORE classification, so a pre-cutover
@@ -122,10 +121,6 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
         });
     }
     std::process::exit(1);
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 fn emit(report: &DoctorReport, mode: Mode) -> Result<(), TomeError> {

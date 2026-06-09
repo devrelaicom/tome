@@ -80,7 +80,18 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // handled deliberately rather than silently mis-routed.
     let Action::Install = input.action;
 
-    // (1) Host harness must be known — fail closed (FR-029), never guess.
+    // (1) Unknown skill → 87 (mirror), before any I/O. P9 contract MINOR:
+    // check skill existence FIRST so the CLI↔MCP precedence matches — the CLI
+    // rejects an unknown skill (87) before resolving harness targets, so when
+    // BOTH an unknown skill AND no host hold, both surfaces return 87.
+    if meta_skill::find(&input.skill_id).is_none() {
+        return Err(McpError::invalid_params(
+            format!("no embedded meta skill with id `{}`", input.skill_id),
+            Some(json!({ "code": "meta_skill_not_found", "skill_id": input.skill_id })),
+        ));
+    }
+
+    // (2) Host harness must be known — fail closed (FR-029), never guess.
     let Some(host) = state.host_harness.clone() else {
         return Err(McpError::invalid_params(
             "this Tome MCP server has no host-harness identity; re-run `tome harness sync` to \
@@ -99,14 +110,6 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         return Err(McpError::invalid_params(
             format!("host harness `{host}` does not consume native skills"),
             Some(json!({ "code": "no_harness_detected", "harness": host })),
-        ));
-    }
-
-    // (2) Unknown skill → 87 (mirror), before any I/O.
-    if meta_skill::find(&input.skill_id).is_none() {
-        return Err(McpError::invalid_params(
-            format!("no embedded meta skill with id `{}`", input.skill_id),
-            Some(json!({ "code": "meta_skill_not_found", "skill_id": input.skill_id })),
         ));
     }
 

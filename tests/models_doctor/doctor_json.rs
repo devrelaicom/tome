@@ -289,6 +289,51 @@ fn doctor_json_overall_unhealthy_when_models_missing() {
     assert_eq!(v["embedder"]["state"], "missing");
 }
 
+/// FIX G (Test Minor #3): a SPAWNED `tome --json doctor` under a HOME with
+/// `~/.claude` present (so claude-code is detected) but NO meta-skill install
+/// emits a POPULATED `meta_skills` array — exactly one object carrying all five
+/// documented keys and `state:"missing-but-expected"`. The pre-existing
+/// `doctor_json` spawned tests all run under an empty home (no detected
+/// harness), so the populated path was untested end-to-end through the binary.
+#[test]
+fn doctor_json_meta_skills_populated_when_harness_detected() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_all_registry_models(&paths);
+    // Detect claude-code (existence-only) under the isolated HOME; install nothing.
+    std::fs::create_dir_all(env.home_path().join(".claude")).unwrap();
+
+    let out = env.cmd().args(["--json", "doctor"]).output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).expect("doctor --json parses");
+
+    let rows = v["meta_skills"]
+        .as_array()
+        .expect("meta_skills present + an array when a harness is detected");
+    let cc = rows
+        .iter()
+        .find(|r| r["harness"] == "claude-code" && r["scope"] == "global")
+        .expect("claude-code/global missing-but-expected row present");
+
+    // Exactly the five documented keys.
+    let mut keys: Vec<&str> = cc.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["dir", "harness", "scope", "skill_id", "state"],
+        "the meta_skills row carries exactly the five keys: {cc}",
+    );
+    assert_eq!(cc["skill_id"], "convert-marketplace");
+    assert_eq!(cc["harness"], "claude-code");
+    assert_eq!(cc["scope"], "global");
+    assert_eq!(cc["state"], "missing-but-expected");
+    assert!(
+        cc["dir"].as_str().unwrap().ends_with(".claude/skills"),
+        "dir is the claude-code/global skills root: {}",
+        cc["dir"],
+    );
+}
+
 // Silence unused-import warning when no harness check uses TempDir.
 #[allow(dead_code)]
 fn _silence(_: TempDir) {}

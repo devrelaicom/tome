@@ -39,9 +39,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::authoring::meta::{self, DriftState};
+use crate::commands::meta::{Scope, skill_targets_for_scope};
 use crate::doctor::report::MetaSkillDrift;
 use crate::error::TomeError;
-use crate::harness::with_effective_modules;
 use crate::workspace::ResolvedScope;
 
 /// Wire string for the project scope.
@@ -60,61 +60,64 @@ struct Candidate {
 
 /// Re-derive the installer's candidate set for the active scope (FR-031a).
 ///
-/// The candidate set is derived **the exact way the installer targets** — this
-/// is the SSOT with [`crate::commands::meta`]'s `resolve_targets`:
+/// The candidate set is derived through the **one** shared enumeration helper
+/// [`skill_targets_for_scope`] — the true SSOT with the installer's
+/// `resolve_targets`, so the two surfaces can never diverge on which
+/// (harness × scope × dir) locations are in play. The helper:
 ///
-/// - **All-harness enumeration** mirrors the installer's multi-harness
-///   targeting: it iterates the effective registry via [`with_effective_modules`]
-///   (so a test-injected `HARNESS_MODULES_OVERRIDE` is honoured) and skips any
-///   harness that does not consume native skills.
-/// - **Detection** is the harness's OWN `detect(&home)` — the same mechanism
-///   `resolve_targets` uses for the all-detected default — NOT a separate
-///   existence probe, so the two surfaces can never diverge.
-/// - **Both scopes are surveyed**: the installer can target project-default OR
-///   global-via-`--global` across invocations, so both are legitimate candidate
-///   locations. `meta_skills` is verdict-neutral (it never feeds `overall`), so
-///   surveying both never trips `degraded`.
+/// - iterates the effective registry (so a test-injected
+///   `HARNESS_MODULES_OVERRIDE` is honoured) and skips any harness that does not
+///   consume native skills;
+/// - gates the all-default case on the harness's OWN `detect(&home)` — the same
+///   mechanism `resolve_targets` uses for the all-detected default;
+/// - resolves the per-scope skills dir (`skill_dir` for project /
+///   `skill_dir_global` for global).
 ///
-/// PROJECT candidates are produced only when `scope.project_root` is `Some`
-/// (doctor must not invent a project root — it surveys the one it was given, if
-/// any). GLOBAL candidates are gated on the harness's `detect(&home)`.
+/// Doctor passes **no explicit harness list** (it always surveys the
+/// all-detected set) and surveys both scopes the installer can target across
+/// invocations:
+///
+/// - **GLOBAL** candidates are gated on `detect(&home)` (the all-default path).
+/// - **PROJECT** candidates are produced only when `scope.project_root` is
+///   `Some` (doctor never invents a project root — it surveys the one it was
+///   given) AND the harness is detected. The project root is **necessary but
+///   not sufficient**: the harness must ALSO be detected under `home`, matching
+///   the installer exactly (FR-031a). Before this routed through the shared
+///   helper, the project branch gated on the project root alone — so
+///   `doctor --fix` could write into an UNDETECTED harness's project dir, more
+///   broadly than `meta add` ever would. The shared helper closes that.
+///
+/// `meta_skills` is verdict-neutral (it never feeds `overall`), so surveying
+/// both scopes never trips `degraded`.
 fn candidates(home: &Path, scope: &ResolvedScope) -> Vec<Candidate> {
+    // Doctor surveys the all-detected set: no explicit harness selection.
+    const NO_EXPLICIT: &[String] = &[];
+
     let mut out = Vec::new();
-
     for skill in meta::all() {
-        with_effective_modules(|mods| {
-            for m in mods {
-                if !m.supports_native_skills() {
-                    continue;
-                }
-                let harness = m.name();
-
-                // PROJECT scope: a surveyed project root IS the detection signal.
-                if let Some(project_root) = scope.project_root.as_deref()
-                    && let Some(dir) = m.skill_dir(project_root)
-                {
-                    out.push(Candidate {
-                        skill_id: skill.id,
-                        harness,
-                        scope: SCOPE_PROJECT,
-                        dir,
-                    });
-                }
-
-                // GLOBAL scope: emit only for a harness the installer would
-                // itself detect (its own `detect(&home)`, FR-031a).
-                if m.detect(home)
-                    && let Some(dir) = m.skill_dir_global(home)
-                {
-                    out.push(Candidate {
-                        skill_id: skill.id,
-                        harness,
-                        scope: SCOPE_GLOBAL,
-                        dir,
-                    });
-                }
+        // GLOBAL: detect-gated under `home`.
+        for (harness, dir) in skill_targets_for_scope(home, Scope::Global, None, NO_EXPLICIT) {
+            out.push(Candidate {
+                skill_id: skill.id,
+                harness,
+                scope: SCOPE_GLOBAL,
+                dir,
+            });
+        }
+        // PROJECT: only when a project root was surveyed, AND still detect-gated
+        // under `home` (the project root is necessary, not sufficient).
+        if let Some(project_root) = scope.project_root.as_deref() {
+            for (harness, dir) in
+                skill_targets_for_scope(home, Scope::Project, Some(project_root), NO_EXPLICIT)
+            {
+                out.push(Candidate {
+                    skill_id: skill.id,
+                    harness,
+                    scope: SCOPE_PROJECT,
+                    dir,
+                });
             }
-        });
+        }
     }
 
     out
@@ -298,19 +301,39 @@ mod tests {
     }
 
     #[test]
-    fn project_scope_emits_per_skill_capable_harness() {
+    fn project_scope_emits_per_detected_skill_capable_harness() {
         let home = TempDir::new().unwrap();
         let project = TempDir::new().unwrap();
-        // No on-disk install → every project candidate is missing-but-expected.
+        // FIX A: the project branch is now detect-gated like the installer — the
+        // project root is necessary but NOT sufficient; the harness must ALSO be
+        // detected under `home`. Detect claude-code so its project row appears.
+        std::fs::create_dir_all(home.path().join(".claude")).unwrap();
+
+        // No on-disk install → every detected project candidate is
+        // missing-but-expected.
         let rows = check(home.path(), &project_scope(project.path()));
-        assert!(rows.iter().all(|r| r.scope == "project"));
+        let project_rows: Vec<_> = rows.iter().filter(|r| r.scope == "project").collect();
         assert!(
-            rows.iter().any(|r| r.harness == "claude-code"),
-            "claude-code (skill-capable) must appear in project rows: {rows:?}",
+            project_rows.iter().any(|r| r.harness == "claude-code"),
+            "detected claude-code (skill-capable) must appear in project rows: {rows:?}",
         );
         assert!(
             !rows.iter().any(|r| r.harness == "gemini"),
             "gemini does not support native skills ⇒ no rows",
+        );
+    }
+
+    #[test]
+    fn project_scope_undetected_harness_emits_no_project_row() {
+        // FIX A: a surveyed project root with NO detected harness under `home`
+        // produces NO rows — doctor must not write into an undetected harness's
+        // project dir (the divergence FR-031a closes).
+        let home = TempDir::new().unwrap();
+        let project = TempDir::new().unwrap();
+        let rows = check(home.path(), &project_scope(project.path()));
+        assert!(
+            rows.is_empty(),
+            "an undetected harness yields no project candidates: {rows:?}",
         );
     }
 

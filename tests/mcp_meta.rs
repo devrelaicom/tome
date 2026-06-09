@@ -237,6 +237,41 @@ fn meta_tool_symlinked_target_is_meta_install_failed() {
     );
 }
 
+/// FIX F (Test Minor #2): the `tome mcp --harness <name>` arg → `McpState.
+/// host_harness` hop. Two halves cover the full chain without a server
+/// handshake:
+///   (a) the CLI parses `--harness cursor` into `McpArgs.harness`;
+///   (b) an `McpState` constructed with that value (exactly as `mcp::run`
+///       builds it) carries it in `state.host_harness`, which the `meta` tool
+///       reads.
+#[test]
+fn mcp_harness_arg_threads_into_state_host_harness() {
+    use clap::Parser;
+    use tome::cli::{Cli, Command};
+
+    // (a) CLI → arg.
+    let cli = Cli::try_parse_from(["tome", "mcp", "--harness", "cursor"]).expect("parse");
+    let Command::Mcp(args) = cli.command else {
+        panic!("expected the mcp subcommand");
+    };
+    assert_eq!(
+        args.harness.as_deref(),
+        Some("cursor"),
+        "`--harness cursor` lands in McpArgs.harness",
+    );
+
+    // (b) arg → McpState.host_harness (the value `mcp::run` would forward).
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    let _home = HomeGuard::install(env.home_path());
+    let harness = McpHarness::with_host(&paths, PromptRegistry::default(), args.harness, None);
+    assert_eq!(
+        harness.state().host_harness.as_deref(),
+        Some("cursor"),
+        "the parsed --harness value is the one McpState exposes to the meta tool",
+    );
+}
+
 // --- the reserved prompt ----------------------------------------------------
 
 #[test]
