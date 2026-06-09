@@ -26,6 +26,7 @@ pub mod emit;
 pub mod import;
 pub mod ir;
 pub mod lint;
+pub mod meta;
 pub mod rewrite;
 pub mod scaffold;
 pub mod untrusted;

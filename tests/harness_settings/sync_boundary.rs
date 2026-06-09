@@ -80,3 +80,21 @@ fn sync_boundary_outside_mcp() {
         violations.join("\n"),
     );
 }
+
+/// Phase 9 — the shared meta-skill compute (`authoring::meta`) is the install
+/// path behind BOTH the CLI and the MCP tool. The MCP side calls it under
+/// `spawn_blocking`, so the module itself MUST stay sync. The generic walker
+/// above already covers it; this names it explicitly so the invariant is
+/// self-documenting and a future async leak in this exact file is caught with a
+/// pointed message.
+#[test]
+fn authoring_meta_is_sync() {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/authoring/meta.rs");
+    let contents = fs::read_to_string(&file).expect("read src/authoring/meta.rs");
+    for needle in FORBIDDEN {
+        assert!(
+            !contents.contains(needle),
+            "src/authoring/meta.rs must stay sync but contains {needle:?}"
+        );
+    }
+}

@@ -135,6 +135,20 @@ impl HarnessModule for ClaudeCode {
         Some(AgentFormat::MarkdownYaml)
     }
 
+    // -- Native skills (Phase 9, harness-skill-emit.md) ---------------------
+
+    fn supports_native_skills(&self) -> bool {
+        true
+    }
+
+    fn skill_dir(&self, project_root: &Path) -> Option<PathBuf> {
+        Some(project_root.join(".claude/skills"))
+    }
+
+    fn skill_dir_global(&self, home: &Path) -> Option<PathBuf> {
+        Some(home.join(".claude/skills"))
+    }
+
     /// Claude Code is the canonical vendor: it keeps the full canonical
     /// frontmatter vocabulary, including the privileged `hooks` /
     /// `mcpServers` / `permissionMode` blobs which are a Claude Code-only
