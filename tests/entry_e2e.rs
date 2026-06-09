@@ -208,6 +208,7 @@ fn build_state(paths: &tome::paths::Paths, registry: PromptRegistry) -> Arc<McpS
         embedder_entry,
         reranker_entry,
         prompt_registry: Arc::new(registry),
+        host_harness: None,
     })
 }
 
@@ -267,6 +268,7 @@ fn build_state_with_stub_entries(
         embedder_entry: &STUB_EMBEDDER_ENTRY,
         reranker_entry: &STUB_RERANKER_ENTRY,
         prompt_registry: Arc::new(registry),
+        host_harness: None,
     })
 }
 
@@ -416,10 +418,13 @@ fn prompts_list_shows_only_user_invocable_entries() {
     );
 
     let registry = build_registry(&paths);
+    // Phase 9 / US3: drop the always-on reserved `add-tome-conversion-skill`
+    // built-in so this asserts only the PLUGIN-derived prompt surface.
     let names: Vec<String> = registry
         .descriptors()
         .iter()
         .map(|d| d.name.clone())
+        .filter(|n| n != "add-tome-conversion-skill")
         .collect();
     assert_eq!(
         names,
@@ -642,10 +647,13 @@ fn matrix_plugin_filters_searches_and_prompts_per_flag_combination() {
     // The dormant entry AND the default skill MUST be absent.
     // ------------------------------------------------------------------
     let registry = build_registry(&paths);
+    // Phase 9 / US3: drop the always-on reserved built-in (orthogonal to the
+    // user-invocable filtering under test).
     let prompt_names: std::collections::BTreeSet<String> = registry
         .descriptors()
         .iter()
         .map(|d| d.name.clone())
+        .filter(|n| n != "add-tome-conversion-skill")
         .collect();
     let expected_prompts: std::collections::BTreeSet<String> = [
         "plug__default-command".to_string(),

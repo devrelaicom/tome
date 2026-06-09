@@ -219,6 +219,7 @@ fn build_state(paths: &tome::paths::Paths) -> Arc<McpState> {
         embedder_entry,
         reranker_entry,
         prompt_registry: Arc::new(registry),
+        host_harness: None,
     })
 }
 
@@ -261,6 +262,18 @@ fn off_by_default_no_personas() {
 
     let registry = build(&paths, false);
     let names = descriptor_names(&registry);
+
+    // Phase 9 / US3: the always-on reserved `add-tome-conversion-skill`
+    // built-in is present regardless of the persona toggle. Filter it out
+    // before pinning the persona-relevant surface.
+    assert!(
+        names.iter().any(|n| n == "add-tome-conversion-skill"),
+        "reserved built-in present regardless of persona toggle; got {names:?}",
+    );
+    let names: Vec<String> = names
+        .into_iter()
+        .filter(|n| n != "add-tome-conversion-skill")
+        .collect();
 
     assert_eq!(
         names,
@@ -601,7 +614,22 @@ fn persona_list_descriptors_are_byte_stable() {
     let (_tmp, paths) = stage("acme", &plugins);
 
     let registry = build(&paths, true);
-    let serialised = serde_json::to_value(registry.descriptors()).expect("serialise");
+    // Phase 9 / US3: the always-on reserved `add-tome-conversion-skill`
+    // built-in sorts first in the descriptor list. Assert its presence,
+    // then filter it out so this pin stays decoupled from its text and
+    // pins only the persona-derived descriptors.
+    let descriptors = registry.descriptors();
+    assert!(
+        descriptors
+            .iter()
+            .any(|d| d.name == "add-tome-conversion-skill"),
+        "reserved built-in must be advertised; got {descriptors:?}",
+    );
+    let persona_descriptors: Vec<_> = descriptors
+        .into_iter()
+        .filter(|d| d.name != "add-tome-conversion-skill")
+        .collect();
+    let serialised = serde_json::to_value(persona_descriptors).expect("serialise");
 
     let expected: Value = json!([
         {

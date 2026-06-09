@@ -430,9 +430,12 @@ pub struct WorkspaceSyncArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct McpArgs {
-    // No tool-specific flags. `--workspace <name>` comes from
-    // `GlobalScopeArgs` on the top-level `Cli`. Empty struct keeps the
-    // clap-derive pattern consistent with other commands.
+    /// The harness hosting this MCP server (claude-code, cursor, codex,
+    /// opencode). Conveys host identity to the built-in `meta` tool so it
+    /// can install skills into the right harness. Normally stamped
+    /// automatically by `tome harness sync`; absent for a legacy config.
+    #[arg(long)]
+    pub harness: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]

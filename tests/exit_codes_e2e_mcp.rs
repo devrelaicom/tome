@@ -305,8 +305,16 @@ fn plugin_enable_with_illegal_argument_name_exits_29() {
     // malformed-frontmatter entry. Prove that invariant end-to-end. The
     // catalog was already enrolled above (before the enable).
     let harness = McpHarness::new(&paths);
+    // Phase 9 / US3: the always-on reserved `add-tome-conversion-skill` built-in
+    // is the only prompt on the surface; the illegal-arg PLUGIN entry must not
+    // reach it.
+    let plugin_prompts: Vec<String> = harness
+        .prompt_names()
+        .into_iter()
+        .filter(|n| n != "add-tome-conversion-skill")
+        .collect();
     assert!(
-        harness.prompt_names().is_empty(),
+        plugin_prompts.is_empty(),
         "the illegal-arg entry must not reach the MCP prompt surface; got {:?}",
         harness.prompt_names(),
     );
@@ -342,7 +350,10 @@ fn prompt_collision_all_three_entries_resolvable_e2e() {
     let harness = staged.harness();
 
     // (1) prompts/list — all three present, under three DISTINCT names.
+    // Phase 9 / US3: drop the always-on reserved `add-tome-conversion-skill`
+    // built-in so this asserts only the three PLUGIN-derived prompts.
     let mut names = harness.prompt_names();
+    names.retain(|n| n != "add-tome-conversion-skill");
     names.sort();
     assert_eq!(
         names.len(),

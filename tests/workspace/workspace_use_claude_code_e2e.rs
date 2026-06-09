@@ -223,10 +223,19 @@ fn bind_then_sync_writes_claude_code_artefacts() {
     let args = tome_entry["args"]
         .as_array()
         .expect("args must be an array");
-    assert_eq!(args.len(), 3, "args = ['mcp', '--workspace', '<name>']");
+    // Phase 9 / US3 (FR-030): the synced args now also carry the host-harness
+    // stamp `--harness <name>` (a later arg — the `args[0]=="mcp"` ownership
+    // marker is preserved).
+    assert_eq!(
+        args.len(),
+        5,
+        "args = ['mcp', '--workspace', '<name>', '--harness', '<harness>']"
+    );
     assert_eq!(args[0], "mcp");
     assert_eq!(args[1], "--workspace");
     assert_eq!(args[2], "test-ws");
+    assert_eq!(args[3], "--harness");
+    assert_eq!(args[4], "claude-code");
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +423,71 @@ fn idempotent_resync_no_disk_changes() {
         mtime(&settings),
         settings_mtime_1,
         ".claude/settings.json mtime must not advance on idempotent re-sync"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5b. Phase 9 / US3 (FR-030): a pre-P9 Tome-owned MCP entry without the
+//     `--harness` stamp re-stamps EXACTLY ONCE on the next sync (Updated), then
+//     is idempotent (LeftAlone) — the upgrade/round-trip path.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn legacy_mcp_entry_restamps_harness_once_then_idempotent() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // A pre-P9 Tome-owned entry: marker present, but no `--harness` stamp.
+    let legacy = r#"{
+  "mcpServers": {
+    "tome": {
+      "command": "tome",
+      "args": ["mcp", "--workspace", "test-ws"]
+    }
+  }
+}"#;
+    let fx = Fixture::build_with_existing("test-ws", &[(".claude/settings.json", legacy)]);
+    fx.bind_then_sync();
+
+    let settings = fx.project_path.join(".claude/settings.json");
+    let read_args = |path: &Path| -> Vec<String> {
+        read_json(path)["mcpServers"]["tome"]["args"]
+            .as_array()
+            .expect("args array")
+            .iter()
+            .map(|a| a.as_str().expect("string arg").to_owned())
+            .collect()
+    };
+
+    let args = read_args(&settings);
+    assert_eq!(
+        args,
+        vec!["mcp", "--workspace", "test-ws", "--harness", "claude-code"],
+        "legacy entry re-stamped to the canonical 5-element form",
+    );
+    assert_eq!(
+        args.iter().filter(|a| *a == "--harness").count(),
+        1,
+        "exactly one --harness (no duplicate on re-stamp)",
+    );
+    assert_eq!(args[0], "mcp", "ownership marker preserved");
+
+    // A subsequent re-sync (no bind) is idempotent — the re-stamped entry is
+    // LeftAlone, the stamp not duplicated.
+    let outcome =
+        sync::sync_project(&fx.project_path, &fx.sync_deps(false)).expect("re-sync must succeed");
+    assert!(
+        outcome.updated.is_empty(),
+        "re-stamped entry is LeftAlone on re-sync; got {:?}",
+        outcome.updated,
+    );
+    assert_eq!(
+        read_args(&settings)
+            .iter()
+            .filter(|a| *a == "--harness")
+            .count(),
+        1,
+        "still exactly one --harness after the idempotent re-sync",
     );
 }
 

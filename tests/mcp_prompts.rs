@@ -210,9 +210,23 @@ fn list_returns_empty_for_empty_workspace() {
     let conn = open_index(&paths);
     let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
         .expect("build registry");
-    assert!(registry.by_name.is_empty());
+    // Phase 9 / US3: the reserved built-in is ALWAYS on, even with zero plugins
+    // (positively asserted so a regression that dropped it can't hide behind the
+    // filter below) — and an empty workspace yields no PLUGIN prompts.
+    assert!(
+        registry
+            .descriptors()
+            .iter()
+            .any(|d| d.name == "add-tome-conversion-skill"),
+        "reserved prompt is always-on even in an empty workspace",
+    );
+    let plugin: Vec<_> = registry
+        .descriptors()
+        .into_iter()
+        .filter(|d| d.name != "add-tome-conversion-skill")
+        .collect();
+    assert!(plugin.is_empty());
     assert!(registry.collisions.is_empty());
-    assert!(registry.descriptors().is_empty());
 }
 
 #[test]
@@ -225,8 +239,14 @@ fn list_excludes_skills_by_default() {
     let conn = open_index(&paths);
     let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
         .expect("build registry");
+    // Phase 9 / US3: filter the always-on reserved built-in.
+    let plugin: Vec<_> = registry
+        .descriptors()
+        .into_iter()
+        .filter(|d| d.name != "add-tome-conversion-skill")
+        .collect();
     assert!(
-        registry.by_name.is_empty(),
+        plugin.is_empty(),
         "skills with default user_invocable=false must be excluded; got {:?}",
         registry.by_name.keys().collect::<Vec<_>>()
     );
@@ -241,7 +261,11 @@ fn list_includes_commands_by_default() {
     let conn = open_index(&paths);
     let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
         .expect("build registry");
-    let descriptors = registry.descriptors();
+    let descriptors: Vec<_> = registry
+        .descriptors()
+        .into_iter()
+        .filter(|d| d.name != "add-tome-conversion-skill")
+        .collect();
     assert_eq!(descriptors.len(), 1, "one command becomes one prompt");
     assert_eq!(descriptors[0].name, "plug__fix-issue");
     assert_eq!(
@@ -285,7 +309,11 @@ Run a deploy for $1 from $2 to $3
     let conn = open_index(&paths);
     let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
         .expect("build registry");
-    let descriptors = registry.descriptors();
+    let descriptors: Vec<_> = registry
+        .descriptors()
+        .into_iter()
+        .filter(|d| d.name != "add-tome-conversion-skill")
+        .collect();
     assert_eq!(descriptors.len(), 1);
     let args = descriptors[0]
         .arguments
@@ -317,7 +345,11 @@ Please fix issue $ARGUMENTS
     let conn = open_index(&paths);
     let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
         .expect("build registry");
-    let descriptors = registry.descriptors();
+    let descriptors: Vec<_> = registry
+        .descriptors()
+        .into_iter()
+        .filter(|d| d.name != "add-tome-conversion-skill")
+        .collect();
     let args = descriptors[0]
         .arguments
         .as_ref()
@@ -398,6 +430,7 @@ fn build_state_for_prompts(paths: &tome::paths::Paths) -> Arc<McpState> {
         embedder_entry,
         reranker_entry,
         prompt_registry: Arc::new(registry),
+        host_harness: None,
     })
 }
 
@@ -598,6 +631,7 @@ fn registry_build_skips_entry_with_missing_body_file() {
         .descriptors()
         .iter()
         .map(|p| p.name.clone())
+        .filter(|n| n != "add-tome-conversion-skill")
         .collect();
     assert_eq!(
         names,
@@ -631,6 +665,7 @@ fn registry_build_skips_entry_with_malformed_frontmatter() {
         .descriptors()
         .iter()
         .map(|p| p.name.clone())
+        .filter(|n| n != "add-tome-conversion-skill")
         .collect();
     assert_eq!(
         names,
@@ -649,7 +684,11 @@ fn description_truncated_at_300_chars_with_ellipsis() {
     let conn = open_index(&paths);
     let registry = PromptRegistry::build_for_workspace(&global(), &paths, &conn, false)
         .expect("build registry");
-    let desc = registry.descriptors()[0]
+    let desc = registry
+        .descriptors()
+        .into_iter()
+        .find(|d| d.name == "plug__chatty")
+        .expect("chatty prompt present")
         .description
         .clone()
         .expect("description present");

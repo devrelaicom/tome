@@ -417,6 +417,7 @@ fn build_state_for_prompts(paths: &tome::paths::Paths) -> Arc<McpState> {
         embedder_entry,
         reranker_entry,
         prompt_registry: Arc::new(registry),
+        host_harness: None,
     })
 }
 
@@ -433,5 +434,6 @@ fn build_state_for_get_skill(paths: &tome::paths::Paths) -> Arc<McpState> {
         embedder_entry,
         reranker_entry,
         prompt_registry: Arc::new(PromptRegistry::default()),
+        host_harness: None,
     })
 }

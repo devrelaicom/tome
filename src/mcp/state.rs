@@ -34,4 +34,9 @@ pub struct McpState {
     /// switches require a server restart (NFR-008, `list_changed:
     /// false`).
     pub prompt_registry: Arc<PromptRegistry>,
+    /// Phase 9 / US3: the harness hosting this MCP server, conveyed by
+    /// `tome mcp --harness <name>` (stamped into the `tome mcp` args at
+    /// `harness sync`). `None` for a legacy/unstamped config — the `meta`
+    /// tool then fails closed (FR-029) rather than guessing a harness.
+    pub host_harness: Option<String>,
 }

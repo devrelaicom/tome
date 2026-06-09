@@ -56,6 +56,7 @@ fn build_state(paths: &Paths, ws: &WorkspaceName) -> Arc<McpState> {
         embedder_entry: entry_for(ModelKind::Embedder),
         reranker_entry: entry_for(ModelKind::Reranker),
         prompt_registry: Arc::new(PromptRegistry::default()),
+        host_harness: None,
     })
 }
 

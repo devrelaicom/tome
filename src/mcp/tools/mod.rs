@@ -14,4 +14,5 @@
 
 pub mod get_skill;
 pub mod get_skill_info;
+pub mod meta;
 pub mod search_skills;

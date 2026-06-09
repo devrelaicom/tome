@@ -31,7 +31,7 @@ use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_handler,
 
 use crate::mcp::prompts;
 use crate::mcp::state::McpState;
-use crate::mcp::tools::{get_skill, get_skill_info, search_skills};
+use crate::mcp::tools::{get_skill, get_skill_info, meta, search_skills};
 
 #[derive(Clone)]
 pub struct Server {
@@ -138,6 +138,15 @@ impl Server {
         get_skill_info::handle(self.state.clone(), input)
             .await
             .map(Json)
+    }
+
+    /// Install one of Tome's bundled "meta skills" (native `SKILL.md` guides that teach an agent how to use Tome) into the harness hosting this server, so it persists for future sessions. Currently supports `{ "action": "install", "skill_id": "convert-marketplace" }`. Use this when the user wants to convert a Claude Code marketplace into Tome's native format — install `convert-marketplace`, then follow the now-installed skill.
+    #[tool(name = "meta")]
+    async fn meta(
+        &self,
+        Parameters(input): Parameters<meta::Input>,
+    ) -> Result<Json<meta::Output>, McpError> {
+        meta::handle(self.state.clone(), input).await.map(Json)
     }
 }
 
