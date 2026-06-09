@@ -263,6 +263,9 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
         personas: None,
         legacy_model_manifests: Vec::new(),
         unconverted_plugins: Vec::new(),
+        // Phase 9 / US4: empty → `skip_serializing_if = "Vec::is_empty"` omits
+        // it from the wire shape, so the byte-stable pin below stays unchanged.
+        meta_skills: Vec::new(),
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -410,6 +413,9 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
         personas: None,
         legacy_model_manifests: Vec::new(),
         unconverted_plugins: Vec::new(),
+        // Phase 9 / US4: empty → `skip_serializing_if = "Vec::is_empty"` omits
+        // it from the wire shape, so the byte-stable pin below stays unchanged.
+        meta_skills: Vec::new(),
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -540,6 +546,9 @@ fn doctor_json_phase6_fields_appended_last_in_order() {
         }),
         legacy_model_manifests: Vec::new(),
         unconverted_plugins: Vec::new(),
+        // Phase 9 / US4: empty → `skip_serializing_if = "Vec::is_empty"` omits
+        // it from the wire shape, so the byte-stable pin below stays unchanged.
+        meta_skills: Vec::new(),
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };

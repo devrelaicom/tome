@@ -592,6 +592,28 @@ pub struct PersonaReport {
     pub drop_persona: String,
 }
 
+/// Phase 9 / US4: one meta-skill drift row — a single (skill, harness, scope)
+/// candidate location whose on-disk install drifted from the embedded revision.
+/// Only the two DRIFT classes are surfaced (`stale` | `missing-but-expected`);
+/// an up-to-date install is the absence of drift and is omitted (so a clean
+/// system's `meta_skills` Vec is empty and the byte-stable wire shape is
+/// preserved). See `doctor::meta_drift` for the emit policy + contract cite.
+///
+/// `scope` is `"global"` | `"project"`; `state` is `"up-to-date"` |
+/// `"stale"` | `"missing-but-expected"` (the full classification vocabulary,
+/// though only the latter two ever land here). Plain `Serialize` struct,
+/// matching the sibling report record style.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MetaSkillDrift {
+    pub skill_id: String,
+    pub harness: String,
+    pub scope: String,
+    /// The resolved skills root for `(harness, scope)` the installer would
+    /// write under (data-model §7 `MetaSkillDriftRow.dir`).
+    pub dir: String,
+    pub state: String,
+}
+
 /// Full doctor report. Field order matches `contracts/doctor.md` +
 /// `contracts/doctor-extensions-p4.md` so the rendered JSON is
 /// deterministic.
@@ -696,6 +718,14 @@ pub struct DoctorReport {
     /// sorted. Omitted from JSON when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unconverted_plugins: Vec<String>,
+    /// Phase 9 / US4: meta-skill drift rows — the `stale` /
+    /// `missing-but-expected` (skill × harness × scope) candidate locations
+    /// found by the read-only `meta_drift::check` projection. `doctor --fix`
+    /// re-runs the idempotent `meta::install_skill` for each. Sorted by
+    /// `(skill_id, harness, scope)`. Omitted from JSON when empty, so a clean
+    /// system keeps the existing byte-stable wire shape unchanged.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub meta_skills: Vec<MetaSkillDrift>,
     pub overall: DoctorClassification,
     pub suggested_fixes: Vec<SuggestedFix>,
 }
