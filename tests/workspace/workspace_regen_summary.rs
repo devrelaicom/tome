@@ -320,7 +320,7 @@ fn regen_summary_long_window_oversize_is_still_cached() {
 /// `tracing-test` itself uses internally; we hand-roll it to avoid the
 /// new dep.
 #[test]
-fn regen_summary_long_window_emits_warn_via_layer() {
+fn regen_summary_long_window_emits_info_via_layer() {
     use std::cell::RefCell;
     use std::sync::{Arc, Mutex, OnceLock};
     use tracing::{Event, Subscriber};
