@@ -49,7 +49,9 @@ pub enum TomeError {
     // Pre-allocated by F3; first wired by US1/US2 (workspace lifecycle +
     // project binding). See data-model.md §14 and contracts/exit-codes-p4.md.
     // -----------------------------------------------------------------------
-    #[error("workspace `{name}` not found in the central registry")]
+    #[error(
+        "workspace `{name}` not found in the central registry\nhint: create it with `tome workspace init {name}`"
+    )]
     WorkspaceNotFound { name: String },
 
     #[error("workspace `{name}` already exists")]
@@ -885,4 +887,21 @@ pub enum ManifestInvalid {
 
     #[error("toml parse error in {}: {message}", file.display())]
     TomlParse { file: PathBuf, message: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_not_found_hints_at_init() {
+        let e = TomeError::WorkspaceNotFound {
+            name: "myws".into(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("hint: create it with `tome workspace init myws`"),
+            "{msg}"
+        );
+    }
 }
