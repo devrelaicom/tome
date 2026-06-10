@@ -246,9 +246,10 @@ pub fn assemble_report(
 
     // Phase 9 / US4 meta-skill drift (read-only, FR-031). Re-derives the
     // installer's (harness × scope) candidate set from the supported-harness
-    // set and probes each via the shared `meta::drift_probe`. Surfaces only the
-    // `stale` / `missing-but-expected` drift classes (empty when clean → the
-    // wire shape stays byte-stable). `--fix` repair lives in the command layer.
+    // set and probes each via the shared `meta::drift_probe`. Surfaces only
+    // `stale` rows (missing is "not installed", not drift — empty when clean →
+    // the wire shape stays byte-stable). `--fix` repair lives in the command
+    // layer (refreshes in place; never creates new installs).
     let meta_skills = meta_drift::check(home, scope);
 
     Ok(DoctorReport {

@@ -8,10 +8,10 @@
 //! 1. install-then-corrupt-then-fix round trip (up-to-date → stale → repaired),
 //! 2. read-only default mutates nothing (mtime-stable, FR-124),
 //! 3. a malformed on-disk SKILL.md classifies `stale` (never a panic, FR-031b),
-//! 4. a detected skill-capable harness with NO install → `missing-but-expected`,
-//! 5. a positive `--json` wire-shape pin (all five fields incl. `dir`),
-//! 6. repair forward-progress: one symlink-refused harness, the other still
-//!    lands (first_error surfaced, no escape),
+//! 4. a detected skill-capable harness with NO install → NOT drift (option A),
+//! 5. a positive `--json` wire-shape pin for a stale row (all five fields incl. `dir`),
+//! 6. repair forward-progress: one symlink-refused harness with a stale install,
+//!    the other still lands (first_error surfaced, no escape),
 //! 7. a hand-written sort order over ≥2 detected harnesses + both scopes,
 //! 8. a project-scope install → stale → `--fix` → up-to-date round trip.
 
@@ -160,15 +160,24 @@ fn malformed_on_disk_file_classifies_stale_not_panic() {
 }
 
 #[test]
-fn detected_harness_with_no_install_is_missing_but_expected() {
+fn detected_harness_with_no_install_is_not_drift() {
+    // Option A (smoke-test regression): a detected harness with NO install is
+    // simply "not installed" — `tome meta list` is that surface, not doctor.
     let (_root, home, paths) = setup();
     // Detect claude-code but install NOTHING.
     detect_claude_code(home.path());
 
     let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
-    let row = cc_global_row(&report).expect("detected harness must produce a row");
-    assert_eq!(row.state, "missing-but-expected");
-    assert_eq!(row.scope, "global");
+    assert!(
+        cc_global_row(&report).is_none(),
+        "missing is never drift — detected harness with no install must not produce a drift row: {:?}",
+        report.meta_skills,
+    );
+    assert!(
+        report.meta_skills.is_empty(),
+        "no stale install ⇒ empty drift projection: {:?}",
+        report.meta_skills,
+    );
 }
 
 #[test]
@@ -191,17 +200,26 @@ fn detect_cursor(home: &Path) -> PathBuf {
     skills
 }
 
-/// FIX 3 / Test MAJOR #8 (closes #6 `dir`): a POPULATED `meta_skills` row freezes
-/// the `--json` wire shape — exactly the five keys, the expected values, and the
-/// `.../skills` `dir` suffix for the (harness, scope) pair.
+/// A POPULATED `meta_skills` row freezes the `--json` wire shape — exactly the
+/// five keys, the expected values, and the `.../skills` `dir` suffix for the
+/// (harness, scope) pair. Uses a stale (present-but-unstamped) install so the
+/// row appears under the new stale-only emit policy (option A: missing is not
+/// drift).
 #[test]
 fn populated_row_json_wire_shape_is_pinned() {
     let (_root, home, paths) = setup();
-    // Detect claude-code, install NOTHING → exactly one missing-but-expected row.
-    detect_claude_code(home.path());
+    let skills = detect_claude_code(home.path());
+
+    // Plant a stale (present-but-unstamped) SKILL.md — drift_probe reads Stale.
+    std::fs::create_dir_all(skills.join(SKILL)).unwrap();
+    std::fs::write(
+        skills.join(SKILL).join("SKILL.md"),
+        "---\nname: convert-marketplace\n---\nold body\n",
+    )
+    .unwrap();
 
     let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
-    let row = cc_global_row(&report).expect("detected claude-code must produce a row");
+    let row = cc_global_row(&report).expect("stale install must produce a row");
 
     let value = serde_json::to_value(row).expect("row serialises");
     let obj = value.as_object().expect("row is a JSON object");
@@ -218,7 +236,7 @@ fn populated_row_json_wire_shape_is_pinned() {
     assert_eq!(obj["skill_id"], serde_json::json!("convert-marketplace"));
     assert_eq!(obj["harness"], serde_json::json!("claude-code"));
     assert_eq!(obj["scope"], serde_json::json!("global"));
-    assert_eq!(obj["state"], serde_json::json!("missing-but-expected"));
+    assert_eq!(obj["state"], serde_json::json!("stale"));
 
     // `dir` is the claude-code/global skills root — ends with `.../.claude/skills`.
     let dir = obj["dir"].as_str().expect("dir is a string");
@@ -229,11 +247,13 @@ fn populated_row_json_wire_shape_is_pinned() {
     );
 }
 
-/// FIX 4 / Test MAJOR #10: repair forward-progress. TWO detected skill-capable
-/// harnesses; one harness's skills root traverses a SYMLINK so its
-/// `install_skill` is refused (MetaInstallFailed/88) while the other installs
+/// Repair forward-progress. TWO detected skill-capable harnesses both have
+/// STALE installs; one harness's skills root traverses a SYMLINK so its
+/// `install_skill` is refused (MetaInstallFailed/88) while the other refreshes
 /// cleanly. `repair` surfaces the first error AND lands the healthy one (one
 /// failure never aborts the rest), and the symlinked one does not escape.
+/// Under option A (missing-is-not-drift) both harnesses must have a stale
+/// on-disk copy to be drift candidates in the first place.
 #[cfg(unix)]
 #[test]
 fn repair_forward_progress_one_symlink_refused_other_lands() {
@@ -243,23 +263,28 @@ fn repair_forward_progress_one_symlink_refused_other_lands() {
     // Canonicalise so the symlink-guard compares stable absolute components.
     let home = home_dir.path().canonicalize().unwrap();
 
-    // cursor is "detected" + healthy → its global skills root is real.
-    detect_cursor(&home);
+    // cursor is "detected" + healthy → plant a stale install so it is a drift
+    // candidate (missing-is-not-drift; cursor must have a copy to be repaired).
+    let cursor_skills = detect_cursor(&home);
+    std::fs::create_dir_all(cursor_skills.join(SKILL)).unwrap();
+    std::fs::write(
+        cursor_skills.join(SKILL).join("SKILL.md"),
+        "---\nname: convert-marketplace\n---\nold body\n",
+    )
+    .unwrap();
 
     // claude-code is "detected" but its `.claude` dot-dir is a SYMLINK to an
     // out-of-tree dir, so the global skills root traverses a symlinked
-    // component → install refused, no escape.
+    // component → probe reads Stale (symlink-refused read degrades), and
+    // the repair write is also refused — no escape.
     let outside = TempDir::new().unwrap();
     symlink(outside.path(), home.join(".claude")).unwrap();
 
     let scope = global_scope();
 
-    // Pre-repair: both harnesses are drift candidates (no install yet). After
-    // FIX C (the read-side symlink guard), the symlinked claude-code candidate is
-    // classified refreshable `stale` (the probe refuses to read THROUGH the
-    // symlinked `.claude` component) rather than `missing-but-expected`; cursor
-    // (a real dir, no install) stays `missing-but-expected`. Both are drift
-    // classes the repair attempts.
+    // Pre-repair: both harnesses are stale drift candidates.
+    // claude-code is stale (symlink-refused read degrades to Stale).
+    // cursor is stale (unstamped SKILL.md).
     let before = doctor::meta_drift::check(&home, &scope);
     assert!(
         before
@@ -270,20 +295,20 @@ fn repair_forward_progress_one_symlink_refused_other_lands() {
     assert!(
         before
             .iter()
-            .any(|r| r.harness == "cursor" && r.state == "missing-but-expected"),
-        "cursor/global is a candidate: {before:?}",
+            .any(|r| r.harness == "cursor" && r.state == "stale"),
+        "cursor/global is a stale drift candidate: {before:?}",
     );
 
-    // Repair: the claude-code symlink is refused (88), cursor still lands.
+    // Repair: the claude-code symlink is refused (88), cursor still refreshes.
     let err = doctor::meta_drift::repair(&home, &scope)
         .expect_err("the symlinked harness must surface a first_error");
     assert_eq!(err.exit_code(), 88, "first_error is MetaInstallFailed (88)");
 
-    // (b) forward-progress: the HEALTHY cursor skill landed on disk.
+    // (b) forward-progress: the HEALTHY cursor skill was refreshed on disk.
     assert!(
         home.join(".cursor/skills/convert-marketplace/SKILL.md")
             .is_file(),
-        "cursor/global must install despite the claude-code failure",
+        "cursor/global must refresh despite the claude-code failure",
     );
 
     // (c) the symlinked claude-code write did NOT escape the home tree.
@@ -293,11 +318,12 @@ fn repair_forward_progress_one_symlink_refused_other_lands() {
     );
 }
 
-/// FIX 5 / Test Minor #7: a HAND-WRITTEN expected order over ≥2 detected
-/// harnesses AND both scopes — catches a comparator change, not just a missing
-/// `sort` call. With a single embedded skill (`convert-marketplace`), the rows
-/// sort `(skill_id, harness, scope)`, so claude-code precedes cursor and, within
-/// a harness, `global` precedes `project`.
+/// A HAND-WRITTEN expected order over ≥2 detected harnesses AND both scopes —
+/// catches a comparator change, not just a missing `sort` call. With a single
+/// embedded skill (`convert-marketplace`), the rows sort `(skill_id, harness,
+/// scope)`, so claude-code precedes cursor and, within a harness, `global`
+/// precedes `project`. Under option A (missing-is-not-drift) all four candidate
+/// locations must carry a STALE install to appear as rows.
 #[test]
 fn rows_match_hand_written_sort_order() {
     let (_root, home, paths) = setup();
@@ -306,6 +332,24 @@ fn rows_match_hand_written_sort_order() {
     // project root → PROJECT-scope candidates for the same two harnesses.
     detect_claude_code(home.path());
     detect_cursor(home.path());
+
+    // Plant a stale (unstamped) SKILL.md at all four candidate locations so
+    // they surface as drift rows under the stale-only emit policy.
+    let stale = "---\nname: convert-marketplace\n---\nold body\n";
+    // Global dirs.
+    let cc_global = home.path().join(".claude/skills");
+    let cursor_global = home.path().join(".cursor/skills");
+    for dir in [&cc_global, &cursor_global] {
+        std::fs::create_dir_all(dir.join(SKILL)).unwrap();
+        std::fs::write(dir.join(SKILL).join("SKILL.md"), stale).unwrap();
+    }
+    // Project dirs (claude-code and cursor under the project root).
+    let cc_project = project.path().join(".claude/skills");
+    let cursor_project = project.path().join(".cursor/skills");
+    for dir in [&cc_project, &cursor_project] {
+        std::fs::create_dir_all(dir.join(SKILL)).unwrap();
+        std::fs::write(dir.join(SKILL).join("SKILL.md"), stale).unwrap();
+    }
 
     let report =
         doctor::assemble_report(&project_scope(project.path()), &paths, home.path(), false)
@@ -399,9 +443,9 @@ fn project_scope_install_corrupt_fix_round_trip() {
 
 /// FIX A (Rust MAJOR, FR-031a): the doctor PROJECT branch is now detect-gated
 /// EXACTLY like the installer. A surveyed project root with NO detected harness
-/// under `home` must yield NO project `missing-but-expected` row — doctor must
-/// never write into an undetected harness's project dir (broader than `meta add`
-/// would). This is the SSOT-divergence the shared enumeration helper closes.
+/// under `home` must yield NO project drift row — doctor must never write into
+/// an undetected harness's project dir (broader than `meta add` would). This is
+/// the SSOT-divergence the shared enumeration helper closes.
 #[test]
 fn project_scope_undetected_harness_emits_no_project_row() {
     let (_root, home, paths) = setup();

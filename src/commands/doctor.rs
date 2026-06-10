@@ -510,7 +510,7 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         writeln!(out)?;
     }
 
-    // Phase 9 / US4: meta-skill drift (stale / missing-but-expected only).
+    // Phase 9 / US4: meta-skill drift (stale only; missing is "not installed").
     if !report.meta_skills.is_empty() {
         writeln!(out, "Meta skills (drift):")?;
         for m in &report.meta_skills {

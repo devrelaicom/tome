@@ -289,31 +289,37 @@ fn doctor_json_overall_unhealthy_when_models_missing() {
     assert_eq!(v["embedder"]["state"], "missing");
 }
 
-/// FIX G (Test Minor #3): a SPAWNED `tome --json doctor` under a HOME with
-/// `~/.claude` present (so claude-code is detected) but NO meta-skill install
-/// emits a POPULATED `meta_skills` array — exactly one object carrying all five
-/// documented keys and `state:"missing-but-expected"`. The pre-existing
-/// `doctor_json` spawned tests all run under an empty home (no detected
-/// harness), so the populated path was untested end-to-end through the binary.
+/// A SPAWNED `tome --json doctor` under a HOME with `~/.claude` present (so
+/// claude-code is detected) and a STALE meta-skill install emits a POPULATED
+/// `meta_skills` array — exactly one object carrying all five documented keys
+/// and `state:"stale"`. Under option A (missing-is-not-drift) an install-less
+/// detected harness emits no rows; we need a stale copy to verify the wire shape.
 #[test]
 fn doctor_json_meta_skills_populated_when_harness_detected() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_registry_models(&paths);
-    // Detect claude-code (existence-only) under the isolated HOME; install nothing.
-    std::fs::create_dir_all(env.home_path().join(".claude")).unwrap();
+    // Detect claude-code under the isolated HOME; plant a stale (unstamped)
+    // SKILL.md so drift_probe classifies it Stale and the row surfaces.
+    let cc_skills = env.home_path().join(".claude/skills/convert-marketplace");
+    std::fs::create_dir_all(&cc_skills).unwrap();
+    std::fs::write(
+        cc_skills.join("SKILL.md"),
+        "---\nname: convert-marketplace\n---\nold body\n",
+    )
+    .unwrap();
 
     let out = env.cmd().args(["--json", "doctor"]).output().unwrap();
     let v: Value = serde_json::from_slice(&out.stdout).expect("doctor --json parses");
 
     let rows = v["meta_skills"]
         .as_array()
-        .expect("meta_skills present + an array when a harness is detected");
+        .expect("meta_skills present + an array when a stale install exists");
     let cc = rows
         .iter()
         .find(|r| r["harness"] == "claude-code" && r["scope"] == "global")
-        .expect("claude-code/global missing-but-expected row present");
+        .expect("claude-code/global stale row present");
 
     // Exactly the five documented keys.
     let mut keys: Vec<&str> = cc.as_object().unwrap().keys().map(String::as_str).collect();
@@ -326,7 +332,7 @@ fn doctor_json_meta_skills_populated_when_harness_detected() {
     assert_eq!(cc["skill_id"], "convert-marketplace");
     assert_eq!(cc["harness"], "claude-code");
     assert_eq!(cc["scope"], "global");
-    assert_eq!(cc["state"], "missing-but-expected");
+    assert_eq!(cc["state"], "stale");
     assert!(
         cc["dir"].as_str().unwrap().ends_with(".claude/skills"),
         "dir is the claude-code/global skills root: {}",

@@ -593,17 +593,16 @@ pub struct PersonaReport {
 }
 
 /// Phase 9 / US4: one meta-skill drift row — a single (skill, harness, scope)
-/// candidate location whose on-disk install drifted from the embedded revision.
-/// Only the two DRIFT classes are surfaced (`stale` | `missing-but-expected`);
-/// an up-to-date install is the absence of drift and is omitted (so a clean
-/// system's `meta_skills` Vec is empty and the byte-stable wire shape is
-/// preserved). See `doctor::meta_drift` for the emit policy + contract cite.
+/// candidate location whose on-disk install is stale (revision mismatch or
+/// unreadable). Only the `stale` class is surfaced; `up-to-date` is the absence
+/// of drift and is omitted; `missing` (no install) is "not installed" and is the
+/// domain of `tome meta list`, not doctor. A clean system yields an empty
+/// `meta_skills` Vec, keeping the byte-stable wire shape unchanged.
+/// See `doctor::meta_drift` for the emit policy + contract cite.
 ///
-/// `scope` is `"global"` | `"project"`; `state` is only ever `"stale"` |
-/// `"missing-but-expected"` on the wire — `check()` omits `up-to-date` rows
-/// entirely (up-to-date is the absence of drift), so the wire never carries an
-/// `"up-to-date"` value here. Plain `Serialize` struct, matching the sibling
-/// report record style.
+/// `scope` is `"global"` | `"project"`; `state` is only ever `"stale"` on the
+/// wire — `check()` omits both `up-to-date` and `missing` rows. Plain
+/// `Serialize` struct, matching the sibling report record style.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MetaSkillDrift {
     pub skill_id: String,
@@ -719,10 +718,11 @@ pub struct DoctorReport {
     /// sorted. Omitted from JSON when empty.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unconverted_plugins: Vec<String>,
-    /// Phase 9 / US4: meta-skill drift rows — the `stale` /
-    /// `missing-but-expected` (skill × harness × scope) candidate locations
-    /// found by the read-only `meta_drift::check` projection. `doctor --fix`
-    /// re-runs the idempotent `meta::install_skill` for each. Sorted by
+    /// Phase 9 / US4: meta-skill drift rows — `stale` (skill × harness × scope)
+    /// locations found by the read-only `meta_drift::check` projection. Missing
+    /// (no install) is not drift — `tome meta list` is that surface. `doctor
+    /// --fix` refreshes stale installs IN PLACE via the idempotent
+    /// `meta::install_skill`; it never creates new ones. Sorted by
     /// `(skill_id, harness, scope)`. Omitted from JSON when empty, so a clean
     /// system keeps the existing byte-stable wire shape unchanged.
     #[serde(skip_serializing_if = "Vec::is_empty")]
