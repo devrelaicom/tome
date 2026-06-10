@@ -31,7 +31,7 @@ and what Tome can and cannot carry over.
   instead.) The JSON plan enumerates every plugin and entry that will convert,
   and — critically —
   every **unsupported component** Tome flagged (monitors, themes, LSP servers,
-  output-styles, status-line scripts, hooks Tome can't model, `bin/` helpers,
+  output-styles, status-line scripts, `bin/` helpers,
   channels, custom `userConfig`, and so on).
 - Summarise for yourself: how many plugins, how many skills / commands / agents
   convert cleanly, and the full list of flagged unsupported components. This list
@@ -57,9 +57,28 @@ From the `--json` output, separate two buckets:
 - **Auto-converted** — entries Tome translated for you: native `SKILL.md` /
   command / agent files written, `tome-plugin.toml` / `tome-catalog.toml`
   manifests synthesised, and harness-specific variables rewritten to their Tome
-  equivalents automatically. You do not need to touch these.
+  equivalents automatically — and each plugin's `hooks/` directory copied through
+  verbatim (Tome's harness sync consumes it). You do not need to touch these.
 - **Flagged** — the unsupported components from Step 1, which convert leaves
   behind with a warning rather than guessing. These are Step 3.
+
+**Remote-source plugins.** Marketplace entries that point at other repositories
+(`github` / `git` / `url` sources) are fetched and vendored automatically — each
+repo is shallow-cloned and converted in place, reported with a
+`convert/remote-plugin-fetched` info line. Two cases need your attention:
+
+- A `convert/remote-plugin-fetch-failed` warning means one plugin could not be
+  fetched (network, auth, or not actually a plugin repo). The rest of the
+  catalog still converted. Fall back to converting that plugin individually
+  into the catalog:
+  ```sh
+  tome plugin convert <repo-url> --into <catalog>
+  ```
+- `npm`-source plugins cannot be fetched and are skipped with a
+  `convert/remote-plugin-skipped` warning; treat them as Step 3 judgment items.
+
+Pass `--no-fetch` to skip all remote plugins instead (an offline conversion —
+they are skipped with warnings, exactly like the failures above).
 
 If you want Tome to refuse rather than warn on anything it cannot represent, add
 `--strict` — it aborts before writing so you can decide deliberately. Without
