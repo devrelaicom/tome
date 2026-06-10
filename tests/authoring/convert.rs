@@ -469,6 +469,8 @@ fn marketplace_with_remotes(tmp: &Path, good_url: &str, bad_url: &str) -> PathBu
 
 #[test]
 fn catalog_convert_fetches_remote_plugins_and_skips_failures() {
+    tome::authoring::import::claude_code::ALLOW_FILE_URLS_FOR_TESTS
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let tmp = tempfile::tempdir().unwrap();
     let good = remote_plugin_repo(tmp.path(), "fetched-one");
     let bad = format!("file://{}/nonexistent", tmp.path().display());
@@ -503,6 +505,8 @@ fn catalog_convert_fetches_remote_plugins_and_skips_failures() {
 
 #[test]
 fn catalog_convert_no_fetch_restores_hermetic_skip() {
+    tome::authoring::import::claude_code::ALLOW_FILE_URLS_FOR_TESTS
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let tmp = tempfile::tempdir().unwrap();
     let good = remote_plugin_repo(tmp.path(), "fetched-one");
     let bad = format!("file://{}/nonexistent", tmp.path().display());
@@ -531,6 +535,8 @@ fn catalog_convert_no_fetch_restores_hermetic_skip() {
 
 #[test]
 fn strict_aborts_on_a_remote_fetch_failure() {
+    tome::authoring::import::claude_code::ALLOW_FILE_URLS_FOR_TESTS
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     let tmp = tempfile::tempdir().unwrap();
     let good = remote_plugin_repo(tmp.path(), "fetched-one");
     let bad = format!("file://{}/nonexistent", tmp.path().display());
@@ -750,4 +756,106 @@ fn a_symlinked_skill_child_aborts_the_convert() {
     let err = run(&src, &config(out.clone())).unwrap_err();
     assert_eq!(err.exit_code(), 7);
     assert!(!out.join("p-tome").exists());
+}
+
+// --- security regression tests (code-review fixes) -------------------------
+
+#[test]
+fn remote_fetch_rejects_disallowed_url_schemes() {
+    // The argument-injection guard: an `ext::` transport (or any non-allowlisted
+    // scheme) must be refused BEFORE any git spawn, degrading to fetch-failed.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("market");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/marketplace.json"),
+        br#"{"name":"m","version":"1.0.0","description":"d",
+             "owner":{"name":"o","email":"o@x.io"},
+             "plugins":[{"name":"evil","source":{"source":"url","url":"ext::sh -c id"}}]}"#,
+    )
+    .unwrap();
+    let out = tmp.path().join("out");
+    let outcome = run(&src, &catalog_config(out.clone(), false)).expect("convert proceeds");
+    assert!(outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/remote-plugin-fetch-failed"
+            && d.message.contains("unsupported remote URL scheme")
+    }));
+}
+
+#[test]
+fn remote_fetch_skips_a_plugin_with_an_unsafe_marketplace_name() {
+    // I1 regression: one hostile entry name must not poison the catalog.
+    tome::authoring::import::claude_code::ALLOW_FILE_URLS_FOR_TESTS
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let tmp = tempfile::tempdir().unwrap();
+    let good = remote_plugin_repo(tmp.path(), "good-one");
+    let evil = remote_plugin_repo(tmp.path(), "evil-src");
+    let src = tmp.path().join("market");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/marketplace.json"),
+        format!(
+            r#"{{"name":"m","version":"1.0.0","description":"d",
+                 "owner":{{"name":"o","email":"o@x.io"}},
+                 "plugins":[
+                   {{"name":"good-one","source":{{"source":"url","url":"{good}"}}}},
+                   {{"name":"../escape","source":{{"source":"url","url":"{evil}"}}}}
+                 ]}}"#
+        ),
+    )
+    .unwrap();
+    let out = tmp.path().join("out");
+    let outcome = run(&src, &catalog_config(out.clone(), false)).expect("convert proceeds");
+    let root = out.join(&outcome.final_name);
+    assert!(
+        root.join("good-one/tome-plugin.toml").is_file(),
+        "good plugin still vendors"
+    );
+    assert!(outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/remote-plugin-fetch-failed" && d.message.contains("unsafe name")
+    }));
+    assert!(!tmp.path().join("escape").exists());
+}
+
+#[test]
+fn remote_fetch_honours_a_ref_pin_and_degrades_on_a_missing_ref() {
+    tome::authoring::import::claude_code::ALLOW_FILE_URLS_FOR_TESTS
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let tmp = tempfile::tempdir().unwrap();
+    let url = remote_plugin_repo(tmp.path(), "pinned");
+    // Tag the current state, then move main past it with a marker file inside
+    // the skill dir (collect_supporting copies all non-SKILL.md files there).
+    let repo = tmp.path().join("pinned");
+    git_cmd(&["tag", "v1"], &repo);
+    fs::write(repo.join("skills/hello/AFTER_TAG.md"), b"post-tag marker").unwrap();
+    git_cmd(&["add", "-A"], &repo);
+    git_cmd(&["commit", "-q", "-m", "after tag"], &repo);
+
+    let src = tmp.path().join("market");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/marketplace.json"),
+        format!(
+            r#"{{"name":"m","version":"1.0.0","description":"d",
+                 "owner":{{"name":"o","email":"o@x.io"}},
+                 "plugins":[
+                   {{"name":"pinned","source":{{"source":"url","url":"{url}","ref":"v1"}}}},
+                   {{"name":"missing-ref","source":{{"source":"url","url":"{url}","ref":"no-such-ref"}}}}
+                 ]}}"#
+        ),
+    )
+    .unwrap();
+    let out = tmp.path().join("out");
+    let outcome = run(&src, &catalog_config(out.clone(), false)).expect("convert proceeds");
+    let root = out.join(&outcome.final_name);
+    // The v1 pin vendored the PRE-tag tree (no AFTER_TAG.md in the skill dir).
+    assert!(root.join("pinned/tome-plugin.toml").is_file());
+    assert!(
+        !root.join("pinned/skills/hello/AFTER_TAG.md").exists(),
+        "v1 pin must not include the post-tag supporting file"
+    );
+    // A missing ref fails the clone and degrades to the warning.
+    assert!(outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/remote-plugin-fetch-failed" && d.message.contains("missing-ref")
+    }));
 }

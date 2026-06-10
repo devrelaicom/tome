@@ -238,7 +238,9 @@ pub fn import_plugin(
 /// `--no-fetch`) restores the hermetic warn-and-skip path. A fetch failure
 /// skips that plugin only (forward-progress) but is strict-blocking so
 /// `--strict` hard-fails on any failure. Unfetchable kinds (`npm`, etc.) are
-/// always warned-and-skipped.
+/// always warned-and-skipped. A fetched plugin.json name that disagrees with
+/// the marketplace entry is resolved in favor of the entry and is not
+/// strict-blocking.
 pub fn import_marketplace(
     root: &UntrustedRoot,
     source_path: &Path,
@@ -341,25 +343,31 @@ pub fn import_marketplace(
                         Ok(mut plugin) => {
                             // The marketplace entry `name` is the catalog identity; a
                             // differing fetched plugin.json name is surfaced + overridden.
-                            if let Some(entry_name) = &pname
+                            // A fetched plugin.json name that disagrees with the marketplace
+                            // entry is resolved in favor of the entry and is not strict-blocking.
+                            let fetched_info = if let Some(entry_name) = &pname
                                 && *entry_name != plugin.name
                             {
-                                diagnostics.push(Diagnostic::info(
-                                    rule::REMOTE_PLUGIN_FETCHED,
-                                    format!(
-                                        "plugin `{label}`: fetched plugin.json names itself `{}`; the marketplace entry name wins",
-                                        plugin.name
-                                    ),
-                                ));
-                                plugin.name = entry_name.clone();
-                            }
+                                let old = std::mem::replace(&mut plugin.name, entry_name.clone());
+                                format!(
+                                    "plugin `{label}` fetched from {display_url} and vendored \
+                                     (its plugin.json self-names `{old}`; the marketplace entry name wins)"
+                                )
+                            } else {
+                                format!("plugin `{label}` fetched from {display_url} and vendored")
+                            };
                             // Same SEC-1 defence as the relative path: the name becomes
-                            // the emitted directory.
-                            UntrustedRoot::validate_name(&plugin.name)?;
-                            diagnostics.push(Diagnostic::info(
-                                rule::REMOTE_PLUGIN_FETCHED,
-                                format!("plugin `{label}` fetched from {display_url} and vendored"),
-                            ));
+                            // the emitted directory. Per-plugin forward-progress: an unsafe
+                            // name skips THIS plugin (strict-blocking), never the whole catalog.
+                            if let Err(e) = UntrustedRoot::validate_name(&plugin.name) {
+                                diagnostics.push(Diagnostic::warning(
+                                    rule::REMOTE_PLUGIN_FETCH_FAILED,
+                                    format!("plugin `{label}` fetched but has an unsafe name: {e}"),
+                                ));
+                                continue;
+                            }
+                            diagnostics
+                                .push(Diagnostic::info(rule::REMOTE_PLUGIN_FETCHED, fetched_info));
                             plugins.push(plugin);
                         }
                         // Forward-progress: a fetch/import failure skips THIS plugin
@@ -456,12 +464,31 @@ fn classify_plugin_source(source: Option<&serde_json::Value>) -> PluginSource {
     }
 }
 
-/// URL schemes a marketplace remote may use. `file://` is required by the
-/// hermetic test fixtures; everything else is the conventional git set. A URL
-/// outside this set (including anything starting with `-`) is refused BEFORE
-/// it reaches the spawned git — the scheme check plus `clone_shallow`'s `--`
-/// end-of-options marker together close git argument injection.
-const FETCH_URL_SCHEMES: &[&str] = &["https://", "http://", "git://", "ssh://", "git@", "file://"];
+/// URL schemes a marketplace remote may use — the conventional git set.
+/// `file://` is deliberately ABSENT: a hostile marketplace could otherwise
+/// vendor the operator's local private repos into the converted output
+/// (read-disclosure). The hermetic tests opt back in via the
+/// `#[doc(hidden)]` override below.
+///
+/// A URL outside this set (including anything starting with `-`) is refused
+/// BEFORE it reaches the spawned git — the scheme check plus
+/// `clone_shallow`'s `--` end-of-options marker together close git argument
+/// injection.
+const FETCH_URL_SCHEMES: &[&str] = &["https://", "http://", "git://", "ssh://", "git@"];
+
+/// Test-only opt-in for `file://` remotes (integration tests can't see
+/// `#[cfg(test)]`). Never set in production code paths.
+#[doc(hidden)]
+pub static ALLOW_FILE_URLS_FOR_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn scheme_allowed(url: &str) -> bool {
+    if FETCH_URL_SCHEMES.iter().any(|s| url.starts_with(s)) {
+        return true;
+    }
+    url.starts_with("file://")
+        && ALLOW_FILE_URLS_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Shallow-clone a remote plugin source and import it as a Claude Code plugin.
 /// The clone's TempDir is pushed onto the keepalive ONLY on success — a failed
@@ -475,7 +502,7 @@ fn fetch_remote_plugin(
     entry_name: Option<&str>,
     fetch: &mut FetchContext,
 ) -> Result<PluginIr, TomeError> {
-    if !FETCH_URL_SCHEMES.iter().any(|s| url.starts_with(s)) {
+    if !scheme_allowed(url) {
         return Err(TomeError::Usage(format!(
             "unsupported remote URL scheme (expected one of {})",
             FETCH_URL_SCHEMES.join(", ")
