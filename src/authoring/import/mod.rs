@@ -69,4 +69,7 @@ pub mod rule {
     /// (forward-progress). Strict-blocking.
     pub const REMOTE_PLUGIN_FETCH_FAILED: &str = "convert/remote-plugin-fetch-failed";
     pub const CATALOG_SYNTHESIZED_FIELD: &str = "convert/catalog-synthesized-field";
+    /// `hooks/hooks.json` exists but could not be read as UTF-8 text; copied
+    /// verbatim, unvalidated. Strict-blocking.
+    pub const HOOKS_UNREADABLE: &str = "convert/hooks-unreadable";
 }

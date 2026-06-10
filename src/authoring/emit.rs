@@ -194,6 +194,15 @@ fn plan_plugin(
             content: PlannedContent::Text(mcp_json(&plugin.mcp_servers)),
         });
     }
+
+    // Verbatim pass-through (hooks/): planned as Copy like supporting files;
+    // `ensure_in_bounds` still asserts every rel at the sink.
+    for f in &plugin.hooks_files {
+        files.push(PlannedFile {
+            rel: prefix.join(&f.relative),
+            content: PlannedContent::Copy(f.source.clone()),
+        });
+    }
     Ok(())
 }
 
@@ -487,6 +496,8 @@ mod tests {
                 "# Review\n\nDo it.\n",
             )],
             mcp_servers: Vec::new(),
+            hooks_files: Vec::new(),
+            hooks_json: None,
             provenance: Provenance::local("test", PathBuf::from("src")),
             diagnostics: Vec::new(),
         }

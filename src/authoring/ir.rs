@@ -55,6 +55,15 @@ pub struct PluginIr {
     pub license: Option<String>,
     pub entries: Vec<EntryIr>,
     pub mcp_servers: Vec<McpServerIr>,
+    /// Verbatim pass-through files — currently the `hooks/` subtree. Copied
+    /// byte-identical to the emitted plugin, never harness-ism-rewritten:
+    /// sync-time `harness::hooks::read_rewritten_entries` owns the
+    /// `${CLAUDE_PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_DATA}` rewrite and expects the
+    /// tokens intact. Rel-paths are plugin-root-relative, importer-validated.
+    pub hooks_files: Vec<SupportingFile>,
+    /// Raw `hooks/hooks.json` body when present and readable — carried so the
+    /// lint hooks-spec rule reads the IR, not the source tree.
+    pub hooks_json: Option<String>,
     pub provenance: Provenance,
     pub diagnostics: Vec<Diagnostic>,
 }

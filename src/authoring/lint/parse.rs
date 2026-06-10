@@ -216,6 +216,8 @@ fn parse_plugin(ur: &UntrustedRoot) -> Result<PluginIr, TomeError> {
         license,
         entries,
         mcp_servers: Vec::new(),
+        hooks_files: Vec::new(),
+        hooks_json: None,
         provenance: Provenance::local("tome", ur.root().to_path_buf()),
         diagnostics,
     })

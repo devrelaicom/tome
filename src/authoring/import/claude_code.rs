@@ -1,15 +1,19 @@
 //! Claude Code → Tome IR importer (Tier 1, FR-010/FR-012/FR-013).
 //!
 //! Reads a Claude Code plugin directory — `.claude-plugin/plugin.json` plus the
-//! conventional `skills/`, `commands/`, `agents/` trees and an optional
-//! `.mcp.json` — through the [`UntrustedRoot`] guard and produces a
+//! conventional `skills/`, `commands/`, `agents/` trees, an optional `.mcp.json`,
+//! and the `hooks/` subtree — through the [`UntrustedRoot`] guard and produces a
 //! [`PluginIr`]. Honest by construction:
 //!
 //! * manifest fields map 1:1 where Tome models them; dropped fields surface as
 //!   `Info`, exotic fields (`userConfig`/`dependencies`) as `Warning`
 //!   (`data-model.md §1`);
 //! * unsupported component directories (`monitors/`, `themes/`, `lsp/`, …) and
-//!   plugin `settings.json`/`hooks/` surface as `Warning`s (FR-012, §8);
+//!   plugin `settings.json` surface as `Warning`s (FR-012, §8);
+//! * the `hooks/` subtree is copied **verbatim** (byte-identical, no
+//!   harness-ism rewriting) so that `harness::hooks::read_rewritten_entries`
+//!   can apply the `${CLAUDE_PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_DATA}` rewrite at
+//!   sync time with the tokens intact;
 //! * entry frontmatter maps the Tome-modelled set, dropping the rest with an
 //!   `Info`, tool-restriction fields with a `Warning` (silently broadening
 //!   capability), and treating agent conversion as lossy (FR-013, §6);
@@ -78,7 +82,6 @@ const UNSUPPORTED_COMPONENTS: &[(&str, &str)] = &[
     ("output-styles", "output styles"),
     ("channels", "channels"),
     ("bin", "`bin/` executables"),
-    ("hooks", "hooks"),
 ];
 
 /// Defensive bounds against a hostile source tree.
@@ -208,6 +211,9 @@ pub fn import_plugin(
         ));
     }
 
+    // --- hooks/ verbatim pass-through --------------------------------------
+    let (hooks_files, hooks_json) = collect_hooks(root, &mut diagnostics)?;
+
     // --- MCP servers --------------------------------------------------------
     let mcp_servers = import_mcp(root, &mut diagnostics)?;
 
@@ -219,6 +225,8 @@ pub fn import_plugin(
         license,
         entries,
         mcp_servers,
+        hooks_files,
+        hooks_json,
         provenance: Provenance {
             source_harness: "claude-code".to_owned(),
             source_path: source_path.to_path_buf(),
@@ -799,6 +807,46 @@ fn collect_supporting(
     Ok(out)
 }
 
+/// Collect the `hooks/` subtree for verbatim pass-through. Reuses the
+/// supporting-file walk (bounded, symlink-refusing, VCS-junk-skipping); rel
+/// paths are re-prefixed `hooks/` so emit plans them at the plugin root.
+/// `hooks/hooks.json`'s text is also carried (when readable) for the lint
+/// hooks-spec rule.
+fn collect_hooks(
+    root: &UntrustedRoot,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<(Vec<SupportingFile>, Option<String>), TomeError> {
+    let hooks_dir = Path::new("hooks");
+    if !root.is_dir(hooks_dir) {
+        return Ok((Vec::new(), None));
+    }
+    // The empty exclude never matches a child name (it only suppresses a
+    // depth-0 file named like the exclude — none is named "").
+    let mut files = collect_supporting(root, hooks_dir, "")?;
+    for f in &mut files {
+        f.relative = hooks_dir.join(&f.relative);
+    }
+    let json = if root.is_file(Path::new("hooks/hooks.json")) {
+        match root.read_text(Path::new("hooks/hooks.json"), HARNESS_MCP_MAX) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                // Copied verbatim regardless, but Tome cannot validate it —
+                // surfaced as strict-blocking honesty.
+                diagnostics.push(Diagnostic::warning(
+                    rule::HOOKS_UNREADABLE,
+                    format!(
+                        "hooks/hooks.json could not be read as UTF-8 text ({e}); it is copied verbatim but not validated"
+                    ),
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Ok((files, json))
+}
+
 /// Synthesize the plugin's MCP servers from `.mcp.json` (CC format), inferring
 /// transport from `command` (stdio) vs `url` (http). Lenient parse.
 fn import_mcp(
@@ -1101,6 +1149,48 @@ mod tests {
         assert_eq!(p.entries.len(), 1, "only the good skill imports");
         assert_eq!(p.entries[0].name, "good");
         assert!(has(&p.diagnostics, rule::SKIPPED_ENTRY));
+    }
+
+    #[test]
+    fn hooks_pass_through_verbatim_not_unsupported() {
+        let (_t, root) = cc_plugin(|base| {
+            fs::write(
+                base.join(".claude-plugin/plugin.json"),
+                br#"{"name":"p","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            fs::create_dir_all(base.join("hooks/scripts")).unwrap();
+            fs::write(
+                base.join("hooks/hooks.json"),
+                br#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/run.sh"}]}]}}"#,
+            )
+            .unwrap();
+            fs::write(base.join("hooks/scripts/run.sh"), b"#!/bin/sh\n").unwrap();
+        });
+        let p = import_plugin(&root, "p", Path::new("/src")).unwrap();
+        // hooks/ is NOT an unsupported component any more.
+        assert!(
+            !p.diagnostics
+                .iter()
+                .any(|d| d.rule_id == rule::UNSUPPORTED_COMPONENT && d.message.contains("hooks")),
+            "{:?}",
+            p.diagnostics
+        );
+        // The whole subtree is collected, hooks/-prefixed, sorted.
+        let rels: Vec<_> = p
+            .hooks_files
+            .iter()
+            .map(|f| f.relative.display().to_string())
+            .collect();
+        assert_eq!(rels, ["hooks/hooks.json", "hooks/scripts/run.sh"]);
+        // hooks.json content is carried for the lint rule — token INTACT (the
+        // sync-time rewriter owns ${CLAUDE_PLUGIN_ROOT}).
+        assert!(
+            p.hooks_json
+                .as_deref()
+                .unwrap()
+                .contains("${CLAUDE_PLUGIN_ROOT}")
+        );
     }
 
     #[test]

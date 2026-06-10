@@ -270,6 +270,7 @@ fn is_strict_blocking(rule_id: &str) -> bool {
             | cc::CODEX_UNSUPPORTED
             | cc::REMOTE_PLUGIN_SKIPPED
             | cc::REMOTE_PLUGIN_FETCH_FAILED
+            | cc::HOOKS_UNREADABLE
     ) || is_unsupported_harness_ism(rule_id)
 }
 

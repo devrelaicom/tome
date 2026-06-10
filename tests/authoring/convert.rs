@@ -43,6 +43,14 @@ fn cc_plugin_fixture(tmp: &Path) -> PathBuf {
         br#"{"mcpServers":{"svc":{"command":"node","args":["s.js"]}}}"#,
     )
     .unwrap();
+    // Hooks subtree — passed through verbatim.
+    fs::create_dir_all(src.join("hooks")).unwrap();
+    fs::write(
+        src.join("hooks/hooks.json"),
+        br#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh"}]}]}}"#,
+    )
+    .unwrap();
+    fs::write(src.join("hooks/run.sh"), b"#!/bin/sh\necho hooked\n").unwrap();
     src
 }
 
@@ -593,7 +601,6 @@ fn every_unsupported_component_type_warns_exactly_once() {
         "output-styles",
         "channels",
         "bin",
-        "hooks",
     ] {
         fs::create_dir(src.join(d)).unwrap();
     }
@@ -608,8 +615,9 @@ fn every_unsupported_component_type_warns_exactly_once() {
         .iter()
         .filter(|d| d.rule_id == "convert/unsupported-component")
         .count();
-    // 7 component dirs + settings.json.
-    assert_eq!(count, 8, "{:?}", outcome.report.diagnostics);
+    // 6 component dirs + settings.json (hooks/ is now a verbatim pass-through,
+    // not an unsupported component).
+    assert_eq!(count, 7, "{:?}", outcome.report.diagnostics);
 }
 
 #[test]
@@ -628,6 +636,26 @@ fn skill_convert_with_non_utf8_body_is_named_error_and_emits_nothing() {
     assert!(
         !out.join("badskill-tome").exists(),
         "a non-UTF-8 body must leave nothing on disk"
+    );
+}
+
+#[test]
+fn convert_copies_hooks_byte_identical_with_tokens_intact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_plugin_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).expect("convert");
+    let root = out.join(&outcome.final_name);
+
+    let original = fs::read(src.join("hooks/hooks.json")).unwrap();
+    let converted = fs::read(root.join("hooks/hooks.json")).unwrap();
+    assert_eq!(original, converted, "hooks.json must be byte-identical");
+    assert!(root.join("hooks/run.sh").is_file());
+    let text = String::from_utf8(converted).unwrap();
+    assert!(
+        text.contains("${CLAUDE_PLUGIN_ROOT}"),
+        "token must NOT be rewritten"
     );
 }
 
