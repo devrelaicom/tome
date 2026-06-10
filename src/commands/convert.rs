@@ -61,6 +61,7 @@ pub fn run(
         strict: args.strict,
         force: args.force,
         dry_run: args.dry_run,
+        fetch_remote: !args.no_fetch,
         output_dir,
     };
 
@@ -458,6 +459,7 @@ mod tests {
             strict: false,
             force: false,
             dry_run: false,
+            fetch_remote: true,
             output_dir,
         };
         let outcome = crate::authoring::convert::run(&src, &cfg).unwrap();

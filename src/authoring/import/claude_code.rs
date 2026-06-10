@@ -27,6 +27,7 @@ use crate::authoring::ir::{
 };
 use crate::authoring::rewrite::{RewriteOptions, rewrite_body};
 use crate::authoring::untrusted::UntrustedRoot;
+use crate::catalog::git::{Git, scrub_to_string};
 use crate::catalog::manifest::Owner;
 use crate::error::TomeError;
 use crate::plugin::frontmatter::{frontmatter_keys, parse_skill_frontmatter_str};
@@ -36,7 +37,7 @@ use crate::util::{HARNESS_MCP_MAX, PLUGIN_MANIFEST_MAX};
 
 // The diagnostic rule ids this importer emits live in the shared
 // `super::rule` SSOT (promoted when Codex became the second consumer).
-use super::rule;
+use super::{FetchContext, rule};
 
 /// Frontmatter keys Tome models 1:1 (kebab-case, matching `SkillFrontmatter`'s
 /// `rename_all`; the two snake exceptions carry explicit renames). Anything not
@@ -232,12 +233,16 @@ pub fn import_plugin(
 /// Relative-path plugins are imported and vendored inline; a failure converting
 /// **any** relative-path plugin aborts the whole conversion (the error is
 /// propagated, so `build_ir` returns before `emit` and nothing lands —
-/// all-or-nothing, FR-014a). Remote-source plugins (github/git/url/npm) are
-/// warned-and-skipped, and that warning is strict-blocking so `--strict`
-/// hard-fails them (FR-014).
+/// all-or-nothing, FR-014a). Remote-source plugins (`github`/`git`/`url`) are
+/// shallow-cloned and vendored by default; `fetch.enabled = false` (i.e.
+/// `--no-fetch`) restores the hermetic warn-and-skip path. A fetch failure
+/// skips that plugin only (forward-progress) but is strict-blocking so
+/// `--strict` hard-fails on any failure. Unfetchable kinds (`npm`, etc.) are
+/// always warned-and-skipped.
 pub fn import_marketplace(
     root: &UntrustedRoot,
     source_path: &Path,
+    fetch: &mut FetchContext,
 ) -> Result<CatalogIr, TomeError> {
     let mut diagnostics = Vec::new();
 
@@ -317,15 +322,62 @@ pub fn import_marketplace(
                     UntrustedRoot::validate_name(&plugin.name)?;
                     plugins.push(plugin);
                 }
-                // TEMPORARY (replaced by the fetch task): both remote variants
-                // keep the historical warn-and-skip until fetching lands.
-                PluginSource::RemoteGit { kind, .. }
-                | PluginSource::RemoteUnfetchable(kind) => diagnostics.push(Diagnostic::warning(
-                    rule::REMOTE_PLUGIN_SKIPPED,
-                    format!(
-                        "plugin `{label}` has a remote source ({kind}); Tome catalogs are relative-path-only, so it is skipped"
-                    ),
-                )),
+                PluginSource::RemoteGit {
+                    kind,
+                    url,
+                    reference,
+                } => {
+                    let display_url = scrub_to_string(url.as_bytes());
+                    if !fetch.enabled {
+                        diagnostics.push(Diagnostic::warning(
+                            rule::REMOTE_PLUGIN_SKIPPED,
+                            format!(
+                                "plugin `{label}` has a remote source ({kind}); skipped under --no-fetch"
+                            ),
+                        ));
+                        continue;
+                    }
+                    match fetch_remote_plugin(&url, reference.as_deref(), pname.as_deref(), fetch) {
+                        Ok(mut plugin) => {
+                            // The marketplace entry `name` is the catalog identity; a
+                            // differing fetched plugin.json name is surfaced + overridden.
+                            if let Some(entry_name) = &pname
+                                && *entry_name != plugin.name
+                            {
+                                diagnostics.push(Diagnostic::info(
+                                    rule::REMOTE_PLUGIN_FETCHED,
+                                    format!(
+                                        "plugin `{label}`: fetched plugin.json names itself `{}`; the marketplace entry name wins",
+                                        plugin.name
+                                    ),
+                                ));
+                                plugin.name = entry_name.clone();
+                            }
+                            // Same SEC-1 defence as the relative path: the name becomes
+                            // the emitted directory.
+                            UntrustedRoot::validate_name(&plugin.name)?;
+                            diagnostics.push(Diagnostic::info(
+                                rule::REMOTE_PLUGIN_FETCHED,
+                                format!("plugin `{label}` fetched from {display_url} and vendored"),
+                            ));
+                            plugins.push(plugin);
+                        }
+                        // Forward-progress: a fetch/import failure skips THIS plugin
+                        // only; the warning is strict-blocking.
+                        Err(e) => diagnostics.push(Diagnostic::warning(
+                            rule::REMOTE_PLUGIN_FETCH_FAILED,
+                            format!("plugin `{label}` ({display_url}) could not be fetched: {e}"),
+                        )),
+                    }
+                }
+                PluginSource::RemoteUnfetchable(kind) => {
+                    diagnostics.push(Diagnostic::warning(
+                        rule::REMOTE_PLUGIN_SKIPPED,
+                        format!(
+                            "plugin `{label}` has a remote source ({kind}) Tome cannot fetch; it is skipped"
+                        ),
+                    ));
+                }
                 PluginSource::Malformed => diagnostics.push(Diagnostic::warning(
                     rule::REMOTE_PLUGIN_SKIPPED,
                     format!("plugin `{label}` has an unrecognized `source`; skipping it"),
@@ -349,8 +401,6 @@ pub fn import_marketplace(
 }
 
 /// Classification of a marketplace `plugins[].source`.
-// `RemoteGit.url` and `RemoteGit.reference` are read by the fetch task (Task 3).
-#[allow(dead_code)]
 enum PluginSource {
     /// A relative path within the marketplace repo (vendored inline).
     Relative(String),
@@ -404,6 +454,55 @@ fn classify_plugin_source(source: Option<&serde_json::Value>) -> PluginSource {
         }
         _ => PluginSource::Malformed,
     }
+}
+
+/// URL schemes a marketplace remote may use. `file://` is required by the
+/// hermetic test fixtures; everything else is the conventional git set. A URL
+/// outside this set (including anything starting with `-`) is refused BEFORE
+/// it reaches the spawned git — the scheme check plus `clone_shallow`'s `--`
+/// end-of-options marker together close git argument injection.
+const FETCH_URL_SCHEMES: &[&str] = &["https://", "http://", "git://", "ssh://", "git@", "file://"];
+
+/// Shallow-clone a remote plugin source and import it as a Claude Code plugin.
+/// The clone's TempDir is pushed onto the keepalive ONLY on success — a failed
+/// fetch/import drops (cleans up) the clone immediately. Errors carry only
+/// scrubbed URLs. `reference` rides `git clone --branch`, which accepts
+/// branch/tag names only — a commit-SHA pin fails the clone and degrades to
+/// the fetch-failed warning.
+fn fetch_remote_plugin(
+    url: &str,
+    reference: Option<&str>,
+    entry_name: Option<&str>,
+    fetch: &mut FetchContext,
+) -> Result<PluginIr, TomeError> {
+    if !FETCH_URL_SCHEMES.iter().any(|s| url.starts_with(s)) {
+        return Err(TomeError::Usage(format!(
+            "unsupported remote URL scheme (expected one of {})",
+            FETCH_URL_SCHEMES.join(", ")
+        )));
+    }
+    let tempdir = tempfile::Builder::new()
+        .prefix("tome-fetch-")
+        .tempdir()
+        .map_err(TomeError::Io)?;
+    let dest = tempdir.path().join("repo");
+    let git = Git::new(scrub_to_string(url.as_bytes()));
+    git.clone_shallow(url, &dest, reference)?;
+
+    let plugin_root = UntrustedRoot::open(&dest)?;
+    // The fetched repo must BE a plugin. A self-marketplace repo carrying both
+    // manifests imports as a plugin here — the catalog context already decided
+    // the level (no recursive marketplace expansion).
+    if !plugin_root.is_file(Path::new(".claude-plugin/plugin.json")) {
+        return Err(TomeError::Usage(
+            "fetched repository has no .claude-plugin/plugin.json (not a Claude Code plugin)"
+                .to_owned(),
+        ));
+    }
+    let default = entry_name.unwrap_or("plugin");
+    let plugin = import_plugin(&plugin_root, default, &dest)?;
+    fetch.keepalive.push(tempdir);
+    Ok(plugin)
 }
 
 /// Parse a CC marketplace `owner` (`{name, email}` object) into the required

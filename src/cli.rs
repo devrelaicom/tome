@@ -775,6 +775,11 @@ pub struct ConvertArgs {
     /// Abort (writing nothing) on anything Tome cannot represent.
     #[arg(long)]
     pub strict: bool,
+    /// Do not fetch remote-source marketplace plugins (`catalog convert`
+    /// only); they are warned-and-skipped instead, restoring a fully hermetic
+    /// conversion. Has no effect on `plugin`/`skill convert`.
+    #[arg(long = "no-fetch")]
+    pub no_fetch: bool,
 }
 
 /// Shared `lint` arguments across all three artifact levels.

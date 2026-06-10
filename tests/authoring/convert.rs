@@ -54,6 +54,7 @@ fn config(output_dir: PathBuf) -> ConvertConfig {
         strict: false,
         force: false,
         dry_run: false,
+        fetch_remote: true,
         output_dir,
     }
 }
@@ -228,6 +229,7 @@ fn skill_config(output_dir: PathBuf, from: Option<&str>) -> ConvertConfig {
         strict: false,
         force: false,
         dry_run: false,
+        fetch_remote: true,
         output_dir,
     }
 }
@@ -349,18 +351,23 @@ fn catalog_config(output_dir: PathBuf, strict: bool) -> ConvertConfig {
         strict,
         force: false,
         dry_run: false,
+        fetch_remote: true,
         output_dir,
     }
 }
 
 #[test]
 fn converts_a_marketplace_vendoring_relative_plugins_and_skipping_remote() {
+    // The fixture uses a github remote that cannot be fetched in tests; we
+    // disable fetching so it degrades to the hermetic warn-and-skip path.
     let tmp = tempfile::tempdir().unwrap();
     let src = cc_marketplace_fixture(tmp.path());
     let out = tmp.path().join("out");
     fs::create_dir(&out).unwrap();
 
-    let outcome = run(&src, &catalog_config(out.clone(), false)).unwrap();
+    let mut cfg = catalog_config(out.clone(), false);
+    cfg.fetch_remote = false;
+    let outcome = run(&src, &cfg).unwrap();
     assert_eq!(outcome.final_name, "mkt-tome");
 
     let target = out.join("mkt-tome");
@@ -369,7 +376,7 @@ fn converts_a_marketplace_vendoring_relative_plugins_and_skipping_remote() {
     assert!(cat.contains("name = \"mkt-tome\""), "{cat}");
     assert!(read_plugin_manifest(&target.join("alpha")).is_ok());
     assert!(target.join("alpha/skills/s/SKILL.md").exists());
-    // The remote plugin was skipped + warned, not vendored.
+    // Under --no-fetch the remote plugin was skipped + warned, not vendored.
     assert!(!target.join("beta").exists());
     assert!(
         outcome
@@ -382,14 +389,157 @@ fn converts_a_marketplace_vendoring_relative_plugins_and_skipping_remote() {
 
 #[test]
 fn strict_marketplace_hard_fails_on_a_remote_plugin() {
+    // With fetch disabled, a github remote produces remote-plugin-skipped which
+    // is strict-blocking → exit 84.
     let tmp = tempfile::tempdir().unwrap();
     let src = cc_marketplace_fixture(tmp.path());
     let out = tmp.path().join("out");
     fs::create_dir(&out).unwrap();
 
-    let err = run(&src, &catalog_config(out.clone(), true)).unwrap_err();
+    let mut cfg = catalog_config(out.clone(), true);
+    cfg.fetch_remote = false;
+    let err = run(&src, &cfg).unwrap_err();
     assert_eq!(err.exit_code(), 84);
     assert!(!out.join("mkt-tome").exists(), "strict abort lands nothing");
+}
+
+/// Run a git subcommand in `dir`, asserting success (identity injected so CI
+/// never prompts).
+fn git_cmd(args: &[&str], dir: &Path) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "Tome Test")
+        .env("GIT_AUTHOR_EMAIL", "tests@tome.invalid")
+        .env("GIT_COMMITTER_NAME", "Tome Test")
+        .env("GIT_COMMITTER_EMAIL", "tests@tome.invalid")
+        .status()
+        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    assert!(status.success(), "git {args:?} exited {status}");
+}
+
+/// A minimal CC plugin repo committed to git, returning its `file://` URL.
+fn remote_plugin_repo(tmp: &Path, name: &str) -> String {
+    let repo = tmp.join(name);
+    fs::create_dir_all(repo.join(".claude-plugin")).unwrap();
+    fs::write(
+        repo.join(".claude-plugin/plugin.json"),
+        format!(r#"{{"name":"{name}","version":"1.0.0","description":"d"}}"#),
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("skills/hello")).unwrap();
+    fs::write(
+        repo.join("skills/hello/SKILL.md"),
+        "---\nname: hello\ndescription: says hello\n---\nHello.\n",
+    )
+    .unwrap();
+    git_cmd(&["init", "-q", "-b", "main"], &repo);
+    git_cmd(&["add", "-A"], &repo);
+    git_cmd(&["commit", "-q", "-m", "init"], &repo);
+    format!("file://{}", repo.display())
+}
+
+/// A marketplace whose plugins mix a vendored relative source, a fetchable
+/// `url` source, an unreachable `url` source, and an unfetchable npm source.
+fn marketplace_with_remotes(tmp: &Path, good_url: &str, bad_url: &str) -> PathBuf {
+    let src = tmp.join("market");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/marketplace.json"),
+        format!(
+            r#"{{"name":"mixed","version":"1.0.0","description":"d",
+                 "owner":{{"name":"o","email":"o@x.io"}},
+                 "plugins":[
+                   {{"name":"local-one","source":"./local-one"}},
+                   {{"name":"fetched-one","source":{{"source":"url","url":"{good_url}"}}}},
+                   {{"name":"broken-one","source":{{"source":"url","url":"{bad_url}"}}}},
+                   {{"name":"npm-one","source":{{"source":"npm","package":"x"}}}}
+                 ]}}"#
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("local-one/.claude-plugin")).unwrap();
+    fs::write(
+        src.join("local-one/.claude-plugin/plugin.json"),
+        br#"{"name":"local-one","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    src
+}
+
+#[test]
+fn catalog_convert_fetches_remote_plugins_and_skips_failures() {
+    let tmp = tempfile::tempdir().unwrap();
+    let good = remote_plugin_repo(tmp.path(), "fetched-one");
+    let bad = format!("file://{}/nonexistent", tmp.path().display());
+    let src = marketplace_with_remotes(tmp.path(), &good, &bad);
+    let out = tmp.path().join("out");
+
+    let outcome = run(&src, &catalog_config(out.clone(), false)).expect("convert");
+    let root = out.join(&outcome.final_name);
+
+    // The relative plugin AND the fetched remote plugin are vendored.
+    assert!(root.join("local-one/tome-plugin.toml").is_file());
+    assert!(root.join("fetched-one/tome-plugin.toml").is_file());
+    assert!(root.join("fetched-one/skills/hello/SKILL.md").is_file());
+    // Both are registered in the catalog manifest.
+    let manifest = fs::read_to_string(root.join("tome-catalog.toml")).unwrap();
+    assert!(manifest.contains("name = \"fetched-one\""), "{manifest}");
+
+    // Forward-progress: the unreachable URL warned, did not abort.
+    assert!(outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/remote-plugin-fetch-failed" && d.message.contains("broken-one")
+    }));
+    // npm stays skipped under the existing rule.
+    assert!(outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/remote-plugin-skipped" && d.message.contains("npm-one")
+    }));
+    // The fetched plugin is reported.
+    assert!(outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/remote-plugin-fetched" && d.message.contains("fetched-one")
+    }));
+    assert!(!root.join("broken-one").exists());
+}
+
+#[test]
+fn catalog_convert_no_fetch_restores_hermetic_skip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let good = remote_plugin_repo(tmp.path(), "fetched-one");
+    let bad = format!("file://{}/nonexistent", tmp.path().display());
+    let src = marketplace_with_remotes(tmp.path(), &good, &bad);
+    let out = tmp.path().join("out");
+
+    let mut cfg = catalog_config(out.clone(), false);
+    cfg.fetch_remote = false;
+    let outcome = run(&src, &cfg).expect("convert");
+    let root = out.join(&outcome.final_name);
+
+    assert!(root.join("local-one/tome-plugin.toml").is_file());
+    assert!(
+        !root.join("fetched-one").exists(),
+        "--no-fetch must not clone"
+    );
+    // Every remote (fetchable or not) warned under the skip rule.
+    let skips = outcome
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule_id == "convert/remote-plugin-skipped")
+        .count();
+    assert_eq!(skips, 3, "fetched-one + broken-one + npm-one all skipped");
+}
+
+#[test]
+fn strict_aborts_on_a_remote_fetch_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let good = remote_plugin_repo(tmp.path(), "fetched-one");
+    let bad = format!("file://{}/nonexistent", tmp.path().display());
+    let src = marketplace_with_remotes(tmp.path(), &good, &bad);
+    let out = tmp.path().join("out");
+
+    let err = run(&src, &catalog_config(out.clone(), true)).unwrap_err();
+    assert_eq!(err.exit_code(), 84, "strict fetch failure aborts: {err}");
+    assert!(!out.exists(), "strict abort writes nothing");
 }
 
 #[test]

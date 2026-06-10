@@ -157,6 +157,12 @@ impl Git {
 
     /// Shallow clone `url` into `dest`, optionally tracking `ref_`. The
     /// destination must not exist; caller is responsible for using a temp dir.
+    ///
+    /// The `--` end-of-options separator is inserted before `url` and `dest`
+    /// so that a third-party URL (e.g. from a marketplace `plugins[].source`)
+    /// can never be parsed as a git option — argument-injection defence.
+    /// `--branch` accepts branch/tag names only; a commit-SHA pin will fail
+    /// the clone and degrade to the fetch-failed warning.
     pub fn clone_shallow(
         &self,
         url: &str,
@@ -168,6 +174,9 @@ impl Git {
             args.push("--branch".into());
             args.push(r.to_string());
         }
+        // End-of-options: a third-party URL can never be parsed as a git
+        // option (argument-injection defence; the marketplace controls it).
+        args.push("--".into());
         args.push(url.into());
         args.push(dest.display().to_string());
         self.run(args, None).map(|_| ())
