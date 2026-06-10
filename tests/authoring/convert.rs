@@ -43,6 +43,14 @@ fn cc_plugin_fixture(tmp: &Path) -> PathBuf {
         br#"{"mcpServers":{"svc":{"command":"node","args":["s.js"]}}}"#,
     )
     .unwrap();
+    // Hooks subtree — passed through verbatim.
+    fs::create_dir_all(src.join("hooks")).unwrap();
+    fs::write(
+        src.join("hooks/hooks.json"),
+        br#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh"}]}]}}"#,
+    )
+    .unwrap();
+    fs::write(src.join("hooks/run.sh"), b"#!/bin/sh\necho hooked\n").unwrap();
     src
 }
 
@@ -54,6 +62,7 @@ fn config(output_dir: PathBuf) -> ConvertConfig {
         strict: false,
         force: false,
         dry_run: false,
+        fetch_remote: true,
         output_dir,
     }
 }
@@ -228,6 +237,7 @@ fn skill_config(output_dir: PathBuf, from: Option<&str>) -> ConvertConfig {
         strict: false,
         force: false,
         dry_run: false,
+        fetch_remote: true,
         output_dir,
     }
 }
@@ -315,6 +325,10 @@ fn converts_a_codex_project_to_a_synthesized_plugin() {
 }
 
 /// Build a CC marketplace with one relative-path plugin + one remote plugin.
+///
+/// The `alpha` plugin includes a `hooks/` subtree (with a `${CLAUDE_PLUGIN_ROOT}`
+/// token in `hooks.json`) to verify that hooks land NAMESPACED under the vendored
+/// plugin directory (`alpha/hooks/`), never flat at the catalog root.
 fn cc_marketplace_fixture(tmp: &Path) -> PathBuf {
     let src = tmp.join("mkt");
     fs::create_dir_all(src.join(".claude-plugin")).unwrap();
@@ -338,6 +352,13 @@ fn cc_marketplace_fixture(tmp: &Path) -> PathBuf {
         "---\nname: s\ndescription: d\n---\nbody\n",
     )
     .unwrap();
+    // hooks/ subtree for the namespaced-placement test.
+    fs::create_dir_all(src.join("alpha/hooks")).unwrap();
+    fs::write(
+        src.join("alpha/hooks/hooks.json"),
+        br#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/run.sh"}]}]}}"#,
+    )
+    .unwrap();
     src
 }
 
@@ -349,18 +370,23 @@ fn catalog_config(output_dir: PathBuf, strict: bool) -> ConvertConfig {
         strict,
         force: false,
         dry_run: false,
+        fetch_remote: true,
         output_dir,
     }
 }
 
 #[test]
 fn converts_a_marketplace_vendoring_relative_plugins_and_skipping_remote() {
+    // The fixture uses a github remote that cannot be fetched in tests; we
+    // disable fetching so it degrades to the hermetic warn-and-skip path.
     let tmp = tempfile::tempdir().unwrap();
     let src = cc_marketplace_fixture(tmp.path());
     let out = tmp.path().join("out");
     fs::create_dir(&out).unwrap();
 
-    let outcome = run(&src, &catalog_config(out.clone(), false)).unwrap();
+    let mut cfg = catalog_config(out.clone(), false);
+    cfg.fetch_remote = false;
+    let outcome = run(&src, &cfg).unwrap();
     assert_eq!(outcome.final_name, "mkt-tome");
 
     let target = out.join("mkt-tome");
@@ -369,7 +395,7 @@ fn converts_a_marketplace_vendoring_relative_plugins_and_skipping_remote() {
     assert!(cat.contains("name = \"mkt-tome\""), "{cat}");
     assert!(read_plugin_manifest(&target.join("alpha")).is_ok());
     assert!(target.join("alpha/skills/s/SKILL.md").exists());
-    // The remote plugin was skipped + warned, not vendored.
+    // Under --no-fetch the remote plugin was skipped + warned, not vendored.
     assert!(!target.join("beta").exists());
     assert!(
         outcome
@@ -382,14 +408,214 @@ fn converts_a_marketplace_vendoring_relative_plugins_and_skipping_remote() {
 
 #[test]
 fn strict_marketplace_hard_fails_on_a_remote_plugin() {
+    // With fetch disabled, a github remote produces remote-plugin-skipped which
+    // is strict-blocking → exit 84.
     let tmp = tempfile::tempdir().unwrap();
     let src = cc_marketplace_fixture(tmp.path());
     let out = tmp.path().join("out");
     fs::create_dir(&out).unwrap();
 
-    let err = run(&src, &catalog_config(out.clone(), true)).unwrap_err();
+    let mut cfg = catalog_config(out.clone(), true);
+    cfg.fetch_remote = false;
+    let err = run(&src, &cfg).unwrap_err();
     assert_eq!(err.exit_code(), 84);
     assert!(!out.join("mkt-tome").exists(), "strict abort lands nothing");
+}
+
+#[test]
+fn vendored_catalog_plugin_hooks_land_namespaced_not_flat() {
+    // Hooks must be emitted under `<catalog>/<plugin>/hooks/`, not flat at the
+    // catalog root (`<catalog>/hooks/`). The cc_marketplace_fixture alpha plugin
+    // has a hooks/hooks.json with a ${CLAUDE_PLUGIN_ROOT} token.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_marketplace_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let mut cfg = catalog_config(out.clone(), false);
+    cfg.fetch_remote = false; // beta is a github remote, skip it
+    let outcome = run(&src, &cfg).unwrap();
+    let root = out.join(&outcome.final_name);
+
+    // hooks.json lands namespaced under the alpha plugin directory.
+    assert!(
+        root.join("alpha/hooks/hooks.json").is_file(),
+        "hooks must land under alpha/hooks/, not at the catalog root"
+    );
+    // No flat hooks/ directory at the catalog root.
+    assert!(
+        !root.join("hooks").exists(),
+        "hooks must NOT appear flat at the catalog root"
+    );
+    // Token is intact (verbatim pass-through, no harness-ism rewrite at convert time).
+    let text = fs::read_to_string(root.join("alpha/hooks/hooks.json")).unwrap();
+    assert!(
+        text.contains("${CLAUDE_PLUGIN_ROOT}"),
+        "token must survive verbatim: {text}"
+    );
+}
+
+/// Run a git subcommand in `dir`, asserting success (identity injected so CI
+/// never prompts).
+fn git_cmd(args: &[&str], dir: &Path) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "Tome Test")
+        .env("GIT_AUTHOR_EMAIL", "tests@tome.invalid")
+        .env("GIT_COMMITTER_NAME", "Tome Test")
+        .env("GIT_COMMITTER_EMAIL", "tests@tome.invalid")
+        .status()
+        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    assert!(status.success(), "git {args:?} exited {status}");
+}
+
+/// A minimal CC plugin repo committed to git, returning its `file://` URL.
+///
+/// Includes a `hooks/` subtree (with a `${CLAUDE_PLUGIN_ROOT}` token in
+/// `hooks.json`) to verify the FetchContext keepalive contract: the temp clone
+/// must stay alive across emit so the hooks files can be copied from it.
+fn remote_plugin_repo(tmp: &Path, name: &str) -> String {
+    let repo = tmp.join(name);
+    fs::create_dir_all(repo.join(".claude-plugin")).unwrap();
+    fs::write(
+        repo.join(".claude-plugin/plugin.json"),
+        format!(r#"{{"name":"{name}","version":"1.0.0","description":"d"}}"#),
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("skills/hello")).unwrap();
+    fs::write(
+        repo.join("skills/hello/SKILL.md"),
+        "---\nname: hello\ndescription: says hello\n---\nHello.\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("hooks")).unwrap();
+    fs::write(
+        repo.join("hooks/hooks.json"),
+        br#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh"}]}]}}"#,
+    )
+    .unwrap();
+    fs::write(repo.join("hooks/run.sh"), b"#!/bin/sh\n").unwrap();
+    git_cmd(&["init", "-q", "-b", "main"], &repo);
+    git_cmd(&["add", "-A"], &repo);
+    git_cmd(&["commit", "-q", "-m", "init"], &repo);
+    format!("file://{}", repo.display())
+}
+
+/// A marketplace whose plugins mix a vendored relative source, a fetchable
+/// `url` source, an unreachable `url` source, and an unfetchable npm source.
+fn marketplace_with_remotes(tmp: &Path, good_url: &str, bad_url: &str) -> PathBuf {
+    let src = tmp.join("market");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/marketplace.json"),
+        format!(
+            r#"{{"name":"mixed","version":"1.0.0","description":"d",
+                 "owner":{{"name":"o","email":"o@x.io"}},
+                 "plugins":[
+                   {{"name":"local-one","source":"./local-one"}},
+                   {{"name":"fetched-one","source":{{"source":"url","url":"{good_url}"}}}},
+                   {{"name":"broken-one","source":{{"source":"url","url":"{bad_url}"}}}},
+                   {{"name":"npm-one","source":{{"source":"npm","package":"x"}}}}
+                 ]}}"#
+        ),
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("local-one/.claude-plugin")).unwrap();
+    fs::write(
+        src.join("local-one/.claude-plugin/plugin.json"),
+        br#"{"name":"local-one","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    src
+}
+
+#[test]
+fn catalog_convert_fetches_remote_plugins_and_skips_failures() {
+    tome::authoring::import::claude_code::ALLOW_FILE_URLS_FOR_TESTS
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let tmp = tempfile::tempdir().unwrap();
+    let good = remote_plugin_repo(tmp.path(), "fetched-one");
+    let bad = format!("file://{}/nonexistent", tmp.path().display());
+    let src = marketplace_with_remotes(tmp.path(), &good, &bad);
+    let out = tmp.path().join("out");
+
+    let outcome = run(&src, &catalog_config(out.clone(), false)).expect("convert");
+    let root = out.join(&outcome.final_name);
+
+    // The relative plugin AND the fetched remote plugin are vendored.
+    assert!(root.join("local-one/tome-plugin.toml").is_file());
+    assert!(root.join("fetched-one/tome-plugin.toml").is_file());
+    assert!(root.join("fetched-one/skills/hello/SKILL.md").is_file());
+    // Both are registered in the catalog manifest.
+    let manifest = fs::read_to_string(root.join("tome-catalog.toml")).unwrap();
+    assert!(manifest.contains("name = \"fetched-one\""), "{manifest}");
+
+    // Forward-progress: the unreachable URL warned, did not abort.
+    assert!(outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/remote-plugin-fetch-failed" && d.message.contains("broken-one")
+    }));
+    // npm stays skipped under the existing rule.
+    assert!(outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/remote-plugin-skipped" && d.message.contains("npm-one")
+    }));
+    // The fetched plugin is reported.
+    assert!(outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/remote-plugin-fetched" && d.message.contains("fetched-one")
+    }));
+    assert!(!root.join("broken-one").exists());
+
+    // Fetched-plugin hooks: Copy sources live in the temp clone, which the
+    // FetchContext keepalive holds alive across emit — the hooks must land
+    // namespaced under the vendored plugin with the token intact.
+    let hooks = fs::read_to_string(root.join("fetched-one/hooks/hooks.json")).unwrap();
+    assert!(hooks.contains("${CLAUDE_PLUGIN_ROOT}"));
+    assert!(root.join("fetched-one/hooks/run.sh").is_file());
+}
+
+#[test]
+fn catalog_convert_no_fetch_restores_hermetic_skip() {
+    tome::authoring::import::claude_code::ALLOW_FILE_URLS_FOR_TESTS
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let tmp = tempfile::tempdir().unwrap();
+    let good = remote_plugin_repo(tmp.path(), "fetched-one");
+    let bad = format!("file://{}/nonexistent", tmp.path().display());
+    let src = marketplace_with_remotes(tmp.path(), &good, &bad);
+    let out = tmp.path().join("out");
+
+    let mut cfg = catalog_config(out.clone(), false);
+    cfg.fetch_remote = false;
+    let outcome = run(&src, &cfg).expect("convert");
+    let root = out.join(&outcome.final_name);
+
+    assert!(root.join("local-one/tome-plugin.toml").is_file());
+    assert!(
+        !root.join("fetched-one").exists(),
+        "--no-fetch must not clone"
+    );
+    // Every remote (fetchable or not) warned under the skip rule.
+    let skips = outcome
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule_id == "convert/remote-plugin-skipped")
+        .count();
+    assert_eq!(skips, 3, "fetched-one + broken-one + npm-one all skipped");
+}
+
+#[test]
+fn strict_aborts_on_a_remote_fetch_failure() {
+    tome::authoring::import::claude_code::ALLOW_FILE_URLS_FOR_TESTS
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let tmp = tempfile::tempdir().unwrap();
+    let good = remote_plugin_repo(tmp.path(), "fetched-one");
+    let bad = format!("file://{}/nonexistent", tmp.path().display());
+    let src = marketplace_with_remotes(tmp.path(), &good, &bad);
+    let out = tmp.path().join("out");
+
+    let err = run(&src, &catalog_config(out.clone(), true)).unwrap_err();
+    assert_eq!(err.exit_code(), 84, "strict fetch failure aborts: {err}");
+    assert!(!out.exists(), "strict abort writes nothing");
 }
 
 #[test]
@@ -437,7 +663,6 @@ fn every_unsupported_component_type_warns_exactly_once() {
         "output-styles",
         "channels",
         "bin",
-        "hooks",
     ] {
         fs::create_dir(src.join(d)).unwrap();
     }
@@ -452,8 +677,9 @@ fn every_unsupported_component_type_warns_exactly_once() {
         .iter()
         .filter(|d| d.rule_id == "convert/unsupported-component")
         .count();
-    // 7 component dirs + settings.json.
-    assert_eq!(count, 8, "{:?}", outcome.report.diagnostics);
+    // 6 component dirs + settings.json (hooks/ is now a verbatim pass-through,
+    // not an unsupported component).
+    assert_eq!(count, 7, "{:?}", outcome.report.diagnostics);
 }
 
 #[test]
@@ -472,6 +698,26 @@ fn skill_convert_with_non_utf8_body_is_named_error_and_emits_nothing() {
     assert!(
         !out.join("badskill-tome").exists(),
         "a non-UTF-8 body must leave nothing on disk"
+    );
+}
+
+#[test]
+fn convert_copies_hooks_byte_identical_with_tokens_intact() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_plugin_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let outcome = run(&src, &config(out.clone())).expect("convert");
+    let root = out.join(&outcome.final_name);
+
+    let original = fs::read(src.join("hooks/hooks.json")).unwrap();
+    let converted = fs::read(root.join("hooks/hooks.json")).unwrap();
+    assert_eq!(original, converted, "hooks.json must be byte-identical");
+    assert!(root.join("hooks/run.sh").is_file());
+    let text = String::from_utf8(converted).unwrap();
+    assert!(
+        text.contains("${CLAUDE_PLUGIN_ROOT}"),
+        "token must NOT be rewritten"
     );
 }
 
@@ -496,11 +742,60 @@ fn conversion_is_byte_stable_across_runs() {
         "skills/greet/scripts/run.sh",
         "commands/say.md",
         ".mcp.json",
+        "hooks/hooks.json",
+        "hooks/run.sh",
     ] {
         let a = fs::read(t1.join(f)).unwrap_or_else(|_| panic!("missing {f} in run1"));
         let b = fs::read(t2.join(f)).unwrap_or_else(|_| panic!("missing {f} in run2"));
         assert_eq!(a, b, "byte drift in {f}");
     }
+}
+
+#[test]
+fn strict_aborts_on_an_unreadable_hooks_json() {
+    // A binary (non-UTF-8) hooks.json emits convert/hooks-unreadable (Warning,
+    // strict-blocking) and, under --strict, aborts before writing anything.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"p","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("hooks")).unwrap();
+    // 4 bytes that are not valid UTF-8.
+    fs::write(src.join("hooks/hooks.json"), [0xFF, 0xFE, 0x00, 0x9C]).unwrap();
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let mut cfg = config(out.clone());
+    cfg.strict = true;
+    let err = run(&src, &cfg).unwrap_err();
+    assert_eq!(err.exit_code(), 84, "{err}");
+    assert!(!out.join("p-tome").exists(), "strict abort writes nothing");
+}
+
+#[test]
+fn strict_aborts_on_a_malformed_hooks_json() {
+    // Symmetry with the unreadable case: valid-UTF-8/invalid-JSON hooks.json
+    // is strict-blocking too (it would hard-fail harness sync at exit 43).
+    // Contrast: without --strict the convert succeeds with a lint warning only.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"p","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("hooks")).unwrap();
+    fs::write(src.join("hooks/hooks.json"), b"{not json").unwrap();
+    let out = tmp.path().join("out");
+    let mut cfg = config(out.clone());
+    cfg.strict = true;
+    let err = run(&src, &cfg).unwrap_err();
+    assert_eq!(err.exit_code(), 84, "{err}");
+    assert!(!out.exists(), "strict abort writes nothing");
 }
 
 #[test]
@@ -600,4 +895,106 @@ fn a_symlinked_skill_child_aborts_the_convert() {
     let err = run(&src, &config(out.clone())).unwrap_err();
     assert_eq!(err.exit_code(), 7);
     assert!(!out.join("p-tome").exists());
+}
+
+// --- security regression tests (code-review fixes) -------------------------
+
+#[test]
+fn remote_fetch_rejects_disallowed_url_schemes() {
+    // The argument-injection guard: an `ext::` transport (or any non-allowlisted
+    // scheme) must be refused BEFORE any git spawn, degrading to fetch-failed.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("market");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/marketplace.json"),
+        br#"{"name":"m","version":"1.0.0","description":"d",
+             "owner":{"name":"o","email":"o@x.io"},
+             "plugins":[{"name":"evil","source":{"source":"url","url":"ext::sh -c id"}}]}"#,
+    )
+    .unwrap();
+    let out = tmp.path().join("out");
+    let outcome = run(&src, &catalog_config(out.clone(), false)).expect("convert proceeds");
+    assert!(outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/remote-plugin-fetch-failed"
+            && d.message.contains("unsupported remote URL scheme")
+    }));
+}
+
+#[test]
+fn remote_fetch_skips_a_plugin_with_an_unsafe_marketplace_name() {
+    // I1 regression: one hostile entry name must not poison the catalog.
+    tome::authoring::import::claude_code::ALLOW_FILE_URLS_FOR_TESTS
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let tmp = tempfile::tempdir().unwrap();
+    let good = remote_plugin_repo(tmp.path(), "good-one");
+    let evil = remote_plugin_repo(tmp.path(), "evil-src");
+    let src = tmp.path().join("market");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/marketplace.json"),
+        format!(
+            r#"{{"name":"m","version":"1.0.0","description":"d",
+                 "owner":{{"name":"o","email":"o@x.io"}},
+                 "plugins":[
+                   {{"name":"good-one","source":{{"source":"url","url":"{good}"}}}},
+                   {{"name":"../escape","source":{{"source":"url","url":"{evil}"}}}}
+                 ]}}"#
+        ),
+    )
+    .unwrap();
+    let out = tmp.path().join("out");
+    let outcome = run(&src, &catalog_config(out.clone(), false)).expect("convert proceeds");
+    let root = out.join(&outcome.final_name);
+    assert!(
+        root.join("good-one/tome-plugin.toml").is_file(),
+        "good plugin still vendors"
+    );
+    assert!(outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/remote-plugin-fetch-failed" && d.message.contains("unsafe name")
+    }));
+    assert!(!tmp.path().join("escape").exists());
+}
+
+#[test]
+fn remote_fetch_honours_a_ref_pin_and_degrades_on_a_missing_ref() {
+    tome::authoring::import::claude_code::ALLOW_FILE_URLS_FOR_TESTS
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let tmp = tempfile::tempdir().unwrap();
+    let url = remote_plugin_repo(tmp.path(), "pinned");
+    // Tag the current state, then move main past it with a marker file inside
+    // the skill dir (collect_supporting copies all non-SKILL.md files there).
+    let repo = tmp.path().join("pinned");
+    git_cmd(&["tag", "v1"], &repo);
+    fs::write(repo.join("skills/hello/AFTER_TAG.md"), b"post-tag marker").unwrap();
+    git_cmd(&["add", "-A"], &repo);
+    git_cmd(&["commit", "-q", "-m", "after tag"], &repo);
+
+    let src = tmp.path().join("market");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/marketplace.json"),
+        format!(
+            r#"{{"name":"m","version":"1.0.0","description":"d",
+                 "owner":{{"name":"o","email":"o@x.io"}},
+                 "plugins":[
+                   {{"name":"pinned","source":{{"source":"url","url":"{url}","ref":"v1"}}}},
+                   {{"name":"missing-ref","source":{{"source":"url","url":"{url}","ref":"no-such-ref"}}}}
+                 ]}}"#
+        ),
+    )
+    .unwrap();
+    let out = tmp.path().join("out");
+    let outcome = run(&src, &catalog_config(out.clone(), false)).expect("convert proceeds");
+    let root = out.join(&outcome.final_name);
+    // The v1 pin vendored the PRE-tag tree (no AFTER_TAG.md in the skill dir).
+    assert!(root.join("pinned/tome-plugin.toml").is_file());
+    assert!(
+        !root.join("pinned/skills/hello/AFTER_TAG.md").exists(),
+        "v1 pin must not include the post-tag supporting file"
+    );
+    // A missing ref fails the clone and degrades to the warning.
+    assert!(outcome.report.diagnostics.iter().any(|d| {
+        d.rule_id == "convert/remote-plugin-fetch-failed" && d.message.contains("missing-ref")
+    }));
 }

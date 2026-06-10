@@ -4,15 +4,21 @@
 //!
 //! | Signal (at the source root) | Harness | Level |
 //! |---|---|---|
-//! | `marketplace.json` | Claude Code | Catalog |
+//! | `.claude-plugin/marketplace.json` | Claude Code | Catalog |
 //! | `.claude-plugin/plugin.json` | Claude Code | Plugin |
+//! | BOTH `.claude-plugin/marketplace.json` + `plugin.json` | Claude Code | The command's expected level (tie-break) |
 //! | `.agents/skills/` directory | Codex | Plugin (synthesized) |
 //! | `SKILL.md` | Agent Skills (generic) | Skill |
 //!
 //! A `--from <harness>` flag overrides the *harness* interpretation (e.g. a
 //! bare `SKILL.md` is generic Agent Skills unless `--from cursor` marks it a
 //! Cursor skill); the *level* still comes from structure. The three commands
-//! each pass the level they expect (`catalog`/`plugin`/`skill convert`):
+//! each pass the level they expect (`catalog`/`plugin`/`skill convert`). The
+//! dual-manifest tie-break applies on the `--from` path too — the level from
+//! structure already reflects the command's expectation, so `plugin convert
+//! --from claude-code` succeeds on a self-marketplace repo (the tie-break
+//! feeds `ArtifactLevel::Plugin` through, matching what `plugin convert`
+//! expects).
 //!
 //! * undetectable + no `--from` → [`SourceFormatUnrecognized`](crate::error::TomeError::SourceFormatUnrecognized) (83);
 //! * detected level ≠ the command's expected level → [`Usage`](crate::error::TomeError::Usage) (2).
@@ -92,15 +98,33 @@ pub struct Detected {
 }
 
 /// Pure structural detection: probe the root for the known markers. Returns
-/// `None` when no signal matches.
-fn detect_structural(root: &UntrustedRoot) -> Option<Detected> {
-    if root.is_file(Path::new(".claude-plugin/marketplace.json")) {
+/// `None` when no signal matches. `expected` breaks the tie when a repo
+/// carries BOTH Claude Code manifests (the self-marketplace pattern).
+fn detect_structural(root: &UntrustedRoot, expected: ArtifactLevel) -> Option<Detected> {
+    let has_marketplace = root.is_file(Path::new(".claude-plugin/marketplace.json"));
+    let has_plugin = root.is_file(Path::new(".claude-plugin/plugin.json"));
+    if has_marketplace && has_plugin {
+        // Self-marketplace repos (e.g. obra/superpowers) carry both manifests.
+        // The invoking command's expected level wins: `plugin convert` reads
+        // the plugin, anything else keeps the original marketplace-first
+        // precedence.
+        let level = if expected == ArtifactLevel::Plugin {
+            ArtifactLevel::Plugin
+        } else {
+            ArtifactLevel::Catalog
+        };
+        return Some(Detected {
+            harness: SourceHarness::ClaudeCode,
+            level,
+        });
+    }
+    if has_marketplace {
         return Some(Detected {
             harness: SourceHarness::ClaudeCode,
             level: ArtifactLevel::Catalog,
         });
     }
-    if root.is_file(Path::new(".claude-plugin/plugin.json")) {
+    if has_plugin {
         return Some(Detected {
             harness: SourceHarness::ClaudeCode,
             level: ArtifactLevel::Plugin,
@@ -142,7 +166,7 @@ pub fn detect(
     from: Option<&str>,
     expected: ArtifactLevel,
 ) -> Result<Detected, TomeError> {
-    let structural = detect_structural(root);
+    let structural = detect_structural(root, expected);
 
     let detected = match from {
         Some(value) => {
@@ -274,5 +298,40 @@ mod tests {
         let d = detect(&root, Some("cursor"), ArtifactLevel::Skill).unwrap();
         assert_eq!(d.harness, SourceHarness::Cursor);
         assert_eq!(d.level, ArtifactLevel::Skill);
+    }
+
+    #[test]
+    fn both_manifests_tie_break_to_the_commands_expected_level() {
+        // Self-marketplace repos (obra/superpowers) carry BOTH manifests.
+        let (_t, root) = root_with(|base| {
+            fs::create_dir(base.join(".claude-plugin")).unwrap();
+            fs::write(base.join(".claude-plugin/marketplace.json"), b"{}").unwrap();
+            fs::write(base.join(".claude-plugin/plugin.json"), b"{}").unwrap();
+        });
+        // `plugin convert` wins the tie toward Plugin…
+        let p = detect(&root, None, ArtifactLevel::Plugin).unwrap();
+        assert_eq!(p.harness, SourceHarness::ClaudeCode);
+        assert_eq!(p.level, ArtifactLevel::Plugin);
+        // …`catalog convert` keeps the marketplace.
+        let c = detect(&root, None, ArtifactLevel::Catalog).unwrap();
+        assert_eq!(c.level, ArtifactLevel::Catalog);
+        // A skill expectation keeps marketplace-first precedence → level mismatch.
+        let err = detect(&root, None, ArtifactLevel::Skill).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn from_override_on_dual_manifest_repo_also_tie_breaks() {
+        // `plugin convert --from claude-code` on a self-marketplace repo: the
+        // tie-break feeds the expected level through the --from path too (before
+        // the tie-break this was a level-mismatch usage error).
+        let (_t, root) = root_with(|base| {
+            fs::create_dir(base.join(".claude-plugin")).unwrap();
+            fs::write(base.join(".claude-plugin/marketplace.json"), b"{}").unwrap();
+            fs::write(base.join(".claude-plugin/plugin.json"), b"{}").unwrap();
+        });
+        let d = detect(&root, Some("claude-code"), ArtifactLevel::Plugin).unwrap();
+        assert_eq!(d.harness, SourceHarness::ClaudeCode);
+        assert_eq!(d.level, ArtifactLevel::Plugin);
     }
 }

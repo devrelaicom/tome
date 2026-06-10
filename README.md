@@ -49,7 +49,7 @@ tome meta add convert-marketplace --harness cursor  # target named harness(es) o
 tome meta remove convert-marketplace # remove the installed copy
 ```
 
-The first bundled skill, **`convert-marketplace`**, walks an agent through converting a Claude Code marketplace into Tome: it drives `tome catalog convert` / `tome catalog lint` for the mechanical work, applies judgment to the unsupported residue, verifies the result, and **reports back for your confirmation before registering anything**. Installs land atomically and refuse to follow symlinks; `tome doctor` reports drift (a stale or missing install) and `tome doctor --fix` re-installs. From inside a running `tome mcp` server the host harness can install a meta skill via the built-in `meta` MCP tool.
+The first bundled skill, **`convert-marketplace`**, walks an agent through converting a Claude Code marketplace into Tome: it drives `tome catalog convert` / `tome catalog lint` for the mechanical work, applies judgment to the unsupported residue, verifies the result, and **reports back for your confirmation before registering anything**. Installs land atomically and refuse to follow symlinks; `tome doctor` reports stale installs and `tome doctor --fix` refreshes them in place; `tome meta list` shows what is and isn't installed. From inside a running `tome mcp` server the host harness can install a meta skill via the built-in `meta` MCP tool.
 
 ## Supported platforms
 

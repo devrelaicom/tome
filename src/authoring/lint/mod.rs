@@ -225,6 +225,8 @@ mod tests {
             license: None,
             entries,
             mcp_servers: Vec::new(),
+            hooks_files: Vec::new(),
+            hooks_json: None,
             provenance: Provenance::local("t", PathBuf::from("s")),
             diagnostics: node_diags,
         }

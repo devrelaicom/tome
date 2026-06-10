@@ -3,9 +3,9 @@
 //! Loads a Qwen2.5-0.5B-Instruct GGUF model via `llama-cpp-2`, runs the
 //! short + long prompts in sequence, and returns the resulting
 //! `SummariserOutput`. Length-window enforcement (FR-425) emits a
-//! `tracing::warn!` for outputs above the documented hard cap but never
+//! `tracing::info!` for outputs above the documented hard cap but never
 //! drops the value — a too-long short summary already embedded into the
-//! MCP tool description is a warning, not a hard failure. Empty or
+//! MCP tool description is advisory, not a hard failure. Empty or
 //! unparsable outputs surface as `SummariserFailure::OutputEmpty` /
 //! `OutputUnparsable` (exit 24).
 //!
@@ -52,7 +52,7 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::embedding::download::sha256_file;
 use crate::error::{ShortOrLong, SummariserFailureKind, TomeError};
@@ -418,7 +418,7 @@ fn check_length_window(text: &str, which: ShortOrLong) {
         ShortOrLong::Long => LONG_MAX_CHARS,
     };
     if observed > max {
-        warn!(
+        info!(
             which = %which,
             observed_chars = observed,
             max_chars = max,

@@ -226,6 +226,14 @@ pub fn backend() -> Result<&'static LlamaBackend, TomeError> {
         });
     }
 
+    // Route llama.cpp/ggml C-side logging through `tracing` instead of raw
+    // stderr (send_logs_to_tracing sets BOTH llama_log_set and ggml_log_set,
+    // so the Metal/sched chatter is captured too). At the default `warn`
+    // filter the info-level load/buffer lines disappear; `-vv` still surfaces
+    // them. Must run at most once per process — guaranteed by the surrounding
+    // once-only init path.
+    llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default());
+
     match LlamaBackend::init() {
         Ok(backend) => {
             // `set` may fail if a racing init beat us; in that case

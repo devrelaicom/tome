@@ -1,15 +1,19 @@
 //! Claude Code → Tome IR importer (Tier 1, FR-010/FR-012/FR-013).
 //!
 //! Reads a Claude Code plugin directory — `.claude-plugin/plugin.json` plus the
-//! conventional `skills/`, `commands/`, `agents/` trees and an optional
-//! `.mcp.json` — through the [`UntrustedRoot`] guard and produces a
+//! conventional `skills/`, `commands/`, `agents/` trees, an optional `.mcp.json`,
+//! and the `hooks/` subtree — through the [`UntrustedRoot`] guard and produces a
 //! [`PluginIr`]. Honest by construction:
 //!
 //! * manifest fields map 1:1 where Tome models them; dropped fields surface as
 //!   `Info`, exotic fields (`userConfig`/`dependencies`) as `Warning`
 //!   (`data-model.md §1`);
 //! * unsupported component directories (`monitors/`, `themes/`, `lsp/`, …) and
-//!   plugin `settings.json`/`hooks/` surface as `Warning`s (FR-012, §8);
+//!   plugin `settings.json` surface as `Warning`s (FR-012, §8);
+//! * the `hooks/` subtree is copied **verbatim** (byte-identical, no
+//!   harness-ism rewriting) so that `harness::hooks::read_rewritten_entries`
+//!   can apply the `${CLAUDE_PLUGIN_ROOT}`/`${CLAUDE_PLUGIN_DATA}` rewrite at
+//!   sync time with the tokens intact;
 //! * entry frontmatter maps the Tome-modelled set, dropping the rest with an
 //!   `Info`, tool-restriction fields with a `Warning` (silently broadening
 //!   capability), and treating agent conversion as lossy (FR-013, §6);
@@ -27,6 +31,7 @@ use crate::authoring::ir::{
 };
 use crate::authoring::rewrite::{RewriteOptions, rewrite_body};
 use crate::authoring::untrusted::UntrustedRoot;
+use crate::catalog::git::{Git, scrub_to_string};
 use crate::catalog::manifest::Owner;
 use crate::error::TomeError;
 use crate::plugin::frontmatter::{frontmatter_keys, parse_skill_frontmatter_str};
@@ -36,7 +41,7 @@ use crate::util::{HARNESS_MCP_MAX, PLUGIN_MANIFEST_MAX};
 
 // The diagnostic rule ids this importer emits live in the shared
 // `super::rule` SSOT (promoted when Codex became the second consumer).
-use super::rule;
+use super::{FetchContext, rule};
 
 /// Frontmatter keys Tome models 1:1 (kebab-case, matching `SkillFrontmatter`'s
 /// `rename_all`; the two snake exceptions carry explicit renames). Anything not
@@ -77,7 +82,6 @@ const UNSUPPORTED_COMPONENTS: &[(&str, &str)] = &[
     ("output-styles", "output styles"),
     ("channels", "channels"),
     ("bin", "`bin/` executables"),
-    ("hooks", "hooks"),
 ];
 
 /// Defensive bounds against a hostile source tree.
@@ -207,6 +211,9 @@ pub fn import_plugin(
         ));
     }
 
+    // --- hooks/ verbatim pass-through --------------------------------------
+    let (hooks_files, hooks_json) = collect_hooks(root, &mut diagnostics)?;
+
     // --- MCP servers --------------------------------------------------------
     let mcp_servers = import_mcp(root, &mut diagnostics)?;
 
@@ -218,6 +225,8 @@ pub fn import_plugin(
         license,
         entries,
         mcp_servers,
+        hooks_files,
+        hooks_json,
         provenance: Provenance {
             source_harness: "claude-code".to_owned(),
             source_path: source_path.to_path_buf(),
@@ -232,12 +241,18 @@ pub fn import_plugin(
 /// Relative-path plugins are imported and vendored inline; a failure converting
 /// **any** relative-path plugin aborts the whole conversion (the error is
 /// propagated, so `build_ir` returns before `emit` and nothing lands —
-/// all-or-nothing, FR-014a). Remote-source plugins (github/git/url/npm) are
-/// warned-and-skipped, and that warning is strict-blocking so `--strict`
-/// hard-fails them (FR-014).
+/// all-or-nothing, FR-014a). Remote-source plugins (`github`/`git`/`url`) are
+/// shallow-cloned and vendored by default; `fetch.enabled = false` (i.e.
+/// `--no-fetch`) restores the hermetic warn-and-skip path. A fetch failure
+/// skips that plugin only (forward-progress) but is strict-blocking so
+/// `--strict` hard-fails on any failure. Unfetchable kinds (`npm`, etc.) are
+/// always warned-and-skipped. A fetched plugin.json name that disagrees with
+/// the marketplace entry is resolved in favor of the entry and is not
+/// strict-blocking.
 pub fn import_marketplace(
     root: &UntrustedRoot,
     source_path: &Path,
+    fetch: &mut FetchContext,
 ) -> Result<CatalogIr, TomeError> {
     let mut diagnostics = Vec::new();
 
@@ -317,12 +332,68 @@ pub fn import_marketplace(
                     UntrustedRoot::validate_name(&plugin.name)?;
                     plugins.push(plugin);
                 }
-                PluginSource::Remote(kind) => diagnostics.push(Diagnostic::warning(
-                    rule::REMOTE_PLUGIN_SKIPPED,
-                    format!(
-                        "plugin `{label}` has a remote source ({kind}); Tome catalogs are relative-path-only, so it is skipped"
-                    ),
-                )),
+                PluginSource::RemoteGit {
+                    kind,
+                    url,
+                    reference,
+                } => {
+                    let display_url = scrub_to_string(url.as_bytes());
+                    if !fetch.enabled {
+                        diagnostics.push(Diagnostic::warning(
+                            rule::REMOTE_PLUGIN_SKIPPED,
+                            format!(
+                                "plugin `{label}` has a remote source ({kind}); skipped under --no-fetch"
+                            ),
+                        ));
+                        continue;
+                    }
+                    match fetch_remote_plugin(&url, reference.as_deref(), pname.as_deref(), fetch) {
+                        Ok(mut plugin) => {
+                            // The marketplace entry `name` is the catalog identity; a
+                            // differing fetched plugin.json name is surfaced + overridden.
+                            // A fetched plugin.json name that disagrees with the marketplace
+                            // entry is resolved in favor of the entry and is not strict-blocking.
+                            let fetched_info = if let Some(entry_name) = &pname
+                                && *entry_name != plugin.name
+                            {
+                                let old = std::mem::replace(&mut plugin.name, entry_name.clone());
+                                format!(
+                                    "plugin `{label}` fetched from {display_url} and vendored \
+                                     (its plugin.json self-names `{old}`; the marketplace entry name wins)"
+                                )
+                            } else {
+                                format!("plugin `{label}` fetched from {display_url} and vendored")
+                            };
+                            // Same SEC-1 defence as the relative path: the name becomes
+                            // the emitted directory. Per-plugin forward-progress: an unsafe
+                            // name skips THIS plugin (strict-blocking), never the whole catalog.
+                            if let Err(e) = UntrustedRoot::validate_name(&plugin.name) {
+                                diagnostics.push(Diagnostic::warning(
+                                    rule::REMOTE_PLUGIN_FETCH_FAILED,
+                                    format!("plugin `{label}` fetched but has an unsafe name: {e}"),
+                                ));
+                                continue;
+                            }
+                            diagnostics
+                                .push(Diagnostic::info(rule::REMOTE_PLUGIN_FETCHED, fetched_info));
+                            plugins.push(plugin);
+                        }
+                        // Forward-progress: a fetch/import failure skips THIS plugin
+                        // only; the warning is strict-blocking.
+                        Err(e) => diagnostics.push(Diagnostic::warning(
+                            rule::REMOTE_PLUGIN_FETCH_FAILED,
+                            format!("plugin `{label}` ({display_url}) could not be fetched: {e}"),
+                        )),
+                    }
+                }
+                PluginSource::RemoteUnfetchable(kind) => {
+                    diagnostics.push(Diagnostic::warning(
+                        rule::REMOTE_PLUGIN_SKIPPED,
+                        format!(
+                            "plugin `{label}` has a remote source ({kind}) Tome cannot fetch; it is skipped"
+                        ),
+                    ));
+                }
                 PluginSource::Malformed => diagnostics.push(Diagnostic::warning(
                     rule::REMOTE_PLUGIN_SKIPPED,
                     format!("plugin `{label}` has an unrecognized `source`; skipping it"),
@@ -349,29 +420,124 @@ pub fn import_marketplace(
 enum PluginSource {
     /// A relative path within the marketplace repo (vendored inline).
     Relative(String),
-    /// A remote source (github/git/url/npm); not representable in a Tome
-    /// catalog. The string is the remote kind, for the warning.
-    Remote(String),
+    /// A git-fetchable remote: `github` (clone URL synthesized from `repo`),
+    /// `git`/`url` (the URL as given — the dominant real-world shape is
+    /// `{"source":"url","url":"https://github.com/….git"}`). `reference` is
+    /// an optional `ref` pin passed to the shallow clone.
+    RemoteGit {
+        kind: String,
+        url: String,
+        reference: Option<String>,
+    },
+    /// A remote kind Tome cannot git-fetch (`npm`, unknown) — warned-and-skipped.
+    RemoteUnfetchable(String),
     /// An unrecognized/absent source.
     Malformed,
 }
 
 /// A string `source` is a relative path; an object `source` is classified by
-/// its `source` type field (`local`/`relative` → vendor; anything else →
-/// remote).
+/// its `source` type field (`local`/`relative` → vendor; `github`/`git`/`url`
+/// → git-fetchable; anything else → unfetchable remote).
 fn classify_plugin_source(source: Option<&serde_json::Value>) -> PluginSource {
     match source {
         Some(serde_json::Value::String(s)) => PluginSource::Relative(s.clone()),
-        Some(serde_json::Value::Object(o)) => match o.get("source").and_then(|v| v.as_str()) {
-            Some("local") | Some("relative") => match o.get("path").and_then(|v| v.as_str()) {
-                Some(p) => PluginSource::Relative(p.to_owned()),
+        Some(serde_json::Value::Object(o)) => {
+            let reference = o.get("ref").and_then(|v| v.as_str()).map(str::to_owned);
+            match o.get("source").and_then(|v| v.as_str()) {
+                Some("local") | Some("relative") => match o.get("path").and_then(|v| v.as_str()) {
+                    Some(p) => PluginSource::Relative(p.to_owned()),
+                    None => PluginSource::Malformed,
+                },
+                Some("github") => match o.get("repo").and_then(|v| v.as_str()) {
+                    Some(repo) => PluginSource::RemoteGit {
+                        kind: "github".to_owned(),
+                        url: format!("https://github.com/{repo}.git"),
+                        reference,
+                    },
+                    None => PluginSource::Malformed,
+                },
+                Some(kind @ ("git" | "url")) => match o.get("url").and_then(|v| v.as_str()) {
+                    Some(url) => PluginSource::RemoteGit {
+                        kind: kind.to_owned(),
+                        url: url.to_owned(),
+                        reference,
+                    },
+                    None => PluginSource::Malformed,
+                },
+                Some(kind) => PluginSource::RemoteUnfetchable(kind.to_owned()),
                 None => PluginSource::Malformed,
-            },
-            Some(kind) => PluginSource::Remote(kind.to_owned()),
-            None => PluginSource::Malformed,
-        },
+            }
+        }
         _ => PluginSource::Malformed,
     }
+}
+
+/// URL schemes a marketplace remote may use — the conventional git set.
+/// `file://` is deliberately ABSENT: a hostile marketplace could otherwise
+/// vendor the operator's local private repos into the converted output
+/// (read-disclosure). The hermetic tests opt back in via the
+/// `#[doc(hidden)]` override below.
+///
+/// A URL outside this set (including anything starting with `-`) is refused
+/// BEFORE it reaches the spawned git — the scheme check plus
+/// `clone_shallow`'s `--` end-of-options marker together close git argument
+/// injection.
+const FETCH_URL_SCHEMES: &[&str] = &["https://", "http://", "git://", "ssh://", "git@"];
+
+/// Test-only opt-in for `file://` remotes (integration tests can't see
+/// `#[cfg(test)]`). Never set in production code paths.
+#[doc(hidden)]
+pub static ALLOW_FILE_URLS_FOR_TESTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn scheme_allowed(url: &str) -> bool {
+    if FETCH_URL_SCHEMES.iter().any(|s| url.starts_with(s)) {
+        return true;
+    }
+    url.starts_with("file://")
+        && ALLOW_FILE_URLS_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Shallow-clone a remote plugin source and import it as a Claude Code plugin.
+/// The clone's TempDir is pushed onto the keepalive ONLY on success — a failed
+/// fetch/import drops (cleans up) the clone immediately. Errors carry only
+/// scrubbed URLs. `reference` rides `git clone --branch`, which accepts
+/// branch/tag names only — a commit-SHA pin fails the clone and degrades to
+/// the fetch-failed warning.
+fn fetch_remote_plugin(
+    url: &str,
+    reference: Option<&str>,
+    entry_name: Option<&str>,
+    fetch: &mut FetchContext,
+) -> Result<PluginIr, TomeError> {
+    if !scheme_allowed(url) {
+        return Err(TomeError::Usage(format!(
+            "unsupported remote URL scheme (expected one of {})",
+            FETCH_URL_SCHEMES.join(", ")
+        )));
+    }
+    let tempdir = tempfile::Builder::new()
+        .prefix("tome-fetch-")
+        .tempdir()
+        .map_err(TomeError::Io)?;
+    let dest = tempdir.path().join("repo");
+    let git = Git::new(scrub_to_string(url.as_bytes()));
+    git.clone_shallow(url, &dest, reference)?;
+
+    let plugin_root = UntrustedRoot::open(&dest)?;
+    // The fetched repo must BE a plugin. A self-marketplace repo carrying both
+    // manifests imports as a plugin here — the catalog context already decided
+    // the level (no recursive marketplace expansion).
+    if !plugin_root.is_file(Path::new(".claude-plugin/plugin.json")) {
+        return Err(TomeError::Usage(
+            "fetched repository has no .claude-plugin/plugin.json (not a Claude Code plugin)"
+                .to_owned(),
+        ));
+    }
+    let default = entry_name.unwrap_or("plugin");
+    let plugin = import_plugin(&plugin_root, default, &dest)?;
+    fetch.keepalive.push(tempdir);
+    Ok(plugin)
 }
 
 /// Parse a CC marketplace `owner` (`{name, email}` object) into the required
@@ -494,7 +660,7 @@ pub(crate) fn import_skill(
     diagnostics.extend(rewritten.diagnostics);
     let description = resolved_description(&parsed.frontmatter, &rewritten.text);
 
-    let supporting_files = collect_supporting(root, rel_dir, "SKILL.md")?;
+    let supporting_files = collect_supporting(root, rel_dir, Some("SKILL.md"))?;
 
     Ok(EntryIr {
         kind: EntryKind::Skill,
@@ -585,10 +751,14 @@ fn classify_dropped_frontmatter(content: &str, kind: EntryKind, diagnostics: &mu
 /// Collect a skill directory's non-`SKILL.md` files as supporting files
 /// (preserving `scripts/`/`references/`/`assets/` substructure), guard-validated
 /// for containment + symlink refusal, with defensive depth/count bounds.
+///
+/// `exclude` names a single depth-0 file to skip (e.g. `Some("SKILL.md")` for
+/// skill entries). Pass `None` when every depth-0 file should be collected
+/// (e.g. the `hooks/` verbatim walk).
 fn collect_supporting(
     root: &UntrustedRoot,
     rel_dir: &Path,
-    exclude: &str,
+    exclude: Option<&str>,
 ) -> Result<Vec<SupportingFile>, TomeError> {
     let mut out = Vec::new();
     let mut dirs_visited = 0usize;
@@ -608,8 +778,9 @@ fn collect_supporting(
             )));
         }
         for child in root.list_dir(&dir)? {
-            // Skip the entry's own SKILL.md (it is rendered, not copied).
-            if depth == 0 && child.name == exclude {
+            // Skip the entry's own primary file at depth 0 (e.g. SKILL.md is
+            // rendered, not copied).
+            if depth == 0 && Some(child.name.as_str()) == exclude {
                 continue;
             }
             // Never copy VCS metadata / OS junk into the converted artifact.
@@ -639,6 +810,45 @@ fn collect_supporting(
     }
     out.sort_by(|a, b| a.relative.cmp(&b.relative));
     Ok(out)
+}
+
+/// Collect the `hooks/` subtree for verbatim pass-through. Reuses the
+/// supporting-file walk (bounded, symlink-refusing, VCS-junk-skipping); rel
+/// paths are re-prefixed `hooks/` so emit plans them at the plugin root.
+/// `hooks/hooks.json`'s text is also carried (when readable) for the lint
+/// hooks-spec rule.
+fn collect_hooks(
+    root: &UntrustedRoot,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<(Vec<SupportingFile>, Option<String>), TomeError> {
+    let hooks_dir = Path::new("hooks");
+    if !root.is_dir(hooks_dir) {
+        return Ok((Vec::new(), None));
+    }
+    let mut files = collect_supporting(root, hooks_dir, None)?;
+    for f in &mut files {
+        f.relative = hooks_dir.join(&f.relative);
+    }
+    let json = if root.is_file(Path::new("hooks/hooks.json")) {
+        // hooks.json shares the harness-config read cap (1 MiB) — same semantic class as .mcp.json.
+        match root.read_text(Path::new("hooks/hooks.json"), HARNESS_MCP_MAX) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                // Copied verbatim regardless, but Tome cannot validate it —
+                // surfaced as strict-blocking honesty.
+                diagnostics.push(Diagnostic::warning(
+                    rule::HOOKS_UNREADABLE,
+                    format!(
+                        "hooks/hooks.json could not be read as UTF-8 text ({e}); it is copied verbatim but not validated"
+                    ),
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Ok((files, json))
 }
 
 /// Synthesize the plugin's MCP servers from `.mcp.json` (CC format), inferring
@@ -946,6 +1156,48 @@ mod tests {
     }
 
     #[test]
+    fn hooks_pass_through_verbatim_not_unsupported() {
+        let (_t, root) = cc_plugin(|base| {
+            fs::write(
+                base.join(".claude-plugin/plugin.json"),
+                br#"{"name":"p","version":"1.0.0"}"#,
+            )
+            .unwrap();
+            fs::create_dir_all(base.join("hooks/scripts")).unwrap();
+            fs::write(
+                base.join("hooks/hooks.json"),
+                br#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/run.sh"}]}]}}"#,
+            )
+            .unwrap();
+            fs::write(base.join("hooks/scripts/run.sh"), b"#!/bin/sh\n").unwrap();
+        });
+        let p = import_plugin(&root, "p", Path::new("/src")).unwrap();
+        // hooks/ is NOT an unsupported component any more.
+        assert!(
+            !p.diagnostics
+                .iter()
+                .any(|d| d.rule_id == rule::UNSUPPORTED_COMPONENT && d.message.contains("hooks")),
+            "{:?}",
+            p.diagnostics
+        );
+        // The whole subtree is collected, hooks/-prefixed, sorted.
+        let rels: Vec<_> = p
+            .hooks_files
+            .iter()
+            .map(|f| f.relative.display().to_string())
+            .collect();
+        assert_eq!(rels, ["hooks/hooks.json", "hooks/scripts/run.sh"]);
+        // hooks.json content is carried for the lint rule — token INTACT (the
+        // sync-time rewriter owns ${CLAUDE_PLUGIN_ROOT}).
+        assert!(
+            p.hooks_json
+                .as_deref()
+                .unwrap()
+                .contains("${CLAUDE_PLUGIN_ROOT}")
+        );
+    }
+
+    #[test]
     fn invalid_json_manifest_is_a_usage_error() {
         let (_t, root) = cc_plugin(|base| {
             fs::write(base.join(".claude-plugin/plugin.json"), b"{not json").unwrap();
@@ -967,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_plugin_source_distinguishes_relative_from_remote() {
+    fn classify_plugin_source_distinguishes_relative_fetchable_and_unfetchable() {
         // A string source is a relative (vendored) path.
         assert!(matches!(
             classify_plugin_source(Some(&serde_json::json!("./alpha"))),
@@ -978,18 +1230,43 @@ mod tests {
             classify_plugin_source(Some(&serde_json::json!({"source":"local","path":"x"}))),
             PluginSource::Relative(p) if p == "x"
         ));
-        // Remote kinds are skipped.
+        // github synthesizes a clone URL from `repo` and honours a `ref` pin.
         assert!(matches!(
-            classify_plugin_source(Some(&serde_json::json!({"source":"github","repo":"o/r"}))),
-            PluginSource::Remote(k) if k == "github"
+            classify_plugin_source(Some(
+                &serde_json::json!({"source":"github","repo":"o/r","ref":"v1"})
+            )),
+            PluginSource::RemoteGit { kind, url, reference }
+                if kind == "github" && url == "https://github.com/o/r.git"
+                    && reference.as_deref() == Some("v1")
         ));
-        // Absent / unrecognized → malformed.
+        // git + url kinds carry their URL as given (the real-world obra shape).
         assert!(matches!(
-            classify_plugin_source(None),
+            classify_plugin_source(Some(
+                &serde_json::json!({"source":"url","url":"https://github.com/o/r.git"})
+            )),
+            PluginSource::RemoteGit { kind, url, .. }
+                if kind == "url" && url == "https://github.com/o/r.git"
+        ));
+        assert!(matches!(
+            classify_plugin_source(Some(&serde_json::json!({"source":"git","url":"u"}))),
+            PluginSource::RemoteGit { kind, .. } if kind == "git"
+        ));
+        // npm cannot be git-fetched.
+        assert!(matches!(
+            classify_plugin_source(Some(&serde_json::json!({"source":"npm","package":"p"}))),
+            PluginSource::RemoteUnfetchable(k) if k == "npm"
+        ));
+        // Missing required fields / absent source → malformed.
+        assert!(matches!(
+            classify_plugin_source(Some(&serde_json::json!({"source":"github"}))),
             PluginSource::Malformed
         ));
         assert!(matches!(
-            classify_plugin_source(Some(&serde_json::json!({"no":"source"}))),
+            classify_plugin_source(Some(&serde_json::json!({"source":"url"}))),
+            PluginSource::Malformed
+        ));
+        assert!(matches!(
+            classify_plugin_source(None),
             PluginSource::Malformed
         ));
     }

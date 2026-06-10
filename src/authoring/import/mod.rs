@@ -19,6 +19,28 @@ pub mod claude_code;
 pub mod codex;
 pub mod native_skill;
 
+/// Per-conversion remote-plugin fetch context (`catalog convert`): the
+/// `--no-fetch` policy plus the temp-clone keepalive. The clones MUST outlive
+/// `emit` — planned `Copy` files are read from the clone at landing time — so
+/// the context is owned by `convert::run`'s scope and dropped (cleaning up
+/// every clone) only after the emit completes.
+pub struct FetchContext {
+    /// `false` under `--no-fetch`: every remote source degrades to the
+    /// hermetic warn-and-skip behaviour.
+    pub enabled: bool,
+    /// Owned temp clones, one per successfully fetched plugin.
+    pub keepalive: Vec<tempfile::TempDir>,
+}
+
+impl FetchContext {
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            keepalive: Vec::new(),
+        }
+    }
+}
+
 /// Shared `convert` diagnostic rule ids — the single source of truth for the
 /// per-importer diagnostics, so the `--strict` blocking-set
 /// ([`crate::authoring::convert`]) and every importer agree on one stable
@@ -41,5 +63,13 @@ pub mod rule {
     pub const CODEX_UNSUPPORTED: &str = "convert/codex-unsupported";
     // Catalog / marketplace level.
     pub const REMOTE_PLUGIN_SKIPPED: &str = "convert/remote-plugin-skipped";
+    /// A remote-source plugin was fetched (shallow clone) and vendored.
+    pub const REMOTE_PLUGIN_FETCHED: &str = "convert/remote-plugin-fetched";
+    /// A remote-source plugin could not be fetched/imported; skipped
+    /// (forward-progress). Strict-blocking.
+    pub const REMOTE_PLUGIN_FETCH_FAILED: &str = "convert/remote-plugin-fetch-failed";
     pub const CATALOG_SYNTHESIZED_FIELD: &str = "convert/catalog-synthesized-field";
+    /// `hooks/hooks.json` exists but could not be read as UTF-8 text; copied
+    /// verbatim, unvalidated. Strict-blocking.
+    pub const HOOKS_UNREADABLE: &str = "convert/hooks-unreadable";
 }

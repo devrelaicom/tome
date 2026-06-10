@@ -48,6 +48,9 @@ pub struct ConvertConfig {
     pub force: bool,
     /// `--dry-run`: compute the plan; write nothing.
     pub dry_run: bool,
+    /// Fetch remote-source marketplace plugins (github/git/url) into temp clones
+    /// and vendor them (`catalog convert`; default). `false` under `--no-fetch`.
+    pub fetch_remote: bool,
     /// Parent directory the converted copy lands under (`<output_dir>/<name>/`).
     pub output_dir: PathBuf,
 }
@@ -96,7 +99,19 @@ pub fn run(source_root: &Path, cfg: &ConvertConfig) -> Result<ConvertOutcome, To
     let root = UntrustedRoot::open(source_root)?;
     let detected = detect(&root, cfg.from.as_deref(), cfg.level)?;
 
-    let mut artifact = import(&root, source_root, detected.harness, detected.level)?;
+    // The fetch context owns the temp clones for remote-source marketplace
+    // plugins. The clones MUST outlive `emit` — planned `Copy` files are read
+    // from the clone at landing time — so the context lives to end of scope
+    // and is dropped (cleaning up every clone) only after the emit completes.
+    let mut fetch = crate::authoring::import::FetchContext::new(cfg.fetch_remote);
+
+    let mut artifact = import(
+        &root,
+        source_root,
+        detected.harness,
+        detected.level,
+        &mut fetch,
+    )?;
     let source_name = artifact_name(&artifact).to_owned();
     let final_name = match &cfg.new_name {
         Some(n) => n.clone(),
@@ -158,6 +173,7 @@ fn import(
     source_root: &Path,
     harness: SourceHarness,
     level: ArtifactLevel,
+    fetch: &mut crate::authoring::import::FetchContext,
 ) -> Result<Artifact, TomeError> {
     match (level, harness) {
         (ArtifactLevel::Plugin, SourceHarness::ClaudeCode) => {
@@ -177,7 +193,7 @@ fn import(
             source_root,
         )?)),
         (ArtifactLevel::Catalog, SourceHarness::ClaudeCode) => Ok(Artifact::Catalog(
-            claude_code::import_marketplace(root, source_root)?,
+            claude_code::import_marketplace(root, source_root, fetch)?,
         )),
         (ArtifactLevel::Catalog, other) => Err(TomeError::Usage(format!(
             "catalog conversion from `{}` is not supported (only Claude Code marketplaces)",
@@ -253,7 +269,15 @@ fn is_strict_blocking(rule_id: &str) -> bool {
             | cc::MALFORMED_MCP
             | cc::CODEX_UNSUPPORTED
             | cc::REMOTE_PLUGIN_SKIPPED
-    ) || is_unsupported_harness_ism(rule_id)
+            | cc::REMOTE_PLUGIN_FETCH_FAILED
+            | cc::HOOKS_UNREADABLE
+    )
+        // A valid-UTF-8/invalid-JSON hooks.json is strict-blocking at convert time
+        // because it would hard-fail `harness sync` at exit 43 later. The rule is
+        // provenance-safe (reads IR only, not the source tree), so it fires on the
+        // convert path without risk of double-flagging.
+        || rule_id == crate::authoring::lint::rules::rule::HOOKS_SPEC
+        || is_unsupported_harness_ism(rule_id)
 }
 
 #[cfg(test)]
@@ -294,6 +318,12 @@ mod tests {
         use crate::authoring::import::rule as cc;
         assert!(is_strict_blocking(cc::UNSUPPORTED_COMPONENT));
         assert!(is_strict_blocking(cc::TOOL_RESTRICTION_DROPPED));
+        assert!(is_strict_blocking(cc::HOOKS_UNREADABLE));
+        // Symmetry: valid-UTF-8/invalid-JSON hooks.json is also strict-blocking
+        // (would hard-fail harness sync at exit 43).
+        assert!(is_strict_blocking(
+            crate::authoring::lint::rules::rule::HOOKS_SPEC
+        ));
         assert!(is_strict_blocking(
             crate::authoring::rewrite::rule::SHELL_EXEC
         ));
