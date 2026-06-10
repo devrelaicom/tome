@@ -216,7 +216,7 @@ fn parse_plugin(ur: &UntrustedRoot) -> Result<PluginIr, TomeError> {
             Ok(s) => Some(s),
             Err(e) => {
                 diagnostics.push(Diagnostic::warning(
-                    rule::HOOKS_INVALID,
+                    rule::HOOKS_SPEC,
                     format!("could not read hooks/hooks.json: {e}"),
                 ));
                 None

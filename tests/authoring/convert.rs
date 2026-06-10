@@ -471,6 +471,10 @@ fn git_cmd(args: &[&str], dir: &Path) {
 }
 
 /// A minimal CC plugin repo committed to git, returning its `file://` URL.
+///
+/// Includes a `hooks/` subtree (with a `${CLAUDE_PLUGIN_ROOT}` token in
+/// `hooks.json`) to verify the FetchContext keepalive contract: the temp clone
+/// must stay alive across emit so the hooks files can be copied from it.
 fn remote_plugin_repo(tmp: &Path, name: &str) -> String {
     let repo = tmp.join(name);
     fs::create_dir_all(repo.join(".claude-plugin")).unwrap();
@@ -485,6 +489,13 @@ fn remote_plugin_repo(tmp: &Path, name: &str) -> String {
         "---\nname: hello\ndescription: says hello\n---\nHello.\n",
     )
     .unwrap();
+    fs::create_dir_all(repo.join("hooks")).unwrap();
+    fs::write(
+        repo.join("hooks/hooks.json"),
+        br#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/hooks/run.sh"}]}]}}"#,
+    )
+    .unwrap();
+    fs::write(repo.join("hooks/run.sh"), b"#!/bin/sh\n").unwrap();
     git_cmd(&["init", "-q", "-b", "main"], &repo);
     git_cmd(&["add", "-A"], &repo);
     git_cmd(&["commit", "-q", "-m", "init"], &repo);
@@ -553,6 +564,13 @@ fn catalog_convert_fetches_remote_plugins_and_skips_failures() {
         d.rule_id == "convert/remote-plugin-fetched" && d.message.contains("fetched-one")
     }));
     assert!(!root.join("broken-one").exists());
+
+    // Fetched-plugin hooks: Copy sources live in the temp clone, which the
+    // FetchContext keepalive holds alive across emit — the hooks must land
+    // namespaced under the vendored plugin with the token intact.
+    let hooks = fs::read_to_string(root.join("fetched-one/hooks/hooks.json")).unwrap();
+    assert!(hooks.contains("${CLAUDE_PLUGIN_ROOT}"));
+    assert!(root.join("fetched-one/hooks/run.sh").is_file());
 }
 
 #[test]
@@ -755,6 +773,29 @@ fn strict_aborts_on_an_unreadable_hooks_json() {
     let err = run(&src, &cfg).unwrap_err();
     assert_eq!(err.exit_code(), 84, "{err}");
     assert!(!out.join("p-tome").exists(), "strict abort writes nothing");
+}
+
+#[test]
+fn strict_aborts_on_a_malformed_hooks_json() {
+    // Symmetry with the unreadable case: valid-UTF-8/invalid-JSON hooks.json
+    // is strict-blocking too (it would hard-fail harness sync at exit 43).
+    // Contrast: without --strict the convert succeeds with a lint warning only.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"p","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("hooks")).unwrap();
+    fs::write(src.join("hooks/hooks.json"), b"{not json").unwrap();
+    let out = tmp.path().join("out");
+    let mut cfg = config(out.clone());
+    cfg.strict = true;
+    let err = run(&src, &cfg).unwrap_err();
+    assert_eq!(err.exit_code(), 84, "{err}");
+    assert!(!out.exists(), "strict abort writes nothing");
 }
 
 #[test]

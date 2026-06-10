@@ -41,7 +41,7 @@ pub mod rule {
     pub const UNSAFE_PATH: &str = "lint/unsafe-path";
     /// `hooks/hooks.json` is present but not valid JSON (or unreadable);
     /// `harness sync` would fail on this plugin (exit 43).
-    pub const HOOKS_INVALID: &str = "lint/hooks-spec";
+    pub const HOOKS_SPEC: &str = "lint/hooks-spec";
 }
 
 /// Agent-Skills description length cap (§9).
@@ -147,7 +147,7 @@ impl Rule for PluginManifest {
 struct HooksSpec;
 impl Rule for HooksSpec {
     fn id(&self) -> &'static str {
-        rule::HOOKS_INVALID
+        rule::HOOKS_SPEC
     }
     fn scope(&self) -> Scope {
         Scope::Plugin
@@ -159,7 +159,7 @@ impl Rule for HooksSpec {
         match serde_json::from_str::<serde_json::Value>(json) {
             Ok(_) => Vec::new(),
             Err(e) => vec![Diagnostic::warning(
-                rule::HOOKS_INVALID,
+                rule::HOOKS_SPEC,
                 format!(
                     "hooks/hooks.json is not valid JSON ({e}); `harness sync` will fail on this plugin (exit 43)"
                 ),
@@ -671,7 +671,7 @@ mod tests {
         p.hooks_json = Some("{not json".to_owned());
         let d = HooksSpec.check_plugin(&p);
         assert_eq!(d.len(), 1);
-        assert_eq!(d[0].rule_id, rule::HOOKS_INVALID);
+        assert_eq!(d[0].rule_id, rule::HOOKS_SPEC);
         assert_eq!(d[0].severity, Severity::Warning);
         assert!(d[0].message.contains("hooks/hooks.json"));
     }

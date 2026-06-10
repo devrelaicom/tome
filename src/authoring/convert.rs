@@ -271,7 +271,13 @@ fn is_strict_blocking(rule_id: &str) -> bool {
             | cc::REMOTE_PLUGIN_SKIPPED
             | cc::REMOTE_PLUGIN_FETCH_FAILED
             | cc::HOOKS_UNREADABLE
-    ) || is_unsupported_harness_ism(rule_id)
+    )
+        // A valid-UTF-8/invalid-JSON hooks.json is strict-blocking at convert time
+        // because it would hard-fail `harness sync` at exit 43 later. The rule is
+        // provenance-safe (reads IR only, not the source tree), so it fires on the
+        // convert path without risk of double-flagging.
+        || rule_id == crate::authoring::lint::rules::rule::HOOKS_SPEC
+        || is_unsupported_harness_ism(rule_id)
 }
 
 #[cfg(test)]
@@ -313,6 +319,11 @@ mod tests {
         assert!(is_strict_blocking(cc::UNSUPPORTED_COMPONENT));
         assert!(is_strict_blocking(cc::TOOL_RESTRICTION_DROPPED));
         assert!(is_strict_blocking(cc::HOOKS_UNREADABLE));
+        // Symmetry: valid-UTF-8/invalid-JSON hooks.json is also strict-blocking
+        // (would hard-fail harness sync at exit 43).
+        assert!(is_strict_blocking(
+            crate::authoring::lint::rules::rule::HOOKS_SPEC
+        ));
         assert!(is_strict_blocking(
             crate::authoring::rewrite::rule::SHELL_EXEC
         ));
