@@ -286,6 +286,71 @@ fn lint_refuses_a_symlinked_skill_child_and_does_not_read_out_of_tree() {
     );
 }
 
+// --- hooks-spec rule e2e coverage ------------------------------------------
+
+#[test]
+fn invalid_hooks_json_produces_a_hooks_spec_warning() {
+    // A native plugin with a hooks/hooks.json that is not valid JSON must
+    // produce a lint/hooks-spec warning. This is the signal that would otherwise
+    // only surface at `harness sync` time (exit 43).
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("p");
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("tome-plugin.toml"),
+        "name = \"my-plugin\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("hooks")).unwrap();
+    fs::write(dir.join("hooks/hooks.json"), "{not json").unwrap();
+
+    let artifact = parse_artifact(&dir).unwrap();
+    let report = run(&artifact, &rules::all());
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "lint/hooks-spec"),
+        "expected lint/hooks-spec finding: {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn valid_hooks_json_produces_no_hooks_spec_finding() {
+    // A native plugin with a hooks/hooks.json that is valid JSON must not
+    // produce any lint/hooks-spec finding.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("p");
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("tome-plugin.toml"),
+        "name = \"my-plugin\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("hooks")).unwrap();
+    fs::write(dir.join("hooks/hooks.json"), r#"{"hooks":{}}"#).unwrap();
+    // A skill so the plugin is otherwise clean.
+    fs::create_dir_all(dir.join("skills/foo")).unwrap();
+    fs::write(
+        dir.join("skills/foo/SKILL.md"),
+        "---\nname: foo\ndescription: a skill\n---\nbody\n",
+    )
+    .unwrap();
+
+    let artifact = parse_artifact(&dir).unwrap();
+    let report = run(&artifact, &rules::all());
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.rule_id == "lint/hooks-spec"),
+        "unexpected lint/hooks-spec finding: {:?}",
+        report.diagnostics
+    );
+    assert_eq!(report.errors, 0, "{:?}", report.diagnostics);
+}
+
 #[test]
 fn findings_order_is_deterministic_across_runs() {
     let tmp = tempfile::tempdir().unwrap();

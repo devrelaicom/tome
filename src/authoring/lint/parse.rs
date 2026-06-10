@@ -24,7 +24,7 @@ use crate::error::TomeError;
 use crate::plugin::frontmatter::parse_skill_frontmatter_str;
 use crate::plugin::identity::EntryKind;
 use crate::plugin::manifest::TomeAuthor;
-use crate::util::{PLUGIN_MANIFEST_MAX, TOME_CONFIG_MAX};
+use crate::util::{HARNESS_MCP_MAX, PLUGIN_MANIFEST_MAX, TOME_CONFIG_MAX};
 
 use super::rules::rule;
 
@@ -208,6 +208,24 @@ fn parse_plugin(ur: &UntrustedRoot) -> Result<PluginIr, TomeError> {
         &mut diagnostics,
     );
 
+    // hooks/hooks.json content for the HooksSpec rule — same UntrustedRoot
+    // guard as every other read (P8: one read guard, no sibling hand-rolls).
+    // An unreadable file is itself a finding (never-halt).
+    let hooks_json = if ur.is_file(Path::new("hooks/hooks.json")) {
+        match ur.read_text(Path::new("hooks/hooks.json"), HARNESS_MCP_MAX) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                diagnostics.push(Diagnostic::warning(
+                    rule::HOOKS_INVALID,
+                    format!("could not read hooks/hooks.json: {e}"),
+                ));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(PluginIr {
         name,
         version,
@@ -217,7 +235,7 @@ fn parse_plugin(ur: &UntrustedRoot) -> Result<PluginIr, TomeError> {
         entries,
         mcp_servers: Vec::new(),
         hooks_files: Vec::new(),
-        hooks_json: None,
+        hooks_json,
         provenance: Provenance::local("tome", ur.root().to_path_buf()),
         diagnostics,
     })

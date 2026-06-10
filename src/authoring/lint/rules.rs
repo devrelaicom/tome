@@ -39,6 +39,9 @@ pub mod rule {
     /// A source path the lint parser refused to read (an escaping or symlinked
     /// component under the artifact root) — reported, never followed.
     pub const UNSAFE_PATH: &str = "lint/unsafe-path";
+    /// `hooks/hooks.json` is present but not valid JSON (or unreadable);
+    /// `harness sync` would fail on this plugin (exit 43).
+    pub const HOOKS_INVALID: &str = "lint/hooks-spec";
 }
 
 /// Agent-Skills description length cap (§9).
@@ -50,6 +53,7 @@ pub fn all() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(CatalogManifest),
         Box::new(PluginManifest),
+        Box::new(HooksSpec),
         Box::new(UnsupportedComponents),
         Box::new(EntryName),
         Box::new(EntryDescription),
@@ -70,6 +74,7 @@ pub fn for_convert() -> Vec<Box<dyn Rule>> {
     vec![
         Box::new(CatalogManifest),
         Box::new(PluginManifest),
+        Box::new(HooksSpec),
         Box::new(EntryDescription),
         Box::new(EntryHarnessIsms),
     ]
@@ -132,6 +137,34 @@ impl Rule for PluginManifest {
         check_name(&p.name, "plugin", &mut d);
         check_version(&p.version, &mut d);
         d
+    }
+}
+
+/// `hooks/hooks.json`, when present, must be valid JSON — otherwise
+/// `harness sync` fails on this plugin at exit 43 with no earlier signal.
+/// Content arrives on the IR (`hooks_json`), so the rule is provenance-safe in
+/// both registries (it never reads the source tree).
+struct HooksSpec;
+impl Rule for HooksSpec {
+    fn id(&self) -> &'static str {
+        rule::HOOKS_INVALID
+    }
+    fn scope(&self) -> Scope {
+        Scope::Plugin
+    }
+    fn check_plugin(&self, p: &PluginIr) -> Vec<Diagnostic> {
+        let Some(json) = &p.hooks_json else {
+            return Vec::new();
+        };
+        match serde_json::from_str::<serde_json::Value>(json) {
+            Ok(_) => Vec::new(),
+            Err(e) => vec![Diagnostic::warning(
+                rule::HOOKS_INVALID,
+                format!(
+                    "hooks/hooks.json is not valid JSON ({e}); `harness sync` will fail on this plugin (exit 43)"
+                ),
+            )],
+        }
     }
 }
 
@@ -619,5 +652,27 @@ mod tests {
         let d = run_catalog(c);
         assert!(has(&d, rule::OWNER_EMAIL_INVALID));
         assert!(has(&d, rule::DUP_PLUGIN));
+    }
+
+    #[test]
+    fn hooks_spec_flags_invalid_json_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = plugin("p", "1.0.0", tmp.path().to_path_buf(), vec![]);
+
+        // No hooks at all → silent.
+        p.hooks_json = None;
+        assert!(HooksSpec.check_plugin(&p).is_empty());
+
+        // Valid JSON → silent.
+        p.hooks_json = Some(r#"{"hooks":{}}"#.to_owned());
+        assert!(HooksSpec.check_plugin(&p).is_empty());
+
+        // Invalid JSON → one warning naming the file and the consequence.
+        p.hooks_json = Some("{not json".to_owned());
+        let d = HooksSpec.check_plugin(&p);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].rule_id, rule::HOOKS_INVALID);
+        assert_eq!(d[0].severity, Severity::Warning);
+        assert!(d[0].message.contains("hooks/hooks.json"));
     }
 }
