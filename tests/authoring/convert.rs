@@ -325,6 +325,10 @@ fn converts_a_codex_project_to_a_synthesized_plugin() {
 }
 
 /// Build a CC marketplace with one relative-path plugin + one remote plugin.
+///
+/// The `alpha` plugin includes a `hooks/` subtree (with a `${CLAUDE_PLUGIN_ROOT}`
+/// token in `hooks.json`) to verify that hooks land NAMESPACED under the vendored
+/// plugin directory (`alpha/hooks/`), never flat at the catalog root.
 fn cc_marketplace_fixture(tmp: &Path) -> PathBuf {
     let src = tmp.join("mkt");
     fs::create_dir_all(src.join(".claude-plugin")).unwrap();
@@ -346,6 +350,13 @@ fn cc_marketplace_fixture(tmp: &Path) -> PathBuf {
     fs::write(
         src.join("alpha/skills/s/SKILL.md"),
         "---\nname: s\ndescription: d\n---\nbody\n",
+    )
+    .unwrap();
+    // hooks/ subtree for the namespaced-placement test.
+    fs::create_dir_all(src.join("alpha/hooks")).unwrap();
+    fs::write(
+        src.join("alpha/hooks/hooks.json"),
+        br#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"${CLAUDE_PLUGIN_ROOT}/run.sh"}]}]}}"#,
     )
     .unwrap();
     src
@@ -409,6 +420,39 @@ fn strict_marketplace_hard_fails_on_a_remote_plugin() {
     let err = run(&src, &cfg).unwrap_err();
     assert_eq!(err.exit_code(), 84);
     assert!(!out.join("mkt-tome").exists(), "strict abort lands nothing");
+}
+
+#[test]
+fn vendored_catalog_plugin_hooks_land_namespaced_not_flat() {
+    // Hooks must be emitted under `<catalog>/<plugin>/hooks/`, not flat at the
+    // catalog root (`<catalog>/hooks/`). The cc_marketplace_fixture alpha plugin
+    // has a hooks/hooks.json with a ${CLAUDE_PLUGIN_ROOT} token.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = cc_marketplace_fixture(tmp.path());
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+
+    let mut cfg = catalog_config(out.clone(), false);
+    cfg.fetch_remote = false; // beta is a github remote, skip it
+    let outcome = run(&src, &cfg).unwrap();
+    let root = out.join(&outcome.final_name);
+
+    // hooks.json lands namespaced under the alpha plugin directory.
+    assert!(
+        root.join("alpha/hooks/hooks.json").is_file(),
+        "hooks must land under alpha/hooks/, not at the catalog root"
+    );
+    // No flat hooks/ directory at the catalog root.
+    assert!(
+        !root.join("hooks").exists(),
+        "hooks must NOT appear flat at the catalog root"
+    );
+    // Token is intact (verbatim pass-through, no harness-ism rewrite at convert time).
+    let text = fs::read_to_string(root.join("alpha/hooks/hooks.json")).unwrap();
+    assert!(
+        text.contains("${CLAUDE_PLUGIN_ROOT}"),
+        "token must survive verbatim: {text}"
+    );
 }
 
 /// Run a git subcommand in `dir`, asserting success (identity injected so CI
@@ -680,11 +724,37 @@ fn conversion_is_byte_stable_across_runs() {
         "skills/greet/scripts/run.sh",
         "commands/say.md",
         ".mcp.json",
+        "hooks/hooks.json",
+        "hooks/run.sh",
     ] {
         let a = fs::read(t1.join(f)).unwrap_or_else(|_| panic!("missing {f} in run1"));
         let b = fs::read(t2.join(f)).unwrap_or_else(|_| panic!("missing {f} in run2"));
         assert_eq!(a, b, "byte drift in {f}");
     }
+}
+
+#[test]
+fn strict_aborts_on_an_unreadable_hooks_json() {
+    // A binary (non-UTF-8) hooks.json emits convert/hooks-unreadable (Warning,
+    // strict-blocking) and, under --strict, aborts before writing anything.
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(src.join(".claude-plugin")).unwrap();
+    fs::write(
+        src.join(".claude-plugin/plugin.json"),
+        br#"{"name":"p","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    fs::create_dir_all(src.join("hooks")).unwrap();
+    // 4 bytes that are not valid UTF-8.
+    fs::write(src.join("hooks/hooks.json"), [0xFF, 0xFE, 0x00, 0x9C]).unwrap();
+    let out = tmp.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let mut cfg = config(out.clone());
+    cfg.strict = true;
+    let err = run(&src, &cfg).unwrap_err();
+    assert_eq!(err.exit_code(), 84, "{err}");
+    assert!(!out.join("p-tome").exists(), "strict abort writes nothing");
 }
 
 #[test]

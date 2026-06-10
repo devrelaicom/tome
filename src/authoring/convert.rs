@@ -312,6 +312,7 @@ mod tests {
         use crate::authoring::import::rule as cc;
         assert!(is_strict_blocking(cc::UNSUPPORTED_COMPONENT));
         assert!(is_strict_blocking(cc::TOOL_RESTRICTION_DROPPED));
+        assert!(is_strict_blocking(cc::HOOKS_UNREADABLE));
         assert!(is_strict_blocking(
             crate::authoring::rewrite::rule::SHELL_EXEC
         ));

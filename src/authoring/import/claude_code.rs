@@ -660,7 +660,7 @@ pub(crate) fn import_skill(
     diagnostics.extend(rewritten.diagnostics);
     let description = resolved_description(&parsed.frontmatter, &rewritten.text);
 
-    let supporting_files = collect_supporting(root, rel_dir, "SKILL.md")?;
+    let supporting_files = collect_supporting(root, rel_dir, Some("SKILL.md"))?;
 
     Ok(EntryIr {
         kind: EntryKind::Skill,
@@ -751,10 +751,14 @@ fn classify_dropped_frontmatter(content: &str, kind: EntryKind, diagnostics: &mu
 /// Collect a skill directory's non-`SKILL.md` files as supporting files
 /// (preserving `scripts/`/`references/`/`assets/` substructure), guard-validated
 /// for containment + symlink refusal, with defensive depth/count bounds.
+///
+/// `exclude` names a single depth-0 file to skip (e.g. `Some("SKILL.md")` for
+/// skill entries). Pass `None` when every depth-0 file should be collected
+/// (e.g. the `hooks/` verbatim walk).
 fn collect_supporting(
     root: &UntrustedRoot,
     rel_dir: &Path,
-    exclude: &str,
+    exclude: Option<&str>,
 ) -> Result<Vec<SupportingFile>, TomeError> {
     let mut out = Vec::new();
     let mut dirs_visited = 0usize;
@@ -774,8 +778,9 @@ fn collect_supporting(
             )));
         }
         for child in root.list_dir(&dir)? {
-            // Skip the entry's own SKILL.md (it is rendered, not copied).
-            if depth == 0 && child.name == exclude {
+            // Skip the entry's own primary file at depth 0 (e.g. SKILL.md is
+            // rendered, not copied).
+            if depth == 0 && Some(child.name.as_str()) == exclude {
                 continue;
             }
             // Never copy VCS metadata / OS junk into the converted artifact.
@@ -820,13 +825,12 @@ fn collect_hooks(
     if !root.is_dir(hooks_dir) {
         return Ok((Vec::new(), None));
     }
-    // The empty exclude never matches a child name (it only suppresses a
-    // depth-0 file named like the exclude — none is named "").
-    let mut files = collect_supporting(root, hooks_dir, "")?;
+    let mut files = collect_supporting(root, hooks_dir, None)?;
     for f in &mut files {
         f.relative = hooks_dir.join(&f.relative);
     }
     let json = if root.is_file(Path::new("hooks/hooks.json")) {
+        // hooks.json shares the harness-config read cap (1 MiB) — same semantic class as .mcp.json.
         match root.read_text(Path::new("hooks/hooks.json"), HARNESS_MCP_MAX) {
             Ok(s) => Some(s),
             Err(e) => {

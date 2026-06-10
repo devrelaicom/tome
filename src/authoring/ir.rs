@@ -62,7 +62,9 @@ pub struct PluginIr {
     /// tokens intact. Rel-paths are plugin-root-relative, importer-validated.
     pub hooks_files: Vec<SupportingFile>,
     /// Raw `hooks/hooks.json` body when present and readable — carried so the
-    /// lint hooks-spec rule reads the IR, not the source tree.
+    /// lint hooks-spec rule reads the IR, not the source tree. `None` means the
+    /// file was absent, the `hooks/` directory was absent, or the file was
+    /// present but unreadable (that last case also emits `convert/hooks-unreadable`).
     pub hooks_json: Option<String>,
     pub provenance: Provenance,
     pub diagnostics: Vec<Diagnostic>,
