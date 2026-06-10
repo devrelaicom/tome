@@ -317,7 +317,10 @@ pub fn import_marketplace(
                     UntrustedRoot::validate_name(&plugin.name)?;
                     plugins.push(plugin);
                 }
-                PluginSource::Remote(kind) => diagnostics.push(Diagnostic::warning(
+                // TEMPORARY (replaced by the fetch task): both remote variants
+                // keep the historical warn-and-skip until fetching lands.
+                PluginSource::RemoteGit { kind, .. }
+                | PluginSource::RemoteUnfetchable(kind) => diagnostics.push(Diagnostic::warning(
                     rule::REMOTE_PLUGIN_SKIPPED,
                     format!(
                         "plugin `{label}` has a remote source ({kind}); Tome catalogs are relative-path-only, so it is skipped"
@@ -346,30 +349,59 @@ pub fn import_marketplace(
 }
 
 /// Classification of a marketplace `plugins[].source`.
+// `RemoteGit.url` and `RemoteGit.reference` are read by the fetch task (Task 3).
+#[allow(dead_code)]
 enum PluginSource {
     /// A relative path within the marketplace repo (vendored inline).
     Relative(String),
-    /// A remote source (github/git/url/npm); not representable in a Tome
-    /// catalog. The string is the remote kind, for the warning.
-    Remote(String),
+    /// A git-fetchable remote: `github` (clone URL synthesized from `repo`),
+    /// `git`/`url` (the URL as given — the dominant real-world shape is
+    /// `{"source":"url","url":"https://github.com/….git"}`). `reference` is
+    /// an optional `ref` pin passed to the shallow clone.
+    RemoteGit {
+        kind: String,
+        url: String,
+        reference: Option<String>,
+    },
+    /// A remote kind Tome cannot git-fetch (`npm`, unknown) — warned-and-skipped.
+    RemoteUnfetchable(String),
     /// An unrecognized/absent source.
     Malformed,
 }
 
 /// A string `source` is a relative path; an object `source` is classified by
-/// its `source` type field (`local`/`relative` → vendor; anything else →
-/// remote).
+/// its `source` type field (`local`/`relative` → vendor; `github`/`git`/`url`
+/// → git-fetchable; anything else → unfetchable remote).
 fn classify_plugin_source(source: Option<&serde_json::Value>) -> PluginSource {
     match source {
         Some(serde_json::Value::String(s)) => PluginSource::Relative(s.clone()),
-        Some(serde_json::Value::Object(o)) => match o.get("source").and_then(|v| v.as_str()) {
-            Some("local") | Some("relative") => match o.get("path").and_then(|v| v.as_str()) {
-                Some(p) => PluginSource::Relative(p.to_owned()),
+        Some(serde_json::Value::Object(o)) => {
+            let reference = o.get("ref").and_then(|v| v.as_str()).map(str::to_owned);
+            match o.get("source").and_then(|v| v.as_str()) {
+                Some("local") | Some("relative") => match o.get("path").and_then(|v| v.as_str()) {
+                    Some(p) => PluginSource::Relative(p.to_owned()),
+                    None => PluginSource::Malformed,
+                },
+                Some("github") => match o.get("repo").and_then(|v| v.as_str()) {
+                    Some(repo) => PluginSource::RemoteGit {
+                        kind: "github".to_owned(),
+                        url: format!("https://github.com/{repo}.git"),
+                        reference,
+                    },
+                    None => PluginSource::Malformed,
+                },
+                Some(kind @ ("git" | "url")) => match o.get("url").and_then(|v| v.as_str()) {
+                    Some(url) => PluginSource::RemoteGit {
+                        kind: kind.to_owned(),
+                        url: url.to_owned(),
+                        reference,
+                    },
+                    None => PluginSource::Malformed,
+                },
+                Some(kind) => PluginSource::RemoteUnfetchable(kind.to_owned()),
                 None => PluginSource::Malformed,
-            },
-            Some(kind) => PluginSource::Remote(kind.to_owned()),
-            None => PluginSource::Malformed,
-        },
+            }
+        }
         _ => PluginSource::Malformed,
     }
 }
@@ -967,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_plugin_source_distinguishes_relative_from_remote() {
+    fn classify_plugin_source_distinguishes_relative_fetchable_and_unfetchable() {
         // A string source is a relative (vendored) path.
         assert!(matches!(
             classify_plugin_source(Some(&serde_json::json!("./alpha"))),
@@ -978,18 +1010,43 @@ mod tests {
             classify_plugin_source(Some(&serde_json::json!({"source":"local","path":"x"}))),
             PluginSource::Relative(p) if p == "x"
         ));
-        // Remote kinds are skipped.
+        // github synthesizes a clone URL from `repo` and honours a `ref` pin.
         assert!(matches!(
-            classify_plugin_source(Some(&serde_json::json!({"source":"github","repo":"o/r"}))),
-            PluginSource::Remote(k) if k == "github"
+            classify_plugin_source(Some(
+                &serde_json::json!({"source":"github","repo":"o/r","ref":"v1"})
+            )),
+            PluginSource::RemoteGit { kind, url, reference }
+                if kind == "github" && url == "https://github.com/o/r.git"
+                    && reference.as_deref() == Some("v1")
         ));
-        // Absent / unrecognized → malformed.
+        // git + url kinds carry their URL as given (the real-world obra shape).
         assert!(matches!(
-            classify_plugin_source(None),
+            classify_plugin_source(Some(
+                &serde_json::json!({"source":"url","url":"https://github.com/o/r.git"})
+            )),
+            PluginSource::RemoteGit { kind, url, .. }
+                if kind == "url" && url == "https://github.com/o/r.git"
+        ));
+        assert!(matches!(
+            classify_plugin_source(Some(&serde_json::json!({"source":"git","url":"u"}))),
+            PluginSource::RemoteGit { kind, .. } if kind == "git"
+        ));
+        // npm cannot be git-fetched.
+        assert!(matches!(
+            classify_plugin_source(Some(&serde_json::json!({"source":"npm","package":"p"}))),
+            PluginSource::RemoteUnfetchable(k) if k == "npm"
+        ));
+        // Missing required fields / absent source → malformed.
+        assert!(matches!(
+            classify_plugin_source(Some(&serde_json::json!({"source":"github"}))),
             PluginSource::Malformed
         ));
         assert!(matches!(
-            classify_plugin_source(Some(&serde_json::json!({"no":"source"}))),
+            classify_plugin_source(Some(&serde_json::json!({"source":"url"}))),
+            PluginSource::Malformed
+        ));
+        assert!(matches!(
+            classify_plugin_source(None),
             PluginSource::Malformed
         ));
     }
