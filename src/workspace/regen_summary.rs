@@ -116,7 +116,7 @@ pub fn regen(
     let short_chars = output.short.chars().count();
     let long_chars = output.long.chars().count();
     if short_chars > SHORT_MAX_CHARS {
-        tracing::warn!(
+        tracing::info!(
             workspace = name.as_str(),
             short_chars,
             limit = SHORT_MAX_CHARS,
@@ -124,7 +124,7 @@ pub fn regen(
         );
     }
     if long_chars > LONG_MAX_CHARS {
-        tracing::warn!(
+        tracing::info!(
             workspace = name.as_str(),
             long_chars,
             limit = LONG_MAX_CHARS,

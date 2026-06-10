@@ -302,7 +302,7 @@ fn regen_summary_long_window_oversize_is_still_cached() {
     assert_eq!(rules_body.len(), 3000);
 }
 
-/// T-M5 (US4.d-1): the length-window warn IS emitted. Verifies via a
+/// T-M5 (US4.d-1): the length-window info event IS emitted. Verifies via a
 /// `tracing-subscriber::Layer` installed GLOBALLY (via `OnceLock`) that
 /// routes captured events into a per-thread buffer. The disposition
 /// selected this in-line adapter over taking a `tracing_test` dep.
@@ -311,7 +311,7 @@ fn regen_summary_long_window_oversize_is_still_cached() {
 ///
 /// `tracing::subscriber::with_default` is per-thread, BUT
 /// `tracing::callsite` interest is cached per-callsite at first dispatch.
-/// In a parallel-test binary, the first thread to hit a `warn!` line
+/// In a parallel-test binary, the first thread to hit an `info!` line
 /// caches "Interest::never()" against the default `NoSubscriber`; later
 /// threads using `with_default` see the cached miss. The work-around is
 /// to install a subscriber GLOBALLY (which makes every callsite return
@@ -358,14 +358,14 @@ fn regen_summary_long_window_emits_warn_via_layer() {
         }
     }
 
-    /// Layer that routes WARN events into the calling thread's
+    /// Layer that routes INFO events into the calling thread's
     /// installed `THREAD_BUF`. If no buffer is installed for this
     /// thread, the event is dropped silently — other tests running in
     /// parallel don't see it.
     struct RoutingLayer;
     impl<S: Subscriber> Layer<S> for RoutingLayer {
         fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-            if *event.metadata().level() != tracing::Level::WARN {
+            if *event.metadata().level() != tracing::Level::INFO {
                 return;
             }
             THREAD_BUF.with(|slot| {
@@ -408,25 +408,25 @@ fn regen_summary_long_window_emits_warn_via_layer() {
     });
 
     let captured = warns.lock().unwrap();
-    // The regen path emits warns for short > SHORT_MAX_CHARS (800) and
+    // The regen path emits info events for short > SHORT_MAX_CHARS (800) and
     // long > LONG_MAX_CHARS (2500). Oversize stub returns 900 and 3000
-    // respectively, so we expect TWO warns from this run.
-    let oversize_warns: Vec<&String> = captured
+    // respectively, so we expect TWO info events from this run.
+    let oversize_events: Vec<&String> = captured
         .iter()
         .filter(|s| s.contains("exceeds recommended length window"))
         .collect();
     assert_eq!(
-        oversize_warns.len(),
+        oversize_events.len(),
         2,
-        "expected exactly 2 length-window warns (short + long), got {oversize_warns:?}",
+        "expected exactly 2 length-window info events (short + long), got {oversize_events:?}",
     );
     assert!(
-        oversize_warns.iter().any(|s| s.contains("(short)")),
-        "missing short-summary warn in {oversize_warns:?}",
+        oversize_events.iter().any(|s| s.contains("(short)")),
+        "missing short-summary info event in {oversize_events:?}",
     );
     assert!(
-        oversize_warns.iter().any(|s| s.contains("(long)")),
-        "missing long-summary warn in {oversize_warns:?}",
+        oversize_events.iter().any(|s| s.contains("(long)")),
+        "missing long-summary info event in {oversize_events:?}",
     );
 }
 
