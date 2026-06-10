@@ -13,7 +13,12 @@
 //! A `--from <harness>` flag overrides the *harness* interpretation (e.g. a
 //! bare `SKILL.md` is generic Agent Skills unless `--from cursor` marks it a
 //! Cursor skill); the *level* still comes from structure. The three commands
-//! each pass the level they expect (`catalog`/`plugin`/`skill convert`):
+//! each pass the level they expect (`catalog`/`plugin`/`skill convert`). The
+//! dual-manifest tie-break applies on the `--from` path too — the level from
+//! structure already reflects the command's expectation, so `plugin convert
+//! --from claude-code` succeeds on a self-marketplace repo (the tie-break
+//! feeds `ArtifactLevel::Plugin` through, matching what `plugin convert`
+//! expects).
 //!
 //! * undetectable + no `--from` → [`SourceFormatUnrecognized`](crate::error::TomeError::SourceFormatUnrecognized) (83);
 //! * detected level ≠ the command's expected level → [`Usage`](crate::error::TomeError::Usage) (2).
@@ -313,5 +318,20 @@ mod tests {
         // A skill expectation keeps marketplace-first precedence → level mismatch.
         let err = detect(&root, None, ArtifactLevel::Skill).unwrap_err();
         assert_eq!(err.exit_code(), 2);
+    }
+
+    #[test]
+    fn from_override_on_dual_manifest_repo_also_tie_breaks() {
+        // `plugin convert --from claude-code` on a self-marketplace repo: the
+        // tie-break feeds the expected level through the --from path too (before
+        // the tie-break this was a level-mismatch usage error).
+        let (_t, root) = root_with(|base| {
+            fs::create_dir(base.join(".claude-plugin")).unwrap();
+            fs::write(base.join(".claude-plugin/marketplace.json"), b"{}").unwrap();
+            fs::write(base.join(".claude-plugin/plugin.json"), b"{}").unwrap();
+        });
+        let d = detect(&root, Some("claude-code"), ArtifactLevel::Plugin).unwrap();
+        assert_eq!(d.harness, SourceHarness::ClaudeCode);
+        assert_eq!(d.level, ArtifactLevel::Plugin);
     }
 }
