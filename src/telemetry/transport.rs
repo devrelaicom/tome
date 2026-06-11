@@ -273,6 +273,12 @@ mod tests {
 
     #[test]
     fn network_counter_records() {
+        // Serialize on the same mutex the `post_batch` delta tests hold: the
+        // process-global `NETWORK_CALLS` counter is shared across this binary's
+        // tests, so an unguarded `record_network_call()` here would pollute the
+        // exact `before + 1` / `before` deltas those tests assert (observed as a
+        // flake on a loaded CI runner).
+        let _g = EndpointEnvGuard::new();
         let before = network_call_count();
         record_network_call();
         assert_eq!(network_call_count(), before + 1);
