@@ -287,6 +287,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         )
     })?
     .map_err(|e| {
+        // C-L1: best-effort MCP-surface `tome.error` (closed category only, never
+        // the raw message), carrying this session's `calling_harness` + the `Mcp`
+        // surface. Emitted at the terminal `TomeError`→`McpError` conversion;
+        // never alters the returned `McpError`.
+        crate::mcp::enqueue_tool_error(&state, e.category());
         // Translate filter-validation results into the contract's
         // structured error codes.
         match &e {

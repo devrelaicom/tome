@@ -94,6 +94,26 @@ pub(crate) fn rank_bucket_for(
     RankBucket::from_rank(rank)
 }
 
+/// Emit a best-effort MCP-surface `tome.error` (FR-029/029a) for an error a tool
+/// handler is about to return to the harness.
+///
+/// `category` is the closed [`ErrorCategory`](crate::error::ErrorCategory) — the
+/// ONLY error detail that leaves the box (never the raw message). `surface` is
+/// fixed to [`Surface::Mcp`] and `calling_harness` is resolved from this
+/// session's host harness via [`calling_harness`], so the MCP funnel carries the
+/// same dimensions the success-path events do.
+///
+/// Best-effort: this is the same infallible local append as every other enqueue —
+/// it NEVER alters the returned `McpError`, produces user output, blocks, or
+/// flushes. Call it at each handler's terminal `TomeError`-bearing error site.
+pub(crate) fn enqueue_tool_error(state: &state::McpState, category: crate::error::ErrorCategory) {
+    crate::telemetry::enqueue(crate::telemetry::event::ErrorEvent {
+        error_class: category,
+        surface: crate::telemetry::event::Surface::Mcp,
+        calling_harness: calling_harness(state),
+    });
+}
+
 /// Graceful-shutdown deadline per `contracts/mcp-server.md` §"Signal
 /// handling" step 2. After this elapses the cancellation token has been
 /// triggered but in-flight tool calls haven't finished — log a "hard

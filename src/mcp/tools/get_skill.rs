@@ -84,7 +84,15 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         tokio::task::spawn_blocking(move || lookup_skill(&paths, &scope, &catalog, &plugin, &name))
             .await
             .map_err(|e| internal(&input, started, format!("lookup join: {e}"), "internal"))?
-            .map_err(|e| internal(&input, started, e.to_string(), e.category().as_str()))?;
+            .map_err(|e| {
+                // C-L1: best-effort MCP-surface `tome.error` (closed category
+                // only), with this session's `calling_harness`. Never alters the
+                // returned `McpError`. This is the one `TomeError`→`McpError`
+                // conversion in this handler (the other error arms are non-`TomeError`
+                // lookup/read outcomes already shaped to the contract codes).
+                crate::mcp::enqueue_tool_error(&state, e.category());
+                internal(&input, started, e.to_string(), e.category().as_str())
+            })?;
 
     let hit = match lookup {
         LookupOutcome::Found(hit) => hit,

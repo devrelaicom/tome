@@ -155,6 +155,8 @@ fn inspect_with_corrupt_line_is_exit_92_and_does_not_repair() {
     let seeded = "{\"event_type\":\"tome.command\",\"ok\":true}\nthis is not json\n";
     seed_queue(&env, seeded);
 
+    let before = queue_digest(&env).expect("queue exists before inspect");
+
     let out = run(&env, &["telemetry", "inspect"]);
     assert_eq!(
         out.status.code(),
@@ -179,24 +181,17 @@ fn inspect_with_corrupt_line_is_exit_92_and_does_not_repair() {
         "the corrupt line must be reported; stdout: {stdout}"
     );
 
-    // NOT repaired: inspect itself never mutates the queue. The exit-92 boundary
-    // DOES append one app-level `tome.error` event (FR-029, emitted in `main.rs`
-    // after `write_error`), so the file is not byte-for-byte identical — but the
-    // original seeded prefix (INCLUDING the corrupt line, verbatim) is untouched.
-    // That is the read-only / never-repair contract: inspect leaves the corrupt
-    // line exactly where it was for the flusher to self-heal later.
-    let after = std::fs::read(queue_path(&env)).expect("queue still exists after inspect");
-    assert!(
-        after.starts_with(seeded.as_bytes()),
-        "inspect must NOT alter the original queue bytes (corrupt line preserved verbatim); \
-         after={:?}",
-        String::from_utf8_lossy(&after),
-    );
-    // And specifically: the corrupt line is still present (NOT dropped/repaired).
-    let after_str = String::from_utf8_lossy(&after);
-    assert!(
-        after_str.contains("this is not json"),
-        "the corrupt line must NOT be repaired away by inspect; after={after_str}"
+    // Read-only / never-repair, restored to the STRICT form (C-H1): the queue
+    // file is byte-for-byte IDENTICAL after inspect. The `tome telemetry`
+    // control surface is now excluded from the `tome.error` boundary emit (see
+    // `main.rs` `is_telemetry_cmd`), so the exit-92 corrupt-queue report no
+    // longer appends a self-referential `tome.error` line to the very file it
+    // just reported. inspect leaves the corrupt line exactly where it was for
+    // the flusher to self-heal later — and touches nothing else.
+    let after = queue_digest(&env).expect("queue still exists after inspect");
+    assert_eq!(
+        before, after,
+        "inspect must NOT mutate the queue file at all (byte-identical, corrupt line preserved)"
     );
 }
 

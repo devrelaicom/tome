@@ -125,7 +125,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
     })
     .await
     .map_err(|e| internal(&input, started, format!("lookup join: {e}"), "internal"))?
-    .map_err(|e| internal(&input, started, e.to_string(), e.category().as_str()))?;
+    .map_err(|e| {
+        // C-L1: best-effort MCP-surface `tome.error` (closed category only),
+        // with this session's `calling_harness`. Never alters the returned
+        // `McpError`. The other error arms below are non-`TomeError` lookup/walk
+        // outcomes already shaped to the contract codes.
+        crate::mcp::enqueue_tool_error(&state, e.category());
+        internal(&input, started, e.to_string(), e.category().as_str())
+    })?;
 
     let LookupOutcome::Found(hit) = lookup else {
         return Err(emit_error(

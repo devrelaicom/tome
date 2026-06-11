@@ -20,8 +20,14 @@ use crate::telemetry::lock;
 /// How many times the `AlreadyExists` loser re-reads a still-EMPTY id file
 /// before giving up and treating it as corrupt. Each retry sleeps a growing,
 /// capped wall-clock interval (see the loop below), so this count bounds a real
-/// time budget (tens of ms) rather than a scheduling-dependent spin count.
-const RACE_READ_RETRIES: usize = 32;
+/// time budget rather than a scheduling-dependent spin count.
+///
+/// R-L2: the budget is deliberately small. The legitimate winner-mid-write
+/// window (two adjacent `write_all`s, no I/O between) is sub-millisecond, so the
+/// early exponential sleeps already cover it with wide margin; the count + cap
+/// below bound the worst-case FOREGROUND block (a rare crashed-mint empty file)
+/// to ~6 ms, not the prior ~83 ms.
+const RACE_READ_RETRIES: usize = 12;
 
 /// Re-assert `0600` on the id file after an atomic *replace*.
 ///
@@ -71,6 +77,13 @@ fn ensure_dir(paths: &Paths) -> Result<(), TomeError> {
 /// unrecoverable (a corrupt join key cannot be repaired — there is no "correct"
 /// value to restore) and RE-MINTED via an atomic replace, returning
 /// `just_minted = true`.
+///
+/// Foreground-block bound (R-L2, qualifying NFR-001's "no wait"): the only path
+/// that sleeps is the rare EMPTY-id race-retry (a winner caught mid-write, or a
+/// crashed mint that left a zero-byte file). The happy path (mint, or read a
+/// valid id) does NOT sleep. When it does, the bounded retry budget caps the
+/// total foreground block at ~6 ms before the file is treated as corrupt and
+/// re-minted — so even the pathological case stays well under a perceptible wait.
 pub fn ensure_install_id(paths: &Paths) -> Result<(Uuid, bool), TomeError> {
     ensure_dir(paths)?;
     let path = paths.telemetry_id();
@@ -139,10 +152,11 @@ pub fn ensure_install_id(paths: &Paths) -> Result<(Uuid, bool), TomeError> {
                 // is deliberate: under slow-FS / heavy-load a busy-spin can burn
                 // all retries *inside* the winner's sub-millisecond empty window
                 // and wrongly re-mint over it (two minters). The growing sleep
-                // (~50µs doubling, capped at attempt 6 ≈ 3.2ms) gives the winner
-                // a guaranteed wall-clock budget regardless of scheduling.
+                // (~25µs doubling, capped at attempt 5 ≈ 800µs) gives the winner
+                // a guaranteed wall-clock budget regardless of scheduling, while
+                // bounding the total worst-case foreground block to ~6 ms (R-L2).
                 if attempt + 1 < RACE_READ_RETRIES {
-                    std::thread::sleep(std::time::Duration::from_micros(50u64 << attempt.min(6)));
+                    std::thread::sleep(std::time::Duration::from_micros(25u64 << attempt.min(5)));
                 }
             }
 

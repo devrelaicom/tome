@@ -44,7 +44,7 @@ use {
 };
 
 use tome::telemetry::event::{Install, InstallMethod};
-use tome::telemetry::transport::network_call_count;
+use tome::telemetry::transport::{network_call_count, record_network_call};
 
 use crate::common::HomeGuard;
 #[cfg(unix)]
@@ -122,6 +122,85 @@ fn multi_writer_append_never_interleaves() {
         seen.len(),
         expected.len(),
         "every expected line landed once"
+    );
+}
+
+/// T-M2 — multi-writer no-interleave at the BOUNDARY the single-`write`
+/// atomicity guarantee is scoped to: each appended line is just UNDER 4096 bytes
+/// (incl. its newline) and distinct per (thread, iteration), under contention.
+/// Afterwards every read line is one complete expected line (no torn/interleaved
+/// fragment) and each appears exactly once. The near-max line size is the point:
+/// it exercises the largest single `write` the queue permits, where a torn line
+/// would be most likely if the append weren't one atomic syscall.
+#[test]
+fn multi_writer_near_max_line_never_interleaves() {
+    const THREADS: usize = 6;
+    const PER_THREAD: usize = 24;
+    // Target byte length of each line INCLUDING the trailing newline `append`
+    // adds: one under the cap so the line is kept, not dropped.
+    const TARGET_WITH_NL: usize = MAX_LINE_BYTES - 1; // 4095
+    // The line body length (excluding the newline `append` appends).
+    const BODY_LEN: usize = TARGET_WITH_NL - 1; // 4094
+
+    let dir = TempDir::new().unwrap();
+    let paths = Arc::new(paths_in(&dir));
+
+    // Build one distinct near-max line per (thread, iteration): a JSON object
+    // whose `t`/`i` make it unique, padded with a `p` filler to BODY_LEN so the
+    // whole line (plus newline) is exactly one under the cap.
+    let line_for = |t: usize, i: usize| -> String {
+        let prefix = format!("{{\"t\":{t},\"i\":{i},\"p\":\"");
+        let suffix = "\"}";
+        // pad so prefix + pad + suffix == BODY_LEN.
+        let pad_len = BODY_LEN - prefix.len() - suffix.len();
+        let mut s = String::with_capacity(BODY_LEN);
+        s.push_str(&prefix);
+        s.extend(std::iter::repeat_n('z', pad_len));
+        s.push_str(suffix);
+        debug_assert_eq!(s.len(), BODY_LEN);
+        debug_assert_eq!(s.len() + 1, TARGET_WITH_NL, "line+nl is one under the cap");
+        s
+    };
+
+    let expected: std::collections::HashSet<String> = (0..THREADS)
+        .flat_map(|t| (0..PER_THREAD).map(move |i| line_for(t, i)))
+        .collect();
+
+    let handles: Vec<_> = (0..THREADS)
+        .map(|t| {
+            let paths = Arc::clone(&paths);
+            std::thread::spawn(move || {
+                for i in 0..PER_THREAD {
+                    let line = line_for(t, i);
+                    // Each is one under the cap ⇒ kept (not dropped).
+                    queue::append(&paths, &line).expect("near-max append ok");
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().expect("writer thread joined");
+    }
+
+    let lines = queue::read_lines(&paths).expect("read_lines ok");
+    assert_eq!(
+        lines.len(),
+        THREADS * PER_THREAD,
+        "every near-max line landed exactly once (no drop, no split)",
+    );
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for line in &lines {
+        assert!(
+            expected.contains(line),
+            "observed a torn/interleaved near-max line not in the expected set (len {})",
+            line.len(),
+        );
+        assert!(seen.insert(line), "a near-max line appeared twice");
+    }
+    assert_eq!(
+        seen.len(),
+        expected.len(),
+        "every expected near-max line once"
     );
 }
 
@@ -266,6 +345,43 @@ fn classify_lines_counts_corrupt_and_is_read_only() {
 // proof that no foreground path performs network I/O.
 // ===========================================================================
 
+/// T-C1 [negative control] — the seam the `== before` foreground proofs depend
+/// on is LOAD-BEARING: snapshotting the counter, calling `record_network_call()`
+/// exactly once, and asserting the LOCAL delta is exactly 1.
+///
+/// Without this, the `does_no_network` tests above could pass vacuously against a
+/// counter that never moves (e.g. if the seam were accidentally a no-op). This
+/// proves the counter increments, so those `after == before` assertions are
+/// FALSIFIABLE by contrast — a foreground path that networked WOULD move the
+/// counter and be caught.
+///
+/// Race-safety: `NETWORK_CALLS` is a process-global `AtomicU64` shared with the
+/// foreground `== before` tests, which run in parallel threads of this same
+/// binary. This test's `+1` increment would corrupt a foreground test's
+/// `before→after` window if the two overlapped (the foreground delta would read
+/// `+1` and fail). To make the shared counter safe WITHOUT relying on ordering,
+/// this test acquires the SAME `HOME_MUTEX` the foreground tests hold (via a
+/// `HomeGuard`), so it can never run concurrently with any foreground emit path.
+/// We assert only the LOCAL delta (`after - before == 1`), never an absolute
+/// value, so the snapshot stays correct regardless of the counter's prior value.
+#[test]
+fn network_counter_seam_is_load_bearing() {
+    // Hold HOME_MUTEX for the snapshot window so no foreground network test
+    // (all of which hold it via their own `HomeGuard`) can interleave our `+1`.
+    let home = TempDir::new().unwrap();
+    let _home_guard = HomeGuard::install(home.path());
+
+    let before = network_call_count();
+    record_network_call();
+    let after = network_call_count();
+    assert_eq!(
+        after - before,
+        1,
+        "record_network_call must move the counter by exactly 1 — \
+         the seam the foreground no-network proofs rely on",
+    );
+}
+
 /// CLI-foreground path: the `enqueue` library entry (the foreground emit path)
 /// appends a local line and performs NO network I/O — the counter is unchanged.
 ///
@@ -274,6 +390,15 @@ fn classify_lines_counts_corrupt_and_is_read_only() {
 /// `main.rs` uses, so this is the real foreground path — not just the
 /// path-injected `enqueue_to`. `enqueue_to` (also a foreground path) is exercised
 /// against an explicit `Paths` for good measure.
+///
+/// FALSIFIABILITY: this asserts a `before`/`after` DELTA of zero (never an
+/// absolute `0`), so the process-global counter is never assumed pristine — a
+/// sibling test (`network_counter_seam_is_load_bearing`) deliberately moves it.
+/// That negative control proves the seam this `== before` relies on actually
+/// increments, so a foreground path that DID network would be caught here by
+/// contrast. The end-to-end proof completes in US3, when the `reqwest::blocking`
+/// POST becomes the one `record_network_call` increment site; until then this
+/// negative control guards the seam.
 #[test]
 fn cli_foreground_enqueue_does_no_network() {
     let home = TempDir::new().unwrap();
@@ -320,6 +445,11 @@ fn cli_foreground_enqueue_does_no_network() {
 /// MCP-tool foreground path: an in-process `search_skills` handler call emits
 /// `tome.search` via enqueue-only and performs NO network I/O — even with a
 /// non-routable endpoint configured. Mirrors the `mcp_funnel.rs` staging.
+///
+/// FALSIFIABILITY: same `before`/`after` DELTA discipline as the CLI test above —
+/// `network_counter_seam_is_load_bearing` proves the counter moves, so this
+/// `== before` is a real (falsifiable) no-network claim, not a vacuous one. The
+/// US3 POST is the increment site that closes the end-to-end proof.
 #[cfg(unix)]
 #[test]
 fn mcp_tool_foreground_call_does_no_network() {

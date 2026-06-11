@@ -59,9 +59,11 @@ pub fn maybe_emit_heartbeat(paths: &Paths) {
 
     // 3. Enqueue against THE SAME `paths` we gated on. Using `enqueue_to` (not
     //    the default-resolving `enqueue`) keeps the heartbeat self-consistent:
-    //    it lands in, and is gated by, one `Paths` — no default-`$HOME`
-    //    divergence. `enqueue_to` is itself gated on `is_enabled()` upstream of
-    //    every event, so a disabled install enqueues nothing here.
+    //    it lands in one `Paths` — no default-`$HOME` divergence. NOTE:
+    //    `enqueue_to` is the UN-gated primitive (it does NOT call `is_enabled()`);
+    //    the enabled gate for this path is the caller's — `cli_startup` resolved
+    //    `resolve_enabled` and returned early on a disabled install before ever
+    //    reaching `maybe_emit_heartbeat`, so a disabled install enqueues nothing.
     enqueue_to(
         paths,
         Heartbeat {
@@ -439,6 +441,66 @@ mod tests {
         assert_eq!(counts.agents, CountBucket::from(0u64));
         assert_eq!(counts.workspaces, CountBucket::from(0u64));
         assert_eq!(counts.catalogs, CountBucket::from(0u64));
+    }
+
+    /// T-M3 / SC-003 — the de-dup-across-invocations property: many
+    /// `maybe_emit_heartbeat` calls within ONE UTC day emit EXACTLY ONE
+    /// `tome.heartbeat` (the once-per-day gate via the `last-heartbeat` stamp),
+    /// then a SECOND heartbeat fires once the clock advances to the next day.
+    /// This is the unit-level proof of "100 runs → 1 heartbeat / day".
+    #[test]
+    fn heartbeat_dedups_within_a_day_then_re_emits_next_day() {
+        let _lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _enabled = ForceEnabled::on();
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+
+        // Day 1: five back-to-back invocations under a FIXED clock. The first is
+        // due (no stamp) and emits + records today; the next four see the stamp
+        // == today and return before the index open ⇒ no further emit.
+        {
+            let _clock = ClockGuard::install(at(2026, Month::June, 11));
+            for _ in 0..5 {
+                maybe_emit_heartbeat(&paths);
+            }
+        }
+        let after_day1 = queue::count_pending(&paths);
+        assert_eq!(
+            after_day1, 1,
+            "exactly one heartbeat across five same-day invocations (SC-003)",
+        );
+        // And it IS a heartbeat (not some other event leaking in).
+        let lines = queue::read_lines(&paths).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(v["event_type"], "tome.heartbeat");
+        assert_eq!(
+            std::fs::read_to_string(paths.telemetry_last_heartbeat())
+                .unwrap()
+                .trim(),
+            "2026-06-11",
+            "day-1 stamp recorded",
+        );
+
+        // Day 2: advance the clock one calendar day. The stamp (2026-06-11) now
+        // differs from today (2026-06-12) ⇒ a SECOND heartbeat is due.
+        {
+            let _clock = ClockGuard::install(at(2026, Month::June, 12));
+            for _ in 0..5 {
+                maybe_emit_heartbeat(&paths);
+            }
+        }
+        assert_eq!(
+            queue::count_pending(&paths),
+            2,
+            "the day boundary releases exactly one more heartbeat (total 2)",
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.telemetry_last_heartbeat())
+                .unwrap()
+                .trim(),
+            "2026-06-12",
+            "day-2 stamp recorded after the second emit",
+        );
     }
 
     #[test]

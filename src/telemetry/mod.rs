@@ -166,6 +166,11 @@ pub fn enqueue<E: event::AnonymousEvent>(event: E) {
 ///
 /// Same best-effort contract as [`enqueue`]: infallible, exactly one append, no
 /// network, no contended lock, no wait.
+///
+/// UN-GATED primitive: unlike [`enqueue`], this does NOT call [`is_enabled`].
+/// Callers MUST gate themselves on the enabled state before calling (as
+/// `cli_startup` / `heartbeat::maybe_emit_heartbeat` do, via `resolve_enabled`),
+/// or use the public [`enqueue`], which resolves the default paths and gates.
 #[doc(hidden)]
 pub fn enqueue_to<E: event::AnonymousEvent>(paths: &crate::paths::Paths, event: E) {
     // Lazily mint (or read) the install id. This LAZY mint realizes the MCP

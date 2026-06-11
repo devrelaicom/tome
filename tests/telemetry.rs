@@ -9,6 +9,10 @@
 
 mod common;
 
+// Per-command anonymous emits: real-binary catalog/workspace/doctor paths
+// (cross-platform) + an in-process, Unix-only CLI `tome.search` section.
+#[path = "telemetry/command_emits.rs"]
+mod command_emits;
 #[path = "telemetry/events.rs"]
 mod events;
 #[path = "telemetry/exit_codes.rs"]
@@ -24,3 +28,7 @@ mod inspect;
 mod mcp_funnel;
 #[path = "telemetry/queue_behavior.rs"]
 mod queue_behavior;
+// Process-start lifecycle: cli_startup install/upgrade/disabled (cross-platform)
+// + a Unix-only MCP cold-start silent-mint section.
+#[path = "telemetry/startup.rs"]
+mod startup;

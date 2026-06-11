@@ -15,7 +15,6 @@
 //! any `Err` to a `debug!` + return at its call site.
 
 use std::io::Write;
-use std::path::Path;
 
 use crate::error::TomeError;
 use crate::paths::Paths;
@@ -99,6 +98,22 @@ pub fn append(paths: &Paths, line: &str) -> Result<(), TomeError> {
             current_len,
             line_bytes = wire_len,
             "telemetry_queue_overflow"
+        );
+        return Ok(());
+    }
+
+    // Read/write containment parity (S-M1): every other telemetry write sink
+    // (`write_atomic` on the id / last-version, the id read in `ensure_install_id`)
+    // refuses a symlinked final component; the append sink must too, or a hostile
+    // `telemetry/queue.jsonl` symlink/FIFO could redirect this `O_APPEND` write —
+    // and the install UUID it carries — out of tree. On refusal we DROP the event
+    // (`Ok(())`, never block/propagate): this is the best-effort silent path, so a
+    // poisoned queue path must not crash or stall the user's foreground command.
+    if let Err(e) = crate::util::refuse_symlinked_component(&queue) {
+        tracing::debug!(
+            target: "telemetry",
+            error = %e,
+            "telemetry_queue_unsafe_path"
         );
         return Ok(());
     }
@@ -225,14 +240,6 @@ pub fn reassert_queue_0600(paths: &Paths) {
 /// No-op on non-Unix.
 #[cfg(not(unix))]
 pub fn reassert_queue_0600(_paths: &Paths) {}
-
-/// True iff `target`'s final component is a regular file (or absent) — a tiny
-/// guard the flusher reuses; kept private here as it is only needed once the
-/// read/write paths land. Currently unused on the append path.
-#[allow(dead_code)]
-fn is_safe_queue(target: &Path) -> bool {
-    crate::util::refuse_symlinked_component(target).is_ok()
-}
 
 #[cfg(test)]
 mod tests {
@@ -390,6 +397,40 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(paths.telemetry_queue()).unwrap(),
             ""
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_drops_when_queue_is_a_symlink() {
+        // S-M1: a hostile `telemetry/queue.jsonl` that is a SYMLINK must be
+        // refused — the append drops (returns Ok, writes nothing) and the link's
+        // target is left untouched, so the install UUID can't be redirected
+        // out of tree.
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        std::fs::create_dir_all(paths.telemetry_dir()).unwrap();
+
+        // The link target lives OUTSIDE the telemetry dir; if the guard failed,
+        // the append would write through the link and clobber it.
+        let outside = dir.path().join("outside-target.txt");
+        std::fs::write(&outside, b"untouched\n").unwrap();
+        std::os::unix::fs::symlink(&outside, paths.telemetry_queue()).unwrap();
+
+        // Append returns Ok (best-effort drop, never an error/block).
+        append(&paths, "{\"redirect\":true}").unwrap();
+
+        // The link target is byte-for-byte untouched — nothing was written through.
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "untouched\n",
+            "a symlinked queue must NOT be followed (the target stays untouched)"
+        );
+        // The symlinked queue path was not turned into a real file with content.
+        assert_eq!(
+            std::fs::read_to_string(paths.telemetry_queue()).unwrap(),
+            "untouched\n",
+            "reading through the still-present symlink shows the untouched target"
         );
     }
 
