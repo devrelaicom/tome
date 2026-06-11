@@ -109,6 +109,42 @@ pub enum Command {
     /// that teach an agent how to use Tome — into your detected harnesses.
     #[command(subcommand)]
     Meta(MetaCommand),
+    /// Inspect and control local-first usage telemetry. Telemetry is opt-out
+    /// (CI auto-disabled); `status` reports the current state, `on`/`off`
+    /// toggle it, and `reset`/`purge` manage the local install identity.
+    #[command(subcommand)]
+    Telemetry(TelemetryCommand),
+}
+
+/// `tome telemetry <subcommand>` — control the local-first telemetry subsystem.
+///
+/// `inspect` and `flush` land in later slices (US2 / US3); only the US1 control
+/// surface is exposed here.
+#[derive(Debug, Subcommand)]
+pub enum TelemetryCommand {
+    /// Report telemetry state: enabled + why, install UUID (if any), the
+    /// delivery endpoint, queued-event count, and last-flush stamp. Read-only —
+    /// never mints an install id.
+    Status,
+    /// Enable telemetry (sets the opt-out switch on) and ensure an install
+    /// identity exists.
+    On,
+    /// Disable telemetry. The install UUID is left intact; a later `on` resumes
+    /// it. Use `purge` to also delete the identity.
+    Off,
+    /// Sever telemetry continuity: mint a fresh install UUID and clear the
+    /// queue. Prompts for confirmation unless `--yes`.
+    Reset(TelemetryResetArgs),
+    /// Delete all telemetry state (install UUID + queue) and switch telemetry
+    /// off until explicitly re-enabled.
+    Purge,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct TelemetryResetArgs {
+    /// Skip the confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// `tome meta <subcommand>` — manage Tome's bundled meta skills.

@@ -14,6 +14,9 @@ pub mod buckets;
 pub mod clock;
 pub mod config;
 pub mod event;
+pub mod identity;
+pub mod lock;
+pub mod notice;
 pub mod transport;
 
 /// Whether telemetry is enabled for this process (opt-out + CI auto-disable).
@@ -80,5 +83,14 @@ pub fn teardown_at_exit() {}
 
 /// Emit the one-line first-run opt-out notice if it has not been shown.
 ///
-/// Phase-2 fill: prints the CLI-only notice once, guarded by a marker file.
-pub fn first_run_notice_if_needed() {}
+/// Resolves the default (`$HOME`) [`Paths`](crate::paths::Paths) and delegates
+/// to [`notice::first_run_notice_if_needed`] on the CLI surface. The actual
+/// once-per-install / disabled / CI gating lives in `notice` (the once-ness
+/// comes from the O_EXCL id mint, not a marker file). A `$HOME` failure is
+/// swallowed — the notice is best-effort and must never break a command.
+pub fn first_run_notice_if_needed() {
+    match crate::paths::Paths::resolve() {
+        Ok(paths) => notice::first_run_notice_if_needed(&paths, true),
+        Err(e) => tracing::debug!(error = %e, "telemetry notice skipped: $HOME unresolvable"),
+    }
+}

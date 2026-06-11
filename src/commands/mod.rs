@@ -12,4 +12,5 @@ pub mod query;
 pub mod reindex;
 pub mod skill;
 pub mod status;
+pub mod telemetry;
 pub mod workspace;

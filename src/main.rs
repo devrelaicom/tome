@@ -53,6 +53,15 @@ fn main() {
         }
     };
 
+    // First-run opt-out notice (FR-013/014/015). Skip the MCP path (no human
+    // stderr) AND the `telemetry` path (its subcommands manage telemetry
+    // themselves — a `telemetry off` must not first mint an id + print a
+    // notice). The call self-gates on `is_enabled()` (CI/disabled ⇒ no mint, no
+    // notice) and is best-effort — it never errors out the command.
+    if !matches!(cli.command, Command::Mcp(_) | Command::Telemetry(_)) {
+        tome::telemetry::notice::first_run_notice_if_needed(&paths, true);
+    }
+
     let result = match cli.command {
         Command::Catalog(cmd) => commands::catalog::run(cmd, &scope, mode),
         Command::Plugin(args) => match args.command {
@@ -71,13 +80,26 @@ fn main() {
         Command::Harness(args) => commands::harness::run(args, &scope, mode),
         Command::Skill(cmd) => commands::skill::run(cmd, &scope, mode),
         Command::Meta(cmd) => commands::meta::run(cmd, &scope, mode),
+        Command::Telemetry(cmd) => commands::telemetry::run(cmd, &scope, mode),
     };
 
+    // Single exit-path teardown (FR-047b). `teardown_at_exit` is THE one call
+    // site that spawns the detached telemetry flusher (a no-op stub today; US3
+    // fills it). It runs in BOTH arms — after the exit code is computed and
+    // after `write_error` on the error arm — but BEFORE `process::exit`, because
+    // the release profile is `panic = "abort"` and runs no destructors, so a
+    // `Drop`/`atexit` hook would never fire. The early `paths`/`scope`
+    // resolution-failure exits above intentionally skip it (best-effort absence
+    // is fine — there is nothing queued before a command runs).
     match result {
-        Ok(()) => std::process::exit(0),
+        Ok(()) => {
+            tome::telemetry::teardown_at_exit();
+            std::process::exit(0);
+        }
         Err(err) => {
             let code = err.exit_code();
             output::write_error(mode, &err);
+            tome::telemetry::teardown_at_exit();
             std::process::exit(code);
         }
     }

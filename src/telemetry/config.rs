@@ -20,6 +20,26 @@ use serde::{Deserialize, Serialize};
 use crate::error::TomeError;
 use crate::paths::Paths;
 
+/// Which precedence rule decided the resolved enabled-state.
+///
+/// This is the structured provenance the `tome telemetry status` surface reports
+/// (and the byte-stable shape the JSON pin test asserts). `snake_case` keeps the
+/// wire tokens stable independent of the Rust variant spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    /// `TOME_TELEMETRY=1` forced telemetry ON (overrides CI + file).
+    EnvOn,
+    /// `TOME_TELEMETRY=0` forced telemetry OFF.
+    EnvOff,
+    /// A CI environment was detected ⇒ auto-OFF.
+    Ci,
+    /// The `telemetry/config.toml` file decided it (present and parsed).
+    Config,
+    /// No env override, no CI, no file ⇒ the opt-out default (ON).
+    Default,
+}
+
 /// The serde default for [`TelemetryConfig::enabled`]: telemetry is opt-out, so
 /// an omitted `enabled` key means ON.
 fn default_true() -> bool {
@@ -122,39 +142,64 @@ pub fn is_ci() -> bool {
         || present("TEAMCITY_VERSION")
 }
 
-/// The full enabled-state precedence (the function the CLI surfaces call):
+/// The full enabled-state precedence, returning the deciding [`Source`].
 ///
-/// 1. `TOME_TELEMETRY == "1"` ⇒ `true` — explicit force-on, overrides CI + file.
-/// 2. CI detected ⇒ `false` — build farms never emit (even over a force-off
-///    being absent).
-/// 3. `TOME_TELEMETRY == "0"` ⇒ `false` — explicit force-off.
-/// 4. otherwise ⇒ `load(paths)?.enabled` — the file (default-on when absent).
+/// This is the SSOT every caller routes through: [`resolve_enabled`] (the silent
+/// gate's backing) delegates to it dropping the source, and `tome telemetry
+/// status` keeps the source for its report. Precedence:
 ///
-/// A malformed config only surfaces (as exit 91) when step 4 is reached: an
-/// explicit env override or CI short-circuits before we ever read the file.
-pub fn resolve_enabled(paths: &Paths) -> Result<bool, TomeError> {
+/// 1. `TOME_TELEMETRY == "1"` ⇒ `(true, EnvOn)` — overrides CI + file.
+/// 2. CI detected ⇒ `(false, Ci)` — build farms never emit.
+/// 3. `TOME_TELEMETRY == "0"` ⇒ `(false, EnvOff)` — explicit force-off.
+/// 4. file present ⇒ `(load(..).enabled, Config)`; absent ⇒ `(true, Default)`.
+///
+/// A malformed config only surfaces (as exit 91) when step 4 reads a present
+/// file: an explicit env override or CI short-circuits before any file read.
+/// The present-vs-absent split is decided BEFORE `load` (which collapses a
+/// missing file to the opt-out default) so the source faithfully distinguishes
+/// `Config` from `Default`.
+pub fn resolve_enabled_with_source(paths: &Paths) -> Result<(bool, Source), TomeError> {
     let force = std::env::var("TOME_TELEMETRY").ok();
 
     // 1. Explicit force-on wins over everything (incl. CI + a disabled file).
     if force.as_deref() == Some("1") {
-        return Ok(true);
+        return Ok((true, Source::EnvOn));
     }
 
     // 2. CI auto-off. Placed above force-off only matters when the two
     //    disagree, which they can't (both yield `false`); the ordering is kept
     //    explicit so the documented precedence reads top-to-bottom.
     if is_ci() {
-        return Ok(false);
+        return Ok((false, Source::Ci));
     }
 
     // 3. Explicit force-off.
     if force.as_deref() == Some("0") {
-        return Ok(false);
+        return Ok((false, Source::EnvOff));
     }
 
-    // 4. Fall back to the file (default-on when absent). This is the ONLY step
-    //    that can surface a malformed-config error (exit 91).
-    Ok(load(paths)?.enabled)
+    // 4. Fall back to the file. Probe presence FIRST so we can report `Config`
+    //    vs `Default` truthfully — `load` itself folds a missing file into the
+    //    opt-out default and would erase that distinction. The presence probe
+    //    is cheap and racy-but-benign: a file appearing/disappearing between the
+    //    probe and the read only mislabels the source, never the enabled bool
+    //    (which `load` re-derives authoritatively).
+    if paths.telemetry_config().exists() {
+        // Present: `load` may surface a malformed-config error (exit 91).
+        Ok((load(paths)?.enabled, Source::Config))
+    } else {
+        // Absent: opt-out default-on, no file read.
+        Ok((true, Source::Default))
+    }
+}
+
+/// The full enabled-state precedence (the function the CLI surfaces call).
+///
+/// A thin wrapper over [`resolve_enabled_with_source`] that drops the deciding
+/// [`Source`] — kept so existing callers (the silent gate, the `notice`/config
+/// tests) read unchanged.
+pub fn resolve_enabled(paths: &Paths) -> Result<bool, TomeError> {
+    resolve_enabled_with_source(paths).map(|(enabled, _)| enabled)
 }
 
 /// Scrub a path for inclusion in a telemetry error/log surface. A filesystem
