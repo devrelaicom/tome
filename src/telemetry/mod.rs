@@ -6,26 +6,62 @@
 //! deliberately `tokio`-free — it is sync-only (the MCP timer `spawn_blocking`s
 //! into [`flush`]). See `specs/010-phase-10-telemetry/`.
 //!
-//! Phase 1 (this slice) lands the module skeleton + the typed event enums only;
-//! every function below is a stub filled in by a later phase.
+//! Phase 2 (this slice) lands config + clock + transport-scaffolding plus the
+//! enqueue gate; the actual queue append (US2) and delivery POST (US3) are
+//! still stubs below.
 
+pub mod buckets;
+pub mod clock;
+pub mod config;
 pub mod event;
+pub mod transport;
 
 /// Whether telemetry is enabled for this process (opt-out + CI auto-disable).
 ///
-/// Phase-2 fill: reads `telemetry/config.toml` + the `TOME_TELEMETRY`/CI env
-/// signals. The skeleton reports disabled so no caller emits before the queue
-/// path exists.
+/// This is the **best-effort, infallible** gate the silent enqueue path uses:
+/// it resolves the default [`Paths`](crate::paths::Paths) from `$HOME` and calls
+/// [`config::resolve_enabled`].
+///
+/// FAIL-SAFE-OFF: any error — `$HOME` unresolvable, or a malformed
+/// `config.toml` (exit 91 on the *CLI* path) — collapses to `false` here. The
+/// silent path must NEVER emit under a broken config and must NEVER crash the
+/// user's foreground command, so it diverges from the CLI surface (which
+/// surfaces the 91): a background emit just stays quiet.
 pub fn is_enabled() -> bool {
-    false
+    let paths = match crate::paths::Paths::resolve() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(error = %e, "telemetry disabled: $HOME unresolvable");
+            return false;
+        }
+    };
+    match config::resolve_enabled(&paths) {
+        Ok(enabled) => enabled,
+        Err(e) => {
+            // Malformed config on the silent path: fail safe OFF, never panic.
+            tracing::debug!(error = %e, "telemetry disabled: config resolve failed (fail-safe-off)");
+            false
+        }
+    }
 }
 
 /// Append one event to the local JSONL queue (`O_APPEND`, ≤4 KiB line).
 ///
-/// Phase-2 fill: takes a typed `Event` and serialises it; the signature is
-/// intentionally left no-arg in the skeleton because the event type does not
-/// exist yet and an unused parameter would not be clippy-clean.
-pub fn enqueue() {}
+/// Gated on [`is_enabled`]: when telemetry is disabled NOTHING is enqueued and
+/// no flusher is spawned (FR-010). The enabled branch stamps the shared
+/// envelope and appends the line — filled in by US2.
+pub fn enqueue<E: event::AnonymousEvent>(event: E) {
+    if !is_enabled() {
+        // Disabled ⇒ no queue write, no flusher. Return before any I/O.
+        return;
+    }
+
+    // US1/US2 fill: stamp Envelope (identity install/session UUID +
+    // `clock::now_utc` timestamp) → `event::to_line` → `queue::append`. Until
+    // the queue lands, consume the event so the bound is exercised and the
+    // signature is clippy-clean.
+    let _ = event;
+}
 
 /// Best-effort, blocking delivery of the queued events to the collector.
 ///

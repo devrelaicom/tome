@@ -98,3 +98,32 @@ fn authoring_meta_is_sync() {
         );
     }
 }
+
+/// Phase 10 — the entire `src/telemetry/**` tree MUST stay `tokio`-free: it is a
+/// cross-cutting concern called from `commands/*`, the app boundary, AND the
+/// MCP island, where the MCP timer `spawn_blocking`s into `telemetry::flush`.
+/// The generic walker above already covers it (telemetry is not under `mcp/`),
+/// but we assert it explicitly so a future async leak anywhere under
+/// `src/telemetry/` is caught with a pointed message naming the offending file.
+#[test]
+fn telemetry_is_sync() {
+    let telemetry = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/telemetry");
+    let mut files = Vec::new();
+    collect_rs_files(&telemetry, &mut files);
+    assert!(!files.is_empty(), "expected .rs files under src/telemetry/");
+
+    let mut violations: Vec<String> = Vec::new();
+    for file in &files {
+        let contents = fs::read_to_string(file).expect("read telemetry .rs file");
+        for needle in FORBIDDEN {
+            if contents.contains(needle) {
+                violations.push(format!("  {}: contains {needle:?}", file.display()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "src/telemetry/ must stay tokio-free:\n{}",
+        violations.join("\n"),
+    );
+}
