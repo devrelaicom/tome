@@ -33,7 +33,7 @@ pub mod tool_description;
 pub mod tools;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Slash-command prefix that Claude Code (and harness-compatible MCP
 /// hosts) renders for a Tome MCP prompt called `<name>`. Single source of
@@ -51,7 +51,68 @@ pub use preflight::EmbedderHandle;
 use crate::catalog::git::scrub_to_string;
 use crate::error::TomeError;
 use crate::paths::Paths;
+use crate::telemetry::event::Harness;
 use crate::workspace::ResolvedScope;
+
+/// Resolve this MCP session's host harness into the closed telemetry
+/// [`Harness`] enum, for the `calling_harness` dimension on the MCP-surface
+/// funnel events (`tome.search` / `tome.entry_info` / `tome.entry_invoked`).
+///
+/// `state.host_harness` is the raw id string stamped into the `tome mcp` args
+/// at `harness sync` (FR-028 / Phase 9). Mapping runs through the SSOT
+/// [`crate::commands::harness::harness_name_to_enum`] — the SAME bridge the CLI
+/// `harness_action` emit uses — so a `None`, unstamped, or unmappable host
+/// yields `None` and the optional event field is simply OMITTED (never a
+/// guessed closed-enum value).
+pub(crate) fn calling_harness(state: &state::McpState) -> Option<Harness> {
+    state
+        .host_harness
+        .as_deref()
+        .and_then(crate::commands::harness::harness_name_to_enum)
+}
+
+/// Resolve the funnel `rank_bucket` for `entry_name` from this session's
+/// most-recent-search state (FR-028), for the `tome.entry_info` /
+/// `tome.entry_invoked` events.
+///
+/// Looks the name up in [`state.last_search_ranks`](state::McpState::last_search_ranks),
+/// which `search_skills::handle` clears + repopulates on every search. An
+/// entry with no preceding search this session (or one absent from the latest
+/// result list) yields [`RankBucket::None`] — `RankBucket::from_rank` also maps
+/// a defensive `0` to `None`. A poisoned lock degrades to `None` (best-effort).
+pub(crate) fn rank_bucket_for(
+    state: &state::McpState,
+    entry_name: &str,
+) -> crate::telemetry::buckets::RankBucket {
+    use crate::telemetry::buckets::RankBucket;
+    let rank = state
+        .last_search_ranks
+        .lock()
+        .ok()
+        .and_then(|ranks| ranks.get(entry_name).copied())
+        .unwrap_or(0);
+    RankBucket::from_rank(rank)
+}
+
+/// Emit a best-effort MCP-surface `tome.error` (FR-029/029a) for an error a tool
+/// handler is about to return to the harness.
+///
+/// `category` is the closed [`ErrorCategory`](crate::error::ErrorCategory) — the
+/// ONLY error detail that leaves the box (never the raw message). `surface` is
+/// fixed to [`Surface::Mcp`] and `calling_harness` is resolved from this
+/// session's host harness via [`calling_harness`], so the MCP funnel carries the
+/// same dimensions the success-path events do.
+///
+/// Best-effort: this is the same infallible local append as every other enqueue —
+/// it NEVER alters the returned `McpError`, produces user output, blocks, or
+/// flushes. Call it at each handler's terminal `TomeError`-bearing error site.
+pub(crate) fn enqueue_tool_error(state: &state::McpState, category: crate::error::ErrorCategory) {
+    crate::telemetry::enqueue(crate::telemetry::event::ErrorEvent {
+        error_class: category,
+        surface: crate::telemetry::event::Surface::Mcp,
+        calling_harness: calling_harness(state),
+    });
+}
 
 /// Graceful-shutdown deadline per `contracts/mcp-server.md` §"Signal
 /// handling" step 2. After this elapses the cancellation token has been
@@ -85,8 +146,17 @@ pub fn run(
         // Pre-flight is synchronous (model load, index open, SHA-256
         // are all sync). Run it on the blocking pool so the
         // single-threaded reactor isn't held up by the hash step.
+        //
+        // FR-027 cold-start timing: time the pre-flight as the `embedder_load`
+        // measure. The pre-flight's dominant cost is the ONNX embedder load
+        // (`FastembedEmbedder::load`); its index-open + SHA-256 verify are
+        // comparatively cheap. Best-effort — the bucket is coarse (4 buckets),
+        // so attributing the small verify overhead to the embedder-load bucket
+        // is within tolerance. The `index_ready` measure is the separate
+        // prompt-registry build below (the index READ phase).
         let scope_clone = scope.clone();
         let paths_clone = paths.clone();
+        let preflight_started = Instant::now();
         let handle =
             match tokio::task::spawn_blocking(move || preflight::run(&scope_clone, &paths_clone))
                 .await
@@ -108,6 +178,10 @@ pub fn run(
                     return Err(e);
                 }
             };
+        // Captured AFTER the pre-flight succeeds (a failed pre-flight returned
+        // above, so no cold-start event fires for a non-starting server).
+        let embedder_load_elapsed = preflight_started.elapsed();
+        let embedder_model_id = handle.embedder_entry.name;
 
         let scope_label = if scope.scope.is_global() {
             "global"
@@ -134,6 +208,11 @@ pub fn run(
         // `spawn_blocking` per the sync-boundary discipline.
         let registry_scope = scope.clone();
         let registry_paths = paths.clone();
+        // FR-027 cold-start timing: time the prompt-registry build as the
+        // `index_ready` measure — it is the index READ phase (read-only DB
+        // open + the per-entry frontmatter parses), the closest cleanly
+        // measurable "index ready" step. Best-effort.
+        let index_ready_started = Instant::now();
         let prompt_registry = match tokio::task::spawn_blocking(move || {
             build_prompt_registry(&registry_scope, &registry_paths)
         })
@@ -151,6 +230,21 @@ pub fn run(
                 return Err(e);
             }
         };
+        let index_ready_elapsed = index_ready_started.elapsed();
+
+        // FR-027: `tome.cold_start` ONCE per server start, fired here — after
+        // both the embedder load and the index read have completed, before the
+        // transport binds + serving begins. This is ALSO the MCP silent-mint
+        // trigger (AC#7): the first `enqueue` lazily mints the install id with
+        // no first-run notice (the notice is a CLI-only concern). Best-effort —
+        // a sub-ms local append that never blocks startup or flushes.
+        crate::telemetry::enqueue(crate::telemetry::event::ColdStart {
+            embedder_load_bucket: crate::telemetry::buckets::LoadBucket::from(
+                embedder_load_elapsed,
+            ),
+            index_ready_bucket: crate::telemetry::buckets::LoadBucket::from(index_ready_elapsed),
+            embedder_model_id: Some(embedder_model_id),
+        });
         info!(
             target: "tome::mcp::prompts",
             prompt_count = prompt_registry.by_name.len(),
@@ -167,6 +261,7 @@ pub fn run(
             reranker_entry: handle.reranker_entry,
             prompt_registry: Arc::new(prompt_registry),
             host_harness: host_harness.clone(),
+            last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
 
         let mut server = server::Server::new(state);

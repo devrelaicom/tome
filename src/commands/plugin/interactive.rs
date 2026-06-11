@@ -514,6 +514,11 @@ fn run_disable_action(paths: &Paths, scope: &ResolvedScope, id: &PluginId) -> Lo
         reranker_seed,
         summariser_seed,
     )?;
+
+    crate::telemetry::enqueue(crate::telemetry::event::PluginActionEvent {
+        action: crate::telemetry::event::PluginAction::Disabled,
+    });
+
     let mut out = std::io::stdout().lock();
     let _ = writeln!(
         out,

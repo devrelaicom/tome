@@ -125,7 +125,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
     })
     .await
     .map_err(|e| internal(&input, started, format!("lookup join: {e}"), "internal"))?
-    .map_err(|e| internal(&input, started, e.to_string(), e.category().as_str()))?;
+    .map_err(|e| {
+        // C-L1: best-effort MCP-surface `tome.error` (closed category only),
+        // with this session's `calling_harness`. Never alters the returned
+        // `McpError`. The other error arms below are non-`TomeError` lookup/walk
+        // outcomes already shaped to the contract codes.
+        crate::mcp::enqueue_tool_error(&state, e.category());
+        internal(&input, started, e.to_string(), e.category().as_str())
+    })?;
 
     let LookupOutcome::Found(hit) = lookup else {
         return Err(emit_error(
@@ -199,6 +206,15 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
         elapsed_ms = started.elapsed().as_millis() as u64,
         "call",
     );
+
+    // FR-027/FR-028: `tome.entry_info` for the middle-tier lookup, carrying the
+    // `rank_bucket` of THIS entry from the preceding search this session (the
+    // funnel join). `None` ⇒ no preceding search ranked it ⇒ `RankBucket::None`.
+    // Best-effort enqueue (a sub-ms local append; never blocks, never flushes).
+    crate::telemetry::enqueue(crate::telemetry::event::EntryInfo {
+        rank_bucket: crate::mcp::rank_bucket_for(&state, &input.name),
+        calling_harness: crate::mcp::calling_harness(&state),
+    });
 
     Ok(SkillInfo {
         catalog: input.catalog,

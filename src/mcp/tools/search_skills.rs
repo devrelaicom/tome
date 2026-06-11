@@ -251,10 +251,20 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // default rather than reading the never-written `config.toml`.
     let config = crate::config::Config::default();
 
+    // Capture the strict flag for the telemetry emit before `args` is moved
+    // into the blocking closure.
+    let strict = args.strict;
+
     // The pipeline calls into `rusqlite` + `fastembed`, both sync.
     // Run on the blocking pool so the single-threaded reactor isn't
     // held up by inference latency.
-    let outcome = tokio::task::spawn_blocking(move || {
+    //
+    // FR-027a: time the COMPUTE boundary ONLY — `Instant` wraps the `pipeline`
+    // call inside the closure so the bucketed `latency_bucket` excludes the
+    // `spawn_blocking` dispatch, the enqueue overhead, and the result mapping
+    // below. The raw `Duration` rides back out of the closure alongside the
+    // outcome; only its bucket is ever reported.
+    let (outcome, compute_elapsed) = tokio::task::spawn_blocking(move || {
         let deps = query::QueryDeps {
             paths: &paths,
             scope: &scope,
@@ -264,7 +274,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             embedder_seed,
             reranker_seed,
         };
-        query::pipeline(&args, &deps)
+        let compute_started = Instant::now();
+        let result = query::pipeline(&args, &deps);
+        let compute_elapsed = compute_started.elapsed();
+        result.map(|o| (o, compute_elapsed))
     })
     .await
     .map_err(|e| {
@@ -274,6 +287,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         )
     })?
     .map_err(|e| {
+        // C-L1: best-effort MCP-surface `tome.error` (closed category only, never
+        // the raw message), carrying this session's `calling_harness` + the `Mcp`
+        // surface. Emitted at the terminal `TomeError`→`McpError` conversion;
+        // never alters the returned `McpError`.
+        crate::mcp::enqueue_tool_error(&state, e.category());
         // Translate filter-validation results into the contract's
         // structured error codes.
         match &e {
@@ -311,6 +329,44 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             score: s.score,
         })
         .collect();
+
+    // FR-028: record this search's result ranks into the per-session funnel
+    // state BEFORE emitting, clearing the prior search's ranks so only the
+    // latest search attributes a `rank_bucket` to a later get. The rank is the
+    // 1-indexed position in the returned (already top-k, reranked) list. The
+    // lock is held only for this clear+repopulate — never across an `.await`.
+    if let Ok(mut ranks) = state.last_search_ranks.lock() {
+        ranks.clear();
+        for (idx, m) in matches.iter().enumerate() {
+            // `idx + 1` is the 1-indexed rank. A duplicate `name` (same entry
+            // name across plugins in one result set) keeps its FIRST/best rank.
+            ranks.entry(m.name.clone()).or_insert((idx + 1) as u32);
+        }
+    }
+    // Note: a poisoned lock (a prior holder panicked) silently skips the
+    // funnel update — telemetry is best-effort and must never fail the tool.
+
+    // FR-027: `tome.search` fires on the MCP surface for a successful search.
+    // Best-effort `enqueue` (a sub-ms local append; SC-009: an unreachable
+    // endpoint never blocks the handler — enqueue does NOT flush). Mirrors the
+    // CLI `query::run_with_deps` emit; the divergence is `surface = Mcp` plus
+    // the `calling_harness` dimension (CLI has no host harness).
+    crate::telemetry::enqueue(crate::telemetry::event::Search {
+        surface: crate::telemetry::event::Surface::Mcp,
+        latency_bucket: crate::telemetry::buckets::LatencyBucket::from(compute_elapsed),
+        candidates_returned: crate::telemetry::buckets::CountBucket::from(matches.len()),
+        // The reranker is always loaded + used on the MCP search path (no
+        // `--no-rerank` equivalent — see the `QueryArgs` construction above).
+        reranker_used: true,
+        strict,
+        // Mirror the CLI: the bucketed whole-index corpus size the pipeline
+        // already computed (best-effort `0` on a count failure).
+        corpus_size_bucket: crate::telemetry::buckets::CountBucket::from(outcome.corpus_size),
+        // The embedder identity is the pinned registry entry's `&'static str`
+        // name — a closed-set value from `MODEL_REGISTRY`, never free-form.
+        embedder_model_id: Some(state.embedder_entry.name),
+        calling_harness: crate::mcp::calling_harness(&state),
+    });
 
     // FR-M-LOG-5: contract names `filter` as a nested JSON object.
     // tracing flattens fields, so emit two named slots (`filter_catalog`,

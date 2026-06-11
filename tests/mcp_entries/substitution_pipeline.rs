@@ -428,6 +428,7 @@ fn build_state_for_prompts(paths: &tome::paths::Paths) -> Arc<McpState> {
         reranker_entry,
         prompt_registry: Arc::new(registry),
         host_harness: None,
+        last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }
 
@@ -445,5 +446,6 @@ fn build_state_for_get_skill(paths: &tome::paths::Paths) -> Arc<McpState> {
         reranker_entry,
         prompt_registry: Arc::new(PromptRegistry::default()),
         host_harness: None,
+        last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }

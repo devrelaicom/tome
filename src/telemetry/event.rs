@@ -621,6 +621,41 @@ impl AnonymousEvent for ErrorEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Timestamp formatting
+// ---------------------------------------------------------------------------
+
+/// Format an instant as the EXACT envelope timestamp shape:
+/// `YYYY-MM-DDTHH:MM:SS.mmmZ` — UTC, always exactly 3 subsecond digits, a
+/// literal `Z` (never `+00:00`). Matches the data-model worked example
+/// `2026-06-11T14:11:45.123Z`.
+///
+/// Hand-rolled from the date/time components rather than via a
+/// `format_description` string: we need an UNCONDITIONAL 3-digit millisecond
+/// field (`time`'s subsecond formatters drop trailing zeros or require a fixed
+/// nanosecond width) and a literal `Z`, both of which are trivial to pin by
+/// hand. Sub-millisecond precision is TRUNCATED (not rounded) — `.123999` ⇒
+/// `.123` — so the field is the integer-millisecond floor, deterministic for a
+/// given instant.
+pub fn format_rfc3339_millis(dt: time::OffsetDateTime) -> String {
+    // Normalise to UTC first so a non-UTC input still renders with `Z`.
+    let dt = dt.to_offset(time::UtcOffset::UTC);
+    let date = dt.date();
+    let time_of_day = dt.time();
+    // Nanoseconds since the second, floored to whole milliseconds.
+    let millis = time_of_day.nanosecond() / 1_000_000;
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        date.year(),
+        date.month() as u8,
+        date.day(),
+        time_of_day.hour(),
+        time_of_day.minute(),
+        time_of_day.second(),
+        millis,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Wire serialization (envelope-first, byte-stable)
 // ---------------------------------------------------------------------------
 
@@ -745,6 +780,51 @@ mod tests {
         // `tome_version` "0.6.0", which is the crate version this builds against.
         let expected = "{\"schema_version\":1,\"install_uuid\":\"0b9c1f2e-3a4d-4b6c-8e1f-2a3b4c5d6e7f\",\"session_uuid\":\"7f6e5d4c-3b2a-4f1e-9c8b-1a2b3c4d5e6f\",\"tome_version\":\"0.6.0\",\"os\":\"macos\",\"arch\":\"aarch64\",\"timestamp\":\"2026-06-11T14:11:45.123Z\",\"event_type\":\"tome.install\",\"sample_rate\":1.0,\"install_method\":\"brew\"}";
         assert_eq!(line, expected);
+    }
+
+    #[test]
+    fn format_rfc3339_millis_pins_the_worked_example() {
+        use time::{Date, Month, Time};
+        // 2026-06-11 14:11:45.123 UTC ⇒ exactly the data-model worked example.
+        let dt = Date::from_calendar_date(2026, Month::June, 11)
+            .unwrap()
+            .with_time(Time::from_hms_milli(14, 11, 45, 123).unwrap())
+            .assume_utc();
+        assert_eq!(format_rfc3339_millis(dt), "2026-06-11T14:11:45.123Z");
+    }
+
+    #[test]
+    fn format_rfc3339_millis_truncates_sub_millisecond() {
+        use time::{Date, Month, Time};
+        // .123999 (123 ms + 999 µs) must TRUNCATE to `.123`, not round to `.124`.
+        let dt = Date::from_calendar_date(2026, Month::June, 11)
+            .unwrap()
+            .with_time(Time::from_hms_nano(14, 11, 45, 123_999_000).unwrap())
+            .assume_utc();
+        assert_eq!(format_rfc3339_millis(dt), "2026-06-11T14:11:45.123Z");
+    }
+
+    #[test]
+    fn format_rfc3339_millis_pads_zero_millis_and_components() {
+        use time::{Date, Month, Time};
+        // Single-digit month/day/h/m/s and zero subseconds ⇒ all zero-padded,
+        // `.000`, literal `Z`.
+        let dt = Date::from_calendar_date(2026, Month::January, 5)
+            .unwrap()
+            .with_time(Time::from_hms(3, 7, 9).unwrap())
+            .assume_utc();
+        assert_eq!(format_rfc3339_millis(dt), "2026-01-05T03:07:09.000Z");
+    }
+
+    #[test]
+    fn format_rfc3339_millis_normalises_non_utc_to_z() {
+        use time::{Date, Month, Time, UtcOffset};
+        // An input at +02:00 must render as the equivalent UTC instant with `Z`.
+        let dt = Date::from_calendar_date(2026, Month::June, 11)
+            .unwrap()
+            .with_time(Time::from_hms_milli(16, 11, 45, 123).unwrap())
+            .assume_offset(UtcOffset::from_hms(2, 0, 0).unwrap());
+        assert_eq!(format_rfc3339_millis(dt), "2026-06-11T14:11:45.123Z");
     }
 
     #[test]

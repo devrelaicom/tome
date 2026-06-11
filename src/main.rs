@@ -53,14 +53,25 @@ fn main() {
         }
     };
 
-    // First-run opt-out notice (FR-013/014/015). Skip the MCP path (no human
-    // stderr) AND the `telemetry` path (its subcommands manage telemetry
-    // themselves — a `telemetry off` must not first mint an id + print a
-    // notice). The call self-gates on `is_enabled()` (CI/disabled ⇒ no mint, no
-    // notice) and is best-effort — it never errors out the command.
+    // CLI process-start telemetry (FR-013/014/015 first-run notice + FR-026
+    // `tome.install`/`tome.upgrade` lifecycle emits). Skip the MCP path (no
+    // human stderr; it mints silently on its first enqueue) AND the `telemetry`
+    // path (its subcommands manage telemetry themselves — a `telemetry off` must
+    // not first mint an id + print a notice). `cli_startup` self-gates on the
+    // enabled resolver (CI/disabled ⇒ no mint, no notice, no emit) and is
+    // best-effort throughout — it never errors out the command.
     if !matches!(cli.command, Command::Mcp(_) | Command::Telemetry(_)) {
-        tome::telemetry::notice::first_run_notice_if_needed(&paths, true);
+        tome::telemetry::cli_startup(&paths);
     }
+
+    // Capture whether this is a `tome telemetry` control-surface command BEFORE
+    // `cli.command` is moved into the dispatch `match` below. Telemetry's own
+    // control commands (`inspect`/`status`/`reset`/`purge`/…) must be INVISIBLE
+    // to the `tome.error` boundary emit: appending a self-referential queue line
+    // would (a) make telemetry self-instrument its own subsystem failures and
+    // (b) violate `inspect`'s byte-identical / read-only guarantee (an exit-92
+    // corrupt-queue report would otherwise grow the very file it just reported).
+    let is_telemetry_cmd = matches!(cli.command, Command::Telemetry(_));
 
     let result = match cli.command {
         Command::Catalog(cmd) => commands::catalog::run(cmd, &scope, mode),
@@ -99,6 +110,26 @@ fn main() {
         Err(err) => {
             let code = err.exit_code();
             output::write_error(mode, &err);
+            // FR-029/029a: emit `tome.error` at the application boundary, carrying
+            // ONLY the closed `ErrorCategory` (never the raw message) plus the CLI
+            // surface. The command fns return `TomeError` directly here (the same
+            // `&TomeError` `write_error` consumed), so we read `category()` rather
+            // than downcasting an `anyhow::Error`. Best-effort: this enqueue must
+            // not alter the exit code, produce user output, or block — `enqueue`
+            // is the same infallible append. Placed AFTER `write_error` and BEFORE
+            // teardown/exit. Only the error arm emits — a successful run does not.
+            //
+            // EXCEPT the `tome telemetry` control surface: those commands must be
+            // invisible to the boundary (no self-instrumentation, and `inspect`'s
+            // read-only / byte-identical guarantee stays intact — see the
+            // `is_telemetry_cmd` capture above).
+            if !is_telemetry_cmd {
+                tome::telemetry::enqueue(tome::telemetry::event::ErrorEvent {
+                    error_class: err.category(),
+                    surface: tome::telemetry::event::Surface::Cli,
+                    calling_harness: None,
+                });
+            }
             tome::telemetry::teardown_at_exit();
             std::process::exit(code);
         }

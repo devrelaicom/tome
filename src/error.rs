@@ -1114,4 +1114,205 @@ mod tests {
             "{msg}"
         );
     }
+
+    /// T-L1 — exhaustive `ErrorCategory::as_str()` wire-token table.
+    ///
+    /// Every `ErrorCategory` variant is paired with its EXACT snake_case slug in
+    /// a hand-frozen table, and the table is asserted against `as_str()`. The
+    /// `match category` block below is `#[deny]`-non-exhaustive by construction:
+    /// adding a variant without extending this table fails to compile, and
+    /// renaming a slug in `as_str()` fails the assertion. Either way a drift in a
+    /// telemetry `error_class` slug (the `tome.error` / `tome.model_download`
+    /// `error_class` field, the `--json` envelope, and the MCP error-code
+    /// contract all read this) breaks CI here rather than silently re-keying the
+    /// collector.
+    #[test]
+    fn error_category_wire_tokens_are_pinned_and_exhaustive() {
+        use ErrorCategory::*;
+
+        // The frozen `(variant, slug)` table. Each entry's slug is a LITERAL —
+        // it is NOT recomputed from `as_str()`.
+        let table: &[(ErrorCategory, &str)] = &[
+            (Internal, "internal"),
+            (Usage, "usage"),
+            (CatalogNotFound, "catalog_not_found"),
+            (CatalogAlreadyExists, "catalog_already_exists"),
+            (ManifestInvalid, "manifest_invalid"),
+            (GitFailed, "git_failed"),
+            (Io, "io"),
+            (Interrupted, "interrupted"),
+            (PluginDataDirWriteFailed, "plugin_data_dir_write_failed"),
+            (WorkspaceNotFound, "workspace_not_found"),
+            (WorkspaceAlreadyExists, "workspace_already_exists"),
+            (WorkspaceNameInvalid, "workspace_name_invalid"),
+            (WorkspaceHasBoundProjects, "workspace_has_bound_projects"),
+            (CompositionError, "composition_error"),
+            (HarnessNotSupported, "harness_not_supported"),
+            (HarnessClash, "harness_clash"),
+            (SummariserFailure, "summariser_failure"),
+            (
+                WorkspaceDataDirWriteFailed,
+                "workspace_data_dir_write_failed",
+            ),
+            (PromptArgumentMismatch, "prompt_argument_mismatch"),
+            (EntryNotFound, "entry_not_found"),
+            (SubstitutionFailed, "substitution_failed"),
+            (InvalidArgumentFrontmatter, "invalid_argument_frontmatter"),
+            (HookSpecParseError, "hook_spec_parse_error"),
+            (HookSettingsWriteFailed, "hook_settings_write_failed"),
+            (AgentTranslationFailed, "agent_translation_failed"),
+            (GuardrailsWriteFailed, "guardrails_write_failed"),
+            (PluginNotFound, "plugin_not_found"),
+            (PluginAlreadyInState, "plugin_already_in_state"),
+            (PluginManifestParseError, "plugin_manifest_parse_error"),
+            (SkillFrontmatterParseError, "skill_frontmatter_parse_error"),
+            (ModelMissing, "model_missing"),
+            (ModelCorrupt, "model_corrupt"),
+            (ModelChecksumMismatch, "model_checksum_mismatch"),
+            (
+                ModelRegistrationParseError,
+                "model_registration_parse_error",
+            ),
+            (
+                InferenceRuntimeInitFailure,
+                "inference_runtime_init_failure",
+            ),
+            (VectorExtensionInitFailure, "vector_extension_init_failure"),
+            (EmbeddingGenerationFailure, "embedding_generation_failure"),
+            (RerankingFailure, "reranking_failure"),
+            (QueryNoResultsStrict, "query_no_results_strict"),
+            (EmbedderNameDrift, "embedder_name_drift"),
+            (EmbedderVersionDrift, "embedder_version_drift"),
+            (IndexBusy, "index_busy"),
+            (IndexIntegrityCheckFailure, "index_integrity_check_failure"),
+            (SchemaTooNew, "schema_too_new"),
+            (CatalogHasEnabledPlugins, "catalog_has_enabled_plugins"),
+            (NotATerminal, "not_a_terminal"),
+            (McpStartup, "mcp_startup"),
+            (McpIo, "mcp_io"),
+            (WorkspaceMalformed, "workspace_malformed"),
+            (SchemaMigration, "schema_migration"),
+            (DoctorFixUnsafe, "doctor_fix_unsafe"),
+            (PluginNotConverted, "plugin_not_converted"),
+            (OutputExists, "output_exists"),
+            (TemplateInvalid, "template_invalid"),
+            (SourceFormatUnrecognized, "source_format_unrecognized"),
+            (ConversionUnsupportedStrict, "conversion_unsupported_strict"),
+            (ValidationFoundErrors, "validation_found_errors"),
+            (ValidationStrictWarnings, "validation_strict_warnings"),
+            (MetaSkillNotFound, "meta_skill_not_found"),
+            (MetaInstallFailed, "meta_install_failed"),
+            (NoHarnessDetected, "no_harness_detected"),
+            (
+                TelemetryEndpointUnreachable,
+                "telemetry_endpoint_unreachable",
+            ),
+            (TelemetryConfigInvalid, "telemetry_config_invalid"),
+            (TelemetryQueueCorrupt, "telemetry_queue_corrupt"),
+        ];
+
+        // Each table row's slug matches `as_str()`, and Serialize agrees.
+        for (variant, slug) in table {
+            assert_eq!(
+                variant.as_str(),
+                *slug,
+                "ErrorCategory::{variant:?} wire token drifted",
+            );
+            assert_eq!(
+                serde_json::to_string(variant).unwrap(),
+                format!("\"{slug}\""),
+                "ErrorCategory::{variant:?} Serialize must match as_str()",
+            );
+        }
+
+        // EXHAUSTIVENESS: this `match` has one arm per variant and NO wildcard,
+        // so the compiler rejects any future variant that is not added to the
+        // table above. Each arm asserts the table contains exactly that variant
+        // mapped to the same slug `as_str()` returns, closing the loop in both
+        // directions (table ⊇ variants here; variants ⊇ table by the loop above).
+        let lookup = |needle: ErrorCategory| -> Option<&'static str> {
+            table
+                .iter()
+                .find(|(v, _)| *v == needle)
+                .map(|(_, slug)| *slug)
+        };
+        let assert_covered = |variant: ErrorCategory| {
+            assert_eq!(
+                lookup(variant),
+                Some(variant.as_str()),
+                "ErrorCategory::{variant:?} is missing from the wire-token table",
+            );
+        };
+        // The non-exhaustive `match` is the compile-time guard. Every variant
+        // funnels through `assert_covered`, which proves the table carries it.
+        let probe = |c: ErrorCategory| match c {
+            Internal => assert_covered(Internal),
+            Usage => assert_covered(Usage),
+            CatalogNotFound => assert_covered(CatalogNotFound),
+            CatalogAlreadyExists => assert_covered(CatalogAlreadyExists),
+            ManifestInvalid => assert_covered(ManifestInvalid),
+            GitFailed => assert_covered(GitFailed),
+            Io => assert_covered(Io),
+            Interrupted => assert_covered(Interrupted),
+            PluginDataDirWriteFailed => assert_covered(PluginDataDirWriteFailed),
+            WorkspaceNotFound => assert_covered(WorkspaceNotFound),
+            WorkspaceAlreadyExists => assert_covered(WorkspaceAlreadyExists),
+            WorkspaceNameInvalid => assert_covered(WorkspaceNameInvalid),
+            WorkspaceHasBoundProjects => assert_covered(WorkspaceHasBoundProjects),
+            CompositionError => assert_covered(CompositionError),
+            HarnessNotSupported => assert_covered(HarnessNotSupported),
+            HarnessClash => assert_covered(HarnessClash),
+            SummariserFailure => assert_covered(SummariserFailure),
+            WorkspaceDataDirWriteFailed => assert_covered(WorkspaceDataDirWriteFailed),
+            PromptArgumentMismatch => assert_covered(PromptArgumentMismatch),
+            EntryNotFound => assert_covered(EntryNotFound),
+            SubstitutionFailed => assert_covered(SubstitutionFailed),
+            InvalidArgumentFrontmatter => assert_covered(InvalidArgumentFrontmatter),
+            HookSpecParseError => assert_covered(HookSpecParseError),
+            HookSettingsWriteFailed => assert_covered(HookSettingsWriteFailed),
+            AgentTranslationFailed => assert_covered(AgentTranslationFailed),
+            GuardrailsWriteFailed => assert_covered(GuardrailsWriteFailed),
+            PluginNotFound => assert_covered(PluginNotFound),
+            PluginAlreadyInState => assert_covered(PluginAlreadyInState),
+            PluginManifestParseError => assert_covered(PluginManifestParseError),
+            SkillFrontmatterParseError => assert_covered(SkillFrontmatterParseError),
+            ModelMissing => assert_covered(ModelMissing),
+            ModelCorrupt => assert_covered(ModelCorrupt),
+            ModelChecksumMismatch => assert_covered(ModelChecksumMismatch),
+            ModelRegistrationParseError => assert_covered(ModelRegistrationParseError),
+            InferenceRuntimeInitFailure => assert_covered(InferenceRuntimeInitFailure),
+            VectorExtensionInitFailure => assert_covered(VectorExtensionInitFailure),
+            EmbeddingGenerationFailure => assert_covered(EmbeddingGenerationFailure),
+            RerankingFailure => assert_covered(RerankingFailure),
+            QueryNoResultsStrict => assert_covered(QueryNoResultsStrict),
+            EmbedderNameDrift => assert_covered(EmbedderNameDrift),
+            EmbedderVersionDrift => assert_covered(EmbedderVersionDrift),
+            IndexBusy => assert_covered(IndexBusy),
+            IndexIntegrityCheckFailure => assert_covered(IndexIntegrityCheckFailure),
+            SchemaTooNew => assert_covered(SchemaTooNew),
+            CatalogHasEnabledPlugins => assert_covered(CatalogHasEnabledPlugins),
+            NotATerminal => assert_covered(NotATerminal),
+            McpStartup => assert_covered(McpStartup),
+            McpIo => assert_covered(McpIo),
+            WorkspaceMalformed => assert_covered(WorkspaceMalformed),
+            SchemaMigration => assert_covered(SchemaMigration),
+            DoctorFixUnsafe => assert_covered(DoctorFixUnsafe),
+            PluginNotConverted => assert_covered(PluginNotConverted),
+            OutputExists => assert_covered(OutputExists),
+            TemplateInvalid => assert_covered(TemplateInvalid),
+            SourceFormatUnrecognized => assert_covered(SourceFormatUnrecognized),
+            ConversionUnsupportedStrict => assert_covered(ConversionUnsupportedStrict),
+            ValidationFoundErrors => assert_covered(ValidationFoundErrors),
+            ValidationStrictWarnings => assert_covered(ValidationStrictWarnings),
+            MetaSkillNotFound => assert_covered(MetaSkillNotFound),
+            MetaInstallFailed => assert_covered(MetaInstallFailed),
+            NoHarnessDetected => assert_covered(NoHarnessDetected),
+            TelemetryEndpointUnreachable => assert_covered(TelemetryEndpointUnreachable),
+            TelemetryConfigInvalid => assert_covered(TelemetryConfigInvalid),
+            TelemetryQueueCorrupt => assert_covered(TelemetryQueueCorrupt),
+        };
+        for (variant, _) in table {
+            probe(*variant);
+        }
+    }
 }

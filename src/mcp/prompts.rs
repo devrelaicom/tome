@@ -198,6 +198,27 @@ pub enum PersonaRole {
     MetaInstall,
 }
 
+/// Map an entry's [`PersonaRole`] to the telemetry [`PromptKind`] for the
+/// `tome.prompt_invoked` event (FR-027). The two persona shapes ([`Agent`] +
+/// the reserved [`Drop`]) are `Persona`; the reserved meta-install built-in is
+/// `Builtin`; a Phase 5 command/skill entry-prompt ([`None`]) is `Command`.
+///
+/// [`Agent`]: PersonaRole::Agent
+/// [`Drop`]: PersonaRole::Drop
+/// [`None`]: PersonaRole::None
+fn prompt_kind_for(role: PersonaRole) -> crate::telemetry::event::PromptKind {
+    use crate::telemetry::event::PromptKind;
+    match role {
+        // A user-invocable command or skill exposed as a prompt. The anonymous
+        // stream only distinguishes the three prompt SHAPES, not skill-vs-command
+        // (that finer split is the catalog-attributed stream's concern), so both
+        // collapse to `Command` here.
+        PersonaRole::None => PromptKind::Command,
+        PersonaRole::Agent | PersonaRole::Drop => PromptKind::Persona,
+        PersonaRole::MetaInstall => PromptKind::Builtin,
+    }
+}
+
 /// Wrap an agent's (already substitution-applied) body in the
 /// role-assumption template, reproduced verbatim from PRD §2.4 /
 /// `contracts/agent-personas.md` § "Persona prompt body".
@@ -933,6 +954,17 @@ pub async fn handle_get(
         "prompts/get ok",
     );
 
+    // FR-027: `tome.prompt_invoked` on a successful `prompts/get` render. The
+    // `prompt_kind` is derived from the entry's persona role (the same
+    // discriminator `render_for_get` branched on): the two persona shapes are
+    // `Persona`, the reserved meta-install built-in is `Builtin`, and a Phase 5
+    // command/skill entry-prompt is `Command`. Best-effort enqueue — a sub-ms
+    // local append that never blocks the render or flushes.
+    crate::telemetry::enqueue(crate::telemetry::event::PromptInvoked {
+        prompt_kind: prompt_kind_for(entry.persona),
+        calling_harness: crate::mcp::calling_harness(&state),
+    });
+
     let mut result =
         PromptGetResponse::new(vec![PromptMessage::new_text(PromptRole::User, rendered)]);
     if let Some(desc) = description {
@@ -1366,4 +1398,25 @@ where
         router.add_route(PromptRoute::new_dyn(descriptor, handler));
     }
     router
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PersonaRole, prompt_kind_for};
+    use crate::telemetry::event::PromptKind;
+
+    #[test]
+    fn prompt_kind_for_maps_every_persona_role() {
+        // The `prompts/get` telemetry discriminator: command/skill entry-prompts
+        // are `Command`, both persona shapes are `Persona`, the reserved
+        // meta-install built-in is `Builtin`. Exhaustive so a new `PersonaRole`
+        // surfaces as a compile error here.
+        assert_eq!(prompt_kind_for(PersonaRole::None), PromptKind::Command);
+        assert_eq!(prompt_kind_for(PersonaRole::Agent), PromptKind::Persona);
+        assert_eq!(prompt_kind_for(PersonaRole::Drop), PromptKind::Persona);
+        assert_eq!(
+            prompt_kind_for(PersonaRole::MetaInstall),
+            PromptKind::Builtin
+        );
+    }
 }

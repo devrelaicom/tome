@@ -54,6 +54,7 @@ fn build_state(env: &ToolEnv) -> Arc<McpState> {
         reranker_entry,
         prompt_registry: Arc::new(PromptRegistry::default()),
         host_harness: None,
+        last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }
 

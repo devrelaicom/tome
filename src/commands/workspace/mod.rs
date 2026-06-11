@@ -27,17 +27,48 @@ pub fn run(
     let paths = Paths::resolve()?;
     match cmd {
         WorkspaceCommand::Info(args) => info::run(args, scope, &paths, mode),
-        WorkspaceCommand::Init(args) => init::run(args, &paths, mode),
+        WorkspaceCommand::Init(args) => {
+            let r = init::run(args, &paths, mode);
+            // Anonymous action emit only on success (the workspace was created).
+            // Failures are already captured by the app-boundary `tome.error`.
+            emit_on_ok(&r, crate::telemetry::event::WorkspaceAction::Init);
+            r
+        }
         WorkspaceCommand::List(args) => list::run(args, &paths, mode),
-        WorkspaceCommand::Remove(args) => remove::run(args, &paths, mode),
-        WorkspaceCommand::Rename(args) => rename::run(args, &paths, mode),
+        WorkspaceCommand::Remove(args) => {
+            let r = remove::run(args, &paths, mode);
+            emit_on_ok(&r, crate::telemetry::event::WorkspaceAction::Remove);
+            r
+        }
+        WorkspaceCommand::Rename(args) => {
+            let r = rename::run(args, &paths, mode);
+            emit_on_ok(&r, crate::telemetry::event::WorkspaceAction::Rename);
+            r
+        }
         WorkspaceCommand::RegenSummary(args) => regen_summary::run(args, scope, &paths, mode),
-        WorkspaceCommand::Sync(args) => sync::run(args, &paths, mode),
+        WorkspaceCommand::Sync(args) => {
+            let r = sync::run(args, &paths, mode);
+            emit_on_ok(&r, crate::telemetry::event::WorkspaceAction::Sync);
+            r
+        }
         // The Use arm threads the global `--workspace <name>` through
         // so it can emit a `tracing::debug!` when both the flag and the
         // positional `<name>` are set. The positional always wins; the
         // flag is informational here (documented on the
         // `WorkspaceCommand::Use` doc comment in `src/cli.rs`).
-        WorkspaceCommand::Use(args) => use_::run(args, global_workspace_flag, &paths, mode),
+        WorkspaceCommand::Use(args) => {
+            let r = use_::run(args, global_workspace_flag, &paths, mode);
+            emit_on_ok(&r, crate::telemetry::event::WorkspaceAction::Use);
+            r
+        }
+    }
+}
+
+/// Emit a `tome.workspace_action` telemetry event ONLY when the verb
+/// succeeded (the mutation actually happened). One infallible `enqueue`;
+/// never alters control flow, exit code, or output.
+fn emit_on_ok(result: &Result<(), TomeError>, action: crate::telemetry::event::WorkspaceAction) {
+    if result.is_ok() {
+        crate::telemetry::enqueue(crate::telemetry::event::WorkspaceActionEvent { action });
     }
 }

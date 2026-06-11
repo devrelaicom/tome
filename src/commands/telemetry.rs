@@ -7,9 +7,12 @@
 //! flag (carried in `mode`) shapes them. `status` is strictly read-only: it must
 //! never mint the install id or write any state.
 //!
-//! `inspect` and `flush` are deliberately absent — they land in later slices
-//! (US2 / US3). The enum is the CLI's [`crate::cli::TelemetryCommand`]; new
-//! variants are added there when those slices land.
+//! `inspect` (US2) is a read-only reporter: it pretty-prints the pending queue
+//! WITHOUT sending it, leaves the queue file byte-identical, and exits 92
+//! ([`TomeError::TelemetryQueueCorrupt`]) when unparsable lines exist (after the
+//! report). `flush` (US3) is still absent. The enum is the CLI's
+//! [`crate::cli::TelemetryCommand`]; new variants are added there when those
+//! slices land.
 
 use std::io::Write;
 
@@ -36,6 +39,7 @@ pub fn run(cmd: TelemetryCommand, _scope: &ResolvedScope, mode: Mode) -> Result<
     let paths = Paths::resolve()?;
     match cmd {
         TelemetryCommand::Status => status(&paths, mode),
+        TelemetryCommand::Inspect => inspect_run(&paths, mode),
         TelemetryCommand::On => on(&paths, mode),
         TelemetryCommand::Off => off(&paths, mode),
         TelemetryCommand::Reset(args) => reset(&paths, args, mode),
@@ -105,14 +109,13 @@ fn read_install_uuid(paths: &Paths) -> Option<String> {
     Uuid::parse(first).map(|u| u.as_str().to_string())
 }
 
-/// Count queued events = lines in `telemetry/queue.jsonl`. A missing queue is 0
-/// (nothing pending). The read is bounded; an unreadable/over-cap queue degrades
-/// to 0 rather than erroring a read-only report.
+/// Count queued events = non-blank lines in `telemetry/queue.jsonl`. Routes
+/// through the queue module's SSOT [`queue::count_pending`] (read-only, missing
+/// queue ⇒ 0, any error ⇒ 0) rather than re-counting lines inline, so the
+/// "what counts as a pending line" rule lives in exactly one place. The `as u64`
+/// keeps the byte-stable `pending` JSON field type unchanged.
 fn pending_count(paths: &Paths) -> u64 {
-    match util::bounded_read_to_string(&paths.telemetry_queue(), util::HARNESS_RULES_MAX) {
-        Ok(body) => body.lines().filter(|l| !l.trim().is_empty()).count() as u64,
-        Err(_) => 0,
-    }
+    crate::telemetry::queue::count_pending(paths) as u64
 }
 
 /// Read the `telemetry/last-flush` stamp, if present.
@@ -158,6 +161,102 @@ fn source_label(source: Source) -> &'static str {
         Source::Config => "config file",
         Source::Default => "default",
     }
+}
+
+// ---------------------------------------------------------------------------
+// inspect — read-only dump of the pending queue (NEVER sends, NEVER repairs)
+// ---------------------------------------------------------------------------
+
+/// The byte-stable `tome telemetry inspect --json` record (pin-tested). Field
+/// order is load-bearing. `events` preserves queue (FIFO) order and embeds the
+/// parsed JSON values verbatim. `corrupt` is the count of unparsable lines that
+/// were skipped — inspect reports them but NEVER repairs the queue (the flusher
+/// self-heals on drain).
+#[derive(Debug, Serialize)]
+struct InspectReport {
+    /// Total parsable pending events (the length of `events`).
+    pending: u64,
+    /// Unparsable lines skipped while reporting. Non-zero ⇒ exit 92.
+    corrupt: usize,
+    /// The parsed event values, oldest first, embedded as-is.
+    events: Vec<serde_json::Value>,
+}
+
+/// `tome telemetry inspect` — pretty-print the pending queue without sending it.
+///
+/// Strictly read-only: routes through [`queue::classify_lines`] /
+/// [`queue::read_lines`], which never mutate the file, so the queue is
+/// byte-identical afterwards. The report (human or JSON) is emitted FIRST; then,
+/// if any line was unparsable, we surface [`TomeError::TelemetryQueueCorrupt`]
+/// (exit 92) carrying the SCRUBBED queue path. A clean queue exits 0.
+fn inspect_run(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
+    // Read-only classification: parsed values + a count of unparsable lines.
+    // `classify_lines` (and the `read_lines` it calls) only read the file.
+    let (events, corrupt) = crate::telemetry::queue::classify_lines(paths)?;
+    let pending = events.len() as u64;
+
+    match mode {
+        Mode::Json => {
+            let report = InspectReport {
+                pending,
+                corrupt,
+                events,
+            };
+            write_json(&report)?;
+        }
+        Mode::Human => emit_inspect_human(pending, corrupt, &events)?,
+    }
+
+    // The report has already been printed. If the queue held unparsable lines,
+    // surface exit 92 — but NEVER mutate the queue (no repair); the flusher
+    // self-heals on its next drain. The path is scrubbed like every other
+    // telemetry-facing string.
+    if corrupt > 0 {
+        return Err(TomeError::TelemetryQueueCorrupt {
+            path: scrubbed_queue_path(paths),
+            count: corrupt,
+        });
+    }
+    Ok(())
+}
+
+fn emit_inspect_human(
+    pending: u64,
+    corrupt: usize,
+    events: &[serde_json::Value],
+) -> Result<(), TomeError> {
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "pending: {pending}")?;
+    for (i, ev) in events.iter().enumerate() {
+        // Surface the event_type when present (the wire field is `event_type`);
+        // fall back to "(unknown)" so a value missing it still lists.
+        let kind = ev
+            .get("event_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("(unknown)");
+        // A compact, one-line rendering of the value (no pretty-print: keep it
+        // to a single line per event).
+        let compact = serde_json::to_string(ev).unwrap_or_else(|_| "<unrenderable>".to_string());
+        writeln!(out, "  [{i}] {kind}: {compact}")?;
+    }
+    if corrupt > 0 {
+        writeln!(
+            out,
+            "{corrupt} unparsable line(s) (left in place; the flusher self-heals on drain)"
+        )?;
+    }
+    Ok(())
+}
+
+/// Scrub the queue path for inclusion in a [`TomeError::TelemetryQueueCorrupt`]
+/// surface. A filesystem path can't carry URL credentials, but routing it
+/// through the shared scrubber keeps "every telemetry-facing string is scrubbed"
+/// true by construction — mirrors `config::scrubbed_path`.
+fn scrubbed_queue_path(paths: &Paths) -> std::path::PathBuf {
+    let queue = paths.telemetry_queue();
+    let bytes = queue.to_string_lossy();
+    let scrubbed = crate::catalog::git::scrub_credentials(bytes.as_bytes());
+    std::path::PathBuf::from(String::from_utf8_lossy(&scrubbed).into_owned())
 }
 
 // ---------------------------------------------------------------------------

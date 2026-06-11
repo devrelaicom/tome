@@ -55,6 +55,7 @@ fn build_state(paths: &Paths, ws: &WorkspaceName) -> Arc<McpState> {
         reranker_entry: entry_for(ModelKind::Reranker),
         prompt_registry: Arc::new(PromptRegistry::default()),
         host_harness: None,
+        last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }
 

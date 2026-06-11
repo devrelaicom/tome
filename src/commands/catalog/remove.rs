@@ -212,6 +212,19 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
         cache_path: cache_path.display().to_string(),
     };
     emit(mode, &removed_rec, &cascade_records)?;
+
+    // best-effort: the stored enrolment url is `file://` for a local-path
+    // source; every remote shape is Git.
+    let source_type = if enrolment.url.starts_with("file://") {
+        crate::telemetry::event::SourceType::Local
+    } else {
+        crate::telemetry::event::SourceType::Git
+    };
+    crate::telemetry::enqueue(crate::telemetry::event::CatalogActionEvent {
+        action: crate::telemetry::event::CatalogAction::Removed,
+        source_type,
+    });
+
     Ok(())
 }
 

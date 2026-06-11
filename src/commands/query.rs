@@ -73,6 +73,10 @@ pub struct QueryOutcome {
     /// the scoring mode in use). Always `true` after `--strict` filtering.
     pub threshold_passed: bool,
     pub reranker_drift: Option<String>,
+    /// Total searchable corpus size (enabled skill embeddings in scope), used
+    /// only for the bucketed `tome.search.corpus_size_bucket` telemetry field.
+    /// Best-effort: a count failure yields `0` rather than aborting the query.
+    pub corpus_size: u64,
 }
 
 /// Scoring source for a `QueryOutcome`.
@@ -163,7 +167,33 @@ pub fn run_with_deps(
     deps: QueryDeps<'_>,
     mode: Mode,
 ) -> Result<QueryOutcome, TomeError> {
+    // Measure latency around the COMPUTE boundary ONLY (FR-027a) — the silent
+    // `pipeline` call — so the bucketed `latency_bucket` excludes all emit and
+    // telemetry overhead. The raw duration never leaves this scope; only its
+    // bucket is reported.
+    let reranker_used = deps.reranker.is_some();
+    let started = std::time::Instant::now();
     let outcome = pipeline(&args, &deps)?;
+    let elapsed = started.elapsed();
+
+    // FR-027: `tome.search` fires on a successful query (CLI surface). On an
+    // error the pipeline returns `Err` and the app-boundary `tome.error` covers
+    // it, so we do NOT reach here on failure (no double-emit). Best-effort
+    // enqueue — never blocks or alters the result.
+    crate::telemetry::enqueue(crate::telemetry::event::Search {
+        surface: crate::telemetry::event::Surface::Cli,
+        latency_bucket: crate::telemetry::buckets::LatencyBucket::from(elapsed),
+        candidates_returned: crate::telemetry::buckets::CountBucket::from(outcome.results.len()),
+        reranker_used,
+        strict: args.strict,
+        corpus_size_bucket: crate::telemetry::buckets::CountBucket::from(outcome.corpus_size),
+        // The embedder identity is the pinned registry entry — a `&'static str`
+        // from the closed `MODEL_REGISTRY`, never a free-form string.
+        embedder_model_id: Some(embedder_entry().name),
+        // CLI surface has no calling harness (that's an MCP-only dimension).
+        calling_harness: None,
+    });
+
     let home = std::env::var_os("HOME").map(PathBuf::from);
     match mode {
         Mode::Human => emit_human(
@@ -285,11 +315,25 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
         ScoringMode::Similarity
     };
 
+    // Total embeddings count for the bucketed telemetry `corpus_size_bucket`.
+    // Best-effort: a count failure must not fail the (already-computed) query —
+    // we fall back to 0 (which buckets to `0`). This is the whole-index count,
+    // not the in-scope filtered count: the latter would require re-running the
+    // filtered KNN universe, and a coarse 5-bucket signal does not warrant it.
+    let corpus_size: u64 = conn
+        .query_row("SELECT COUNT(*) FROM skill_embeddings", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .ok()
+        .map(|n: i64| n.max(0) as u64)
+        .unwrap_or(0);
+
     Ok(QueryOutcome {
         results: trimmed,
         scoring,
         threshold_passed,
         reranker_drift,
+        corpus_size,
     })
 }
 

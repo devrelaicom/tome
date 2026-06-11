@@ -219,15 +219,48 @@ struct ActionReport {
 fn add_run(args: MetaAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     // Unknown skill id fails closed before any target resolution (87).
     if meta_skill::find(&args.skill_id).is_none() {
+        // OUTCOME-bearing: emit `Failed` even on a pre-report hard fail.
+        emit_meta_telemetry(crate::telemetry::event::MetaAction::Add, None);
         return Err(meta_skill::not_found(&args.skill_id));
     }
-    let targets = resolve_targets(&args.harnesses, args.global, scope)?;
+    let targets = match resolve_targets(&args.harnesses, args.global, scope) {
+        Ok(t) => t,
+        Err(e) => {
+            emit_meta_telemetry(crate::telemetry::event::MetaAction::Add, None);
+            return Err(e);
+        }
+    };
     let report = install_to_targets(&args.skill_id, &targets, args.force);
+    emit_meta_telemetry(crate::telemetry::event::MetaAction::Add, Some(&report));
     emit_action(&report, mode)?;
     match report.first_error {
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+/// Emit one `tome.meta_action` event with the forward-progress outcome:
+/// `None` report (a pre-report hard fail) → `Failed`; a report with no
+/// `first_error` → `Ok`; a report with a `first_error` but at least one
+/// succeeding location → `Partial`; otherwise `Failed`. One infallible
+/// `enqueue`; never alters control flow.
+fn emit_meta_telemetry(action: crate::telemetry::event::MetaAction, report: Option<&ActionReport>) {
+    use crate::telemetry::event::{MetaActionEvent, Outcome};
+    let outcome = match report {
+        None => Outcome::Failed,
+        Some(r) if r.first_error.is_none() => Outcome::Ok,
+        Some(r) => {
+            // Some failed (first_error set). Partial iff at least one location
+            // did NOT fail; otherwise every location failed → Failed.
+            let any_ok = r.locations.iter().any(|l| l.result != "failed");
+            if any_ok {
+                Outcome::Partial
+            } else {
+                Outcome::Failed
+            }
+        }
+    };
+    crate::telemetry::enqueue(MetaActionEvent { action, outcome });
 }
 
 /// Install `skill_id` into every target, forward-progress. An up-to-date
@@ -296,10 +329,18 @@ fn install_to_targets(skill_id: &str, targets: &[Target], force: bool) -> Action
 
 fn remove_run(args: MetaRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     if meta_skill::find(&args.skill_id).is_none() {
+        emit_meta_telemetry(crate::telemetry::event::MetaAction::Remove, None);
         return Err(meta_skill::not_found(&args.skill_id));
     }
-    let targets = resolve_targets(&args.harnesses, args.global, scope)?;
+    let targets = match resolve_targets(&args.harnesses, args.global, scope) {
+        Ok(t) => t,
+        Err(e) => {
+            emit_meta_telemetry(crate::telemetry::event::MetaAction::Remove, None);
+            return Err(e);
+        }
+    };
     let report = remove_from_targets(&args.skill_id, &targets);
+    emit_meta_telemetry(crate::telemetry::event::MetaAction::Remove, Some(&report));
     emit_action(&report, mode)?;
     match report.first_error {
         Some(err) => Err(err),

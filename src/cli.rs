@@ -118,14 +118,18 @@ pub enum Command {
 
 /// `tome telemetry <subcommand>` — control the local-first telemetry subsystem.
 ///
-/// `inspect` and `flush` land in later slices (US2 / US3); only the US1 control
-/// surface is exposed here.
+/// `flush` lands in a later slice (US3); the US1 control surface plus the US2
+/// read-only `inspect` are exposed here.
 #[derive(Debug, Subcommand)]
 pub enum TelemetryCommand {
     /// Report telemetry state: enabled + why, install UUID (if any), the
     /// delivery endpoint, queued-event count, and last-flush stamp. Read-only —
     /// never mints an install id.
     Status,
+    /// Pretty-print the pending event queue WITHOUT sending it. Read-only — the
+    /// queue file is byte-identical after (the flusher self-heals; inspect never
+    /// repairs). Reports any corrupt/unparsable lines; exits 92 if any exist.
+    Inspect,
     /// Enable telemetry (sets the opt-out switch on) and ensure an install
     /// identity exists.
     On,

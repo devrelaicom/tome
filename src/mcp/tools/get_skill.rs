@@ -84,7 +84,15 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         tokio::task::spawn_blocking(move || lookup_skill(&paths, &scope, &catalog, &plugin, &name))
             .await
             .map_err(|e| internal(&input, started, format!("lookup join: {e}"), "internal"))?
-            .map_err(|e| internal(&input, started, e.to_string(), e.category().as_str()))?;
+            .map_err(|e| {
+                // C-L1: best-effort MCP-surface `tome.error` (closed category
+                // only), with this session's `calling_harness`. Never alters the
+                // returned `McpError`. This is the one `TomeError`→`McpError`
+                // conversion in this handler (the other error arms are non-`TomeError`
+                // lookup/read outcomes already shaped to the contract codes).
+                crate::mcp::enqueue_tool_error(&state, e.category());
+                internal(&input, started, e.to_string(), e.category().as_str())
+            })?;
 
     let hit = match lookup {
         LookupOutcome::Found(hit) => hit,
@@ -227,6 +235,18 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         elapsed_ms = started.elapsed().as_millis() as u64,
         "call",
     );
+
+    // FR-027/FR-028: `tome.entry_invoked` once the entry body is fetched. The
+    // `entry_kind` is always `Skill` — `get_skill` only ever resolves skills
+    // (FR-084; `lookup_skill` hardcodes `EntryKind::Skill`). The `rank_bucket`
+    // is THIS entry's position in the preceding search this session (the funnel
+    // join; `None` when no search ranked it). Best-effort enqueue — a sub-ms
+    // local append that never blocks the tool call or flushes.
+    crate::telemetry::enqueue(crate::telemetry::event::EntryInvoked {
+        entry_kind: crate::telemetry::event::EntryKind::Skill,
+        rank_bucket: crate::mcp::rank_bucket_for(&state, &input.name),
+        calling_harness: crate::mcp::calling_harness(&state),
+    });
 
     // The `Output.path` field is documented as the absolute path to the
     // skill body (see the `Output` struct's doc comment) — emit the

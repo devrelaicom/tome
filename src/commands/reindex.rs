@@ -36,6 +36,43 @@ use crate::commands::plugin::{embedder_entry, open_index_for_read, registry_seed
 // `&ResolvedScope` (or `&crate::workspace::Scope`) at function boundaries.
 
 pub fn run(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+    let forced = args.force;
+    // Derive the telemetry scope structurally from the raw arg (before
+    // validation) so a failure during `parse_scope` still carries the right
+    // dimension. omitted→All, `<catalog>/<plugin>`→Plugin, `<catalog>`→Catalog.
+    let tele_scope = reindex_scope_of(args.scope.as_deref());
+
+    let result = run_inner(args, ws, mode);
+
+    // OUTCOME-bearing: emit on BOTH success and failure. A failed reindex emits
+    // `Reindex{outcome:Failed}` here AND the boundary emits `tome.error` — two
+    // distinct signals (intentional). One infallible `enqueue`.
+    crate::telemetry::enqueue(crate::telemetry::event::Reindex {
+        scope: tele_scope,
+        forced,
+        outcome: if result.is_ok() {
+            crate::telemetry::event::Outcome::Ok
+        } else {
+            crate::telemetry::event::Outcome::Failed
+        },
+    });
+
+    result
+}
+
+/// Structurally map the raw `<scope>` arg to the telemetry
+/// [`ReindexScope`](crate::telemetry::event::ReindexScope) — no validation, so
+/// it is meaningful even when `parse_scope` later rejects the value.
+fn reindex_scope_of(raw: Option<&str>) -> crate::telemetry::event::ReindexScope {
+    use crate::telemetry::event::ReindexScope;
+    match raw {
+        None => ReindexScope::All,
+        Some(s) if s.contains('/') => ReindexScope::Plugin,
+        Some(_) => ReindexScope::Catalog,
+    }
+}
+
+fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
 
     let scope = parse_scope(args.scope.as_deref(), &paths, &ws.scope)?;

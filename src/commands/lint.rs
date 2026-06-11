@@ -25,21 +25,64 @@ pub fn run(
     mode: Mode,
     level: ArtifactLevel,
 ) -> Result<(), TomeError> {
-    let source = Path::new(&args.source);
+    let strict = args.strict;
+    // Run the lint compute into a Result<LintReport>. A pre-report failure
+    // (parse / level-mismatch / autofix I/O) short-circuits with an Err and is
+    // telemetered as `Errors`; a produced report is telemetered by its verdict.
+    let result = (|| -> Result<LintReport, TomeError> {
+        let source = Path::new(&args.source);
 
-    // Parse once to detect + validate the artifact matches the command level.
-    let artifact = parse_artifact(source)?;
-    check_artifact_level(&artifact, level)?;
+        // Parse once to detect + validate the artifact matches the command level.
+        let artifact = parse_artifact(source)?;
+        check_artifact_level(&artifact, level)?;
 
-    let (report, fixed) = if args.autofix {
-        let outcome = autofix(source, args.dry_run)?;
-        (outcome.report, outcome.fixed)
-    } else {
-        (lint::run(&artifact, &rules::all()), 0)
+        let (report, fixed) = if args.autofix {
+            let outcome = autofix(source, args.dry_run)?;
+            (outcome.report, outcome.fixed)
+        } else {
+            (lint::run(&artifact, &rules::all()), 0)
+        };
+
+        emit_report(&report, fixed, args.autofix, args.dry_run, mode)?;
+        Ok(report)
+    })();
+
+    // One `tome.authoring_action{verb=Lint}` emit with the REAL outcome.
+    // source_format is `Unknown`: lint runs over a NATIVE Tome artifact, there
+    // is no foreign source format.
+    emit_lint_telemetry(level, strict, &result);
+
+    let report = result?;
+    report.into_result(strict)
+}
+
+/// Emit one `tome.authoring_action{verb=Lint}` event with the REAL outcome:
+/// errors → `Errors`; strict + warnings → `StrictRefused`; warnings →
+/// `Warnings`; clean → `Ok`. A pre-report failure (the `Err` arm) is `Errors`.
+fn emit_lint_telemetry(level: ArtifactLevel, strict: bool, result: &Result<LintReport, TomeError>) {
+    use crate::telemetry::event::{
+        AuthoringActionEvent, AuthoringOutcome, AuthoringVerb, SourceFormat,
     };
-
-    emit_report(&report, fixed, args.autofix, args.dry_run, mode)?;
-    report.into_result(args.strict)
+    let outcome = match result {
+        Ok(report) => {
+            if report.errors > 0 {
+                AuthoringOutcome::Errors
+            } else if strict && report.warnings > 0 {
+                AuthoringOutcome::StrictRefused
+            } else if report.warnings > 0 {
+                AuthoringOutcome::Warnings
+            } else {
+                AuthoringOutcome::Ok
+            }
+        }
+        Err(_) => AuthoringOutcome::Errors,
+    };
+    crate::telemetry::enqueue(AuthoringActionEvent {
+        verb: AuthoringVerb::Lint,
+        artifact: crate::commands::convert::artifact_of(level),
+        source_format: SourceFormat::Unknown,
+        outcome,
+    });
 }
 
 /// Reject `plugin lint <catalog>` / `skill lint <plugin>` etc.

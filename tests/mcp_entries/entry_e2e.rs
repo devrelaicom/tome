@@ -207,6 +207,7 @@ fn build_state(paths: &tome::paths::Paths, registry: PromptRegistry) -> Arc<McpS
         reranker_entry,
         prompt_registry: Arc::new(registry),
         host_harness: None,
+        last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }
 
@@ -267,6 +268,7 @@ fn build_state_with_stub_entries(
         reranker_entry: &STUB_RERANKER_ENTRY,
         prompt_registry: Arc::new(registry),
         host_harness: None,
+        last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }
 

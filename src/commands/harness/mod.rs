@@ -83,10 +83,55 @@ pub fn run(args: HarnessArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), T
     match args.command {
         None => bare::run(scope, &paths, mode),
         Some(HarnessCommand::List(a)) => list::run(a, scope, &paths, mode),
-        Some(HarnessCommand::Use(a)) => use_::run(a, scope, &paths, mode),
-        Some(HarnessCommand::Remove(a)) => remove::run(a, scope, &paths, mode),
+        Some(HarnessCommand::Use(a)) => {
+            // Capture the name before `run` consumes the args; emit on success.
+            let name = a.name.clone();
+            let r = use_::run(a, scope, &paths, mode);
+            if r.is_ok() {
+                emit_harness_action(&name, crate::telemetry::event::HarnessAction::Use);
+            }
+            r
+        }
+        Some(HarnessCommand::Remove(a)) => {
+            let name = a.name.clone();
+            let r = remove::run(a, scope, &paths, mode);
+            if r.is_ok() {
+                emit_harness_action(&name, crate::telemetry::event::HarnessAction::Remove);
+            }
+            r
+        }
         Some(HarnessCommand::Info(a)) => info::run(a, scope, &paths, mode),
         Some(HarnessCommand::Sync) => sync::run(scope, &paths, mode),
+    }
+}
+
+/// Map a harness id string (as used by the `HarnessModule::name()` registry —
+/// `claude-code` / `cursor` / `codex` / `opencode` / `gemini`) to the closed
+/// telemetry [`Harness`](crate::telemetry::event::Harness) enum.
+///
+/// Note the one rename: the harness module names itself `gemini` while the
+/// telemetry enum's wire token is `gemini-cli`; this is the single place the
+/// two vocabularies are bridged. Returns `None` for any unknown id so the
+/// caller can SKIP the emit rather than invent a value (closed-by-construction).
+pub(crate) fn harness_name_to_enum(name: &str) -> Option<crate::telemetry::event::Harness> {
+    use crate::telemetry::event::Harness;
+    match name {
+        "claude-code" => Some(Harness::ClaudeCode),
+        "cursor" => Some(Harness::Cursor),
+        "codex" => Some(Harness::Codex),
+        "opencode" => Some(Harness::Opencode),
+        "gemini" => Some(Harness::GeminiCli),
+        // SKIP: unmapped — never guess a closed-enum value.
+        _ => None,
+    }
+}
+
+/// Emit one `tome.harness_action` event for a single harness on the success
+/// path. Infallible best-effort `enqueue`; SKIPs silently when the name does
+/// not map to the closed [`Harness`](crate::telemetry::event::Harness) enum.
+pub(crate) fn emit_harness_action(name: &str, action: crate::telemetry::event::HarnessAction) {
+    if let Some(harness) = harness_name_to_enum(name) {
+        crate::telemetry::enqueue(crate::telemetry::event::HarnessActionEvent { action, harness });
     }
 }
 
@@ -214,4 +259,34 @@ pub(crate) fn home_root() -> Result<std::path::PathBuf, TomeError> {
         )));
     }
     Ok(home)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::harness_name_to_enum;
+    use crate::telemetry::event::Harness;
+
+    #[test]
+    fn harness_name_to_enum_maps_every_known_id() {
+        // The five harness module ids → their closed telemetry enum tokens.
+        // `gemini` is the one renamed bridge (module id `gemini` → `GeminiCli`).
+        assert_eq!(
+            harness_name_to_enum("claude-code"),
+            Some(Harness::ClaudeCode)
+        );
+        assert_eq!(harness_name_to_enum("cursor"), Some(Harness::Cursor));
+        assert_eq!(harness_name_to_enum("codex"), Some(Harness::Codex));
+        assert_eq!(harness_name_to_enum("opencode"), Some(Harness::Opencode));
+        assert_eq!(harness_name_to_enum("gemini"), Some(Harness::GeminiCli));
+    }
+
+    #[test]
+    fn harness_name_to_enum_unmapped_is_none() {
+        // SSOT mapper used by BOTH the CLI harness_action emit and the MCP
+        // `calling_harness` resolver: an unknown / unstamped id must yield
+        // `None` so the caller omits the field rather than guessing.
+        assert_eq!(harness_name_to_enum(""), None);
+        assert_eq!(harness_name_to_enum("gemini-cli"), None);
+        assert_eq!(harness_name_to_enum("not-a-real-harness"), None);
+    }
 }
