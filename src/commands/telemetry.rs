@@ -17,7 +17,7 @@
 
 use std::io::Write;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cli::{TelemetryCommand, TelemetryFlushArgs, TelemetryResetArgs};
 use crate::error::TomeError;
@@ -74,12 +74,18 @@ struct StatusReport {
     last_flush: Option<LastFlush>,
 }
 
-/// The `telemetry/last-flush` stamp shape. US3 defines + writes it; until then a
-/// status read always sees it absent and reports `None`.
-#[derive(Debug, Serialize)]
+/// The `telemetry/last-flush` stamp shape — written by the flusher (US3,
+/// `flush::stamp_last_flush`) as `{"timestamp":"<rfc3339>","last_status":<u16|null>}`.
+///
+/// `status` deserializes from the stamp's `last_status` key and is an `Option`
+/// so a failed-drain `null` status (no batch acknowledged a 2xx) is
+/// distinguished from a successful 2xx. `#[serde(default)]` lets a stamp that
+/// omits the field (shouldn't happen — the writer always emits it) still parse.
+#[derive(Debug, Serialize, Deserialize)]
 struct LastFlush {
     timestamp: String,
-    status: u16,
+    #[serde(rename = "last_status", default)]
+    status: Option<u16>,
 }
 
 fn status(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
@@ -122,10 +128,14 @@ fn pending_count(paths: &Paths) -> u64 {
 
 /// Read the `telemetry/last-flush` stamp, if present.
 ///
-// US3 fills last-flush: the stamp format is not yet defined/written, so there is
-// no on-disk producer. Until then an absent file is the only case → `None`.
-fn read_last_flush(_paths: &Paths) -> Option<LastFlush> {
-    None
+/// Best-effort and read-only (like every `status` read): an absent file, an
+/// unreadable/over-cap file, or an unparsable body all degrade to `None` — a
+/// `status` report never fails on the stamp. The flusher (US3) writes the stamp
+/// as `{"timestamp":...,"last_status":<u16|null>}`; we parse exactly that shape.
+fn read_last_flush(paths: &Paths) -> Option<LastFlush> {
+    let body =
+        util::bounded_read_to_string(&paths.telemetry_last_flush(), util::TOME_CONFIG_MAX).ok()?;
+    serde_json::from_str::<LastFlush>(&body).ok()
 }
 
 fn emit_status_human(report: &StatusReport) -> Result<(), TomeError> {
@@ -149,7 +159,12 @@ fn emit_status_human(report: &StatusReport) -> Result<(), TomeError> {
     writeln!(out, "endpoint:  {}", report.endpoint)?;
     writeln!(out, "pending:   {}", report.pending)?;
     match &report.last_flush {
-        Some(lf) => writeln!(out, "last flush: {} (status {})", lf.timestamp, lf.status)?,
+        Some(lf) => match lf.status {
+            Some(s) => writeln!(out, "last flush: {} (status {})", lf.timestamp, s)?,
+            // A `null` status means the drain ran but no batch was acknowledged
+            // (empty queue, or a transport error before any 2xx).
+            None => writeln!(out, "last flush: {} (no successful delivery)", lf.timestamp)?,
+        },
         None => writeln!(out, "last flush: never")?,
     }
     Ok(())

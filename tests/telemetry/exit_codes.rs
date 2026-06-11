@@ -108,3 +108,51 @@ fn status_json_ci_disabled_is_byte_stable() {
         r#"{"enabled":false,"source":"ci","endpoint":"https://telemetry.tome-mcp.app/v1/events","pending":0}"#,
     );
 }
+
+// ---------------------------------------------------------------------------
+// last-flush stamp surfaced by `status --json` (Co-M1)
+// ---------------------------------------------------------------------------
+
+/// Write a `telemetry/last-flush` stamp under the isolated home with the exact
+/// shape the flusher emits: `{"timestamp":...,"last_status":<u16|null>}`.
+fn write_last_flush(env: &ToolEnv, body: &str) {
+    let dir = env.tome_root().join("telemetry");
+    std::fs::create_dir_all(&dir).expect("create telemetry dir");
+    std::fs::write(dir.join("last-flush"), body).expect("write last-flush stamp");
+}
+
+#[test]
+fn status_json_surfaces_last_flush_with_status() {
+    let env = ToolEnv::new();
+    // A successful-delivery stamp: a concrete 2xx status.
+    write_last_flush(
+        &env,
+        "{\"timestamp\":\"2026-06-11T12:00:00.000Z\",\"last_status\":200}\n",
+    );
+    let body = status_json_bytes(clean_cmd(&env).args(["telemetry", "status", "--json"]));
+    let v: serde_json::Value = serde_json::from_str(&body).expect("status --json is JSON");
+    let lf = v.get("last_flush").expect("last_flush present");
+    assert_eq!(
+        lf.get("timestamp").and_then(|t| t.as_str()),
+        Some("2026-06-11T12:00:00.000Z"),
+    );
+    assert_eq!(lf.get("last_status").and_then(|s| s.as_u64()), Some(200));
+}
+
+#[test]
+fn status_json_surfaces_last_flush_null_status() {
+    let env = ToolEnv::new();
+    // A drain that ran but acknowledged nothing: `last_status` is JSON null.
+    write_last_flush(
+        &env,
+        "{\"timestamp\":\"2026-06-11T12:00:00.000Z\",\"last_status\":null}\n",
+    );
+    let body = status_json_bytes(clean_cmd(&env).args(["telemetry", "status", "--json"]));
+    let v: serde_json::Value = serde_json::from_str(&body).expect("status --json is JSON");
+    let lf = v.get("last_flush").expect("last_flush present");
+    // We PIN that a null status is EMITTED (not omitted) as JSON null.
+    assert!(
+        lf.get("last_status").map(|s| s.is_null()).unwrap_or(false),
+        "last_status must be present and null: {lf}"
+    );
+}

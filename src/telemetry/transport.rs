@@ -5,6 +5,7 @@
 //! to touch the network. It MUST call [`record_network_call`] so the
 //! integration tests can assert zero network calls after a foreground command.
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -73,6 +74,32 @@ pub fn network_call_count() -> u64 {
     NETWORK_CALLS.load(Ordering::Relaxed)
 }
 
+/// The ONE process-wide `reqwest::blocking::Client`, built lazily on first POST
+/// (R-L1). Building a client initialises the TLS backend; a multi-batch drain
+/// would otherwise re-init TLS per batch. Memoising it here amortises that to
+/// once-per-process while keeping every POST's policy identical:
+/// - the 5 s [`POST_TIMEOUT`] (no retry);
+/// - **redirect following DISABLED** ([`Policy::none`], FR-043): reqwest's
+///   default follows up to 10 redirects INCLUDING an https→http downgrade and
+///   re-POSTs the body (carrying the install UUID) over plaintext. With
+///   `Policy::none` a 3xx is returned verbatim as a non-2xx status — the drain
+///   leaves those lines unsent (no body re-send, no plaintext downgrade).
+///
+/// A builder failure (TLS backend init) is unreachable in practice; we return
+/// `None` and let [`post_batch`] fail closed rather than panic.
+fn shared_client() -> Option<&'static reqwest::blocking::Client> {
+    static CLIENT: OnceLock<Option<reqwest::blocking::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(POST_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
 /// Group line indices into delivery batches each bounded by BOTH
 /// [`MAX_BATCH_LINES`] lines AND [`MAX_BATCH_BYTES`] of wire bytes (FR-041b).
 ///
@@ -121,6 +148,9 @@ pub fn split_batches(lines: &[String]) -> Vec<Vec<usize>> {
 /// - **HTTPS only** (FR-043): a non-`https://` endpoint fails CLOSED with
 ///   [`TelemetryEndpointUnreachable`](TomeError::TelemetryEndpointUnreachable) —
 ///   we NEVER POST telemetry (carrying the install UUID) over plaintext.
+///   Redirect following is DISABLED on the shared client ([`shared_client`],
+///   FR-043) so a 3xx https→http downgrade can never re-POST the body over
+///   plaintext: a 3xx surfaces as a non-2xx status the drain leaves unsent.
 /// - One attempt, [`POST_TIMEOUT`] (5 s), **no retry**, `Content-Type:
 ///   application/x-ndjson`. A `?stream=<stream>` query is appended (`&` if the
 ///   endpoint already has a query).
@@ -144,14 +174,12 @@ pub fn post_batch(stream: &str, ndjson_body: &[u8]) -> Result<u16, TomeError> {
     let separator = if endpoint.contains('?') { '&' } else { '?' };
     let url = format!("{endpoint}{separator}stream={stream}");
 
-    let client = match reqwest::blocking::Client::builder()
-        .timeout(POST_TIMEOUT)
-        .build()
-    {
-        Ok(c) => c,
-        // A builder failure (TLS backend init) is unreachable in practice but
-        // must fail closed, not panic — report the scrubbed endpoint.
-        Err(_) => return Err(TomeError::TelemetryEndpointUnreachable { endpoint }),
+    // Reuse the ONE memoised client (R-L1): timeout + redirect-disabled
+    // (S-M1/FR-043). A builder failure (TLS backend init) is unreachable in
+    // practice but must fail closed, not panic — report the scrubbed endpoint.
+    let client = match shared_client() {
+        Some(c) => c,
+        None => return Err(TomeError::TelemetryEndpointUnreachable { endpoint }),
     };
 
     // THE single network site. Increment BEFORE the request so the seam counts

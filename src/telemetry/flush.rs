@@ -255,14 +255,34 @@ pub fn run(paths: &Paths) -> Result<(), TomeError> {
     // 6. Rewrite-after-2xx (R-9/FR-042): the surviving queue is every parsed
     //    line NOT acknowledged by a 2xx. Unparsable lines are already excluded
     //    (we never carried them into `parsed`) — the self-heal.
-    let unsent: Vec<String> = parsed
+    let any_sent = sent.iter().any(|&s| s);
+    let mut kept: Vec<String> = parsed
         .iter()
         .enumerate()
         .filter(|(i, _)| !sent[*i])
         .map(|(_, p)| p.original.clone())
         .collect();
-    queue::rewrite(paths, &unsent)?;
-    queue::reassert_queue_0600(paths);
+
+    // FIFO drop-oldest when the surviving set still exceeds the queue cap
+    // (FR-038/038a). If the collector is unreachable NO line was 2xx'd, so
+    // without this the queue wedges at the 1 MiB append cap and every new event
+    // is dropped forever. The queue is FIFO (oldest first), so we evict from the
+    // FRONT until the wire size is ≤ cap, preserving the NEWEST events. We reuse
+    // the SAME `queue::MAX_QUEUE_BYTES` the append path enforces — one number.
+    let evicted = fifo_evict_to_cap(&mut kept, queue::MAX_QUEUE_BYTES);
+    if evicted > 0 {
+        tracing::debug!(target: "telemetry", evicted, "telemetry_queue_fifo_evicted");
+    }
+
+    // Rewrite only when SOMETHING changed — lines were sent, lines were evicted,
+    // OR unparsable lines were self-healed away (`dropped`, which `kept` already
+    // excludes since they never entered `parsed`). A no-delivery drain
+    // (unreachable collector) still trims an over-cap queue and still persists
+    // the self-heal; a no-delivery, under-cap, clean-queue drain touches nothing.
+    if any_sent || evicted > 0 || dropped > 0 {
+        queue::rewrite(paths, &kept)?;
+        queue::reassert_queue_0600(paths);
+    }
 
     // CRASH SEAM 2 — after the rewrite, before the stamp. A crash here leaves
     // the sent batch GONE (no double-send) with the stamp absent/stale.
@@ -282,6 +302,24 @@ pub fn run(paths: &Paths) -> Result<(), TomeError> {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// FIFO-evict the OLDEST lines (front of the vec) until the surviving wire size
+/// is ≤ `cap`, returning the number evicted (FR-038/038a).
+///
+/// The wire size is the NDJSON the queue holds on disk: each line's bytes plus
+/// one `\n` (matching [`queue::rewrite`]'s `line + '\n'` shape and the append
+/// path's `MAX_QUEUE_BYTES` accounting). `lines` is FIFO (oldest first), so we
+/// drain from the FRONT — dropping the OLDEST events and preserving the NEWEST.
+fn fifo_evict_to_cap(lines: &mut Vec<String>, cap: u64) -> usize {
+    let mut total: u64 = lines.iter().map(|l| l.len() as u64 + 1).sum();
+    let mut evicted = 0usize;
+    while total > cap && !lines.is_empty() {
+        let oldest = lines.remove(0);
+        total -= oldest.len() as u64 + 1;
+        evicted += 1;
+    }
+    evicted
 }
 
 /// Stamp `telemetry/last-flush` with a small JSON record `{timestamp,
@@ -481,6 +519,32 @@ mod tests {
     }
 
     #[test]
+    fn redirect_3xx_is_treated_as_non_2xx_and_left_unsent() {
+        let _serial = serial();
+        // S-M1: with redirect-following disabled on the production client, a 3xx
+        // surfaces as a raw 3xx status (not a followed/re-POSTed request). The
+        // drain treats it like any non-2xx: the lines are LEFT UNSENT (no body
+        // re-send, no plaintext downgrade). We can't exercise the real no-follow
+        // without TLS infra; this asserts the DRAIN's contract that a 3xx status
+        // never acknowledges a batch. (The no-follow itself is enforced
+        // structurally by `Policy::none` in `transport::shared_client`.)
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        seed(&paths, &[&anon_line(1), &anon_line(2)]);
+        let mint = identity::install_mint_time(&paths).unwrap();
+        let _clk = ClockGuard::install(mint + time::Duration::minutes(11));
+
+        let _t = TransportGuard::install(|_s, _b| Ok(301));
+        run(&paths).unwrap();
+        // A 3xx never falls in 200..300 ⇒ no line is acknowledged ⇒ queue kept.
+        assert_eq!(
+            queue::count_pending(&paths),
+            2,
+            "a 3xx leaves the batch unsent (no redirect-follow re-POST)"
+        );
+    }
+
+    #[test]
     fn transport_error_surfaces_exit_90_and_keeps_queue() {
         let _serial = serial();
         let dir = TempDir::new().unwrap();
@@ -623,6 +687,67 @@ mod tests {
             queue::count_pending(&paths),
             0,
             "self-heal drops the corrupt line"
+        );
+    }
+
+    #[test]
+    fn unreachable_collector_fifo_evicts_over_cap_queue() {
+        let _serial = serial();
+        // Co-H1: with an unreachable collector NO line is 2xx'd, but an over-cap
+        // queue must NOT wedge — the drain FIFO-drops the OLDEST lines until the
+        // surviving set is ≤ cap, preserving the NEWEST events.
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+
+        // Seed well over the 1 MiB cap with uniquely-numbered ~2 KiB lines so we
+        // can tell oldest-vs-newest apart. Each line carries a parseable
+        // `event_type` and a monotonic `seq`.
+        let big = "z".repeat(2000);
+        let lines: Vec<String> = (0..700u32)
+            .map(|seq| {
+                format!("{{\"event_type\":\"tome.search\",\"seq\":{seq},\"pad\":\"{big}\"}}")
+            })
+            .collect();
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        seed(&paths, &refs);
+        let len_before = std::fs::metadata(paths.telemetry_queue()).unwrap().len();
+        assert!(
+            len_before > queue::MAX_QUEUE_BYTES,
+            "fixture must exceed the cap (was {len_before})"
+        );
+
+        let mint = identity::install_mint_time(&paths).unwrap();
+        let _clk = ClockGuard::install(mint + time::Duration::minutes(11));
+
+        // The collector is unreachable: every POST errors ⇒ nothing 2xx'd.
+        let _t = TransportGuard::install(|_s, _b| {
+            Err(TomeError::TelemetryEndpointUnreachable {
+                endpoint: "https://collector.example/v1/events".to_string(),
+            })
+        });
+
+        // Foreground caller surfaces the transport error (exit 90)…
+        let err = run(&paths).unwrap_err();
+        assert_eq!(err.exit_code(), 90);
+
+        // …but the queue was trimmed: its on-disk size is now ≤ cap.
+        let len_after = std::fs::metadata(paths.telemetry_queue()).unwrap().len();
+        assert!(
+            len_after <= queue::MAX_QUEUE_BYTES,
+            "over-cap queue must be FIFO-trimmed to ≤ cap (was {len_after})"
+        );
+
+        // And the NEWEST events survived (oldest dropped): the highest `seq`
+        // (699) is present, while the very oldest (0) is gone.
+        let survivors = queue::read_lines(&paths).unwrap();
+        assert!(!survivors.is_empty(), "some newest events survive");
+        assert!(
+            survivors.iter().any(|l| l.contains("\"seq\":699")),
+            "the NEWEST event must survive eviction"
+        );
+        assert!(
+            survivors.iter().all(|l| !l.contains("\"seq\":0,")),
+            "the OLDEST event must be evicted"
         );
     }
 

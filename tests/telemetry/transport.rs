@@ -281,6 +281,99 @@ fn sc002_crash_after_rewrite_removes_batch_and_skips_stamp() {
     );
 }
 
+/// SC-008 (the "queue stays PARSEABLE after a kill" half) / FR-042/042a: across
+/// BOTH crash windows, EVERY surviving queue line must round-trip through
+/// `serde_json::from_str::<Value>` — a mid-drain process death never leaves a
+/// torn/partial JSON fragment behind (the prior crash tests assert the COUNT is
+/// right; this asserts the surviving lines are still well-formed JSON).
+///
+/// - crash@`AfterResponseBeforeRewrite`: the queue is UNCHANGED (nothing
+///   rewritten) — every seeded line survives and must parse.
+/// - crash@`AfterRewriteBeforeStamp`: the rewrite ran, so survivors are the
+///   UN-acked lines. We 2xx the anonymous stream but FAIL the catalog stream so
+///   the catalog line is kept by the rewrite — a real survivor to parse-check
+///   (an all-2xx queue would drain empty and make the check vacuous).
+#[test]
+fn crash_windows_leave_a_parseable_queue() {
+    /// Assert the queue at `paths` is non-empty and every line is valid JSON.
+    fn assert_queue_all_parseable(paths: &Paths, context: &str) {
+        let lines = queue::read_lines(paths).expect("read queue");
+        assert!(
+            !lines.is_empty(),
+            "{context}: expected at least one surviving line to parse-check"
+        );
+        for line in &lines {
+            serde_json::from_str::<serde_json::Value>(line).unwrap_or_else(|e| {
+                panic!("{context}: surviving queue line is not parseable JSON ({e}): {line}")
+            });
+        }
+    }
+
+    let home = TempDir::new().unwrap();
+    let _home = HomeGuard::install(home.path());
+
+    // --- Crash window 1: AfterResponseBeforeRewrite ⇒ queue UNCHANGED.
+    {
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        seed(&paths, &[&anon_line(1), &anon_line(2)]);
+        let _clk = past_grace(&paths);
+
+        let (_t, _calls) = recording_transport();
+        let _crash = CrashGuard::install(CrashPoint::AfterResponseBeforeRewrite);
+        flush::run(&paths).expect("crash@1 returns early Ok");
+
+        assert_eq!(
+            queue::count_pending(&paths),
+            2,
+            "crash@1 preserves the queue (no rewrite)"
+        );
+        assert_queue_all_parseable(&paths, "crash@AfterResponseBeforeRewrite");
+    }
+
+    // --- Crash window 2: AfterRewriteBeforeStamp, with the catalog stream UNSENT
+    //     so a real survivor is kept by the rewrite.
+    {
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        seed(&paths, &[&anon_line(1), &catalog_line(7)]);
+        let _clk = past_grace(&paths);
+
+        // 2xx the anonymous stream (sent ⇒ removed by the rewrite), but FAIL the
+        // catalog stream (transport error ⇒ kept by the rewrite). The catalog
+        // line is the surviving line we parse-check after crash@2.
+        let _t = TransportGuard::install(|stream, _body| {
+            if stream == "anonymous" {
+                Ok(200)
+            } else {
+                Err(tome::error::TomeError::TelemetryEndpointUnreachable {
+                    endpoint: "https://collector.example/v1/events".to_string(),
+                })
+            }
+        });
+        let _crash = CrashGuard::install(CrashPoint::AfterRewriteBeforeStamp);
+        // crash@2 returns Ok early (the transport_err is never surfaced past the
+        // crash seam), so `run` is Ok here.
+        flush::run(&paths).expect("crash@2 returns early Ok");
+
+        // The anonymous line was 2xx'd + rewritten away; the catalog line is kept.
+        assert_eq!(
+            queue::count_pending(&paths),
+            1,
+            "crash@2 keeps the un-acked catalog line as a survivor"
+        );
+        assert_queue_all_parseable(&paths, "crash@AfterRewriteBeforeStamp");
+        // And it is specifically the catalog survivor (no double-send risk on the
+        // already-acked anonymous line).
+        let survivors = queue::read_lines(&paths).unwrap();
+        assert!(
+            survivors[0].contains("catalog.midnight.compile"),
+            "the survivor is the un-acked catalog line: {}",
+            survivors[0]
+        );
+    }
+}
+
 // ===========================================================================
 // FR-044 — the `?stream=` split: tome.* → anonymous, catalog.* → catalog.
 // ===========================================================================
