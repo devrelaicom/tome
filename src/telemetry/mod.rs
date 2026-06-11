@@ -14,6 +14,9 @@ pub mod buckets;
 pub mod clock;
 pub mod config;
 pub mod event;
+pub mod identity;
+pub mod lock;
+pub mod notice;
 pub mod transport;
 
 /// Whether telemetry is enabled for this process (opt-out + CI auto-disable).
@@ -77,8 +80,3 @@ pub fn flush() -> Result<(), crate::error::TomeError> {
 ///
 /// Phase-2 fill: spawns `tome telemetry flush --quiet` and does not wait.
 pub fn teardown_at_exit() {}
-
-/// Emit the one-line first-run opt-out notice if it has not been shown.
-///
-/// Phase-2 fill: prints the CLI-only notice once, guarded by a marker file.
-pub fn first_run_notice_if_needed() {}

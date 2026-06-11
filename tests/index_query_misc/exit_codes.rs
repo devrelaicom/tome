@@ -471,6 +471,32 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
             "meta_install_failed",
         ),
         (TomeError::NoHarnessDetected, 89, "no_harness_detected"),
+        // 90–92 — Phase 10 telemetry. A dedicated block per the constitution's
+        // Principle II (new exit-code blocks need no amendment). See
+        // specs/010-phase-10-telemetry/data-model.md.
+        (
+            TomeError::TelemetryEndpointUnreachable {
+                endpoint: "https://telemetry.tome-mcp.app/v1/events".into(),
+            },
+            90,
+            "telemetry_endpoint_unreachable",
+        ),
+        (
+            TomeError::TelemetryConfigInvalid {
+                path: PathBuf::from("/home/u/.tome/telemetry/config.toml"),
+                detail: "invalid type: string, expected a boolean".into(),
+            },
+            91,
+            "telemetry_config_invalid",
+        ),
+        (
+            TomeError::TelemetryQueueCorrupt {
+                path: PathBuf::from("/home/u/.tome/telemetry/queue.jsonl"),
+                count: 3,
+            },
+            92,
+            "telemetry_queue_corrupt",
+        ),
     ]
 }
 
