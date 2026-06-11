@@ -32,6 +32,33 @@ pub use resolver::resolve_attribution;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// THE one serialisation lock every lib test that touches a PROCESS-GLOBAL flush
+/// seam must hold for its whole duration.
+///
+/// The flush seams — `flush::TRANSPORT_OVERRIDE` / `flush::CRASH_POINT`,
+/// `transport::NETWORK_CALLS`, and the DEFAULT-`$HOME` queue that
+/// [`flush`]/[`enqueue`] resolve — are all process-global, and they are exercised
+/// from THREE different lib-test modules (`flush.rs`, `transport.rs`, and
+/// `mcp::telemetry_flush_loop_tests`). Before this lock each module serialised on
+/// its OWN mutex, so a `flush.rs` seam test and the MCP loop test (or a
+/// `transport.rs` counter test) could run CONCURRENTLY and clobber each other's
+/// transport override / crash slot / `NETWORK_CALLS` delta / `$HOME` queue — the
+/// `notify_drives_exactly_one_drain` flake. One shared lock makes that impossible.
+///
+/// Doc-hidden, test-only. Acquire it via [`test_serial`] (lock-poison tolerant).
+/// A test must acquire it EXACTLY ONCE — never via two helpers that both lock it.
+#[doc(hidden)]
+pub static TELEMETRY_TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire [`TELEMETRY_TEST_SERIAL`], recovering a poisoned mutex (a panicking
+/// test must not deadlock the rest of the suite). Test-only.
+#[doc(hidden)]
+pub fn test_serial() -> std::sync::MutexGuard<'static, ()> {
+    TELEMETRY_TEST_SERIAL
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 /// Set `true` exactly once when THIS process's `cli_startup` minted a fresh
 /// install id. The exit hook reads it: a brand-new install should schedule a
 /// flush even with `< 50` queued events, so the delivery cadence is established

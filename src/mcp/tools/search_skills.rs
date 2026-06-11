@@ -388,25 +388,61 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // entry_name)`. Attribution is memoised per catalog name so a result set
     // spanning several catalogs opens the read-only index at most once per
     // distinct catalog (NFR-009 — no lock). Best-effort; never alters the result.
-    let mut attribution_cache: std::collections::HashMap<String, Option<&'static str>> =
-        std::collections::HashMap::new();
+    //
+    // Sec-M1 / R-L1: `resolve_attribution` does a SYNC SQLite open+query (5s
+    // busy_timeout) — running it inline on the single-threaded MCP reactor can
+    // stall the server under index-write contention, violating the project's
+    // "spawn_blocking for sync work in async MCP handlers" discipline (which
+    // `sync_boundary.rs` cannot catch — it only guards the module boundary, not
+    // blocking-on-the-reactor). Fold the per-catalog resolution + each
+    // `enqueue_attributed` (itself a sync queue append) into ONE `spawn_blocking`;
+    // ignore a join error (best-effort). The funnel-rank capture above stays on
+    // the reactor (a sub-µs `Mutex`, not a DB read). Exact-rank + per-catalog
+    // memoisation + the `Mcp`-surface `calling_harness` are all preserved.
+    let attribution_scope = state.scope.clone();
     let search_harness = crate::mcp::calling_harness(&state);
-    for (idx, m) in matches.iter().enumerate() {
-        let catalog_id = *attribution_cache
-            .entry(m.catalog.clone())
-            .or_insert_with(|| crate::telemetry::resolve_attribution(&state.scope, &m.catalog));
-        if let Some(catalog_id) = catalog_id {
-            crate::telemetry::enqueue_attributed(crate::telemetry::event::SearchResult {
-                entry_name: m.name.clone(),
-                entry_kind: m.kind.into(),
-                plugin_name: m.plugin.clone(),
+    // Snapshot only what the closure needs (name/kind/plugin/catalog/rank) so the
+    // `matches` Vec can be returned in the `Output` unmoved.
+    let attribution_rows: Vec<(
+        String,
+        crate::telemetry::event::EntryKind,
+        String,
+        String,
+        u32,
+    )> = matches
+        .iter()
+        .enumerate()
+        .map(|(idx, m)| {
+            (
+                m.name.clone(),
+                m.kind.into(),
+                m.plugin.clone(),
+                m.catalog.clone(),
                 // EXACT 1-indexed rank (FR-057) — `idx + 1`, never bucketed.
-                rank: (idx + 1) as u32,
-                catalog_id,
-                calling_harness: search_harness,
+                (idx + 1) as u32,
+            )
+        })
+        .collect();
+    let _ = tokio::task::spawn_blocking(move || {
+        let mut attribution_cache: std::collections::HashMap<String, Option<&'static str>> =
+            std::collections::HashMap::new();
+        for (entry_name, entry_kind, plugin_name, catalog, rank) in attribution_rows {
+            let catalog_id = *attribution_cache.entry(catalog.clone()).or_insert_with(|| {
+                crate::telemetry::resolve_attribution(&attribution_scope, &catalog)
             });
+            if let Some(catalog_id) = catalog_id {
+                crate::telemetry::enqueue_attributed(crate::telemetry::event::SearchResult {
+                    entry_name,
+                    entry_kind,
+                    plugin_name,
+                    rank,
+                    catalog_id,
+                    calling_harness: search_harness,
+                });
+            }
         }
-    }
+    })
+    .await;
 
     // FR-M-LOG-5: contract names `filter` as a nested JSON object.
     // tracing flattens fields, so emit two named slots (`filter_catalog`,

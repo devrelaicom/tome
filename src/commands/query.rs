@@ -27,7 +27,7 @@ use crate::index::schema::MetaSeed;
 use crate::output::{self, Mode};
 use crate::paths::Paths;
 use crate::presentation::{colour, progress, tables};
-use crate::workspace::{ResolvedScope, Scope};
+use crate::workspace::{ResolvedScope, Scope, ScopeSource};
 
 use super::plugin::{
     embedder_entry, missing_models, open_index_for_read, read_catalog_manifest, registry_seeds,
@@ -193,6 +193,50 @@ pub fn run_with_deps(
         // CLI surface has no calling harness (that's an MCP-only dimension).
         calling_harness: None,
     });
+
+    // Co-H1 / FR-052 + FR-057: ALONGSIDE the anonymous `tome.search`, emit one
+    // catalog-attributed `catalog.<id>.search_result` per result entry whose
+    // catalog resolves — by SOURCE, at emit time — to an allowlisted catalog.
+    // Mirrors the MCP `search_skills` path (the divergence is `calling_harness:
+    // None` — the CLI has no host harness). `rank` is the EXACT 1-indexed
+    // position in the returned (already top-k, reranked) list, NOT bucketed
+    // (FR-057). Attribution is memoised per catalog NAME so a result set spanning
+    // several catalogs opens the read-only index at most once per distinct
+    // catalog (NFR-009 — read-only, no advisory lock; fine inline on this sync
+    // CLI path). Best-effort: a `None` resolution ⇒ anonymous only; never alters
+    // the result or fails the query.
+    //
+    // `resolve_attribution` reads only `scope.scope.name()`; wrap the `&Scope`
+    // we hold in a throwaway `ResolvedScope` (provenance/project_root are unused
+    // by the attribution read) rather than thread a `ResolvedScope` through the
+    // whole dep struct.
+    let attribution_scope = ResolvedScope {
+        scope: deps.scope.clone(),
+        source: ScopeSource::GlobalFallback,
+        project_root: None,
+    };
+    let mut attribution_cache: std::collections::HashMap<String, Option<&'static str>> =
+        std::collections::HashMap::new();
+    for (idx, s) in outcome.results.iter().enumerate() {
+        let c = &s.candidate;
+        let catalog_id = *attribution_cache
+            .entry(c.catalog.clone())
+            .or_insert_with(|| {
+                crate::telemetry::resolve_attribution(&attribution_scope, &c.catalog)
+            });
+        if let Some(catalog_id) = catalog_id {
+            crate::telemetry::enqueue_attributed(crate::telemetry::event::SearchResult {
+                entry_name: c.name.clone(),
+                entry_kind: c.kind.into(),
+                plugin_name: c.plugin.clone(),
+                // EXACT 1-indexed rank (FR-057) — `idx + 1`, never bucketed.
+                rank: (idx + 1) as u32,
+                catalog_id,
+                // CLI surface has no calling harness.
+                calling_harness: None,
+            });
+        }
+    }
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
     match mode {

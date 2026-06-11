@@ -52,12 +52,19 @@ pub const ATTRIBUTED_TELEMETRY_CATALOGS: &[(&str, &str)] =
 /// leaking into LOG output. That redaction is correct for logging but would
 /// DEFEAT legitimate SSH-form attribution — `git@github.com:…` would scrub to
 /// `git@<host>:…` and never match the allowlist, breaking the FR-054 / AC-4.4
-/// equivalence requirement. The schemeless scp form carries NO `user:password@`
-/// credential (`git` is the conventional SSH user, not a secret), so normalising
-/// it to `host/path` first removes nothing sensitive and leaves no credential for
-/// the scrub to act on. Scheme-form credentials (`https://user:token@…`) are
-/// untouched by this pre-step and are still fully scrubbed below — so "credentials
-/// never participate" holds exactly.
+/// equivalence requirement. The scp form CAN syntactically carry a credential
+/// (`user:pass@host:path`), but [`rewrite_ssh_scp_form`] DISCARDS the entire
+/// `user@` (or `user:pass@`) userinfo segment when it rewrites to `host/path`, so
+/// whatever was there — credential or the conventional bare `git` user — is gone
+/// BEFORE the scrubber ever sees it; nothing sensitive is moved past the
+/// scrubber. Scheme-form credentials (`https://user:token@…`) are untouched by
+/// this pre-step and are still fully scrubbed below — so "credentials never
+/// participate" holds exactly.
+///
+/// SECURITY: `canonicalize` MUST NEVER log `raw` (or the pre-scrub `pre`/scrubbed
+/// value) — only post-scrub, post-canonicalization derivatives are safe to emit.
+/// A future refactor that adds a `tracing` call here must scrub first (or log only
+/// the canonical result), or it reintroduces the very leak the scrub prevents.
 pub fn canonicalize(raw: &str) -> Option<String> {
     let pre = rewrite_ssh_scp_form(raw.trim());
 
@@ -112,7 +119,10 @@ pub fn canonicalize(raw: &str) -> Option<String> {
 /// Rewrite the schemeless SSH scp-like form `git@host:path` → `host/path`. A no-op
 /// for anything with a `://` scheme or no schemeless `user@host:` shape. See the
 /// WHY in [`canonicalize`]: this runs before the scrub so the scrubber's
-/// SSH-host redaction can't break legitimate SSH-form attribution.
+/// SSH-host redaction can't break legitimate SSH-form attribution. The userinfo
+/// segment — whether a bare `git` user OR a `user:pass@` credential — is DROPPED
+/// here (we keep only `rest` after the `@`), so no credential survives into the
+/// canonical form or reaches the scrubber.
 fn rewrite_ssh_scp_form(s: &str) -> std::borrow::Cow<'_, str> {
     // A scheme form (`scheme://…`) is not scp-like; leave it for scheme handling.
     if s.contains("://") {
@@ -163,12 +173,20 @@ pub fn match_source(raw_source: &str) -> Option<&'static str> {
 
 /// Case-insensitive ASCII prefix strip (schemes are ASCII). Returns the remainder
 /// after `prefix` if `s` starts with it (ignoring ASCII case), else `None`.
+///
+/// BOUNDARY-SAFE: compares on BYTES via `as_bytes().get(..prefix.len())`, which
+/// yields `None` (not a panic) when `s` is shorter than `prefix`. The previous
+/// `s[..prefix.len()]` slice panicked when the byte at `prefix.len()` fell INSIDE
+/// a multibyte UTF-8 char (e.g. `canonicalize("https:/😀…")`) — and that is
+/// reachable from the SILENT telemetry path (catalog URLs are user-controlled),
+/// where `panic = "abort"` would ABORT the user's foreground command. Once the
+/// ASCII-length prefix MATCHES (it is all ASCII, so each byte is its own char),
+/// `prefix.len()` is guaranteed to land on a char boundary, so `&s[prefix.len()..]`
+/// below is safe.
 fn strip_prefix_ascii_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    if s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        Some(&s[prefix.len()..])
-    } else {
-        None
-    }
+    let head = s.as_bytes().get(..prefix.len())?; // None if `s` is too short
+    head.eq_ignore_ascii_case(prefix.as_bytes())
+        .then(|| &s[prefix.len()..])
 }
 
 /// Lowercase only the host (up to the first '/'); leave the path untouched.
@@ -275,6 +293,47 @@ mod tests {
         assert_eq!(canonicalize("").as_deref(), None);
         assert_eq!(canonicalize("https://").as_deref(), None);
         assert_eq!(match_source(""), None);
+    }
+
+    #[test]
+    fn multibyte_inputs_never_panic() {
+        // R-H1 regression: `strip_prefix_ascii_ci` used to slice `s[..prefix.len()]`
+        // with only a length guard, so a multibyte byte at the prefix boundary
+        // PANICKED. This is reachable from the SILENT telemetry path (catalog URLs
+        // are user-controlled via `tome catalog add`), and `panic = "abort"` would
+        // abort the user's command. Each of these used to (or could) split a
+        // multibyte UTF-8 char at a fixed byte offset; canonicalize must just
+        // return (None or a canonical string) WITHOUT panicking.
+        let cases = [
+            // The reported repro: a 4-byte 😀 straddling the `https://` boundary.
+            "https:/\u{1F600}x",
+            // Multibyte right after a scheme.
+            "https://\u{1F600}/repo",
+            // Multibyte in the host position (no scheme).
+            "\u{1F600}.com/org/repo",
+            // Multibyte in the SSH scp host/path positions.
+            "git@\u{1F600}.com:org/repo.git",
+            // Multibyte in the path only (host is ASCII).
+            "https://github.com/org/\u{1F600}repo",
+            // A bare multibyte char and a multibyte-only host.
+            "\u{1F600}",
+            "ssh://\u{1F600}",
+            // Multibyte just short of a longer scheme prefix.
+            "ht\u{1F600}",
+        ];
+        for c in cases {
+            // The assertion is simply "does not panic"; the value is whatever the
+            // boundary-safe path yields (None or a canonical String).
+            let _ = canonicalize(c);
+            let _ = match_source(c);
+        }
+        // And one concrete shape: a 😀 right after the scheme leaves a non-empty
+        // remainder, so we get a canonical (non-None) result with the scheme gone.
+        assert_eq!(
+            canonicalize("https://\u{1F600}.com/org/repo").as_deref(),
+            // Host-lowercasing leaves the emoji untouched; the scheme is stripped.
+            Some("\u{1F600}.com/org/repo")
+        );
     }
 
     #[test]

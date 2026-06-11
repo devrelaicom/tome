@@ -364,18 +364,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
-    /// The `TRANSPORT_OVERRIDE` / `CRASH_POINT` slots are PROCESS-GLOBAL, so two
-    /// flush tests running on different threads would clobber each other's
-    /// override (one's `Drop` clears the slot mid-run of another). Serialise
-    /// every test that drives `run` against the global seams. (Pure-`split_batches`
-    /// transport tests don't touch these slots and live in `transport.rs`.)
-    static FLUSH_SERIAL: Mutex<()> = Mutex::new(());
-
-    /// Acquire the serialisation lock; recover a poisoned mutex (a panicking test
-    /// must not deadlock the rest).
-    fn serial() -> std::sync::MutexGuard<'static, ()> {
-        FLUSH_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-    }
+    /// The `TRANSPORT_OVERRIDE` / `CRASH_POINT` slots are PROCESS-GLOBAL, as is the
+    /// `transport::NETWORK_CALLS` counter and the DEFAULT-`$HOME` queue that the
+    /// MCP loop tests drive — and ALL THREE seam-touching modules (this one,
+    /// `transport.rs`, `mcp::telemetry_flush_loop_tests`) must serialise against
+    /// each other, not just within themselves. So every test that drives `run`
+    /// (installing a transport / crash override) acquires the ONE shared
+    /// `crate::telemetry::test_serial()` lock for its whole duration.
+    use crate::telemetry::test_serial as serial;
 
     fn paths_in(dir: &TempDir) -> Paths {
         Paths::from_root(dir.path().to_path_buf())

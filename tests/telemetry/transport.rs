@@ -12,10 +12,10 @@
 //! ## Serialising the process-global seams
 //!
 //! `TRANSPORT_OVERRIDE`, `CRASH_POINT`, the `time::clock` override, and the
-//! `transport::NETWORK_CALLS` counter are ALL process-global. The in-crate
-//! `flush.rs` tests guard them with a `#[cfg(test)] static FLUSH_SERIAL` mutex
-//! that is invisible across the crate boundary — so this binary uses the next
-//! coarser available lock that the sibling telemetry integration files
+//! `transport::NETWORK_CALLS` counter are ALL process-global. The in-crate lib
+//! tests guard them with the `#[cfg(test)]`-only `crate::telemetry::test_serial()`
+//! mutex, which is invisible across the crate boundary — so THIS binary uses the
+//! next coarser available lock that the sibling telemetry integration files
 //! (`mcp_funnel.rs`, `queue_behavior.rs`) ALSO hold: `HOME_MUTEX`, taken via a
 //! `HomeGuard`. Every test here installs a `HomeGuard` for its whole body, so it
 //! can never run concurrently with another seam-touching telemetry test in this

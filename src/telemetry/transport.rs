@@ -203,12 +203,13 @@ pub fn post_batch(stream: &str, ndjson_body: &[u8]) -> Result<u16, TomeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    /// `TOME_TELEMETRY_ENDPOINT` is process-global; serialise the tests that
-    /// mutate it.
-    static ENDPOINT_ENV_MUTEX: Mutex<()> = Mutex::new(());
-
+    /// Both `TOME_TELEMETRY_ENDPOINT` AND the process-global `NETWORK_CALLS`
+    /// counter are shared across the binary; this guard serialises every test that
+    /// mutates the env var or reads/records a `NETWORK_CALLS` delta. It holds the
+    /// ONE shared `crate::telemetry::test_serial()` lock (NOT a transport-local
+    /// mutex) so a `flush.rs` drain or the MCP loop test — which also POST through
+    /// the seam and move the counter — can never run concurrently with these.
     struct EndpointEnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         prior: Option<std::ffi::OsString>,
@@ -216,7 +217,7 @@ mod tests {
 
     impl EndpointEnvGuard {
         fn new() -> Self {
-            let lock = ENDPOINT_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = crate::telemetry::test_serial();
             let prior = std::env::var_os("TOME_TELEMETRY_ENDPOINT");
             // SAFETY: guarded by ENDPOINT_ENV_MUTEX for the guard's lifetime.
             unsafe { std::env::remove_var("TOME_TELEMETRY_ENDPOINT") };
