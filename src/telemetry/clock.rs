@@ -66,6 +66,20 @@ pub fn grace_period_active(mint_time: OffsetDateTime, now: OffsetDateTime) -> bo
     now < mint_time || now < mint_time + GRACE
 }
 
+/// Best-effort parse of an envelope/stamp timestamp (`YYYY-MM-DDTHH:MM:SS.mmmZ`,
+/// the shape [`format_rfc3339_millis`](super::event::format_rfc3339_millis)
+/// produces) back into an [`OffsetDateTime`].
+///
+/// Used by the CLI exit hook to age the oldest queued event and to read the
+/// `last-flush-attempt` throttle stamp. The literal-`Z` millisecond shape is a
+/// strict RFC3339 subset, so [`Rfc3339`](time::format_description::well_known::Rfc3339)
+/// parses it. Returns `None` on any malformed input — the caller treats an
+/// unparsable timestamp as "not old" / "no recorded attempt" (fail-safe: never
+/// spawn off a garbage stamp).
+pub fn parse_rfc3339(s: &str) -> Option<OffsetDateTime> {
+    OffsetDateTime::parse(s.trim(), &time::format_description::well_known::Rfc3339).ok()
+}
+
 /// The UTC calendar date of `now` as `YYYY-MM-DD`.
 ///
 /// Built from the date components (not a format-description string) to avoid a
@@ -150,6 +164,26 @@ mod tests {
         // Zero-padding for single-digit month/day.
         let early = at(2026, Month::January, 5, 0, 0, 0);
         assert_eq!(today_utc_date(early), "2026-01-05");
+    }
+
+    #[test]
+    fn parse_rfc3339_round_trips_the_millis_shape() {
+        // The exact shape `format_rfc3339_millis` emits parses back.
+        let parsed = parse_rfc3339("2026-06-11T14:11:45.123Z").expect("parses");
+        assert_eq!(parsed.year(), 2026);
+        assert_eq!(parsed.month() as u8, 6);
+        assert_eq!(parsed.day(), 11);
+        assert_eq!(parsed.hour(), 14);
+        assert_eq!(parsed.minute(), 11);
+        assert_eq!(parsed.second(), 45);
+        // UTC offset.
+        assert_eq!(parsed.offset(), time::UtcOffset::UTC);
+    }
+
+    #[test]
+    fn parse_rfc3339_returns_none_on_garbage() {
+        assert!(parse_rfc3339("not a timestamp").is_none());
+        assert!(parse_rfc3339("").is_none());
     }
 
     #[test]

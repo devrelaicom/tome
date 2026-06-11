@@ -292,6 +292,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         // surface. Emitted at the terminal `TomeError`→`McpError` conversion;
         // never alters the returned `McpError`.
         crate::mcp::enqueue_tool_error(&state, e.category());
+        // FR-050: nudge the off-path flush timer if this enqueue crossed the
+        // ≥50 threshold. Cheap atomic bump + maybe a `Notify` — never an inline
+        // flush (SC-009).
+        state.note_enqueue();
         // Translate filter-validation results into the contract's
         // structured error codes.
         match &e {
@@ -367,6 +371,8 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         embedder_model_id: Some(state.embedder_entry.name),
         calling_harness: crate::mcp::calling_harness(&state),
     });
+    // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
+    state.note_enqueue();
 
     // FR-M-LOG-5: contract names `filter` as a nested JSON object.
     // tracing flattens fields, so emit two named slots (`filter_catalog`,

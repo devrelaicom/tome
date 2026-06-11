@@ -429,6 +429,8 @@ fn build_state_for_prompts(paths: &tome::paths::Paths) -> Arc<McpState> {
         prompt_registry: Arc::new(registry),
         host_harness: None,
         last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
+        flush_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
+        enqueued_since_flush: std::sync::atomic::AtomicUsize::new(0),
     })
 }
 
@@ -447,5 +449,7 @@ fn build_state_for_get_skill(paths: &tome::paths::Paths) -> Arc<McpState> {
         prompt_registry: Arc::new(PromptRegistry::default()),
         host_harness: None,
         last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
+        flush_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
+        enqueued_since_flush: std::sync::atomic::AtomicUsize::new(0),
     })
 }

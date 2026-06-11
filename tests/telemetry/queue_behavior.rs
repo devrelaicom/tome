@@ -675,6 +675,8 @@ fn build_state(paths: &Paths, host_harness: Option<&str>) -> Arc<McpState> {
         prompt_registry: Arc::new(PromptRegistry::default()),
         host_harness: host_harness.map(str::to_owned),
         last_search_ranks: std::sync::Mutex::new(HashMap::new()),
+        flush_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
+        enqueued_since_flush: std::sync::atomic::AtomicUsize::new(0),
     })
 }
 

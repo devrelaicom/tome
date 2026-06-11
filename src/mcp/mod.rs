@@ -252,6 +252,11 @@ pub fn run(
             "prompt registry built",
         );
 
+        // FR-050: the "flush soon" signal, shared between the tool handlers
+        // (which raise it on the ≥50-enqueue crossing via `McpState::note_enqueue`)
+        // and the background flush task spawned below.
+        let flush_signal = Arc::new(tokio::sync::Notify::new());
+
         let state = Arc::new(state::McpState {
             embedder: Arc::from(handle.embedder),
             reranker: OnceCell::new(),
@@ -262,7 +267,18 @@ pub fn run(
             prompt_registry: Arc::new(prompt_registry),
             host_harness: host_harness.clone(),
             last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            flush_signal: flush_signal.clone(),
+            enqueued_since_flush: std::sync::atomic::AtomicUsize::new(0),
         });
+
+        // FR-049/050: the background telemetry flush task. It owns the 5-min
+        // interval + the shared "flush soon" `Notify`, and on EITHER trigger
+        // `spawn_blocking`s the one sync drain (`telemetry::flush`). It NEVER
+        // calls `flush()` on the async thread — that does a blocking
+        // `reqwest::blocking` POST and would stall this single-thread runtime.
+        // Its `JoinHandle` is aborted after `serve_server` returns so the task
+        // can't outlive the server (no leak).
+        let flush_task = tokio::spawn(telemetry_flush_loop(flush_signal));
 
         let mut server = server::Server::new(state);
 
@@ -295,7 +311,7 @@ pub fn run(
         let triggered_signal = wait_for_shutdown_signal();
         tokio::pin!(triggered_signal);
 
-        tokio::select! {
+        let shutdown_result = tokio::select! {
             res = &mut waiter => {
                 match res {
                     Ok(reason) => {
@@ -357,8 +373,59 @@ pub fn run(
                 }
                 Err(TomeError::Interrupted)
             }
-        }
+        };
+
+        // Tie the background flush task's lifetime to the server: once serving
+        // has ended (either arm above), abort it so it can't outlive the server
+        // or leak past the `block_on`. The drain it might be mid-running is the
+        // sync `telemetry::flush` on the blocking pool, which self-locks + is
+        // best-effort — losing an in-flight final flush is acceptable (the next
+        // process run's exit hook / timer re-drains the queue).
+        flush_task.abort();
+
+        shutdown_result
     })
+}
+
+/// Phase 10 / US3 (FR-049/050): the background telemetry flush loop.
+///
+/// Holds the 5-min interval and the shared "flush soon" [`Notify`]; on EITHER
+/// trigger it `spawn_blocking`s the one sync drain ([`crate::telemetry::flush`]).
+/// This is the ONLY bridge from the async island into the `tokio`-free
+/// `telemetry/` module, and it crosses via `spawn_blocking` per the sync-boundary
+/// discipline — `flush()` does a blocking `reqwest::blocking` POST that must
+/// NEVER run on this single-thread runtime's reactor.
+///
+/// Best-effort throughout (NFR-001): the drain's result is discarded
+/// (background flushes fail silent by design; the foreground `tome telemetry
+/// flush` is the loud one). `flush()` self-acquires its non-blocking `flush.lock`
+/// and self-gates on the grace period, so overlapping interval/notify flushes
+/// are safe — the loser no-ops. The loop runs until its `JoinHandle` is aborted
+/// on server shutdown.
+async fn telemetry_flush_loop(flush_signal: Arc<tokio::sync::Notify>) {
+    // FR-049: the 5-min cadence. `MissedTickBehavior::Skip` (the default for a
+    // fresh interval is `Burst`; a blocking drain could overrun a tick, so skip
+    // missed ticks rather than firing a backlog of flushes back-to-back).
+    let mut interval = tokio::time::interval(Duration::from_secs(300));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The first `interval.tick()` resolves immediately; consume it so the first
+    // real flush is one full period out (the cold-start enqueue is already on
+    // the queue and the exit/notify paths cover early delivery — we don't want a
+    // flush in the first reactor poll of the loop).
+    interval.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = flush_signal.notified() => {}
+        }
+        // Off the async thread: the drain is sync blocking I/O. Don't await the
+        // join — fire-and-forget keeps the loop responsive to the next trigger,
+        // and the drain self-serialises on its own lock.
+        tokio::task::spawn_blocking(|| {
+            let _ = crate::telemetry::flush();
+        });
+    }
 }
 
 /// Build the per-session [`prompts::PromptRegistry`] from the resolved

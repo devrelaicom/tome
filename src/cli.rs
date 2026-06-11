@@ -117,9 +117,6 @@ pub enum Command {
 }
 
 /// `tome telemetry <subcommand>` — control the local-first telemetry subsystem.
-///
-/// `flush` lands in a later slice (US3); the US1 control surface plus the US2
-/// read-only `inspect` are exposed here.
 #[derive(Debug, Subcommand)]
 pub enum TelemetryCommand {
     /// Report telemetry state: enabled + why, install UUID (if any), the
@@ -142,6 +139,11 @@ pub enum TelemetryCommand {
     /// Delete all telemetry state (install UUID + queue) and switch telemetry
     /// off until explicitly re-enabled.
     Purge,
+    /// Drain the pending event queue to the collector in the FOREGROUND and
+    /// report the outcome. Exits 90 (`TelemetryEndpointUnreachable`) if the
+    /// endpoint is unreachable. The detached background flusher invokes this with
+    /// `--quiet` (no output, always exit 0).
+    Flush(TelemetryFlushArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -149,6 +151,13 @@ pub struct TelemetryResetArgs {
     /// Skip the confirmation prompt.
     #[arg(long)]
     pub yes: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct TelemetryFlushArgs {
+    /// Suppress all output and always exit 0 (used by the detached child).
+    #[arg(long)]
+    pub quiet: bool,
 }
 
 /// `tome meta <subcommand>` — manage Tome's bundled meta skills.

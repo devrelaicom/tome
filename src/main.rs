@@ -73,6 +73,14 @@ fn main() {
     // corrupt-queue report would otherwise grow the very file it just reported).
     let is_telemetry_cmd = matches!(cli.command, Command::Telemetry(_));
 
+    // Whether the single-exit-path flusher teardown should run. It must NOT run
+    // for `Command::Mcp` (the MCP server runs its OWN `tokio` interval flusher)
+    // NOR `Command::Telemetry` — the detached `tome telemetry flush --quiet`
+    // child IS a `Telemetry` command, so gating it OFF here is precisely what
+    // stops a fork-bomb: the child never forks another flusher. Other telemetry
+    // subcommands (`status`/`reset`/…) likewise shouldn't fork a flusher.
+    let is_mcp_or_telemetry = matches!(cli.command, Command::Mcp(_) | Command::Telemetry(_));
+
     let result = match cli.command {
         Command::Catalog(cmd) => commands::catalog::run(cmd, &scope, mode),
         Command::Plugin(args) => match args.command {
@@ -104,7 +112,9 @@ fn main() {
     // is fine — there is nothing queued before a command runs).
     match result {
         Ok(()) => {
-            tome::telemetry::teardown_at_exit();
+            if !is_mcp_or_telemetry {
+                tome::telemetry::teardown_at_exit();
+            }
             std::process::exit(0);
         }
         Err(err) => {
@@ -130,7 +140,9 @@ fn main() {
                     calling_harness: None,
                 });
             }
-            tome::telemetry::teardown_at_exit();
+            if !is_mcp_or_telemetry {
+                tome::telemetry::teardown_at_exit();
+            }
             std::process::exit(code);
         }
     }
