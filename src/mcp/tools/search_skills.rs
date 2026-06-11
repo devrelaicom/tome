@@ -292,6 +292,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         // surface. Emitted at the terminal `TomeError`→`McpError` conversion;
         // never alters the returned `McpError`.
         crate::mcp::enqueue_tool_error(&state, e.category());
+        // US4 deferral: no clean plugin context at this error boundary. A search
+        // failure is not scoped to a single plugin (it is a query/embedder/index
+        // failure), so there is no `plugin_name`/`plugin_version` to attribute —
+        // the attributed `catalog.<id>.error` stays deferred here. Anonymous
+        // `tome.error` above is the right granularity for a search failure.
         // FR-050: nudge the off-path flush timer if this enqueue crossed the
         // ≥50 threshold. Cheap atomic bump + maybe a `Notify` — never an inline
         // flush (SC-009).
@@ -373,6 +378,35 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     });
     // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
     state.note_enqueue();
+
+    // FR-052 + FR-057: ALONGSIDE the anonymous `tome.search` above, emit one
+    // catalog-attributed `catalog.<id>.search_result` per result entry whose
+    // catalog resolves — by SOURCE, at emit time — to an allowlisted catalog.
+    // `rank` is the EXACT 1-indexed position in the returned (already top-k,
+    // reranked) list, NOT bucketed (FR-057): server-side selection attribution
+    // joins this against the later `entry_invoked` on `(session_uuid,
+    // entry_name)`. Attribution is memoised per catalog name so a result set
+    // spanning several catalogs opens the read-only index at most once per
+    // distinct catalog (NFR-009 — no lock). Best-effort; never alters the result.
+    let mut attribution_cache: std::collections::HashMap<String, Option<&'static str>> =
+        std::collections::HashMap::new();
+    let search_harness = crate::mcp::calling_harness(&state);
+    for (idx, m) in matches.iter().enumerate() {
+        let catalog_id = *attribution_cache
+            .entry(m.catalog.clone())
+            .or_insert_with(|| crate::telemetry::resolve_attribution(&state.scope, &m.catalog));
+        if let Some(catalog_id) = catalog_id {
+            crate::telemetry::enqueue_attributed(crate::telemetry::event::SearchResult {
+                entry_name: m.name.clone(),
+                entry_kind: m.kind.into(),
+                plugin_name: m.plugin.clone(),
+                // EXACT 1-indexed rank (FR-057) — `idx + 1`, never bucketed.
+                rank: (idx + 1) as u32,
+                catalog_id,
+                calling_harness: search_harness,
+            });
+        }
+    }
 
     // FR-M-LOG-5: contract names `filter` as a nested JSON object.
     // tracing flattens fields, so emit two named slots (`filter_catalog`,

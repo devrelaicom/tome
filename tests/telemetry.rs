@@ -9,6 +9,12 @@
 
 mod common;
 
+// US4 (T062): the catalog-attributed stream's integration-level acceptance
+// guarantees — both-streams-same-drain (SC-006), source-is-the-gate name
+// collision (FR-052), exact `rank` (FR-057), never-sampled (FR-058), and
+// emit-time `const` de-allowlist (FR-053).
+#[path = "telemetry/attributed.rs"]
+mod attributed;
 // Per-command anonymous emits: real-binary catalog/workspace/doctor paths
 // (cross-platform) + an in-process, Unix-only CLI `tome.search` section.
 #[path = "telemetry/command_emits.rs"]

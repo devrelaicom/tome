@@ -23,14 +23,16 @@ use tome::error::ErrorCategory;
 use tome::telemetry::buckets::{
     CountBucket, FindingsBucket, LatencyBucket, LoadBucket, RankBucket,
 };
-use tome::telemetry::event::{AnonymousEvent, fixed_envelope_for_tests, to_line};
 use tome::telemetry::event::{
-    Artifact, AuthoringActionEvent, AuthoringOutcome, AuthoringVerb, CatalogAction,
-    CatalogActionEvent, ColdStart, DoctorRun, EntryInfo, EntryInvoked, EntryKind, ErrorEvent,
-    Harness, HarnessAction, HarnessActionEvent, Heartbeat, Install, InstallMethod, MetaAction,
-    MetaActionEvent, ModelDownload, Outcome, PluginAction, PluginActionEvent, PromptInvoked,
-    PromptKind, Reindex, ReindexScope, Search, SourceFormat, SourceType, Surface, Upgrade,
-    VersionStr, WorkspaceAction, WorkspaceActionEvent,
+    AnonymousEvent, fixed_attributed_envelope_for_tests, fixed_envelope_for_tests, to_line,
+};
+use tome::telemetry::event::{
+    Artifact, AttributedEntryInvoked, AuthoringActionEvent, AuthoringOutcome, AuthoringVerb,
+    CatalogAction, CatalogActionEvent, ColdStart, DoctorRun, EntryInfo, EntryInvoked, EntryKind,
+    ErrorEvent, Harness, HarnessAction, HarnessActionEvent, Heartbeat, Install, InstallMethod,
+    MetaAction, MetaActionEvent, ModelDownload, Outcome, PluginAction, PluginActionEvent,
+    PromptInvoked, PromptKind, Reindex, ReindexScope, Search, SourceFormat, SourceType, Surface,
+    Upgrade, VersionStr, WorkspaceAction, WorkspaceActionEvent,
 };
 
 /// Serialize `event` behind the canonical fixed envelope for its event type and
@@ -77,6 +79,33 @@ fn install_envelope_matches_data_model_worked_example() {
     assert_eq!(
         got, expected,
         "tome.install drifted from the data-model §10 pin"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Attributed pin — the data-model §10 `catalog.midnight.entry_invoked` worked
+// example 2, byte-exact across the crate boundary. Note: the attributed envelope
+// has NO `sample_rate` (FR-058, attributed events are never sampled).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn attributed_entry_invoked_matches_data_model_worked_example_2() {
+    let envelope =
+        fixed_attributed_envelope_for_tests("catalog.midnight.entry_invoked".to_string());
+    let event = AttributedEntryInvoked {
+        entry_name: "midnight-compact-debug".to_string(),
+        entry_kind: EntryKind::Skill,
+        plugin_name: "midnight-expert".to_string(),
+        plugin_version: "1.2.0".to_string(),
+        catalog_id: "midnight",
+        calling_harness: Some(Harness::ClaudeCode),
+    };
+    let got = to_line(&envelope, &event).expect("attributed event serialises");
+    // Pinned byte-for-byte against `specs/010-phase-10-telemetry/data-model.md` §10.
+    let expected = "{\"schema_version\":1,\"install_uuid\":\"0b9c1f2e-3a4d-4b6c-8e1f-2a3b4c5d6e7f\",\"session_uuid\":\"7f6e5d4c-3b2a-4f1e-9c8b-1a2b3c4d5e6f\",\"tome_version\":\"0.6.0\",\"os\":\"macos\",\"arch\":\"aarch64\",\"timestamp\":\"2026-06-11T14:12:03.456Z\",\"event_type\":\"catalog.midnight.entry_invoked\",\"entry_name\":\"midnight-compact-debug\",\"entry_kind\":\"skill\",\"plugin_name\":\"midnight-expert\",\"plugin_version\":\"1.2.0\",\"catalog_id\":\"midnight\",\"calling_harness\":\"claude-code\"}";
+    assert_eq!(
+        got, expected,
+        "catalog.midnight.entry_invoked drifted from the data-model §10 pin"
     );
 }
 

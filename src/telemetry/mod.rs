@@ -11,6 +11,7 @@
 //! callers — the CLI single-exit-path [`teardown_at_exit`] (which forks the
 //! detached `setsid` flusher via [`spawn`]) and the MCP timer (in `src/mcp/`).
 
+pub mod allowlist;
 pub mod buckets;
 pub mod clock;
 pub mod config;
@@ -22,10 +23,12 @@ pub mod install_method;
 pub mod lock;
 pub mod notice;
 pub mod queue;
+pub mod resolver;
 pub mod spawn;
 pub mod transport;
 
 pub use install_method::detect_install_method;
+pub use resolver::resolve_attribution;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -237,6 +240,71 @@ pub fn enqueue_to<E: event::AnonymousEvent>(paths: &crate::paths::Paths, event: 
     // event, never a propagated failure on this silent path.
     if let Err(e) = queue::append(paths, &line) {
         tracing::debug!(target: "telemetry", error = %e, "enqueue dropped: queue append failed");
+    }
+}
+
+/// Append one CATALOG-ATTRIBUTED event to the local JSONL queue.
+///
+/// Mirrors [`enqueue`] exactly (same gate, same best-effort/infallible contract,
+/// same single `O_APPEND`) with ONE difference: the envelope's `event_type` is
+/// built dynamically as `catalog.<catalog_id>.<suffix>` and `sample_rate` is
+/// omitted. The caller has ALREADY resolved attribution (via
+/// [`allowlist::match_source`]) and constructed the typed event with the matched
+/// short id; this function does NOT re-resolve — it just stamps and appends.
+///
+/// Attributed events are NEVER sampled (FR-058): there is no client-side sampling
+/// in v1, but should one ever be added, the attributed path MUST bypass the
+/// sample gate entirely (their volume is bounded by allowlist size, per-event
+/// value is high). This function is the place that bypass belongs.
+pub fn enqueue_attributed<E: event::AttributedEvent>(event: E) {
+    if !is_enabled() {
+        return;
+    }
+    let paths = match crate::paths::Paths::resolve() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(target: "telemetry", error = %e, "enqueue_attributed skipped: $HOME unresolvable");
+            return;
+        }
+    };
+    enqueue_attributed_to(&paths, event);
+}
+
+/// Path-injectable [`enqueue_attributed`] (the shared body). Doc-hidden test seam,
+/// mirroring [`enqueue_to`]: UN-GATED (callers must gate on the enabled state, or
+/// use the public [`enqueue_attributed`]).
+#[doc(hidden)]
+pub fn enqueue_attributed_to<E: event::AttributedEvent>(paths: &crate::paths::Paths, event: E) {
+    let (install_uuid, _just_minted) = match identity::ensure_install_id(paths) {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::debug!(target: "telemetry", error = %e, "enqueue_attributed skipped: install id unavailable");
+            return;
+        }
+    };
+
+    // Build the dynamic dotted type `catalog.<id>.<suffix>` and an envelope with
+    // NO `sample_rate` (FR-058 — attributed events are never sampled).
+    let event_type = format!("catalog.{}.{}", event.catalog_id(), E::EVENT_SUFFIX);
+    let envelope = event::Envelope::new_attributed(
+        install_uuid,
+        identity::session_id(),
+        event::CURRENT_OS,
+        event::CURRENT_ARCH,
+        event::format_rfc3339_millis(clock::now_utc()),
+        event_type,
+    );
+
+    let line = match event::to_line(&envelope, &event) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::debug!(target: "telemetry", error = %e, "enqueue_attributed skipped: serialization failed");
+            return;
+        }
+    };
+
+    if let Err(e) = queue::append(paths, &line) {
+        tracing::debug!(target: "telemetry", error = %e, "enqueue_attributed dropped: queue append failed");
     }
 }
 
@@ -482,6 +550,41 @@ mod tests {
         );
 
         assert!(paths.telemetry_id().exists(), "id minted by first enqueue");
+    }
+
+    #[test]
+    fn enqueue_attributed_to_builds_catalog_event_type_and_keeps_names() {
+        use crate::telemetry::event::{AttributedEntryInvoked, EntryKind, Harness};
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+
+        enqueue_attributed_to(
+            &paths,
+            AttributedEntryInvoked {
+                entry_name: "midnight-compact-debug".to_string(),
+                entry_kind: EntryKind::Skill,
+                plugin_name: "midnight-expert".to_string(),
+                plugin_version: "1.2.0".to_string(),
+                catalog_id: "midnight",
+                calling_harness: Some(Harness::ClaudeCode),
+            },
+        );
+
+        let lines = queue::read_lines(&paths).unwrap();
+        assert_eq!(lines.len(), 1, "exactly one append");
+        let v: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        // The dynamic `catalog.<id>.<suffix>` type.
+        assert_eq!(v["event_type"], "catalog.midnight.entry_invoked");
+        // The artefact-name carve-out fields are present (FR-059).
+        assert_eq!(v["entry_name"], "midnight-compact-debug");
+        assert_eq!(v["plugin_name"], "midnight-expert");
+        assert_eq!(v["plugin_version"], "1.2.0");
+        assert_eq!(v["catalog_id"], "midnight");
+        // Attributed events are never sampled ⇒ no `sample_rate` field (FR-058).
+        assert!(
+            v.get("sample_rate").is_none(),
+            "attributed events omit sample_rate"
+        );
     }
 
     // -----------------------------------------------------------------------

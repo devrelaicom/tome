@@ -91,6 +91,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                 // conversion in this handler (the other error arms are non-`TomeError`
                 // lookup/read outcomes already shaped to the contract codes).
                 crate::mcp::enqueue_tool_error(&state, e.category());
+                // US4 deferral: no clean plugin context at this error boundary.
+                // The attributed `catalog.<id>.error` requires a (non-optional)
+                // `plugin_version`, but a *lookup* failure here means the entry
+                // row was never resolved — there is no trustworthy version to
+                // attribute, and the catalog/plugin may not even resolve to an
+                // allowlisted source. Fabricating a version would be worse than
+                // the anonymous-only `tome.error` already emitted above, so the
+                // attributed error stays deferred at this boundary.
                 // FR-050: nudge the off-path flush timer on the ≥50 crossing.
                 state.note_enqueue();
                 internal(&input, started, e.to_string(), e.category().as_str())
@@ -156,6 +164,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         plugin_version,
     } = hit;
     let skill_path = body_path;
+    // Capture the version before it is moved into the substitution closure
+    // below — the catalog-attributed emit (further down) needs it, and it is a
+    // PUBLISHED manifest value (the FR-059 carve-out), not a secret.
+    let attributed_plugin_version = plugin_version.clone();
 
     // The actual file read + frontmatter strip + sibling walk is all
     // synchronous I/O; do it on the blocking pool.
@@ -249,6 +261,23 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         rank_bucket: crate::mcp::rank_bucket_for(&state, &input.name),
         calling_harness: crate::mcp::calling_harness(&state),
     });
+
+    // FR-052: ALONGSIDE the anonymous `tome.entry_invoked`, emit the attributed
+    // `catalog.<id>.entry_invoked` ONLY when this entry's catalog resolves — by
+    // SOURCE, at emit time — to an allowlisted catalog. The attribution read
+    // opens the index read-only with no lock (NFR-009); `None` ⇒ anonymous only.
+    // The artefact names (entry/plugin name + version) are PUBLISHED values
+    // (FR-059), never secrets. Best-effort — never alters the tool result.
+    if let Some(catalog_id) = crate::telemetry::resolve_attribution(&state.scope, &input.catalog) {
+        crate::telemetry::enqueue_attributed(crate::telemetry::event::AttributedEntryInvoked {
+            entry_name: input.name.clone(),
+            entry_kind: crate::telemetry::event::EntryKind::Skill,
+            plugin_name: input.plugin.clone(),
+            plugin_version: attributed_plugin_version,
+            catalog_id,
+            calling_harness: crate::mcp::calling_harness(&state),
+        });
+    }
     // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
     state.note_enqueue();
 

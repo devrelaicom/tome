@@ -519,6 +519,17 @@ fn run_disable_action(paths: &Paths, scope: &ResolvedScope, id: &PluginId) -> Lo
         action: crate::telemetry::event::PluginAction::Disabled,
     });
 
+    // FR-052: ALONGSIDE the anonymous event, the catalog-attributed
+    // `plugin_disabled` when this plugin's catalog resolves (by SOURCE) to an
+    // allowlisted catalog — mirrors the non-interactive `disable::run` path.
+    if let Some(catalog_id) = crate::telemetry::resolve_attribution(scope, &id.catalog) {
+        crate::telemetry::enqueue_attributed(crate::telemetry::event::PluginDisabled {
+            plugin_name: id.plugin.clone(),
+            plugin_version: super::attributed_plugin_version(paths, &scope.scope, id),
+            catalog_id,
+        });
+    }
+
     let mut out = std::io::stdout().lock();
     let _ = writeln!(
         out,

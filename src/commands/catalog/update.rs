@@ -137,8 +137,47 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
                 allow_model_download: false,
             };
 
+            // Capture each enabled plugin's CURRENT (pre-reindex) version so we
+            // can detect a real version change after the reindex below — the
+            // attributed `plugin_updated` event carries `from`/`to` (FR-056).
+            // Read-only, best-effort: any miss yields an empty string and is
+            // diffed normally (a blank→version transition still counts as a
+            // change, which is correct for a freshly-indexed plugin).
+            let old_versions = read_plugin_versions(&paths, &ws_name, &catalog_name, &enabled);
+
             let outcome = reindex_catalog_plugins(&catalog_name, &enabled, &deps)?;
             emit_reindex_outcome(mode, &catalog_name, &outcome)?;
+
+            // FR-052 + FR-056: ALONGSIDE the anonymous `tome.catalog_action`
+            // emitted once per refreshed catalog above, emit one attributed
+            // `catalog.<id>.plugin_updated` per plugin whose version CHANGED —
+            // but ONLY when this workspace's catalog resolves, by SOURCE at emit
+            // time, to an allowlisted catalog. Resolved per (workspace, catalog)
+            // so a multi-workspace refresh attributes correctly. Best-effort:
+            // the attribution + version reads never lock and never fail the run.
+            let ws_resolved = crate::workspace::ResolvedScope {
+                scope: ws_scope.clone(),
+                source: crate::workspace::ScopeSource::Flag,
+                project_root: None,
+            };
+            if let Some(catalog_id) =
+                crate::telemetry::resolve_attribution(&ws_resolved, &catalog_name)
+            {
+                let new_versions = read_plugin_versions(&paths, &ws_name, &catalog_name, &enabled);
+                for plugin_name in &enabled {
+                    let from = old_versions.get(plugin_name).cloned().unwrap_or_default();
+                    let to = new_versions.get(plugin_name).cloned().unwrap_or_default();
+                    if from == to {
+                        continue;
+                    }
+                    crate::telemetry::enqueue_attributed(crate::telemetry::event::PluginUpdated {
+                        plugin_name: plugin_name.clone(),
+                        from_version: from,
+                        to_version: to,
+                        catalog_id,
+                    });
+                }
+            }
 
             // FR-365 + FR-385 + FR-423: regenerate the workspace's
             // cached summary if any plugin in this catalog changed
@@ -222,6 +261,33 @@ fn read_enabled_plugins_for(
         },
     )?;
     enabled_plugins_for_catalog(&conn, workspace, catalog)
+}
+
+/// Best-effort read of each plugin's `plugin_version` from the index, keyed by
+/// plugin name, for the catalog-attributed `plugin_updated` event (Phase 10 /
+/// US4). Opens the central index READ-ONLY with NO advisory lock (NFR-009).
+///
+/// Infallible: any failure (missing DB, query error) yields an empty map, and a
+/// plugin with no row is simply absent (its `from`/`to` default to empty at the
+/// diff site). The versions are PUBLISHED manifest values (the FR-059 carve-out).
+fn read_plugin_versions(
+    paths: &Paths,
+    workspace: &str,
+    catalog: &str,
+    plugins: &[String],
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(conn) = index::open_read_only(&paths.index_db) else {
+        return out;
+    };
+    for plugin in plugins {
+        if let Ok(rows) = crate::index::skills::list_for_plugin(&conn, workspace, catalog, plugin)
+            && let Some(row) = rows.into_iter().next()
+        {
+            out.insert(plugin.clone(), row.plugin_version);
+        }
+    }
+    out
 }
 
 /// Per-plugin row in the catalog-update summary. One of `summary` or
