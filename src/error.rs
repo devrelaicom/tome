@@ -435,6 +435,35 @@ pub enum TomeError {
     NoHarnessDetected,
 
     // -----------------------------------------------------------------------
+    // Phase 10 — telemetry (codes 90–92).
+    //
+    // Three NEW failure classes (principle II — new classes get new codes,
+    // none repurposed), opening the 90s decade. Only the *foreground*
+    // `tome telemetry flush` surfaces these; background/`--quiet` flushes fail
+    // silent by design (the scoped Principle-V exception, plan §Constitution).
+    // See `specs/010-phase-10-telemetry/data-model.md`.
+    // -----------------------------------------------------------------------
+    /// The foreground flusher could not deliver the queue to the collector
+    /// endpoint. `endpoint` is ALREADY scrubbed by the caller (no credentials
+    /// reach this variant) — it names the host the POST targeted, for the
+    /// operator's benefit.
+    #[error("telemetry endpoint unreachable: {endpoint}")]
+    TelemetryEndpointUnreachable { endpoint: String },
+
+    /// `telemetry/config.toml` exists but is malformed (parse failure or an
+    /// out-of-range field). The on-disk config is Tome-owned, so this is a
+    /// strict-parse failure, not a third-party leniency case.
+    #[error("telemetry config invalid at {}: {detail}", path.display())]
+    TelemetryConfigInvalid { path: PathBuf, detail: String },
+
+    /// The local JSONL queue is unreadable as a sequence of telemetry events —
+    /// `count` records were dropped while self-healing the file. Distinct from
+    /// `Io` (7): the bytes were readable but not valid events (e.g. a torn
+    /// non-local line), which the flusher recovers from rather than aborting.
+    #[error("telemetry queue corrupt at {}: dropped {count} record(s)", path.display())]
+    TelemetryQueueCorrupt { path: PathBuf, count: usize },
+
+    // -----------------------------------------------------------------------
     // Internal — last-resort variant for panics caught at top level, etc.
     // No named failure above may collapse into this — that would defeat the
     // closed-set guarantee.
@@ -567,84 +596,265 @@ impl TomeError {
             Self::MetaSkillNotFound { .. } => 87,
             Self::MetaInstallFailed { .. } => 88,
             Self::NoHarnessDetected => 89,
+            // 90–92 — Phase 10 telemetry. A fresh contiguous decade; only the
+            // foreground `tome telemetry flush` ever returns these.
+            Self::TelemetryEndpointUnreachable { .. } => 90,
+            Self::TelemetryConfigInvalid { .. } => 91,
+            Self::TelemetryQueueCorrupt { .. } => 92,
         }
     }
 
-    /// Snake-case identifier used in `--json` error records. Maps 1:1 to the
-    /// closed error set (FR-022 carried forward + FR-048 additions).
-    pub fn category(&self) -> &'static str {
+    /// Closed category for `--json` error records and MCP error-code slugs.
+    /// Maps 1:1 to the closed error set (FR-022 carried forward + FR-048 +
+    /// the Phase 10 telemetry block). Returning the typed [`ErrorCategory`]
+    /// (rather than a bare `&'static str`) keeps the wire slug stable while
+    /// giving the telemetry `error_class` field a closed enum to serialise —
+    /// the compiler still enforces exhaustiveness, so a new `TomeError`
+    /// variant fails to build until it is categorised here.
+    pub fn category(&self) -> ErrorCategory {
         match self {
-            Self::Internal(_) => "internal",
-            Self::Usage(_) => "usage",
-            Self::CatalogNotFound(_) => "catalog_not_found",
-            Self::CatalogAlreadyExists(_) => "catalog_already_exists",
-            Self::ManifestInvalid(_) => "manifest_invalid",
-            Self::GitFailed { .. } => "git_failed",
-            Self::Io(_) => "io",
-            Self::Interrupted => "interrupted",
+            Self::Internal(_) => ErrorCategory::Internal,
+            Self::Usage(_) => ErrorCategory::Usage,
+            Self::CatalogNotFound(_) => ErrorCategory::CatalogNotFound,
+            Self::CatalogAlreadyExists(_) => ErrorCategory::CatalogAlreadyExists,
+            Self::ManifestInvalid(_) => ErrorCategory::ManifestInvalid,
+            Self::GitFailed { .. } => ErrorCategory::GitFailed,
+            Self::Io(_) => ErrorCategory::Io,
+            Self::Interrupted => ErrorCategory::Interrupted,
             // Phase 5 / US1.d (R-M1): plugin data dir write failure.
-            Self::PluginDataDirWriteFailed { .. } => "plugin_data_dir_write_failed",
+            Self::PluginDataDirWriteFailed { .. } => ErrorCategory::PluginDataDirWriteFailed,
             // Phase 4 — workspace name + project binding
-            Self::WorkspaceNotFound { .. } => "workspace_not_found",
-            Self::WorkspaceAlreadyExists { .. } => "workspace_already_exists",
-            Self::WorkspaceNameInvalid { .. } => "workspace_name_invalid",
-            Self::WorkspaceHasBoundProjects { .. } => "workspace_has_bound_projects",
+            Self::WorkspaceNotFound { .. } => ErrorCategory::WorkspaceNotFound,
+            Self::WorkspaceAlreadyExists { .. } => ErrorCategory::WorkspaceAlreadyExists,
+            Self::WorkspaceNameInvalid { .. } => ErrorCategory::WorkspaceNameInvalid,
+            Self::WorkspaceHasBoundProjects { .. } => ErrorCategory::WorkspaceHasBoundProjects,
             // Phase 4 — harness composition + integration
-            Self::CompositionError { .. } => "composition_error",
-            Self::HarnessNotSupported { .. } => "harness_not_supported",
-            Self::HarnessClash { .. } => "harness_clash",
+            Self::CompositionError { .. } => ErrorCategory::CompositionError,
+            Self::HarnessNotSupported { .. } => ErrorCategory::HarnessNotSupported,
+            Self::HarnessClash { .. } => ErrorCategory::HarnessClash,
             // Phase 4 — summariser
-            Self::SummariserFailure { .. } => "summariser_failure",
+            Self::SummariserFailure { .. } => ErrorCategory::SummariserFailure,
             // Phase 5 — commands-as-prompts + substitution layer
-            Self::WorkspaceDataDirWriteFailed { .. } => "workspace_data_dir_write_failed",
-            Self::PromptArgumentMismatch { .. } => "prompt_argument_mismatch",
-            Self::EntryNotFound { .. } => "entry_not_found",
-            Self::SubstitutionFailed { .. } => "substitution_failed",
-            Self::InvalidArgumentFrontmatter { .. } => "invalid_argument_frontmatter",
+            Self::WorkspaceDataDirWriteFailed { .. } => ErrorCategory::WorkspaceDataDirWriteFailed,
+            Self::PromptArgumentMismatch { .. } => ErrorCategory::PromptArgumentMismatch,
+            Self::EntryNotFound { .. } => ErrorCategory::EntryNotFound,
+            Self::SubstitutionFailed { .. } => ErrorCategory::SubstitutionFailed,
+            Self::InvalidArgumentFrontmatter { .. } => ErrorCategory::InvalidArgumentFrontmatter,
             // Phase 6 — hooks + agents
-            Self::HookSpecParseError { .. } => "hook_spec_parse_error",
-            Self::HookSettingsWriteFailed { .. } => "hook_settings_write_failed",
-            Self::AgentTranslationFailed { .. } => "agent_translation_failed",
-            Self::GuardrailsWriteFailed { .. } => "guardrails_write_failed",
-            Self::PluginNotFound(_) => "plugin_not_found",
-            Self::PluginAlreadyInState { .. } => "plugin_already_in_state",
-            Self::PluginManifestParseError { .. } => "plugin_manifest_parse_error",
-            Self::SkillFrontmatterParseError { .. } => "skill_frontmatter_parse_error",
-            Self::ModelMissing { .. } => "model_missing",
-            Self::ModelCorrupt { .. } => "model_corrupt",
-            Self::ModelChecksumMismatch { .. } => "model_checksum_mismatch",
-            Self::ModelRegistrationParseError { .. } => "model_registration_parse_error",
-            Self::InferenceRuntimeInitFailure(_) => "inference_runtime_init_failure",
-            Self::VectorExtensionInitFailure(_) => "vector_extension_init_failure",
-            Self::EmbeddingGenerationFailure { .. } => "embedding_generation_failure",
-            Self::RerankingFailure(_) => "reranking_failure",
-            Self::QueryNoResultsStrict { .. } => "query_no_results_strict",
-            Self::EmbedderNameDrift { .. } => "embedder_name_drift",
-            Self::EmbedderVersionDrift { .. } => "embedder_version_drift",
-            Self::IndexBusy => "index_busy",
-            Self::IndexIntegrityCheckFailure(_) => "index_integrity_check_failure",
-            Self::SchemaTooNew { .. } => "schema_too_new",
-            Self::CatalogHasEnabledPlugins { .. } => "catalog_has_enabled_plugins",
-            Self::NotATerminal => "not_a_terminal",
-            Self::McpStartupFailed { .. } => "mcp_startup",
-            Self::McpProtocolIo { .. } => "mcp_io",
-            Self::WorkspaceMalformed { .. } => "workspace_malformed",
-            Self::SchemaVersionTooNew { .. } => "schema_too_new",
-            Self::SchemaMigrationFailed { .. } => "schema_migration",
-            Self::DoctorFixNotSafe { .. } => "doctor_fix_unsafe",
+            Self::HookSpecParseError { .. } => ErrorCategory::HookSpecParseError,
+            Self::HookSettingsWriteFailed { .. } => ErrorCategory::HookSettingsWriteFailed,
+            Self::AgentTranslationFailed { .. } => ErrorCategory::AgentTranslationFailed,
+            Self::GuardrailsWriteFailed { .. } => ErrorCategory::GuardrailsWriteFailed,
+            Self::PluginNotFound(_) => ErrorCategory::PluginNotFound,
+            Self::PluginAlreadyInState { .. } => ErrorCategory::PluginAlreadyInState,
+            Self::PluginManifestParseError { .. } => ErrorCategory::PluginManifestParseError,
+            Self::SkillFrontmatterParseError { .. } => ErrorCategory::SkillFrontmatterParseError,
+            Self::ModelMissing { .. } => ErrorCategory::ModelMissing,
+            Self::ModelCorrupt { .. } => ErrorCategory::ModelCorrupt,
+            Self::ModelChecksumMismatch { .. } => ErrorCategory::ModelChecksumMismatch,
+            Self::ModelRegistrationParseError { .. } => ErrorCategory::ModelRegistrationParseError,
+            Self::InferenceRuntimeInitFailure(_) => ErrorCategory::InferenceRuntimeInitFailure,
+            Self::VectorExtensionInitFailure(_) => ErrorCategory::VectorExtensionInitFailure,
+            Self::EmbeddingGenerationFailure { .. } => ErrorCategory::EmbeddingGenerationFailure,
+            Self::RerankingFailure(_) => ErrorCategory::RerankingFailure,
+            Self::QueryNoResultsStrict { .. } => ErrorCategory::QueryNoResultsStrict,
+            Self::EmbedderNameDrift { .. } => ErrorCategory::EmbedderNameDrift,
+            Self::EmbedderVersionDrift { .. } => ErrorCategory::EmbedderVersionDrift,
+            Self::IndexBusy => ErrorCategory::IndexBusy,
+            Self::IndexIntegrityCheckFailure(_) => ErrorCategory::IndexIntegrityCheckFailure,
+            Self::SchemaTooNew { .. } => ErrorCategory::SchemaTooNew,
+            Self::CatalogHasEnabledPlugins { .. } => ErrorCategory::CatalogHasEnabledPlugins,
+            Self::NotATerminal => ErrorCategory::NotATerminal,
+            Self::McpStartupFailed { .. } => ErrorCategory::McpStartup,
+            Self::McpProtocolIo { .. } => ErrorCategory::McpIo,
+            Self::WorkspaceMalformed { .. } => ErrorCategory::WorkspaceMalformed,
+            // NOTE: shares the `schema_too_new` slug with `SchemaTooNew` above —
+            // byte-identical to today's output; preserved deliberately.
+            Self::SchemaVersionTooNew { .. } => ErrorCategory::SchemaTooNew,
+            Self::SchemaMigrationFailed { .. } => ErrorCategory::SchemaMigration,
+            Self::DoctorFixNotSafe { .. } => ErrorCategory::DoctorFixUnsafe,
             // Phase 8 — authoring & conversion
-            Self::PluginNotConverted { .. } => "plugin_not_converted",
-            Self::OutputExists { .. } => "output_exists",
-            Self::TemplateInvalid { .. } => "template_invalid",
-            Self::SourceFormatUnrecognized { .. } => "source_format_unrecognized",
-            Self::ConversionUnsupportedStrict { .. } => "conversion_unsupported_strict",
-            Self::ValidationFoundErrors { .. } => "validation_found_errors",
-            Self::ValidationStrictWarnings { .. } => "validation_strict_warnings",
+            Self::PluginNotConverted { .. } => ErrorCategory::PluginNotConverted,
+            Self::OutputExists { .. } => ErrorCategory::OutputExists,
+            Self::TemplateInvalid { .. } => ErrorCategory::TemplateInvalid,
+            Self::SourceFormatUnrecognized { .. } => ErrorCategory::SourceFormatUnrecognized,
+            Self::ConversionUnsupportedStrict { .. } => ErrorCategory::ConversionUnsupportedStrict,
+            Self::ValidationFoundErrors { .. } => ErrorCategory::ValidationFoundErrors,
+            Self::ValidationStrictWarnings { .. } => ErrorCategory::ValidationStrictWarnings,
             // Phase 9 — meta skills
-            Self::MetaSkillNotFound { .. } => "meta_skill_not_found",
-            Self::MetaInstallFailed { .. } => "meta_install_failed",
-            Self::NoHarnessDetected => "no_harness_detected",
+            Self::MetaSkillNotFound { .. } => ErrorCategory::MetaSkillNotFound,
+            Self::MetaInstallFailed { .. } => ErrorCategory::MetaInstallFailed,
+            Self::NoHarnessDetected => ErrorCategory::NoHarnessDetected,
+            // Phase 10 — telemetry
+            Self::TelemetryEndpointUnreachable { .. } => {
+                ErrorCategory::TelemetryEndpointUnreachable
+            }
+            Self::TelemetryConfigInvalid { .. } => ErrorCategory::TelemetryConfigInvalid,
+            Self::TelemetryQueueCorrupt { .. } => ErrorCategory::TelemetryQueueCorrupt,
         }
+    }
+}
+
+/// Closed, wire-stable category for the `--json` error envelope and MCP
+/// error-code slugs. One variant per `TomeError` failure class; [`Self::as_str`]
+/// returns the byte-identical snake_case slug the error set has always emitted.
+///
+/// This is an emit-only `Serialize` record (the telemetry `error_class` field
+/// plus the existing JSON/MCP surfaces) — there is no `deny_unknown_fields`,
+/// which is reserved for *inputs*. Both the `SchemaTooNew` and
+/// `SchemaVersionTooNew` error classes deliberately map onto the single
+/// `SchemaTooNew` category, preserving the slug overlap that predates this
+/// refactor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCategory {
+    Internal,
+    Usage,
+    CatalogNotFound,
+    CatalogAlreadyExists,
+    ManifestInvalid,
+    GitFailed,
+    Io,
+    Interrupted,
+    PluginDataDirWriteFailed,
+    WorkspaceNotFound,
+    WorkspaceAlreadyExists,
+    WorkspaceNameInvalid,
+    WorkspaceHasBoundProjects,
+    CompositionError,
+    HarnessNotSupported,
+    HarnessClash,
+    SummariserFailure,
+    WorkspaceDataDirWriteFailed,
+    PromptArgumentMismatch,
+    EntryNotFound,
+    SubstitutionFailed,
+    InvalidArgumentFrontmatter,
+    HookSpecParseError,
+    HookSettingsWriteFailed,
+    AgentTranslationFailed,
+    GuardrailsWriteFailed,
+    PluginNotFound,
+    PluginAlreadyInState,
+    PluginManifestParseError,
+    SkillFrontmatterParseError,
+    ModelMissing,
+    ModelCorrupt,
+    ModelChecksumMismatch,
+    ModelRegistrationParseError,
+    InferenceRuntimeInitFailure,
+    VectorExtensionInitFailure,
+    EmbeddingGenerationFailure,
+    RerankingFailure,
+    QueryNoResultsStrict,
+    EmbedderNameDrift,
+    EmbedderVersionDrift,
+    IndexBusy,
+    IndexIntegrityCheckFailure,
+    SchemaTooNew,
+    CatalogHasEnabledPlugins,
+    NotATerminal,
+    McpStartup,
+    McpIo,
+    WorkspaceMalformed,
+    SchemaMigration,
+    DoctorFixUnsafe,
+    PluginNotConverted,
+    OutputExists,
+    TemplateInvalid,
+    SourceFormatUnrecognized,
+    ConversionUnsupportedStrict,
+    ValidationFoundErrors,
+    ValidationStrictWarnings,
+    MetaSkillNotFound,
+    MetaInstallFailed,
+    NoHarnessDetected,
+    TelemetryEndpointUnreachable,
+    TelemetryConfigInvalid,
+    TelemetryQueueCorrupt,
+}
+
+impl ErrorCategory {
+    /// The byte-stable snake_case slug. Wire-facing — changing any string here
+    /// breaks the `--json` error envelope and MCP error-code contracts.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Internal => "internal",
+            Self::Usage => "usage",
+            Self::CatalogNotFound => "catalog_not_found",
+            Self::CatalogAlreadyExists => "catalog_already_exists",
+            Self::ManifestInvalid => "manifest_invalid",
+            Self::GitFailed => "git_failed",
+            Self::Io => "io",
+            Self::Interrupted => "interrupted",
+            Self::PluginDataDirWriteFailed => "plugin_data_dir_write_failed",
+            Self::WorkspaceNotFound => "workspace_not_found",
+            Self::WorkspaceAlreadyExists => "workspace_already_exists",
+            Self::WorkspaceNameInvalid => "workspace_name_invalid",
+            Self::WorkspaceHasBoundProjects => "workspace_has_bound_projects",
+            Self::CompositionError => "composition_error",
+            Self::HarnessNotSupported => "harness_not_supported",
+            Self::HarnessClash => "harness_clash",
+            Self::SummariserFailure => "summariser_failure",
+            Self::WorkspaceDataDirWriteFailed => "workspace_data_dir_write_failed",
+            Self::PromptArgumentMismatch => "prompt_argument_mismatch",
+            Self::EntryNotFound => "entry_not_found",
+            Self::SubstitutionFailed => "substitution_failed",
+            Self::InvalidArgumentFrontmatter => "invalid_argument_frontmatter",
+            Self::HookSpecParseError => "hook_spec_parse_error",
+            Self::HookSettingsWriteFailed => "hook_settings_write_failed",
+            Self::AgentTranslationFailed => "agent_translation_failed",
+            Self::GuardrailsWriteFailed => "guardrails_write_failed",
+            Self::PluginNotFound => "plugin_not_found",
+            Self::PluginAlreadyInState => "plugin_already_in_state",
+            Self::PluginManifestParseError => "plugin_manifest_parse_error",
+            Self::SkillFrontmatterParseError => "skill_frontmatter_parse_error",
+            Self::ModelMissing => "model_missing",
+            Self::ModelCorrupt => "model_corrupt",
+            Self::ModelChecksumMismatch => "model_checksum_mismatch",
+            Self::ModelRegistrationParseError => "model_registration_parse_error",
+            Self::InferenceRuntimeInitFailure => "inference_runtime_init_failure",
+            Self::VectorExtensionInitFailure => "vector_extension_init_failure",
+            Self::EmbeddingGenerationFailure => "embedding_generation_failure",
+            Self::RerankingFailure => "reranking_failure",
+            Self::QueryNoResultsStrict => "query_no_results_strict",
+            Self::EmbedderNameDrift => "embedder_name_drift",
+            Self::EmbedderVersionDrift => "embedder_version_drift",
+            Self::IndexBusy => "index_busy",
+            Self::IndexIntegrityCheckFailure => "index_integrity_check_failure",
+            Self::SchemaTooNew => "schema_too_new",
+            Self::CatalogHasEnabledPlugins => "catalog_has_enabled_plugins",
+            Self::NotATerminal => "not_a_terminal",
+            Self::McpStartup => "mcp_startup",
+            Self::McpIo => "mcp_io",
+            Self::WorkspaceMalformed => "workspace_malformed",
+            Self::SchemaMigration => "schema_migration",
+            Self::DoctorFixUnsafe => "doctor_fix_unsafe",
+            Self::PluginNotConverted => "plugin_not_converted",
+            Self::OutputExists => "output_exists",
+            Self::TemplateInvalid => "template_invalid",
+            Self::SourceFormatUnrecognized => "source_format_unrecognized",
+            Self::ConversionUnsupportedStrict => "conversion_unsupported_strict",
+            Self::ValidationFoundErrors => "validation_found_errors",
+            Self::ValidationStrictWarnings => "validation_strict_warnings",
+            Self::MetaSkillNotFound => "meta_skill_not_found",
+            Self::MetaInstallFailed => "meta_install_failed",
+            Self::NoHarnessDetected => "no_harness_detected",
+            Self::TelemetryEndpointUnreachable => "telemetry_endpoint_unreachable",
+            Self::TelemetryConfigInvalid => "telemetry_config_invalid",
+            Self::TelemetryQueueCorrupt => "telemetry_queue_corrupt",
+        }
+    }
+}
+
+impl std::fmt::Display for ErrorCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl serde::Serialize for ErrorCategory {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 

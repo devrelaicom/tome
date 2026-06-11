@@ -171,7 +171,19 @@ toml_edit = "0.25"
 # intermediate-component walk that the deferred final-node-only `O_NOFOLLOW`
 # half-measure could never offer (research §R-1). `version = "1"` matches the
 # locked 1.1.4; `fs` is the feature the primitive needs (already enabled).
-rustix = { version = "1", features = ["fs"] }
+# Phase 10 adds the `process` feature for `rustix::process::setsid`, used to
+# detach the best-effort telemetry flusher (FR-047a) — still a feature-add on
+# an already-direct dep (1.1.4), so it adds NO new Cargo.lock package.
+rustix = { version = "1", features = ["fs", "process"] }
+
+# Phase 10 — promoted from transitive (0.3.4 already locked, pulled by tempfile
+# and the ring/rustls stack) to a direct dep under the constitution
+# §Complexity-budget "make-it-explicit" rule (precedent: filetime, encoding_rs,
+# rustix). Source of the v4 install-UUID randomness; `cargo tree -i getrandom`
+# resolves a single 0.3.4 so this adds ZERO new Cargo.lock package (NFR-004).
+# A `getrandom`-based hand-rolled v4 UUID (16 bytes, RFC-4122 variant/version
+# bits set) keeps us off the `uuid` crate entirely (NFR-002).
+getrandom = "0.3"
 
 # Phase 8 — template rendering for `tome {catalog,plugin,skill} create --template`.
 # The lightest maintained engine: `serde` (already in tree) plus exactly ONE new

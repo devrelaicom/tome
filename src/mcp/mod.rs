@@ -101,7 +101,7 @@ pub fn run(
                     // startup in mcp.log (not just stderr).
                     error!(
                         target: "tome::mcp::preflight",
-                        check = e.category(),
+                        check = e.category().as_str(),
                         error = %scrub_to_string(e.to_string().as_bytes()),
                         "pre-flight check failed",
                     );

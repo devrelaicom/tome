@@ -484,7 +484,7 @@ fn every_variant_has_documented_exit_code_and_category() {
             err
         );
         assert_eq!(
-            err.category(),
+            err.category().as_str(),
             expected_category,
             "variant {:?} produced unexpected category",
             err
@@ -577,6 +577,9 @@ fn exhaustive_match_compile_check() {
             TomeError::MetaSkillNotFound { .. } => 87,
             TomeError::MetaInstallFailed { .. } => 88,
             TomeError::NoHarnessDetected => 89,
+            TomeError::TelemetryEndpointUnreachable { .. } => 90,
+            TomeError::TelemetryConfigInvalid { .. } => 91,
+            TomeError::TelemetryQueueCorrupt { .. } => 92,
         }
     }
 }
