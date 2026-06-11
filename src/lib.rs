@@ -21,6 +21,7 @@ pub mod presentation;
 pub mod settings;
 pub mod substitution;
 pub mod summarise;
+pub mod telemetry;
 pub mod util;
 pub mod workspace;
 

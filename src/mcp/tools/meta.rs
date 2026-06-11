@@ -151,7 +151,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             .map_err(|e| {
                 // Carry the CLI exit-code slug (meta_skill_not_found /
                 // meta_install_failed) so the MCP error stays consistent.
-                McpError::invalid_params(e.to_string(), Some(json!({ "code": e.category() })))
+                McpError::invalid_params(
+                    e.to_string(),
+                    Some(json!({ "code": e.category().as_str() })),
+                )
             })?;
 
     Ok(Output {

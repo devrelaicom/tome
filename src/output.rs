@@ -55,7 +55,7 @@ pub struct ErrorRecord<'a> {
 impl<'a> ErrorRecord<'a> {
     pub fn from_error(err: &'a TomeError) -> Self {
         Self {
-            category: err.category(),
+            category: err.category().as_str(),
             exit_code: err.exit_code(),
             message: format!("{}", err),
         }

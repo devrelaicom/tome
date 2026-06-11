@@ -406,7 +406,7 @@ fn tome_to_mcp(e: TomeError) -> McpError {
     let scrubbed = crate::catalog::git::scrub_to_string(msg.as_bytes());
     error!(
         target: "tome::mcp::tools::search_skills",
-        error_code = e.category(),
+        error_code = e.category().as_str(),
         error_message = %scrubbed,
         "tool error",
     );
@@ -423,6 +423,6 @@ fn tome_to_mcp(e: TomeError) -> McpError {
             msg,
             Some(json!({ "code": "index_busy" })),
         ),
-        _ => McpError::internal_error(msg, Some(json!({ "code": e.category() }))),
+        _ => McpError::internal_error(msg, Some(json!({ "code": e.category().as_str() }))),
     }
 }

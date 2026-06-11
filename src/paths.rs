@@ -240,6 +240,65 @@ impl Paths {
             .join(plugin)
     }
 
+    // --- Telemetry accessors (Phase 10) ---------------------------------
+    //
+    // All telemetry state lives under `<root>/telemetry/`. The directory is
+    // NOT created here — the telemetry module lands it (mode 0600 for the id
+    // file) at first write. These are pure path joins; no I/O.
+
+    /// `<root>/telemetry/` — the root of the local telemetry state tree.
+    pub fn telemetry_dir(&self) -> PathBuf {
+        self.root.join("telemetry")
+    }
+
+    /// `<root>/telemetry/id` — the local-only v4 install UUID (the funnel join
+    /// key, written `0600`; never network-derived).
+    pub fn telemetry_id(&self) -> PathBuf {
+        self.telemetry_dir().join("id")
+    }
+
+    /// `<root>/telemetry/queue.jsonl` — the append-only event queue drained by
+    /// the best-effort flusher.
+    pub fn telemetry_queue(&self) -> PathBuf {
+        self.telemetry_dir().join("queue.jsonl")
+    }
+
+    /// `<root>/telemetry/config.toml` — opt-out + endpoint config (Tome-owned,
+    /// strict-parsed).
+    pub fn telemetry_config(&self) -> PathBuf {
+        self.telemetry_dir().join("config.toml")
+    }
+
+    /// `<root>/telemetry/flush.lock` — the non-blocking advisory lock that
+    /// serialises concurrent flushers (one delivery at a time).
+    pub fn telemetry_flush_lock(&self) -> PathBuf {
+        self.telemetry_dir().join("flush.lock")
+    }
+
+    /// `<root>/telemetry/last-version` — the binary version stamped at the last
+    /// flush, used to detect an upgrade for the version-change event.
+    pub fn telemetry_last_version(&self) -> PathBuf {
+        self.telemetry_dir().join("last-version")
+    }
+
+    /// `<root>/telemetry/last-heartbeat` — timestamp of the last heartbeat
+    /// event, used to rate-limit heartbeats.
+    pub fn telemetry_last_heartbeat(&self) -> PathBuf {
+        self.telemetry_dir().join("last-heartbeat")
+    }
+
+    /// `<root>/telemetry/last-flush` — timestamp of the last *successful*
+    /// (2xx) delivery.
+    pub fn telemetry_last_flush(&self) -> PathBuf {
+        self.telemetry_dir().join("last-flush")
+    }
+
+    /// `<root>/telemetry/last-flush-attempt` — timestamp of the last flush
+    /// *attempt* (success or not), used for the inter-attempt grace period.
+    pub fn telemetry_last_flush_attempt(&self) -> PathBuf {
+        self.telemetry_dir().join("last-flush-attempt")
+    }
+
     // --- Project marker accessors ---------------------------------------
     //
     // Project markers live at `<project_root>/.tome/`. They are

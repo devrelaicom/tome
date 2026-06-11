@@ -288,7 +288,7 @@ fn plugin_enable_with_illegal_argument_name_exits_29() {
         .expect_err("illegal argument name must reject at enable time");
 
     assert_eq!(
-        err.category(),
+        err.category().as_str(),
         "invalid_argument_frontmatter",
         "illegal arg name → InvalidArgumentFrontmatter; got {err:?}",
     );

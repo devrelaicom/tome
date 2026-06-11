@@ -565,7 +565,7 @@ pub fn mcp_error_exit_code(err: &McpError) -> i32 {
     // Cross-check the reconstructed variant's category matches the slug
     // we observed, so the bridge can't silently drift from the source.
     assert_eq!(
-        canonical.category(),
+        canonical.category().as_str(),
         slug,
         "harness slug→variant bridge drift: slug `{slug}` reconstructed as \
          category `{}`",
