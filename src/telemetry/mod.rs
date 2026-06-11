@@ -6,23 +6,51 @@
 //! deliberately `tokio`-free — it is sync-only (the MCP timer `spawn_blocking`s
 //! into [`flush`]). See `specs/010-phase-10-telemetry/`.
 //!
-//! Phase 2 (this slice) lands config + clock + transport-scaffolding plus the
-//! enqueue gate; the actual queue append (US2) and delivery POST (US3) are
-//! still stubs below.
+//! US1 lands config + clock + transport-scaffolding plus the enqueue gate; US2
+//! the queue append; US3 the delivery POST ([`flush`]) plus the two delivery
+//! callers — the CLI single-exit-path [`teardown_at_exit`] (which forks the
+//! detached `setsid` flusher via [`spawn`]) and the MCP timer (in `src/mcp/`).
 
 pub mod buckets;
 pub mod clock;
 pub mod config;
 pub mod event;
+pub mod flush;
 pub mod heartbeat;
 pub mod identity;
 pub mod install_method;
 pub mod lock;
 pub mod notice;
 pub mod queue;
+pub mod spawn;
 pub mod transport;
 
 pub use install_method::detect_install_method;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set `true` exactly once when THIS process's `cli_startup` minted a fresh
+/// install id. The exit hook reads it: a brand-new install should schedule a
+/// flush even with `< 50` queued events, so the delivery cadence is established
+/// from the first run (the 10-min grace means the child sends nothing yet —
+/// this just primes the throttle/cadence). Process-global because there is one
+/// install id per process and the mint observation and the exit-hook read are
+/// both single-threaded on the CLI path.
+static MINTED_THIS_RUN: AtomicBool = AtomicBool::new(false);
+
+/// The spawn throttle window (FR-048): the exit hook forks at most ONE detached
+/// flusher per minute, so a scripted loop of hundreds of invocations can't
+/// fork-storm (SC-003). Compared against the `telemetry/last-flush-attempt`
+/// stamp the hook writes before each spawn.
+const SPAWN_THROTTLE: time::Duration = time::Duration::minutes(1);
+
+/// The queue-depth threshold (FR-047): a queue at/over this many pending events
+/// triggers a spawn regardless of age.
+const SPAWN_QUEUE_THRESHOLD: usize = 50;
+
+/// The oldest-event age threshold (FR-047): the oldest queued event being older
+/// than this triggers a spawn even below the depth threshold.
+const SPAWN_OLDEST_AGE: time::Duration = time::Duration::minutes(5);
 
 /// Whether telemetry is enabled for this process (opt-out + CI auto-disable).
 ///
@@ -98,6 +126,9 @@ pub fn cli_startup(paths: &crate::paths::Paths) {
     // 3. First-ever run for this install: print the CLI opt-out notice AND emit
     //    `tome.install` exactly ONCE (FR-026). Both hang off the same mint.
     if just_minted {
+        // Record the fresh mint so the exit hook schedules the first flush even
+        // below the queue-depth threshold (establishes the delivery cadence).
+        MINTED_THIS_RUN.store(true, Ordering::Relaxed);
         notice::print_first_run_notice();
         enqueue(event::Install {
             install_method: detect_install_method(),
@@ -211,18 +242,182 @@ pub fn enqueue_to<E: event::AnonymousEvent>(paths: &crate::paths::Paths, event: 
 
 /// Best-effort, blocking delivery of the queued events to the collector.
 ///
-/// Phase-2 fill: non-blocking `flush.lock` → read queue → `reqwest::blocking`
-/// POST → rewrite-after-2xx. Foreground callers surface the
-/// `TelemetryEndpointUnreachable` (exit 90) error; background/`--quiet`
-/// flushes fail silent.
+/// THE single shared sync drain (NFR-010): non-blocking `flush.lock` → grace
+/// gate → read queue → batch → `reqwest::blocking` POST → rewrite-after-2xx →
+/// `last-flush` stamp. Delegates to [`flush::run`] against the default
+/// [`Paths`](crate::paths::Paths); an unresolvable `$HOME` is best-effort
+/// `Ok(())` (nothing to flush). Foreground callers surface the
+/// `TelemetryEndpointUnreachable` (exit 90) error; background/`--quiet` flushes
+/// ignore it.
 pub fn flush() -> Result<(), crate::error::TomeError> {
-    Ok(())
+    let paths = match crate::paths::Paths::resolve() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(target: "telemetry", error = %e, "flush skipped: $HOME unresolvable");
+            return Ok(());
+        }
+    };
+    flush::run(&paths)
 }
 
-/// Spawn the detached flusher at process exit (CLI: `setsid` child).
+/// The CLI single-exit-path delivery hook (FR-047/047b): decide whether to fork
+/// a detached flusher, and if so throttle + spawn it.
 ///
-/// Phase-2 fill: spawns `tome telemetry flush --quiet` and does not wait.
-pub fn teardown_at_exit() {}
+/// This is THE one explicit call site that spawns the background flusher (never a
+/// `Drop`/`atexit` — the release profile is `panic = "abort"` and runs no
+/// destructors, FR-047b). `main.rs` gates it OFF for the `Mcp` command (which
+/// runs its own `tokio` timer) and the `Telemetry` command (so the spawned
+/// `flush --quiet` child — itself a `Telemetry` command — never forks ANOTHER
+/// flusher: that gating is what prevents fork-bomb recursion).
+///
+/// Best-effort throughout: an unresolvable `$HOME`, a disabled install, or a
+/// spawn failure all just return — the user's foreground exit is never affected.
+pub fn teardown_at_exit() {
+    // Resolve the default Paths; nowhere to look ⇒ nothing to do.
+    let paths = match crate::paths::Paths::resolve() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!(target: "telemetry", error = %e, "teardown skipped: $HOME unresolvable");
+            return;
+        }
+    };
+
+    // Disabled ⇒ never spawn (no delivery for an opted-out / CI install).
+    if !is_enabled() {
+        return;
+    }
+
+    // Throttle + threshold decision (testable, Paths-injectable).
+    if !should_spawn(&paths) {
+        return;
+    }
+
+    // Record the attempt FIRST (before the spawn) so a scripted loop that re-runs
+    // immediately sees a fresh stamp and is throttled out — even if the spawn
+    // itself races or fails (FR-048: ≤ 1 flusher / window regardless).
+    record_attempt(&paths);
+
+    // Fork the detached `tome telemetry flush --quiet` child; best-effort.
+    if let Err(e) = spawn::spawn_detached_flusher() {
+        tracing::debug!(target: "telemetry", error = %e, "teardown: flusher spawn failed (best-effort)");
+    }
+}
+
+/// Whether the exit hook should fork a flusher now: the FR-047 threshold AND the
+/// FR-048 throttle, both evaluated against `paths`. Pure decision (no spawn, no
+/// stamp) so it is unit-testable with a `TempDir`-rooted `Paths`.
+///
+/// Spawn iff:
+/// - the `last-flush-attempt` stamp is ABSENT or older than the 1-min throttle
+///   window (FR-048) — a scripted loop forks ≤ 1 flusher/minute; AND
+/// - any threshold holds (FR-047): `queue >= 50` events, OR the oldest queued
+///   event is older than 5 min, OR this process just minted the install id.
+#[doc(hidden)]
+pub fn should_spawn(paths: &crate::paths::Paths) -> bool {
+    let now = clock::now_utc();
+
+    // Throttle gate FIRST (cheap, and the dominant SC-003 protection): a recent
+    // attempt within the window suppresses the spawn outright.
+    if let Some(attempt) = read_last_flush_attempt(paths) {
+        // `now < attempt` (a backward clock) is treated as "still inside the
+        // window" — fail-safe-no-spawn, never fork off a skewed clock.
+        if now < attempt || now < attempt + SPAWN_THROTTLE {
+            return false;
+        }
+    }
+
+    // Threshold: a fresh mint this run primes the cadence even below the depth.
+    if MINTED_THIS_RUN.load(Ordering::Relaxed) {
+        return true;
+    }
+
+    // Depth: a full-enough queue triggers regardless of age.
+    if queue::count_pending(paths) >= SPAWN_QUEUE_THRESHOLD {
+        return true;
+    }
+
+    // Age: the OLDEST queued event (the first line, FIFO) older than 5 min. The
+    // timestamp parse is best-effort — an unparsable first line is treated as
+    // "not old" (never spawn off a garbage stamp). A missing/empty queue reads
+    // as no first line ⇒ no age trigger.
+    oldest_event_age_exceeds(paths, now, SPAWN_OLDEST_AGE)
+}
+
+/// Stamp `telemetry/last-flush-attempt` with the current instant (atomic, 0600).
+/// The SPAWN throttle key (distinct from `last-flush`, which records the last
+/// successful DRAIN). Best-effort: a stamp failure is logged, never propagated —
+/// worst case a single extra flusher forks next run.
+#[doc(hidden)]
+pub fn record_attempt(paths: &crate::paths::Paths) {
+    let stamp = event::format_rfc3339_millis(clock::now_utc());
+    let mut body = stamp;
+    body.push('\n');
+    if let Err(e) =
+        crate::catalog::store::write_atomic(&paths.telemetry_last_flush_attempt(), body.as_bytes())
+    {
+        tracing::debug!(target: "telemetry", error = %e, "last-flush-attempt stamp failed (best-effort)");
+        return;
+    }
+    reassert_attempt_0600(paths);
+}
+
+/// Read + parse the `telemetry/last-flush-attempt` throttle stamp. `None` when
+/// absent/unreadable/unparsable (fail-safe: treated as "no recent attempt").
+fn read_last_flush_attempt(paths: &crate::paths::Paths) -> Option<time::OffsetDateTime> {
+    let body = crate::util::bounded_read_to_string(
+        &paths.telemetry_last_flush_attempt(),
+        crate::util::TOME_CONFIG_MAX,
+    )
+    .ok()?;
+    let first = body.lines().next().unwrap_or("").trim();
+    clock::parse_rfc3339(first)
+}
+
+/// Whether the OLDEST queued event (first FIFO line) is older than `max_age`.
+/// Best-effort: a missing queue, an empty queue, an unparsable first line, or a
+/// first line without a `timestamp` field all return `false` (no age trigger).
+fn oldest_event_age_exceeds(
+    paths: &crate::paths::Paths,
+    now: time::OffsetDateTime,
+    max_age: time::Duration,
+) -> bool {
+    let lines = match queue::read_lines(paths) {
+        Ok(l) => l,
+        Err(_) => return false,
+    };
+    let first = match lines.first() {
+        Some(l) => l,
+        None => return false,
+    };
+    let ts = serde_json::from_str::<serde_json::Value>(first)
+        .ok()
+        .and_then(|v| {
+            v.get("timestamp")
+                .and_then(|t| t.as_str())
+                .and_then(clock::parse_rfc3339)
+        });
+    match ts {
+        // Only a parseable, forward-in-time-enough timestamp triggers. A future
+        // timestamp (now < ts) is "not old" (never negative-age trigger).
+        Some(t) => now >= t && (now - t) > max_age,
+        None => false,
+    }
+}
+
+/// Re-assert `0600` on the throttle stamp after an atomic replace (`write_atomic`
+/// preserves the prior mode). Best-effort, Unix-only — mirrors the id/last-flush
+/// re-tighten.
+#[cfg(unix)]
+fn reassert_attempt_0600(paths: &crate::paths::Paths) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(
+        paths.telemetry_last_flush_attempt(),
+        std::fs::Permissions::from_mode(0o600),
+    );
+}
+
+#[cfg(not(unix))]
+fn reassert_attempt_0600(_paths: &crate::paths::Paths) {}
 
 #[cfg(test)]
 mod tests {
@@ -287,5 +482,163 @@ mod tests {
         );
 
         assert!(paths.telemetry_id().exists(), "id minted by first enqueue");
+    }
+
+    // -----------------------------------------------------------------------
+    // Exit-hook decision helpers (`should_spawn` / `record_attempt`) — the
+    // throttle + threshold logic the detached-spawn cadence rests on. Driven
+    // directly (a real detached child is non-deterministic to assert; the
+    // throttle STAMP + the pure decision are the testable surface).
+    //
+    // `MINTED_THIS_RUN` is a process-global flag; these tests touch it, so they
+    // serialise on a local mutex and snapshot/restore it around each case.
+    // -----------------------------------------------------------------------
+
+    use crate::telemetry::clock::ClockGuard;
+    use std::sync::Mutex;
+    use std::sync::atomic::Ordering;
+
+    static MINTED_SERIAL: Mutex<()> = Mutex::new(());
+
+    /// RAII: force `MINTED_THIS_RUN` to `value` for the test, restore on drop.
+    struct MintedGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prior: bool,
+    }
+    impl MintedGuard {
+        fn install(value: bool) -> Self {
+            let lock = MINTED_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let prior = MINTED_THIS_RUN.swap(value, Ordering::Relaxed);
+            Self { _lock: lock, prior }
+        }
+    }
+    impl Drop for MintedGuard {
+        fn drop(&mut self) {
+            MINTED_THIS_RUN.store(self.prior, Ordering::Relaxed);
+        }
+    }
+
+    /// Seed the queue with `n` anonymous lines, each carrying a `timestamp` set
+    /// to `ts`. Also mints an id (so the queue/dir exist consistently).
+    fn seed_queue_with_ts(paths: &Paths, n: usize, ts: &str) {
+        let line = format!("{{\"event_type\":\"tome.search\",\"timestamp\":\"{ts}\"}}");
+        let lines: Vec<String> = std::iter::repeat_n(line, n).collect();
+        queue::rewrite(paths, &lines).unwrap();
+    }
+
+    #[test]
+    fn should_spawn_false_when_attempt_is_fresh() {
+        let _minted = MintedGuard::install(true); // even a fresh mint can't override the throttle
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        // 50 events past the threshold, but a JUST-written attempt stamp.
+        seed_queue_with_ts(&paths, 60, "2020-01-01T00:00:00.000Z");
+        record_attempt(&paths);
+        let before = std::fs::read_to_string(paths.telemetry_last_flush_attempt()).unwrap();
+
+        assert!(!should_spawn(&paths), "a fresh attempt throttles the spawn");
+        // The stamp is unchanged (should_spawn never writes).
+        let after = std::fs::read_to_string(paths.telemetry_last_flush_attempt()).unwrap();
+        assert_eq!(before, after, "should_spawn must not write the stamp");
+    }
+
+    #[test]
+    fn should_spawn_true_on_full_queue_with_stale_attempt() {
+        let _minted = MintedGuard::install(false);
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        // A queue at/over the 50-event threshold.
+        seed_queue_with_ts(&paths, 50, "2020-01-01T00:00:00.000Z");
+        // Plant a STALE attempt stamp (older than the 1-min window).
+        let now = clock::now_utc();
+        let stale = event::format_rfc3339_millis(now - time::Duration::minutes(5));
+        crate::catalog::store::write_atomic(
+            &paths.telemetry_last_flush_attempt(),
+            format!("{stale}\n").as_bytes(),
+        )
+        .unwrap();
+
+        assert!(should_spawn(&paths), "≥50 events + a stale attempt ⇒ spawn");
+    }
+
+    #[test]
+    fn should_spawn_false_when_below_threshold_and_no_mint() {
+        let _minted = MintedGuard::install(false);
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        // A small, recent queue (timestamp = now) and no attempt stamp.
+        let now = clock::now_utc();
+        let fresh = event::format_rfc3339_millis(now);
+        seed_queue_with_ts(&paths, 3, &fresh);
+        assert!(
+            !should_spawn(&paths),
+            "few recent events + no mint ⇒ no spawn"
+        );
+    }
+
+    #[test]
+    fn should_spawn_true_on_old_oldest_event() {
+        let _minted = MintedGuard::install(false);
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        // Pin "now" so the seeded timestamp is deterministically > 5 min old.
+        let now = time::Date::from_calendar_date(2026, time::Month::June, 11)
+            .unwrap()
+            .with_hms(14, 0, 0)
+            .unwrap()
+            .assume_utc();
+        let _clk = ClockGuard::install(now);
+        let old = event::format_rfc3339_millis(now - time::Duration::minutes(6));
+        // Just a couple of events (below the depth threshold), but the oldest is
+        // older than 5 min ⇒ age trigger.
+        seed_queue_with_ts(&paths, 2, &old);
+        assert!(should_spawn(&paths), "an old oldest-event triggers a spawn");
+    }
+
+    #[test]
+    fn should_spawn_true_on_fresh_mint_even_below_threshold() {
+        let _minted = MintedGuard::install(true);
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        // Empty queue, no attempt stamp, but a fresh mint this run.
+        assert!(
+            should_spawn(&paths),
+            "a fresh mint primes the cadence even with no queued events"
+        );
+    }
+
+    #[test]
+    fn record_attempt_writes_a_parseable_stamp() {
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        assert!(!paths.telemetry_last_flush_attempt().exists());
+        record_attempt(&paths);
+        let body = std::fs::read_to_string(paths.telemetry_last_flush_attempt()).unwrap();
+        // One line that parses back as a timestamp.
+        assert!(
+            clock::parse_rfc3339(body.trim()).is_some(),
+            "attempt stamp is a parseable timestamp: {body:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn record_attempt_stamp_is_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        record_attempt(&paths);
+        let mode = std::fs::metadata(paths.telemetry_last_flush_attempt())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn spawn_detached_flusher_is_best_effort_ok() {
+        // It must never panic; on this matrix it returns Ok (the child reparents).
+        // We don't assert the child ran — only that the parent path is non-fatal.
+        spawn::spawn_detached_flusher().expect("spawn is best-effort Ok");
     }
 }

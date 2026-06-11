@@ -10,15 +10,16 @@
 //! `inspect` (US2) is a read-only reporter: it pretty-prints the pending queue
 //! WITHOUT sending it, leaves the queue file byte-identical, and exits 92
 //! ([`TomeError::TelemetryQueueCorrupt`]) when unparsable lines exist (after the
-//! report). `flush` (US3) is still absent. The enum is the CLI's
-//! [`crate::cli::TelemetryCommand`]; new variants are added there when those
-//! slices land.
+//! report). `flush` (US3) drains the queue in the FOREGROUND: it reports the
+//! outcome and exits 90 ([`TomeError::TelemetryEndpointUnreachable`]) on a
+//! transport error, EXCEPT under `--quiet` (the detached child) which is silent
+//! and always exits 0. The enum is the CLI's [`crate::cli::TelemetryCommand`].
 
 use std::io::Write;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::cli::{TelemetryCommand, TelemetryResetArgs};
+use crate::cli::{TelemetryCommand, TelemetryFlushArgs, TelemetryResetArgs};
 use crate::error::TomeError;
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
@@ -44,6 +45,7 @@ pub fn run(cmd: TelemetryCommand, _scope: &ResolvedScope, mode: Mode) -> Result<
         TelemetryCommand::Off => off(&paths, mode),
         TelemetryCommand::Reset(args) => reset(&paths, args, mode),
         TelemetryCommand::Purge => purge(&paths, mode),
+        TelemetryCommand::Flush(args) => flush_run(&paths, args, mode),
     }
 }
 
@@ -72,12 +74,18 @@ struct StatusReport {
     last_flush: Option<LastFlush>,
 }
 
-/// The `telemetry/last-flush` stamp shape. US3 defines + writes it; until then a
-/// status read always sees it absent and reports `None`.
-#[derive(Debug, Serialize)]
+/// The `telemetry/last-flush` stamp shape — written by the flusher (US3,
+/// `flush::stamp_last_flush`) as `{"timestamp":"<rfc3339>","last_status":<u16|null>}`.
+///
+/// `status` deserializes from the stamp's `last_status` key and is an `Option`
+/// so a failed-drain `null` status (no batch acknowledged a 2xx) is
+/// distinguished from a successful 2xx. `#[serde(default)]` lets a stamp that
+/// omits the field (shouldn't happen — the writer always emits it) still parse.
+#[derive(Debug, Serialize, Deserialize)]
 struct LastFlush {
     timestamp: String,
-    status: u16,
+    #[serde(rename = "last_status", default)]
+    status: Option<u16>,
 }
 
 fn status(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
@@ -120,10 +128,14 @@ fn pending_count(paths: &Paths) -> u64 {
 
 /// Read the `telemetry/last-flush` stamp, if present.
 ///
-// US3 fills last-flush: the stamp format is not yet defined/written, so there is
-// no on-disk producer. Until then an absent file is the only case → `None`.
-fn read_last_flush(_paths: &Paths) -> Option<LastFlush> {
-    None
+/// Best-effort and read-only (like every `status` read): an absent file, an
+/// unreadable/over-cap file, or an unparsable body all degrade to `None` — a
+/// `status` report never fails on the stamp. The flusher (US3) writes the stamp
+/// as `{"timestamp":...,"last_status":<u16|null>}`; we parse exactly that shape.
+fn read_last_flush(paths: &Paths) -> Option<LastFlush> {
+    let body =
+        util::bounded_read_to_string(&paths.telemetry_last_flush(), util::TOME_CONFIG_MAX).ok()?;
+    serde_json::from_str::<LastFlush>(&body).ok()
 }
 
 fn emit_status_human(report: &StatusReport) -> Result<(), TomeError> {
@@ -147,7 +159,12 @@ fn emit_status_human(report: &StatusReport) -> Result<(), TomeError> {
     writeln!(out, "endpoint:  {}", report.endpoint)?;
     writeln!(out, "pending:   {}", report.pending)?;
     match &report.last_flush {
-        Some(lf) => writeln!(out, "last flush: {} (status {})", lf.timestamp, lf.status)?,
+        Some(lf) => match lf.status {
+            Some(s) => writeln!(out, "last flush: {} (status {})", lf.timestamp, s)?,
+            // A `null` status means the drain ran but no batch was acknowledged
+            // (empty queue, or a transport error before any 2xx).
+            None => writeln!(out, "last flush: {} (no successful delivery)", lf.timestamp)?,
+        },
         None => writeln!(out, "last flush: never")?,
     }
     Ok(())
@@ -338,4 +355,56 @@ fn purge(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
         )?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// flush — FOREGROUND drain (and the detached child's `--quiet` entry point)
+// ---------------------------------------------------------------------------
+
+/// `tome telemetry flush [--quiet]` — drain the pending queue to the collector
+/// in the FOREGROUND (this is NOT the spawn site; it calls
+/// [`crate::telemetry::flush::run`] directly).
+///
+/// Two modes, both routing through the ONE shared drain:
+/// - **default (loud)**: report the outcome on stdout and exit 0 on a clean
+///   drain; surface [`TelemetryEndpointUnreachable`](TomeError::TelemetryEndpointUnreachable)
+///   (exit 90, scrubbed endpoint) on a transport error, and propagate any other
+///   error.
+/// - **`--quiet`** (the spawned detached child, FR-020): discard the `Result`
+///   entirely — NO stdout/stderr, ALWAYS exit 0. A transport failure is invisible
+///   to the background child (it leaves the queue intact to retry next drain).
+///
+/// The `--quiet` child neither enqueues nor spawns: it is a `Telemetry` command,
+/// so `main.rs` skips `cli_startup` (no mint/notice) AND skips `teardown_at_exit`
+/// (no recursive flusher fork) — that gating is the fork-bomb guard.
+fn flush_run(paths: &Paths, args: TelemetryFlushArgs, mode: Mode) -> Result<(), TomeError> {
+    let result = crate::telemetry::flush::run(paths);
+
+    if args.quiet {
+        // FR-020: the detached child must be silent and always exit 0. Swallow
+        // the outcome wholesale — a transport failure stays in the queue for the
+        // next drain and is never surfaced.
+        return Ok(());
+    }
+
+    match result {
+        Ok(()) => {
+            if mode == Mode::Human {
+                let mut out = std::io::stdout().lock();
+                // A best-effort, concise outcome: the pending count after the
+                // drain distinguishes "sent everything" from "nothing queued".
+                let pending = crate::telemetry::queue::count_pending(paths);
+                if pending == 0 {
+                    writeln!(out, "Telemetry flushed.")?;
+                } else {
+                    writeln!(out, "Telemetry flush: {pending} event(s) still pending.")?;
+                }
+            }
+            Ok(())
+        }
+        // A transport/non-https/unreachable error surfaces as exit 90 with the
+        // SCRUBBED endpoint (the error variant already carries the scrubbed form).
+        // Any other error propagates unchanged.
+        Err(e) => Err(e),
+    }
 }

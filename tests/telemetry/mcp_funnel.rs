@@ -244,6 +244,8 @@ fn build_state(paths: &Paths, host_harness: Option<&str>) -> Arc<McpState> {
         prompt_registry: Arc::new(PromptRegistry::default()),
         host_harness: host_harness.map(str::to_owned),
         last_search_ranks: std::sync::Mutex::new(HashMap::new()),
+        flush_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
+        enqueued_since_flush: std::sync::atomic::AtomicUsize::new(0),
     })
 }
 
@@ -545,4 +547,48 @@ fn tool_call_returns_promptly_with_nonroutable_endpoint() {
         first_of(&queue_events(&paths), "tome.search").is_some(),
         "the search event must still be enqueued"
     );
+}
+
+#[test]
+fn note_enqueue_raises_flush_signal_only_on_fiftieth() {
+    // FR-050: a handler's enqueue raises the shared "flush soon" signal once the
+    // session crosses 50 enqueues — scheduling the OFF-PATH flush the background
+    // timer task picks up. The handler never flushes inline; this drives the
+    // `note_enqueue` decision directly + proves the `Notify` fires on the cross.
+    let home = TempDir::new().unwrap();
+    let _home_guard = HomeGuard::install(home.path());
+    let _env = EnvForce::install();
+
+    let paths = stage_at_home(
+        home.path(),
+        &[("alpha", &skill_body("alpha", "alpha widget configuration"))],
+    );
+    let state = build_state(&paths, Some("claude-code"));
+
+    // Arm a listener on the shared signal BEFORE the crossing so a `notify_one`
+    // emitted during the 50th `note_enqueue` is observed (a `Notified` future
+    // armed before the notify resolves immediately once notified).
+    let armed = state.flush_signal.notified();
+
+    // The first 49 calls must NOT schedule a flush.
+    for i in 1..50 {
+        assert!(
+            !state.note_enqueue(),
+            "enqueue #{i} (< 50) must not schedule an off-path flush"
+        );
+    }
+    // The 50th crosses the threshold and schedules the flush.
+    assert!(
+        state.note_enqueue(),
+        "the 50th enqueue crosses the threshold and schedules an off-path flush"
+    );
+
+    // The signal fired: the pre-armed listener resolves without hanging. A short
+    // timeout guards against a regression where `note_enqueue` stopped notifying.
+    let rt = rt();
+    rt.block_on(async {
+        tokio::time::timeout(Duration::from_secs(2), armed)
+            .await
+            .expect("the flush_signal must be raised on the 50th enqueue (FR-050)");
+    });
 }

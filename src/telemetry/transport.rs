@@ -1,12 +1,30 @@
-//! Delivery transport SCAFFOLDING (Phase 10, US Foundational).
+//! Delivery transport (Phase 10, US3).
 //!
-//! This slice lands only the endpoint resolver + the no-foreground-network
-//! counter seam. The real `reqwest::blocking` POST (read queue → POST →
-//! rewrite-after-2xx) lands in US3 and is the ONLY site permitted to touch the
-//! network — it MUST call [`record_network_call`] so the integration tests can
-//! assert zero network calls after a foreground command.
+//! The endpoint resolver + the no-foreground-network counter seam landed in the
+//! Foundational slice; this slice lands [`post_batch`], the ONE site permitted
+//! to touch the network. It MUST call [`record_network_call`] so the
+//! integration tests can assert zero network calls after a foreground command.
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use crate::error::TomeError;
+
+/// Per-request timeout for the single POST attempt (FR-041b/043). No retry: one
+/// connect+send+receive must complete within this window or the batch is left
+/// unsent for the next drain.
+const POST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Max events per batch (FR-041b). The flusher groups queue-line *indices* into
+/// batches each ≤ this many lines AND ≤ [`MAX_BATCH_BYTES`] of wire bytes.
+pub const MAX_BATCH_LINES: usize = 100;
+
+/// Max wire bytes per batch (FR-041b): the NDJSON body (lines joined by `\n`
+/// plus a trailing `\n`) must not exceed 256 KiB. A single line can never reach
+/// this on its own (the queue's 4096 B per-line cap), so no oversize-single
+/// special case is needed.
+pub const MAX_BATCH_BYTES: usize = 256 * 1024;
 
 /// The production collector endpoint, compiled in as a single `const`.
 ///
@@ -54,6 +72,132 @@ pub fn record_network_call() {
 #[doc(hidden)]
 pub fn network_call_count() -> u64 {
     NETWORK_CALLS.load(Ordering::Relaxed)
+}
+
+/// The ONE process-wide `reqwest::blocking::Client`, built lazily on first POST
+/// (R-L1). Building a client initialises the TLS backend; a multi-batch drain
+/// would otherwise re-init TLS per batch. Memoising it here amortises that to
+/// once-per-process while keeping every POST's policy identical:
+/// - the 5 s [`POST_TIMEOUT`] (no retry);
+/// - **redirect following DISABLED** ([`Policy::none`], FR-043): reqwest's
+///   default follows up to 10 redirects INCLUDING an https→http downgrade and
+///   re-POSTs the body (carrying the install UUID) over plaintext. With
+///   `Policy::none` a 3xx is returned verbatim as a non-2xx status — the drain
+///   leaves those lines unsent (no body re-send, no plaintext downgrade).
+///
+/// A builder failure (TLS backend init) is unreachable in practice; we return
+/// `None` and let [`post_batch`] fail closed rather than panic.
+fn shared_client() -> Option<&'static reqwest::blocking::Client> {
+    static CLIENT: OnceLock<Option<reqwest::blocking::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(POST_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
+/// Group line indices into delivery batches each bounded by BOTH
+/// [`MAX_BATCH_LINES`] lines AND [`MAX_BATCH_BYTES`] of wire bytes (FR-041b).
+///
+/// The wire size of a batch is the NDJSON body the flusher will POST: each
+/// line's bytes plus one `\n` (a `\n` after the final line too — the
+/// `lines.join("\n") + "\n"` shape `post_batch` consumes). We greedily fill a
+/// batch and close it the moment adding the next line would cross *either* cap.
+///
+/// A single line cannot exceed [`MAX_BATCH_BYTES`] on its own (the queue caps
+/// each line at 4096 B including its newline — FR-036), so a one-line batch is
+/// always deliverable; no oversize-single special case is needed.
+pub fn split_batches(lines: &[String]) -> Vec<Vec<usize>> {
+    let mut batches: Vec<Vec<usize>> = Vec::new();
+    let mut current: Vec<usize> = Vec::new();
+    let mut current_bytes = 0usize;
+
+    for (idx, line) in lines.iter().enumerate() {
+        // Each line contributes its bytes + one trailing '\n' to the body.
+        let line_wire = line.len() + 1;
+        let would_overflow_bytes =
+            !current.is_empty() && current_bytes + line_wire > MAX_BATCH_BYTES;
+        let would_overflow_lines = current.len() >= MAX_BATCH_LINES;
+
+        if would_overflow_bytes || would_overflow_lines {
+            batches.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+
+        current.push(idx);
+        current_bytes += line_wire;
+    }
+
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
+/// POST one NDJSON batch for `stream` to the resolved collector endpoint — THE
+/// single network site (FR-043).
+///
+/// - Resolves the endpoint via [`resolve_endpoint`] (already credential-scrubbed)
+///   and uses that scrubbed form as BOTH the POST target and any error display,
+///   so a credential can never reach the wire or a user surface. Telemetry
+///   endpoints carry no URL credentials, so the scrubbed form IS the target.
+/// - **HTTPS only** (FR-043): a non-`https://` endpoint fails CLOSED with
+///   [`TelemetryEndpointUnreachable`](TomeError::TelemetryEndpointUnreachable) —
+///   we NEVER POST telemetry (carrying the install UUID) over plaintext.
+///   Redirect following is DISABLED on the shared client ([`shared_client`],
+///   FR-043) so a 3xx https→http downgrade can never re-POST the body over
+///   plaintext: a 3xx surfaces as a non-2xx status the drain leaves unsent.
+/// - One attempt, [`POST_TIMEOUT`] (5 s), **no retry**, `Content-Type:
+///   application/x-ndjson`. A `?stream=<stream>` query is appended (`&` if the
+///   endpoint already has a query).
+/// - Increments [`record_network_call`] right before the request — this is the
+///   load-bearing increment behind the foreground-counter==0 proof.
+///
+/// Returns the response status as a `u16` on a COMPLETED request (the caller
+/// decides 2xx vs not); a transport error (connect/timeout/TLS) or a non-https /
+/// malformed endpoint is `Err(TelemetryEndpointUnreachable { endpoint })` with
+/// the scrubbed endpoint. Never panics.
+pub fn post_batch(stream: &str, ndjson_body: &[u8]) -> Result<u16, TomeError> {
+    let endpoint = resolve_endpoint();
+
+    // HTTPS-only fail-closed: never POST telemetry over plaintext (FR-043).
+    if !endpoint.starts_with("https://") {
+        return Err(TomeError::TelemetryEndpointUnreachable { endpoint });
+    }
+
+    // Append `?stream=<stream>` (or `&stream=<stream>` if a query already
+    // exists). The scrubbed endpoint is the SSOT, so this stays scrubbed.
+    let separator = if endpoint.contains('?') { '&' } else { '?' };
+    let url = format!("{endpoint}{separator}stream={stream}");
+
+    // Reuse the ONE memoised client (R-L1): timeout + redirect-disabled
+    // (S-M1/FR-043). A builder failure (TLS backend init) is unreachable in
+    // practice but must fail closed, not panic — report the scrubbed endpoint.
+    let client = match shared_client() {
+        Some(c) => c,
+        None => return Err(TomeError::TelemetryEndpointUnreachable { endpoint }),
+    };
+
+    // THE single network site. Increment BEFORE the request so the seam counts
+    // the attempt even if it errors out (the proof is "did the foreground path
+    // reach the network at all", not "did it succeed").
+    record_network_call();
+
+    match client
+        .post(&url)
+        .header(reqwest::header::CONTENT_TYPE, "application/x-ndjson")
+        .body(ndjson_body.to_vec())
+        .send()
+    {
+        Ok(resp) => Ok(resp.status().as_u16()),
+        // connect / timeout / TLS — surface the SCRUBBED endpoint, never the
+        // reqwest error display (which can reproduce the URL).
+        Err(_) => Err(TomeError::TelemetryEndpointUnreachable { endpoint }),
+    }
 }
 
 #[cfg(test)]
@@ -129,8 +273,103 @@ mod tests {
 
     #[test]
     fn network_counter_records() {
+        // Serialize on the same mutex the `post_batch` delta tests hold: the
+        // process-global `NETWORK_CALLS` counter is shared across this binary's
+        // tests, so an unguarded `record_network_call()` here would pollute the
+        // exact `before + 1` / `before` deltas those tests assert (observed as a
+        // flake on a loaded CI runner).
+        let _g = EndpointEnvGuard::new();
         let before = network_call_count();
         record_network_call();
         assert_eq!(network_call_count(), before + 1);
+    }
+
+    #[test]
+    fn post_batch_rejects_plaintext_http_fail_closed() {
+        // FR-043: a non-https endpoint must fail CLOSED (exit 90) and NEVER POST.
+        let g = EndpointEnvGuard::new();
+        g.set("http://127.0.0.1:1/v1/events");
+        let before = network_call_count();
+        let err = post_batch("anonymous", b"{}\n").unwrap_err();
+        match err {
+            TomeError::TelemetryEndpointUnreachable { endpoint } => {
+                assert!(
+                    endpoint.starts_with("http://"),
+                    "scrubbed endpoint: {endpoint}"
+                );
+            }
+            other => panic!("expected TelemetryEndpointUnreachable, got {other:?}"),
+        }
+        // It fails closed BEFORE the network — the counter must not move.
+        assert_eq!(
+            network_call_count(),
+            before,
+            "a plaintext-rejected POST must not reach the network"
+        );
+    }
+
+    #[test]
+    fn post_batch_error_endpoint_is_scrubbed_and_records_attempt() {
+        // Point at a non-routable https addr (TEST-NET-1, RFC 5737) carrying
+        // credentials in the override; the transport error endpoint must be
+        // scrubbed, and `record_network_call` must have fired for the attempt.
+        let g = EndpointEnvGuard::new();
+        g.set("https://user:secret@192.0.2.1:1/v1/events");
+        let before = network_call_count();
+        let err = post_batch("anonymous", b"{}\n").unwrap_err();
+        match err {
+            TomeError::TelemetryEndpointUnreachable { endpoint } => {
+                assert!(!endpoint.contains("secret"), "creds scrubbed: {endpoint}");
+                assert!(!endpoint.contains("user:"), "userinfo scrubbed: {endpoint}");
+            }
+            other => panic!("expected TelemetryEndpointUnreachable, got {other:?}"),
+        }
+        // A real https attempt (it times out / refuses) DID reach the network
+        // site, so the counter moved.
+        assert_eq!(
+            network_call_count(),
+            before + 1,
+            "an https attempt records exactly one network call"
+        );
+    }
+
+    #[test]
+    fn split_batches_groups_by_line_count() {
+        // 250 small lines ⇒ 3 batches (100, 100, 50) at the line-count cap.
+        let lines: Vec<String> = (0..250).map(|i| format!("{{\"n\":{i}}}")).collect();
+        let batches = split_batches(&lines);
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].len(), MAX_BATCH_LINES);
+        assert_eq!(batches[1].len(), MAX_BATCH_LINES);
+        assert_eq!(batches[2].len(), 50);
+        // Indices are contiguous and complete.
+        assert_eq!(batches[0][0], 0);
+        assert_eq!(*batches[2].last().unwrap(), 249);
+    }
+
+    #[test]
+    fn split_batches_splits_on_byte_budget() {
+        // Lines ~2 KiB each: 256 KiB / ~2 KiB ≈ 128 lines per batch, well under
+        // the 100-line cap on the byte side — so the BYTE cap must bind first.
+        // Use ~3 KiB lines so the byte cap (256 KiB ⇒ ~85 lines) trips before
+        // the 100-line cap.
+        let big = "z".repeat(3000);
+        let lines: Vec<String> = (0..90).map(|_| big.clone()).collect();
+        let batches = split_batches(&lines);
+        assert!(
+            batches.len() >= 2,
+            "oversize-by-bytes must split: {}",
+            batches.len()
+        );
+        // Every batch's wire size is within the byte cap.
+        for batch in &batches {
+            let wire: usize = batch.iter().map(|&i| lines[i].len() + 1).sum();
+            assert!(wire <= MAX_BATCH_BYTES, "batch wire {wire} within cap");
+        }
+    }
+
+    #[test]
+    fn split_batches_empty_is_empty() {
+        assert!(split_batches(&[]).is_empty());
     }
 }

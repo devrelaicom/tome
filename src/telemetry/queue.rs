@@ -28,7 +28,11 @@ const MAX_LINE_BYTES: usize = 4096;
 /// Soft queue size cap (FR-038). Past this, foreground enqueues drop silently
 /// (`telemetry_queue_overflow`); FIFO eviction of the oldest events happens
 /// later under the flush lock at the next drain (US3), never on this hot path.
-const MAX_QUEUE_BYTES: u64 = 1_048_576; // 1 MiB
+///
+/// `pub` so the flusher (US3) can reuse the SAME cap for its drain-time FIFO
+/// eviction (FR-038/038a) — the append-path cap and the drain-path eviction
+/// threshold MUST be the one number, not two that "agree today".
+pub const MAX_QUEUE_BYTES: u64 = 1_048_576; // 1 MiB
 
 /// Generous read cap for whole-queue reads: the queue is bounded to ~1 MiB by
 /// [`append`], but a pre-existing/over-grown file (e.g. an interrupted earlier
