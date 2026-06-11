@@ -53,13 +53,15 @@ fn main() {
         }
     };
 
-    // First-run opt-out notice (FR-013/014/015). Skip the MCP path (no human
-    // stderr) AND the `telemetry` path (its subcommands manage telemetry
-    // themselves — a `telemetry off` must not first mint an id + print a
-    // notice). The call self-gates on `is_enabled()` (CI/disabled ⇒ no mint, no
-    // notice) and is best-effort — it never errors out the command.
+    // CLI process-start telemetry (FR-013/014/015 first-run notice + FR-026
+    // `tome.install`/`tome.upgrade` lifecycle emits). Skip the MCP path (no
+    // human stderr; it mints silently on its first enqueue) AND the `telemetry`
+    // path (its subcommands manage telemetry themselves — a `telemetry off` must
+    // not first mint an id + print a notice). `cli_startup` self-gates on the
+    // enabled resolver (CI/disabled ⇒ no mint, no notice, no emit) and is
+    // best-effort throughout — it never errors out the command.
     if !matches!(cli.command, Command::Mcp(_) | Command::Telemetry(_)) {
-        tome::telemetry::notice::first_run_notice_if_needed(&paths, true);
+        tome::telemetry::cli_startup(&paths);
     }
 
     let result = match cli.command {
@@ -99,6 +101,19 @@ fn main() {
         Err(err) => {
             let code = err.exit_code();
             output::write_error(mode, &err);
+            // FR-029/029a: emit `tome.error` at the application boundary, carrying
+            // ONLY the closed `ErrorCategory` (never the raw message) plus the CLI
+            // surface. The command fns return `TomeError` directly here (the same
+            // `&TomeError` `write_error` consumed), so we read `category()` rather
+            // than downcasting an `anyhow::Error`. Best-effort: this enqueue must
+            // not alter the exit code, produce user output, or block — `enqueue`
+            // is the same infallible append. Placed AFTER `write_error` and BEFORE
+            // teardown/exit. Only the error arm emits — a successful run does not.
+            tome::telemetry::enqueue(tome::telemetry::event::ErrorEvent {
+                error_class: err.category(),
+                surface: tome::telemetry::event::Surface::Cli,
+                calling_harness: None,
+            });
             tome::telemetry::teardown_at_exit();
             std::process::exit(code);
         }

@@ -46,7 +46,33 @@ pub struct CreateRequest {
 }
 
 /// Scaffold a new artifact at the request's level.
-pub fn run(req: CreateRequest, _scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+pub fn run(req: CreateRequest, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
+    let level = req.level;
+    let result = run_inner(req, scope, mode);
+
+    // One `tome.authoring_action{verb=Create}` emit with the REAL outcome.
+    // `create` is lint-clean by construction (no report), so the outcome is
+    // `Ok` on success and `Errors` on any failure. source_format is `Unknown`:
+    // a scaffold has no foreign source.
+    use crate::telemetry::event::{
+        AuthoringActionEvent, AuthoringOutcome, AuthoringVerb, SourceFormat,
+    };
+    let outcome = if result.is_ok() {
+        AuthoringOutcome::Ok
+    } else {
+        AuthoringOutcome::Errors
+    };
+    crate::telemetry::enqueue(AuthoringActionEvent {
+        verb: AuthoringVerb::Create,
+        artifact: crate::commands::convert::artifact_of(level),
+        source_format: SourceFormat::Unknown,
+        outcome,
+    });
+
+    result
+}
+
+fn run_inner(req: CreateRequest, _scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     // `--template bare-skill` is an alias for `--bare`; any other non-built-in
     // value is a remote/custom template, deferred to a fast-follow.
     if let Some(t) = &req.template

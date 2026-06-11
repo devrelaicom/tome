@@ -80,6 +80,20 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
             continue;
         }
 
+        // best-effort: the stored target url is `file://` for a local-path
+        // source; every remote shape is Git. One emit per catalog actually
+        // refreshed (a SHA-pinned target returns `refreshed == false` above
+        // and is skipped).
+        let source_type = if target.url.starts_with("file://") {
+            crate::telemetry::event::SourceType::Local
+        } else {
+            crate::telemetry::event::SourceType::Git
+        };
+        crate::telemetry::enqueue(crate::telemetry::event::CatalogActionEvent {
+            action: crate::telemetry::event::CatalogAction::Updated,
+            source_type,
+        });
+
         // Reindex every workspace that enrols this URL. The pass opens
         // its own connection — readers don't need the advisory lock for
         // the workspace+catalog list.

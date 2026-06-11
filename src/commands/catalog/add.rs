@@ -187,6 +187,19 @@ pub fn run(args: CatalogAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
         last_synced,
     };
     emit(mode, &emit_record)?;
+
+    // best-effort: `file://` is the resolved shape for a local path source;
+    // every other shape (https/ssh/git/owner-repo→github) is a remote clone.
+    let source_type = if emit_record.url.starts_with("file://") {
+        crate::telemetry::event::SourceType::Local
+    } else {
+        crate::telemetry::event::SourceType::Git
+    };
+    crate::telemetry::enqueue(crate::telemetry::event::CatalogActionEvent {
+        action: crate::telemetry::event::CatalogAction::Added,
+        source_type,
+    });
+
     Ok(())
 }
 

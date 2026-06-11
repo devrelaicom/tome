@@ -72,8 +72,9 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
         // error is logged but never aborts the doctor pass (FR-561). The
         // report's `meta_skills` field is then re-projected (gated on "the
         // repair ran") so it reflects post-repair on-disk state.
-        match doctor::meta_drift::repair(&home, scope) {
-            Ok(n) if n > 0 => {
+        let meta_repair = doctor::meta_drift::repair(&home, scope);
+        match &meta_repair {
+            Ok(n) if *n > 0 => {
                 tracing::info!(count = n, "doctor --fix: (re)installed meta skills");
             }
             Ok(_) => {}
@@ -81,6 +82,18 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
                 tracing::warn!(error = %e, "doctor --fix: meta-skill repair had failures");
             }
         }
+        // `MetaAction::Fix` is doctor's meta `--fix` repair (FR-026). Forward-
+        // progress: `repair` returns the first error after continuing past
+        // per-location failures → all-ok = Ok, an Err carries at least one
+        // failure (some may have still landed) = Partial. One infallible emit.
+        crate::telemetry::enqueue(crate::telemetry::event::MetaActionEvent {
+            action: crate::telemetry::event::MetaAction::Fix,
+            outcome: if meta_repair.is_ok() {
+                crate::telemetry::event::Outcome::Ok
+            } else {
+                crate::telemetry::event::Outcome::Partial
+            },
+        });
         report.meta_skills = doctor::meta_drift::check(&home, scope);
 
         // FR-410: sweep orphan `.tome.tmp.*` staging directories. Best-
@@ -98,6 +111,17 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     }
 
     emit(&report, mode)?;
+
+    // `tome.doctor_run`: emit AFTER the report renders but BEFORE any of the
+    // exit paths below (one of which is a hard `std::process::exit(1)` that
+    // would otherwise skip the emit). `findings_bucket` buckets the number of
+    // suggested-fix issues the report surfaced.
+    crate::telemetry::enqueue(crate::telemetry::event::DoctorRun {
+        fix: args.fix,
+        findings_bucket: crate::telemetry::buckets::FindingsBucket::from(
+            report.suggested_fixes.len(),
+        ),
+    });
 
     // Exit-code semantics per `contracts/doctor.md`:
     // - Overall Ok → exit 0.

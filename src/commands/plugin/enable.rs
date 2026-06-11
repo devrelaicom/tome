@@ -92,6 +92,10 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     // surfaces and the prior `[summaries]` cache survives.
     crate::summarise::regenerate_for_trigger(scope.scope.name(), &paths)?;
 
+    crate::telemetry::enqueue(crate::telemetry::event::PluginActionEvent {
+        action: crate::telemetry::event::PluginAction::Enabled,
+    });
+
     match mode {
         Mode::Human => emit_human(&id, &outcome),
         Mode::Json => emit_json(&id, &outcome),

@@ -6,7 +6,8 @@
 //! FR-109; the `tokio::sync::OnceCell` enables async-friendly
 //! initialisation without blocking subsequent calls.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::OnceCell;
 
@@ -39,4 +40,18 @@ pub struct McpState {
     /// `harness sync`). `None` for a legacy/unstamped config — the `meta`
     /// tool then fails closed (FR-029) rather than guessing a harness.
     pub host_harness: Option<String>,
+    /// Phase 10 / US2 (FR-028): per-session search→selection funnel state.
+    /// Maps an entry `name` to its 1-indexed rank in the MOST RECENT
+    /// `search_skills` result list this session. `get_skill` / `get_skill_info`
+    /// look the selected entry up here to attribute a `rank_bucket` on their
+    /// `tome.entry_invoked` / `tome.entry_info` events — the bucket is `none`
+    /// when no preceding search this session ranked the entry.
+    ///
+    /// WHY a `Mutex<HashMap>` rather than per-request state: the MCP server is
+    /// a long-running session, so the funnel join is across SEPARATE tool calls
+    /// (search, then a later get) — the rank must outlive the search handler.
+    /// Each search clears + repopulates it (only the latest search's ranks
+    /// attribute), so it never grows unbounded. The lock is held only for the
+    /// sub-µs clear/insert/lookup; it is never held across an `.await`.
+    pub last_search_ranks: Mutex<HashMap<String, u32>>,
 }

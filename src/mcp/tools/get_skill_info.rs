@@ -200,6 +200,15 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
         "call",
     );
 
+    // FR-027/FR-028: `tome.entry_info` for the middle-tier lookup, carrying the
+    // `rank_bucket` of THIS entry from the preceding search this session (the
+    // funnel join). `None` ⇒ no preceding search ranked it ⇒ `RankBucket::None`.
+    // Best-effort enqueue (a sub-ms local append; never blocks, never flushes).
+    crate::telemetry::enqueue(crate::telemetry::event::EntryInfo {
+        rank_bucket: crate::mcp::rank_bucket_for(&state, &input.name),
+        calling_harness: crate::mcp::calling_harness(&state),
+    });
+
     Ok(SkillInfo {
         catalog: input.catalog,
         plugin: input.plugin,

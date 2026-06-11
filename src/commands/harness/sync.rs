@@ -32,6 +32,27 @@ pub fn run(scope: &ResolvedScope, paths: &Paths, mode: Mode) -> Result<(), TomeE
     // --force` to re-bind.
     let deps = sync_lib::build_deps(paths, &home, scope.scope.name(), false);
     let outcome = sync_lib::sync_project(project_root, &deps)?;
+
+    // `tome harness sync` reconciles ALL effective harnesses, not one — so emit
+    // one `tome.harness_action{Sync}` per DISTINCT harness that actually had a
+    // change in this sync. Unmapped names are skipped by `emit_harness_action`.
+    // best-effort: an empty (fully idempotent) sync emits nothing here.
+    let mut seen: Vec<&str> = Vec::new();
+    for change in outcome
+        .added
+        .iter()
+        .chain(outcome.updated.iter())
+        .chain(outcome.removed.iter())
+    {
+        if !seen.contains(&change.harness.as_str()) {
+            seen.push(change.harness.as_str());
+            super::emit_harness_action(
+                &change.harness,
+                crate::telemetry::event::HarnessAction::Sync,
+            );
+        }
+    }
+
     match mode {
         Mode::Human => emit_human(&outcome),
         Mode::Json => write_json(&outcome),

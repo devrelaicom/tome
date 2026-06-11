@@ -352,6 +352,7 @@ impl McpHarness {
             reranker_entry: &STUB_RERANKER_ENTRY,
             prompt_registry: Arc::new(registry),
             host_harness,
+            last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
 
         // Build the REAL server — `Server::new` constructs the real

@@ -65,7 +65,14 @@ pub fn run(
         output_dir,
     };
 
-    let outcome = convert::run(&source_root, &cfg)?;
+    // Run the convert compute into a Result; derive the telemetry outcome from
+    // BOTH the verdict and the Result, emit ONE `tome.authoring_action` event,
+    // then proceed with the original control flow unchanged (the emit is
+    // infallible and side-effect-only).
+    let convert_result = convert::run(&source_root, &cfg);
+    emit_authoring_telemetry(level, &convert_result);
+
+    let outcome = convert_result?;
 
     // Register the injected plugin in the target catalog's `plugins[]` (atomic,
     // comment-preserving, idempotent) — never under `--dry-run`.
@@ -84,6 +91,74 @@ pub fn run(
         return Err(TomeError::ConversionUnsupportedStrict { feature });
     }
     Ok(())
+}
+
+/// Map a detected [`SourceHarness`](crate::authoring::detect::SourceHarness) to
+/// the closed telemetry [`SourceFormat`](crate::telemetry::event::SourceFormat).
+/// The native-SKILL.md harnesses (Cursor / OpenCode / Cline / Agent-Skills) all
+/// collapse to `NativeSkill`.
+fn source_format_of(
+    harness: crate::authoring::detect::SourceHarness,
+) -> crate::telemetry::event::SourceFormat {
+    use crate::authoring::detect::SourceHarness;
+    use crate::telemetry::event::SourceFormat;
+    match harness {
+        SourceHarness::ClaudeCode => SourceFormat::ClaudeCode,
+        SourceHarness::Codex => SourceFormat::Codex,
+        SourceHarness::Cursor
+        | SourceHarness::OpenCode
+        | SourceHarness::Cline
+        | SourceHarness::AgentSkills => SourceFormat::NativeSkill,
+    }
+}
+
+/// Map an [`ArtifactLevel`] to the telemetry [`Artifact`](crate::telemetry::event::Artifact).
+pub(crate) fn artifact_of(level: ArtifactLevel) -> crate::telemetry::event::Artifact {
+    use crate::telemetry::event::Artifact;
+    match level {
+        ArtifactLevel::Catalog => Artifact::Catalog,
+        ArtifactLevel::Plugin => Artifact::Plugin,
+        ArtifactLevel::Skill => Artifact::Skill,
+    }
+}
+
+/// Emit one `tome.authoring_action{verb=Convert}` event with the REAL outcome.
+///
+/// On `Ok`: a non-dry-run `strict_blocked` is impossible (a strict run aborts
+/// before returning Ok), so the outcome is `Errors` when the report has errors,
+/// `Warnings` when it has warnings, else `Ok`. On `Err`: a
+/// `ConversionUnsupportedStrict` is `StrictRefused`; anything else is `Errors`.
+/// `source_format` is the detected source on `Ok`, and `Unknown` when the
+/// failure happened before/at detection (we have no outcome to read it from).
+fn emit_authoring_telemetry(level: ArtifactLevel, result: &Result<ConvertOutcome, TomeError>) {
+    use crate::telemetry::event::{
+        AuthoringActionEvent, AuthoringOutcome, AuthoringVerb, SourceFormat,
+    };
+    let (source_format, outcome) = match result {
+        Ok(o) => {
+            let outcome = if o.strict_blocked.is_some() {
+                AuthoringOutcome::StrictRefused
+            } else if o.report.errors > 0 {
+                AuthoringOutcome::Errors
+            } else if o.report.warnings > 0 {
+                AuthoringOutcome::Warnings
+            } else {
+                AuthoringOutcome::Ok
+            };
+            (source_format_of(o.harness), outcome)
+        }
+        Err(TomeError::ConversionUnsupportedStrict { .. }) => {
+            (SourceFormat::Unknown, AuthoringOutcome::StrictRefused)
+        }
+        // best-effort: a failure before detection has no source format to read.
+        Err(_) => (SourceFormat::Unknown, AuthoringOutcome::Errors),
+    };
+    crate::telemetry::enqueue(AuthoringActionEvent {
+        verb: AuthoringVerb::Convert,
+        artifact: artifact_of(level),
+        source_format,
+        outcome,
+    });
 }
 
 /// Resolve an `--into <DIR>` target to `(output_dir, register_in_catalog)`:

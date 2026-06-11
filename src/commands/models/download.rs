@@ -89,6 +89,23 @@ pub fn run(args: ModelsDownloadArgs, mode: Mode) -> Result<(), TomeError> {
         let result = download_model(entry, &paths.models_dir, Some(&cb));
         pb.finish_and_clear();
         let elapsed = started.elapsed();
+
+        // OUTCOME-bearing: emit `tome.model_download` per attempt with the REAL
+        // outcome (Ok on success / Failed on error). `model_id` is the closed
+        // `&'static str` registry id; `error_class` is the failure's category.
+        match &result {
+            Ok(_) => crate::telemetry::enqueue(crate::telemetry::event::ModelDownload {
+                model_id: entry.name,
+                outcome: crate::telemetry::event::Outcome::Ok,
+                error_class: None,
+            }),
+            Err(e) => crate::telemetry::enqueue(crate::telemetry::event::ModelDownload {
+                model_id: entry.name,
+                outcome: crate::telemetry::event::Outcome::Failed,
+                error_class: Some(e.category()),
+            }),
+        }
+
         result?;
         info!(model = entry.name, "model artefact installed");
 

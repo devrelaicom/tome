@@ -228,6 +228,18 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         "call",
     );
 
+    // FR-027/FR-028: `tome.entry_invoked` once the entry body is fetched. The
+    // `entry_kind` is always `Skill` — `get_skill` only ever resolves skills
+    // (FR-084; `lookup_skill` hardcodes `EntryKind::Skill`). The `rank_bucket`
+    // is THIS entry's position in the preceding search this session (the funnel
+    // join; `None` when no search ranked it). Best-effort enqueue — a sub-ms
+    // local append that never blocks the tool call or flushes.
+    crate::telemetry::enqueue(crate::telemetry::event::EntryInvoked {
+        entry_kind: crate::telemetry::event::EntryKind::Skill,
+        rank_bucket: crate::mcp::rank_bucket_for(&state, &input.name),
+        calling_harness: crate::mcp::calling_harness(&state),
+    });
+
     // The `Output.path` field is documented as the absolute path to the
     // skill body (see the `Output` struct's doc comment) — emit the
     // resolved `skill_path` (which is absolute) rather than the row's

@@ -221,6 +221,7 @@ fn build_state(paths: &tome::paths::Paths) -> Arc<McpState> {
         reranker_entry: &STUB_RERANKER_ENTRY,
         prompt_registry: Arc::new(PromptRegistry::default()),
         host_harness: None,
+        last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }
 
