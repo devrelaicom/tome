@@ -10,6 +10,11 @@
 //! not "already sent"): at the moment we print, nothing has been emitted yet
 //! (FR-015 — no over-claim). The MCP surface passes `surface_is_cli = false` and
 //! stays silent (a server has no stderr a human reads).
+//!
+//! Content (FR-013): the single line discloses BOTH telemetry streams — the
+//! anonymous usage data AND the named usage of plugins from allowlisted catalogs
+//! (currently Midnight) shared with that catalog's publisher — plus the opt-out
+//! mechanism and a pointer to `tome telemetry --help` for the full detail.
 
 use crate::paths::Paths;
 use crate::telemetry::identity;
@@ -23,9 +28,10 @@ pub fn print_first_run_notice() {
     // stderr, not stdout: a `--json` consumer parses stdout, and this must not
     // appear there. Best-effort — a failed write to stderr is not actionable.
     eprintln!(
-        "Tome collects anonymous usage telemetry to improve the project. \
-         It is opt-out: run `tome telemetry off` to disable (or set TOME_TELEMETRY=0) \
-         before the next run. See TELEMETRY.md."
+        "Tome collects anonymous usage telemetry, plus named usage of plugins from \
+         allowlisted catalogs (currently Midnight) shared with that catalog's publisher, \
+         to help improve the project. It's opt-out — run `tome telemetry off` (or set \
+         TOME_TELEMETRY=0). See `tome telemetry --help`."
     );
 }
 
@@ -45,8 +51,18 @@ pub fn first_run_notice_if_needed(paths: &Paths, surface_is_cli: bool) {
     if !surface_is_cli {
         return;
     }
-    if !crate::telemetry::is_enabled() {
-        return;
+    // Gate on the SAME `paths` we mint into (not the path-less `is_enabled()`,
+    // which resolves the default `$HOME`). Fail-safe-OFF: any resolve error
+    // (e.g. a malformed `config.toml` → exit 91 on the CLI) is treated as
+    // disabled here — the notice is best-effort and must never propagate or
+    // break the foreground command.
+    match crate::telemetry::config::resolve_enabled(paths) {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(e) => {
+            tracing::debug!(error = %e, "telemetry first-run notice skipped: enabled-resolve failed (fail-safe-off)");
+            return;
+        }
     }
     match identity::ensure_install_id(paths) {
         Ok((_uuid, just_minted)) => {
@@ -126,14 +142,22 @@ mod tests {
         Paths::from_root(dir.path().to_path_buf())
     }
 
+    /// Write `enabled = true` into the temp-dir telemetry config so the gate
+    /// (which now resolves against the PASSED `paths`, R2) reads enabled-on
+    /// without relying on the `TOME_TELEMETRY=1` env force-on.
+    fn enable_via_config(paths: &Paths) {
+        crate::telemetry::config::set_enabled(paths, true).unwrap();
+    }
+
     #[test]
     fn enabled_cli_mints_once_then_does_not_re_mint() {
-        // `is_enabled()` resolves the DEFAULT (`$HOME`) Paths, so we force-on via
-        // env to make the gate true regardless of the developer's real config.
+        // The gate now resolves against the PASSED `paths` (R2), so we set the
+        // enabled state via the temp-dir config rather than an env force-on. We
+        // still clear the env (EnvGuard) so a host CI var can't auto-off.
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
-        let g = EnvGuard::new();
-        g.set("TOME_TELEMETRY", "1");
+        let _g = EnvGuard::new();
+        enable_via_config(&paths);
 
         // First call: enabled + CLI ⇒ mints the id (and would print the notice).
         first_run_notice_if_needed(&paths, true);
@@ -150,8 +174,8 @@ mod tests {
     fn mcp_surface_never_mints() {
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
-        let g = EnvGuard::new();
-        g.set("TOME_TELEMETRY", "1"); // even force-on...
+        let _g = EnvGuard::new();
+        enable_via_config(&paths); // even enabled...
 
         first_run_notice_if_needed(&paths, false); // ...MCP stays silent.
         assert!(

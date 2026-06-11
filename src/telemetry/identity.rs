@@ -18,10 +18,28 @@ use crate::telemetry::event::{Uuid, VersionStr};
 use crate::telemetry::lock;
 
 /// How many times the `AlreadyExists` loser re-reads a still-EMPTY id file
-/// before giving up and treating it as corrupt. The empty window is the
-/// winner's two-`write_all` mint, so a handful of `yield_now`-spaced reads
-/// covers it with wide margin while bounding a genuinely-stale empty file.
-const RACE_READ_RETRIES: usize = 64;
+/// before giving up and treating it as corrupt. Each retry sleeps a growing,
+/// capped wall-clock interval (see the loop below), so this count bounds a real
+/// time budget (tens of ms) rather than a scheduling-dependent spin count.
+const RACE_READ_RETRIES: usize = 32;
+
+/// Re-assert `0600` on the id file after an atomic *replace*.
+///
+/// `write_atomic` PRESERVES the existing target's mode (it copies onto the prior
+/// file's permissions), so a re-mint over a loosened id would inherit the loose
+/// mode. The fresh-mint path uses `OpenOptions::mode(0o600)` and is already
+/// tight; this helper covers every atomic-replace re-mint (corrupt / empty /
+/// reset) so a widened mode can never persist. Best-effort + Unix-only — a
+/// platform/FS that rejects the chmod leaves the (already-written) id intact.
+#[cfg(unix)]
+fn reassert_id_0600(paths: &Paths) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(paths.telemetry_id(), std::fs::Permissions::from_mode(0o600));
+}
+
+/// No-op on non-Unix (the mode model does not apply).
+#[cfg(not(unix))]
+fn reassert_id_0600(_paths: &Paths) {}
 
 /// Ensure the `telemetry/` directory exists with a `0600`-friendly (`0700`)
 /// mode. Idempotent. Mirrors `lock::open_lock_file`'s dir landing.
@@ -81,6 +99,13 @@ pub fn ensure_install_id(paths: &Paths) -> Result<(Uuid, bool), TomeError> {
             // Someone else holds the id (a prior run, or the race winner). Read
             // and validate it.
             //
+            // Read/write containment parity: the write side (`write_atomic`)
+            // refuses a symlinked component; the read side must too, or a hostile
+            // `telemetry/id` symlink/FIFO could redirect/block this read. Refuse
+            // up front and fail closed (the guard returns `Ok(())` for a normal
+            // regular file, so this is inert on the happy path).
+            crate::util::refuse_symlinked_component(&path).map_err(TomeError::Io)?;
+            //
             // Race subtlety: `create_new` (O_EXCL) is atomic, but the winner's
             // *write* is not — between its create and its first `write_all` the
             // file exists but is EMPTY. A loser that reads in that window would
@@ -105,12 +130,19 @@ pub fn ensure_install_id(paths: &Paths) -> Result<(Uuid, bool), TomeError> {
                     let mut line = uuid.as_str().to_string();
                     line.push('\n');
                     crate::catalog::store::write_atomic(&path, line.as_bytes())?;
+                    // write_atomic preserves the prior file's mode; re-tighten.
+                    reassert_id_0600(paths);
                     return Ok((uuid, true));
                 }
-                // Empty: the winner is mid-write. Yield and retry. The final
-                // attempt falls through to the corrupt-re-mint below.
+                // Empty: the winner is mid-write. Sleep a growing, capped
+                // interval and retry. A real wall-clock sleep (not `yield_now`)
+                // is deliberate: under slow-FS / heavy-load a busy-spin can burn
+                // all retries *inside* the winner's sub-millisecond empty window
+                // and wrongly re-mint over it (two minters). The growing sleep
+                // (~50µs doubling, capped at attempt 6 ≈ 3.2ms) gives the winner
+                // a guaranteed wall-clock budget regardless of scheduling.
                 if attempt + 1 < RACE_READ_RETRIES {
-                    std::thread::yield_now();
+                    std::thread::sleep(std::time::Duration::from_micros(50u64 << attempt.min(6)));
                 }
             }
 
@@ -120,6 +152,8 @@ pub fn ensure_install_id(paths: &Paths) -> Result<(Uuid, bool), TomeError> {
             let mut line = uuid.as_str().to_string();
             line.push('\n');
             crate::catalog::store::write_atomic(&path, line.as_bytes())?;
+            // write_atomic preserves the prior file's mode; re-tighten.
+            reassert_id_0600(paths);
             Ok((uuid, true))
         }
         Err(e) => Err(TomeError::Io(e)),
@@ -202,14 +236,17 @@ fn stamp_version(path: &std::path::Path, version: &str) -> Result<(), TomeError>
 /// Returns the new install UUID.
 pub fn reset(paths: &Paths) -> Result<Uuid, TomeError> {
     // Hold the lock for the full reset; `_guard` drops (unlocks) on return.
-    let _guard = lock::acquire_blocking(paths)?;
+    // BOUNDED acquire (FR-021a): a hung flusher must never block reset forever.
+    let _guard = lock::acquire_bounded(paths, std::time::Duration::from_secs(3))?;
 
     ensure_dir(paths)?;
     let uuid = Uuid::mint();
     let mut line = uuid.as_str().to_string();
     line.push('\n');
-    // Atomic replace of the id — symlink-safe + 0600.
+    // Atomic replace of the id — symlink-safe. write_atomic preserves the prior
+    // file's mode, so re-tighten to 0600 (a loosened mode must not persist).
     crate::catalog::store::write_atomic(&paths.telemetry_id(), line.as_bytes())?;
+    reassert_id_0600(paths);
 
     clear_queue(paths)?;
     Ok(uuid)
@@ -221,7 +258,8 @@ pub fn reset(paths: &Paths) -> Result<Uuid, TomeError> {
 /// install id (ignoring a missing file), clears the queue, and writes
 /// `enabled = false`. Telemetry then stays off until `tome telemetry on`.
 pub fn purge(paths: &Paths) -> Result<(), TomeError> {
-    let _guard = lock::acquire_blocking(paths)?;
+    // BOUNDED acquire (FR-021a): never wait indefinitely on a hung flusher.
+    let _guard = lock::acquire_bounded(paths, std::time::Duration::from_secs(3))?;
 
     // Delete the id; a missing file is fine (nothing to purge there).
     match std::fs::remove_file(paths.telemetry_id()) {
@@ -413,6 +451,78 @@ mod tests {
         // On-disk id matches the returned fresh id.
         let body = std::fs::read_to_string(paths.telemetry_id()).unwrap();
         assert_eq!(Uuid::parse(body.trim()).unwrap().as_str(), fresh.as_str());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_re_asserts_0600_even_over_a_loosened_id() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        ensure_install_id(&paths).unwrap();
+        // Loosen the existing id's mode; `write_atomic` would otherwise preserve
+        // it across the reset re-mint.
+        std::fs::set_permissions(paths.telemetry_id(), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+
+        reset(&paths).unwrap();
+
+        let mode = std::fs::metadata(paths.telemetry_id())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "reset must re-tighten the id to 0600");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn corrupt_re_mint_re_asserts_0600_even_over_a_loosened_id() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        ensure_dir(&paths).unwrap();
+        // Plant loosened garbage so the AlreadyExists re-mint path runs.
+        std::fs::write(paths.telemetry_id(), b"not-a-uuid\n").unwrap();
+        std::fs::set_permissions(paths.telemetry_id(), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+
+        let (_uuid, just_minted) = ensure_install_id(&paths).unwrap();
+        assert!(just_minted, "corrupt id re-mints");
+        let mode = std::fs::metadata(paths.telemetry_id())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "corrupt re-mint must re-tighten to 0600"
+        );
+    }
+
+    #[test]
+    fn empty_id_is_re_minted_after_retry_window() {
+        // T5 (deterministic empty-window fall-through): a pre-existing EMPTY id
+        // file (a crashed/mid-write mint with NO live writer) must, after the
+        // bounded retry exhausts, be re-minted to a valid v4 id (just_minted).
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        ensure_dir(&paths).unwrap();
+        // Zero-byte id — the create_new hits AlreadyExists, every read sees "".
+        std::fs::write(paths.telemetry_id(), b"").unwrap();
+
+        let (uuid, just_minted) = ensure_install_id(&paths).unwrap();
+        assert!(
+            just_minted,
+            "a persistently-empty id (no live winner) re-mints after the retry budget"
+        );
+        assert!(
+            Uuid::parse(uuid.as_str()).is_some(),
+            "re-minted id is a valid v4 uuid"
+        );
+        // On-disk file now holds the returned id, one line.
+        let body = std::fs::read_to_string(paths.telemetry_id()).unwrap();
+        assert_eq!(body.lines().count(), 1);
+        assert_eq!(Uuid::parse(body.trim()).unwrap().as_str(), uuid.as_str());
     }
 
     #[test]

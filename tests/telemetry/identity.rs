@@ -79,6 +79,18 @@ fn id_path(env: &ToolEnv) -> std::path::PathBuf {
     env.tome_root().join("telemetry").join("id")
 }
 
+/// The `telemetry/queue.jsonl` file path under the isolated home.
+fn queue_path(env: &ToolEnv) -> std::path::PathBuf {
+    env.tome_root().join("telemetry").join("queue.jsonl")
+}
+
+/// Seed the queue file with `body`, creating `telemetry/` first.
+fn seed_queue(env: &ToolEnv, body: &str) {
+    let q = queue_path(env);
+    std::fs::create_dir_all(q.parent().unwrap()).expect("create telemetry dir");
+    std::fs::write(&q, body).expect("seed queue");
+}
+
 /// A canonical `8-4-4-4-12` UUID shape check (hex groups). Mirrors the v4 shape
 /// the binary mints without re-deriving the version-nibble logic here.
 fn looks_like_uuid(s: &str) -> bool {
@@ -252,6 +264,98 @@ fn purge_removes_the_id_and_disables() {
 }
 
 // ---------------------------------------------------------------------------
+// status pending counter — counts non-empty queue lines (US2-independent pin)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn status_pending_counts_queue_lines() {
+    let env = ToolEnv::new();
+    // N non-empty JSON-ish lines + one blank line. The blank line must NOT be
+    // counted. This pins the line-counter independent of US2's queue producer.
+    seed_queue(&env, "{\"e\":\"a\"}\n{\"e\":\"b\"}\n{\"e\":\"c\"}\n\n");
+
+    let v = status_json(&env);
+    assert_eq!(
+        v["pending"], 3,
+        "pending counts the 3 non-empty lines, not the blank: {v}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// on → off → on reuses the SAME install UUID (re-enable does not re-mint)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn on_off_on_reuses_same_uuid() {
+    let env = ToolEnv::new();
+    assert!(run(&env, &["telemetry", "on"]).status.success());
+    let original = status_json(&env)["install_uuid"]
+        .as_str()
+        .expect("uuid after first on")
+        .to_string();
+
+    assert!(run(&env, &["telemetry", "off"]).status.success());
+    assert!(run(&env, &["telemetry", "on"]).status.success());
+
+    let v = status_json(&env);
+    assert_eq!(v["enabled"], Value::Bool(true), "re-enabled");
+    assert_eq!(v["source"], "config");
+    assert_eq!(
+        v["install_uuid"].as_str(),
+        Some(original.as_str()),
+        "re-enable reuses the original install UUID (no re-mint)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// reset / purge clear the queue
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reset_clears_the_queue() {
+    let env = ToolEnv::new();
+    assert!(run(&env, &["telemetry", "on"]).status.success());
+    seed_queue(&env, "{\"e\":\"a\"}\n{\"e\":\"b\"}\n");
+    assert_eq!(status_json(&env)["pending"], 2, "queue seeded");
+
+    let out = run(&env, &["telemetry", "reset", "--yes"]);
+    assert!(
+        out.status.success(),
+        "reset --yes exited {:?}; stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    assert_eq!(
+        status_json(&env)["pending"],
+        0,
+        "reset must clear the queue"
+    );
+}
+
+#[test]
+fn purge_clears_the_queue() {
+    let env = ToolEnv::new();
+    assert!(run(&env, &["telemetry", "on"]).status.success());
+    seed_queue(&env, "{\"e\":\"a\"}\n{\"e\":\"b\"}\n{\"e\":\"c\"}\n");
+
+    let out = run(&env, &["telemetry", "purge"]);
+    assert!(
+        out.status.success(),
+        "purge exited {:?}; stderr: {}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Purge also disables telemetry, but the queue must be gone regardless.
+    assert!(
+        !queue_path(&env).exists(),
+        "purge must clear the queue file"
+    );
+    assert_eq!(status_json(&env)["pending"], 0, "no pending after purge");
+}
+
+// ---------------------------------------------------------------------------
 // CI auto-disable — no mint, no notice
 // ---------------------------------------------------------------------------
 
@@ -342,10 +446,43 @@ fn first_run_notice_fires_once_on_stderr() {
         err1.contains("telemetry") && err1.contains("off"),
         "first run must print the opt-out notice on stderr; stderr: {err1}"
     );
+    // The full FR-013 clause set is pinned by
+    // `first_run_notice_discloses_all_required_clauses` below.
     // Run 2 saw the id already present ⇒ no notice.
     assert!(
         !err2.contains("telemetry"),
         "second run must NOT re-print the notice; stderr: {err2}"
+    );
+}
+
+#[test]
+fn first_run_notice_discloses_all_required_clauses() {
+    // FR-013: the single first-run line must disclose ALL of — anonymous usage
+    // data, named usage of plugins from allowlisted catalogs (Midnight), the
+    // opt-out mechanism, and a pointer to `tome telemetry --help`.
+    let env = ToolEnv::new();
+    let out = clean_cmd(&env)
+        .env("TOME_TELEMETRY", "1")
+        .args(["catalog", "list"])
+        .output()
+        .expect("spawn run1");
+    let err = String::from_utf8_lossy(&out.stderr).to_lowercase();
+
+    assert!(
+        err.contains("anonymous"),
+        "notice must disclose anonymous collection; stderr: {err}"
+    );
+    assert!(
+        err.contains("midnight"),
+        "notice must name the allowlisted catalog (Midnight); stderr: {err}"
+    );
+    assert!(
+        err.contains("tome telemetry --help"),
+        "notice must point to `tome telemetry --help`; stderr: {err}"
+    );
+    assert!(
+        err.contains("off"),
+        "notice must state the opt-out (`tome telemetry off`); stderr: {err}"
     );
 }
 
@@ -362,13 +499,23 @@ fn telemetry_command_prints_no_notice() {
         .expect("spawn tome");
     let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
     assert!(
-        !stderr.contains("telemetry collects") && !stderr.contains("opt-out"),
+        !stderr.contains("collects anonymous usage telemetry") && !stderr.contains("opt-out"),
         "the telemetry group must print no first-run notice; stderr: {stderr}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// upgrade detection — SKIPPED in US1.
+// AC#7 — MCP server mints the install UUID SILENTLY on first-ever run.
+//
+// Not assertable in US1: the MCP cold-start mint is realized in US2 via the
+// `tome.cold_start` enqueue→mint at server startup (the MCP surface passes
+// `surface_is_cli = false`, so it never prints the first-run notice). US2 MUST
+// add an integration test asserting the MCP path mints a 0600 `telemetry/id`
+// with NO notice on any stream.
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// upgrade detection — SKIPPED in US1 (tracked US2 obligation).
 //
 // `detect_and_record_version` (the `telemetry/last-version` rewrite mechanism)
 // exists and is unit-tested in `src/telemetry/identity.rs`, but it is NOT yet
@@ -376,3 +523,6 @@ fn telemetry_command_prints_no_notice() {
 // the version-record call site (and the `tome.upgrade` enqueue) is US2's startup
 // path. There is therefore no observable CLI behaviour to assert here, so the
 // upgrade sub-test is intentionally omitted until US2 lands the call site.
+//
+// US2 MUST add: an integration assertion that a version change emits
+// `tome.upgrade { from_version }` and rewrites `telemetry/last-version`.

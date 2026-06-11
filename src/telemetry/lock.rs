@@ -11,14 +11,22 @@
 //! rewrite the install id.
 //!
 //! Implementation mirrors `src/index/lock.rs`: a per-fd OS advisory lock via
-//! `std::fs::File::{lock,try_lock}` with a `Drop` guard that releases on scope
-//! exit. The OS releases the lock on process death, so there are no orphaned
-//! locks to clean up.
+//! `std::fs::File::try_lock` with a `Drop` guard that releases on scope exit.
+//! The OS releases the lock on process death, so there are no orphaned locks to
+//! clean up. The foreground `reset`/`purge` commands use a BOUNDED retry over
+//! `try_acquire` ([`acquire_bounded`], FR-021a) so a hung flusher can never
+//! block them indefinitely; the background flusher (US3) uses the non-blocking
+//! [`try_acquire`] directly.
 
 use std::fs::{File, OpenOptions, TryLockError};
+use std::time::{Duration, Instant};
 
 use crate::error::TomeError;
 use crate::paths::Paths;
+
+/// Poll interval between bounded-acquire retries. Small enough that the wait is
+/// responsive, large enough that a brief flush is waited out without a busy spin.
+const ACQUIRE_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 
 /// RAII holder of the telemetry flush lock. The lock is released when the guard
 /// is dropped (or the process exits).
@@ -70,19 +78,34 @@ fn open_lock_file(paths: &Paths) -> Result<File, TomeError> {
     opts.open(&path).map_err(TomeError::Io)
 }
 
-/// Acquire the flush lock, BLOCKING until it is available.
+/// Acquire the flush lock with a BOUNDED wait (FR-021a).
 ///
-/// Used by `reset`/`purge`: these are explicit, foreground user commands, and a
-/// concurrent flush is bounded (≤5 s × a small number of batches), so a brief
-/// wait for the lock is acceptable — and far simpler than a spin/retry. A lock
-/// error (not contention — `File::lock` blocks rather than returning
-/// `WouldBlock`) maps to [`TomeError::Io`].
-pub fn acquire_blocking(paths: &Paths) -> Result<FlushLock, TomeError> {
-    let file = open_lock_file(paths)?;
-    match file.lock() {
-        Ok(()) => Ok(FlushLock { file: Some(file) }),
-        // `File::lock` blocks; a non-`WouldBlock` error is a real fault.
-        Err(e) => Err(TomeError::Io(e)),
+/// Used by `reset`/`purge`: explicit, foreground user commands whose lock acquire
+/// MUST be bounded — never an indefinite wait — so a hung flusher cannot block
+/// the user's command forever. We poll [`try_acquire`] every
+/// [`ACQUIRE_RETRY_INTERVAL`] until the lock is taken or `max_wait` elapses; on
+/// timeout we return a `WouldBlock` [`TomeError::Io`] ("telemetry flush in
+/// progress; retry shortly").
+///
+/// `Instant` is the correct clock here: this is a single-process, in-foreground
+/// wall-clock budget (not a cross-process timestamp), so monotonic elapsed time
+/// is exactly what we want — and it is immune to wall-clock adjustments.
+pub fn acquire_bounded(paths: &Paths, max_wait: Duration) -> Result<FlushLock, TomeError> {
+    let deadline = Instant::now() + max_wait;
+    loop {
+        if let Some(guard) = try_acquire(paths)? {
+            return Ok(guard);
+        }
+        // Contended. Give up once the budget is spent; otherwise back off briefly
+        // and retry. Clamp the sleep to whatever remains so we never overshoot.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(TomeError::Io(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "telemetry flush in progress; retry shortly",
+            )));
+        }
+        std::thread::sleep(ACQUIRE_RETRY_INTERVAL.min(remaining));
     }
 }
 
@@ -111,10 +134,10 @@ mod tests {
     }
 
     #[test]
-    fn acquire_blocking_succeeds_on_fresh_lock() {
+    fn acquire_bounded_succeeds_on_fresh_lock() {
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
-        let guard = acquire_blocking(&paths).unwrap();
+        let guard = acquire_bounded(&paths, Duration::from_secs(1)).unwrap();
         // The lock file was created.
         assert!(paths.telemetry_flush_lock().exists());
         drop(guard);
@@ -126,7 +149,7 @@ mod tests {
         let paths = paths_in(&dir);
 
         // Hold the lock on one fd...
-        let held = acquire_blocking(&paths).unwrap();
+        let held = acquire_bounded(&paths, Duration::from_secs(1)).unwrap();
         // ...a second fd in the SAME process must see contention. (OFD/flock
         // locks are per-open-file-description, so two opens of the same path
         // contend even within one process.)
@@ -138,13 +161,43 @@ mod tests {
         assert!(again.is_some());
     }
 
+    #[test]
+    fn acquire_bounded_times_out_while_held() {
+        // While the lock is held on a second in-process fd, a bounded acquire
+        // must give up within ~the bound and return a `WouldBlock` Io error —
+        // never wait indefinitely (FR-021a).
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+
+        let _held = acquire_bounded(&paths, Duration::from_secs(1)).unwrap();
+
+        let start = Instant::now();
+        let err = acquire_bounded(&paths, Duration::from_millis(100)).unwrap_err();
+        let elapsed = start.elapsed();
+
+        match err {
+            TomeError::Io(e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock,
+                "bounded acquire timeout must be a WouldBlock Io error"
+            ),
+            other => panic!("expected Io(WouldBlock), got {other:?}"),
+        }
+        // It honoured the bound and did not block forever (generous ceiling to
+        // absorb a slow/contended CI scheduler).
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "bounded acquire must return within ~the bound, took {elapsed:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn lock_file_is_0600() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
-        let _guard = acquire_blocking(&paths).unwrap();
+        let _guard = acquire_bounded(&paths, Duration::from_secs(1)).unwrap();
         let mode = std::fs::metadata(paths.telemetry_flush_lock())
             .unwrap()
             .permissions()
