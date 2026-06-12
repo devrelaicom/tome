@@ -614,6 +614,102 @@ pub struct MetaSkillDrift {
     pub state: String,
 }
 
+/// Phase 10 / US5 (FR-064): the read-only telemetry subsystem report.
+///
+/// A projection over the SAME on-disk state the telemetry writers produced
+/// (the doctor-as-projection precedent): nothing here writes, mints, or
+/// creates a directory (FR-124). Every field routes through an existing
+/// telemetry reader (`config::resolve_enabled_with_source`, `identity`,
+/// `queue`, the `last-flush` stamp, `transport::resolve_endpoint`,
+/// `allowlist`), so doctor and `tome telemetry status` cannot diverge.
+///
+/// Plain `Serialize` (no `deny_unknown_fields` — this is an output). Field
+/// order is the wire order; nested optionals carry `skip_serializing_if` so an
+/// absent id / queue / flush stamp keeps the block byte-stable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TelemetrySection {
+    /// The resolved enabled-state (full precedence: env / CI / config / default).
+    pub enabled: bool,
+    /// Which precedence rule decided `enabled` (the same provenance
+    /// `tome telemetry status` reports).
+    pub source: crate::telemetry::config::Source,
+    /// `Some` if the install-id config could not be read (malformed config →
+    /// exit 91 on the foreground CLI, but doctor never crashes: it reports the
+    /// error state read-only instead). Carries the scrubbed detail string.
+    /// Omitted when the resolve succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_error: Option<String>,
+    /// The install UUID file (path scrubbed). Always present (path + existence);
+    /// `mode`/`age_seconds` are populated only when the file exists.
+    pub install_id: TelemetryIdReport,
+    /// The local JSONL queue: pending depth, oldest-event age, unparsable lines.
+    pub queue: TelemetryQueueReport,
+    /// The `last-flush` stamp (time + HTTP status), when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_flush: Option<TelemetryFlushReport>,
+    /// The collector endpoint in effect, credential-scrubbed.
+    pub endpoint: String,
+    /// The compiled-in attribution allowlist (short id + canonical source).
+    pub allowlist: Vec<TelemetryAllowlistEntry>,
+}
+
+/// The install-UUID file's read-only state for the doctor report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TelemetryIdReport {
+    /// The `telemetry/id` path, credential-scrubbed (a path can't carry URL
+    /// creds, but routing it through the shared scrubber keeps every
+    /// telemetry-facing string scrubbed by construction).
+    pub path: String,
+    /// Whether the id file exists on disk (doctor never mints it).
+    pub present: bool,
+    /// The Unix mode bits (`& 0o777`) when present and on a Unix platform.
+    /// Omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
+    /// Age of the id file in whole seconds (now − mint mtime), when present.
+    /// Omitted when absent or the mtime is unreadable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_seconds: Option<u64>,
+}
+
+/// The pending-queue read-only state for the doctor report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TelemetryQueueReport {
+    /// Pending (non-blank) line count — via `queue::count_pending` (read-only,
+    /// missing ⇒ 0).
+    pub pending: u64,
+    /// Unparsable lines found while classifying — via `queue::classify_lines`
+    /// (read-only; the flusher self-heals these on drain).
+    pub corrupt: usize,
+    /// Age in whole seconds of the OLDEST pending event's `timestamp` envelope
+    /// field (the queue is FIFO, so the first parsable event). Omitted when the
+    /// queue is empty or no event carried a parseable timestamp.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_age_seconds: Option<u64>,
+}
+
+/// The `last-flush` stamp's read-only state for the doctor report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TelemetryFlushReport {
+    /// The stamp's RFC3339 timestamp string (verbatim).
+    pub timestamp: String,
+    /// The last HTTP status, when a batch was acknowledged (`null`/absent ⇒ the
+    /// drain ran but nothing was confirmed). Omitted when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
+}
+
+/// One attribution-allowlist entry surfaced read-only: the short id and its
+/// canonical source. Mirrors `allowlist::ATTRIBUTED_TELEMETRY_CATALOGS`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TelemetryAllowlistEntry {
+    /// The short id (e.g. `midnight`) — the only source-identifying value that
+    /// ever appears on the attributed wire.
+    pub short_id: String,
+    /// The canonical source (host/path) the entry matches against.
+    pub canonical_source: String,
+}
+
 /// Full doctor report. Field order matches `contracts/doctor.md` +
 /// `contracts/doctor-extensions-p4.md` so the rendered JSON is
 /// deterministic.
@@ -727,6 +823,12 @@ pub struct DoctorReport {
     /// system keeps the existing byte-stable wire shape unchanged.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub meta_skills: Vec<MetaSkillDrift>,
+    /// Phase 10 / US5: the read-only telemetry subsystem report (FR-064).
+    /// `Option` + `skip_serializing_if = "Option::is_none"` so a build/test that
+    /// does not assemble it (the byte-stable minimal-report pin) keeps the
+    /// existing wire shape unchanged. `assemble_report` always populates it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<TelemetrySection>,
     pub overall: DoctorClassification,
     pub suggested_fixes: Vec<SuggestedFix>,
 }

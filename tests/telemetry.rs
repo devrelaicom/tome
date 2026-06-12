@@ -47,3 +47,12 @@ mod startup;
 // network-counter increment.
 #[path = "telemetry/transport.rs"]
 mod transport;
+// US5 (T069): the `TELEMETRY.md` worked-example wire-shape pin — the §8 JSON
+// blocks compared byte-for-byte against the typed constructors (FR-062 drift
+// guard).
+#[path = "telemetry/telemetry_md_pin.rs"]
+mod telemetry_md_pin;
+// US5 (T071): the read-only `tome doctor` telemetry section, end-to-end through
+// the real binary (FR-064/065) — read-only/no-mint + `--fix` no-op.
+#[path = "telemetry/telemetry_doctor.rs"]
+mod telemetry_doctor;
