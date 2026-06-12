@@ -547,6 +547,66 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         writeln!(out)?;
     }
 
+    // Phase 10 / US5: read-only telemetry subsystem report (FR-064).
+    if let Some(t) = &report.telemetry {
+        let on_off = if t.enabled { "enabled" } else { "disabled" };
+        writeln!(out, "Telemetry:")?;
+        writeln!(
+            out,
+            "  state:     {on_off} ({})",
+            telemetry_source_label(t.source),
+        )?;
+        if let Some(err) = &t.config_error {
+            writeln!(out, "  {warn} config error: {err}")?;
+        }
+        if t.install_id.present {
+            let mode = t
+                .install_id
+                .mode
+                .map(|m| format!(" mode {m:04o}"))
+                .unwrap_or_default();
+            let age = t
+                .install_id
+                .age_seconds
+                .map(|s| format!(" age {s}s"))
+                .unwrap_or_default();
+            writeln!(out, "  install:   {}{mode}{age}", t.install_id.path)?;
+        } else {
+            writeln!(out, "  install:   (none) {}", t.install_id.path)?;
+        }
+        let oldest = t
+            .queue
+            .oldest_age_seconds
+            .map(|s| format!(", oldest {s}s"))
+            .unwrap_or_default();
+        writeln!(
+            out,
+            "  queue:     {} pending, {} unparsable{oldest}",
+            t.queue.pending, t.queue.corrupt,
+        )?;
+        match &t.last_flush {
+            Some(lf) => match lf.status {
+                Some(s) => writeln!(out, "  last flush: {} (status {s})", lf.timestamp)?,
+                None => writeln!(
+                    out,
+                    "  last flush: {} (no successful delivery)",
+                    lf.timestamp
+                )?,
+            },
+            None => writeln!(out, "  last flush: never")?,
+        }
+        writeln!(out, "  endpoint:  {}", t.endpoint)?;
+        if t.allowlist.is_empty() {
+            writeln!(out, "  allowlist: (empty)")?;
+        } else {
+            writeln!(out, "  allowlist:")?;
+            for e in &t.allowlist {
+                writeln!(out, "    {} -> {}", e.short_id, e.canonical_source)?;
+            }
+        }
+        writeln!(out)?;
+    }
+
     if !report.suggested_fixes.is_empty() {
         writeln!(out, "Suggested fixes:")?;
         for f in &report.suggested_fixes {
@@ -564,6 +624,19 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
     };
     writeln!(out, "Overall:         {overall_label}")?;
     Ok(())
+}
+
+/// Human label for the telemetry enabled-state provenance. Mirrors the
+/// `commands::telemetry` status labels so the two surfaces read identically.
+fn telemetry_source_label(source: crate::telemetry::config::Source) -> &'static str {
+    use crate::telemetry::config::Source;
+    match source {
+        Source::EnvOn => "TOME_TELEMETRY=1",
+        Source::EnvOff => "TOME_TELEMETRY=0",
+        Source::Ci => "CI auto-off",
+        Source::Config => "config file",
+        Source::Default => "default",
+    }
 }
 
 fn harness_display_name(machine_name: &str) -> &'static str {

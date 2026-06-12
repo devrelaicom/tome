@@ -880,20 +880,34 @@ pub fn to_line(envelope: &Envelope, event: &impl Serialize) -> Result<String, se
     serde_json::to_string(&wire)
 }
 
+/// The FIXED `tome_version` token used by the byte-stable pin envelopes below.
+///
+/// WHY a fixed const and NOT `env!("CARGO_PKG_VERSION")`: the `TELEMETRY.md` pin
+/// (US5) compares the document's two worked JSON examples byte-for-byte against
+/// these constructors. Those examples show `"0.6.0"`. `tome_version` is *data*
+/// (a value on the wire), not *schema* (the field order / set), so a future
+/// crate-version bump must NOT break the schema pin — otherwise every release
+/// would have to re-edit the worked examples in lockstep with the crate version
+/// for no schema reason. Pinning the test-only envelopes to a fixed version
+/// decouples the schema-stability guarantee from the crate's marketing version.
+/// The current crate version IS `0.6.0`, so this changes nothing today; it only
+/// keeps the pins green across the next version bump.
+const TEST_TOME_VERSION: &str = "0.6.0";
+
 /// The ONE canonical fixed [`Envelope`] for byte-stable pin tests across the
 /// suite (data-model §10). The `TELEMETRY.md` pin (US5) and the
 /// `telemetry_events.rs` wire pins (US2) all build their expected lines off
-/// this so the fixed install/session uuids, os/arch, timestamp, and sample
-/// rate live in exactly one place — change them here and every pin updates in
-/// lockstep.
+/// this so the fixed install/session uuids, os/arch, timestamp, sample rate,
+/// AND `tome_version` live in exactly one place — change them here and every
+/// pin updates in lockstep.
 ///
 /// Doc-hidden: it constructs from arbitrary (test-only) fixed uuids and is not
-/// part of the published API. `tome_version` is NOT fixed here — it comes from
-/// `env!("CARGO_PKG_VERSION")` via [`Envelope::new`], so a version bump updates
-/// every pin together (matching the existing data-model worked example).
+/// part of the published API. `tome_version` is fixed to [`TEST_TOME_VERSION`]
+/// (NOT `env!("CARGO_PKG_VERSION")`) so the schema pin survives a crate-version
+/// bump — see the const's doc-comment.
 #[doc(hidden)]
 pub fn fixed_envelope_for_tests(event_type: &'static str) -> Envelope {
-    Envelope::new(
+    let mut envelope = Envelope::new(
         Uuid::parse("0b9c1f2e-3a4d-4b6c-8e1f-2a3b4c5d6e7f")
             .expect("canonical fixed install uuid is valid"),
         Uuid::parse("7f6e5d4c-3b2a-4f1e-9c8b-1a2b3c4d5e6f")
@@ -902,17 +916,20 @@ pub fn fixed_envelope_for_tests(event_type: &'static str) -> Envelope {
         Arch::Aarch64,
         "2026-06-11T14:11:45.123Z".to_string(),
         event_type,
-    )
+    );
+    envelope.tome_version = TEST_TOME_VERSION;
+    envelope
 }
 
 /// The CATALOG-ATTRIBUTED counterpart of [`fixed_envelope_for_tests`]: same fixed
-/// install/session uuids + os/arch, but built via [`Envelope::new_attributed`]
-/// (so NO `sample_rate`) with a DYNAMIC `event_type`. The timestamp here
-/// (`2026-06-11T14:12:03.456Z`) matches data-model §10 worked example 2 exactly,
-/// so the attributed pin is byte-for-byte against the data-model.
+/// install/session uuids + os/arch + `tome_version`, but built via
+/// [`Envelope::new_attributed`] (so NO `sample_rate`) with a DYNAMIC
+/// `event_type`. The timestamp here (`2026-06-11T14:12:03.456Z`) matches
+/// data-model §10 worked example 2 exactly, so the attributed pin is
+/// byte-for-byte against the data-model.
 #[doc(hidden)]
 pub fn fixed_attributed_envelope_for_tests(event_type: String) -> Envelope {
-    Envelope::new_attributed(
+    let mut envelope = Envelope::new_attributed(
         Uuid::parse("0b9c1f2e-3a4d-4b6c-8e1f-2a3b4c5d6e7f")
             .expect("canonical fixed install uuid is valid"),
         Uuid::parse("7f6e5d4c-3b2a-4f1e-9c8b-1a2b3c4d5e6f")
@@ -921,7 +938,9 @@ pub fn fixed_attributed_envelope_for_tests(event_type: String) -> Envelope {
         Arch::Aarch64,
         "2026-06-11T14:12:03.456Z".to_string(),
         event_type,
-    )
+    );
+    envelope.tome_version = TEST_TOME_VERSION;
+    envelope
 }
 
 #[cfg(test)]

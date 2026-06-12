@@ -19,6 +19,7 @@ pub mod harness_integration;
 pub mod meta_drift;
 pub mod orphan_cleanup;
 pub mod report;
+pub mod telemetry;
 
 use std::path::Path;
 
@@ -36,6 +37,8 @@ pub use report::{
     CatalogCacheHealth, CatalogCacheState, DoctorClassification, DoctorReport, EntryCountsByKind,
     HarnessPresence, HarnessSubsystemReport, MetaSkillDrift, OrphanDataDirReport,
     ProjectBindingState, PromptsReport, RulesCopyState, Subsystem, SubsystemHealth, SuggestedFix,
+    TelemetryAllowlistEntry, TelemetryFlushReport, TelemetryIdReport, TelemetryQueueReport,
+    TelemetrySection,
 };
 
 /// Build a [`DoctorReport`] from the on-disk state. Read-only; never
@@ -252,6 +255,14 @@ pub fn assemble_report(
     // layer (refreshes in place; never creates new installs).
     let meta_skills = meta_drift::check(home, scope);
 
+    // Phase 10 / US5 (FR-064): the read-only telemetry subsystem projection.
+    // Infallible by construction (a malformed config is reported, not
+    // propagated); read-only (FR-124 — mints nothing, creates no dir). Always
+    // populated by `assemble_report`; the `Option` + `skip_serializing_if`
+    // keeps the byte-stable minimal-report pin (which builds the struct literal
+    // with `telemetry: None`) unchanged.
+    let telemetry = Some(telemetry::assemble(paths));
+
     Ok(DoctorReport {
         tome_version,
         workspace,
@@ -279,6 +290,7 @@ pub fn assemble_report(
         legacy_model_manifests,
         unconverted_plugins,
         meta_skills,
+        telemetry,
         overall,
         suggested_fixes,
     })
