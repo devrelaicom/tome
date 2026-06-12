@@ -210,31 +210,44 @@ pub fn run_with_deps(
     // we hold in a throwaway `ResolvedScope` (provenance/project_root are unused
     // by the attribution read) rather than thread a `ResolvedScope` through the
     // whole dep struct.
-    let attribution_scope = ResolvedScope {
-        scope: deps.scope.clone(),
-        source: ScopeSource::GlobalFallback,
-        project_root: None,
-    };
-    let mut attribution_cache: std::collections::HashMap<String, Option<&'static str>> =
-        std::collections::HashMap::new();
-    for (idx, s) in outcome.results.iter().enumerate() {
-        let c = &s.candidate;
-        let catalog_id = *attribution_cache
-            .entry(c.catalog.clone())
-            .or_insert_with(|| {
-                crate::telemetry::resolve_attribution(&attribution_scope, &c.catalog)
-            });
-        if let Some(catalog_id) = catalog_id {
-            crate::telemetry::enqueue_attributed(crate::telemetry::event::SearchResult {
-                entry_name: c.name.clone(),
-                entry_kind: c.kind.into(),
-                plugin_name: c.plugin.clone(),
-                // EXACT 1-indexed rank (FR-057) — `idx + 1`, never bucketed.
-                rank: (idx + 1) as u32,
-                catalog_id,
-                // CLI surface has no calling harness.
-                calling_harness: None,
-            });
+    // R-L1: gate the loop ONCE. The public `enqueue_attributed` re-runs
+    // `is_enabled()` (a `Paths::resolve()` + a `config.toml` read) PER result —
+    // N config reads per search. Resolve `Paths` + the enabled state a single
+    // time here, then call the un-gated `enqueue_attributed_to(&paths, …)`
+    // primitive inside the loop. The exact rank, the per-catalog memoised
+    // resolution, and the alongside-the-anonymous semantics are unchanged.
+    // Best-effort: an unresolvable `$HOME` or a disabled/failed gate skips the
+    // whole attributed loop (the anonymous `tome.search` already fired above).
+    if let Some(paths) = telemetry_attribution_paths() {
+        let attribution_scope = ResolvedScope {
+            scope: deps.scope.clone(),
+            source: ScopeSource::GlobalFallback,
+            project_root: None,
+        };
+        let mut attribution_cache: std::collections::HashMap<String, Option<&'static str>> =
+            std::collections::HashMap::new();
+        for (idx, s) in outcome.results.iter().enumerate() {
+            let c = &s.candidate;
+            let catalog_id = *attribution_cache
+                .entry(c.catalog.clone())
+                .or_insert_with(|| {
+                    crate::telemetry::resolve_attribution(&attribution_scope, &c.catalog)
+                });
+            if let Some(catalog_id) = catalog_id {
+                crate::telemetry::enqueue_attributed_to(
+                    &paths,
+                    crate::telemetry::event::SearchResult {
+                        entry_name: c.name.clone(),
+                        entry_kind: c.kind.into(),
+                        plugin_name: c.plugin.clone(),
+                        // EXACT 1-indexed rank (FR-057) — `idx + 1`, never bucketed.
+                        rank: (idx + 1) as u32,
+                        catalog_id,
+                        // CLI surface has no calling harness.
+                        calling_harness: None,
+                    },
+                );
+            }
         }
     }
 
@@ -254,6 +267,21 @@ pub fn run_with_deps(
         )?,
     }
     Ok(outcome)
+}
+
+/// Resolve `Paths` ONCE for the attributed-search loop, gated on the telemetry
+/// enabled state. Returns `Some(paths)` only when telemetry is enabled and
+/// `$HOME` resolves — so the per-result loop can call the un-gated
+/// `enqueue_attributed_to(&paths, …)` primitive without re-reading `config.toml`
+/// on every entry (R-L1). FAIL-SAFE-OFF: an unresolvable `$HOME` or a malformed
+/// config collapses to `None` (skip the attributed loop), mirroring the
+/// silent-path contract in [`crate::telemetry::is_enabled`].
+fn telemetry_attribution_paths() -> Option<Paths> {
+    let paths = Paths::resolve().ok()?;
+    match crate::telemetry::config::resolve_enabled(&paths) {
+        Ok(true) => Some(paths),
+        _ => None,
+    }
 }
 
 /// The silent compute path. Runs filter validation → drift check →

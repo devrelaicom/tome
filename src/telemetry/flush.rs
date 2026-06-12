@@ -188,10 +188,10 @@ pub fn run(paths: &Paths) -> Result<(), TomeError> {
         tracing::debug!(target: "telemetry", dropped, "flush self-heal: dropped unparsable lines");
     }
 
-    // Nothing parseable to send: still rewrite (to drop any unparsable lines we
-    // just self-healed away) and stamp, so the queue converges to clean.
     // 4–5. Per-stream batching + delivery. `sent` collects the parsed-index of
-    //      every line a 2xx acknowledged.
+    //      every line a 2xx acknowledged. (A drain with NOTHING parseable to send
+    //      still converges the queue to clean — the rewrite gate below fires on
+    //      `dropped > 0` alone, persisting the self-heal.)
     let mut sent: Vec<bool> = vec![false; parsed.len()];
     let mut transport_err: Option<TomeError> = None;
     let mut last_status: Option<u16> = None;

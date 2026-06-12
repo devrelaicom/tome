@@ -90,6 +90,13 @@ pub fn maybe_emit_heartbeat(paths: &Paths) {
 /// unreadable. A bounded read so a corrupt/over-grown stamp can't blow memory.
 fn read_last_heartbeat(paths: &Paths) -> Option<String> {
     let path = paths.telemetry_last_heartbeat();
+    // Sec-L1: read/write containment parity — `record_last_heartbeat` writes via
+    // `write_atomic` (symlink-refusing); refuse a symlinked component on the read
+    // too. A hostile stamp is treated as absent (best-effort `None`), matching the
+    // "never sent" degrade below — never propagated.
+    if crate::util::refuse_symlinked_component(&path).is_err() {
+        return None;
+    }
     match crate::util::bounded_read_to_string(&path, LAST_HEARTBEAT_READ_CAP) {
         // Trim trailing newline/whitespace so the comparison against
         // `today_utc_date` (which has none) is exact.

@@ -310,16 +310,36 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // opens the index read-only with no lock (NFR-009); `None` ⇒ anonymous only.
     // The artefact names (entry/plugin name + version) are PUBLISHED values
     // (FR-059), never secrets. Best-effort — never alters the tool result.
-    if let Some(catalog_id) = crate::telemetry::resolve_attribution(&state.scope, &input.catalog) {
-        crate::telemetry::enqueue_attributed(crate::telemetry::event::AttributedEntryInvoked {
-            entry_name: input.name.clone(),
-            entry_kind: crate::telemetry::event::EntryKind::Skill,
-            plugin_name: input.plugin.clone(),
-            plugin_version: attributed_plugin_version,
-            catalog_id,
-            calling_harness: crate::mcp::calling_harness(&state),
-        });
-    }
+    //
+    // Sec-M1 / R-L1 (cross-sink parity): `resolve_attribution` does a SYNC
+    // SQLite open+query (5s busy_timeout). The sibling `search_skills` success
+    // path and this file's POST-resolution error helper already fold it into a
+    // `spawn_blocking`; the SUCCESS path here was the one that still ran it
+    // inline on the single-threaded MCP reactor. Fold the resolution + the
+    // attributed `enqueue_attributed` into ONE blocking task (snapshot the
+    // owned values the closure needs; ignore a join error — best-effort). The
+    // anonymous `entry_invoked` emit + the funnel `rank_bucket` above stay on
+    // the reactor (sub-µs, no DB read).
+    let attribution_scope = state.scope.clone();
+    let attribution_catalog = input.catalog.clone();
+    let attribution_entry_name = input.name.clone();
+    let attribution_plugin_name = input.plugin.clone();
+    let attribution_harness = crate::mcp::calling_harness(&state);
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Some(catalog_id) =
+            crate::telemetry::resolve_attribution(&attribution_scope, &attribution_catalog)
+        {
+            crate::telemetry::enqueue_attributed(crate::telemetry::event::AttributedEntryInvoked {
+                entry_name: attribution_entry_name,
+                entry_kind: crate::telemetry::event::EntryKind::Skill,
+                plugin_name: attribution_plugin_name,
+                plugin_version: attributed_plugin_version,
+                catalog_id,
+                calling_harness: attribution_harness,
+            });
+        }
+    })
+    .await;
     // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
     state.note_enqueue();
 

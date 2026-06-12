@@ -29,6 +29,17 @@ use crate::telemetry::lock;
 /// to ~6 ms, not the prior ~83 ms.
 const RACE_READ_RETRIES: usize = 12;
 
+/// Map a failed `Uuid::mint()` (OS RNG unavailable) onto a `TomeError::Io`.
+///
+/// `Uuid::mint` returns `None` if `getrandom` errs (fd exhaustion / seccomp /
+/// early boot). On the explicit `reset`/`on` command paths surfacing that as an
+/// `Err` is acceptable (and correct — those are user commands, not the silent
+/// best-effort append path). We reuse the existing closed `Io` variant rather
+/// than promote a new one (no new exit code for a rare environment fault).
+fn rng_unavailable() -> TomeError {
+    TomeError::Io(std::io::Error::other("telemetry RNG unavailable"))
+}
+
 /// Re-assert `0600` on the id file after an atomic *replace*.
 ///
 /// `write_atomic` PRESERVES the existing target's mode (it copies onto the prior
@@ -100,7 +111,12 @@ pub fn ensure_install_id(paths: &Paths) -> Result<(Uuid, bool), TomeError> {
     match opts.open(&path) {
         Ok(mut file) => {
             // We won the race (or it is a fresh install): write a new id.
-            let uuid = Uuid::mint();
+            // A mint failure (RNG unavailable) surfaces as an `Err` so the
+            // enqueue caller drops the event (best-effort) rather than panicking.
+            // The just-created empty `O_EXCL` file is left as-is; a subsequent
+            // run re-enters this branch (now `AlreadyExists`) and the empty-file
+            // race/corruption handling re-mints it.
+            let uuid = Uuid::mint().ok_or_else(rng_unavailable)?;
             file.write_all(uuid.as_str().as_bytes())
                 .map_err(TomeError::Io)?;
             file.write_all(b"\n").map_err(TomeError::Io)?;
@@ -139,7 +155,7 @@ pub fn ensure_install_id(paths: &Paths) -> Result<(Uuid, bool), TomeError> {
                 if !first.is_empty() {
                     // Non-empty garbage: unrecoverable corruption — re-mint via
                     // an atomic replace (a corrupt join key cannot be repaired).
-                    let uuid = Uuid::mint();
+                    let uuid = Uuid::mint().ok_or_else(rng_unavailable)?;
                     let mut line = uuid.as_str().to_string();
                     line.push('\n');
                     crate::catalog::store::write_atomic(&path, line.as_bytes())?;
@@ -162,7 +178,7 @@ pub fn ensure_install_id(paths: &Paths) -> Result<(Uuid, bool), TomeError> {
 
             // Exhausted retries on a persistently-empty file: treat as corrupt
             // (a stale zero-byte id from a crashed mint) and re-mint.
-            let uuid = Uuid::mint();
+            let uuid = Uuid::mint().ok_or_else(rng_unavailable)?;
             let mut line = uuid.as_str().to_string();
             line.push('\n');
             crate::catalog::store::write_atomic(&path, line.as_bytes())?;
@@ -189,11 +205,24 @@ pub fn install_mint_time(paths: &Paths) -> Option<OffsetDateTime> {
     Some(OffsetDateTime::from(modified))
 }
 
-/// The per-process session UUID: minted once on first call, cached, never
-/// persisted. Subsequent calls return a clone of the same value.
-pub fn session_id() -> Uuid {
+/// The per-process session UUID: minted once on first SUCCESSFUL call, cached,
+/// never persisted. Subsequent calls return a clone of the same value.
+///
+/// Returns `None` if the OS RNG was unavailable when the session id was first
+/// needed (and stays `None` only until a later call succeeds — we cache ONLY on
+/// success, so a transient RNG fault does not poison the session for the whole
+/// process). The envelope-stamp on the silent enqueue path bails (best-effort
+/// drop) when this is `None`, never panicking.
+pub fn session_id() -> Option<Uuid> {
     static SESSION: OnceLock<Uuid> = OnceLock::new();
-    SESSION.get_or_init(Uuid::mint).clone()
+    if let Some(existing) = SESSION.get() {
+        return Some(existing.clone());
+    }
+    let minted = Uuid::mint()?;
+    // `get_or_init`-style cache-on-success: if a racing thread already set it,
+    // keep theirs; either way return the cached value.
+    let _ = SESSION.set(minted);
+    SESSION.get().cloned()
 }
 
 /// Detect (and record) a version change since the last run.
@@ -212,10 +241,17 @@ pub fn detect_and_record_version(paths: &Paths) -> Result<Option<VersionStr>, To
     let path = paths.telemetry_last_version();
     let current = env!("CARGO_PKG_VERSION");
 
-    let prior = match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
-        Ok(s) => Some(s.lines().next().unwrap_or("").trim().to_string()),
-        Err(TomeError::Io(e)) if e.kind() == ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
+    // Sec-L1: read/write containment parity — `stamp_version` writes via
+    // `write_atomic` (symlink-safe); the read must refuse a symlinked component
+    // too. A hostile `last-version` symlink is treated as ABSENT (degrade the
+    // refusal to `None`, the first-run branch), never propagated/blocked.
+    let prior = match crate::util::refuse_symlinked_component(&path) {
+        Err(_) => None,
+        Ok(()) => match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
+            Ok(s) => Some(s.lines().next().unwrap_or("").trim().to_string()),
+            Err(TomeError::Io(e)) if e.kind() == ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        },
     };
 
     match prior {
@@ -254,7 +290,9 @@ pub fn reset(paths: &Paths) -> Result<Uuid, TomeError> {
     let _guard = lock::acquire_bounded(paths, std::time::Duration::from_secs(3))?;
 
     ensure_dir(paths)?;
-    let uuid = Uuid::mint();
+    // `reset` is an explicit user command — surfacing an RNG failure as an
+    // `Err` (exit-coded) is acceptable here, unlike the silent enqueue path.
+    let uuid = Uuid::mint().ok_or_else(rng_unavailable)?;
     let mut line = uuid.as_str().to_string();
     line.push('\n');
     // Atomic replace of the id — symlink-safe. write_atomic preserves the prior
@@ -412,8 +450,8 @@ mod tests {
 
     #[test]
     fn session_id_is_stable_within_process() {
-        let a = session_id();
-        let b = session_id();
+        let a = session_id().expect("OS RNG available in tests");
+        let b = session_id().expect("OS RNG available in tests");
         assert_eq!(a.as_str(), b.as_str());
         // And it is a valid v4 id.
         assert!(Uuid::parse(a.as_str()).is_some());

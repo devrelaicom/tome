@@ -146,11 +146,12 @@ fn queue_report(paths: &Paths) -> TelemetryQueueReport {
 /// The `last-flush` stamp (time + HTTP status), when present. Bounded,
 /// read-only; an absent/unreadable/unparsable stamp degrades to `None`.
 fn last_flush_report(paths: &Paths) -> Option<TelemetryFlushReport> {
-    let body = crate::util::bounded_read_to_string(
-        &paths.telemetry_last_flush(),
-        crate::util::TOME_CONFIG_MAX,
-    )
-    .ok()?;
+    let path = paths.telemetry_last_flush();
+    // Sec-L1: read/write containment parity — the flusher writes the stamp via the
+    // shared atomic (symlink-refusing) writer; refuse a symlinked component on the
+    // read too. A hostile stamp degrades to `None`, never propagated/blocked.
+    crate::util::refuse_symlinked_component(&path).ok()?;
+    let body = crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX).ok()?;
     let stamp = serde_json::from_str::<LastFlushStamp>(&body).ok()?;
     Some(TelemetryFlushReport {
         timestamp: stamp.timestamp,

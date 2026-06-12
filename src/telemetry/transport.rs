@@ -64,6 +64,9 @@ pub fn resolve_endpoint() -> String {
 pub static NETWORK_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// Record that a network call was made. Called ONLY by the US3 POST site.
+/// Production-internal + test seam (not public API) — matches the
+/// `#[doc(hidden)]` on the [`NETWORK_CALLS`] counter and [`network_call_count`].
+#[doc(hidden)]
 pub fn record_network_call() {
     NETWORK_CALLS.fetch_add(1, Ordering::Relaxed);
 }

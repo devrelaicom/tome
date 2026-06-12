@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Telemetry
+
+- **Anonymous, opt-out usage telemetry.** Tome now collects bucketed counts,
+  closed enum values, and a random per-install UUID to understand which features
+  are used and where the tool breaks — **never** queries, file paths, project
+  names, or any free-form text. A second, **catalog-attributed** stream sends the
+  *published* name of a plugin only when its catalog resolves (at emit time) to a
+  hardcoded, in-repo, PR-only allowlist (today: one — Midnight); the source is the
+  gate, never the name. Both streams share one local-only install UUID.
+- **Zero foreground cost.** A command or MCP tool call only appends one ≤4 KiB
+  line to a local JSONL queue — no network, no blocking. Delivery is a best-effort
+  background flush (a detached CLI child / an MCP timer), HTTPS-only, never within
+  a 10-minute first-run grace period.
+- **`tome telemetry {status,on,off,inspect,flush,reset,purge}`** — inspect and
+  control telemetry; `status`/`inspect` are read-only, `off`/`TOME_TELEMETRY=0`
+  disable it, `purge` deletes all local state. CI is auto-disabled. `tome doctor`
+  reports the telemetry subsystem read-only.
+- **Published & pinned.** [`TELEMETRY.md`](./TELEMETRY.md) documents exactly what
+  is collected and is kept in sync with the code by a byte-for-byte pin test.
+- New exit codes **90/91/92** (`TelemetryEndpointUnreachable` /
+  `TelemetryConfigInvalid` / `TelemetryQueueCorrupt`).
+
 ### Meta skills
 
 - **`tome meta {list,add,remove}`** — install Tome's own bundled, trusted

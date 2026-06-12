@@ -57,7 +57,11 @@ Linux and macOS, on both `x86_64` and `aarch64`. **Windows is untested** — it 
 
 ## Privacy / network
 
-**Tome has no telemetry.** It never phones home. The only network access is Git operations against the catalogs you explicitly register and one-time downloads of the pinned inference models (see [Models](#models)). Everything else — the index, embeddings, and summaries — is computed and stored locally under `<home>/.tome/`.
+**Tome collects anonymous, opt-out usage telemetry** to understand which features are used and where the tool breaks. It sends only bucketed counts, closed enum values, and random UUIDs — **never** your queries, file paths, project names, or any free-form text. A second stream sends the *published* name of a plugin only when that plugin comes from a small, hardcoded, in-repo allowlist of catalogs (today: one — Midnight). Nothing is ever sent on a foreground path: a command only appends one line to a local queue, and delivery is a best-effort background flush. [`TELEMETRY.md`](https://github.com/devrelaicom/tome/blob/main/TELEMETRY.md) is the complete, code-pinned description of exactly what is collected.
+
+**To turn it off:** `tome telemetry off` (or set `TOME_TELEMETRY=0`). CI environments are auto-disabled. Use `tome telemetry status` to see the state and `tome telemetry inspect` to view the pending queue without sending.
+
+Apart from telemetry, the only network access is Git operations against the catalogs you explicitly register and one-time downloads of the pinned inference models (see [Models](#models)). The index, embeddings, and summaries are computed and stored locally under `<home>/.tome/`.
 
 ## Install
 
@@ -183,6 +187,7 @@ Tome makes **mechanical** safety guarantees but cannot vet catalog **content** �
 - **Project principles:** [`CONSTITUTION.md`](https://github.com/devrelaicom/tome/blob/main/CONSTITUTION.md)
 - **Contributor on-ramp:** [`CONTRIBUTING.md`](https://github.com/devrelaicom/tome/blob/main/CONTRIBUTING.md)
 - **Security & trust model:** [`SECURITY.md`](https://github.com/devrelaicom/tome/blob/main/SECURITY.md)
+- **Telemetry (what's collected, opt-out):** [`TELEMETRY.md`](https://github.com/devrelaicom/tome/blob/main/TELEMETRY.md)
 
 ## Licence
 
