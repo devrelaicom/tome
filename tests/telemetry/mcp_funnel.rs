@@ -158,14 +158,23 @@ fn open_index(paths: &Paths) -> rusqlite::Connection {
     .expect("open index db")
 }
 
-fn seed_catalog_enrolment(paths: &Paths, catalog_root: &Path, catalog_name: &str) {
-    let url = format!("file://{}", catalog_root.display());
+/// The canonical Midnight catalog source — exactly what the compiled-in allowlist
+/// canonicalizes to. An enrolment recorded at this URL attributes to `"midnight"`,
+/// so the staged plugin's actions/errors emit the attributed `catalog.midnight.*`
+/// stream ALONGSIDE the anonymous one (FR-052).
+const MIDNIGHT_SOURCE: &str = "https://github.com/devrelaicom/midnight-expert-tome";
+
+/// Seed a `workspace_catalogs` enrolment for `catalog_name` at `enrol_url`, and
+/// symlink `cache_dir_for(enrol_url)` onto `catalog_root` so the plugin files
+/// resolve. `enrol_url` is the attribution join key: pass [`MIDNIGHT_SOURCE`] for
+/// an allowlisted (attributed) catalog, or a `file://` URL for a plain one.
+fn seed_catalog_enrolment(paths: &Paths, catalog_root: &Path, catalog_name: &str, enrol_url: &str) {
     let conn = open_index(paths);
-    tome::index::workspace_catalogs::insert(&conn, "global", catalog_name, &url, "main")
+    tome::index::workspace_catalogs::insert(&conn, "global", catalog_name, enrol_url, "main")
         .expect("seed workspace_catalogs");
     drop(conn);
 
-    let cache_dir = paths.cache_dir_for(&url);
+    let cache_dir = paths.cache_dir_for(enrol_url);
     if let Some(parent) = cache_dir.parent() {
         std::fs::create_dir_all(parent).expect("create catalogs parent");
     }
@@ -182,8 +191,18 @@ fn skill_body(name: &str, description: &str) -> String {
 
 /// Stage `acme/plug` with the supplied skills rooted at `home/.tome`, enabled +
 /// indexed against the `global` workspace with the StubEmbedder. Returns the
-/// `Paths` (rooted at `$HOME/.tome`) the in-process server will run over.
+/// `Paths` (rooted at `$HOME/.tome`) the in-process server will run over. The
+/// catalog is enrolled at a plain `file://` URL (NOT allowlisted ⇒ anonymous only).
 fn stage_at_home(home: &Path, skills: &[(&str, &str)]) -> Paths {
+    let catalog_root = home.join("catalog");
+    let file_url = format!("file://{}", catalog_root.display());
+    stage_at_home_with_url(home, skills, &file_url)
+}
+
+/// Path-injectable [`stage_at_home`] that records the catalog enrolment at
+/// `enrol_url` — pass [`MIDNIGHT_SOURCE`] to make the catalog allowlisted so the
+/// staged plugin emits the attributed `catalog.midnight.*` stream.
+fn stage_at_home_with_url(home: &Path, skills: &[(&str, &str)], enrol_url: &str) -> Paths {
     let root = home.join(".tome");
     let paths = Paths::from_root(root.clone());
     std::fs::create_dir_all(&paths.root).unwrap();
@@ -224,7 +243,7 @@ fn stage_at_home(home: &Path, skills: &[(&str, &str)]) -> Paths {
         allow_model_download: false,
     };
     let id: PluginId = "acme/plug".parse().unwrap();
-    seed_catalog_enrolment(&paths, &catalog_root, "acme");
+    seed_catalog_enrolment(&paths, &catalog_root, "acme", enrol_url);
     lifecycle::enable(&id, &deps).expect("enable plugin");
 
     paths
@@ -591,4 +610,139 @@ fn note_enqueue_raises_flush_signal_only_on_fiftieth() {
             .await
             .expect("the flush_signal must be raised on the 50th enqueue (FR-050)");
     });
+}
+
+#[test]
+fn search_on_allowlisted_catalog_emits_attributed_search_result() {
+    // Co-H1 / Sec-M1 (MCP side): a search over an ALLOWLISTED catalog emits, on
+    // the SAME queue as the anonymous `tome.search`, one attributed
+    // `catalog.midnight.search_result` per ranked entry with an EXACT 1-indexed
+    // `rank`. The attribution resolution + enqueue now run inside `spawn_blocking`
+    // (off the reactor); this end-to-end test proves the alongside-anonymous
+    // semantics + the exact rank survive the refactor.
+    let home = TempDir::new().unwrap();
+    let _home_guard = HomeGuard::install(home.path());
+    let _env = EnvForce::install();
+
+    let paths = stage_at_home_with_url(
+        home.path(),
+        &[
+            ("alpha", &skill_body("alpha", "alpha widget configuration")),
+            ("beta", &skill_body("beta", "beta gadget tuning")),
+        ],
+        MIDNIGHT_SOURCE,
+    );
+    let state = build_state(&paths, Some("claude-code"));
+    let rt = rt();
+
+    let out = rt
+        .block_on(search_skills::handle(
+            state.clone(),
+            search_skills::Input {
+                query: "alpha widget configuration".into(),
+                top_k: 10,
+                catalog: None,
+                plugin: None,
+                description_max_chars: 150,
+            },
+        ))
+        .expect("search ok");
+    assert!(!out.matches.is_empty(), "search returns ranked entries");
+    let top_name = out.matches[0].name.clone();
+
+    let events = queue_events(&paths);
+    // The anonymous search event still landed.
+    assert!(
+        first_of(&events, "tome.search").is_some(),
+        "anonymous tome.search still enqueued alongside the attributed stream"
+    );
+    // The attributed search_result for the rank-1 entry landed on the SAME queue.
+    let result = events
+        .iter()
+        .find(|e| {
+            e["event_type"] == "catalog.midnight.search_result" && e["entry_name"] == top_name
+        })
+        .cloned()
+        .expect("an attributed catalog.midnight.search_result for the top entry");
+    // EXACT 1-indexed integer rank (FR-057), never bucketed.
+    assert_eq!(
+        result["rank"], 1,
+        "the rank-1 entry's attributed search_result carries the exact integer rank 1: {result}"
+    );
+    assert_eq!(result["catalog_id"], "midnight");
+    assert_eq!(
+        result["calling_harness"], "claude-code",
+        "the MCP search_result carries the host harness"
+    );
+    // No `sample_rate` field — attributed events are never sampled (FR-058).
+    assert!(
+        result.get("sample_rate").is_none(),
+        "attributed search_result omits sample_rate"
+    );
+}
+
+#[test]
+fn post_resolution_get_skill_failure_on_allowlisted_entry_emits_attributed_error() {
+    // Co-M1 / FR-052: a get_skill failure that occurs AFTER the entry row
+    // resolved (here: the SKILL.md file is deleted post-index, so the read fails
+    // with `skill_file_missing`) emits, on an ALLOWLISTED catalog, the attributed
+    // `catalog.midnight.error` — carrying the resolved plugin/entry names + the
+    // captured `plugin_version` (the FR-059 carve-out) — ALONGSIDE the anonymous
+    // `tome.error`.
+    let home = TempDir::new().unwrap();
+    let _home_guard = HomeGuard::install(home.path());
+    let _env = EnvForce::install();
+
+    let paths = stage_at_home_with_url(
+        home.path(),
+        &[("alpha", &skill_body("alpha", "alpha widget configuration"))],
+        MIDNIGHT_SOURCE,
+    );
+    let state = build_state(&paths, Some("claude-code"));
+
+    // Delete the on-disk SKILL.md AFTER indexing so the row still resolves (the
+    // entry is enabled) but the post-resolution read fails → `skill_file_missing`.
+    let skill_md = home
+        .path()
+        .join("catalog")
+        .join("plug")
+        .join("skills")
+        .join("alpha")
+        .join("SKILL.md");
+    std::fs::remove_file(&skill_md).expect("delete the staged SKILL.md");
+
+    let rt = rt();
+    let res = rt.block_on(get_skill::handle(
+        state.clone(),
+        get_skill::Input {
+            catalog: "acme".into(),
+            plugin: "plug".into(),
+            name: "alpha".into(),
+        },
+    ));
+    assert!(
+        res.is_err(),
+        "get_skill must fail once the resolved entry's SKILL.md is gone"
+    );
+
+    let events = queue_events(&paths);
+    // The anonymous MCP-surface error landed.
+    let anon = first_of(&events, "tome.error").expect("anonymous tome.error enqueued");
+    assert_eq!(anon["surface"], "mcp", "the anonymous error is MCP-surface");
+
+    // The attributed error landed on the SAME queue with the resolved names +
+    // version (the entry resolved before the read failed).
+    let attr =
+        first_of(&events, "catalog.midnight.error").expect("attributed catalog.midnight.error");
+    assert_eq!(attr["plugin_name"], "plug");
+    assert_eq!(attr["entry_name"], "alpha");
+    assert_eq!(attr["plugin_version"], "1.0.0");
+    assert_eq!(attr["catalog_id"], "midnight");
+    // A skill-file-missing read failure maps to the `io` error class.
+    assert_eq!(attr["error_class"], "io");
+    // Attributed events are never sampled (FR-058).
+    assert!(
+        attr.get("sample_rate").is_none(),
+        "attributed error omits sample_rate"
+    );
 }

@@ -292,6 +292,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         // surface. Emitted at the terminal `TomeError`→`McpError` conversion;
         // never alters the returned `McpError`.
         crate::mcp::enqueue_tool_error(&state, e.category());
+        // US4 deferral: no clean plugin context at this error boundary. A search
+        // failure is not scoped to a single plugin (it is a query/embedder/index
+        // failure), so there is no `plugin_name`/`plugin_version` to attribute —
+        // the attributed `catalog.<id>.error` stays deferred here. Anonymous
+        // `tome.error` above is the right granularity for a search failure.
         // FR-050: nudge the off-path flush timer if this enqueue crossed the
         // ≥50 threshold. Cheap atomic bump + maybe a `Notify` — never an inline
         // flush (SC-009).
@@ -373,6 +378,71 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     });
     // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
     state.note_enqueue();
+
+    // FR-052 + FR-057: ALONGSIDE the anonymous `tome.search` above, emit one
+    // catalog-attributed `catalog.<id>.search_result` per result entry whose
+    // catalog resolves — by SOURCE, at emit time — to an allowlisted catalog.
+    // `rank` is the EXACT 1-indexed position in the returned (already top-k,
+    // reranked) list, NOT bucketed (FR-057): server-side selection attribution
+    // joins this against the later `entry_invoked` on `(session_uuid,
+    // entry_name)`. Attribution is memoised per catalog name so a result set
+    // spanning several catalogs opens the read-only index at most once per
+    // distinct catalog (NFR-009 — no lock). Best-effort; never alters the result.
+    //
+    // Sec-M1 / R-L1: `resolve_attribution` does a SYNC SQLite open+query (5s
+    // busy_timeout) — running it inline on the single-threaded MCP reactor can
+    // stall the server under index-write contention, violating the project's
+    // "spawn_blocking for sync work in async MCP handlers" discipline (which
+    // `sync_boundary.rs` cannot catch — it only guards the module boundary, not
+    // blocking-on-the-reactor). Fold the per-catalog resolution + each
+    // `enqueue_attributed` (itself a sync queue append) into ONE `spawn_blocking`;
+    // ignore a join error (best-effort). The funnel-rank capture above stays on
+    // the reactor (a sub-µs `Mutex`, not a DB read). Exact-rank + per-catalog
+    // memoisation + the `Mcp`-surface `calling_harness` are all preserved.
+    let attribution_scope = state.scope.clone();
+    let search_harness = crate::mcp::calling_harness(&state);
+    // Snapshot only what the closure needs (name/kind/plugin/catalog/rank) so the
+    // `matches` Vec can be returned in the `Output` unmoved.
+    let attribution_rows: Vec<(
+        String,
+        crate::telemetry::event::EntryKind,
+        String,
+        String,
+        u32,
+    )> = matches
+        .iter()
+        .enumerate()
+        .map(|(idx, m)| {
+            (
+                m.name.clone(),
+                m.kind.into(),
+                m.plugin.clone(),
+                m.catalog.clone(),
+                // EXACT 1-indexed rank (FR-057) — `idx + 1`, never bucketed.
+                (idx + 1) as u32,
+            )
+        })
+        .collect();
+    let _ = tokio::task::spawn_blocking(move || {
+        let mut attribution_cache: std::collections::HashMap<String, Option<&'static str>> =
+            std::collections::HashMap::new();
+        for (entry_name, entry_kind, plugin_name, catalog, rank) in attribution_rows {
+            let catalog_id = *attribution_cache.entry(catalog.clone()).or_insert_with(|| {
+                crate::telemetry::resolve_attribution(&attribution_scope, &catalog)
+            });
+            if let Some(catalog_id) = catalog_id {
+                crate::telemetry::enqueue_attributed(crate::telemetry::event::SearchResult {
+                    entry_name,
+                    entry_kind,
+                    plugin_name,
+                    rank,
+                    catalog_id,
+                    calling_harness: search_harness,
+                });
+            }
+        }
+    })
+    .await;
 
     // FR-M-LOG-5: contract names `filter` as a nested JSON object.
     // tracing flattens fields, so emit two named slots (`filter_catalog`,

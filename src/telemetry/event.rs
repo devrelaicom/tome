@@ -218,14 +218,29 @@ pub struct Envelope {
     /// Pre-formatted by the caller (not here) so the envelope stays trivially
     /// injectable/testable without pulling time formatting into this type.
     timestamp: String,
-    event_type: &'static str,
-    sample_rate: f32,
+    /// The dotted event type. `String` (not `&'static str`) because the
+    /// catalog-attributed stream builds it DYNAMICALLY at enqueue time —
+    /// `catalog.<short_id>.<suffix>` (e.g. `catalog.midnight.entry_invoked`). The
+    /// anonymous path still passes a `&'static str` const (`E::EVENT_TYPE`) and
+    /// `.to_string()`s it — one tiny per-event allocation, negligible against the
+    /// JSON serialize that follows. The wire shape is IDENTICAL to `&str`: serde
+    /// emits a JSON string either way, so the existing byte-stable anonymous pins
+    /// do not move.
+    event_type: String,
+    /// The applied sampling rate (FR-060), `Some(1.0)` for anonymous events.
+    /// `Option` + `skip_serializing_if` so the ATTRIBUTED stream — which is NEVER
+    /// sampled (FR-058) — OMITS the field entirely (matching data-model §10
+    /// worked example 2, whose attributed line carries no `sample_rate`). The
+    /// anonymous envelope always sets `Some(1.0)`, so its pinned line is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sample_rate: Option<f32>,
 }
 
 impl Envelope {
-    /// Build an envelope from the injectable pieces; fills the constants
-    /// (`schema_version = 1`, `tome_version = env!(CARGO_PKG_VERSION)`,
-    /// `sample_rate = 1.0`).
+    /// Build an ANONYMOUS-stream envelope from the injectable pieces; fills the
+    /// constants (`schema_version = 1`, `tome_version = env!(CARGO_PKG_VERSION)`,
+    /// `sample_rate = Some(1.0)`). The `event_type` is a `&'static str` const at
+    /// every anonymous call site, `.to_string()`d into the dynamic field.
     pub fn new(
         install_uuid: Uuid,
         session_uuid: Uuid,
@@ -233,6 +248,51 @@ impl Envelope {
         arch: Arch,
         timestamp: String,
         event_type: &'static str,
+    ) -> Envelope {
+        Envelope::with_event_type(
+            install_uuid,
+            session_uuid,
+            os,
+            arch,
+            timestamp,
+            event_type.to_string(),
+            Some(1.0),
+        )
+    }
+
+    /// Build a CATALOG-ATTRIBUTED-stream envelope. The `event_type` is built
+    /// dynamically by the caller (`catalog.<id>.<suffix>`) and `sample_rate` is
+    /// `None` — attributed events are never sampled (FR-058), so the field is
+    /// omitted on the wire entirely.
+    pub fn new_attributed(
+        install_uuid: Uuid,
+        session_uuid: Uuid,
+        os: Os,
+        arch: Arch,
+        timestamp: String,
+        event_type: String,
+    ) -> Envelope {
+        Envelope::with_event_type(
+            install_uuid,
+            session_uuid,
+            os,
+            arch,
+            timestamp,
+            event_type,
+            None,
+        )
+    }
+
+    /// Shared constructor: fills the constants and takes the two stream-varying
+    /// pieces (the dynamic `event_type` and the `sample_rate`).
+    fn with_event_type(
+        install_uuid: Uuid,
+        session_uuid: Uuid,
+        os: Os,
+        arch: Arch,
+        timestamp: String,
+        event_type: String,
+        sample_rate: Option<f32>,
     ) -> Envelope {
         Envelope {
             schema_version: 1,
@@ -243,7 +303,7 @@ impl Envelope {
             arch,
             timestamp,
             event_type,
-            sample_rate: 1.0,
+            sample_rate,
         }
     }
 }
@@ -374,6 +434,20 @@ pub enum EntryKind {
     Skill,
     Command,
     Agent,
+}
+
+impl From<crate::plugin::identity::EntryKind> for EntryKind {
+    /// Bridge the registry's `identity::EntryKind` (the index-row discriminator)
+    /// into the closed telemetry enum. Both are total over the same three
+    /// variants; this exhaustive match surfaces a future variant addition on
+    /// either side as a compile error rather than a silent miscategorisation.
+    fn from(kind: crate::plugin::identity::EntryKind) -> Self {
+        match kind {
+            crate::plugin::identity::EntryKind::Skill => EntryKind::Skill,
+            crate::plugin::identity::EntryKind::Command => EntryKind::Command,
+            crate::plugin::identity::EntryKind::Agent => EntryKind::Agent,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -621,6 +695,135 @@ impl AnonymousEvent for ErrorEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Catalog-attributed events (`catalog.<id>.*`) — the ONLY bounded-`String`
+// carve-out (FR-059)
+// ---------------------------------------------------------------------------
+//
+// THE SINGLE EXCEPTION to the "no free-form `String` in an event field" rule
+// (FR-034): the structs below carry PUBLISHED artefact names + versions
+// (`plugin_name`, `entry_name`, `plugin_version`, …) as bounded `String`s. These
+// are not user secrets and not a fingerprint — they are the names a maintainer
+// already published to a public catalog, and they are emitted ONLY on the
+// attributed stream for an allowlisted catalog (see `allowlist.rs`). Every other
+// event type in this module is bucketed ints / closed enums / UUIDs. If you are
+// adding a `String` field ANYWHERE ELSE in this file, stop: it almost certainly
+// belongs in a closed enum or a bucket instead.
+
+/// Every catalog-attributed (`catalog.<id>.*`) event carries an event-type
+/// SUFFIX (the part after `catalog.<catalog_id>.`) plus the resolved short id.
+/// The full `event_type` is assembled at enqueue time as
+/// `format!("catalog.{}.{}", self.catalog_id(), E::EVENT_SUFFIX)`.
+pub trait AttributedEvent: Serialize {
+    /// The trailing event-type segment (e.g. `plugin_enabled`, `entry_invoked`).
+    const EVENT_SUFFIX: &'static str;
+    /// The allowlist short id (also the `catalog.<id>.` prefix). Stored on every
+    /// struct so the enqueue path can build the full type without a re-resolve.
+    fn catalog_id(&self) -> &'static str;
+}
+
+/// `catalog.<id>.plugin_enabled` — an allowlisted-catalog plugin was enabled.
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginEnabled {
+    pub plugin_name: String,
+    pub plugin_version: String,
+    pub catalog_id: &'static str,
+}
+
+/// `catalog.<id>.plugin_disabled` — an allowlisted-catalog plugin was disabled.
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginDisabled {
+    pub plugin_name: String,
+    pub plugin_version: String,
+    pub catalog_id: &'static str,
+}
+
+/// `catalog.<id>.plugin_updated` — per plugin whose version changed during a
+/// `catalog update` of an allowlisted catalog.
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginUpdated {
+    pub plugin_name: String,
+    pub from_version: String,
+    pub to_version: String,
+    pub catalog_id: &'static str,
+}
+
+/// `catalog.<id>.entry_invoked` — an allowlisted-catalog entry body was invoked.
+#[derive(Debug, Clone, Serialize)]
+pub struct AttributedEntryInvoked {
+    pub entry_name: String,
+    pub entry_kind: EntryKind,
+    pub plugin_name: String,
+    pub plugin_version: String,
+    pub catalog_id: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calling_harness: Option<Harness>,
+}
+
+/// `catalog.<id>.search_result` — fires once per allowlisted-catalog entry that
+/// appears in a result. `rank` is EXACT (FR-057), not bucketed: selection
+/// attribution is a server-side join on `(session_uuid, entry_name)` against the
+/// later `entry_invoked`; the client NEVER back-edits queued events.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchResult {
+    pub entry_name: String,
+    pub entry_kind: EntryKind,
+    pub plugin_name: String,
+    pub rank: u32,
+    pub catalog_id: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calling_harness: Option<Harness>,
+}
+
+/// `catalog.<id>.error` — a classified error involving an allowlisted-catalog
+/// plugin. `entry_name` is optional (some errors are plugin-level, not entry).
+#[derive(Debug, Clone, Serialize)]
+pub struct AttributedError {
+    pub plugin_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_name: Option<String>,
+    pub error_class: crate::error::ErrorCategory,
+    pub plugin_version: String,
+    pub catalog_id: &'static str,
+}
+
+impl AttributedEvent for PluginEnabled {
+    const EVENT_SUFFIX: &'static str = "plugin_enabled";
+    fn catalog_id(&self) -> &'static str {
+        self.catalog_id
+    }
+}
+impl AttributedEvent for PluginDisabled {
+    const EVENT_SUFFIX: &'static str = "plugin_disabled";
+    fn catalog_id(&self) -> &'static str {
+        self.catalog_id
+    }
+}
+impl AttributedEvent for PluginUpdated {
+    const EVENT_SUFFIX: &'static str = "plugin_updated";
+    fn catalog_id(&self) -> &'static str {
+        self.catalog_id
+    }
+}
+impl AttributedEvent for AttributedEntryInvoked {
+    const EVENT_SUFFIX: &'static str = "entry_invoked";
+    fn catalog_id(&self) -> &'static str {
+        self.catalog_id
+    }
+}
+impl AttributedEvent for SearchResult {
+    const EVENT_SUFFIX: &'static str = "search_result";
+    fn catalog_id(&self) -> &'static str {
+        self.catalog_id
+    }
+}
+impl AttributedEvent for AttributedError {
+    const EVENT_SUFFIX: &'static str = "error";
+    fn catalog_id(&self) -> &'static str {
+        self.catalog_id
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Timestamp formatting
 // ---------------------------------------------------------------------------
 
@@ -702,6 +905,25 @@ pub fn fixed_envelope_for_tests(event_type: &'static str) -> Envelope {
     )
 }
 
+/// The CATALOG-ATTRIBUTED counterpart of [`fixed_envelope_for_tests`]: same fixed
+/// install/session uuids + os/arch, but built via [`Envelope::new_attributed`]
+/// (so NO `sample_rate`) with a DYNAMIC `event_type`. The timestamp here
+/// (`2026-06-11T14:12:03.456Z`) matches data-model §10 worked example 2 exactly,
+/// so the attributed pin is byte-for-byte against the data-model.
+#[doc(hidden)]
+pub fn fixed_attributed_envelope_for_tests(event_type: String) -> Envelope {
+    Envelope::new_attributed(
+        Uuid::parse("0b9c1f2e-3a4d-4b6c-8e1f-2a3b4c5d6e7f")
+            .expect("canonical fixed install uuid is valid"),
+        Uuid::parse("7f6e5d4c-3b2a-4f1e-9c8b-1a2b3c4d5e6f")
+            .expect("canonical fixed session uuid is valid"),
+        Os::Macos,
+        Arch::Aarch64,
+        "2026-06-11T14:12:03.456Z".to_string(),
+        event_type,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,6 +1001,27 @@ mod tests {
         // §10 (the seed of the later TELEMETRY.md pin). The worked example uses
         // `tome_version` "0.6.0", which is the crate version this builds against.
         let expected = "{\"schema_version\":1,\"install_uuid\":\"0b9c1f2e-3a4d-4b6c-8e1f-2a3b4c5d6e7f\",\"session_uuid\":\"7f6e5d4c-3b2a-4f1e-9c8b-1a2b3c4d5e6f\",\"tome_version\":\"0.6.0\",\"os\":\"macos\",\"arch\":\"aarch64\",\"timestamp\":\"2026-06-11T14:11:45.123Z\",\"event_type\":\"tome.install\",\"sample_rate\":1.0,\"install_method\":\"brew\"}";
+        assert_eq!(line, expected);
+    }
+
+    #[test]
+    fn attributed_entry_invoked_matches_data_model_worked_example_2() {
+        let envelope =
+            fixed_attributed_envelope_for_tests("catalog.midnight.entry_invoked".to_string());
+        let event = AttributedEntryInvoked {
+            entry_name: "midnight-compact-debug".to_string(),
+            entry_kind: EntryKind::Skill,
+            plugin_name: "midnight-expert".to_string(),
+            plugin_version: "1.2.0".to_string(),
+            catalog_id: "midnight",
+            calling_harness: Some(Harness::ClaudeCode),
+        };
+        let line = to_line(&envelope, &event).unwrap();
+
+        // Pinned byte-for-byte against `specs/010-phase-10-telemetry/data-model.md`
+        // §10 worked example 2. Note: NO `sample_rate` field (attributed events
+        // are never sampled, FR-058).
+        let expected = "{\"schema_version\":1,\"install_uuid\":\"0b9c1f2e-3a4d-4b6c-8e1f-2a3b4c5d6e7f\",\"session_uuid\":\"7f6e5d4c-3b2a-4f1e-9c8b-1a2b3c4d5e6f\",\"tome_version\":\"0.6.0\",\"os\":\"macos\",\"arch\":\"aarch64\",\"timestamp\":\"2026-06-11T14:12:03.456Z\",\"event_type\":\"catalog.midnight.entry_invoked\",\"entry_name\":\"midnight-compact-debug\",\"entry_kind\":\"skill\",\"plugin_name\":\"midnight-expert\",\"plugin_version\":\"1.2.0\",\"catalog_id\":\"midnight\",\"calling_harness\":\"claude-code\"}";
         assert_eq!(line, expected);
     }
 

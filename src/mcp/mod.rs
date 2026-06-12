@@ -544,28 +544,28 @@ mod telemetry_flush_loop_tests {
     use crate::telemetry::{identity, queue};
 
     // The flush loop drains the DEFAULT `Paths` (`telemetry::flush()` resolves
-    // `$HOME`), and it installs the process-global flush `TransportGuard` + clock
-    // override. Both are shared across the suite, so these tests serialise on the
-    // same coarse lock the sibling integration files use (`HOME_MUTEX`, taken via
-    // the test `HomeGuard`). Here in the in-crate `#[cfg(test)]` module we have no
-    // access to `tests/common`, so we use a local mutex over `$HOME` + the seam
-    // slots; the `telemetry::flush::run` in-crate tests use their own `FLUSH_SERIAL`
-    // and never resolve `$HOME`, so a local mutex here is sufficient isolation.
-    static LOOP_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    // `$HOME`), and it POSTs through the process-global flush `TransportGuard` +
+    // moves the `transport::NETWORK_CALLS` counter. Those seams are ALSO touched
+    // by the `flush.rs` and `transport.rs` lib tests, so a per-module mutex is
+    // NOT enough — a concurrent `flush.rs` seam test clobbered this one's
+    // transport override / `$HOME` queue (the `notify_drives_exactly_one_drain`
+    // flake). So this guard holds the ONE shared `crate::telemetry::test_serial()`
+    // lock EVERY seam-touching lib test acquires, guaranteeing no two run at once.
     /// RAII: point `$HOME` at `dir` for the test, restoring the prior value on
-    /// drop, while holding `LOOP_SERIAL` so the process-global `$HOME` + seam
-    /// slots can't be clobbered by a concurrent test in this binary.
+    /// drop, while holding the shared telemetry-test serial lock so the
+    /// process-global `$HOME` + flush seams can't be clobbered by a concurrent
+    /// seam-touching test anywhere in this binary.
     struct HomeAndSerial {
         _lock: std::sync::MutexGuard<'static, ()>,
         prior_home: Option<std::ffi::OsString>,
     }
     impl HomeAndSerial {
         fn install(home: &std::path::Path) -> Self {
-            let lock = LOOP_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = crate::telemetry::test_serial();
             let prior_home = std::env::var_os("HOME");
-            // SAFETY: we hold `LOOP_SERIAL` for the lifetime of `Self`, so no
-            // other test in this binary reads/writes `$HOME` concurrently.
+            // SAFETY: we hold the telemetry test serial lock for the lifetime of
+            // `Self`, so no other seam-touching test reads/writes `$HOME` or the
+            // flush seams concurrently.
             unsafe { std::env::set_var("HOME", home) };
             Self {
                 _lock: lock,
@@ -575,7 +575,7 @@ mod telemetry_flush_loop_tests {
     }
     impl Drop for HomeAndSerial {
         fn drop(&mut self) {
-            // SAFETY: still under `LOOP_SERIAL`.
+            // SAFETY: still under the telemetry test serial lock.
             unsafe {
                 match self.prior_home.take() {
                     Some(v) => std::env::set_var("HOME", v),

@@ -90,6 +90,20 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
         action: crate::telemetry::event::PluginAction::Disabled,
     });
 
+    // FR-052: ALONGSIDE the anonymous event above, emit the catalog-attributed
+    // `catalog.<id>.plugin_disabled` ONLY when the plugin's catalog resolves —
+    // by SOURCE, at emit time — to an allowlisted catalog. The version read is
+    // still valid post-disable: disable removes the `workspace_skills` junction
+    // but RETAINS the `skills` rows (hence `skills_retained`), so the plugin's
+    // `plugin_version` is still in the index. Best-effort throughout.
+    if let Some(catalog_id) = crate::telemetry::resolve_attribution(scope, &id.catalog) {
+        crate::telemetry::enqueue_attributed(crate::telemetry::event::PluginDisabled {
+            plugin_name: id.plugin.clone(),
+            plugin_version: super::attributed_plugin_version(&paths, &scope.scope, &id),
+            catalog_id,
+        });
+    }
+
     match mode {
         Mode::Human => emit_human(&id, &outcome),
         Mode::Json => emit_json(&id, &outcome),

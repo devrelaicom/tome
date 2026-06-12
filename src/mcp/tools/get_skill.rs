@@ -91,6 +91,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                 // conversion in this handler (the other error arms are non-`TomeError`
                 // lookup/read outcomes already shaped to the contract codes).
                 crate::mcp::enqueue_tool_error(&state, e.category());
+                // US4 deferral: no clean plugin context at this error boundary.
+                // The attributed `catalog.<id>.error` requires a (non-optional)
+                // `plugin_version`, but a *lookup* failure here means the entry
+                // row was never resolved — there is no trustworthy version to
+                // attribute, and the catalog/plugin may not even resolve to an
+                // allowlisted source. Fabricating a version would be worse than
+                // the anonymous-only `tome.error` already emitted above, so the
+                // attributed error stays deferred at this boundary.
                 // FR-050: nudge the off-path flush timer on the ≥50 crossing.
                 state.note_enqueue();
                 internal(&input, started, e.to_string(), e.category().as_str())
@@ -156,41 +164,72 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         plugin_version,
     } = hit;
     let skill_path = body_path;
+    // Capture the version before it is moved into the substitution closure
+    // below — the catalog-attributed emit (further down) needs it, and it is a
+    // PUBLISHED manifest value (the FR-059 carve-out), not a secret.
+    let attributed_plugin_version = plugin_version.clone();
 
     // The actual file read + frontmatter strip + sibling walk is all
     // synchronous I/O; do it on the blocking pool.
     let read_input = input.clone_for_log();
     let read_path = skill_path.clone();
-    let body_and_resources =
-        tokio::task::spawn_blocking(move || read_skill_and_resources(&read_path))
-            .await
-            .map_err(|e| internal(&read_input, started, format!("read join: {e}"), "internal"))?
-            .map_err(|e| match e {
-                ReadError::SkillFileMissing(p) => emit_error(
-                    &read_input,
-                    started,
-                    "skill_file_missing",
-                    McpError::new(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!("skill file is missing: {}", p.display()),
-                        Some(json!({
-                            "code": "skill_file_missing",
-                            "path": p.display().to_string(),
-                        })),
+    let read_result = tokio::task::spawn_blocking(move || read_skill_and_resources(&read_path))
+        .await
+        .map_err(|e| internal(&read_input, started, format!("read join: {e}"), "internal"))?;
+
+    let body_and_resources = match read_result {
+        Ok(v) => v,
+        Err(e) => {
+            // Co-M1: a POST-resolution read failure — the entry row resolved, so
+            // `attributed_plugin_version` + the entry/plugin names are in hand.
+            // Map the read error to its closed `ErrorCategory` AND the contract
+            // `McpError`, emit the anonymous + attributed error telemetry, then
+            // return the McpError unchanged.
+            let (category, err) = match e {
+                ReadError::SkillFileMissing(p) => (
+                    crate::error::ErrorCategory::Io,
+                    emit_error(
+                        &read_input,
+                        started,
+                        "skill_file_missing",
+                        McpError::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("skill file is missing: {}", p.display()),
+                            Some(json!({
+                                "code": "skill_file_missing",
+                                "path": p.display().to_string(),
+                            })),
+                        ),
                     ),
                 ),
-                ReadError::FrontmatterStripFailed(detail) => emit_error(
-                    &read_input,
-                    started,
-                    "frontmatter_strip_failed",
-                    McpError::new(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!("frontmatter parse failed: {detail}"),
-                        Some(json!({ "code": "frontmatter_strip_failed" })),
+                ReadError::FrontmatterStripFailed(detail) => (
+                    crate::error::ErrorCategory::SkillFrontmatterParseError,
+                    emit_error(
+                        &read_input,
+                        started,
+                        "frontmatter_strip_failed",
+                        McpError::new(
+                            ErrorCode::INTERNAL_ERROR,
+                            format!("frontmatter parse failed: {detail}"),
+                            Some(json!({ "code": "frontmatter_strip_failed" })),
+                        ),
                     ),
                 ),
-                ReadError::Io(io) => internal(&read_input, started, io.to_string(), "io"),
-            })?;
+                ReadError::Io(io) => (
+                    crate::error::ErrorCategory::Io,
+                    internal(&read_input, started, io.to_string(), "io"),
+                ),
+            };
+            emit_post_resolution_error_telemetry(
+                &state,
+                &input,
+                attributed_plugin_version.clone(),
+                category,
+            )
+            .await;
+            return Err(err);
+        }
+    };
 
     let (raw_content, resources) = body_and_resources;
 
@@ -223,7 +262,22 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
 
     let content = match rendered_result {
         Ok(s) => s,
-        Err((code, err)) => return Err(emit_error(&input, started, code, err)),
+        Err((code, err)) => {
+            // Co-M1: a POST-resolution substitution/render failure — the entry
+            // resolved, so the version + names are in hand. Map the contract
+            // `code` slug back to its closed `ErrorCategory`, emit anonymous +
+            // attributed error telemetry, then return the McpError unchanged.
+            let category = substitution_code_to_category(code);
+            let err = emit_error(&input, started, code, err);
+            emit_post_resolution_error_telemetry(
+                &state,
+                &input,
+                attributed_plugin_version.clone(),
+                category,
+            )
+            .await;
+            return Err(err);
+        }
     };
 
     info!(
@@ -249,6 +303,23 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         rank_bucket: crate::mcp::rank_bucket_for(&state, &input.name),
         calling_harness: crate::mcp::calling_harness(&state),
     });
+
+    // FR-052: ALONGSIDE the anonymous `tome.entry_invoked`, emit the attributed
+    // `catalog.<id>.entry_invoked` ONLY when this entry's catalog resolves — by
+    // SOURCE, at emit time — to an allowlisted catalog. The attribution read
+    // opens the index read-only with no lock (NFR-009); `None` ⇒ anonymous only.
+    // The artefact names (entry/plugin name + version) are PUBLISHED values
+    // (FR-059), never secrets. Best-effort — never alters the tool result.
+    if let Some(catalog_id) = crate::telemetry::resolve_attribution(&state.scope, &input.catalog) {
+        crate::telemetry::enqueue_attributed(crate::telemetry::event::AttributedEntryInvoked {
+            entry_name: input.name.clone(),
+            entry_kind: crate::telemetry::event::EntryKind::Skill,
+            plugin_name: input.plugin.clone(),
+            plugin_version: attributed_plugin_version,
+            catalog_id,
+            calling_harness: crate::mcp::calling_harness(&state),
+        });
+    }
     // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
     state.note_enqueue();
 
@@ -542,6 +613,23 @@ fn map_substitution_error(err: SubstitutionError) -> (&'static str, McpError) {
     }
 }
 
+/// Map a substitution/context-build `code` slug (the `&'static str` first element
+/// of the `(code, McpError)` tuples produced by [`map_substitution_error`] and
+/// [`build_substitution_context`]) back to its closed [`ErrorCategory`], for the
+/// Co-M1 attributed-error telemetry. Any unrecognised slug falls back to the
+/// generic `SubstitutionFailed` category (the render stage's umbrella class).
+fn substitution_code_to_category(code: &str) -> crate::error::ErrorCategory {
+    use crate::error::ErrorCategory;
+    match code {
+        "plugin_data_dir_write_failed" => ErrorCategory::PluginDataDirWriteFailed,
+        "workspace_data_dir_write_failed" => ErrorCategory::WorkspaceDataDirWriteFailed,
+        "invalid_argument_frontmatter" => ErrorCategory::InvalidArgumentFrontmatter,
+        "prompt_argument_mismatch" => ErrorCategory::PromptArgumentMismatch,
+        // "substitution_failed" (the context-build umbrella) + any future slug.
+        _ => ErrorCategory::SubstitutionFailed,
+    }
+}
+
 /// Build the `internal_error` envelope plus an error log event.
 fn internal(input: &Input, started: Instant, msg: String, code: &str) -> McpError {
     // FR-M-LOG-1: scrub error chains before logging — reqwest / git
@@ -575,6 +663,57 @@ fn emit_error(input: &Input, started: Instant, code: &str, err: McpError) -> Mcp
         "call",
     );
     err
+}
+
+/// Co-M1 / FR-052: emit the POST-resolution telemetry for a `get_skill` failure
+/// that occurred AFTER the entry row resolved — so the (non-optional)
+/// `plugin_version` and the entry/plugin names are all in hand (the FR-059
+/// PUBLISHED-artefact carve-out, never a secret).
+///
+/// Emits the anonymous `tome.error` (closed [`ErrorCategory`] only) and, ALONGSIDE,
+/// the attributed `catalog.<id>.error` IFF this entry's catalog resolves — by
+/// SOURCE, at emit time — to an allowlisted catalog. Mirrors the success-path
+/// `entry_invoked` attribution; `None` ⇒ anonymous only.
+///
+/// Sec-M1 / R-L1: the attribution read + the attributed enqueue are folded into a
+/// `spawn_blocking` (best-effort: a join error is ignored) so the sync SQLite
+/// open+query never runs on the single-threaded MCP reactor. Best-effort
+/// throughout — never alters the returned `McpError`.
+///
+/// This is distinct from the PRE-resolution lookup boundary (see the
+/// `lookup_skill` `map_err` above), where there is no trustworthy
+/// `plugin_version` and the attributed error stays DEFERRED.
+async fn emit_post_resolution_error_telemetry(
+    state: &Arc<McpState>,
+    input: &Input,
+    plugin_version: String,
+    category: crate::error::ErrorCategory,
+) {
+    // Anonymous `tome.error` (closed category only, MCP surface + this session's
+    // calling harness). Same infallible local append as every other enqueue.
+    crate::mcp::enqueue_tool_error(state, category);
+
+    // Attributed `catalog.<id>.error`, folded into a blocking task so the
+    // `resolve_attribution` SQLite read never stalls the reactor.
+    let scope = state.scope.clone();
+    let catalog = input.catalog.clone();
+    let plugin_name = input.plugin.clone();
+    let entry_name = input.name.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Some(catalog_id) = crate::telemetry::resolve_attribution(&scope, &catalog) {
+            crate::telemetry::enqueue_attributed(crate::telemetry::event::AttributedError {
+                plugin_name,
+                entry_name: Some(entry_name),
+                error_class: category,
+                plugin_version,
+                catalog_id,
+            });
+        }
+    })
+    .await;
+
+    // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
+    state.note_enqueue();
 }
 
 impl Input {

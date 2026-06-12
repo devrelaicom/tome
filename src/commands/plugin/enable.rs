@@ -96,6 +96,21 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
         action: crate::telemetry::event::PluginAction::Enabled,
     });
 
+    // FR-052: ALONGSIDE the anonymous event above, emit the catalog-attributed
+    // `catalog.<id>.plugin_enabled` ONLY when the plugin's catalog resolves — at
+    // emit time, by SOURCE not name — to an allowlisted catalog. `None` ⇒ the
+    // anonymous event already fired and we add nothing (a name collision with a
+    // non-allowlisted source stays anonymous). Best-effort throughout: the
+    // attribution read and the version read are read-only, never lock, never
+    // fail the command.
+    if let Some(catalog_id) = crate::telemetry::resolve_attribution(scope, &id.catalog) {
+        crate::telemetry::enqueue_attributed(crate::telemetry::event::PluginEnabled {
+            plugin_name: id.plugin.clone(),
+            plugin_version: super::attributed_plugin_version(&paths, &scope.scope, &id),
+            catalog_id,
+        });
+    }
+
     match mode {
         Mode::Human => emit_human(&id, &outcome),
         Mode::Json => emit_json(&id, &outcome),

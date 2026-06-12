@@ -215,6 +215,32 @@ pub(crate) fn open_index_for_read(
     crate::index::open_read_only(&db_path)
 }
 
+/// Best-effort read of a plugin's `plugin_version` from the index, for the
+/// catalog-attributed telemetry events (Phase 10 / US4, FR-056). Opens the
+/// central index READ-ONLY with NO advisory lock (NFR-009) and returns the
+/// first matching `skills` row's `plugin_version` (every row for one plugin
+/// carries the same manifest version).
+///
+/// Infallible + best-effort, matching the silent telemetry path: any failure
+/// (missing DB, no rows, query error) yields an empty string rather than
+/// propagating — the attributed event still fires with a blank version rather
+/// than crashing or altering the user's exit code. The artefact version is a
+/// PUBLISHED manifest value (the FR-059 carve-out), never a user secret.
+pub(crate) fn attributed_plugin_version(
+    paths: &Paths,
+    scope: &crate::workspace::Scope,
+    id: &crate::plugin::PluginId,
+) -> String {
+    let Ok(conn) = crate::index::open_read_only(&paths.index_db) else {
+        return String::new();
+    };
+    crate::index::skills::list_for_plugin(&conn, scope.name().as_str(), &id.catalog, &id.plugin)
+        .ok()
+        .and_then(|rows| rows.into_iter().next())
+        .map(|row| row.plugin_version)
+        .unwrap_or_default()
+}
+
 /// Per-plugin index aggregate used by `list` and `show`. None of the fields
 /// require an index to exist on disk; absent rows collapse to `(0, 0, None)`.
 #[derive(Debug, Clone, Default)]
