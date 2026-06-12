@@ -78,21 +78,28 @@ impl Uuid {
     /// We hand-roll the 16-byte → version/variant-stamped → hyphenated render
     /// rather than pull a `uuid` crate: `getrandom` is already a direct dep for
     /// exactly this, and the format is trivial and fully pinned by tests.
-    pub fn mint() -> Uuid {
+    ///
+    /// Returns `None` if the OS RNG is unavailable (fd exhaustion / seccomp /
+    /// early boot). This is the silent best-effort telemetry path: under
+    /// `panic = "abort"` an `expect` here would abort the user's foreground
+    /// command from a telemetry append, contradicting the "INFALLIBLE, never
+    /// crash/propagate" invariant. Callers degrade an RNG failure to the
+    /// existing best-effort drop (silent paths) or an `Err` (explicit
+    /// `telemetry on`/`reset` commands).
+    pub fn mint() -> Option<Uuid> {
         let mut buf = [0u8; 16];
-        // `getrandom::fill` only errs if the OS RNG is unavailable, which on our
-        // supported matrix is a non-recoverable environment fault — there is no
-        // sensible fallback for a unique id, so we surface it as a panic. This
-        // path runs once per install (id mint) / once per process (session),
-        // never in a hot loop.
-        getrandom::fill(&mut buf).expect("OS RNG unavailable while minting telemetry UUID");
+        // `getrandom::fill` errs only if the OS RNG is unavailable. We never
+        // panic on this path; bubble the failure up as `None`. This path runs
+        // once per install (id mint) / once per process (session), never in a
+        // hot loop.
+        getrandom::fill(&mut buf).ok()?;
 
         // RFC 4122: high nibble of byte 6 = version (4); top two bits of byte 8
         // = variant (0b10).
         buf[6] = (buf[6] & 0x0f) | 0x40;
         buf[8] = (buf[8] & 0x3f) | 0x80;
 
-        Uuid(render_hyphenated(&buf))
+        Some(Uuid(render_hyphenated(&buf)))
     }
 
     /// Parse and validate a stored v4 UUID string. Returns `None` for anything
@@ -973,7 +980,7 @@ mod tests {
 
     #[test]
     fn uuid_mint_round_trips_through_parse() {
-        let u = Uuid::mint();
+        let u = Uuid::mint().expect("OS RNG available in tests");
         let reparsed = Uuid::parse(u.as_str()).expect("a freshly minted uuid must parse");
         assert_eq!(u, reparsed);
         assert_eq!(u.as_str(), reparsed.as_str());
@@ -981,7 +988,7 @@ mod tests {
 
     #[test]
     fn uuid_mint_sets_version_and_variant() {
-        let u = Uuid::mint();
+        let u = Uuid::mint().expect("OS RNG available in tests");
         let s = u.as_str();
         // Version nibble at index 14 must be '4'.
         assert_eq!(s.as_bytes()[14], b'4', "version nibble must be 4: {s}");

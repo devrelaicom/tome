@@ -424,6 +424,19 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         })
         .collect();
     let _ = tokio::task::spawn_blocking(move || {
+        // R-L1: gate the loop ONCE. The public `enqueue_attributed` re-runs
+        // `is_enabled()` (`Paths::resolve()` + a `config.toml` read) per result;
+        // resolve `Paths` + the enabled state a single time in the closure, then
+        // call the un-gated `enqueue_attributed_to(&paths, …)` inside the loop.
+        // FAIL-SAFE-OFF: an unresolvable `$HOME` or a disabled/failed gate skips
+        // the whole attributed loop (the anonymous `tome.search` already fired).
+        let paths = match crate::paths::Paths::resolve() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        if !matches!(crate::telemetry::config::resolve_enabled(&paths), Ok(true)) {
+            return;
+        }
         let mut attribution_cache: std::collections::HashMap<String, Option<&'static str>> =
             std::collections::HashMap::new();
         for (entry_name, entry_kind, plugin_name, catalog, rank) in attribution_rows {
@@ -431,14 +444,17 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                 crate::telemetry::resolve_attribution(&attribution_scope, &catalog)
             });
             if let Some(catalog_id) = catalog_id {
-                crate::telemetry::enqueue_attributed(crate::telemetry::event::SearchResult {
-                    entry_name,
-                    entry_kind,
-                    plugin_name,
-                    rank,
-                    catalog_id,
-                    calling_harness: search_harness,
-                });
+                crate::telemetry::enqueue_attributed_to(
+                    &paths,
+                    crate::telemetry::event::SearchResult {
+                        entry_name,
+                        entry_kind,
+                        plugin_name,
+                        rank,
+                        catalog_id,
+                        calling_harness: search_harness,
+                    },
+                );
             }
         }
     })

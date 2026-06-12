@@ -246,9 +246,19 @@ pub fn enqueue_to<E: event::AnonymousEvent>(paths: &crate::paths::Paths, event: 
         }
     };
 
+    // The session id can fail to mint if the OS RNG is unavailable. On this
+    // silent best-effort path we drop the event (debug log) rather than panic.
+    let session_uuid = match identity::session_id() {
+        Some(u) => u,
+        None => {
+            tracing::debug!(target: "telemetry", "enqueue skipped: session id unavailable (RNG)");
+            return;
+        }
+    };
+
     let envelope = event::Envelope::new(
         install_uuid,
-        identity::session_id(),
+        session_uuid,
         event::CURRENT_OS,
         event::CURRENT_ARCH,
         event::format_rfc3339_millis(clock::now_utc()),
@@ -310,12 +320,22 @@ pub fn enqueue_attributed_to<E: event::AttributedEvent>(paths: &crate::paths::Pa
         }
     };
 
+    // Drop silently if the session id can't be minted (RNG unavailable) — same
+    // best-effort contract as the anonymous path.
+    let session_uuid = match identity::session_id() {
+        Some(u) => u,
+        None => {
+            tracing::debug!(target: "telemetry", "enqueue_attributed skipped: session id unavailable (RNG)");
+            return;
+        }
+    };
+
     // Build the dynamic dotted type `catalog.<id>.<suffix>` and an envelope with
     // NO `sample_rate` (FR-058 — attributed events are never sampled).
     let event_type = format!("catalog.{}.{}", event.catalog_id(), E::EVENT_SUFFIX);
     let envelope = event::Envelope::new_attributed(
         install_uuid,
-        identity::session_id(),
+        session_uuid,
         event::CURRENT_OS,
         event::CURRENT_ARCH,
         event::format_rfc3339_millis(clock::now_utc()),
@@ -459,11 +479,13 @@ pub fn record_attempt(paths: &crate::paths::Paths) {
 /// Read + parse the `telemetry/last-flush-attempt` throttle stamp. `None` when
 /// absent/unreadable/unparsable (fail-safe: treated as "no recent attempt").
 fn read_last_flush_attempt(paths: &crate::paths::Paths) -> Option<time::OffsetDateTime> {
-    let body = crate::util::bounded_read_to_string(
-        &paths.telemetry_last_flush_attempt(),
-        crate::util::TOME_CONFIG_MAX,
-    )
-    .ok()?;
+    let path = paths.telemetry_last_flush_attempt();
+    // Sec-L1: read/write containment parity — `record_attempt` writes via
+    // `write_atomic` (symlink-refusing); refuse a symlinked component on the read
+    // too. A hostile stamp is treated as absent (best-effort `None` → "no recent
+    // attempt"), never propagated.
+    crate::util::refuse_symlinked_component(&path).ok()?;
+    let body = crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX).ok()?;
     let first = body.lines().next().unwrap_or("").trim();
     clock::parse_rfc3339(first)
 }

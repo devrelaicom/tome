@@ -133,8 +133,12 @@ fn pending_count(paths: &Paths) -> u64 {
 /// `status` report never fails on the stamp. The flusher (US3) writes the stamp
 /// as `{"timestamp":...,"last_status":<u16|null>}`; we parse exactly that shape.
 fn read_last_flush(paths: &Paths) -> Option<LastFlush> {
-    let body =
-        util::bounded_read_to_string(&paths.telemetry_last_flush(), util::TOME_CONFIG_MAX).ok()?;
+    let path = paths.telemetry_last_flush();
+    // Sec-L1: read/write containment parity — the flusher writes the stamp via the
+    // shared atomic (symlink-refusing) writer; refuse a symlinked component on the
+    // read too. A hostile stamp degrades to `None` (absent), never propagated.
+    util::refuse_symlinked_component(&path).ok()?;
+    let body = util::bounded_read_to_string(&path, util::TOME_CONFIG_MAX).ok()?;
     serde_json::from_str::<LastFlush>(&body).ok()
 }
 
