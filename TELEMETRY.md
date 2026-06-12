@@ -264,7 +264,8 @@ be force-set with the `TOME_TELEMETRY` environment variable.
 
 On the first CLI run with telemetry enabled, Tome prints a one-line disclosure to
 **stderr** (once), then proceeds. The disclosure states that anonymous usage plus
-named usage of allowlisted-catalog plugins is collected and points here. The
+named usage of allowlisted-catalog plugins is collected and points to
+`tome telemetry --help`. The
 guarantee is that this disclosure is **seeable on your next CLI run** (the 10-min
 grace period, §4) — not that it was shown before any possible send.
 

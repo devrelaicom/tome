@@ -56,6 +56,11 @@ pub fn assemble(paths: &Paths) -> TelemetrySection {
     // FOREGROUND CLI; here we degrade it to a reported `config_error` so the
     // read-only doctor pass never crashes. The default enabled value mirrors the
     // opt-out default (on) — the user sees both the error AND the effective state.
+    // NOTE: `e.to_string()` can echo a snippet of the offending config CONTENT
+    // (the toml parse error's `detail`). Safe today because `telemetry/config.toml`
+    // is Tome-owned and its only field is `enabled: bool` (no credential-shaped
+    // value can land there), and the path component is already scrubbed. If this
+    // config ever gains a free-text field, scrub the surfaced detail here.
     let (enabled, source, config_error) = match config::resolve_enabled_with_source(paths) {
         Ok((enabled, source)) => (enabled, source, None),
         Err(e) => (true, config::Source::Default, Some(e.to_string())),
