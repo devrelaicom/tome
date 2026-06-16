@@ -6,7 +6,7 @@ name: Release-plz
 # bump in Cargo.toml/Cargo.lock + CHANGELOG regenerated from the Conventional
 # Commits). Merging that PR is the single approval gate; release-plz then pushes
 # the `vX.Y.Z` git tag. That tag fires the existing, audited tag-triggered
-# `.github/workflows/release.yml` back-end (gate → build 4 targets → installer +
+# `.github/workflows/release.yml` back-end (gate → build targets → installer +
 # Homebrew formula + licence bundle → GitHub Release → `cargo publish` → tap
 # push). release-plz itself does NOT publish or create the GitHub Release
 # (`publish=false`, `git_release_enable=false` in release-plz.toml), so the
