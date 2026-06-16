@@ -431,6 +431,12 @@ Security hardening
 
 - *(status)* bookshelf redesign — colored ASCII shelf + grouped panel + enriched report ([#224](https://github.com/devrelaicom/tome/pull/224))
 
+## [0.6.1](https://github.com/devrelaicom/tome/compare/v0.6.0...v0.6.1) - 2026-06-16
+
+### Added
+
+- *(status)* bookshelf redesign — colored ASCII shelf + grouped panel + enriched report ([#224](https://github.com/devrelaicom/tome/pull/224))
+
 ## [0.6.0](https://github.com/devrelaicom/tome/releases/tag/v0.6.0) - 2026-06-16
 
 ### Added
