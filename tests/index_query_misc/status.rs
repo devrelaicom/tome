@@ -284,6 +284,70 @@ fn status_verify_flag_detects_checksum_mismatch() {
     assert_eq!(report.overall, OverallHealth::Unhealthy);
 }
 
+// ---- New fields: summariser, scope, models_on_disk_bytes -----------------
+
+#[test]
+fn status_reports_summariser_scope_and_models_on_disk() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    crate::common::fabricate_all_registry_models(&paths);
+
+    let scope = tome::workspace::Scope(tome::workspace::WorkspaceName::global());
+    let report = assemble_report(&paths, &scope, false).unwrap();
+
+    // Third model is reported.
+    assert_eq!(report.summariser.state, "ok");
+    // Scope fields reflect the global default.
+    assert_eq!(report.current_workspace, "global");
+    assert_eq!(report.current_scope, "global");
+    // Fabricated models occupy non-zero disk.
+    assert!(report.models_on_disk_bytes > 0);
+}
+
+// ---- New fields: workspace-scoped entry/catalog/reindex counts -----------
+
+#[test]
+fn status_reports_workspace_scoped_counts() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    crate::common::fabricate_all_registry_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // Enrol the catalog + symlink the cache dir so `enable_alpha` resolves
+    // the fixture via the DB-backed `resolve_plugin_dir`.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
+
+    let embedder = StubEmbedder::new();
+    enable_alpha(&paths, &config, &embedder);
+
+    let scope = tome::workspace::Scope(tome::workspace::WorkspaceName::global());
+    let report = assemble_report(&paths, &scope, false).unwrap();
+
+    // plugin-alpha ships at least one skill → entries.skills > 0.
+    assert!(report.entries.skills > 0, "expected indexed skills, got 0");
+    // `global` is excluded from the user-workspace count.
+    assert_eq!(report.workspaces_total, 0);
+    // alpha came from an enrolled catalog.
+    assert!(
+        report.catalogs_enrolled >= 1,
+        "expected at least one enrolled catalog"
+    );
+    // something was indexed → a timestamp exists.
+    assert!(
+        report.reindexed_at.is_some(),
+        "expected a reindexed_at timestamp"
+    );
+}
+
 // ---- CLI binary: exit code semantics -------------------------------------
 
 #[test]
@@ -337,4 +401,44 @@ fn status_cli_json_emits_structured_record() {
     assert_eq!(v["embedder"]["state"], "ok");
     assert_eq!(v["reranker"]["state"], "ok");
     assert_eq!(v["overall"], "ok");
+    // Enriched fields pinned in Task 4 of the bookshelf redesign.
+    // fabricate_all_registry_models fabricates all three models including the
+    // summariser, so state == "ok" is strict.
+    assert_eq!(v["summariser"]["state"], "ok");
+    assert!(v["workspaces_total"].is_number());
+    assert!(v["current_workspace"].is_string());
+    assert!(v["current_scope"].is_string());
+    assert!(v["entries"]["skills"].is_number());
+    assert!(v["entries"]["commands"].is_number());
+    assert!(v["entries"]["agents"].is_number());
+    assert!(v["catalogs_enrolled"].is_number());
+    assert!(v.get("reindexed_at").is_some()); // null or number
+    assert!(v["models_on_disk_bytes"].is_number());
+}
+
+#[test]
+fn status_human_plain_is_grouped_and_labeled() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    crate::common::fabricate_all_registry_models(&paths);
+
+    let out = env.cmd().args(["status"]).output().unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+
+    // Title + group headers + a sampling of labels (piped => no colour/art).
+    assert!(s.contains("Tome v"));
+    assert!(s.contains("Global"));
+    assert!(s.contains("Workspace"));
+    assert!(s.contains("Models:"));
+    assert!(s.contains("Workspaces:"));
+    assert!(s.contains("Entries:"));
+    assert!(s.contains("Catalogs:"));
+    assert!(s.contains("Reindexed:"));
+    assert!(s.contains("Overall:"));
+    // No box-drawing art when piped.
+    assert!(!s.contains('┌'));
 }

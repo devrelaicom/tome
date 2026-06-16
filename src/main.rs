@@ -3,6 +3,7 @@ use clap::Parser;
 use tome::catalog::git;
 use tome::cli::{Cli, Command};
 use tome::paths;
+use tome::presentation::colour;
 use tome::workspace;
 use tome::{commands, logging, output};
 
@@ -27,6 +28,11 @@ fn main() {
     if !matches!(cli.command, Command::Mcp(_)) {
         logging::init(cli.verbosity());
         git::install_signal_handler();
+        // Resolve the colour-enabled decision once, before any human output.
+        // Gated on TTY + `NO_COLOR` (see `presentation::colour`). Without this
+        // the cached decision defaults to disabled, so colour never renders.
+        // The MCP path emits only JSON-RPC, so it needs no colour.
+        colour::init();
     }
 
     let mode = cli.mode();
