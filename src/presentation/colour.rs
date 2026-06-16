@@ -104,6 +104,16 @@ pub fn dim(text: &str) -> String {
     }
 }
 
+/// Render `text` as a panel key: bold + the project accent (cyan) iff colour
+/// is enabled.
+pub fn label(text: &str) -> String {
+    if is_enabled() {
+        text.cyan().bold().to_string()
+    } else {
+        text.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

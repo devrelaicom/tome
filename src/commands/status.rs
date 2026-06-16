@@ -445,6 +445,16 @@ fn relative_time(then: i64, now: i64) -> String {
     }
 }
 
+/// Best-effort terminal width. No terminal-size dependency by design: read
+/// `$COLUMNS`, else assume a standard 80-column terminal.
+fn term_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|w| *w > 0)
+        .unwrap_or(80)
+}
+
 fn human_size(bytes: u64) -> String {
     if bytes < 1024 {
         return format!("{bytes} B");
