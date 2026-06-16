@@ -203,7 +203,7 @@ jobs:
           fi
 
       - name: Upload local artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: artifacts-local-${{ matrix.target }}
           path: |
@@ -271,7 +271,7 @@ jobs:
           echo "Regenerated THIRD-PARTY-LICENSES ($(wc -l < THIRD-PARTY-LICENSES) lines)"
 
       - name: Upload global artifacts + licence bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: artifacts-global
           path: |
@@ -293,7 +293,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: artifacts-*
           path: dist-artifacts
@@ -334,7 +334,7 @@ jobs:
   # log/output (§XIII / NFR-010). Publishing is `--locked` (NFR-008).
   # ---------------------------------------------------------------------------
   publish-crates-io:
-    name: Publish to crates.io (dormant until secret set)
+    name: Publish to crates.io
     needs: [gate, build, secret-preflight]
     if: needs.secret-preflight.outputs.has_cargo_token == 'true'
     runs-on: ubuntu-latest
@@ -372,13 +372,13 @@ jobs:
   # command, and never written to a log (§XIII / NFR-010).
   # ---------------------------------------------------------------------------
   publish-homebrew-tap:
-    name: Push formula to Homebrew tap (dormant until PAT set)
+    name: Push formula to Homebrew tap
     needs: [global, release, secret-preflight]
     if: needs.secret-preflight.outputs.has_tap_token == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Download global artifacts (the generated formula)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: artifacts-global
           path: global-artifacts
