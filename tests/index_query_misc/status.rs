@@ -401,4 +401,17 @@ fn status_cli_json_emits_structured_record() {
     assert_eq!(v["embedder"]["state"], "ok");
     assert_eq!(v["reranker"]["state"], "ok");
     assert_eq!(v["overall"], "ok");
+    // Enriched fields pinned in Task 4 of the bookshelf redesign.
+    // fabricate_all_registry_models fabricates all three models including the
+    // summariser, so state == "ok" is strict.
+    assert_eq!(v["summariser"]["state"], "ok");
+    assert!(v["workspaces_total"].is_number());
+    assert!(v["current_workspace"].is_string());
+    assert!(v["current_scope"].is_string());
+    assert!(v["entries"]["skills"].is_number());
+    assert!(v["entries"]["commands"].is_number());
+    assert!(v["entries"]["agents"].is_number());
+    assert!(v["catalogs_enrolled"].is_number());
+    assert!(v.get("reindexed_at").is_some()); // null or number
+    assert!(v["models_on_disk_bytes"].is_number());
 }
