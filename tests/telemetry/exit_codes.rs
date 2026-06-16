@@ -66,6 +66,47 @@ fn malformed_config_is_exit_91() {
 }
 
 // ---------------------------------------------------------------------------
+// #225 negative control — the test harness must fork ZERO detached flushers
+// ---------------------------------------------------------------------------
+
+/// A `tome` invocation under the DEFAULT `ToolEnv` (telemetry force-disabled by
+/// `cmd()`) must leave no telemetry footprint. The load-bearing assertion is the
+/// absence of `telemetry/last-flush-attempt`: `teardown_at_exit` writes that
+/// stamp ONLY on the path where it is about to fork a detached `telemetry flush`
+/// child, so its absence proves the exit hook never spawned a flusher — the #225
+/// storm cannot occur. (`teardown_at_exit` runs on both the success and error
+/// exit arms, so `catalog list` exercises it regardless of its exit code.)
+#[test]
+fn default_harness_forks_no_detached_flusher() {
+    let env = ToolEnv::new();
+    let out = env
+        .cmd()
+        .args(["catalog", "list"])
+        .output()
+        .expect("spawn tome catalog list");
+    // It actually ran through the normal dispatch (so teardown_at_exit ran too).
+    assert!(
+        out.status.code().is_some(),
+        "command ran to completion; stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let tel = env.tome_root().join("telemetry");
+    assert!(
+        !tel.join("last-flush-attempt").exists(),
+        "disabled telemetry must not stamp a spawn attempt (#225: no detached flusher forked)",
+    );
+    assert!(
+        !tel.join("id").exists(),
+        "disabled telemetry mints no install id",
+    );
+    assert!(
+        !tel.join("queue.jsonl").exists(),
+        "disabled telemetry enqueues nothing",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // status --json byte-stable pins (deterministic, uuid-free states only)
 // ---------------------------------------------------------------------------
 

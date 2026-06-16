@@ -11,6 +11,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Force telemetry off on the runner (defence-in-depth beyond CI auto-off, #225).
+  TOME_TELEMETRY: "0"
 
 jobs:
   audit:

@@ -20,6 +20,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Force telemetry off on the runner (defence-in-depth beyond CI auto-off, #225).
+  TOME_TELEMETRY: "0"
   # The exact cargo-dist version the pipeline is pinned to. Must match
   # `cargo-dist-version` in dist-workspace.toml (reproducibility / NFR-008).
   DIST_VERSION: "0.32.0"

@@ -128,9 +128,18 @@ impl ToolEnv {
 
     /// Build a `Command` for the compiled `tome` binary, pre-populated with
     /// the isolated env.
+    ///
+    /// Telemetry is force-DISABLED (`TOME_TELEMETRY=0`) for every spawned `tome`:
+    /// each test runs against a FRESH temp root with no install id, so an enabled
+    /// `tome` would mint an id and fork a detached `telemetry flush` child on exit
+    /// — across the whole suite that is the #225 flusher storm (and the per-root
+    /// throttle never applies across distinct temp roots). The telemetry suites
+    /// that DO want delivery normalise the env themselves (`env_remove` then
+    /// `TOME_TELEMETRY=1`), so this base force-off is invisible to them.
     pub fn cmd(&self) -> Command {
         let mut cmd = Command::new(tome_bin());
         cmd.env("HOME", self.home.path())
+            .env("TOME_TELEMETRY", "0")
             .env_remove("TOME_LOG")
             .env_remove("RUST_LOG");
         cmd
