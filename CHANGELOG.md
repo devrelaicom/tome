@@ -425,6 +425,12 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.6.2](https://github.com/devrelaicom/tome/compare/v0.6.1...v0.6.2) - 2026-06-16
+
+### Fixed
+
+- *(summarise)* set n_batch to the context size and degrade post-commit summary-trigger failures ([#229](https://github.com/devrelaicom/tome/pull/229))
+
 ## [0.6.1](https://github.com/devrelaicom/tome/compare/v0.6.0...v0.6.1) - 2026-06-16
 
 ### Added
