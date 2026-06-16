@@ -29,24 +29,27 @@ const SHELVES: [&str; 3] = [
 ];
 
 /// Colorize a spine row: each run of non-space characters (a "book") takes
-/// the next palette colour. Spaces pass through. Plain when colour disabled.
+/// the next palette colour, starting at `PALETTE[0]` for the first book.
+/// Spaces pass through. Plain when colour disabled.
 fn paint_spines(row: &str) -> String {
     let mut out = String::new();
-    let mut idx = 0usize;
-    let mut prev_space = true;
+    // Palette index of the current book; advanced only when a book ends so
+    // the first book is `PALETTE[0]` (otherwise the leading colour is skipped).
+    let mut book = 0usize;
+    let mut in_book = false;
     for ch in row.chars() {
         if ch == ' ' {
             out.push(' ');
-            prev_space = true;
+            if in_book {
+                book += 1;
+            }
+            in_book = false;
             continue;
         }
-        if prev_space {
-            idx += 1;
-        }
-        prev_space = false;
+        in_book = true;
         let s = ch.to_string();
         if colour::is_enabled() {
-            out.push_str(&s.color(PALETTE[idx % PALETTE.len()]).to_string());
+            out.push_str(&s.color(PALETTE[book % PALETTE.len()]).to_string());
         } else {
             out.push_str(&s);
         }
