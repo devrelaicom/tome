@@ -32,6 +32,8 @@ use crate::workspace::{ResolvedScope, Scope};
 use crate::commands::models::{ModelState, cheap_state};
 use crate::commands::plugin::{embedder_entry, reranker_entry};
 
+mod art;
+
 pub fn run(args: StatusArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
     let report = assemble_report(&paths, &scope.scope, args.verify)?;
