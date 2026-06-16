@@ -301,11 +301,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # download-artifact (merge-multiple) preserves each artifact's own
+          # directory structure, so the local target archives land under
+          # dist-artifacts/target/distrib/. A shallow `dist-artifacts/*` glob
+          # therefore matches that `target` DIRECTORY, which `gh release create`
+          # rejects ("is a directory"). Enumerate FILES only, recursively.
+          mapfile -t assets < <(find dist-artifacts -type f)
           gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "${GITHUB_REF_NAME}" \
             --generate-notes \
-            dist-artifacts/*
+            "${assets[@]}"
 
   # ---------------------------------------------------------------------------
   # DORMANT — crates.io publish (FR-019, user-reserved). Runs only once the
