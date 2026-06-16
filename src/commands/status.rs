@@ -132,8 +132,8 @@ pub fn assemble_report(
     let models_on_disk_bytes =
         models_on_disk(paths, &[embedder_entry, reranker_entry, summariser_entry]);
 
-    // DB-derived workspace/global stats (Task 2 fills these in).
-    let db = DbStats::default();
+    // DB-derived workspace/global stats.
+    let db = gather_db_stats(paths, scope)?;
 
     Ok(StatusReport {
         tome,
@@ -437,7 +437,7 @@ fn human_size(bytes: u64) -> String {
     format!("{:.1} MiB", mib)
 }
 
-// ---- DB-derived stats placeholder (Task 2 fills these in) -----------------
+// ---- DB-derived stats (gather_db_stats) ------------------------------------
 
 #[derive(Default)]
 struct DbStats {
@@ -445,6 +445,84 @@ struct DbStats {
     entries: EntryCounts,
     catalogs_enrolled: u32,
     reindexed_at: Option<i64>,
+}
+
+/// All index-DB-derived stats in a single read-only open. Returns defaults
+/// (zeros / None) when the index DB does not exist yet. A query failure on
+/// any single stat degrades that stat to 0 / None rather than aborting the
+/// report (the report must always render). Read-only; never takes the lock.
+fn gather_db_stats(paths: &Paths, scope: &Scope) -> Result<DbStats, TomeError> {
+    if !paths.index_db.is_file() {
+        return Ok(DbStats::default());
+    }
+    let conn = index::open_read_only(&paths.index_db)?;
+    let ws = scope.name().as_str();
+
+    let workspaces_total: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM workspaces WHERE name != ?1",
+            rusqlite::params![index::GLOBAL_WORKSPACE],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    let mut entries = EntryCounts::default();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT s.kind, COUNT(*) FROM skills s
+         JOIN workspace_skills ws ON ws.skill_id = s.id
+         JOIN workspaces       w  ON w.id = ws.workspace_id
+         WHERE w.name = ?1
+         GROUP BY s.kind",
+    ) && let Ok(rows) = stmt.query_map(rusqlite::params![ws], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    }) {
+        for (kind, n) in rows.flatten() {
+            let n = u32::try_from(n).unwrap_or(u32::MAX);
+            match kind.as_str() {
+                "skill" => entries.skills = n,
+                "command" => entries.commands = n,
+                "agent" => entries.agents = n,
+                _ => {}
+            }
+        }
+    }
+
+    let catalogs_enrolled: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM workspace_catalogs wc
+             JOIN workspaces w ON w.id = wc.workspace_id
+             WHERE w.name = ?1",
+            rusqlite::params![ws],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    // `indexed_at` is stored as RFC 3339 TEXT (lexicographically sortable);
+    // MAX() over text gives the latest timestamp string. Parse it to unix
+    // seconds for the report field; degrade to None on any failure.
+    let reindexed_at: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(s.indexed_at) FROM skills s
+             JOIN workspace_skills ws ON ws.skill_id = s.id
+             JOIN workspaces       w  ON w.id = ws.workspace_id
+             WHERE w.name = ?1",
+            rusqlite::params![ws],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .and_then(|s| {
+            time::OffsetDateTime::parse(&s, &time::format_description::well_known::Rfc3339)
+                .ok()
+                .map(|dt| dt.unix_timestamp())
+        });
+
+    Ok(DbStats {
+        workspaces_total: u32::try_from(workspaces_total).unwrap_or(u32::MAX),
+        entries,
+        catalogs_enrolled: u32::try_from(catalogs_enrolled).unwrap_or(u32::MAX),
+        reindexed_at,
+    })
 }
 
 /// Sum the on-disk size of each model's directory. Missing dirs contribute 0.

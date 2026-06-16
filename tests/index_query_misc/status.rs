@@ -308,6 +308,46 @@ fn status_reports_summariser_scope_and_models_on_disk() {
     assert!(report.models_on_disk_bytes > 0);
 }
 
+// ---- New fields: workspace-scoped entry/catalog/reindex counts -----------
+
+#[test]
+fn status_reports_workspace_scoped_counts() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    crate::common::fabricate_all_registry_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    // Enrol the catalog + symlink the cache dir so `enable_alpha` resolves
+    // the fixture via the DB-backed `resolve_plugin_dir`.
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
+
+    let embedder = StubEmbedder::new();
+    enable_alpha(&paths, &config, &embedder);
+
+    let scope = tome::workspace::Scope(tome::workspace::WorkspaceName::global());
+    let report = assemble_report(&paths, &scope, false).unwrap();
+
+    // plugin-alpha ships at least one skill → entries.skills > 0.
+    assert!(report.entries.skills > 0, "expected indexed skills, got 0");
+    // `global` is excluded from the user-workspace count.
+    assert_eq!(report.workspaces_total, 0);
+    // alpha came from an enrolled catalog.
+    assert!(
+        report.catalogs_enrolled >= 1,
+        "expected at least one enrolled catalog"
+    );
+    // something was indexed → a timestamp exists.
+    assert!(
+        report.reindexed_at.is_some(),
+        "expected a reindexed_at timestamp"
+    );
+}
+
 // ---- CLI binary: exit code semantics -------------------------------------
 
 #[test]
