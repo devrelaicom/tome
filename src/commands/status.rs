@@ -425,6 +425,26 @@ fn drift_description(drift: &DriftStatus) -> String {
     }
 }
 
+/// Humanize the gap between `then` and `now` (both unix seconds). Future
+/// timestamps (clock skew) clamp to "just now".
+#[allow(dead_code)] // wired into the renderer in the human-render task
+fn relative_time(then: i64, now: i64) -> String {
+    let d = (now - then).max(0);
+    let plural = |n: i64| if n == 1 { "" } else { "s" };
+    if d < 60 {
+        "just now".to_owned()
+    } else if d < 3600 {
+        let m = d / 60;
+        format!("{m} minute{} ago", plural(m))
+    } else if d < 86400 {
+        let h = d / 3600;
+        format!("{h} hour{} ago", plural(h))
+    } else {
+        let days = d / 86400;
+        format!("{days} day{} ago", plural(days))
+    }
+}
+
 fn human_size(bytes: u64) -> String {
     if bytes < 1024 {
         return format!("{bytes} B");
@@ -589,5 +609,21 @@ pub fn print_version(json: bool) {
         println!("tome {tome}");
         println!("embedder: {} {}", embedder.name, embedder.version);
         println!("reranker: {} {}", reranker.name, reranker.version);
+    }
+}
+
+#[cfg(test)]
+mod relative_time_tests {
+    use super::relative_time;
+
+    #[test]
+    fn formats_buckets() {
+        assert_eq!(relative_time(1000, 1000), "just now");
+        assert_eq!(relative_time(1000, 1030), "just now"); // < 60s
+        assert_eq!(relative_time(1000, 1000 + 60), "1 minute ago");
+        assert_eq!(relative_time(1000, 1000 + 600), "10 minutes ago");
+        assert_eq!(relative_time(1000, 1000 + 3600), "1 hour ago");
+        assert_eq!(relative_time(1000, 1000 + 2 * 86400), "2 days ago");
+        assert_eq!(relative_time(1000, 500), "just now"); // clock skew (future) clamps
     }
 }
