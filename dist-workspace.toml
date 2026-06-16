@@ -32,12 +32,13 @@ ci = "github"
 # documented escape hatch for a custom CI workflow.
 allow-dirty = ["ci"]
 
-# Self-contained prebuilt binaries for Linux + macOS, x86_64 + aarch64
-# (FR-018). Windows is explicitly out of scope this phase (research §R-24).
+# Self-contained prebuilt binaries for Linux (x86_64 + aarch64) and
+# Apple-silicon macOS (FR-018). Windows is explicitly out of scope this phase
+# (research §R-24). Intel macOS (x86_64-apple-darwin) was dropped: the
+# macos-13 runner pool stalls release builds and the target is not supported.
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
     "aarch64-apple-darwin",
 ]
 
@@ -58,7 +59,7 @@ formula = "tome"
 # Where releases are hosted.
 hosting = "github"
 
-# Build the four targets in separate, precise invocations rather than one
+# Build each target in separate, precise invocations rather than one
 # fat host build — required for cross-target correctness and so each target's
 # self-contained check runs against its own binary (FR-018, SC-007).
 precise-builds = true
