@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::common::{fabricate_models, lifecycle_paths};
 use tempfile::TempDir;
-use tome::error::TomeError;
+use tome::error::{SummariserFailureKind, TomeError};
 use tome::summarise::{
     PluginSummariesInput, StubSummariser, Summariser, SummariserOutput, regenerate_for_trigger,
 };
@@ -147,5 +147,90 @@ fn override_guard_drop_clears_slot_so_subsequent_call_falls_through() {
         counter.load(Ordering::SeqCst),
         1,
         "counter must NOT increment after guard drop — slot was cleared",
+    );
+}
+
+/// A summariser that always fails with `BackendInitFailed`. Used to verify
+/// that the PRODUCTION trigger wrapper (`regenerate_for_trigger`) degrades
+/// non-`ModelMissing` failures to a non-fatal `Ok(())` (issue #208).
+///
+/// Distinct from the `FailingSummariser` in `summariser_forward_progress.rs`
+/// which uses `OutputEmpty` — here we use `BackendInitFailed` to exercise
+/// the specific failure mode that GGML_ASSERT triggered before the n_batch
+/// fix, and to confirm the degrade covers all non-`ModelMissing` kinds.
+struct AlwaysFailsSummariser;
+
+impl Summariser for AlwaysFailsSummariser {
+    fn summarise(&self, _input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+        Err(TomeError::SummariserFailure {
+            kind: SummariserFailureKind::BackendInitFailed {
+                source: "injected failure for issue #208 regression test".to_owned(),
+            },
+        })
+    }
+}
+
+/// T-208: the PRODUCTION trigger wrapper (`regenerate_for_trigger`) must
+/// return `Ok(())` when the summariser fails with a non-`ModelMissing`
+/// error. This covers the #208 scenario: a content-heavy plugin enable
+/// succeeds (state commits), the post-commit summariser call fails
+/// (`BackendInitFailed` from the n_batch GGML_ASSERT or similar), and the
+/// command must NOT abort — the failure is demoted to a warning.
+///
+/// We drive the production `regenerate_for_trigger` (NOT `_with_summariser`)
+/// via `SummariserOverrideGuard` to inject `AlwaysFailsSummariser` without
+/// needing a real model on disk.
+#[test]
+fn production_trigger_degrades_non_model_missing_failure_to_ok() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+    workspace::init::init(WorkspaceName::parse("issue-208-ws").unwrap(), false, &paths)
+        .expect("init workspace");
+
+    let _guard = tome::summarise::trigger::SummariserOverrideGuard::install(Arc::new(
+        AlwaysFailsSummariser,
+    )
+        as Arc<dyn Summariser>);
+
+    // The production trigger MUST return Ok even though the summariser
+    // fails — the state mutation already committed and the command must
+    // not crash (issue #208).
+    let result = regenerate_for_trigger(&WorkspaceName::parse("issue-208-ws").unwrap(), &paths);
+    assert!(
+        result.is_ok(),
+        "production trigger must degrade BackendInitFailed to Ok(()) per #208, got {result:?}",
+    );
+}
+
+/// Companion to `production_trigger_degrades_non_model_missing_failure_to_ok`:
+/// confirm that the SAME error bubbles when driven through the DI variant
+/// `regenerate_for_trigger_with_summariser` (which must NOT degrade, because
+/// `tome workspace regen-summary` and the forward-progress tests rely on it).
+#[test]
+fn di_variant_still_propagates_backend_init_failed() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    workspace::init::init(WorkspaceName::parse("di-ws").unwrap(), false, &paths)
+        .expect("init workspace");
+
+    let failing = AlwaysFailsSummariser;
+    let err = tome::summarise::regenerate_for_trigger_with_summariser(
+        &WorkspaceName::parse("di-ws").unwrap(),
+        &failing,
+        &paths,
+    )
+    .expect_err("_with_summariser must propagate errors — not degrade them");
+
+    assert!(
+        matches!(
+            err,
+            TomeError::SummariserFailure {
+                kind: SummariserFailureKind::BackendInitFailed { .. }
+            }
+        ),
+        "expected BackendInitFailed, got {err:?}",
     );
 }

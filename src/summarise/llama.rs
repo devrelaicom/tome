@@ -41,9 +41,10 @@
 //! - Token decoding uses `LlamaModel::token_to_piece` with an
 //!   `encoding_rs::UTF_8` decoder so multi-byte sequences are reassembled
 //!   correctly across token boundaries.
-//! - The `LlamaContext` carries a 4096-token KV cache (`with_n_ctx`).
-//!   That's enough headroom for the longest realistic skill-library
-//!   summary while staying cheap on memory.
+//! - The `LlamaContext` pins both n_ctx and n_batch to 4096
+//!   (`with_n_ctx` / `with_n_batch`) — see `run_inference` for why
+//!   n_batch must match n_ctx. That's enough headroom for the longest
+//!   realistic skill-library summary while staying cheap on memory.
 
 use std::num::NonZeroU32;
 
@@ -256,7 +257,17 @@ fn run_inference(
     // prompts' KV histories. A fresh context per pass is the safest
     // contract — the cost is one extra `llama_new_context_with_model`
     // call (sub-millisecond on a 0.5B model).
-    let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(CONTEXT_SIZE));
+    //
+    // `n_batch` MUST be >= the largest prompt we ever decode in one call.
+    // We never set it before, so llama.cpp used its 2048 default while the
+    // context window is CONTEXT_SIZE (4096); a 2048–4096-token prompt then
+    // tripped `GGML_ASSERT(n_tokens_all <= n_batch)` and aborted the process
+    // (issue #208). Pinning n_batch = CONTEXT_SIZE means the existing
+    // prompt-length guard (tokens <= n_ctx - max_tokens < n_ctx == n_batch)
+    // guarantees the assert can never fire.
+    let ctx_params = LlamaContextParams::default()
+        .with_n_ctx(NonZeroU32::new(CONTEXT_SIZE))
+        .with_n_batch(CONTEXT_SIZE);
     let mut ctx =
         model
             .new_context(backend, ctx_params)
