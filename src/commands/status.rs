@@ -26,7 +26,6 @@ use crate::index::meta::{DriftStatus, ModelIdent, detect_drift};
 use crate::index::{self, integrity};
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
-use crate::presentation::colour;
 use crate::workspace::{ResolvedScope, Scope};
 
 use crate::commands::models::{ModelState, cheap_state};
@@ -341,71 +340,36 @@ fn emit(report: &StatusReport, mode: Mode) -> Result<(), TomeError> {
 
 fn emit_human(report: &StatusReport) -> Result<(), TomeError> {
     let mut out = std::io::stdout().lock();
-    let glyph_ok = if crate::output::stdout_is_tty() {
-        format!("{} ok", colour::success("✓"))
-    } else {
-        "[ok]".to_owned()
-    };
-    let glyph_fail = if crate::output::stdout_is_tty() {
-        format!("{} {}", colour::error("✗"), "fail")
-    } else {
-        "[fail]".to_owned()
-    };
-    let model_glyph = |state: &str| -> String {
-        if state == "ok" {
-            glyph_ok.clone()
-        } else {
-            format!("{glyph_fail} ({state})")
-        }
-    };
+    let panel = render_panel(report);
 
-    writeln!(out, "Tome:               {}", report.tome)?;
-    writeln!(
-        out,
-        "Embedder:           {} ({})  {}",
-        report.embedder.name,
-        report.embedder.version,
-        model_glyph(&report.embedder.state),
-    )?;
-    writeln!(
-        out,
-        "Reranker:           {} ({})  {}",
-        report.reranker.name,
-        report.reranker.version,
-        model_glyph(&report.reranker.state),
-    )?;
+    // Panel-only when not a TTY (colour already off) or the terminal is too
+    // narrow to fit art + gap + a reasonable panel width.
+    const GAP: usize = 3;
+    const PANEL_MIN: usize = 34;
+    let show_art =
+        crate::output::stdout_is_tty() && term_width() >= art::ART_WIDTH + GAP + PANEL_MIN;
 
-    if report.index.present {
-        writeln!(
-            out,
-            "Index database:     {} ({} plugins enabled, {} skills indexed, {})",
-            if report.index.integrity_ok {
-                glyph_ok.as_str()
-            } else {
-                glyph_fail.as_str()
-            },
-            report.index.plugins_enabled,
-            report.index.skills_indexed,
-            human_size(report.index.size_bytes),
-        )?;
-        if let Some(v) = report.index.schema_version {
-            writeln!(out, "Schema version:     {v}")?;
+    if !show_art {
+        for line in &panel {
+            writeln!(out, "{line}")?;
         }
-    } else {
-        writeln!(out, "Index database:     not yet bootstrapped")?;
+        return Ok(());
     }
 
-    writeln!(
-        out,
-        "Drift:              {}",
-        drift_description(&report.drift)
-    )?;
-    let overall_glyph = match report.overall {
-        OverallHealth::Ok => format!("{} healthy", glyph_ok),
-        OverallHealth::Degraded => format!("{} degraded", colour::warning("⚠")),
-        OverallHealth::Unhealthy => format!("{} unhealthy", colour::error("✗")),
-    };
-    writeln!(out, "Overall:            {}", overall_glyph)?;
+    let art = art::bookshelf();
+    let blank_art = " ".repeat(art::ART_WIDTH);
+    let gap = " ".repeat(GAP);
+    let rows = art.len().max(panel.len());
+    for i in 0..rows {
+        let left = art.get(i).map(String::as_str).unwrap_or(&blank_art);
+        let right = panel.get(i).map(String::as_str).unwrap_or("");
+        // Trim trailing whitespace when the right column is empty.
+        if right.is_empty() {
+            writeln!(out, "{}", left.trim_end())?;
+        } else {
+            writeln!(out, "{left}{gap}{right}")?;
+        }
+    }
     Ok(())
 }
 
