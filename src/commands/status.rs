@@ -409,6 +409,124 @@ fn emit_human(report: &StatusReport) -> Result<(), TomeError> {
     Ok(())
 }
 
+/// The right-hand info panel, as colored lines. Colour auto-disables in
+/// non-TTY contexts (so this same function yields the plain rendering).
+fn render_panel(report: &StatusReport) -> Vec<String> {
+    use crate::presentation::colour;
+
+    let glyph_ok = if colour::is_enabled() {
+        format!("{} ok", colour::success("✓"))
+    } else {
+        "[ok]".to_owned()
+    };
+    let glyph_fail = if colour::is_enabled() {
+        format!("{} fail", colour::error("✗"))
+    } else {
+        "[fail]".to_owned()
+    };
+    let model_glyph = |state: &str| -> String {
+        if state == "ok" {
+            glyph_ok.clone()
+        } else {
+            format!("{glyph_fail} ({state})")
+        }
+    };
+    // Pad the key to a fixed column then colour it (padding inside the span
+    // is invisible; this keeps alignment correct despite ANSI codes).
+    let key = |k: &str| colour::label(&format!("{k:<12}"));
+
+    let models = format!(
+        "embedder {} / reranker {} / summariser {}",
+        model_glyph(&report.embedder.state),
+        model_glyph(&report.reranker.state),
+        model_glyph(&report.summariser.state),
+    );
+
+    let index_line = if report.index.present {
+        let schema = report
+            .index
+            .schema_version
+            .map(|v| format!("schema v{v}"))
+            .unwrap_or_else(|| "schema ?".to_owned());
+        let integ = if report.index.integrity_ok {
+            glyph_ok.clone()
+        } else {
+            glyph_fail.clone()
+        };
+        format!(
+            "{} · {} · {} integrity",
+            human_size(report.index.size_bytes),
+            schema,
+            integ
+        )
+    } else {
+        "not yet bootstrapped".to_owned()
+    };
+
+    let reindexed = match report.reindexed_at {
+        Some(t) => {
+            let now = time::OffsetDateTime::now_utc().unix_timestamp();
+            relative_time(t, now)
+        }
+        None => "never".to_owned(),
+    };
+
+    let overall = match report.overall {
+        OverallHealth::Ok => format!("{} healthy", colour::success("✓")),
+        OverallHealth::Degraded => format!("{} degraded", colour::warning("⚠")),
+        OverallHealth::Unhealthy => format!("{} unhealthy", colour::error("✗")),
+    };
+
+    let mut lines = Vec::new();
+    lines.push(colour::bold(&format!("Tome v{}", report.tome)));
+    lines.push(String::new());
+
+    lines.push(colour::dim("Global"));
+    lines.push(format!("{} {}", key("Models:"), models));
+    lines.push(format!(
+        "{} {} on disk",
+        key(""),
+        human_size(report.models_on_disk_bytes)
+    ));
+    lines.push(format!(
+        "{} {}",
+        key("Workspaces:"),
+        report.workspaces_total
+    ));
+    lines.push(format!("{} {}", key("Index:"), index_line));
+    lines.push(format!(
+        "{} {}",
+        key("Drift:"),
+        drift_description(&report.drift)
+    ));
+    lines.push(String::new());
+
+    lines.push(colour::dim("Workspace"));
+    lines.push(format!(
+        "{} {} [{}]",
+        key("Current:"),
+        report.current_workspace,
+        report.current_scope
+    ));
+    lines.push(format!(
+        "{} {} skills, {} commands, {} agents",
+        key("Entries:"),
+        report.entries.skills,
+        report.entries.commands,
+        report.entries.agents
+    ));
+    lines.push(format!(
+        "{} {} enrolled",
+        key("Catalogs:"),
+        report.catalogs_enrolled
+    ));
+    lines.push(format!("{} {}", key("Reindexed:"), reindexed));
+    lines.push(String::new());
+
+    lines.push(format!("{} {}", key("Overall:"), overall));
+    lines
+}
+
 fn drift_description(drift: &DriftStatus) -> String {
     match drift {
         DriftStatus::None => "none".to_owned(),
@@ -429,7 +547,6 @@ fn drift_description(drift: &DriftStatus) -> String {
 
 /// Humanize the gap between `then` and `now` (both unix seconds). Future
 /// timestamps (clock skew) clamp to "just now".
-#[allow(dead_code)] // wired into the renderer in the human-render task
 fn relative_time(then: i64, now: i64) -> String {
     let d = (now - then).max(0);
     let plural = |n: i64| if n == 1 { "" } else { "s" };
