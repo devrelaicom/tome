@@ -9,17 +9,25 @@
 //!
 //! The skill-state mutation (workspace_skills row INSERT / DELETE)
 //! commits in its OWN transaction BEFORE [`regenerate_for_trigger`]
-//! is called. If the summariser subsequently fails:
+//! is called. The production trigger wrapper degrades ALL summariser
+//! failures to a non-fatal `warn!` and returns `Ok(())` (changed by
+//! issue #208):
 //!
-//! * The surrounding command exits with code 24
-//!   ([`TomeError::SummariserFailure`]).
+//! * A missing model is a silent `debug!` no-op — the GGUF is
+//!   downloaded on demand, so absence is expected on fresh installs.
+//! * Any other failure (e.g. `BackendInitFailed`, `OutputEmpty`) is
+//!   logged at `warn!` and swallowed — the state mutation already
+//!   committed; crashing the command after the fact would leave the
+//!   user with a broken experience.
 //! * The prior `workspace_skills` rows are NOT rolled back — the
 //!   enable / disable / reindex took effect.
 //! * The workspace's cached `[summaries]` in `settings.toml` is NOT
-//!   overwritten — the prior cache survives.
+//!   overwritten — the prior cache survives intact.
 //! * `tome doctor` reports the workspace's cached summary as stale
 //!   on next inspection (`summariser_drift` already covers the bulk
 //!   of this; T331 widens the harness).
+//! * Run `tome workspace regen-summary` to retry after installing
+//!   the model or resolving the failure.
 //!
 //! This is the "summarise is downstream of state" invariant: the
 //! summariser is a derived view, not a precondition.
@@ -27,9 +35,10 @@
 //! ## Production vs test seams
 //!
 //! [`regenerate_for_trigger`] constructs the production [`LlamaSummariser`]
-//! (which requires the GGUF model file on disk — exit 24 if absent).
+//! and degrades all failures as described above.
 //! [`regenerate_for_trigger_with_summariser`] is the dependency-injection
-//! seam used by tests to pass a [`StubSummariser`].
+//! seam used by tests to pass a [`StubSummariser`]; it still propagates
+//! errors (exit 24) so tests can assert failure paths directly.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -88,40 +97,51 @@ impl Drop for SummariserOverrideGuard {
 /// [`LlamaSummariser`]. Called by every trigger site after their
 /// `workspace_skills` mutation commits.
 ///
-/// Returns `Ok(())` on success. On any `SummariserFailure` other than
-/// `ModelMissing`, the error bubbles — `main.rs` maps it to exit code
-/// 24.
+/// Returns `Ok(())` on success. ALL summariser failures are degraded to
+/// a non-fatal warning at this layer so a post-commit summary error
+/// never aborts a command that already successfully mutated workspace
+/// state (issue #208).
 ///
-/// ## Missing summariser model is a no-op (FR-423 corollary)
+/// ## Failure posture (updated per #208)
 ///
-/// `LlamaSummariser::new` returns `SummariserFailure { ModelMissing }`
-/// if `qwen2.5-0.5b-instruct/model.gguf` is absent. Per FR-420's
-/// posture, the summariser model is downloaded on-demand by
-/// `tome models download` — not as a prerequisite for plugin
-/// enable / disable / catalog update. When the model isn't installed
-/// the trigger is a no-op: the prior cached summary survives (if
-/// any), and the MCP `search_skills` description falls back to the
-/// scaffold per [`crate::mcp::tool_description`]. `tome doctor`
-/// surfaces the missing model so the operator knows summaries aren't
-/// regenerating; the explicit [`crate::workspace::regen_summary`]
-/// path still hard-fails with exit 24 if invoked.
+/// * `ModelMissing` — silent `debug!` no-op (unchanged). The model is
+///   downloaded on-demand; absence is expected on fresh installs.
+/// * Any other error (e.g. `BackendInitFailed`, `OutputEmpty`, etc.) —
+///   logged as a `warn!` and degraded to `Ok(())`. The state mutation
+///   already committed; crashing the command after the fact gives the
+///   user a broken experience. The prior cached summary survives intact.
+///   Run `tome workspace regen-summary` to retry.
 ///
-/// All other `SummariserFailure` variants (inference produced empty
-/// output, backend init failed, etc.) DO bubble up per FR-385.
+/// The explicit [`crate::workspace::regen_summary`] path and the
+/// [`regenerate_for_trigger_with_summariser`] DI variant still surface
+/// errors — only this production-trigger wrapper degrades them.
 ///
 /// Per FR-385, the caller MUST commit the skill-state mutation BEFORE
 /// invoking this function.
 pub fn regenerate_for_trigger(name: &WorkspaceName, paths: &Paths) -> Result<(), TomeError> {
-    // Test-only override hook (gated by `SUMMARISER_OVERRIDE`).
-    // Production paths never set the slot; the `if let Some(...)`
-    // collapses to the fallthrough on every real invocation.
+    // Test-only override hook (gated by `SUMMARISER_OVERRIDE`). Production
+    // paths never set the slot; the `if let Some(...)` collapses to the
+    // real-summariser branch on every real invocation.
     let override_summariser = SUMMARISER_OVERRIDE.with(|slot| slot.borrow().as_ref().cloned());
-    if let Some(s) = override_summariser {
-        return regenerate_for_trigger_with_summariser(name, s.as_ref(), paths);
-    }
 
-    let summariser = match LlamaSummariser::new(paths) {
-        Ok(s) => s,
+    let result = if let Some(s) = override_summariser {
+        regenerate_for_trigger_with_summariser(name, s.as_ref(), paths)
+    } else {
+        match LlamaSummariser::new(paths) {
+            Ok(s) => regenerate_for_trigger_with_summariser(name, &s, paths),
+            Err(e) => Err(e),
+        }
+    };
+
+    // Single, uniform degrade site (issue #208): the skill-state mutation
+    // already committed before this trigger ran, so a summary-regeneration
+    // failure must NOT fail the command. A missing model is an expected,
+    // silent no-op (the cached summary survives); any other failure is
+    // logged at warn and swallowed. The explicit `tome workspace
+    // regen-summary` path and the `_with_summariser` DI seam still surface
+    // errors.
+    match result {
+        Ok(()) => Ok(()),
         Err(TomeError::SummariserFailure {
             kind: SummariserFailureKind::ModelMissing,
         }) => {
@@ -129,11 +149,17 @@ pub fn regenerate_for_trigger(name: &WorkspaceName, paths: &Paths) -> Result<(),
                 workspace = name.as_str(),
                 "summariser model not installed; skipping trigger regeneration (cached summary survives if any)",
             );
-            return Ok(());
+            Ok(())
         }
-        Err(other) => return Err(other),
-    };
-    regenerate_for_trigger_with_summariser(name, &summariser, paths)
+        Err(other) => {
+            tracing::warn!(
+                workspace = name.as_str(),
+                error = %other,
+                "summary regeneration failed after the state change committed; continuing (run `tome workspace regen-summary` to retry)",
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Dependency-injection variant. Production code goes through
