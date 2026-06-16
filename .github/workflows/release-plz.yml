@@ -23,6 +23,19 @@ name: Release-plz
 # automation as disabled and the two real jobs are skipped — so this workflow
 # stays GREEN and inert on every push to main (mirrors release.yml's
 # secret-preflight). The moment the operator adds the secret, it activates.
+#
+# LOOP AVOIDANCE — why the jobs are shaped the way they are (see also the
+# `git_only` rationale in release-plz.toml):
+#   * `git_only = true` makes git tags (not the lagging cargo registry) the
+#     source of truth for "what's released", so a just-tagged version counts as
+#     released immediately — even though crates.io won't catch up until
+#     release.yml's gated publish finishes ~18 min later.
+#   * The `release` (tag) job runs BEFORE the `release-pr` job (via `needs`).
+#     On a Release-PR merge the `vX.Y.Z` tag is pushed before the PR job
+#     re-evaluates state, so the PR job sees the new tag and never races ahead
+#     to propose a duplicate Release PR for the version just released.
+#   * Concurrency is scoped to the PR job ONLY (below) — never the release job:
+#     a cancelled release would drop a tag and reintroduce the loop next run.
 
 on:
   push:
@@ -30,12 +43,6 @@ on:
 
 # Least privilege at the workflow level; jobs grant exactly what they need.
 permissions: {}
-
-# Never run two release-plz passes against `main` concurrently (a release PR
-# update racing a tag push corrupts release-plz's view of the next version).
-concurrency:
-  group: release-plz-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -55,17 +62,24 @@ jobs:
         run: echo "enabled=$HAS_TOKEN" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
-  # Maintain the "Release vX.Y.Z" PR (version bump + CHANGELOG). Idempotent:
-  # re-runs update the open PR; no PR is created when there is nothing to release.
+  # Maintain the "Release vX.Y.Z" PR (version bump + CHANGELOG). Sequenced AFTER
+  # the release (tag) job so it sees the freshly-pushed tag and never opens a
+  # duplicate PR for a version that was just released. Idempotent: re-runs update
+  # the open PR; no PR is created when there is nothing to release.
   # ---------------------------------------------------------------------------
   release-plz-pr:
     name: Release-plz PR
-    needs: preflight
+    needs: [preflight, release-plz-release]
     if: ${{ needs.preflight.outputs.enabled == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
+    # Serialize PR updates on this job ONLY — never the release job above, whose
+    # tag push must always complete (a cancelled tag reintroduces the loop).
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - name: Checkout (full history for the changelog)
         uses: actions/checkout@v5
@@ -75,7 +89,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz release-pr
-        uses: release-plz/action@v0.5.129
+        # >= v0.5.130 (CLI >= 0.3.159) for `git_only` support.
+        uses: release-plz/action@v0.5.130
         with:
           command: release-pr
         env:
@@ -84,9 +99,11 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # When the release PR merges (the version in Cargo.toml is now ahead of the
-  # registry), push the `vX.Y.Z` tag. With publish=false / git_release_enable=
-  # false this ONLY creates + pushes the tag — which then triggers release.yml.
-  # On ordinary pushes (no release PR merged) this is a no-op.
+  # newest git tag), push the `vX.Y.Z` tag. With publish=false / git_only=true /
+  # git_release_enable=false this ONLY creates + pushes the tag — which then
+  # triggers release.yml. Runs FIRST (the PR job `needs` it) so the tag lands
+  # before the PR job re-evaluates. On ordinary pushes (no release PR merged,
+  # the version already tagged) this is a no-op.
   # ---------------------------------------------------------------------------
   release-plz-release:
     name: Release-plz release (tag only)
@@ -104,7 +121,8 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz release
-        uses: release-plz/action@v0.5.129
+        # >= v0.5.130 (CLI >= 0.3.159) for `git_only` support.
+        uses: release-plz/action@v0.5.130
         with:
           command: release
         env:
