@@ -408,11 +408,18 @@ jobs:
           cd homebrew-tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- Formula/tome.rb; then
+          # Stage FIRST, then diff the index. `git diff --quiet` (working-tree
+          # vs index, tracked paths only) does NOT see a brand-new untracked
+          # file, so the first-ever tome.rb was reported "unchanged" and the
+          # push was silently skipped. `git add` + `git diff --cached --quiet`
+          # correctly detects both a new formula and a version change, and stays
+          # idempotent (a re-run with an identical, already-tracked formula
+          # stages a no-op and the cached diff is empty → skip).
+          git add Formula/tome.rb
+          if git diff --cached --quiet; then
             echo "Formula unchanged; nothing to push."
             exit 0
           fi
-          git add Formula/tome.rb
           git commit -m "tome ${GITHUB_REF_NAME}"
           # Push uses the credentials persisted by actions/checkout (the PAT);
           # the token is never referenced on this command line.
