@@ -284,6 +284,30 @@ fn status_verify_flag_detects_checksum_mismatch() {
     assert_eq!(report.overall, OverallHealth::Unhealthy);
 }
 
+// ---- New fields: summariser, scope, models_on_disk_bytes -----------------
+
+#[test]
+fn status_reports_summariser_scope_and_models_on_disk() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    crate::common::fabricate_all_registry_models(&paths);
+
+    let scope = tome::workspace::Scope(tome::workspace::WorkspaceName::global());
+    let report = assemble_report(&paths, &scope, false).unwrap();
+
+    // Third model is reported.
+    assert_eq!(report.summariser.state, "ok");
+    // Scope fields reflect the global default.
+    assert_eq!(report.current_workspace, "global");
+    assert_eq!(report.current_scope, "global");
+    // Fabricated models occupy non-zero disk.
+    assert!(report.models_on_disk_bytes > 0);
+}
+
 // ---- CLI binary: exit code semantics -------------------------------------
 
 #[test]

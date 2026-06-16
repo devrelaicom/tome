@@ -69,14 +69,29 @@ pub struct IndexHealth {
     pub integrity_ok: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct EntryCounts {
+    pub skills: u32,
+    pub commands: u32,
+    pub agents: u32,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StatusReport {
     pub tome: String,
     pub embedder: ModelHealth,
     pub reranker: ModelHealth,
+    pub summariser: ModelHealth,
     pub index: IndexHealth,
     pub drift: DriftStatus,
     pub overall: OverallHealth,
+    pub workspaces_total: u32,
+    pub current_workspace: String,
+    pub current_scope: String,
+    pub entries: EntryCounts,
+    pub catalogs_enrolled: u32,
+    pub reindexed_at: Option<i64>,
+    pub models_on_disk_bytes: u64,
 }
 
 // ---- Assembly --------------------------------------------------------------
@@ -96,22 +111,45 @@ pub fn assemble_report(
     let tome = env!("CARGO_PKG_VERSION").to_owned();
     let embedder_entry = embedder_entry();
     let reranker_entry = reranker_entry();
+    let summariser_entry = crate::summarise::registry::summariser_entry();
 
     let embedder = check_model(paths, embedder_entry, verify)?;
     let reranker = check_model(paths, reranker_entry, verify)?;
+    let summariser = check_model(paths, summariser_entry, verify)?;
 
     let index = check_index(paths, scope)?;
     let drift = check_drift(paths, scope, embedder_entry, reranker_entry)?;
 
     let overall = classify(&embedder, &reranker, &index, &drift);
 
+    let current_workspace = scope.name().as_str().to_owned();
+    let current_scope = if scope.is_global() {
+        "global"
+    } else {
+        "project"
+    }
+    .to_owned();
+    let models_on_disk_bytes =
+        models_on_disk(paths, &[embedder_entry, reranker_entry, summariser_entry]);
+
+    // DB-derived workspace/global stats (Task 2 fills these in).
+    let db = DbStats::default();
+
     Ok(StatusReport {
         tome,
         embedder,
         reranker,
+        summariser,
         index,
         drift,
         overall,
+        workspaces_total: db.workspaces_total,
+        current_workspace,
+        current_scope,
+        entries: db.entries,
+        catalogs_enrolled: db.catalogs_enrolled,
+        reindexed_at: db.reindexed_at,
+        models_on_disk_bytes,
     })
 }
 
@@ -397,6 +435,39 @@ fn human_size(bytes: u64) -> String {
     }
     let mib = kib / 1024.0;
     format!("{:.1} MiB", mib)
+}
+
+// ---- DB-derived stats placeholder (Task 2 fills these in) -----------------
+
+#[derive(Default)]
+struct DbStats {
+    workspaces_total: u32,
+    entries: EntryCounts,
+    catalogs_enrolled: u32,
+    reindexed_at: Option<i64>,
+}
+
+/// Sum the on-disk size of each model's directory. Missing dirs contribute 0.
+fn models_on_disk(paths: &Paths, entries: &[&ModelEntry]) -> u64 {
+    entries
+        .iter()
+        .filter_map(|e| paths.model_path(e.name).ok())
+        .map(|dir| dir_size(&dir))
+        .sum()
+}
+
+fn dir_size(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            match entry.metadata() {
+                Ok(md) if md.is_file() => total += md.len(),
+                Ok(md) if md.is_dir() => total += dir_size(&entry.path()),
+                _ => {}
+            }
+        }
+    }
+    total
 }
 
 // ---- --version handling ----------------------------------------------------
