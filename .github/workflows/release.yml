@@ -307,11 +307,23 @@ jobs:
           # therefore matches that `target` DIRECTORY, which `gh release create`
           # rejects ("is a directory"). Enumerate FILES only, recursively.
           mapfile -t assets < <(find dist-artifacts -type f)
-          gh release create "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            "${assets[@]}"
+          # Idempotent: if a prior run already created the release (e.g. this is
+          # a re-run after a downstream job failed), upload/refresh its assets
+          # instead of failing on "release already exists". --clobber overwrites
+          # same-named assets so a re-run converges rather than erroring.
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} exists; uploading/refreshing assets."
+            gh release upload "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber \
+              "${assets[@]}"
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              "${assets[@]}"
+          fi
 
   # ---------------------------------------------------------------------------
   # DORMANT — crates.io publish (FR-019, user-reserved). Runs only once the
@@ -330,10 +342,24 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: cargo publish (--locked)
+      - name: cargo publish (--locked, skip if version already on crates.io)
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[0].name')"
+          ver="$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[0].version')"
+          # crates.io sparse-index path: <first2>/<next2>/<name> for names >= 4 chars.
+          idx="https://index.crates.io/${name:0:2}/${name:2:2}/${name}"
+          # Idempotent: a published version can never be re-uploaded, so a re-run
+          # (e.g. after a downstream Release/tap job failed) must SKIP rather than
+          # error. Treat an exact-version match in the index as already published.
+          if curl -fsSL "$idx" 2>/dev/null | grep -q "\"vers\":\"${ver}\""; then
+            echo "${name} ${ver} is already on crates.io; skipping publish."
+            exit 0
+          fi
+          cargo publish --locked
 
   # ---------------------------------------------------------------------------
   # DORMANT — push the Homebrew formula to the cross-owner tap
@@ -369,8 +395,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # download-artifact preserves the artifact's own layout, so the
+          # cargo-dist formula lands under target/distrib/, not at the root.
+          # Locate it by name rather than assuming a flat path.
+          formula="$(find global-artifacts -type f -name tome.rb | head -1)"
+          if [ -z "$formula" ]; then
+            echo "::error::tome.rb not found in the global artifacts; cannot update the Homebrew tap."
+            exit 1
+          fi
           mkdir -p homebrew-tap/Formula
-          cp global-artifacts/tome.rb homebrew-tap/Formula/tome.rb
+          cp "$formula" homebrew-tap/Formula/tome.rb
           cd homebrew-tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
