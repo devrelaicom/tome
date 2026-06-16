@@ -402,20 +402,67 @@ pub fn teardown_at_exit() {
         return;
     }
 
-    // Throttle + threshold decision (testable, Paths-injectable).
+    // Cheap pre-check (no lock, no I/O beyond a stamp+queue read): skip the
+    // common no-op exit where the FR-047 threshold isn't met.
     if !should_spawn(&paths) {
         return;
     }
 
-    // Record the attempt FIRST (before the spawn) so a scripted loop that re-runs
-    // immediately sees a fresh stamp and is throttled out — even if the spawn
-    // itself races or fails (FR-048: ≤ 1 flusher / window regardless).
+    // Atomically CLAIM the spawn window. The bare pre-check above is a TOCTOU: the
+    // `last-flush-attempt` stamp throttles a SEQUENTIAL loop (each run sees the
+    // prior run's fresh stamp), but NOT a burst of processes exiting at once —
+    // they all read the same stale/absent stamp before any one records its
+    // attempt, and all fork (#225: a flusher STORM, the very thing FR-048/SC-003
+    // forbid). Serialise the re-check + stamp under the non-blocking flush lock so
+    // at most ONE process per root wins the window. Contended ⇒ another process
+    // already owns delivery this window (or is mid-drain) ⇒ skip.
+    let guard = match claim_spawn_window(&paths) {
+        Some(g) => g,
+        None => return,
+    };
+
+    // Holding the lock and re-confirmed under it: record the attempt so the next
+    // concurrent claimant AND a sequential re-run are throttled out (FR-048).
     record_attempt(&paths);
+
+    // Release the lock BEFORE forking — the detached child takes the SAME flush
+    // lock to drain, so holding it through the spawn would make the child no-op.
+    drop(guard);
 
     // Fork the detached `tome telemetry flush --quiet` child; best-effort.
     if let Err(e) = spawn::spawn_detached_flusher() {
         tracing::debug!(target: "telemetry", error = %e, "teardown: flusher spawn failed (best-effort)");
     }
+}
+
+/// Atomically claim the right to fork a flusher this throttle window.
+///
+/// Returns the held [`lock::FlushLock`] guard iff THIS process won the claim: the
+/// non-blocking flush lock was acquired AND [`should_spawn`] is still true under
+/// it. The lock makes the read-decide-stamp sequence atomic across processes, so a
+/// burst of concurrent exits against a shared root forks ≤ 1 flusher/window
+/// (FR-048/SC-003) instead of one per process (#225). `None` means: another
+/// process holds the lock (owns the window, or is mid-drain), OR the re-check
+/// under the lock failed (a process that won the lock just before us already
+/// stamped — double-checked locking). Best-effort: a lock-open error ⇒ `None`
+/// (skip rather than risk an unsynchronised fork).
+#[doc(hidden)]
+pub fn claim_spawn_window(paths: &crate::paths::Paths) -> Option<lock::FlushLock> {
+    let guard = match lock::try_acquire(paths) {
+        Ok(Some(g)) => g,
+        // Contended — another process owns this window (deciding or draining).
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::debug!(target: "telemetry", error = %e, "teardown: spawn-claim lock unavailable");
+            return None;
+        }
+    };
+    // Re-check under the lock (double-checked locking): a process that acquired the
+    // lock just before us may already have stamped, throttling us out.
+    if !should_spawn(paths) {
+        return None; // `guard` drops here, releasing the lock
+    }
+    Some(guard)
 }
 
 /// Whether the exit hook should fork a flusher now: the FR-047 threshold AND the
@@ -785,6 +832,49 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn claim_spawn_window_skips_when_lock_is_held() {
+        // #225 concurrent-exit guard: if another process already holds the flush
+        // lock (mid-claim or mid-drain), THIS process must NOT also fork — even
+        // when `should_spawn` would otherwise be true. This is what bounds the
+        // burst to ≤ 1 flusher/window (FR-048/SC-003) where the bare stamp can't.
+        let _minted = MintedGuard::install(true); // should_spawn would be true
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+
+        // Hold the flush lock on another fd (stands in for a concurrent process).
+        let held = lock::try_acquire(&paths)
+            .expect("open flush lock")
+            .expect("lock is free");
+        assert!(
+            claim_spawn_window(&paths).is_none(),
+            "a held flush lock must block a concurrent spawn claim",
+        );
+
+        // Once released, the claim succeeds (lock free AND should_spawn holds).
+        drop(held);
+        assert!(
+            claim_spawn_window(&paths).is_some(),
+            "claim succeeds once the lock is free and should_spawn is true",
+        );
+    }
+
+    #[test]
+    fn claim_spawn_window_skips_when_should_not_spawn() {
+        // Lock is free, but the throttle/threshold says no: the under-lock
+        // re-check returns None and releases (no stamp, no fork).
+        let _minted = MintedGuard::install(false);
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        // A just-written attempt stamp throttles the spawn (mirrors a process that
+        // won the lock immediately before us and stamped).
+        record_attempt(&paths);
+        assert!(
+            claim_spawn_window(&paths).is_none(),
+            "a fresh attempt stamp throttles the claim even with the lock free",
+        );
     }
 
     #[test]

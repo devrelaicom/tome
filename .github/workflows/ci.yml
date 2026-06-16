@@ -8,6 +8,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Belt-and-suspenders: CI is already auto-detected as telemetry-off, but pin
+  # the explicit force-off so no test-spawned `tome` can ever emit or fork a
+  # detached flusher on a runner, independent of CI-var detection (#225).
+  TOME_TELEMETRY: "0"
   # The ~175 integration-test binaries each statically embed ONNX Runtime +
   # llama.cpp + SQLite; with full debuginfo they grew large enough that
   # `cargo build --all-targets` exhausted the runner disk and the linker died

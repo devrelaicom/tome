@@ -176,6 +176,9 @@ fn interactive_disable_via_scripted_session_exits_zero_and_flips_state() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tome"));
     cmd.arg("plugin")
         .env("HOME", env.home_path())
+        // This PTY spawn bypasses `ToolEnv::cmd`, so force-disable telemetry
+        // explicitly — no detached flusher should fork on exit (#225).
+        .env("TOME_TELEMETRY", "0")
         .env("XDG_CONFIG_HOME", env.home_path().join(".config"))
         .env("XDG_DATA_HOME", env.home_path().join(".local/share"))
         // Reduce ANSI noise so `exp_string` matches the prompt copy
@@ -272,6 +275,9 @@ fn interactive_renders_db_enrolled_catalog_without_config_and_disables() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tome"));
     cmd.arg("plugin")
         .env("HOME", env.home_path())
+        // This PTY spawn bypasses `ToolEnv::cmd`, so force-disable telemetry
+        // explicitly — no detached flusher should fork on exit (#225).
+        .env("TOME_TELEMETRY", "0")
         .env("XDG_CONFIG_HOME", env.home_path().join(".config"))
         .env("XDG_DATA_HOME", env.home_path().join(".local/share"))
         .env("NO_COLOR", "1")

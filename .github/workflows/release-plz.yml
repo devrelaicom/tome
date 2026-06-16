@@ -44,6 +44,10 @@ on:
 # Least privilege at the workflow level; jobs grant exactly what they need.
 permissions: {}
 
+# Force telemetry off on the runner (defence-in-depth beyond CI auto-off, #225).
+env:
+  TOME_TELEMETRY: "0"
+
 jobs:
   # ---------------------------------------------------------------------------
   # Dormant-job gating. Skip the real jobs until the operator sets

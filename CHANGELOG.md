@@ -80,6 +80,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `tome doctor --fix` migrates a legacy JSON manifest in place (no re-download).
   A new `${TOME_PROJECT_DIR}` substitution built-in resolves to the project root.
 
+## [0.7.0] — 2026-06-16
+
+### Fixed
+
+- **Telemetry: eliminate the detached-flusher process storm (#225).** A burst of
+  concurrent `tome` exits could each fork a background `telemetry flush` child
+  before the one-minute throttle stamp gated them (a check-then-stamp TOCTOU), and
+  the integration suite — every command spawned against a fresh temp root —
+  multiplied that into a storm that wedged the run and wrote to the real `~/.tome`.
+  The exit hook now claims its spawn window under the telemetry flush lock
+  (double-checked), bounding forks to ≤ 1 per window per root even under
+  concurrent starts; the test harness force-disables telemetry for every spawned
+  `tome`; and every CI workflow pins `TOME_TELEMETRY=0`.
+
+### Changed
+
+- **Release automation no longer re-opens duplicate "Release" PRs.** release-plz
+  now treats git tags as the source of truth for what's released (`git_only`)
+  instead of the lagging crates.io registry, and the tag job runs before the
+  release-PR job. Merging a release PR no longer spawns a duplicate one during the
+  binary-build window. (`cargo publish` stays gated behind a green binary build.)
+
 ## [0.5.0] — 2026-05-27
 
 ### Phase 5 additions
