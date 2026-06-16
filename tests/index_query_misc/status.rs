@@ -415,3 +415,30 @@ fn status_cli_json_emits_structured_record() {
     assert!(v.get("reindexed_at").is_some()); // null or number
     assert!(v["models_on_disk_bytes"].is_number());
 }
+
+#[test]
+fn status_human_plain_is_grouped_and_labeled() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    crate::common::fabricate_all_registry_models(&paths);
+
+    let out = env.cmd().args(["status"]).output().unwrap();
+    let s = String::from_utf8_lossy(&out.stdout);
+
+    // Title + group headers + a sampling of labels (piped => no colour/art).
+    assert!(s.contains("Tome v"));
+    assert!(s.contains("Global"));
+    assert!(s.contains("Workspace"));
+    assert!(s.contains("Models:"));
+    assert!(s.contains("Workspaces:"));
+    assert!(s.contains("Entries:"));
+    assert!(s.contains("Catalogs:"));
+    assert!(s.contains("Reindexed:"));
+    assert!(s.contains("Overall:"));
+    // No box-drawing art when piped.
+    assert!(!s.contains('┌'));
+}
