@@ -31,6 +31,28 @@ pub fn run(
         None => scope.scope.name().clone(),
     };
 
+    // Reconcile this project's files before printing, so the directive we emit
+    // is consistent with freshly-synced harness files (and `.tome/RULES.md`).
+    // FAIL-SOFT: a sync error must never block or fail the session-start hook —
+    // warn and continue; the directive prints regardless. (No `?` on the call.)
+    if let Some(project_root) = scope.project_root.as_deref() {
+        let sync_args = crate::cli::SyncArgs {
+            all: false,
+            rules_only: false,
+            harness_only: false,
+            harness: None,
+        };
+        if let Err(e) =
+            crate::commands::sync::sync_one_project(&name, project_root, &sync_args, paths)
+        {
+            tracing::warn!(
+                workspace = name.as_str(),
+                error = %e,
+                "session-start: project reconcile failed; printing directive anyway",
+            );
+        }
+    }
+
     let entries = if paths.index_db.exists() {
         let conn = crate::index::open_read_only(&paths.index_db)?;
         crate::index::skills::tiered_entries_for_workspace(&conn, name.as_str())?
