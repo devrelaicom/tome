@@ -1,6 +1,6 @@
 //! The Tome-owned Claude Code SessionStart hook lands in
-//! `settings.local.json` on a sync with a live `RealJson` harness and at least
-//! one enabled plugin.
+//! `settings.local.json` on a sync with a live `RealJson` harness — with or
+//! without enabled plugins.
 //!
 //! Mirrors the `harness_sync_p6_idempotence` scaffold: a single `StubHarness`
 //! configured `RealJson` + `with_hook_settings()` drives the hooks sink, one
@@ -243,5 +243,52 @@ fn sync_removes_tome_session_start_hook_when_claude_code_non_live() {
             .map(|o| !o.contains_key("SessionStart"))
             .unwrap_or(true),
         "`SessionStart` key must be pruned when the harness goes non-live; got: {doc2}"
+    );
+}
+
+/// The Tome-owned SessionStart hook is installed even when the enabled skill
+/// set is completely empty (no `workspace_skills` rows).
+///
+/// This is correct by design: unconditional injection gives clean add/remove
+/// semantics with no sidecar. When a workspace later empties, re-syncing still
+/// re-derives the entry so `remove_hooks_for_harness` can locate and strip it
+/// exactly. The hook itself is harmless when the workspace is empty because
+/// `build_directive(&[], None)` produces an empty directive string.
+#[test]
+fn sync_installs_tome_session_start_hook_even_with_empty_enabled_set() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(
+        StubHarness::default()
+            .with_hooks_strategy(HooksStrategy::RealJson)
+            .with_hook_settings(),
+    )]);
+
+    // Build the project fixture exactly like the other tests, but do NOT
+    // enable any skill or command — the workspace_skills table stays empty.
+    let fx = Fixture::build("test-workspace", "\"stub\"");
+
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync");
+
+    let hooks_path = fx.project.join(".stub/settings.local.json");
+    assert!(hooks_path.is_file(), "settings.local.json created on sync");
+
+    let doc: JsonValue =
+        serde_json::from_str(&std::fs::read_to_string(&hooks_path).expect("read settings"))
+            .expect("parse settings");
+
+    let session_start = doc["hooks"]["SessionStart"]
+        .as_array()
+        .expect("SessionStart event array present even with empty enabled set");
+    let has_session_context = session_start.iter().any(|entry| {
+        entry["hooks"][0]["command"]
+            .as_str()
+            .is_some_and(|c| c.contains("harness session-context"))
+    });
+    assert!(
+        has_session_context,
+        "Tome SessionStart entry must be present for a live RealJson harness \
+         even when no skills are enabled; got: {doc}"
     );
 }
