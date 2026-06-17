@@ -21,11 +21,13 @@
 //! 7. Update the workspace's `settings.toml` `[summaries]` section
 //!    atomically via `toml_edit::DocumentMut` so other sections
 //!    (`[[catalogs]]`, `harnesses`) are preserved.
-//! 8. Rewrite `<root>/workspaces/<name>/RULES.md` body from `long`.
-//! 9. Release the lock.
-//! 10. Sync the new central RULES.md to every bound project's marker
-//!     RULES.md via
-//!     [`crate::workspace::sync::sync_workspace_rules_to_bound_projects`].
+//! 8. Release the lock.
+//! 9. Compose `<root>/workspaces/<name>/RULES.md` as the routing
+//!    directive (tiers + the freshly-cached long summary) and sync it
+//!    to every bound project's marker RULES.md via
+//!    [`crate::harness::routing::write_workspace_rules`]. RULES.md is no
+//!    longer the raw long summary — the long summary is persisted to
+//!    `settings.toml` `[summaries]` in step 7 and read back here.
 //!
 //! ## Forward-progress / failure-modes
 //!
@@ -51,7 +53,6 @@ use crate::summarise::{
     Summariser,
 };
 use crate::workspace::WorkspaceName;
-use crate::workspace::sync::sync_workspace_rules_to_bound_projects;
 
 // Length-window caps live in [`crate::summarise`] (US4.d-1
 // consolidation — there used to be a duplicate pair here that drifted
@@ -149,10 +150,6 @@ pub fn regen(
     )?;
     store::write_atomic(&settings_path, updated_settings.as_bytes())?;
 
-    // Rewrite RULES.md from the long summary.
-    let rules_path = paths.workspace_rules_file(name);
-    store::write_atomic(&rules_path, output.long.as_bytes())?;
-
     // FR-411: bump `last_used_at` on the workspaces row after a
     // successful summariser invocation. The advisory lock is still held;
     // no other writer can be mutating the row.
@@ -175,7 +172,11 @@ pub fn regen(
     // does not need the central-DB write lock.
     drop(lock);
 
-    let bound_projects_synced = sync_workspace_rules_to_bound_projects(name, paths)?;
+    // RULES.md is now the composed routing directive (tiers + this summary),
+    // not the raw long summary. The summary is already persisted to
+    // settings.toml `[summaries]` above; routing reads it back + composes,
+    // then syncs to every bound project.
+    let bound_projects_synced = crate::harness::routing::write_workspace_rules(paths, name)?;
 
     Ok(RegenSummaryOutcome {
         workspace: name.clone(),

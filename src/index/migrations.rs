@@ -648,7 +648,11 @@ mod tier_migration_tests {
         assert_eq!(new_version, 5);
 
         let tier: i64 = conn
-            .query_row("SELECT tier FROM workspace_skills WHERE skill_id = 1", [], |r| r.get(0))
+            .query_row(
+                "SELECT tier FROM workspace_skills WHERE skill_id = 1",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(tier, 3, "pre-existing rows default to Tier 3");
     }

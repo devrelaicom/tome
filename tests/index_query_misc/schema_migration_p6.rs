@@ -22,7 +22,12 @@ fn kind_domain_marker_bumps_version() {
     // Phase 6 introduced the v3→v4 marker migration. SCHEMA_VERSION has
     // since advanced (Phase 11 bumped it to 5); the assertion below pins
     // only that the compiled version is at least 4, not the exact value.
-    assert!(SCHEMA_VERSION >= 4, "Phase 6 must have bumped SCHEMA_VERSION to at least 4");
+    const {
+        assert!(
+            SCHEMA_VERSION >= 4,
+            "Phase 6 must have bumped SCHEMA_VERSION to at least 4"
+        );
+    }
 
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("index.db");
