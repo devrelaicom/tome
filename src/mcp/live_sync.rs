@@ -8,8 +8,10 @@
 
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Duration;
 
 use rmcp::handler::server::router::prompt::PromptRouter;
+use rmcp::{Peer, RoleServer};
 
 use crate::mcp::server::Server;
 use crate::mcp::state::McpState;
@@ -129,6 +131,87 @@ pub fn recompute(
     }
 
     changed
+}
+
+/// Bundle handed to the watcher task — everything it needs to probe,
+/// recompute, and notify. Each field is `Clone + Send + 'static`, so the
+/// bundle moves cleanly into the spawned watcher.
+pub struct Handles {
+    pub state: Arc<McpState>,
+    pub prompt_cell: Arc<RwLock<PromptRouter<Server>>>,
+    pub desc_cell: Arc<RwLock<String>>,
+    pub peer: Peer<RoleServer>,
+}
+
+/// Poll interval. Short enough that a newly-enabled prompt appears within a
+/// minute; the no-op tick is one tiny indexed query (a read-only COUNT) plus
+/// one bounded settings read.
+const POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The watcher loop. Mirrors the telemetry loop's `loop { turn().await }`
+/// shape so a test can drive a single turn deterministically. Runs until its
+/// `JoinHandle` is aborted on server shutdown (alongside the telemetry task)
+/// so it can never outlive the server.
+pub async fn watch(handles: Handles) {
+    let mut interval = tokio::time::interval(POLL_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Consume the immediate first tick so the first real probe is one full
+    // period out — the server's startup already built the prompt list + tool
+    // description from this same state, so there is nothing to reconcile yet.
+    interval.tick().await;
+    // The baseline reflects what the server advertised at startup. A failed
+    // initial probe (e.g. a concurrent writer mid-migration) degrades to the
+    // empty signal; the first real tick re-probes and reconciles any drift.
+    let mut last = probe(&handles.state.scope, &handles.state.paths).unwrap_or_default();
+    loop {
+        interval.tick().await;
+        last = watch_turn(&handles, last).await;
+    }
+}
+
+/// One probe→recompute→notify turn. Returns the new baseline signal.
+///
+/// The two sync seams (`probe` reads the index + settings; `recompute` may
+/// rebuild the prompt router) run on the blocking pool via `spawn_blocking`
+/// per the sync-boundary discipline — neither must run on the single-thread
+/// reactor. A failed probe (join error or DB error) leaves the baseline
+/// unchanged and retries next tick.
+pub async fn watch_turn(handles: &Handles, last: DriftSignal) -> DriftSignal {
+    let state = handles.state.clone();
+    let probed = tokio::task::spawn_blocking(move || probe(&state.scope, &state.paths))
+        .await
+        .ok()
+        .and_then(Result::ok);
+    let Some(next) = probed else { return last };
+    if next == last {
+        return next;
+    }
+    let state = handles.state.clone();
+    let prompt_cell = handles.prompt_cell.clone();
+    let desc_cell = handles.desc_cell.clone();
+    let prev = last.clone();
+    let next_for_blocking = next.clone();
+    // `recompute` takes `&RwLock<...>`; the `Arc<RwLock<...>>` deref-coerces.
+    let changed = tokio::task::spawn_blocking(move || {
+        recompute(&prev, &next_for_blocking, &state, &prompt_cell, &desc_cell)
+    })
+    .await
+    .unwrap_or_default();
+    // Notify only the surfaces that actually moved. A failed notify (the peer
+    // is shutting down) is logged at debug and otherwise ignored — the next
+    // tick's recompute is a no-op (the cells already hold the new state) so we
+    // do not retry the notification.
+    if changed.prompts
+        && let Err(e) = handles.peer.notify_prompt_list_changed().await
+    {
+        tracing::debug!("live-sync: prompts/list_changed notify failed: {e}");
+    }
+    if changed.tools
+        && let Err(e) = handles.peer.notify_tool_list_changed().await
+    {
+        tracing::debug!("live-sync: tools/list_changed notify failed: {e}");
+    }
+    next
 }
 
 #[cfg(test)]
