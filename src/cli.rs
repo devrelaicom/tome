@@ -121,6 +121,30 @@ pub enum Command {
     /// another).
     #[command(subcommand)]
     Tier(TierCommand),
+    /// Propagate workspace state to bound projects: write `.tome/RULES.md` and
+    /// reconcile harness files. Defaults to the current project; `--all` fans
+    /// out to every bound project in the resolved workspace.
+    Sync(SyncArgs),
+}
+
+/// `tome sync` — unified propagation of workspace state to bound projects.
+/// Composes the per-project RULES.md write with the harness-file reconcile;
+/// the legacy `tome workspace sync` / `tome harness sync` subcommands remain
+/// for now and are removed in a later step.
+#[derive(Debug, clap::Args)]
+pub struct SyncArgs {
+    /// Sync every bound project in the resolved workspace, not just the current project.
+    #[arg(long)]
+    pub all: bool,
+    /// Only write `.tome/RULES.md` (skip the harness reconcile).
+    #[arg(long, conflicts_with = "harness_only")]
+    pub rules_only: bool,
+    /// Only reconcile harness files (skip the RULES.md write).
+    #[arg(long)]
+    pub harness_only: bool,
+    /// Restrict the harness reconcile to a single harness. Ignored with --rules-only. Errors on unknown name.
+    #[arg(long, value_name = "NAME")]
+    pub harness: Option<String>,
 }
 
 /// `tome tier <subcommand>` — manage per-workspace skill/command routing tiers.

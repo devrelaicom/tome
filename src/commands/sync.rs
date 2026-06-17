@@ -1,0 +1,250 @@
+//! `tome sync` — unified propagation of workspace state to bound projects.
+//!
+//! Composes the two formerly-separate sync surfaces:
+//!
+//!  * [`crate::workspace::sync::sync_rules_to_project`] writes the
+//!    workspace's `RULES.md` into one project's `<project>/.tome/RULES.md`,
+//!    and
+//!  * [`crate::harness::sync::sync_project`] reconciles that project's
+//!    harness files (rules sink, MCP config, hooks, agents).
+//!
+//! Defaults to the current project (the resolved scope's `project_root`);
+//! `--all` fans out to every project bound to the resolved workspace in
+//! `workspace_projects`.
+//!
+//! ## Why both halves, why this order
+//!
+//! The RULES.md write lands the workspace prose first; the harness
+//! reconcile then renders harness-specific files that may incorporate it.
+//! The two halves are independently skippable (`--rules-only` /
+//! `--harness-only`, mutually exclusive at the clap layer).
+//!
+//! ## Forward-progress on `--all`
+//!
+//! Mirrors the project's `first_error` pattern: a per-project failure is
+//! captured but does not abort the fan-out — every reachable project is
+//! attempted, and the first captured error is returned at the end so the
+//! exit code reflects a genuine failure while partial progress still lands.
+//!
+//! The OLD `tome workspace sync` / `tome harness sync` subcommands continue
+//! to exist alongside this command (removed in a later step).
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+use crate::cli::SyncArgs;
+use crate::error::TomeError;
+use crate::output::{Mode, write_json};
+use crate::paths::Paths;
+use crate::workspace::sync::RulesSync;
+use crate::workspace::{ResolvedScope, WorkspaceName};
+
+/// One project's sync outcome. `rules` is the classification string from
+/// [`RulesSync`] (`"synced"` / `"unchanged"` / `"missing"`) or `None` when
+/// the RULES.md write was skipped (`--harness-only`). `harness_changes` is
+/// the total count of added + updated + removed harness files, or `0` when
+/// the harness reconcile was skipped (`--rules-only`).
+#[derive(Debug, Serialize)]
+pub struct ProjectOutcome {
+    pub project: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<&'static str>,
+    pub harness_changes: usize,
+}
+
+/// Aggregate of every project this `tome sync` invocation touched.
+#[derive(Debug, Serialize)]
+pub struct SyncReport {
+    pub projects: Vec<ProjectOutcome>,
+}
+
+/// Dispatcher invoked by `main.rs`. Validates flags, resolves the active
+/// workspace, fans out (or targets the current project), then emits.
+pub fn run(
+    args: SyncArgs,
+    scope: &ResolvedScope,
+    paths: &Paths,
+    mode: Mode,
+) -> Result<(), TomeError> {
+    // Validate `--harness <name>` eagerly so an unknown name fails fast with
+    // the same error/exit code as `tome harness use` — but only when the
+    // harness reconcile will actually run (a `--rules-only` run never touches
+    // harnesses, so the value is simply ignored).
+    if !args.rules_only
+        && let Some(name) = args.harness.as_deref()
+        && crate::harness::lookup(name).is_none()
+    {
+        return Err(TomeError::HarnessNotSupported {
+            name: name.to_string(),
+        });
+    }
+
+    // A `--harness` value under `--rules-only` is inert; say so once on stderr
+    // rather than silently dropping it.
+    if args.rules_only && args.harness.is_some() {
+        eprintln!("note: --harness is ignored with --rules-only");
+    }
+
+    let ws = scope.scope.name().clone();
+
+    let report = if args.all {
+        sync_all(&ws, &args, paths)?
+    } else {
+        let Some(project_root) = scope.project_root.as_deref() else {
+            return Err(TomeError::Usage(
+                "`tome sync` requires a project marker — run inside a project bound via `tome workspace use`, or pass --all to sync every bound project"
+                    .into(),
+            ));
+        };
+        let mut report = SyncReport {
+            projects: Vec::new(),
+        };
+        report
+            .projects
+            .push(sync_one_project(&ws, project_root, &args, paths)?);
+        report
+    };
+
+    emit(&report, mode)
+}
+
+/// Sync ONE project: the per-project RULES.md write (unless `--harness-only`)
+/// followed by the harness reconcile (unless `--rules-only`).
+pub fn sync_one_project(
+    ws: &WorkspaceName,
+    project_root: &Path,
+    args: &SyncArgs,
+    paths: &Paths,
+) -> Result<ProjectOutcome, TomeError> {
+    let rules = if args.harness_only {
+        None
+    } else {
+        // A missing central RULES.md is not an error — an empty source still
+        // reconciles cleanly (mirrors `workspace::sync::sync_one`, which
+        // treats source-absent as a no-op). `unwrap_or_default` collapses the
+        // NotFound case to empty bytes.
+        let source = std::fs::read(paths.workspace_rules_file(ws)).unwrap_or_default();
+        let classification =
+            match crate::workspace::sync::sync_rules_to_project(&source, project_root, ws)? {
+                RulesSync::Synced => "synced",
+                RulesSync::Unchanged => "unchanged",
+                RulesSync::MissingProjectDir => "missing",
+            };
+        Some(classification)
+    };
+
+    let harness_changes = if args.rules_only {
+        0
+    } else {
+        let home = crate::commands::harness::home_root()?;
+        // `--force` is not exposed on `tome sync` (matching `tome harness
+        // sync`); a clash is resolved by re-binding with
+        // `tome workspace use --force`.
+        let mut deps = crate::harness::sync::build_deps(paths, &home, ws, false);
+        // `Option<String>`; `None` reconciles the full effective set.
+        deps.only_harness = args.harness.clone();
+        let outcome = crate::harness::sync::sync_project(project_root, &deps)?;
+        outcome.added.len() + outcome.updated.len() + outcome.removed.len()
+    };
+
+    Ok(ProjectOutcome {
+        project: project_root.to_path_buf(),
+        rules,
+        harness_changes,
+    })
+}
+
+/// Fan out [`sync_one_project`] over every project bound to `ws` in
+/// `workspace_projects`. Forward-progress: a per-project failure is captured
+/// in `first_error` and the loop continues; the first error is returned after
+/// every project has been attempted.
+pub fn sync_all(
+    ws: &WorkspaceName,
+    args: &SyncArgs,
+    paths: &Paths,
+) -> Result<SyncReport, TomeError> {
+    let mut report = SyncReport {
+        projects: Vec::new(),
+    };
+
+    // No central DB → no bindings to walk. An empty report is the correct
+    // pre-bootstrap answer (mirrors `workspace::sync::sync_one`).
+    if !paths.index_db.is_file() {
+        return Ok(report);
+    }
+
+    let conn = crate::index::open_read_only(&paths.index_db)?;
+    let workspace_id = crate::index::workspaces::resolve_id_required(&conn, ws)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT project_path FROM workspace_projects
+             WHERE workspace_id = ?1
+             ORDER BY project_path",
+        )
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("sync: prepare projects: {e}"))
+        })?;
+    let project_iter = stmt
+        .query_map(rusqlite::params![workspace_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("sync: query projects: {e}")))?;
+
+    let mut first_error: Option<TomeError> = None;
+    for row in project_iter {
+        let project_path = row.map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("sync: read project row: {e}"))
+        })?;
+        let project_root = PathBuf::from(&project_path);
+        match sync_one_project(ws, &project_root, args, paths) {
+            Ok(outcome) => report.projects.push(outcome),
+            Err(e) => {
+                // Forward-progress: keep going so every reachable project is
+                // attempted; surface the first failure for the exit code.
+                tracing::warn!(
+                    workspace = ws.as_str(),
+                    project = %project_root.display(),
+                    error = %e,
+                    "sync: project failed; continuing",
+                );
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+    }
+
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(report),
+    }
+}
+
+/// Emit the report per output mode. Human mode prints one line per project;
+/// `--json` emits the wire-stable [`SyncReport`].
+fn emit(report: &SyncReport, mode: Mode) -> Result<(), TomeError> {
+    match mode {
+        Mode::Json => write_json(report),
+        Mode::Human => {
+            let mut out = std::io::stdout().lock();
+            if report.projects.is_empty() {
+                writeln!(out, "Sync: no bound projects")?;
+                return Ok(());
+            }
+            for p in &report.projects {
+                let rules = p.rules.unwrap_or("skipped");
+                writeln!(
+                    out,
+                    "{}: rules {}, {} harness change(s)",
+                    p.project.display(),
+                    rules,
+                    p.harness_changes,
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
