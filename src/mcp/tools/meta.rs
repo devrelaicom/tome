@@ -94,7 +94,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // (2) Host harness must be known — fail closed (FR-029), never guess.
     let Some(host) = state.host_harness.clone() else {
         return Err(McpError::invalid_params(
-            "this Tome MCP server has no host-harness identity; re-run `tome harness sync` to \
+            "this Tome MCP server has no host-harness identity; re-run `tome sync` to \
              stamp it, or install via `tome meta add` from the CLI"
                 .to_string(),
             Some(json!({ "code": "no_harness_detected" })),

@@ -243,14 +243,14 @@ fn getting_started_workspace_and_harness_flow_resolves() {
         .expect("spawn harness list");
     assert_ok("harness list", &harness_list);
 
-    // `tome harness sync` — reconcile; byte-for-byte idempotent.
-    let harness_sync = env
+    // `tome sync` — reconcile rules + harness files; byte-for-byte idempotent.
+    let sync = env
         .cmd()
         .current_dir(&project)
-        .args(["harness", "sync"])
+        .args(["sync"])
         .output()
-        .expect("spawn harness sync");
-    assert_ok("harness sync", &harness_sync);
+        .expect("spawn sync");
+    assert_ok("sync", &sync);
 }
 
 #[test]

@@ -7,8 +7,10 @@
 //!
 //! Phase 4 / US2.c promotes the helper to a [`sync_one`] entry point
 //! that returns a richer [`WorkspaceSyncOutcome`] (synced + unchanged +
-//! missing-project lists) so the new `tome workspace sync [<name>]`
-//! CLI surface can render per-project detail in `--json` mode.
+//! missing-project lists). It is now consumed by the unified `tome sync`
+//! command (via [`bound_project_roots`] + [`sync_rules_to_project`]) and
+//! by `regen-summary`; the former `tome workspace sync` CLI surface that
+//! originally drove it was removed pre-launch.
 //!
 //! `regen-summary` (US2.a-2) continues to call the legacy
 //! [`sync_workspace_rules_to_bound_projects`] convenience wrapper, which
@@ -116,8 +118,8 @@ pub fn sync_rules_to_project(
     Ok(RulesSync::Synced)
 }
 
-/// Per-workspace sync outcome. Field order pinned by the contract;
-/// extra fields go on the surrounding `WorkspaceSyncEntry` envelope.
+/// Per-workspace sync outcome — the three partitions of `sync_one`'s
+/// per-project fan-out. Field order pinned by the contract.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 pub struct WorkspaceSyncOutcome {
     /// Project roots whose `<project>/.tome/RULES.md` was (re)written.
@@ -175,6 +177,25 @@ pub fn sync_one(name: &WorkspaceName, paths: &Paths) -> Result<WorkspaceSyncOutc
         return Ok(outcome);
     };
 
+    for project_root in bound_project_roots(&conn, workspace_id)? {
+        match sync_rules_to_project(&source_bytes, &project_root, name)? {
+            RulesSync::Synced => outcome.synced_projects.push(project_root),
+            RulesSync::Unchanged => outcome.unchanged.push(project_root),
+            RulesSync::MissingProjectDir => outcome.missing_project_dirs.push(project_root),
+        }
+    }
+
+    Ok(outcome)
+}
+
+/// All bound project roots for a workspace id, ordered. Shared by [`sync_one`]
+/// (RULES.md fan-out) and `commands::sync` (the `tome sync --all` fan-out) so
+/// the two surfaces walk `workspace_projects` through one query rather than
+/// duplicating the SELECT + error-wraps.
+pub(crate) fn bound_project_roots(
+    conn: &rusqlite::Connection,
+    workspace_id: i64,
+) -> Result<Vec<PathBuf>, TomeError> {
     let mut stmt = conn
         .prepare(
             "SELECT project_path FROM workspace_projects
@@ -193,20 +214,14 @@ pub fn sync_one(name: &WorkspaceName, paths: &Paths) -> Result<WorkspaceSyncOutc
             TomeError::IndexIntegrityCheckFailure(format!("workspace sync: query projects: {e}"))
         })?;
 
+    let mut roots = Vec::new();
     for row in project_iter {
         let project_path = row.map_err(|e| {
             TomeError::IndexIntegrityCheckFailure(format!("workspace sync: read project row: {e}"))
         })?;
-        let project_root = PathBuf::from(&project_path);
-
-        match sync_rules_to_project(&source_bytes, &project_root, name)? {
-            RulesSync::Synced => outcome.synced_projects.push(project_root),
-            RulesSync::Unchanged => outcome.unchanged.push(project_root),
-            RulesSync::MissingProjectDir => outcome.missing_project_dirs.push(project_root),
-        }
+        roots.push(PathBuf::from(project_path));
     }
-
-    Ok(outcome)
+    Ok(roots)
 }
 
 /// Copy `<root>/workspaces/<name>/RULES.md` to ONE project's
@@ -263,12 +278,10 @@ pub fn sync_one_project(
 }
 
 /// List every workspace name in the central registry, alphabetically.
-/// Used by `tome workspace sync` with no name arg to iterate every
-/// workspace.
 ///
 /// Returns `["global"]` synthesised in the pre-bootstrap case (DB
-/// file absent) so the sync command never errors on a fresh install
-/// — the privileged `global` workspace is the conceptual default.
+/// file absent) so callers never error on a fresh install — the
+/// privileged `global` workspace is the conceptual default.
 pub fn list_workspace_names(paths: &Paths) -> Result<Vec<WorkspaceName>, TomeError> {
     if !paths.index_db.is_file() {
         return Ok(vec![WorkspaceName::global()]);

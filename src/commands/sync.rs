@@ -26,8 +26,8 @@
 //! attempted, and the first captured error is returned at the end so the
 //! exit code reflects a genuine failure while partial progress still lands.
 //!
-//! The OLD `tome workspace sync` / `tome harness sync` subcommands continue
-//! to exist alongside this command (removed in a later step).
+//! This command replaces the former `tome workspace sync` /
+//! `tome harness sync` subcommands, which were removed pre-launch.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -146,6 +146,28 @@ pub fn sync_one_project(
         // `Option<String>`; `None` reconciles the full effective set.
         deps.only_harness = args.harness.clone();
         let outcome = crate::harness::sync::sync_project(project_root, &deps)?;
+
+        // Telemetry parity with the removed `tome harness sync`: emit one
+        // `tome.harness_action{Sync}` per DISTINCT harness that actually had a
+        // change. Best-effort, success-path only; a fully-idempotent reconcile
+        // (no changes) emits nothing. Unmapped harness names are SKIPped by
+        // `emit_harness_action`.
+        let mut seen: Vec<&str> = Vec::new();
+        for change in outcome
+            .added
+            .iter()
+            .chain(outcome.updated.iter())
+            .chain(outcome.removed.iter())
+        {
+            if !seen.contains(&change.harness.as_str()) {
+                seen.push(change.harness.as_str());
+                crate::commands::harness::emit_harness_action(
+                    &change.harness,
+                    crate::telemetry::event::HarnessAction::Sync,
+                );
+            }
+        }
+
         outcome.added.len() + outcome.updated.len() + outcome.removed.len()
     };
 
@@ -176,29 +198,17 @@ pub fn sync_all(
     }
 
     let conn = crate::index::open_read_only(&paths.index_db)?;
+    // `resolve_id_required` is the correct loud-on-missing choice here: an
+    // explicit `tome sync --all` against a workspace with no registry row is a
+    // user error, not the silent-empty pre-bootstrap case handled above.
     let workspace_id = crate::index::workspaces::resolve_id_required(&conn, ws)?;
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT project_path FROM workspace_projects
-             WHERE workspace_id = ?1
-             ORDER BY project_path",
-        )
-        .map_err(|e| {
-            TomeError::IndexIntegrityCheckFailure(format!("sync: prepare projects: {e}"))
-        })?;
-    let project_iter = stmt
-        .query_map(rusqlite::params![workspace_id], |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("sync: query projects: {e}")))?;
+    // Shared SSOT with `workspace::sync::sync_one` — one `workspace_projects`
+    // walk, not a duplicated SELECT.
+    let project_roots = crate::workspace::sync::bound_project_roots(&conn, workspace_id)?;
 
     let mut first_error: Option<TomeError> = None;
-    for row in project_iter {
-        let project_path = row.map_err(|e| {
-            TomeError::IndexIntegrityCheckFailure(format!("sync: read project row: {e}"))
-        })?;
-        let project_root = PathBuf::from(&project_path);
+    for project_root in project_roots {
         match sync_one_project(ws, &project_root, args, paths) {
             Ok(outcome) => report.projects.push(outcome),
             Err(e) => {

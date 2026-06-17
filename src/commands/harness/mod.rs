@@ -44,7 +44,6 @@ pub mod info;
 pub mod list;
 pub mod remove;
 pub mod session_context;
-pub mod sync;
 pub mod use_;
 
 use std::path::Path;
@@ -102,7 +101,6 @@ pub fn run(args: HarnessArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), T
             r
         }
         Some(HarnessCommand::Info(a)) => info::run(a, scope, &paths, mode),
-        Some(HarnessCommand::Sync) => sync::run(scope, &paths, mode),
         Some(HarnessCommand::SessionContext(a)) => session_context::run(a, scope, &paths, mode),
     }
 }

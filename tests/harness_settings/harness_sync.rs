@@ -1,12 +1,14 @@
-//! T-M5 (US3 review) — `tome harness sync` thin-wrapper behaviour.
+//! Project-required precondition for the harness reconcile.
 //!
-//! `tome harness sync` requires a resolved project root; absence is
-//! exit 2 (Usage). Prior coverage tested the orchestrator's sync logic
-//! via `harness::sync::sync_project` directly but never exercised the
-//! CLI wrapper's project-required precondition.
+//! The former `tome harness sync` thin wrapper was removed pre-launch;
+//! its reconcile is now folded into the unified `tome sync` command.
+//! This guards the same precondition the old wrapper enforced: with no
+//! resolved project root (and without `--all`), `tome sync` exits 2
+//! (Usage).
 
 use crate::common::{HomeGuard, ToolEnv, paths_for};
-use tome::commands::harness::sync;
+use tome::cli::SyncArgs;
+use tome::commands::sync;
 use tome::output::Mode;
 use tome::workspace::{ResolvedScope, Scope, ScopeSource, WorkspaceName};
 
@@ -29,6 +31,14 @@ fn sync_without_project_marker_exits_with_usage_code_2() {
     let _home = HomeGuard::install(env.home_path());
 
     let scope = fallback_scope();
-    let err = sync::run(&scope, &paths, Mode::Json).expect_err("missing project marker");
+    // No `--all`, no project marker → the harness reconcile has no project
+    // to act on, so `tome sync` refuses with Usage (2).
+    let args = SyncArgs {
+        all: false,
+        rules_only: false,
+        harness_only: false,
+        harness: None,
+    };
+    let err = sync::run(args, &scope, &paths, Mode::Json).expect_err("missing project marker");
     assert_eq!(err.exit_code(), 2, "want Usage (2); got {err:?}");
 }
