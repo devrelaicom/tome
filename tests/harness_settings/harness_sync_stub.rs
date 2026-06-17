@@ -966,6 +966,24 @@ fn sync_with_only_harness_touches_just_that_harness() {
         Some("harnesses = [\"cursor\", \"claude-code\"]"),
     );
 
+    // Plant a Tome-owned agent file in claude-code's native-agent dir BEFORE
+    // the sync. Both cursor and claude-code support native agents, so the
+    // agents sink runs (cursor is snapshotted ⇒ the fast-exit guard passes).
+    // The owned-file naming is `<plugin>__<name>.md`; the agents sink would
+    // unlink it as an orphan (its plugin is not in the empty enabled set) IF
+    // it touched claude-code's dir. Under `only_harness = Some("cursor")` that
+    // dir must be left completely untouched, so this file must survive — this
+    // is the regression the agents sink ignored before the filter was honoured.
+    let cc_agents_dir = fx.project.join(".claude/agents");
+    std::fs::create_dir_all(&cc_agents_dir).expect("create claude-code agent dir");
+    let planted_cc_agent = cc_agents_dir.join("plugin-keep__reviewer.md");
+    std::fs::write(&planted_cc_agent, "---\nname: reviewer\n---\nbody\n")
+        .expect("plant owned claude-code agent file");
+    assert!(
+        planted_cc_agent.is_file(),
+        "precondition: the claude-code owned agent file was planted",
+    );
+
     // Restrict the reconcile to cursor only.
     let mut deps = fx.deps(false);
     deps.only_harness = Some("cursor".to_string());
@@ -982,6 +1000,24 @@ fn sync_with_only_harness_touches_just_that_harness() {
     assert!(
         !fx.project.join("CLAUDE.md").exists(),
         "claude-code's CLAUDE.md must NOT be created under --harness cursor",
+    );
+    // The agents sink honours `only_harness` too: claude-code's planted owned
+    // agent file must STILL EXIST — it was never an emit/cleanup target because
+    // claude-code was not in the (cursor-only) snapshot set.
+    assert!(
+        planted_cc_agent.is_file(),
+        "claude-code's owned agent file must NOT be removed under --harness cursor \
+         (the agents sink must honour only_harness)",
+    );
+    // No recorded change targets claude-code in the agents subsystem (defence in
+    // depth alongside the on-disk survival assertion).
+    assert!(
+        !outcome
+            .removed
+            .iter()
+            .any(|c| c.subsystem == SyncSubsystem::Agents && c.harness == "claude-code"),
+        "no agents-subsystem removal may target claude-code under --harness cursor; got {:?}",
+        outcome.removed,
     );
 
     // Every recorded decision is for cursor only — claude-code never entered

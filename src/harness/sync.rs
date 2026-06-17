@@ -524,8 +524,13 @@ fn collect_harness_snapshots(project_root: &Path, deps: &SyncDeps<'_>) -> Vec<Ha
             // (for `tome sync --harness <name>`): only that module is
             // snapshotted, so every downstream dedup map + the is-live
             // write-vs-remove decision operate over the one-element set and
-            // every OTHER harness's files are left completely untouched. `None`
-            // snapshots the full registry (the default full reconcile).
+            // every OTHER harness's files are left completely untouched. This
+            // is the SINGLE filter point — every sink derives its scope from
+            // these snapshots (the rules/MCP/hooks/guardrails loops iterate
+            // them directly; the agents sink gates its registry walk on the
+            // snapshotted name set), so the "other harnesses untouched"
+            // guarantee holds across ALL sinks. `None` snapshots the full
+            // registry (the default full reconcile).
             .filter(|m| match deps.only_harness.as_deref() {
                 Some(only) => m.name() == only,
                 None => true,
