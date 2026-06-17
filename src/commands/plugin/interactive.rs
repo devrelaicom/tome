@@ -482,6 +482,9 @@ fn run_enable_action(scope: &ResolvedScope, id: &PluginId) -> Result<(), TomeErr
         PluginEnableArgs {
             id: id.to_string(),
             yes: false,
+            // Interactive enable does not pre-set a tier; the default (3)
+            // applies. Users can refine per-entry via `tome tier set`.
+            tier: None,
         },
         scope,
         Mode::Human,

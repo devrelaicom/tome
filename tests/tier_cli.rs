@@ -16,6 +16,7 @@ use common::{
 };
 use tempfile::TempDir;
 use tome::embedding::stub::StubEmbedder;
+use tome::index::skills::set_tier_for_plugin;
 use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
 
@@ -189,4 +190,154 @@ fn tier_set_rejects_out_of_range() {
         Some(2),
         "out-of-range tier → usage exit 2"
     );
+}
+
+/// Verify that `set_tier_for_plugin` (the function called by `plugin enable
+/// --tier`) bulk-sets ALL skills/commands for a plugin and that the result is
+/// visible via `tome tier list --json`.
+///
+/// This test exercises the underlying DB helper that `enable --tier` invokes.
+/// The command-layer flag wiring is covered by
+/// `plugin_enable_with_tier_flag_binary` (marked `#[ignore]` because the
+/// `plugin enable` binary path loads FastembedEmbedder/ONNX models).
+#[test]
+fn plugin_enable_with_tier_flag_bulk_sets() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+
+    // Enable the plugin in-process via the stub embedder (no ONNX load).
+    setup_enabled(&env, &tmp);
+
+    // Default tier for all entries is 3.
+    let before = tier_list_json(&env);
+    for entry in &before {
+        assert_eq!(
+            entry["tier"], 3,
+            "all entries start at tier 3, but {:?} has tier {}",
+            entry["name"], entry["tier"]
+        );
+    }
+    assert!(
+        !before.is_empty(),
+        "plugin-alpha must have at least one tierable entry after enable"
+    );
+
+    // Simulate what `plugin enable --tier 1` does: call set_tier_for_plugin
+    // under a writable connection + advisory lock, exactly as enable.rs does.
+    {
+        let paths = paths_for(&env);
+        let (e, r, s) = (
+            stub_embedder_seed(),
+            stub_reranker_seed(),
+            stub_summariser_seed(),
+        );
+        let conn = tome::index::open(
+            &paths.index_db,
+            &tome::index::OpenOptions {
+                embedder: e,
+                reranker: r,
+                summariser: s,
+            },
+        )
+        .expect("open writable index");
+        let lock = tome::index::acquire_lock(&paths.index_lock).expect("acquire lock");
+        let affected =
+            set_tier_for_plugin(&conn, "global", "sample-plugin-catalog", "plugin-alpha", 1)
+                .expect("set_tier_for_plugin");
+        lock.release().expect("release lock");
+
+        assert!(
+            affected > 0,
+            "set_tier_for_plugin must update at least one row; got 0 affected"
+        );
+    }
+
+    // Every skill/command for plugin-alpha must now show tier 1.
+    let after = tier_list_json(&env);
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "entry count must be unchanged after tier update"
+    );
+    for entry in &after {
+        assert_eq!(
+            entry["tier"], 1,
+            "after bulk-set all entries must be tier 1, but {:?} shows tier {}",
+            entry["name"], entry["tier"]
+        );
+    }
+}
+
+/// Drive `tome plugin enable --tier 1` via the compiled binary.
+///
+/// # Why `#[ignore]`
+///
+/// The `plugin enable` command path unconditionally calls
+/// `FastembedEmbedder::load`, which requires the real ONNX model files to be
+/// present on disk (not just the `manifest.toml` stubs used by the cheap
+/// integration tests). Running this test without the models results in a
+/// `ModelEmbedInitFailed` error. This test is therefore gated behind the
+/// real-model release gate (`cargo test --ignored`), exactly like
+/// `model_download_complete`, `reranker_cpu_inference`, and
+/// `search_knn_recall_realmodel`.
+///
+/// The underlying behaviour (DB tier update + visibility via `tier list`) is
+/// covered without models by `plugin_enable_with_tier_flag_bulk_sets` above.
+#[test]
+#[ignore = "requires real ONNX model files on disk; run with `cargo test --ignored`"]
+fn plugin_enable_with_tier_flag_binary() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+
+    // For this binary-driven path we need the catalog enrolled and models
+    // actually installed (the binary checks model presence before the embedder
+    // loads). setup_enabled uses the stub embedder; we re-stage the catalog so
+    // the binary can resolve it, then let `plugin enable --yes --tier 1` do
+    // everything.
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    write_config_for_cli(&paths, &config);
+    // Real model files must be present; if they aren't the binary exits with
+    // ModelMissing (exit 30) and the test assertion below will surface a
+    // descriptive failure.
+
+    let out = env
+        .cmd()
+        .args([
+            "--json",
+            "plugin",
+            "enable",
+            "--yes",
+            "--tier",
+            "1",
+            "sample-plugin-catalog/plugin-alpha",
+        ])
+        .output()
+        .expect("spawn plugin enable");
+
+    assert!(
+        out.status.success(),
+        "plugin enable --tier 1 failed (exit {:?}); stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Every skill/command for plugin-alpha must show tier 1 immediately after.
+    let after = tier_list_json(&env);
+    assert!(
+        !after.is_empty(),
+        "tier list must be non-empty after enable with --tier"
+    );
+    for entry in &after {
+        assert_eq!(
+            entry["tier"], 1,
+            "all entries must be tier 1 after `plugin enable --tier 1`, but {:?} shows {}",
+            entry["name"], entry["tier"]
+        );
+    }
 }

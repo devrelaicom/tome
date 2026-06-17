@@ -700,6 +700,11 @@ pub struct PluginEnableArgs {
     /// not yet installed.
     #[arg(long)]
     pub yes: bool,
+    /// Routing tier (1|2|3) to apply to ALL of this plugin's skills and
+    /// commands at enable time. Omitted → the default tier 3. Refine
+    /// per-entry later with `tome tier set`.
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=3))]
+    pub tier: Option<u8>,
 }
 
 #[derive(Debug, clap::Args)]

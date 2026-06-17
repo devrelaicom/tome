@@ -86,6 +86,43 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
         }
     }
 
+    // --tier bulk-sets every skill/command of this plugin to the requested
+    // routing tier. The UPDATE runs under the advisory write lock on a
+    // writable connection (FR-040) — same idiom as `commands/tier/set.rs`.
+    // We apply this BEFORE regenerate_for_trigger so RULES.md is recomposed
+    // with the new tiers (regenerate_for_trigger → regen_summary::regen →
+    // write_workspace_rules reads tiers from the DB).
+    if let Some(tier) = args.tier {
+        let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
+        let tier_conn = crate::index::open(
+            &paths.index_db,
+            &crate::index::OpenOptions {
+                embedder: embedder_seed,
+                reranker: reranker_seed,
+                summariser: summariser_seed,
+            },
+        )?;
+        let tier_lock = crate::index::acquire_lock(&paths.index_lock)?;
+
+        let tier_result = crate::index::skills::set_tier_for_plugin(
+            &tier_conn,
+            scope.scope.name().as_str(),
+            &id.catalog,
+            &id.plugin,
+            tier,
+        );
+
+        match tier_result {
+            Ok(_) => {
+                tier_lock.release()?;
+            }
+            Err(e) => {
+                drop(tier_lock);
+                return Err(e);
+            }
+        }
+    }
+
     // FR-380 + FR-385: regenerate cached summaries AFTER the
     // workspace_skills mutation commits. The lifecycle transaction
     // above already committed; if the summariser fails, exit 24
