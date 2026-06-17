@@ -17,6 +17,7 @@
 //! the swappable `search_desc` cell (read by `list_tools` on each call).
 
 use crate::common::lifecycle_paths;
+use crate::common::mcp_harness::StagedWorkspace;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::OnceCell;
@@ -158,5 +159,53 @@ fn server_override_path_mutates_advertised_description() {
     assert!(
         desc.starts_with(SCAFFOLD),
         "advertised description should retain the scaffold prefix",
+    );
+}
+
+/// FR-425 wire branch: with an override seeded, the `tools/list` output
+/// the live server advertises carries the OVERRIDE as the `search_skills`
+/// tool description (the `list_tools` injection branch this commit added).
+#[test]
+fn tools_list_reflects_search_skills_description_override() {
+    const SKILL: &str = "---\nname: alpha\ndescription: A\n---\nBody.\n";
+    let staged = StagedWorkspace::stage(&[("alpha", SKILL)], &[]);
+    let mut harness = staged.harness();
+
+    harness.override_search_skills_description("CUSTOM DESC");
+
+    let tools = harness.tools_list();
+    let search = tools
+        .iter()
+        .find(|t| t.name == "search_skills")
+        .expect("search_skills advertised");
+    assert_eq!(
+        search.description.as_deref(),
+        Some("CUSTOM DESC"),
+        "override must surface as the advertised search_skills description",
+    );
+}
+
+/// With NO override (empty `search_desc` cell), `tools/list` advertises
+/// the static built-in `#[tool]` doc-comment description — NOT an empty
+/// string. The static wording is identical to `tool_description::SCAFFOLD`.
+#[test]
+fn tools_list_falls_back_to_static_description_without_override() {
+    const SKILL: &str = "---\nname: alpha\ndescription: A\n---\nBody.\n";
+    let staged = StagedWorkspace::stage(&[("alpha", SKILL)], &[]);
+    let harness = staged.harness();
+
+    let tools = harness.tools_list();
+    let search = tools
+        .iter()
+        .find(|t| t.name == "search_skills")
+        .expect("search_skills advertised");
+    let desc = search.description.as_deref().unwrap_or("");
+    assert!(
+        !desc.is_empty(),
+        "empty override must fall back to the static description, not an empty string",
+    );
+    assert_eq!(
+        desc, SCAFFOLD,
+        "with no override the advertised description is the static built-in (== SCAFFOLD)",
     );
 }

@@ -394,6 +394,24 @@ impl McpHarness {
         self.prompts_list().into_iter().map(|p| p.name).collect()
     }
 
+    /// `tools/list` — returns the tool list the live server advertises,
+    /// with the live `search_skills` description override applied. Mirrors
+    /// [`Self::prompts_list`]: the real `ServerHandler::list_tools`
+    /// requires a `RequestContext<RoleServer>` only obtainable over a live
+    /// transport (see the module header), so the harness drives the same
+    /// `Server::tools_listing` the production handler delegates to.
+    pub fn tools_list(&self) -> Vec<rmcp::model::Tool> {
+        self.server.tools_listing()
+    }
+
+    /// Seed the live `search_skills` description override on the server —
+    /// the same seam `mcp::run` uses after construction
+    /// ([`Server::override_search_skills_description`]). Lets a test drive
+    /// the `tools/list` injection branch.
+    pub fn override_search_skills_description(&mut self, description: impl Into<String>) {
+        self.server.override_search_skills_description(description);
+    }
+
     /// `prompts/get` — drive the live `prompts/get` route end-to-end via
     /// `prompts::handle_get` (the exact fn each route closure forwards
     /// to). `Ok` carries the rendered response; `Err` carries the

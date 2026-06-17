@@ -50,7 +50,11 @@ pub struct Server {
 
 impl Server {
     pub fn new(state: Arc<McpState>) -> Self {
-        let registry = state.prompt_registry.read().unwrap().clone();
+        let registry = state
+            .prompt_registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let prompt_router = prompts::build_router::<Self>(&registry, state.clone());
         Self {
             state,
@@ -77,7 +81,7 @@ impl Server {
     /// FR-425; `mcp::run` calls this once after server construction
     /// and before `serve_server` hands the router to rmcp.
     pub fn override_search_skills_description(&mut self, description: impl Into<String>) {
-        *self.search_desc.write().unwrap() = description.into();
+        *self.search_desc.write().unwrap_or_else(|e| e.into_inner()) = description.into();
     }
 
     /// Read-only borrow of the inner [`ToolRouter`]. Used by tests to
@@ -93,7 +97,10 @@ impl Server {
     /// is used). Test-seam only — [`list_tools`] is the production reader.
     #[doc(hidden)]
     pub fn search_desc_snapshot(&self) -> String {
-        self.search_desc.read().unwrap().clone()
+        self.search_desc
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Read-only access to the per-session [`PromptRouter`] — the exact
@@ -102,7 +109,33 @@ impl Server {
     /// (Phase 7 / FR-012) drives `prompts/list` through it so the
     /// assertion sees the same router the live server advertises.
     pub fn prompt_router_ref(&self) -> impl std::ops::Deref<Target = PromptRouter<Self>> + '_ {
-        self.prompt_router.read().unwrap()
+        self.prompt_router.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The exact tool list `ServerHandler::list_tools` advertises: the
+    /// statically registered tools with the live `search_skills`
+    /// description override applied when one is active (empty cell ⇒ the
+    /// static `#[tool]` doc-comment description stands).
+    ///
+    /// The production `list_tools` handler delegates here so the wire
+    /// output is computed in one place; the in-process MCP test harness
+    /// drives this directly (the real `list_tools` requires a
+    /// `RequestContext<RoleServer>` that is only obtainable over a live
+    /// transport — see the harness header — so the injection branch would
+    /// otherwise be untestable in-process).
+    pub fn tools_listing(&self) -> Vec<rmcp::model::Tool> {
+        let mut tools = self.tool_router.list_all();
+        let desc = self
+            .search_desc
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if !desc.is_empty()
+            && let Some(t) = tools.iter_mut().find(|t| t.name == "search_skills")
+        {
+            t.description = Some(std::borrow::Cow::Owned(desc));
+        }
+        tools
     }
 
     /// Read-only borrow of the per-session `McpState`. Required by the
@@ -196,7 +229,11 @@ impl ServerHandler for Server {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
-        let prompts = self.prompt_router.read().unwrap().list_all();
+        let prompts = self
+            .prompt_router
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .list_all();
         Ok(ListPromptsResult {
             prompts,
             next_cursor: None,
@@ -220,7 +257,11 @@ impl ServerHandler for Server {
         );
         // Clone the current router out of the cell so we don't hold the
         // lock across the `.await` (the render may be slow).
-        let router = self.prompt_router.read().unwrap().clone();
+        let router = self
+            .prompt_router
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         router.get_prompt(prompt_context).await
     }
 
@@ -229,15 +270,8 @@ impl ServerHandler for Server {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let mut tools = self.tool_router.list_all();
-        let desc = self.search_desc.read().unwrap().clone();
-        if !desc.is_empty()
-            && let Some(t) = tools.iter_mut().find(|t| t.name == "search_skills")
-        {
-            t.description = Some(std::borrow::Cow::Owned(desc));
-        }
         Ok(ListToolsResult {
-            tools,
+            tools: self.tools_listing(),
             next_cursor: None,
             meta: None,
         })
