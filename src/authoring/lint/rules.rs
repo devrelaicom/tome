@@ -126,6 +126,7 @@ pub fn all() -> Vec<Box<dyn Rule>> {
         Box::new(EntryDescription),
         Box::new(EntryHarnessIsms),
         Box::new(EntryBodyBudget { budgets }),
+        Box::new(EntryResourceBudget { budgets }),
     ]
 }
 
@@ -446,6 +447,49 @@ impl Rule for EntryBodyBudget {
     }
 }
 
+struct EntryResourceBudget {
+    budgets: TokenBudgets,
+}
+impl Rule for EntryResourceBudget {
+    fn id(&self) -> &'static str {
+        rule::RESOURCE_TOO_LARGE
+    }
+    fn scope(&self) -> Scope {
+        Scope::Entry
+    }
+    fn check_entry(&self, e: &EntryIr) -> Vec<Diagnostic> {
+        let Some(dir) = e.source_path.parent() else {
+            return Vec::new();
+        };
+        let mut resources = Vec::new();
+        walk_text_resources(dir, &e.source_path, &mut resources);
+        // Deterministic order — read_dir order is OS-dependent.
+        resources.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut out = Vec::new();
+        for (path, bytes) in resources {
+            let est = est_tokens(bytes as usize);
+            if est >= self.budgets.hard_tokens {
+                let name = path.strip_prefix(dir).unwrap_or(&path).display();
+                out.push(
+                    Diagnostic::warning(
+                        rule::RESOURCE_TOO_LARGE,
+                        format!(
+                            "supporting file `{name}` is ~{est} tokens (≈{kb} KB), over \
+                             the {hard}-token budget — the agent cannot read it in one \
+                             call; split it into smaller files",
+                            kb = bytes / 1024,
+                            hard = self.budgets.hard_tokens,
+                        ),
+                    )
+                    .at(Location::file(path.clone())),
+                );
+            }
+        }
+        out
+    }
+}
+
 // --- helpers ----------------------------------------------------------------
 
 fn check_name(name: &str, what: &str, d: &mut Vec<Diagnostic>) {
@@ -545,6 +589,43 @@ fn set_frontmatter_name(content: &str, new_name: &str) -> Option<String> {
     Some(format!("---\n{}{rest}", lines.join("\n")))
 }
 
+/// Whether a supporting file is text the agent would read via a get_skill
+/// resource path. Extension-less files (LICENSE, NOTES) count as text;
+/// known binary assets (images, archives) do not.
+fn is_text_like(path: &Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "md" | "markdown" | "mdx" | "txt" | "rst"
+        ),
+        None => true,
+    }
+}
+
+/// Recursively collect `(path, byte_len)` for text-like files under `dir`,
+/// excluding `skill_file` and skipping symlinks — mirroring `get_skill`'s
+/// `walk_dir`, which never serves symlinked resources. I/O errors short-circuit
+/// the offending directory rather than failing the lint run.
+fn walk_text_resources(dir: &Path, skill_file: &Path, out: &mut Vec<(PathBuf, u64)>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if ft.is_dir() {
+            walk_text_resources(&path, skill_file, out);
+        } else if path != skill_file && is_text_like(&path) {
+            if let Ok(meta) = entry.metadata() {
+                out.push((path, meta.len()));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,6 +676,59 @@ mod tests {
 
     fn has(d: &[Diagnostic], id: &str) -> bool {
         d.iter().any(|x| x.rule_id == id)
+    }
+
+    #[test]
+    fn resource_budget_flags_large_text_file_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("skills/foo");
+        fs::create_dir_all(dir.join("references")).unwrap();
+        let skill = dir.join("SKILL.md");
+        fs::write(&skill, "---\nname: foo\ndescription: d\n---\nbody\n").unwrap();
+
+        // from_max(1_000) -> hard_tokens = 700 -> ~2_800-byte threshold.
+        let rule = EntryResourceBudget {
+            budgets: TokenBudgets::from_max(1_000),
+        };
+        let e = entry(EntryKind::Skill, "foo", skill, Some("d"), "body\n");
+
+        // Small text file: no finding.
+        fs::write(dir.join("references/small.md"), "x".repeat(100)).unwrap();
+        assert!(rule.check_entry(&e).is_empty(), "small file clean");
+
+        // Large text file: one finding naming the file.
+        fs::write(dir.join("references/big.md"), "x".repeat(3_000)).unwrap();
+        let d = rule.check_entry(&e);
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].rule_id, rule::RESOURCE_TOO_LARGE);
+        assert!(d[0].message.contains("big.md"), "{:?}", d[0].message);
+
+        // Large BINARY file: skipped (not text-like) — still just big.md.
+        fs::write(dir.join("references/big.png"), vec![0u8; 5_000]).unwrap();
+        assert_eq!(rule.check_entry(&e).len(), 1, "png ignored");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn resource_budget_skips_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("skills/foo");
+        fs::create_dir_all(dir.join("references")).unwrap();
+        let skill = dir.join("SKILL.md");
+        fs::write(&skill, "---\nname: foo\ndescription: d\n---\nbody\n").unwrap();
+        // A large real target outside the skill dir, symlinked in.
+        let target = tmp.path().join("huge.md");
+        fs::write(&target, "x".repeat(5_000)).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("references/link.md")).unwrap();
+
+        let rule = EntryResourceBudget {
+            budgets: TokenBudgets::from_max(1_000),
+        };
+        let e = entry(EntryKind::Skill, "foo", skill, Some("d"), "body\n");
+        assert!(
+            rule.check_entry(&e).is_empty(),
+            "symlinked resource skipped"
+        );
     }
 
     #[test]
