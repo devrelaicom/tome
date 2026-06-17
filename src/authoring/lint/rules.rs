@@ -716,6 +716,26 @@ mod tests {
     }
 
     #[test]
+    fn resource_budget_walks_nested_dirs() {
+        // get_skill's walk recurses, so a large file in references/sub/ must be
+        // flagged too — locks the recursive-walk parity the feature relies on.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("skills/foo");
+        fs::create_dir_all(dir.join("references/sub")).unwrap();
+        let skill = dir.join("SKILL.md");
+        fs::write(&skill, "---\nname: foo\ndescription: d\n---\nbody\n").unwrap();
+        fs::write(dir.join("references/sub/deep.md"), "x".repeat(3_000)).unwrap();
+
+        let rule = EntryResourceBudget {
+            budgets: TokenBudgets::from_max(1_000),
+        };
+        let e = entry(EntryKind::Skill, "foo", skill, Some("d"), "body\n");
+        let d = rule.check_entry(&e);
+        assert_eq!(d.len(), 1);
+        assert!(d[0].message.contains("deep.md"), "{:?}", d[0].message);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn resource_budget_skips_symlinks() {
         let tmp = tempfile::tempdir().unwrap();
