@@ -20,6 +20,9 @@ pub fn run(args: TierClearArgs, scope: &ResolvedScope, mode: Mode) -> Result<(),
     let ws = scope.scope.name();
 
     // Same writable-open-under-lock discipline as `set` — `clear` is an UPDATE.
+    // NOTE: `index::open` is called BEFORE `acquire_lock` so that schema-version
+    // checks and migrations can run on the connection; the first actual write
+    // (`set_tier_for_entry`) runs only after `acquire_lock` is held.
     let (embedder, reranker, summariser) = crate::commands::plugin::registry_seeds();
     let conn = crate::index::open(
         &paths.index_db,

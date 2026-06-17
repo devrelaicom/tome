@@ -134,6 +134,10 @@ pub(crate) struct TierRecord {
     pub tier: u8,
 }
 
+// NOTE: `index::open` is called BEFORE `acquire_lock` so that schema-version
+// checks and migrations can run on the connection; the first actual write
+// (`set_tier_for_entry`) runs only after `acquire_lock` is held.
+
 pub(crate) fn emit(record: &TierRecord, mode: Mode) -> Result<(), TomeError> {
     match mode {
         Mode::Human => {
@@ -146,5 +150,27 @@ pub(crate) fn emit(record: &TierRecord, mode: Mode) -> Result<(), TomeError> {
             Ok(())
         }
         Mode::Json => output::write_json(record),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tier_record_json_shape_is_pinned() {
+        // Byte-stable wire-shape pin: field order == struct declaration order
+        // (serde_json preserve_order feature is active crate-wide).
+        let r = TierRecord {
+            catalog: "cat".into(),
+            plugin: "plug".into(),
+            name: "my-skill".into(),
+            kind: "skill",
+            tier: 1,
+        };
+        assert_eq!(
+            serde_json::to_string(&r).unwrap(),
+            r#"{"catalog":"cat","plugin":"plug","name":"my-skill","kind":"skill","tier":1}"#,
+        );
     }
 }

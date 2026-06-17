@@ -74,3 +74,25 @@ pub fn run(_args: TierListArgs, scope: &ResolvedScope, mode: Mode) -> Result<(),
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_record_json_shape_is_pinned() {
+        // Byte-stable wire-shape pin: field order == struct declaration order
+        // (serde_json preserve_order feature is active crate-wide).
+        let r = ListRecord {
+            catalog: "cat",
+            plugin: "plug",
+            name: "my-skill",
+            kind: "skill",
+            tier: 2,
+        };
+        assert_eq!(
+            serde_json::to_string(&r).unwrap(),
+            r#"{"catalog":"cat","plugin":"plug","name":"my-skill","kind":"skill","tier":2}"#,
+        );
+    }
+}
