@@ -1129,7 +1129,11 @@ fn workspace_use_malformed_hooks_exits_43() {
         let entries = hooks["SessionStart"]
             .as_array()
             .expect("SessionStart is an array");
-        assert_eq!(entries.len(), 1, "exactly one (Tome-owned) SessionStart entry");
+        assert_eq!(
+            entries.len(),
+            1,
+            "exactly one (Tome-owned) SessionStart entry"
+        );
         let cmd = entries[0]["hooks"][0]["command"].as_str().unwrap_or("");
         assert!(
             cmd.contains("harness session-context"),
