@@ -74,6 +74,10 @@ pub struct SyncDeps<'a> {
     /// directly to the CLI `--force` flag on `tome workspace use` (and
     /// the future `tome harness sync --force`).
     pub force: bool,
+    /// When `Some(name)`, reconcile ONLY that harness (written if effective,
+    /// removed if not) and leave every other harness's files untouched. When
+    /// `None`, reconcile the full effective set. Set by `tome sync --harness`.
+    pub only_harness: Option<String>,
 }
 
 /// Summary of one sync pass per FR-547. Serialised verbatim in the
@@ -516,6 +520,16 @@ pub(crate) struct HarnessSnapshot {
 fn collect_harness_snapshots(project_root: &Path, deps: &SyncDeps<'_>) -> Vec<HarnessSnapshot> {
     with_effective_modules(|mods| {
         mods.iter()
+            // `only_harness` restricts the reconcile to a single named harness
+            // (for `tome sync --harness <name>`): only that module is
+            // snapshotted, so every downstream dedup map + the is-live
+            // write-vs-remove decision operate over the one-element set and
+            // every OTHER harness's files are left completely untouched. `None`
+            // snapshots the full registry (the default full reconcile).
+            .filter(|m| match deps.only_harness.as_deref() {
+                Some(only) => m.name() == only,
+                None => true,
+            })
             .map(|m| snapshot_for(*m, project_root, deps.home_root))
             .collect()
     })
@@ -886,6 +900,7 @@ pub(crate) fn build_deps<'a>(
         home_root,
         workspace_name,
         force,
+        only_harness: None,
     }
 }
 

@@ -125,6 +125,7 @@ fn deps_for<'a>(fx: &'a Fixture, force: bool) -> SyncDeps<'a> {
         home_root: fx._home.path(),
         workspace_name: &fx.workspace,
         force,
+        only_harness: None,
     }
 }
 

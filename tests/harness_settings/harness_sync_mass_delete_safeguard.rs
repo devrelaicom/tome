@@ -96,6 +96,7 @@ impl Fixture {
             home_root: self._home.path(),
             workspace_name: &self.workspace,
             force: false,
+            only_harness: None,
         }
     }
 }

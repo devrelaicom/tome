@@ -667,6 +667,7 @@ mod tests {
             home_root: home.path(),
             workspace_name: &workspace,
             force: false,
+            only_harness: None,
         };
 
         // Build a faithful snapshot via the same path the orchestrator uses

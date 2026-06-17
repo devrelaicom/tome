@@ -72,6 +72,7 @@ impl Fixture {
             home_root: self._home.path(),
             workspace_name: &self.workspace,
             force,
+            only_harness: None,
         }
     }
 }
@@ -937,6 +938,62 @@ fn hooks_forward_progress_one_malformed_one_good() {
     assert!(
         cmd.starts_with(&*plugin_root.to_string_lossy()),
         "the well-formed plugin's hook merged despite the malformed sibling: {cmd}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11. `--harness <name>` single-harness filter (`SyncDeps.only_harness`):
+//     a project whose effective list is `cursor` + `claude-code`, synced with
+//     `only_harness = Some("cursor")`, touches ONLY cursor's files and leaves
+//     claude-code's `CLAUDE.md` untouched. `None` would reconcile both.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_with_only_harness_touches_just_that_harness() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Two real harnesses with distinct rules sinks: cursor writes a standalone
+    // `.cursor/rules/TOME_SKILLS.md`; claude-code writes a block into
+    // `<project>/CLAUDE.md`. Both effective so a full reconcile WOULD write both.
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(tome::harness::cursor::CURSOR),
+        Box::new(tome::harness::claude_code::CLAUDE_CODE),
+    ]);
+
+    let fx = Fixture::build(
+        "test-workspace",
+        Some("harnesses = [\"cursor\", \"claude-code\"]"),
+    );
+
+    // Restrict the reconcile to cursor only.
+    let mut deps = fx.deps(false);
+    deps.only_harness = Some("cursor".to_string());
+
+    let outcome = sync::sync_project(&fx.project, &deps).expect("sync cursor only");
+
+    // Cursor's standalone rules file was created.
+    let cursor_rules = fx.project.join(".cursor/rules/TOME_SKILLS.md");
+    assert!(
+        cursor_rules.is_file(),
+        "cursor's rules file must be written under --harness cursor",
+    );
+    // Claude-code was left completely untouched: its CLAUDE.md was never created.
+    assert!(
+        !fx.project.join("CLAUDE.md").exists(),
+        "claude-code's CLAUDE.md must NOT be created under --harness cursor",
+    );
+
+    // Every recorded decision is for cursor only — claude-code never entered
+    // the snapshot set, so it produced no decision at all.
+    assert!(
+        outcome.decisions.iter().all(|d| d.harness == "cursor"),
+        "only cursor decisions expected; got {:?}",
+        outcome
+            .decisions
+            .iter()
+            .map(|d| d.harness.as_str())
+            .collect::<Vec<_>>(),
     );
 }
 
