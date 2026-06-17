@@ -83,6 +83,12 @@ impl HarnessModule for Codex {
         Some(AgentFormat::Toml)
     }
 
+    // -- Tome-owned session hook (Phase 11) ---------------------------------
+
+    fn tome_session_hook_path(&self, project_root: &Path) -> Option<PathBuf> {
+        Some(project_root.join(".codex/hooks.json"))
+    }
+
     // -- Native skills (Phase 9, harness-skill-emit.md) ---------------------
 
     fn supports_native_skills(&self) -> bool {
@@ -173,6 +179,21 @@ impl HarnessModule for Codex {
             rendered,
             dropped_fields: dropped,
         })
+    }
+}
+
+#[cfg(test)]
+mod tome_session_hook_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn codex_tome_session_hook_path_is_project_codex_hooks_json() {
+        let m = Codex;
+        let p = m
+            .tome_session_hook_path(Path::new("/proj"))
+            .expect("codex has a tome session hook path");
+        assert_eq!(p, Path::new("/proj/.codex/hooks.json"));
     }
 }
 

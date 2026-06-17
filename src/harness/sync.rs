@@ -488,6 +488,12 @@ pub(crate) struct HarnessSnapshot {
     /// harness (no real-hook participation; the guardrails fallback is US3).
     /// `pub(crate)` so the hooks reconciler reads it across the module boundary.
     pub(crate) hook_settings_path: Option<PathBuf>,
+    /// Phase 11: the JSON sink for Tome's OWN session-start routing hook on a
+    /// non-`RealJson` harness (Codex → `<project>/.codex/hooks.json`). `None`
+    /// for harnesses with no Tome-owned session hook (or whose Tome hook rides
+    /// the `RealJson` pass, e.g. Claude Code).
+    #[allow(dead_code)] // Phase 11 scaffolding — consumed by the session-hook reconciler.
+    pub(crate) tome_session_hook_path: Option<PathBuf>,
     /// Phase 6 / US3: the harness's guardrails sink (in-file region or Cursor
     /// standalone sibling) plus its hooks-driven suppression flag.
     pub(crate) guardrails_target: crate::harness::GuardrailsTarget,
@@ -518,6 +524,7 @@ fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) ->
             crate::harness::HooksStrategy::RealJson => m.hook_settings_path(project_root),
             crate::harness::HooksStrategy::GuardrailsOnly => None,
         },
+        tome_session_hook_path: m.tome_session_hook_path(project_root),
         guardrails_target: m.guardrails_target(project_root),
     }
 }
