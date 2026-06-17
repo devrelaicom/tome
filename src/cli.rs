@@ -305,6 +305,10 @@ pub enum HarnessCommand {
     /// Reconcile the project's actual filesystem state against the
     /// effective harness list. Byte-for-byte idempotent.
     Sync,
+    /// Print the workspace's skill-routing directive to stdout, generated fresh
+    /// from live state. Intended as a Claude Code SessionStart hook target; not
+    /// usually run by hand.
+    SessionContext(HarnessSessionContextArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -343,6 +347,13 @@ pub struct HarnessRemoveArgs {
 pub struct HarnessInfoArgs {
     /// Harness name.
     pub name: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct HarnessSessionContextArgs {
+    /// Workspace name. Defaults to the resolved scope.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Scope argument for `harness use` and `harness remove`. Distinct from

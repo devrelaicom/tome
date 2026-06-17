@@ -67,6 +67,54 @@ fn tier_list_json(env: &ToolEnv) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// `tome harness session-context` regenerates the routing directive fresh from
+/// live state. With a tier-1 skill present, the directive must carry the
+/// "Load now (Tier 1)" section and a `get_skill(` call for it. The command
+/// prints plain text to stdout (the Claude Code SessionStart hook target).
+#[test]
+fn harness_session_context_prints_directive() {
+    let _fixture = Fixture::build_sample();
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    setup_enabled(&env, &tmp);
+
+    // Promote skill-a to tier 1 so the directive has a "Load now (Tier 1)"
+    // section with a get_skill call.
+    let set = env
+        .cmd()
+        .args(["tier", "set", "plugin-alpha/skill-a", "1"])
+        .output()
+        .expect("spawn tier set");
+    assert!(
+        set.status.success(),
+        "tier set exit {:?}; stderr={}",
+        set.status.code(),
+        String::from_utf8_lossy(&set.stderr),
+    );
+
+    let out = env
+        .cmd()
+        .args(["harness", "session-context"])
+        .output()
+        .expect("spawn harness session-context");
+    assert!(
+        out.status.success(),
+        "session-context exit {:?}; stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let directive = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        directive.contains("## Load now (Tier 1)"),
+        "directive must carry the Tier 1 section; got:\n{directive}"
+    );
+    assert!(
+        directive.contains("get_skill("),
+        "directive must carry a get_skill call for the tier-1 skill; got:\n{directive}"
+    );
+}
+
 #[test]
 fn tier_set_then_list_roundtrip() {
     let _fixture = Fixture::build_sample();

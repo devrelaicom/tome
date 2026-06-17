@@ -88,6 +88,38 @@ pub fn build_directive(entries: &[TieredEntry], long_summary: Option<&str>) -> S
     s
 }
 
+/// The single Tome-owned Claude Code SessionStart hook entry: runs the
+/// `session-context` command and lets Claude Code inject its stdout as
+/// `additionalContext` each session.
+///
+/// Ownership is by structural deep-equal (no sidecar — the same mechanism the
+/// rest of [`crate::harness::hooks`] uses), so the exact bytes ARE the
+/// ownership marker — keep them stable.
+///
+/// `tome_command` is the binary reference; it MUST match the convention the
+/// MCP-config sync uses for the `tome mcp` entry (bare `"tome"`, see
+/// `harness::sync::write_mcp_for_harness`) so the SessionStart hook invokes the
+/// same binary. `workspace_name` pins the directive to the bound workspace,
+/// mirroring the `--workspace <ws>` arg the MCP entry also carries.
+pub fn session_start_hook(
+    tome_command: &str,
+    workspace_name: &str,
+) -> crate::harness::hooks::RewrittenHooks {
+    let entry = serde_json::json!({
+        "hooks": [
+            {
+                "type": "command",
+                "command": format!(
+                    "{tome_command} harness session-context --workspace {workspace_name}"
+                )
+            }
+        ]
+    });
+    crate::harness::hooks::RewrittenHooks {
+        events: vec![("SessionStart".to_string(), vec![entry])],
+    }
+}
+
 /// Read the cached LONG summary text for a workspace from its `settings.toml`
 /// `[summaries]` block. `None` when the file or block is absent / unparsable —
 /// the Tier 3 section then falls back to enumeration. Mirrors
