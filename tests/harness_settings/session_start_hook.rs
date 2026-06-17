@@ -150,14 +150,14 @@ fn sync_installs_tome_session_start_hook_for_claude_code() {
     let session_start = doc["hooks"]["SessionStart"]
         .as_array()
         .expect("SessionStart event array present");
-    let has_session_context = session_start.iter().any(|entry| {
+    let has_session_start_entry = session_start.iter().any(|entry| {
         entry["hooks"][0]["command"]
             .as_str()
-            .is_some_and(|c| c.contains("harness session-context"))
+            .is_some_and(|c| c.contains("harness session-start"))
     });
     assert!(
-        has_session_context,
-        "a SessionStart entry must invoke `harness session-context`; got: {doc}"
+        has_session_start_entry,
+        "a SessionStart entry must invoke `harness session-start`; got: {doc}"
     );
 
     // A second sync must be a byte-for-byte no-op (deterministic entry).
@@ -218,9 +218,9 @@ fn sync_removes_tome_session_start_hook_when_claude_code_non_live() {
         session_start.iter().any(|entry| {
             entry["hooks"][0]["command"]
                 .as_str()
-                .is_some_and(|c| c.contains("harness session-context"))
+                .is_some_and(|c| c.contains("harness session-start"))
         }),
-        "SessionStart must contain the `harness session-context` entry after sync 1; got: {doc}"
+        "SessionStart must contain the `harness session-start` entry after sync 1; got: {doc}"
     );
 
     // ----- sync 2: drop the harness from the effective list -----
@@ -282,13 +282,13 @@ fn sync_installs_tome_session_start_hook_even_with_empty_enabled_set() {
     let session_start = doc["hooks"]["SessionStart"]
         .as_array()
         .expect("SessionStart event array present even with empty enabled set");
-    let has_session_context = session_start.iter().any(|entry| {
+    let has_session_start_entry = session_start.iter().any(|entry| {
         entry["hooks"][0]["command"]
             .as_str()
-            .is_some_and(|c| c.contains("harness session-context"))
+            .is_some_and(|c| c.contains("harness session-start"))
     });
     assert!(
-        has_session_context,
+        has_session_start_entry,
         "Tome SessionStart entry must be present for a live RealJson harness \
          even when no skills are enabled; got: {doc}"
     );

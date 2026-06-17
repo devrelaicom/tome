@@ -326,10 +326,10 @@ pub enum HarnessCommand {
     /// Report per-harness details for the current project: detection,
     /// targets, integration state, and source-of-scope.
     Info(HarnessInfoArgs),
-    /// Print the workspace's skill-routing directive to stdout, generated fresh
-    /// from live state. Intended as a Claude Code SessionStart hook target; not
-    /// usually run by hand.
-    SessionContext(HarnessSessionContextArgs),
+    /// Reconcile the project, then print the workspace's skill-routing directive
+    /// to stdout, generated fresh from live state. Intended as a SessionStart
+    /// hook target; not usually run by hand.
+    SessionStart(HarnessSessionStartArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -371,7 +371,7 @@ pub struct HarnessInfoArgs {
 }
 
 #[derive(Debug, clap::Args)]
-pub struct HarnessSessionContextArgs {
+pub struct HarnessSessionStartArgs {
     /// Workspace name. Defaults to the resolved scope.
     #[arg(long)]
     pub workspace: Option<String>,

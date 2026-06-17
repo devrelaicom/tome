@@ -1,4 +1,4 @@
-//! `tome harness session-context` — print the workspace's skill-routing
+//! `tome harness session-start` — print the workspace's skill-routing
 //! directive to stdout, regenerated fresh from live state.
 //!
 //! This is the target of the Tome-owned Claude Code SessionStart hook
@@ -10,7 +10,7 @@
 
 use std::io::Write;
 
-use crate::cli::HarnessSessionContextArgs;
+use crate::cli::HarnessSessionStartArgs;
 use crate::error::TomeError;
 use crate::output::Mode;
 use crate::paths::Paths;
@@ -21,7 +21,7 @@ use crate::workspace::{ResolvedScope, WorkspaceName};
 /// stdout as `additionalContext` regardless of the global `--json` flag, so
 /// this command does not branch on `Mode`.
 pub fn run(
-    args: HarnessSessionContextArgs,
+    args: HarnessSessionStartArgs,
     scope: &ResolvedScope,
     paths: &Paths,
     _mode: Mode,
