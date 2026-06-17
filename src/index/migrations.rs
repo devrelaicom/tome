@@ -310,13 +310,41 @@ fn phase_6_v3_to_v4(_tx: &Transaction) -> Result<(), TomeError> {
 /// rebuilds above), so no 12-step rebuild is needed. Every pre-existing
 /// enrolment row gains `tier = 3` (the default routing tier). `apply_pending`
 /// records `meta.schema_version = 5` after this returns `Ok`.
+///
+/// The column-existence guard via `PRAGMA table_info` makes the step
+/// idempotent: a DB whose `meta.schema_version` row was downstamp-corrected
+/// back to v4 after a v5 bootstrap (e.g. in doctor tests) can re-run this
+/// migration without failing on an already-present column. SQLite does not
+/// support `ALTER TABLE … ADD COLUMN IF NOT EXISTS`.
 fn phase_11_v4_to_v5(tx: &Transaction) -> Result<(), TomeError> {
-    tx.execute_batch("ALTER TABLE workspace_skills ADD COLUMN tier INTEGER NOT NULL DEFAULT 3;")
+    // `PRAGMA table_info` returns one row per column; the `name` field is
+    // in column index 1.  If `tier` is absent the query returns no rows.
+    let already_exists: bool = tx
+        .query_row(
+            "SELECT 1 FROM pragma_table_info('workspace_skills') WHERE name = 'tier'",
+            [],
+            |_| Ok(true),
+        )
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(false),
+            other => Err(other),
+        })
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!(
+                "phase_11_v4_to_v5: probe workspace_skills.tier: {e}"
+            ))
+        })?;
+
+    if !already_exists {
+        tx.execute_batch(
+            "ALTER TABLE workspace_skills ADD COLUMN tier INTEGER NOT NULL DEFAULT 3;",
+        )
         .map_err(|e| {
             TomeError::IndexIntegrityCheckFailure(format!(
                 "phase_11_v4_to_v5: add workspace_skills.tier: {e}"
             ))
         })?;
+    }
     Ok(())
 }
 
