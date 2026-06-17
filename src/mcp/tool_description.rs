@@ -56,13 +56,34 @@ pub const SCAFFOLD: &str = "Find the most relevant skills in the local Tome inde
 /// * the file is unparsable (best-effort fallback, not an error
 ///   — a malformed cache shouldn't refuse the MCP server),
 ///
-/// otherwise returns `"{scaffold}\n\n{cached_short}"`.
+/// otherwise wraps the cached blurb in the imperative routing template
+/// (see [`compose_from_short`]). The disk read stays here so the pure
+/// template logic is unit-testable in isolation.
 pub fn compose(name: &WorkspaceName, paths: &Paths) -> String {
     let settings_path = paths.workspace_settings_file(name);
     match read_cached_short(&settings_path) {
-        Some(short) if !short.trim().is_empty() => format!("{SCAFFOLD}\n\n{short}"),
-        _ => SCAFFOLD.to_owned(),
+        Some(short) => compose_from_short(&short),
+        None => SCAFFOLD.to_owned(),
     }
+}
+
+/// Wrap the workspace's cached topics/example-tasks blurb into the
+/// `search_skills` description. The blurb (the LLM-generated `short`)
+/// supplies the *what*; this template supplies the *when*.
+///
+/// An empty or whitespace-only blurb degrades to the scaffold alone —
+/// an imperative "before working on tasks related to <nothing>" line
+/// would be worse than no routing hint at all.
+pub fn compose_from_short(short: &str) -> String {
+    let short = short.trim();
+    if short.is_empty() {
+        return SCAFFOLD.to_owned();
+    }
+    format!(
+        "{SCAFFOLD}\n\nBefore working on tasks related to {short}, or when the user asks \
+         you to do related work, you must call this tool to search for relevant skills \
+         before you start."
+    )
 }
 
 /// Read `[summaries].short` from `settings.toml`. Returns `None` for
@@ -145,5 +166,27 @@ mod tests {
         std::fs::write(paths.workspace_settings_file(&name), "::: not toml at all").unwrap();
         let out = compose(&name, &paths);
         assert_eq!(out, SCAFFOLD);
+    }
+
+    #[test]
+    fn compose_wraps_blurb_in_imperative_routing_line() {
+        let out = compose_from_short("database migrations, release notes, auth flows");
+        assert!(out.starts_with(SCAFFOLD), "keeps the mechanical scaffold");
+        assert!(
+            out.contains(
+                "Before working on tasks related to database migrations, release notes, auth flows"
+            ),
+            "imperative routing line present: {out}"
+        );
+        assert!(
+            out.contains("search for relevant skills before you start"),
+            "imperative instruction present: {out}"
+        );
+    }
+
+    #[test]
+    fn compose_from_empty_short_is_scaffold_only() {
+        assert_eq!(compose_from_short(""), SCAFFOLD);
+        assert_eq!(compose_from_short("   "), SCAFFOLD);
     }
 }
