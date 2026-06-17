@@ -168,3 +168,80 @@ fn sync_installs_tome_session_start_hook_for_claude_code() {
         "re-sync must not change settings.local.json (idempotent)"
     );
 }
+
+/// When the stub harness (configured `RealJson`) is dropped from the effective
+/// harness list, `remove_hooks_for_harness` removes the Tome-owned
+/// `SessionStart` entry and `prune_empty_event` removes the now-empty
+/// `SessionStart` key entirely (FR-006 pruning).
+#[test]
+fn sync_removes_tome_session_start_hook_when_claude_code_non_live() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(
+        StubHarness::default()
+            .with_hooks_strategy(HooksStrategy::RealJson)
+            .with_hook_settings(),
+    )]);
+
+    let fx = Fixture::build("test-workspace", "\"stub\"");
+
+    let url = seed_hooks_source(
+        &fx.paths,
+        "plugin-a",
+        r#"{ "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/guard.sh" } ] } ] }"#,
+    );
+
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw");
+    tome::index::workspace_catalogs::insert(&conn, "test-workspace", "cat", &url, "main")
+        .expect("enrol catalog");
+    drop(conn);
+    insert_enabled_skill_row(&fx.paths, "test-workspace", "cat", "plugin-a", "skill-a");
+
+    // ----- sync 1: SessionStart entry lands -----
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync 1");
+
+    let hooks_path = fx.project.join(".stub/settings.local.json");
+    assert!(
+        hooks_path.is_file(),
+        "settings.local.json created on sync 1"
+    );
+
+    let doc: JsonValue =
+        serde_json::from_str(&std::fs::read_to_string(&hooks_path).expect("read settings"))
+            .expect("parse settings");
+    let session_start = doc["hooks"]["SessionStart"]
+        .as_array()
+        .expect("SessionStart event array present after sync 1");
+    assert!(
+        session_start.iter().any(|entry| {
+            entry["hooks"][0]["command"]
+                .as_str()
+                .is_some_and(|c| c.contains("harness session-context"))
+        }),
+        "SessionStart must contain the `harness session-context` entry after sync 1; got: {doc}"
+    );
+
+    // ----- sync 2: drop the harness from the effective list -----
+    std::fs::write(
+        fx.project.join(".tome/config.toml"),
+        "workspace = \"test-workspace\"\nharnesses = []\n",
+    )
+    .expect("rewrite marker to empty harness list");
+
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync 2");
+
+    // The `SessionStart` key must be gone (prune_empty_event removes it once
+    // all owned entries are removed and the array is empty).
+    let doc2: JsonValue = serde_json::from_str(
+        &std::fs::read_to_string(&hooks_path).expect("read settings after sync 2"),
+    )
+    .expect("parse settings after sync 2");
+    assert!(
+        doc2["hooks"]
+            .as_object()
+            .map(|o| !o.contains_key("SessionStart"))
+            .unwrap_or(true),
+        "`SessionStart` key must be pruned when the harness goes non-live; got: {doc2}"
+    );
+}
