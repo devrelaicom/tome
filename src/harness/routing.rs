@@ -120,6 +120,33 @@ pub fn session_start_hook(
     }
 }
 
+/// The Tome-owned Codex `SessionStart` hook entry. Codex's `hooks.json` entry
+/// shape carries a `matcher` (matched against the session `source`) plus a
+/// nested `hooks` array. `"startup|resume"` fires on fresh sessions and resumes
+/// (not `clear`/`compact`). Ownership is by structural deep-equal (no sidecar),
+/// so the exact bytes ARE the ownership marker — keep them stable. The command
+/// runs the harness-agnostic `session-context` printer; its plain-markdown
+/// stdout becomes Codex developer context.
+pub fn codex_session_start_hook(
+    tome_command: &str,
+    workspace_name: &str,
+) -> crate::harness::hooks::RewrittenHooks {
+    let entry = serde_json::json!({
+        "matcher": "startup|resume",
+        "hooks": [
+            {
+                "type": "command",
+                "command": format!(
+                    "{tome_command} harness session-context --workspace {workspace_name}"
+                )
+            }
+        ]
+    });
+    crate::harness::hooks::RewrittenHooks {
+        events: vec![("SessionStart".to_string(), vec![entry])],
+    }
+}
+
 /// Read the cached LONG summary text for a workspace from its `settings.toml`
 /// `[summaries]` block. `None` when the file or block is absent / unparsable —
 /// the Tier 3 section then falls back to enumeration. Mirrors
@@ -231,5 +258,21 @@ mod tests {
         let paths = Paths::from_root(tmp.path().join(".tome"));
         let name = WorkspaceName::parse("mine").unwrap();
         assert_eq!(read_cached_long_summary(&paths, &name), None);
+    }
+
+    #[test]
+    fn codex_session_start_hook_has_matcher_and_command() {
+        let h = codex_session_start_hook("tome", "my-ws");
+        assert_eq!(h.events.len(), 1);
+        let (event, entries) = &h.events[0];
+        assert_eq!(event, "SessionStart");
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e["matcher"], "startup|resume");
+        assert_eq!(
+            e["hooks"][0]["command"],
+            "tome harness session-context --workspace my-ws"
+        );
+        assert_eq!(e["hooks"][0]["type"], "command");
     }
 }

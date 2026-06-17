@@ -40,7 +40,7 @@ use serde::Serialize;
 use crate::error::TomeError;
 use crate::harness::reconcile::agents::reconcile_agents;
 use crate::harness::reconcile::guardrails::reconcile_guardrails;
-use crate::harness::reconcile::hooks::reconcile_hooks;
+use crate::harness::reconcile::hooks::{reconcile_hooks, reconcile_tome_session_hooks};
 // Shared bookkeeping for the orchestrator's rules/MCP loop; the per-sink
 // reconcilers under `reconcile/` call the same path (Phase 7 / FR-011).
 use crate::harness::reconcile::record_action;
@@ -395,6 +395,18 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         }
     }
 
+    // Phase 11: Tome's own SessionStart routing hook for non-RealJson harnesses
+    // (Codex). Separate from the plugin-hooks pass above so plugin hooks are never
+    // mapped onto Codex. Reuses the `hooks_action` decision field + the hooks error
+    // class.
+    let (codex_hook_actions, codex_hook_error) =
+        reconcile_tome_session_hooks(deps, &effective_names, &snapshots, &mut outcome);
+    for decision in &mut outcome.decisions {
+        if let Some(action) = codex_hook_actions.get(&decision.harness) {
+            decision.hooks_action = *action;
+        }
+    }
+
     // -----------------------------------------------------------------
     // 3c2. Guardrails (Phase 6 / US3) — SECOND among the Phase 6 sinks.
     //
@@ -449,6 +461,9 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     if let Some(hooks_err) = hooks_recon.first_error {
         return Err(hooks_err);
     }
+    if let Some(codex_hook_err) = codex_hook_error {
+        return Err(codex_hook_err);
+    }
     if let Some(guardrails_err) = guardrails_recon.first_error {
         return Err(guardrails_err);
     }
@@ -488,6 +503,11 @@ pub(crate) struct HarnessSnapshot {
     /// harness (no real-hook participation; the guardrails fallback is US3).
     /// `pub(crate)` so the hooks reconciler reads it across the module boundary.
     pub(crate) hook_settings_path: Option<PathBuf>,
+    /// Phase 11: the JSON sink for Tome's OWN session-start routing hook on a
+    /// non-`RealJson` harness (Codex → `<project>/.codex/hooks.json`). `None`
+    /// for harnesses with no Tome-owned session hook (or whose Tome hook rides
+    /// the `RealJson` pass, e.g. Claude Code).
+    pub(crate) tome_session_hook_path: Option<PathBuf>,
     /// Phase 6 / US3: the harness's guardrails sink (in-file region or Cursor
     /// standalone sibling) plus its hooks-driven suppression flag.
     pub(crate) guardrails_target: crate::harness::GuardrailsTarget,
@@ -518,6 +538,7 @@ fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) ->
             crate::harness::HooksStrategy::RealJson => m.hook_settings_path(project_root),
             crate::harness::HooksStrategy::GuardrailsOnly => None,
         },
+        tome_session_hook_path: m.tome_session_hook_path(project_root),
         guardrails_target: m.guardrails_target(project_root),
     }
 }

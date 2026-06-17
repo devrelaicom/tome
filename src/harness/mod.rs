@@ -259,6 +259,19 @@ pub trait HarnessModule: Send + Sync {
         None
     }
 
+    /// Path to the JSON hooks file into which Tome writes its OWN
+    /// `SessionStart` routing hook (the directive deliverer), for harnesses
+    /// that support a session-start hook but are NOT routed through the
+    /// Claude-Code `RealJson` plugin-hooks pass. `None` (default) means the
+    /// harness gets no Tome-owned session hook. This is deliberately separate
+    /// from [`Self::hook_settings_path`]: a harness here receives ONLY Tome's
+    /// own hook, never plugin hooks (plugin→harness hook mapping is not yet
+    /// implemented). Claude Code returns `None` here — its Tome hook rides the
+    /// `RealJson` pass alongside plugin hooks.
+    fn tome_session_hook_path(&self, _project_root: &Path) -> Option<PathBuf> {
+        None
+    }
+
     /// The harness's guardrails sink (FR-011, FR-012). Default: an in-file
     /// region on the harness's own rules-file target, with no
     /// hooks-driven suppression.

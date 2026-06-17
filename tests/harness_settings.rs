@@ -8,6 +8,8 @@
 
 mod common;
 
+#[path = "harness_settings/codex_session_hook.rs"]
+mod codex_session_hook;
 #[path = "harness_settings/guardrails_marker_injection.rs"]
 mod guardrails_marker_injection;
 #[path = "harness_settings/guardrails_render.rs"]
