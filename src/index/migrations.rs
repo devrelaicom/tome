@@ -51,7 +51,9 @@ pub struct Migration {
 /// `searchable`, `user_invocable`, and `when_to_use` columns. Phase 6
 /// registers the third: `phase_6_v3_to_v4`, a marker-only no-op that
 /// advances the version because the free-text `kind` column already admits
-/// the new `'agent'` value without DDL (entry-schema-p6.md).
+/// the new `'agent'` value without DDL (entry-schema-p6.md). Phase 11
+/// registers the fourth: `phase_11_v4_to_v5`, adding `workspace_skills.tier`
+/// for tiered skill routing (every pre-existing enrolment defaults to tier 3).
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         from: 1,
@@ -70,6 +72,12 @@ pub const MIGRATIONS: &[Migration] = &[
         to: 4,
         name: "phase6_kind_domain_agent_marker",
         apply: phase_6_v3_to_v4,
+    },
+    Migration {
+        from: 4,
+        to: 5,
+        name: "phase11_workspace_skills_tier",
+        apply: phase_11_v4_to_v5,
     },
 ];
 
@@ -293,6 +301,22 @@ fn phase_5_v2_to_v3(tx: &Transaction) -> Result<(), TomeError> {
 /// records `meta.schema_version = 4` after this returns `Ok`; the body
 /// itself touches nothing.
 fn phase_6_v3_to_v4(_tx: &Transaction) -> Result<(), TomeError> {
+    Ok(())
+}
+
+/// The schema v4 → v5 migration body (Phase 11 / tiered skill routing). A
+/// purely additive `ALTER TABLE ... ADD COLUMN`: `workspace_skills` carries no
+/// index or CHECK constraint that blocks ADD COLUMN (unlike the `skills`
+/// rebuilds above), so no 12-step rebuild is needed. Every pre-existing
+/// enrolment row gains `tier = 3` (the default routing tier). `apply_pending`
+/// records `meta.schema_version = 5` after this returns `Ok`.
+fn phase_11_v4_to_v5(tx: &Transaction) -> Result<(), TomeError> {
+    tx.execute_batch("ALTER TABLE workspace_skills ADD COLUMN tier INTEGER NOT NULL DEFAULT 3;")
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!(
+                "phase_11_v4_to_v5: add workspace_skills.tier: {e}"
+            ))
+        })?;
     Ok(())
 }
 
@@ -560,4 +584,44 @@ fn active_migrations() -> &'static [Migration] {
 /// folded by callers (default = ON = 1).
 fn read_fk_pragma(conn: &Connection) -> Result<i64, rusqlite::Error> {
     conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+}
+
+#[cfg(test)]
+mod tier_migration_tests {
+    use rusqlite::Connection;
+
+    #[test]
+    fn v4_to_v5_adds_tier_default_three() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+             INSERT INTO meta (key, value) VALUES ('schema_version', '4');
+             CREATE TABLE workspaces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL,
+                created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL);
+             INSERT INTO workspaces (name, created_at, last_used_at) VALUES ('global', 0, 0);
+             CREATE TABLE skills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, catalog TEXT NOT NULL,
+                plugin TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'skill',
+                description TEXT NOT NULL, plugin_version TEXT NOT NULL, path TEXT NOT NULL,
+                content_hash TEXT NOT NULL, searchable INTEGER NOT NULL DEFAULT 1,
+                user_invocable INTEGER NOT NULL DEFAULT 0, when_to_use TEXT,
+                indexed_at INTEGER NOT NULL);
+             INSERT INTO skills (catalog, plugin, name, description, plugin_version, path, content_hash, indexed_at)
+                VALUES ('cat', 'plug', 'sk', 'd', '1.0.0', 'skills/sk/SKILL.md', 'h', 0);
+             CREATE TABLE workspace_skills (
+                workspace_id INTEGER NOT NULL, skill_id INTEGER NOT NULL,
+                enabled_at INTEGER NOT NULL, PRIMARY KEY (workspace_id, skill_id));
+             INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (1, 1, 0);",
+        )
+        .unwrap();
+
+        let new_version = super::apply_pending(&mut conn, 4, 5).unwrap();
+        assert_eq!(new_version, 5);
+
+        let tier: i64 = conn
+            .query_row("SELECT tier FROM workspace_skills WHERE skill_id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tier, 3, "pre-existing rows default to Tier 3");
+    }
 }

@@ -28,9 +28,11 @@ use crate::error::TomeError;
 /// migration (entry-schema-p6.md): the `kind` column is free-text TEXT so
 /// admitting `'agent'` needs no DDL — the migration exists solely to keep
 /// the schema version monotonic and auditable so doctor's schema check and
-/// the migration registry agree the `kind` domain widened. Bumping further
-/// requires a matching `Migration` row in [`crate::index::migrations`].
-pub const SCHEMA_VERSION: u32 = 4;
+/// the migration registry agree the `kind` domain widened. Phase 11 bumps
+/// to 5: `workspace_skills.tier` column added (tiered skill routing). A
+/// matching `Migration` row in [`crate::index::migrations`] handles
+/// existing databases.
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// The privileged seeded workspace name, present after every bootstrap and
 /// migration. Phase 4's lifecycle paths route un-bound operations through
@@ -97,10 +99,14 @@ pub const CREATE_STATEMENTS: &[&str] = &[
         skill_id   INTEGER PRIMARY KEY,
         embedding  FLOAT[384]
     )",
+    // Phase 11 / schema v5: `tier` column added (tiered skill routing).
+    // Fresh bootstraps land here directly; existing DBs gain the column
+    // via the phase_11_v4_to_v5 migration.
     "CREATE TABLE workspace_skills (
         workspace_id  INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
         skill_id      INTEGER NOT NULL REFERENCES skills(id)     ON DELETE CASCADE,
         enabled_at    INTEGER NOT NULL,
+        tier          INTEGER NOT NULL DEFAULT 3,
         PRIMARY KEY (workspace_id, skill_id)
     )",
     "CREATE TABLE workspace_catalogs (

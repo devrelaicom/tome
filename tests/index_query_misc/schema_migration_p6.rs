@@ -19,12 +19,16 @@ use tome::index::migrations::{apply_pending, current_schema_version};
 
 #[test]
 fn kind_domain_marker_bumps_version() {
-    // Compiled-in schema version reached 4 in Phase 6.
-    assert_eq!(SCHEMA_VERSION, 4, "Phase 6 bumps SCHEMA_VERSION to 4");
+    // Phase 6 introduced the v3→v4 marker migration. SCHEMA_VERSION has
+    // since advanced (Phase 11 bumped it to 5); the assertion below pins
+    // only that the compiled version is at least 4, not the exact value.
+    assert!(SCHEMA_VERSION >= 4, "Phase 6 must have bumped SCHEMA_VERSION to at least 4");
 
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("index.db");
-    // Stamp a synthetic v3 DB, then run the production marker migration.
+    // Stamp a synthetic v3 DB, then run the production marker migration
+    // targeting v4 explicitly — this exercises the real phase_6_v3_to_v4
+    // step regardless of the current compiled SCHEMA_VERSION.
     write_index_db_with_schema_version(&path, 3);
 
     let mut conn = rusqlite::Connection::open(&path).expect("open synthetic v3 db");
