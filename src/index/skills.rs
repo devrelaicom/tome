@@ -1072,6 +1072,135 @@ where
     Ok(summary)
 }
 
+/// One tierable entry (skill or command) enabled in a workspace, projected for
+/// the routing-directive builder and `tome tier list`. Agents are excluded —
+/// they are delivered as native translated files, not via the MCP retrieval
+/// tools, so they carry no tier.
+#[derive(Debug, Clone)]
+pub struct TieredEntry {
+    pub catalog: String,
+    pub plugin: String,
+    pub name: String,
+    pub kind: EntryKind,
+    pub description: String,
+    pub when_to_use: Option<String>,
+    /// The `workspace_skills.tier` column (1 | 2 | 3).
+    pub tier: u8,
+}
+
+/// Every `skill`/`command` row enabled in `workspace_name`, with its routing
+/// tier, ordered by `(tier, catalog, plugin, name)` so the generated directive
+/// is byte-stable across runs. Agents (`kind = 'agent'`) are excluded.
+pub fn tiered_entries_for_workspace(
+    conn: &Connection,
+    workspace_name: &str,
+) -> Result<Vec<TieredEntry>, TomeError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.catalog, s.plugin, s.name, s.kind, s.description, s.when_to_use, ws.tier
+             FROM skills AS s
+             JOIN workspace_skills AS ws ON ws.skill_id = s.id
+             JOIN workspaces       AS w  ON w.id = ws.workspace_id
+             WHERE w.name = ?1 AND s.kind IN ('skill', 'command')
+             ORDER BY ws.tier, s.catalog, s.plugin, s.name",
+        )
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!("prepare tiered entries: {e}"))
+        })?;
+    let rows = stmt
+        .query_map(params![workspace_name], |row| {
+            let kind_text: String = row.get(3)?;
+            let kind = kind_text.parse::<EntryKind>().map_err(|msg| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::other(msg)),
+                )
+            })?;
+            Ok(TieredEntry {
+                catalog: row.get(0)?,
+                plugin: row.get(1)?,
+                name: row.get(2)?,
+                kind,
+                description: row.get(4)?,
+                when_to_use: row.get::<_, Option<String>>(5)?,
+                tier: row.get::<_, i64>(6)? as u8,
+            })
+        })
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query tiered entries: {e}")))?;
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect tiered entries: {e}")))
+}
+
+/// Set the routing `tier` for one enabled `(catalog, plugin, kind, name)` entry
+/// in `workspace_name`. Returns `EntryNotFound` (exit 27) when no enrolled row
+/// matches — addressing an entry that is not enabled in the workspace, or does
+/// not exist, is the same user-facing error.
+pub fn set_tier_for_entry(
+    conn: &Connection,
+    workspace_name: &str,
+    catalog: &str,
+    plugin: &str,
+    kind: &EntryKind,
+    name: &str,
+    tier: u8,
+) -> Result<(), TomeError> {
+    let affected = conn
+        .execute(
+            "UPDATE workspace_skills
+             SET tier = ?1
+             WHERE workspace_id = (SELECT id FROM workspaces WHERE name = ?2)
+               AND skill_id = (SELECT s.id FROM skills s
+                               WHERE s.catalog = ?3 AND s.plugin = ?4
+                                 AND s.kind = ?5 AND s.name = ?6)",
+            params![
+                tier as i64,
+                workspace_name,
+                catalog,
+                plugin,
+                kind.as_str(),
+                name
+            ],
+        )
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("set tier: {e}")))?;
+    if affected == 0 {
+        return Err(TomeError::EntryNotFound {
+            catalog: catalog.to_owned(),
+            plugin: plugin.to_owned(),
+            name: name.to_owned(),
+            kind: kind.as_str().to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// Bulk-set the tier for every enabled `skill`/`command` entry of one plugin in
+/// `workspace_name` (the `tome plugin enable --tier` path). Agents are left
+/// untouched. Returns the number of rows updated (0 when the plugin has no
+/// enrolled tierable entries — a benign no-op the caller may ignore).
+pub fn set_tier_for_plugin(
+    conn: &Connection,
+    workspace_name: &str,
+    catalog: &str,
+    plugin: &str,
+    tier: u8,
+) -> Result<u32, TomeError> {
+    let affected = conn
+        .execute(
+            "UPDATE workspace_skills
+             SET tier = ?1
+             WHERE workspace_id = (SELECT id FROM workspaces WHERE name = ?2)
+               AND skill_id IN (SELECT s.id FROM skills s
+                                WHERE s.catalog = ?3 AND s.plugin = ?4
+                                  AND s.kind IN ('skill', 'command'))",
+            params![tier as i64, workspace_name, catalog, plugin],
+        )
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("set tier for plugin: {e}")))?;
+    u32::try_from(affected).map_err(|_| {
+        TomeError::IndexIntegrityCheckFailure(format!("affected rows ({affected}) overflows u32"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1184,6 +1313,138 @@ mod tests {
         assert!(
             !clashes.contains("ghost"),
             "disabled (non-enrolled) agents do not contribute to the clash set",
+        );
+    }
+
+    /// Insert a skill or command row and enrol it in `global` with the default
+    /// tier (3). Returns the `workspace_skills.skill_id` so callers can set a
+    /// specific tier after insertion.
+    fn insert_enabled_entry(
+        conn: &Connection,
+        catalog: &str,
+        plugin: &str,
+        kind: EntryKind,
+        name: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO skills
+                (catalog, plugin, name, kind, description, plugin_version,
+                 path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+             VALUES (?1, ?2, ?3, ?4, 'desc', '0.0.0', ?5, 'h', 1, 1, NULL, '1970-01-01T00:00:00Z')",
+            params![
+                catalog,
+                plugin,
+                name,
+                kind.as_str(),
+                format!("skills/{name}.md"),
+            ],
+        )
+        .expect("insert entry");
+        let skill_id: i64 = conn
+            .query_row(
+                "SELECT id FROM skills WHERE catalog=?1 AND plugin=?2 AND kind=?3 AND name=?4",
+                params![catalog, plugin, kind.as_str(), name],
+                |r| r.get(0),
+            )
+            .expect("skill id");
+        let ws_id: i64 = conn
+            .query_row("SELECT id FROM workspaces WHERE name = 'global'", [], |r| {
+                r.get(0)
+            })
+            .expect("global ws id");
+        conn.execute(
+            "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+            params![ws_id, skill_id],
+        )
+        .expect("enrol entry");
+    }
+
+    #[test]
+    fn tiered_entries_excludes_agents_and_carries_tier() {
+        let dir = TempDir::new().unwrap();
+        let conn = open_db(&dir);
+
+        insert_enabled_entry(&conn, "cat", "plug", EntryKind::Skill, "my-skill");
+        insert_enabled_entry(&conn, "cat", "plug", EntryKind::Command, "my-cmd");
+        insert_enabled_agent(&conn, "cat", "plug", "my-agent");
+
+        // Set skill → tier 1, command → tier 2.
+        set_tier_for_entry(
+            &conn,
+            "global",
+            "cat",
+            "plug",
+            &EntryKind::Skill,
+            "my-skill",
+            1,
+        )
+        .expect("set skill tier");
+        set_tier_for_entry(
+            &conn,
+            "global",
+            "cat",
+            "plug",
+            &EntryKind::Command,
+            "my-cmd",
+            2,
+        )
+        .expect("set command tier");
+
+        let entries = tiered_entries_for_workspace(&conn, "global").expect("tiered entries");
+        assert_eq!(entries.len(), 2, "agent must be excluded");
+
+        let skill = entries
+            .iter()
+            .find(|e| e.name == "my-skill")
+            .expect("skill");
+        assert_eq!(skill.tier, 1, "skill tier must be 1");
+        assert_eq!(skill.kind, EntryKind::Skill);
+
+        let cmd = entries.iter().find(|e| e.name == "my-cmd").expect("cmd");
+        assert_eq!(cmd.tier, 2, "command tier must be 2");
+        assert_eq!(cmd.kind, EntryKind::Command);
+    }
+
+    #[test]
+    fn set_tier_on_unenabled_entry_is_entry_not_found() {
+        let dir = TempDir::new().unwrap();
+        let conn = open_db(&dir);
+
+        // Nothing enrolled — any set_tier call must return EntryNotFound.
+        let err = set_tier_for_entry(
+            &conn,
+            "global",
+            "cat",
+            "plug",
+            &EntryKind::Skill,
+            "ghost",
+            1,
+        )
+        .expect_err("must fail for unenrolled entry");
+        assert!(
+            matches!(err, TomeError::EntryNotFound { .. }),
+            "expected EntryNotFound, got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn set_tier_for_plugin_bulk() {
+        let dir = TempDir::new().unwrap();
+        let conn = open_db(&dir);
+
+        insert_enabled_entry(&conn, "cat", "plug", EntryKind::Skill, "alpha");
+        insert_enabled_entry(&conn, "cat", "plug", EntryKind::Skill, "beta");
+        // An agent in the same plugin — must be left untouched (not counted).
+        insert_enabled_agent(&conn, "cat", "plug", "bot");
+
+        let updated =
+            set_tier_for_plugin(&conn, "global", "cat", "plug", 1).expect("bulk set tier");
+        assert_eq!(updated, 2, "only skill/command rows should be updated");
+
+        let entries = tiered_entries_for_workspace(&conn, "global").expect("tiered entries");
+        assert!(
+            entries.iter().all(|e| e.tier == 1),
+            "all tierable entries must have tier 1",
         );
     }
 }
