@@ -44,9 +44,9 @@ fn recompute_updates_tool_description_after_blurb_change() {
 
     // Capture the baseline drift signal BEFORE the out-of-process change.
     let prev = live_sync::probe(&state.scope, &state.paths).expect("probe baseline");
-    assert!(
-        prev.short_blurb.is_empty(),
-        "test setup: no cached short summary yet",
+    assert_eq!(
+        prev.description, SCAFFOLD,
+        "test setup: no cached short summary yet -> the bare scaffold",
     );
 
     // Simulate a CLI regenerating the workspace summary: write a new
@@ -66,7 +66,11 @@ fn recompute_updates_tool_description_after_blurb_change() {
 
     // Re-probe: the signal now carries the new blurb, so it differs.
     let next = live_sync::probe(&state.scope, &state.paths).expect("probe after write");
-    assert_eq!(next.short_blurb, NEW_BLURB, "probe picks up the new blurb");
+    assert!(
+        next.description.contains(NEW_BLURB),
+        "probe picks up the new blurb in the composed description, got:\n{}",
+        next.description,
+    );
     assert_ne!(prev, next, "the drift signal changed");
 
     // Recompute against the harness's REAL cells.

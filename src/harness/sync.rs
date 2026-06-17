@@ -256,8 +256,34 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     let snapshots = collect_harness_snapshots(project_root, deps);
     let mut outcome = SyncOutcome::default();
 
-    // Build the dedup maps for shared rules-file / MCP paths.
-    let rules_targets_by_path = group_by_path(&snapshots, |s| &s.rules_path);
+    // The bytes written to a SHARED rules file must stay correct for EVERY live
+    // co-owner of that path, regardless of `--harness`. A `--harness X` run still
+    // touches only X's own sinks (the main loop below iterates the FILTERED
+    // `snapshots`), but the body-style LCD and the live-sharer set for a shared
+    // rules path are computed against the FULL effective registry — otherwise
+    // `tome sync --harness codex` on a codex+opencode project would see only
+    // codex as a sharer, pick the `AtInclude` LCD, and rewrite the shared
+    // `AGENTS.md` to `@include` form, breaking opencode's still-live inline view
+    // until a full sync. So the rules-path grouping is built from an UNFILTERED
+    // snapshot pass; when `only_harness` is `None` this is identical to
+    // `snapshots`, so the full-sync path is byte-for-byte unchanged.
+    let all_snapshots = match deps.only_harness {
+        Some(_) => collect_all_harness_snapshots(project_root, deps),
+        // No filter active — the full pass already IS `snapshots`; avoid the
+        // second registry walk + allocation.
+        None => Vec::new(),
+    };
+    let rules_grouping_source: &[HarnessSnapshot] = match deps.only_harness {
+        Some(_) => &all_snapshots,
+        None => &snapshots,
+    };
+
+    // Build the dedup maps for shared rules-file / MCP paths. The rules map is
+    // keyed off the FULL effective view (so a shared file's body stays correct
+    // for every live co-owner under `--harness`); the MCP map stays scoped to the
+    // FILTERED set — MCP entries are per-harness writes, never co-owned content,
+    // so a `--harness X` run must not consult other harnesses' MCP sharers.
+    let rules_targets_by_path = group_by_path(rules_grouping_source, |s| &s.rules_path);
     let mcp_targets_by_path = group_by_path(&snapshots, |s| &s.mcp_path);
 
     // Track which deduplicated targets have already been processed so
@@ -535,6 +561,20 @@ fn collect_harness_snapshots(project_root: &Path, deps: &SyncDeps<'_>) -> Vec<Ha
                 Some(only) => m.name() == only,
                 None => true,
             })
+            .map(|m| snapshot_for(*m, project_root, deps.home_root))
+            .collect()
+    })
+}
+
+/// Snapshot the FULL effective registry, ignoring `only_harness`. Used solely
+/// to compute the body-style LCD + live-sharer set for SHARED rules paths under
+/// `tome sync --harness <name>`: a shared rules file's content must stay correct
+/// for every live co-owner, even ones not being reconciled this pass. The main
+/// per-harness write/leave-alone loop still iterates the FILTERED snapshots, so
+/// non-shared sinks for other harnesses stay untouched.
+fn collect_all_harness_snapshots(project_root: &Path, deps: &SyncDeps<'_>) -> Vec<HarnessSnapshot> {
+    with_effective_modules(|mods| {
+        mods.iter()
             .map(|m| snapshot_for(*m, project_root, deps.home_root))
             .collect()
     })

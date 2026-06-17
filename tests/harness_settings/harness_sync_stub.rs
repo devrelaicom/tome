@@ -1033,6 +1033,74 @@ fn sync_with_only_harness_touches_just_that_harness() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// 11b. I-1 regression: `--harness <X>` on a project where X co-owns a SHARED
+//     rules file with another LIVE harness whose body style is `Inline` must
+//     preserve the inline LCD body — it must NOT rewrite the shared file to the
+//     bare `@`-include form just because the filtered snapshot set sees only X.
+//
+//     codex (AtInclude) + opencode (Inline) both write `<project>/AGENTS.md`.
+//     `tome sync --harness codex` must still write the INLINE body (opencode is
+//     a live co-owner), keeping opencode's view intact. A full sync already does
+//     this; the bug was that the filtered `--harness` path computed the
+//     body-style LCD over the one-element (codex-only) snapshot set.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn only_harness_preserves_inline_lcd_for_shared_rules_with_live_coowner() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // codex + opencode both target `<project>/AGENTS.md`; codex is `AtInclude`,
+    // opencode is `Inline`. Both effective.
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(tome::harness::codex::CODEX),
+        Box::new(tome::harness::opencode::OPENCODE),
+    ]);
+
+    let fx = Fixture::build(
+        "test-workspace",
+        Some("harnesses = [\"codex\", \"opencode\"]"),
+    );
+
+    // Author a non-empty project RULES.md so the inline body is distinguishable
+    // from the bare `@.tome/RULES.md` include directive.
+    let rules_marker = fx.project.join(".tome/RULES.md");
+    let rules_text = "INLINE RULES BODY MARKER\n";
+    std::fs::write(&rules_marker, rules_text).expect("write project RULES.md");
+
+    let agents_md = fx.project.join("AGENTS.md");
+
+    // ----- Sanity: a FULL sync writes the inline body (opencode forces it). -----
+    sync::sync_project(&fx.project, &fx.deps(false)).expect("full sync");
+    let full_body = std::fs::read_to_string(&agents_md).expect("read AGENTS.md after full sync");
+    assert!(
+        full_body.contains("INLINE RULES BODY MARKER"),
+        "full sync must write the inline LCD body for codex+opencode; got: {full_body}",
+    );
+    assert!(
+        !full_body.contains("@.tome/RULES.md"),
+        "full sync must NOT use the bare @-include form; got: {full_body}",
+    );
+
+    // ----- The bug: `--harness codex` must NOT downgrade to the @-include. -----
+    let mut deps = fx.deps(false);
+    deps.only_harness = Some("codex".to_string());
+    sync::sync_project(&fx.project, &deps).expect("sync codex only");
+
+    let after_body = std::fs::read_to_string(&agents_md).expect("read AGENTS.md after --harness");
+    assert!(
+        after_body.contains("INLINE RULES BODY MARKER"),
+        "`--harness codex` must preserve opencode's inline view (the LCD across \
+         ALL live co-owners), NOT rewrite the shared AGENTS.md to @-include; got: {after_body}",
+    );
+    assert!(
+        !after_body.contains("@.tome/RULES.md"),
+        "`--harness codex` must NOT write the bare @-include directive into the \
+         shared file while opencode is a live co-owner; got: {after_body}",
+    );
+}
+
 #[test]
 fn workspace_settings_supply_harness_list_when_marker_omits_key() {
     let _lock = crate::common::HARNESS_OVERRIDE_MUTEX

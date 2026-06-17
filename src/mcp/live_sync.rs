@@ -17,7 +17,7 @@ use rmcp::{Peer, RoleServer};
 use crate::mcp::server::Server;
 use crate::mcp::state::McpState;
 use crate::paths::Paths;
-use crate::workspace::{ResolvedScope, WorkspaceName};
+use crate::workspace::ResolvedScope;
 
 /// Cheap fingerprint of the inputs that determine the prompt list + the tool
 /// description. Recomputed each tick; a change triggers a rebuild.
@@ -27,8 +27,15 @@ pub struct DriftSignal {
     pub entry_count: i64,
     /// MAX(indexed_at) over those entries (0 when none).
     pub max_indexed_at: i64,
-    /// The cached `[summaries].short` content (feeds the description).
-    pub short_blurb: String,
+    /// The FULLY-COMPOSED `search_skills` description — the SAME value the swap
+    /// produces (via [`crate::mcp::tool_description::compose`], the LENIENT
+    /// reader). The drift gate keys off this so it can never diverge from what
+    /// the swap would write: keying off the strict `[summaries].short` reader
+    /// instead would blind the gate whenever `settings.toml` is malformed or
+    /// missing `[summaries].generated_at` (the strict parser returns `""` every
+    /// tick, so a blurb-only change leaves `next == last` and the description
+    /// goes stale until restart).
+    pub description: String,
 }
 
 /// Which live surfaces changed on a recompute.
@@ -63,29 +70,15 @@ pub fn probe(scope: &ResolvedScope, paths: &Paths) -> Result<DriftSignal, crate:
     } else {
         (0, 0)
     };
-    let short_blurb = read_short(paths, name);
+    // Compose via the LENIENT path (`tool_description::compose` → raw `toml::Value`),
+    // the SAME function the swap calls, so the gate and the swap share one source
+    // of truth and can never diverge.
+    let description = crate::mcp::tool_description::compose(name, paths);
     Ok(DriftSignal {
         entry_count,
         max_indexed_at,
-        short_blurb,
+        description,
     })
-}
-
-/// Read the workspace's cached `[summaries].short`, best-effort. Mirrors the
-/// `harness::routing` long-summary read but pulls the `short` field (the one
-/// that feeds the `search_skills` description). Any read/parse failure degrades
-/// to an empty blurb — a malformed cache must never refuse the drift probe.
-fn read_short(paths: &Paths, name: &WorkspaceName) -> String {
-    let settings_path = paths.workspace_settings_file(name);
-    let Ok(body) =
-        crate::util::bounded_read_to_string(&settings_path, crate::util::TOME_CONFIG_MAX)
-    else {
-        return String::new();
-    };
-    match crate::settings::parser::parse_workspace(&body) {
-        Ok(p) => p.summaries.map(|s| s.short).unwrap_or_default(),
-        Err(_) => String::new(),
-    }
 }
 
 /// Rebuild whichever surface the new signal indicates changed, swap the cells
@@ -122,12 +115,13 @@ pub fn recompute(
         changed.prompts = true;
     }
 
-    // The description is cheap to recompose unconditionally (one bounded file
-    // read); compare against the cached value and only swap + flag on a real
-    // change so we don't emit a spurious `tools/list_changed`.
-    let new_desc = crate::mcp::tool_description::compose(state.scope.scope.name(), &state.paths);
-    if *desc_cell.read().unwrap_or_else(|e| e.into_inner()) != new_desc {
-        *desc_cell.write().unwrap_or_else(|e| e.into_inner()) = new_desc;
+    // The description swap uses the value already composed in `probe` (`next`),
+    // NOT a fresh `compose` call — this is the SSOT that guarantees the drift
+    // gate (`next == last` in `watch_turn`) and the swap can never diverge.
+    // Compare against the cached value and only swap + flag on a real change so
+    // we don't emit a spurious `tools/list_changed`.
+    if *desc_cell.read().unwrap_or_else(|e| e.into_inner()) != next.description {
+        *desc_cell.write().unwrap_or_else(|e| e.into_inner()) = next.description.clone();
         changed.tools = true;
     }
 
@@ -224,16 +218,16 @@ mod tests {
         let prev = DriftSignal {
             entry_count: 2,
             max_indexed_at: 100,
-            short_blurb: "a".into(),
+            description: "a".into(),
         };
         let next = DriftSignal {
             entry_count: 2,
             max_indexed_at: 100,
-            short_blurb: "b".into(),
+            description: "b".into(),
         };
         assert_ne!(prev, next);
         assert_eq!(prev.entry_count, next.entry_count);
-        assert_ne!(prev.short_blurb, next.short_blurb);
+        assert_ne!(prev.description, next.description);
     }
 
     #[test]
@@ -241,6 +235,6 @@ mod tests {
         let s = DriftSignal::default();
         assert_eq!(s.entry_count, 0);
         assert_eq!(s.max_indexed_at, 0);
-        assert!(s.short_blurb.is_empty());
+        assert!(s.description.is_empty());
     }
 }
