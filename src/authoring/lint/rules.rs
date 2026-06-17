@@ -407,6 +407,9 @@ impl Rule for EntryBodyBudget {
         Scope::Entry
     }
     fn check_entry(&self, e: &EntryIr) -> Vec<Diagnostic> {
+        if e.kind != EntryKind::Skill {
+            return Vec::new();
+        }
         let bytes = e.body.len();
         let est = est_tokens(bytes);
         let kb = bytes / 1024;
@@ -458,6 +461,9 @@ impl Rule for EntryResourceBudget {
         Scope::Entry
     }
     fn check_entry(&self, e: &EntryIr) -> Vec<Diagnostic> {
+        if e.kind != EntryKind::Skill {
+            return Vec::new();
+        }
         let Some(dir) = e.source_path.parent() else {
             return Vec::new();
         };
@@ -468,7 +474,7 @@ impl Rule for EntryResourceBudget {
 
         let mut out = Vec::new();
         for (path, bytes) in resources {
-            let est = est_tokens(bytes as usize);
+            let est = est_tokens(usize::try_from(bytes).unwrap_or(usize::MAX));
             if est >= self.budgets.hard_tokens {
                 let name = path.strip_prefix(dir).unwrap_or(&path).display();
                 out.push(
@@ -618,10 +624,11 @@ fn walk_text_resources(dir: &Path, skill_file: &Path, out: &mut Vec<(PathBuf, u6
         let path = entry.path();
         if ft.is_dir() {
             walk_text_resources(&path, skill_file, out);
-        } else if path != skill_file && is_text_like(&path) {
-            if let Ok(meta) = entry.metadata() {
-                out.push((path, meta.len()));
-            }
+        } else if path != skill_file
+            && is_text_like(&path)
+            && let Ok(meta) = entry.metadata()
+        {
+            out.push((path, meta.len()));
         }
     }
 }
@@ -790,6 +797,34 @@ mod tests {
 
         // Empty body is clean.
         assert!(rule.check_entry(&mk(0)).is_empty());
+    }
+
+    #[test]
+    fn budget_rules_ignore_non_skill_entries() {
+        // A Command with a huge body + the same-dir siblings must NOT be flagged:
+        // get_skill only ever serves Skills.
+        let big = "x".repeat(80_000); // ~20k tokens, well over any budget
+        let cmd = entry(
+            EntryKind::Command,
+            "do",
+            PathBuf::from("commands/do.md"),
+            Some("d"),
+            &big,
+        );
+        let body_rule = EntryBodyBudget {
+            budgets: TokenBudgets::from_max(25_000),
+        };
+        assert!(
+            body_rule.check_entry(&cmd).is_empty(),
+            "command body not flagged"
+        );
+        let res_rule = EntryResourceBudget {
+            budgets: TokenBudgets::from_max(25_000),
+        };
+        assert!(
+            res_rule.check_entry(&cmd).is_empty(),
+            "command siblings not walked"
+        );
     }
 
     #[test]
