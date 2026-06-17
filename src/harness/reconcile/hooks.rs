@@ -304,3 +304,80 @@ fn remove_hooks_for_harness(
         Action::LeftAlone
     }
 }
+
+// =====================================================================
+// Tome's own SessionStart routing hook for non-RealJson harnesses (Codex)
+// =====================================================================
+
+/// Reconcile Tome's OWN `SessionStart` routing hook for harnesses that expose a
+/// [`HarnessModule::tome_session_hook_path`](crate::harness::HarnessModule::tome_session_hook_path)
+/// but are NOT routed through the Claude-Code `RealJson` plugin-hooks pass
+/// (currently: Codex → `<project>/.codex/hooks.json`). Carries ONLY Tome's hook
+/// — never plugin hooks — so this never maps plugin hooks onto another harness.
+///
+/// Live harness → merge the Tome entry (structural-match, idempotent). Non-live
+/// → remove the deep-equal Tome entry (re-derived, no sidecar). A write failure
+/// for one harness is recorded on `first_error` (exit 44) and does not abort the
+/// pass (forward progress).
+pub(crate) fn reconcile_tome_session_hooks(
+    deps: &SyncDeps<'_>,
+    effective_names: &HashSet<String>,
+    snapshots: &[HarnessSnapshot],
+    outcome: &mut SyncOutcome,
+) -> (std::collections::HashMap<String, Action>, Option<TomeError>) {
+    let mut actions = std::collections::HashMap::new();
+    let mut first_error: Option<TomeError> = None;
+    let workspace = deps.workspace_name.as_str();
+
+    for snap in snapshots {
+        let Some(path) = &snap.tome_session_hook_path else {
+            continue;
+        };
+        let entry = crate::harness::routing::codex_session_start_hook("tome", workspace);
+        let is_live = effective_names.contains(&snap.name);
+        let action = if is_live {
+            let pre_existed = path.exists();
+            match crate::harness::hooks::merge_into_settings(path, &entry) {
+                Ok(true) => {
+                    let a = if pre_existed {
+                        Action::Updated
+                    } else {
+                        Action::Created
+                    };
+                    record_action(outcome, &snap.name, SyncSubsystem::Hooks, path, a);
+                    a
+                }
+                Ok(false) => Action::LeftAlone,
+                Err(e) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                    Action::LeftAlone
+                }
+            }
+        } else {
+            match crate::harness::hooks::remove_from_settings(path, &entry) {
+                Ok(true) => {
+                    record_action(
+                        outcome,
+                        &snap.name,
+                        SyncSubsystem::Hooks,
+                        path,
+                        Action::Removed,
+                    );
+                    Action::Removed
+                }
+                Ok(false) => Action::LeftAlone,
+                Err(e) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                    Action::LeftAlone
+                }
+            }
+        };
+        actions.insert(snap.name.clone(), action);
+    }
+
+    (actions, first_error)
+}
