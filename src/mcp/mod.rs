@@ -20,6 +20,7 @@
 //! `${XDG_STATE_HOME}/tome/mcp.log`. Each startup rotates the log if
 //! the existing file exceeds 10 MiB.
 
+pub mod live_sync;
 pub mod log;
 pub mod preflight;
 pub mod prompt_collision;
@@ -454,7 +455,7 @@ fn dispatch_flush() {
 /// trip over the advisory lock held by a concurrent writer. Returns
 /// the registry on success; surface DB / parse failures as
 /// [`TomeError`] so the MCP startup path can log + exit deterministically.
-fn build_prompt_registry(
+pub(crate) fn build_prompt_registry(
     scope: &ResolvedScope,
     paths: &Paths,
 ) -> Result<prompts::PromptRegistry, TomeError> {
