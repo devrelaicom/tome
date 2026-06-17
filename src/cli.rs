@@ -114,6 +114,61 @@ pub enum Command {
     /// toggle it, and `reset`/`purge` manage the local install identity.
     #[command(subcommand)]
     Telemetry(TelemetryCommand),
+    /// Set, list, or clear the per-workspace routing tier of enabled skills and
+    /// commands. Tiers drive what instructions Tome injects so an agent knows
+    /// when to fetch a skill (Tier 1/2 via get_skill) or search (Tier 3, the
+    /// default). Operates on the resolved workspace (use --workspace to target
+    /// another).
+    #[command(subcommand)]
+    Tier(TierCommand),
+}
+
+/// `tome tier <subcommand>` — manage per-workspace skill/command routing tiers.
+#[derive(Debug, Subcommand)]
+pub enum TierCommand {
+    /// Set an entry's routing tier (1, 2, or 3) in the resolved workspace.
+    Set(TierSetArgs),
+    /// List every enabled skill/command grouped by routing tier.
+    List(TierListArgs),
+    /// Reset an entry's routing tier to the default (3).
+    Clear(TierClearArgs),
+}
+
+#[derive(Debug, clap::Args)]
+pub struct TierSetArgs {
+    /// The entry to retier, as `<plugin>/<name>`.
+    pub id: String,
+    /// The routing tier: 1 (load at session start), 2 (load before matching
+    /// tasks), or 3 (default; searchable on demand).
+    #[arg(value_parser = clap::value_parser!(u8).range(1..=3))]
+    pub tier: u8,
+    /// Disambiguate when the same plugin name exists across catalogs.
+    #[arg(long)]
+    pub catalog: Option<String>,
+    /// Disambiguate a skill vs command with the same name.
+    #[arg(long, value_enum)]
+    pub kind: Option<TierKindArg>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct TierListArgs {}
+
+#[derive(Debug, clap::Args)]
+pub struct TierClearArgs {
+    /// The entry to reset, as `<plugin>/<name>`.
+    pub id: String,
+    #[arg(long)]
+    pub catalog: Option<String>,
+    #[arg(long, value_enum)]
+    pub kind: Option<TierKindArg>,
+}
+
+/// CLI-facing entry-kind selector for tier disambiguation (tiers never apply to
+/// agents, so only skill/command are offered).
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum TierKindArg {
+    Skill,
+    Command,
 }
 
 /// `tome telemetry <subcommand>` — control the local-first telemetry subsystem.
