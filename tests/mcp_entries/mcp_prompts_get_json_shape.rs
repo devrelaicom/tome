@@ -156,7 +156,7 @@ fn build_state(paths: &tome::paths::Paths) -> Arc<McpState> {
         paths: paths.clone(),
         embedder_entry,
         reranker_entry,
-        prompt_registry: Arc::new(registry),
+        prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(registry))),
         host_harness: None,
         last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
         flush_signal: std::sync::Arc::new(tokio::sync::Notify::new()),

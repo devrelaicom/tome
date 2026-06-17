@@ -38,12 +38,13 @@ pub struct McpState {
     /// Registry entry for the reranker that will be loaded on first
     /// `search_skills` call.
     pub reranker_entry: &'static ModelEntry,
-    /// Phase 5 / US1.b: prompts capability registry. Built once at MCP
-    /// server startup from the resolved workspace's enabled-and-user-
-    /// invocable entries. Immutable for the session — workspace
-    /// switches require a server restart (NFR-008, `list_changed:
-    /// false`).
-    pub prompt_registry: Arc<PromptRegistry>,
+    /// Phase 5 / US1.b + 2026-06 live-sync: prompts capability registry.
+    /// Built at startup from the resolved workspace's enabled-and-user-
+    /// invocable entries, and swapped in place by the live-sync watcher
+    /// when the workspace's skill set drifts (no restart needed). Reads
+    /// take the read lock for the sub-µs clone of the `Arc`; the watcher
+    /// takes the write lock only to swap.
+    pub prompt_registry: Arc<std::sync::RwLock<Arc<PromptRegistry>>>,
     /// Phase 9 / US3: the harness hosting this MCP server, conveyed by
     /// `tome mcp --harness <name>` (stamped into the `tome mcp` args at
     /// `harness sync`). `None` for a legacy/unstamped config — the `meta`

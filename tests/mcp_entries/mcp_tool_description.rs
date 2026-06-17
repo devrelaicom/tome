@@ -13,9 +13,8 @@
 //!
 //! Tests inspect [`tome::mcp::tool_description::compose`] directly
 //! and use `Server::override_search_skills_description` +
-//! `tool_router_ref` to confirm the runtime override path mutates
-//! the registered tool's `attr.description` (the same surface rmcp
-//! advertises in `list_tools`).
+//! `search_desc_snapshot` to confirm the runtime override is stored in
+//! the swappable `search_desc` cell (read by `list_tools` on each call).
 
 use crate::common::lifecycle_paths;
 use std::sync::Arc;
@@ -53,7 +52,7 @@ fn build_state(paths: &Paths, ws: &WorkspaceName) -> Arc<McpState> {
         paths: paths.clone(),
         embedder_entry: entry_for(ModelKind::Embedder),
         reranker_entry: entry_for(ModelKind::Reranker),
-        prompt_registry: Arc::new(PromptRegistry::default()),
+        prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(PromptRegistry::default()))),
         host_harness: None,
         last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
         flush_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
@@ -113,18 +112,13 @@ fn oversized_description_still_returned_and_server_can_apply_it() {
     warn_if_too_long(&ws, &composed);
 
     // The server's override path must accept the oversized string
-    // without refusing to start. Verify by mutating the router and
-    // reading the tool's advertised description back.
+    // without refusing to start. Verify by setting the description cell
+    // and reading the snapshot back via the test seam.
     let state = build_state(&paths, &ws);
     let mut server = Server::new(state);
     server.override_search_skills_description(composed.clone());
 
-    let tools = server.tool_router_ref().list_all();
-    let search = tools
-        .iter()
-        .find(|t| t.name == "search_skills")
-        .expect("search_skills tool registered");
-    let desc = search.description.as_deref().unwrap_or("");
+    let desc = server.search_desc_snapshot();
     assert_eq!(
         desc.chars().count(),
         composed.chars().count(),
@@ -152,12 +146,11 @@ fn server_override_path_mutates_advertised_description() {
     let composed = compose(&ws, &paths);
     server.override_search_skills_description(composed.clone());
 
-    let tools = server.tool_router_ref().list_all();
-    let search = tools
-        .iter()
-        .find(|t| t.name == "search_skills")
-        .expect("search_skills tool registered");
-    let desc = search.description.as_deref().unwrap_or("");
+    // The description is now stored in the swappable `search_desc` cell
+    // and injected into `list_tools` output on each call — not mutated
+    // on the static ToolRouter. The `search_desc_snapshot` test seam
+    // reads the cell directly.
+    let desc = server.search_desc_snapshot();
     assert!(
         desc.contains("specialised in payment integrations"),
         "advertised description should include the cached short summary, got:\n{desc}",

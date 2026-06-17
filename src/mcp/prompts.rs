@@ -906,7 +906,10 @@ pub async fn handle_get(
     let started = Instant::now();
 
     // (1) Lookup is cheap (HashMap.get); do it on the runtime thread.
-    let Some(entry) = state.prompt_registry.lookup(&name).cloned() else {
+    // Clone the Arc out of the RwLock so the lookup borrow is not tied
+    // to a lock guard that would need to outlive this scope.
+    let registry = state.prompt_registry.read().unwrap().clone();
+    let Some(entry) = registry.lookup(&name).cloned() else {
         return Err(emit_get_error(
             &name,
             started,

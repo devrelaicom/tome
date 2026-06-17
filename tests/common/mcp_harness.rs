@@ -350,7 +350,7 @@ impl McpHarness {
             // with the stub-seeded index `meta`.
             embedder_entry: &STUB_EMBEDDER_ENTRY,
             reranker_entry: &STUB_RERANKER_ENTRY,
-            prompt_registry: Arc::new(registry),
+            prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(registry))),
             host_harness,
             last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
             flush_signal: std::sync::Arc::new(tokio::sync::Notify::new()),

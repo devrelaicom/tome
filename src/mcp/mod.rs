@@ -264,7 +264,7 @@ pub fn run(
             paths: paths.clone(),
             embedder_entry: handle.embedder_entry,
             reranker_entry: handle.reranker_entry,
-            prompt_registry: Arc::new(prompt_registry),
+            prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(prompt_registry))),
             host_harness: host_harness.clone(),
             last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
             flush_signal: flush_signal.clone(),
