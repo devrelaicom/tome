@@ -122,6 +122,17 @@ tome catalog lint <catalog> --json
   Then re-lint to confirm. Never autofix blindly over a judgment call from Step 3 —
   review the diff.
 
+**Body-size warnings.** `tome catalog lint` flags `lint/body-too-large` /
+`lint/resource-too-large` when a skill's `SKILL.md` body, or one of its text
+reference files, is too large to fit the harness's `get_skill` response budget.
+These are **not** autofixable — splitting prose is a judgment call. To resolve
+one, extract long inline material — large fenced code blocks, embedded reference
+tables, verbose background — into `references/*.md` files and replace each in the
+body with a one-line pointer to the reference. `get_skill` returns the body
+inline but supporting files as *paths the agent loads on demand*, so moving
+material out of the body directly shrinks the served response. Re-lint to confirm
+the warning clears.
+
 Iterate Step 3 ↔ Step 4 until `tome catalog lint` is clean (or only carries
 intentional, documented gaps).
 
