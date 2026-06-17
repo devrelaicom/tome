@@ -9,6 +9,7 @@
 //! compute autofix bytes; `lint` is I/O-bound and takes no index lock.
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use super::{Rule, Scope};
 use crate::authoring::ir::{CatalogIr, Diagnostic, EntryIr, Fix, Location, PluginIr};
@@ -42,10 +43,75 @@ pub mod rule {
     /// `hooks/hooks.json` is present but not valid JSON (or unreadable);
     /// `harness sync` would fail on this plugin (exit 43).
     pub const HOOKS_SPEC: &str = "lint/hooks-spec";
+    /// Skill body is too large to fit the harness MCP-output budget that
+    /// `get_skill` returns it inside (70% of the limit, after envelope).
+    pub const BODY_TOO_LARGE: &str = "lint/body-too-large";
+    /// A single text supporting file is too large for the agent to read in
+    /// one call.
+    pub const RESOURCE_TOO_LARGE: &str = "lint/resource-too-large";
 }
 
 /// Agent-Skills description length cap (§9).
 const DESCRIPTION_MAX: usize = 1024;
+
+/// Bytes-per-token estimate. ~4 bytes/token for English prose; code and
+/// markdown are denser and multi-byte input inflates byte count, so this errs
+/// slightly high (more tokens), biasing toward flagging rather than missing.
+/// This is an ESTIMATE — there is no tokenizer in the lint path (the only one
+/// is the heavyweight llama GGUF tokenizer in `summarise`).
+const BYTES_PER_TOKEN_EST: usize = 4;
+
+/// Rough token count for a byte length.
+fn est_tokens(bytes: usize) -> usize {
+    bytes / BYTES_PER_TOKEN_EST
+}
+
+/// Token budgets for the get_skill MCP response. The harness cap is on the
+/// FULL response (JSON envelope + `path` + `resources[]` paths + `content`),
+/// so we reserve 70% of the limit for the body.
+#[derive(Debug, Clone, Copy)]
+struct TokenBudgets {
+    /// Effective hard limit: `MAX_MCP_OUTPUT_TOKENS` env override, else the
+    /// 25_000 default. Shown in messages so a user sees their own number.
+    hard_limit: usize,
+    /// 70% of `SOFT_LIMIT`, clamped to never exceed `hard_tokens`.
+    soft_tokens: usize,
+    /// 70% of `hard_limit`.
+    hard_tokens: usize,
+}
+
+impl TokenBudgets {
+    /// Claude Code's MCP-output soft-warning point. Not env-configurable.
+    const SOFT_LIMIT: usize = 10_000;
+    /// Default `MAX_MCP_OUTPUT_TOKENS`.
+    const DEFAULT_HARD_LIMIT: usize = 25_000;
+    /// Envelope headroom: keep the body under 70% of the limit.
+    const HEADROOM_NUM: usize = 7;
+    const HEADROOM_DEN: usize = 10;
+
+    /// Resolve from the environment: 70% of `MAX_MCP_OUTPUT_TOKENS` when set to
+    /// a positive integer, else 70% of the 25_000 default.
+    fn from_env() -> Self {
+        let max = std::env::var("MAX_MCP_OUTPUT_TOKENS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(Self::DEFAULT_HARD_LIMIT);
+        Self::from_max(max)
+    }
+
+    /// Build budgets from an explicit hard limit (the test seam — no env).
+    fn from_max(max: usize) -> Self {
+        let hard_tokens = max * Self::HEADROOM_NUM / Self::HEADROOM_DEN;
+        let soft_tokens =
+            (Self::SOFT_LIMIT * Self::HEADROOM_NUM / Self::HEADROOM_DEN).min(hard_tokens);
+        Self {
+            hard_limit: max,
+            soft_tokens,
+            hard_tokens,
+        }
+    }
+}
 
 /// The full rule registry — used by `lint`, where the IR's `source_path` IS the
 /// native Tome artifact being validated.
@@ -474,6 +540,22 @@ mod tests {
 
     fn has(d: &[Diagnostic], id: &str) -> bool {
         d.iter().any(|x| x.rule_id == id)
+    }
+
+    #[test]
+    fn token_budgets_apply_headroom_and_clamp() {
+        let d = TokenBudgets::from_max(25_000);
+        assert_eq!(d.hard_limit, 25_000);
+        assert_eq!(d.hard_tokens, 17_500);
+        assert_eq!(d.soft_tokens, 7_000);
+        // Tiny configured cap: soft is clamped down to hard so soft <= hard.
+        let t = TokenBudgets::from_max(8_000);
+        assert_eq!(t.hard_tokens, 5_600);
+        assert_eq!(t.soft_tokens, 5_600);
+        // est_tokens is integer bytes/4.
+        assert_eq!(est_tokens(0), 0);
+        assert_eq!(est_tokens(4), 1);
+        assert_eq!(est_tokens(28_000), 7_000);
     }
 
     #[test]
