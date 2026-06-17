@@ -333,3 +333,31 @@ fn report_serialises_to_byte_stable_json_for_empty_state() {
         "WorkspaceSyncReport wire shape drift"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 8. Direct unit coverage of the extracted single-project helper. Guards
+//    the byte-for-byte idempotence + missing-dir classification that the
+//    forthcoming project-scoped `tome sync` command reuses.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_rules_to_project_is_idempotent() {
+    use tome::workspace::sync::{RulesSync, sync_rules_to_project};
+    let ws = parse("demo");
+    let tmp = TempDir::new().unwrap();
+    let proj = tmp.path().join("p");
+    std::fs::create_dir_all(proj.join(".tome")).unwrap();
+    assert_eq!(
+        sync_rules_to_project(b"body\n", &proj, &ws).unwrap(),
+        RulesSync::Synced
+    );
+    assert_eq!(
+        sync_rules_to_project(b"body\n", &proj, &ws).unwrap(),
+        RulesSync::Unchanged
+    );
+    let missing = tmp.path().join("nope");
+    assert_eq!(
+        sync_rules_to_project(b"body\n", &missing, &ws).unwrap(),
+        RulesSync::MissingProjectDir
+    );
+}

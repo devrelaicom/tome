@@ -49,6 +49,73 @@ use crate::index::{self};
 use crate::paths::Paths;
 use crate::workspace::WorkspaceName;
 
+/// Outcome of syncing the workspace RULES.md to ONE bound project.
+///
+/// Maps 1:1 onto [`WorkspaceSyncOutcome`]'s three partitions so the
+/// `sync_one` loop can classify a project by a single match. The write
+/// path can still fail with [`TomeError`] (propagated, not collapsed
+/// into `MissingProjectDir`) — only the *skip* cases (project dir or
+/// `.tome/` marker absent) are non-errors that land here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulesSync {
+    /// Destination was (re)written — bytes differed or were absent.
+    Synced,
+    /// Destination already matched the source bytes; no write issued.
+    Unchanged,
+    /// Project directory or its `.tome/` marker is missing; skipped.
+    MissingProjectDir,
+}
+
+/// Write the workspace's RULES.md (`source_bytes`) to ONE bound
+/// project's `<project>/.tome/RULES.md`.
+///
+/// Byte-for-byte idempotent: returns [`RulesSync::Unchanged`] without a
+/// write when the destination already matches `source_bytes`.
+/// [`RulesSync::MissingProjectDir`] when the project directory or its
+/// `.tome/` marker is absent (each `debug!`-logged with `name` for
+/// `tome doctor` drift triage — not an error per the contract Edge
+/// Cases). A genuine write failure is an error and is *propagated*, not
+/// classified as missing.
+///
+/// Extracted from [`sync_one`]'s per-project loop so the project-scoped
+/// `tome sync` command can reuse the identical classification +
+/// atomic-write path.
+pub fn sync_rules_to_project(
+    source_bytes: &[u8],
+    project_root: &std::path::Path,
+    name: &WorkspaceName,
+) -> Result<RulesSync, TomeError> {
+    if !project_root.is_dir() {
+        tracing::debug!(
+            workspace = name.as_str(),
+            project = %project_root.display(),
+            "workspace sync: project directory missing; skipping",
+        );
+        return Ok(RulesSync::MissingProjectDir);
+    }
+    let marker_dir = Paths::project_marker_dir(project_root);
+    if !marker_dir.is_dir() {
+        tracing::debug!(
+            workspace = name.as_str(),
+            project = %project_root.display(),
+            marker = %marker_dir.display(),
+            "workspace sync: project marker `.tome/` missing; skipping",
+        );
+        return Ok(RulesSync::MissingProjectDir);
+    }
+    let dest = Paths::project_marker_rules(project_root);
+
+    if let Ok(existing) = std::fs::read(&dest)
+        && existing == source_bytes
+    {
+        // Idempotence: bytes already match. No write.
+        return Ok(RulesSync::Unchanged);
+    }
+
+    store::write_atomic(&dest, source_bytes)?;
+    Ok(RulesSync::Synced)
+}
+
 /// Per-workspace sync outcome. Field order pinned by the contract;
 /// extra fields go on the surrounding `WorkspaceSyncEntry` envelope.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
@@ -132,38 +199,11 @@ pub fn sync_one(name: &WorkspaceName, paths: &Paths) -> Result<WorkspaceSyncOutc
         })?;
         let project_root = PathBuf::from(&project_path);
 
-        if !project_root.is_dir() {
-            tracing::debug!(
-                workspace = name.as_str(),
-                project = %project_root.display(),
-                "workspace sync: project directory missing; skipping",
-            );
-            outcome.missing_project_dirs.push(project_root);
-            continue;
+        match sync_rules_to_project(&source_bytes, &project_root, name)? {
+            RulesSync::Synced => outcome.synced_projects.push(project_root),
+            RulesSync::Unchanged => outcome.unchanged.push(project_root),
+            RulesSync::MissingProjectDir => outcome.missing_project_dirs.push(project_root),
         }
-        let marker_dir = Paths::project_marker_dir(&project_root);
-        if !marker_dir.is_dir() {
-            tracing::debug!(
-                workspace = name.as_str(),
-                project = %project_root.display(),
-                marker = %marker_dir.display(),
-                "workspace sync: project marker `.tome/` missing; skipping",
-            );
-            outcome.missing_project_dirs.push(project_root);
-            continue;
-        }
-        let dest = Paths::project_marker_rules(&project_root);
-
-        if let Ok(existing) = std::fs::read(&dest)
-            && existing == source_bytes
-        {
-            // Idempotence: bytes already match. No write.
-            outcome.unchanged.push(project_root);
-            continue;
-        }
-
-        store::write_atomic(&dest, &source_bytes)?;
-        outcome.synced_projects.push(project_root);
     }
 
     Ok(outcome)
