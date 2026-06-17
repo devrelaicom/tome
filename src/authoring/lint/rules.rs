@@ -116,6 +116,7 @@ impl TokenBudgets {
 /// The full rule registry — used by `lint`, where the IR's `source_path` IS the
 /// native Tome artifact being validated.
 pub fn all() -> Vec<Box<dyn Rule>> {
+    let budgets = TokenBudgets::from_env();
     vec![
         Box::new(CatalogManifest),
         Box::new(PluginManifest),
@@ -124,6 +125,7 @@ pub fn all() -> Vec<Box<dyn Rule>> {
         Box::new(EntryName),
         Box::new(EntryDescription),
         Box::new(EntryHarnessIsms),
+        Box::new(EntryBodyBudget { budgets }),
     ]
 }
 
@@ -137,12 +139,14 @@ pub fn all() -> Vec<Box<dyn Rule>> {
 /// (convert already enforces `name == dir` in the emitter). `lint` keeps
 /// [`all`]; only the convert pre-emit pass uses this subset.
 pub fn for_convert() -> Vec<Box<dyn Rule>> {
+    let budgets = TokenBudgets::from_env();
     vec![
         Box::new(CatalogManifest),
         Box::new(PluginManifest),
         Box::new(HooksSpec),
         Box::new(EntryDescription),
         Box::new(EntryHarnessIsms),
+        Box::new(EntryBodyBudget { budgets }),
     ]
 }
 
@@ -391,6 +395,57 @@ impl Rule for EntryHarnessIsms {
     }
 }
 
+struct EntryBodyBudget {
+    budgets: TokenBudgets,
+}
+impl Rule for EntryBodyBudget {
+    fn id(&self) -> &'static str {
+        rule::BODY_TOO_LARGE
+    }
+    fn scope(&self) -> Scope {
+        Scope::Entry
+    }
+    fn check_entry(&self, e: &EntryIr) -> Vec<Diagnostic> {
+        let bytes = e.body.len();
+        let est = est_tokens(bytes);
+        let kb = bytes / 1024;
+        let loc = Location::file(e.source_path.clone());
+        if est >= self.budgets.hard_tokens {
+            vec![
+                Diagnostic::warning(
+                    rule::BODY_TOO_LARGE,
+                    format!(
+                        "skill body is ~{est} tokens (≈{kb} KB), over the {hard}-token \
+                     budget (70% of the {limit}-token MCP-output limit) — get_skill \
+                     returns the body inline, so its response will be truncated; split \
+                     long material into references/ files",
+                        hard = self.budgets.hard_tokens,
+                        limit = self.budgets.hard_limit,
+                    ),
+                )
+                .at(loc),
+            ]
+        } else if est >= self.budgets.soft_tokens {
+            vec![
+                Diagnostic::warning(
+                    rule::BODY_TOO_LARGE,
+                    format!(
+                        "skill body is ~{est} tokens (≈{kb} KB), past the {soft}-token \
+                     budget (70% of the {softlimit}-token MCP-output soft limit, leaving \
+                     room for the get_skill response envelope) — move long material into \
+                     references/ files the agent loads on demand",
+                        soft = self.budgets.soft_tokens,
+                        softlimit = TokenBudgets::SOFT_LIMIT,
+                    ),
+                )
+                .at(loc),
+            ]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
 // --- helpers ----------------------------------------------------------------
 
 fn check_name(name: &str, what: &str, d: &mut Vec<Diagnostic>) {
@@ -540,6 +595,67 @@ mod tests {
 
     fn has(d: &[Diagnostic], id: &str) -> bool {
         d.iter().any(|x| x.rule_id == id)
+    }
+
+    #[test]
+    fn registries_wire_the_budget_rules() {
+        let all_ids: Vec<&str> = all().iter().map(|r| r.id()).collect();
+        assert!(
+            all_ids.contains(&rule::BODY_TOO_LARGE),
+            "body rule in all()"
+        );
+        assert!(
+            all_ids.contains(&rule::RESOURCE_TOO_LARGE),
+            "resource rule in all()"
+        );
+
+        let conv_ids: Vec<&str> = for_convert().iter().map(|r| r.id()).collect();
+        assert!(
+            conv_ids.contains(&rule::BODY_TOO_LARGE),
+            "body rule in for_convert()"
+        );
+        assert!(
+            !conv_ids.contains(&rule::RESOURCE_TOO_LARGE),
+            "resource rule is FS-reading — all()-only, like UnsupportedComponents/EntryName"
+        );
+    }
+
+    #[test]
+    fn body_budget_fires_at_soft_and_hard_boundaries() {
+        let rule = EntryBodyBudget {
+            budgets: TokenBudgets::from_max(25_000), // hard=17_500, soft=7_000
+        };
+        let mk = |n: usize| {
+            entry(
+                EntryKind::Skill,
+                "foo",
+                PathBuf::from("SKILL.md"),
+                Some("d"),
+                &"x".repeat(n),
+            )
+        };
+
+        // Soft boundary is 7_000 tokens = 28_000 bytes.
+        assert!(
+            rule.check_entry(&mk(28_000 - 1)).is_empty(),
+            "just under soft"
+        );
+        let at_soft = rule.check_entry(&mk(28_000));
+        assert_eq!(at_soft.len(), 1);
+        assert_eq!(at_soft[0].rule_id, rule::BODY_TOO_LARGE);
+        assert!(at_soft[0].message.contains("past the 7000-token budget"));
+
+        // Hard boundary is 17_500 tokens = 70_000 bytes.
+        let at_hard = rule.check_entry(&mk(70_000));
+        assert_eq!(at_hard.len(), 1);
+        assert!(at_hard[0].message.contains("over the 17500-token budget"));
+        assert!(
+            at_hard[0].message.contains("25000-token"),
+            "shows effective limit"
+        );
+
+        // Empty body is clean.
+        assert!(rule.check_entry(&mk(0)).is_empty());
     }
 
     #[test]
