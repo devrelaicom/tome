@@ -28,7 +28,9 @@ fn recompute_updates_tool_description_after_blurb_change() {
     let staged = StagedWorkspace::stage(&[("alpha", SKILL)], &[]);
     let harness = staged.harness();
     let state = harness.state();
-    let (_prompt_cell, desc_cell) = harness.server().live_sync_cells();
+    // `prompt_cell` is passed to recompute so the prompt-rebuild branch is
+    // reachable; this test asserts the tool-description swap, not a prompt swap.
+    let (prompt_cell, desc_cell) = harness.server().live_sync_cells();
 
     // Seed the description cell with the startup-composed value, exactly as
     // `mcp::run` does after building the server. The staged workspace has no
@@ -68,7 +70,7 @@ fn recompute_updates_tool_description_after_blurb_change() {
     assert_ne!(prev, next, "the drift signal changed");
 
     // Recompute against the harness's REAL cells.
-    let changed = live_sync::recompute(&prev, &next, &state, &_prompt_cell, &desc_cell);
+    let changed = live_sync::recompute(&prev, &next, &state, &prompt_cell, &desc_cell);
 
     // The entry set + freshness did not move (same enabled skill, same
     // indexed_at), so prompts did not drift — only the description did.

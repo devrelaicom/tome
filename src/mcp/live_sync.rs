@@ -3,8 +3,9 @@
 //! polls a cheap composite drift signal and, on change, rebuilds the prompt
 //! router and/or the `search_skills` description in place and reports which
 //! surfaces moved so the caller can emit the matching `list_changed`
-//! notification. Sync-only: all DB/file work runs on the blocking pool via the
-//! caller's `spawn_blocking`; this module never `.await`s.
+//! notification. The async `watch`/`watch_turn` loop drives the polling; the
+//! sync `probe`/`recompute` seams run on the blocking pool via `spawn_blocking`
+//! so they never touch the single-thread reactor.
 
 use std::sync::Arc;
 use std::sync::RwLock;
