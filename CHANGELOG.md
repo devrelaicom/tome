@@ -447,6 +447,14 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.1](https://github.com/devrelaicom/tome/compare/v0.7.0...v0.7.1) - 2026-06-17
+
+### Added
+
+- Tome-owned SessionStart hook for Codex ([#238](https://github.com/devrelaicom/tome/pull/238))
+- tiered skill-routing instructions ([#237](https://github.com/devrelaicom/tome/pull/237))
+- *(lint)* warn when a skill exceeds the get_skill MCP token budget ([#235](https://github.com/devrelaicom/tome/pull/235))
+
 ## [0.6.2](https://github.com/devrelaicom/tome/compare/v0.6.1...v0.6.2) - 2026-06-16
 
 ### Fixed
