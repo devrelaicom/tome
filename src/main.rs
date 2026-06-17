@@ -106,6 +106,7 @@ fn main() {
         Command::Skill(cmd) => commands::skill::run(cmd, &scope, mode),
         Command::Meta(cmd) => commands::meta::run(cmd, &scope, mode),
         Command::Telemetry(cmd) => commands::telemetry::run(cmd, &scope, mode),
+        Command::Tier(cmd) => commands::tier::run(cmd, &scope, mode),
     };
 
     // Single exit-path teardown (FR-047b). `teardown_at_exit` is THE one call

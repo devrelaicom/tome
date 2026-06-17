@@ -70,6 +70,26 @@ pub struct SummaryCacheState {
     pub generated_at: String,
 }
 
+/// One entry inside a `--details` plugin breakdown. `tier` is `None` for agents.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DetailEntry {
+    pub name: String,
+    pub kind: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<u8>,
+}
+
+/// A `--details` per-plugin breakdown.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PluginDetail {
+    pub catalog: String,
+    pub plugin: String,
+    pub skills: Vec<DetailEntry>,
+    pub commands: Vec<DetailEntry>,
+    pub agents: Vec<DetailEntry>,
+}
+
 /// The wire record for `tome workspace info`. Field order matches
 /// `contracts/workspace-commands.md` § `tome workspace info` so the
 /// human-readable `serde_json::to_string` rendering is deterministic.
@@ -103,4 +123,8 @@ pub struct WorkspaceInfo {
     /// `[summaries]` block yet (US2.a-2's `regen-summary` fills it).
     #[serde(default)]
     pub summary_cache: Option<SummaryCacheState>,
+    /// Per-plugin entry breakdown with tiers, populated only when `--details`
+    /// is passed. Absent from the JSON wire otherwise (default shape unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_details: Option<Vec<PluginDetail>>,
 }

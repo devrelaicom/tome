@@ -213,6 +213,7 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
             enabled_plugins: Vec::new(),
             bound_projects: Vec::new(),
             summary_cache: None,
+            plugin_details: None,
         },
         project_binding: None,
         embedder: ModelHealth {
@@ -410,6 +411,7 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
             enabled_plugins: Vec::new(),
             bound_projects: Vec::new(),
             summary_cache: None,
+            plugin_details: None,
         },
         project_binding: None,
         embedder: ModelHealth {
@@ -539,6 +541,7 @@ fn doctor_json_phase6_fields_appended_last_in_order() {
             enabled_plugins: Vec::new(),
             bound_projects: Vec::new(),
             summary_cache: None,
+            plugin_details: None,
         },
         project_binding: None,
         embedder: ModelHealth {

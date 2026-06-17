@@ -45,6 +45,7 @@ pub mod opencode;
 /// in Phase 7 (FR-011). Crate-internal: the orchestrator and the doctor are
 /// the only callers.
 pub(crate) mod reconcile;
+pub mod routing;
 pub mod rules_file;
 pub mod stub;
 pub mod sync;

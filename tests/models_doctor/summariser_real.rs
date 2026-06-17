@@ -304,17 +304,23 @@ fn regen_summary_through_real_llama_summariser_writes_settings_and_rules() {
         "missing summaries.generated_at: {settings_body}",
     );
 
-    // RULES.md mirrors the long summary value.
+    // RULES.md is now the composed routing directive (tiers + the long
+    // summary in the Tier 3 prose), not the raw long summary.
     let rules_body = std::fs::read_to_string(paths.workspace_rules_file(&parse_ws("real-ws")))
         .expect("read RULES.md");
     assert!(
         !rules_body.is_empty(),
-        "RULES.md should be the long summary, but is empty",
+        "RULES.md should be the routing directive, but is empty",
+    );
+    assert!(
+        rules_body.contains("# Tome — Skill Routing"),
+        "RULES.md should be the routing directive: {rules_body}",
     );
 
-    // Parse the doc back to extract the long field so we can assert
-    // RULES.md == settings.long. The toml crate gives the typed value;
-    // anything mismatched here means the writer drifted from the reader.
+    // Parse the doc back to extract the long field so we can assert the
+    // directive EMBEDS settings.summaries.long verbatim in its Tier 3
+    // prose. Anything mismatched here means the writer drifted from the
+    // reader.
     let parsed: toml::Value = toml::from_str(&settings_body).expect("re-parse settings.toml");
     let summaries = parsed
         .get("summaries")
@@ -325,10 +331,10 @@ fn regen_summary_through_real_llama_summariser_writes_settings_and_rules() {
         .get("long")
         .and_then(|v| v.as_str())
         .expect("long is a string");
-    assert_eq!(
-        rules_body.trim_end(),
-        long_field.trim_end(),
-        "RULES.md body must match settings.summaries.long",
+    assert!(
+        rules_body.contains(long_field.trim_end()),
+        "RULES.md should embed settings.summaries.long in its Tier 3 prose:\n\
+         RULES.md = {rules_body}\nlong = {long_field}",
     );
 
     eprintln!(

@@ -13,4 +13,5 @@ pub mod reindex;
 pub mod skill;
 pub mod status;
 pub mod telemetry;
+pub mod tier;
 pub mod workspace;

@@ -85,6 +85,7 @@ pub fn assemble_report(
                 enabled_plugins: Vec::new(),
                 bound_projects: Vec::new(),
                 summary_cache: None,
+                plugin_details: None,
             }
         }
         Err(e) => return Err(e),

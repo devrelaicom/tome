@@ -1101,13 +1101,45 @@ fn workspace_use_malformed_hooks_exits_43() {
         String::from_utf8_lossy(&out.stderr),
     );
 
-    // The hooks pass must never have written the local settings file — the
-    // malformed source fails before any merge. (`.claude/settings.json` is the
-    // separate MCP-config sink and may legitimately exist from the MCP write.)
-    assert!(
-        !project.join(".claude/settings.local.json").exists(),
-        "settings.local.json must not be written when the hook source is malformed",
-    );
+    // Forward progress: the malformed THIRD-PARTY hook source contributes
+    // nothing (it fails parsing → recorded as the first error → surfaced as
+    // exit 43), and is never merged. Tome's own trusted SessionStart routing
+    // hook is still reconciled for the live claude-code harness, so
+    // settings.local.json may now exist — but if it does it must contain ONLY
+    // that Tome-owned entry, proving the malformed plugin merged nothing.
+    // (`.claude/settings.json` is the separate MCP-config sink and may
+    // legitimately exist from the MCP write.)
+    let settings_local = project.join(".claude/settings.local.json");
+    if settings_local.exists() {
+        let doc: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&settings_local).expect("read settings.local.json"),
+        )
+        .expect("settings.local.json is valid JSON");
+        let hooks = doc
+            .get("hooks")
+            .and_then(|h| h.as_object())
+            .expect("hooks object present");
+        // Only the SessionStart event, holding exactly the Tome routing hook.
+        assert_eq!(
+            hooks.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["SessionStart"],
+            "only Tome's SessionStart hook may be written; the malformed plugin \
+             must contribute nothing: {doc}",
+        );
+        let entries = hooks["SessionStart"]
+            .as_array()
+            .expect("SessionStart is an array");
+        assert_eq!(
+            entries.len(),
+            1,
+            "exactly one (Tome-owned) SessionStart entry"
+        );
+        let cmd = entries[0]["hooks"][0]["command"].as_str().unwrap_or("");
+        assert!(
+            cmd.contains("harness session-context"),
+            "the sole entry must be Tome's session-context hook, got: {cmd}",
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

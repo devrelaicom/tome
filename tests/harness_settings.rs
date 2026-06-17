@@ -61,6 +61,8 @@ mod rules_file_claude_correction;
 mod rules_file_standalone;
 #[path = "harness_settings/rules_opencode_inline.rs"]
 mod rules_opencode_inline;
+#[path = "harness_settings/session_start_hook.rs"]
+mod session_start_hook;
 #[path = "harness_settings/settings_array_types.rs"]
 mod settings_array_types;
 #[path = "harness_settings/settings_bad_exclusion.rs"]

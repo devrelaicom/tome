@@ -168,6 +168,19 @@ pub(crate) fn reconcile_hooks(
         }
     }
 
+    // The first Tome-OWNED hook: a SessionStart entry delivering the routing
+    // directive on Claude Code. Pushed into `prepared` so the SAME merge (live)
+    // / remove (non-live) machinery reconciles it. Reached only after the
+    // fast-exit above, so it is added unconditionally only when a RealJson
+    // harness participates; a harness going non-live has its entry removed by
+    // structural re-derivation in `remove_hooks_for_harness`. The binary
+    // reference is the bare `"tome"` string the MCP-config sync also uses (see
+    // `harness::sync::write_mcp_for_harness`), keeping the spawned command
+    // consistent.
+    prepared.push(crate::harness::routing::session_start_hook(
+        "tome", workspace,
+    ));
+
     for snap in snapshots {
         let Some(settings_path) = &snap.hook_settings_path else {
             // GuardrailsOnly (or no settings path) → no-op for hooks.

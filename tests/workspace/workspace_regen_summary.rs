@@ -139,11 +139,48 @@ fn regen_summary_writes_settings_and_rules() {
         "lost `name` field after rewrite: {settings_body}",
     );
 
-    // RULES.md is the long summary body.
+    // RULES.md is now the composed routing directive (tiers + summary),
+    // not the raw long summary. It still CONTAINS the long summary (in the
+    // Tier 3 prose) but is wrapped in the directive scaffold.
     let rules_body = std::fs::read_to_string(paths.workspace_rules_file(&parse("mine"))).unwrap();
     assert!(
+        rules_body.contains("# Tome — Skill Routing"),
+        "RULES.md should be the routing directive: {rules_body}",
+    );
+    assert!(
+        rules_body.contains("## Search before related work (Tier 3)"),
+        "RULES.md should carry the Tier 3 section: {rules_body}",
+    );
+    assert!(
         rules_body.contains("This workspace covers"),
-        "RULES.md should match stub long summary: {rules_body}",
+        "RULES.md Tier 3 should embed the stub long summary: {rules_body}",
+    );
+}
+
+/// Regression: after enabling a plugin with ≥1 skill and running
+/// regen-summary, the workspace RULES.md is the composed routing
+/// directive — NOT the raw long summary. Encodes the directive header
+/// and the Tier 3 section header so a future revert to "RULES.md = raw
+/// long summary" fails loudly.
+#[test]
+fn regen_summary_rules_is_routing_directive() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    workspace::init::init(parse("mine"), false, &paths).expect("init");
+    seed_enabled_skill(&paths, "mine", "cat1", "plugA", "skill-x", "First skill");
+
+    let stub = StubSummariser::new();
+    let _ = workspace::regen_summary::regen(&parse("mine"), &stub, &paths).expect("regen");
+
+    let rules_body = std::fs::read_to_string(paths.workspace_rules_file(&parse("mine"))).unwrap();
+    assert!(
+        rules_body.contains("# Tome — Skill Routing"),
+        "RULES.md must be the routing directive: {rules_body}",
+    );
+    assert!(
+        rules_body.contains("## Search before related work (Tier 3)"),
+        "RULES.md must carry the Tier 3 section: {rules_body}",
     );
 }
 
@@ -298,8 +335,16 @@ fn regen_summary_long_window_oversize_is_still_cached() {
     assert_eq!(outcome.short_chars, 900);
     assert_eq!(outcome.long_chars, 3000);
 
+    // RULES.md is now the routing directive wrapping the (oversize) long
+    // summary, so it is LONGER than the raw 3000-char summary — but it must
+    // still embed the full summary verbatim in the Tier 3 prose.
     let rules_body = std::fs::read_to_string(paths.workspace_rules_file(&parse("mine"))).unwrap();
-    assert_eq!(rules_body.len(), 3000);
+    assert!(rules_body.len() > 3000, "directive wraps the summary");
+    assert!(
+        rules_body.contains(&"y".repeat(3000)),
+        "RULES.md should embed the full long summary verbatim",
+    );
+    assert!(rules_body.contains("# Tome — Skill Routing"));
 }
 
 /// T-M5 (US4.d-1): the length-window info event IS emitted. Verifies via a
