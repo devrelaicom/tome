@@ -34,35 +34,46 @@ pub fn run(
     // resolved scope. With a positional, parse + verify membership in
     // the central DB (exit 13 if absent).
     let info = match args.name.as_deref() {
-        None => assemble(scope, paths)?,
+        None => assemble_with_details(scope, paths, args.details)?,
         Some(raw) => {
             let name = WorkspaceName::parse(raw)?;
-            assemble_for_name(&name, paths)?
+            assemble_for_name(&name, paths, args.details)?
         }
     };
     emit(&info, mode)
 }
 
-/// Build a [`WorkspaceInfo`] for the resolved scope.
+/// Build a [`WorkspaceInfo`] for the resolved scope. Equivalent to
+/// [`assemble_with_details`] with `details = false`.
 pub fn assemble(scope: &ResolvedScope, paths: &Paths) -> Result<WorkspaceInfo, TomeError> {
+    assemble_with_details(scope, paths, false)
+}
+
+/// Build a [`WorkspaceInfo`] for the resolved scope. When `details` is set,
+/// the report's `plugin_details` field is populated with a per-plugin
+/// breakdown of skills / commands / agents and their routing tiers.
+pub fn assemble_with_details(
+    scope: &ResolvedScope,
+    paths: &Paths,
+    details: bool,
+) -> Result<WorkspaceInfo, TomeError> {
     let (scope_kind, path) = if scope.scope.is_global() {
         (ScopeKind::Global, None)
     } else {
         (ScopeKind::Workspace, scope.project_root.clone())
     };
     let name = scope.scope.name();
-    let mut info = compute_info(name, paths, scope_kind, scope.source, path)?;
-    // Resolved-scope reads pre-date the Phase 4 widening: the per-scope
-    // source field was tagged from the resolver. Keep the field name as
-    // the resolver supplied it.
-    let _ = &mut info;
-    Ok(info)
+    compute_info(name, paths, scope_kind, scope.source, path, details)
 }
 
 /// Build a [`WorkspaceInfo`] for an explicitly-named workspace. The
 /// `<name>` positional uses this — `source` is [`ScopeSource::Flag`] (the
 /// positional is functionally a flag) and `path` is unset.
-fn assemble_for_name(name: &WorkspaceName, paths: &Paths) -> Result<WorkspaceInfo, TomeError> {
+fn assemble_for_name(
+    name: &WorkspaceName,
+    paths: &Paths,
+    details: bool,
+) -> Result<WorkspaceInfo, TomeError> {
     // The membership check + the per-field reads share one DB handle;
     // delegate.
     let scope_kind = if name.is_reserved() {
@@ -70,7 +81,7 @@ fn assemble_for_name(name: &WorkspaceName, paths: &Paths) -> Result<WorkspaceInf
     } else {
         ScopeKind::Workspace
     };
-    compute_info(name, paths, scope_kind, ScopeSource::Flag, None)
+    compute_info(name, paths, scope_kind, ScopeSource::Flag, None, details)
 }
 
 fn compute_info(
@@ -79,6 +90,7 @@ fn compute_info(
     scope_kind: ScopeKind,
     source: ScopeSource,
     path: Option<PathBuf>,
+    details: bool,
 ) -> Result<WorkspaceInfo, TomeError> {
     // Bootstrap-not-yet path: DB file missing. We can't validate the
     // workspace's central-registry membership, so we treat this as the
@@ -101,6 +113,7 @@ fn compute_info(
             enabled_plugins: Vec::new(),
             bound_projects: Vec::new(),
             summary_cache: None,
+            plugin_details: None,
         });
     }
 
@@ -141,6 +154,7 @@ fn compute_info(
             enabled_plugins: Vec::new(),
             bound_projects: Vec::new(),
             summary_cache: None,
+            plugin_details: None,
         });
     }
 
@@ -169,6 +183,7 @@ fn compute_info(
                 enabled_plugins: Vec::new(),
                 bound_projects: Vec::new(),
                 summary_cache: None,
+                plugin_details: None,
             });
         }
         return Err(TomeError::WorkspaceNotFound {
@@ -225,6 +240,11 @@ fn compute_info(
     let enabled_plugins = list_enabled_plugins(&conn, workspace_id)?;
     let bound_projects = list_bound_projects(&conn, workspace_id)?;
     let summary_cache = read_summary_cache(paths, name);
+    let plugin_details = if details {
+        Some(assemble_plugin_details(&conn, name.as_str())?)
+    } else {
+        None
+    };
 
     Ok(WorkspaceInfo {
         scope: scope_kind,
@@ -240,7 +260,63 @@ fn compute_info(
         enabled_plugins,
         bound_projects,
         summary_cache,
+        plugin_details,
     })
+}
+
+/// Group every enabled skill / command / agent for `workspace_name` into a
+/// per-plugin breakdown, carrying each skill's and command's routing tier
+/// (agents have no tier). Ordered deterministically by `(catalog, plugin)`.
+fn assemble_plugin_details(
+    conn: &rusqlite::Connection,
+    workspace_name: &str,
+) -> Result<Vec<crate::workspace::info::PluginDetail>, TomeError> {
+    use crate::workspace::info::{DetailEntry, PluginDetail};
+    use std::collections::BTreeMap;
+
+    let tiered = crate::index::skills::tiered_entries_for_workspace(conn, workspace_name)?;
+    let agents = crate::index::skills::enabled_agents_for_workspace(conn, workspace_name)?;
+
+    let mut map: BTreeMap<(String, String), PluginDetail> = BTreeMap::new();
+    for e in tiered {
+        let pd = map
+            .entry((e.catalog.clone(), e.plugin.clone()))
+            .or_insert_with(|| PluginDetail {
+                catalog: e.catalog.clone(),
+                plugin: e.plugin.clone(),
+                skills: Vec::new(),
+                commands: Vec::new(),
+                agents: Vec::new(),
+            });
+        let de = DetailEntry {
+            name: e.name.clone(),
+            kind: e.kind.as_str().to_string(),
+            description: e.description.clone(),
+            tier: Some(e.tier),
+        };
+        match e.kind {
+            crate::plugin::identity::EntryKind::Command => pd.commands.push(de),
+            _ => pd.skills.push(de),
+        }
+    }
+    for a in agents {
+        let pd = map
+            .entry((a.catalog.clone(), a.plugin.clone()))
+            .or_insert_with(|| PluginDetail {
+                catalog: a.catalog.clone(),
+                plugin: a.plugin.clone(),
+                skills: Vec::new(),
+                commands: Vec::new(),
+                agents: Vec::new(),
+            });
+        pd.agents.push(DetailEntry {
+            name: a.name.clone(),
+            kind: "agent".to_string(),
+            description: String::new(),
+            tier: None,
+        });
+    }
+    Ok(map.into_values().collect())
 }
 
 fn list_enrolled_catalogs(
@@ -403,6 +479,41 @@ fn emit_human(info: &WorkspaceInfo) -> Result<(), TomeError> {
                 "    - {}/{} ({} skills)",
                 p.catalog, p.plugin, p.skill_count
             )?;
+        }
+    }
+    if let Some(details) = info.plugin_details.as_ref() {
+        for pd in details {
+            writeln!(out, "  {}/{}:", pd.catalog, pd.plugin)?;
+            if !pd.skills.is_empty() {
+                writeln!(out, "    skills:")?;
+                for e in &pd.skills {
+                    writeln!(
+                        out,
+                        "      - {} [tier {}]  {}",
+                        e.name,
+                        e.tier.unwrap_or(3),
+                        e.description
+                    )?;
+                }
+            }
+            if !pd.commands.is_empty() {
+                writeln!(out, "    commands:")?;
+                for e in &pd.commands {
+                    writeln!(
+                        out,
+                        "      - {} [tier {}]  {}",
+                        e.name,
+                        e.tier.unwrap_or(3),
+                        e.description
+                    )?;
+                }
+            }
+            if !pd.agents.is_empty() {
+                writeln!(out, "    agents:")?;
+                for e in &pd.agents {
+                    writeln!(out, "      - {}", e.name)?;
+                }
+            }
         }
     }
     if !info.bound_projects.is_empty() {

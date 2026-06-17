@@ -494,6 +494,11 @@ pub struct WorkspaceInfoArgs {
     /// Workspace name. Defaults to the resolved scope. Missing names
     /// surface as exit 13 (`WorkspaceNotFound`).
     pub name: Option<String>,
+    /// Expand the enabled-plugins section into a per-plugin breakdown of
+    /// skills / commands / agents, showing each skill's and command's routing
+    /// tier.
+    #[arg(long)]
+    pub details: bool,
 }
 
 #[derive(Debug, clap::Args)]

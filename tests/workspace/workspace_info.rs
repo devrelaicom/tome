@@ -342,6 +342,63 @@ fn info_missing_workspace_returns_workspace_not_found() {
 }
 
 // =============================================================
+// Tiered-skill-routing — `tome workspace info --details`.
+// =============================================================
+
+#[test]
+fn workspace_info_details_lists_entries_with_tiers() {
+    use tome::commands::workspace::info::assemble_with_details;
+
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+    crate::common::fabricate_all_registry_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    write_config_for_cli(&paths, &config);
+    enable_alpha(&paths, &config);
+
+    // With `details = true`, the report gains a `plugin_details` array
+    // with per-entry routing tiers.
+    let info = assemble_with_details(&global_scope(), &paths, true).expect("assemble details");
+    let details = info
+        .plugin_details
+        .as_ref()
+        .expect("plugin_details present with details=true");
+    assert!(!details.is_empty(), "expected at least one plugin");
+    let pd = &details[0];
+    assert_eq!(pd.plugin, "plugin-alpha");
+    assert!(!pd.skills.is_empty(), "expected at least one skill");
+    // Every skill/command entry carries a routing tier.
+    for s in &pd.skills {
+        assert!(s.tier.is_some(), "skill entry missing tier: {s:?}");
+    }
+    // Freshly-enabled entries carry the default routing tier (3, per the
+    // schema-v5 `workspace_skills.tier DEFAULT 3`).
+    let has_default_tier = details
+        .iter()
+        .flat_map(|pd| pd.skills.iter().chain(pd.commands.iter()))
+        .any(|e| e.tier == Some(3));
+    assert!(has_default_tier, "expected at least one tier-3 entry");
+
+    // The JSON wire surfaces the field + numeric tiers under `--details`.
+    let json = serde_json::to_string(&info).expect("serialise");
+    assert!(json.contains(r#""plugin_details""#), "json={json}");
+    assert!(json.contains(r#""tier":3"#), "json={json}");
+
+    // WITHOUT details, the field is None → absent from the JSON wire
+    // (byte-shape unchanged).
+    let info_plain = assemble_with_details(&global_scope(), &paths, false).expect("assemble plain");
+    assert!(info_plain.plugin_details.is_none());
+    let json_plain = serde_json::to_string(&info_plain).expect("serialise");
+    assert!(
+        !json_plain.contains("plugin_details"),
+        "plugin_details must be absent without details: {json_plain}",
+    );
+}
+
+// =============================================================
 // T-M6 (Polish PR-D): byte-stable JSON wire-shape pin for
 // `WorkspaceCatalogEntry`. The triple `(name, url, pinned_ref)` is the
 // public contract for the enrolled-catalogs array under
