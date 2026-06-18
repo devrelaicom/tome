@@ -1348,6 +1348,19 @@ mod dialect_pin_tests {
     }
 
     #[test]
+    fn snippet_opencode_command_array_exact_bytes() {
+        // opencode is the CommandArray canary: a single `command` array
+        // [launcher, …args] + `type:local` + `enabled:true`, no separate
+        // `args` key, no `env`. Guards `render_entry_snippet` for the
+        // CommandArray shape the way the JSON pins guard CommandArgs.
+        let snippet = render_entry_snippet(&OPENCODE_DIALECT, &tome_entry());
+        assert_eq!(
+            snippet,
+            "{\n  \"mcp\": {\n    \"tome\": {\n      \"type\": \"local\",\n      \"command\": [\n        \"tome\",\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n",
+        );
+    }
+
+    #[test]
     fn snippet_crush_type_stdio_exact_bytes() {
         // crush: `mcp` parent key + per-entry `type:stdio`, no env.
         let snippet = render_entry_snippet(&CRUSH_DIALECT, &tome_entry());
@@ -1376,6 +1389,7 @@ mod dialect_pin_tests {
             (&DEFAULT_DIALECT, "settings.json"),
             (&CRUSH_DIALECT, "crush.json"),
             (&CODEX_DIALECT, "config.toml"),
+            (&OPENCODE_DIALECT, "opencode.json"),
         ] {
             let tmp = TempDir::new().unwrap();
             let target = tmp.path().join(file);

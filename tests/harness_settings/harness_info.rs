@@ -122,3 +122,39 @@ fn info_for_manual_only_harness_renders_snippet_path() {
         .is_ok()
     );
 }
+
+/// MINOR (US5 closeout): capture the Human-mode STDOUT bytes of
+/// `tome harness info jetbrains-ai` (via the real CLI) and assert the
+/// `MCP config — paste into …:` heading + the exact paste-able snippet (now
+/// carrying `"env": {}` per M1). `info` is read-only — no project, no models.
+#[test]
+fn info_human_stdout_contains_paste_heading_and_snippet() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let out = env
+        .cmd()
+        .args(["harness", "info", "jetbrains-ai"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("MCP config — paste into jetbrains-ai:"),
+        "paste heading present; got:\n{s}",
+    );
+    // The snippet body — mcpServers shape with env:{} (the M1 fix).
+    assert!(s.contains("\"mcpServers\""), "snippet present; got:\n{s}");
+    assert!(
+        s.contains("\"env\": {}"),
+        "snippet carries env:{{}}; got:\n{s}"
+    );
+}

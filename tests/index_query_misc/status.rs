@@ -416,6 +416,114 @@ fn status_cli_json_emits_structured_record() {
     assert!(v["models_on_disk_bytes"].is_number());
 }
 
+/// M3 (US5 closeout): exercise `status::fill_harness_mcp`'s POPULATED path
+/// through the real CLI. Bind a project marker to workspace "demo" declaring an
+/// effective harness list whose members have known MCP states — crush=ok
+/// (correct Tome entry), devin=drift (stale `--workspace` arg), jetbrains-ai=
+/// manual (no writable MCP file) — then run `--json status` UNDER that project
+/// scope and assert the emitted `harness_mcp` array's states + the human-panel
+/// glyphs. The status analogue of `doctor_mcp_states_p11.rs`.
+#[test]
+fn status_cli_json_populates_harness_mcp_under_project_scope() {
+    use tome::harness::lookup;
+    use tome::harness::mcp_config::{self, TomeEntry};
+
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    crate::common::fabricate_all_registry_models(&paths);
+    // The marker binds to "demo"; the workspace row must exist in the DB.
+    crate::common::seed_workspace(&paths, "demo");
+
+    // Project marker: workspace + an effective harness list.
+    let project = env.home_path().join("project");
+    let marker_dir = project.join(".tome");
+    std::fs::create_dir_all(&marker_dir).unwrap();
+    std::fs::write(
+        marker_dir.join("config.toml"),
+        "workspace = \"demo\"\nharnesses = [\"crush\", \"devin\", \"jetbrains-ai\"]\n",
+    )
+    .unwrap();
+
+    // Seed each harness's MCP entry on disk via its PRODUCTION dialect.
+    let home = env.home_path();
+    let seed = |harness: &str, ws: &str| {
+        let module = lookup(harness).expect("harness");
+        let path = module.mcp_config_path(&project, home);
+        let entry = TomeEntry::new(
+            "tome".to_string(),
+            vec![
+                "mcp".to_string(),
+                "--workspace".to_string(),
+                ws.to_string(),
+                "--harness".to_string(),
+                harness.to_string(),
+            ],
+        );
+        mcp_config::write_entry(&path, &module.mcp_dialect(), &entry).expect("write entry");
+    };
+    // crush: correct workspace → ok.
+    seed("crush", "demo");
+    // devin: stale workspace arg → drift.
+    seed("devin", "stale");
+    // jetbrains-ai: manual-only — deliberately write NO MCP file.
+
+    // Run `--json status` from inside the project dir so the marker resolves.
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["--json", "status"])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+        panic!(
+            "parse JSON; stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )
+    });
+
+    let mcp = v["harness_mcp"]
+        .as_array()
+        .expect("harness_mcp array present");
+    let state_of = |name: &str| -> &str {
+        mcp.iter()
+            .find(|h| h["harness"] == name)
+            .unwrap_or_else(|| panic!("{name} in harness_mcp; got {mcp:?}"))["state"]
+            .as_str()
+            .unwrap()
+    };
+    assert_eq!(state_of("crush"), "ok", "crush correct entry → ok");
+    assert_eq!(
+        state_of("devin"),
+        "drift",
+        "devin stale --workspace → drift"
+    );
+    assert_eq!(
+        state_of("jetbrains-ai"),
+        "manual",
+        "jetbrains-ai has no writable MCP file → manual",
+    );
+
+    // Human panel renders the per-harness MCP glyphs (piped ⇒ plain forms).
+    let human = env
+        .cmd()
+        .current_dir(&project)
+        .args(["status"])
+        .output()
+        .unwrap();
+    let s = String::from_utf8_lossy(&human.stdout);
+    assert!(s.contains("MCP:"), "panel shows the MCP row; got:\n{s}");
+    assert!(s.contains("crush [ok]"), "crush ok glyph; got:\n{s}");
+    assert!(s.contains("devin [drift]"), "devin drift glyph; got:\n{s}",);
+    assert!(
+        s.contains("jetbrains-ai [manual]"),
+        "jetbrains-ai manual glyph; got:\n{s}",
+    );
+}
+
 #[test]
 fn status_human_plain_is_grouped_and_labeled() {
     let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX

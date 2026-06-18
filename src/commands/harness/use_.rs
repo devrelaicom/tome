@@ -63,6 +63,32 @@ pub fn run(
     paths: &Paths,
     mode: Mode,
 ) -> Result<(), TomeError> {
+    let sync_ran_for_human = std::cell::Cell::new(false);
+    let outcome = run_inner(args, scope, paths, &sync_ran_for_human)?;
+
+    match mode {
+        Mode::Human => emit_human(&outcome, scope, sync_ran_for_human.get()),
+        Mode::Json => write_json(&outcome),
+    }
+}
+
+/// Compute the full [`HarnessUseOutcome`] — the entire read-modify-write +
+/// sync + notice pipeline, MINUS the terminal emit (the "silent compute /
+/// emit wrapper" split). `run` wraps this and emits per mode; integration
+/// tests call this directly to assert the EMITTED outcome (e.g. `mcp_notice`)
+/// without capturing stdout, proving the real `run → compute_mcp_notice →
+/// outcome` chain rather than just the helper.
+///
+/// `sync_ran_out` carries the human-mode-only `sync_ran` signal back to `run`
+/// (the field on the outcome is the same value, but `emit_human` takes it
+/// positionally for the legacy signature).
+#[doc(hidden)]
+pub fn run_inner(
+    args: HarnessUseArgs,
+    scope: &ResolvedScope,
+    paths: &Paths,
+    sync_ran_out: &std::cell::Cell<bool>,
+) -> Result<HarnessUseOutcome, TomeError> {
     // 1. Validate harness name against the effective registry
     //    (consults `HARNESS_MODULES_OVERRIDE` for tests).
     let supported = with_effective_modules(|mods| mods.iter().any(|m| m.name() == args.name));
@@ -121,19 +147,16 @@ pub fn run(
     // aware, override-aware), keyed off the resolved workspace name.
     let mcp_notice = compute_mcp_notice(&args.name, scope.scope.name().as_str());
 
-    let outcome = HarnessUseOutcome {
+    sync_ran_out.set(sync_ran);
+
+    Ok(HarnessUseOutcome {
         scope: args.scope.to_string(),
         name: args.name,
         settings_path: settings_path.clone(),
         list_changed: changed,
         sync_ran,
         mcp_notice,
-    };
-
-    match mode {
-        Mode::Human => emit_human(&outcome, scope, sync_ran),
-        Mode::Json => write_json(&outcome),
-    }
+    })
 }
 
 /// Build the MCP-only notice (T064) for the harness named `name` in workspace

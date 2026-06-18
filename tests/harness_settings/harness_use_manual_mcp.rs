@@ -206,3 +206,115 @@ fn use_pi_writes_mcp_and_emits_adapter_notice() {
             .contains("pi-mcp-adapter"),
     );
 }
+
+/// M2 (US5 closeout): drive the REAL `use_::run` emission path (via the
+/// `run_inner` compute seam `run` itself wraps) for jetbrains-ai and assert the
+/// EMITTED `HarnessUseOutcome.mcp_notice` is `Some(...)` carrying the snippet
+/// pointer. This proves the `run → compute_mcp_notice → outcome` chain — a
+/// regression that dropped `mcp_notice` from `run`'s outcome would fail HERE
+/// even though `compute_mcp_notice` (asserted above) stayed correct.
+#[test]
+fn run_emits_mcp_notice_for_jetbrains_ai_and_pi() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    seed_workspace(&paths, "demo");
+
+    let project = env.home_path().join("project");
+    let marker_dir = project.join(".tome");
+    std::fs::create_dir_all(&marker_dir).unwrap();
+    std::fs::write(marker_dir.join("config.toml"), "workspace = \"demo\"\n").unwrap();
+    std::fs::write(marker_dir.join("RULES.md"), "# rules\n").unwrap();
+
+    let _home = HomeGuard::install(env.home_path());
+    let scope = make_project_scope("demo", project.clone());
+    let sync_ran = std::cell::Cell::new(false);
+
+    // jetbrains-ai: the EMITTED outcome carries the paste-the-snippet notice
+    // pointing at `tome harness info jetbrains-ai`.
+    let jb_args = HarnessUseArgs {
+        name: "jetbrains-ai".to_string(),
+        scope: HarnessScopeArg::Project,
+        force: false,
+    };
+    let jb_outcome =
+        use_::run_inner(jb_args, &scope, &paths, &sync_ran).expect("use jetbrains-ai ok");
+    let jb_notice = jb_outcome
+        .mcp_notice
+        .as_deref()
+        .expect("run must emit an mcp_notice for jetbrains-ai");
+    assert!(
+        jb_notice.contains("manually") && jb_notice.contains("tome harness info jetbrains-ai"),
+        "emitted notice must point at the manual snippet path; got: {jb_notice}",
+    );
+    // The embedded snippet (the recovery artifact) is present in the EMITTED
+    // notice, not just the standalone helper.
+    assert!(
+        jb_notice.contains("\"mcpServers\""),
+        "snippet present in emitted notice"
+    );
+    assert!(jb_notice.contains("\"--harness\"") && jb_notice.contains("\"jetbrains-ai\""));
+
+    // pi: the EMITTED outcome carries the `pi-mcp-adapter` install notice.
+    let pi_args = HarnessUseArgs {
+        name: "pi".to_string(),
+        scope: HarnessScopeArg::Project,
+        force: false,
+    };
+    let pi_outcome = use_::run_inner(pi_args, &scope, &paths, &sync_ran).expect("use pi ok");
+    let pi_notice = pi_outcome
+        .mcp_notice
+        .as_deref()
+        .expect("run must emit an mcp_notice for pi");
+    assert!(
+        pi_notice.contains("pi-mcp-adapter"),
+        "emitted pi notice must mention the adapter; got: {pi_notice}",
+    );
+}
+
+/// MINOR (US5 closeout): capture the Human-mode STDOUT bytes of
+/// `tome harness use jetbrains-ai` (via the real CLI) and assert the
+/// `Note (MCP):` heading + the notice body (the manual-MCP guidance). Proves
+/// the human-emit path prints the notice, not just the JSON field.
+#[test]
+fn use_human_stdout_contains_note_mcp_heading_and_body() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    seed_workspace(&paths, "demo");
+
+    let project = env.home_path().join("project");
+    let marker_dir = project.join(".tome");
+    std::fs::create_dir_all(&marker_dir).unwrap();
+    std::fs::write(marker_dir.join("config.toml"), "workspace = \"demo\"\n").unwrap();
+    std::fs::write(marker_dir.join("RULES.md"), "# rules\n").unwrap();
+
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["harness", "use", "jetbrains-ai"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("Note (MCP):"),
+        "Note (MCP) heading present; got:\n{s}",
+    );
+    assert!(
+        s.contains("configures its MCP server manually"),
+        "notice body present; got:\n{s}",
+    );
+}

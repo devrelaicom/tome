@@ -11,14 +11,20 @@
 //!   AI Assistant's own dir — Tome never clobbers a developer rule file.
 //! - MCP: **manual-only** ([`HarnessModule::mcp_manual_only`] → `true`).
 //!   AI Assistant configures MCP servers through its Settings UI; there is
-//!   no file Tome can own, so the sync skips the MCP sink entirely. The
-//!   "paste this snippet into Settings" notice is a separate US5 concern.
+//!   no file Tome can own, so the sync skips the MCP sink entirely.
 //!   `mcp_config_path` still returns a path (the trait requires it) but it
-//!   is never read or written for a manual-only harness.
+//!   is never read or written for a manual-only harness. The "paste this
+//!   snippet into Settings" recovery snippet IS surfaced (US5): both
+//!   `tome harness info jetbrains-ai` and the `tome harness use` notice
+//!   render it via [`mcp_dialect`](JetbrainsAi::mcp_dialect) — which is why
+//!   that dialect is an explicit override (it must carry `emit_env:true`),
+//!   NOT the LEGACY default.
 
 use std::path::{Path, PathBuf};
 
-use crate::harness::{HarnessModule, RulesFileStrategy, RulesFrontmatter};
+use crate::harness::{
+    EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy, RulesFrontmatter,
+};
 
 /// Unit struct implementing [`HarnessModule`] for JetBrains AI Assistant.
 pub struct JetbrainsAi;
@@ -92,8 +98,28 @@ impl HarnessModule for JetbrainsAi {
         project_root.join(".aiassistant/mcp.json")
     }
 
-    // MCP dialect: the default ([`McpDialect::LEGACY`]) is fine — it is never
-    // consulted because `mcp_manual_only()` is `true`.
+    /// AI Assistant's MCP dialect: JSON `mcpServers` + `CommandArgs`, no `type`,
+    /// `emit_env:true` (`"env": {}` per the contract — matching its US1 default-
+    /// shape peers devin/junie/kiro/cline/antigravity/pi), no extra fields.
+    ///
+    /// Because jetbrains-ai is `mcp_manual_only`, the sync orchestrator NEVER
+    /// reads or writes its MCP config file — this dialect is consulted ONLY by
+    /// the paste-able recovery snippet (`mcp_config::render_entry_snippet`, via
+    /// `tome harness info` and the `use` manual-MCP notice). It must therefore
+    /// carry `emit_env:true` so the snippet a user pastes into AI Assistant's
+    /// Settings UI matches the contract's default `mcpServers` shape (the
+    /// LEGACY default's `emit_env:false` would omit `"env": {}` and diverge
+    /// from its peers).
+    fn mcp_dialect(&self) -> McpDialect {
+        McpDialect {
+            file_format: FileFormat::Json,
+            parent_key: "mcpServers",
+            entry_shape: EntryShape::CommandArgs,
+            entry_type: None,
+            emit_env: true,
+            extra_fields: &[],
+        }
+    }
 }
 
 #[cfg(test)]
@@ -127,6 +153,44 @@ mod tests {
     #[test]
     fn mcp_is_manual_only() {
         assert!(JETBRAINS_AI.mcp_manual_only());
+    }
+
+    /// M1 (US5 closeout): jetbrains-ai's dialect is the contract default
+    /// `mcpServers` CommandArgs shape with `emit_env:true` — matching its US1
+    /// peers (devin/junie/kiro/cline/antigravity/pi), NOT the LEGACY default
+    /// (`emit_env:false`). It is consulted ONLY by the recovery snippet.
+    #[test]
+    fn dialect_is_mcpservers_command_args_emit_env() {
+        let d = JETBRAINS_AI.mcp_dialect();
+        assert_eq!(d.file_format, FileFormat::Json);
+        assert_eq!(d.parent_key, "mcpServers");
+        assert_eq!(d.entry_shape, EntryShape::CommandArgs);
+        assert_eq!(d.entry_type, None);
+        assert!(d.emit_env, "snippet must carry env:{{}}");
+        assert!(d.extra_fields.is_empty());
+    }
+
+    /// M1: the EXACT recovery-snippet bytes jetbrains-ai renders — `env:{}`
+    /// present (the whole point of the explicit `emit_env:true` dialect).
+    #[test]
+    fn recovery_snippet_carries_empty_env_exact_bytes() {
+        use crate::harness::mcp_config::{TomeEntry, render_entry_snippet};
+
+        let entry = TomeEntry::new(
+            "tome".to_string(),
+            vec![
+                "mcp".to_string(),
+                "--workspace".to_string(),
+                "demo".to_string(),
+                "--harness".to_string(),
+                "jetbrains-ai".to_string(),
+            ],
+        );
+        let snippet = render_entry_snippet(&JETBRAINS_AI.mcp_dialect(), &entry);
+        assert_eq!(
+            snippet,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"demo\",\n        \"--harness\",\n        \"jetbrains-ai\"\n      ],\n      \"env\": {}\n    }\n  }\n}\n",
+        );
     }
 
     /// Live-probe gate (T087): NOT run in CI. A human must confirm against a
