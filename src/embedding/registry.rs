@@ -33,6 +33,9 @@ pub struct ModelEntry {
     pub sha256: &'static str,
     pub size_bytes: u64,
     pub licence: &'static str,
+    /// Output dimension of the embedding vector. `Some(dim)` for embedders;
+    /// `None` for rerankers and the summariser (they do not produce vectors).
+    pub embedding_dim: Option<u32>,
     /// Relative paths inside the model directory once installation completes.
     /// `files[0]` is the primary artefact (fetched from [`source_url`]);
     /// `files[1..]` are the non-primary files, fetched from [`aux_urls`].
@@ -124,6 +127,7 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
         sha256: "6c9c6101a956d62dfb5e7190c538226c0c5bb9cb27b651234b6df063ee7dbfe4",
         size_bytes: 34_014_426,
         licence: "MIT",
+        embedding_dim: Some(384),
         // tokenizer.json is REQUIRED — fastembed's `build_tokenizer_files`
         // reads it via `read_required`; without it `FastembedEmbedder::load`
         // returns ModelMissing. config.json / special_tokens_map.json /
@@ -159,6 +163,7 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
         sha256: "46a1bb4cf46ff1e300d27589d620141fbf04fc0eaf8e7bb6dea5e044475ff387",
         size_bytes: 279_252_659,
         licence: "MIT",
+        embedding_dim: None,
         // Same layout as the embedder above. All four non-primary files were
         // verified 200 at the onnx-community mirror's /resolve/main/ base.
         // NOTE: the primary .onnx lives under /onnx/, but tokenizer + config
@@ -198,9 +203,82 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
         sha256: "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
         size_bytes: 491_400_032,
         licence: "Apache-2.0",
+        embedding_dim: None,
         files: &["model.gguf"],
         // Single-file model: the GGUF carries its own tokenizer. No aux files.
         aux_urls: &[],
+    },
+    // === Medium embedder: bge-base-en-v1.5 (768-d, MIT, single-file Xenova INT8) ===
+    ModelEntry {
+        name: "bge-base-en-v1.5",
+        version: "1.5",
+        kind: ModelKind::Embedder,
+        source_url: "https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/onnx/model_quantized.onnx",
+        sha256: "c9729cc84cbd0e9fecc759505d2be65916c9fe05222d7ea26c65fcb3382af38d",
+        size_bytes: 110_083_337,
+        licence: "MIT",
+        embedding_dim: Some(768),
+        files: &["model.onnx", "tokenizer.json", "config.json", "special_tokens_map.json", "tokenizer_config.json"],
+        aux_urls: &[
+            "https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json",
+            "https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/config.json",
+            "https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/special_tokens_map.json",
+            "https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer_config.json",
+        ],
+    },
+    // === Large embedder: bge-large-en-v1.5 (1024-d, MIT, single-file Xenova INT8) ===
+    ModelEntry {
+        name: "bge-large-en-v1.5",
+        version: "1.5",
+        kind: ModelKind::Embedder,
+        source_url: "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/onnx/model_quantized.onnx",
+        sha256: "4842b56e233be1cc74770f57f63b1ebb6cf357cca3dd73fcdec35c019f8a5d6e",
+        size_bytes: 336_983_162,
+        licence: "MIT",
+        embedding_dim: Some(1024),
+        files: &["model.onnx", "tokenizer.json", "config.json", "special_tokens_map.json", "tokenizer_config.json"],
+        aux_urls: &[
+            "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/tokenizer.json",
+            "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/config.json",
+            "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/special_tokens_map.json",
+            "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/tokenizer_config.json",
+        ],
+    },
+    // === Medium reranker: bge-reranker-large (MIT, single-file Xenova INT8) ===
+    ModelEntry {
+        name: "bge-reranker-large",
+        version: "large",
+        kind: ModelKind::Reranker,
+        source_url: "https://huggingface.co/Xenova/bge-reranker-large/resolve/main/onnx/model_quantized.onnx",
+        sha256: "62cbff7af164e3a5c6776918a25c1b24a54a31854bdbe83ffe1dd13f68901637",
+        size_bytes: 562_938_749,
+        licence: "MIT",
+        embedding_dim: None,
+        files: &["model.onnx", "tokenizer.json", "config.json", "special_tokens_map.json", "tokenizer_config.json"],
+        aux_urls: &[
+            "https://huggingface.co/Xenova/bge-reranker-large/resolve/main/tokenizer.json",
+            "https://huggingface.co/Xenova/bge-reranker-large/resolve/main/config.json",
+            "https://huggingface.co/Xenova/bge-reranker-large/resolve/main/special_tokens_map.json",
+            "https://huggingface.co/Xenova/bge-reranker-large/resolve/main/tokenizer_config.json",
+        ],
+    },
+    // === Large reranker: bge-reranker-v2-m3 (MIT, multilingual, single-file INT8) ===
+    ModelEntry {
+        name: "bge-reranker-v2-m3",
+        version: "v2-m3",
+        kind: ModelKind::Reranker,
+        source_url: "https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX/resolve/main/onnx/model_int8.onnx",
+        sha256: "912fc1215c2dbff6499700534bd8d31253af01573861abbfc43afd1fab6cce5d",
+        size_bytes: 570_727_094,
+        licence: "MIT",
+        embedding_dim: None,
+        files: &["model.onnx", "tokenizer.json", "config.json", "special_tokens_map.json", "tokenizer_config.json"],
+        aux_urls: &[
+            "https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX/resolve/main/tokenizer.json",
+            "https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX/resolve/main/config.json",
+            "https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX/resolve/main/special_tokens_map.json",
+            "https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX/resolve/main/tokenizer_config.json",
+        ],
     },
 ];
 
@@ -262,5 +340,46 @@ mod tests {
         // Tome-owned → strict (deny_unknown_fields).
         let bad = "name=\"x\"\nversion=\"1\"\nkind=\"embedder\"\nsource_url=\"u\"\nsha256=\"h\"\nsize_bytes=1\nlicence=\"MIT\"\nfiles=[]\ninstalled_at=\"2026-01-01T00:00:00Z\"\nextra=true\n";
         assert!(ModelManifest::from_toml_slice(Path::new("m.toml"), bad.as_bytes()).is_err());
+    }
+
+    /// Registry well-formedness: each entry has a non-placeholder sha256,
+    /// non-zero size_bytes, files.len() == aux_urls.len() + 1, and embedders
+    /// carry embedding_dim.is_some() while rerankers/summariser carry None.
+    #[test]
+    fn model_registry_invariant() {
+        for entry in MODEL_REGISTRY {
+            assert!(
+                !entry.has_placeholder_checksum(),
+                "entry `{}` has a placeholder sha256",
+                entry.name
+            );
+            assert!(
+                entry.size_bytes > 0,
+                "entry `{}` has zero size_bytes",
+                entry.name
+            );
+            assert_eq!(
+                entry.files.len(),
+                entry.aux_urls.len() + 1,
+                "entry `{}`: files.len() must equal aux_urls.len() + 1",
+                entry.name
+            );
+            match entry.kind {
+                ModelKind::Embedder => {
+                    assert!(
+                        entry.embedding_dim.is_some(),
+                        "embedder `{}` must carry embedding_dim",
+                        entry.name
+                    );
+                }
+                ModelKind::Reranker | ModelKind::Summariser => {
+                    assert!(
+                        entry.embedding_dim.is_none(),
+                        "non-embedder `{}` must have embedding_dim = None",
+                        entry.name
+                    );
+                }
+            }
+        }
     }
 }

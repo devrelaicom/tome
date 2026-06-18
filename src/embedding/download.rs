@@ -465,6 +465,7 @@ mod tests {
             sha256: Box::leak(primary_sha.into_boxed_str()),
             size_bytes: primary_size,
             licence: "MIT",
+            embedding_dim: Some(384),
             files: &["model.onnx", "tokenizer.json"],
             aux_urls,
         }))

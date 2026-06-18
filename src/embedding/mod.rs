@@ -20,7 +20,8 @@ use crate::index::query::Candidate;
 
 pub use registry::{MODEL_REGISTRY, ModelEntry, ModelKind, ModelManifest};
 
-/// Produces a 384-dimensional embedding for arbitrary text.
+/// Produces an embedding vector for arbitrary text. The output dimension
+/// depends on the active model profile (small: 384-d, medium: 768-d, large: 1024-d).
 pub trait Embedder: Send + Sync {
     fn embed(&self, text: &str) -> Result<Vec<f32>, TomeError>;
 

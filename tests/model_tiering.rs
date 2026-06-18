@@ -75,3 +75,80 @@ fn v5_to_v6_preserves_vector_bytes_and_sets_small_profile() {
         .expect("read model_profile");
     assert_eq!(profile, "small");
 }
+
+/// Network-gated smoke test: download each new model entry, load it, and run
+/// one embed/rerank. Asserts that the output dimension matches `embedding_dim`
+/// for embedders. Skipped in normal CI (`#[ignore]`); run manually with:
+///
+/// ```
+/// cargo test --test model_tiering -- --ignored new_models_load_and_infer
+/// ```
+///
+/// Expected: PASS (downloads ~450 MB total). This is the real validation that
+/// the new ONNX graphs are CPU-safe in our `ort` stack.
+#[test]
+#[ignore]
+fn new_models_load_and_infer() {
+    use tome::embedding::download::download_model;
+    use tome::embedding::fastembed::{FastembedEmbedder, FastembedReranker};
+    use tome::embedding::registry::{lookup, ModelKind};
+    use tome::embedding::{Embedder, Reranker};
+    use tome::index::query::Candidate;
+    use tome::plugin::identity::EntryKind;
+
+    let new_model_names = &[
+        "bge-base-en-v1.5",
+        "bge-large-en-v1.5",
+        "bge-reranker-large",
+        "bge-reranker-v2-m3",
+    ];
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let models_root = tmp.path();
+
+    for &name in new_model_names {
+        let entry = lookup(name).unwrap_or_else(|| panic!("entry `{name}` must be in MODEL_REGISTRY"));
+
+        // download_model creates <models_root>/<name>/ internally
+        download_model(entry, models_root, None)
+            .unwrap_or_else(|e| panic!("download `{name}` failed: {e}"));
+
+        let model_dir = models_root.join(name);
+        match entry.kind {
+            ModelKind::Embedder => {
+                let embedder = FastembedEmbedder::load(entry, &model_dir)
+                    .unwrap_or_else(|e| panic!("load embedder `{name}` failed: {e}"));
+                let result = embedder.embed("hello world")
+                    .unwrap_or_else(|e| panic!("embed `{name}` failed: {e}"));
+                let expected_dim = entry.embedding_dim.expect("embedder must have embedding_dim") as usize;
+                assert_eq!(
+                    result.len(),
+                    expected_dim,
+                    "embedder `{name}` output dim mismatch: got {} expected {}",
+                    result.len(),
+                    expected_dim,
+                );
+            }
+            ModelKind::Reranker => {
+                let reranker = FastembedReranker::load(entry, &model_dir)
+                    .unwrap_or_else(|e| panic!("load reranker `{name}` failed: {e}"));
+                let candidates = vec![
+                    Candidate {
+                        skill_id: 1,
+                        catalog: "c".to_owned(),
+                        plugin: "p".to_owned(),
+                        name: "n".to_owned(),
+                        kind: EntryKind::Skill,
+                        description: "test candidate".to_owned(),
+                        plugin_version: "1.0.0".to_owned(),
+                        path: "p".to_owned(),
+                        distance: 0.1,
+                    },
+                ];
+                reranker.rerank("hello world", candidates)
+                    .unwrap_or_else(|e| panic!("rerank `{name}` failed: {e}"));
+            }
+            ModelKind::Summariser => {}
+        }
+    }
+}
