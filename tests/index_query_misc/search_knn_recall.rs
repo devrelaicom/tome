@@ -3,27 +3,31 @@
 //! vectors are excluded by the workspace / `searchable` / `--catalog` /
 //! `--plugin` post-JOIN filters.
 //!
-//! ## The hazard under test
+//! ## Schema v6 / Phase p11 update
 //!
-//! `index::query::knn` binds the `sqlite-vec` virtual-table `k` limit and
-//! ONLY THEN applies the JOIN/WHERE filters. If `>= k` vectors that are
-//! *nearer* than a genuine match get excluded by those filters, the match
-//! never enters the candidate window and the result is silently short. A
-//! naive fixed-multiplier over-fetch (`k = top_k * 4`) papers over small
-//! cases but still loses a match pushed far enough down the neighbour
-//! ordering — only a geometric *widen* loop, bounded by the global
-//! embeddings count, is correct.
+//! `skill_embeddings` is now a plain BLOB table; `knn` uses
+//! `vec_distance_cosine()` scalar rather than the old `vec0 MATCH k = ?`
+//! virtual-table scan. Because the catalog / `searchable` / workspace
+//! filters are applied in the JOIN *before* `LIMIT ?3`, the old over-fetch /
+//! widen hazard no longer exists at the SQL level — the LIMIT applies to
+//! the already-filtered result set. The tests below verify the end-to-end
+//! correctness property (the right rows come back) not the widen mechanism.
 //!
 //! ## Fixture strategy (no real model, fully deterministic)
 //!
 //! We bypass the stub embedder's text→vector hashing and write embeddings
-//! DIRECTLY, so we control each row's neighbour rank exactly. The schema
-//! declares `embedding FLOAT[384]` with no `distance_metric`, so `vec0`
-//! uses its default **L2** metric. Every fixture vector is all-zeros
-//! except component[0]; the query is the zero vector, so a row with
-//! `component[0] = v` sits at L2 distance `|v|` from the query. Assigning
-//! decoys small `v` and real matches large `v` gives a precise, metric-
-//! agnostic ordering: decoys are uniformly nearer than every match.
+//! DIRECTLY to control each row's cosine-distance rank exactly.
+//! `vec_distance_cosine` requires non-zero vectors (it returns NULL for
+//! zero-magnitude inputs). Fixture uses two orthogonal axes:
+//!
+//! * **Decoys** → axis-0 unit vectors: cosine distance from the axis-0
+//!   query ≈ 0 (nearer / more similar).
+//! * **Matches** → axis-1 unit vectors: cosine distance from the axis-0
+//!   query = 1.0 (orthogonal / farther).
+//!
+//! Decoys are uniformly nearer than every match in cosine space, so the
+//! SQL must correctly apply the catalog filter *before* the LIMIT to return
+//! any matches at all.
 
 use crate::common::{stub_embedder_seed, stub_reranker_seed, stub_summariser_seed};
 use rusqlite::{Connection, params};
@@ -35,11 +39,13 @@ const DIM: usize = 384;
 const MATCH_CATALOG: &str = "match-cat";
 const DECOY_CATALOG: &str = "decoy-cat";
 
-/// Encode a 384-dim vector whose only non-zero component is index 0, set to
-/// `magnitude`. Little-endian f32, matching `query::vector_to_bytes`.
-fn axis_vector_bytes(magnitude: f32) -> Vec<u8> {
+/// Encode a 384-dim **decoy** vector: unit vector along axis-0.
+/// Cosine distance from the axis-0 query vector = 0 (identical direction).
+/// All decoys share the same direction; magnitude > 0 to avoid NULL from
+/// `vec_distance_cosine`.
+fn decoy_vector_bytes() -> Vec<u8> {
     let mut v = vec![0.0f32; DIM];
-    v[0] = magnitude;
+    v[0] = 1.0;
     let mut out = Vec::with_capacity(DIM * 4);
     for f in &v {
         out.extend_from_slice(&f.to_le_bytes());
@@ -47,10 +53,27 @@ fn axis_vector_bytes(magnitude: f32) -> Vec<u8> {
     out
 }
 
-/// The query vector: the origin, so a row at `component[0] = m` is exactly
-/// L2 distance `|m|` away.
+/// Encode a 384-dim **match** vector: unit vector along axis-1.
+/// Cosine distance from the axis-0 query vector = 1.0 (orthogonal).
+/// All matches share the same direction so they all lie at the same
+/// distance from the query, farther than every decoy.
+fn match_vector_bytes() -> Vec<u8> {
+    let mut v = vec![0.0f32; DIM];
+    v[1] = 1.0;
+    let mut out = Vec::with_capacity(DIM * 4);
+    for f in &v {
+        out.extend_from_slice(&f.to_le_bytes());
+    }
+    out
+}
+
+/// The query vector: unit vector along axis-0. Decoys are near (distance ≈ 0);
+/// matches are orthogonal (distance = 1.0). Both are strictly non-zero so
+/// `vec_distance_cosine` never returns NULL.
 fn query_vector() -> Vec<f32> {
-    vec![0.0f32; DIM]
+    let mut v = vec![0.0f32; DIM];
+    v[0] = 1.0;
+    v
 }
 
 /// Open a fresh on-disk index (full schema + seeded `global` workspace) and
@@ -90,7 +113,7 @@ fn insert_row(
     catalog: &str,
     plugin: &str,
     name: &str,
-    magnitude: f32,
+    embedding: Vec<u8>,
     searchable: bool,
     enrol: bool,
 ) {
@@ -120,7 +143,7 @@ fn insert_row(
         .expect("skill id");
     conn.execute(
         "INSERT INTO skill_embeddings (skill_id, embedding) VALUES (?1, ?2)",
-        params![skill_id, axis_vector_bytes(magnitude)],
+        params![skill_id, embedding],
     )
     .expect("insert embedding");
     if enrol {
@@ -138,9 +161,10 @@ fn total_embeddings(conn: &Connection) -> i64 {
 }
 
 /// Build a corpus of `n_decoys` *nearer* rows excluded by the catalog filter
-/// plus `n_matches` *farther* rows that DO satisfy every filter. Decoys
-/// occupy L2 distances `1.0 ..= n_decoys`; matches occupy a band starting at
-/// `decoy_max + 100.0` so they are unambiguously behind every decoy.
+/// plus `n_matches` *farther* rows that DO satisfy every filter. Decoys are
+/// axis-0 unit vectors (cosine distance ≈ 0 from the query); matches are
+/// axis-1 unit vectors (cosine distance = 1.0, orthogonal to query). With
+/// `vec_distance_cosine` the decoys are uniformly nearer than the matches.
 ///
 /// Returns the set of match names for membership assertions.
 fn build_corpus(conn: &Connection, n_decoys: usize, n_matches: usize) -> Vec<String> {
@@ -149,22 +173,21 @@ fn build_corpus(conn: &Connection, n_decoys: usize, n_matches: usize) -> Vec<Str
     // Nearer-than-everything decoys, all in the WRONG catalog → excluded by
     // `QueryFilters{ catalog: MATCH_CATALOG }`. Enrolled + searchable so the
     // *only* thing keeping them out of the result is the catalog filter.
+    // Axis-0 vectors → cosine distance ≈ 0 (near the query).
     for i in 0..n_decoys {
-        let mag = 1.0 + i as f32; // 1.0, 2.0, ... strictly < any match
         insert_row(
             conn,
             ws,
             DECOY_CATALOG,
             "decoy-plugin",
             &format!("decoy-{i}"),
-            mag,
+            decoy_vector_bytes(),
             true,
             true,
         );
     }
 
-    // Genuine matches, all farther than every decoy.
-    let base = 1.0 + n_decoys as f32 + 100.0;
+    // Genuine matches, all farther than every decoy (axis-1 → cosine dist = 1.0).
     let mut names = Vec::with_capacity(n_matches);
     for i in 0..n_matches {
         let name = format!("match-{i}");
@@ -174,7 +197,7 @@ fn build_corpus(conn: &Connection, n_decoys: usize, n_matches: usize) -> Vec<Str
             MATCH_CATALOG,
             "match-plugin",
             &name,
-            base + i as f32,
+            match_vector_bytes(),
             true,
             true,
         );
@@ -191,11 +214,11 @@ fn run_knn(conn: &Connection, top_k: u32) -> Vec<Candidate> {
     knn(conn, "global", &query_vector(), top_k, &filters).expect("knn")
 }
 
-/// CORE REGRESSION (FR-001). The corpus is sized so that the 5 genuine
-/// matches sit at neighbour ranks 61..=65 behind 60 nearer decoys. A naive
-/// `k = top_k * 4 = 20` over-fetch never reaches them → 0 matches survive
-/// the catalog filter under the buggy implementation. Only the widen loop,
-/// growing `k` past the 65-vector universe, recovers all five.
+/// CORE REGRESSION (FR-001). The corpus has 60 decoys (axis-0, cosine dist ≈ 0)
+/// nearer than 5 genuine matches (axis-1, cosine dist = 1.0), all filtered by
+/// catalog. With schema-v6 JOIN-level filtering, `vec_distance_cosine` orders
+/// all 65 vectors and the catalog filter is applied before LIMIT, so all 5
+/// matches are always returned regardless of decoy count.
 #[test]
 fn filtered_knn_returns_top_k_despite_many_nearer_excluded_vectors() {
     let (_tmp, conn) = fresh_index();
@@ -319,7 +342,7 @@ fn widen_exhaustion_with_zero_matches_returns_empty_not_error() {
             MATCH_CATALOG,
             "p",
             &format!("hidden-{i}"),
-            1.0 + i as f32,
+            match_vector_bytes(),
             false, // searchable = 0 → excluded by `s.searchable = 1`
             true,
         );

@@ -6,7 +6,10 @@
 //! catalog / plugin so the caller can implement `--catalog` and `--plugin`
 //! flags on `tome query`. Phase 4 / F11a swapped the F9 hard-coded
 //! `'global'` join for a runtime `workspace_name` parameter sourced from
-//! the resolved scope.
+//! the resolved scope. Phase p11 / schema v6: queries now use
+//! `vec_distance_cosine()` scalar over plain BLOB embeddings; the vec0
+//! over-fetch / widen loop is removed because the plain JOIN filters at
+//! SQL level, so the LIMIT is applied after filtering.
 //!
 //! Spec: data-model.md §10 (`QueryResult`), contracts/query.md, FR-024.
 
@@ -43,38 +46,11 @@ pub struct QueryFilters<'a> {
     pub plugin: Option<&'a str>,
 }
 
-/// Initial over-fetch factor applied to `top_k` when binding the `vec0`
-/// `k` limit (see [`knn`] for the recall hazard this addresses).
-const OVER_FETCH_MULTIPLIER: u32 = 4;
-
-/// Geometric growth factor for the widen loop when an over-fetch pass does
-/// not yield `min(top_k, total matches)` survivors.
-const WIDEN_GROWTH: u32 = 4;
-
-/// Return the top `top_k` enabled skills closest to `query_vec`, scoped to
-/// the workspace named `workspace_name`. `query_vec` must have length 384
-/// (matches the `FLOAT[384]` virtual table column); shorter / longer vectors
-/// surface as [`TomeError::IndexIntegrityCheckFailure`].
-///
-/// The result is exactly `min(top_k, total matching entries)` rows, ordered
-/// by ascending distance, *regardless* of how many nearer vectors are
-/// excluded by the workspace / `searchable` / `--catalog` / `--plugin`
-/// filters.
-///
-/// # Why over-fetch + widen
-///
-/// `vec0` applies its `k` limit BEFORE we JOIN to `skills` /
-/// `workspace_skills` and apply the post-filters — the virtual table has no
-/// visibility into those columns. So binding `k = top_k` directly means: if
-/// `>= top_k` vectors nearer than a genuine match are excluded by the
-/// filters, the match never enters the candidate window and the result is
-/// silently short. We over-fetch a multiple of `top_k`, apply the filters,
-/// and if fewer than `min(top_k, total)` survive we re-query with a
-/// geometrically larger `k`. The candidate universe is bounded by the global
-/// `skill_embeddings` count (`vec0 MATCH` scans the whole table), so the
-/// loop terminates: either `top_k` survivors are collected, or `k` reaches
-/// that count and we have scanned every vector — at which point the true
-/// (smaller) match set is returned. No schema change; the only knob is `k`.
+/// Top-`top_k` enabled, searchable skills closest to `query_vec` in the
+/// workspace, by cosine distance. `query_vec` is embedded by the active
+/// profile's embedder; its length must equal the stored vectors' length
+/// (guaranteed by the embedder-drift→reindex invariant). Filters are applied
+/// in the same statement, so the result is exactly min(top_k, matches) rows.
 pub fn knn(
     conn: &Connection,
     workspace_name: &str,
@@ -82,148 +58,61 @@ pub fn knn(
     top_k: u32,
     filters: &QueryFilters<'_>,
 ) -> Result<Vec<Candidate>, TomeError> {
-    if query_vec.len() != 384 {
-        return Err(TomeError::IndexIntegrityCheckFailure(format!(
-            "query vector length {} must equal 384",
-            query_vec.len()
-        )));
-    }
-    if top_k == 0 {
+    if top_k == 0 || query_vec.is_empty() {
         return Ok(Vec::new());
     }
-
-    // Candidate-universe ceiling: `vec0 MATCH` scans the entire virtual
-    // table, so the most candidates any pass can surface is the total
-    // embeddings count. Beyond this, widening cannot reveal new rows — it is
-    // the loop's hard termination bound. An empty index short-circuits
-    // (vec0 rejects `k < 1`).
-    let total: u32 = conn
-        .query_row("SELECT COUNT(*) FROM skill_embeddings", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("count skill_embeddings: {e}")))?
-        .try_into()
-        .unwrap_or(u32::MAX);
-    if total == 0 {
-        return Ok(Vec::new());
-    }
-
     let sql = build_knn_sql(filters);
     let query_bytes = vector_to_bytes(query_vec);
 
-    // Start at the over-fetch window, capped at the universe. `top_k * MULT`
-    // uses saturating arithmetic so a pathologically large `top_k` cannot
-    // overflow into a tiny `k`.
-    let mut k = top_k.saturating_mul(OVER_FETCH_MULTIPLIER).clamp(1, total);
-    loop {
-        let candidates = run_knn_pass(conn, &sql, &query_bytes, k, workspace_name, filters)?;
+    let mut params: Vec<ToSqlOutput<'_>> = Vec::with_capacity(5);
+    params.push(ToSqlOutput::from(query_bytes));          // ?1 query vector
+    params.push(ToSqlOutput::from(workspace_name.to_owned())); // ?2 workspace
+    params.push(ToSqlOutput::from(i64::from(top_k)));     // ?3 LIMIT
+    if let Some(c) = filters.catalog { params.push(ToSqlOutput::from(c.to_owned())); }
+    if let Some(p) = filters.plugin  { params.push(ToSqlOutput::from(p.to_owned())); }
 
-        // Collected enough, or we have scanned the whole table (the true
-        // match set is now fully known — return it even if it is smaller
-        // than `top_k`).
-        if candidates.len() as u32 >= top_k || k >= total {
-            return Ok(truncate(candidates, top_k));
-        }
-
-        // Widen geometrically toward the ceiling. Saturating mul guards the
-        // overflow; the clamp guarantees forward progress (k strictly grows
-        // until it reaches `total`, where the loop above exits).
-        k = k.saturating_mul(WIDEN_GROWTH).clamp(k + 1, total);
-    }
-}
-
-/// Truncate to `top_k` rows. The candidate vector is already ordered by
-/// ascending distance, so this keeps the nearest matches.
-fn truncate(mut candidates: Vec<Candidate>, top_k: u32) -> Vec<Candidate> {
-    candidates.truncate(top_k as usize);
-    candidates
+    let mut stmt = conn.prepare(&sql)
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("prepare knn: {e}")))?;
+    let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
+        let kind_text: String = row.get(4)?;
+        let kind = kind_text.parse::<EntryKind>().map_err(|msg| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4, rusqlite::types::Type::Text, Box::new(std::io::Error::other(msg)))
+        })?;
+        Ok(Candidate {
+            skill_id: row.get(0)?, catalog: row.get(1)?, plugin: row.get(2)?,
+            name: row.get(3)?, kind, description: row.get(5)?,
+            plugin_version: row.get(6)?, path: row.get(7)?,
+            distance: row.get::<_, f64>(8)? as f32,
+        })
+    })
+    .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query knn: {e}")))?;
+    rows.collect::<Result<_, _>>()
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect knn rows: {e}")))
 }
 
 /// Build the (parameterised) KNN SQL for the given filters. `?1` is the
-/// query vector, `?2` the `vec0` `k` limit, `?3` the workspace name; the
-/// optional `--catalog` / `--plugin` filters take the next positional
-/// indices. The string is filter-shaped only — `k` is rebound per widen
-/// iteration without re-deriving it.
+/// query vector BLOB, `?2` the workspace name, `?3` the LIMIT; optional
+/// `--catalog` / `--plugin` filters take the next positional indices.
+/// `vec_distance_cosine` is applied as a scalar in the SELECT list and the
+/// ORDER BY, so filtering is done at JOIN level before the LIMIT is applied —
+/// no over-fetch / widen loop needed.
 fn build_knn_sql(filters: &QueryFilters<'_>) -> String {
-    // Phase 5: `search_skills` covers both kinds (skills + commands) but
-    // honours the `searchable` flag. Entries with
-    // `disable-model-invocation: true` are excluded.
     let mut sql = String::from(
         "SELECT s.id, s.catalog, s.plugin, s.name, s.kind, s.description,
-                s.plugin_version, s.path, e.distance
+                s.plugin_version, s.path,
+                vec_distance_cosine(e.embedding, ?1) AS distance
          FROM skill_embeddings AS e
          JOIN skills AS s ON s.id = e.skill_id
          JOIN workspace_skills AS ws ON ws.skill_id = s.id
-                                    AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = ?3)
-         WHERE e.embedding MATCH ?1 AND k = ?2 AND s.searchable = 1",
+                AND ws.workspace_id = (SELECT id FROM workspaces WHERE name = ?2)
+         WHERE s.searchable = 1",
     );
-    // Positional indices continue after the three fixed params (?1..?3).
     let mut next = 4;
-    if filters.catalog.is_some() {
-        sql.push_str(&format!(" AND s.catalog = ?{next}"));
-        next += 1;
-    }
-    if filters.plugin.is_some() {
-        sql.push_str(&format!(" AND s.plugin = ?{next}"));
-    }
-    sql.push_str(" ORDER BY e.distance");
+    if filters.catalog.is_some() { sql.push_str(&format!(" AND s.catalog = ?{next}")); next += 1; }
+    if filters.plugin.is_some()  { sql.push_str(&format!(" AND s.plugin = ?{next}")); }
+    sql.push_str(" ORDER BY distance LIMIT ?3");
     sql
-}
-
-/// Run one KNN pass for a concrete `k`, returning the filtered, distance-
-/// ordered candidates. Caller drives the over-fetch / widen loop.
-fn run_knn_pass(
-    conn: &Connection,
-    sql: &str,
-    query_bytes: &[u8],
-    k: u32,
-    workspace_name: &str,
-    filters: &QueryFilters<'_>,
-) -> Result<Vec<Candidate>, TomeError> {
-    // Params in positional order: query bytes (?1), k (?2), workspace (?3),
-    // then the optional catalog / plugin filters in the order `build_knn_sql`
-    // emitted them.
-    let mut params: Vec<ToSqlOutput<'_>> = Vec::with_capacity(5);
-    params.push(ToSqlOutput::from(query_bytes.to_vec()));
-    params.push(ToSqlOutput::from(k as i64));
-    params.push(ToSqlOutput::from(workspace_name.to_owned()));
-    if let Some(c) = filters.catalog {
-        params.push(ToSqlOutput::from(c.to_owned()));
-    }
-    if let Some(p) = filters.plugin {
-        params.push(ToSqlOutput::from(p.to_owned()));
-    }
-
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("prepare knn: {e}")))?;
-
-    let rows = stmt
-        .query_map(params_from_iter(params.iter()), |row| {
-            let kind_text: String = row.get(4)?;
-            let kind = kind_text.parse::<EntryKind>().map_err(|msg| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    4,
-                    rusqlite::types::Type::Text,
-                    Box::new(std::io::Error::other(msg)),
-                )
-            })?;
-            Ok(Candidate {
-                skill_id: row.get(0)?,
-                catalog: row.get(1)?,
-                plugin: row.get(2)?,
-                name: row.get(3)?,
-                kind,
-                description: row.get(5)?,
-                plugin_version: row.get(6)?,
-                path: row.get(7)?,
-                distance: row.get::<_, f64>(8)? as f32,
-            })
-        })
-        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query knn: {e}")))?;
-
-    rows.collect::<Result<_, _>>()
-        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect knn rows: {e}")))
 }
 
 fn vector_to_bytes(v: &[f32]) -> Vec<u8> {
@@ -232,4 +121,60 @@ fn vector_to_bytes(v: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&f.to_le_bytes());
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_knn_sql_no_filters() {
+        let sql = build_knn_sql(&QueryFilters::default());
+        assert!(sql.contains("vec_distance_cosine(e.embedding, ?1)"), "must use cosine scalar");
+        assert!(sql.contains("WHERE name = ?2"), "workspace param is ?2");
+        assert!(sql.contains("LIMIT ?3"), "limit param is ?3");
+        assert!(!sql.contains("?4"), "no extra params when no filters");
+        assert!(!sql.contains("MATCH"), "must not use vec0 MATCH syntax");
+    }
+
+    #[test]
+    fn build_knn_sql_with_catalog_filter() {
+        let filters = QueryFilters { catalog: Some("my-catalog"), plugin: None };
+        let sql = build_knn_sql(&filters);
+        assert!(sql.contains("AND s.catalog = ?4"), "catalog filter is ?4");
+        assert!(!sql.contains("?5"), "no plugin param when only catalog is set");
+    }
+
+    #[test]
+    fn build_knn_sql_with_plugin_filter() {
+        let filters = QueryFilters { catalog: None, plugin: Some("my-plugin") };
+        let sql = build_knn_sql(&filters);
+        // Without catalog, plugin is the first optional param: ?4
+        assert!(sql.contains("AND s.plugin = ?4"), "plugin-only filter is ?4");
+    }
+
+    #[test]
+    fn build_knn_sql_with_both_filters() {
+        let filters = QueryFilters { catalog: Some("c"), plugin: Some("p") };
+        let sql = build_knn_sql(&filters);
+        assert!(sql.contains("AND s.catalog = ?4"), "catalog filter is ?4");
+        assert!(sql.contains("AND s.plugin = ?5"), "plugin filter is ?5");
+    }
+
+    #[test]
+    fn knn_returns_empty_for_zero_top_k() {
+        crate::index::vec_ext::register_globally().unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let qv = vec![1.0f32; 4];
+        let result = knn(&conn, "global", &qv, 0, &QueryFilters::default()).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn knn_returns_empty_for_empty_query_vec() {
+        crate::index::vec_ext::register_globally().unwrap();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        let result = knn(&conn, "global", &[], 5, &QueryFilters::default()).unwrap();
+        assert!(result.is_empty());
+    }
 }
