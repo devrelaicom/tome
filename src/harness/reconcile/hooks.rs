@@ -577,6 +577,16 @@ fn entry_array<'a>(
         .ok_or_else(|| TomeError::HookSpecParseError {
             path: path.to_path_buf(),
         })?;
+    // Copilot CLI's hook document is `{ "version": 1, "hooks": { … } }` — the
+    // T087 live-probe confirms Copilot CLI silently ignores a hook file that
+    // omits the top-level `version`. Stamp it on the CREATE path (or any file
+    // that lacks it) but NEVER overwrite a developer-set value: `or_insert`
+    // only fills it when absent. Other specs (devin: no wrapper, gemini/
+    // antigravity: their own container key) are untouched by this.
+    if matches!(spec, HookFileSpec::CopilotHooks) {
+        root.entry("version".to_string())
+            .or_insert(JsonValue::from(1));
+    }
     // The intermediate container object (if any) the event array nests under.
     let container_key: Option<&str> = match spec {
         HookFileSpec::DevinHooksV1 => None,
@@ -847,8 +857,11 @@ fn remove_command_hook(
     Action::Removed
 }
 
-/// Drop the now-empty event array (and, for antigravity, the empty named `tome`
-/// container) so a removed Tome hook leaves no scaffolding.
+/// Drop the now-empty event array so a removed Tome hook leaves no scaffolding.
+/// This prunes the container the spec nests under: the bare root for devin, the
+/// `hooks` container for copilot-cli and gemini, and the named `tome` container
+/// for antigravity (the antigravity container is additionally dropped once empty,
+/// since its only content is Tome's own event).
 fn prune_empty(doc: &mut JsonValue, spec: HookFileSpec, event: HookEvent) {
     let key = event_key(event);
     let Some(root) = doc.as_object_mut() else {
@@ -943,6 +956,9 @@ mod command_hook_tests {
         assert_eq!(
             v,
             serde_json::json!({
+                // Copilot CLI requires the top-level `version` (T087 live-probe);
+                // Tome stamps it on create.
+                "version": 1,
                 "hooks": {
                     "SessionStart": [ { "type": "command", "command": CMD } ]
                 }
@@ -1218,5 +1234,402 @@ mod command_hook_tests {
             cmd,
             "tome harness session-start --workspace global --harness stub"
         );
+    }
+}
+
+// =====================================================================
+// Phase 11 / US2 (T045/T046/T048/T049): the REAL new-harness modules
+// (devin / copilot-cli / gemini) drive `reconcile_command_hooks`
+// end-to-end. These assert the module → snapshot → reconciler flow with
+// each harness's ACTUAL `session_steering()` override, the exact
+// `--harness <name>` command, developer-hook preservation, non-live
+// removal, the gemini MCP-vs-hook no-clobber relationship, and that
+// antigravity (rules-only) writes NO hook file.
+// =====================================================================
+#[cfg(test)]
+mod us2_real_harness_tests {
+    use super::*;
+    use crate::harness::sync::{Action, SyncDeps, SyncOutcome};
+    use crate::harness::{HarnessModule, SessionSteering};
+    use std::collections::HashSet;
+    use tempfile::TempDir;
+
+    fn read(path: &Path) -> String {
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    /// Drive `reconcile_command_hooks` over a single real module with the
+    /// given live set, returning `(actions, first_error, project_root_dir)`.
+    fn run_reconcile(
+        module: &dyn HarnessModule,
+        live: bool,
+        tmp: &TempDir,
+    ) -> (
+        std::collections::HashMap<String, Action>,
+        Option<TomeError>,
+        PathBuf,
+    ) {
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let paths = crate::paths::Paths::from_root(tmp.path().join(".tome"));
+        let workspace = crate::workspace::WorkspaceName::global();
+        let deps = SyncDeps {
+            paths: &paths,
+            home_root: tmp.path(),
+            workspace_name: &workspace,
+            force: false,
+            only_harness: None,
+        };
+        let snapshots = vec![crate::harness::sync::snapshot_for_test(
+            module,
+            &project,
+            tmp.path(),
+        )];
+        let effective: HashSet<String> = if live {
+            std::iter::once(module.name().to_string()).collect()
+        } else {
+            HashSet::new()
+        };
+        let mut outcome = SyncOutcome::default();
+        let (actions, err) =
+            reconcile_command_hooks(&deps, &effective, &snapshots, &project, &mut outcome);
+        (actions, err, project)
+    }
+
+    /// T045/T049: the REAL devin module writes `.devin/hooks.v1.json` (no
+    /// wrapper) carrying the exact `--harness devin` command, no envelope
+    /// wrapper key.
+    #[test]
+    fn devin_real_module_writes_devin_hooks_v1_pin() {
+        let tmp = TempDir::new().unwrap();
+        let (actions, err, project) = run_reconcile(&crate::harness::devin::DEVIN, true, &tmp);
+        assert!(err.is_none(), "{err:?}");
+        assert_eq!(actions.get("devin"), Some(&Action::Created));
+        let hook_file = project.join(".devin/hooks.v1.json");
+        let v: JsonValue = serde_json::from_str(&read(&hook_file)).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "SessionStart": [
+                    { "matcher": "", "hooks": [ { "type": "command",
+                        "command": "tome harness session-start --workspace global --harness devin" } ] }
+                ]
+            }),
+        );
+    }
+
+    /// T046/T049: the REAL copilot-cli module writes `.github/hooks/tome.json`
+    /// with the `{ hooks: { SessionStart: [...] } }` wrapper carrying the exact
+    /// `--harness copilot-cli` command.
+    #[test]
+    fn copilot_cli_real_module_writes_github_hooks_tome_json_pin() {
+        let tmp = TempDir::new().unwrap();
+        let (actions, err, project) =
+            run_reconcile(&crate::harness::copilot_cli::COPILOT_CLI, true, &tmp);
+        assert!(err.is_none(), "{err:?}");
+        assert_eq!(actions.get("copilot-cli"), Some(&Action::Created));
+        let hook_file = project.join(".github/hooks/tome.json");
+        let v: JsonValue = serde_json::from_str(&read(&hook_file)).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                // T087 live-probe: Copilot CLI requires the top-level `version`.
+                "version": 1,
+                "hooks": {
+                    "SessionStart": [ { "type": "command",
+                        "command": "tome harness session-start --workspace global --harness copilot-cli" } ]
+                }
+            }),
+        );
+    }
+
+    /// T048/T049: the REAL gemini module writes the PROJECT
+    /// `.gemini/settings.json` `hooks` section carrying the exact `--harness
+    /// gemini` command.
+    #[test]
+    fn gemini_real_module_writes_project_settings_hooks_pin() {
+        let tmp = TempDir::new().unwrap();
+        let (actions, err, project) = run_reconcile(&crate::harness::gemini::GEMINI, true, &tmp);
+        assert!(err.is_none(), "{err:?}");
+        assert_eq!(actions.get("gemini"), Some(&Action::Created));
+        let hook_file = project.join(".gemini/settings.json");
+        let v: JsonValue = serde_json::from_str(&read(&hook_file)).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "hooks": {
+                    "SessionStart": [
+                        { "hooks": [ { "name": "tome", "type": "command",
+                            "command": "tome harness session-start --workspace global --harness gemini" } ] }
+                    ]
+                }
+            }),
+        );
+    }
+
+    /// T047/T049: antigravity is RULES-ONLY — its `session_steering()` is
+    /// `None`, so `reconcile_command_hooks` produces no action for it and
+    /// writes NO hook file anywhere under the project root.
+    #[test]
+    fn antigravity_real_module_writes_no_hook_file() {
+        let tmp = TempDir::new().unwrap();
+        // Sanity: the module itself declares rules-only.
+        assert_eq!(
+            crate::harness::antigravity::ANTIGRAVITY.session_steering(),
+            SessionSteering::None,
+        );
+        let (actions, err, project) =
+            run_reconcile(&crate::harness::antigravity::ANTIGRAVITY, true, &tmp);
+        assert!(err.is_none(), "{err:?}");
+        // No CommandHook → fast-exit → no action recorded for antigravity.
+        assert!(
+            !actions.contains_key("antigravity"),
+            "antigravity (rules-only) must produce no command-hook action",
+        );
+        // Neither candidate antigravity hook path exists.
+        assert!(!project.join(".agents/hooks.json").exists());
+        assert!(!project.join(".agent/hooks.json").exists());
+    }
+
+    /// T049 developer-hook preservation: a pre-existing unrelated hook entry in
+    /// the devin file survives the Tome write (real module).
+    #[test]
+    fn devin_real_module_preserves_developer_hook() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let hook_file = project.join(".devin/hooks.v1.json");
+        std::fs::create_dir_all(hook_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &hook_file,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "SessionStart": [
+                    { "matcher": "x", "hooks": [ { "type": "command", "command": "dev run" } ] }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let paths = crate::paths::Paths::from_root(tmp.path().join(".tome"));
+        let workspace = crate::workspace::WorkspaceName::global();
+        let deps = SyncDeps {
+            paths: &paths,
+            home_root: tmp.path(),
+            workspace_name: &workspace,
+            force: false,
+            only_harness: None,
+        };
+        let snapshots = vec![crate::harness::sync::snapshot_for_test(
+            &crate::harness::devin::DEVIN,
+            &project,
+            tmp.path(),
+        )];
+        let effective: HashSet<String> = std::iter::once("devin".to_string()).collect();
+        let mut outcome = SyncOutcome::default();
+        let (actions, err) =
+            reconcile_command_hooks(&deps, &effective, &snapshots, &project, &mut outcome);
+        assert!(err.is_none(), "{err:?}");
+        // File pre-existed → Updated.
+        assert_eq!(actions.get("devin"), Some(&Action::Updated));
+        let v: JsonValue = serde_json::from_str(&read(&hook_file)).unwrap();
+        let arr = v["SessionStart"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "developer entry + Tome entry");
+        assert_eq!(arr[0]["hooks"][0]["command"], "dev run");
+        assert_eq!(
+            arr[1]["hooks"][0]["command"],
+            "tome harness session-start --workspace global --harness devin"
+        );
+    }
+
+    /// T049 non-live removal: a harness that left the effective set has ONLY
+    /// its Tome hook entry removed; a developer entry under the same event
+    /// stays (real copilot-cli module).
+    #[test]
+    fn copilot_cli_real_module_non_live_removes_only_tome_entry() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let hook_file = project.join(".github/hooks/tome.json");
+        std::fs::create_dir_all(hook_file.parent().unwrap()).unwrap();
+        // Seed: developer entry + Tome's exact entry.
+        let tome_cmd = "tome harness session-start --workspace global --harness copilot-cli";
+        std::fs::write(
+            &hook_file,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "SessionStart": [
+                        { "type": "command", "command": "dev run" },
+                        { "type": "command", "command": tome_cmd }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let paths = crate::paths::Paths::from_root(tmp.path().join(".tome"));
+        let workspace = crate::workspace::WorkspaceName::global();
+        let deps = SyncDeps {
+            paths: &paths,
+            home_root: tmp.path(),
+            workspace_name: &workspace,
+            force: false,
+            only_harness: None,
+        };
+        let snapshots = vec![crate::harness::sync::snapshot_for_test(
+            &crate::harness::copilot_cli::COPILOT_CLI,
+            &project,
+            tmp.path(),
+        )];
+        // NON-live: empty effective set.
+        let effective: HashSet<String> = HashSet::new();
+        let mut outcome = SyncOutcome::default();
+        let (actions, err) =
+            reconcile_command_hooks(&deps, &effective, &snapshots, &project, &mut outcome);
+        assert!(err.is_none(), "{err:?}");
+        assert_eq!(actions.get("copilot-cli"), Some(&Action::Removed));
+        let v: JsonValue = serde_json::from_str(&read(&hook_file)).unwrap();
+        let arr = v["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "only the developer entry remains");
+        assert_eq!(arr[0]["command"], "dev run");
+    }
+
+    /// T049 gemini developer-hook preservation (nested shape): a pre-existing
+    /// developer `hooks.SessionStart[]` entry AND an unrelated top-level key
+    /// survive the Tome merge; Tome's entry lands AFTER the developer's.
+    #[test]
+    fn gemini_real_module_preserves_developer_hook() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let hook_file = project.join(".gemini/settings.json");
+        std::fs::create_dir_all(hook_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &hook_file,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "theme": "dark",
+                "hooks": {
+                    "SessionStart": [
+                        { "hooks": [ { "name": "dev", "type": "command", "command": "dev run" } ] }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let paths = crate::paths::Paths::from_root(tmp.path().join(".tome"));
+        let workspace = crate::workspace::WorkspaceName::global();
+        let deps = SyncDeps {
+            paths: &paths,
+            home_root: tmp.path(),
+            workspace_name: &workspace,
+            force: false,
+            only_harness: None,
+        };
+        let snapshots = vec![crate::harness::sync::snapshot_for_test(
+            &crate::harness::gemini::GEMINI,
+            &project,
+            tmp.path(),
+        )];
+        let effective: HashSet<String> = std::iter::once("gemini".to_string()).collect();
+        let mut outcome = SyncOutcome::default();
+        let (actions, err) =
+            reconcile_command_hooks(&deps, &effective, &snapshots, &project, &mut outcome);
+        assert!(err.is_none(), "{err:?}");
+        // File pre-existed → Updated.
+        assert_eq!(actions.get("gemini"), Some(&Action::Updated));
+        let v: JsonValue = serde_json::from_str(&read(&hook_file)).unwrap();
+        let arr = v["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "developer entry + Tome entry");
+        assert_eq!(arr[0]["hooks"][0]["command"], "dev run");
+        assert_eq!(
+            arr[1]["hooks"][0]["command"],
+            "tome harness session-start --workspace global --harness gemini"
+        );
+        // The unrelated top-level key survives untouched.
+        assert_eq!(v["theme"], "dark");
+    }
+
+    /// T049 gemini NON-LIVE removal: a harness that left the effective set has
+    /// ONLY its deep-equal Tome entry removed; a developer entry under the same
+    /// event stays and the now-empty Tome scaffolding is pruned.
+    #[test]
+    fn gemini_real_module_non_live_removes_only_tome_entry() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let hook_file = project.join(".gemini/settings.json");
+        std::fs::create_dir_all(hook_file.parent().unwrap()).unwrap();
+        // Seed: a developer entry + Tome's EXACT gemini entry under the same
+        // event array.
+        let tome_cmd = "tome harness session-start --workspace global --harness gemini";
+        std::fs::write(
+            &hook_file,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "SessionStart": [
+                        { "hooks": [ { "name": "dev", "type": "command", "command": "dev run" } ] },
+                        { "hooks": [ { "name": "tome", "type": "command", "command": tome_cmd } ] }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (actions, err, _project) = run_reconcile(&crate::harness::gemini::GEMINI, false, &tmp);
+        assert!(err.is_none(), "{err:?}");
+        assert_eq!(actions.get("gemini"), Some(&Action::Removed));
+        let v: JsonValue = serde_json::from_str(&read(&hook_file)).unwrap();
+        let arr = v["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "only the developer entry remains");
+        assert_eq!(arr[0]["hooks"][0]["command"], "dev run");
+    }
+
+    /// T048/T049 gemini no-clobber: the MCP server lives in the GLOBAL
+    /// `~/.gemini/settings.json` and the hook lives in the PROJECT
+    /// `<project>/.gemini/settings.json`. Even when BOTH files exist and a
+    /// pre-existing `mcpServers` block sits in the project file alongside the
+    /// hook write, the hook write preserves it (and vice versa) — disjoint
+    /// top-level keys through the lenient preserve-order parse.
+    #[test]
+    fn gemini_hook_write_preserves_a_coexisting_mcp_block() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        let project_settings = project.join(".gemini/settings.json");
+        std::fs::create_dir_all(project_settings.parent().unwrap()).unwrap();
+        // A developer (or a hypothetical project-local MCP) wrote an
+        // `mcpServers` block into the SAME project settings.json the hook
+        // targets. The hook write must NOT drop it.
+        std::fs::write(
+            &project_settings,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mcpServers": { "other": { "command": "x", "args": [] } },
+                "theme": "dark"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (actions, err, project_root) =
+            run_reconcile(&crate::harness::gemini::GEMINI, true, &tmp);
+        assert!(err.is_none(), "{err:?}");
+        assert_eq!(actions.get("gemini"), Some(&Action::Updated));
+        let v: JsonValue = serde_json::from_str(&read(&project_settings)).unwrap();
+        // The hook was added under `hooks`.
+        assert_eq!(
+            v["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            "tome harness session-start --workspace global --harness gemini"
+        );
+        // The pre-existing `mcpServers` + `theme` keys survive untouched.
+        assert_eq!(v["mcpServers"]["other"]["command"], "x");
+        assert_eq!(v["theme"], "dark");
+        // The GLOBAL MCP path is a different file and was NOT created by the
+        // hook write.
+        let global_mcp = tmp.path().join(".gemini/settings.json");
+        assert_ne!(project_settings, global_mcp);
+        assert!(
+            !global_mcp.exists(),
+            "the hook reconciler must not touch the GLOBAL gemini settings.json",
+        );
+        let _ = project_root;
     }
 }

@@ -1,7 +1,38 @@
 //! `antigravity` — the Antigravity IDE.
 //!
 //! Phase 11 (US1). Baseline integration: standalone rules file + MCP dialect.
-//! Session steering (the G2 `injectSteps` envelope) lands in US2/US3.
+//!
+//! ## Session steering: RULES-ONLY for now (US2 / T047, DE-RISK per FR-020/R14)
+//!
+//! Antigravity DELIBERATELY keeps `session_steering()` = [`SessionSteering::None`]
+//! (rules-only). The command-hook path for Antigravity is doc-ambiguous and
+//! CANNOT be confirmed without a live install: the hooks directory (`.agents/`
+//! vs `.agent/`), the hook event (`PreInvocation`), and the `injectSteps` stdout
+//! envelope are all unverified. Shipping a guessed hook file risks writing to
+//! the wrong path / under the wrong event, so until a real Antigravity install
+//! confirms the shape, Antigravity is integrated via its standalone rules file
+//! only (the directive still reaches Antigravity through `.agent/rules/tome.md`).
+//!
+//! The foundation is READY for the flip: `HookFileSpec::AntigravityHooks`
+//! (`.agents/hooks.json`, named `tome` block, `PreInvocation`) and the
+//! [`Envelope::AntigravityInjectSteps`] (`{ "injectSteps": [ { "ephemeralMessage":
+//! … } ] }`) envelope both exist and are exercised by the `reconcile_command_hooks`
+//! unit tests. Confirming the live shape (T087, run on a real Antigravity install
+//! during Polish) is the ONLY blocker. Once confirmed, flip
+//! `session_steering()` to EXACTLY:
+//!
+//! ```ignore
+//! fn session_steering(&self) -> SessionSteering {
+//!     SessionSteering::CommandHook {
+//!         file_spec: HookFileSpec::AntigravityHooks,
+//!         event: HookEvent::PreInvocation,
+//!         envelope: Envelope::AntigravityInjectSteps,
+//!     }
+//! }
+//! ```
+//!
+//! [`SessionSteering::None`]: crate::harness::SessionSteering::None
+//! [`Envelope::AntigravityInjectSteps`]: crate::harness::Envelope::AntigravityInjectSteps
 //!
 //! - Per-user dir: `~/.gemini/` — Antigravity shares the Gemini config tree.
 //!   The `antigravity-cli` → `gemini` alias (in [`HARNESS_ALIASES`]) routes
@@ -82,6 +113,16 @@ impl HarnessModule for Antigravity {
             extra_fields: &[],
         }
     }
+
+    // RULES-ONLY (US2 / T047): `session_steering()` is DELIBERATELY left as the
+    // trait default `SessionSteering::None`. The Antigravity command-hook shape
+    // (`.agents/` dir, `PreInvocation` event, `injectSteps` envelope) is
+    // doc-ambiguous and cannot be confirmed without a live install — see the
+    // module doc comment for the de-risk rationale and the exact `CommandHook`
+    // value (`AntigravityHooks` / `PreInvocation` / `AntigravityInjectSteps`)
+    // to set once T087 (the live-probe gate below) confirms it. No
+    // `session_steering` override here means NO hook file is written for
+    // antigravity; the directive rides its `.agent/rules/tome.md` rules file.
 }
 
 #[cfg(test)]
@@ -116,11 +157,39 @@ mod tests {
         assert!(!ANTIGRAVITY.mcp_manual_only());
     }
 
+    /// US2 (T047, DE-RISK): antigravity stays RULES-ONLY — its
+    /// `session_steering()` is the trait default `SessionSteering::None`, so the
+    /// `reconcile_command_hooks` pass never writes a hook file for it. Flipping
+    /// to `CommandHook` is gated on the live probe below (T087).
+    #[test]
+    fn session_steering_is_none_rules_only() {
+        use crate::harness::SessionSteering;
+        assert_eq!(
+            ANTIGRAVITY.session_steering(),
+            SessionSteering::None,
+            "antigravity must stay rules-only until T087 confirms the hook shape",
+        );
+    }
+
     /// Live-probe gate (T087): NOT run in CI. A human must confirm against a
     /// real Antigravity install the `.agent/` rules dir, the `.agents/` hooks
-    /// dir, and the `injectSteps` session-start envelope before US2/US3 ship.
+    /// dir, the `PreInvocation` event, and the `injectSteps` session-start
+    /// envelope. ONLY when all four are confirmed, flip `session_steering()` to:
+    ///
+    /// ```ignore
+    /// SessionSteering::CommandHook {
+    ///     file_spec: HookFileSpec::AntigravityHooks,   // .agents/hooks.json
+    ///     event: HookEvent::PreInvocation,
+    ///     envelope: Envelope::AntigravityInjectSteps,
+    /// }
+    /// ```
+    ///
+    /// The `AntigravityHooks` spec + `AntigravityInjectSteps` envelope already
+    /// exist in the foundation (exercised by the `reconcile_command_hooks` unit
+    /// tests), so the flip is the single `session_steering()` override above —
+    /// no new wiring.
     #[test]
-    #[ignore = "live-probe: confirm .agent/ rules dir + .agents/ hooks dir + injectSteps envelope"]
+    #[ignore = "live-probe (T087): confirm .agents/ hooks dir + PreInvocation event + injectSteps envelope, then flip session_steering to CommandHook"]
     fn antigravity_rules_hooks_dirs_and_inject_steps_live_probe() {
         // No automated body — see the doc comment for the manual checklist.
     }
