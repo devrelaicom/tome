@@ -907,6 +907,36 @@ mod dialect_pin_tests {
         }],
     };
 
+    /// Copilot (VS Code): `servers` parent key + `type:stdio`, no env.
+    const COPILOT_DIALECT: McpDialect = McpDialect {
+        file_format: FileFormat::Json,
+        parent_key: "servers",
+        entry_shape: EntryShape::CommandArgs,
+        entry_type: Some(ServerType::Stdio),
+        emit_env: false,
+        extra_fields: &[],
+    };
+
+    /// Zed: `context_servers` parent key + `CommandArgs` + `emit_env`.
+    const ZED_DIALECT: McpDialect = McpDialect {
+        file_format: FileFormat::Json,
+        parent_key: "context_servers",
+        entry_shape: EntryShape::CommandArgs,
+        entry_type: None,
+        emit_env: true,
+        extra_fields: &[],
+    };
+
+    /// Crush: `mcp` parent key + `CommandArgs` + per-entry `type:stdio`, no env.
+    const CRUSH_DIALECT: McpDialect = McpDialect {
+        file_format: FileFormat::Json,
+        parent_key: "mcp",
+        entry_shape: EntryShape::CommandArgs,
+        entry_type: Some(ServerType::Stdio),
+        emit_env: false,
+        extra_fields: &[],
+    };
+
     fn tome_entry() -> TomeEntry {
         TomeEntry::new(
             "tome".to_string(),
@@ -1087,5 +1117,158 @@ mod dialect_pin_tests {
             Some(vec![("MY_FLAG".to_string(), "1".to_string())]),
             "developer env must survive the rewrite",
         );
+    }
+
+    // ---- remove_entry under the new dialect parent keys (the disable path) ----
+    //
+    // Each: seed a Tome-owned entry + a FOREIGN sibling server under the SAME
+    // parent key, `remove_entry`, then assert the `tome` key is gone and the
+    // foreign sibling survives byte-for-byte (value-equality, since serde_json's
+    // pretty-printer normalises whitespace).
+
+    /// Seed `{ "<parent_key>": { "tome": {<owned>}, "other": {<foreign>} } }`,
+    /// remove the Tome entry, and return the re-read parent object so the caller
+    /// can assert on the surviving siblings.
+    fn remove_entry_preserves_sibling(
+        dialect: &McpDialect,
+        file: &str,
+        owned: &str,
+        foreign: &str,
+    ) -> JsonValue {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join(file);
+        let seed = format!(
+            "{{\n  \"{key}\": {{\n    \"tome\": {owned},\n    \"other\": {foreign}\n  }}\n}}\n",
+            key = dialect.parent_key,
+        );
+        std::fs::write(&target, seed).unwrap();
+        // Sanity: the seeded Tome entry IS owned before removal.
+        assert!(is_tome_owned(
+            &read_entry(&target, dialect).unwrap().unwrap()
+        ));
+
+        remove_entry(&target, dialect).unwrap();
+
+        let body = std::fs::read_to_string(&target).unwrap();
+        let doc: JsonValue = serde_json::from_str(&body).unwrap();
+        let parent = doc
+            .get(dialect.parent_key)
+            .and_then(JsonValue::as_object)
+            .expect("parent object survives removal");
+        assert!(
+            parent.get("tome").is_none(),
+            "tome key must be gone after remove_entry:\n{body}",
+        );
+        assert!(
+            parent.get("other").is_some(),
+            "foreign sibling must survive remove_entry:\n{body}",
+        );
+        doc.get(dialect.parent_key).cloned().unwrap()
+    }
+
+    #[test]
+    fn remove_entry_servers_key_preserves_foreign_sibling() {
+        // copilot (VS Code): `servers` + type:stdio.
+        let parent = remove_entry_preserves_sibling(
+            &COPILOT_DIALECT,
+            "mcp.json",
+            "{ \"type\": \"stdio\", \"command\": \"tome\", \"args\": [\"mcp\"] }",
+            "{ \"type\": \"stdio\", \"command\": \"other-bin\", \"args\": [\"run\"] }",
+        );
+        let other = &parent["other"];
+        assert_eq!(other["command"], "other-bin");
+        assert_eq!(other["args"][0], "run");
+    }
+
+    #[test]
+    fn remove_entry_context_servers_key_preserves_foreign_sibling() {
+        // zed: `context_servers` + CommandArgs.
+        let parent = remove_entry_preserves_sibling(
+            &ZED_DIALECT,
+            "settings.json",
+            "{ \"command\": \"tome\", \"args\": [\"mcp\"] }",
+            "{ \"command\": \"other-bin\", \"args\": [\"run\"] }",
+        );
+        assert_eq!(parent["other"]["command"], "other-bin");
+    }
+
+    #[test]
+    fn remove_entry_mcp_key_type_stdio_preserves_foreign_sibling() {
+        // crush: `mcp` parent key + per-entry type:stdio.
+        let parent = remove_entry_preserves_sibling(
+            &CRUSH_DIALECT,
+            "crush.json",
+            "{ \"type\": \"stdio\", \"command\": \"tome\", \"args\": [\"mcp\"] }",
+            "{ \"type\": \"stdio\", \"command\": \"other-bin\", \"args\": [\"run\"] }",
+        );
+        assert_eq!(parent["other"]["command"], "other-bin");
+        assert_eq!(parent["other"]["type"], "stdio");
+    }
+
+    #[test]
+    fn remove_entry_mcpservers_tools_extra_preserves_foreign_sibling() {
+        // copilot-cli: `mcpServers` + type:local + env:{} + tools:["*"].
+        let parent = remove_entry_preserves_sibling(
+            &COPILOT_CLI_DIALECT,
+            "mcp-config.json",
+            "{ \"type\": \"local\", \"command\": \"tome\", \"args\": [\"mcp\"], \"env\": {}, \"tools\": [\"*\"] }",
+            "{ \"type\": \"local\", \"command\": \"other-bin\", \"args\": [\"run\"], \"tools\": [\"x\"] }",
+        );
+        assert_eq!(parent["other"]["command"], "other-bin");
+        assert_eq!(parent["other"]["tools"][0], "x");
+    }
+
+    // ---- write_entry preserves a foreign sibling under the new parent keys ----
+
+    #[test]
+    fn write_entry_servers_key_preserves_foreign_sibling() {
+        // Seed ONLY a foreign sibling under `servers`; writing the Tome entry
+        // must ADD `tome` and leave `other` intact.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("mcp.json");
+        std::fs::write(
+            &target,
+            "{\n  \"servers\": {\n    \"other\": { \"type\": \"stdio\", \"command\": \"other-bin\", \"args\": [\"run\"] }\n  }\n}\n",
+        )
+        .unwrap();
+        write_entry(&target, &COPILOT_DIALECT, &tome_entry()).unwrap();
+
+        let body = std::fs::read_to_string(&target).unwrap();
+        let doc: JsonValue = serde_json::from_str(&body).unwrap();
+        let servers = doc.get("servers").and_then(JsonValue::as_object).unwrap();
+        assert!(
+            servers.get("other").is_some(),
+            "foreign sibling must survive the write:\n{body}",
+        );
+        assert_eq!(servers["other"]["command"], "other-bin");
+        // The Tome entry was added and is owned.
+        let read = read_entry(&target, &COPILOT_DIALECT).unwrap().unwrap();
+        assert!(is_tome_owned(&read));
+    }
+
+    #[test]
+    fn write_entry_context_servers_key_preserves_foreign_sibling() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        std::fs::write(
+            &target,
+            "{\n  \"context_servers\": {\n    \"other\": { \"command\": \"other-bin\", \"args\": [\"run\"] }\n  }\n}\n",
+        )
+        .unwrap();
+        write_entry(&target, &ZED_DIALECT, &tome_entry()).unwrap();
+
+        let body = std::fs::read_to_string(&target).unwrap();
+        let doc: JsonValue = serde_json::from_str(&body).unwrap();
+        let parent = doc
+            .get("context_servers")
+            .and_then(JsonValue::as_object)
+            .unwrap();
+        assert!(
+            parent.get("other").is_some(),
+            "foreign sibling must survive the write:\n{body}",
+        );
+        assert_eq!(parent["other"]["command"], "other-bin");
+        let read = read_entry(&target, &ZED_DIALECT).unwrap().unwrap();
+        assert!(is_tome_owned(&read));
     }
 }

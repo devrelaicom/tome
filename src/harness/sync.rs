@@ -403,7 +403,15 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         // -------------------------------------------------------------
         // 3b. MCP config
         // -------------------------------------------------------------
-        let mcp_action = if !mcp_paths_processed.insert(snap.mcp_path.clone()) {
+        let mcp_action = if snap.mcp_manual_only {
+            // Phase 11: this harness has no writable MCP config file (UI-only,
+            // jetbrains-ai). Skip the MCP sink entirely — no read, no write, no
+            // remove — and leave the path unmarked-processed so a real sharer of
+            // the same path (there is none in practice) is unaffected. The
+            // harness still gets its rules-file integration above; the
+            // "paste this snippet" notice is a separate US5 concern.
+            Action::LeftAlone
+        } else if !mcp_paths_processed.insert(snap.mcp_path.clone()) {
             Action::LeftAlone
         } else {
             let any_live = mcp_targets_by_path
@@ -616,12 +624,25 @@ pub(crate) struct HarnessSnapshot {
     pub(crate) name: String,
     rules_path: PathBuf,
     rules_strategy: RulesFileStrategy,
+    /// Phase 11 (G3, FR-026): the Tome-owned YAML front-matter header written
+    /// ABOVE the verbatim directive on a `StandaloneFile` sink (kiro's
+    /// `inclusion: always`, jetbrains-ai's apply-mode marker). `None` for every
+    /// harness without a front-matter requirement — every Phase ≤10 module, so
+    /// their standalone bytes are unchanged. Consulted ONLY in the
+    /// `StandaloneFile` write branch; the clean branch removes the whole file
+    /// regardless.
+    rules_frontmatter: Option<crate::harness::RulesFrontmatter>,
     block_body_style: BlockBodyStyle,
     mcp_path: PathBuf,
     /// Phase 11 (G1): the harness's full MCP wire-shape, replacing the
     /// Phase ≤10 `mcp_format` + `mcp_parent_key` scalar pair. Drives the
     /// shared dialect-aware `mcp_config` read/write/remove.
     mcp_dialect: crate::harness::McpDialect,
+    /// Phase 11: `true` when the harness has NO writable MCP config file
+    /// (jetbrains-ai — UI-only). The MCP read/write/remove sink is skipped
+    /// entirely for such a harness; `false` for every other module, so the
+    /// MCP byte output is unchanged for all writable harnesses.
+    mcp_manual_only: bool,
     /// Phase 6 / US1: whether this harness emits native agent files. Drives
     /// the agents-reconciliation fast-exit; the actual `agent_dir` is
     /// re-derived under the registry guard at dispatch time (the trait
@@ -688,11 +709,23 @@ fn collect_all_harness_snapshots(project_root: &Path, deps: &SyncDeps<'_>) -> Ve
 fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) -> HarnessSnapshot {
     HarnessSnapshot {
         name: m.name().to_string(),
-        rules_path: m.rules_file_target(project_root),
+        // Phase 11 (G3, FR-024): prefer the harness's dedicated, namespaced
+        // standalone file when it declares one — so Tome never inserts a block
+        // into (or owns) a developer-authored shared rules file. For the four
+        // current overriders (cline/zed/kiro/jetbrains-ai) this returns the SAME
+        // path as `rules_file_target`, so behaviour is unchanged today; wiring it
+        // here makes the namespaced accessor LOAD-BEARING (it stops being dead
+        // code) so it cannot silently drift from the target. Every Phase ≤10
+        // module returns `None` → falls back to `rules_file_target` verbatim.
+        rules_path: m
+            .rules_namespaced_file(project_root)
+            .unwrap_or_else(|| m.rules_file_target(project_root)),
         rules_strategy: m.rules_file_strategy(),
+        rules_frontmatter: m.rules_frontmatter(),
         block_body_style: m.block_body_style(),
         mcp_path: m.mcp_config_path(project_root, home_root),
         mcp_dialect: m.mcp_dialect(),
+        mcp_manual_only: m.mcp_manual_only(),
         supports_native_agents: m.supports_native_agents(),
         // Only a `RealJson` harness with a settings path participates in real
         // hooks. A `GuardrailsOnly` harness — even one that returns a settings
@@ -851,6 +884,18 @@ fn write_rules_for_path(snap: &HarnessSnapshot, body: &str) -> Result<Action, To
             Ok(classification)
         }
         RulesFileStrategy::StandaloneFile => {
+            // Phase 11 (G3, FR-026): a harness declaring `rules_frontmatter()`
+            // (kiro `inclusion: always`, jetbrains-ai apply-mode) gets a
+            // Tome-owned `---`-fenced header ABOVE the directive; every other
+            // harness (every Phase ≤10 module, all returning `None`) writes the
+            // verbatim body with no header, so their standalone bytes are
+            // byte-identical. The on-disk comparison classifies against the FULLY
+            // RENDERED payload so the idempotence + Created/Updated/LeftAlone
+            // distinction stays correct for both shapes.
+            let desired = match snap.rules_frontmatter {
+                Some(fm) => rules_file::render_standalone_with_frontmatter(&fm, body),
+                None => body.to_string(),
+            };
             let prior_bytes = match crate::util::bounded_read_to_string(
                 &snap.rules_path,
                 crate::util::HARNESS_RULES_MAX,
@@ -861,10 +906,15 @@ fn write_rules_for_path(snap: &HarnessSnapshot, body: &str) -> Result<Action, To
             };
             let classification = match prior_bytes.as_deref() {
                 None => Action::Created,
-                Some(existing) if existing == body => Action::LeftAlone,
+                Some(existing) if existing == desired => Action::LeftAlone,
                 Some(_) => Action::Updated,
             };
-            rules_file::write_standalone(&snap.rules_path, body)?;
+            match snap.rules_frontmatter {
+                Some(fm) => {
+                    rules_file::write_standalone_with_frontmatter(&snap.rules_path, &fm, body)?
+                }
+                None => rules_file::write_standalone(&snap.rules_path, body)?,
+            }
             Ok(classification)
         }
     }
