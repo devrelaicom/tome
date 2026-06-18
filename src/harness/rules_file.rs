@@ -51,7 +51,7 @@ use regex::Regex;
 use tempfile::NamedTempFile;
 
 use crate::error::TomeError;
-use crate::harness::BlockBodyStyle;
+use crate::harness::{BlockBodyStyle, RulesFrontmatter};
 
 /// Line-anchored regex matching either marker, with trailing whitespace
 /// tolerated. Pinned here per data-model §11.
@@ -416,6 +416,55 @@ pub fn write_standalone(target: &Path, contents: &str) -> Result<(), TomeError> 
     atomic_write(target, contents.as_bytes())
 }
 
+/// Render the byte-stable file contents for a frontmatter-fronted standalone
+/// rules file (G3, FR-026).
+///
+/// Format (deterministic — key order is the `fields` slice order):
+///
+/// ```text
+/// ---
+/// <key>: <value>
+/// …
+/// ---
+/// <body>
+/// ```
+///
+/// A trailing newline always follows the closing `---`; `body` is emitted
+/// verbatim after it. Tome owns every key/value (they are `&'static`
+/// constants), so they are NOT scanned for marker collisions — only
+/// third-party content gets the verbatim-collision guard.
+fn render_frontmatter(frontmatter: &RulesFrontmatter, body: &str) -> String {
+    let mut out = String::with_capacity(body.len() + 32);
+    out.push_str("---\n");
+    for (key, value) in frontmatter.fields {
+        out.push_str(key);
+        out.push_str(": ");
+        out.push_str(value);
+        out.push('\n');
+    }
+    out.push_str("---\n");
+    out.push_str(body);
+    out
+}
+
+/// Write the standalone Tome-owned rules file at `target` with a Tome-owned
+/// YAML front-matter header above the verbatim `body` (G3, FR-026).
+///
+/// The emitted bytes are `render_frontmatter(frontmatter, body)` — a
+/// `---`-fenced header whose key order is the `frontmatter.fields` slice
+/// order, then `body` verbatim. Same symlink-refusal + atomic-write +
+/// idempotence discipline as [`write_standalone`]; the only difference is the
+/// composed payload. Used by harnesses whose standalone sink requires a
+/// front-matter directive (kiro `inclusion: always`, jetbrains-ai apply-mode).
+pub fn write_standalone_with_frontmatter(
+    target: &Path,
+    frontmatter: &RulesFrontmatter,
+    body: &str,
+) -> Result<(), TomeError> {
+    let contents = render_frontmatter(frontmatter, body);
+    write_standalone(target, &contents)
+}
+
 /// Remove the standalone Tome-owned rules file at `target` (if
 /// present). The containing directory is untouched.
 pub fn remove_standalone(target: &Path) -> Result<(), TomeError> {
@@ -621,5 +670,56 @@ mod tests {
         let s = "<!-- tome:begin -->\nfirst\n<!-- tome:end -->\n<!-- tome:begin -->\nsecond\n<!-- tome:end -->\n";
         let block = parse_block(s).unwrap().unwrap();
         assert_eq!(block.body, "first");
+    }
+
+    #[test]
+    fn render_frontmatter_kiro_shape_pins_exact_bytes() {
+        let fm = RulesFrontmatter {
+            fields: &[("inclusion", "always")],
+        };
+        assert_eq!(
+            render_frontmatter(&fm, "the directive\n"),
+            "---\ninclusion: always\n---\nthe directive\n",
+        );
+    }
+
+    #[test]
+    fn render_frontmatter_jetbrains_shape_pins_exact_bytes() {
+        let fm = RulesFrontmatter {
+            fields: &[("apply", "always")],
+        };
+        assert_eq!(
+            render_frontmatter(&fm, "body"),
+            "---\napply: always\n---\nbody",
+        );
+    }
+
+    #[test]
+    fn render_frontmatter_preserves_field_slice_order() {
+        let fm = RulesFrontmatter {
+            fields: &[("b", "2"), ("a", "1")],
+        };
+        assert_eq!(render_frontmatter(&fm, "x"), "---\nb: 2\na: 1\n---\nx");
+    }
+
+    #[test]
+    fn write_standalone_with_frontmatter_round_trips_and_is_idempotent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join(".kiro/steering/tome.md");
+        let fm = RulesFrontmatter {
+            fields: &[("inclusion", "always")],
+        };
+        write_standalone_with_frontmatter(&target, &fm, "rules body\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "---\ninclusion: always\n---\nrules body\n",
+        );
+        // Second write with identical inputs is a no-op (idempotence inherited
+        // from `write_standalone`).
+        write_standalone_with_frontmatter(&target, &fm, "rules body\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "---\ninclusion: always\n---\nrules body\n",
+        );
     }
 }

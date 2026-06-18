@@ -76,7 +76,7 @@ use tracing::{debug, warn};
 
 use crate::commands::plugin::registry_seeds;
 use crate::error::TomeError;
-use crate::harness::{self, McpConfigFormat, RulesFileStrategy, with_effective_modules};
+use crate::harness::{self, McpDialect, RulesFileStrategy, with_effective_modules};
 use crate::index::{self, OpenOptions, acquire_lock, workspace_catalogs};
 use crate::paths::Paths;
 use crate::settings::{self, GlobalSettings, resolve_effective_list, resolver::StubScope};
@@ -392,8 +392,7 @@ fn teardown_integration_for_project(
         rules_path: PathBuf,
         rules_strategy: RulesFileStrategy,
         mcp_path: PathBuf,
-        mcp_format: McpConfigFormat,
-        mcp_parent_key: &'static str,
+        mcp_dialect: McpDialect,
     }
 
     let snapshots: Vec<Snapshot> = with_effective_modules(|mods| {
@@ -404,8 +403,7 @@ fn teardown_integration_for_project(
                 rules_path: m.rules_file_target(project),
                 rules_strategy: m.rules_file_strategy(),
                 mcp_path: m.mcp_config_path(project, home_root),
-                mcp_format: m.mcp_config_format(),
-                mcp_parent_key: m.mcp_parent_key(),
+                mcp_dialect: m.mcp_dialect(),
             })
             .collect()
     });
@@ -444,11 +442,7 @@ fn teardown_integration_for_project(
         }
 
         if processed_mcp.insert(snap.mcp_path.clone())
-            && let Err(e) = harness::mcp_config::remove_entry(
-                &snap.mcp_path,
-                snap.mcp_format,
-                snap.mcp_parent_key,
-            )
+            && let Err(e) = harness::mcp_config::remove_entry(&snap.mcp_path, &snap.mcp_dialect)
         {
             warn!(
                 harness = %snap.name,

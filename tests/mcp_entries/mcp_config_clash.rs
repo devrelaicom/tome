@@ -10,8 +10,8 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tome::harness::McpConfigFormat;
 use tome::harness::mcp_config::{TomeEntry, is_tome_owned, read_entry, write_entry};
+use tome::harness::{McpConfigFormat, McpDialect};
 
 const MTIME_TICK: Duration = Duration::from_millis(1500);
 
@@ -33,9 +33,12 @@ fn user_owned_entry_with_different_command_returns_value_not_error() {
 "#;
     std::fs::write(&target, seed).unwrap();
 
-    let parsed = read_entry(&target, McpConfigFormat::Json, "mcpServers")
-        .unwrap()
-        .expect("entry must be returned");
+    let parsed = read_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+    )
+    .unwrap()
+    .expect("entry must be returned");
     assert_eq!(parsed.command, "other-binary");
     assert!(
         !is_tome_owned(&parsed),
@@ -58,9 +61,12 @@ fn user_owned_entry_with_different_first_arg_returns_value_not_error() {
 "#;
     std::fs::write(&target, seed).unwrap();
 
-    let parsed = read_entry(&target, McpConfigFormat::Json, "mcpServers")
-        .unwrap()
-        .expect("entry must be returned");
+    let parsed = read_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+    )
+    .unwrap()
+    .expect("entry must be returned");
     assert_eq!(parsed.args, vec!["other-cmd"]);
     assert!(
         !is_tome_owned(&parsed),
@@ -94,7 +100,12 @@ fn tome_owned_entry_is_idempotent_overwrite() {
             "demo".to_string(),
         ],
     );
-    write_entry(&target, McpConfigFormat::Json, "mcpServers", &same).unwrap();
+    write_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+        &same,
+    )
+    .unwrap();
 
     let mtime_after = std::fs::metadata(&target).unwrap().modified().unwrap();
     assert_eq!(

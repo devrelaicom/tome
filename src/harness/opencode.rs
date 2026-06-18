@@ -23,7 +23,8 @@ use crate::harness::agents::{
     self, CanonicalAgent, TranslatedAgent, agent_extension, agent_filename,
 };
 use crate::harness::{
-    AgentFormat, BlockBodyStyle, HarnessModule, McpConfigFormat, RulesFileStrategy,
+    AgentFormat, BlockBodyStyle, EntryShape, ExtraField, ExtraValue, FileFormat, HarnessModule,
+    McpDialect, RulesFileStrategy, ServerType,
 };
 
 /// Unit struct implementing [`HarnessModule`] for OpenCode CLI.
@@ -63,12 +64,44 @@ impl HarnessModule for OpenCode {
         project_root.join("opencode.json")
     }
 
-    fn mcp_config_format(&self) -> McpConfigFormat {
-        McpConfigFormat::Json
-    }
-
-    fn mcp_parent_key(&self) -> &'static str {
-        "mcpServers"
+    /// OpenCode's MCP dialect (Phase 11 G1 fix — the canary proving the
+    /// dialect generalization). The Phase ≤10 emit used the legacy
+    /// `mcpServers` + `command`/`args` shape, which is SUSPECTED WRONG for
+    /// OpenCode. The contract (`contracts/mcp-dialects.md`) pins the real
+    /// shape:
+    ///
+    /// ```jsonc
+    /// { "mcp": { "tome": {
+    ///     "type": "local",
+    ///     "command": ["tome", "mcp", "--workspace", "<ws>", "--harness", "opencode"],
+    ///     "enabled": true
+    /// } } }
+    /// ```
+    ///
+    /// - `mcp` parent key (NOT `mcpServers`).
+    /// - `CommandArray` body — the launcher AND args live in ONE
+    ///   `command` array; there is no separate `args` key. The ownership
+    ///   predicate becomes `command[0] == "tome" && command[1] == "mcp"`
+    ///   by construction of the read-side normalisation.
+    /// - `type: "local"` discriminator.
+    /// - `enabled: true` mandated field, re-derived on every rewrite.
+    /// - `Jsonc` format (OpenCode tolerates comments in `opencode.json`;
+    ///   Tome still emits plain JSON).
+    ///
+    /// A live-probe gate (the `#[ignore]`d test below) confirms this is
+    /// what OpenCode actually reads before the fix ships.
+    fn mcp_dialect(&self) -> McpDialect {
+        McpDialect {
+            file_format: FileFormat::Jsonc,
+            parent_key: "mcp",
+            entry_shape: EntryShape::CommandArray,
+            entry_type: Some(ServerType::Local),
+            emit_env: false,
+            extra_fields: &[ExtraField {
+                key: "enabled",
+                value: ExtraValue::Bool(true),
+            }],
+        }
     }
 
     // -- Native agents (FR-030–FR-036, FR-042) ------------------------------
@@ -303,5 +336,50 @@ mod tests {
             "empty body → placeholder:\n{}",
             t2.rendered
         );
+    }
+
+    #[test]
+    fn mcp_dialect_is_the_g1_canary_shape() {
+        use crate::harness::{EntryShape, ExtraValue, FileFormat, HarnessModule, ServerType};
+        let d = OPENCODE.mcp_dialect();
+        assert_eq!(d.file_format, FileFormat::Jsonc);
+        assert_eq!(d.parent_key, "mcp");
+        assert_eq!(d.entry_shape, EntryShape::CommandArray);
+        assert_eq!(d.entry_type, Some(ServerType::Local));
+        assert!(!d.emit_env);
+        assert_eq!(d.extra_fields.len(), 1);
+        assert_eq!(d.extra_fields[0].key, "enabled");
+        assert_eq!(d.extra_fields[0].value, ExtraValue::Bool(true));
+        // The Phase ≤10 scalar accessors derive from the dialect.
+        assert_eq!(
+            d.config_format(),
+            crate::harness::McpConfigFormat::Json,
+            "Jsonc maps to the serde_json read/write path"
+        );
+        assert_eq!(OPENCODE.mcp_parent_key(), "mcp");
+    }
+
+    /// Live-probe merge gate (R14 / T087). NOT run in CI — a human must run
+    /// this against a real OpenCode install before the G1 fix ships.
+    ///
+    /// What to verify by hand:
+    ///
+    /// 1. `tome harness use opencode` (or `tome sync --harness opencode`) in a
+    ///    workspace-bound project, then open the generated `opencode.json`.
+    /// 2. Confirm the Tome entry is under the top-level `"mcp"` key (NOT
+    ///    `"mcpServers"`), with `"type": "local"`, a single `"command"` array
+    ///    `["tome","mcp","--workspace","<ws>","--harness","opencode"]` (NO
+    ///    separate `"args"` key), and `"enabled": true`.
+    /// 3. Start OpenCode in that project and confirm it actually discovers and
+    ///    connects to the Tome MCP server (tools `search_skills` / `get_skill`
+    ///    appear). This is the assertion the unit pins cannot make: that
+    ///    OpenCode READS this shape. The current `mcpServers`+command/args
+    ///    emit is suspected wrong; this probe is what confirms the fix.
+    #[test]
+    #[ignore = "live-probe: confirm OpenCode reads the `mcp`+command-array+type:local shape against a real install"]
+    fn opencode_reads_mcp_command_array_shape_live_probe() {
+        // No automated body — see the doc comment for the manual checklist a
+        // human runs against a real OpenCode install. Present so the gate is
+        // discoverable via `cargo test -- --ignored`.
     }
 }

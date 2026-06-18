@@ -516,12 +516,18 @@ mod opencode_tests {
 
     #[test]
     fn mcp_config_format_is_json() {
+        // Jsonc routes through the same serde_json read/write path as Json,
+        // so the coarse `mcp_config_format()` accessor still reports Json.
         assert_eq!(OPENCODE.mcp_config_format(), McpConfigFormat::Json);
     }
 
     #[test]
-    fn mcp_parent_key_is_camel_mcp_servers() {
-        assert_eq!(OPENCODE.mcp_parent_key(), "mcpServers");
+    fn mcp_parent_key_is_mcp_g1_fix() {
+        // Phase 11 G1 (the canary fix): OpenCode's parent key is `mcp`, NOT
+        // the legacy `mcpServers`. See `contracts/mcp-dialects.md` and the
+        // `mcp_dialect()` override — the full wire shape is the
+        // `mcp`+command-array+type:local+enabled shape.
+        assert_eq!(OPENCODE.mcp_parent_key(), "mcp");
     }
 }
 
@@ -580,13 +586,18 @@ fn mcp_config_key_is_tome() {
 }
 
 #[test]
-fn every_harness_parent_key_is_one_of_the_two_documented_values() {
-    // JSON harnesses → `"mcpServers"`. The single TOML harness (Codex)
-    // → `"mcp_servers"`. Anything else would be a contract drift.
+fn every_harness_parent_key_is_one_of_the_documented_values() {
+    // JSON harnesses historically → `"mcpServers"`; the single TOML
+    // harness (Codex) → `"mcp_servers"`. Phase 11 G1 adds OpenCode's
+    // `"mcp"` (the canary fix). Anything else is contract drift. As the
+    // Phase 11 harness set widens, this allowlist grows per
+    // `contracts/mcp-dialects.md` — it is no longer "two documented
+    // values".
+    const DOCUMENTED: &[&str] = &["mcpServers", "mcp_servers", "mcp"];
     for m in SUPPORTED_HARNESSES {
         let key = m.mcp_parent_key();
         assert!(
-            key == "mcpServers" || key == "mcp_servers",
+            DOCUMENTED.contains(&key),
             "harness {} has unexpected mcp_parent_key {key:?}",
             m.name(),
         );
@@ -594,16 +605,21 @@ fn every_harness_parent_key_is_one_of_the_two_documented_values() {
 }
 
 #[test]
-fn json_format_implies_camel_parent_key_toml_implies_snake() {
-    // Pin the cross-axis invariant: format ↔ parent key naming.
+fn format_and_parent_key_match_the_dialect_contract() {
+    // Pin the format ↔ parent-key invariant per the Phase 11 dialect
+    // contract. The TOML harness uses `mcp_servers`. JSON/Jsonc harnesses
+    // historically used `mcpServers`, with OpenCode's G1 fix carving out
+    // `mcp`.
     for m in SUPPORTED_HARNESSES {
         match m.mcp_config_format() {
-            McpConfigFormat::Json => assert_eq!(
-                m.mcp_parent_key(),
-                "mcpServers",
-                "JSON harness {} must use mcpServers",
-                m.name(),
-            ),
+            McpConfigFormat::Json => {
+                let key = m.mcp_parent_key();
+                assert!(
+                    key == "mcpServers" || (m.name() == "opencode" && key == "mcp"),
+                    "JSON harness {} has unexpected parent key {key:?}",
+                    m.name(),
+                );
+            }
             McpConfigFormat::Toml => assert_eq!(
                 m.mcp_parent_key(),
                 "mcp_servers",
@@ -713,8 +729,11 @@ fn explicit_5x9_method_matrix_covers_every_supported_harness() {
                 detect_dir_name: ".opencode",
                 rules_strategy: RulesFileStrategy::BlockInExistingFile,
                 block_body_style: BlockBodyStyle::Inline,
+                // Phase 11 G1 (canary fix): OpenCode's parent key is `mcp`,
+                // not the legacy `mcpServers`. Format stays Json (Jsonc → the
+                // serde_json path).
                 mcp_format: McpConfigFormat::Json,
-                mcp_parent_key: "mcpServers",
+                mcp_parent_key: "mcp",
             },
         ),
     ];

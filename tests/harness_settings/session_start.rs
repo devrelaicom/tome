@@ -151,6 +151,7 @@ fn session_start_no_project_is_fail_soft() {
 fn session_start_run(fx: &Fixture, scope: &ResolvedScope) -> Result<(), tome::error::TomeError> {
     let args = HarnessSessionStartArgs {
         workspace: Some(fx.workspace.as_str().to_string()),
+        harness: None,
     };
     tome::commands::harness::session_start::run(args, scope, &fx.paths, Mode::Human)
 }

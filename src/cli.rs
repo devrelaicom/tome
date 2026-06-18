@@ -375,6 +375,13 @@ pub struct HarnessSessionStartArgs {
     /// Workspace name. Defaults to the resolved scope.
     #[arg(long)]
     pub workspace: Option<String>,
+    /// Host harness whose stdout envelope wraps the directive. Absent → emit
+    /// the raw directive (the Phase ≤10 claude-code / codex path, unchanged).
+    /// An unknown name fails closed (no output). A `CommandHook` harness wraps
+    /// the directive in its closed JSON envelope; a `TsPlugin`/`None` harness
+    /// receives the raw directive (its shim wraps it).
+    #[arg(long)]
+    pub harness: Option<String>,
 }
 
 /// Scope argument for `harness use` and `harness remove`. Distinct from

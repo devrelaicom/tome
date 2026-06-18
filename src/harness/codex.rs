@@ -21,7 +21,8 @@ use crate::harness::agents::{
     self, CanonicalAgent, TranslatedAgent, agent_extension, agent_filename,
 };
 use crate::harness::{
-    AgentFormat, BlockBodyStyle, HarnessModule, McpConfigFormat, RulesFileStrategy,
+    AgentFormat, BlockBodyStyle, EntryShape, FileFormat, HarnessModule, McpDialect,
+    RulesFileStrategy,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Codex CLI.
@@ -61,12 +62,18 @@ impl HarnessModule for Codex {
         home.join(".codex/config.toml")
     }
 
-    fn mcp_config_format(&self) -> McpConfigFormat {
-        McpConfigFormat::Toml
-    }
-
-    fn mcp_parent_key(&self) -> &'static str {
-        "mcp_servers"
+    /// Codex's MCP dialect: TOML, `mcp_servers` parent key, `CommandArgs`
+    /// body, no `type` discriminator, omit-empty-`env`, no extra fields.
+    /// Byte-identical to the Phase ≤10 `(Toml, "mcp_servers")` output.
+    fn mcp_dialect(&self) -> McpDialect {
+        McpDialect {
+            file_format: FileFormat::Toml,
+            parent_key: "mcp_servers",
+            entry_shape: EntryShape::CommandArgs,
+            entry_type: None,
+            emit_env: false,
+            extra_fields: &[],
+        }
     }
 
     // -- Native agents (FR-030–FR-033, FR-036) ------------------------------
