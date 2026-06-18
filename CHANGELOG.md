@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Additional harness support
+
+- **Eleven new harnesses.** `tome harness use` / `tome sync` now configure
+  `copilot-cli`, `copilot` (VS Code), `devin`, `cline`, `junie`, `jetbrains-ai`,
+  `antigravity`, `pi`, `crush`, `zed`, and `kiro` — on top of the existing
+  Claude Code, Codex, Cursor, Gemini, and OpenCode. For each, Tome registers the
+  **Tome MCP server** (where the harness exposes a writable config) and delivers
+  the tiered skill-routing directive in the harness's **rules sink**, and — where
+  supported — at **session start** via a session-start command hook or a
+  Tome-shipped TypeScript plugin shim (executed by the harness's own runtime).
+- **Opt-in `generic` / `goose` targets.** `generic` writes a universal
+  `AGENTS.md` + project-root `./mcp.json`; `generic-op` (aliased `goose`) emits a
+  `tome-op` Open Plugins bundle (manifest + `hooks/hooks.json` + `.mcp.json` +
+  `AGENTS.md` region). Both are reachable **by name only** — never auto-detected,
+  never included in `--all`.
+- **`antigravity-cli` → `gemini` alias.** Resolves to the shared `~/.gemini`
+  tree; aliases are resolved before de-duplication so an alias + its target never
+  double-write.
+- **Multi-harness selection.** `tome harness use` with no arguments configures
+  every auto-detected harness; with names, exactly those (variadic); with
+  `--all`, every supported real harness. `tome sync --harness <name>` is
+  repeatable to reconcile a chosen subset.
+- **`tome harness info <name>`** prints the exact paste-able Tome MCP-config
+  snippet — the recovery path for the **manual-MCP** harnesses (`jetbrains-ai`
+  is UI-only; `pi` needs the pi-mcp-adapter).
+- **Self-healing rules preamble.** Every Tome-written rules sink opens with a
+  harness-agnostic preamble: if the agent can't see the Tome MCP tools, it
+  instructs the user to run `tome harness use <name>` (or
+  `tome harness info <name>`) and restart.
+- **`tome status` / `tome doctor`** report each harness's MCP state — `ok`,
+  `manual`, `unverified`, or `drift`.
+- The Antigravity session hook and a few first-match-wins sink behaviours are
+  confirmed against a live install before shipping; a harness whose session hook
+  can't be confirmed falls back to rules-only steering.
+
 ### Telemetry
 
 - **Anonymous, opt-out usage telemetry.** Tome now collects bucketed counts,
