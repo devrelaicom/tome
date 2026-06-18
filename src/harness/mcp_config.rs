@@ -977,6 +977,17 @@ mod dialect_pin_tests {
         extra_fields: &[],
     };
 
+    /// Generic (US4): `mcpServers` parent key + `CommandArgs` + `emit_env`
+    /// (`"env": {}`), no `type`, no extras — the portable `./mcp.json` shape.
+    const GENERIC_DIALECT: McpDialect = McpDialect {
+        file_format: FileFormat::Json,
+        parent_key: "mcpServers",
+        entry_shape: EntryShape::CommandArgs,
+        entry_type: None,
+        emit_env: true,
+        extra_fields: &[],
+    };
+
     /// Crush: `mcp` parent key + `CommandArgs` + per-entry `type:stdio`, no env.
     const CRUSH_DIALECT: McpDialect = McpDialect {
         file_format: FileFormat::Json,
@@ -1047,6 +1058,31 @@ mod dialect_pin_tests {
             body,
             "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"type\": \"local\",\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ],\n      \"env\": {},\n      \"tools\": [\n        \"*\"\n      ]\n    }\n  }\n}\n",
         );
+    }
+
+    #[test]
+    fn generic_dialect_pins_exact_mcp_json_bytes() {
+        // The `generic` harness's `./mcp.json`: `mcpServers` + CommandArgs +
+        // `"env": {}` (emit_env), no `type`, no extras.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("mcp.json");
+        write_entry(&target, &GENERIC_DIALECT, &tome_entry()).unwrap();
+        let body = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            body,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ],\n      \"env\": {}\n    }\n  }\n}\n",
+        );
+        // The shape the `generic` module returns matches this dialect.
+        use crate::harness::HarnessModule;
+        assert_eq!(
+            crate::harness::generic::GENERIC.mcp_dialect(),
+            GENERIC_DIALECT
+        );
+    }
+
+    #[test]
+    fn generic_dialect_round_trips_and_is_owned() {
+        round_trip(&GENERIC_DIALECT, "mcp.json");
     }
 
     // ---- write → read-back → is_tome_owned round-trips ----------------

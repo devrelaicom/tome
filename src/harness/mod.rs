@@ -10,20 +10,36 @@
 //!
 //! ## Module layout
 //!
-//! - `mod.rs` (this file) — the `HarnessModule` trait, the four shape
-//!   enums (`RulesFileStrategy`, `BlockBodyStyle`, `McpConfigFormat`),
-//!   the `MCP_CONFIG_KEY` static, the `SUPPORTED_HARNESSES` registry,
-//!   `lookup`, and the `HARNESS_MODULES_OVERRIDE` test-injection hook.
+//! - `mod.rs` (this file) — the `HarnessModule` trait, the shape enums
+//!   (`RulesFileStrategy`, `BlockBodyStyle`, `McpConfigFormat`; the Phase-11
+//!   G1 `McpDialect` family — `FileFormat`/`EntryShape`/`ServerType`/
+//!   `ExtraValue`/`ExtraField`; the G2 session-steering enums — `Envelope`/
+//!   `HookEvent`/`ShimKind`/`HookFileSpec`/`SessionSteering`; the G3 rules
+//!   extension `RulesFrontmatter`), the `MCP_CONFIG_KEY` static, the
+//!   `SUPPORTED_HARNESSES` + `OPT_IN_TARGETS` registries, the `HARNESS_ALIASES`
+//!   alias layer, `resolve_alias` / `lookup`, and the
+//!   `HARNESS_MODULES_OVERRIDE` test-injection hook.
 //! - `rules_file.rs` — the read/modify/write helpers for the two
-//!   rules-file strategies (`BlockInExistingFile` + `StandaloneFile`).
-//!   Skeleton only — production wiring lands in US3.c / US4.
-//! - `mcp_config.rs` — the read/modify/write helpers for harness MCP
-//!   configuration files (JSON + TOML). Skeleton only.
-//! - `claude_code.rs`, `codex.rs`, `cursor.rs`, `gemini.rs`,
-//!   `opencode.rs` — the five concrete `HarnessModule` impls. Each
-//!   harness's path / format / parent-key decisions are pinned per
-//!   research §R-8 and verified against the upstream harness docs at
-//!   implementation time.
+//!   rules-file strategies (`BlockInExistingFile` + `StandaloneFile`),
+//!   plus the Phase-11 front-matter standalone renderer.
+//! - `mcp_config.rs` — the dialect-aware read/modify/write helpers for harness
+//!   MCP configuration files (JSON + TOML), driven by `McpDialect`.
+//! - `open_plugins.rs` — the Open Plugins `tome-op` portable-plugin emitter
+//!   (`generic-op` / `goose`): an atomic, self-contained bundle.
+//! - `plugin_assets.rs` — the `build.rs`-generated embedded TypeScript shim
+//!   registry (`HARNESS_PLUGINS`) for the G2 `TsPlugin` steering harnesses.
+//! - `routing.rs` — the tiered session-start directive builder shared by the
+//!   rules-file sink, the `CommandHook` sink, and the `tome-op` bundle.
+//! - `reconcile/` — the per-sink reconcilers (hooks / guardrails / agents /
+//!   plugins / open_plugins) the orchestrator (`sync.rs`) dispatches.
+//! - `claude_code.rs`, `codex.rs`, `cursor.rs`, `gemini.rs`, `opencode.rs`
+//!   (the five Phase ≤10 modules) plus the Phase-11 additions
+//!   (`antigravity.rs`, `cline.rs`, `copilot.rs`, `copilot_cli.rs`,
+//!   `crush.rs`, `devin.rs`, `generic.rs`, `generic_op.rs`, `goose.rs`,
+//!   `jetbrains_ai.rs`, `junie.rs`, `kiro.rs`, `pi.rs`, `zed.rs`) — the
+//!   concrete `HarnessModule` impls. Each harness's path / format /
+//!   parent-key / steering decisions are pinned per research §R-8 and
+//!   verified against the upstream harness docs at implementation time.
 //!
 //! Sync-only — `tests/sync_boundary.rs` enforces the constitution's
 //! sync discipline on this tree. No async runtime imports, no await
@@ -73,12 +89,21 @@ pub mod crush;
 pub mod cursor;
 pub mod devin;
 pub mod gemini;
+pub mod generic;
+pub mod generic_op;
+pub mod goose;
 pub mod guardrails;
 pub mod hooks;
 pub mod jetbrains_ai;
 pub mod junie;
 pub mod kiro;
 pub mod mcp_config;
+/// The Open Plugins `tome-op` portable-plugin emitter (Phase 11 / US4). A
+/// self-contained bundle (`.plugin/plugin.json` + `hooks/hooks.json` +
+/// `.mcp.json` + `AGENTS.md`) built in a staging dir then atomic-renamed into
+/// place, mirroring `authoring::meta`. Lives in `harness/` — NO new top-level
+/// module.
+pub mod open_plugins;
 pub mod opencode;
 pub mod pi;
 /// Embedded harness-plugin (TypeScript shim) registry (Phase 11, R6). Defines
@@ -105,6 +130,9 @@ use crush::CRUSH;
 use cursor::CURSOR;
 use devin::DEVIN;
 use gemini::GEMINI;
+use generic::GENERIC;
+use generic_op::GENERIC_OP;
+use goose::GOOSE;
 use jetbrains_ai::JETBRAINS_AI;
 use junie::JUNIE;
 use kiro::KIRO;
@@ -856,6 +884,35 @@ pub trait HarnessModule: Send + Sync {
         false
     }
 
+    // -----------------------------------------------------------------------
+    // Phase 11 — US4: opt-in targets + the Open Plugins `tome-op` emitter
+    // (data-model §Registry partition; contract open-plugins-tome-op.md).
+    // -----------------------------------------------------------------------
+
+    /// Whether this module is an OPT-IN target — lookup-able by name but NEVER
+    /// auto-detected and NEVER included in `--all` (data-model §Registry
+    /// partition). Default `false`; only the US4 modules (`generic`,
+    /// `generic-op`, `goose`) — registered in [`OPT_IN_TARGETS`] — return
+    /// `true`. (`goose` is detectable, so it stays in
+    /// [`SUPPORTED_HARNESSES`] and keeps the default `false`.)
+    fn is_opt_in_target(&self) -> bool {
+        false
+    }
+
+    /// The Open Plugins (`tome-op`) bundle root for this harness, or `None`
+    /// (default) for every harness that integrates through the per-sink loop.
+    ///
+    /// `Some(root)` opts the harness OUT of the normal rules/MCP/hooks/guardrails
+    /// sink loop and INTO the atomic [`crate::harness::open_plugins::emit_tome_op`]
+    /// emitter, which builds the whole self-contained `tome-op` plugin bundle in a
+    /// staging dir and renames it into `root`. Only `generic-op` and `goose`
+    /// return `Some`. The bundle is all-or-nothing, so dispatching it through the
+    /// emitter (rather than the per-sink loop) avoids double-writing the bundle's
+    /// `AGENTS.md` / `.mcp.json` via the normal rules/MCP sinks.
+    fn open_plugins_root(&self, _project_root: &Path) -> Option<PathBuf> {
+        None
+    }
+
     /// Project-scope skills root (`<project_root>/…/skills/`). `None` unless
     /// `supports_native_skills()`.
     fn skill_dir(&self, _project_root: &Path) -> Option<PathBuf> {
@@ -889,6 +946,7 @@ pub static SUPPORTED_HARNESSES: &[&'static dyn HarnessModule] = &[
     &CURSOR,
     &DEVIN,
     &GEMINI,
+    &GOOSE,
     &JETBRAINS_AI,
     &JUNIE,
     &KIRO,
@@ -943,7 +1001,12 @@ pub static HARNESS_ALIASES: &[HarnessAlias] = &[HarnessAlias {
 /// INVARIANT: `OPT_IN_TARGETS` is disjoint from [`SUPPORTED_HARNESSES`] (a
 /// module is either auto-detectable or opt-in, never both). Asserted in the
 /// unit tests.
-pub static OPT_IN_TARGETS: &[&'static dyn HarnessModule] = &[];
+///
+/// US4 populates it with `generic` (AGENTS.md + `./mcp.json`, via the standard
+/// sinks) and `generic-op` (the Open Plugins `tome-op` bundle, via the
+/// `open_plugins` emitter). `goose` is NOT here — it IS detectable (`~/.config/goose`),
+/// so it lives in [`SUPPORTED_HARNESSES`] despite also emitting the `tome-op` bundle.
+pub static OPT_IN_TARGETS: &[&'static dyn HarnessModule] = &[&GENERIC, &GENERIC_OP];
 
 /// Resolve a possibly-aliased harness name to its canonical name.
 ///
@@ -1068,10 +1131,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supported_harnesses_has_sixteen_entries() {
-        // Phase 11 widened the registry from 5 to 16 (the 5 Phase ≤10 modules
-        // plus the 11 US1 harnesses).
-        assert_eq!(SUPPORTED_HARNESSES.len(), 16);
+    fn supported_harnesses_has_seventeen_entries() {
+        // Phase 11 widened the registry from 5 to 16 (US1: the 5 Phase ≤10
+        // modules plus the 11 US1 harnesses), then US4 added the detectable
+        // `goose` (the `tome-op` host) → 17. `generic` / `generic-op` are
+        // OPT_IN_TARGETS, NOT here.
+        assert_eq!(SUPPORTED_HARNESSES.len(), 17);
     }
 
     #[test]
@@ -1160,6 +1225,76 @@ mod tests {
     }
 
     #[test]
+    fn opt_in_targets_are_generic_and_generic_op() {
+        // US4: exactly `generic` + `generic-op` are opt-in. `goose` is NOT here
+        // (it is detectable, so it lives in SUPPORTED_HARNESSES).
+        let names: Vec<&str> = OPT_IN_TARGETS.iter().map(|m| m.name()).collect();
+        assert_eq!(names, vec!["generic", "generic-op"]);
+        for m in OPT_IN_TARGETS {
+            assert!(
+                m.is_opt_in_target(),
+                "{} must report is_opt_in_target",
+                m.name()
+            );
+            // Opt-in targets are never detected (no per-user dir).
+            assert!(
+                !m.detect(std::path::Path::new("/nonexistent-home")),
+                "{} must never auto-detect",
+                m.name(),
+            );
+        }
+    }
+
+    #[test]
+    fn goose_is_detectable_supported_not_opt_in() {
+        let goose = lookup("goose").expect("goose registered");
+        assert!(!goose.is_opt_in_target(), "goose is detectable, not opt-in");
+        assert!(
+            SUPPORTED_HARNESSES.iter().any(|m| m.name() == "goose"),
+            "goose is in SUPPORTED_HARNESSES (auto-detected + in --all)",
+        );
+        assert!(
+            !OPT_IN_TARGETS.iter().any(|m| m.name() == "goose"),
+            "goose must NOT be an opt-in target",
+        );
+    }
+
+    #[test]
+    fn generic_and_generic_op_are_lookup_able_but_not_in_supported() {
+        for name in ["generic", "generic-op"] {
+            assert!(lookup(name).is_some(), "{name} must be lookup-able");
+            assert!(
+                !SUPPORTED_HARNESSES.iter().any(|m| m.name() == name),
+                "{name} must NOT be in SUPPORTED_HARNESSES (never in --all/detection)",
+            );
+        }
+    }
+
+    #[test]
+    fn open_plugins_root_only_for_op_harnesses() {
+        let proj = std::path::Path::new("/proj");
+        // `generic-op` + `goose` declare a bundle root; everyone else None.
+        assert!(
+            lookup("generic-op")
+                .unwrap()
+                .open_plugins_root(proj)
+                .is_some()
+        );
+        assert!(lookup("goose").unwrap().open_plugins_root(proj).is_some());
+        assert!(lookup("generic").unwrap().open_plugins_root(proj).is_none());
+        for m in SUPPORTED_HARNESSES {
+            if m.name() == "goose" {
+                continue;
+            }
+            assert!(
+                m.open_plugins_root(proj).is_none(),
+                "{} must not declare an open_plugins_root",
+                m.name(),
+            );
+        }
+    }
+
+    #[test]
     fn mcp_config_key_is_tome() {
         assert_eq!(MCP_CONFIG_KEY, "tome");
     }
@@ -1178,6 +1313,7 @@ mod tests {
             "copilot-cli",  // ~/.copilot
             "copilot",      // ~/.vscode
             "antigravity",  // ~/.gemini
+            "goose",        // ~/.config/goose
         ];
         let home = std::path::Path::new("/h");
         for harness in SUPPORTED_HARNESSES {
