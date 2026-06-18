@@ -165,7 +165,12 @@ mod tests {
     #[test]
     fn embedded_shim_invokes_session_start_and_fails_closed() {
         let plugin = crate::harness::plugin_assets::find("cline").unwrap();
-        let src = std::str::from_utf8(plugin.files[0].bytes).expect("shim is UTF-8");
+        let shim = plugin
+            .files
+            .iter()
+            .find(|f| f.rel_path == "tome.ts")
+            .expect("cline shim must contain tome.ts");
+        let src = std::str::from_utf8(shim.bytes).expect("shim is UTF-8");
         // Invokes the `tome` launcher's `session-start` for THIS harness.
         assert!(src.contains("\"tome\""), "shim launches the `tome` binary");
         assert!(
@@ -181,5 +186,26 @@ mod tests {
             src.contains("catch") && src.contains("return \"\""),
             "shim must fail closed (catch → empty string → no injection) on a missing binary",
         );
+    }
+
+    /// Live-probe merge gate (T087). NOT run in CI — a human must run this
+    /// against a real Cline install before the shim ships.
+    ///
+    /// What to verify by hand:
+    ///
+    /// 1. `tome sync --harness cline` (or `tome harness use cline`) in a
+    ///    workspace-bound project, then confirm `.cline/plugins/tome.ts` is
+    ///    written.
+    /// 2. Start Cline in that project and confirm the shim's
+    ///    `api.registerMessageBuilder({ build })` registration is actually
+    ///    invoked and the Tome directive is injected as a message at session
+    ///    start. The byte-pin + integration tests prove Tome WRITES the shim;
+    ///    only a real Cline can confirm it READS this plugin API shape.
+    #[test]
+    #[ignore = "live-probe: confirm Cline registerMessageBuilder plugin API shape"]
+    fn cline_reads_register_message_builder_shape_live_probe() {
+        // No automated body — see the doc comment for the manual checklist a
+        // human runs against a real Cline install. Present so the gate is
+        // discoverable via `cargo test -- --ignored`.
     }
 }

@@ -410,7 +410,12 @@ mod tests {
     #[test]
     fn embedded_shim_invokes_session_start_and_fails_closed() {
         let plugin = crate::harness::plugin_assets::find("opencode").unwrap();
-        let src = std::str::from_utf8(plugin.files[0].bytes).expect("shim is UTF-8");
+        let shim = plugin
+            .files
+            .iter()
+            .find(|f| f.rel_path == "tome.ts")
+            .expect("opencode shim must contain tome.ts");
+        let src = std::str::from_utf8(shim.bytes).expect("shim is UTF-8");
         assert!(src.contains("\"tome\""), "shim launches the `tome` binary");
         assert!(
             src.contains("session-start"),

@@ -148,7 +148,12 @@ mod tests {
     #[test]
     fn embedded_shim_invokes_session_start_and_fails_closed() {
         let plugin = crate::harness::plugin_assets::find("pi").unwrap();
-        let src = std::str::from_utf8(plugin.files[0].bytes).expect("shim is UTF-8");
+        let shim = plugin
+            .files
+            .iter()
+            .find(|f| f.rel_path == "tome.ts")
+            .expect("pi shim must contain tome.ts");
+        let src = std::str::from_utf8(shim.bytes).expect("shim is UTF-8");
         assert!(src.contains("\"tome\""), "shim launches the `tome` binary");
         assert!(
             src.contains("session-start"),
@@ -162,5 +167,27 @@ mod tests {
             src.contains("catch") && src.contains("return \"\""),
             "shim must fail closed (catch → empty string → no injection) on a missing binary",
         );
+    }
+
+    /// Live-probe merge gate (T087). NOT run in CI — a human must run this
+    /// against a real Pi install before the shim ships.
+    ///
+    /// What to verify by hand:
+    ///
+    /// 1. `tome sync --harness pi` (or `tome harness use pi`) in a
+    ///    workspace-bound project, then confirm `.pi/extensions/tome.ts` is
+    ///    written.
+    /// 2. Start Pi in that project and confirm the shim's
+    ///    `pi.on("before_agent_start", …)` handler is actually invoked and the
+    ///    returned `{ message: { customType:"tome", content:<directive>,
+    ///    display:true } }` is injected at session start. The byte-pin +
+    ///    integration tests prove Tome WRITES the shim; only a real Pi can
+    ///    confirm it READS this extension API shape.
+    #[test]
+    #[ignore = "live-probe: confirm Pi before_agent_start extension API shape"]
+    fn pi_reads_before_agent_start_shape_live_probe() {
+        // No automated body — see the doc comment for the manual checklist a
+        // human runs against a real Pi install. Present so the gate is
+        // discoverable via `cargo test -- --ignored`.
     }
 }

@@ -170,6 +170,39 @@ fn cline_live_sync_writes_shim_and_decision_is_created() {
 }
 
 // ---------------------------------------------------------------------------
+// 2b. Pi (sync_project integration): a live sync writes
+//     `.pi/extensions/tome.ts` byte-identically, and the decision is Created.
+//     (F1 — the pi real-path coverage that was missing.)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pi_live_sync_writes_shim_and_decision_is_created() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::pi::PI)]);
+
+    let fx = Fixture::build("test-workspace", "harnesses = [\"pi\"]");
+
+    let outcome = sync::sync_project(&fx.project, &fx.deps()).expect("sync");
+
+    let shim = fx.project.join(".pi/extensions/tome.ts");
+    assert!(shim.is_file(), "pi tome.ts must be written on a live sync");
+    assert_eq!(
+        std::fs::read(&shim).unwrap(),
+        embedded_shim_bytes(ShimKind::Pi),
+        "the installed pi shim must be byte-identical to the embedded asset",
+    );
+
+    let decision = outcome
+        .decisions
+        .iter()
+        .find(|d| d.harness == "pi")
+        .expect("pi decision present");
+    assert_eq!(decision.plugins_action, Action::Created);
+}
+
+// ---------------------------------------------------------------------------
 // 3. Idempotent re-sync: the shim is left alone (LeftAlone, no mtime advance).
 // ---------------------------------------------------------------------------
 
@@ -247,14 +280,16 @@ fn dropping_harness_removes_only_tome_shim_and_keeps_sibling() {
         sibling.is_file(),
         "a developer's sibling plugin file must NOT be removed (mass-delete safeguard)",
     );
-    let decision = outcome.decisions.iter().find(|d| d.harness == "opencode");
-    if let Some(decision) = decision {
-        assert_eq!(
-            decision.plugins_action,
-            Action::Removed,
-            "the shim sink must record Removed when the harness drops",
-        );
-    }
+    let decision = outcome
+        .decisions
+        .iter()
+        .find(|d| d.harness == "opencode")
+        .expect("opencode decision present");
+    assert_eq!(
+        decision.plugins_action,
+        Action::Removed,
+        "the shim sink must record Removed when the harness drops",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +325,147 @@ fn shim_write_through_symlinked_dir_is_refused_exit_7() {
     // Fail-closed: no `tome.ts` was written through the link.
     assert!(
         !real_target.join("plugin/tome.ts").exists(),
+        "no shim file may be written through the symlinked component",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cline real-path coverage (F2): the removal/idempotence/symlink behaviours
+// were previously proven through `sync_project` for OpenCode ONLY. Each
+// depends on the per-module `session_steering().dir`, so a second real module
+// is exercised here. A tiny `RealShim` descriptor keeps these readable without
+// re-stating the fixture/guard boilerplate per case.
+// ---------------------------------------------------------------------------
+
+/// A real module's identity for the cross-module shim assertions: how to box a
+/// fresh instance, its registry `name`, and the project-relative shim path.
+/// (Byte-identity vs the embedded asset is pinned in the per-module live-write
+/// tests above; these cross-module cases assert presence/removal/idempotence.)
+struct RealShim {
+    boxed: fn() -> Box<dyn tome::harness::HarnessModule>,
+    name: &'static str,
+    shim_rel: &'static str,
+}
+
+const CLINE_SHIM: RealShim = RealShim {
+    boxed: || Box::new(tome::harness::cline::CLINE),
+    name: "cline",
+    shim_rel: ".cline/plugins/tome.ts",
+};
+
+// 6. Cline removal + sibling survival through `sync_project`.
+#[test]
+fn cline_dropping_harness_removes_only_tome_shim_and_keeps_sibling() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let s = &CLINE_SHIM;
+    let _guard = HarnessModulesGuard::install(vec![(s.boxed)()]);
+
+    let fx = Fixture::build("test-workspace", &format!("harnesses = [\"{}\"]", s.name));
+
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync 1");
+    let shim = fx.project.join(s.shim_rel);
+    assert!(shim.is_file(), "{} shim written on live sync", s.name);
+
+    // Seed a developer file alongside the shim.
+    let sibling = shim.parent().unwrap().join("dev.ts");
+    std::fs::write(&sibling, b"// developer's own plugin\n").expect("write sibling");
+
+    // Drop the harness from the effective list.
+    std::fs::write(
+        fx.project.join(".tome/config.toml"),
+        "workspace = \"test-workspace\"\nharnesses = []\n",
+    )
+    .unwrap();
+
+    let outcome = sync::sync_project(&fx.project, &fx.deps()).expect("sync 2");
+
+    assert!(
+        !shim.exists(),
+        "Tome's {} tome.ts must be removed when the harness drops",
+        s.name,
+    );
+    assert!(
+        sibling.is_file(),
+        "a developer's sibling plugin file must NOT be removed (mass-delete safeguard)",
+    );
+    let decision = outcome
+        .decisions
+        .iter()
+        .find(|d| d.harness == s.name)
+        .expect("cline decision present");
+    assert_eq!(
+        decision.plugins_action,
+        Action::Removed,
+        "the shim sink must record Removed when the harness drops",
+    );
+}
+
+// 7. Cline idempotent re-sync (LeftAlone, no mtime advance) through `sync_project`.
+#[test]
+fn cline_resync_is_idempotent_for_the_shim() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let s = &CLINE_SHIM;
+    let _guard = HarnessModulesGuard::install(vec![(s.boxed)()]);
+
+    let fx = Fixture::build("test-workspace", &format!("harnesses = [\"{}\"]", s.name));
+
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync 1");
+    let shim = fx.project.join(s.shim_rel);
+    assert!(shim.is_file());
+    let shim_mtime = mtime(&shim);
+
+    std::thread::sleep(Duration::from_millis(1100));
+    let outcome = sync::sync_project(&fx.project, &fx.deps()).expect("sync 2");
+
+    let decision = outcome
+        .decisions
+        .iter()
+        .find(|d| d.harness == s.name)
+        .expect("cline decision present");
+    assert_eq!(
+        decision.plugins_action,
+        Action::LeftAlone,
+        "an idempotent re-sync must leave the shim alone",
+    );
+    assert_eq!(
+        mtime(&shim),
+        shim_mtime,
+        "the shim mtime must not advance on an idempotent re-sync",
+    );
+}
+
+// 8. Cline symlink refusal through `sync_project` (exit 7, nothing written).
+#[test]
+#[cfg(unix)]
+fn cline_shim_write_through_symlinked_dir_is_refused_exit_7() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let s = &CLINE_SHIM;
+    let _guard = HarnessModulesGuard::install(vec![(s.boxed)()]);
+
+    let fx = Fixture::build("test-workspace", &format!("harnesses = [\"{}\"]", s.name));
+
+    // Plant a symlinked intermediate component (`.cline`) on the shim path.
+    let real_target = fx.project.join("real_cline_dir");
+    std::fs::create_dir_all(&real_target).expect("create real dir");
+    let cline_dir = fx.project.join(".cline");
+    std::os::unix::fs::symlink(&real_target, &cline_dir).expect("plant symlink");
+
+    let err = sync::sync_project(&fx.project, &fx.deps())
+        .expect_err("a symlinked plugin-dir component must be refused");
+    assert_eq!(
+        err.exit_code(),
+        7,
+        "the shim sink's symlink refusal maps to Io (exit 7); got {err:?}",
+    );
+    // Fail-closed: no `tome.ts` was written through the link.
+    assert!(
+        !real_target.join("plugins/tome.ts").exists(),
         "no shim file may be written through the symlinked component",
     );
 }
