@@ -111,7 +111,7 @@ mod tests {
         assert!(d.emit_env);
         assert_eq!(d.extra_fields.len(), 1);
         assert_eq!(d.extra_fields[0].key, "tools");
-        assert_eq!(d.extra_fields[0].value, ExtraValue::StringArray(&["*"]),);
+        assert_eq!(d.extra_fields[0].value, ExtraValue::StringArray(&["*"]));
         assert!(!COPILOT_CLI.mcp_manual_only());
     }
 }

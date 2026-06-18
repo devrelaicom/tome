@@ -72,6 +72,12 @@ impl HarnessModule for JetbrainsAi {
         })
     }
 
+    // F5 DEFER (US1 closeout): jetbrains-ai is a `StandaloneFile` rules harness
+    // but inherits the DEFAULT `guardrails_target` = `InFileRegion` on the SAME
+    // standalone path — needs an explicit guardrails-sink decision (StandaloneSibling
+    // or suppression) before the guardrails pass is wired for the new harnesses.
+    // TODO(P11-guardrails): pick the guardrails sink for StandaloneFile harnesses.
+
     /// Manual-only: AI Assistant configures MCP through its Settings UI, so
     /// Tome writes no MCP file. The sync skips the MCP sink entirely; the
     /// "paste this snippet" notice is a US5 fast-follow.
@@ -121,5 +127,17 @@ mod tests {
     #[test]
     fn mcp_is_manual_only() {
         assert!(JETBRAINS_AI.mcp_manual_only());
+    }
+
+    /// Live-probe gate (T087): NOT run in CI. A human must confirm against a
+    /// real JetBrains AI Assistant install the exact front-matter key/value for
+    /// the "Always" apply mode — `apply: always` is the PLANNED value but is
+    /// UNVERIFIED. Mirrors the zed/antigravity live-probe gates.
+    #[test]
+    #[ignore = "live-probe: confirm AI Assistant Always apply-mode front-matter key/value"]
+    fn jetbrains_apply_always_frontmatter_live_probe() {
+        // No automated body — see the doc comment for the manual checklist a
+        // human runs against a real AI Assistant install. Present so the gate is
+        // discoverable via `cargo test -- --ignored`.
     }
 }

@@ -39,7 +39,19 @@ impl HarnessModule for Zed {
     }
 
     fn detect_path(&self, home: &Path) -> PathBuf {
-        home.join(".config/zed")
+        // `detect` accepts EITHER the XDG `~/.config/zed/` or the legacy
+        // `~/.zed/` dir. Report whichever actually EXISTS so `tome harness info`
+        // doesn't claim a non-existent `detected_path`; fall back to the XDG dir
+        // (the preferred primary) when neither is present.
+        let xdg = home.join(".config/zed");
+        if xdg.is_dir() {
+            return xdg;
+        }
+        let legacy = home.join(".zed");
+        if legacy.is_dir() {
+            return legacy;
+        }
+        xdg
     }
 
     fn rules_file_target(&self, project_root: &Path) -> PathBuf {
@@ -56,6 +68,13 @@ impl HarnessModule for Zed {
     fn rules_namespaced_file(&self, project_root: &Path) -> Option<PathBuf> {
         Some(project_root.join(".rules"))
     }
+
+    // F5 DEFER (US1 closeout): zed is a `StandaloneFile` rules harness but
+    // inherits the DEFAULT `guardrails_target` = `InFileRegion` on the SAME
+    // `.rules` path — needs an explicit guardrails-sink decision
+    // (StandaloneSibling or suppression) before the guardrails pass is wired for
+    // the new harnesses.
+    // TODO(P11-guardrails): pick the guardrails sink for StandaloneFile harnesses.
 
     fn mcp_config_path(&self, project_root: &Path, _home: &Path) -> PathBuf {
         project_root.join(".zed/settings.json")
@@ -94,6 +113,33 @@ mod tests {
             ZED.mcp_config_path(Path::new("/proj"), Path::new("/h")),
             Path::new("/proj/.zed/settings.json"),
         );
+    }
+
+    #[test]
+    fn detect_path_reports_legacy_dir_when_only_legacy_exists() {
+        // When ONLY `~/.zed/` exists (no XDG dir), `detect_path` must report the
+        // legacy dir — not a non-existent `~/.config/zed/`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join(".zed")).unwrap();
+        assert_eq!(ZED.detect_path(home), home.join(".zed"));
+        assert!(ZED.detect(home), "detect must agree the harness is present");
+    }
+
+    #[test]
+    fn detect_path_prefers_xdg_when_both_exist() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join(".config/zed")).unwrap();
+        std::fs::create_dir_all(home.join(".zed")).unwrap();
+        assert_eq!(ZED.detect_path(home), home.join(".config/zed"));
+    }
+
+    #[test]
+    fn detect_path_falls_back_to_xdg_when_neither_exists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        assert_eq!(ZED.detect_path(home), home.join(".config/zed"));
     }
 
     #[test]

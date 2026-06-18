@@ -831,7 +831,11 @@ fn explicit_5x9_method_matrix_covers_every_supported_harness() {
                 description_starts_with: "",
                 detect_dir_name: ".devin",
                 rules_strategy: RulesFileStrategy::BlockInExistingFile,
-                block_body_style: BlockBodyStyle::Inline,
+                // Devin resolves `@`-includes (contract §"Body delivery rule",
+                // line 19). The shared-sink LCD may still write the region
+                // inline when an Inline co-owner is live; this pins the declared
+                // capability.
+                block_body_style: BlockBodyStyle::AtInclude,
                 mcp_format: McpConfigFormat::Json,
                 mcp_parent_key: "mcpServers",
             },

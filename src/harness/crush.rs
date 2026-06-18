@@ -39,9 +39,19 @@ impl HarnessModule for Crush {
     }
 
     fn detect_path(&self, home: &Path) -> PathBuf {
-        // Report the XDG dir as the primary probed location (the first of the
-        // two `detect` checks).
-        home.join(".config/crush")
+        // `detect` accepts EITHER the XDG `~/.config/crush/` or the legacy
+        // `~/.crush/` dir. Report whichever actually EXISTS so `tome harness
+        // info` doesn't claim a non-existent `detected_path`; fall back to the
+        // XDG dir (the preferred primary) when neither is present.
+        let xdg = home.join(".config/crush");
+        if xdg.is_dir() {
+            return xdg;
+        }
+        let legacy = home.join(".crush");
+        if legacy.is_dir() {
+            return legacy;
+        }
+        xdg
     }
 
     fn rules_file_target(&self, project_root: &Path) -> PathBuf {
@@ -91,6 +101,36 @@ mod tests {
             CRUSH.mcp_config_path(Path::new("/proj"), Path::new("/h")),
             Path::new("/proj/crush.json"),
         );
+    }
+
+    #[test]
+    fn detect_path_reports_legacy_dir_when_only_legacy_exists() {
+        // When ONLY `~/.crush/` exists (no XDG dir), `detect_path` must report
+        // the legacy dir — not a non-existent `~/.config/crush/`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join(".crush")).unwrap();
+        assert_eq!(CRUSH.detect_path(home), home.join(".crush"));
+        assert!(
+            CRUSH.detect(home),
+            "detect must agree the harness is present"
+        );
+    }
+
+    #[test]
+    fn detect_path_prefers_xdg_when_both_exist() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join(".config/crush")).unwrap();
+        std::fs::create_dir_all(home.join(".crush")).unwrap();
+        assert_eq!(CRUSH.detect_path(home), home.join(".config/crush"));
+    }
+
+    #[test]
+    fn detect_path_falls_back_to_xdg_when_neither_exists() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        assert_eq!(CRUSH.detect_path(home), home.join(".config/crush"));
     }
 
     #[test]

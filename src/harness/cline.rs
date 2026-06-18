@@ -49,6 +49,13 @@ impl HarnessModule for Cline {
         Some(project_root.join(".clinerules/tome.md"))
     }
 
+    // F5 DEFER (US1 closeout): cline is a `StandaloneFile` rules harness but
+    // inherits the DEFAULT `guardrails_target` = `InFileRegion` on the SAME
+    // standalone path — needs an explicit guardrails-sink decision
+    // (StandaloneSibling or suppression) before the guardrails pass is wired for
+    // the new harnesses.
+    // TODO(P11-guardrails): pick the guardrails sink for StandaloneFile harnesses.
+
     fn mcp_config_path(&self, _project_root: &Path, home: &Path) -> PathBuf {
         // GLOBAL config under the per-user dir.
         home.join(".cline/mcp.json")

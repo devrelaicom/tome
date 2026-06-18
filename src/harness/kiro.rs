@@ -70,6 +70,15 @@ impl HarnessModule for Kiro {
         project_root.join(".kiro/settings/mcp.json")
     }
 
+    // F5 DEFER (US1 closeout): Kiro is a `StandaloneFile` rules harness but
+    // inherits the DEFAULT `guardrails_target` = `InFileRegion` on the SAME
+    // `rules_file_target` path — so once the guardrails pass is wired for these
+    // new harnesses it would try to insert a marker region into Tome's own
+    // standalone file. The guardrails pass is NOT wired for the StandaloneFile
+    // newcomers in US1; this needs an explicit decision (a Cursor-style
+    // `StandaloneSibling`, or suppression) before guardrails is enabled here.
+    // TODO(P11-guardrails): pick the guardrails sink for StandaloneFile harnesses.
+
     /// Kiro's MCP dialect: JSON `mcpServers` + `CommandArgs`, no `type`,
     /// `emit_env:true` (`"env": {}`), no extra fields.
     fn mcp_dialect(&self) -> McpDialect {

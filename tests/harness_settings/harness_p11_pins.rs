@@ -58,8 +58,23 @@ fn write_and_read(module: &dyn HarnessModule, file: &str) -> String {
     // Idempotent second write — bytes must not change.
     mcp_config::write_entry(&target, &dialect, &tome_entry()).unwrap();
     let body = std::fs::read_to_string(&target).unwrap();
-    // Round-trip: read back and confirm ownership.
+    // Round-trip: read back and confirm the FULL entry survives, not just the
+    // ownership marker. A dialect that dropped/reordered args would still pass
+    // `is_tome_owned` (it only checks command + args[0]); pinning the exact
+    // command + args closes that gap across every new dialect shape.
     let read = mcp_config::read_entry(&target, &dialect).unwrap().unwrap();
+    assert_eq!(
+        read.command,
+        "tome",
+        "round-tripped {} command must be `tome`",
+        module.name(),
+    );
+    assert_eq!(
+        read.args,
+        vec!["mcp", "--workspace", "demo"],
+        "round-tripped {} args must survive verbatim",
+        module.name(),
+    );
     assert!(
         mcp_config::is_tome_owned(&read),
         "round-tripped {} entry must be Tome-owned",
@@ -250,6 +265,104 @@ fn copilot_and_copilot_cli_share_one_rules_region() {
         body.contains("ROUTING DIRECTIVE BODY"),
         "inline directive body present:\n{body}",
     );
+}
+
+/// Drive a real `sync_project` with `module` as the SOLE effective harness and
+/// return the bytes written to its rules-file target. The directive body seeded
+/// in `build_fixture` is `ROUTING DIRECTIVE BODY\n`.
+fn sync_one_and_read_rules(
+    module: Box<dyn HarnessModule>,
+    harness_name: &str,
+    rules_target: PathBuf,
+) -> String {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![module]);
+
+    let fx = build_fixture(&format!("harnesses = [\"{harness_name}\"]"));
+    let abs_target = fx.project.join(&rules_target);
+    sync::sync_project(&fx.project, &deps_for(&fx)).expect("sync");
+    std::fs::read_to_string(&abs_target)
+        .unwrap_or_else(|e| panic!("rules file at {} must exist: {e}", abs_target.display()))
+}
+
+#[test]
+fn kiro_sync_writes_inclusion_always_frontmatter() {
+    // Real `sync_project` (NOT the unit helper) must emit kiro's Tome-owned
+    // `inclusion: always` front-matter ABOVE the directive — proving F1 wired
+    // `rules_frontmatter()` into the standalone write branch.
+    let body = sync_one_and_read_rules(
+        Box::new(tome::harness::kiro::Kiro),
+        "kiro",
+        PathBuf::from(".kiro/steering/tome.md"),
+    );
+    assert!(
+        body.starts_with("---\ninclusion: always\n---\n"),
+        "kiro standalone file must begin with the inclusion:always header:\n{body}",
+    );
+    assert!(
+        body.contains("ROUTING DIRECTIVE BODY"),
+        "the directive body must follow the header:\n{body}",
+    );
+}
+
+#[test]
+fn jetbrains_sync_writes_apply_always_frontmatter() {
+    let body = sync_one_and_read_rules(
+        Box::new(tome::harness::jetbrains_ai::JetbrainsAi),
+        "jetbrains-ai",
+        PathBuf::from(".aiassistant/rules/tome.md"),
+    );
+    assert!(
+        body.starts_with("---\napply: always\n---\n"),
+        "jetbrains-ai standalone file must begin with the apply:always header:\n{body}",
+    );
+    assert!(body.contains("ROUTING DIRECTIVE BODY"), "{body}");
+}
+
+#[test]
+fn cline_sync_writes_standalone_directive_no_frontmatter() {
+    // cline declares NO front-matter → its standalone file is the verbatim
+    // directive body with NO `---` header.
+    let body = sync_one_and_read_rules(
+        Box::new(tome::harness::cline::Cline),
+        "cline",
+        PathBuf::from(".clinerules/tome.md"),
+    );
+    assert!(
+        !body.starts_with("---"),
+        "cline (no front-matter) must NOT emit a header:\n{body}",
+    );
+    assert!(body.contains("ROUTING DIRECTIVE BODY"), "{body}");
+}
+
+#[test]
+fn zed_sync_writes_standalone_directive_no_frontmatter() {
+    let body = sync_one_and_read_rules(
+        Box::new(tome::harness::zed::Zed),
+        "zed",
+        PathBuf::from(".rules"),
+    );
+    assert!(
+        !body.starts_with("---"),
+        "zed must NOT emit a header:\n{body}"
+    );
+    assert!(body.contains("ROUTING DIRECTIVE BODY"), "{body}");
+}
+
+#[test]
+fn antigravity_sync_writes_standalone_directive_no_frontmatter() {
+    let body = sync_one_and_read_rules(
+        Box::new(tome::harness::antigravity::Antigravity),
+        "antigravity",
+        PathBuf::from(".agent/rules/tome.md"),
+    );
+    assert!(
+        !body.starts_with("---"),
+        "antigravity must NOT emit a header:\n{body}",
+    );
+    assert!(body.contains("ROUTING DIRECTIVE BODY"), "{body}");
 }
 
 #[test]
