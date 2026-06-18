@@ -237,7 +237,14 @@ fn scope_label(scope: ScopeKind) -> String {
 /// in synthetic harnesses validate against their registry rather than the
 /// production `SUPPORTED_HARNESSES` constant.
 fn is_supported_harness(name: &str) -> bool {
+    // Production registry (or a synthetic override registry for tests). Phase 11
+    // / US4: also accept the opt-in targets (`generic` / `generic-op`), which
+    // live in `OPT_IN_TARGETS` rather than `SUPPORTED_HARNESSES` and so are NOT
+    // surfaced by `with_effective_modules` — `lookup` is the alias+opt-in-aware
+    // resolver. (When an override registry is installed, `lookup` doesn't consult
+    // it; the `with_effective_modules` branch already matched the synthetic name.)
     crate::harness::with_effective_modules(|modules| modules.iter().any(|m| m.name() == name))
+        || crate::harness::lookup(name).is_some()
 }
 
 /// Compute the `(ScopeKind, key)` cycle-detection key for the entry

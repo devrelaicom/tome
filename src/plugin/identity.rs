@@ -83,6 +83,24 @@ pub(crate) fn is_kebab(s: &str) -> bool {
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// The Open Plugins plugin-name rule (Phase 11 / US4, contract
+/// open-plugins-tome-op.md): lowercase alphanumeric, hyphen, or period;
+/// MUST start and end with an alphanumeric. Used by the `tome-op` emitter
+/// to validate the (constant) plugin name at every emit. Kept here as the
+/// SSOT for plugin-name validators rather than duplicated in `harness/`.
+pub(crate) fn open_plugins_name_ok(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    // First + last must be lowercase-alphanumeric.
+    if !is_alnum(bytes[0]) || !is_alnum(bytes[bytes.len() - 1]) {
+        return false;
+    }
+    bytes.iter().all(|&b| is_alnum(b) || b == b'-' || b == b'.')
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PluginIdParseError {
     #[error("plugin id `{0}` must be `<catalog>/<plugin>`")]
@@ -183,7 +201,25 @@ impl FromStr for EntryKind {
 
 #[cfg(test)]
 mod tests {
-    use super::EntryKind;
+    use super::{EntryKind, open_plugins_name_ok};
+
+    #[test]
+    fn open_plugins_name_rule_accepts_and_rejects() {
+        // Accepted: lowercase alnum + hyphen/period, alnum at both ends.
+        assert!(open_plugins_name_ok("tome-op"));
+        assert!(open_plugins_name_ok("a"));
+        assert!(open_plugins_name_ok("my.plugin-1"));
+        assert!(open_plugins_name_ok("x9"));
+        // Rejected: empty, leading/trailing non-alnum, uppercase, illegal chars.
+        assert!(!open_plugins_name_ok(""));
+        assert!(!open_plugins_name_ok("-tome"));
+        assert!(!open_plugins_name_ok("tome-"));
+        assert!(!open_plugins_name_ok(".tome"));
+        assert!(!open_plugins_name_ok("tome."));
+        assert!(!open_plugins_name_ok("Tome-Op"));
+        assert!(!open_plugins_name_ok("tome_op"));
+        assert!(!open_plugins_name_ok("tome/op"));
+    }
 
     #[test]
     fn agent_kind_round_trips() {

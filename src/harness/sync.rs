@@ -43,6 +43,7 @@ use crate::harness::reconcile::guardrails::reconcile_guardrails;
 use crate::harness::reconcile::hooks::{
     reconcile_command_hooks, reconcile_hooks, reconcile_tome_session_hooks,
 };
+use crate::harness::reconcile::open_plugins::reconcile_open_plugins;
 use crate::harness::reconcile::plugins::reconcile_plugins;
 // Shared bookkeeping for the orchestrator's rules/MCP loop; the per-sink
 // reconcilers under `reconcile/` call the same path (Phase 7 / FR-011).
@@ -131,6 +132,12 @@ pub enum SyncSubsystem {
     /// with every Phase ≤10 module returning `SessionSteering::None` this value
     /// never appears, so the existing wire shape is byte-identical.
     Plugins,
+    /// Open Plugins `tome-op` bundle emit/remove (Phase 11 / US4). One change per
+    /// bundle written or removed for a `generic-op` / `goose` harness. Added LAST
+    /// so the snake_case wire form only gains the new value (`"open_plugins"`)
+    /// when an Open Plugins harness participates; no Phase ≤10 / US1–US3 harness
+    /// is an Open Plugins host, so the existing wire shape is byte-identical.
+    OpenPlugins,
 }
 
 /// Per-harness decision record. Populated for every harness in
@@ -285,8 +292,20 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // per-harness metadata into owned values up front, then drop the
     // borrow before dispatch.
     // -----------------------------------------------------------------
-    let snapshots = collect_harness_snapshots(project_root, deps);
+    let all_filtered = collect_harness_snapshots(project_root, deps);
     let mut outcome = SyncOutcome::default();
+
+    // Phase 11 / US4: partition out the Open Plugins harnesses (`generic-op`,
+    // `goose` — `open_plugins_root == Some`). They integrate via the atomic
+    // `open_plugins` emitter, NOT the per-sink loop, so they must be EXCLUDED
+    // from every rules/MCP/hooks/guardrails/agents/plugins pass (the bundle is
+    // all-or-nothing; the per-sink writers would double-write its `AGENTS.md` /
+    // `.mcp.json`). With no Open Plugins harness in the effective set this is a
+    // no-op split: `snapshots == all_filtered` and `op_snapshots` is empty, so
+    // every existing project's sink processing is byte-identical.
+    let (op_snapshots, snapshots): (Vec<HarnessSnapshot>, Vec<HarnessSnapshot>) = all_filtered
+        .into_iter()
+        .partition(|s| s.open_plugins_root.is_some());
 
     // The bytes written to a SHARED rules file must stay correct for EVERY live
     // co-owner of that path, regardless of `--harness`. A `--harness X` run still
@@ -577,6 +596,42 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         }
     }
 
+    // -----------------------------------------------------------------
+    // 3f. Open Plugins (Phase 11 / US4) — the `tome-op` bundle sink.
+    //
+    // Reconciles the harnesses partitioned OUT of the per-sink loop
+    // (`generic-op` / `goose`): emit the whole bundle atomically for a live
+    // harness, remove it (structural-match) for a non-live one. These harnesses
+    // never appeared in the per-harness loop above, so they have no
+    // `HarnessDecision` yet — push one per op harness here, recording the bundle
+    // action under `plugins_action` (the closest existing decision field; the
+    // per-bundle granularity lives in `added`/`updated`/`removed` under the
+    // `OpenPlugins` subsystem). With no Open Plugins harness in the effective
+    // set this loop is empty, so the decision list is byte-identical.
+    // -----------------------------------------------------------------
+    let (op_actions, op_error) = reconcile_open_plugins(
+        project_root,
+        deps,
+        &effective_names,
+        &op_snapshots,
+        &mut outcome,
+    );
+    for snap in &op_snapshots {
+        outcome.decisions.push(HarnessDecision {
+            harness: snap.name.clone(),
+            in_effective_list: effective_names.contains(&snap.name),
+            rules_action: Action::LeftAlone,
+            mcp_action: Action::LeftAlone,
+            agents_action: Action::LeftAlone,
+            hooks_action: Action::LeftAlone,
+            guardrails_action: Action::LeftAlone,
+            plugins_action: op_actions
+                .get(&snap.name)
+                .copied()
+                .unwrap_or(Action::LeftAlone),
+        });
+    }
+
     if let Some(clash) = first_clash {
         return Err(clash);
     }
@@ -604,6 +659,12 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // error is returned.
     if let Some(plugin_err) = plugin_error {
         return Err(plugin_err);
+    }
+    // Phase 11 / US4: the Open Plugins bundle sink is surfaced LAST — every
+    // earlier sink's error wins, and forward progress means the bundle pass
+    // still reconciled where it could before this error is returned.
+    if let Some(op_err) = op_error {
+        return Err(op_err);
     }
 
     Ok(outcome)
@@ -667,6 +728,15 @@ pub(crate) struct HarnessSnapshot {
     /// Phase 6 / US3: the harness's guardrails sink (in-file region or Cursor
     /// standalone sibling) plus its hooks-driven suppression flag.
     pub(crate) guardrails_target: crate::harness::GuardrailsTarget,
+    /// Phase 11 / US4: the Open Plugins `tome-op` bundle root, when this harness
+    /// integrates via the atomic `open_plugins` emitter (`generic-op`, `goose`)
+    /// instead of the per-sink loop. `Some(root)` means the harness is dispatched
+    /// to [`crate::harness::reconcile::open_plugins::reconcile_open_plugins`] and
+    /// is EXCLUDED from the rules/MCP/hooks/guardrails/agents/plugins passes
+    /// (the bundle is all-or-nothing; the per-sink loop must not double-write its
+    /// `AGENTS.md` / `.mcp.json`). `None` for every other harness, so their sink
+    /// processing is byte-identical.
+    pub(crate) open_plugins_root: Option<PathBuf>,
 }
 
 fn collect_harness_snapshots(project_root: &Path, deps: &SyncDeps<'_>) -> Vec<HarnessSnapshot> {
@@ -702,6 +772,11 @@ fn collect_all_harness_snapshots(project_root: &Path, deps: &SyncDeps<'_>) -> Ve
     with_effective_modules(|mods| {
         mods.iter()
             .map(|m| snapshot_for(*m, project_root, deps.home_root))
+            // Open Plugins harnesses never share a per-sink rules path (their
+            // `AGENTS.md` lives inside the bundle), so they have no business in
+            // the shared-rules-path grouping. Excluding them keeps the grouping
+            // source consistent with the partitioned per-sink `snapshots`.
+            .filter(|s| s.open_plugins_root.is_none())
             .collect()
     })
 }
@@ -737,6 +812,7 @@ fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) ->
         tome_session_hook_path: m.tome_session_hook_path(project_root),
         session_steering: m.session_steering(),
         guardrails_target: m.guardrails_target(project_root),
+        open_plugins_root: m.open_plugins_root(project_root),
     }
 }
 

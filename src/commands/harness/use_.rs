@@ -90,8 +90,14 @@ pub fn run_inner(
     sync_ran_out: &std::cell::Cell<bool>,
 ) -> Result<HarnessUseOutcome, TomeError> {
     // 1. Validate harness name against the effective registry
-    //    (consults `HARNESS_MODULES_OVERRIDE` for tests).
-    let supported = with_effective_modules(|mods| mods.iter().any(|m| m.name() == args.name));
+    //    (consults `HARNESS_MODULES_OVERRIDE` for tests). Phase 11 / US4: the
+    //    opt-in targets (`generic` / `generic-op`) live in `OPT_IN_TARGETS`, not
+    //    `SUPPORTED_HARNESSES`, so they are not in `with_effective_modules`; fall
+    //    back to the alias+opt-in-aware `lookup` so `tome harness use generic`
+    //    resolves. (When a test override is installed, `lookup` doesn't consult
+    //    it, but the override branch already matched above.)
+    let supported = with_effective_modules(|mods| mods.iter().any(|m| m.name() == args.name))
+        || crate::harness::lookup(&args.name).is_some();
     if !supported {
         return Err(TomeError::HarnessNotSupported {
             name: args.name.clone(),

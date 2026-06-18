@@ -23,8 +23,8 @@ use tome::harness::{
     BlockBodyStyle, HarnessModule, MCP_CONFIG_KEY, McpConfigFormat, RulesFileStrategy,
     SUPPORTED_HARNESSES, antigravity::ANTIGRAVITY, claude_code::CLAUDE_CODE, cline::CLINE,
     codex::CODEX, copilot::COPILOT, copilot_cli::COPILOT_CLI, crush::CRUSH, cursor::CURSOR,
-    devin::DEVIN, gemini::GEMINI, jetbrains_ai::JETBRAINS_AI, junie::JUNIE, kiro::KIRO, lookup,
-    opencode::OPENCODE, pi::PI, zed::ZED,
+    devin::DEVIN, gemini::GEMINI, goose::GOOSE, jetbrains_ai::JETBRAINS_AI, junie::JUNIE,
+    kiro::KIRO, lookup, opencode::OPENCODE, pi::PI, zed::ZED,
 };
 
 // ===========================================================================
@@ -538,11 +538,11 @@ mod opencode_tests {
 // ===========================================================================
 
 #[test]
-fn supported_harnesses_has_exactly_sixteen_entries() {
+fn supported_harnesses_has_exactly_seventeen_entries() {
     assert_eq!(
         SUPPORTED_HARNESSES.len(),
-        16,
-        "Phase 11 (US1) widens the registry to 16 harness modules",
+        17,
+        "Phase 11 (US1) widened the registry to 16; US4 added the detectable `goose` → 17",
     );
 }
 
@@ -587,6 +587,7 @@ fn supported_harness_names_match_expected_set() {
             "cursor",
             "devin",
             "gemini",
+            "goose",
             "jetbrains-ai",
             "junie",
             "kiro",
@@ -836,6 +837,20 @@ fn explicit_5x9_method_matrix_covers_every_supported_harness() {
                 // inline when an Inline co-owner is live; this pins the declared
                 // capability.
                 block_body_style: BlockBodyStyle::AtInclude,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcpServers",
+            },
+        ),
+        (
+            &GOOSE,
+            ExpectedValues {
+                name: "goose",
+                description_starts_with: "",
+                detect_dir_name: ".config/goose",
+                // Bundle-internal sinks (informational; the open_plugins emitter
+                // owns the bundle). AGENTS.md lives inside the bundle root.
+                rules_strategy: RulesFileStrategy::BlockInExistingFile,
+                block_body_style: BlockBodyStyle::Inline,
                 mcp_format: McpConfigFormat::Json,
                 mcp_parent_key: "mcpServers",
             },
