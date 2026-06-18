@@ -581,14 +581,20 @@ pub struct ReindexArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ModelsCommand {
-    /// Download every registered model that is missing. `--force` re-downloads
-    /// even when the on-disk manifest already records a complete install.
+    /// Download the active profile's models if missing. `--all` fetches every
+    /// registered model; `--force` re-downloads even when the on-disk manifest
+    /// already records a complete install.
     Download(ModelsDownloadArgs),
-    /// List every registered model with its on-disk state. `--verify` rehashes
-    /// each installed model against its pinned SHA-256.
+    /// List every registered model with its on-disk state, the profile(s) that
+    /// reference it, and which set the active profile selects. `--verify`
+    /// rehashes each installed model against its pinned SHA-256.
     List(ModelsListArgs),
     /// Remove an installed model directory and its manifest.
     Remove(ModelsRemoveArgs),
+    /// Show or set the active model profile (small/medium/large). The profile
+    /// selects which embedder + reranker Tome uses; the summariser is shared
+    /// across every profile. Omit `<tier>` to show the current profile.
+    Profile(ModelsProfileArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -596,6 +602,16 @@ pub struct ModelsDownloadArgs {
     /// Re-download even when the on-disk manifest records a complete install.
     #[arg(long)]
     pub force: bool,
+    /// Download every registered model, not just the active profile's set.
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ModelsProfileArgs {
+    /// Set the active model profile. Omit to show the current profile.
+    #[arg(value_parser = ["small", "medium", "large"])]
+    pub tier: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]

@@ -8,6 +8,7 @@
 
 mod download;
 mod list;
+mod profile;
 mod remove;
 
 use std::path::PathBuf;
@@ -30,6 +31,7 @@ pub fn run(cmd: ModelsCommand, scope: &ResolvedScope, mode: Mode) -> Result<(), 
         ModelsCommand::Download(args) => download::run(args, mode),
         ModelsCommand::List(args) => list::run(args, mode),
         ModelsCommand::Remove(args) => remove::run(args, mode),
+        ModelsCommand::Profile(args) => profile::run(args, mode),
     }
 }
 

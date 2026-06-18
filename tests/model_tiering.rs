@@ -452,3 +452,113 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
         "the consistent 768-d index must return hits for a 768-d query",
     );
 }
+
+// ===========================================================================
+// Task 9 — `tome models profile [show | set <tier>]` CLI surface.
+//
+// Driven through the compiled binary so the clap value_parser, the meta write,
+// and the reindex/download notices are all exercised end-to-end.
+// ===========================================================================
+
+use crate::common::{ToolEnv, paths_for};
+use serde_json::Value;
+
+#[test]
+fn models_profile_show_reports_default_medium_when_no_db_exists() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let out = env.cmd().args(["--json", "models", "profile"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let rec: Value = serde_json::from_slice(&out.stdout).expect("--json object");
+    assert_eq!(rec["profile"], "medium", "fresh install defaults to Medium");
+    assert_eq!(rec["embedder"]["name"], "bge-base-en-v1.5");
+    assert_eq!(rec["reranker"]["name"], "bge-reranker-large");
+    // Each model line carries its install state (missing here, nothing fetched).
+    assert_eq!(rec["embedder"]["state"], "missing");
+}
+
+#[test]
+fn models_profile_set_writes_meta_and_show_reports_it() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let set = env.cmd().args(["--json", "models", "profile", "small"]).output().unwrap();
+    assert!(
+        set.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&set.stderr),
+    );
+    let set_rec: Value = serde_json::from_slice(&set.stdout).expect("set --json object");
+    assert_eq!(set_rec["profile"], "small");
+    assert_eq!(set_rec["embedder"], "bge-small-en-v1.5");
+    assert_eq!(set_rec["reranker"], "bge-reranker-base");
+
+    // `show` must now report `small` (persisted in meta.model_profile).
+    let show = env.cmd().args(["--json", "models", "profile"]).output().unwrap();
+    assert!(show.status.success());
+    let show_rec: Value = serde_json::from_slice(&show.stdout).unwrap();
+    assert_eq!(show_rec["profile"], "small", "set must persist to meta");
+
+    // The on-disk meta row is `small`.
+    let conn = tome::index::open_read_only(&paths.index_db).expect("open index");
+    let profile = tome::index::meta::active_profile(&conn).expect("active profile");
+    assert_eq!(profile, tome::embedding::profile::Profile::Small);
+}
+
+#[test]
+fn models_profile_set_large_from_medium_prints_reindex_notice() {
+    // The DB bootstraps with the DEFAULT (medium) embedder stamped into
+    // meta.embedder_name. Switching to `large` changes the embedder identity,
+    // so the switch must surface the reindex notice (dim 768→1024).
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    // First touch creates the DB stamped with the medium embedder.
+    let _ = env.cmd().args(["models", "profile", "medium"]).output().unwrap();
+
+    // JSON proves the structured signal.
+    let json = env.cmd().args(["--json", "models", "profile", "large"]).output().unwrap();
+    assert!(json.status.success());
+    let rec: Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(rec["embedder_changed"], true, "medium→large changes the embedder");
+    assert_eq!(rec["reindex_required"], true);
+    assert_eq!(rec["prev_embedder_dim"], 768);
+    assert_eq!(rec["new_embedder_dim"], 1024);
+
+    // Human output names `reindex`.
+    let human = env.cmd().args(["models", "profile", "large"]).output().unwrap();
+    assert!(human.status.success());
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        text.contains("reindex"),
+        "the embedder-change notice must mention `reindex`: {text}",
+    );
+    assert!(
+        text.contains("768") && text.contains("1024"),
+        "the notice must show the dimension change: {text}",
+    );
+}
+
+#[test]
+fn models_profile_set_rejects_invalid_tier_via_clap() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let out = env.cmd().args(["models", "profile", "extra-large"]).output().unwrap();
+    assert!(!out.status.success(), "invalid tier must be rejected");
+    assert_eq!(out.status.code(), Some(2), "clap usage error exits 2");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("small") && stderr.contains("medium") && stderr.contains("large"),
+        "clap must list the valid tiers: {stderr}",
+    );
+}
