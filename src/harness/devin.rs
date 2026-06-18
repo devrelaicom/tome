@@ -1,7 +1,18 @@
 //! `devin` — Cognition's Devin agent.
 //!
-//! Phase 11 (US1). Baseline integration: rules-file + MCP dialect only.
-//! Session steering (the G2 `CommandHook` SessionStart entry) lands in US2.
+//! Phase 11. Baseline integration: rules-file + MCP dialect (US1) plus the
+//! G2 `CommandHook` SessionStart entry (US2).
+//!
+//! ## Session steering (US2, T045)
+//!
+//! Devin gets a Tome-owned `SessionStart` command hook written into
+//! `<project>/.devin/hooks.v1.json` (the `DevinHooksV1` spec — no wrapper key)
+//! by the `reconcile_command_hooks` pass. The hook runs `tome harness
+//! session-start --workspace <ws> --harness devin`, whose stdout is wrapped in
+//! the [`Envelope::ClaudeNested`] `{ "hookSpecificOutput": { … } }` shape Devin
+//! consumes (contract session-steering.md §Stdout envelopes).
+//!
+//! [`Envelope::ClaudeNested`]: crate::harness::Envelope::ClaudeNested
 //!
 //! - Per-user dir: `~/.devin/` (the default `detect_path`).
 //! - Rules-file target: `<project>/AGENTS.md`, `BlockInExistingFile` ·
@@ -29,7 +40,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::harness::{
-    BlockBodyStyle, EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy,
+    BlockBodyStyle, EntryShape, Envelope, FileFormat, HarnessModule, HookEvent, HookFileSpec,
+    McpDialect, RulesFileStrategy, SessionSteering,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Devin.
@@ -87,6 +99,17 @@ impl HarnessModule for Devin {
             extra_fields: &[],
         }
     }
+
+    /// Session steering (US2, T045): a `SessionStart` command hook in
+    /// `<project>/.devin/hooks.v1.json` (the `DevinHooksV1` spec) whose stdout
+    /// is wrapped in the [`Envelope::ClaudeNested`] shape Devin consumes.
+    fn session_steering(&self) -> SessionSteering {
+        SessionSteering::CommandHook {
+            file_spec: HookFileSpec::DevinHooksV1,
+            event: HookEvent::SessionStart,
+            envelope: Envelope::ClaudeNested,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -125,5 +148,19 @@ mod tests {
         assert!(d.emit_env);
         assert!(d.extra_fields.is_empty());
         assert!(!DEVIN.mcp_manual_only());
+    }
+
+    /// US2 (T045): devin steers via a `DevinHooksV1` `SessionStart` command
+    /// hook wrapped in the `ClaudeNested` envelope.
+    #[test]
+    fn session_steering_is_devin_hooks_v1_session_start_claude_nested() {
+        assert_eq!(
+            DEVIN.session_steering(),
+            SessionSteering::CommandHook {
+                file_spec: HookFileSpec::DevinHooksV1,
+                event: HookEvent::SessionStart,
+                envelope: Envelope::ClaudeNested,
+            },
+        );
     }
 }

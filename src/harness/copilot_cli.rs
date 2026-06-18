@@ -1,8 +1,20 @@
 //! `copilot-cli` — GitHub Copilot CLI.
 //!
-//! Phase 11 (US1). Baseline integration: rules-file + MCP dialect only.
-//! Session steering (the G2 `CommandHook` SessionStart entry, flat
-//! `additionalContext` envelope) lands in US2.
+//! Phase 11. Baseline integration: rules-file + MCP dialect (US1) plus the
+//! G2 `CommandHook` SessionStart entry (US2).
+//!
+//! ## Session steering (US2, T046)
+//!
+//! Copilot CLI gets a Tome-owned `SessionStart` command hook written into
+//! `<project>/.github/hooks/tome.json` (the `CopilotHooks` spec — wrapped in
+//! `{ version, hooks: { SessionStart: [...] } }`, under a Tome-dedicated
+//! `tome.json` so it never collides with a developer's own hook file). The
+//! hook runs `tome harness session-start --workspace <ws> --harness
+//! copilot-cli`, whose stdout is wrapped in the
+//! [`Envelope::FlatAdditionalContext`] `{ "additionalContext": … }` shape
+//! (contract session-steering.md §Stdout envelopes).
+//!
+//! [`Envelope::FlatAdditionalContext`]: crate::harness::Envelope::FlatAdditionalContext
 //!
 //! - Per-user dir: `~/.copilot/` (the default name `copilot-cli` does NOT
 //!   match it, so `detect_path` is overridden).
@@ -17,8 +29,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::harness::{
-    EntryShape, ExtraField, ExtraValue, FileFormat, HarnessModule, McpDialect, RulesFileStrategy,
-    ServerType,
+    EntryShape, Envelope, ExtraField, ExtraValue, FileFormat, HarnessModule, HookEvent,
+    HookFileSpec, McpDialect, RulesFileStrategy, ServerType, SessionSteering,
 };
 
 /// Unit struct implementing [`HarnessModule`] for GitHub Copilot CLI.
@@ -78,6 +90,17 @@ impl HarnessModule for CopilotCli {
             }],
         }
     }
+
+    /// Session steering (US2, T046): a `SessionStart` command hook in
+    /// `<project>/.github/hooks/tome.json` (the `CopilotHooks` spec) whose
+    /// stdout is wrapped in the [`Envelope::FlatAdditionalContext`] shape.
+    fn session_steering(&self) -> SessionSteering {
+        SessionSteering::CommandHook {
+            file_spec: HookFileSpec::CopilotHooks,
+            event: HookEvent::SessionStart,
+            envelope: Envelope::FlatAdditionalContext,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -113,5 +136,19 @@ mod tests {
         assert_eq!(d.extra_fields[0].key, "tools");
         assert_eq!(d.extra_fields[0].value, ExtraValue::StringArray(&["*"]));
         assert!(!COPILOT_CLI.mcp_manual_only());
+    }
+
+    /// US2 (T046): copilot-cli steers via a `CopilotHooks` `SessionStart`
+    /// command hook wrapped in the `FlatAdditionalContext` envelope.
+    #[test]
+    fn session_steering_is_copilot_hooks_session_start_flat() {
+        assert_eq!(
+            COPILOT_CLI.session_steering(),
+            SessionSteering::CommandHook {
+                file_spec: HookFileSpec::CopilotHooks,
+                event: HookEvent::SessionStart,
+                envelope: Envelope::FlatAdditionalContext,
+            },
+        );
     }
 }

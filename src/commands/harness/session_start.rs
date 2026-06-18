@@ -173,4 +173,27 @@ mod tests {
                 .unwrap();
         assert_eq!(anti["injectSteps"][0]["ephemeralMessage"], TRICKY);
     }
+
+    /// US2 (T049): the `--harness <name>` → envelope mapping `run` applies. For
+    /// each real new-harness name, `lookup(name).session_steering()` yields a
+    /// `CommandHook` whose envelope is the one `run` wraps the directive in:
+    /// devin → ClaudeNested, copilot-cli → FlatAdditionalContext, gemini →
+    /// ClaudeNested. Antigravity (rules-only) yields `None` → raw directive.
+    #[test]
+    fn harness_name_selects_the_contract_envelope() {
+        fn envelope_for(name: &str) -> Option<Envelope> {
+            match lookup(name).unwrap().session_steering() {
+                SessionSteering::CommandHook { envelope, .. } => Some(envelope),
+                SessionSteering::TsPlugin { .. } | SessionSteering::None => None,
+            }
+        }
+        assert_eq!(envelope_for("devin"), Some(Envelope::ClaudeNested));
+        assert_eq!(
+            envelope_for("copilot-cli"),
+            Some(Envelope::FlatAdditionalContext)
+        );
+        assert_eq!(envelope_for("gemini"), Some(Envelope::ClaudeNested));
+        // Antigravity is rules-only (US2 T047): no command-hook envelope.
+        assert_eq!(envelope_for("antigravity"), None);
+    }
 }
