@@ -380,6 +380,111 @@ pub enum AgentFormat {
     Toml,
 }
 
+// =====================================================================
+// Phase 11 — G2: session steering (contract session-steering.md).
+//
+// `SessionSteering` generalizes the Phase ≤10 "Tome owns its own
+// session-start hook" wiring (the claude `RealJson` SessionStart entry +
+// the codex `tome_session_hook_path`) into one descriptor covering THREE
+// transports: a command hook (the new-harness JSON `CommandHook` sink),
+// an embedded TypeScript plugin shim (`TsPlugin`), or no native steering
+// (`None`, the rules-file-only floor every existing module keeps).
+//
+// All state is closed (enums / `PathBuf`) — there is no free-form escape
+// hatch, so each harness's session-start wire shape is a compile-time
+// constant the byte-stable pins can pin exactly.
+//
+// IMPORTANT: this is SEPARATE from [`HooksStrategy`], which governs
+// PLUGIN-hook merging (the `RealJson` Claude Code path). Claude Code and
+// Codex keep their dedicated Phase ≤10 session-hook path and continue to
+// return [`SessionSteering::None`] here, so the new `CommandHook`
+// reconciler naturally excludes them and their byte output is unchanged.
+// =====================================================================
+
+/// Closed set of stdout envelopes a harness wraps the directive in
+/// (selected by `tome harness session-start --harness <name>`).
+///
+/// The directive bytes are identical across envelopes — only the JSON
+/// wrapper differs. See `wrap_in_envelope` in the `session_start` command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Envelope {
+    /// `{ "hookSpecificOutput": { "hookEventName": "SessionStart",
+    /// "additionalContext": "<directive>" } }` — claude-code, devin, gemini.
+    ClaudeNested,
+    /// `{ "additionalContext": "<directive>" }` — copilot-cli.
+    FlatAdditionalContext,
+    /// `{ "injectSteps": [ { "ephemeralMessage": "<directive>" } ] }` —
+    /// antigravity.
+    AntigravityInjectSteps,
+}
+
+/// The hook event a `CommandHook` session-start entry registers under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEvent {
+    /// `SessionStart` (devin, copilot-cli, gemini).
+    SessionStart,
+    /// `PreInvocation` (antigravity's `.agents/hooks.json` list form).
+    PreInvocation,
+}
+
+/// Which embedded TypeScript shim a `TsPlugin` harness ships.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShimKind {
+    Cline,
+    Pi,
+    OpenCode,
+}
+
+/// Closed set of new-harness hook-file shapes the `CommandHook` reconciler
+/// writes (contract session-steering.md §CommandHook file specs).
+///
+/// `ClaudeSettingsLocal` / `CodexHooks` name the two Phase ≤10 sinks for
+/// completeness, but they are UNREACHABLE through the new `CommandHook`
+/// reconciler — claude-code/codex keep [`SessionSteering::None`] and their
+/// dedicated path, so the new reconciler never sees them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookFileSpec {
+    /// Devin `.devin/hooks.v1.json` (no wrapper key).
+    DevinHooksV1,
+    /// Copilot CLI `.github/hooks/<file>.json` (`version` + `hooks` wrapper).
+    CopilotHooks,
+    /// Gemini `.gemini/settings.json` (`hooks` section, nested `hooks` array).
+    GeminiSettings,
+    /// Antigravity `.agents/hooks.json` (named `tome` block, `PreInvocation`).
+    AntigravityHooks,
+    /// Claude Code `.claude/settings.local.json` — Phase ≤10 sink, NOT
+    /// reachable via the new `CommandHook` reconciler.
+    ClaudeSettingsLocal,
+    /// Codex `.codex/hooks.json` — Phase ≤10 sink, NOT reachable via the new
+    /// `CommandHook` reconciler.
+    CodexHooks,
+}
+
+/// How a harness receives Tome's session-start steering directive (G2).
+///
+/// The default ([`SessionSteering::None`]) keeps the rules-file-only floor
+/// every existing module relies on; the new harnesses override
+/// [`HarnessModule::session_steering`] with `CommandHook` or `TsPlugin`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionSteering {
+    /// No native session steering — the directive rides the rules file only.
+    /// Claude Code and Codex stay here (their Tome session hook uses the
+    /// dedicated Phase ≤10 path, NOT this descriptor).
+    None,
+    /// A Tome-owned hook entry written into the harness's JSON hook file,
+    /// invoking `tome harness session-start --workspace <ws> --harness <name>`
+    /// and wrapping the stdout in `envelope`.
+    CommandHook {
+        file_spec: HookFileSpec,
+        event: HookEvent,
+        envelope: Envelope,
+    },
+    /// An embedded TypeScript shim written into the harness's plugin dir; the
+    /// shim runs `tome harness session-start … --harness <name>` and injects
+    /// its (raw) stdout via the harness's own injection API.
+    TsPlugin { dir: PathBuf, kind: ShimKind },
+}
+
 /// One coding harness Tome can integrate with.
 ///
 /// Trait methods cover three concerns:
@@ -583,6 +688,27 @@ pub trait HarnessModule: Send + Sync {
             "translate_agent called on a harness without native agent support: {}",
             self.name()
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 11 — G2: session steering (contract session-steering.md).
+    //
+    // The default makes a brand-new harness — and every existing module —
+    // rules-file-only: no native session-start transport. New harnesses
+    // override this with `CommandHook` (the JSON hook reconciler) or
+    // `TsPlugin` (an embedded shim). Claude Code and Codex DELIBERATELY keep
+    // the default `None`: their Tome session hook uses the dedicated Phase ≤10
+    // path (the `RealJson` SessionStart entry / `tome_session_hook_path`), so
+    // the new `CommandHook` reconciler never touches them and their byte
+    // output is unchanged.
+    // -----------------------------------------------------------------------
+
+    /// How this harness receives Tome's session-start steering directive
+    /// (FR-014–FR-021, G2). Default [`SessionSteering::None`] — rules-file
+    /// only. Overridden by the new Phase 11 harnesses; the five existing
+    /// modules keep `None`.
+    fn session_steering(&self) -> SessionSteering {
+        SessionSteering::None
     }
 
     // -----------------------------------------------------------------------

@@ -12,6 +12,7 @@ use std::io::Write;
 
 use crate::cli::HarnessSessionStartArgs;
 use crate::error::TomeError;
+use crate::harness::{Envelope, SessionSteering, lookup};
 use crate::output::Mode;
 use crate::paths::Paths;
 use crate::workspace::{ResolvedScope, WorkspaceName};
@@ -62,6 +63,114 @@ pub fn run(
     let summary = crate::harness::routing::read_cached_long_summary(paths, &name);
     let directive = crate::harness::routing::build_directive(&entries, summary.as_deref());
 
-    std::io::stdout().lock().write_all(directive.as_bytes())?;
+    // Select the output channel from `--harness`:
+    //
+    // * ABSENT → raw directive, byte-identical to the Phase ≤10 path (the
+    //   claude-code / codex hooks pass no `--harness`; this must not change).
+    // * PRESENT but UNKNOWN → fail closed, emit nothing (the rules file still
+    //   carries the directive).
+    // * PRESENT + `CommandHook { envelope, .. }` → wrap in that envelope.
+    // * PRESENT + `TsPlugin`/`None` → raw directive (the shim wraps it; `None`
+    //   harnesses get raw).
+    //
+    // An EMPTY directive (empty workspace) emits nothing regardless of the
+    // channel: an empty `additionalContext` envelope would inject noise.
+    let output = match args.harness.as_deref() {
+        None => Some(directive),
+        Some(_) if directive.is_empty() => None,
+        Some(host) => match lookup(host) {
+            None => None,
+            Some(module) => match module.session_steering() {
+                SessionSteering::CommandHook { envelope, .. } => {
+                    Some(wrap_in_envelope(envelope, &directive))
+                }
+                SessionSteering::TsPlugin { .. } | SessionSteering::None => Some(directive),
+            },
+        },
+    };
+
+    if let Some(out) = output {
+        std::io::stdout().lock().write_all(out.as_bytes())?;
+    }
     Ok(())
+}
+
+/// Wrap a routing `directive` in the harness's stdout `envelope` (contract
+/// session-steering.md §Stdout envelopes). Pure + deterministic: identical
+/// inputs → byte-identical output.
+///
+/// The JSON is built via `serde_json` so a directive containing `"` / `\n` /
+/// any control char is escaped correctly — never string-concatenated. The
+/// result is one compact JSON object on a single line (the convention every
+/// hook stdout consumer expects).
+pub fn wrap_in_envelope(envelope: Envelope, directive: &str) -> String {
+    let value = match envelope {
+        Envelope::ClaudeNested => serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": directive,
+            }
+        }),
+        Envelope::FlatAdditionalContext => serde_json::json!({
+            "additionalContext": directive,
+        }),
+        Envelope::AntigravityInjectSteps => serde_json::json!({
+            "injectSteps": [ { "ephemeralMessage": directive } ]
+        }),
+    };
+    // `to_string` (not pretty) → compact single-line object, the stdout-hook
+    // convention. Serialisation of a plain `Value` is infallible here.
+    value.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A directive carrying a `"` and a `\n` proves the envelope escapes
+    /// correctly (serde_json, never string concatenation): the quote becomes
+    /// `\"`, the newline becomes `\n`, and the surrounding JSON stays valid.
+    const TRICKY: &str = "line1 \"quoted\"\nline2";
+
+    #[test]
+    fn wrap_claude_nested_pins_exact_bytes() {
+        assert_eq!(
+            wrap_in_envelope(Envelope::ClaudeNested, TRICKY),
+            r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"line1 \"quoted\"\nline2"}}"#,
+        );
+    }
+
+    #[test]
+    fn wrap_flat_additional_context_pins_exact_bytes() {
+        assert_eq!(
+            wrap_in_envelope(Envelope::FlatAdditionalContext, TRICKY),
+            r#"{"additionalContext":"line1 \"quoted\"\nline2"}"#,
+        );
+    }
+
+    #[test]
+    fn wrap_antigravity_inject_steps_pins_exact_bytes() {
+        assert_eq!(
+            wrap_in_envelope(Envelope::AntigravityInjectSteps, TRICKY),
+            r#"{"injectSteps":[{"ephemeralMessage":"line1 \"quoted\"\nline2"}]}"#,
+        );
+    }
+
+    /// Every wrapped envelope round-trips as valid JSON whose escaped string
+    /// payload equals the original directive — the escaping is correct, not
+    /// merely present.
+    #[test]
+    fn wrapped_envelopes_round_trip_the_directive() {
+        let claude: serde_json::Value =
+            serde_json::from_str(&wrap_in_envelope(Envelope::ClaudeNested, TRICKY)).unwrap();
+        assert_eq!(claude["hookSpecificOutput"]["additionalContext"], TRICKY,);
+        let flat: serde_json::Value =
+            serde_json::from_str(&wrap_in_envelope(Envelope::FlatAdditionalContext, TRICKY))
+                .unwrap();
+        assert_eq!(flat["additionalContext"], TRICKY);
+        let anti: serde_json::Value =
+            serde_json::from_str(&wrap_in_envelope(Envelope::AntigravityInjectSteps, TRICKY))
+                .unwrap();
+        assert_eq!(anti["injectSteps"][0]["ephemeralMessage"], TRICKY);
+    }
 }

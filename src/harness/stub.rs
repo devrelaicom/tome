@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use crate::harness::agents::{CanonicalAgent, TranslatedAgent};
 use crate::harness::{
     AgentFormat, BlockBodyStyle, GuardrailsPlacement, GuardrailsTarget, HarnessModule,
-    HooksStrategy, RulesFileStrategy,
+    HooksStrategy, RulesFileStrategy, SessionSteering,
 };
 
 /// Test-configurable [`HarnessModule`]. All fields default to the original
@@ -64,6 +64,9 @@ pub struct StubHarness {
     agent_format: Option<AgentFormat>,
     /// Canned `translate_agent` result, cloned per call.
     translation: Option<TranslatedAgent>,
+    /// Phase 11 (G2): canned `session_steering()`. Defaults to
+    /// [`SessionSteering::None`] (the trait floor).
+    session_steering: SessionSteering,
 }
 
 impl Default for StubHarness {
@@ -76,6 +79,7 @@ impl Default for StubHarness {
             agent_dir: None,
             agent_format: None,
             translation: None,
+            session_steering: SessionSteering::None,
         }
     }
 }
@@ -116,6 +120,13 @@ impl StubHarness {
 
     pub fn with_translation(mut self, translated: TranslatedAgent) -> Self {
         self.translation = Some(translated);
+        self
+    }
+
+    /// Drive the Phase 11 `session_steering()` (the `CommandHook` /
+    /// `TsPlugin` reconcilers).
+    pub fn with_session_steering(mut self, steering: SessionSteering) -> Self {
+        self.session_steering = steering;
         self
     }
 }
@@ -186,6 +197,10 @@ impl HarnessModule for StubHarness {
 
     fn agent_format(&self) -> Option<AgentFormat> {
         self.agent_format
+    }
+
+    fn session_steering(&self) -> SessionSteering {
+        self.session_steering.clone()
     }
 
     fn translate_agent(

@@ -40,7 +40,10 @@ use serde::Serialize;
 use crate::error::TomeError;
 use crate::harness::reconcile::agents::reconcile_agents;
 use crate::harness::reconcile::guardrails::reconcile_guardrails;
-use crate::harness::reconcile::hooks::{reconcile_hooks, reconcile_tome_session_hooks};
+use crate::harness::reconcile::hooks::{
+    reconcile_command_hooks, reconcile_hooks, reconcile_tome_session_hooks,
+};
+use crate::harness::reconcile::plugins::reconcile_plugins;
 // Shared bookkeeping for the orchestrator's rules/MCP loop; the per-sink
 // reconcilers under `reconcile/` call the same path (Phase 7 / FR-011).
 use crate::harness::reconcile::record_action;
@@ -121,6 +124,13 @@ pub enum SyncSubsystem {
     /// Guardrails prose fallback (Phase 6 / US3). One change per rules-file
     /// target or Cursor sibling whose guardrails regions Tome reconciled.
     Guardrails,
+    /// Embedded TypeScript plugin shims (Phase 11 / G2, `TsPlugin` steering).
+    /// One change per `tome.ts` shim written into or removed from a harness's
+    /// Tome-managed plugin dir. Added LAST so the snake_case wire form only
+    /// gains a new value (`"plugins"`) when a `TsPlugin` harness participates;
+    /// with every Phase ≤10 module returning `SessionSteering::None` this value
+    /// never appears, so the existing wire shape is byte-identical.
+    Plugins,
 }
 
 /// Per-harness decision record. Populated for every harness in
@@ -154,6 +164,18 @@ pub struct HarnessDecision {
     /// gained/changed/lost a region, `LeftAlone` otherwise. Appended LAST so
     /// the byte-stable JSON pin only gains a trailing field.
     pub guardrails_action: Action,
+    /// Phase 11 / G2: the TypeScript-shim (`TsPlugin`) reconciliation action
+    /// for this harness. `Created`/`Updated` when the embedded shim was
+    /// written, `Removed` when it was cleaned up, `LeftAlone` otherwise.
+    ///
+    /// Appended LAST AND gated with `skip_serializing_if` so the field is
+    /// OMITTED from the JSON wire form when it is `LeftAlone` — which it always
+    /// is for the five Phase ≤10 modules (none declares `TsPlugin`). That keeps
+    /// the byte-stable `SyncOutcome` / `HarnessDecision` pins UNCHANGED until a
+    /// `TsPlugin` harness actually does plugin work; only then does the new
+    /// trailing `plugins_action` key appear.
+    #[serde(skip_serializing_if = "Action::is_left_alone")]
+    pub plugins_action: Action,
 }
 
 /// What happened to one subsystem (rules-file or MCP config) for one
@@ -165,6 +187,16 @@ pub enum Action {
     Updated,
     Removed,
     LeftAlone,
+}
+
+impl Action {
+    /// `true` for [`Action::LeftAlone`]. Used by `serde`'s
+    /// `skip_serializing_if` on the Phase 11 `HarnessDecision::plugins_action`
+    /// field so a no-op (the steady state for every Phase ≤10 module) is
+    /// omitted from the JSON wire form, keeping the byte-stable pins unchanged.
+    fn is_left_alone(&self) -> bool {
+        matches!(self, Action::LeftAlone)
+    }
 }
 
 // =====================================================================
@@ -401,11 +433,12 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
             in_effective_list: is_live,
             rules_action,
             mcp_action,
-            // Backfilled by the hooks + guardrails + agents reconciliation
-            // passes below.
+            // Backfilled by the hooks + guardrails + agents + plugins
+            // reconciliation passes below.
             agents_action: Action::LeftAlone,
             hooks_action: Action::LeftAlone,
             guardrails_action: Action::LeftAlone,
+            plugins_action: Action::LeftAlone,
         });
     }
 
@@ -433,6 +466,25 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         reconcile_tome_session_hooks(deps, &effective_names, &snapshots, &mut outcome);
     for decision in &mut outcome.decisions {
         if let Some(action) = codex_hook_actions.get(&decision.harness) {
+            decision.hooks_action = *action;
+        }
+    }
+
+    // Phase 11 (G2 / T017): Tome's own session-start `CommandHook` entry for the
+    // NEW harnesses (devin / copilot-cli / gemini / antigravity). Excludes
+    // claude-code/codex (both `SessionSteering::None`). With every CURRENT module
+    // returning `None`, this pass fast-exits as a NO-OP, so the orchestrator
+    // output is byte-identical to before — the call site is wired now so US2 only
+    // has to add the per-harness `session_steering()` overrides.
+    let (command_hook_actions, command_hook_error) = reconcile_command_hooks(
+        deps,
+        &effective_names,
+        &snapshots,
+        project_root,
+        &mut outcome,
+    );
+    for decision in &mut outcome.decisions {
+        if let Some(action) = command_hook_actions.get(&decision.harness) {
             decision.hooks_action = *action;
         }
     }
@@ -482,6 +534,25 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         }
     }
 
+    // -----------------------------------------------------------------
+    // 3e. Plugins (Phase 11 / G2, T018) — the `TsPlugin` shim sink.
+    //
+    // Installs / removes Tome's embedded TypeScript session-steering shim for
+    // every harness whose `session_steering()` is `TsPlugin`. Runs LAST, after
+    // agents. With every CURRENT module returning `SessionSteering::None`, this
+    // pass fast-exits as a NO-OP — no shim writes, no decision-field changes,
+    // no `Plugins` subsystem entries — so the orchestrator output stays
+    // byte-identical to before. The `first_error` is surfaced LAST in the fixed
+    // precedence chain below.
+    // -----------------------------------------------------------------
+    let (plugin_actions, plugin_error) =
+        reconcile_plugins(project_root, &effective_names, &snapshots, &mut outcome);
+    for decision in &mut outcome.decisions {
+        if let Some(action) = plugin_actions.get(&decision.harness) {
+            decision.plugins_action = *action;
+        }
+    }
+
     if let Some(clash) = first_clash {
         return Err(clash);
     }
@@ -494,11 +565,21 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     if let Some(codex_hook_err) = codex_hook_error {
         return Err(codex_hook_err);
     }
+    if let Some(command_hook_err) = command_hook_error {
+        return Err(command_hook_err);
+    }
     if let Some(guardrails_err) = guardrails_recon.first_error {
         return Err(guardrails_err);
     }
     if let Some(agent_err) = agents_recon.first_error {
         return Err(agent_err);
+    }
+    // Phase 11 / G2: the TsPlugin shim sink is surfaced LAST (after agents) in
+    // the fixed precedence chain — every earlier sink's error wins, and forward
+    // progress means the shim pass still reconciled where it could before this
+    // error is returned.
+    if let Some(plugin_err) = plugin_error {
+        return Err(plugin_err);
     }
 
     Ok(outcome)
@@ -540,6 +621,12 @@ pub(crate) struct HarnessSnapshot {
     /// for harnesses with no Tome-owned session hook (or whose Tome hook rides
     /// the `RealJson` pass, e.g. Claude Code).
     pub(crate) tome_session_hook_path: Option<PathBuf>,
+    /// Phase 11 (G2): how this harness receives Tome's session-start steering
+    /// directive. Drives the `CommandHook` reconciler's fast-exit + per-harness
+    /// write/remove. Every Phase ≤10 module returns
+    /// [`crate::harness::SessionSteering::None`], so the reconciler is a no-op
+    /// for them and the orchestrator output stays byte-identical.
+    pub(crate) session_steering: crate::harness::SessionSteering,
     /// Phase 6 / US3: the harness's guardrails sink (in-file region or Cursor
     /// standalone sibling) plus its hooks-driven suppression flag.
     pub(crate) guardrails_target: crate::harness::GuardrailsTarget,
@@ -599,6 +686,7 @@ fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) ->
             crate::harness::HooksStrategy::GuardrailsOnly => None,
         },
         tome_session_hook_path: m.tome_session_hook_path(project_root),
+        session_steering: m.session_steering(),
         guardrails_target: m.guardrails_target(project_root),
     }
 }
