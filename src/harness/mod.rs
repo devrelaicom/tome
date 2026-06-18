@@ -63,14 +63,24 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 pub mod agents;
+pub mod antigravity;
 pub mod claude_code;
+pub mod cline;
 pub mod codex;
+pub mod copilot;
+pub mod copilot_cli;
+pub mod crush;
 pub mod cursor;
+pub mod devin;
 pub mod gemini;
 pub mod guardrails;
 pub mod hooks;
+pub mod jetbrains_ai;
+pub mod junie;
+pub mod kiro;
 pub mod mcp_config;
 pub mod opencode;
+pub mod pi;
 /// Embedded harness-plugin (TypeScript shim) registry (Phase 11, R6). Defines
 /// the `include!` target shapes and exposes the `build.rs`-generated
 /// `HARNESS_PLUGINS` slice. Harness-runtime-executed — the sync boundary holds.
@@ -83,12 +93,24 @@ pub mod routing;
 pub mod rules_file;
 pub mod stub;
 pub mod sync;
+pub mod zed;
 
+use antigravity::ANTIGRAVITY;
 use claude_code::CLAUDE_CODE;
+use cline::CLINE;
 use codex::CODEX;
+use copilot::COPILOT;
+use copilot_cli::COPILOT_CLI;
+use crush::CRUSH;
 use cursor::CURSOR;
+use devin::DEVIN;
 use gemini::GEMINI;
+use jetbrains_ai::JETBRAINS_AI;
+use junie::JUNIE;
+use kiro::KIRO;
 use opencode::OPENCODE;
+use pi::PI;
+use zed::ZED;
 
 #[doc(hidden)]
 pub use stub::StubHarness;
@@ -666,6 +688,25 @@ pub trait HarnessModule: Send + Sync {
         self.mcp_dialect().parent_key
     }
 
+    /// Whether this harness has NO writable MCP configuration file (Phase
+    /// 11, contract mcp-dialects.md § "Manual-only (no file write)").
+    ///
+    /// When `true`, the sync orchestrator MUST NOT read, write, or remove
+    /// the harness's MCP config — the harness configures MCP through a
+    /// UI-only surface (jetbrains-ai) with no file Tome can own. The
+    /// harness still receives its rules-file integration; only the MCP
+    /// sink is skipped. The user-facing "paste this snippet" notice is a
+    /// SEPARATE US5 concern — this predicate only governs the file write.
+    ///
+    /// Default `false` — every Phase ≤10 module (and every harness with a
+    /// real writable MCP file) keeps writing its entry, so the existing
+    /// byte output is unchanged. `pi` keeps the default `false` in US1: it
+    /// DOES write `~/.pi/agent/mcp.json` (the adapter-install notice is a
+    /// US5 fast-follow), so only `jetbrains-ai` overrides this to `true`.
+    fn mcp_manual_only(&self) -> bool {
+        false
+    }
+
     // -----------------------------------------------------------------------
     // Phase 6 — hooks, guardrails, native agents (harness-modules-p6.md).
     //
@@ -823,8 +864,24 @@ pub trait HarnessModule: Send + Sync {
 ///
 /// Lookups also consult `HARNESS_MODULES_OVERRIDE` first — see
 /// [`lookup`] and [`effective_modules`].
-pub static SUPPORTED_HARNESSES: &[&'static dyn HarnessModule] =
-    &[&CLAUDE_CODE, &CODEX, &CURSOR, &GEMINI, &OPENCODE];
+pub static SUPPORTED_HARNESSES: &[&'static dyn HarnessModule] = &[
+    &ANTIGRAVITY,
+    &CLAUDE_CODE,
+    &CLINE,
+    &CODEX,
+    &COPILOT,
+    &COPILOT_CLI,
+    &CRUSH,
+    &CURSOR,
+    &DEVIN,
+    &GEMINI,
+    &JETBRAINS_AI,
+    &JUNIE,
+    &KIRO,
+    &OPENCODE,
+    &PI,
+    &ZED,
+];
 
 // =====================================================================
 // Phase 11 — registry alias layer + real-vs-opt-in partition
@@ -997,8 +1054,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supported_harnesses_has_five_entries() {
-        assert_eq!(SUPPORTED_HARNESSES.len(), 5);
+    fn supported_harnesses_has_sixteen_entries() {
+        // Phase 11 widened the registry from 5 to 16 (the 5 Phase ≤10 modules
+        // plus the 11 US1 harnesses).
+        assert_eq!(SUPPORTED_HARNESSES.len(), 16);
     }
 
     #[test]
@@ -1094,10 +1153,21 @@ mod tests {
     #[test]
     fn detect_path_defaults_to_dot_name_under_home() {
         // Default impl: `home.join(format!(".{}", self.name()))`.
-        // Codex / Cursor / Gemini / OpenCode all use the default.
+        // Harnesses whose per-user dir diverges from `name()` override
+        // `detect_path` (claude-code → ~/.claude, the XDG/per-user
+        // overriders below) and are excluded here.
+        const OVERRIDERS: &[&str] = &[
+            "claude-code",  // ~/.claude
+            "crush",        // ~/.config/crush
+            "zed",          // ~/.config/zed
+            "jetbrains-ai", // ~/.aiassistant
+            "copilot-cli",  // ~/.copilot
+            "copilot",      // ~/.vscode
+            "antigravity",  // ~/.gemini
+        ];
         let home = std::path::Path::new("/h");
         for harness in SUPPORTED_HARNESSES {
-            if harness.name() == "claude-code" {
+            if OVERRIDERS.contains(&harness.name()) {
                 continue;
             }
             assert_eq!(
