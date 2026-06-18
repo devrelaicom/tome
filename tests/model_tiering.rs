@@ -159,27 +159,6 @@ fn new_models_load_and_infer() {
 // ===========================================================================
 // Task 8 / S1 — deterministic mixed-dimension regression test (NON-network).
 //
-// The corruption B1/B3 prevent: a profile-switch that changes the embedder
-// (and therefore the embedding DIMENSION) must NOT land new-dimension vectors
-// in a table that still holds old-dimension vectors. The schema v6
-// `skill_embeddings.embedding` is a dimension-free BLOB, so SQLite no longer
-// rejects a mismatched-length vector at INSERT time — the guard is the only
-// thing standing between a profile switch and a corrupt, un-queryable index.
-//
-// Scenario (mirrors the brief's Step 7), entirely model-free via StubEmbedder:
-//   1. bootstrap + enable a plugin with a 384-d stub → meta stamps the stub
-//      embedder identity, every row is a 384-d vector;
-//   2. "install" a 768-d stub and flip `meta.model_profile` so the configured
-//      active-profile embedder differs from the stored one (embedder DRIFT);
-//   3. a plain `plugin enable` AND a `catalog update` are both REFUSED by the
-//      shared B3 drift guard with a `tome reindex` hint (no vector written);
-//   4. a whole-index `tome reindex` force-re-embeds EVERY row to 768-d and
-//      clears the drift (B1);
-//   5. a subsequent query SUCCEEDS — no dimension-mismatch error — proving the
-//      index is internally consistent again.
-// ===========================================================================
-// Task 8 / S1 — deterministic mixed-dimension regression test (NON-network).
-//
 // The corruption B1/B3 prevent: a profile switch that changes the embedder
 // (and therefore the embedding DIMENSION) must NOT land new-dimension vectors
 // in a table that still holds old-dimension vectors. The schema v6
@@ -192,19 +171,24 @@ fn new_models_load_and_infer() {
 //      meta carries the medium embedder identity, every row is a 384-d vector;
 //   2. flip `meta.model_profile` to `large` so the configured active-profile
 //      embedder differs from the stored one (embedder NAME drift);
-//   3. a plain `plugin enable` AND a `catalog update` are both REFUSED by the
-//      shared B3 drift guard with a `tome reindex` hint (no vector written);
-//      a SCOPED reindex is refused too (B1, exit 47);
+//   3. a plain `plugin enable` AND a `catalog update` (driven through the real
+//      `catalog::update::run` entry point — `enable::run` is a private module,
+//      see the (3a) note) are both REFUSED by the shared B3 drift guard with a
+//      `tome reindex` hint (no vector written); a SCOPED reindex is refused too
+//      (B1, exit 47);
 //   4. a whole-index `tome reindex` force-re-embeds EVERY row to 768-d and
 //      stamps + clears the drift (B1);
 //   5. a subsequent query SUCCEEDS — no dimension-mismatch error — proving the
 //      index is internally consistent again.
+// ===========================================================================
 
 use crate::common::{
-    config_with_catalog, copy_sample_plugin_catalog, enrol_catalog_symlinked, fabricate_models,
-    lifecycle_paths, stub_reranker_seed, stub_summariser_seed,
+    HomeGuard, config_with_catalog, copy_sample_plugin_catalog, enrol_catalog_symlinked,
+    fabricate_models, lifecycle_paths, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
+use tome::cli::CatalogUpdateArgs;
+use tome::commands::catalog::update as catalog_update;
 use tome::commands::reindex::{self, Scope};
 use tome::embedding::Embedder;
 use tome::embedding::stub::StubEmbedder;
@@ -213,7 +197,7 @@ use tome::index::{self, MetaSeed, OpenOptions};
 use tome::output::Mode;
 use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
-use tome::workspace::{Scope as WsScope, WorkspaceName};
+use tome::workspace::{ResolvedScope, Scope as WsScope, ScopeSource, WorkspaceName};
 
 /// The MEDIUM-profile embedder identity stamped into `meta` for the baseline.
 const MEDIUM_EMBEDDER: &str = "bge-base-en-v1.5";
@@ -238,7 +222,15 @@ fn open_writable(paths: &tome::paths::Paths) -> rusqlite::Connection {
 #[test]
 fn mixed_dimension_profile_switch_is_refused_until_reindex() {
     let tmp = TempDir::new().unwrap();
-    let paths = lifecycle_paths(tmp.path());
+
+    // Root the fixture at `<home>/.tome` so a production `*::run` entry point —
+    // which resolves `Paths` from `$HOME/.tome` via `Paths::resolve` — lands on
+    // the SAME on-disk index/catalogs the explicit-`paths` helpers below build.
+    // `HomeGuard` redirects `$HOME` under a process-global mutex and restores it
+    // on drop; step (3b) relies on this to drive the real `catalog update`.
+    let home = tmp.path().to_path_buf();
+    let _home_guard = HomeGuard::install(&home);
+    let paths = lifecycle_paths(&home.join(".tome"));
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_models(&paths);
 
@@ -316,7 +308,13 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
     );
 
     // ---- (3a) a plain `plugin enable` is REFUSED -----------------------
-    // `enable::run` calls `guard_embedder_drift` before loading any model.
+    // `commands::plugin::enable::run` calls `guard_embedder_drift` (enable.rs
+    // ~:53) before loading any model. That `run` lives in a PRIVATE module
+    // (`mod enable;` in `commands/plugin/mod.rs`), so it is not reachable from
+    // an integration test — we assert the shared guard at the helper level
+    // here and exercise the SIBLING production call site (`catalog update`)
+    // through its public `run` in (3b) below, keeping at least one real entry
+    // point on the test's critical path.
     let enable_err = meta::guard_embedder_drift(&conn, &configured_ident)
         .expect_err("enable must refuse under embedder drift");
     assert_eq!(
@@ -329,11 +327,34 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
         "the refusal must direct the user to `tome reindex`: {enable_err}",
     );
 
-    // ---- (3b) a `catalog update` is REFUSED the same way ---------------
-    let update_err = meta::guard_embedder_drift(&conn, &configured_ident)
-        .expect_err("catalog update must refuse under embedder drift");
-    assert_eq!(update_err.exit_code(), 41);
-    assert!(update_err.to_string().to_lowercase().contains("reindex"));
+    // ---- (3b) a `catalog update` is REFUSED via the REAL command -------
+    // Drive the production `commands::catalog::update::run` (public `run`),
+    // NOT the guard helper directly. `run` resolves `Paths` from `$HOME/.tome`
+    // (redirected to this fixture by `HomeGuard` above), opens the index, and
+    // calls `guard_embedder_drift` at `commands/catalog/update.rs` ~:57 BEFORE
+    // any git fetch or model load — so the drift state stamped in `meta` makes
+    // it refuse before touching the network. This keeps the guard CALL SITE on
+    // the test's critical path: deleting that guard call would fail this test.
+    let update_scope = ResolvedScope {
+        scope: WsScope(WorkspaceName::global()),
+        source: ScopeSource::GlobalFallback,
+        project_root: None,
+    };
+    let update_err = catalog_update::run(
+        CatalogUpdateArgs { name: None, force: false },
+        &update_scope,
+        Mode::Json,
+    )
+    .expect_err("`catalog update` must refuse under embedder drift");
+    assert_eq!(
+        update_err.exit_code(),
+        41,
+        "the real `catalog update` refusal is EmbedderNameDrift (exit 41)",
+    );
+    assert!(
+        update_err.to_string().to_lowercase().contains("reindex"),
+        "the real refusal must direct the user to `tome reindex`: {update_err}",
+    );
 
     // ---- (3c) a SCOPED reindex is ALSO refused (B1) --------------------
     // Re-embedding only one plugin while stamping the GLOBAL meta would leave
