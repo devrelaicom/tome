@@ -1,8 +1,13 @@
-//! `tome models download` — fetch every registered model that is missing.
-//! With `--force`, re-download every model whether or not the on-disk
-//! manifest already records a complete install.
+//! `tome models download` — fetch the active profile's models if missing.
+//! With `--all`, fetch every registered model. With `--force`, re-download
+//! whether or not the on-disk manifest already records a complete install.
 //!
-//! Spec: `contracts/models-commands.md` §"`tome models download`".
+//! The default target set is the ACTIVE profile's `{embedder, reranker,
+//! summariser}` (the summariser is profile-independent). Scoping the default
+//! to the active profile mirrors the enable path's `ensure_models_or_prompt`
+//! (B2) so a small/medium/large install never pulls every tier's weights.
+//!
+//! Spec: `contracts/models-commands.md` §"`tome models download`", FR-021.
 
 use std::io::Write;
 use std::time::Instant;
@@ -12,7 +17,7 @@ use tracing::info;
 
 use crate::cli::ModelsDownloadArgs;
 use crate::embedding::download::download_model;
-use crate::embedding::registry::MODEL_REGISTRY;
+use crate::embedding::registry::{MODEL_REGISTRY, ModelEntry};
 use crate::error::TomeError;
 use crate::output::{self, Mode};
 use crate::paths::Paths;
@@ -24,9 +29,11 @@ pub fn run(args: ModelsDownloadArgs, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
     std::fs::create_dir_all(&paths.models_dir).map_err(TomeError::Io)?;
 
+    let targets = resolve_targets(&paths, args.all)?;
+
     let mut records: Vec<DownloadRecord> = Vec::new();
 
-    for entry in MODEL_REGISTRY {
+    for entry in targets {
         let (state, _manifest) = cheap_state(&paths, entry)?;
         let already_installed = matches!(state, ModelState::Ok);
 
@@ -138,6 +145,31 @@ pub fn run(args: ModelsDownloadArgs, mode: Mode) -> Result<(), TomeError> {
     }
 
     Ok(())
+}
+
+/// The set of registry entries `download` should fetch. With `all`, every
+/// `MODEL_REGISTRY` entry; otherwise the active profile's `{embedder,
+/// reranker, summariser}` (resolved from the index `meta`, falling back to
+/// the default profile when no DB exists — exactly what the bootstrap will
+/// stamp).
+fn resolve_targets(paths: &Paths, all: bool) -> Result<Vec<&'static ModelEntry>, TomeError> {
+    if all {
+        return Ok(MODEL_REGISTRY.iter().collect());
+    }
+
+    use crate::embedding::profile::{Profile, embedder_for, reranker_for};
+    let profile = if paths.index_db.is_file() {
+        let conn = crate::index::open_read_only(&paths.index_db)?;
+        crate::index::meta::active_profile(&conn)?
+    } else {
+        Profile::DEFAULT
+    };
+
+    Ok(vec![
+        embedder_for(profile),
+        reranker_for(profile),
+        crate::summarise::registry::summariser_entry(),
+    ])
 }
 
 fn kind_str(kind: crate::embedding::registry::ModelKind) -> &'static str {

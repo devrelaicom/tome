@@ -40,6 +40,99 @@ fn list_with_no_models_installed_reports_missing_for_every_entry() {
 }
 
 #[test]
+fn list_json_annotates_each_row_with_profiles_and_marks_the_active_set() {
+    // Default profile is Medium: bge-base-en-v1.5 + bge-reranker-large are the
+    // active set; the summariser is referenced by every profile but is never
+    // `active` (profile-independent).
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let out = env
+        .cmd()
+        .args(["models", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let records: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap();
+    let by_name = |name: &str| {
+        records
+            .iter()
+            .find(|r| r["name"] == name)
+            .unwrap_or_else(|| panic!("`{name}` must appear in the list"))
+            .clone()
+    };
+
+    // Every entry carries a non-empty `profiles` array + a boolean `active`.
+    for r in &records {
+        assert!(
+            r["profiles"].as_array().is_some_and(|a| !a.is_empty()),
+            "every row must carry a non-empty `profiles` array, got {r:?}",
+        );
+        assert!(r["active"].is_boolean(), "every row carries a boolean `active`: {r:?}");
+    }
+
+    // Per-entry profile mapping.
+    assert_eq!(by_name("bge-small-en-v1.5")["profiles"], serde_json::json!(["small"]));
+    assert_eq!(by_name("bge-base-en-v1.5")["profiles"], serde_json::json!(["medium"]));
+    assert_eq!(by_name("bge-large-en-v1.5")["profiles"], serde_json::json!(["large"]));
+    assert_eq!(
+        by_name("qwen2.5-0.5b-instruct")["profiles"],
+        serde_json::json!(["small", "medium", "large"]),
+    );
+
+    // The Medium set is active; no other entry is.
+    assert_eq!(by_name("bge-base-en-v1.5")["active"], true);
+    assert_eq!(by_name("bge-reranker-large")["active"], true);
+    assert_eq!(by_name("bge-small-en-v1.5")["active"], false);
+    assert_eq!(by_name("bge-large-en-v1.5")["active"], false);
+    assert_eq!(by_name("qwen2.5-0.5b-instruct")["active"], false);
+}
+
+#[test]
+fn list_active_marker_follows_the_active_profile() {
+    // After switching to `large`, the large pair becomes the active set.
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let set = env
+        .cmd()
+        .args(["models", "profile", "large"])
+        .output()
+        .unwrap();
+    assert!(
+        set.status.success(),
+        "profile set failed: {}",
+        String::from_utf8_lossy(&set.stderr),
+    );
+
+    let out = env
+        .cmd()
+        .args(["models", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let records: Vec<Value> = serde_json::from_slice(&out.stdout).unwrap();
+    let active: Vec<&str> = records
+        .iter()
+        .filter(|r| r["active"] == true)
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        active,
+        vec!["bge-large-en-v1.5", "bge-reranker-v2-m3"],
+        "after `profile large`, the active set is the large pair",
+    );
+}
+
+#[test]
 fn list_with_all_models_installed_reports_ok_under_cheap_check() {
     let env = ToolEnv::new();
     let paths = paths_for(&env);
