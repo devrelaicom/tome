@@ -42,8 +42,8 @@ fn download_with_all_models_already_installed_emits_skipped_records() {
         .expect("envelope.models must be an array");
     assert_eq!(
         models.len(),
-        3,
-        "three registered models (embedder + reranker + summariser)"
+        7,
+        "seven registered models (3 embedders + 3 rerankers + 1 summariser) after Phase 2 model tiering"
     );
     for m in models {
         assert_eq!(
