@@ -145,6 +145,196 @@ pub enum McpConfigFormat {
     Toml,
 }
 
+// =====================================================================
+// Phase 11 — G1: the MCP dialect (FR-008, R2/R3, contract mcp-dialects.md).
+//
+// `McpDialect` generalizes the two scalars the Phase ≤10 trait exposed
+// (`mcp_config_format()` + `mcp_parent_key()`) into one value that also
+// captures the per-harness *body shape*: the entry-body template, the
+// optional `type` discriminator, the empty-`env` policy, and any
+// always-present mandated fields (`tools`, `enabled`, …). The single
+// dialect-aware read/write/remove in `mcp_config.rs` is driven by this
+// value; `TomeEntry { command, args, env }` stays the uniform in-memory
+// model regardless of dialect.
+//
+// All new state is closed (enums / `&'static` slices) — there is no
+// free-form escape hatch — so every harness's wire shape is a
+// compile-time constant the byte-stable pins can pin exactly.
+// =====================================================================
+
+/// On-disk serialisation family for a harness MCP config file.
+///
+/// `Json` and `Jsonc` both route through the `serde_json` read/write
+/// path (Tome always *emits* plain JSON); `Jsonc` is a distinct variant
+/// only to document that the harness *tolerates* comments in the file it
+/// reads (OpenCode's `opencode.json`), so a future reader knows the
+/// lenient parse is intentional. `Toml` routes through `toml_edit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileFormat {
+    /// `serde_json` with the `preserve_order` feature.
+    Json,
+    /// JSON-with-comments — same `serde_json` read/write path as `Json`;
+    /// the variant documents comment-tolerance of the harness's reader.
+    Jsonc,
+    /// `toml_edit` (comment- and order-preserving).
+    Toml,
+}
+
+/// Closed set of entry-body templates (FR-008).
+///
+/// Determines how `command`/`args` serialise:
+///
+/// - `CommandArgs` — `command` is a string, `args` is a string array
+///   (the Phase ≤10 shape every existing harness uses).
+/// - `CommandArray` — `command` is a single array `[launcher, ...args]`
+///   with NO separate `args` key (OpenCode's `opencode.json`). On read
+///   the array is normalised back to `command = arr[0]`, `args =
+///   arr[1..]` so `TomeEntry` and `is_tome_owned` are shape-agnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryShape {
+    /// `"command": "<launcher>", "args": ["mcp", …]`.
+    CommandArgs,
+    /// `"command": ["<launcher>", "mcp", …]` — no `args` key.
+    CommandArray,
+}
+
+/// The server-`type` discriminator some harnesses require on each entry.
+///
+/// Serialises to `"type": "local"` / `"type": "stdio"`. Re-derived from
+/// the dialect on every rewrite (a stale/edited value self-heals).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerType {
+    /// `"type": "local"` (OpenCode, copilot-cli).
+    Local,
+    /// `"type": "stdio"` (copilot VS Code, crush).
+    Stdio,
+}
+
+impl ServerType {
+    /// The literal `type` string this discriminator serialises to.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ServerType::Local => "local",
+            ServerType::Stdio => "stdio",
+        }
+    }
+}
+
+/// Closed value domain for a mandated [`ExtraField`].
+///
+/// Covers exactly the two always-present field values across the Phase
+/// 11 harness set: OpenCode's `"enabled": true` and copilot-cli's
+/// `"tools": ["*"]`. No free-form escape hatch — extending the set is a
+/// deliberate enum edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtraValue {
+    /// A JSON/TOML boolean (e.g. OpenCode `enabled: true`).
+    Bool(bool),
+    /// A JSON/TOML array of strings (e.g. copilot-cli `tools: ["*"]`).
+    StringArray(&'static [&'static str]),
+}
+
+/// One always-present mandated field appended to an emitted entry.
+///
+/// Re-derived from the dialect on every rewrite so a developer's edit of
+/// a mandated value self-heals back to the dialect's canonical form
+/// (R3/m6). Appended LAST, in slice order, after `env`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtraField {
+    pub key: &'static str,
+    pub value: ExtraValue,
+}
+
+/// The full per-harness MCP wire-shape (the G1 generalization).
+///
+/// Replaces the Phase ≤10 `mcp_config_format()` + `mcp_parent_key()`
+/// scalar pair with one value the shared `mcp_config` read/write/remove
+/// is driven by. The legacy behaviour is the default dialect (see
+/// [`HarnessModule::mcp_dialect`]); only OpenCode (the G1 canary)
+/// diverges among the five existing modules.
+///
+/// ## Emitted field order (load-bearing for byte-stable pins)
+///
+/// `type` (iff `entry_type` is `Some`) → `command` →
+/// `args` (`CommandArgs` only) → `env` (iff a developer env is present,
+/// OR `emit_env` and no env) → each `extra_fields` entry, in slice
+/// order.
+///
+/// ## Ownership predicate (R2/B1)
+///
+/// After the per-shape extraction of `(command, args)`, the SINGLE
+/// existing [`mcp_config::is_tome_owned`] predicate applies (`command ==
+/// "tome" && args[0] == "mcp"`). For `CommandArray` this is `arr[0] ==
+/// "tome" && arr[1] == "mcp"` by construction of the normalisation.
+///
+/// [`mcp_config::is_tome_owned`]: crate::harness::mcp_config::is_tome_owned
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpDialect {
+    /// On-disk serialisation family.
+    pub file_format: FileFormat,
+    /// Top-level container key under which `MCP_CONFIG_KEY` is nested
+    /// (`"mcpServers"`, `"mcp_servers"`, `"mcp"`, `"servers"`,
+    /// `"context_servers"`, …).
+    pub parent_key: &'static str,
+    /// Entry-body template (`command`/`args` vs single `command` array).
+    pub entry_shape: EntryShape,
+    /// The `type` discriminator, if the harness mandates one.
+    pub entry_type: Option<ServerType>,
+    /// Whether to emit `"env": {}` when no developer env exists. `false`
+    /// preserves the Phase ≤10 writer's "omit empty env" behaviour.
+    pub emit_env: bool,
+    /// Always-present mandated fields, appended last in slice order.
+    pub extra_fields: &'static [ExtraField],
+}
+
+impl McpDialect {
+    /// The legacy dialect: JSON `mcpServers` + `CommandArgs`, no `type`,
+    /// no empty-`env` emission, no extra fields. Reproduces the Phase
+    /// ≤10 byte output exactly. This is the value [`HarnessModule`]'s
+    /// default `mcp_dialect()` returns.
+    pub const LEGACY: McpDialect = McpDialect {
+        file_format: FileFormat::Json,
+        parent_key: "mcpServers",
+        entry_shape: EntryShape::CommandArgs,
+        entry_type: None,
+        emit_env: false,
+        extra_fields: &[],
+    };
+
+    /// Build a legacy-shaped dialect (`CommandArgs`, no `type`, no empty
+    /// `env`, no extras) for a given format + parent key.
+    ///
+    /// Bridges the Phase ≤10 `(McpConfigFormat, parent_key)` pair to a
+    /// `McpDialect` — used by call sites (and tests) that still think in
+    /// the old scalar terms. The `Json`/`Toml` mapping is exact;
+    /// `Jsonc → serde_json` is not reachable here (no legacy harness was
+    /// Jsonc).
+    pub const fn from_format(format: McpConfigFormat, parent_key: &'static str) -> McpDialect {
+        let file_format = match format {
+            McpConfigFormat::Json => FileFormat::Json,
+            McpConfigFormat::Toml => FileFormat::Toml,
+        };
+        McpDialect {
+            file_format,
+            parent_key,
+            entry_shape: EntryShape::CommandArgs,
+            entry_type: None,
+            emit_env: false,
+            extra_fields: &[],
+        }
+    }
+
+    /// The coarse [`McpConfigFormat`] this dialect maps to (`Json`/`Jsonc`
+    /// → `Json`; `Toml` → `Toml`). Kept so the Phase ≤10
+    /// `mcp_config_format()` accessor can be derived from the dialect.
+    pub fn config_format(&self) -> McpConfigFormat {
+        match self.file_format {
+            FileFormat::Json | FileFormat::Jsonc => McpConfigFormat::Json,
+            FileFormat::Toml => McpConfigFormat::Toml,
+        }
+    }
+}
+
 /// How Tome reconciles a plugin's `hooks/hooks.json` for a harness
 /// (data-model §2). Only Claude Code returns `RealJson`; every other
 /// harness is `GuardrailsOnly`, falling back to the prose `GUARDRAILS.md`
@@ -261,15 +451,42 @@ pub trait HarnessModule: Send + Sync {
     /// harness can pick.
     fn mcp_config_path(&self, project_root: &Path, home: &Path) -> PathBuf;
 
+    /// The harness's full MCP wire-shape (Phase 11, G1).
+    ///
+    /// The single value driving the shared `mcp_config` read/write/remove.
+    /// The default reproduces the Phase ≤10 behaviour exactly
+    /// ([`McpDialect::LEGACY`]: JSON `mcpServers` + `CommandArgs`, no
+    /// `type`, omit-empty-`env`, no extra fields). A harness whose wire
+    /// shape diverges overrides this ONE method — among the five existing
+    /// modules only OpenCode (the G1 canary) does so.
+    ///
+    /// IMPORTANT: `emit_env` stays `false` in the default — the Phase ≤10
+    /// writer omits an empty `env`, so flipping it would move every JSON
+    /// harness's byte-stable pin.
+    fn mcp_dialect(&self) -> McpDialect {
+        McpDialect::LEGACY
+    }
+
     /// Serialisation format of the MCP configuration file.
-    fn mcp_config_format(&self) -> McpConfigFormat;
+    ///
+    /// Derived from [`Self::mcp_dialect`] by default
+    /// (`Json`/`Jsonc → Json`, `Toml → Toml`). A harness should override
+    /// `mcp_dialect()`, not this — this accessor exists only for the
+    /// surfaces that still think in the coarse format scalar.
+    fn mcp_config_format(&self) -> McpConfigFormat {
+        self.mcp_dialect().config_format()
+    }
 
     /// Top-level container key under which `MCP_CONFIG_KEY` is nested.
     ///
     /// JSON harnesses use `"mcpServers"`. The Codex TOML harness uses
     /// `"mcp_servers"`. Returned as a `&'static str` because the value
-    /// is a compile-time constant per harness.
-    fn mcp_parent_key(&self) -> &'static str;
+    /// is a compile-time constant per harness. Derived from
+    /// [`Self::mcp_dialect`] by default — override `mcp_dialect()`, not
+    /// this.
+    fn mcp_parent_key(&self) -> &'static str {
+        self.mcp_dialect().parent_key
+    }
 
     // -----------------------------------------------------------------------
     // Phase 6 — hooks, guardrails, native agents (harness-modules-p6.md).

@@ -276,8 +276,8 @@ fn refuses_symlink_on_settings_edit() {
 #[test]
 fn preserve_file_mode_on_mcp_config_rewrite() {
     use std::os::unix::fs::PermissionsExt;
-    use tome::harness::McpConfigFormat;
     use tome::harness::mcp_config::{self, TomeEntry};
+    use tome::harness::{McpConfigFormat, McpDialect};
 
     let tmp = TempDir::new().unwrap();
     let target = tmp.path().join("settings.json");
@@ -310,8 +310,12 @@ fn preserve_file_mode_on_mcp_config_rewrite() {
             "now".to_string(),
         ],
     );
-    mcp_config::write_entry(&target, McpConfigFormat::Json, "mcpServers", &entry)
-        .expect("write entry");
+    mcp_config::write_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+        &entry,
+    )
+    .expect("write entry");
 
     let actual = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
     assert_eq!(

@@ -6,8 +6,8 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tome::harness::McpConfigFormat;
 use tome::harness::mcp_config::{read_entry, remove_entry};
+use tome::harness::{McpConfigFormat, McpDialect};
 
 const MTIME_TICK: Duration = Duration::from_millis(1500);
 
@@ -30,7 +30,11 @@ fn removes_tome_owned_entry_from_json() {
 "#;
     std::fs::write(&target, seed).unwrap();
 
-    remove_entry(&target, McpConfigFormat::Json, "mcpServers").unwrap();
+    remove_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+    )
+    .unwrap();
 
     let parsed: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
@@ -53,7 +57,11 @@ args = []
 "#;
     std::fs::write(&target, seed).unwrap();
 
-    remove_entry(&target, McpConfigFormat::Toml, "mcp_servers").unwrap();
+    remove_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Toml, "mcp_servers"),
+    )
+    .unwrap();
 
     let body = std::fs::read_to_string(&target).unwrap();
     assert!(
@@ -66,7 +74,11 @@ args = []
     );
 
     // And the parsed entry round-trips to absent.
-    let read_back = read_entry(&target, McpConfigFormat::Toml, "mcp_servers").unwrap();
+    let read_back = read_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Toml, "mcp_servers"),
+    )
+    .unwrap();
     assert!(
         read_back.is_none(),
         "tome entry must be absent after remove"
@@ -91,7 +103,11 @@ fn leaves_user_owned_tome_entry_alone() {
     let mtime_before = std::fs::metadata(&target).unwrap().modified().unwrap();
     sleep(MTIME_TICK);
 
-    remove_entry(&target, McpConfigFormat::Json, "mcpServers").unwrap();
+    remove_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+    )
+    .unwrap();
 
     let after = std::fs::read(&target).unwrap();
     let mtime_after = std::fs::metadata(&target).unwrap().modified().unwrap();
@@ -111,7 +127,11 @@ fn noop_on_missing_file() {
     let target = tmp.path().join("does-not-exist.json");
     assert!(!target.exists());
 
-    remove_entry(&target, McpConfigFormat::Json, "mcpServers").unwrap();
+    remove_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+    )
+    .unwrap();
 
     assert!(
         !target.exists(),
@@ -136,7 +156,11 @@ fn noop_on_file_with_no_tome_entry() {
     let mtime_before = std::fs::metadata(&target).unwrap().modified().unwrap();
     sleep(MTIME_TICK);
 
-    remove_entry(&target, McpConfigFormat::Json, "mcpServers").unwrap();
+    remove_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+    )
+    .unwrap();
 
     let mtime_after = std::fs::metadata(&target).unwrap().modified().unwrap();
     assert_eq!(

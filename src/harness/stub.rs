@@ -30,8 +30,8 @@
 //! - `rules_file_strategy` → `BlockInExistingFile`
 //! - `block_body_style`  → `Inline`
 //! - `mcp_config_path`   → `<project>/stub.mcp.json`
-//! - `mcp_config_format` → `Json`
-//! - `mcp_parent_key`    → `"mcpServers"`
+//! - `mcp_dialect`       → the trait default (`McpDialect::LEGACY` —
+//!   JSON `mcpServers` + `CommandArgs`)
 //! - Phase 6 capabilities → the trait's safe defaults (GuardrailsOnly,
 //!   no hook settings path, in-file guardrails region without suppression,
 //!   no native agents) unless overridden via `with_*`.
@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use crate::harness::agents::{CanonicalAgent, TranslatedAgent};
 use crate::harness::{
     AgentFormat, BlockBodyStyle, GuardrailsPlacement, GuardrailsTarget, HarnessModule,
-    HooksStrategy, McpConfigFormat, RulesFileStrategy,
+    HooksStrategy, RulesFileStrategy,
 };
 
 /// Test-configurable [`HarnessModule`]. All fields default to the original
@@ -149,13 +149,8 @@ impl HarnessModule for StubHarness {
         project_root.join("stub.mcp.json")
     }
 
-    fn mcp_config_format(&self) -> McpConfigFormat {
-        McpConfigFormat::Json
-    }
-
-    fn mcp_parent_key(&self) -> &'static str {
-        "mcpServers"
-    }
+    // MCP dialect: the trait default ([`McpDialect::LEGACY`] — JSON
+    // `mcpServers` + `CommandArgs`) is exactly the stub's shape.
 
     fn hooks_strategy(&self) -> HooksStrategy {
         self.hooks_strategy

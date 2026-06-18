@@ -145,7 +145,10 @@ fn gemini_specifics() {
 #[test]
 fn opencode_specifics() {
     let h = lookup("opencode").expect("opencode registered");
-    assert_eq!(h.mcp_parent_key(), "mcpServers");
+    // Phase 11 G1 (canary fix): OpenCode's parent key is `mcp`, not the
+    // legacy `mcpServers`. `mcp_config_format()` stays Json (Jsonc routes
+    // through the serde_json path).
+    assert_eq!(h.mcp_parent_key(), "mcp");
     assert_eq!(h.mcp_config_format(), McpConfigFormat::Json);
     assert_eq!(
         h.rules_file_strategy(),

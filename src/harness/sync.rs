@@ -521,8 +521,10 @@ pub(crate) struct HarnessSnapshot {
     rules_strategy: RulesFileStrategy,
     block_body_style: BlockBodyStyle,
     mcp_path: PathBuf,
-    mcp_format: crate::harness::McpConfigFormat,
-    mcp_parent_key: &'static str,
+    /// Phase 11 (G1): the harness's full MCP wire-shape, replacing the
+    /// Phase ≤10 `mcp_format` + `mcp_parent_key` scalar pair. Drives the
+    /// shared dialect-aware `mcp_config` read/write/remove.
+    mcp_dialect: crate::harness::McpDialect,
     /// Phase 6 / US1: whether this harness emits native agent files. Drives
     /// the agents-reconciliation fast-exit; the actual `agent_dir` is
     /// re-derived under the registry guard at dispatch time (the trait
@@ -587,8 +589,7 @@ fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) ->
         rules_strategy: m.rules_file_strategy(),
         block_body_style: m.block_body_style(),
         mcp_path: m.mcp_config_path(project_root, home_root),
-        mcp_format: m.mcp_config_format(),
-        mcp_parent_key: m.mcp_parent_key(),
+        mcp_dialect: m.mcp_dialect(),
         supports_native_agents: m.supports_native_agents(),
         // Only a `RealJson` harness with a settings path participates in real
         // hooks. A `GuardrailsOnly` harness — even one that returns a settings
@@ -813,7 +814,7 @@ fn classify_block(prior: &Option<rules_file::ParsedBlock>, new_body: &str) -> Ac
 // =====================================================================
 
 fn write_mcp_for_harness(snap: &HarnessSnapshot, deps: &SyncDeps<'_>) -> Result<Action, TomeError> {
-    let existing = mcp_config::read_entry(&snap.mcp_path, snap.mcp_format, snap.mcp_parent_key)?;
+    let existing = mcp_config::read_entry(&snap.mcp_path, &snap.mcp_dialect)?;
 
     if let Some(current) = existing.as_ref()
         && !mcp_config::is_tome_owned(current)
@@ -855,22 +856,17 @@ fn write_mcp_for_harness(snap: &HarnessSnapshot, deps: &SyncDeps<'_>) -> Result<
         Some(_) => Action::Updated,
     };
 
-    mcp_config::write_entry(
-        &snap.mcp_path,
-        snap.mcp_format,
-        snap.mcp_parent_key,
-        &expected,
-    )?;
+    mcp_config::write_entry(&snap.mcp_path, &snap.mcp_dialect, &expected)?;
     Ok(classification)
 }
 
 fn clean_mcp_for_harness(snap: &HarnessSnapshot) -> Result<Action, TomeError> {
-    let existing = mcp_config::read_entry(&snap.mcp_path, snap.mcp_format, snap.mcp_parent_key)?;
+    let existing = mcp_config::read_entry(&snap.mcp_path, &snap.mcp_dialect)?;
     let was_tome = matches!(existing.as_ref(), Some(e) if mcp_config::is_tome_owned(e));
     if !was_tome {
         return Ok(Action::LeftAlone);
     }
-    mcp_config::remove_entry(&snap.mcp_path, snap.mcp_format, snap.mcp_parent_key)?;
+    mcp_config::remove_entry(&snap.mcp_path, &snap.mcp_dialect)?;
     Ok(Action::Removed)
 }
 

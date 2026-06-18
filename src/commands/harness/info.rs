@@ -14,8 +14,7 @@ use serde::Serialize;
 use crate::cli::HarnessInfoArgs;
 use crate::error::TomeError;
 use crate::harness::{
-    BlockBodyStyle, McpConfigFormat, RulesFileStrategy, mcp_config, rules_file,
-    with_effective_modules,
+    BlockBodyStyle, McpDialect, RulesFileStrategy, mcp_config, rules_file, with_effective_modules,
 };
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
@@ -70,8 +69,7 @@ struct ModuleSnapshot {
     name: String,
     description: String,
     rules_strategy: RulesFileStrategy,
-    mcp_format: McpConfigFormat,
-    mcp_parent_key: &'static str,
+    mcp_dialect: McpDialect,
     detected: bool,
     detected_path: PathBuf,
     rules_target: Option<PathBuf>,
@@ -95,8 +93,7 @@ pub fn run(
                 name: m.name().to_string(),
                 description: m.description().to_string(),
                 rules_strategy: m.rules_file_strategy(),
-                mcp_format: m.mcp_config_format(),
-                mcp_parent_key: m.mcp_parent_key(),
+                mcp_dialect: m.mcp_dialect(),
                 detected: m.detect(&home),
                 detected_path: m.detect_path(&home),
                 rules_target: project_root.as_deref().map(|p| m.rules_file_target(p)),
@@ -112,7 +109,7 @@ pub fn run(
         match (&snap.rules_target, &snap.mcp_target) {
             (Some(rules_path), Some(mcp_path)) => {
                 let block_present = probe_rules_block(rules_path, snap.rules_strategy)?;
-                let entry = mcp_config::read_entry(mcp_path, snap.mcp_format, snap.mcp_parent_key)?;
+                let entry = mcp_config::read_entry(mcp_path, &snap.mcp_dialect)?;
                 let entry_present = entry.is_some();
                 let entry_tome_owned = entry.as_ref().map(mcp_config::is_tome_owned);
                 (Some(block_present), Some(entry_present), entry_tome_owned)

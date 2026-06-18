@@ -11,7 +11,7 @@ use crate::common::{
 };
 use tempfile::TempDir;
 use time::OffsetDateTime;
-use tome::harness::{BlockBodyStyle, McpConfigFormat, mcp_config, rules_file};
+use tome::harness::{BlockBodyStyle, McpConfigFormat, McpDialect, mcp_config, rules_file};
 use tome::index::{self, OpenOptions, workspace_catalogs};
 use tome::workspace::{self, WorkspaceName};
 
@@ -91,12 +91,19 @@ fn cascade_step1_tears_down_real_harness_mcp_entry() {
             "mine".to_string(),
         ],
     );
-    mcp_config::write_entry(&mcp_path, McpConfigFormat::Json, "mcpServers", &entry)
-        .expect("write entry");
+    mcp_config::write_entry(
+        &mcp_path,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+        &entry,
+    )
+    .expect("write entry");
 
     // Sanity: the entry is present before cascade.
-    let pre =
-        mcp_config::read_entry(&mcp_path, McpConfigFormat::Json, "mcpServers").expect("read pre");
+    let pre = mcp_config::read_entry(
+        &mcp_path,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+    )
+    .expect("read pre");
     assert!(pre.is_some(), "MCP entry should be present before cascade");
 
     // Cascade. `home_root` is `tmp.path()` so any home-scoped harness
@@ -108,8 +115,11 @@ fn cascade_step1_tears_down_real_harness_mcp_entry() {
 
     // Post: the MCP entry was removed (claude-code's path was
     // `<project>/.claude/settings.json`).
-    let post =
-        mcp_config::read_entry(&mcp_path, McpConfigFormat::Json, "mcpServers").expect("read post");
+    let post = mcp_config::read_entry(
+        &mcp_path,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+    )
+    .expect("read post");
     assert!(
         post.is_none(),
         "MCP entry should have been removed by cascade Step 1, got {post:?}",
@@ -250,8 +260,12 @@ fn cascade_step1_leaves_user_owned_mcp_entry_alone() {
         "evil-binary".to_string(),
         vec!["--my-custom".to_string(), "args".to_string()],
     );
-    mcp_config::write_entry(&mcp_path, McpConfigFormat::Json, "mcpServers", &user_entry)
-        .expect("seed user-owned entry");
+    mcp_config::write_entry(
+        &mcp_path,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+        &user_entry,
+    )
+    .expect("seed user-owned entry");
     let pre_bytes = std::fs::read(&mcp_path).expect("read pre");
 
     let outcome =

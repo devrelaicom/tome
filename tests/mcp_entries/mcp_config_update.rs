@@ -6,8 +6,8 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use tempfile::TempDir;
-use tome::harness::McpConfigFormat;
 use tome::harness::mcp_config::{TomeEntry, read_entry, write_entry};
+use tome::harness::{McpConfigFormat, McpDialect};
 
 const MTIME_TICK: Duration = Duration::from_millis(1500);
 
@@ -43,11 +43,19 @@ fn rebind_rewrites_args_preserving_env_json() {
 
     // Re-bind to `beta`. Caller passes env=None; on-disk env must
     // survive (FR-503).
-    write_entry(&target, McpConfigFormat::Json, "mcpServers", &entry("beta")).unwrap();
+    write_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+        &entry("beta"),
+    )
+    .unwrap();
 
-    let read_back = read_entry(&target, McpConfigFormat::Json, "mcpServers")
-        .unwrap()
-        .expect("entry must exist after rewrite");
+    let read_back = read_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+    )
+    .unwrap()
+    .expect("entry must exist after rewrite");
     assert_eq!(read_back.args, vec!["mcp", "--workspace", "beta"]);
     assert_eq!(
         read_back.env.as_deref(),
@@ -71,15 +79,17 @@ MY_FEATURE_FLAG = "1"
 
     write_entry(
         &target,
-        McpConfigFormat::Toml,
-        "mcp_servers",
+        &McpDialect::from_format(McpConfigFormat::Toml, "mcp_servers"),
         &entry("beta"),
     )
     .unwrap();
 
-    let read_back = read_entry(&target, McpConfigFormat::Toml, "mcp_servers")
-        .unwrap()
-        .expect("entry must exist after rewrite");
+    let read_back = read_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Toml, "mcp_servers"),
+    )
+    .unwrap()
+    .expect("entry must exist after rewrite");
     assert_eq!(read_back.args, vec!["mcp", "--workspace", "beta"]);
     assert_eq!(
         read_back.env.as_deref(),
@@ -91,12 +101,22 @@ MY_FEATURE_FLAG = "1"
 fn idempotent_rewrite_no_mtime_advance() {
     let tmp = TempDir::new().unwrap();
     let target = tmp.path().join("settings.json");
-    write_entry(&target, McpConfigFormat::Json, "mcpServers", &entry("demo")).unwrap();
+    write_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+        &entry("demo"),
+    )
+    .unwrap();
 
     let mtime_before = std::fs::metadata(&target).unwrap().modified().unwrap();
     sleep(MTIME_TICK);
 
-    write_entry(&target, McpConfigFormat::Json, "mcpServers", &entry("demo")).unwrap();
+    write_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+        &entry("demo"),
+    )
+    .unwrap();
 
     let mtime_after = std::fs::metadata(&target).unwrap().modified().unwrap();
     assert_eq!(
@@ -111,7 +131,12 @@ fn idempotence_ignores_env_for_comparison() {
     let target = tmp.path().join("settings.json");
 
     // Write entry with no env.
-    write_entry(&target, McpConfigFormat::Json, "mcpServers", &entry("demo")).unwrap();
+    write_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+        &entry("demo"),
+    )
+    .unwrap();
     let mtime_before = std::fs::metadata(&target).unwrap().modified().unwrap();
     sleep(MTIME_TICK);
 
@@ -120,7 +145,12 @@ fn idempotence_ignores_env_for_comparison() {
     // be a no-op (mtime unchanged).
     let mut with_env = entry("demo");
     with_env.env = Some(vec![("ADDED".to_string(), "yes".to_string())]);
-    write_entry(&target, McpConfigFormat::Json, "mcpServers", &with_env).unwrap();
+    write_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+        &with_env,
+    )
+    .unwrap();
 
     let mtime_after = std::fs::metadata(&target).unwrap().modified().unwrap();
     assert_eq!(

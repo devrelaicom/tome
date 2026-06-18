@@ -229,14 +229,13 @@ fn check_mcp_config(
     workspace_name: &WorkspaceName,
 ) -> SubsystemHealth {
     let path = module.mcp_config_path(project_root, home);
-    let entry =
-        match mcp_config::read_entry(&path, module.mcp_config_format(), module.mcp_parent_key()) {
-            Ok(Some(e)) => e,
-            // No file or no entry → Broken (Tome should have written one).
-            Ok(None) => return SubsystemHealth::Broken,
-            // Parse error or symlink refusal → Broken.
-            Err(_) => return SubsystemHealth::Broken,
-        };
+    let entry = match mcp_config::read_entry(&path, &module.mcp_dialect()) {
+        Ok(Some(e)) => e,
+        // No file or no entry → Broken (Tome should have written one).
+        Ok(None) => return SubsystemHealth::Broken,
+        // Parse error or symlink refusal → Broken.
+        Err(_) => return SubsystemHealth::Broken,
+    };
     if !mcp_config::is_tome_owned(&entry) {
         return SubsystemHealth::UserOwned;
     }

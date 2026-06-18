@@ -263,7 +263,7 @@ mod sinks {
     use tome::harness::hooks::{self, RewrittenHooks};
     use tome::harness::mcp_config::{self, TomeEntry};
     use tome::harness::rules_file;
-    use tome::harness::{BlockBodyStyle, MCP_CONFIG_KEY, McpConfigFormat};
+    use tome::harness::{BlockBodyStyle, MCP_CONFIG_KEY, McpConfigFormat, McpDialect};
 
     /// A canonicalized tempdir base (trusted anchor, no system symlinks) plus a
     /// real directory and a symlink aimed at it. Returns `(base, real_dir)`
@@ -433,8 +433,12 @@ mod sinks {
         let target = through_symlinked_dir(&base, ".mcp.json");
 
         let entry = TomeEntry::new("tome".to_string(), vec!["mcp".to_string()]);
-        let err = mcp_config::write_entry(&target, McpConfigFormat::Json, "mcpServers", &entry)
-            .expect_err("mcp-config write through a symlinked intermediate must be refused");
+        let err = mcp_config::write_entry(
+            &target,
+            &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+            &entry,
+        )
+        .expect_err("mcp-config write through a symlinked intermediate must be refused");
         assert_eq!(
             err.exit_code(),
             7,
@@ -452,8 +456,12 @@ mod sinks {
         symlink(base.join("decoy.json"), &target).expect("symlink final node");
 
         let entry = TomeEntry::new("tome".to_string(), vec!["mcp".to_string()]);
-        let err = mcp_config::write_entry(&target, McpConfigFormat::Json, "mcpServers", &entry)
-            .expect_err("mcp-config write through a symlinked final node must be refused");
+        let err = mcp_config::write_entry(
+            &target,
+            &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+            &entry,
+        )
+        .expect_err("mcp-config write through a symlinked final node must be refused");
         assert_eq!(err.exit_code(), 7, "got {err:?}");
         let _ = MCP_CONFIG_KEY; // keep the import meaningful across refactors
     }
@@ -550,8 +558,7 @@ mod sinks {
         let entry = TomeEntry::new("tome".to_string(), vec!["mcp".to_string()]);
         mcp_config::write_entry(
             &dir.join(".mcp.json"),
-            McpConfigFormat::Json,
-            "mcpServers",
+            &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
             &entry,
         )
         .expect("mcp write");
