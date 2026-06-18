@@ -799,6 +799,56 @@ pub fn is_tome_owned(entry: &TomeEntry) -> bool {
     entry.command == "tome" && entry.args.first().map(String::as_str) == Some("mcp")
 }
 
+/// Render the EXACT bytes a user would paste to add the Tome MCP server to
+/// `dialect`'s harness — the paste-able snippet `tome harness info` prints
+/// (Phase 11 / US5, T063, contract cli-surface.md § `tome harness info`).
+///
+/// Pure: no I/O, no file access. The snippet is a fresh, minimal document
+/// containing ONLY the `{ "<parent_key>": { "tome": { …entry… } } }` shape
+/// (or the TOML `[<parent_key>.tome]` block for Codex). It is built from the
+/// SAME `json_entry_object` / `toml_new_entry_table` constructors the sync
+/// writer uses, so the snippet bytes are byte-identical to what `write_entry`
+/// lands for an otherwise-empty config (modulo the surrounding developer
+/// content `write_entry` preserves and the snippet — by design — omits).
+///
+/// For a manual-only harness (jetbrains-ai) this snippet is the primary
+/// recovery artifact; for every harness it is the self-heal paste-target the
+/// rules-file preamble points at.
+pub fn render_entry_snippet(dialect: &McpDialect, entry: &TomeEntry) -> String {
+    match dialect.file_format {
+        FileFormat::Json | FileFormat::Jsonc => {
+            // Build `{ "<parent_key>": { "tome": <entry-object> } }` and
+            // pretty-print it exactly as `write_entry_json` does (trailing
+            // newline included), so the snippet matches the on-disk bytes.
+            let mut parent = JsonMap::new();
+            parent.insert(
+                MCP_CONFIG_KEY.to_string(),
+                json_entry_object(entry, dialect),
+            );
+            let mut doc = JsonMap::new();
+            doc.insert(dialect.parent_key.to_string(), JsonValue::Object(parent));
+            let mut body = serde_json::to_string_pretty(&JsonValue::Object(doc))
+                .unwrap_or_else(|_| "{}".to_string());
+            body.push('\n');
+            body
+        }
+        FileFormat::Toml => {
+            // Build `[<parent_key>.tome]` via the same standard-table
+            // constructor `write_entry_toml` uses for a fresh entry, so the
+            // serialised bytes match.
+            let mut doc = DocumentMut::new();
+            let mut parent = TomlTable::new();
+            parent.set_implicit(true);
+            parent.insert(
+                MCP_CONFIG_KEY,
+                TomlItem::Table(toml_new_entry_table(entry, dialect)),
+            );
+            doc.insert(dialect.parent_key, TomlItem::Table(parent));
+            doc.to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1270,5 +1320,72 @@ mod dialect_pin_tests {
         assert_eq!(parent["other"]["command"], "other-bin");
         let read = read_entry(&target, &ZED_DIALECT).unwrap().unwrap();
         assert!(is_tome_owned(&read));
+    }
+
+    // ---- T063: render_entry_snippet exact bytes per dialect ------------
+    //
+    // The snippet a user pastes must be byte-identical to what `write_entry`
+    // lands into an otherwise-empty config. Each test renders the snippet AND
+    // (for JSON) cross-checks it against `write_entry`'s on-disk bytes.
+
+    #[test]
+    fn snippet_default_dialect_exact_bytes() {
+        let snippet = render_entry_snippet(&DEFAULT_DIALECT, &tome_entry());
+        assert_eq!(
+            snippet,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ]\n    }\n  }\n}\n",
+        );
+    }
+
+    #[test]
+    fn snippet_copilot_cli_tools_and_env_exact_bytes() {
+        // type → command → args → env:{} (emit_env) → tools (extra) order.
+        let snippet = render_entry_snippet(&COPILOT_CLI_DIALECT, &tome_entry());
+        assert_eq!(
+            snippet,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"type\": \"local\",\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ],\n      \"env\": {},\n      \"tools\": [\n        \"*\"\n      ]\n    }\n  }\n}\n",
+        );
+    }
+
+    #[test]
+    fn snippet_crush_type_stdio_exact_bytes() {
+        // crush: `mcp` parent key + per-entry `type:stdio`, no env.
+        let snippet = render_entry_snippet(&CRUSH_DIALECT, &tome_entry());
+        assert_eq!(
+            snippet,
+            "{\n  \"mcp\": {\n    \"tome\": {\n      \"type\": \"stdio\",\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ]\n    }\n  }\n}\n",
+        );
+    }
+
+    #[test]
+    fn snippet_codex_toml_exact_bytes() {
+        let snippet = render_entry_snippet(&CODEX_DIALECT, &tome_entry());
+        assert_eq!(
+            snippet,
+            "[mcp_servers.tome]\ncommand = \"tome\"\nargs = [\"mcp\", \"--workspace\", \"demo\"]\n",
+        );
+    }
+
+    /// The snippet bytes MUST equal what `write_entry` lands into an
+    /// otherwise-empty config — the whole point of reusing the dialect
+    /// serializer. Verified for a JSON shape (copilot-cli) and a TOML shape.
+    #[test]
+    fn snippet_matches_write_entry_into_empty_config() {
+        for (dialect, file) in [
+            (&COPILOT_CLI_DIALECT, "mcp-config.json"),
+            (&DEFAULT_DIALECT, "settings.json"),
+            (&CRUSH_DIALECT, "crush.json"),
+            (&CODEX_DIALECT, "config.toml"),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let target = tmp.path().join(file);
+            write_entry(&target, dialect, &tome_entry()).unwrap();
+            let on_disk = std::fs::read_to_string(&target).unwrap();
+            let snippet = render_entry_snippet(dialect, &tome_entry());
+            assert_eq!(
+                snippet, on_disk,
+                "snippet must match write_entry bytes for {file}",
+            );
+        }
     }
 }

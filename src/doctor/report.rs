@@ -132,6 +132,15 @@ pub struct SuggestedFix {
 /// - `NotApplicable` — the subsystem isn't applicable in the current
 ///   context (e.g. harness subsystems when the effective list is empty
 ///   per FR-561). Does NOT affect overall classification.
+/// - `Manual` — Phase 11 / US5: only emitted for `HarnessMcp` on a
+///   `mcp_manual_only` harness (jetbrains-ai). Tome writes no MCP file;
+///   recovery is manual (paste the snippet from `tome harness info`). NOT a
+///   failure — does NOT affect overall classification, and `--fix` does not
+///   touch it.
+/// - `Unverified` — Phase 11 / US5: only emitted for `HarnessMcp` on an
+///   adapter harness (pi). Tome wrote the entry, but its effect can't be
+///   confirmed (an external adapter is required). NOT a failure — does NOT
+///   affect overall classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubsystemHealth {
@@ -140,6 +149,8 @@ pub enum SubsystemHealth {
     Broken,
     UserOwned,
     NotApplicable,
+    Manual,
+    Unverified,
 }
 
 impl SubsystemHealth {
@@ -150,6 +161,8 @@ impl SubsystemHealth {
             SubsystemHealth::Broken => "broken",
             SubsystemHealth::UserOwned => "user_owned",
             SubsystemHealth::NotApplicable => "not_applicable",
+            SubsystemHealth::Manual => "manual",
+            SubsystemHealth::Unverified => "unverified",
         }
     }
 }

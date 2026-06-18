@@ -35,7 +35,10 @@ mod art;
 
 pub fn run(args: StatusArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    let report = assemble_report(&paths, &scope.scope, args.verify)?;
+    let mut report = assemble_report(&paths, &scope.scope, args.verify)?;
+    // Phase 11 / US5 (T065): augment with per-harness MCP integration state
+    // (needs the ResolvedScope's project root, which `assemble_report` lacks).
+    fill_harness_mcp(&mut report, scope, &paths);
     emit(&report, mode)?;
     if !matches!(report.overall, OverallHealth::Ok) {
         std::process::exit(1);
@@ -77,6 +80,17 @@ pub struct EntryCounts {
     pub agents: u32,
 }
 
+/// Phase 11 / US5 (T065): one configured harness's MCP integration state for
+/// `tome status`. `state` is `ok` / `manual` / `unverified` / `drift` (plus the
+/// `broken` / `user_owned` / `not_applicable` states the shared doctor check can
+/// also yield) — the SAME [`crate::doctor::report::SubsystemHealth`] vocabulary
+/// the doctor reports, so the two surfaces cannot diverge.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HarnessMcpStatus {
+    pub harness: String,
+    pub state: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StatusReport {
     pub tome: String,
@@ -93,6 +107,14 @@ pub struct StatusReport {
     pub catalogs_enrolled: u32,
     pub reindexed_at: Option<i64>,
     pub models_on_disk_bytes: u64,
+    /// Phase 11 / US5 (T065): per-harness MCP integration state for every
+    /// harness in the resolved effective list. Empty when no project/scope
+    /// resolves a harness list. Appended LAST + `skip_serializing_if`-gated so
+    /// the pre-Phase-11 byte-stable `--json` pins don't move (empty ⇒ absent).
+    /// `assemble_report` leaves it empty (it lacks the project root); `run`
+    /// populates it via [`fill_harness_mcp`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harness_mcp: Vec<HarnessMcpStatus>,
 }
 
 // ---- Assembly --------------------------------------------------------------
@@ -151,7 +173,65 @@ pub fn assemble_report(
         catalogs_enrolled: db.catalogs_enrolled,
         reindexed_at: db.reindexed_at,
         models_on_disk_bytes,
+        // `run` fills this via `fill_harness_mcp` (needs the project root /
+        // effective list, which `Scope` alone doesn't carry).
+        harness_mcp: Vec::new(),
     })
+}
+
+/// Phase 11 / US5 (T065): populate `report.harness_mcp` with each effective
+/// harness's MCP integration state. Read-only — never writes, never takes the
+/// lock. Resolves the effective harness list for the scope, then reuses the
+/// SAME shared doctor check (`doctor::harness_integration::check_harness_integration`)
+/// so `status` and `doctor` cannot diverge. Silently leaves the field empty when
+/// no project root resolves (the integration check needs a project root) or the
+/// effective list can't be computed (status must always render).
+fn fill_harness_mcp(report: &mut StatusReport, scope: &ResolvedScope, paths: &Paths) {
+    let Some(project_root) = scope.project_root.as_deref() else {
+        return;
+    };
+    let Ok(home) = crate::commands::harness::home_root() else {
+        return;
+    };
+    let Some(effective) = resolve_effective_for_status(scope, paths) else {
+        return;
+    };
+    let (_rules, mcp) = crate::doctor::harness_integration::check_harness_integration(
+        project_root,
+        &effective,
+        &home,
+        scope.scope.name(),
+    );
+    report.harness_mcp = mcp
+        .into_iter()
+        .map(|m| HarnessMcpStatus {
+            harness: m.harness,
+            state: m.health.as_str().to_owned(),
+        })
+        .collect();
+}
+
+/// Resolve the effective harness list for `status` (read-only), or `None` on any
+/// failure (status must always render). Mirrors the harness-command loaders.
+fn resolve_effective_for_status(
+    scope: &ResolvedScope,
+    paths: &Paths,
+) -> Option<crate::settings::resolver::EffectiveHarnessList> {
+    use crate::settings::resolver::resolve_effective_list;
+
+    let marker = crate::commands::harness::list::load_project_marker_for_use(scope).ok()?;
+    let workspace_settings =
+        crate::commands::harness::list::load_workspace_settings_for_use(scope, paths).ok()?;
+    let global_settings =
+        crate::commands::harness::list::load_global_settings_for_use(paths).ok()?;
+    let provider = crate::commands::harness::CentralDbScopeProvider::new(paths);
+    resolve_effective_list(
+        marker.as_ref(),
+        workspace_settings.as_ref(),
+        &global_settings,
+        &provider,
+    )
+    .ok()
 }
 
 pub fn check_model(
@@ -485,10 +565,51 @@ fn render_panel(report: &StatusReport) -> Vec<String> {
         report.catalogs_enrolled
     ));
     lines.push(format!("{} {}", key("Reindexed:"), reindexed));
+
+    // Phase 11 / US5 (T065): per-harness MCP integration state, when a
+    // project/scope resolved any harnesses.
+    if !report.harness_mcp.is_empty() {
+        let states = report
+            .harness_mcp
+            .iter()
+            .map(|h| format!("{} {}", h.harness, mcp_state_glyph(&h.state)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("{} {}", key("MCP:"), states));
+    }
     lines.push(String::new());
 
     lines.push(format!("{} {}", key("Overall:"), overall));
     lines
+}
+
+/// Render a per-harness MCP-integration state (`ok`/`manual`/`unverified`/
+/// `drift`/…) into a short colored glyph for the status panel.
+fn mcp_state_glyph(state: &str) -> String {
+    use crate::presentation::colour;
+    match state {
+        "ok" => {
+            if colour::is_enabled() {
+                format!("{} ok", colour::success("✓"))
+            } else {
+                "[ok]".to_owned()
+            }
+        }
+        "manual" | "unverified" => {
+            if colour::is_enabled() {
+                format!("{} {state}", colour::warning("⚠"))
+            } else {
+                format!("[{state}]")
+            }
+        }
+        other => {
+            if colour::is_enabled() {
+                format!("{} {other}", colour::error("✗"))
+            } else {
+                format!("[{other}]")
+            }
+        }
+    }
 }
 
 fn drift_description(drift: &DriftStatus) -> String {
@@ -718,5 +839,102 @@ mod relative_time_tests {
         assert_eq!(relative_time(1000, 1000 + 3600), "1 hour ago");
         assert_eq!(relative_time(1000, 1000 + 2 * 86400), "2 days ago");
         assert_eq!(relative_time(1000, 500), "just now"); // clock skew (future) clamps
+    }
+}
+
+#[cfg(test)]
+mod harness_mcp_status_tests {
+    use super::*;
+
+    fn base_report(harness_mcp: Vec<HarnessMcpStatus>) -> StatusReport {
+        StatusReport {
+            tome: "0".to_string(),
+            embedder: ModelHealth {
+                name: "e".to_string(),
+                version: "1".to_string(),
+                state: "ok".to_string(),
+            },
+            reranker: ModelHealth {
+                name: "r".to_string(),
+                version: "1".to_string(),
+                state: "ok".to_string(),
+            },
+            summariser: ModelHealth {
+                name: "s".to_string(),
+                version: "1".to_string(),
+                state: "ok".to_string(),
+            },
+            index: IndexHealth {
+                present: false,
+                schema_version: None,
+                plugins_enabled: 0,
+                skills_indexed: 0,
+                size_bytes: 0,
+                integrity_ok: false,
+            },
+            drift: DriftStatus::None,
+            overall: OverallHealth::Ok,
+            workspaces_total: 0,
+            current_workspace: "global".to_string(),
+            current_scope: "global".to_string(),
+            entries: EntryCounts::default(),
+            catalogs_enrolled: 0,
+            reindexed_at: None,
+            models_on_disk_bytes: 0,
+            harness_mcp,
+        }
+    }
+
+    /// T065: `harness_mcp` is `skip_serializing_if`-gated — an EMPTY Vec omits
+    /// the key, so the pre-Phase-11 `tome status --json` byte pin is unchanged.
+    #[test]
+    fn empty_harness_mcp_is_omitted_from_json() {
+        let json = serde_json::to_string(&base_report(Vec::new())).unwrap();
+        assert!(
+            !json.contains("harness_mcp"),
+            "empty harness_mcp must be omitted; got: {json}",
+        );
+        // It is also the LAST field, so a populated value appends last.
+        assert!(json.ends_with("\"models_on_disk_bytes\":0}"));
+    }
+
+    /// T065: a populated `harness_mcp` appends LAST, carrying the
+    /// ok/manual/unverified/drift vocabulary.
+    #[test]
+    fn populated_harness_mcp_appends_last() {
+        let report = base_report(vec![
+            HarnessMcpStatus {
+                harness: "crush".to_string(),
+                state: "ok".to_string(),
+            },
+            HarnessMcpStatus {
+                harness: "jetbrains-ai".to_string(),
+                state: "manual".to_string(),
+            },
+            HarnessMcpStatus {
+                harness: "pi".to_string(),
+                state: "unverified".to_string(),
+            },
+        ]);
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(
+            json.ends_with(
+                "\"harness_mcp\":[{\"harness\":\"crush\",\"state\":\"ok\"},\
+                 {\"harness\":\"jetbrains-ai\",\"state\":\"manual\"},\
+                 {\"harness\":\"pi\",\"state\":\"unverified\"}]}"
+            ),
+            "harness_mcp must append last with the state vocabulary; got: {json}",
+        );
+    }
+
+    /// T065: the panel glyphs distinguish ok / manual / unverified / failure.
+    #[test]
+    fn mcp_state_glyph_buckets() {
+        // Colour is off in the test process (no TTY), so plain forms render.
+        assert_eq!(mcp_state_glyph("ok"), "[ok]");
+        assert_eq!(mcp_state_glyph("manual"), "[manual]");
+        assert_eq!(mcp_state_glyph("unverified"), "[unverified]");
+        assert_eq!(mcp_state_glyph("drift"), "[drift]");
+        assert_eq!(mcp_state_glyph("broken"), "[broken]");
     }
 }

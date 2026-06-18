@@ -81,3 +81,44 @@ fn info_reports_direct_scope_when_global_declares() {
     let result = info::run(args, &scope, &paths, Mode::Human);
     assert!(result.is_ok(), "info run: {result:?}");
 }
+
+/// T063: `tome harness info jetbrains-ai` (a manual-only MCP harness) renders
+/// the paste-able snippet path without error — for jetbrains-ai the snippet is
+/// the primary recovery artifact. (Exact-byte snippet pins live in the
+/// `mcp_config` unit tests; this exercises the `info::run` wiring end-to-end.)
+#[test]
+fn info_for_manual_only_harness_renders_snippet_path() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let scope = fallback_scope();
+    let _home = HomeGuard::install(env.home_path());
+    // Both modes exercise the snippet branch (Human prints it; Json serialises
+    // the `mcp_snippet` field).
+    assert!(
+        info::run(
+            HarnessInfoArgs {
+                name: "jetbrains-ai".to_string(),
+            },
+            &scope,
+            &paths,
+            Mode::Human,
+        )
+        .is_ok()
+    );
+    assert!(
+        info::run(
+            HarnessInfoArgs {
+                name: "jetbrains-ai".to_string(),
+            },
+            &scope,
+            &paths,
+            Mode::Json,
+        )
+        .is_ok()
+    );
+}

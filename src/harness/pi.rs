@@ -73,6 +73,14 @@ impl HarnessModule for Pi {
         }
     }
 
+    /// Pi's MCP entry requires the `pi-mcp-adapter` to take effect. Tome writes
+    /// the file (so `mcp_manual_only()` stays `false`) but `use` emits this
+    /// install instruction and doctor/status report `unverified` (Phase 11 /
+    /// US5, contract mcp-dialects.md § "Manual-only" — pi case).
+    fn mcp_adapter_notice(&self) -> Option<&'static str> {
+        Some("Run `pi install pi-mcp-adapter` to enable the Tome MCP server in Pi.")
+    }
+
     /// Pi cannot run a native session-start hook, so Tome ships an embedded
     /// TypeScript extension shim (Phase 11 / G2, US3). The dir is PROJECT-RELATIVE
     /// — `reconcile_plugins` anchors it under `project_root` via
