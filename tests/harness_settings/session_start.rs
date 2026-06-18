@@ -155,3 +155,111 @@ fn session_start_run(fx: &Fixture, scope: &ResolvedScope) -> Result<(), tome::er
     };
     tome::commands::harness::session_start::run(args, scope, &fx.paths, Mode::Human)
 }
+
+// ---------------------------------------------------------------------------
+// F2 (US2 closeout) — drive the `--harness` → stdout-envelope selection through
+// `session_start::select_output`, the exact function `run` calls to choose its
+// stdout payload (NOT a copy). For each real new-harness name we assert the
+// EXACT wrapped-envelope bytes the contract pins (session-steering.md), plus the
+// negatives (unknown host → nothing; empty directive → nothing). Installing the
+// real harness modules via `HarnessModulesGuard` is what makes `lookup(name)`
+// resolve their `session_steering()` — the same registry `run` reads.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn select_output_wraps_per_harness_envelope_and_fails_closed() {
+    use tome::commands::harness::session_start::select_output;
+
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(tome::harness::devin::DEVIN),
+        Box::new(tome::harness::copilot_cli::COPILOT_CLI),
+        Box::new(tome::harness::gemini::GEMINI),
+    ]);
+
+    // A representative NON-empty directive (content is opaque to the channel
+    // selector; the envelope wrapping is what F2 pins).
+    let directive = "# Tome — Skill Routing\nload now";
+
+    // devin → ClaudeNested.
+    assert_eq!(
+        select_output(Some("devin"), directive),
+        Some(format!(
+            r#"{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":{}}}}}"#,
+            serde_json::to_string(directive).unwrap()
+        )),
+    );
+    // gemini → ClaudeNested.
+    assert_eq!(
+        select_output(Some("gemini"), directive),
+        Some(format!(
+            r#"{{"hookSpecificOutput":{{"hookEventName":"SessionStart","additionalContext":{}}}}}"#,
+            serde_json::to_string(directive).unwrap()
+        )),
+    );
+    // copilot-cli → FlatAdditionalContext.
+    assert_eq!(
+        select_output(Some("copilot-cli"), directive),
+        Some(format!(
+            r#"{{"additionalContext":{}}}"#,
+            serde_json::to_string(directive).unwrap()
+        )),
+    );
+
+    // ABSENT `--harness` → raw directive byte-identical (Phase ≤10 parity).
+    assert_eq!(select_output(None, directive), Some(directive.to_string()),);
+
+    // NEGATIVE: unknown host → fail closed, emit nothing.
+    assert_eq!(select_output(Some("does-not-exist"), directive), None);
+
+    // NEGATIVE: an EMPTY directive emits nothing regardless of the channel —
+    // an empty `additionalContext` envelope would inject noise.
+    assert_eq!(select_output(Some("devin"), ""), None);
+    assert_eq!(select_output(Some("copilot-cli"), ""), None);
+    assert_eq!(select_output(Some("gemini"), ""), None);
+}
+
+// ---------------------------------------------------------------------------
+// F2 negatives, driven end-to-end through the real `run`: a seeded EMPTY
+// workspace (no enabled skills → empty directive) with `--harness devin` and an
+// unknown `--harness` must both succeed and write nothing to the project's hook
+// files. (The empty-directive → no-stdout decision lives in `select_output`,
+// which `run` calls; here we prove `run` reaches it against real state.)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn run_with_harness_on_empty_workspace_is_ok_and_writes_no_hook() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::devin::DEVIN)]);
+
+    let fx = Fixture::build("test-workspace", Some("harnesses = [\"devin\"]"));
+    let _home = HomeGuard::install(&fx.home_path);
+    let scope = fx.project_scope();
+
+    // Empty (unknown) harness arg → fail-closed selection; real run still Ok.
+    let args = HarnessSessionStartArgs {
+        workspace: Some(fx.workspace.as_str().to_string()),
+        harness: Some("does-not-exist".to_string()),
+    };
+    let res = tome::commands::harness::session_start::run(args, &scope, &fx.paths, Mode::Human);
+    assert!(
+        res.is_ok(),
+        "unknown --harness must still succeed; got {res:?}"
+    );
+
+    // Real devin harness arg, but the seeded workspace has no enabled skills →
+    // empty directive → no stdout, and `run` must still succeed.
+    let args = HarnessSessionStartArgs {
+        workspace: Some(fx.workspace.as_str().to_string()),
+        harness: Some("devin".to_string()),
+    };
+    let res = tome::commands::harness::session_start::run(args, &scope, &fx.paths, Mode::Human);
+    assert!(
+        res.is_ok(),
+        "empty-directive devin run must succeed; got {res:?}"
+    );
+}

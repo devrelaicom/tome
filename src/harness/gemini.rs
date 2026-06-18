@@ -27,12 +27,14 @@
 //!   (`HookFileSpec::GeminiSettings` resolves under `project_root`, see
 //!   `reconcile::hooks::hook_file_path`) — the `hooks` key.
 //!
-//! These are two distinct files (`home` vs `project_root`), so the MCP write and
-//! the hook write never touch the same file and cannot clobber each other. Even
-//! if a user's `home` and `project_root` coincided, the two writers touch
-//! disjoint top-level keys (`mcpServers` vs `hooks`) and both go through the
-//! lenient, preserve-order JSON read/modify/write path, so each preserves the
-//! other's keys.
+//! The PRIMARY guarantee is the **disjoint top-level keys**: the MCP writer owns
+//! only `mcpServers` and the hook writer owns only `hooks`, and both go through
+//! the lenient, preserve-order JSON read/modify/write path that retains every
+//! other key it finds. So even in the degenerate case where a user's `home` and
+//! `project_root` coincide and both writers target the SAME file, neither can
+//! clobber the other's key. The distinct-files property (`home` vs
+//! `project_root`) is the second, belt-and-braces layer — but the no-clobber
+//! correctness does not depend on it.
 //!
 //! [`Envelope::ClaudeNested`]: crate::harness::Envelope::ClaudeNested
 
