@@ -64,6 +64,7 @@ impl Fixture {
             home_root: self._home.path(),
             workspace_name: &self.workspace,
             force: false,
+            only_harness: None,
         }
     }
 }
@@ -165,8 +166,8 @@ fn sync_installs_tome_session_start_hook_for_codex() {
         .as_str()
         .expect("nested hook command present");
     assert!(
-        command.contains("harness session-context"),
-        "command must invoke `harness session-context`; got: {command}"
+        command.contains("harness session-start"),
+        "command must invoke `harness session-start`; got: {command}"
     );
     assert!(
         command.contains("--workspace"),
@@ -204,7 +205,7 @@ fn sync_removes_tome_session_start_hook_when_codex_non_live() {
             .as_array()
             .is_some_and(|a| a.iter().any(|e| e["hooks"][0]["command"]
                 .as_str()
-                .is_some_and(|c| c.contains("harness session-context")))),
+                .is_some_and(|c| c.contains("harness session-start")))),
         "SessionStart must contain the Tome entry after sync 1; got: {doc}"
     );
 
@@ -282,7 +283,7 @@ fn codex_session_hook_never_contains_plugin_hooks() {
     assert!(
         session_start[0]["hooks"][0]["command"]
             .as_str()
-            .is_some_and(|c| c.contains("harness session-context")),
+            .is_some_and(|c| c.contains("harness session-start")),
         "the single SessionStart entry must be the Tome routing hook; got: {doc}"
     );
 }

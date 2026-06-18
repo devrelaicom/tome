@@ -67,12 +67,12 @@ fn tier_list_json(env: &ToolEnv) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// `tome harness session-context` regenerates the routing directive fresh from
+/// `tome harness session-start` regenerates the routing directive fresh from
 /// live state. With a tier-1 skill present, the directive must carry the
 /// "Load now (Tier 1)" section and a `get_skill(` call for it. The command
 /// prints plain text to stdout (the Claude Code SessionStart hook target).
 #[test]
-fn harness_session_context_prints_directive() {
+fn harness_session_start_prints_directive() {
     let _fixture = Fixture::build_sample();
     let tmp = TempDir::new().unwrap();
     let env = ToolEnv::new();
@@ -94,12 +94,12 @@ fn harness_session_context_prints_directive() {
 
     let out = env
         .cmd()
-        .args(["harness", "session-context"])
+        .args(["harness", "session-start"])
         .output()
-        .expect("spawn harness session-context");
+        .expect("spawn harness session-start");
     assert!(
         out.status.success(),
-        "session-context exit {:?}; stderr={}",
+        "session-start exit {:?}; stderr={}",
         out.status.code(),
         String::from_utf8_lossy(&out.stderr),
     );

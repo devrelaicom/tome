@@ -53,17 +53,54 @@ impl StubSummariser {
 impl Summariser for StubSummariser {
     fn summarise(&self, input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
-        let topics: Vec<String> = input
-            .plugins
-            .iter()
-            .flat_map(|p| p.skills.iter().map(|s| s.name.clone()))
-            .collect();
-        let topics_joined = topics.join(", ");
+        // `short` is a deterministic comma-separated list of the
+        // workspace's skill names — it stands in for the real model's
+        // topics-and-tasks output. It varies with the workspace yet stays
+        // byte-stable for a given input so cache-shape tests can pin it.
+        let short = if input.plugins.is_empty() {
+            String::new()
+        } else {
+            input
+                .plugins
+                .iter()
+                .flat_map(|p| p.skills.iter().map(|s| s.name.clone()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         Ok(SummariserOutput {
-            short: topics_joined.clone(),
             long: format!(
-                "This workspace covers: {topics_joined}. Call search_skills when working on these topics."
+                "This workspace covers: {short}. Call search_skills when working on these topics."
             ),
+            short,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::summarise::{PluginSummaryItem, SkillSummaryItem};
+
+    #[test]
+    fn stub_short_is_comma_joined_skill_names() {
+        let input = PluginSummariesInput {
+            plugins: vec![PluginSummaryItem {
+                catalog: "c".into(),
+                plugin: "p".into(),
+                description: "d".into(),
+                skills: vec![
+                    SkillSummaryItem {
+                        name: "alpha".into(),
+                        description: "x".into(),
+                    },
+                    SkillSummaryItem {
+                        name: "beta".into(),
+                        description: "y".into(),
+                    },
+                ],
+            }],
+        };
+        let out = StubSummariser::default().summarise(&input).unwrap();
+        assert_eq!(out.short, "alpha, beta");
     }
 }

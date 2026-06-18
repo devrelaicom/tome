@@ -121,6 +121,30 @@ pub enum Command {
     /// another).
     #[command(subcommand)]
     Tier(TierCommand),
+    /// Propagate workspace state to bound projects: write `.tome/RULES.md` and
+    /// reconcile harness files. Defaults to the current project; `--all` fans
+    /// out to every bound project in the resolved workspace.
+    Sync(SyncArgs),
+}
+
+/// `tome sync` — unified propagation of workspace state to bound projects.
+/// Composes the per-project RULES.md write with the harness-file reconcile.
+/// Replaces the former `tome workspace sync` / `tome harness sync`
+/// subcommands, which were removed pre-launch.
+#[derive(Debug, clap::Args)]
+pub struct SyncArgs {
+    /// Sync every bound project in the resolved workspace, not just the current project.
+    #[arg(long)]
+    pub all: bool,
+    /// Only write `.tome/RULES.md` (skip the harness reconcile).
+    #[arg(long, conflicts_with = "harness_only")]
+    pub rules_only: bool,
+    /// Only reconcile harness files (skip the RULES.md write).
+    #[arg(long)]
+    pub harness_only: bool,
+    /// Restrict the harness reconcile to a single harness. Ignored with --rules-only. Errors on unknown name.
+    #[arg(long, value_name = "NAME")]
+    pub harness: Option<String>,
 }
 
 /// `tome tier <subcommand>` — manage per-workspace skill/command routing tiers.
@@ -302,13 +326,10 @@ pub enum HarnessCommand {
     /// Report per-harness details for the current project: detection,
     /// targets, integration state, and source-of-scope.
     Info(HarnessInfoArgs),
-    /// Reconcile the project's actual filesystem state against the
-    /// effective harness list. Byte-for-byte idempotent.
-    Sync,
-    /// Print the workspace's skill-routing directive to stdout, generated fresh
-    /// from live state. Intended as a Claude Code SessionStart hook target; not
-    /// usually run by hand.
-    SessionContext(HarnessSessionContextArgs),
+    /// Reconcile the project, then print the workspace's skill-routing directive
+    /// to stdout, generated fresh from live state. Intended as a SessionStart
+    /// hook target; not usually run by hand.
+    SessionStart(HarnessSessionStartArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -350,7 +371,7 @@ pub struct HarnessInfoArgs {
 }
 
 #[derive(Debug, clap::Args)]
-pub struct HarnessSessionContextArgs {
+pub struct HarnessSessionStartArgs {
     /// Workspace name. Defaults to the resolved scope.
     #[arg(long)]
     pub workspace: Option<String>,
@@ -390,7 +411,7 @@ pub struct DoctorArgs {
     pub fix: bool,
     /// Override safe-by-default repair gates. Currently rewrites
     /// developer-authored harness MCP `tome` entries on `--fix` (the
-    /// same semantics as `tome harness sync --force`). Other
+    /// clash-overriding harness reconcile). Other
     /// manually-classified issues — notably a binding whose marker
     /// names a missing workspace — are NOT affected by `--force`:
     /// choosing the target workspace is a developer decision.
@@ -436,13 +457,6 @@ pub enum WorkspaceCommand {
     /// `<root>/workspaces/<name>/RULES.md`, and copies the new RULES.md
     /// to every bound project's marker copy.
     RegenSummary(WorkspaceRegenSummaryArgs),
-    /// Copy the workspace's central RULES.md to every bound project's
-    /// marker copy. With `<name>` omitted, syncs every workspace in
-    /// the central registry. Idempotent — destinations whose bytes
-    /// already match the source are skipped without a write. MUST NOT
-    /// regenerate summaries; for that use
-    /// `tome workspace regen-summary` first.
-    Sync(WorkspaceSyncArgs),
     /// Remove a workspace from the central registry. The cascade
     /// removes integration in every bound project, deletes per-workspace
     /// DB rows (`workspace_skills`, `workspace_catalogs`,
@@ -540,20 +554,11 @@ pub struct WorkspaceRegenSummaryArgs {
 }
 
 #[derive(Debug, clap::Args)]
-pub struct WorkspaceSyncArgs {
-    /// Workspace whose central RULES.md should be propagated. Omit to
-    /// sync every workspace in the central registry. Must satisfy the
-    /// workspace naming rule when present; unknown names surface as
-    /// exit 13 (`WorkspaceNotFound`).
-    pub name: Option<String>,
-}
-
-#[derive(Debug, clap::Args)]
 pub struct McpArgs {
     /// The harness hosting this MCP server (claude-code, cursor, codex,
     /// opencode). Conveys host identity to the built-in `meta` tool so it
     /// can install skills into the right harness. Normally stamped
-    /// automatically by `tome harness sync`; absent for a legacy config.
+    /// automatically by `tome sync`; absent for a legacy config.
     #[arg(long)]
     pub harness: Option<String>,
 }

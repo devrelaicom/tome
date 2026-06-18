@@ -72,6 +72,7 @@ impl Fixture {
             home_root: self._home.path(),
             workspace_name: &self.workspace,
             force,
+            only_harness: None,
         }
     }
 }
@@ -937,6 +938,166 @@ fn hooks_forward_progress_one_malformed_one_good() {
     assert!(
         cmd.starts_with(&*plugin_root.to_string_lossy()),
         "the well-formed plugin's hook merged despite the malformed sibling: {cmd}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11. `--harness <name>` single-harness filter (`SyncDeps.only_harness`):
+//     a project whose effective list is `cursor` + `claude-code`, synced with
+//     `only_harness = Some("cursor")`, touches ONLY cursor's files and leaves
+//     claude-code's `CLAUDE.md` untouched. `None` would reconcile both.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_with_only_harness_touches_just_that_harness() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Two real harnesses with distinct rules sinks: cursor writes a standalone
+    // `.cursor/rules/TOME_SKILLS.md`; claude-code writes a block into
+    // `<project>/CLAUDE.md`. Both effective so a full reconcile WOULD write both.
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(tome::harness::cursor::CURSOR),
+        Box::new(tome::harness::claude_code::CLAUDE_CODE),
+    ]);
+
+    let fx = Fixture::build(
+        "test-workspace",
+        Some("harnesses = [\"cursor\", \"claude-code\"]"),
+    );
+
+    // Plant a Tome-owned agent file in claude-code's native-agent dir BEFORE
+    // the sync. Both cursor and claude-code support native agents, so the
+    // agents sink runs (cursor is snapshotted ⇒ the fast-exit guard passes).
+    // The owned-file naming is `<plugin>__<name>.md`; the agents sink would
+    // unlink it as an orphan (its plugin is not in the empty enabled set) IF
+    // it touched claude-code's dir. Under `only_harness = Some("cursor")` that
+    // dir must be left completely untouched, so this file must survive — this
+    // is the regression the agents sink ignored before the filter was honoured.
+    let cc_agents_dir = fx.project.join(".claude/agents");
+    std::fs::create_dir_all(&cc_agents_dir).expect("create claude-code agent dir");
+    let planted_cc_agent = cc_agents_dir.join("plugin-keep__reviewer.md");
+    std::fs::write(&planted_cc_agent, "---\nname: reviewer\n---\nbody\n")
+        .expect("plant owned claude-code agent file");
+    assert!(
+        planted_cc_agent.is_file(),
+        "precondition: the claude-code owned agent file was planted",
+    );
+
+    // Restrict the reconcile to cursor only.
+    let mut deps = fx.deps(false);
+    deps.only_harness = Some("cursor".to_string());
+
+    let outcome = sync::sync_project(&fx.project, &deps).expect("sync cursor only");
+
+    // Cursor's standalone rules file was created.
+    let cursor_rules = fx.project.join(".cursor/rules/TOME_SKILLS.md");
+    assert!(
+        cursor_rules.is_file(),
+        "cursor's rules file must be written under --harness cursor",
+    );
+    // Claude-code was left completely untouched: its CLAUDE.md was never created.
+    assert!(
+        !fx.project.join("CLAUDE.md").exists(),
+        "claude-code's CLAUDE.md must NOT be created under --harness cursor",
+    );
+    // The agents sink honours `only_harness` too: claude-code's planted owned
+    // agent file must STILL EXIST — it was never an emit/cleanup target because
+    // claude-code was not in the (cursor-only) snapshot set.
+    assert!(
+        planted_cc_agent.is_file(),
+        "claude-code's owned agent file must NOT be removed under --harness cursor \
+         (the agents sink must honour only_harness)",
+    );
+    // No recorded change targets claude-code in the agents subsystem (defence in
+    // depth alongside the on-disk survival assertion).
+    assert!(
+        !outcome
+            .removed
+            .iter()
+            .any(|c| c.subsystem == SyncSubsystem::Agents && c.harness == "claude-code"),
+        "no agents-subsystem removal may target claude-code under --harness cursor; got {:?}",
+        outcome.removed,
+    );
+
+    // Every recorded decision is for cursor only — claude-code never entered
+    // the snapshot set, so it produced no decision at all.
+    assert!(
+        outcome.decisions.iter().all(|d| d.harness == "cursor"),
+        "only cursor decisions expected; got {:?}",
+        outcome
+            .decisions
+            .iter()
+            .map(|d| d.harness.as_str())
+            .collect::<Vec<_>>(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11b. I-1 regression: `--harness <X>` on a project where X co-owns a SHARED
+//     rules file with another LIVE harness whose body style is `Inline` must
+//     preserve the inline LCD body — it must NOT rewrite the shared file to the
+//     bare `@`-include form just because the filtered snapshot set sees only X.
+//
+//     codex (AtInclude) + opencode (Inline) both write `<project>/AGENTS.md`.
+//     `tome sync --harness codex` must still write the INLINE body (opencode is
+//     a live co-owner), keeping opencode's view intact. A full sync already does
+//     this; the bug was that the filtered `--harness` path computed the
+//     body-style LCD over the one-element (codex-only) snapshot set.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn only_harness_preserves_inline_lcd_for_shared_rules_with_live_coowner() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // codex + opencode both target `<project>/AGENTS.md`; codex is `AtInclude`,
+    // opencode is `Inline`. Both effective.
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(tome::harness::codex::CODEX),
+        Box::new(tome::harness::opencode::OPENCODE),
+    ]);
+
+    let fx = Fixture::build(
+        "test-workspace",
+        Some("harnesses = [\"codex\", \"opencode\"]"),
+    );
+
+    // Author a non-empty project RULES.md so the inline body is distinguishable
+    // from the bare `@.tome/RULES.md` include directive.
+    let rules_marker = fx.project.join(".tome/RULES.md");
+    let rules_text = "INLINE RULES BODY MARKER\n";
+    std::fs::write(&rules_marker, rules_text).expect("write project RULES.md");
+
+    let agents_md = fx.project.join("AGENTS.md");
+
+    // ----- Sanity: a FULL sync writes the inline body (opencode forces it). -----
+    sync::sync_project(&fx.project, &fx.deps(false)).expect("full sync");
+    let full_body = std::fs::read_to_string(&agents_md).expect("read AGENTS.md after full sync");
+    assert!(
+        full_body.contains("INLINE RULES BODY MARKER"),
+        "full sync must write the inline LCD body for codex+opencode; got: {full_body}",
+    );
+    assert!(
+        !full_body.contains("@.tome/RULES.md"),
+        "full sync must NOT use the bare @-include form; got: {full_body}",
+    );
+
+    // ----- The bug: `--harness codex` must NOT downgrade to the @-include. -----
+    let mut deps = fx.deps(false);
+    deps.only_harness = Some("codex".to_string());
+    sync::sync_project(&fx.project, &deps).expect("sync codex only");
+
+    let after_body = std::fs::read_to_string(&agents_md).expect("read AGENTS.md after --harness");
+    assert!(
+        after_body.contains("INLINE RULES BODY MARKER"),
+        "`--harness codex` must preserve opencode's inline view (the LCD across \
+         ALL live co-owners), NOT rewrite the shared AGENTS.md to @-include; got: {after_body}",
+    );
+    assert!(
+        !after_body.contains("@.tome/RULES.md"),
+        "`--harness codex` must NOT write the bare @-include directive into the \
+         shared file while opencode is a live co-owner; got: {after_body}",
     );
 }
 

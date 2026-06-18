@@ -1,4 +1,4 @@
-//! `tome harness session-context` — print the workspace's skill-routing
+//! `tome harness session-start` — print the workspace's skill-routing
 //! directive to stdout, regenerated fresh from live state.
 //!
 //! This is the target of the Tome-owned Claude Code SessionStart hook
@@ -10,7 +10,7 @@
 
 use std::io::Write;
 
-use crate::cli::HarnessSessionContextArgs;
+use crate::cli::HarnessSessionStartArgs;
 use crate::error::TomeError;
 use crate::output::Mode;
 use crate::paths::Paths;
@@ -21,7 +21,7 @@ use crate::workspace::{ResolvedScope, WorkspaceName};
 /// stdout as `additionalContext` regardless of the global `--json` flag, so
 /// this command does not branch on `Mode`.
 pub fn run(
-    args: HarnessSessionContextArgs,
+    args: HarnessSessionStartArgs,
     scope: &ResolvedScope,
     paths: &Paths,
     _mode: Mode,
@@ -30,6 +30,28 @@ pub fn run(
         Some(raw) => WorkspaceName::parse(raw)?,
         None => scope.scope.name().clone(),
     };
+
+    // Reconcile this project's files before printing, so the directive we emit
+    // is consistent with freshly-synced harness files (and `.tome/RULES.md`).
+    // FAIL-SOFT: a sync error must never block or fail the session-start hook —
+    // warn and continue; the directive prints regardless. (No `?` on the call.)
+    if let Some(project_root) = scope.project_root.as_deref() {
+        let sync_args = crate::cli::SyncArgs {
+            all: false,
+            rules_only: false,
+            harness_only: false,
+            harness: None,
+        };
+        if let Err(e) =
+            crate::commands::sync::sync_one_project(&name, project_root, &sync_args, paths)
+        {
+            tracing::warn!(
+                workspace = name.as_str(),
+                error = %e,
+                "session-start: project reconcile failed; printing directive anyway",
+            );
+        }
+    }
 
     let entries = if paths.index_db.exists() {
         let conn = crate::index::open_read_only(&paths.index_db)?;

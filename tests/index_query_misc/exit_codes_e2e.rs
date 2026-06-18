@@ -1136,8 +1136,8 @@ fn workspace_use_malformed_hooks_exits_43() {
         );
         let cmd = entries[0]["hooks"][0]["command"].as_str().unwrap_or("");
         assert!(
-            cmd.contains("harness session-context"),
-            "the sole entry must be Tome's session-context hook, got: {cmd}",
+            cmd.contains("harness session-start"),
+            "the sole entry must be Tome's session-start hook, got: {cmd}",
         );
     }
 }

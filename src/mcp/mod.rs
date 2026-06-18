@@ -20,6 +20,7 @@
 //! `${XDG_STATE_HOME}/tome/mcp.log`. Each startup rotates the log if
 //! the existing file exceeds 10 MiB.
 
+pub mod live_sync;
 pub mod log;
 pub mod preflight;
 pub mod prompt_collision;
@@ -264,7 +265,7 @@ pub fn run(
             paths: paths.clone(),
             embedder_entry: handle.embedder_entry,
             reranker_entry: handle.reranker_entry,
-            prompt_registry: Arc::new(prompt_registry),
+            prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(prompt_registry))),
             host_harness: host_harness.clone(),
             last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
             flush_signal: flush_signal.clone(),
@@ -280,6 +281,10 @@ pub fn run(
         // can't outlive the server (no leak).
         let flush_task = tokio::spawn(telemetry_flush_loop(flush_signal));
 
+        // The live-sync watcher needs its own `McpState` handle (it shares the
+        // server's swappable prompt-registry cell through it). Clone the `Arc`
+        // before `Server::new` consumes `state`.
+        let state_for_watch = state.clone();
         let mut server = server::Server::new(state);
 
         // FR-425 + NFR-103: compose the `search_skills` tool
@@ -290,11 +295,27 @@ pub fn run(
         tool_description::warn_if_too_long(scope.scope.name(), &composed);
         server.override_search_skills_description(composed);
 
+        // Clone the swappable prompt-router + description cells the watcher
+        // rebuilds in place, BEFORE `serve_server` moves the server.
+        let (prompt_cell, desc_cell) = server.live_sync_cells();
+
         let running = rmcp::serve_server(server, rmcp::transport::stdio())
             .await
             .map_err(|e| TomeError::McpStartupFailed {
                 reason: format!("rmcp serve_server: {e}"),
             })?;
+
+        // Live-sync watcher: when the workspace drifts out-of-process (a CLI
+        // enable/disable/reindex or a regenerated summary), rebuild the prompt
+        // list + tool description in place and emit the matching `list_changed`
+        // notification. Aborted on shutdown alongside the telemetry task so it
+        // can't outlive the server.
+        let watch_task = tokio::spawn(live_sync::watch(live_sync::Handles {
+            state: state_for_watch,
+            prompt_cell,
+            desc_cell,
+            peer: running.peer().clone(),
+        }));
 
         let cancel_token = running.cancellation_token();
 
@@ -383,6 +404,13 @@ pub fn run(
         // process run's exit hook / timer re-drains the queue).
         flush_task.abort();
 
+        // Same lifetime tie for the live-sync watcher: abort it once serving
+        // has ended so it can't outlive the server or leak past the `block_on`.
+        // Any rebuild it might be mid-running is on the blocking pool and only
+        // mutates in-process cells — losing it is harmless (the next process
+        // run rebuilds the registry at startup).
+        watch_task.abort();
+
         shutdown_result
     })
 }
@@ -454,7 +482,7 @@ fn dispatch_flush() {
 /// trip over the advisory lock held by a concurrent writer. Returns
 /// the registry on success; surface DB / parse failures as
 /// [`TomeError`] so the MCP startup path can log + exit deterministically.
-fn build_prompt_registry(
+pub(crate) fn build_prompt_registry(
     scope: &ResolvedScope,
     paths: &Paths,
 ) -> Result<prompts::PromptRegistry, TomeError> {

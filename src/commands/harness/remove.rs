@@ -120,7 +120,7 @@ fn emit_human(outcome: &HarnessRemoveOutcome) -> Result<(), TomeError> {
     } else {
         writeln!(
             out,
-            "Effective list unchanged — run `tome harness sync` in any project where this harness was active.",
+            "Effective list unchanged — run `tome sync` in any project where this harness was active.",
         )?;
     }
     Ok(())

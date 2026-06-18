@@ -350,7 +350,7 @@ impl McpHarness {
             // with the stub-seeded index `meta`.
             embedder_entry: &STUB_EMBEDDER_ENTRY,
             reranker_entry: &STUB_RERANKER_ENTRY,
-            prompt_registry: Arc::new(registry),
+            prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(registry))),
             host_harness,
             last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
             flush_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
@@ -392,6 +392,24 @@ impl McpHarness {
     /// [`Self::prompts_list`]).
     pub fn prompt_names(&self) -> Vec<String> {
         self.prompts_list().into_iter().map(|p| p.name).collect()
+    }
+
+    /// `tools/list` — returns the tool list the live server advertises,
+    /// with the live `search_skills` description override applied. Mirrors
+    /// [`Self::prompts_list`]: the real `ServerHandler::list_tools`
+    /// requires a `RequestContext<RoleServer>` only obtainable over a live
+    /// transport (see the module header), so the harness drives the same
+    /// `Server::tools_listing` the production handler delegates to.
+    pub fn tools_list(&self) -> Vec<rmcp::model::Tool> {
+        self.server.tools_listing()
+    }
+
+    /// Seed the live `search_skills` description override on the server —
+    /// the same seam `mcp::run` uses after construction
+    /// ([`Server::override_search_skills_description`]). Lets a test drive
+    /// the `tools/list` injection branch.
+    pub fn override_search_skills_description(&mut self, description: impl Into<String>) {
+        self.server.override_search_skills_description(description);
     }
 
     /// `prompts/get` — drive the live `prompts/get` route end-to-end via

@@ -1,30 +1,31 @@
-//! Phase 4 / US2.c — `tome workspace sync [<name>]` tests.
+//! Per-workspace RULES.md sync tests.
 //!
-//! Exercises [`tome::commands::workspace::sync::assemble`] (the
-//! pure-compute entry point) using the library API. The CLI binary
-//! path is not driven here: sync is pure I/O against the central DB +
-//! per-project marker files, so the library API gives full coverage
-//! without spinning up the binary.
+//! The `tome workspace sync` COMMAND surface was removed pre-launch
+//! (its multi-workspace fan-out is superseded by the unified `tome sync`
+//! command, which is workspace-scoped to the resolved workspace's bound
+//! projects). What remains testable here is the compute layer that
+//! `tome sync` (and `regen-summary`) still depend on:
+//!
+//!  * [`tome::workspace::sync_one`] — fan out one workspace's central
+//!    RULES.md to every bound project, partitioning the outcome into
+//!    synced / unchanged / missing.
+//!  * [`tome::workspace::sync::sync_rules_to_project`] — the single-project
+//!    write the `tome sync` command reuses.
 //!
 //! Source-of-truth helpers (DB seed shape) mirror
 //! `tests/workspace_regen_summary.rs` since both suites operate on
 //! `workspaces` + `workspace_projects`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::common::{
     lifecycle_paths, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
 };
 use tempfile::TempDir;
 use time::OffsetDateTime;
-use tome::cli::WorkspaceSyncArgs;
-use tome::commands::workspace::sync::{
-    WorkspaceSyncEntry, WorkspaceSyncReport, assemble as sync_assemble,
-};
-use tome::error::TomeError;
 use tome::index::{self, OpenOptions};
 use tome::paths::Paths;
-use tome::workspace::{self, WorkspaceName, WorkspaceSyncOutcome};
+use tome::workspace::{self, WorkspaceName};
 
 fn parse(name: &str) -> WorkspaceName {
     WorkspaceName::parse(name).expect("valid workspace name")
@@ -81,121 +82,48 @@ fn init_with_rules(paths: &Paths, workspace_name: &str, rules_body: &str) {
     .expect("overwrite central RULES.md");
 }
 
-fn args_for(name: Option<&str>) -> WorkspaceSyncArgs {
-    WorkspaceSyncArgs {
-        name: name.map(|s| s.to_owned()),
-    }
-}
-
-fn outcome_for<'a>(report: &'a WorkspaceSyncReport, workspace: &str) -> &'a WorkspaceSyncOutcome {
-    let entry: &WorkspaceSyncEntry = report
-        .per_workspace
-        .iter()
-        .find(|e| e.workspace.as_str() == workspace)
-        .unwrap_or_else(|| panic!("no entry for workspace `{workspace}` in report"));
-    &entry.outcome
-}
-
 // ---------------------------------------------------------------------------
-// 1. No arg → every workspace syncs.
+// 1. `sync_one` fans out to EVERY bound project of one workspace.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn sync_with_no_arg_syncs_every_workspace() {
+fn sync_one_fans_out_to_every_bound_project() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
     std::fs::create_dir_all(&paths.root).unwrap();
 
     init_with_rules(&paths, "ws-a", "Rules for ws-a body\n");
-    init_with_rules(&paths, "ws-b", "Rules for ws-b body\n");
 
-    let project_a = tmp.path().join("proj-a");
-    let project_b = tmp.path().join("proj-b");
-    seed_bound_project(&paths, "ws-a", &project_a);
-    seed_bound_project(&paths, "ws-b", &project_b);
+    let project_1 = tmp.path().join("proj-1");
+    let project_2 = tmp.path().join("proj-2");
+    seed_bound_project(&paths, "ws-a", &project_1);
+    seed_bound_project(&paths, "ws-a", &project_2);
 
-    // Pre-populate proj-a's marker RULES.md with stale content so we
-    // can verify the sync actually overwrites it.
-    std::fs::write(project_a.join(".tome/RULES.md"), b"STALE\n").unwrap();
+    // Pre-populate proj-1's marker RULES.md with stale content so we can
+    // verify the sync actually overwrites it.
+    std::fs::write(project_1.join(".tome/RULES.md"), b"STALE\n").unwrap();
 
-    let report = sync_assemble(args_for(None), &paths).expect("assemble");
-
-    // Both ws-a and ws-b appear in the report; plus the seeded
-    // `global` workspace with zero bound projects.
-    let names: Vec<&str> = report
-        .per_workspace
-        .iter()
-        .map(|e| e.workspace.as_str())
-        .collect();
-    assert!(names.contains(&"ws-a"), "report missing ws-a: {names:?}");
-    assert!(names.contains(&"ws-b"), "report missing ws-b: {names:?}");
-
-    let body_a = std::fs::read(project_a.join(".tome/RULES.md")).unwrap();
-    assert_eq!(body_a, b"Rules for ws-a body\n", "ws-a project not synced");
-    let body_b = std::fs::read(project_b.join(".tome/RULES.md")).unwrap();
-    assert_eq!(body_b, b"Rules for ws-b body\n", "ws-b project not synced");
+    let outcome = workspace::sync_one(&parse("ws-a"), &paths).expect("sync_one");
 
     assert_eq!(
-        outcome_for(&report, "ws-a").synced_projects.len(),
-        1,
-        "ws-a should sync its one bound project",
+        outcome.synced_projects.len(),
+        2,
+        "both bound projects should sync: {outcome:?}",
     );
-    assert_eq!(
-        outcome_for(&report, "ws-b").synced_projects.len(),
-        1,
-        "ws-b should sync its one bound project",
-    );
-    assert_eq!(report.total_synced, 2);
+
+    let body_1 = std::fs::read(project_1.join(".tome/RULES.md")).unwrap();
+    assert_eq!(body_1, b"Rules for ws-a body\n", "proj-1 not synced");
+    let body_2 = std::fs::read(project_2.join(".tome/RULES.md")).unwrap();
+    assert_eq!(body_2, b"Rules for ws-a body\n", "proj-2 not synced");
 }
 
 // ---------------------------------------------------------------------------
-// 2. With name arg → only that workspace syncs.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn sync_with_name_only_syncs_that_workspace() {
-    let tmp = TempDir::new().unwrap();
-    let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.root).unwrap();
-
-    init_with_rules(&paths, "ws-a", "ws-a body\n");
-    init_with_rules(&paths, "ws-b", "ws-b body\n");
-
-    let project_a = tmp.path().join("proj-a");
-    let project_b = tmp.path().join("proj-b");
-    seed_bound_project(&paths, "ws-a", &project_a);
-    seed_bound_project(&paths, "ws-b", &project_b);
-
-    // Pre-populate both projects' marker RULES.md with stale content
-    // so we can verify ws-b's was left alone.
-    std::fs::write(project_a.join(".tome/RULES.md"), b"STALE_A\n").unwrap();
-    std::fs::write(project_b.join(".tome/RULES.md"), b"STALE_B\n").unwrap();
-
-    let report = sync_assemble(args_for(Some("ws-a")), &paths).expect("assemble");
-
-    // Only ws-a in the report.
-    assert_eq!(report.per_workspace.len(), 1);
-    assert_eq!(report.per_workspace[0].workspace.as_str(), "ws-a");
-
-    // ws-a project file was updated.
-    let body_a = std::fs::read(project_a.join(".tome/RULES.md")).unwrap();
-    assert_eq!(body_a, b"ws-a body\n");
-
-    // ws-b project file was NOT touched.
-    let body_b = std::fs::read(project_b.join(".tome/RULES.md")).unwrap();
-    assert_eq!(
-        body_b, b"STALE_B\n",
-        "ws-b project should not have been synced"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// 3. Missing project directory is reported in `missing_project_dirs`
+// 2. A missing project directory is reported in `missing_project_dirs`
 //    and the sync does not fail.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn sync_missing_project_dir_is_reported_and_skipped() {
+fn sync_one_missing_project_dir_is_reported_and_skipped() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
     std::fs::create_dir_all(&paths.root).unwrap();
@@ -207,9 +135,8 @@ fn sync_missing_project_dir_is_reported_and_skipped() {
     // Now make the project disappear entirely (the row remains).
     std::fs::remove_dir_all(&project).unwrap();
 
-    let report = sync_assemble(args_for(Some("ws-a")), &paths).expect("assemble");
+    let outcome = workspace::sync_one(&parse("ws-a"), &paths).expect("sync_one");
 
-    let outcome = outcome_for(&report, "ws-a");
     assert_eq!(
         outcome.missing_project_dirs.len(),
         1,
@@ -225,11 +152,11 @@ fn sync_missing_project_dir_is_reported_and_skipped() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Idempotent re-run: no writes (verified via mtime).
+// 3. Idempotent re-run: no writes (verified via mtime).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn sync_idempotent_re_run_no_writes() {
+fn sync_one_idempotent_re_run_no_writes() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
     std::fs::create_dir_all(&paths.root).unwrap();
@@ -239,26 +166,25 @@ fn sync_idempotent_re_run_no_writes() {
     seed_bound_project(&paths, "ws-a", &project);
 
     // First sync writes the file.
-    let first = sync_assemble(args_for(Some("ws-a")), &paths).expect("first sync");
-    assert_eq!(outcome_for(&first, "ws-a").synced_projects.len(), 1);
+    let first = workspace::sync_one(&parse("ws-a"), &paths).expect("first sync");
+    assert_eq!(first.synced_projects.len(), 1);
 
     let dest = project.join(".tome/RULES.md");
     let mtime_before = std::fs::metadata(&dest).unwrap().modified().unwrap();
 
-    // Wait long enough that any rename() would produce a distinct
-    // mtime even on coarse-resolution filesystems (1500ms covers HFS+
-    // and ext3 at 1s granularity).
+    // Wait long enough that any rename() would produce a distinct mtime
+    // even on coarse-resolution filesystems (1500ms covers HFS+ and ext3
+    // at 1s granularity).
     std::thread::sleep(std::time::Duration::from_millis(1500));
 
     // Second sync: bytes match, MUST NOT write.
-    let second = sync_assemble(args_for(Some("ws-a")), &paths).expect("second sync");
-    let outcome = outcome_for(&second, "ws-a");
+    let second = workspace::sync_one(&parse("ws-a"), &paths).expect("second sync");
     assert_eq!(
-        outcome.synced_projects.len(),
+        second.synced_projects.len(),
         0,
-        "second sync should produce zero writes; got {outcome:?}",
+        "second sync should produce zero writes; got {second:?}",
     );
-    assert_eq!(outcome.unchanged.len(), 1, "should land in unchanged");
+    assert_eq!(second.unchanged.len(), 1, "should land in unchanged");
 
     let mtime_after = std::fs::metadata(&dest).unwrap().modified().unwrap();
     assert_eq!(
@@ -268,68 +194,29 @@ fn sync_idempotent_re_run_no_writes() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Invalid workspace name → exit 15.
+// 4. Direct unit coverage of the extracted single-project helper. Guards
+//    the byte-for-byte idempotence + missing-dir classification that the
+//    project-scoped `tome sync` command reuses.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn sync_with_invalid_name_exits_15() {
+fn sync_rules_to_project_is_idempotent() {
+    use tome::workspace::sync::{RulesSync, sync_rules_to_project};
+    let ws = parse("demo");
     let tmp = TempDir::new().unwrap();
-    let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.root).unwrap();
-
-    let err = sync_assemble(args_for(Some("Bad!Name")), &paths).unwrap_err();
-    assert!(
-        matches!(err, TomeError::WorkspaceNameInvalid { .. }),
-        "expected WorkspaceNameInvalid, got {err:?}",
-    );
-    assert_eq!(err.exit_code(), 15);
-}
-
-// ---------------------------------------------------------------------------
-// 6. Unknown workspace → exit 13.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn sync_unknown_workspace_exits_13() {
-    let tmp = TempDir::new().unwrap();
-    let paths = lifecycle_paths(tmp.path());
-    std::fs::create_dir_all(&paths.root).unwrap();
-    // Init one workspace so the DB is bootstrapped (otherwise the
-    // membership check short-circuits before the registry exists).
-    workspace::init::init(parse("real"), false, &paths).expect("init real");
-
-    let err = sync_assemble(args_for(Some("missing")), &paths).unwrap_err();
-    assert!(
-        matches!(err, TomeError::WorkspaceNotFound { .. }),
-        "expected WorkspaceNotFound, got {err:?}",
-    );
-    assert_eq!(err.exit_code(), 13);
-}
-
-// ---------------------------------------------------------------------------
-// 7. JSON wire-shape pin (one fixed-state outcome). Follows the byte-
-//    stable pattern from `tests/workspace_use_json_shape.rs`.
-// ---------------------------------------------------------------------------
-
-#[test]
-fn report_serialises_to_byte_stable_json_for_empty_state() {
-    let report = WorkspaceSyncReport {
-        per_workspace: vec![WorkspaceSyncEntry {
-            workspace: parse("demo"),
-            outcome: WorkspaceSyncOutcome {
-                synced_projects: vec![PathBuf::from("/tmp/proj")],
-                unchanged: vec![],
-                missing_project_dirs: vec![],
-            },
-        }],
-        total_synced: 1,
-        total_unchanged: 0,
-        total_missing: 0,
-    };
-    let json = serde_json::to_string(&report).expect("serialise");
+    let proj = tmp.path().join("p");
+    std::fs::create_dir_all(proj.join(".tome")).unwrap();
     assert_eq!(
-        json,
-        r#"{"per_workspace":[{"workspace":"demo","outcome":{"synced_projects":["/tmp/proj"],"unchanged":[],"missing_project_dirs":[]}}],"total_synced":1,"total_unchanged":0,"total_missing":0}"#,
-        "WorkspaceSyncReport wire shape drift"
+        sync_rules_to_project(b"body\n", &proj, &ws).unwrap(),
+        RulesSync::Synced
+    );
+    assert_eq!(
+        sync_rules_to_project(b"body\n", &proj, &ws).unwrap(),
+        RulesSync::Unchanged
+    );
+    let missing = tmp.path().join("nope");
+    assert_eq!(
+        sync_rules_to_project(b"body\n", &missing, &ws).unwrap(),
+        RulesSync::MissingProjectDir
     );
 }

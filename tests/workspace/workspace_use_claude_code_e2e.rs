@@ -121,6 +121,7 @@ impl Fixture {
             home_root: &self.home_path,
             workspace_name: &self.workspace,
             force,
+            only_harness: None,
         }
     }
 

@@ -129,9 +129,25 @@ pub(crate) fn reconcile_agents(
     // Dispatch translation under the registry guard so `translate_agent`
     // sees the effective module set. The DB work above is already done, so
     // the guard only spans the (fast) translate + (atomic) write.
+    //
+    // `snapshots` is already filtered by `SyncDeps.only_harness` upstream
+    // (`collect_harness_snapshots`), so this sink honours the same filter by
+    // gating its registry walk on the snapshotted name set — exactly like the
+    // other sinks, which iterate `snapshots` directly. We still need the full
+    // `with_effective_modules` registry view here for `translate_agent`, so we
+    // keep the walk but `continue` past any module absent from the snapshots.
+    // When `only_harness` is `None` every effective module is snapshotted, so
+    // the set contains them all and the `continue` never fires (the full
+    // reconcile is unchanged).
+    let snap_names: HashSet<&str> = snapshots.iter().map(|s| s.name.as_str()).collect();
     with_effective_modules(|mods| {
         for m in mods {
             let name = m.name();
+            if !snap_names.contains(name) {
+                // Not in the (possibly `only_harness`-filtered) snapshot set →
+                // leave this harness's agent dir completely untouched.
+                continue;
+            }
             let is_live = effective_names.contains(name);
             let Some(dir) = m.agent_dir(project_root) else {
                 // No native-agent dir → nothing to emit or clean up.
@@ -667,6 +683,7 @@ mod tests {
             home_root: home.path(),
             workspace_name: &workspace,
             force: false,
+            only_harness: None,
         };
 
         // Build a faithful snapshot via the same path the orchestrator uses

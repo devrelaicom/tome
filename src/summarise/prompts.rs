@@ -4,8 +4,10 @@
 //! The summariser runs two sequential inference passes:
 //!
 //! 1. **Short pass** — compress every enabled skill's description into a
-//!    single comma-separated topic list (≤ 800 chars). The output feeds
-//!    the MCP server's tool description (FR-425).
+//!    single comma-separated list of TOPICS + example TASKS (≤ 800
+//!    chars). The output feeds the MCP server's `search_skills` tool
+//!    description, which wraps it in an imperative routing template
+//!    (FR-425).
 //! 2. **Long pass** — using the short output as input, write a 4–6
 //!    sentence rules section for the harness's `RULES.md` file
 //!    (≤ 2500 chars). The output feeds the workspace's composed
@@ -30,10 +32,20 @@
 
 /// First-pass prompt. `{descriptions}` is substituted via `String::replace`
 /// with one line per skill of the form `<plugin>: <skill-name> — <skill-description>`.
+///
+/// The instruction asks for TOPICS + example TASKS (not a prose paragraph)
+/// because the sole consumer of `short` is the MCP `search_skills` tool
+/// description, which wraps it in an imperative routing template
+/// ("Before working on tasks related to {short}, … call this tool …").
+/// That template reads naturally only when `{short}` is a comma-separated
+/// list of topics and example tasks, so the model is steered toward that
+/// shape here rather than at the wrapping site.
 pub const SHORT_PROMPT: &str =
     "You are summarising a developer's skill library. Given the descriptions below,
-produce a single comma-separated phrase listing the topics these skills cover.
-No prose, no lead-in, no bullet points. Maximum 700 characters.
+write a single line naming the concrete TOPICS this workspace's skills cover and
+2-3 example TASKS a user might ask for, as a comma-separated list. No preamble,
+no sentences — just the comma-separated topics and example tasks. Example:
+\"database migrations, release notes drafting, OAuth login flows, writing a deploy script\".
 
 Skill descriptions:
 {descriptions}";

@@ -7,8 +7,10 @@
 //!
 //! Phase 4 / US2.c promotes the helper to a [`sync_one`] entry point
 //! that returns a richer [`WorkspaceSyncOutcome`] (synced + unchanged +
-//! missing-project lists) so the new `tome workspace sync [<name>]`
-//! CLI surface can render per-project detail in `--json` mode.
+//! missing-project lists). It is now consumed by the unified `tome sync`
+//! command (via [`bound_project_roots`] + [`sync_rules_to_project`]) and
+//! by `regen-summary`; the former `tome workspace sync` CLI surface that
+//! originally drove it was removed pre-launch.
 //!
 //! `regen-summary` (US2.a-2) continues to call the legacy
 //! [`sync_workspace_rules_to_bound_projects`] convenience wrapper, which
@@ -49,8 +51,75 @@ use crate::index::{self};
 use crate::paths::Paths;
 use crate::workspace::WorkspaceName;
 
-/// Per-workspace sync outcome. Field order pinned by the contract;
-/// extra fields go on the surrounding `WorkspaceSyncEntry` envelope.
+/// Outcome of syncing the workspace RULES.md to ONE bound project.
+///
+/// Maps 1:1 onto [`WorkspaceSyncOutcome`]'s three partitions so the
+/// `sync_one` loop can classify a project by a single match. The write
+/// path can still fail with [`TomeError`] (propagated, not collapsed
+/// into `MissingProjectDir`) — only the *skip* cases (project dir or
+/// `.tome/` marker absent) are non-errors that land here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulesSync {
+    /// Destination was (re)written — bytes differed or were absent.
+    Synced,
+    /// Destination already matched the source bytes; no write issued.
+    Unchanged,
+    /// Project directory or its `.tome/` marker is missing; skipped.
+    MissingProjectDir,
+}
+
+/// Write the workspace's RULES.md (`source_bytes`) to ONE bound
+/// project's `<project>/.tome/RULES.md`.
+///
+/// Byte-for-byte idempotent: returns [`RulesSync::Unchanged`] without a
+/// write when the destination already matches `source_bytes`.
+/// [`RulesSync::MissingProjectDir`] when the project directory or its
+/// `.tome/` marker is absent (each `debug!`-logged with `name` for
+/// `tome doctor` drift triage — not an error per the contract Edge
+/// Cases). A genuine write failure is an error and is *propagated*, not
+/// classified as missing.
+///
+/// Extracted from [`sync_one`]'s per-project loop so the project-scoped
+/// `tome sync` command can reuse the identical classification +
+/// atomic-write path.
+pub fn sync_rules_to_project(
+    source_bytes: &[u8],
+    project_root: &std::path::Path,
+    name: &WorkspaceName,
+) -> Result<RulesSync, TomeError> {
+    if !project_root.is_dir() {
+        tracing::debug!(
+            workspace = name.as_str(),
+            project = %project_root.display(),
+            "workspace sync: project directory missing; skipping",
+        );
+        return Ok(RulesSync::MissingProjectDir);
+    }
+    let marker_dir = Paths::project_marker_dir(project_root);
+    if !marker_dir.is_dir() {
+        tracing::debug!(
+            workspace = name.as_str(),
+            project = %project_root.display(),
+            marker = %marker_dir.display(),
+            "workspace sync: project marker `.tome/` missing; skipping",
+        );
+        return Ok(RulesSync::MissingProjectDir);
+    }
+    let dest = Paths::project_marker_rules(project_root);
+
+    if let Ok(existing) = std::fs::read(&dest)
+        && existing == source_bytes
+    {
+        // Idempotence: bytes already match. No write.
+        return Ok(RulesSync::Unchanged);
+    }
+
+    store::write_atomic(&dest, source_bytes)?;
+    Ok(RulesSync::Synced)
+}
+
+/// Per-workspace sync outcome — the three partitions of `sync_one`'s
+/// per-project fan-out. Field order pinned by the contract.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 pub struct WorkspaceSyncOutcome {
     /// Project roots whose `<project>/.tome/RULES.md` was (re)written.
@@ -108,6 +177,25 @@ pub fn sync_one(name: &WorkspaceName, paths: &Paths) -> Result<WorkspaceSyncOutc
         return Ok(outcome);
     };
 
+    for project_root in bound_project_roots(&conn, workspace_id)? {
+        match sync_rules_to_project(&source_bytes, &project_root, name)? {
+            RulesSync::Synced => outcome.synced_projects.push(project_root),
+            RulesSync::Unchanged => outcome.unchanged.push(project_root),
+            RulesSync::MissingProjectDir => outcome.missing_project_dirs.push(project_root),
+        }
+    }
+
+    Ok(outcome)
+}
+
+/// All bound project roots for a workspace id, ordered. Shared by [`sync_one`]
+/// (RULES.md fan-out) and `commands::sync` (the `tome sync --all` fan-out) so
+/// the two surfaces walk `workspace_projects` through one query rather than
+/// duplicating the SELECT + error-wraps.
+pub(crate) fn bound_project_roots(
+    conn: &rusqlite::Connection,
+    workspace_id: i64,
+) -> Result<Vec<PathBuf>, TomeError> {
     let mut stmt = conn
         .prepare(
             "SELECT project_path FROM workspace_projects
@@ -126,47 +214,14 @@ pub fn sync_one(name: &WorkspaceName, paths: &Paths) -> Result<WorkspaceSyncOutc
             TomeError::IndexIntegrityCheckFailure(format!("workspace sync: query projects: {e}"))
         })?;
 
+    let mut roots = Vec::new();
     for row in project_iter {
         let project_path = row.map_err(|e| {
             TomeError::IndexIntegrityCheckFailure(format!("workspace sync: read project row: {e}"))
         })?;
-        let project_root = PathBuf::from(&project_path);
-
-        if !project_root.is_dir() {
-            tracing::debug!(
-                workspace = name.as_str(),
-                project = %project_root.display(),
-                "workspace sync: project directory missing; skipping",
-            );
-            outcome.missing_project_dirs.push(project_root);
-            continue;
-        }
-        let marker_dir = Paths::project_marker_dir(&project_root);
-        if !marker_dir.is_dir() {
-            tracing::debug!(
-                workspace = name.as_str(),
-                project = %project_root.display(),
-                marker = %marker_dir.display(),
-                "workspace sync: project marker `.tome/` missing; skipping",
-            );
-            outcome.missing_project_dirs.push(project_root);
-            continue;
-        }
-        let dest = Paths::project_marker_rules(&project_root);
-
-        if let Ok(existing) = std::fs::read(&dest)
-            && existing == source_bytes
-        {
-            // Idempotence: bytes already match. No write.
-            outcome.unchanged.push(project_root);
-            continue;
-        }
-
-        store::write_atomic(&dest, &source_bytes)?;
-        outcome.synced_projects.push(project_root);
+        roots.push(PathBuf::from(project_path));
     }
-
-    Ok(outcome)
+    Ok(roots)
 }
 
 /// Copy `<root>/workspaces/<name>/RULES.md` to ONE project's
@@ -223,12 +278,10 @@ pub fn sync_one_project(
 }
 
 /// List every workspace name in the central registry, alphabetically.
-/// Used by `tome workspace sync` with no name arg to iterate every
-/// workspace.
 ///
 /// Returns `["global"]` synthesised in the pre-bootstrap case (DB
-/// file absent) so the sync command never errors on a fresh install
-/// — the privileged `global` workspace is the conceptual default.
+/// file absent) so callers never error on a fresh install — the
+/// privileged `global` workspace is the conceptual default.
 pub fn list_workspace_names(paths: &Paths) -> Result<Vec<WorkspaceName>, TomeError> {
     if !paths.index_db.is_file() {
         return Ok(vec![WorkspaceName::global()]);

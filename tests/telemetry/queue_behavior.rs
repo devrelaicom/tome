@@ -672,7 +672,7 @@ fn build_state(paths: &Paths, host_harness: Option<&str>) -> Arc<McpState> {
         paths: paths.clone(),
         embedder_entry: &STUB_EMBEDDER_ENTRY,
         reranker_entry: &STUB_RERANKER_ENTRY,
-        prompt_registry: Arc::new(PromptRegistry::default()),
+        prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(PromptRegistry::default()))),
         host_harness: host_harness.map(str::to_owned),
         last_search_ranks: std::sync::Mutex::new(HashMap::new()),
         flush_signal: std::sync::Arc::new(tokio::sync::Notify::new()),

@@ -89,7 +89,7 @@ pub fn build_directive(entries: &[TieredEntry], long_summary: Option<&str>) -> S
 }
 
 /// The single Tome-owned Claude Code SessionStart hook entry: runs the
-/// `session-context` command and lets Claude Code inject its stdout as
+/// `session-start` command and lets Claude Code inject its stdout as
 /// `additionalContext` each session.
 ///
 /// Ownership is by structural deep-equal (no sidecar — the same mechanism the
@@ -110,7 +110,7 @@ pub fn session_start_hook(
             {
                 "type": "command",
                 "command": format!(
-                    "{tome_command} harness session-context --workspace {workspace_name}"
+                    "{tome_command} harness session-start --workspace {workspace_name}"
                 )
             }
         ]
@@ -125,7 +125,7 @@ pub fn session_start_hook(
 /// nested `hooks` array. `"startup|resume"` fires on fresh sessions and resumes
 /// (not `clear`/`compact`). Ownership is by structural deep-equal (no sidecar),
 /// so the exact bytes ARE the ownership marker — keep them stable. The command
-/// runs the harness-agnostic `session-context` printer; its plain-markdown
+/// runs the harness-agnostic `session-start` printer; its plain-markdown
 /// stdout becomes Codex developer context.
 pub fn codex_session_start_hook(
     tome_command: &str,
@@ -137,7 +137,7 @@ pub fn codex_session_start_hook(
             {
                 "type": "command",
                 "command": format!(
-                    "{tome_command} harness session-context --workspace {workspace_name}"
+                    "{tome_command} harness session-start --workspace {workspace_name}"
                 )
             }
         ]
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(e["matcher"], "startup|resume");
         assert_eq!(
             e["hooks"][0]["command"],
-            "tome harness session-context --workspace my-ws"
+            "tome harness session-start --workspace my-ws"
         );
         assert_eq!(e["hooks"][0]["type"], "command");
     }

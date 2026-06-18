@@ -52,7 +52,7 @@ fn build_state(env: &ToolEnv) -> Arc<McpState> {
         paths,
         embedder_entry,
         reranker_entry,
-        prompt_registry: Arc::new(PromptRegistry::default()),
+        prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(PromptRegistry::default()))),
         host_harness: None,
         last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
         flush_signal: std::sync::Arc::new(tokio::sync::Notify::new()),

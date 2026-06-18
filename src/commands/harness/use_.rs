@@ -182,7 +182,7 @@ fn emit_human(
     } else {
         writeln!(
             out,
-            "Effective list unchanged — run `tome harness sync` in any project where this harness should activate.",
+            "Effective list unchanged — run `tome sync` in any project where this harness should activate.",
         )?;
     }
     Ok(())

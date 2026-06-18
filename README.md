@@ -127,7 +127,7 @@ tome query "..." --strict                                # only high-confidence 
 tome harness                                # list the supported harnesses
 tome harness use claude-code                # add a harness to the project's settings
 tome harness list                           # effective list with the source chain
-tome harness sync                           # reconcile rules + MCP config + hooks + guardrails + agents
+tome sync                                    # reconcile rules + MCP config + hooks + guardrails + agents
 ```
 
 ### Run as an MCP server
@@ -137,7 +137,7 @@ tome mcp                                    # stdio MCP server; launched by your
                                             # diagnostics → ~/.tome/logs/mcp.log (JSON-lines)
 ```
 
-The server exposes a search-then-load flow — `search_skills` → `get_skill_info` → `get_skill` — plus a `meta` tool (installs a bundled meta skill into the host harness) and your plugins' user-invocable commands as MCP prompts. You normally don't launch this by hand: `tome harness use` / `tome harness sync` writes the wiring for you.
+The server exposes a search-then-load flow — `search_skills` → `get_skill_info` → `get_skill` — plus a `meta` tool (installs a bundled meta skill into the host harness) and your plugins' user-invocable commands as MCP prompts. You normally don't launch this by hand: `tome harness use` / `tome sync` writes the wiring for you.
 
 ### Health and maintenance
 

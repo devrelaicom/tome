@@ -23,8 +23,8 @@ use rmcp::handler::server::router::prompt::PromptRouter;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{
-    GetPromptRequestParams, GetPromptResult, Implementation, ListPromptsResult,
-    PaginatedRequestParams, PromptsCapability, ServerCapabilities, ServerInfo,
+    GetPromptRequestParams, GetPromptResult, Implementation, ListPromptsResult, ListToolsResult,
+    PaginatedRequestParams, PromptsCapability, ServerCapabilities, ServerInfo, ToolsCapability,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, tool, tool_handler, tool_router};
@@ -36,27 +36,43 @@ use crate::mcp::tools::{get_skill, get_skill_info, meta, search_skills};
 #[derive(Clone)]
 pub struct Server {
     state: Arc<McpState>,
-    // Accessed by the `#[tool_handler]`-generated `ServerHandler` impl,
-    // not by any explicit code path in this module. Clippy's dead-code
-    // analysis misses the macro expansion, so we silence the warning
-    // rather than re-routing through a getter.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
-    /// Per-session prompts router. Built once at construction from the
-    /// `McpState`'s `PromptRegistry`. The `prompts/list` handler reads
-    /// `list_all()`; the `prompts/get` handler dispatches by name into the
-    /// substitution-driven body render.
-    prompt_router: PromptRouter<Self>,
+    /// Per-session prompts router, swappable by the live-sync watcher.
+    /// `list_prompts` / `get_prompt` read it under the read lock; the
+    /// watcher rebuilds and swaps it on drift.
+    prompt_router: Arc<std::sync::RwLock<PromptRouter<Self>>>,
+    /// The live `search_skills` description. Seeded at startup from the
+    /// cached workspace summary, swapped by the watcher on drift. The
+    /// custom `list_tools` reads it on each call.
+    search_desc: Arc<std::sync::RwLock<String>>,
 }
 
 impl Server {
     pub fn new(state: Arc<McpState>) -> Self {
-        let prompt_router = prompts::build_router::<Self>(&state.prompt_registry, state.clone());
+        let registry = state
+            .prompt_registry
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let prompt_router = prompts::build_router::<Self>(&registry, state.clone());
         Self {
             state,
             tool_router: Self::tool_router(),
-            prompt_router,
+            prompt_router: Arc::new(std::sync::RwLock::new(prompt_router)),
+            search_desc: Arc::new(std::sync::RwLock::new(String::new())),
         }
+    }
+
+    /// Clone the handles the live-sync watcher needs (called before the
+    /// server is moved into `serve_server`).
+    pub fn live_sync_cells(
+        &self,
+    ) -> (
+        Arc<std::sync::RwLock<PromptRouter<Self>>>,
+        Arc<std::sync::RwLock<String>>,
+    ) {
+        (self.prompt_router.clone(), self.search_desc.clone())
     }
 
     /// Override the runtime description for the `search_skills` tool.
@@ -64,34 +80,62 @@ impl Server {
     /// plus the resolved workspace's cached `[summaries].short` per
     /// FR-425; `mcp::run` calls this once after server construction
     /// and before `serve_server` hands the router to rmcp.
-    ///
-    /// No-op if the `search_skills` route is absent — defensive
-    /// posture; the route is registered by `#[tool_router]` so the
-    /// `.get_mut` lookup is expected to succeed in practice.
-    pub fn override_search_skills_description(
-        &mut self,
-        description: impl Into<std::borrow::Cow<'static, str>>,
-    ) {
-        if let Some(route) = self.tool_router.map.get_mut("search_skills") {
-            route.attr.description = Some(description.into());
-        }
+    pub fn override_search_skills_description(&mut self, description: impl Into<String>) {
+        *self.search_desc.write().unwrap_or_else(|e| e.into_inner()) = description.into();
     }
 
-    /// Read-only borrow of the inner [`ToolRouter`]. Used by tests
-    /// (and the runtime description override path) to introspect the
-    /// registered tools.
+    /// Read-only borrow of the inner [`ToolRouter`]. Used by tests to
+    /// introspect the statically registered tools (without the live
+    /// `search_desc` override applied — use `search_desc_snapshot` to
+    /// read the active override).
     pub fn tool_router_ref(&self) -> &rmcp::handler::server::tool::ToolRouter<Self> {
         &self.tool_router
     }
 
-    /// Read-only borrow of the per-session [`PromptRouter`] — the exact
+    /// Snapshot of the live `search_skills` description override. Empty
+    /// string means no override is active (the router's static description
+    /// is used). Test-seam only — [`list_tools`] is the production reader.
+    #[doc(hidden)]
+    pub fn search_desc_snapshot(&self) -> String {
+        self.search_desc
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Read-only access to the per-session [`PromptRouter`] — the exact
     /// object `ServerHandler::list_prompts` reads (`list_all()`) and
-    /// `get_prompt` dispatches through. Symmetric with
-    /// [`Self::tool_router_ref`]; the in-process MCP test harness
+    /// `get_prompt` dispatches through. The in-process MCP test harness
     /// (Phase 7 / FR-012) drives `prompts/list` through it so the
     /// assertion sees the same router the live server advertises.
-    pub fn prompt_router_ref(&self) -> &PromptRouter<Self> {
-        &self.prompt_router
+    pub fn prompt_router_ref(&self) -> impl std::ops::Deref<Target = PromptRouter<Self>> + '_ {
+        self.prompt_router.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The exact tool list `ServerHandler::list_tools` advertises: the
+    /// statically registered tools with the live `search_skills`
+    /// description override applied when one is active (empty cell ⇒ the
+    /// static `#[tool]` doc-comment description stands).
+    ///
+    /// The production `list_tools` handler delegates here so the wire
+    /// output is computed in one place; the in-process MCP test harness
+    /// drives this directly (the real `list_tools` requires a
+    /// `RequestContext<RoleServer>` that is only obtainable over a live
+    /// transport — see the harness header — so the injection branch would
+    /// otherwise be untestable in-process).
+    pub fn tools_listing(&self) -> Vec<rmcp::model::Tool> {
+        let mut tools = self.tool_router.list_all();
+        let desc = self
+            .search_desc
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if !desc.is_empty()
+            && let Some(t) = tools.iter_mut().find(|t| t.name == "search_skills")
+        {
+            t.description = Some(std::borrow::Cow::Owned(desc));
+        }
+        tools
     }
 
     /// Read-only borrow of the per-session `McpState`. Required by the
@@ -153,14 +197,17 @@ impl Server {
 #[tool_handler]
 impl ServerHandler for Server {
     fn get_info(&self) -> ServerInfo {
-        // Phase 5 / US1.b: advertise `prompts` capability alongside the
-        // pre-existing `tools` capability. `list_changed: false` per
-        // NFR-008 — workspace switches require a server restart, so
-        // we never emit `notifications/prompts/list_changed`.
+        // Advertise live-update support for both prompts and tools. A workspace
+        // *switch* still requires a restart (the server is stamped with a fixed
+        // --workspace); intra-workspace content drift (enable/disable) is picked
+        // up by the live-sync watcher, which emits list_changed. (Updates the
+        // prior NFR-008 rationale, which assumed a frozen session.)
         let capabilities = ServerCapabilities::builder()
-            .enable_tools()
+            .enable_tools_with(ToolsCapability {
+                list_changed: Some(true),
+            })
             .enable_prompts_with(PromptsCapability {
-                list_changed: Some(false),
+                list_changed: Some(true),
             })
             .build();
         ServerInfo::new(capabilities)
@@ -182,7 +229,11 @@ impl ServerHandler for Server {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
-        let prompts = self.prompt_router.list_all();
+        let prompts = self
+            .prompt_router
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .list_all();
         Ok(ListPromptsResult {
             prompts,
             next_cursor: None,
@@ -204,6 +255,25 @@ impl ServerHandler for Server {
             request.arguments,
             context,
         );
-        self.prompt_router.get_prompt(prompt_context).await
+        // Clone the current router out of the cell so we don't hold the
+        // lock across the `.await` (the render may be slow).
+        let router = self
+            .prompt_router
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        router.get_prompt(prompt_context).await
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult {
+            tools: self.tools_listing(),
+            next_cursor: None,
+            meta: None,
+        })
     }
 }

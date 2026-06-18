@@ -881,7 +881,7 @@ fn build_suggested_fixes(
                         "rules-file integration for `{}` differs from Tome's expected body",
                         hr.harness,
                     ),
-                    command: "tome harness sync".to_owned(),
+                    command: "tome sync".to_owned(),
                     auto_fixable: true,
                 });
             }
@@ -892,7 +892,7 @@ fn build_suggested_fixes(
                         "rules-file integration for `{}` is missing (file absent or block removed)",
                         hr.harness,
                     ),
-                    command: "tome harness sync".to_owned(),
+                    command: "tome sync".to_owned(),
                     auto_fixable: true,
                 });
             }
@@ -912,7 +912,7 @@ fn build_suggested_fixes(
                         "MCP config for `{}` carries a stale `--workspace` argument",
                         hm.harness,
                     ),
-                    command: "tome harness sync".to_owned(),
+                    command: "tome sync".to_owned(),
                     auto_fixable: true,
                 });
             }
@@ -923,7 +923,7 @@ fn build_suggested_fixes(
                         "MCP config for `{}` is missing the `tome` entry",
                         hm.harness,
                     ),
-                    command: "tome harness sync".to_owned(),
+                    command: "tome sync".to_owned(),
                     auto_fixable: true,
                 });
             }
@@ -935,13 +935,12 @@ fn build_suggested_fixes(
                          Tome refuses to overwrite without explicit force",
                         hm.harness,
                     ),
-                    // Two paths offered: the harness-scoped explicit
-                    // sync (`tome harness sync --force`) and the
-                    // doctor-scoped override (`tome doctor --fix
-                    // --force`). The doctor flow lets `--fix --force`
-                    // run an end-to-end repair pass in one invocation.
-                    command: "tome doctor --fix --force  # or: tome harness sync --force"
-                        .to_owned(),
+                    // `tome sync` deliberately omits a `--force` flag, so
+                    // the override path is the doctor-scoped one: `tome
+                    // doctor --fix --force` runs an end-to-end repair pass
+                    // (including the clash-overriding harness reconcile) in
+                    // one invocation.
+                    command: "tome doctor --fix --force".to_owned(),
                     auto_fixable: false,
                 });
             }
