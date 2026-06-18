@@ -24,7 +24,7 @@ use crate::harness::agents::{
 };
 use crate::harness::{
     AgentFormat, BlockBodyStyle, EntryShape, ExtraField, ExtraValue, FileFormat, HarnessModule,
-    McpDialect, RulesFileStrategy, ServerType,
+    McpDialect, RulesFileStrategy, ServerType, SessionSteering, ShimKind,
 };
 
 /// Unit struct implementing [`HarnessModule`] for OpenCode CLI.
@@ -58,6 +58,21 @@ impl HarnessModule for OpenCode {
 
     fn block_body_style(&self) -> BlockBodyStyle {
         BlockBodyStyle::Inline
+    }
+
+    /// OpenCode receives Tome's session-start directive through an embedded
+    /// TypeScript plugin shim (Phase 11 / G2, US3) — it has no native
+    /// session-start hook file. The dir is PROJECT-RELATIVE: `reconcile_plugins`
+    /// anchors it under `project_root` via `project_root.join(dir)`. The shim
+    /// lands at `<project>/.opencode/plugin/tome.ts` (singular `plugin/`, per the
+    /// contract), a dedicated file inside OpenCode's own plugin dir. This is the
+    /// ONLY behavioural addition for OpenCode in Phase 11 US3 — every other sink
+    /// (rules / MCP dialect / native agents / native skills) is unchanged.
+    fn session_steering(&self) -> SessionSteering {
+        SessionSteering::TsPlugin {
+            dir: PathBuf::from(".opencode/plugin"),
+            kind: ShimKind::OpenCode,
+        }
     }
 
     fn mcp_config_path(&self, project_root: &Path, _home: &Path) -> PathBuf {
@@ -357,6 +372,63 @@ mod tests {
             "Jsonc maps to the serde_json read/write path"
         );
         assert_eq!(OPENCODE.mcp_parent_key(), "mcp");
+    }
+
+    /// Phase 11 / US3 (T057): OpenCode's session steering is the embedded
+    /// `TsPlugin` shim, project-relative dir `.opencode/plugin` (singular
+    /// `plugin/`), `ShimKind::OpenCode`.
+    #[test]
+    fn session_steering_is_opencode_ts_plugin() {
+        assert_eq!(
+            OPENCODE.session_steering(),
+            SessionSteering::TsPlugin {
+                dir: PathBuf::from(".opencode/plugin"),
+                kind: ShimKind::OpenCode,
+            },
+        );
+    }
+
+    /// T058 — shim byte pin: OpenCode's embedded `tome.ts` is non-empty.
+    #[test]
+    fn embedded_shim_is_non_empty() {
+        let plugin = crate::harness::plugin_assets::find("opencode")
+            .expect("opencode shim must be embedded");
+        let entry = plugin
+            .files
+            .iter()
+            .find(|f| f.rel_path == "tome.ts")
+            .expect("opencode shim must contain tome.ts");
+        assert!(
+            !entry.bytes.is_empty(),
+            "opencode tome.ts must be non-empty"
+        );
+    }
+
+    /// T058 — invocation + fail-closed pin: the embedded shim invokes
+    /// `tome … session-start … --harness opencode` (B3) and no-ops fail-closed
+    /// on a missing binary.
+    #[test]
+    fn embedded_shim_invokes_session_start_and_fails_closed() {
+        let plugin = crate::harness::plugin_assets::find("opencode").unwrap();
+        let shim = plugin
+            .files
+            .iter()
+            .find(|f| f.rel_path == "tome.ts")
+            .expect("opencode shim must contain tome.ts");
+        let src = std::str::from_utf8(shim.bytes).expect("shim is UTF-8");
+        assert!(src.contains("\"tome\""), "shim launches the `tome` binary");
+        assert!(
+            src.contains("session-start"),
+            "shim runs the session-start subcommand",
+        );
+        assert!(
+            src.contains("\"--harness\"") && src.contains("\"opencode\""),
+            "shim passes --harness opencode (defers to the Rust directive source)",
+        );
+        assert!(
+            src.contains("catch") && src.contains("return \"\""),
+            "shim must fail closed (catch → empty string → no injection) on a missing binary",
+        );
     }
 
     /// Live-probe merge gate (R14 / T087). NOT run in CI — a human must run

@@ -271,6 +271,10 @@ fn write_shim_file(target: &Path, bytes: &[u8]) -> Result<ShimWrite, TomeError> 
         ))
     })?;
 
+    // Idempotence pre-read: read the prior `tome.ts` (if any) to compare bytes.
+    // An oversize prior file (> `HARNESS_RULES_MAX`) intentionally propagates
+    // its bounded-read error rather than being silently overwritten — we never
+    // blind-clobber a `tome.ts` we could not fully read back to compare.
     let prior = match crate::util::bounded_read_to_string(target, crate::util::HARNESS_RULES_MAX) {
         Ok(s) => Some(s),
         Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -393,6 +397,54 @@ mod tests {
             "tome.ts removed"
         );
         assert!(dev.is_file(), "developer sibling NOT removed");
+    }
+
+    /// In-place upgrade path: a STALE `tome.ts` (different bytes) on disk is
+    /// rewritten to the embedded asset and classified `Updated`, with the
+    /// `outcome.updated` bookkeeping recording one `Plugins` entry.
+    #[test]
+    fn stale_shim_is_updated_in_place() {
+        let tmp = TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let plugin_dir = PathBuf::from(".opencode/plugin");
+        let snapshots = vec![ts_plugin_snapshot(
+            plugin_dir.clone(),
+            ShimKind::OpenCode,
+            &project,
+        )];
+
+        // Seed a STALE `tome.ts` (different bytes than the embedded asset).
+        let shim = project.join(".opencode/plugin/tome.ts");
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::fs::write(&shim, b"// stale tome.ts - must be overwritten\n").unwrap();
+        assert_ne!(
+            std::fs::read(&shim).unwrap(),
+            embedded_shim_bytes(ShimKind::OpenCode),
+            "precondition: the seeded shim differs from the embedded asset",
+        );
+
+        let live: HashSet<String> = std::iter::once("stub".to_string()).collect();
+        let mut outcome = SyncOutcome::default();
+        let (actions, err) = reconcile_plugins(&project, &live, &snapshots, &mut outcome);
+        assert!(err.is_none(), "{err:?}");
+        assert_eq!(
+            actions.get("stub"),
+            Some(&Action::Updated),
+            "a stale shim must be classified Updated, not Created/LeftAlone",
+        );
+        assert_eq!(
+            std::fs::read(&shim).unwrap(),
+            embedded_shim_bytes(ShimKind::OpenCode),
+            "the shim is now byte-identical to the embedded asset",
+        );
+        assert!(outcome.added.is_empty(), "an in-place upgrade adds nothing");
+        assert_eq!(
+            outcome.updated.len(),
+            1,
+            "exactly one Plugins update recorded",
+        );
+        assert_eq!(outcome.updated[0].subsystem, SyncSubsystem::Plugins);
     }
 
     /// `reconcile_plugins` fast-exits (no work, no error) when every snapshot is
