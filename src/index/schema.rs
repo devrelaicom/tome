@@ -31,8 +31,12 @@ use crate::error::TomeError;
 /// the migration registry agree the `kind` domain widened. Phase 11 bumps
 /// to 5: `workspace_skills.tier` column added (tiered skill routing). A
 /// matching `Migration` row in [`crate::index::migrations`] handles
-/// existing databases.
-pub const SCHEMA_VERSION: u32 = 5;
+/// existing databases. Phase p11 / model tiering bumps to 6:
+/// `skill_embeddings` rebuilt from `vec0(embedding FLOAT[384])` virtual
+/// table into a plain `(skill_id INTEGER PRIMARY KEY, embedding BLOB)`
+/// table; KNN uses `vec_distance_cosine()` scalar so no dimension is
+/// baked into the schema (switching embedder models needs only a re-embed).
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// The privileged seeded workspace name, present after every bootstrap and
 /// migration. Phase 4's lifecycle paths route un-bound operations through
@@ -95,9 +99,14 @@ pub const CREATE_STATEMENTS: &[&str] = &[
     // schema-v2 → v3 migration's DROP/CREATE statements target the same
     // index name a fresh-bootstrap DB uses.
     "CREATE UNIQUE INDEX skills_unique ON skills (catalog, plugin, kind, name)",
-    "CREATE VIRTUAL TABLE skill_embeddings USING vec0(
+    // Phase p11 / schema v6: dimension-free vector storage. The embedding is a
+    // raw little-endian f32 BLOB of arbitrary length; KNN runs via the sqlite-vec
+    // scalar vec_distance_cosine(). The dimension is NOT in the schema, so
+    // switching embedder models (different dims) needs only a re-embed, never a
+    // schema migration.
+    "CREATE TABLE skill_embeddings (
         skill_id   INTEGER PRIMARY KEY,
-        embedding  FLOAT[384]
+        embedding  BLOB NOT NULL
     )",
     // Phase 11 / schema v5: `tier` column added (tiered skill routing).
     // Fresh bootstraps land here directly; existing DBs gain the column
@@ -159,7 +168,7 @@ pub fn bootstrap(
     let now_rfc = now_unix.to_string();
     let schema_version = SCHEMA_VERSION.to_string();
 
-    let rows: [(&str, &str); 8] = [
+    let rows: [(&str, &str); 9] = [
         ("schema_version", schema_version.as_str()),
         ("embedder_name", embedder.name.as_str()),
         ("embedder_version", embedder.version.as_str()),
@@ -167,6 +176,7 @@ pub fn bootstrap(
         ("reranker_version", reranker.version.as_str()),
         ("summariser_name", summariser.name.as_str()),
         ("summariser_version", summariser.version.as_str()),
+        ("model_profile", "medium"), // TODO(task-7): replace literal with Profile::DEFAULT.as_str()
         ("created_at", now_rfc.as_str()),
     ];
     for (k, v) in rows {
@@ -192,4 +202,26 @@ pub fn bootstrap(
     tx.commit()
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("commit bootstrap: {e}")))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::*;
+    use crate::index::schema::MetaSeed;
+
+    #[test]
+    fn bootstrap_creates_blob_embeddings_table_and_seeds_profile() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::index::vec_ext::register_globally().unwrap();
+        let seed = |n: &str, v: &str| MetaSeed { name: n.into(), version: v.into() };
+        bootstrap(&mut conn, &seed("e","1"), &seed("r","1"), &seed("s","1")).unwrap();
+        // skill_embeddings is a plain table whose DDL has no FLOAT[N] / vec0.
+        let ddl: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE name='skill_embeddings'", [], |r| r.get(0)).unwrap();
+        assert!(ddl.contains("BLOB"), "embedding column must be BLOB: {ddl}");
+        assert!(!ddl.to_lowercase().contains("vec0"), "must not be a vec0 table: {ddl}");
+        let profile: String = conn.query_row(
+            "SELECT value FROM meta WHERE key='model_profile'", [], |r| r.get(0)).unwrap();
+        assert_eq!(profile, "medium");
+    }
 }
