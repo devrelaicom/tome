@@ -13,7 +13,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::harness::{EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy};
+use crate::harness::{
+    EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy, SessionSteering, ShimKind,
+};
 
 /// Unit struct implementing [`HarnessModule`] for Cline.
 pub struct Cline;
@@ -73,6 +75,20 @@ impl HarnessModule for Cline {
             extra_fields: &[],
         }
     }
+
+    /// Cline cannot run a native session-start hook, so Tome ships an embedded
+    /// TypeScript plugin shim (Phase 11 / G2, US3). The dir is PROJECT-RELATIVE:
+    /// `reconcile_plugins` anchors it under `project_root` via `project_root.join(dir)`
+    /// (a relative `dir` is anchored; the `session_steering()` signature takes no
+    /// `project_root`, so relative is the only option). The shim lands at
+    /// `<project>/.cline/plugins/tome.ts` — a dedicated file inside Cline's own
+    /// plugin dir, so a developer's sibling plugin is never clobbered or removed.
+    fn session_steering(&self) -> SessionSteering {
+        SessionSteering::TsPlugin {
+            dir: PathBuf::from(".cline/plugins"),
+            kind: ShimKind::Cline,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -114,5 +130,82 @@ mod tests {
         assert_eq!(d.entry_type, None);
         assert!(d.emit_env);
         assert!(!CLINE.mcp_manual_only());
+    }
+
+    /// Phase 11 / US3 (T057): Cline's session steering is the embedded
+    /// `TsPlugin` shim, project-relative dir `.cline/plugins`, `ShimKind::Cline`.
+    #[test]
+    fn session_steering_is_cline_ts_plugin() {
+        assert_eq!(
+            CLINE.session_steering(),
+            SessionSteering::TsPlugin {
+                dir: PathBuf::from(".cline/plugins"),
+                kind: ShimKind::Cline,
+            },
+        );
+    }
+
+    /// T058 — shim byte pin: Cline's embedded `tome.ts` is non-empty.
+    #[test]
+    fn embedded_shim_is_non_empty() {
+        let plugin =
+            crate::harness::plugin_assets::find("cline").expect("cline shim must be embedded");
+        let entry = plugin
+            .files
+            .iter()
+            .find(|f| f.rel_path == "tome.ts")
+            .expect("cline shim must contain tome.ts");
+        assert!(!entry.bytes.is_empty(), "cline tome.ts must be non-empty");
+    }
+
+    /// T058 — invocation + fail-closed pin: the embedded shim invokes
+    /// `tome … session-start … --harness cline` (B3: it defers to the Rust
+    /// directive source) and no-ops fail-closed on a missing binary (a `catch`
+    /// that returns the empty string → no injection).
+    #[test]
+    fn embedded_shim_invokes_session_start_and_fails_closed() {
+        let plugin = crate::harness::plugin_assets::find("cline").unwrap();
+        let shim = plugin
+            .files
+            .iter()
+            .find(|f| f.rel_path == "tome.ts")
+            .expect("cline shim must contain tome.ts");
+        let src = std::str::from_utf8(shim.bytes).expect("shim is UTF-8");
+        // Invokes the `tome` launcher's `session-start` for THIS harness.
+        assert!(src.contains("\"tome\""), "shim launches the `tome` binary");
+        assert!(
+            src.contains("session-start"),
+            "shim runs the session-start subcommand",
+        );
+        assert!(
+            src.contains("\"--harness\"") && src.contains("\"cline\""),
+            "shim passes --harness cline (defers to the Rust directive source)",
+        );
+        // Fail-closed: a catch that yields empty → no injection.
+        assert!(
+            src.contains("catch") && src.contains("return \"\""),
+            "shim must fail closed (catch → empty string → no injection) on a missing binary",
+        );
+    }
+
+    /// Live-probe merge gate (T087). NOT run in CI — a human must run this
+    /// against a real Cline install before the shim ships.
+    ///
+    /// What to verify by hand:
+    ///
+    /// 1. `tome sync --harness cline` (or `tome harness use cline`) in a
+    ///    workspace-bound project, then confirm `.cline/plugins/tome.ts` is
+    ///    written.
+    /// 2. Start Cline in that project and confirm the shim's
+    ///    `api.registerMessageBuilder({ build })` registration is actually
+    ///    invoked and the Tome directive is injected as a message at session
+    ///    start. The byte-pin + integration tests prove Tome WRITES the shim;
+    ///    only a real Cline can confirm it READS this plugin API shape.
+    #[test]
+    #[ignore = "live-probe: confirm Cline registerMessageBuilder plugin API shape"]
+    fn cline_reads_register_message_builder_shape_live_probe() {
+        // No automated body — see the doc comment for the manual checklist a
+        // human runs against a real Cline install. Present so the gate is
+        // discoverable via `cargo test -- --ignored`.
     }
 }
