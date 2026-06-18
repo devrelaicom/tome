@@ -280,6 +280,16 @@ fn configure_one(
                 .project_root
                 .as_deref()
                 .expect("project_root present when pre was Some");
+            // PERF (US6 NON-BLOCKING note): `build_deps` sets `only_harness =
+            // None`, so each harness in a `--all` / multi-name `use` runs a FULL
+            // `sync_project` reconcile of the WHOLE effective set — O(N) reconciles
+            // for an N-harness selection (and each walks every registered module's
+            // write/cleanup decision). Redundant but correct + idempotent; left
+            // as-is deliberately. Scoping this to the single harness (via
+            // `only_harness`) would change single-`use` semantics (it would stop
+            // reconciling co-owned shared sinks for other live harnesses), so the
+            // full reconcile is the safe choice. `tome sync --harness` is the
+            // scoped path when a caller wants per-harness reconcile.
             let deps = sync::build_deps(paths, home, scope.scope.name(), args.force);
             sync::sync_project(project_root, &deps)?;
             sync_ran = true;

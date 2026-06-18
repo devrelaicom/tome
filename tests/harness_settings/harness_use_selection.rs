@@ -12,7 +12,7 @@
 use crate::common::{HarnessModulesGuard, HomeGuard, ToolEnv, paths_for, seed_workspace};
 use tome::cli::{HarnessScopeArg, HarnessUseArgs};
 use tome::commands::harness::use_;
-use tome::commands::harness::use_::{HarnessUseReport, HarnessUseResult};
+use tome::commands::harness::use_::{HarnessUseOutcome, HarnessUseReport, HarnessUseResult};
 use tome::harness::StubHarness;
 use tome::workspace::{ResolvedScope, Scope, ScopeSource, WorkspaceName};
 
@@ -120,6 +120,30 @@ fn all_flag_selects_every_supported_excluding_generics() {
     );
     // goose IS supported (detectable), so --all includes it.
     assert!(names.contains(&"goose".to_string()), "goose is in --all");
+
+    // F3a: the report is not the only surface — the settings file must have been
+    // written too. Every SUPPORTED harness name is persisted, and NEITHER opt-in
+    // generic appears (the write side mirrors the selection).
+    let body = std::fs::read_to_string(&paths.global_settings_file)
+        .expect("--all must write the global settings file");
+    for m in tome::harness::SUPPORTED_HARNESSES {
+        assert!(
+            body.contains(m.name()),
+            "settings file must persist {}: {body}",
+            m.name(),
+        );
+    }
+    // Word-boundary check: `generic` is a substring of `generic-op`, so assert on
+    // the quoted TOML array element form (`"generic"`) to avoid a false positive
+    // from a (non-existent) entry, and on `"generic-op"` separately.
+    assert!(
+        !body.contains("\"generic\""),
+        "generic must NOT be persisted by --all: {body}",
+    );
+    assert!(
+        !body.contains("\"generic-op\""),
+        "generic-op must NOT be persisted by --all: {body}",
+    );
 }
 
 /// M5 — `use antigravity-cli gemini` collapses to a SINGLE `gemini`
@@ -346,6 +370,114 @@ fn forward_progress_attempts_all_and_surfaces_first_error() {
     // The FIRST failure's exit code is surfaced for the process exit.
     let err = err.expect("a failure must surface an error");
     assert_eq!(err.exit_code(), 7, "first failure's exit code; got {err:?}");
+
+    // F3b: assert the HEALTHY co-selected harness's result variant HONESTLY.
+    //
+    // OBSERVED behaviour (verified, NOT assumed): the healthy `stub_ok` pass
+    // ALSO FAILS with exit 7. `configure_one` builds its `SyncDeps` with
+    // `only_harness = None`, so EACH harness's `sync_project` walks the WHOLE
+    // registered module set and runs the write-OR-cleanup decision for every
+    // module — INCLUDING the broken `stub_fail`. For `stub_ok`'s pass `stub_fail`
+    // is not in the effective list, so it takes the CLEANUP branch
+    // (`clean_mcp_for_harness` → `mcp_config::read_entry`), and that read hits
+    // the symlinked `stub_fail_MCP_BROKEN/mcp.json` parent → the symlink guard
+    // refuses → exit 7. So a broken PEER anywhere in the registry poisons the
+    // healthy harness's full-reconcile pass too; the per-`use` reconcile is NOT
+    // scoped to the harness being configured (that scoping only exists for
+    // `tome sync --harness`, via `only_harness`).
+    //
+    // This is consistent with the documented guarantee — "all attempted + first
+    // error surfaced" — but NOT with a stronger "only the broken harness fails".
+    // Pinning the real `Failed` variant here keeps the test honest and catches a
+    // future change that would scope `use`'s reconcile per-harness.
+    let stub_ok_result = report
+        .results
+        .iter()
+        .find(|r| match r {
+            HarnessUseResult::Ok(o) => o.name == "stub_ok",
+            HarnessUseResult::Failed { name, .. } => name == "stub_ok",
+        })
+        .expect("stub_ok must have a result");
+    assert!(
+        matches!(stub_ok_result, HarnessUseResult::Failed { name, exit_code, .. } if name == "stub_ok" && *exit_code == 7),
+        "the full-reconcile-per-harness coupling makes the healthy stub_ok pass \
+         ALSO fail (exit 7) — its reconcile walks stub_fail's broken MCP cleanup \
+         read; got: {stub_ok_result:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F3c (US6 closeout): the no-arg empty-detected HUMAN message. `run_inner`
+// returns the report but BYPASSES `emit_human`, so the distinct "No harness
+// detected…" string was never exercised. Drive the REAL `tome` binary in a
+// fresh isolated `$HOME` (no well-known harness dir exists → nothing detected)
+// and assert the human stdout carries the actionable message — covering the
+// `run → emit_human → "detected" empty` branch.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn no_arg_empty_detected_prints_no_harness_message() {
+    // No HARNESS_OVERRIDE_MUTEX: the spawned binary uses the REAL registry, not
+    // the lib-local process override. `ToolEnv::cmd()` isolates `$HOME` to a
+    // fresh temp dir, so NO harness is detected.
+    let env = ToolEnv::new();
+
+    let output = env
+        .cmd()
+        .args(["harness", "use", "--scope", "global"])
+        .output()
+        .expect("run tome harness use");
+
+    assert!(
+        output.status.success(),
+        "no-detected is a clean exit, not an error; stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No harness detected"),
+        "the human output must carry the distinct no-harness message; got: {stdout}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F2 (US6 closeout): byte-stable `--json` pin for the `tome harness use`
+// envelope. The single→multi widening (`HarnessUseReport{selection,results[]}`)
+// landed without a wire-shape pin; this locks the exact JSON bytes for a
+// representative one-ok + one-failed report so the envelope cannot drift
+// silently. Built directly from the public types (no I/O), serialised the same
+// way `run`'s `--json` path does (`serde_json::to_string`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn harness_use_report_json_wire_shape_is_byte_stable() {
+    let report = HarnessUseReport {
+        selection: "explicit",
+        results: vec![
+            HarnessUseResult::Ok(HarnessUseOutcome {
+                scope: "global".to_string(),
+                name: "cursor".to_string(),
+                settings_path: std::path::PathBuf::from("/home/u/.tome/settings.toml"),
+                list_changed: true,
+                sync_ran: false,
+                // None → omitted (skip_serializing_if), keeping the common
+                // fully-automatic-MCP shape pinned.
+                mcp_notice: None,
+            }),
+            HarnessUseResult::Failed {
+                name: "codex".to_string(),
+                error: "boom".to_string(),
+                exit_code: 7,
+            },
+        ],
+    };
+
+    let json = serde_json::to_string(&report).expect("serialize report");
+    assert_eq!(
+        json,
+        r#"{"selection":"explicit","results":[{"status":"ok","scope":"global","name":"cursor","settings_path":"/home/u/.tome/settings.toml","list_changed":true,"sync_ran":false},{"status":"failed","name":"codex","error":"boom","exit_code":7}]}"#,
+        "the `tome harness use --json` envelope wire shape must stay byte-stable; got: {json}",
+    );
 }
 
 // ---------------------------------------------------------------------------
