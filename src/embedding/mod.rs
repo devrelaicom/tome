@@ -11,6 +11,7 @@
 
 pub mod download;
 pub mod fastembed;
+pub mod profile;
 pub mod registry;
 pub mod runtime;
 pub mod stub;
