@@ -10,20 +10,36 @@
 //!
 //! ## Module layout
 //!
-//! - `mod.rs` (this file) — the `HarnessModule` trait, the four shape
-//!   enums (`RulesFileStrategy`, `BlockBodyStyle`, `McpConfigFormat`),
-//!   the `MCP_CONFIG_KEY` static, the `SUPPORTED_HARNESSES` registry,
-//!   `lookup`, and the `HARNESS_MODULES_OVERRIDE` test-injection hook.
+//! - `mod.rs` (this file) — the `HarnessModule` trait, the shape enums
+//!   (`RulesFileStrategy`, `BlockBodyStyle`, `McpConfigFormat`; the Phase-11
+//!   G1 `McpDialect` family — `FileFormat`/`EntryShape`/`ServerType`/
+//!   `ExtraValue`/`ExtraField`; the G2 session-steering enums — `Envelope`/
+//!   `HookEvent`/`ShimKind`/`HookFileSpec`/`SessionSteering`; the G3 rules
+//!   extension `RulesFrontmatter`), the `MCP_CONFIG_KEY` static, the
+//!   `SUPPORTED_HARNESSES` + `OPT_IN_TARGETS` registries, the `HARNESS_ALIASES`
+//!   alias layer, `resolve_alias` / `lookup`, and the
+//!   `HARNESS_MODULES_OVERRIDE` test-injection hook.
 //! - `rules_file.rs` — the read/modify/write helpers for the two
-//!   rules-file strategies (`BlockInExistingFile` + `StandaloneFile`).
-//!   Skeleton only — production wiring lands in US3.c / US4.
-//! - `mcp_config.rs` — the read/modify/write helpers for harness MCP
-//!   configuration files (JSON + TOML). Skeleton only.
-//! - `claude_code.rs`, `codex.rs`, `cursor.rs`, `gemini.rs`,
-//!   `opencode.rs` — the five concrete `HarnessModule` impls. Each
-//!   harness's path / format / parent-key decisions are pinned per
-//!   research §R-8 and verified against the upstream harness docs at
-//!   implementation time.
+//!   rules-file strategies (`BlockInExistingFile` + `StandaloneFile`),
+//!   plus the Phase-11 front-matter standalone renderer.
+//! - `mcp_config.rs` — the dialect-aware read/modify/write helpers for harness
+//!   MCP configuration files (JSON + TOML), driven by `McpDialect`.
+//! - `open_plugins.rs` — the Open Plugins `tome-op` portable-plugin emitter
+//!   (`generic-op` / `goose`): an atomic, self-contained bundle.
+//! - `plugin_assets.rs` — the `build.rs`-generated embedded TypeScript shim
+//!   registry (`HARNESS_PLUGINS`) for the G2 `TsPlugin` steering harnesses.
+//! - `routing.rs` — the tiered session-start directive builder shared by the
+//!   rules-file sink, the `CommandHook` sink, and the `tome-op` bundle.
+//! - `reconcile/` — the per-sink reconcilers (hooks / guardrails / agents /
+//!   plugins / open_plugins) the orchestrator (`sync.rs`) dispatches.
+//! - `claude_code.rs`, `codex.rs`, `cursor.rs`, `gemini.rs`, `opencode.rs`
+//!   (the five Phase ≤10 modules) plus the Phase-11 additions
+//!   (`antigravity.rs`, `cline.rs`, `copilot.rs`, `copilot_cli.rs`,
+//!   `crush.rs`, `devin.rs`, `generic.rs`, `generic_op.rs`, `goose.rs`,
+//!   `jetbrains_ai.rs`, `junie.rs`, `kiro.rs`, `pi.rs`, `zed.rs`) — the
+//!   concrete `HarnessModule` impls. Each harness's path / format /
+//!   parent-key / steering decisions are pinned per research §R-8 and
+//!   verified against the upstream harness docs at implementation time.
 //!
 //! Sync-only — `tests/sync_boundary.rs` enforces the constitution's
 //! sync discipline on this tree. No async runtime imports, no await

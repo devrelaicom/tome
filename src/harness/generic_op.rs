@@ -65,8 +65,9 @@ impl HarnessModule for GenericOp {
     }
 
     // The methods below describe the bundle-INTERNAL sinks. They are reported by
-    // `tome harness info` / status but are NOT consulted on the open-plugins
-    // dispatch path (the emitter owns the whole bundle atomically).
+    // `tome harness info generic-op` (which resolves opt-in targets via `lookup`)
+    // but are NOT consulted on the open-plugins dispatch path (the emitter owns
+    // the whole bundle atomically).
 
     fn rules_file_target(&self, project_root: &Path) -> PathBuf {
         bundle_root(project_root).join("AGENTS.md")

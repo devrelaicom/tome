@@ -33,6 +33,8 @@ mod harness_list_json_shape;
 mod harness_module_claude_code;
 #[path = "harness_settings/harness_modules.rs"]
 mod harness_modules;
+#[path = "harness_settings/harness_open_plugins_bundle.rs"]
+mod harness_open_plugins_bundle;
 #[path = "harness_settings/harness_p11_pins.rs"]
 mod harness_p11_pins;
 #[path = "harness_settings/harness_remove_scope.rs"]

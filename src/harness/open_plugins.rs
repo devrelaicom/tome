@@ -202,9 +202,10 @@ fn mcp_bytes(workspace: &str, harness_name: &str) -> Vec<u8> {
 
 /// `serde_json::to_vec_pretty` + a trailing newline (the project's JSON
 /// convention; matches `mcp_config::write_entry`). `to_vec_pretty` cannot fail
-/// for these `json!`-constructed values, so the fallback is unreachable.
+/// for these `json!`-constructed values; the `.expect` makes the impossible
+/// failure loud rather than silently writing `{}` debris into a bundle file.
 fn pretty_bytes(value: &serde_json::Value) -> Vec<u8> {
-    let mut bytes = serde_json::to_vec_pretty(value).unwrap_or_else(|_| b"{}".to_vec());
+    let mut bytes = serde_json::to_vec_pretty(value).expect("json! value always serializes");
     bytes.push(b'\n');
     bytes
 }
@@ -290,8 +291,19 @@ fn read_inline_rules_body(project_root: &Path) -> Result<String, TomeError> {
 /// `.plugin/plugin.json` exists and names `tome-op`. A lenient read — a
 /// malformed/oversize manifest is treated as "not ours" (fail closed; never
 /// mass-delete what we cannot positively identify).
+///
+/// Read/write containment parity (m1, P8/P9 precedent): the manifest read is
+/// routed through [`crate::util::refuse_symlinked_component`] BEFORE the read,
+/// degrading a symlinked-component refusal to `false` ("not ours") — the same
+/// guard the write sink runs. A bundle reachable only through a symlinked
+/// component is not positively identified as ours, so removal is refused.
 fn is_tome_op_bundle(plugin_root: &Path) -> bool {
     let manifest = plugin_root.join(MANIFEST_REL);
+    // A symlinked component on the manifest path → treat as "not ours" (fail
+    // closed; never read or mass-delete through a symlink).
+    if crate::util::refuse_symlinked_component(&manifest).is_err() {
+        return false;
+    }
     let Ok(body) = crate::util::bounded_read_to_string(&manifest, crate::util::PLUGIN_MANIFEST_MAX)
     else {
         return false;
@@ -425,6 +437,98 @@ mod tests {
         .unwrap();
         assert_eq!(remove_tome_op(&root).unwrap(), RemoveOutcome::NotTomeOp);
         assert!(root.exists(), "foreign plugin dir not deleted");
+    }
+
+    // ---- is_tome_op_bundle fail-closed branches (m3) ---------------------
+
+    #[test]
+    fn is_tome_op_bundle_recognises_a_real_bundle() {
+        let (_tmp, project) = project_with_rules("# r\n");
+        let root = project.join("tome-op");
+        emit_tome_op(&root, &project, "ws", "goose").unwrap();
+        assert!(is_tome_op_bundle(&root), "an emitted bundle is recognised");
+    }
+
+    #[test]
+    fn is_tome_op_bundle_false_when_manifest_absent() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("tome-op");
+        std::fs::create_dir_all(&root).unwrap();
+        // No `.plugin/plugin.json` at all → not ours.
+        assert!(!is_tome_op_bundle(&root));
+    }
+
+    #[test]
+    fn is_tome_op_bundle_false_on_malformed_manifest() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("tome-op");
+        std::fs::create_dir_all(root.join(".plugin")).unwrap();
+        // Not valid JSON → fail closed (return false), never mass-delete.
+        std::fs::write(root.join(MANIFEST_REL), b"{ this is not json").unwrap();
+        assert!(!is_tome_op_bundle(&root));
+    }
+
+    #[test]
+    fn is_tome_op_bundle_false_on_wrong_name() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("tome-op");
+        std::fs::create_dir_all(root.join(".plugin")).unwrap();
+        // Valid JSON naming a DIFFERENT plugin → not ours.
+        std::fs::write(
+            root.join(MANIFEST_REL),
+            br#"{"name":"not-tome-op","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        assert!(!is_tome_op_bundle(&root));
+    }
+
+    #[test]
+    fn is_tome_op_bundle_false_on_oversize_manifest() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("tome-op");
+        std::fs::create_dir_all(root.join(".plugin")).unwrap();
+        // A manifest over PLUGIN_MANIFEST_MAX → the bounded read errors → false
+        // (fail closed; never positively identify an oversize file as ours).
+        let oversize = vec![b' '; (crate::util::PLUGIN_MANIFEST_MAX as usize) + 1];
+        std::fs::write(root.join(MANIFEST_REL), &oversize).unwrap();
+        assert!(!is_tome_op_bundle(&root));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_tome_op_bundle_false_when_manifest_is_a_symlink() {
+        // Read/write containment parity (m1): the `refuse_symlinked_component`
+        // guard runs against the manifest path before the read. The guard
+        // refuses a symlinked component that lands in its walked tail — here the
+        // manifest's own `.plugin` directory is a symlink to a sibling holding a
+        // real tome-op manifest. The guard refuses the symlinked component, so
+        // identification degrades to `false` ("not ours") and removal is refused.
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        // A sibling directory holding a real tome-op manifest.
+        let real_plugin_dir = base.join("real_plugin");
+        std::fs::create_dir_all(&real_plugin_dir).unwrap();
+        std::fs::write(
+            real_plugin_dir.join("plugin.json"),
+            format!(
+                r#"{{"name":"tome-op","version":"{}"}}"#,
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .unwrap();
+
+        // The bundle root: a REAL directory whose `.plugin` child is a SYMLINK to
+        // the sibling. `.plugin` is the symlinked component on the manifest path
+        // and has no real-directory descendant of its own under the root, so it
+        // lands in the guard's walked tail and is refused.
+        let root = base.join("tome-op");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&real_plugin_dir, root.join(".plugin")).unwrap();
+
+        assert!(
+            !is_tome_op_bundle(&root),
+            "a symlinked manifest-path component must fail closed to 'not ours'",
+        );
     }
 
     // ---- name validation -------------------------------------------------

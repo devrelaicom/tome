@@ -92,6 +92,42 @@ fn use_global_scope_writes_global_settings_file() {
     );
 }
 
+/// Phase 11 / US4 (M4): `tome harness use generic-op` (global scope) is ACCEPTED
+/// — the opt-in target lives in `OPT_IN_TARGETS`, not `SUPPORTED_HARNESSES`, so
+/// `run` must resolve it via the alias+opt-in-aware `lookup` rather than
+/// erroring exit 18. Driven against the REAL registry (NO `HarnessModulesGuard`
+/// override, since opt-in targets are not in the override slot) at global scope,
+/// so no project sync runs — only the name validation + settings write.
+#[test]
+fn use_generic_op_global_scope_is_accepted() {
+    // No `HarnessModulesGuard` — opt-in targets are resolved through the real
+    // `OPT_IN_TARGETS` registry, which `lookup` consults. Still serialise on the
+    // override mutex so a co-resident test's installed override can't leak in and
+    // shadow the real registry mid-run.
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    // `global` is auto-seeded by index bootstrap; no manual seed needed.
+
+    let args = HarnessUseArgs {
+        name: "generic-op".to_string(),
+        scope: HarnessScopeArg::Global,
+        force: false,
+    };
+    let scope = make_resolved_scope("global", None);
+    use_::run(args, &scope, &paths, Mode::Json).expect("use generic-op ok (not exit 18)");
+
+    let body = std::fs::read_to_string(&paths.global_settings_file).expect("global settings");
+    assert!(
+        body.contains("generic-op"),
+        "global settings must include generic-op: {body}",
+    );
+}
+
 #[test]
 fn use_workspace_scope_writes_workspace_settings_file() {
     let _lock = crate::common::HARNESS_OVERRIDE_MUTEX

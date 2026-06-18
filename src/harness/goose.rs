@@ -67,8 +67,9 @@ impl HarnessModule for Goose {
         Some(bundle_root(project_root))
     }
 
-    // Bundle-INTERNAL sinks (informational for `tome harness info` / status; not
-    // consulted on the open-plugins dispatch path).
+    // Bundle-INTERNAL sinks (informational for `tome harness info goose`; not
+    // consulted on the open-plugins dispatch path — the emitter owns the whole
+    // bundle atomically).
 
     fn rules_file_target(&self, project_root: &Path) -> PathBuf {
         bundle_root(project_root).join("AGENTS.md")

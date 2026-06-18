@@ -56,6 +56,34 @@ fn info_for_real_harness_runs_without_project() {
     assert!(result.is_ok(), "info run: {result:?}");
 }
 
+/// Phase 11 / US4 (M1): `tome harness info generic` / `generic-op` must resolve
+/// the opt-in target via `lookup` and print its snippet, NOT error
+/// `HarnessNotSupported` (exit 18). The opt-in targets live in `OPT_IN_TARGETS`,
+/// not `SUPPORTED_HARNESSES` / the override slot, so `info::run`'s `lookup`
+/// fallback is exercised against the REAL registry.
+#[test]
+fn info_for_opt_in_targets_resolves_via_lookup() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    let _home = HomeGuard::install(env.home_path());
+
+    for name in ["generic", "generic-op"] {
+        let args = HarnessInfoArgs {
+            name: name.to_string(),
+        };
+        let scope = fallback_scope();
+        let result = info::run(args, &scope, &paths, Mode::Json);
+        assert!(
+            result.is_ok(),
+            "info {name} must resolve via lookup (not exit 18); got {result:?}",
+        );
+    }
+}
+
 #[test]
 fn info_reports_direct_scope_when_global_declares() {
     // `info::run` reads the process-global harness-modules override slot;

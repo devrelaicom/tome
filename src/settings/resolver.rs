@@ -536,6 +536,25 @@ mod tests {
     }
 
     #[test]
+    fn opt_in_target_declaration_resolves_into_effective_list() {
+        // Phase 11 / US4 (M4): a `generic-op` declaration in a settings layer must
+        // resolve into the effective harness list. `generic` / `generic-op` live
+        // in `OPT_IN_TARGETS` (not `SUPPORTED_HARNESSES`), so the per-entry
+        // validation in `resolve_list` must accept them via the opt-in-aware
+        // `lookup` — otherwise this would error `HarnessNotSupported`.
+        let stub = StubScope::new();
+        let global = GlobalSettings {
+            harnesses: Some(vec!["generic".to_owned(), "generic-op".to_owned()]),
+            expose_agents_as_personas: None,
+            strip_plugin_agent_privileges: None,
+        };
+        let result = resolve_effective_list(None, None, &global, &stub).unwrap();
+        let names: Vec<&str> = result.harnesses.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, vec!["generic", "generic-op"]);
+        assert!(result.excluded.is_empty());
+    }
+
+    #[test]
     fn workspace_ref_outside_project_errors() {
         let stub = StubScope::new();
         let ws = WorkspaceSettings {
