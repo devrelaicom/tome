@@ -98,22 +98,33 @@ pub fn run(
 ) -> Result<(), TomeError> {
     let home = home_root()?;
     let project_root = scope.project_root.clone();
+    // Snapshot the named module's fields. Build the `ModuleSnapshot` from a
+    // `&dyn HarnessModule` so the same closure serves both the override-aware
+    // `with_effective_modules` path and the opt-in `lookup` fallback below.
+    let snapshot_of = |m: &dyn crate::harness::HarnessModule| ModuleSnapshot {
+        name: m.name().to_string(),
+        description: m.description().to_string(),
+        rules_strategy: m.rules_file_strategy(),
+        mcp_dialect: m.mcp_dialect(),
+        detected: m.detect(&home),
+        detected_path: m.detect_path(&home),
+        rules_target: project_root.as_deref().map(|p| m.rules_file_target(p)),
+        mcp_target: project_root.as_deref().map(|p| m.mcp_config_path(p, &home)),
+        block_body_style: m.block_body_style(),
+    };
+    // Phase 11 / US4 (M1): resolve via the effective registry FIRST (so a test
+    // override and the supported harnesses both work), then fall back to the
+    // alias+opt-in-aware `lookup` so `tome harness info generic` / `generic-op`
+    // resolve their opt-in modules rather than erroring `HarnessNotSupported`.
+    // `lookup` does not consult the override slot, but the override branch has
+    // already matched when one is installed.
     let snap = with_effective_modules(|mods| {
         mods.iter()
             .find(|m| m.name() == args.name)
-            .map(|m| ModuleSnapshot {
-                name: m.name().to_string(),
-                description: m.description().to_string(),
-                rules_strategy: m.rules_file_strategy(),
-                mcp_dialect: m.mcp_dialect(),
-                detected: m.detect(&home),
-                detected_path: m.detect_path(&home),
-                rules_target: project_root.as_deref().map(|p| m.rules_file_target(p)),
-                mcp_target: project_root.as_deref().map(|p| m.mcp_config_path(p, &home)),
-                block_body_style: m.block_body_style(),
-            })
-    });
-    let snap = snap.ok_or_else(|| TomeError::HarnessNotSupported {
+            .map(|m| snapshot_of(*m))
+    })
+    .or_else(|| crate::harness::lookup(&args.name).map(snapshot_of))
+    .ok_or_else(|| TomeError::HarnessNotSupported {
         name: args.name.clone(),
     })?;
 

@@ -237,7 +237,14 @@ fn scope_label(scope: ScopeKind) -> String {
 /// in synthetic harnesses validate against their registry rather than the
 /// production `SUPPORTED_HARNESSES` constant.
 fn is_supported_harness(name: &str) -> bool {
+    // Production registry (or a synthetic override registry for tests). Phase 11
+    // / US4: also accept the opt-in targets (`generic` / `generic-op`), which
+    // live in `OPT_IN_TARGETS` rather than `SUPPORTED_HARNESSES` and so are NOT
+    // surfaced by `with_effective_modules` — `lookup` is the alias+opt-in-aware
+    // resolver. (When an override registry is installed, `lookup` doesn't consult
+    // it; the `with_effective_modules` branch already matched the synthetic name.)
     crate::harness::with_effective_modules(|modules| modules.iter().any(|m| m.name() == name))
+        || crate::harness::lookup(name).is_some()
 }
 
 /// Compute the `(ScopeKind, key)` cycle-detection key for the entry
@@ -525,6 +532,25 @@ mod tests {
         assert_eq!(result.harnesses.len(), 2);
         assert_eq!(result.harnesses[0].name, "claude-code");
         assert_eq!(result.harnesses[1].name, "codex");
+        assert!(result.excluded.is_empty());
+    }
+
+    #[test]
+    fn opt_in_target_declaration_resolves_into_effective_list() {
+        // Phase 11 / US4 (M4): a `generic-op` declaration in a settings layer must
+        // resolve into the effective harness list. `generic` / `generic-op` live
+        // in `OPT_IN_TARGETS` (not `SUPPORTED_HARNESSES`), so the per-entry
+        // validation in `resolve_list` must accept them via the opt-in-aware
+        // `lookup` — otherwise this would error `HarnessNotSupported`.
+        let stub = StubScope::new();
+        let global = GlobalSettings {
+            harnesses: Some(vec!["generic".to_owned(), "generic-op".to_owned()]),
+            expose_agents_as_personas: None,
+            strip_plugin_agent_privileges: None,
+        };
+        let result = resolve_effective_list(None, None, &global, &stub).unwrap();
+        let names: Vec<&str> = result.harnesses.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, vec!["generic", "generic-op"]);
         assert!(result.excluded.is_empty());
     }
 
