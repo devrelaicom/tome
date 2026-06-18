@@ -447,6 +447,12 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.2](https://github.com/devrelaicom/tome/compare/v0.7.1...v0.7.2) - 2026-06-18
+
+### Added
+
+- MCP live-sync + unified `tome sync` + `session-start` ([#239](https://github.com/devrelaicom/tome/pull/239))
+
 ## [0.7.1](https://github.com/devrelaicom/tome/compare/v0.7.0...v0.7.1) - 2026-06-17
 
 ### Added
