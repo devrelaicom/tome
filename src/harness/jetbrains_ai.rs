@@ -23,7 +23,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::harness::{
-    EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy, RulesFrontmatter,
+    EntryShape, FileFormat, GuardrailsPlacement, GuardrailsTarget, HarnessModule, McpDialect,
+    RulesFileStrategy, RulesFrontmatter,
 };
 
 /// Unit struct implementing [`HarnessModule`] for JetBrains AI Assistant.
@@ -78,11 +79,19 @@ impl HarnessModule for JetbrainsAi {
         })
     }
 
-    // F5 DEFER (US1 closeout): jetbrains-ai is a `StandaloneFile` rules harness
-    // but inherits the DEFAULT `guardrails_target` = `InFileRegion` on the SAME
-    // standalone path — needs an explicit guardrails-sink decision (StandaloneSibling
-    // or suppression) before the guardrails pass is wired for the new harnesses.
-    // TODO(P11-guardrails): pick the guardrails sink for StandaloneFile harnesses.
+    /// Guardrails land in a Tome-owned standalone sibling (PW3), distinct from
+    /// the standalone rules file `.aiassistant/rules/tome.md` — both inside AI
+    /// Assistant's own `.aiassistant/rules/` dir. Without it the standalone rules
+    /// writer and the in-file guardrails region would share one path and clobber
+    /// each other every sync. Mirrors `cursor`.
+    fn guardrails_target(&self, project_root: &Path) -> GuardrailsTarget {
+        GuardrailsTarget {
+            placement: GuardrailsPlacement::StandaloneSibling {
+                file: project_root.join(".aiassistant/rules/TOME_GUARDRAILS.md"),
+            },
+            suppress_if_hooks_present: false,
+        }
+    }
 
     /// Manual-only: AI Assistant configures MCP through its Settings UI, so
     /// Tome writes no MCP file. The sync skips the MCP sink entirely; the
@@ -148,6 +157,24 @@ mod tests {
         );
         let fm = JETBRAINS_AI.rules_frontmatter().expect("has frontmatter");
         assert_eq!(fm.fields, &[("apply", "always")]);
+    }
+
+    /// PW3 (phase-wide): guardrails land in a Tome-owned StandaloneSibling that
+    /// is NOT the standalone rules-file path.
+    #[test]
+    fn guardrails_sibling_differs_from_rules_file() {
+        let proj = Path::new("/proj");
+        let rules = JETBRAINS_AI.rules_file_target(proj);
+        match JETBRAINS_AI.guardrails_target(proj).placement {
+            GuardrailsPlacement::StandaloneSibling { file } => {
+                assert_eq!(
+                    file,
+                    PathBuf::from("/proj/.aiassistant/rules/TOME_GUARDRAILS.md")
+                );
+                assert_ne!(file, rules);
+            }
+            other => panic!("expected StandaloneSibling, got {other:?}"),
+        }
     }
 
     #[test]

@@ -408,3 +408,63 @@ fn op_bundle_not_written_when_not_selected() {
         "goose bundle must not be written when not selected/detected",
     );
 }
+
+/// PW4 (phase-wide): `teardown_project` (the empty-effective-set teardown that
+/// `tome workspace remove` Step 1 now routes through) unwinds EVERY new sink —
+/// the `TsPlugin` shim (cline), the `CommandHook` entry (devin), and the
+/// `tome-op` bundle (goose) — not just rules + MCP. A developer-owned sibling
+/// alongside Tome's artifacts survives.
+#[test]
+fn teardown_project_unwinds_ts_shim_command_hook_and_tome_op_bundle() {
+    let _lock = mutex_lock();
+    // Three new-harness shapes in one project: cline (TsPlugin shim), devin
+    // (CommandHook), goose (Open Plugins tome-op bundle).
+    let fx = Fixture::build(
+        "test-workspace",
+        "harnesses = [\"cline\", \"devin\", \"goose\"]",
+    );
+
+    // ---- (a) live sync lands every harness's artifact ----------------------
+    sync::sync_project(&fx.project, &fx.deps()).expect("live sync");
+
+    let shim = fx.project.join(".cline/plugins/tome.ts");
+    let command_hook = fx.project.join(".devin/hooks.v1.json");
+    let bundle = bundle_root(&fx.project, "goose");
+    assert!(shim.is_file(), "cline TsPlugin shim must land");
+    assert!(command_hook.is_file(), "devin CommandHook entry must land");
+    assert!(
+        bundle.join(".plugin/plugin.json").is_file(),
+        "goose tome-op bundle must land",
+    );
+
+    // A developer-owned sibling next to the Tome-owned shim must survive.
+    let dev_sibling = fx.project.join(".cline/plugins/their-plugin.ts");
+    std::fs::write(&dev_sibling, "// developer's own plugin\n").unwrap();
+
+    // ---- (b) teardown removes EVERY Tome-owned artifact --------------------
+    sync::teardown_project(&fx.project, &fx.deps()).expect("teardown");
+
+    assert!(
+        !shim.exists(),
+        "teardown must remove the cline TsPlugin shim"
+    );
+    assert!(
+        !command_hook.exists() || {
+            // The hook file may persist if it carried developer entries; Tome's
+            // own entry must be gone. Here Tome wrote the file, so it is removed.
+            let body = std::fs::read_to_string(&command_hook).unwrap_or_default();
+            !body.contains("tome harness session-start")
+        },
+        "teardown must remove Tome's devin CommandHook entry",
+    );
+    assert!(
+        !bundle.exists(),
+        "teardown must remove the goose tome-op bundle",
+    );
+
+    // ---- (c) the developer sibling is untouched ----------------------------
+    assert!(
+        dev_sibling.is_file(),
+        "a developer-owned sibling must survive teardown",
+    );
+}

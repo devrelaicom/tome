@@ -267,31 +267,11 @@ fn detect_harness_names(home: &Path) -> Vec<String> {
 /// Map a harness module `name()` to the closed [`Harness`] enum. Returns `None`
 /// for any name with no enum variant (e.g. the test `stub` harness) so an
 /// unmappable name is silently dropped rather than forced onto the wire.
+///
+/// PW7: delegates to the SSOT [`crate::commands::harness::harness_name_to_enum`]
+/// rather than carrying a second parallel match — the two can never drift.
 fn harness_from_name(name: &str) -> Option<Harness> {
-    match name {
-        "claude-code" => Some(Harness::ClaudeCode),
-        "cursor" => Some(Harness::Cursor),
-        "codex" => Some(Harness::Codex),
-        "opencode" => Some(Harness::Opencode),
-        "gemini" => Some(Harness::GeminiCli),
-        // Phase 11 — additional harnesses. id == wire token (no rename beyond
-        // `gemini`). `antigravity-cli` is a `gemini` alias resolved upstream.
-        "copilot-cli" => Some(Harness::CopilotCli),
-        "copilot" => Some(Harness::Copilot),
-        "devin" => Some(Harness::Devin),
-        "cline" => Some(Harness::Cline),
-        "junie" => Some(Harness::Junie),
-        "jetbrains-ai" => Some(Harness::JetbrainsAi),
-        "antigravity" => Some(Harness::Antigravity),
-        "pi" => Some(Harness::Pi),
-        "crush" => Some(Harness::Crush),
-        "zed" => Some(Harness::Zed),
-        "kiro" => Some(Harness::Kiro),
-        "generic" => Some(Harness::Generic),
-        "generic-op" => Some(Harness::GenericOp),
-        "goose" => Some(Harness::Goose),
-        _ => None,
-    }
+    crate::commands::harness::harness_name_to_enum(name)
 }
 
 /// The kebab wire token for a [`Harness`], used as the deterministic sort key.

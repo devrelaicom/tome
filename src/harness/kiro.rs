@@ -18,7 +18,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::harness::{
-    EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy, RulesFrontmatter,
+    EntryShape, FileFormat, GuardrailsPlacement, GuardrailsTarget, HarnessModule, McpDialect,
+    RulesFileStrategy, RulesFrontmatter,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Kiro.
@@ -70,14 +71,19 @@ impl HarnessModule for Kiro {
         project_root.join(".kiro/settings/mcp.json")
     }
 
-    // F5 DEFER (US1 closeout): Kiro is a `StandaloneFile` rules harness but
-    // inherits the DEFAULT `guardrails_target` = `InFileRegion` on the SAME
-    // `rules_file_target` path — so once the guardrails pass is wired for these
-    // new harnesses it would try to insert a marker region into Tome's own
-    // standalone file. The guardrails pass is NOT wired for the StandaloneFile
-    // newcomers in US1; this needs an explicit decision (a Cursor-style
-    // `StandaloneSibling`, or suppression) before guardrails is enabled here.
-    // TODO(P11-guardrails): pick the guardrails sink for StandaloneFile harnesses.
+    /// Guardrails land in a Tome-owned standalone sibling (PW3), distinct from
+    /// the standalone steering file `.kiro/steering/tome.md` — both inside
+    /// Kiro's own `.kiro/steering/` dir. Without it the standalone rules writer
+    /// and the in-file guardrails region would share one path and clobber each
+    /// other every sync. Mirrors `cursor`.
+    fn guardrails_target(&self, project_root: &Path) -> GuardrailsTarget {
+        GuardrailsTarget {
+            placement: GuardrailsPlacement::StandaloneSibling {
+                file: project_root.join(".kiro/steering/TOME_GUARDRAILS.md"),
+            },
+            suppress_if_hooks_present: false,
+        }
+    }
 
     /// Kiro's MCP dialect: JSON `mcpServers` + `CommandArgs`, no `type`,
     /// `emit_env:true` (`"env": {}`), no extra fields.
@@ -133,5 +139,23 @@ mod tests {
         assert_eq!(d.entry_type, None);
         assert!(d.emit_env);
         assert!(!KIRO.mcp_manual_only());
+    }
+
+    /// PW3 (phase-wide): guardrails land in a Tome-owned StandaloneSibling that
+    /// is NOT the standalone steering-file path.
+    #[test]
+    fn guardrails_sibling_differs_from_rules_file() {
+        let proj = Path::new("/proj");
+        let rules = KIRO.rules_file_target(proj);
+        match KIRO.guardrails_target(proj).placement {
+            GuardrailsPlacement::StandaloneSibling { file } => {
+                assert_eq!(
+                    file,
+                    PathBuf::from("/proj/.kiro/steering/TOME_GUARDRAILS.md")
+                );
+                assert_ne!(file, rules);
+            }
+            other => panic!("expected StandaloneSibling, got {other:?}"),
+        }
     }
 }

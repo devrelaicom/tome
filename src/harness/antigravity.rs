@@ -48,7 +48,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::harness::{EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy};
+use crate::harness::{
+    EntryShape, FileFormat, GuardrailsPlacement, GuardrailsTarget, HarnessModule, McpDialect,
+    RulesFileStrategy,
+};
 
 /// Unit struct implementing [`HarnessModule`] for Antigravity IDE.
 pub struct Antigravity;
@@ -68,7 +71,12 @@ impl HarnessModule for Antigravity {
     }
 
     fn detect(&self, home: &Path) -> bool {
-        // Antigravity shares the Gemini config tree.
+        // Antigravity shares the `~/.gemini` detection dir with the `gemini`
+        // harness (PW10): a no-arg `tome harness use` that auto-detects from
+        // `~/.gemini` configures BOTH. This is benign — they own DISTINCT sinks
+        // (antigravity's rules at `.agent/rules/`, its MCP at
+        // `~/.gemini/config/mcp_config.json`; gemini's at its own paths), so the
+        // shared detection dir never causes a write collision.
         home.join(".gemini").is_dir()
     }
 
@@ -89,12 +97,18 @@ impl HarnessModule for Antigravity {
         Some(project_root.join(".agent/rules/tome.md"))
     }
 
-    // F5 DEFER (US1 closeout): antigravity is a `StandaloneFile` rules harness
-    // but inherits the DEFAULT `guardrails_target` = `InFileRegion` on the SAME
-    // `.agent/rules/tome.md` path — needs an explicit guardrails-sink decision
-    // (StandaloneSibling or suppression) before the guardrails pass is wired for
-    // the new harnesses.
-    // TODO(P11-guardrails): pick the guardrails sink for StandaloneFile harnesses.
+    /// Guardrails land in a Tome-owned standalone sibling (PW3), distinct from
+    /// the standalone rules file `.agent/rules/tome.md` — without it the
+    /// standalone rules writer and the in-file guardrails region would share one
+    /// path and clobber each other every sync. Mirrors `cursor`.
+    fn guardrails_target(&self, project_root: &Path) -> GuardrailsTarget {
+        GuardrailsTarget {
+            placement: GuardrailsPlacement::StandaloneSibling {
+                file: project_root.join(".agent/rules/TOME_GUARDRAILS.md"),
+            },
+            suppress_if_hooks_present: false,
+        }
+    }
 
     fn mcp_config_path(&self, _project_root: &Path, home: &Path) -> PathBuf {
         // GLOBAL config under the shared Gemini tree.
@@ -145,6 +159,21 @@ mod tests {
             ANTIGRAVITY.mcp_config_path(Path::new("/proj"), Path::new("/h")),
             Path::new("/h/.gemini/config/mcp_config.json"),
         );
+    }
+
+    /// PW3 (phase-wide): guardrails land in a Tome-owned StandaloneSibling that
+    /// is NOT the standalone rules-file path.
+    #[test]
+    fn guardrails_sibling_differs_from_rules_file() {
+        let proj = Path::new("/proj");
+        let rules = ANTIGRAVITY.rules_file_target(proj);
+        match ANTIGRAVITY.guardrails_target(proj).placement {
+            GuardrailsPlacement::StandaloneSibling { file } => {
+                assert_eq!(file, PathBuf::from("/proj/.agent/rules/TOME_GUARDRAILS.md"));
+                assert_ne!(file, rules);
+            }
+            other => panic!("expected StandaloneSibling, got {other:?}"),
+        }
     }
 
     #[test]

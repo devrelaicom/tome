@@ -320,7 +320,11 @@ impl Envelope {
 // ---------------------------------------------------------------------------
 
 /// Which agentic harness an action concerns / originates from. Serializes kebab
-/// so the wire tokens match the harness ids used everywhere else in Tome.
+/// so the wire tokens match the harness ids used everywhere else in Tome — with
+/// ONE exception: `GeminiCli` renders to `gemini-cli` while the harness module
+/// names itself `gemini` (the rename bridged by
+/// [`crate::commands::harness::harness_name_to_enum`]). Every other variant's
+/// `kebab-case` token equals its module `name()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Harness {
@@ -329,9 +333,11 @@ pub enum Harness {
     Codex,
     Opencode,
     GeminiCli,
-    // Phase 11 — additional harness support. `kebab-case` renders each wire
-    // token to match the harness module's `name()`. No `antigravity-cli`
-    // variant: it is an alias of `gemini` and resolves before any emit.
+    // Phase 11 — additional harness support. For these, `kebab-case` renders
+    // each wire token to match the harness module's `name()` exactly (the
+    // `gemini`→`gemini-cli` rename above is the only mismatch). No
+    // `antigravity-cli` variant: it is an alias of `gemini` and resolves before
+    // any emit.
     CopilotCli,
     Copilot,
     Devin,

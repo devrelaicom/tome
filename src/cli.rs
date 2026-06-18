@@ -95,9 +95,9 @@ pub enum Command {
     /// applies the three safe repair classes (re-download models,
     /// re-clone broken catalog caches, forward-migrate the schema).
     Doctor(DoctorArgs),
-    /// Inspect and manage harness integrations (Claude Code, Codex,
-    /// Cursor, Gemini, OpenCode). Run with no subcommand to enumerate
-    /// every supported harness.
+    /// Inspect and manage harness integrations across ~16 coding harnesses
+    /// (Claude Code, Codex, Cursor, Gemini, OpenCode, Copilot, Cline, Zed,
+    /// and more). Run with no subcommand to enumerate every supported harness.
     Harness(HarnessArgs),
     /// Author, convert, and validate standalone skills. `create` scaffolds a
     /// new skill (wrapped in a minimal plugin by default; `--bare` for a
@@ -327,7 +327,9 @@ pub enum HarnessCommand {
     /// the cleanup pass when the effective list changes.
     Remove(HarnessRemoveArgs),
     /// Report per-harness details for the current project: detection,
-    /// targets, integration state, and source-of-scope.
+    /// targets, integration state, and source-of-scope. Also prints the
+    /// paste-able Tome MCP-config snippet for harnesses with a manual MCP
+    /// setup (e.g. JetBrains AI, Pi).
     Info(HarnessInfoArgs),
     /// Reconcile the project, then print the workspace's skill-routing directive
     /// to stdout, generated fresh from live state. Intended as a SessionStart

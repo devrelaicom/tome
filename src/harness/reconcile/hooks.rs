@@ -417,7 +417,8 @@ pub(crate) fn reconcile_tome_session_hooks(
 /// → remove ONLY the deep-equal Tome entry (re-derived, no sidecar; a mismatch
 /// is left in place). A write failure for one harness is recorded on
 /// `first_error` (exit 44; malformed existing file → exit 43; symlink refusal →
-/// exit 7) and does NOT abort the pass (forward progress).
+/// exit 44 — PW6 parity with the Claude hook sink) and does NOT abort the pass
+/// (forward progress).
 ///
 /// Returns the per-harness aggregate action map (keyed on `name()`) plus the
 /// first error. Wired into the orchestrator AFTER the Phase ≤10 hook passes so
@@ -673,13 +674,26 @@ fn load_hook_file(path: &Path) -> Result<(JsonValue, bool), TomeError> {
     Ok((value, true))
 }
 
+/// Map a refused-symlinked-component error at a hook-file sink to
+/// [`TomeError::HookSettingsWriteFailed`] (exit 44) — PW6 exit-code parity with
+/// the Claude hook sink (the P6 7→44 precedent). A symlinked component on a hook
+/// path is a write-side refusal, so it shares the Claude sink's exit code rather
+/// than the generic `Io` (7).
+fn hook_symlink_refusal(path: &Path, e: std::io::Error) -> TomeError {
+    TomeError::HookSettingsWriteFailed {
+        path: path.to_path_buf(),
+        source: e,
+    }
+}
+
 /// Atomic, symlink-refusing, parent-creating write of a spec hook file. Symlink
-/// refusal maps to `Io` (exit 7); every other write failure → exit 44. Mirrors
-/// `harness::hooks::write_settings` / `mcp_config::atomic_write`.
+/// refusal AND every other write failure map to `HookSettingsWriteFailed`
+/// (exit 44) — PW6 exit-code parity with the Claude hook sink (the P6 7→44
+/// precedent). Mirrors `harness::hooks::write_settings` / `mcp_config::atomic_write`.
 fn write_hook_file(path: &Path, doc: &JsonValue) -> Result<(), TomeError> {
-    // Symlink refusal on the write path → `Io` (exit 7), the dedicated code for
-    // a refused symlinked component at a hook sink.
-    crate::util::refuse_symlinked_component(path).map_err(TomeError::Io)?;
+    // Symlink refusal on the write path → `HookSettingsWriteFailed` (exit 44),
+    // the same code the Claude hook sink uses for a refused symlinked component.
+    crate::util::refuse_symlinked_component(path).map_err(|e| hook_symlink_refusal(path, e))?;
 
     let mut bytes =
         serde_json::to_vec_pretty(doc).map_err(|e| TomeError::HookSettingsWriteFailed {
@@ -741,7 +755,10 @@ fn merge_command_hook(
     first_error: &mut Option<TomeError>,
 ) -> Action {
     // Refuse a symlinked component up front (read parity with the write path).
-    if let Err(e) = crate::util::refuse_symlinked_component(path).map_err(TomeError::Io) {
+    // PW6: a symlink refusal at this hook sink shares the Claude sink's exit 44.
+    if let Err(e) =
+        crate::util::refuse_symlinked_component(path).map_err(|e| hook_symlink_refusal(path, e))
+    {
         if first_error.is_none() {
             *first_error = Some(e);
         }
@@ -808,7 +825,10 @@ fn remove_command_hook(
     outcome: &mut SyncOutcome,
     first_error: &mut Option<TomeError>,
 ) -> Action {
-    if let Err(e) = crate::util::refuse_symlinked_component(path).map_err(TomeError::Io) {
+    // PW6: a symlink refusal at this hook sink shares the Claude sink's exit 44.
+    if let Err(e) =
+        crate::util::refuse_symlinked_component(path).map_err(|e| hook_symlink_refusal(path, e))
+    {
         if first_error.is_none() {
             *first_error = Some(e);
         }
@@ -1065,6 +1085,52 @@ mod command_hook_tests {
         assert_eq!(arr[1]["command"], CMD);
         // The developer's top-level `version` key survives.
         assert_eq!(v["version"], 1);
+    }
+
+    /// PW6 (phase-wide): a symlinked component on a command-hook path fails
+    /// CLOSED with `HookSettingsWriteFailed` (exit 44) — parity with the Claude
+    /// hook sink (the P6 7→44 precedent), NOT the generic `Io` (7). Exercised on
+    /// both the merge (live) and remove (non-live) paths.
+    #[cfg(unix)]
+    #[test]
+    fn command_hook_symlink_refusal_is_exit_44() {
+        use std::os::unix::fs::symlink;
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        // `.devin` is a symlink to a sibling real dir — a symlinked component on
+        // the hook path `<root>/.devin/hooks.v1.json`.
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        symlink(&real, base.join(".devin")).unwrap();
+        let path = base.join(".devin/hooks.v1.json");
+
+        let mut outcome = SyncOutcome::default();
+        let mut first_error = None;
+        let action = merge_command_hook(
+            "h",
+            &path,
+            HookFileSpec::DevinHooksV1,
+            HookEvent::SessionStart,
+            CMD,
+            &mut outcome,
+            &mut first_error,
+        );
+        assert_eq!(action, Action::LeftAlone);
+        let err = first_error.take().expect("symlink must be refused");
+        assert_eq!(err.exit_code(), 44, "got {err:?}");
+
+        // The remove path refuses the same component with the same exit code.
+        let action = remove_command_hook(
+            "h",
+            &path,
+            HookFileSpec::DevinHooksV1,
+            HookEvent::SessionStart,
+            CMD,
+            &mut outcome,
+            &mut first_error,
+        );
+        assert_eq!(action, Action::LeftAlone);
+        assert_eq!(first_error.expect("remove also refuses").exit_code(), 44,);
     }
 
     /// Non-live removal takes ONLY Tome's deep-equal entry; a developer entry

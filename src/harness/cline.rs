@@ -14,7 +14,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::harness::{
-    EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy, SessionSteering, ShimKind,
+    EntryShape, FileFormat, GuardrailsPlacement, GuardrailsTarget, HarnessModule, McpDialect,
+    RulesFileStrategy, SessionSteering, ShimKind,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Cline.
@@ -51,12 +52,19 @@ impl HarnessModule for Cline {
         Some(project_root.join(".clinerules/tome.md"))
     }
 
-    // F5 DEFER (US1 closeout): cline is a `StandaloneFile` rules harness but
-    // inherits the DEFAULT `guardrails_target` = `InFileRegion` on the SAME
-    // standalone path — needs an explicit guardrails-sink decision
-    // (StandaloneSibling or suppression) before the guardrails pass is wired for
-    // the new harnesses.
-    // TODO(P11-guardrails): pick the guardrails sink for StandaloneFile harnesses.
+    /// Guardrails land in a Tome-owned standalone sibling (PW3), distinct from
+    /// the standalone rules file `.clinerules/tome.md` — both inside Cline's own
+    /// `.clinerules/` dir. Without it the standalone rules writer and the in-file
+    /// guardrails region would share one path and clobber each other. Mirrors
+    /// `cursor`.
+    fn guardrails_target(&self, project_root: &Path) -> GuardrailsTarget {
+        GuardrailsTarget {
+            placement: GuardrailsPlacement::StandaloneSibling {
+                file: project_root.join(".clinerules/TOME_GUARDRAILS.md"),
+            },
+            suppress_if_hooks_present: false,
+        }
+    }
 
     fn mcp_config_path(&self, _project_root: &Path, home: &Path) -> PathBuf {
         // GLOBAL config under the per-user dir.
@@ -130,6 +138,22 @@ mod tests {
         assert_eq!(d.entry_type, None);
         assert!(d.emit_env);
         assert!(!CLINE.mcp_manual_only());
+    }
+
+    /// PW3 (phase-wide): guardrails land in a Tome-owned StandaloneSibling that
+    /// is NOT the standalone rules-file path — otherwise the rules writer and the
+    /// guardrails region would share one path and clobber each other every sync.
+    #[test]
+    fn guardrails_sibling_differs_from_rules_file() {
+        let proj = Path::new("/proj");
+        let rules = CLINE.rules_file_target(proj);
+        match CLINE.guardrails_target(proj).placement {
+            GuardrailsPlacement::StandaloneSibling { file } => {
+                assert_eq!(file, PathBuf::from("/proj/.clinerules/TOME_GUARDRAILS.md"));
+                assert_ne!(file, rules, "guardrails must not share the rules path");
+            }
+            other => panic!("expected StandaloneSibling, got {other:?}"),
+        }
     }
 
     /// Phase 11 / US3 (T057): Cline's session steering is the embedded

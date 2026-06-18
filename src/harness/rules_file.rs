@@ -293,8 +293,32 @@ pub(crate) fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), TomeError>
 /// Refuses to write through a symlink (security hardening — exit 7 /
 /// `TomeError::Io`). Idempotent: when the on-disk first block already
 /// has the same body, no write is performed.
+///
+/// # Fail-closed marker validation (PW2)
+///
+/// The `body` (the Tier-3 routing directive, whose `long_summary` may be
+/// plugin/LLM-derived) is inserted verbatim+multi-line between Tome's managed
+/// `tome:begin/end` markers and is re-parsed on the next sync. A body line that
+/// itself looks like a managed marker — a `tome:begin/end` block marker or a
+/// guardrails START/END line — would let the content escape its own region or
+/// wedge the next-sync `find_all_blocks` parse (a DoS that fails every future
+/// sync of the file). Escaping is wrong (the directive is verbatim by design);
+/// the honest defence is refusal. Any such line fails closed with
+/// [`TomeError::Io`] (`InvalidData`, exit 7 — the same class `find_all_blocks`
+/// already uses for a malformed block) and the developer file is untouched.
+/// This reuses the SAME marker-family SSOT the guardrails reconciler validates
+/// with ([`crate::harness::guardrails::body_contains_marker_line`]), so the scan
+/// and the parse can never disagree.
 pub fn write_block(target: &Path, body: &str, _style: BlockBodyStyle) -> Result<(), TomeError> {
     refuse_symlink(target)?;
+    if crate::harness::guardrails::body_contains_marker_line(body) {
+        return Err(TomeError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "refusing to write rules block: directive body contains a managed marker line \
+             (a tome:begin/end block marker or a guardrails START/END line) — this would \
+             escape or wedge the managed region",
+        )));
+    }
     let existing = match crate::util::bounded_read_to_string(target, crate::util::HARNESS_RULES_MAX)
     {
         Ok(s) => s,
@@ -685,6 +709,38 @@ mod tests {
         let s = "<!-- tome:begin -->\nfirst\n<!-- tome:end -->\n<!-- tome:begin -->\nsecond\n<!-- tome:end -->\n";
         let block = parse_block(s).unwrap().unwrap();
         assert_eq!(block.body, "first");
+    }
+
+    /// PW2 (phase-wide, security): a directive body containing a standalone
+    /// `<!-- tome:end -->` line is refused (fail closed) and the developer file
+    /// is left byte-for-byte untouched — never a region-escape / wedged parse.
+    #[test]
+    fn write_block_refuses_body_with_managed_marker_line() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("AGENTS.md");
+        let original = "# developer rules\nkeep me\n";
+        std::fs::write(&target, original).unwrap();
+
+        // A directive whose summary line equals the END marker.
+        let malicious = "route skills via Tome.\n<!-- tome:end -->\ntrailer";
+        let err = write_block(&target, malicious, BlockBodyStyle::Inline)
+            .expect_err("a body with a managed marker line must be refused");
+        assert_eq!(err.exit_code(), 7, "got {err:?}");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            original,
+            "developer file must be untouched on refusal",
+        );
+
+        // A guardrails START line in the body is also refused.
+        let with_guardrails_marker = "x\n<!-- START GUARDRAILS: cat:plug -->\ny";
+        assert!(write_block(&target, with_guardrails_marker, BlockBodyStyle::Inline).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), original);
+
+        // A benign multi-line body still writes (no false positive).
+        let benign = "route skills via Tome.\nsecond line.";
+        write_block(&target, benign, BlockBodyStyle::Inline).expect("benign body writes");
+        assert!(std::fs::read_to_string(&target).unwrap().contains(benign));
     }
 
     #[test]
