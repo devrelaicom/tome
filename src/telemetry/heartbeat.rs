@@ -274,6 +274,22 @@ fn harness_from_name(name: &str) -> Option<Harness> {
         "codex" => Some(Harness::Codex),
         "opencode" => Some(Harness::Opencode),
         "gemini" => Some(Harness::GeminiCli),
+        // Phase 11 — additional harnesses. id == wire token (no rename beyond
+        // `gemini`). `antigravity-cli` is a `gemini` alias resolved upstream.
+        "copilot-cli" => Some(Harness::CopilotCli),
+        "copilot" => Some(Harness::Copilot),
+        "devin" => Some(Harness::Devin),
+        "cline" => Some(Harness::Cline),
+        "junie" => Some(Harness::Junie),
+        "jetbrains-ai" => Some(Harness::JetbrainsAi),
+        "antigravity" => Some(Harness::Antigravity),
+        "pi" => Some(Harness::Pi),
+        "crush" => Some(Harness::Crush),
+        "zed" => Some(Harness::Zed),
+        "kiro" => Some(Harness::Kiro),
+        "generic" => Some(Harness::Generic),
+        "generic-op" => Some(Harness::GenericOp),
+        "goose" => Some(Harness::Goose),
         _ => None,
     }
 }
@@ -288,6 +304,23 @@ fn harness_wire_token(h: &Harness) -> &'static str {
         Harness::Codex => "codex",
         Harness::Opencode => "opencode",
         Harness::GeminiCli => "gemini-cli",
+        // Phase 11 — kebab wire tokens must match the serde `kebab-case`
+        // rendering (the `harness_serialises_with_pinned_kebab_tokens` pin) so
+        // this hand-written sort key stays in lockstep with the wire shape.
+        Harness::CopilotCli => "copilot-cli",
+        Harness::Copilot => "copilot",
+        Harness::Devin => "devin",
+        Harness::Cline => "cline",
+        Harness::Junie => "junie",
+        Harness::JetbrainsAi => "jetbrains-ai",
+        Harness::Antigravity => "antigravity",
+        Harness::Pi => "pi",
+        Harness::Crush => "crush",
+        Harness::Zed => "zed",
+        Harness::Kiro => "kiro",
+        Harness::Generic => "generic",
+        Harness::GenericOp => "generic-op",
+        Harness::Goose => "goose",
     }
 }
 

@@ -28,6 +28,36 @@
 //! Sync-only — `tests/sync_boundary.rs` enforces the constitution's
 //! sync discipline on this tree. No async runtime imports, no await
 //! points.
+//!
+//! ## Phase 11 — error reuse (FR-034), NO new exit code
+//!
+//! Phase 11 widens the harness set (~5 → ~16) and adds three trait
+//! generalizations — G1 `McpDialect`, G2 `SessionSteering`, G3
+//! rules-delivery extensions — that all arrive as **defaulted** trait
+//! methods so the existing modules compile unchanged. Per the constitution
+//! gate this phase adds **NO new dependency**, **NO new top-level module**
+//! (the new code lives in `harness/` submodules), and **NO new exit code**.
+//!
+//! Every new failure class in Phase 11 maps onto an existing closed-set
+//! `TomeError` variant — we deliberately do NOT reach for a new code, because
+//! each failure is semantically the same as one Phase ≤10 already names, and
+//! the closed error set's value is exactly that it has no `Other` arm to
+//! absorb novelty. The verbatim mapping a contributor must reuse:
+//!
+//! - [`crate::error::TomeError::HarnessClash`] (exit 19) — a non-Tome-owned
+//!   MCP entry already occupies the `tome` key (the MCP-ownership predicate
+//!   refuses to clobber a foreign server named `tome`).
+//! - [`crate::error::TomeError::HarnessNotSupported`] (exit 18) — an unknown
+//!   harness name (after alias resolution); the `lookup`/registry miss.
+//! - [`crate::error::TomeError::Io`] (exit 7) — symlink refusal or generic IO
+//!   at a sink (rules file, MCP config, shim, session-hook file).
+//! - [`crate::error::TomeError::HookSettingsWriteFailed`] (exit 44) — a
+//!   hook/session-hook file write failure (the G2 `CommandHook` sink).
+//! - [`crate::error::TomeError::HookSpecParseError`] (exit 43) — a malformed
+//!   existing hook file we must merge into.
+//!
+//! When you add a Phase-11 failure path, pick the variant above whose meaning
+//! matches — do not promote a new code for a failure the set already names.
 
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
@@ -41,6 +71,10 @@ pub mod guardrails;
 pub mod hooks;
 pub mod mcp_config;
 pub mod opencode;
+/// Embedded harness-plugin (TypeScript shim) registry (Phase 11, R6). Defines
+/// the `include!` target shapes and exposes the `build.rs`-generated
+/// `HARNESS_PLUGINS` slice. Harness-runtime-executed — the sync boundary holds.
+pub mod plugin_assets;
 /// Per-sink reconcilers (hooks / guardrails / agents) extracted from `sync`
 /// in Phase 7 (FR-011). Crate-internal: the orchestrator and the doctor are
 /// the only callers.

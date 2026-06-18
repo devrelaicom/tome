@@ -329,6 +329,23 @@ pub enum Harness {
     Codex,
     Opencode,
     GeminiCli,
+    // Phase 11 — additional harness support. `kebab-case` renders each wire
+    // token to match the harness module's `name()`. No `antigravity-cli`
+    // variant: it is an alias of `gemini` and resolves before any emit.
+    CopilotCli,
+    Copilot,
+    Devin,
+    Cline,
+    Junie,
+    JetbrainsAi,
+    Antigravity,
+    Pi,
+    Crush,
+    Zed,
+    Kiro,
+    Generic,
+    GenericOp,
+    Goose,
 }
 
 /// Whether the event originated from the CLI or the MCP server surface.
@@ -968,6 +985,34 @@ mod tests {
             serde_json::to_string(&Arch::Aarch64).unwrap(),
             "\"aarch64\""
         );
+    }
+
+    #[test]
+    fn harness_serialises_with_pinned_kebab_tokens() {
+        // Existing tokens — byte-stable pins must not drift.
+        assert_eq!(
+            serde_json::to_string(&Harness::ClaudeCode).unwrap(),
+            "\"claude-code\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Harness::GeminiCli).unwrap(),
+            "\"gemini-cli\""
+        );
+        // Phase 11 additions — `kebab-case` must render the exact harness ids.
+        assert_eq!(
+            serde_json::to_string(&Harness::CopilotCli).unwrap(),
+            "\"copilot-cli\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Harness::JetbrainsAi).unwrap(),
+            "\"jetbrains-ai\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Harness::GenericOp).unwrap(),
+            "\"generic-op\""
+        );
+        assert_eq!(serde_json::to_string(&Harness::Pi).unwrap(), "\"pi\"");
+        assert_eq!(serde_json::to_string(&Harness::Goose).unwrap(), "\"goose\"");
     }
 
     #[test]
