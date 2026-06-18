@@ -54,6 +54,10 @@ pub struct Migration {
 /// the new `'agent'` value without DDL (entry-schema-p6.md). Phase 11
 /// registers the fourth: `phase_11_v4_to_v5`, adding `workspace_skills.tier`
 /// for tiered skill routing (every pre-existing enrolment defaults to tier 3).
+/// Phase p11 / model tiering registers the fifth: `phase_p11_v5_to_v6`,
+/// rebuilding `skill_embeddings` from a `vec0` virtual table into a plain
+/// BLOB table and stamping `meta.model_profile = 'small'` for pre-existing
+/// installs (which used the Small profile models by default).
 pub const MIGRATIONS: &[Migration] = &[
     Migration {
         from: 1,
@@ -78,6 +82,12 @@ pub const MIGRATIONS: &[Migration] = &[
         to: 5,
         name: "phase11_workspace_skills_tier",
         apply: phase_11_v4_to_v5,
+    },
+    Migration {
+        from: 5,
+        to: 6,
+        name: "phase_p11_dimension_free_embeddings",
+        apply: phase_p11_v5_to_v6,
     },
 ];
 
@@ -345,6 +355,63 @@ fn phase_11_v4_to_v5(tx: &Transaction) -> Result<(), TomeError> {
             ))
         })?;
     }
+    Ok(())
+}
+
+/// schema v5 → v6 (Phase p11 / model tiering). Two effects:
+/// 1. Rebuild `skill_embeddings` from a `vec0(embedding FLOAT[384])` virtual
+///    table into a plain `(skill_id INTEGER PRIMARY KEY, embedding BLOB)`
+///    table, copying every existing vector across. sqlite-vec returns a vec0
+///    vector column as its raw little-endian f32 BLOB, so the bytes survive
+///    the copy unchanged — no re-embed needed for an in-place upgrade.
+/// 2. Stamp `meta.model_profile = 'small'`: a pre-v6 DB was necessarily built
+///    with the only pre-tiering models (bge-small + bge-reranker-base), which
+///    ARE the Small profile, so the existing meta embedder/reranker rows match
+///    Small with zero drift.
+///
+/// `apply_pending` records `meta.schema_version = 6` after this returns Ok.
+fn phase_p11_v5_to_v6(tx: &Transaction) -> Result<(), TomeError> {
+    // Idempotency guard: if skill_embeddings is already a plain table (no vec0),
+    // skip the rebuild (re-running after a downstamp in tests must not fail).
+    let is_vec0: bool = tx
+        .query_row(
+            "SELECT sql LIKE '%vec0%' FROM sqlite_master WHERE name='skill_embeddings'",
+            [],
+            |r| r.get::<_, bool>(0),
+        )
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(false),
+            other => Err(other),
+        })
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!(
+            "phase_p11_v5_to_v6: probe skill_embeddings kind: {e}"
+        )))?;
+
+    if is_vec0 {
+        tx.execute_batch(
+            "CREATE TABLE skill_embeddings_v6 (
+                 skill_id   INTEGER PRIMARY KEY,
+                 embedding  BLOB NOT NULL
+             );
+             INSERT INTO skill_embeddings_v6 (skill_id, embedding)
+                 SELECT skill_id, embedding FROM skill_embeddings;
+             DROP TABLE skill_embeddings;
+             ALTER TABLE skill_embeddings_v6 RENAME TO skill_embeddings;",
+        )
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!(
+            "phase_p11_v5_to_v6: rebuild skill_embeddings: {e}"
+        )))?;
+    }
+
+    // Stamp the profile for the pre-existing install (idempotent INSERT..ON CONFLICT).
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES ('model_profile', 'small')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [],
+    )
+    .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!(
+        "phase_p11_v5_to_v6: stamp model_profile: {e}"
+    )))?;
     Ok(())
 }
 
