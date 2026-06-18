@@ -28,7 +28,8 @@ use crate::plugin::lifecycle::{self, LifecycleDeps};
 use crate::presentation::colour;
 use crate::workspace::ResolvedScope;
 
-use crate::commands::plugin::{embedder_entry, open_index_for_read, registry_seeds};
+use crate::commands::plugin::{open_index_for_read, registry_seeds};
+use crate::index::meta::{self, MetaKey, ModelIdent};
 
 // NOTE: this module's local `Scope` enum is the reindex *target* (all /
 // catalog / plugin). To avoid a name collision with the Phase 3
@@ -88,6 +89,31 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
         return Ok(());
     }
 
+    // B1: a profile-driven embedder change requires a WHOLE-INDEX re-embed; the
+    // GLOBAL `meta` embedder stamp is gated on it. Open one writable handle for
+    // the active-embedder read + the (post-commit) stamp. `Scope::All` is the
+    // "no catalog/plugin scope" discriminant from `parse_scope` above.
+    let policy_conn = {
+        let (e_seed, r_seed, s_seed) = registry_seeds();
+        index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: e_seed,
+                reranker: r_seed,
+                summariser: s_seed,
+            },
+        )?
+    };
+    let whole_index = matches!(scope, Scope::All);
+    let configured = meta::active_embedder(&policy_conn)?;
+    let configured_ident = ModelIdent {
+        name: configured.name.to_owned(),
+        version: configured.version.to_owned(),
+    };
+    // Refuses a scoped reindex under embedder drift; otherwise returns the
+    // effective force flag (args.force || embedder_changed).
+    let force = embedder_change_policy(&policy_conn, whole_index, args.force, &configured_ident)?;
+
     let embedder = load_embedder(&paths)?;
     let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     // `LifecycleDeps.config` is vestigial since the catalog-enrolment
@@ -105,7 +131,17 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
         allow_model_download: false,
     };
 
-    let aggregate = execute(&scope, &plugins, &deps, args.force)?;
+    let aggregate = execute(&scope, &plugins, &deps, force)?;
+
+    // B1: stamp the GLOBAL `meta` embedder rows ONLY after a WHOLE-INDEX
+    // re-embed commits. Never stamp after a partial (scoped) re-embed — the
+    // `meta` table is a single global key/value store describing the entire
+    // index, and a partial stamp would advertise a dimension the out-of-scope
+    // rows do not carry. `force` is true here whenever the embedder changed.
+    if whole_index && force {
+        stamp_embedder_after_whole_index(&policy_conn, &configured_ident)?;
+    }
+    drop(policy_conn);
 
     // FR-382 + FR-385: regenerate cached summaries only when at least
     // one skill's content_hash changed (added / modified / removed).
@@ -257,9 +293,71 @@ fn read_enabled_plugins(
 }
 
 fn load_embedder(paths: &Paths) -> Result<FastembedEmbedder, TomeError> {
-    let entry = embedder_entry();
+    // B4: resolve the ACTIVE profile's embedder from the index `meta`, not the
+    // hard-coded default. Reindex is the sole drift resolver, so it loads
+    // whatever the active profile now selects and (for a whole-index run)
+    // re-embeds + restamps to match.
+    let (e_seed, r_seed, s_seed) = registry_seeds();
+    let conn = index::open(
+        &paths.index_db,
+        &OpenOptions {
+            embedder: e_seed,
+            reranker: r_seed,
+            summariser: s_seed,
+        },
+    )?;
+    let entry = meta::active_embedder(&conn)?;
     let dir = paths.model_path(entry.name)?;
     FastembedEmbedder::load(entry, &dir)
+}
+
+/// B1 policy gate for `tome reindex`. Decides whether the embedder changed
+/// (configured active-profile embedder vs the GLOBAL `meta` stamp) and, if so:
+///
+/// * a SCOPED run (`whole_index == false`) is REFUSED with
+///   [`TomeError::ReindexScopedEmbedderChange`] (exit 47) — re-embedding only
+///   some plugins while stamping the global `meta` leaves out-of-scope vectors
+///   at the old dimension (the mixed-dimension corruption);
+/// * a WHOLE-INDEX run forces a full re-embed so every row is rewritten at the
+///   new dimension.
+///
+/// Returns the EFFECTIVE force flag: `args_force || embedder_changed`. When the
+/// embedder did not change the caller's own `--force` is passed through
+/// unchanged. Exposed (`pub`) so the model-tiering regression test can drive
+/// the exact gate `run_inner` uses without spawning the binary.
+pub fn embedder_change_policy(
+    conn: &rusqlite::Connection,
+    whole_index: bool,
+    args_force: bool,
+    configured_embedder: &ModelIdent,
+) -> Result<bool, TomeError> {
+    let stored_name = meta::read(conn, MetaKey::EmbedderName)?.unwrap_or_default();
+    let stored_ver = meta::read(conn, MetaKey::EmbedderVersion)?.unwrap_or_default();
+    let embedder_changed =
+        stored_name != configured_embedder.name || stored_ver != configured_embedder.version;
+
+    if embedder_changed && !whole_index {
+        return Err(TomeError::ReindexScopedEmbedderChange {
+            stored: stored_name,
+            configured: configured_embedder.name.clone(),
+        });
+    }
+    // `skills.rs` SKIPs unchanged-hash skills unless `force`, so an embedder
+    // change MUST force or the new-dimension vectors never get written.
+    Ok(args_force || embedder_changed)
+}
+
+/// B1: stamp the GLOBAL `meta` embedder rows to the configured identity AFTER a
+/// whole-index re-embed has committed. Callers MUST NOT invoke this after a
+/// partial (scoped) re-embed — see [`embedder_change_policy`]. Exposed for the
+/// regression test for the same reason the policy gate is.
+pub fn stamp_embedder_after_whole_index(
+    conn: &rusqlite::Connection,
+    configured_embedder: &ModelIdent,
+) -> Result<(), TomeError> {
+    meta::write(conn, MetaKey::EmbedderName, &configured_embedder.name)?;
+    meta::write(conn, MetaKey::EmbedderVersion, &configured_embedder.version)?;
+    Ok(())
 }
 
 /// Aggregated outcome of one `tome reindex` invocation.

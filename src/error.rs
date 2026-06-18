@@ -261,6 +261,23 @@ pub enum TomeError {
     EmbedderVersionDrift { stored: String, configured: String },
 
     // -----------------------------------------------------------------------
+    // Phase p11 / model tiering — scoped reindex under embedder change (47).
+    //
+    // A profile switch that changes the embedder needs a WHOLE-INDEX re-embed:
+    // re-embedding only some plugins while the GLOBAL `meta` embedder rows are
+    // stamped would leave out-of-scope vectors at the old dimension — the
+    // mixed-dimension corruption B1 guards. 47 is the first free slot after
+    // the Phase 6 hooks/agents block (43–46); the query+drift cluster (40–42)
+    // is full.
+    // -----------------------------------------------------------------------
+    #[error(
+        "embedder changed (`{stored}` -> `{configured}`); a scoped reindex \
+         cannot switch the embedder safely. Run a full `tome reindex` (no \
+         catalog/plugin scope) to re-embed every plugin and switch profiles."
+    )]
+    ReindexScopedEmbedderChange { stored: String, configured: String },
+
+    // -----------------------------------------------------------------------
     // Phase 2 — index + catalog interaction (codes 50–54).
     // -----------------------------------------------------------------------
     #[error("another tome process is updating the index; retry once it has finished")]
@@ -563,6 +580,8 @@ impl TomeError {
             Self::QueryNoResultsStrict { .. } => 40,
             Self::EmbedderNameDrift { .. } => 41,
             Self::EmbedderVersionDrift { .. } => 42,
+            // 47 — model tiering: scoped reindex under embedder change
+            Self::ReindexScopedEmbedderChange { .. } => 47,
             // 50–54 — index + catalog interaction
             Self::IndexBusy => 50,
             Self::IndexIntegrityCheckFailure(_) => 51,
@@ -660,6 +679,9 @@ impl TomeError {
             Self::QueryNoResultsStrict { .. } => ErrorCategory::QueryNoResultsStrict,
             Self::EmbedderNameDrift { .. } => ErrorCategory::EmbedderNameDrift,
             Self::EmbedderVersionDrift { .. } => ErrorCategory::EmbedderVersionDrift,
+            Self::ReindexScopedEmbedderChange { .. } => {
+                ErrorCategory::ReindexScopedEmbedderChange
+            }
             Self::IndexBusy => ErrorCategory::IndexBusy,
             Self::IndexIntegrityCheckFailure(_) => ErrorCategory::IndexIntegrityCheckFailure,
             Self::SchemaTooNew { .. } => ErrorCategory::SchemaTooNew,
@@ -748,6 +770,7 @@ pub enum ErrorCategory {
     QueryNoResultsStrict,
     EmbedderNameDrift,
     EmbedderVersionDrift,
+    ReindexScopedEmbedderChange,
     IndexBusy,
     IndexIntegrityCheckFailure,
     SchemaTooNew,
@@ -819,6 +842,7 @@ impl ErrorCategory {
             Self::QueryNoResultsStrict => "query_no_results_strict",
             Self::EmbedderNameDrift => "embedder_name_drift",
             Self::EmbedderVersionDrift => "embedder_version_drift",
+            Self::ReindexScopedEmbedderChange => "reindex_scoped_embedder_change",
             Self::IndexBusy => "index_busy",
             Self::IndexIntegrityCheckFailure => "index_integrity_check_failure",
             Self::SchemaTooNew => "schema_too_new",
@@ -1183,6 +1207,10 @@ mod tests {
             (QueryNoResultsStrict, "query_no_results_strict"),
             (EmbedderNameDrift, "embedder_name_drift"),
             (EmbedderVersionDrift, "embedder_version_drift"),
+            (
+                ReindexScopedEmbedderChange,
+                "reindex_scoped_embedder_change",
+            ),
             (IndexBusy, "index_busy"),
             (IndexIntegrityCheckFailure, "index_integrity_check_failure"),
             (SchemaTooNew, "schema_too_new"),
@@ -1287,6 +1315,7 @@ mod tests {
             QueryNoResultsStrict => assert_covered(QueryNoResultsStrict),
             EmbedderNameDrift => assert_covered(EmbedderNameDrift),
             EmbedderVersionDrift => assert_covered(EmbedderVersionDrift),
+            ReindexScopedEmbedderChange => assert_covered(ReindexScopedEmbedderChange),
             IndexBusy => assert_covered(IndexBusy),
             IndexIntegrityCheckFailure => assert_covered(IndexIntegrityCheckFailure),
             SchemaTooNew => assert_covered(SchemaTooNew),

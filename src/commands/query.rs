@@ -29,10 +29,7 @@ use crate::paths::Paths;
 use crate::presentation::{colour, progress, tables};
 use crate::workspace::{ResolvedScope, Scope, ScopeSource};
 
-use super::plugin::{
-    embedder_entry, missing_models, open_index_for_read, read_catalog_manifest, registry_seeds,
-    reranker_entry,
-};
+use super::plugin::{missing_models, open_index_for_read, read_catalog_manifest};
 
 /// Either the reranker's raw logit ("reranked") or 1.0 − cosine distance
 /// ("embedding-similarity"). The string is duplicated at the top level and
@@ -102,18 +99,33 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
     // vestigial `QueryDeps.config` field is populated with an empty default.
     let config = Config::default();
 
+    // B4: resolve the ACTIVE profile's embedder + reranker. Open the index
+    // read-only when present; on a fresh install (no DB) fall back to the
+    // default profile, which the bootstrap will stamp. `missing_models` walks
+    // the whole registry but we only ever name-match the two resolved entries,
+    // so the query path is already profile-safe (it never demands a model the
+    // active profile doesn't use).
+    let (embedder_meta, reranker_meta) = if paths.index_db.is_file() {
+        let conn = crate::index::open_read_only(&paths.index_db)?;
+        (
+            crate::index::meta::active_embedder(&conn)?,
+            crate::index::meta::active_reranker(&conn)?,
+        )
+    } else {
+        use crate::embedding::profile::{Profile, embedder_for, reranker_for};
+        (embedder_for(Profile::DEFAULT), reranker_for(Profile::DEFAULT))
+    };
+
     // Model presence — embedder always required, reranker required unless
     // `--no-rerank`. We check before constructing the heavy
     // `FastembedEmbedder` so a missing-model error doesn't pay the load
     // cost first.
-    let embedder_meta = embedder_entry();
     let missing = missing_models(&paths);
     if missing.iter().any(|e| e.name == embedder_meta.name) {
         return Err(TomeError::ModelMissing {
             model: embedder_meta.name.to_owned(),
         });
     }
-    let reranker_meta = reranker_entry();
     if !args.no_rerank && missing.iter().any(|e| e.name == reranker_meta.name) {
         return Err(TomeError::ModelMissing {
             model: reranker_meta.name.to_owned(),
@@ -138,7 +150,17 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
     };
     let reranker: Option<&dyn Reranker> = reranker_loaded.as_ref().map(|r| r as &dyn Reranker);
 
-    let (embedder_seed, reranker_seed, _summariser_seed) = registry_seeds();
+    // The drift-detection seeds must match the models we just loaded (the
+    // ACTIVE profile's), so build them from the resolved metas rather than the
+    // default-profile `registry_seeds()`.
+    let embedder_seed = MetaSeed {
+        name: embedder_meta.name.to_owned(),
+        version: embedder_meta.version.to_owned(),
+    };
+    let reranker_seed = MetaSeed {
+        name: reranker_meta.name.to_owned(),
+        version: reranker_meta.version.to_owned(),
+    };
     let deps = QueryDeps {
         paths: &paths,
         scope: &scope.scope,
@@ -187,9 +209,21 @@ pub fn run_with_deps(
         reranker_used,
         strict: args.strict,
         corpus_size_bucket: crate::telemetry::buckets::CountBucket::from(outcome.corpus_size),
-        // The embedder identity is the pinned registry entry — a `&'static str`
-        // from the closed `MODEL_REGISTRY`, never a free-form string.
-        embedder_model_id: Some(embedder_entry().name),
+        // The embedder identity is the one the caller loaded. The telemetry
+        // field is `&'static str`, so recover the pinned registry entry by the
+        // seed name; a non-registry seed (e.g. a test stub) falls back to the
+        // DEFAULT profile's pinned embedder so the field is never free-form and
+        // is byte-stable with the pre-tiering behaviour.
+        embedder_model_id: Some(
+            crate::embedding::registry::lookup(&deps.embedder_seed.name)
+                .map(|e| e.name)
+                .unwrap_or_else(|| {
+                    crate::embedding::profile::embedder_for(
+                        crate::embedding::profile::Profile::DEFAULT,
+                    )
+                    .name
+                }),
+        ),
         // CLI surface has no calling harness (that's an MCP-only dimension).
         calling_harness: None,
     });

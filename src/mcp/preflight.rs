@@ -12,7 +12,7 @@
 //! handful of `get_skill` invocations never pay the cost.
 
 use crate::embedding::download;
-use crate::embedding::registry::{MODEL_REGISTRY, ModelEntry, ModelKind};
+use crate::embedding::registry::ModelEntry;
 use crate::embedding::{Embedder, fastembed::FastembedEmbedder};
 use crate::error::TomeError;
 use crate::index::meta::{DriftStatus, ModelIdent, detect_drift};
@@ -40,8 +40,10 @@ pub struct EmbedderHandle {
 /// 5. Verify embedder files exist and pass SHA-256.
 /// 6. Eager-load the embedder.
 pub fn run(_scope: &ResolvedScope, paths: &Paths) -> Result<EmbedderHandle, TomeError> {
-    let embedder_entry = pick_kind(ModelKind::Embedder)?;
-    let reranker_entry = pick_kind(ModelKind::Reranker)?;
+    // B4: the embedder + reranker are resolved from the ACTIVE profile AFTER
+    // the index conn opens (see below) — the registry now carries every
+    // profile's models, so the old "first registry entry of this kind"
+    // (`pick_kind`) would pick the small profile rather than the active one.
 
     // F2a: single central index DB; F11 reintroduces workspace-aware view.
     let db_path = paths.index_db.clone();
@@ -81,6 +83,12 @@ pub fn run(_scope: &ResolvedScope, paths: &Paths) -> Result<EmbedderHandle, Tome
     drop(probe_conn);
 
     let conn = db::open_read_only(&db_path)?;
+
+    // B4: resolve the ACTIVE profile's embedder + reranker from the index
+    // `meta` (the conn is in hand now). Used for BOTH the loaded
+    // `EmbedderHandle` and the `detect_drift` idents below.
+    let embedder_entry = crate::index::meta::active_embedder(&conn)?;
+    let reranker_entry = crate::index::meta::active_reranker(&conn)?;
 
     // Drift detection. The reranker comparison still happens here for
     // observability, but reranker drift is *not* a startup failure —
@@ -130,22 +138,6 @@ pub fn run(_scope: &ResolvedScope, paths: &Paths) -> Result<EmbedderHandle, Tome
         embedder_entry,
         reranker_entry,
     })
-}
-
-fn pick_kind(kind: ModelKind) -> Result<&'static ModelEntry, TomeError> {
-    MODEL_REGISTRY
-        .iter()
-        .find(|m| m.kind == kind)
-        .ok_or_else(|| TomeError::McpStartupFailed {
-            reason: format!(
-                "MODEL_REGISTRY missing a {} entry",
-                match kind {
-                    ModelKind::Embedder => "embedder",
-                    ModelKind::Reranker => "reranker",
-                    ModelKind::Summariser => "summariser",
-                }
-            ),
-        })
 }
 
 fn verify_embedder_artefacts(paths: &Paths, entry: &ModelEntry) -> Result<(), TomeError> {

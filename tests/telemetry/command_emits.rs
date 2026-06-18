@@ -351,7 +351,6 @@ mod cli_search {
     use tome::cli::QueryArgs;
     use tome::commands::query;
     use tome::config::Config;
-    use tome::embedding::registry::{MODEL_REGISTRY, ModelKind};
     use tome::embedding::stub::{StubEmbedder, StubReranker};
     use tome::index::{self, OpenOptions};
     use tome::output::Mode;
@@ -369,11 +368,9 @@ mod cli_search {
     /// carries (`Some(embedder_entry().name)`), derived from the public registry
     /// so the test doesn't need the `pub(crate)` accessor.
     fn registry_embedder_name() -> &'static str {
-        MODEL_REGISTRY
-            .iter()
-            .find(|e| e.kind == ModelKind::Embedder)
-            .expect("a registry embedder entry")
-            .name
+        // The telemetry `embedder_model_id` reports the DEFAULT profile's pinned
+        // embedder (B4: a non-registry stub seed falls back to the default).
+        tome::embedding::profile::embedder_for(tome::embedding::profile::Profile::DEFAULT).name
     }
 
     fn open_index(paths: &Paths) -> rusqlite::Connection {

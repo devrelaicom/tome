@@ -64,11 +64,34 @@ pub(crate) fn model_manifest_ok(paths: &Paths, entry: &ModelEntry) -> bool {
 
 /// Enumerate registry entries whose on-disk manifest is missing or
 /// unreadable. Returned in registry order.
+///
+/// NOTE: this walks the WHOLE registry. Consumers that gate on "the models
+/// THIS index actually needs" (B2) must use [`missing_models_for_profile`]
+/// instead — after Phase 2 the registry carries every profile's embedder +
+/// reranker, so the whole-registry walk would demand downloading models the
+/// active profile never uses. `query.rs` is exempt: it name-matches a single
+/// resolved entry, so the whole-registry set is filtered down to one anyway.
 pub(crate) fn missing_models(paths: &Paths) -> Vec<&'static ModelEntry> {
     MODEL_REGISTRY
         .iter()
         .filter(|e| !model_manifest_ok(paths, e))
         .collect()
+}
+
+/// B2: the missing-model set scoped to the ACTIVE profile's `[embedder,
+/// reranker]` only (the summariser is handled by its own US4 download path).
+/// `conn` resolves the active profile from `meta`. Used by the `plugin enable`
+/// download prompt so a workspace only ever pulls the models its profile uses.
+pub(crate) fn missing_models_for_profile(
+    paths: &Paths,
+    conn: &rusqlite::Connection,
+) -> Result<Vec<&'static ModelEntry>, TomeError> {
+    let embedder = crate::index::meta::active_embedder(conn)?;
+    let reranker = crate::index::meta::active_reranker(conn)?;
+    Ok([embedder, reranker]
+        .into_iter()
+        .filter(|e| !model_manifest_ok(paths, e))
+        .collect())
 }
 
 /// `MetaSeed` values matching the `MODEL_REGISTRY` embedder / reranker /
@@ -89,20 +112,6 @@ pub fn registry_seeds() -> (
         name: m.name.to_owned(), version: m.version.to_owned(),
     };
     (seed(e), seed(r), seed(s))
-}
-
-/// Pick the embedder entry for the DEFAULT model profile. Callers that want
-/// the active (potentially non-default) profile's embedder should resolve
-/// via `crate::embedding::profile::embedder_for(active_profile)` instead.
-pub(crate) fn embedder_entry() -> &'static ModelEntry {
-    crate::embedding::profile::embedder_for(crate::embedding::profile::Profile::DEFAULT)
-}
-
-/// Pick the reranker entry for the DEFAULT model profile. Companion to
-/// [`embedder_entry`]. Both `enable` and `query` need this — keeping them in
-/// one place avoids `MODEL_REGISTRY` scanning drift between sites.
-pub(crate) fn reranker_entry() -> &'static ModelEntry {
-    crate::embedding::profile::reranker_for(crate::embedding::profile::Profile::DEFAULT)
 }
 
 pub(crate) use crate::presentation::format::human_mb;

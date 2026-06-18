@@ -20,7 +20,8 @@ use time::OffsetDateTime;
 use crate::catalog::git::{self, Git};
 use crate::catalog::manifest::CatalogManifest;
 use crate::cli::CatalogUpdateArgs;
-use crate::commands::plugin::{embedder_entry, registry_seeds};
+use crate::commands::plugin::registry_seeds;
+use crate::index::meta::{self, ModelIdent};
 use crate::config::Config;
 use crate::embedding::fastembed::FastembedEmbedder;
 use crate::error::TomeError;
@@ -45,6 +46,22 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
             summariser: summariser_seed.clone(),
         },
     )?;
+
+    // B3: refuse the catalog-update re-embed under embedder drift BEFORE doing
+    // any git fetch or model load. `catalog update` re-embeds the affected
+    // plugins (a PARTIAL re-embed), so landing new-dimension vectors against an
+    // old-dimension index would corrupt it. The configured embedder is the
+    // ACTIVE profile's; reindex is the only path allowed to switch it.
+    {
+        let configured = meta::active_embedder(&conn)?;
+        meta::guard_embedder_drift(
+            &conn,
+            &ModelIdent {
+                name: configured.name.to_owned(),
+                version: configured.version.to_owned(),
+            },
+        )?;
+    }
 
     // Resolve the URL/ref pairs to refresh. With `--name`, only the
     // resolved workspace's enrolment of that catalog. Without, the
@@ -239,7 +256,19 @@ impl<T> GetOrInsertWithResult<T> for Option<T> {
 }
 
 fn load_embedder(paths: &Paths) -> Result<FastembedEmbedder, TomeError> {
-    let entry = embedder_entry();
+    // B4: resolve the ACTIVE profile's embedder via `meta`. The B3 guard above
+    // has already proven the configured embedder matches the stored one, so
+    // this loads the model that produced the index's vectors.
+    let (e_seed, r_seed, s_seed) = registry_seeds();
+    let conn = index::open(
+        &paths.index_db,
+        &OpenOptions {
+            embedder: e_seed,
+            reranker: r_seed,
+            summariser: s_seed,
+        },
+    )?;
+    let entry = meta::active_embedder(&conn)?;
     let dir = paths.model_path(entry.name)?;
     FastembedEmbedder::load(entry, &dir)
 }

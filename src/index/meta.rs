@@ -184,6 +184,56 @@ pub fn active_profile(conn: &Connection) -> Result<crate::embedding::profile::Pr
         .unwrap_or(Profile::DEFAULT))
 }
 
+/// The embedder registry entry the ACTIVE profile selects (B4). Conn-bearing
+/// call sites resolve through this rather than the removed zero-arg
+/// `embedder_entry()` so a non-default profile's embedder is honoured
+/// everywhere a connection is in hand.
+pub fn active_embedder(
+    conn: &Connection,
+) -> Result<&'static crate::embedding::registry::ModelEntry, TomeError> {
+    Ok(crate::embedding::profile::embedder_for(active_profile(conn)?))
+}
+
+/// The reranker registry entry the ACTIVE profile selects (B4). Companion to
+/// [`active_embedder`].
+pub fn active_reranker(
+    conn: &Connection,
+) -> Result<&'static crate::embedding::registry::ModelEntry, TomeError> {
+    Ok(crate::embedding::profile::reranker_for(active_profile(conn)?))
+}
+
+/// B3 / model-tiering drift guard. Refuses any partial-re-embed path
+/// (`plugin enable`, `catalog update`) when the configured active-profile
+/// embedder no longer matches the embedder identity stamped in `meta`.
+///
+/// Embedder name OR version drift returns the corresponding
+/// [`TomeError::EmbedderNameDrift`] / [`TomeError::EmbedderVersionDrift`]
+/// (exit 41 / 42), each of which directs the user at `tome reindex --force`.
+/// Reranker / summariser drift do NOT block — only the embedder change
+/// invalidates the stored vectors' dimension. `reindex` is the sole resolver
+/// and is exempt (it forces the whole-index re-embed itself, B1).
+pub fn guard_embedder_drift(
+    conn: &Connection,
+    configured_embedder: &ModelIdent,
+) -> Result<(), TomeError> {
+    let stored_embedder_name = read(conn, MetaKey::EmbedderName)?.unwrap_or_default();
+    let stored_embedder_version = read(conn, MetaKey::EmbedderVersion)?.unwrap_or_default();
+
+    if stored_embedder_name != configured_embedder.name {
+        return Err(TomeError::EmbedderNameDrift {
+            stored: stored_embedder_name,
+            configured: configured_embedder.name.clone(),
+        });
+    }
+    if stored_embedder_version != configured_embedder.version {
+        return Err(TomeError::EmbedderVersionDrift {
+            stored: stored_embedder_version,
+            configured: configured_embedder.version.clone(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

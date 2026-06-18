@@ -38,7 +38,37 @@ use std::path::Path;
 use tracing::warn;
 
 use crate::catalog::git::Git;
-use crate::commands::plugin::{embedder_entry, registry_seeds, reranker_entry};
+use crate::commands::plugin::registry_seeds;
+
+/// B4: the ACTIVE profile's embedder for the doctor `--fix` path. Read-only
+/// `meta` resolution when the DB exists; default profile on a fresh install.
+fn active_embedder_for_fix(
+    paths: &crate::paths::Paths,
+) -> Result<&'static crate::embedding::registry::ModelEntry, TomeError> {
+    if paths.index_db.is_file() {
+        let conn = crate::index::open_read_only(&paths.index_db)?;
+        crate::index::meta::active_embedder(&conn)
+    } else {
+        Ok(crate::embedding::profile::embedder_for(
+            crate::embedding::profile::Profile::DEFAULT,
+        ))
+    }
+}
+
+/// B4: the ACTIVE profile's reranker for the doctor `--fix` path. Companion to
+/// [`active_embedder_for_fix`].
+fn active_reranker_for_fix(
+    paths: &crate::paths::Paths,
+) -> Result<&'static crate::embedding::registry::ModelEntry, TomeError> {
+    if paths.index_db.is_file() {
+        let conn = crate::index::open_read_only(&paths.index_db)?;
+        crate::index::meta::active_reranker(&conn)
+    } else {
+        Ok(crate::embedding::profile::reranker_for(
+            crate::embedding::profile::Profile::DEFAULT,
+        ))
+    }
+}
 use crate::commands::status::{check_index, check_model};
 use crate::doctor::binding::check_binding;
 use crate::doctor::checks::check_catalogs;
@@ -314,13 +344,15 @@ fn apply_one(
     let scope = &ctx.scope.scope;
     match &fix.subsystem {
         Subsystem::Embedder => {
-            let entry = embedder_entry();
+            // B4: repair the ACTIVE profile's embedder (resolved from `meta`;
+            // default profile on a fresh install), not the hard-coded default.
+            let entry = active_embedder_for_fix(paths)?;
             repair_model(entry, paths)?;
             report.embedder = check_model(paths, entry, false)?;
             Ok(())
         }
         Subsystem::Reranker => {
-            let entry = reranker_entry();
+            let entry = active_reranker_for_fix(paths)?;
             repair_model(entry, paths)?;
             report.reranker = check_model(paths, entry, false)?;
             Ok(())
