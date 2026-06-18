@@ -286,6 +286,48 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     let effective_names: HashSet<String> =
         effective.harnesses.iter().map(|h| h.name.clone()).collect();
 
+    reconcile_against_effective(project_root, deps, &effective_names, strip_agent_privileges)
+}
+
+/// Tear down EVERY Tome-owned harness integration in `project_root`, regardless
+/// of the project marker's declared harness list (PW4).
+///
+/// Drives the SAME reconciliation machinery as [`sync_project`] but with an
+/// EMPTY effective set, so every harness's snapshot dispatches through its
+/// reconciler's non-live REMOVAL branch — rules files, MCP entries, plugin
+/// hooks, Tome's own session hooks, the new `CommandHook` session entries, TS
+/// plugin shims, guardrails, native agents, AND the Open Plugins `tome-op`
+/// bundle. Opt-in targets (`generic` `mcp.json`, `generic-op`/`goose` bundles)
+/// are picked up via the same artifact-present probe `sync_project` uses, so a
+/// previously-selected target is cleaned even though it never sits in any
+/// marker. This is the single SSOT for "remove everything" — it inherits every
+/// safety guard the writers have (structural-match-only removal, marker-bounded
+/// edits, symlink refusal, forward-progress `first_error`).
+///
+/// Unlike `sync_project` it does NOT require a readable project marker: with an
+/// empty effective set there is no scope to resolve, so a project whose marker
+/// is already gone (or unreadable) still tears down cleanly. `strip_agent_privileges`
+/// is irrelevant here (it governs only the Claude Code agent EMISSION clone, and
+/// every harness is non-live → agents are removed regardless).
+pub fn teardown_project(
+    project_root: &Path,
+    deps: &SyncDeps<'_>,
+) -> Result<SyncOutcome, TomeError> {
+    let empty: HashSet<String> = HashSet::new();
+    reconcile_against_effective(project_root, deps, &empty, false)
+}
+
+/// The reconciliation body shared by [`sync_project`] (effective set from the
+/// marker) and [`teardown_project`] (empty effective set). Given the resolved
+/// `effective_names`, it snapshots the registry, runs every per-sink
+/// write/leave-alone/remove pass, and returns the [`SyncOutcome`]. Extracted so
+/// the two entry points cannot drift in which sinks they touch.
+fn reconcile_against_effective(
+    project_root: &Path,
+    deps: &SyncDeps<'_>,
+    effective_names: &HashSet<String>,
+    strip_agent_privileges: bool,
+) -> Result<SyncOutcome, TomeError> {
     // -----------------------------------------------------------------
     // 3. Walk every harness in the effective registry.
     //
@@ -294,7 +336,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // per-harness metadata into owned values up front, then drop the
     // borrow before dispatch.
     // -----------------------------------------------------------------
-    let all_filtered = collect_harness_snapshots(project_root, deps, &effective_names);
+    let all_filtered = collect_harness_snapshots(project_root, deps, effective_names);
     let mut outcome = SyncOutcome::default();
 
     // Phase 11 / US4: partition out the Open Plugins harnesses (`generic-op`,
@@ -321,7 +363,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // snapshot pass; when `only_harness` is `None` this is identical to
     // `snapshots`, so the full-sync path is byte-for-byte unchanged.
     let all_snapshots = match deps.only_harness {
-        Some(_) => collect_all_harness_snapshots(project_root, deps, &effective_names),
+        Some(_) => collect_all_harness_snapshots(project_root, deps, effective_names),
         // No filter active — the full pass already IS `snapshots`; avoid the
         // second registry walk + allocation.
         None => Vec::new(),
@@ -496,7 +538,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // participate; the enabled-plugin enumeration is shared across every
     // such harness (computed once per sync).
     // -----------------------------------------------------------------
-    let hooks_recon = reconcile_hooks(deps, &effective_names, &snapshots, &mut outcome)?;
+    let hooks_recon = reconcile_hooks(deps, effective_names, &snapshots, &mut outcome)?;
     for decision in &mut outcome.decisions {
         if let Some(action) = hooks_recon.actions.get(&decision.harness) {
             decision.hooks_action = *action;
@@ -508,7 +550,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // mapped onto Codex. Reuses the `hooks_action` decision field + the hooks error
     // class.
     let (codex_hook_actions, codex_hook_error) =
-        reconcile_tome_session_hooks(deps, &effective_names, &snapshots, &mut outcome);
+        reconcile_tome_session_hooks(deps, effective_names, &snapshots, &mut outcome);
     for decision in &mut outcome.decisions {
         if let Some(action) = codex_hook_actions.get(&decision.harness) {
             decision.hooks_action = *action;
@@ -523,7 +565,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // has to add the per-harness `session_steering()` overrides.
     let (command_hook_actions, command_hook_error) = reconcile_command_hooks(
         deps,
-        &effective_names,
+        effective_names,
         &snapshots,
         project_root,
         &mut outcome,
@@ -544,7 +586,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // -----------------------------------------------------------------
     let guardrails_recon = reconcile_guardrails(
         deps,
-        &effective_names,
+        effective_names,
         &snapshots,
         &hooks_recon.plugins_with_hooks_json,
         &mut outcome,
@@ -566,7 +608,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     let agents_recon = reconcile_agents(
         project_root,
         deps,
-        &effective_names,
+        effective_names,
         &snapshots,
         strip_agent_privileges,
         &mut outcome,
@@ -591,7 +633,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // precedence chain below.
     // -----------------------------------------------------------------
     let (plugin_actions, plugin_error) =
-        reconcile_plugins(project_root, &effective_names, &snapshots, &mut outcome);
+        reconcile_plugins(project_root, effective_names, &snapshots, &mut outcome);
     for decision in &mut outcome.decisions {
         if let Some(action) = plugin_actions.get(&decision.harness) {
             decision.plugins_action = *action;
@@ -614,7 +656,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     let (op_actions, op_error) = reconcile_open_plugins(
         project_root,
         deps,
-        &effective_names,
+        effective_names,
         &op_snapshots,
         &mut outcome,
     );
@@ -889,20 +931,29 @@ fn collect_all_harness_snapshots(
     snapshots
 }
 
+/// The single source of truth for a harness's rules sink path (PW5).
+///
+/// Prefers the harness's dedicated, namespaced standalone file when it declares
+/// one ([`HarnessModule::rules_namespaced_file`]) — so Tome never inserts a
+/// block into (or owns) a developer-authored shared rules file — and otherwise
+/// falls back to [`HarnessModule::rules_file_target`]. For the namespaced
+/// overriders (cline/zed/kiro/jetbrains-ai) the namespaced accessor returns the
+/// SAME path as the target today, so behaviour is unchanged; routing every
+/// consumer through this ONE function makes the accessor load-bearing and means
+/// the sync snapshot and any teardown / doctor path can never disagree about
+/// which file a harness's rules content lives in.
+pub(crate) fn rules_sink_path(m: &dyn HarnessModule, project_root: &Path) -> PathBuf {
+    m.rules_namespaced_file(project_root)
+        .unwrap_or_else(|| m.rules_file_target(project_root))
+}
+
 fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) -> HarnessSnapshot {
     HarnessSnapshot {
         name: m.name().to_string(),
-        // Phase 11 (G3, FR-024): prefer the harness's dedicated, namespaced
-        // standalone file when it declares one — so Tome never inserts a block
-        // into (or owns) a developer-authored shared rules file. For the four
-        // current overriders (cline/zed/kiro/jetbrains-ai) this returns the SAME
-        // path as `rules_file_target`, so behaviour is unchanged today; wiring it
-        // here makes the namespaced accessor LOAD-BEARING (it stops being dead
-        // code) so it cannot silently drift from the target. Every Phase ≤10
-        // module returns `None` → falls back to `rules_file_target` verbatim.
-        rules_path: m
-            .rules_namespaced_file(project_root)
-            .unwrap_or_else(|| m.rules_file_target(project_root)),
+        // Phase 11 (G3, FR-024): the harness's dedicated rules sink, computed via
+        // the [`rules_sink_path`] SSOT so every consumer (this snapshot + any
+        // teardown / doctor path) resolves the SAME path and cannot drift.
+        rules_path: rules_sink_path(m, project_root),
         rules_strategy: m.rules_file_strategy(),
         rules_frontmatter: m.rules_frontmatter(),
         block_body_style: m.block_body_style(),

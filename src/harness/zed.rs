@@ -13,7 +13,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::harness::{EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy};
+use crate::harness::{
+    EntryShape, FileFormat, GuardrailsPlacement, GuardrailsTarget, HarnessModule, McpDialect,
+    RulesFileStrategy,
+};
 
 /// Unit struct implementing [`HarnessModule`] for Zed.
 pub struct Zed;
@@ -69,12 +72,18 @@ impl HarnessModule for Zed {
         Some(project_root.join(".rules"))
     }
 
-    // F5 DEFER (US1 closeout): zed is a `StandaloneFile` rules harness but
-    // inherits the DEFAULT `guardrails_target` = `InFileRegion` on the SAME
-    // `.rules` path — needs an explicit guardrails-sink decision
-    // (StandaloneSibling or suppression) before the guardrails pass is wired for
-    // the new harnesses.
-    // TODO(P11-guardrails): pick the guardrails sink for StandaloneFile harnesses.
+    /// Guardrails land in a Tome-owned standalone sibling (PW3) at the project
+    /// root, distinct from the standalone rules file `.rules`. Without it the
+    /// standalone rules writer and the in-file guardrails region would share the
+    /// `.rules` path and clobber each other every sync. Mirrors `cursor`.
+    fn guardrails_target(&self, project_root: &Path) -> GuardrailsTarget {
+        GuardrailsTarget {
+            placement: GuardrailsPlacement::StandaloneSibling {
+                file: project_root.join("TOME_GUARDRAILS.md"),
+            },
+            suppress_if_hooks_present: false,
+        }
+    }
 
     fn mcp_config_path(&self, project_root: &Path, _home: &Path) -> PathBuf {
         project_root.join(".zed/settings.json")
@@ -113,6 +122,21 @@ mod tests {
             ZED.mcp_config_path(Path::new("/proj"), Path::new("/h")),
             Path::new("/proj/.zed/settings.json"),
         );
+    }
+
+    /// PW3 (phase-wide): guardrails land in a Tome-owned StandaloneSibling at
+    /// the project root, NOT the `.rules` standalone rules-file path.
+    #[test]
+    fn guardrails_sibling_differs_from_rules_file() {
+        let proj = Path::new("/proj");
+        let rules = ZED.rules_file_target(proj);
+        match ZED.guardrails_target(proj).placement {
+            GuardrailsPlacement::StandaloneSibling { file } => {
+                assert_eq!(file, PathBuf::from("/proj/TOME_GUARDRAILS.md"));
+                assert_ne!(file, rules);
+            }
+            other => panic!("expected StandaloneSibling, got {other:?}"),
+        }
     }
 
     #[test]

@@ -119,10 +119,11 @@ pub(crate) fn harness_name_to_enum(name: &str) -> Option<crate::telemetry::event
         "codex" => Some(Harness::Codex),
         "opencode" => Some(Harness::Opencode),
         "gemini" => Some(Harness::GeminiCli),
-        // Phase 11 — additional harnesses. The wire token equals the id
-        // (the telemetry enum's `kebab-case` matches each `name()`), so this
-        // is a flat name→variant bridge. `antigravity-cli` is an alias of
-        // `gemini` and is resolved upstream, never reaching this function.
+        // Phase 11 — additional harnesses. For these the wire token equals the
+        // id, so this is a flat name→variant bridge — but NOT for `gemini`
+        // (id `gemini` → wire token `gemini-cli`, the one rename handled above).
+        // `antigravity-cli` is an alias of `gemini` and is resolved upstream,
+        // never reaching this function.
         "copilot-cli" => Some(Harness::CopilotCli),
         "copilot" => Some(Harness::Copilot),
         "devin" => Some(Harness::Devin),
