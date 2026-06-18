@@ -14,9 +14,12 @@
 //!    TOML), look at the `tome` key under the documented parent key,
 //!    classify against:
 //!
+//!    - `mcp_manual_only` harness (jetbrains-ai) → `Manual` (no file written;
+//!      recovery is manual — Phase 11 / US5). No read happens.
 //!    - Absent → `Broken`.
 //!    - Present, Tome-owned, `--workspace` arg matches the resolved
-//!      workspace → `Ok`.
+//!      workspace → `Ok` (or `Unverified` for an adapter harness like pi
+//!      whose entry can't be confirmed without `pi-mcp-adapter`).
 //!    - Present, Tome-owned, `--workspace` arg is stale → `Drift`.
 //!    - Present, NOT Tome-owned (developer-authored) → `UserOwned`.
 //!
@@ -228,6 +231,13 @@ fn check_mcp_config(
     home: &Path,
     workspace_name: &WorkspaceName,
 ) -> SubsystemHealth {
+    // Phase 11 / US5 (T065): a `mcp_manual_only` harness (jetbrains-ai) has no
+    // MCP file Tome writes — recovery is manual (paste the snippet). Report
+    // `Manual` (not `Broken`): the absence of a file is BY DESIGN, not a
+    // failure, so it must not degrade overall doctor health. No read happens.
+    if module.mcp_manual_only() {
+        return SubsystemHealth::Manual;
+    }
     let path = module.mcp_config_path(project_root, home);
     let entry = match mcp_config::read_entry(&path, &module.mcp_dialect()) {
         Ok(Some(e)) => e,
@@ -239,6 +249,13 @@ fn check_mcp_config(
     if !mcp_config::is_tome_owned(&entry) {
         return SubsystemHealth::UserOwned;
     }
+    // Phase 11 / US5 (T065): an adapter harness (pi) DID get its entry written,
+    // but the entry's effect can't be confirmed without the external adapter.
+    // Report `Unverified` when the entry is otherwise present + Tome-owned —
+    // again NOT a failure, so it doesn't degrade overall health. (A stale
+    // workspace arg still surfaces as `Drift` below, taking precedence so
+    // `--fix` re-runs sync.)
+    let adapter_dependent = module.mcp_adapter_notice().is_some();
     // Tome-owned. Check the `--workspace <name>` argument matches the
     // resolved workspace. We scan args for `--workspace` followed by
     // the value; tolerate the `=` form too (`--workspace=<name>`).
@@ -257,7 +274,14 @@ fn check_mcp_config(
         }
     }
     match seen_workspace {
-        Some(name) if name == workspace_name.as_str() => SubsystemHealth::Ok,
+        // Correct entry: `Unverified` for an adapter harness (pi), else `Ok`.
+        Some(name) if name == workspace_name.as_str() => {
+            if adapter_dependent {
+                SubsystemHealth::Unverified
+            } else {
+                SubsystemHealth::Ok
+            }
+        }
         Some(_) => SubsystemHealth::Drift,
         // No --workspace arg at all → stale args; classify as Drift so
         // `--fix` re-runs sync (which will add the canonical arg).

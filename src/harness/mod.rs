@@ -707,6 +707,20 @@ pub trait HarnessModule: Send + Sync {
         false
     }
 
+    /// An actionable notice surfaced after `tome harness use` when this harness
+    /// writes its MCP file but the entry is not usable until an external adapter
+    /// is installed (Phase 11, contract mcp-dialects.md § "Manual-only").
+    ///
+    /// `pi` returns the `pi install pi-mcp-adapter` instruction: Tome DOES write
+    /// `~/.pi/agent/mcp.json` (so `mcp_manual_only()` stays `false`), but the
+    /// entry has no effect until the adapter is present, so doctor/status report
+    /// `unverified` and `use` emits this notice. The default `None` keeps every
+    /// other harness silent. This is SEPARATE from `mcp_manual_only` (no file
+    /// written): a harness may set either, both, or neither.
+    fn mcp_adapter_notice(&self) -> Option<&'static str> {
+        None
+    }
+
     // -----------------------------------------------------------------------
     // Phase 6 — hooks, guardrails, native agents (harness-modules-p6.md).
     //

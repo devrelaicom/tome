@@ -42,6 +42,19 @@ pub struct HarnessUseOutcome {
     /// `true` iff the sync algorithm ran (i.e. effective list
     /// post-edit differs from the pre-edit effective list).
     pub sync_ran: bool,
+    /// Phase 11 / US5 (T064, M6/FR-011): actionable MCP-only notice surfaced
+    /// when this harness's MCP server must be added (or activated) by hand —
+    /// `manual` (jetbrains-ai: no file written, paste the snippet) or
+    /// `unverified` (pi: file written but an adapter is required). The
+    /// success-with-notice is scoped to MCP ONLY: a failure in ANY
+    /// auto-writable capability (rules / hooks) still errors with its normal
+    /// exit code BEFORE this is reached, because `sync_project` propagates
+    /// those errors and the notice only emits on a successful `use`.
+    ///
+    /// Appended LAST + `skip_serializing_if`-gated so existing `--json` pins
+    /// don't move; `None` for every harness with a fully-automatic MCP write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_notice: Option<String>,
 }
 
 pub fn run(
@@ -50,6 +63,32 @@ pub fn run(
     paths: &Paths,
     mode: Mode,
 ) -> Result<(), TomeError> {
+    let sync_ran_for_human = std::cell::Cell::new(false);
+    let outcome = run_inner(args, scope, paths, &sync_ran_for_human)?;
+
+    match mode {
+        Mode::Human => emit_human(&outcome, scope, sync_ran_for_human.get()),
+        Mode::Json => write_json(&outcome),
+    }
+}
+
+/// Compute the full [`HarnessUseOutcome`] — the entire read-modify-write +
+/// sync + notice pipeline, MINUS the terminal emit (the "silent compute /
+/// emit wrapper" split). `run` wraps this and emits per mode; integration
+/// tests call this directly to assert the EMITTED outcome (e.g. `mcp_notice`)
+/// without capturing stdout, proving the real `run → compute_mcp_notice →
+/// outcome` chain rather than just the helper.
+///
+/// `sync_ran_out` carries the human-mode-only `sync_ran` signal back to `run`
+/// (the field on the outcome is the same value, but `emit_human` takes it
+/// positionally for the legacy signature).
+#[doc(hidden)]
+pub fn run_inner(
+    args: HarnessUseArgs,
+    scope: &ResolvedScope,
+    paths: &Paths,
+    sync_ran_out: &std::cell::Cell<bool>,
+) -> Result<HarnessUseOutcome, TomeError> {
     // 1. Validate harness name against the effective registry
     //    (consults `HARNESS_MODULES_OVERRIDE` for tests).
     let supported = with_effective_modules(|mods| mods.iter().any(|m| m.name() == args.name));
@@ -99,18 +138,68 @@ pub fn run(
         }
     }
 
-    let outcome = HarnessUseOutcome {
+    // Phase 11 / US5 (T064): compute the MCP-only notice. Reached only on a
+    // successful `use` (any rules/hook write failure errored out of
+    // `sync_project` above), so success-with-notice is structurally scoped to
+    // MCP only (M6/FR-011). A `mcp_manual_only` harness (jetbrains-ai) gets the
+    // paste-the-snippet notice; an adapter harness (pi) gets its
+    // `mcp_adapter_notice`. Resolved against the effective registry (alias-
+    // aware, override-aware), keyed off the resolved workspace name.
+    let mcp_notice = compute_mcp_notice(&args.name, scope.scope.name().as_str());
+
+    sync_ran_out.set(sync_ran);
+
+    Ok(HarnessUseOutcome {
         scope: args.scope.to_string(),
         name: args.name,
         settings_path: settings_path.clone(),
         list_changed: changed,
         sync_ran,
-    };
+        mcp_notice,
+    })
+}
 
-    match mode {
-        Mode::Human => emit_human(&outcome, scope, sync_ran),
-        Mode::Json => write_json(&outcome),
-    }
+/// Build the MCP-only notice (T064) for the harness named `name` in workspace
+/// `workspace_name`, or `None` if the harness writes its MCP file fully
+/// automatically. Pure read against the effective harness registry.
+///
+/// - `mcp_manual_only` (jetbrains-ai): no MCP file is written; the notice tells
+///   the user to add the server by hand and includes the EXACT paste-able
+///   snippet (the same bytes `tome harness info` prints), plus a pointer to
+///   `tome harness info`.
+/// - `mcp_adapter_notice` (pi): the MCP file IS written, but an external adapter
+///   must be installed; the notice carries the harness's install instruction.
+///
+/// `#[doc(hidden)] pub` for integration-test reachability (the outcome is
+/// emitted, not returned, so tests assert the notice via this fn).
+#[doc(hidden)]
+pub fn compute_mcp_notice(name: &str, workspace_name: &str) -> Option<String> {
+    use crate::harness::mcp_config;
+
+    with_effective_modules(|mods| {
+        let module = mods.iter().find(|m| m.name() == name)?;
+        if module.mcp_manual_only() {
+            let entry = mcp_config::TomeEntry::new(
+                "tome".to_string(),
+                vec![
+                    "mcp".to_string(),
+                    "--workspace".to_string(),
+                    workspace_name.to_string(),
+                    "--harness".to_string(),
+                    module.name().to_string(),
+                ],
+            );
+            let snippet = mcp_config::render_entry_snippet(&module.mcp_dialect(), &entry);
+            Some(format!(
+                "{} configures its MCP server manually — Tome wrote no MCP file. \
+                 Add the Tome server by hand (or run `tome harness info {}`):\n\n{snippet}",
+                module.description(),
+                module.name(),
+            ))
+        } else {
+            module.mcp_adapter_notice().map(str::to_string)
+        }
+    })
 }
 
 pub(crate) fn resolve_settings_path(
@@ -168,6 +257,7 @@ fn emit_human(
             outcome.scope,
             outcome.settings_path.display(),
         )?;
+        emit_mcp_notice(&mut out, outcome)?;
         return Ok(());
     }
     writeln!(
@@ -184,6 +274,16 @@ fn emit_human(
             out,
             "Effective list unchanged — run `tome sync` in any project where this harness should activate.",
         )?;
+    }
+    emit_mcp_notice(&mut out, outcome)?;
+    Ok(())
+}
+
+/// Print the MCP-only notice (T064), if any, under a clear "Note:" heading.
+fn emit_mcp_notice(out: &mut impl Write, outcome: &HarnessUseOutcome) -> Result<(), TomeError> {
+    if let Some(notice) = &outcome.mcp_notice {
+        writeln!(out)?;
+        writeln!(out, "Note (MCP): {notice}")?;
     }
     Ok(())
 }
