@@ -86,6 +86,41 @@ impl HarnessModule for SharingStubHarness {
     }
 }
 
+/// A THIRD synthetic harness also targeting `STUB_RULES.md`, so the
+/// shared-sink single-region invariant (M3 / FR-013a) can be exercised across
+/// ≥3 co-owners.
+struct ThirdSharingStubHarness;
+
+impl HarnessModule for ThirdSharingStubHarness {
+    fn name(&self) -> &'static str {
+        "third-sharing-stub"
+    }
+    fn description(&self) -> &'static str {
+        "third synthetic harness sharing STUB_RULES.md"
+    }
+    fn detect(&self, _home: &Path) -> bool {
+        true
+    }
+    fn rules_file_target(&self, project_root: &Path) -> PathBuf {
+        project_root.join("STUB_RULES.md") // intentionally same shared path
+    }
+    fn rules_file_strategy(&self) -> RulesFileStrategy {
+        RulesFileStrategy::BlockInExistingFile
+    }
+    fn block_body_style(&self) -> BlockBodyStyle {
+        BlockBodyStyle::Inline
+    }
+    fn mcp_config_path(&self, project_root: &Path, _home: &Path) -> PathBuf {
+        project_root.join("third-sharing-stub.mcp.json")
+    }
+    fn mcp_config_format(&self) -> McpConfigFormat {
+        McpConfigFormat::Json
+    }
+    fn mcp_parent_key(&self) -> &'static str {
+        "mcpServers"
+    }
+}
+
 struct Fixture {
     _home: TempDir,
     paths: tome::paths::Paths,
@@ -470,5 +505,62 @@ fn fr483_shared_rules_path_retained_while_any_sharer_is_live() {
     assert!(
         body.contains("<!-- tome:begin -->"),
         "rules block must survive while any sharer is live; got: {body}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M3 / FR-013a: N (>= 3) live harnesses resolving to the SAME rules file
+// produce EXACTLY ONE `<!-- tome:begin -->` region — not N.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn m3_three_sharers_collapse_to_single_region() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(StubHarness::default()),
+        Box::new(SharingStubHarness),
+        Box::new(ThirdSharingStubHarness),
+    ]);
+
+    let fx = build_fixture(Some(
+        "harnesses = [\"stub\", \"sharing-stub\", \"third-sharing-stub\"]",
+    ));
+    let outcome = sync::sync_project(&fx.project, &deps_for(&fx, false)).expect("sync");
+
+    // Exactly one rules change recorded across the three co-owners.
+    let rules_changes: Vec<_> = outcome
+        .added
+        .iter()
+        .chain(outcome.updated.iter())
+        .filter(|c| c.subsystem == SyncSubsystem::Rules)
+        .collect();
+    assert_eq!(
+        rules_changes.len(),
+        1,
+        "three sharers must produce exactly one rules change; got {rules_changes:?}",
+    );
+
+    // And the on-disk file has exactly ONE begin/end region.
+    let body = std::fs::read_to_string(fx.project.join("STUB_RULES.md")).unwrap();
+    assert_eq!(
+        body.matches("<!-- tome:begin -->").count(),
+        1,
+        "shared rules file must carry exactly one tome region; got:\n{body}",
+    );
+    assert_eq!(
+        body.matches("<!-- tome:end -->").count(),
+        1,
+        "shared rules file must carry exactly one tome end marker; got:\n{body}",
+    );
+
+    // Re-sync is idempotent: still exactly one region, no second region appended.
+    sync::sync_project(&fx.project, &deps_for(&fx, false)).expect("sync 2");
+    let body2 = std::fs::read_to_string(fx.project.join("STUB_RULES.md")).unwrap();
+    assert_eq!(
+        body2.matches("<!-- tome:begin -->").count(),
+        1,
+        "re-sync must keep exactly one region; got:\n{body2}",
     );
 }

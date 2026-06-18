@@ -7,6 +7,17 @@ use crate::index::skills::TieredEntry;
 use crate::paths::Paths;
 use crate::workspace::WorkspaceName;
 
+/// The self-heal MCP-availability preamble (FR-025, R11, contract
+/// rules-delivery.md §Self-heal preamble).
+///
+/// Prepended VERBATIM by [`build_directive`] to a non-empty directive — and
+/// only then — so it rides the single directive source into `.tome/RULES.md`,
+/// every Inline rules block, every `@`-included sink, AND every session-start
+/// hook / plugin envelope identically. A blank line separates it from the
+/// existing `# Tome — Skill Routing` header. Keep these bytes stable: changing
+/// them moves every byte-stable directive / rules-region pin.
+pub const SELF_HEAL_PREAMBLE: &str = "Before doing anything else, verify the Tome MCP tools (search_skills, get_skill, get_skill_info) are available.\nIf they are NOT available, tell the user to run `tome harness use <their harness>` — or run\n`tome harness info <their harness>` to get the MCP config to paste into their harness — and then restart this session.\nDo not proceed with skill routing until the Tome tools are present.";
+
 /// First line of a description, trimmed — keeps the directive scannable when a
 /// description is multi-line.
 fn first_line(s: &str) -> &str {
@@ -34,6 +45,11 @@ pub fn build_directive(entries: &[TieredEntry], long_summary: Option<&str>) -> S
     }
 
     let mut s = String::new();
+    // Self-heal preamble FIRST (FR-025): the directive is non-empty here (the
+    // empty-entries early return above already handled the empty case), so the
+    // preamble + a blank-line separator always precede the routing header.
+    s.push_str(SELF_HEAL_PREAMBLE);
+    s.push_str("\n\n");
     s.push_str(
         "# Tome — Skill Routing\n\nYou have the Tome MCP server. Load skill \
          instructions on demand via its tools.\n",
@@ -210,6 +226,28 @@ mod tests {
     #[test]
     fn empty_entries_produce_empty_directive() {
         assert!(build_directive(&[], None).is_empty());
+    }
+
+    #[test]
+    fn non_empty_directive_starts_with_self_heal_preamble() {
+        let e = vec![entry("migrations", true, 1, "Safe schema migrations")];
+        let out = build_directive(&e, None);
+        assert!(
+            out.starts_with(SELF_HEAL_PREAMBLE),
+            "directive must begin with the self-heal preamble; got:\n{out}",
+        );
+        // The preamble is followed by a blank line then the routing header.
+        assert!(out.contains(&format!("{SELF_HEAL_PREAMBLE}\n\n# Tome — Skill Routing")));
+        // The verbatim self-heal guidance is present.
+        assert!(out.contains("verify the Tome MCP tools"));
+        assert!(out.contains("tome harness use <their harness>"));
+    }
+
+    #[test]
+    fn empty_directive_has_no_preamble() {
+        // The empty-workspace floor must stay byte-empty: an empty directive
+        // would otherwise inject a bare preamble with no routing content.
+        assert!(build_directive(&[], Some("ignored summary")).is_empty());
     }
 
     #[test]

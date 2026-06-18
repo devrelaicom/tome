@@ -40,7 +40,10 @@ use serde::Serialize;
 use crate::error::TomeError;
 use crate::harness::reconcile::agents::reconcile_agents;
 use crate::harness::reconcile::guardrails::reconcile_guardrails;
-use crate::harness::reconcile::hooks::{reconcile_hooks, reconcile_tome_session_hooks};
+use crate::harness::reconcile::hooks::{
+    reconcile_command_hooks, reconcile_hooks, reconcile_tome_session_hooks,
+};
+use crate::harness::reconcile::plugins::reconcile_plugins;
 // Shared bookkeeping for the orchestrator's rules/MCP loop; the per-sink
 // reconcilers under `reconcile/` call the same path (Phase 7 / FR-011).
 use crate::harness::reconcile::record_action;
@@ -121,6 +124,13 @@ pub enum SyncSubsystem {
     /// Guardrails prose fallback (Phase 6 / US3). One change per rules-file
     /// target or Cursor sibling whose guardrails regions Tome reconciled.
     Guardrails,
+    /// Embedded TypeScript plugin shims (Phase 11 / G2, `TsPlugin` steering).
+    /// One change per `tome.ts` shim written into or removed from a harness's
+    /// Tome-managed plugin dir. Added LAST so the snake_case wire form only
+    /// gains a new value (`"plugins"`) when a `TsPlugin` harness participates;
+    /// with every Phase ≤10 module returning `SessionSteering::None` this value
+    /// never appears, so the existing wire shape is byte-identical.
+    Plugins,
 }
 
 /// Per-harness decision record. Populated for every harness in
@@ -154,6 +164,18 @@ pub struct HarnessDecision {
     /// gained/changed/lost a region, `LeftAlone` otherwise. Appended LAST so
     /// the byte-stable JSON pin only gains a trailing field.
     pub guardrails_action: Action,
+    /// Phase 11 / G2: the TypeScript-shim (`TsPlugin`) reconciliation action
+    /// for this harness. `Created`/`Updated` when the embedded shim was
+    /// written, `Removed` when it was cleaned up, `LeftAlone` otherwise.
+    ///
+    /// Appended LAST AND gated with `skip_serializing_if` so the field is
+    /// OMITTED from the JSON wire form when it is `LeftAlone` — which it always
+    /// is for the five Phase ≤10 modules (none declares `TsPlugin`). That keeps
+    /// the byte-stable `SyncOutcome` / `HarnessDecision` pins UNCHANGED until a
+    /// `TsPlugin` harness actually does plugin work; only then does the new
+    /// trailing `plugins_action` key appear.
+    #[serde(skip_serializing_if = "Action::is_left_alone")]
+    pub plugins_action: Action,
 }
 
 /// What happened to one subsystem (rules-file or MCP config) for one
@@ -165,6 +187,16 @@ pub enum Action {
     Updated,
     Removed,
     LeftAlone,
+}
+
+impl Action {
+    /// `true` for [`Action::LeftAlone`]. Used by `serde`'s
+    /// `skip_serializing_if` on the Phase 11 `HarnessDecision::plugins_action`
+    /// field so a no-op (the steady state for every Phase ≤10 module) is
+    /// omitted from the JSON wire form, keeping the byte-stable pins unchanged.
+    fn is_left_alone(&self) -> bool {
+        matches!(self, Action::LeftAlone)
+    }
 }
 
 // =====================================================================
@@ -303,6 +335,22 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         // -------------------------------------------------------------
         let rules_action = if !rules_paths_processed.insert(snap.rules_path.clone()) {
             // Already processed this path under another harness.
+            //
+            // M3 / FR-013a (shared-sink single region): `rules_paths_processed`
+            // is the dedupe that guarantees N live harnesses resolving to the
+            // SAME file (e.g. several `AGENTS.md` sharers) produce exactly ONE
+            // `tome:begin/end` region — the first sharer writes; every later one
+            // short-circuits to `LeftAlone` here. The block writer itself
+            // (`rules_file::compose_block_write`) collapses any pre-existing
+            // duplicate Tome blocks in the file to a single canonical region, so
+            // even a hand-edited file converges. The inserted directive body is
+            // wholly Tome-owned (built by `routing::build_directive`), so no
+            // verbatim-third-party marker-collision scan is needed at this sink —
+            // a developer file whose own content carries a corrupt `tome:*`
+            // marker still fails CLOSED via `find_all_blocks`'s malformed-marker
+            // `Err` (exit 7), never a silent clobber. (Guardrails, which DOES
+            // copy verbatim plugin content, keeps its own `body_contains_marker_line`
+            // fail-closed scan — that is the right place for it.)
             Action::LeftAlone
         } else {
             // The "live" decision for a shared path is OR-of-live across
@@ -401,11 +449,12 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
             in_effective_list: is_live,
             rules_action,
             mcp_action,
-            // Backfilled by the hooks + guardrails + agents reconciliation
-            // passes below.
+            // Backfilled by the hooks + guardrails + agents + plugins
+            // reconciliation passes below.
             agents_action: Action::LeftAlone,
             hooks_action: Action::LeftAlone,
             guardrails_action: Action::LeftAlone,
+            plugins_action: Action::LeftAlone,
         });
     }
 
@@ -433,6 +482,25 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         reconcile_tome_session_hooks(deps, &effective_names, &snapshots, &mut outcome);
     for decision in &mut outcome.decisions {
         if let Some(action) = codex_hook_actions.get(&decision.harness) {
+            decision.hooks_action = *action;
+        }
+    }
+
+    // Phase 11 (G2 / T017): Tome's own session-start `CommandHook` entry for the
+    // NEW harnesses (devin / copilot-cli / gemini / antigravity). Excludes
+    // claude-code/codex (both `SessionSteering::None`). With every CURRENT module
+    // returning `None`, this pass fast-exits as a NO-OP, so the orchestrator
+    // output is byte-identical to before — the call site is wired now so US2 only
+    // has to add the per-harness `session_steering()` overrides.
+    let (command_hook_actions, command_hook_error) = reconcile_command_hooks(
+        deps,
+        &effective_names,
+        &snapshots,
+        project_root,
+        &mut outcome,
+    );
+    for decision in &mut outcome.decisions {
+        if let Some(action) = command_hook_actions.get(&decision.harness) {
             decision.hooks_action = *action;
         }
     }
@@ -482,6 +550,25 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         }
     }
 
+    // -----------------------------------------------------------------
+    // 3e. Plugins (Phase 11 / G2, T018) — the `TsPlugin` shim sink.
+    //
+    // Installs / removes Tome's embedded TypeScript session-steering shim for
+    // every harness whose `session_steering()` is `TsPlugin`. Runs LAST, after
+    // agents. With every CURRENT module returning `SessionSteering::None`, this
+    // pass fast-exits as a NO-OP — no shim writes, no decision-field changes,
+    // no `Plugins` subsystem entries — so the orchestrator output stays
+    // byte-identical to before. The `first_error` is surfaced LAST in the fixed
+    // precedence chain below.
+    // -----------------------------------------------------------------
+    let (plugin_actions, plugin_error) =
+        reconcile_plugins(project_root, &effective_names, &snapshots, &mut outcome);
+    for decision in &mut outcome.decisions {
+        if let Some(action) = plugin_actions.get(&decision.harness) {
+            decision.plugins_action = *action;
+        }
+    }
+
     if let Some(clash) = first_clash {
         return Err(clash);
     }
@@ -494,11 +581,21 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     if let Some(codex_hook_err) = codex_hook_error {
         return Err(codex_hook_err);
     }
+    if let Some(command_hook_err) = command_hook_error {
+        return Err(command_hook_err);
+    }
     if let Some(guardrails_err) = guardrails_recon.first_error {
         return Err(guardrails_err);
     }
     if let Some(agent_err) = agents_recon.first_error {
         return Err(agent_err);
+    }
+    // Phase 11 / G2: the TsPlugin shim sink is surfaced LAST (after agents) in
+    // the fixed precedence chain — every earlier sink's error wins, and forward
+    // progress means the shim pass still reconciled where it could before this
+    // error is returned.
+    if let Some(plugin_err) = plugin_error {
+        return Err(plugin_err);
     }
 
     Ok(outcome)
@@ -521,8 +618,10 @@ pub(crate) struct HarnessSnapshot {
     rules_strategy: RulesFileStrategy,
     block_body_style: BlockBodyStyle,
     mcp_path: PathBuf,
-    mcp_format: crate::harness::McpConfigFormat,
-    mcp_parent_key: &'static str,
+    /// Phase 11 (G1): the harness's full MCP wire-shape, replacing the
+    /// Phase ≤10 `mcp_format` + `mcp_parent_key` scalar pair. Drives the
+    /// shared dialect-aware `mcp_config` read/write/remove.
+    mcp_dialect: crate::harness::McpDialect,
     /// Phase 6 / US1: whether this harness emits native agent files. Drives
     /// the agents-reconciliation fast-exit; the actual `agent_dir` is
     /// re-derived under the registry guard at dispatch time (the trait
@@ -538,6 +637,12 @@ pub(crate) struct HarnessSnapshot {
     /// for harnesses with no Tome-owned session hook (or whose Tome hook rides
     /// the `RealJson` pass, e.g. Claude Code).
     pub(crate) tome_session_hook_path: Option<PathBuf>,
+    /// Phase 11 (G2): how this harness receives Tome's session-start steering
+    /// directive. Drives the `CommandHook` reconciler's fast-exit + per-harness
+    /// write/remove. Every Phase ≤10 module returns
+    /// [`crate::harness::SessionSteering::None`], so the reconciler is a no-op
+    /// for them and the orchestrator output stays byte-identical.
+    pub(crate) session_steering: crate::harness::SessionSteering,
     /// Phase 6 / US3: the harness's guardrails sink (in-file region or Cursor
     /// standalone sibling) plus its hooks-driven suppression flag.
     pub(crate) guardrails_target: crate::harness::GuardrailsTarget,
@@ -587,8 +692,7 @@ fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) ->
         rules_strategy: m.rules_file_strategy(),
         block_body_style: m.block_body_style(),
         mcp_path: m.mcp_config_path(project_root, home_root),
-        mcp_format: m.mcp_config_format(),
-        mcp_parent_key: m.mcp_parent_key(),
+        mcp_dialect: m.mcp_dialect(),
         supports_native_agents: m.supports_native_agents(),
         // Only a `RealJson` harness with a settings path participates in real
         // hooks. A `GuardrailsOnly` harness — even one that returns a settings
@@ -598,6 +702,7 @@ fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) ->
             crate::harness::HooksStrategy::GuardrailsOnly => None,
         },
         tome_session_hook_path: m.tome_session_hook_path(project_root),
+        session_steering: m.session_steering(),
         guardrails_target: m.guardrails_target(project_root),
     }
 }
@@ -813,7 +918,7 @@ fn classify_block(prior: &Option<rules_file::ParsedBlock>, new_body: &str) -> Ac
 // =====================================================================
 
 fn write_mcp_for_harness(snap: &HarnessSnapshot, deps: &SyncDeps<'_>) -> Result<Action, TomeError> {
-    let existing = mcp_config::read_entry(&snap.mcp_path, snap.mcp_format, snap.mcp_parent_key)?;
+    let existing = mcp_config::read_entry(&snap.mcp_path, &snap.mcp_dialect)?;
 
     if let Some(current) = existing.as_ref()
         && !mcp_config::is_tome_owned(current)
@@ -855,22 +960,17 @@ fn write_mcp_for_harness(snap: &HarnessSnapshot, deps: &SyncDeps<'_>) -> Result<
         Some(_) => Action::Updated,
     };
 
-    mcp_config::write_entry(
-        &snap.mcp_path,
-        snap.mcp_format,
-        snap.mcp_parent_key,
-        &expected,
-    )?;
+    mcp_config::write_entry(&snap.mcp_path, &snap.mcp_dialect, &expected)?;
     Ok(classification)
 }
 
 fn clean_mcp_for_harness(snap: &HarnessSnapshot) -> Result<Action, TomeError> {
-    let existing = mcp_config::read_entry(&snap.mcp_path, snap.mcp_format, snap.mcp_parent_key)?;
+    let existing = mcp_config::read_entry(&snap.mcp_path, &snap.mcp_dialect)?;
     let was_tome = matches!(existing.as_ref(), Some(e) if mcp_config::is_tome_owned(e));
     if !was_tome {
         return Ok(Action::LeftAlone);
     }
-    mcp_config::remove_entry(&snap.mcp_path, snap.mcp_format, snap.mcp_parent_key)?;
+    mcp_config::remove_entry(&snap.mcp_path, &snap.mcp_dialect)?;
     Ok(Action::Removed)
 }
 

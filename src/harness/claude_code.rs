@@ -20,7 +20,7 @@ use crate::harness::agents::{
 };
 use crate::harness::{
     AgentFormat, BlockBodyStyle, GuardrailsPlacement, GuardrailsTarget, HarnessModule,
-    HooksStrategy, McpConfigFormat, RulesFileStrategy,
+    HooksStrategy, RulesFileStrategy,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Claude Code.
@@ -83,13 +83,9 @@ impl HarnessModule for ClaudeCode {
         project_root.join(".claude/settings.json")
     }
 
-    fn mcp_config_format(&self) -> McpConfigFormat {
-        McpConfigFormat::Json
-    }
-
-    fn mcp_parent_key(&self) -> &'static str {
-        "mcpServers"
-    }
+    // MCP dialect: the trait default ([`McpDialect::LEGACY`] — JSON
+    // `mcpServers` + `CommandArgs`, no `type`, omit-empty-`env`, no extra
+    // fields) is exactly Claude Code's shape, so no override is needed.
 
     // -- Real hooks (FR-001, FR-002) ----------------------------------------
 

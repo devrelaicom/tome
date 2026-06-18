@@ -121,6 +121,24 @@ pub(crate) fn harness_name_to_enum(name: &str) -> Option<crate::telemetry::event
         "codex" => Some(Harness::Codex),
         "opencode" => Some(Harness::Opencode),
         "gemini" => Some(Harness::GeminiCli),
+        // Phase 11 — additional harnesses. The wire token equals the id
+        // (the telemetry enum's `kebab-case` matches each `name()`), so this
+        // is a flat name→variant bridge. `antigravity-cli` is an alias of
+        // `gemini` and is resolved upstream, never reaching this function.
+        "copilot-cli" => Some(Harness::CopilotCli),
+        "copilot" => Some(Harness::Copilot),
+        "devin" => Some(Harness::Devin),
+        "cline" => Some(Harness::Cline),
+        "junie" => Some(Harness::Junie),
+        "jetbrains-ai" => Some(Harness::JetbrainsAi),
+        "antigravity" => Some(Harness::Antigravity),
+        "pi" => Some(Harness::Pi),
+        "crush" => Some(Harness::Crush),
+        "zed" => Some(Harness::Zed),
+        "kiro" => Some(Harness::Kiro),
+        "generic" => Some(Harness::Generic),
+        "generic-op" => Some(Harness::GenericOp),
+        "goose" => Some(Harness::Goose),
         // SKIP: unmapped — never guess a closed-enum value.
         _ => None,
     }
@@ -278,6 +296,18 @@ mod tests {
         assert_eq!(harness_name_to_enum("codex"), Some(Harness::Codex));
         assert_eq!(harness_name_to_enum("opencode"), Some(Harness::Opencode));
         assert_eq!(harness_name_to_enum("gemini"), Some(Harness::GeminiCli));
+        // Phase 11 additions — id == wire token (no rename beyond `gemini`).
+        assert_eq!(
+            harness_name_to_enum("copilot-cli"),
+            Some(Harness::CopilotCli)
+        );
+        assert_eq!(
+            harness_name_to_enum("jetbrains-ai"),
+            Some(Harness::JetbrainsAi)
+        );
+        assert_eq!(harness_name_to_enum("generic-op"), Some(Harness::GenericOp));
+        assert_eq!(harness_name_to_enum("pi"), Some(Harness::Pi));
+        assert_eq!(harness_name_to_enum("goose"), Some(Harness::Goose));
     }
 
     #[test]

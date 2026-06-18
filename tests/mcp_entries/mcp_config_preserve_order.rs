@@ -3,8 +3,8 @@
 //! and FR-525 idempotence guarantees.
 
 use tempfile::TempDir;
-use tome::harness::McpConfigFormat;
 use tome::harness::mcp_config::{TomeEntry, write_entry};
+use tome::harness::{McpConfigFormat, McpDialect};
 
 fn entry(workspace: &str) -> TomeEntry {
     TomeEntry::new(
@@ -48,7 +48,12 @@ fn inserts_tome_in_middle_position_preserves_existing_order_json() {
 "#;
     std::fs::write(&target, seed).unwrap();
 
-    write_entry(&target, McpConfigFormat::Json, "mcpServers", &entry("demo")).unwrap();
+    write_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+        &entry("demo"),
+    )
+    .unwrap();
 
     let body = std::fs::read_to_string(&target).unwrap();
     let positions = key_positions(&body, &["\"aaa\"", "\"bbb\"", "\"ccc\"", "\"tome\""]);
@@ -79,15 +84,13 @@ fn rewrites_tome_preserves_surrounding_entry_order_json() {
 
     write_entry(
         &target,
-        McpConfigFormat::Json,
-        "mcpServers",
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
         &entry("first"),
     )
     .unwrap();
     write_entry(
         &target,
-        McpConfigFormat::Json,
-        "mcpServers",
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
         &entry("second"),
     )
     .unwrap();
@@ -126,8 +129,7 @@ args = []
 
     write_entry(
         &target,
-        McpConfigFormat::Toml,
-        "mcp_servers",
+        &McpDialect::from_format(McpConfigFormat::Toml, "mcp_servers"),
         &entry("demo"),
     )
     .unwrap();

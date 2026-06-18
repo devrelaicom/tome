@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::harness::{BlockBodyStyle, HarnessModule, McpConfigFormat, RulesFileStrategy};
+use crate::harness::{BlockBodyStyle, HarnessModule, RulesFileStrategy};
 
 /// Unit struct implementing [`HarnessModule`] for Gemini CLI.
 pub struct Gemini;
@@ -60,11 +60,6 @@ impl HarnessModule for Gemini {
         home.join(".gemini/settings.json")
     }
 
-    fn mcp_config_format(&self) -> McpConfigFormat {
-        McpConfigFormat::Json
-    }
-
-    fn mcp_parent_key(&self) -> &'static str {
-        "mcpServers"
-    }
+    // MCP dialect: the trait default ([`McpDialect::LEGACY`]) is exactly
+    // Gemini's shape (JSON `mcpServers` + `CommandArgs`), so no override.
 }
