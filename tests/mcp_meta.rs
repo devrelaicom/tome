@@ -340,3 +340,59 @@ fn reserved_prompt_wins_collision_against_plugin_entry() {
         "the suffixed name serves the displaced command's own body, not the reserved one: {suffixed_body}"
     );
 }
+
+// --- SC-005: self-heal preamble surfaces the missing-tools recovery ---------
+
+/// Phase 11 / US5 (T066, SC-005): the self-heal preamble (added to
+/// `build_directive` in the foundation) instructs an agent to run
+/// `tome harness use` / `tome harness info` when the Tome MCP tools are
+/// ABSENT. Driven through the in-process MCP harness: a real `Server` over a
+/// staged workspace exposes the tools, and the directive that the same
+/// workspace feeds into the session carries the recovery instruction.
+#[test]
+fn self_heal_preamble_surfaces_recovery_instruction_in_directive() {
+    use tome::harness::routing::{SELF_HEAL_PREAMBLE, build_directive};
+    use tome::index::skills::tiered_entries_for_workspace;
+    use tome::workspace::WorkspaceName;
+
+    let skill_body = "---\nname: some-skill\ndescription: a staged skill.\n---\n# body\n";
+    let ws = StagedWorkspace::stage(&[("some-skill", skill_body)], &[]);
+    let harness = ws.harness();
+
+    // The real in-process MCP server exposes the Tome tools (the "present"
+    // reality the preamble tells the agent to verify).
+    let tool_names: Vec<String> = harness
+        .tools_list()
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(
+        tool_names.iter().any(|n| n == "search_skills")
+            && tool_names.iter().any(|n| n == "get_skill"),
+        "the in-process server exposes the Tome tools: {tool_names:?}",
+    );
+
+    // The directive the MCP-hosted session would deliver for this workspace.
+    let conn = common::mcp_harness::open_index(&ws.paths);
+    let entries = tiered_entries_for_workspace(&conn, WorkspaceName::global().as_str())
+        .expect("tiered entries");
+    drop(conn);
+    assert!(!entries.is_empty(), "staged workspace has a skill entry");
+    let directive = build_directive(&entries, None);
+
+    // SC-005: the missing-tools recovery instruction is present, naming the
+    // exact recovery commands.
+    assert!(
+        directive.starts_with(SELF_HEAL_PREAMBLE),
+        "directive must begin with the self-heal preamble; got:\n{directive}",
+    );
+    assert!(
+        directive.contains("verify the Tome MCP tools"),
+        "directive instructs verifying the tools: {directive}",
+    );
+    assert!(
+        directive.contains("tome harness use <their harness>")
+            && directive.contains("tome harness info <their harness>"),
+        "directive instructs running `tome harness use`/`info` when tools are absent: {directive}",
+    );
+}

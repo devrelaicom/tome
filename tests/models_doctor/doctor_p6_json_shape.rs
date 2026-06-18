@@ -196,6 +196,9 @@ fn subsystem_health_variants_wire_shape_is_byte_stable() {
     assert_eq!(s(SubsystemHealth::Broken), r#""broken""#);
     assert_eq!(s(SubsystemHealth::UserOwned), r#""user_owned""#);
     assert_eq!(s(SubsystemHealth::NotApplicable), r#""not_applicable""#);
+    // Phase 11 / US5: the two new states pin their wire strings too.
+    assert_eq!(s(SubsystemHealth::Manual), r#""manual""#);
+    assert_eq!(s(SubsystemHealth::Unverified), r#""unverified""#);
 }
 
 #[test]

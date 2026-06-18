@@ -62,6 +62,18 @@ pub struct HarnessInfoOutcome {
     /// context, so this falls back to direct-declaration scanning of
     /// workspace + global settings (C-B3 from US3 review).
     pub references: Vec<HarnessReference>,
+    /// Phase 11 / US5 (T063): the paste-able MCP-server snippet — the EXACT
+    /// bytes Tome would write for this harness's [`McpDialect`], built with
+    /// the canonical `["mcp", "--workspace", "<ws>", "--harness", "<name>"]`
+    /// args. For a manual-only harness (jetbrains-ai) this is the primary
+    /// recovery artifact; for every harness it is the self-heal paste target.
+    ///
+    /// Appended LAST + `skip_serializing_if`-gated so the byte-stable `--json`
+    /// pins for the pre-Phase-11 fields don't move. Always populated in
+    /// practice (every dialect renders), but `Option` keeps the wire shape
+    /// additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_snippet: Option<String>,
 }
 
 /// Per-harness snapshot captured outside the registry's read guard.
@@ -119,6 +131,26 @@ pub fn run(
 
     let references = collect_references(scope, paths, &snap.name)?;
 
+    // Phase 11 / US5 (T063): render the paste-able MCP snippet from the
+    // harness's dialect, built with the canonical args the sync writer uses
+    // (`mcp --workspace <ws> --harness <name>`, the `--harness` trailing so
+    // the ownership marker survives) — so the snippet bytes match what sync
+    // writes. Keyed off the resolved workspace name + the harness name.
+    let snippet_entry = mcp_config::TomeEntry::new(
+        "tome".to_string(),
+        vec![
+            "mcp".to_string(),
+            "--workspace".to_string(),
+            scope.scope.name().as_str().to_string(),
+            "--harness".to_string(),
+            snap.name.clone(),
+        ],
+    );
+    let mcp_snippet = Some(mcp_config::render_entry_snippet(
+        &snap.mcp_dialect,
+        &snippet_entry,
+    ));
+
     let outcome = HarnessInfoOutcome {
         name: snap.name,
         description: snap.description,
@@ -130,6 +162,7 @@ pub fn run(
         mcp_entry_present,
         mcp_tome_owned,
         references,
+        mcp_snippet,
     };
 
     match mode {
@@ -289,5 +322,57 @@ fn emit_human(outcome: &HarnessInfoOutcome) -> Result<(), TomeError> {
             }
         }
     }
+    // Phase 11 / US5 (T063): the paste-able MCP-config snippet. For a
+    // manual-only harness (jetbrains-ai) this is how a user adds the Tome
+    // server by hand; for every harness it is the self-heal paste target the
+    // rules preamble points at.
+    if let Some(snippet) = &outcome.mcp_snippet {
+        writeln!(out)?;
+        writeln!(out, "  MCP config — paste into {}:", outcome.name)?;
+        writeln!(out)?;
+        // Emit verbatim (already carries its own trailing newline).
+        write!(out, "{snippet}")?;
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outcome_with_snippet(snippet: Option<String>) -> HarnessInfoOutcome {
+        HarnessInfoOutcome {
+            name: "jetbrains-ai".to_string(),
+            description: "JetBrains AI Assistant".to_string(),
+            detected: true,
+            detected_path: PathBuf::from("/h/.aiassistant"),
+            rules_target: None,
+            mcp_target: None,
+            rules_block_present: None,
+            mcp_entry_present: None,
+            mcp_tome_owned: None,
+            references: Vec::new(),
+            mcp_snippet: snippet,
+        }
+    }
+
+    /// T063: `mcp_snippet` serialises LAST + is `skip_serializing_if`-gated so
+    /// the byte-stable pre-Phase-11 `--json` pins don't move.
+    #[test]
+    fn mcp_snippet_is_appended_last_and_gated() {
+        let with = serde_json::to_string(&outcome_with_snippet(Some("SNIP".to_string()))).unwrap();
+        assert!(
+            with.ends_with("\"mcp_snippet\":\"SNIP\"}"),
+            "mcp_snippet must be the LAST field; got: {with}",
+        );
+
+        // Absent → the key is omitted entirely (skip_serializing_if).
+        let without = serde_json::to_string(&outcome_with_snippet(None)).unwrap();
+        assert!(
+            !without.contains("mcp_snippet"),
+            "absent snippet must omit the key; got: {without}",
+        );
+        // The prior-last field (`references`) remains last when snippet absent.
+        assert!(without.ends_with("\"references\":[]}"));
+    }
 }

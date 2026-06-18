@@ -135,11 +135,18 @@ fn zed_mcp_pins_exact_bytes() {
 
 #[test]
 fn mcpservers_emit_env_harnesses_pin_identical_bytes() {
-    // kiro / junie / cline / antigravity / pi all share the exact same
-    // dialect (mcpServers + CommandArgs + emit_env). Pin the shape once and
-    // assert every one produces it byte-for-byte.
+    // kiro / junie / cline / antigravity / pi / jetbrains-ai all share the
+    // exact same dialect (mcpServers + CommandArgs + emit_env). Pin the shape
+    // once and assert every one produces it byte-for-byte.
+    //
+    // M1 (US5 closeout): jetbrains-ai joins this list. Although it is
+    // `mcp_manual_only` (the sync NEVER writes its MCP file), its dialect IS
+    // consulted by the recovery snippet (`tome harness info` / the `use`
+    // notice), so it must carry `emit_env:true` to match its peers — this
+    // `write_and_read` exercises the dialect directly, which is exactly what
+    // the snippet renderer does.
     const EXPECTED: &str = "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ],\n      \"env\": {}\n    }\n  }\n}\n";
-    let modules: &[&dyn HarnessModule] = &[&KIRO, &JUNIE, &CLINE, &ANTIGRAVITY, &PI];
+    let modules: &[&dyn HarnessModule] = &[&KIRO, &JUNIE, &CLINE, &ANTIGRAVITY, &PI, &JETBRAINS_AI];
     for m in modules {
         let body = write_and_read(*m, "mcp.json");
         assert_eq!(body, EXPECTED, "dialect bytes for {}", m.name());
