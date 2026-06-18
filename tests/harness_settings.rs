@@ -51,6 +51,8 @@ mod harness_sync_p6_idempotence;
 mod harness_sync_stub;
 #[path = "harness_settings/harness_trait_p6.rs"]
 mod harness_trait_p6;
+#[path = "harness_settings/harness_ts_plugin_shim.rs"]
+mod harness_ts_plugin_shim;
 #[path = "harness_settings/harness_use_scope.rs"]
 mod harness_use_scope;
 #[path = "harness_settings/hooks_merge.rs"]

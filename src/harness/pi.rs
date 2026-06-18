@@ -16,7 +16,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::harness::{EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy};
+use crate::harness::{
+    EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy, SessionSteering, ShimKind,
+};
 
 /// Unit struct implementing [`HarnessModule`] for Pi.
 pub struct Pi;
@@ -70,6 +72,19 @@ impl HarnessModule for Pi {
             extra_fields: &[],
         }
     }
+
+    /// Pi cannot run a native session-start hook, so Tome ships an embedded
+    /// TypeScript extension shim (Phase 11 / G2, US3). The dir is PROJECT-RELATIVE
+    /// — `reconcile_plugins` anchors it under `project_root` via
+    /// `project_root.join(dir)`. The shim lands at `<project>/.pi/extensions/tome.ts`,
+    /// a dedicated file inside Pi's own extensions dir; a developer's sibling
+    /// extension is never touched.
+    fn session_steering(&self) -> SessionSteering {
+        SessionSteering::TsPlugin {
+            dir: PathBuf::from(".pi/extensions"),
+            kind: ShimKind::Pi,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -100,5 +115,52 @@ mod tests {
         assert!(d.emit_env);
         // US1: Pi writes its MCP file (the adapter notice is US5).
         assert!(!PI.mcp_manual_only());
+    }
+
+    /// Phase 11 / US3 (T057): Pi's session steering is the embedded `TsPlugin`
+    /// shim, project-relative dir `.pi/extensions`, `ShimKind::Pi`.
+    #[test]
+    fn session_steering_is_pi_ts_plugin() {
+        assert_eq!(
+            PI.session_steering(),
+            SessionSteering::TsPlugin {
+                dir: PathBuf::from(".pi/extensions"),
+                kind: ShimKind::Pi,
+            },
+        );
+    }
+
+    /// T058 — shim byte pin: Pi's embedded `tome.ts` is non-empty.
+    #[test]
+    fn embedded_shim_is_non_empty() {
+        let plugin = crate::harness::plugin_assets::find("pi").expect("pi shim must be embedded");
+        let entry = plugin
+            .files
+            .iter()
+            .find(|f| f.rel_path == "tome.ts")
+            .expect("pi shim must contain tome.ts");
+        assert!(!entry.bytes.is_empty(), "pi tome.ts must be non-empty");
+    }
+
+    /// T058 — invocation + fail-closed pin: the embedded shim invokes
+    /// `tome … session-start … --harness pi` (B3) and no-ops fail-closed on a
+    /// missing binary.
+    #[test]
+    fn embedded_shim_invokes_session_start_and_fails_closed() {
+        let plugin = crate::harness::plugin_assets::find("pi").unwrap();
+        let src = std::str::from_utf8(plugin.files[0].bytes).expect("shim is UTF-8");
+        assert!(src.contains("\"tome\""), "shim launches the `tome` binary");
+        assert!(
+            src.contains("session-start"),
+            "shim runs the session-start subcommand",
+        );
+        assert!(
+            src.contains("\"--harness\"") && src.contains("\"pi\""),
+            "shim passes --harness pi (defers to the Rust directive source)",
+        );
+        assert!(
+            src.contains("catch") && src.contains("return \"\""),
+            "shim must fail closed (catch → empty string → no injection) on a missing binary",
+        );
     }
 }
