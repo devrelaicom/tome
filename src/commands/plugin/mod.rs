@@ -81,58 +81,28 @@ pub fn registry_seeds() -> (
     crate::index::MetaSeed,
     crate::index::MetaSeed,
 ) {
-    use crate::embedding::registry::ModelKind;
-    let mut embedder = None;
-    let mut reranker = None;
-    let mut summariser = None;
-    for entry in MODEL_REGISTRY {
-        match entry.kind {
-            ModelKind::Embedder if embedder.is_none() => {
-                embedder = Some(crate::index::MetaSeed {
-                    name: entry.name.to_owned(),
-                    version: entry.version.to_owned(),
-                });
-            }
-            ModelKind::Reranker if reranker.is_none() => {
-                reranker = Some(crate::index::MetaSeed {
-                    name: entry.name.to_owned(),
-                    version: entry.version.to_owned(),
-                });
-            }
-            ModelKind::Summariser if summariser.is_none() => {
-                summariser = Some(crate::index::MetaSeed {
-                    name: entry.name.to_owned(),
-                    version: entry.version.to_owned(),
-                });
-            }
-            _ => {}
-        }
-    }
-    (
-        embedder.expect("MODEL_REGISTRY must declare exactly one embedder"),
-        reranker.expect("MODEL_REGISTRY must declare exactly one reranker"),
-        summariser.expect("MODEL_REGISTRY must declare exactly one summariser"),
-    )
+    use crate::embedding::profile::{Profile, embedder_for, reranker_for};
+    let e = embedder_for(Profile::DEFAULT);
+    let r = reranker_for(Profile::DEFAULT);
+    let s = crate::summarise::registry::summariser_entry();
+    let seed = |m: &crate::embedding::registry::ModelEntry| crate::index::MetaSeed {
+        name: m.name.to_owned(), version: m.version.to_owned(),
+    };
+    (seed(e), seed(r), seed(s))
 }
 
-/// Pick the embedder entry from the registry.
+/// Pick the embedder entry for the DEFAULT model profile. Callers that want
+/// the active (potentially non-default) profile's embedder should resolve
+/// via `crate::embedding::profile::embedder_for(active_profile)` instead.
 pub(crate) fn embedder_entry() -> &'static ModelEntry {
-    use crate::embedding::registry::ModelKind;
-    MODEL_REGISTRY
-        .iter()
-        .find(|e| matches!(e.kind, ModelKind::Embedder))
-        .expect("MODEL_REGISTRY must declare exactly one embedder")
+    crate::embedding::profile::embedder_for(crate::embedding::profile::Profile::DEFAULT)
 }
 
-/// Pick the reranker entry from the registry. Companion to
+/// Pick the reranker entry for the DEFAULT model profile. Companion to
 /// [`embedder_entry`]. Both `enable` and `query` need this — keeping them in
 /// one place avoids `MODEL_REGISTRY` scanning drift between sites.
 pub(crate) fn reranker_entry() -> &'static ModelEntry {
-    use crate::embedding::registry::ModelKind;
-    MODEL_REGISTRY
-        .iter()
-        .find(|e| matches!(e.kind, ModelKind::Reranker))
-        .expect("MODEL_REGISTRY must declare exactly one reranker")
+    crate::embedding::profile::reranker_for(crate::embedding::profile::Profile::DEFAULT)
 }
 
 pub(crate) use crate::presentation::format::human_mb;
@@ -353,3 +323,23 @@ pub(crate) fn aggregate_for_plugin(
 /// next to the parser; surfaced here so the CLI handlers can keep using a
 /// short path without crossing module boundaries.
 pub(crate) use crate::catalog::manifest::read_catalog_manifest;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `registry_seeds()` must yield the DEFAULT (Medium) profile's embedder
+    /// and reranker names, not the first embedder/reranker in registry order.
+    #[test]
+    fn registry_seeds_yields_medium_profile_models() {
+        let (embedder_seed, reranker_seed, _summariser_seed) = registry_seeds();
+        assert_eq!(
+            embedder_seed.name, "bge-base-en-v1.5",
+            "DEFAULT profile embedder must be bge-base-en-v1.5"
+        );
+        assert_eq!(
+            reranker_seed.name, "bge-reranker-large",
+            "DEFAULT profile reranker must be bge-reranker-large"
+        );
+    }
+}

@@ -176,7 +176,7 @@ pub fn bootstrap(
         ("reranker_version", reranker.version.as_str()),
         ("summariser_name", summariser.name.as_str()),
         ("summariser_version", summariser.version.as_str()),
-        ("model_profile", "medium"), // TODO(task-7): replace literal with Profile::DEFAULT.as_str()
+        ("model_profile", crate::embedding::profile::Profile::DEFAULT.as_str()),
         ("created_at", now_rfc.as_str()),
     ];
     for (k, v) in rows {

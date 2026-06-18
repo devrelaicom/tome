@@ -235,6 +235,7 @@ static STUB_EMBEDDER_ENTRY: ModelEntry = ModelEntry {
     sha256: "0000000000000000000000000000000000000000000000000000000000000000",
     size_bytes: 0,
     licence: "MIT",
+    embedding_dim: Some(384),
     files: &[],
     aux_urls: &[],
 };
@@ -247,6 +248,7 @@ static STUB_RERANKER_ENTRY: ModelEntry = ModelEntry {
     sha256: "0000000000000000000000000000000000000000000000000000000000000000",
     size_bytes: 0,
     licence: "MIT",
+    embedding_dim: None,
     files: &[],
     aux_urls: &[],
 };

@@ -30,6 +30,11 @@ pub enum MetaKey {
     SummariserName,
     SummariserVersion,
     CreatedAt,
+    /// Phase p11 / model tiering: which profile (small/medium/large) this
+    /// index was bootstrapped with. Written at bootstrap and at profile-switch
+    /// time. Absent in pre-v6 DBs — `active_profile` defaults to
+    /// `Profile::DEFAULT` in that case.
+    ModelProfile,
 }
 
 impl MetaKey {
@@ -43,6 +48,7 @@ impl MetaKey {
             Self::SummariserName => "summariser_name",
             Self::SummariserVersion => "summariser_version",
             Self::CreatedAt => "created_at",
+            Self::ModelProfile => "model_profile",
         }
     }
 }
@@ -166,4 +172,62 @@ pub fn detect_drift(
         });
     }
     Ok(DriftStatus::None)
+}
+
+/// The active model profile recorded in `meta`. Absent → Profile::DEFAULT
+/// (forward-compat for a DB written before this row existed).
+pub fn active_profile(conn: &Connection) -> Result<crate::embedding::profile::Profile, crate::error::TomeError> {
+    use crate::embedding::profile::Profile;
+    Ok(read(conn, MetaKey::ModelProfile)?
+        .as_deref()
+        .and_then(Profile::from_tier_str)
+        .unwrap_or(Profile::DEFAULT))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_mem() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn active_profile_defaults_to_medium_when_absent() {
+        use crate::embedding::profile::Profile;
+        let conn = open_mem();
+        let p = active_profile(&conn).expect("active_profile should not fail on absent row");
+        assert_eq!(p, Profile::DEFAULT);
+        assert_eq!(p, Profile::Medium);
+    }
+
+    #[test]
+    fn active_profile_round_trips_all_tiers() {
+        use crate::embedding::profile::Profile;
+        let conn = open_mem();
+        for p in Profile::ALL {
+            write(&conn, MetaKey::ModelProfile, p.as_str()).unwrap();
+            let got = active_profile(&conn).expect("round-trip read");
+            assert_eq!(got, p, "round-trip failed for {:?}", p);
+        }
+    }
+
+    #[test]
+    fn active_profile_defaults_on_unknown_value() {
+        use crate::embedding::profile::Profile;
+        let conn = open_mem();
+        write(&conn, MetaKey::ModelProfile, "xl").unwrap();
+        let p = active_profile(&conn).expect("should not error on unknown tier");
+        assert_eq!(p, Profile::DEFAULT, "unknown tier should fall back to DEFAULT");
+    }
+
+    #[test]
+    fn meta_key_model_profile_str_is_correct() {
+        assert_eq!(MetaKey::ModelProfile.as_str(), "model_profile");
+    }
 }
