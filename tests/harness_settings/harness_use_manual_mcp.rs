@@ -16,8 +16,18 @@
 use crate::common::{HomeGuard, ToolEnv, paths_for, seed_workspace};
 use tome::cli::{HarnessScopeArg, HarnessUseArgs};
 use tome::commands::harness::use_;
+use tome::commands::harness::use_::{HarnessUseOutcome, HarnessUseReport, HarnessUseResult};
 use tome::output::Mode;
 use tome::workspace::{ResolvedScope, Scope, ScopeSource, WorkspaceName};
+
+/// Extract the single successful outcome from a one-harness report.
+fn single_ok(report: &HarnessUseReport) -> &HarnessUseOutcome {
+    assert_eq!(report.results.len(), 1, "expected one harness result");
+    match &report.results[0] {
+        HarnessUseResult::Ok(o) => o,
+        other => panic!("expected Ok outcome, got {other:?}"),
+    }
+}
 
 fn make_project_scope(workspace: &str, project_root: std::path::PathBuf) -> ResolvedScope {
     ResolvedScope {
@@ -86,7 +96,8 @@ fn use_jetbrains_ai_succeeds_writes_rules_no_mcp_file() {
     let _home = HomeGuard::install(env.home_path());
 
     let args = HarnessUseArgs {
-        name: "jetbrains-ai".to_string(),
+        names: vec!["jetbrains-ai".to_string()],
+        all: false,
         scope: HarnessScopeArg::Project,
         force: false,
     };
@@ -147,7 +158,8 @@ fn use_jetbrains_ai_still_errors_when_rules_write_fails() {
     let _home = HomeGuard::install(env.home_path());
 
     let args = HarnessUseArgs {
-        name: "jetbrains-ai".to_string(),
+        names: vec!["jetbrains-ai".to_string()],
+        all: false,
         scope: HarnessScopeArg::Project,
         force: false,
     };
@@ -185,7 +197,8 @@ fn use_pi_writes_mcp_and_emits_adapter_notice() {
     let _home = HomeGuard::install(env.home_path());
 
     let args = HarnessUseArgs {
-        name: "pi".to_string(),
+        names: vec!["pi".to_string()],
+        all: false,
         scope: HarnessScopeArg::Project,
         force: false,
     };
@@ -232,17 +245,19 @@ fn run_emits_mcp_notice_for_jetbrains_ai_and_pi() {
 
     let _home = HomeGuard::install(env.home_path());
     let scope = make_project_scope("demo", project.clone());
-    let sync_ran = std::cell::Cell::new(false);
 
     // jetbrains-ai: the EMITTED outcome carries the paste-the-snippet notice
     // pointing at `tome harness info jetbrains-ai`.
     let jb_args = HarnessUseArgs {
-        name: "jetbrains-ai".to_string(),
+        names: vec!["jetbrains-ai".to_string()],
+        all: false,
         scope: HarnessScopeArg::Project,
         force: false,
     };
-    let jb_outcome =
-        use_::run_inner(jb_args, &scope, &paths, &sync_ran).expect("use jetbrains-ai ok");
+    let (jb_report, jb_err) =
+        use_::run_inner(jb_args, &scope, &paths).expect("use jetbrains-ai ok");
+    assert!(jb_err.is_none(), "jetbrains-ai use must not fail");
+    let jb_outcome = single_ok(&jb_report);
     let jb_notice = jb_outcome
         .mcp_notice
         .as_deref()
@@ -261,11 +276,14 @@ fn run_emits_mcp_notice_for_jetbrains_ai_and_pi() {
 
     // pi: the EMITTED outcome carries the `pi-mcp-adapter` install notice.
     let pi_args = HarnessUseArgs {
-        name: "pi".to_string(),
+        names: vec!["pi".to_string()],
+        all: false,
         scope: HarnessScopeArg::Project,
         force: false,
     };
-    let pi_outcome = use_::run_inner(pi_args, &scope, &paths, &sync_ran).expect("use pi ok");
+    let (pi_report, pi_err) = use_::run_inner(pi_args, &scope, &paths).expect("use pi ok");
+    assert!(pi_err.is_none(), "pi use must not fail");
+    let pi_outcome = single_ok(&pi_report);
     let pi_notice = pi_outcome
         .mcp_notice
         .as_deref()
