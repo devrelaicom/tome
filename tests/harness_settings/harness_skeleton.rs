@@ -17,11 +17,28 @@ use tome::harness::{
 /// runner can't observe a half-installed state.
 
 #[test]
-fn registry_lists_five_harnesses_in_lex_order() {
+fn registry_lists_sixteen_harnesses_in_lex_order() {
     let names: Vec<&str> = SUPPORTED_HARNESSES.iter().map(|h| h.name()).collect();
     assert_eq!(
         names,
-        vec!["claude-code", "codex", "cursor", "gemini", "opencode"],
+        vec![
+            "antigravity",
+            "claude-code",
+            "cline",
+            "codex",
+            "copilot",
+            "copilot-cli",
+            "crush",
+            "cursor",
+            "devin",
+            "gemini",
+            "jetbrains-ai",
+            "junie",
+            "kiro",
+            "opencode",
+            "pi",
+            "zed",
+        ],
     );
 }
 

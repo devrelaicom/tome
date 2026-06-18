@@ -433,6 +433,11 @@ pub fn write_standalone(target: &Path, contents: &str) -> Result<(), TomeError> 
 /// verbatim after it. Tome owns every key/value (they are `&'static`
 /// constants), so they are NOT scanned for marker collisions — only
 /// third-party content gets the verbatim-collision guard.
+///
+/// Promoted to `pub(crate)` (as [`render_standalone_with_frontmatter`]) so the
+/// sync orchestrator can compute the EXACT bytes it is about to write and
+/// classify Created/Updated/LeftAlone against them — the same payload
+/// [`write_standalone_with_frontmatter`] persists, keeping idempotence honest.
 fn render_frontmatter(frontmatter: &RulesFrontmatter, body: &str) -> String {
     let mut out = String::with_capacity(body.len() + 32);
     out.push_str("---\n");
@@ -463,6 +468,16 @@ pub fn write_standalone_with_frontmatter(
 ) -> Result<(), TomeError> {
     let contents = render_frontmatter(frontmatter, body);
     write_standalone(target, &contents)
+}
+
+/// Render the exact standalone-with-front-matter payload [`write_standalone_with_frontmatter`]
+/// would persist, WITHOUT writing it. The sync orchestrator uses this to
+/// classify Created/Updated/LeftAlone against the fully-composed bytes (G3).
+pub(crate) fn render_standalone_with_frontmatter(
+    frontmatter: &RulesFrontmatter,
+    body: &str,
+) -> String {
+    render_frontmatter(frontmatter, body)
 }
 
 /// Remove the standalone Tome-owned rules file at `target` (if
