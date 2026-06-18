@@ -63,36 +63,44 @@ pub fn run(
     let summary = crate::harness::routing::read_cached_long_summary(paths, &name);
     let directive = crate::harness::routing::build_directive(&entries, summary.as_deref());
 
-    // Select the output channel from `--harness`:
-    //
-    // * ABSENT → raw directive, byte-identical to the Phase ≤10 path (the
-    //   claude-code / codex hooks pass no `--harness`; this must not change).
-    // * PRESENT but UNKNOWN → fail closed, emit nothing (the rules file still
-    //   carries the directive).
-    // * PRESENT + `CommandHook { envelope, .. }` → wrap in that envelope.
-    // * PRESENT + `TsPlugin`/`None` → raw directive (the shim wraps it; `None`
-    //   harnesses get raw).
-    //
-    // An EMPTY directive (empty workspace) emits nothing regardless of the
-    // channel: an empty `additionalContext` envelope would inject noise.
-    let output = match args.harness.as_deref() {
-        None => Some(directive),
-        Some(_) if directive.is_empty() => None,
-        Some(host) => match lookup(host) {
-            None => None,
-            Some(module) => match module.session_steering() {
-                SessionSteering::CommandHook { envelope, .. } => {
-                    Some(wrap_in_envelope(envelope, &directive))
-                }
-                SessionSteering::TsPlugin { .. } | SessionSteering::None => Some(directive),
-            },
-        },
-    };
+    let output = select_output(args.harness.as_deref(), &directive);
 
     if let Some(out) = output {
         std::io::stdout().lock().write_all(out.as_bytes())?;
     }
     Ok(())
+}
+
+/// Select the stdout payload from the `--harness` argument and the computed
+/// `directive`. This is the REAL channel-selection `run` uses (extracted so it
+/// is unit/integration testable without capturing stdout):
+///
+/// * ABSENT (`None`) → raw directive, byte-identical to the Phase ≤10 path (the
+///   claude-code / codex hooks pass no `--harness`; this must not change).
+/// * PRESENT but UNKNOWN → fail closed, emit nothing (the rules file still
+///   carries the directive).
+/// * PRESENT + `CommandHook { envelope, .. }` → wrap in that envelope.
+/// * PRESENT + `TsPlugin`/`None` → raw directive (the shim wraps it; `None`
+///   harnesses get raw).
+///
+/// An EMPTY directive (empty workspace) emits nothing regardless of the channel:
+/// an empty `additionalContext` envelope would inject noise.
+pub fn select_output(harness: Option<&str>, directive: &str) -> Option<String> {
+    match harness {
+        None => Some(directive.to_string()),
+        Some(_) if directive.is_empty() => None,
+        Some(host) => match lookup(host) {
+            None => None,
+            Some(module) => match module.session_steering() {
+                SessionSteering::CommandHook { envelope, .. } => {
+                    Some(wrap_in_envelope(envelope, directive))
+                }
+                SessionSteering::TsPlugin { .. } | SessionSteering::None => {
+                    Some(directive.to_string())
+                }
+            },
+        },
+    }
 }
 
 /// Wrap a routing `directive` in the harness's stdout `envelope` (contract
@@ -172,5 +180,28 @@ mod tests {
             serde_json::from_str(&wrap_in_envelope(Envelope::AntigravityInjectSteps, TRICKY))
                 .unwrap();
         assert_eq!(anti["injectSteps"][0]["ephemeralMessage"], TRICKY);
+    }
+
+    /// US2 (T049): the `--harness <name>` → envelope mapping `run` applies. For
+    /// each real new-harness name, `lookup(name).session_steering()` yields a
+    /// `CommandHook` whose envelope is the one `run` wraps the directive in:
+    /// devin → ClaudeNested, copilot-cli → FlatAdditionalContext, gemini →
+    /// ClaudeNested. Antigravity (rules-only) yields `None` → raw directive.
+    #[test]
+    fn harness_name_selects_the_contract_envelope() {
+        fn envelope_for(name: &str) -> Option<Envelope> {
+            match lookup(name).unwrap().session_steering() {
+                SessionSteering::CommandHook { envelope, .. } => Some(envelope),
+                SessionSteering::TsPlugin { .. } | SessionSteering::None => None,
+            }
+        }
+        assert_eq!(envelope_for("devin"), Some(Envelope::ClaudeNested));
+        assert_eq!(
+            envelope_for("copilot-cli"),
+            Some(Envelope::FlatAdditionalContext)
+        );
+        assert_eq!(envelope_for("gemini"), Some(Envelope::ClaudeNested));
+        // Antigravity is rules-only (US2 T047): no command-hook envelope.
+        assert_eq!(envelope_for("antigravity"), None);
     }
 }
