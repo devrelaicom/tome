@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use crate::common::{HarnessModulesGuard, ToolEnv, paths_for, seed_workspace};
+use crate::common::{HarnessModulesGuard, HomeGuard, ToolEnv, paths_for, seed_workspace};
 use tempfile::TempDir;
 use tome::harness::StubHarness;
 use tome::harness::sync::{self, Action, SyncDeps, SyncSubsystem};
@@ -986,7 +986,7 @@ fn sync_with_only_harness_touches_just_that_harness() {
 
     // Restrict the reconcile to cursor only.
     let mut deps = fx.deps(false);
-    deps.only_harness = Some("cursor".to_string());
+    deps.only_harness = Some(["cursor".to_string()].into_iter().collect());
 
     let outcome = sync::sync_project(&fx.project, &deps).expect("sync cursor only");
 
@@ -1030,6 +1030,189 @@ fn sync_with_only_harness_touches_just_that_harness() {
             .iter()
             .map(|d| d.harness.as_str())
             .collect::<Vec<_>>(),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11a. Phase 11 / US6 (T081): `--harness` is a SET. A three-harness effective
+//     list synced with `only_harness = Some({cursor, claude-code})` touches
+//     BOTH cursor and claude-code and leaves the third (codex) untouched.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_with_only_harness_set_touches_each_named_harness() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Three real harnesses with distinct rules sinks: cursor → standalone
+    // `.cursor/rules/TOME_SKILLS.md`; claude-code → block in `<project>/CLAUDE.md`;
+    // codex → block in `<project>/AGENTS.md`.
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(tome::harness::cursor::CURSOR),
+        Box::new(tome::harness::claude_code::CLAUDE_CODE),
+        Box::new(tome::harness::codex::CODEX),
+    ]);
+
+    let fx = Fixture::build(
+        "test-workspace",
+        Some("harnesses = [\"cursor\", \"claude-code\", \"codex\"]"),
+    );
+
+    // Restrict the reconcile to the {cursor, claude-code} SET.
+    let mut deps = fx.deps(false);
+    deps.only_harness = Some(
+        ["cursor".to_string(), "claude-code".to_string()]
+            .into_iter()
+            .collect(),
+    );
+
+    let outcome = sync::sync_project(&fx.project, &deps).expect("sync the named set");
+
+    // Both named harnesses wrote their rules files.
+    assert!(
+        fx.project.join(".cursor/rules/TOME_SKILLS.md").is_file(),
+        "cursor's rules file must be written",
+    );
+    assert!(
+        fx.project.join("CLAUDE.md").is_file(),
+        "claude-code's CLAUDE.md must be written",
+    );
+    // The UNNAMED third harness (codex) was left untouched: its AGENTS.md was
+    // never created, and it produced no decision.
+    assert!(
+        !fx.project.join("AGENTS.md").exists(),
+        "codex's AGENTS.md must NOT be created (not in the --harness set)",
+    );
+    assert!(
+        outcome.decisions.iter().all(|d| d.harness != "codex"),
+        "no codex decision expected; got {:?}",
+        outcome
+            .decisions
+            .iter()
+            .map(|d| d.harness.as_str())
+            .collect::<Vec<_>>(),
+    );
+    // Both named harnesses DID produce decisions.
+    assert!(
+        outcome.decisions.iter().any(|d| d.harness == "cursor"),
+        "cursor must have a decision",
+    );
+    assert!(
+        outcome.decisions.iter().any(|d| d.harness == "claude-code"),
+        "claude-code must have a decision",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11a-cmd. Phase 11 / US6 (F1 closeout): the SAME multi-harness filter, but
+//     driven THROUGH the real command entry `commands::sync::sync_one_project`,
+//     which builds `deps.only_harness` from `args.harness` via
+//     `harness_filter_set`. This proves the `args.harness → harness_filter_set →
+//     deps.only_harness` wiring end-to-end (the direct `sync_project` test above
+//     sets `only_harness` by hand and so never exercises that join).
+//
+//     `sync_one_project` calls `commands::harness::home_root()`, which reads the
+//     process `$HOME`; a `HomeGuard` pins it to this fixture's temp home so
+//     harness detection is deterministic AND matches `deps.home_root`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cmd_sync_harness_set_filters_to_named_two_through_command() {
+    // HARNESS_OVERRIDE_MUTEX before HOME_MUTEX (via HomeGuard) — the documented
+    // lock order when a test needs both.
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(tome::harness::cursor::CURSOR),
+        Box::new(tome::harness::claude_code::CLAUDE_CODE),
+        Box::new(tome::harness::codex::CODEX),
+    ]);
+
+    let fx = Fixture::build(
+        "test-workspace",
+        Some("harnesses = [\"cursor\", \"claude-code\", \"codex\"]"),
+    );
+    // Pin $HOME so `home_root()` inside the command resolves to this fixture.
+    let _home = HomeGuard::install(fx._home.path());
+
+    // The REAL command entry builds `only_harness` from `args.harness`.
+    let args = tome::cli::SyncArgs {
+        all: false,
+        rules_only: false,
+        harness_only: true,
+        harness: vec!["cursor".to_string(), "claude-code".to_string()],
+    };
+    let outcome =
+        tome::commands::sync::sync_one_project(&fx.workspace, &fx.project, &args, &fx.paths)
+            .expect("sync_one_project through the command");
+
+    // Both named harnesses wrote their rules sinks.
+    assert!(
+        fx.project.join(".cursor/rules/TOME_SKILLS.md").is_file(),
+        "cursor's rules file must be written through the command filter",
+    );
+    assert!(
+        fx.project.join("CLAUDE.md").is_file(),
+        "claude-code's CLAUDE.md must be written through the command filter",
+    );
+    // The UNNAMED third harness (codex) is left untouched: its AGENTS.md was
+    // never created — proving `args.harness` reached `deps.only_harness`.
+    assert!(
+        !fx.project.join("AGENTS.md").exists(),
+        "codex's AGENTS.md must NOT be created (not in --harness; through-command filter)",
+    );
+    // The reported harness_changes account only for the two named harnesses.
+    assert!(
+        outcome.harness_changes >= 2,
+        "expected at least the two named harnesses' changes; got {}",
+        outcome.harness_changes,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 11a-cmd-single. Phase 11 / US6 (F1 closeout): the single-`--harness` variant
+//     still works THROUGH the command — `harness: vec!["cursor"]` filters to a
+//     one-element set, so only cursor writes and the other two are untouched.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cmd_sync_single_harness_filters_through_command() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(tome::harness::cursor::CURSOR),
+        Box::new(tome::harness::claude_code::CLAUDE_CODE),
+        Box::new(tome::harness::codex::CODEX),
+    ]);
+
+    let fx = Fixture::build(
+        "test-workspace",
+        Some("harnesses = [\"cursor\", \"claude-code\", \"codex\"]"),
+    );
+    let _home = HomeGuard::install(fx._home.path());
+
+    let args = tome::cli::SyncArgs {
+        all: false,
+        rules_only: false,
+        harness_only: true,
+        harness: vec!["cursor".to_string()],
+    };
+    tome::commands::sync::sync_one_project(&fx.workspace, &fx.project, &args, &fx.paths)
+        .expect("single --harness through the command");
+
+    assert!(
+        fx.project.join(".cursor/rules/TOME_SKILLS.md").is_file(),
+        "cursor's rules file must be written under single --harness cursor",
+    );
+    assert!(
+        !fx.project.join("CLAUDE.md").exists(),
+        "claude-code's CLAUDE.md must NOT be created under single --harness cursor",
+    );
+    assert!(
+        !fx.project.join("AGENTS.md").exists(),
+        "codex's AGENTS.md must NOT be created under single --harness cursor",
     );
 }
 
@@ -1085,7 +1268,7 @@ fn only_harness_preserves_inline_lcd_for_shared_rules_with_live_coowner() {
 
     // ----- The bug: `--harness codex` must NOT downgrade to the @-include. -----
     let mut deps = fx.deps(false);
-    deps.only_harness = Some("codex".to_string());
+    deps.only_harness = Some(["codex".to_string()].into_iter().collect());
     sync::sync_project(&fx.project, &deps).expect("sync codex only");
 
     let after_body = std::fs::read_to_string(&agents_md).expect("read AGENTS.md after --harness");

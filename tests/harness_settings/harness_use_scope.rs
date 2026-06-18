@@ -34,7 +34,8 @@ fn use_unknown_harness_errors_with_exit_18() {
     // `global` is auto-seeded by index bootstrap; no manual seed needed.
 
     let args = HarnessUseArgs {
-        name: "totally-not-a-harness".to_string(),
+        names: vec!["totally-not-a-harness".to_string()],
+        all: false,
         scope: HarnessScopeArg::Global,
         force: false,
     };
@@ -56,7 +57,8 @@ fn use_project_scope_without_project_errors_with_usage() {
     // `global` is auto-seeded by index bootstrap; no manual seed needed.
 
     let args = HarnessUseArgs {
-        name: "stub".to_string(),
+        names: vec!["stub".to_string()],
+        all: false,
         scope: HarnessScopeArg::Project,
         force: false,
     };
@@ -78,7 +80,8 @@ fn use_global_scope_writes_global_settings_file() {
     // `global` is auto-seeded by index bootstrap; no manual seed needed.
 
     let args = HarnessUseArgs {
-        name: "stub".to_string(),
+        names: vec!["stub".to_string()],
+        all: false,
         scope: HarnessScopeArg::Global,
         force: false,
     };
@@ -114,7 +117,8 @@ fn use_generic_op_global_scope_is_accepted() {
     // `global` is auto-seeded by index bootstrap; no manual seed needed.
 
     let args = HarnessUseArgs {
-        name: "generic-op".to_string(),
+        names: vec!["generic-op".to_string()],
+        all: false,
         scope: HarnessScopeArg::Global,
         force: false,
     };
@@ -141,7 +145,8 @@ fn use_workspace_scope_writes_workspace_settings_file() {
     seed_workspace(&paths, "demo");
 
     let args = HarnessUseArgs {
-        name: "stub".to_string(),
+        names: vec!["stub".to_string()],
+        all: false,
         scope: HarnessScopeArg::Workspace,
         force: false,
     };
@@ -178,7 +183,8 @@ fn use_project_scope_writes_project_marker() {
     let _home = HomeGuard::install(env.home_path());
 
     let args = HarnessUseArgs {
-        name: "stub".to_string(),
+        names: vec!["stub".to_string()],
+        all: false,
         scope: HarnessScopeArg::Project,
         force: false,
     };
@@ -224,7 +230,8 @@ fn use_with_force_true_propagates_to_sync_deps() {
     let _home = HomeGuard::install(env.home_path());
 
     let args = HarnessUseArgs {
-        name: "stub".to_string(),
+        names: vec!["stub".to_string()],
+        all: false,
         scope: HarnessScopeArg::Project,
         force: true,
     };
@@ -265,7 +272,8 @@ fn use_idempotent_when_name_already_present_does_not_invoke_sync() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
     let args = HarnessUseArgs {
-        name: "stub".to_string(),
+        names: vec!["stub".to_string()],
+        all: false,
         scope: HarnessScopeArg::Global,
         force: false,
     };

@@ -142,9 +142,12 @@ pub struct SyncArgs {
     /// Only reconcile harness files (skip the RULES.md write).
     #[arg(long)]
     pub harness_only: bool,
-    /// Restrict the harness reconcile to a single harness. Ignored with --rules-only. Errors on unknown name.
-    #[arg(long, value_name = "NAME")]
-    pub harness: Option<String>,
+    /// Restrict the harness reconcile to one or more harnesses (repeatable:
+    /// `--harness a --harness b`). Ignored with --rules-only. Errors on an
+    /// unknown name. Aliases resolve to their canonical module; empty (the
+    /// default) reconciles the full effective set.
+    #[arg(long, value_name = "NAME", action = clap::ArgAction::Append)]
+    pub harness: Vec<String>,
 }
 
 /// `tome tier <subcommand>` — manage per-workspace skill/command routing tiers.
@@ -342,9 +345,17 @@ pub struct HarnessListArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct HarnessUseArgs {
-    /// Harness name (one of the five supported: claude-code, codex,
-    /// cursor, gemini, opencode).
-    pub name: String,
+    /// Harness names (variadic). With NO names and without `--all`, every
+    /// auto-detected harness is configured. With names, exactly those are
+    /// configured (aliases + opt-in targets resolve by name). Mutually
+    /// exclusive with `--all`.
+    #[arg(conflicts_with = "all")]
+    pub names: Vec<String>,
+    /// Configure every supported (auto-detectable) harness, regardless of
+    /// detection. Excludes the opt-in `generic` / `generic-op` targets.
+    /// Mutually exclusive with explicit names.
+    #[arg(long)]
+    pub all: bool,
     /// Settings scope to edit. Defaults to `project` (requires a project
     /// marker above CWD; use `workspace` or `global` outside a project).
     #[arg(long, default_value_t = HarnessScopeArg::Project, value_enum)]

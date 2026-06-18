@@ -37,7 +37,7 @@ fn sync_without_project_marker_exits_with_usage_code_2() {
         all: false,
         rules_only: false,
         harness_only: false,
-        harness: None,
+        harness: vec![],
     };
     let err = sync::run(args, &scope, &paths, Mode::Json).expect_err("missing project marker");
     assert_eq!(err.exit_code(), 2, "want Usage (2); got {err:?}");

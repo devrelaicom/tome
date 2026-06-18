@@ -78,10 +78,12 @@ pub struct SyncDeps<'a> {
     /// directly to the CLI `--force` flag on `tome workspace use` (and
     /// the future `tome harness sync --force`).
     pub force: bool,
-    /// When `Some(name)`, reconcile ONLY that harness (written if effective,
-    /// removed if not) and leave every other harness's files untouched. When
-    /// `None`, reconcile the full effective set. Set by `tome sync --harness`.
-    pub only_harness: Option<String>,
+    /// When `Some(set)`, reconcile ONLY the harnesses whose canonical name is
+    /// in `set` (each written if effective, removed if not) and leave every
+    /// other harness's files untouched. When `None`, reconcile the full
+    /// effective set. Set by `tome sync --harness` (repeatable). The set holds
+    /// alias-resolved canonical names, so membership is `set.contains(m.name())`.
+    pub only_harness: Option<HashSet<String>>,
 }
 
 /// Summary of one sync pass per FR-547. Serialised verbatim in the
@@ -746,19 +748,19 @@ fn collect_harness_snapshots(
 ) -> Vec<HarnessSnapshot> {
     let mut snapshots = with_effective_modules(|mods| {
         mods.iter()
-            // `only_harness` restricts the reconcile to a single named harness
-            // (for `tome sync --harness <name>`): only that module is
-            // snapshotted, so every downstream dedup map + the is-live
-            // write-vs-remove decision operate over the one-element set and
-            // every OTHER harness's files are left completely untouched. This
-            // is the SINGLE filter point — every sink derives its scope from
-            // these snapshots (the rules/MCP/hooks/guardrails loops iterate
-            // them directly; the agents sink gates its registry walk on the
-            // snapshotted name set), so the "other harnesses untouched"
-            // guarantee holds across ALL sinks. `None` snapshots the full
-            // registry (the default full reconcile).
-            .filter(|m| match deps.only_harness.as_deref() {
-                Some(only) => m.name() == only,
+            // `only_harness` restricts the reconcile to the named harness SET
+            // (for `tome sync --harness a --harness b`): only modules in the set
+            // are snapshotted, so every downstream dedup map + the is-live
+            // write-vs-remove decision operate over that subset and every OTHER
+            // harness's files are left completely untouched. This is the SINGLE
+            // filter point — every sink derives its scope from these snapshots
+            // (the rules/MCP/hooks/guardrails loops iterate them directly; the
+            // agents sink gates its registry walk on the snapshotted name set),
+            // so the "other harnesses untouched" guarantee holds across ALL
+            // sinks. `None` snapshots the full registry (the default full
+            // reconcile).
+            .filter(|m| match deps.only_harness.as_ref() {
+                Some(set) => set.contains(m.name()),
                 None => true,
             })
             .map(|m| snapshot_for(*m, project_root, deps.home_root))
@@ -816,10 +818,10 @@ fn collect_opt_in_snapshots(
             effective_names.contains(m.name())
                 || opt_in_artifact_present(*m, project_root, deps.home_root)
         })
-        // Honour `--harness <name>`: a single-harness reconcile still touches
-        // only the named harness, opt-in targets included.
-        .filter(|m| match deps.only_harness.as_deref() {
-            Some(only) => m.name() == only,
+        // Honour `--harness <name>...`: a filtered reconcile still touches
+        // only the named harnesses, opt-in targets included.
+        .filter(|m| match deps.only_harness.as_ref() {
+            Some(set) => set.contains(m.name()),
             None => true,
         })
         .map(|m| snapshot_for(m, project_root, deps.home_root))
