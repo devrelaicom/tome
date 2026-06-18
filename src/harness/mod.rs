@@ -460,6 +460,44 @@ pub enum HookFileSpec {
     CodexHooks,
 }
 
+// =====================================================================
+// Phase 11 — G3: rules-delivery extensions (contract rules-delivery.md).
+//
+// Two additive, default-backed surfaces let a new harness diverge from the
+// `rules_file_target` + `BlockInExistingFile` floor without touching the
+// five existing modules:
+//
+//   * `RulesFrontmatter` — a Tome-owned YAML front-matter header written
+//     ABOVE the verbatim directive on a `StandaloneFile` (kiro's
+//     `inclusion: always`, jetbrains-ai's apply-mode marker). Its bytes are
+//     pinned separately from the directive body (m3).
+//
+//   * `rules_namespaced_file` — a dedicated, namespaced standalone file used
+//     INSTEAD of `rules_file_target` (cline's `.clinerules/tome.md`, zed's
+//     `.rules`, kiro/jetbrains steering files), so Tome never clobbers a
+//     developer-authored shared rules file.
+//
+// Both arrive as DEFAULTED trait methods (`None`), so every Phase ≤10 module
+// inherits the unchanged behaviour. The `RulesFrontmatter.fields` slice is a
+// closed `&'static` constant per harness → the front-matter wire shape is a
+// compile-time value the byte-stable pins can pin exactly.
+// =====================================================================
+
+/// A Tome-owned YAML front-matter header for a `StandaloneFile` rules sink
+/// (G3, FR-026).
+///
+/// `fields` is rendered, in slice order, between two `---` fences ABOVE the
+/// verbatim directive body. The key order is the slice order (deterministic),
+/// so the emitted header is byte-stable. Values are emitted verbatim (Tome
+/// owns every value — they are not third-party content).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RulesFrontmatter {
+    /// `(key, value)` pairs rendered as `key: value` lines, in slice order.
+    /// e.g. `&[("inclusion", "always")]` for kiro; `&[("apply", "always")]`
+    /// for jetbrains-ai's Always apply-mode.
+    pub fields: &'static [(&'static str, &'static str)],
+}
+
 /// How a harness receives Tome's session-start steering directive (G2).
 ///
 /// The default ([`SessionSteering::None`]) keeps the rules-file-only floor
@@ -546,7 +584,42 @@ pub trait HarnessModule: Send + Sync {
 
     /// Body-content style for the block. Only consulted when
     /// `rules_file_strategy()` returns `BlockInExistingFile`.
-    fn block_body_style(&self) -> BlockBodyStyle;
+    ///
+    /// Default [`BlockBodyStyle::Inline`] (G3) — a new harness gets the
+    /// verbatim-rules-inline body unless it documents `@`-include support and
+    /// overrides this. Among the five existing modules every one explicitly
+    /// declares its style (`claude-code`/`codex`/`gemini` → `AtInclude`,
+    /// `opencode` → `Inline`, `cursor` → `Inline` though it is a `StandaloneFile`
+    /// and so never consulted), so adding the default changes none of them.
+    fn block_body_style(&self) -> BlockBodyStyle {
+        BlockBodyStyle::Inline
+    }
+
+    /// A dedicated, namespaced standalone rules file used INSTEAD of
+    /// [`Self::rules_file_target`] when `Some` (G3, FR-024).
+    ///
+    /// Returned by harnesses that own a Tome-specific file under their own
+    /// directory (`cline` → `.clinerules/tome.md`, `zed` → `.rules`,
+    /// `kiro` → `.kiro/steering/tome.md`, `jetbrains-ai` →
+    /// `.aiassistant/rules/tome.md`) so Tome never inserts a block into a
+    /// developer-authored shared rules file. `None` (default) means the
+    /// harness's rules content lands at `rules_file_target` per its
+    /// `rules_file_strategy`. The five existing modules return `None`.
+    fn rules_namespaced_file(&self, _project_root: &Path) -> Option<PathBuf> {
+        None
+    }
+
+    /// The Tome-owned YAML front-matter header for this harness's
+    /// `StandaloneFile` rules sink (G3, FR-026), or `None` (default) for no
+    /// front-matter.
+    ///
+    /// Only meaningful for a `StandaloneFile` (or a `rules_namespaced_file`)
+    /// sink: the header is written ABOVE the verbatim directive. `kiro`
+    /// returns `inclusion: always`; `jetbrains-ai` returns its Always
+    /// apply-mode marker. The five existing modules return `None`.
+    fn rules_frontmatter(&self) -> Option<RulesFrontmatter> {
+        None
+    }
 
     /// Path to the harness's MCP configuration file.
     ///
@@ -753,6 +826,68 @@ pub trait HarnessModule: Send + Sync {
 pub static SUPPORTED_HARNESSES: &[&'static dyn HarnessModule] =
     &[&CLAUDE_CODE, &CODEX, &CURSOR, &GEMINI, &OPENCODE];
 
+// =====================================================================
+// Phase 11 — registry alias layer + real-vs-opt-in partition
+// (data-model §HarnessAlias, §Registry partition; FR-039).
+// =====================================================================
+
+/// A registry alias: an alternate CLI name that resolves to a canonical
+/// harness module's `name()` before any lookup / dedupe.
+///
+/// e.g. `antigravity-cli` is a thin alias for `gemini` — it shares the
+/// Gemini module entirely. Aliases are resolved by [`resolve_alias`] /
+/// [`lookup`] first, so a user can say either name and reach the same
+/// module; multi-harness selection (US6) dedupes on the resolved canonical
+/// identity so naming a harness twice (once by alias) collapses to one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HarnessAlias {
+    /// The alternate name the user may type.
+    pub name: &'static str,
+    /// The canonical [`HarnessModule::name`] it resolves to.
+    pub target: &'static str,
+}
+
+/// Registered name aliases. Resolved before any registry lookup.
+///
+/// `antigravity-cli → gemini`: the Antigravity CLI consumes Gemini's
+/// configuration surface, so it shares the `gemini` module rather than
+/// carrying a duplicate. Empty otherwise; new aliases are a deliberate edit.
+pub static HARNESS_ALIASES: &[HarnessAlias] = &[HarnessAlias {
+    name: "antigravity-cli",
+    target: "gemini",
+}];
+
+/// Opt-in targets: modules that are LOOKUP-ABLE by name but NEVER
+/// auto-detected and NEVER included in `--all` (data-model §Registry
+/// partition).
+///
+/// These are the `generic` (AGENTS.md + `./mcp.json`) and `generic-op`
+/// (Open Plugins `tome-op`) write targets a user opts into explicitly via
+/// `tome harness use <name>` — they have no detectable per-user dir, so
+/// detection would never surface them and `--all` must not write them. The
+/// slice is empty until US4 populates it; it is declared now so the
+/// partition-aware `lookup` + the disjointness invariant exist from the
+/// foundation.
+///
+/// INVARIANT: `OPT_IN_TARGETS` is disjoint from [`SUPPORTED_HARNESSES`] (a
+/// module is either auto-detectable or opt-in, never both). Asserted in the
+/// unit tests.
+pub static OPT_IN_TARGETS: &[&'static dyn HarnessModule] = &[];
+
+/// Resolve a possibly-aliased harness name to its canonical name.
+///
+/// Returns the alias `target` when `name` matches a [`HARNESS_ALIASES`]
+/// entry, else `name` unchanged. This is the resolution primitive
+/// multi-harness selection (US6) dedupes on — call it before comparing /
+/// deduplicating user-supplied harness names. Pure; no registry access.
+pub fn resolve_alias(name: &str) -> &str {
+    HARNESS_ALIASES
+        .iter()
+        .find(|a| a.name == name)
+        .map(|a| a.target)
+        .unwrap_or(name)
+}
+
 /// Test-only override slot for the harness registry.
 ///
 /// Integration tests under `tests/` cannot reach `#[cfg(test)]`-gated
@@ -794,11 +929,17 @@ pub static HARNESS_MODULES_OVERRIDE: RwLock<Option<Vec<Box<dyn HarnessModule>>>>
 /// (composition resolver, harness commands) map `None` to
 /// `TomeError::HarnessNotSupported` (exit 18).
 ///
-/// Resolves against `SUPPORTED_HARNESSES` only — does NOT consult
-/// `HARNESS_MODULES_OVERRIDE` (the function signature promises a
+/// Resolves against `SUPPORTED_HARNESSES` + `OPT_IN_TARGETS` only — does NOT
+/// consult `HARNESS_MODULES_OVERRIDE` (the function signature promises a
 /// `'static` reference, which the boxed test modules can't satisfy).
 /// Production code paths should call [`with_effective_modules`] for
 /// override-aware iteration / dispatch.
+///
+/// Phase 11: the supplied name is first run through [`resolve_alias`] (so
+/// `antigravity-cli` resolves to the `gemini` module), then matched against
+/// `SUPPORTED_HARNESSES` and finally `OPT_IN_TARGETS` (the opt-in `generic` /
+/// `generic-op` write targets, which are lookup-able but never auto-detected
+/// or in `--all`).
 ///
 /// Polish R-M8: kept `pub` for integration-test reachability under
 /// `#[doc(hidden)]` — production code should call
@@ -808,10 +949,17 @@ pub static HARNESS_MODULES_OVERRIDE: RwLock<Option<Vec<Box<dyn HarnessModule>>>>
 /// without `cfg(test)` visibility).
 #[doc(hidden)]
 pub fn lookup(name: &str) -> Option<&'static dyn HarnessModule> {
+    let canonical = resolve_alias(name);
     SUPPORTED_HARNESSES
         .iter()
         .copied()
-        .find(|m| m.name() == name)
+        .find(|m| m.name() == canonical)
+        .or_else(|| {
+            OPT_IN_TARGETS
+                .iter()
+                .copied()
+                .find(|m| m.name() == canonical)
+        })
 }
 
 /// Run `f` against the currently-effective harness registry.
@@ -872,6 +1020,70 @@ mod tests {
     #[test]
     fn lookup_returns_none_for_unknown_name() {
         assert!(lookup("definitely-not-a-harness").is_none());
+    }
+
+    #[test]
+    fn resolve_alias_maps_antigravity_cli_to_gemini() {
+        assert_eq!(resolve_alias("antigravity-cli"), "gemini");
+    }
+
+    #[test]
+    fn resolve_alias_passes_through_unknown_names_unchanged() {
+        assert_eq!(resolve_alias("gemini"), "gemini");
+        assert_eq!(resolve_alias("not-an-alias"), "not-an-alias");
+    }
+
+    #[test]
+    fn lookup_resolves_alias_to_canonical_module() {
+        let via_alias = lookup("antigravity-cli").expect("alias must resolve");
+        assert_eq!(
+            via_alias.name(),
+            "gemini",
+            "antigravity-cli alias must resolve to the gemini module",
+        );
+        // Same module identity as a direct lookup of the canonical name.
+        let direct = lookup("gemini").expect("gemini must resolve");
+        assert_eq!(via_alias.name(), direct.name());
+    }
+
+    #[test]
+    fn every_alias_target_resolves_to_a_real_module() {
+        for alias in HARNESS_ALIASES {
+            assert!(
+                SUPPORTED_HARNESSES.iter().any(|m| m.name() == alias.target),
+                "alias {} → {} must target a registered harness",
+                alias.name,
+                alias.target,
+            );
+            // The alias name itself must NOT collide with a real module name.
+            assert!(
+                !SUPPORTED_HARNESSES.iter().any(|m| m.name() == alias.name),
+                "alias name {} must not shadow a real module",
+                alias.name,
+            );
+        }
+    }
+
+    #[test]
+    fn opt_in_targets_are_disjoint_from_supported() {
+        for opt in OPT_IN_TARGETS {
+            assert!(
+                !SUPPORTED_HARNESSES.iter().any(|m| m.name() == opt.name()),
+                "{} must not be both an opt-in target and auto-detected",
+                opt.name(),
+            );
+        }
+    }
+
+    #[test]
+    fn lookup_finds_opt_in_targets() {
+        // Every opt-in target is lookup-able by name even though it is never
+        // auto-detected or in `--all`. (Empty until US4 — this still guards the
+        // partition-aware lookup branch the moment a target lands.)
+        for opt in OPT_IN_TARGETS {
+            let found = lookup(opt.name()).expect("opt-in target must be lookup-able");
+            assert_eq!(found.name(), opt.name());
+        }
     }
 
     #[test]

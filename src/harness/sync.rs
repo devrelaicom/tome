@@ -335,6 +335,22 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         // -------------------------------------------------------------
         let rules_action = if !rules_paths_processed.insert(snap.rules_path.clone()) {
             // Already processed this path under another harness.
+            //
+            // M3 / FR-013a (shared-sink single region): `rules_paths_processed`
+            // is the dedupe that guarantees N live harnesses resolving to the
+            // SAME file (e.g. several `AGENTS.md` sharers) produce exactly ONE
+            // `tome:begin/end` region — the first sharer writes; every later one
+            // short-circuits to `LeftAlone` here. The block writer itself
+            // (`rules_file::compose_block_write`) collapses any pre-existing
+            // duplicate Tome blocks in the file to a single canonical region, so
+            // even a hand-edited file converges. The inserted directive body is
+            // wholly Tome-owned (built by `routing::build_directive`), so no
+            // verbatim-third-party marker-collision scan is needed at this sink —
+            // a developer file whose own content carries a corrupt `tome:*`
+            // marker still fails CLOSED via `find_all_blocks`'s malformed-marker
+            // `Err` (exit 7), never a silent clobber. (Guardrails, which DOES
+            // copy verbatim plugin content, keeps its own `body_contains_marker_line`
+            // fail-closed scan — that is the right place for it.)
             Action::LeftAlone
         } else {
             // The "live" decision for a shared path is OR-of-live across
