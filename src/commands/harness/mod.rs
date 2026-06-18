@@ -84,13 +84,11 @@ pub fn run(args: HarnessArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), T
         None => bare::run(scope, &paths, mode),
         Some(HarnessCommand::List(a)) => list::run(a, scope, &paths, mode),
         Some(HarnessCommand::Use(a)) => {
-            // Capture the name before `run` consumes the args; emit on success.
-            let name = a.name.clone();
-            let r = use_::run(a, scope, &paths, mode);
-            if r.is_ok() {
-                emit_harness_action(&name, crate::telemetry::event::HarnessAction::Use);
-            }
-            r
+            // Phase 11 / US6: `use` is now multi-harness — telemetry is emitted
+            // per successfully-configured harness inside `use_::run` (it knows
+            // the resolved selection + which harnesses succeeded), so the
+            // dispatcher no longer references a single name.
+            use_::run(a, scope, &paths, mode)
         }
         Some(HarnessCommand::Remove(a)) => {
             let name = a.name.clone();

@@ -59,6 +59,8 @@ mod harness_ts_plugin_shim;
 mod harness_use_manual_mcp;
 #[path = "harness_settings/harness_use_scope.rs"]
 mod harness_use_scope;
+#[path = "harness_settings/harness_use_selection.rs"]
+mod harness_use_selection;
 #[path = "harness_settings/hooks_merge.rs"]
 mod hooks_merge;
 #[path = "harness_settings/hooks_rewrite.rs"]
