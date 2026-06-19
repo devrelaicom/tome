@@ -85,7 +85,7 @@ fn rules_only_args() -> SyncArgs {
         all: false,
         rules_only: true,
         harness_only: false,
-        harness: None,
+        harness: vec![],
     }
 }
 
@@ -147,7 +147,7 @@ fn sync_all_rules_only_fans_out() {
         all: true,
         rules_only: true,
         harness_only: false,
-        harness: None,
+        harness: vec![],
     };
     let report = sync_all(&parse("ws-a"), &args, &paths).expect("sync_all");
 
@@ -210,7 +210,7 @@ fn sync_unknown_harness_errors() {
         all: false,
         rules_only: false,
         harness_only: false,
-        harness: Some("not-a-harness".to_string()),
+        harness: vec!["not-a-harness".to_string()],
     };
 
     let err =
@@ -220,4 +220,91 @@ fn sync_unknown_harness_errors() {
         "expected HarnessNotSupported, got {err:?}",
     );
     assert_eq!(err.exit_code(), 18);
+}
+
+// ---------------------------------------------------------------------------
+// 3b. Phase 11 / US6 (T080): one BAD name among several repeated `--harness`
+//     values still errors with HarnessNotSupported (every name is validated).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_one_bad_harness_among_many_errors() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let project = tmp.path().join("proj");
+    std::fs::create_dir_all(project.join(".tome")).unwrap();
+
+    let scope = tome::workspace::ResolvedScope {
+        scope: tome::workspace::Scope(parse("global")),
+        source: tome::workspace::ScopeSource::ProjectMarker,
+        project_root: Some(project.clone()),
+    };
+
+    // cursor is valid; nope is not. The whole run must error (exit 18).
+    let args = SyncArgs {
+        all: false,
+        rules_only: false,
+        harness_only: false,
+        harness: vec!["cursor".to_string(), "nope".to_string()],
+    };
+
+    let err =
+        tome::commands::sync::run(args, &scope, &paths, tome::output::Mode::Json).unwrap_err();
+    assert!(
+        matches!(err, TomeError::HarnessNotSupported { .. }),
+        "expected HarnessNotSupported, got {err:?}",
+    );
+    assert_eq!(err.exit_code(), 18);
+}
+
+// ---------------------------------------------------------------------------
+// 3c. Phase 11 / US6 (T080): an ALIAS `--harness antigravity-cli` passes
+//     validation (resolves to the gemini module via `lookup`), so the run
+//     proceeds past the eager name check.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_alias_harness_passes_validation() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    // `--rules-only` short-circuits the harness reconcile (so no $HOME-dependent
+    // detection runs) while STILL exercising the name-validation gate — which is
+    // skipped under rules-only. So instead use a real project + harness-only and
+    // assert the error is NOT HarnessNotSupported: validation accepted the alias.
+    let project = tmp.path().join("proj");
+    std::fs::create_dir_all(project.join(".tome")).unwrap();
+    std::fs::write(
+        project.join(".tome").join("config.toml"),
+        "workspace = \"global\"\n",
+    )
+    .unwrap();
+
+    let scope = tome::workspace::ResolvedScope {
+        scope: tome::workspace::Scope(parse("global")),
+        source: tome::workspace::ScopeSource::ProjectMarker,
+        project_root: Some(project.clone()),
+    };
+
+    let args = SyncArgs {
+        all: false,
+        rules_only: false,
+        harness_only: true,
+        harness: vec!["antigravity-cli".to_string()],
+    };
+
+    // The eager validation must NOT reject the alias. The reconcile itself runs
+    // against the real registry; whatever it returns, it is NOT an exit-18
+    // HarnessNotSupported (which would mean validation rejected the alias).
+    let result = tome::commands::sync::run(args, &scope, &paths, tome::output::Mode::Json);
+    if let Err(e) = result {
+        assert_ne!(
+            e.exit_code(),
+            18,
+            "alias antigravity-cli must pass name validation; got {e:?}",
+        );
+    }
 }

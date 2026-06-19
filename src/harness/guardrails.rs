@@ -155,11 +155,19 @@ pub fn read_guardrails_source(plugin_root: &Path) -> Result<Option<String>, Tome
     Ok(Some(body))
 }
 
-/// Whether any line of a verbatim guardrails body is itself a managed marker:
-/// a guardrails START or END line, or a `tome:begin/end` block marker. Uses
-/// the same compiled regexes the reconciler parses with, so the scan and the
-/// parse can never disagree about what counts as a marker.
-fn body_contains_marker_line(body: &str) -> bool {
+/// Whether any line of a verbatim body is itself a managed marker — a
+/// guardrails START or END line, or a `tome:begin/end` block marker. Uses the
+/// same compiled regexes the reconciler parses with, so the scan and the parse
+/// can never disagree about what counts as a marker.
+///
+/// Promoted to `pub(crate)` so the rules-block writer
+/// ([`crate::harness::rules_file::write_block`]) reuses this ONE marker-family
+/// SSOT (PW2): the Tier-3 `long_summary` is inserted verbatim+multi-line into
+/// the `tome:begin/end` block across nine shared-AGENTS.md sinks, so a directive
+/// body line equal to `<!-- tome:end -->` would escape the region / wedge the
+/// next-sync parse (DoS). Scanning here — the same families, the same place —
+/// lets the writer fail closed.
+pub(crate) fn body_contains_marker_line(body: &str) -> bool {
     body.split('\n').any(|line| {
         start_regex().is_match(line)
             || end_regex().is_match(line)

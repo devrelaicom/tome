@@ -267,15 +267,11 @@ fn detect_harness_names(home: &Path) -> Vec<String> {
 /// Map a harness module `name()` to the closed [`Harness`] enum. Returns `None`
 /// for any name with no enum variant (e.g. the test `stub` harness) so an
 /// unmappable name is silently dropped rather than forced onto the wire.
+///
+/// PW7: delegates to the SSOT [`crate::commands::harness::harness_name_to_enum`]
+/// rather than carrying a second parallel match — the two can never drift.
 fn harness_from_name(name: &str) -> Option<Harness> {
-    match name {
-        "claude-code" => Some(Harness::ClaudeCode),
-        "cursor" => Some(Harness::Cursor),
-        "codex" => Some(Harness::Codex),
-        "opencode" => Some(Harness::Opencode),
-        "gemini" => Some(Harness::GeminiCli),
-        _ => None,
-    }
+    crate::commands::harness::harness_name_to_enum(name)
 }
 
 /// The kebab wire token for a [`Harness`], used as the deterministic sort key.
@@ -288,6 +284,23 @@ fn harness_wire_token(h: &Harness) -> &'static str {
         Harness::Codex => "codex",
         Harness::Opencode => "opencode",
         Harness::GeminiCli => "gemini-cli",
+        // Phase 11 — kebab wire tokens must match the serde `kebab-case`
+        // rendering (the `harness_serialises_with_pinned_kebab_tokens` pin) so
+        // this hand-written sort key stays in lockstep with the wire shape.
+        Harness::CopilotCli => "copilot-cli",
+        Harness::Copilot => "copilot",
+        Harness::Devin => "devin",
+        Harness::Cline => "cline",
+        Harness::Junie => "junie",
+        Harness::JetbrainsAi => "jetbrains-ai",
+        Harness::Antigravity => "antigravity",
+        Harness::Pi => "pi",
+        Harness::Crush => "crush",
+        Harness::Zed => "zed",
+        Harness::Kiro => "kiro",
+        Harness::Generic => "generic",
+        Harness::GenericOp => "generic-op",
+        Harness::Goose => "goose",
     }
 }
 

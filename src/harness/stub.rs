@@ -30,8 +30,8 @@
 //! - `rules_file_strategy` → `BlockInExistingFile`
 //! - `block_body_style`  → `Inline`
 //! - `mcp_config_path`   → `<project>/stub.mcp.json`
-//! - `mcp_config_format` → `Json`
-//! - `mcp_parent_key`    → `"mcpServers"`
+//! - `mcp_dialect`       → the trait default (`McpDialect::LEGACY` —
+//!   JSON `mcpServers` + `CommandArgs`)
 //! - Phase 6 capabilities → the trait's safe defaults (GuardrailsOnly,
 //!   no hook settings path, in-file guardrails region without suppression,
 //!   no native agents) unless overridden via `with_*`.
@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use crate::harness::agents::{CanonicalAgent, TranslatedAgent};
 use crate::harness::{
     AgentFormat, BlockBodyStyle, GuardrailsPlacement, GuardrailsTarget, HarnessModule,
-    HooksStrategy, McpConfigFormat, RulesFileStrategy,
+    HooksStrategy, RulesFileStrategy, SessionSteering,
 };
 
 /// Test-configurable [`HarnessModule`]. All fields default to the original
@@ -64,6 +64,25 @@ pub struct StubHarness {
     agent_format: Option<AgentFormat>,
     /// Canned `translate_agent` result, cloned per call.
     translation: Option<TranslatedAgent>,
+    /// Phase 11 (G2): canned `session_steering()`. Defaults to
+    /// [`SessionSteering::None`] (the trait floor).
+    session_steering: SessionSteering,
+    /// Phase 11 (US6): override the harness `name()`. Defaults to `"stub"`.
+    /// Multi-harness selection tests install several differently-named stubs.
+    name: &'static str,
+    /// Phase 11 (US6): canned `detect()` result. Defaults to `true` (the
+    /// original behaviour). Selection's detected-default path filters on this.
+    detect: bool,
+    /// Phase 11 (US6): when `true`, `mcp_config_path` points under a parent the
+    /// fixture makes a SYMLINK (`<project>/<NAME>_MCP_BROKEN/mcp.json`, with
+    /// `<project>/<NAME>_MCP_BROKEN` a symlink to a real dir). The
+    /// symlink-refusing MCP write guard rejects the LIVE write (driving the
+    /// `use` forward-progress per-harness failure path); the non-live `clean`
+    /// read of the absent file is a no-op, so a full-registry reconcile that
+    /// visits this stub on its remove path does NOT fail. Isolating the failure
+    /// to the MCP sink (which never shares the rules/guardrails path) lets a
+    /// co-selected healthy stub still succeed.
+    fail_mcp: bool,
 }
 
 impl Default for StubHarness {
@@ -76,6 +95,10 @@ impl Default for StubHarness {
             agent_dir: None,
             agent_format: None,
             translation: None,
+            session_steering: SessionSteering::None,
+            name: "stub",
+            detect: true,
+            fail_mcp: false,
         }
     }
 }
@@ -118,11 +141,42 @@ impl StubHarness {
         self.translation = Some(translated);
         self
     }
+
+    /// Drive the Phase 11 `session_steering()` (the `CommandHook` /
+    /// `TsPlugin` reconcilers).
+    pub fn with_session_steering(mut self, steering: SessionSteering) -> Self {
+        self.session_steering = steering;
+        self
+    }
+
+    /// Phase 11 (US6): override the harness `name()` (a `&'static str`, so
+    /// multi-harness selection tests can install several distinct stubs).
+    pub fn with_name(mut self, name: &'static str) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// Phase 11 (US6): set the canned `detect()` result (defaults to `true`).
+    pub fn with_detect(mut self, detect: bool) -> Self {
+        self.detect = detect;
+        self
+    }
+
+    /// Phase 11 (US6): make the LIVE MCP write fail, to drive the `use`
+    /// forward-progress per-harness failure path. The fixture must plant
+    /// `<project>/<NAME>_MCP_BROKEN` as a symlink (to a real dir) so the
+    /// symlink-refusing MCP write guard rejects the write while the non-live
+    /// clean read stays a no-op (and the rules/guardrails sinks, which target a
+    /// DIFFERENT clean path, succeed for a co-selected healthy stub).
+    pub fn with_failing_mcp(mut self) -> Self {
+        self.fail_mcp = true;
+        self
+    }
 }
 
 impl HarnessModule for StubHarness {
     fn name(&self) -> &'static str {
-        "stub"
+        self.name
     }
 
     fn description(&self) -> &'static str {
@@ -130,11 +184,18 @@ impl HarnessModule for StubHarness {
     }
 
     fn detect(&self, _home: &Path) -> bool {
-        true
+        self.detect
     }
 
     fn rules_file_target(&self, project_root: &Path) -> PathBuf {
-        project_root.join("STUB_RULES.md")
+        // The default-named stub keeps the original `STUB_RULES.md` path (other
+        // test harnesses intentionally share it). A custom-named stub gets a
+        // name-scoped path so distinct stubs in one override don't collide.
+        if self.name == "stub" {
+            project_root.join("STUB_RULES.md")
+        } else {
+            project_root.join(format!("{}_RULES.md", self.name))
+        }
     }
 
     fn rules_file_strategy(&self) -> RulesFileStrategy {
@@ -146,16 +207,24 @@ impl HarnessModule for StubHarness {
     }
 
     fn mcp_config_path(&self, project_root: &Path, _home: &Path) -> PathBuf {
-        project_root.join("stub.mcp.json")
+        if self.fail_mcp {
+            // Parent is a fixture-planted symlink → the LIVE MCP write is
+            // refused by the symlink guard (a non-live clean read is a no-op).
+            return project_root
+                .join(format!("{}_MCP_BROKEN", self.name))
+                .join("mcp.json");
+        }
+        // Default keeps `stub.mcp.json`; custom-named stubs get a name-scoped
+        // file so several stubs in one override don't write the same path.
+        if self.name == "stub" {
+            project_root.join("stub.mcp.json")
+        } else {
+            project_root.join(format!("{}.mcp.json", self.name))
+        }
     }
 
-    fn mcp_config_format(&self) -> McpConfigFormat {
-        McpConfigFormat::Json
-    }
-
-    fn mcp_parent_key(&self) -> &'static str {
-        "mcpServers"
-    }
+    // MCP dialect: the trait default ([`McpDialect::LEGACY`] — JSON
+    // `mcpServers` + `CommandArgs`) is exactly the stub's shape.
 
     fn hooks_strategy(&self) -> HooksStrategy {
         self.hooks_strategy
@@ -191,6 +260,10 @@ impl HarnessModule for StubHarness {
 
     fn agent_format(&self) -> Option<AgentFormat> {
         self.agent_format
+    }
+
+    fn session_steering(&self) -> SessionSteering {
+        self.session_steering.clone()
     }
 
     fn translate_agent(

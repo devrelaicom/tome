@@ -32,9 +32,15 @@ use sha2::{Digest, Sha256};
 /// deliberately if a future skill genuinely needs more.
 const META_SKILL_BYTE_BUDGET: u64 = 5 * 1024 * 1024; // 5 MiB
 
+/// Total embedded harness-plugin (TS shim) bytes must stay well under the 50 MB
+/// binary cap (Phase 11, R6). The shipped shims are a few KB of TypeScript; this
+/// budget is a wide regression backstop, mirroring `META_SKILL_BYTE_BUDGET`.
+const HARNESS_PLUGIN_BYTE_BUDGET: u64 = 1024 * 1024; // 1 MiB
+
 fn main() {
     compile_sqlite_vec();
     generate_meta_skill_manifest();
+    generate_harness_plugin_manifest();
 }
 
 fn compile_sqlite_vec() {
@@ -334,4 +340,154 @@ fn render_manifest(skills: &[ManifestSkill]) -> String {
 /// which produces a valid Rust/`str` literal for our ASCII-ish inputs).
 fn rust_str(s: &str) -> String {
     format!("{s:?}")
+}
+
+// ---------------------------------------------------------------------------
+// Embedded harness-plugin (TS shim) manifest (Phase 11, R6)
+// ---------------------------------------------------------------------------
+//
+// Some harnesses (Cline, Pi, OpenCode) deliver Tome's session-start steering via
+// a small Tome-shipped TypeScript plugin shim rather than a native session hook.
+// We embed each shim tree in the binary (offline, versioned with the binary,
+// zero new dependency) exactly the way the meta-skill manifest does, and the
+// shim is executed by the *harness's* own runtime — so the sync boundary holds.
+//
+// Reuses the meta-skill helpers (`collect_files`, `rel_to_posix`,
+// `is_safe_segment`, `rust_str`) and the `ManifestFile` record — only the
+// per-subdir validation gate (exactly one root `tome.ts` entrypoint) and the
+// generated struct names differ.
+
+/// One embedded harness shim folder, fully validated.
+struct ManifestHarnessPlugin {
+    /// The subdir name = the harness id (a safe path segment).
+    harness: String,
+    /// The rel path of the required entrypoint (`tome.ts`).
+    entrypoint: String,
+    files: Vec<ManifestFile>,
+}
+
+fn generate_harness_plugin_manifest() {
+    let manifest_dir =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let assets_root = manifest_dir.join("assets/harness-plugins");
+
+    // Rebuild when the asset tree changes (the directory itself catches
+    // adds/removes; each file is registered individually below).
+    println!("cargo:rerun-if-changed={}", assets_root.display());
+
+    let mut plugins: Vec<ManifestHarnessPlugin> = Vec::new();
+    if assets_root.is_dir() {
+        // Immediate subdirectories only — each is one harness shim. The
+        // top-level `README.md` (and any other loose file) is NOT a harness
+        // dir and is skipped by the `is_dir()` filter, exactly as the
+        // meta-skills walker skips non-dirs.
+        let mut entries: Vec<PathBuf> = fs::read_dir(&assets_root)
+            .unwrap_or_else(|e| panic!("read assets/harness-plugins/: {e}"))
+            .map(|e| e.expect("dir entry").path())
+            .filter(|p| p.is_dir())
+            .collect();
+        entries.sort();
+        for plugin_dir in entries {
+            plugins.push(load_harness_plugin(&plugin_dir));
+        }
+    }
+
+    // Binary-size budget: fail the build well under the 50 MB cap.
+    let total: u64 = plugins
+        .iter()
+        .flat_map(|p| p.files.iter())
+        .map(|f| f.bytes.len() as u64)
+        .sum();
+    assert!(
+        total <= HARNESS_PLUGIN_BYTE_BUDGET,
+        "embedded harness-plugin shims total {total} bytes, over the \
+         {HARNESS_PLUGIN_BYTE_BUDGET}-byte budget. Trim the shims or raise \
+         HARNESS_PLUGIN_BYTE_BUDGET deliberately."
+    );
+
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let generated = out_dir.join("harness_plugins_manifest.rs");
+    fs::write(&generated, render_harness_plugin_manifest(&plugins))
+        .unwrap_or_else(|e| panic!("write {}: {e}", generated.display()));
+}
+
+/// Walk one `assets/harness-plugins/<harness>/` folder, validate it, and build
+/// the in-memory record. Panics (failing the build) on any invariant violation
+/// — the build-time validation gate FR-022 requires.
+fn load_harness_plugin(plugin_dir: &Path) -> ManifestHarnessPlugin {
+    let harness = plugin_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "non-UTF-8 harness-plugin dir name at {}",
+                plugin_dir.display()
+            )
+        })
+        .to_owned();
+    assert!(
+        is_safe_segment(&harness),
+        "harness-plugin id `{harness}` is not a safe path segment (no empty, `.`, `..`, \
+         leading-dot, `/`, `\\`, or NUL)"
+    );
+
+    let mut files: Vec<ManifestFile> = Vec::new();
+    // `collect_files` rejects any non-`Normal`/absolute rel path at build time
+    // via `rel_to_posix`.
+    collect_files(plugin_dir, plugin_dir, &mut files);
+    files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+
+    // Exactly one `tome.ts` entrypoint at the folder root (FR-022).
+    let entrypoint = "tome.ts";
+    let entry_count = files.iter().filter(|f| f.rel_path == entrypoint).count();
+    assert!(
+        entry_count == 1,
+        "harness-plugin `{harness}` must have exactly one root `{entrypoint}` entrypoint, \
+         found {entry_count}"
+    );
+
+    // Register each file for change-detection.
+    for f in &files {
+        println!("cargo:rerun-if-changed={}", f.abs_path.display());
+    }
+
+    ManifestHarnessPlugin {
+        harness,
+        entrypoint: entrypoint.to_owned(),
+        files,
+    }
+}
+
+/// Render the generated Rust source. Types (`EmbeddedHarnessPlugin`/
+/// `EmbeddedFile`) are defined at the `include!` site in
+/// `src/harness/plugin_assets.rs`.
+fn render_harness_plugin_manifest(plugins: &[ManifestHarnessPlugin]) -> String {
+    let mut out = String::new();
+    out.push_str("// @generated by build.rs — do not edit. Source: assets/harness-plugins/**\n");
+    out.push_str("pub static HARNESS_PLUGINS: &[EmbeddedHarnessPlugin] = &[\n");
+    for p in plugins {
+        out.push_str("    EmbeddedHarnessPlugin {\n");
+        out.push_str(&format!("        harness: {},\n", rust_str(&p.harness)));
+        out.push_str(&format!(
+            "        entrypoint: {},\n",
+            rust_str(&p.entrypoint)
+        ));
+        out.push_str("        files: &[\n");
+        for f in &p.files {
+            out.push_str("            EmbeddedFile {\n");
+            out.push_str(&format!(
+                "                rel_path: {},\n",
+                rust_str(&f.rel_path)
+            ));
+            out.push_str(&format!(
+                "                bytes: include_bytes!({}),\n",
+                rust_str(&f.abs_path.to_string_lossy())
+            ));
+            out.push_str("            },\n");
+        }
+        out.push_str("        ],\n");
+        out.push_str("    },\n");
+    }
+    out.push_str("];\n");
+    out
 }

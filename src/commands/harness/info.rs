@@ -14,8 +14,7 @@ use serde::Serialize;
 use crate::cli::HarnessInfoArgs;
 use crate::error::TomeError;
 use crate::harness::{
-    BlockBodyStyle, McpConfigFormat, RulesFileStrategy, mcp_config, rules_file,
-    with_effective_modules,
+    BlockBodyStyle, McpDialect, RulesFileStrategy, mcp_config, rules_file, with_effective_modules,
 };
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
@@ -63,6 +62,18 @@ pub struct HarnessInfoOutcome {
     /// context, so this falls back to direct-declaration scanning of
     /// workspace + global settings (C-B3 from US3 review).
     pub references: Vec<HarnessReference>,
+    /// Phase 11 / US5 (T063): the paste-able MCP-server snippet — the EXACT
+    /// bytes Tome would write for this harness's [`McpDialect`], built with
+    /// the canonical `["mcp", "--workspace", "<ws>", "--harness", "<name>"]`
+    /// args. For a manual-only harness (jetbrains-ai) this is the primary
+    /// recovery artifact; for every harness it is the self-heal paste target.
+    ///
+    /// Appended LAST + `skip_serializing_if`-gated so the byte-stable `--json`
+    /// pins for the pre-Phase-11 fields don't move. Always populated in
+    /// practice (every dialect renders), but `Option` keeps the wire shape
+    /// additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_snippet: Option<String>,
 }
 
 /// Per-harness snapshot captured outside the registry's read guard.
@@ -70,8 +81,7 @@ struct ModuleSnapshot {
     name: String,
     description: String,
     rules_strategy: RulesFileStrategy,
-    mcp_format: McpConfigFormat,
-    mcp_parent_key: &'static str,
+    mcp_dialect: McpDialect,
     detected: bool,
     detected_path: PathBuf,
     rules_target: Option<PathBuf>,
@@ -88,23 +98,33 @@ pub fn run(
 ) -> Result<(), TomeError> {
     let home = home_root()?;
     let project_root = scope.project_root.clone();
+    // Snapshot the named module's fields. Build the `ModuleSnapshot` from a
+    // `&dyn HarnessModule` so the same closure serves both the override-aware
+    // `with_effective_modules` path and the opt-in `lookup` fallback below.
+    let snapshot_of = |m: &dyn crate::harness::HarnessModule| ModuleSnapshot {
+        name: m.name().to_string(),
+        description: m.description().to_string(),
+        rules_strategy: m.rules_file_strategy(),
+        mcp_dialect: m.mcp_dialect(),
+        detected: m.detect(&home),
+        detected_path: m.detect_path(&home),
+        rules_target: project_root.as_deref().map(|p| m.rules_file_target(p)),
+        mcp_target: project_root.as_deref().map(|p| m.mcp_config_path(p, &home)),
+        block_body_style: m.block_body_style(),
+    };
+    // Phase 11 / US4 (M1): resolve via the effective registry FIRST (so a test
+    // override and the supported harnesses both work), then fall back to the
+    // alias+opt-in-aware `lookup` so `tome harness info generic` / `generic-op`
+    // resolve their opt-in modules rather than erroring `HarnessNotSupported`.
+    // `lookup` does not consult the override slot, but the override branch has
+    // already matched when one is installed.
     let snap = with_effective_modules(|mods| {
         mods.iter()
             .find(|m| m.name() == args.name)
-            .map(|m| ModuleSnapshot {
-                name: m.name().to_string(),
-                description: m.description().to_string(),
-                rules_strategy: m.rules_file_strategy(),
-                mcp_format: m.mcp_config_format(),
-                mcp_parent_key: m.mcp_parent_key(),
-                detected: m.detect(&home),
-                detected_path: m.detect_path(&home),
-                rules_target: project_root.as_deref().map(|p| m.rules_file_target(p)),
-                mcp_target: project_root.as_deref().map(|p| m.mcp_config_path(p, &home)),
-                block_body_style: m.block_body_style(),
-            })
-    });
-    let snap = snap.ok_or_else(|| TomeError::HarnessNotSupported {
+            .map(|m| snapshot_of(*m))
+    })
+    .or_else(|| crate::harness::lookup(&args.name).map(snapshot_of))
+    .ok_or_else(|| TomeError::HarnessNotSupported {
         name: args.name.clone(),
     })?;
 
@@ -112,7 +132,7 @@ pub fn run(
         match (&snap.rules_target, &snap.mcp_target) {
             (Some(rules_path), Some(mcp_path)) => {
                 let block_present = probe_rules_block(rules_path, snap.rules_strategy)?;
-                let entry = mcp_config::read_entry(mcp_path, snap.mcp_format, snap.mcp_parent_key)?;
+                let entry = mcp_config::read_entry(mcp_path, &snap.mcp_dialect)?;
                 let entry_present = entry.is_some();
                 let entry_tome_owned = entry.as_ref().map(mcp_config::is_tome_owned);
                 (Some(block_present), Some(entry_present), entry_tome_owned)
@@ -121,6 +141,26 @@ pub fn run(
         };
 
     let references = collect_references(scope, paths, &snap.name)?;
+
+    // Phase 11 / US5 (T063): render the paste-able MCP snippet from the
+    // harness's dialect, built with the canonical args the sync writer uses
+    // (`mcp --workspace <ws> --harness <name>`, the `--harness` trailing so
+    // the ownership marker survives) — so the snippet bytes match what sync
+    // writes. Keyed off the resolved workspace name + the harness name.
+    let snippet_entry = mcp_config::TomeEntry::new(
+        "tome".to_string(),
+        vec![
+            "mcp".to_string(),
+            "--workspace".to_string(),
+            scope.scope.name().as_str().to_string(),
+            "--harness".to_string(),
+            snap.name.clone(),
+        ],
+    );
+    let mcp_snippet = Some(mcp_config::render_entry_snippet(
+        &snap.mcp_dialect,
+        &snippet_entry,
+    ));
 
     let outcome = HarnessInfoOutcome {
         name: snap.name,
@@ -133,6 +173,7 @@ pub fn run(
         mcp_entry_present,
         mcp_tome_owned,
         references,
+        mcp_snippet,
     };
 
     match mode {
@@ -292,5 +333,57 @@ fn emit_human(outcome: &HarnessInfoOutcome) -> Result<(), TomeError> {
             }
         }
     }
+    // Phase 11 / US5 (T063): the paste-able MCP-config snippet. For a
+    // manual-only harness (jetbrains-ai) this is how a user adds the Tome
+    // server by hand; for every harness it is the self-heal paste target the
+    // rules preamble points at.
+    if let Some(snippet) = &outcome.mcp_snippet {
+        writeln!(out)?;
+        writeln!(out, "  MCP config — paste into {}:", outcome.name)?;
+        writeln!(out)?;
+        // Emit verbatim (already carries its own trailing newline).
+        write!(out, "{snippet}")?;
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn outcome_with_snippet(snippet: Option<String>) -> HarnessInfoOutcome {
+        HarnessInfoOutcome {
+            name: "jetbrains-ai".to_string(),
+            description: "JetBrains AI Assistant".to_string(),
+            detected: true,
+            detected_path: PathBuf::from("/h/.aiassistant"),
+            rules_target: None,
+            mcp_target: None,
+            rules_block_present: None,
+            mcp_entry_present: None,
+            mcp_tome_owned: None,
+            references: Vec::new(),
+            mcp_snippet: snippet,
+        }
+    }
+
+    /// T063: `mcp_snippet` serialises LAST + is `skip_serializing_if`-gated so
+    /// the byte-stable pre-Phase-11 `--json` pins don't move.
+    #[test]
+    fn mcp_snippet_is_appended_last_and_gated() {
+        let with = serde_json::to_string(&outcome_with_snippet(Some("SNIP".to_string()))).unwrap();
+        assert!(
+            with.ends_with("\"mcp_snippet\":\"SNIP\"}"),
+            "mcp_snippet must be the LAST field; got: {with}",
+        );
+
+        // Absent → the key is omitted entirely (skip_serializing_if).
+        let without = serde_json::to_string(&outcome_with_snippet(None)).unwrap();
+        assert!(
+            !without.contains("mcp_snippet"),
+            "absent snippet must omit the key; got: {without}",
+        );
+        // The prior-last field (`references`) remains last when snippet absent.
+        assert!(without.ends_with("\"references\":[]}"));
+    }
 }

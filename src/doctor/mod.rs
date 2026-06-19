@@ -897,8 +897,9 @@ fn build_suggested_fixes(
                 });
             }
             // UserOwned doesn't apply to rules-file integration —
-            // unreachable in practice; defensively skip.
-            SubsystemHealth::UserOwned => {}
+            // unreachable in practice; defensively skip. Manual/Unverified
+            // are MCP-only (Phase 11) — likewise unreachable here; skip.
+            SubsystemHealth::UserOwned | SubsystemHealth::Manual | SubsystemHealth::Unverified => {}
         }
     }
     // Per-harness MCP-config integration.
@@ -944,6 +945,11 @@ fn build_suggested_fixes(
                     auto_fixable: false,
                 });
             }
+            // Phase 11 / US5: Manual (jetbrains-ai, no file written) and
+            // Unverified (pi, adapter-dependent) are informational, NOT
+            // failures — no suggested fix; the recovery artifact is
+            // `tome harness info <name>` / `tome harness use <name>`.
+            SubsystemHealth::Manual | SubsystemHealth::Unverified => {}
         }
     }
     out

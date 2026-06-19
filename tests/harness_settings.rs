@@ -33,6 +33,10 @@ mod harness_list_json_shape;
 mod harness_module_claude_code;
 #[path = "harness_settings/harness_modules.rs"]
 mod harness_modules;
+#[path = "harness_settings/harness_open_plugins_bundle.rs"]
+mod harness_open_plugins_bundle;
+#[path = "harness_settings/harness_p11_pins.rs"]
+mod harness_p11_pins;
 #[path = "harness_settings/harness_remove_scope.rs"]
 mod harness_remove_scope;
 #[path = "harness_settings/harness_skeleton.rs"]
@@ -49,8 +53,14 @@ mod harness_sync_p6_idempotence;
 mod harness_sync_stub;
 #[path = "harness_settings/harness_trait_p6.rs"]
 mod harness_trait_p6;
+#[path = "harness_settings/harness_ts_plugin_shim.rs"]
+mod harness_ts_plugin_shim;
+#[path = "harness_settings/harness_use_manual_mcp.rs"]
+mod harness_use_manual_mcp;
 #[path = "harness_settings/harness_use_scope.rs"]
 mod harness_use_scope;
+#[path = "harness_settings/harness_use_selection.rs"]
+mod harness_use_selection;
 #[path = "harness_settings/hooks_merge.rs"]
 mod hooks_merge;
 #[path = "harness_settings/hooks_rewrite.rs"]

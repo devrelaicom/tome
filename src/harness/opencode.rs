@@ -23,7 +23,8 @@ use crate::harness::agents::{
     self, CanonicalAgent, TranslatedAgent, agent_extension, agent_filename,
 };
 use crate::harness::{
-    AgentFormat, BlockBodyStyle, HarnessModule, McpConfigFormat, RulesFileStrategy,
+    AgentFormat, BlockBodyStyle, EntryShape, ExtraField, ExtraValue, FileFormat, HarnessModule,
+    McpDialect, RulesFileStrategy, ServerType, SessionSteering, ShimKind,
 };
 
 /// Unit struct implementing [`HarnessModule`] for OpenCode CLI.
@@ -59,16 +60,63 @@ impl HarnessModule for OpenCode {
         BlockBodyStyle::Inline
     }
 
+    /// OpenCode receives Tome's session-start directive through an embedded
+    /// TypeScript plugin shim (Phase 11 / G2, US3) — it has no native
+    /// session-start hook file. The dir is PROJECT-RELATIVE: `reconcile_plugins`
+    /// anchors it under `project_root` via `project_root.join(dir)`. The shim
+    /// lands at `<project>/.opencode/plugin/tome.ts` (singular `plugin/`, per the
+    /// contract), a dedicated file inside OpenCode's own plugin dir. This is the
+    /// ONLY behavioural addition for OpenCode in Phase 11 US3 — every other sink
+    /// (rules / MCP dialect / native agents / native skills) is unchanged.
+    fn session_steering(&self) -> SessionSteering {
+        SessionSteering::TsPlugin {
+            dir: PathBuf::from(".opencode/plugin"),
+            kind: ShimKind::OpenCode,
+        }
+    }
+
     fn mcp_config_path(&self, project_root: &Path, _home: &Path) -> PathBuf {
         project_root.join("opencode.json")
     }
 
-    fn mcp_config_format(&self) -> McpConfigFormat {
-        McpConfigFormat::Json
-    }
-
-    fn mcp_parent_key(&self) -> &'static str {
-        "mcpServers"
+    /// OpenCode's MCP dialect (Phase 11 G1 fix — the canary proving the
+    /// dialect generalization). The Phase ≤10 emit used the legacy
+    /// `mcpServers` + `command`/`args` shape, which is SUSPECTED WRONG for
+    /// OpenCode. The contract (`contracts/mcp-dialects.md`) pins the real
+    /// shape:
+    ///
+    /// ```jsonc
+    /// { "mcp": { "tome": {
+    ///     "type": "local",
+    ///     "command": ["tome", "mcp", "--workspace", "<ws>", "--harness", "opencode"],
+    ///     "enabled": true
+    /// } } }
+    /// ```
+    ///
+    /// - `mcp` parent key (NOT `mcpServers`).
+    /// - `CommandArray` body — the launcher AND args live in ONE
+    ///   `command` array; there is no separate `args` key. The ownership
+    ///   predicate becomes `command[0] == "tome" && command[1] == "mcp"`
+    ///   by construction of the read-side normalisation.
+    /// - `type: "local"` discriminator.
+    /// - `enabled: true` mandated field, re-derived on every rewrite.
+    /// - `Jsonc` format (OpenCode tolerates comments in `opencode.json`;
+    ///   Tome still emits plain JSON).
+    ///
+    /// A live-probe gate (the `#[ignore]`d test below) confirms this is
+    /// what OpenCode actually reads before the fix ships.
+    fn mcp_dialect(&self) -> McpDialect {
+        McpDialect {
+            file_format: FileFormat::Jsonc,
+            parent_key: "mcp",
+            entry_shape: EntryShape::CommandArray,
+            entry_type: Some(ServerType::Local),
+            emit_env: false,
+            extra_fields: &[ExtraField {
+                key: "enabled",
+                value: ExtraValue::Bool(true),
+            }],
+        }
     }
 
     // -- Native agents (FR-030–FR-036, FR-042) ------------------------------
@@ -303,5 +351,107 @@ mod tests {
             "empty body → placeholder:\n{}",
             t2.rendered
         );
+    }
+
+    #[test]
+    fn mcp_dialect_is_the_g1_canary_shape() {
+        use crate::harness::{EntryShape, ExtraValue, FileFormat, HarnessModule, ServerType};
+        let d = OPENCODE.mcp_dialect();
+        assert_eq!(d.file_format, FileFormat::Jsonc);
+        assert_eq!(d.parent_key, "mcp");
+        assert_eq!(d.entry_shape, EntryShape::CommandArray);
+        assert_eq!(d.entry_type, Some(ServerType::Local));
+        assert!(!d.emit_env);
+        assert_eq!(d.extra_fields.len(), 1);
+        assert_eq!(d.extra_fields[0].key, "enabled");
+        assert_eq!(d.extra_fields[0].value, ExtraValue::Bool(true));
+        // The Phase ≤10 scalar accessors derive from the dialect.
+        assert_eq!(
+            d.config_format(),
+            crate::harness::McpConfigFormat::Json,
+            "Jsonc maps to the serde_json read/write path"
+        );
+        assert_eq!(OPENCODE.mcp_parent_key(), "mcp");
+    }
+
+    /// Phase 11 / US3 (T057): OpenCode's session steering is the embedded
+    /// `TsPlugin` shim, project-relative dir `.opencode/plugin` (singular
+    /// `plugin/`), `ShimKind::OpenCode`.
+    #[test]
+    fn session_steering_is_opencode_ts_plugin() {
+        assert_eq!(
+            OPENCODE.session_steering(),
+            SessionSteering::TsPlugin {
+                dir: PathBuf::from(".opencode/plugin"),
+                kind: ShimKind::OpenCode,
+            },
+        );
+    }
+
+    /// T058 — shim byte pin: OpenCode's embedded `tome.ts` is non-empty.
+    #[test]
+    fn embedded_shim_is_non_empty() {
+        let plugin = crate::harness::plugin_assets::find("opencode")
+            .expect("opencode shim must be embedded");
+        let entry = plugin
+            .files
+            .iter()
+            .find(|f| f.rel_path == "tome.ts")
+            .expect("opencode shim must contain tome.ts");
+        assert!(
+            !entry.bytes.is_empty(),
+            "opencode tome.ts must be non-empty"
+        );
+    }
+
+    /// T058 — invocation + fail-closed pin: the embedded shim invokes
+    /// `tome … session-start … --harness opencode` (B3) and no-ops fail-closed
+    /// on a missing binary.
+    #[test]
+    fn embedded_shim_invokes_session_start_and_fails_closed() {
+        let plugin = crate::harness::plugin_assets::find("opencode").unwrap();
+        let shim = plugin
+            .files
+            .iter()
+            .find(|f| f.rel_path == "tome.ts")
+            .expect("opencode shim must contain tome.ts");
+        let src = std::str::from_utf8(shim.bytes).expect("shim is UTF-8");
+        assert!(src.contains("\"tome\""), "shim launches the `tome` binary");
+        assert!(
+            src.contains("session-start"),
+            "shim runs the session-start subcommand",
+        );
+        assert!(
+            src.contains("\"--harness\"") && src.contains("\"opencode\""),
+            "shim passes --harness opencode (defers to the Rust directive source)",
+        );
+        assert!(
+            src.contains("catch") && src.contains("return \"\""),
+            "shim must fail closed (catch → empty string → no injection) on a missing binary",
+        );
+    }
+
+    /// Live-probe merge gate (R14 / T087). NOT run in CI — a human must run
+    /// this against a real OpenCode install before the G1 fix ships.
+    ///
+    /// What to verify by hand:
+    ///
+    /// 1. `tome harness use opencode` (or `tome sync --harness opencode`) in a
+    ///    workspace-bound project, then open the generated `opencode.json`.
+    /// 2. Confirm the Tome entry is under the top-level `"mcp"` key (NOT
+    ///    `"mcpServers"`), with `"type": "local"`, a single `"command"` array
+    ///    `["tome","mcp","--workspace","<ws>","--harness","opencode"]` (NO
+    ///    separate `"args"` key), and `"enabled": true`.
+    /// 3. Start OpenCode in that project and confirm it actually discovers and
+    ///    connects to the Tome MCP server (tools `search_skills` / `get_skill`
+    ///    appear). This is the assertion the unit pins cannot make: that
+    ///    OpenCode READS this shape. The current `mcpServers`+command/args
+    ///    emit is suspected wrong; this probe is what confirms the fix.
+    #[test]
+    #[ignore = "live-probe: confirm OpenCode reads the `mcp`+command-array+type:local shape against a real install"]
+    fn opencode_reads_mcp_command_array_shape_live_probe() {
+        // No automated body — see the doc comment for the manual checklist a
+        // human runs against a real OpenCode install. Present so the gate is
+        // discoverable via `cargo test -- --ignored`.
     }
 }

@@ -68,22 +68,21 @@ pub fn run(
     paths: &Paths,
     mode: Mode,
 ) -> Result<(), TomeError> {
-    // Validate `--harness <name>` eagerly so an unknown name fails fast with
-    // the same error/exit code as `tome harness use` — but only when the
+    // Validate every `--harness <name>` eagerly so an unknown name fails fast
+    // with the same error/exit code as `tome harness use` — but only when the
     // harness reconcile will actually run (a `--rules-only` run never touches
-    // harnesses, so the value is simply ignored).
-    if !args.rules_only
-        && let Some(name) = args.harness.as_deref()
-        && crate::harness::lookup(name).is_none()
-    {
-        return Err(TomeError::HarnessNotSupported {
-            name: name.to_string(),
-        });
+    // harnesses, so the values are simply ignored).
+    if !args.rules_only {
+        for name in &args.harness {
+            if crate::harness::lookup(name).is_none() {
+                return Err(TomeError::HarnessNotSupported { name: name.clone() });
+            }
+        }
     }
 
     // A `--harness` value under `--rules-only` is inert; say so once on stderr
     // rather than silently dropping it.
-    if args.rules_only && args.harness.is_some() {
+    if args.rules_only && !args.harness.is_empty() {
         eprintln!("note: --harness is ignored with --rules-only");
     }
 
@@ -143,8 +142,7 @@ pub fn sync_one_project(
         // sync`); a clash is resolved by re-binding with
         // `tome workspace use --force`.
         let mut deps = crate::harness::sync::build_deps(paths, &home, ws, false);
-        // `Option<String>`; `None` reconciles the full effective set.
-        deps.only_harness = args.harness.clone();
+        deps.only_harness = harness_filter_set(&args.harness);
         let outcome = crate::harness::sync::sync_project(project_root, &deps)?;
 
         // Telemetry parity with the removed `tome harness sync`: emit one
@@ -176,6 +174,27 @@ pub fn sync_one_project(
         rules,
         harness_changes,
     })
+}
+
+/// Build the canonical-name `SyncDeps.only_harness` filter SET from the
+/// repeated `--harness` values (Phase 11 / US6, T080).
+///
+/// Each value is alias-resolved (so `--harness antigravity-cli` filters the
+/// `gemini` module) before insertion, then deduped by the set. An EMPTY list →
+/// `None` → reconcile the full effective set (the default). A single
+/// `--harness X` is identical to the former single-name behaviour — a
+/// one-element set whose `set.contains(m.name())` matches exactly X.
+pub(crate) fn harness_filter_set(harness: &[String]) -> Option<std::collections::HashSet<String>> {
+    if harness.is_empty() {
+        None
+    } else {
+        Some(
+            harness
+                .iter()
+                .map(|n| crate::harness::resolve_alias(n).to_string())
+                .collect(),
+        )
+    }
 }
 
 /// Fan out [`sync_one_project`] over every project bound to `ws` in
@@ -256,5 +275,54 @@ fn emit(report: &SyncReport, mode: Mode) -> Result<(), TomeError> {
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::harness_filter_set;
+
+    /// Empty `--harness` → `None` (no filter; reconcile the full effective set).
+    #[test]
+    fn empty_harness_list_is_no_filter() {
+        assert!(harness_filter_set(&[]).is_none());
+    }
+
+    /// A single `--harness X` → a one-element set containing exactly X.
+    #[test]
+    fn single_harness_is_singleton_set() {
+        let set = harness_filter_set(&["cursor".to_string()]).expect("some");
+        assert_eq!(set.len(), 1);
+        assert!(set.contains("cursor"));
+    }
+
+    /// Repeated `--harness a --harness b` → the set {a, b}.
+    #[test]
+    fn repeated_harness_builds_the_set() {
+        let set = harness_filter_set(&["cursor".to_string(), "codex".to_string()]).expect("some");
+        assert_eq!(set.len(), 2);
+        assert!(set.contains("cursor"));
+        assert!(set.contains("codex"));
+    }
+
+    /// Aliases resolve to their canonical name BEFORE the set membership check:
+    /// `antigravity-cli` → `gemini`, and naming both collapses to one entry.
+    #[test]
+    fn aliases_resolve_and_dedupe_before_membership() {
+        let set = harness_filter_set(&["antigravity-cli".to_string()]).expect("some");
+        assert!(
+            set.contains("gemini"),
+            "antigravity-cli must resolve to gemini: {set:?}",
+        );
+
+        // antigravity-cli + gemini collapse to a single `gemini` entry.
+        let collapsed = harness_filter_set(&["antigravity-cli".to_string(), "gemini".to_string()])
+            .expect("some");
+        assert_eq!(
+            collapsed.len(),
+            1,
+            "alias + canonical collapse: {collapsed:?}"
+        );
+        assert!(collapsed.contains("gemini"));
     }
 }

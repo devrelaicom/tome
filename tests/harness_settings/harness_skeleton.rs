@@ -17,11 +17,29 @@ use tome::harness::{
 /// runner can't observe a half-installed state.
 
 #[test]
-fn registry_lists_five_harnesses_in_lex_order() {
+fn registry_lists_seventeen_harnesses_in_lex_order() {
     let names: Vec<&str> = SUPPORTED_HARNESSES.iter().map(|h| h.name()).collect();
     assert_eq!(
         names,
-        vec!["claude-code", "codex", "cursor", "gemini", "opencode"],
+        vec![
+            "antigravity",
+            "claude-code",
+            "cline",
+            "codex",
+            "copilot",
+            "copilot-cli",
+            "crush",
+            "cursor",
+            "devin",
+            "gemini",
+            "goose",
+            "jetbrains-ai",
+            "junie",
+            "kiro",
+            "opencode",
+            "pi",
+            "zed",
+        ],
     );
 }
 
@@ -145,7 +163,10 @@ fn gemini_specifics() {
 #[test]
 fn opencode_specifics() {
     let h = lookup("opencode").expect("opencode registered");
-    assert_eq!(h.mcp_parent_key(), "mcpServers");
+    // Phase 11 G1 (canary fix): OpenCode's parent key is `mcp`, not the
+    // legacy `mcpServers`. `mcp_config_format()` stays Json (Jsonc routes
+    // through the serde_json path).
+    assert_eq!(h.mcp_parent_key(), "mcp");
     assert_eq!(h.mcp_config_format(), McpConfigFormat::Json);
     assert_eq!(
         h.rules_file_strategy(),

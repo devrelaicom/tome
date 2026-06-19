@@ -18,7 +18,7 @@ use crate::harness::agents::{
 };
 use crate::harness::{
     AgentFormat, BlockBodyStyle, GuardrailsPlacement, GuardrailsTarget, HarnessModule,
-    McpConfigFormat, RulesFileStrategy,
+    RulesFileStrategy,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Cursor.
@@ -60,13 +60,8 @@ impl HarnessModule for Cursor {
         project_root.join(".cursor/mcp.json")
     }
 
-    fn mcp_config_format(&self) -> McpConfigFormat {
-        McpConfigFormat::Json
-    }
-
-    fn mcp_parent_key(&self) -> &'static str {
-        "mcpServers"
-    }
+    // MCP dialect: the trait default ([`McpDialect::LEGACY`]) is exactly
+    // Cursor's shape (JSON `mcpServers` + `CommandArgs`), so no override.
 
     // -- Guardrails fallback (FR-011, FR-012, FR-015) -----------------------
 

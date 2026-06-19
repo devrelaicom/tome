@@ -34,7 +34,8 @@ fn use_unknown_harness_errors_with_exit_18() {
     // `global` is auto-seeded by index bootstrap; no manual seed needed.
 
     let args = HarnessUseArgs {
-        name: "totally-not-a-harness".to_string(),
+        names: vec!["totally-not-a-harness".to_string()],
+        all: false,
         scope: HarnessScopeArg::Global,
         force: false,
     };
@@ -56,7 +57,8 @@ fn use_project_scope_without_project_errors_with_usage() {
     // `global` is auto-seeded by index bootstrap; no manual seed needed.
 
     let args = HarnessUseArgs {
-        name: "stub".to_string(),
+        names: vec!["stub".to_string()],
+        all: false,
         scope: HarnessScopeArg::Project,
         force: false,
     };
@@ -78,7 +80,8 @@ fn use_global_scope_writes_global_settings_file() {
     // `global` is auto-seeded by index bootstrap; no manual seed needed.
 
     let args = HarnessUseArgs {
-        name: "stub".to_string(),
+        names: vec!["stub".to_string()],
+        all: false,
         scope: HarnessScopeArg::Global,
         force: false,
     };
@@ -89,6 +92,43 @@ fn use_global_scope_writes_global_settings_file() {
     assert!(
         body.contains("stub"),
         "global settings must include stub: {body}"
+    );
+}
+
+/// Phase 11 / US4 (M4): `tome harness use generic-op` (global scope) is ACCEPTED
+/// — the opt-in target lives in `OPT_IN_TARGETS`, not `SUPPORTED_HARNESSES`, so
+/// `run` must resolve it via the alias+opt-in-aware `lookup` rather than
+/// erroring exit 18. Driven against the REAL registry (NO `HarnessModulesGuard`
+/// override, since opt-in targets are not in the override slot) at global scope,
+/// so no project sync runs — only the name validation + settings write.
+#[test]
+fn use_generic_op_global_scope_is_accepted() {
+    // No `HarnessModulesGuard` — opt-in targets are resolved through the real
+    // `OPT_IN_TARGETS` registry, which `lookup` consults. Still serialise on the
+    // override mutex so a co-resident test's installed override can't leak in and
+    // shadow the real registry mid-run.
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    // `global` is auto-seeded by index bootstrap; no manual seed needed.
+
+    let args = HarnessUseArgs {
+        names: vec!["generic-op".to_string()],
+        all: false,
+        scope: HarnessScopeArg::Global,
+        force: false,
+    };
+    let scope = make_resolved_scope("global", None);
+    use_::run(args, &scope, &paths, Mode::Json).expect("use generic-op ok (not exit 18)");
+
+    let body = std::fs::read_to_string(&paths.global_settings_file).expect("global settings");
+    assert!(
+        body.contains("generic-op"),
+        "global settings must include generic-op: {body}",
     );
 }
 
@@ -105,7 +145,8 @@ fn use_workspace_scope_writes_workspace_settings_file() {
     seed_workspace(&paths, "demo");
 
     let args = HarnessUseArgs {
-        name: "stub".to_string(),
+        names: vec!["stub".to_string()],
+        all: false,
         scope: HarnessScopeArg::Workspace,
         force: false,
     };
@@ -142,7 +183,8 @@ fn use_project_scope_writes_project_marker() {
     let _home = HomeGuard::install(env.home_path());
 
     let args = HarnessUseArgs {
-        name: "stub".to_string(),
+        names: vec!["stub".to_string()],
+        all: false,
         scope: HarnessScopeArg::Project,
         force: false,
     };
@@ -188,7 +230,8 @@ fn use_with_force_true_propagates_to_sync_deps() {
     let _home = HomeGuard::install(env.home_path());
 
     let args = HarnessUseArgs {
-        name: "stub".to_string(),
+        names: vec!["stub".to_string()],
+        all: false,
         scope: HarnessScopeArg::Project,
         force: true,
     };
@@ -229,7 +272,8 @@ fn use_idempotent_when_name_already_present_does_not_invoke_sync() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
 
     let args = HarnessUseArgs {
-        name: "stub".to_string(),
+        names: vec!["stub".to_string()],
+        all: false,
         scope: HarnessScopeArg::Global,
         force: false,
     };

@@ -54,6 +54,8 @@ use crate::harness::sync::{Action, SyncChange, SyncOutcome, SyncSubsystem};
 pub(crate) mod agents;
 pub(crate) mod guardrails;
 pub(crate) mod hooks;
+pub(crate) mod open_plugins;
+pub(crate) mod plugins;
 
 /// Record one on-disk change against the running [`SyncOutcome`].
 ///

@@ -40,7 +40,11 @@ use serde::Serialize;
 use crate::error::TomeError;
 use crate::harness::reconcile::agents::reconcile_agents;
 use crate::harness::reconcile::guardrails::reconcile_guardrails;
-use crate::harness::reconcile::hooks::{reconcile_hooks, reconcile_tome_session_hooks};
+use crate::harness::reconcile::hooks::{
+    reconcile_command_hooks, reconcile_hooks, reconcile_tome_session_hooks,
+};
+use crate::harness::reconcile::open_plugins::reconcile_open_plugins;
+use crate::harness::reconcile::plugins::reconcile_plugins;
 // Shared bookkeeping for the orchestrator's rules/MCP loop; the per-sink
 // reconcilers under `reconcile/` call the same path (Phase 7 / FR-011).
 use crate::harness::reconcile::record_action;
@@ -74,10 +78,12 @@ pub struct SyncDeps<'a> {
     /// directly to the CLI `--force` flag on `tome workspace use` (and
     /// the future `tome harness sync --force`).
     pub force: bool,
-    /// When `Some(name)`, reconcile ONLY that harness (written if effective,
-    /// removed if not) and leave every other harness's files untouched. When
-    /// `None`, reconcile the full effective set. Set by `tome sync --harness`.
-    pub only_harness: Option<String>,
+    /// When `Some(set)`, reconcile ONLY the harnesses whose canonical name is
+    /// in `set` (each written if effective, removed if not) and leave every
+    /// other harness's files untouched. When `None`, reconcile the full
+    /// effective set. Set by `tome sync --harness` (repeatable). The set holds
+    /// alias-resolved canonical names, so membership is `set.contains(m.name())`.
+    pub only_harness: Option<HashSet<String>>,
 }
 
 /// Summary of one sync pass per FR-547. Serialised verbatim in the
@@ -121,6 +127,19 @@ pub enum SyncSubsystem {
     /// Guardrails prose fallback (Phase 6 / US3). One change per rules-file
     /// target or Cursor sibling whose guardrails regions Tome reconciled.
     Guardrails,
+    /// Embedded TypeScript plugin shims (Phase 11 / G2, `TsPlugin` steering).
+    /// One change per `tome.ts` shim written into or removed from a harness's
+    /// Tome-managed plugin dir. Added LAST so the snake_case wire form only
+    /// gains a new value (`"plugins"`) when a `TsPlugin` harness participates;
+    /// with every Phase ≤10 module returning `SessionSteering::None` this value
+    /// never appears, so the existing wire shape is byte-identical.
+    Plugins,
+    /// Open Plugins `tome-op` bundle emit/remove (Phase 11 / US4). One change per
+    /// bundle written or removed for a `generic-op` / `goose` harness. Added LAST
+    /// so the snake_case wire form only gains the new value (`"open_plugins"`)
+    /// when an Open Plugins harness participates; no Phase ≤10 / US1–US3 harness
+    /// is an Open Plugins host, so the existing wire shape is byte-identical.
+    OpenPlugins,
 }
 
 /// Per-harness decision record. Populated for every harness in
@@ -154,6 +173,18 @@ pub struct HarnessDecision {
     /// gained/changed/lost a region, `LeftAlone` otherwise. Appended LAST so
     /// the byte-stable JSON pin only gains a trailing field.
     pub guardrails_action: Action,
+    /// Phase 11 / G2: the TypeScript-shim (`TsPlugin`) reconciliation action
+    /// for this harness. `Created`/`Updated` when the embedded shim was
+    /// written, `Removed` when it was cleaned up, `LeftAlone` otherwise.
+    ///
+    /// Appended LAST AND gated with `skip_serializing_if` so the field is
+    /// OMITTED from the JSON wire form when it is `LeftAlone` — which it always
+    /// is for the five Phase ≤10 modules (none declares `TsPlugin`). That keeps
+    /// the byte-stable `SyncOutcome` / `HarnessDecision` pins UNCHANGED until a
+    /// `TsPlugin` harness actually does plugin work; only then does the new
+    /// trailing `plugins_action` key appear.
+    #[serde(skip_serializing_if = "Action::is_left_alone")]
+    pub plugins_action: Action,
 }
 
 /// What happened to one subsystem (rules-file or MCP config) for one
@@ -165,6 +196,16 @@ pub enum Action {
     Updated,
     Removed,
     LeftAlone,
+}
+
+impl Action {
+    /// `true` for [`Action::LeftAlone`]. Used by `serde`'s
+    /// `skip_serializing_if` on the Phase 11 `HarnessDecision::plugins_action`
+    /// field so a no-op (the steady state for every Phase ≤10 module) is
+    /// omitted from the JSON wire form, keeping the byte-stable pins unchanged.
+    fn is_left_alone(&self) -> bool {
+        matches!(self, Action::LeftAlone)
+    }
 }
 
 // =====================================================================
@@ -245,6 +286,48 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     let effective_names: HashSet<String> =
         effective.harnesses.iter().map(|h| h.name.clone()).collect();
 
+    reconcile_against_effective(project_root, deps, &effective_names, strip_agent_privileges)
+}
+
+/// Tear down EVERY Tome-owned harness integration in `project_root`, regardless
+/// of the project marker's declared harness list (PW4).
+///
+/// Drives the SAME reconciliation machinery as [`sync_project`] but with an
+/// EMPTY effective set, so every harness's snapshot dispatches through its
+/// reconciler's non-live REMOVAL branch — rules files, MCP entries, plugin
+/// hooks, Tome's own session hooks, the new `CommandHook` session entries, TS
+/// plugin shims, guardrails, native agents, AND the Open Plugins `tome-op`
+/// bundle. Opt-in targets (`generic` `mcp.json`, `generic-op`/`goose` bundles)
+/// are picked up via the same artifact-present probe `sync_project` uses, so a
+/// previously-selected target is cleaned even though it never sits in any
+/// marker. This is the single SSOT for "remove everything" — it inherits every
+/// safety guard the writers have (structural-match-only removal, marker-bounded
+/// edits, symlink refusal, forward-progress `first_error`).
+///
+/// Unlike `sync_project` it does NOT require a readable project marker: with an
+/// empty effective set there is no scope to resolve, so a project whose marker
+/// is already gone (or unreadable) still tears down cleanly. `strip_agent_privileges`
+/// is irrelevant here (it governs only the Claude Code agent EMISSION clone, and
+/// every harness is non-live → agents are removed regardless).
+pub fn teardown_project(
+    project_root: &Path,
+    deps: &SyncDeps<'_>,
+) -> Result<SyncOutcome, TomeError> {
+    let empty: HashSet<String> = HashSet::new();
+    reconcile_against_effective(project_root, deps, &empty, false)
+}
+
+/// The reconciliation body shared by [`sync_project`] (effective set from the
+/// marker) and [`teardown_project`] (empty effective set). Given the resolved
+/// `effective_names`, it snapshots the registry, runs every per-sink
+/// write/leave-alone/remove pass, and returns the [`SyncOutcome`]. Extracted so
+/// the two entry points cannot drift in which sinks they touch.
+fn reconcile_against_effective(
+    project_root: &Path,
+    deps: &SyncDeps<'_>,
+    effective_names: &HashSet<String>,
+    strip_agent_privileges: bool,
+) -> Result<SyncOutcome, TomeError> {
     // -----------------------------------------------------------------
     // 3. Walk every harness in the effective registry.
     //
@@ -253,8 +336,20 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // per-harness metadata into owned values up front, then drop the
     // borrow before dispatch.
     // -----------------------------------------------------------------
-    let snapshots = collect_harness_snapshots(project_root, deps);
+    let all_filtered = collect_harness_snapshots(project_root, deps, effective_names);
     let mut outcome = SyncOutcome::default();
+
+    // Phase 11 / US4: partition out the Open Plugins harnesses (`generic-op`,
+    // `goose` — `open_plugins_root == Some`). They integrate via the atomic
+    // `open_plugins` emitter, NOT the per-sink loop, so they must be EXCLUDED
+    // from every rules/MCP/hooks/guardrails/agents/plugins pass (the bundle is
+    // all-or-nothing; the per-sink writers would double-write its `AGENTS.md` /
+    // `.mcp.json`). With no Open Plugins harness in the effective set this is a
+    // no-op split: `snapshots == all_filtered` and `op_snapshots` is empty, so
+    // every existing project's sink processing is byte-identical.
+    let (op_snapshots, snapshots): (Vec<HarnessSnapshot>, Vec<HarnessSnapshot>) = all_filtered
+        .into_iter()
+        .partition(|s| s.open_plugins_root.is_some());
 
     // The bytes written to a SHARED rules file must stay correct for EVERY live
     // co-owner of that path, regardless of `--harness`. A `--harness X` run still
@@ -268,7 +363,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // snapshot pass; when `only_harness` is `None` this is identical to
     // `snapshots`, so the full-sync path is byte-for-byte unchanged.
     let all_snapshots = match deps.only_harness {
-        Some(_) => collect_all_harness_snapshots(project_root, deps),
+        Some(_) => collect_all_harness_snapshots(project_root, deps, effective_names),
         // No filter active — the full pass already IS `snapshots`; avoid the
         // second registry walk + allocation.
         None => Vec::new(),
@@ -303,6 +398,22 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         // -------------------------------------------------------------
         let rules_action = if !rules_paths_processed.insert(snap.rules_path.clone()) {
             // Already processed this path under another harness.
+            //
+            // M3 / FR-013a (shared-sink single region): `rules_paths_processed`
+            // is the dedupe that guarantees N live harnesses resolving to the
+            // SAME file (e.g. several `AGENTS.md` sharers) produce exactly ONE
+            // `tome:begin/end` region — the first sharer writes; every later one
+            // short-circuits to `LeftAlone` here. The block writer itself
+            // (`rules_file::compose_block_write`) collapses any pre-existing
+            // duplicate Tome blocks in the file to a single canonical region, so
+            // even a hand-edited file converges. The inserted directive body is
+            // wholly Tome-owned (built by `routing::build_directive`), so no
+            // verbatim-third-party marker-collision scan is needed at this sink —
+            // a developer file whose own content carries a corrupt `tome:*`
+            // marker still fails CLOSED via `find_all_blocks`'s malformed-marker
+            // `Err` (exit 7), never a silent clobber. (Guardrails, which DOES
+            // copy verbatim plugin content, keeps its own `body_contains_marker_line`
+            // fail-closed scan — that is the right place for it.)
             Action::LeftAlone
         } else {
             // The "live" decision for a shared path is OR-of-live across
@@ -355,7 +466,15 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         // -------------------------------------------------------------
         // 3b. MCP config
         // -------------------------------------------------------------
-        let mcp_action = if !mcp_paths_processed.insert(snap.mcp_path.clone()) {
+        let mcp_action = if snap.mcp_manual_only {
+            // Phase 11: this harness has no writable MCP config file (UI-only,
+            // jetbrains-ai). Skip the MCP sink entirely — no read, no write, no
+            // remove — and leave the path unmarked-processed so a real sharer of
+            // the same path (there is none in practice) is unaffected. The
+            // harness still gets its rules-file integration above; the
+            // "paste this snippet" notice is a separate US5 concern.
+            Action::LeftAlone
+        } else if !mcp_paths_processed.insert(snap.mcp_path.clone()) {
             Action::LeftAlone
         } else {
             let any_live = mcp_targets_by_path
@@ -401,11 +520,12 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
             in_effective_list: is_live,
             rules_action,
             mcp_action,
-            // Backfilled by the hooks + guardrails + agents reconciliation
-            // passes below.
+            // Backfilled by the hooks + guardrails + agents + plugins
+            // reconciliation passes below.
             agents_action: Action::LeftAlone,
             hooks_action: Action::LeftAlone,
             guardrails_action: Action::LeftAlone,
+            plugins_action: Action::LeftAlone,
         });
     }
 
@@ -418,7 +538,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // participate; the enabled-plugin enumeration is shared across every
     // such harness (computed once per sync).
     // -----------------------------------------------------------------
-    let hooks_recon = reconcile_hooks(deps, &effective_names, &snapshots, &mut outcome)?;
+    let hooks_recon = reconcile_hooks(deps, effective_names, &snapshots, &mut outcome)?;
     for decision in &mut outcome.decisions {
         if let Some(action) = hooks_recon.actions.get(&decision.harness) {
             decision.hooks_action = *action;
@@ -430,9 +550,28 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // mapped onto Codex. Reuses the `hooks_action` decision field + the hooks error
     // class.
     let (codex_hook_actions, codex_hook_error) =
-        reconcile_tome_session_hooks(deps, &effective_names, &snapshots, &mut outcome);
+        reconcile_tome_session_hooks(deps, effective_names, &snapshots, &mut outcome);
     for decision in &mut outcome.decisions {
         if let Some(action) = codex_hook_actions.get(&decision.harness) {
+            decision.hooks_action = *action;
+        }
+    }
+
+    // Phase 11 (G2 / T017): Tome's own session-start `CommandHook` entry for the
+    // NEW harnesses (devin / copilot-cli / gemini / antigravity). Excludes
+    // claude-code/codex (both `SessionSteering::None`). With every CURRENT module
+    // returning `None`, this pass fast-exits as a NO-OP, so the orchestrator
+    // output is byte-identical to before — the call site is wired now so US2 only
+    // has to add the per-harness `session_steering()` overrides.
+    let (command_hook_actions, command_hook_error) = reconcile_command_hooks(
+        deps,
+        effective_names,
+        &snapshots,
+        project_root,
+        &mut outcome,
+    );
+    for decision in &mut outcome.decisions {
+        if let Some(action) = command_hook_actions.get(&decision.harness) {
             decision.hooks_action = *action;
         }
     }
@@ -447,7 +586,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     // -----------------------------------------------------------------
     let guardrails_recon = reconcile_guardrails(
         deps,
-        &effective_names,
+        effective_names,
         &snapshots,
         &hooks_recon.plugins_with_hooks_json,
         &mut outcome,
@@ -469,7 +608,7 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     let agents_recon = reconcile_agents(
         project_root,
         deps,
-        &effective_names,
+        effective_names,
         &snapshots,
         strip_agent_privileges,
         &mut outcome,
@@ -480,6 +619,61 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
         if let Some(action) = agents_recon.actions.get(&decision.harness) {
             decision.agents_action = *action;
         }
+    }
+
+    // -----------------------------------------------------------------
+    // 3e. Plugins (Phase 11 / G2, T018) — the `TsPlugin` shim sink.
+    //
+    // Installs / removes Tome's embedded TypeScript session-steering shim for
+    // every harness whose `session_steering()` is `TsPlugin`. Runs LAST, after
+    // agents. With every CURRENT module returning `SessionSteering::None`, this
+    // pass fast-exits as a NO-OP — no shim writes, no decision-field changes,
+    // no `Plugins` subsystem entries — so the orchestrator output stays
+    // byte-identical to before. The `first_error` is surfaced LAST in the fixed
+    // precedence chain below.
+    // -----------------------------------------------------------------
+    let (plugin_actions, plugin_error) =
+        reconcile_plugins(project_root, effective_names, &snapshots, &mut outcome);
+    for decision in &mut outcome.decisions {
+        if let Some(action) = plugin_actions.get(&decision.harness) {
+            decision.plugins_action = *action;
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // 3f. Open Plugins (Phase 11 / US4) — the `tome-op` bundle sink.
+    //
+    // Reconciles the harnesses partitioned OUT of the per-sink loop
+    // (`generic-op` / `goose`): emit the whole bundle atomically for a live
+    // harness, remove it (structural-match) for a non-live one. These harnesses
+    // never appeared in the per-harness loop above, so they have no
+    // `HarnessDecision` yet — push one per op harness here, recording the bundle
+    // action under `plugins_action` (the closest existing decision field; the
+    // per-bundle granularity lives in `added`/`updated`/`removed` under the
+    // `OpenPlugins` subsystem). With no Open Plugins harness in the effective
+    // set this loop is empty, so the decision list is byte-identical.
+    // -----------------------------------------------------------------
+    let (op_actions, op_error) = reconcile_open_plugins(
+        project_root,
+        deps,
+        effective_names,
+        &op_snapshots,
+        &mut outcome,
+    );
+    for snap in &op_snapshots {
+        outcome.decisions.push(HarnessDecision {
+            harness: snap.name.clone(),
+            in_effective_list: effective_names.contains(&snap.name),
+            rules_action: Action::LeftAlone,
+            mcp_action: Action::LeftAlone,
+            agents_action: Action::LeftAlone,
+            hooks_action: Action::LeftAlone,
+            guardrails_action: Action::LeftAlone,
+            plugins_action: op_actions
+                .get(&snap.name)
+                .copied()
+                .unwrap_or(Action::LeftAlone),
+        });
     }
 
     if let Some(clash) = first_clash {
@@ -494,11 +688,27 @@ pub fn sync_project(project_root: &Path, deps: &SyncDeps<'_>) -> Result<SyncOutc
     if let Some(codex_hook_err) = codex_hook_error {
         return Err(codex_hook_err);
     }
+    if let Some(command_hook_err) = command_hook_error {
+        return Err(command_hook_err);
+    }
     if let Some(guardrails_err) = guardrails_recon.first_error {
         return Err(guardrails_err);
     }
     if let Some(agent_err) = agents_recon.first_error {
         return Err(agent_err);
+    }
+    // Phase 11 / G2: the TsPlugin shim sink is surfaced LAST (after agents) in
+    // the fixed precedence chain — every earlier sink's error wins, and forward
+    // progress means the shim pass still reconciled where it could before this
+    // error is returned.
+    if let Some(plugin_err) = plugin_error {
+        return Err(plugin_err);
+    }
+    // Phase 11 / US4: the Open Plugins bundle sink is surfaced LAST — every
+    // earlier sink's error wins, and forward progress means the bundle pass
+    // still reconciled where it could before this error is returned.
+    if let Some(op_err) = op_error {
+        return Err(op_err);
     }
 
     Ok(outcome)
@@ -519,10 +729,25 @@ pub(crate) struct HarnessSnapshot {
     pub(crate) name: String,
     rules_path: PathBuf,
     rules_strategy: RulesFileStrategy,
+    /// Phase 11 (G3, FR-026): the Tome-owned YAML front-matter header written
+    /// ABOVE the verbatim directive on a `StandaloneFile` sink (kiro's
+    /// `inclusion: always`, jetbrains-ai's apply-mode marker). `None` for every
+    /// harness without a front-matter requirement — every Phase ≤10 module, so
+    /// their standalone bytes are unchanged. Consulted ONLY in the
+    /// `StandaloneFile` write branch; the clean branch removes the whole file
+    /// regardless.
+    rules_frontmatter: Option<crate::harness::RulesFrontmatter>,
     block_body_style: BlockBodyStyle,
     mcp_path: PathBuf,
-    mcp_format: crate::harness::McpConfigFormat,
-    mcp_parent_key: &'static str,
+    /// Phase 11 (G1): the harness's full MCP wire-shape, replacing the
+    /// Phase ≤10 `mcp_format` + `mcp_parent_key` scalar pair. Drives the
+    /// shared dialect-aware `mcp_config` read/write/remove.
+    mcp_dialect: crate::harness::McpDialect,
+    /// Phase 11: `true` when the harness has NO writable MCP config file
+    /// (jetbrains-ai — UI-only). The MCP read/write/remove sink is skipped
+    /// entirely for such a harness; `false` for every other module, so the
+    /// MCP byte output is unchanged for all writable harnesses.
+    mcp_manual_only: bool,
     /// Phase 6 / US1: whether this harness emits native agent files. Drives
     /// the agents-reconciliation fast-exit; the actual `agent_dir` is
     /// re-derived under the registry guard at dispatch time (the trait
@@ -538,32 +763,129 @@ pub(crate) struct HarnessSnapshot {
     /// for harnesses with no Tome-owned session hook (or whose Tome hook rides
     /// the `RealJson` pass, e.g. Claude Code).
     pub(crate) tome_session_hook_path: Option<PathBuf>,
+    /// Phase 11 (G2): how this harness receives Tome's session-start steering
+    /// directive. Drives the `CommandHook` reconciler's fast-exit + per-harness
+    /// write/remove. Every Phase ≤10 module returns
+    /// [`crate::harness::SessionSteering::None`], so the reconciler is a no-op
+    /// for them and the orchestrator output stays byte-identical.
+    pub(crate) session_steering: crate::harness::SessionSteering,
     /// Phase 6 / US3: the harness's guardrails sink (in-file region or Cursor
     /// standalone sibling) plus its hooks-driven suppression flag.
     pub(crate) guardrails_target: crate::harness::GuardrailsTarget,
+    /// Phase 11 / US4: the Open Plugins `tome-op` bundle root, when this harness
+    /// integrates via the atomic `open_plugins` emitter (`generic-op`, `goose`)
+    /// instead of the per-sink loop. `Some(root)` means the harness is dispatched
+    /// to [`crate::harness::reconcile::open_plugins::reconcile_open_plugins`] and
+    /// is EXCLUDED from the rules/MCP/hooks/guardrails/agents/plugins passes
+    /// (the bundle is all-or-nothing; the per-sink loop must not double-write its
+    /// `AGENTS.md` / `.mcp.json`). `None` for every other harness, so their sink
+    /// processing is byte-identical.
+    pub(crate) open_plugins_root: Option<PathBuf>,
 }
 
-fn collect_harness_snapshots(project_root: &Path, deps: &SyncDeps<'_>) -> Vec<HarnessSnapshot> {
-    with_effective_modules(|mods| {
+fn collect_harness_snapshots(
+    project_root: &Path,
+    deps: &SyncDeps<'_>,
+    effective_names: &HashSet<String>,
+) -> Vec<HarnessSnapshot> {
+    let mut snapshots = with_effective_modules(|mods| {
         mods.iter()
-            // `only_harness` restricts the reconcile to a single named harness
-            // (for `tome sync --harness <name>`): only that module is
-            // snapshotted, so every downstream dedup map + the is-live
-            // write-vs-remove decision operate over the one-element set and
-            // every OTHER harness's files are left completely untouched. This
-            // is the SINGLE filter point — every sink derives its scope from
-            // these snapshots (the rules/MCP/hooks/guardrails loops iterate
-            // them directly; the agents sink gates its registry walk on the
-            // snapshotted name set), so the "other harnesses untouched"
-            // guarantee holds across ALL sinks. `None` snapshots the full
-            // registry (the default full reconcile).
-            .filter(|m| match deps.only_harness.as_deref() {
-                Some(only) => m.name() == only,
+            // `only_harness` restricts the reconcile to the named harness SET
+            // (for `tome sync --harness a --harness b`): only modules in the set
+            // are snapshotted, so every downstream dedup map + the is-live
+            // write-vs-remove decision operate over that subset and every OTHER
+            // harness's files are left completely untouched. This is the SINGLE
+            // filter point — every sink derives its scope from these snapshots
+            // (the rules/MCP/hooks/guardrails loops iterate them directly; the
+            // agents sink gates its registry walk on the snapshotted name set),
+            // so the "other harnesses untouched" guarantee holds across ALL
+            // sinks. `None` snapshots the full registry (the default full
+            // reconcile).
+            .filter(|m| match deps.only_harness.as_ref() {
+                Some(set) => set.contains(m.name()),
                 None => true,
             })
             .map(|m| snapshot_for(*m, project_root, deps.home_root))
-            .collect()
-    })
+            .collect::<Vec<_>>()
+    });
+    snapshots.extend(collect_opt_in_snapshots(
+        project_root,
+        deps,
+        effective_names,
+    ));
+    snapshots
+}
+
+/// Snapshot every OPT-IN target (`generic` / `generic-op`) that is EXPLICITLY
+/// in `effective_names`, OR whose Tome-managed artifact currently exists on disk
+/// (the removal path), honouring `only_harness` (Phase 11 / US4, B1).
+///
+/// Opt-in targets (`OPT_IN_TARGETS`) live OUTSIDE `SUPPORTED_HARNESSES` and so
+/// are never returned by [`with_effective_modules`] — without this union an
+/// explicitly-selected `generic` / `generic-op` produces no snapshot and the
+/// sinks (the open-plugins partition included) see nothing, so the bundle /
+/// AGENTS.md is never written. [`HarnessModule::is_opt_in_target`] is the
+/// load-bearing gate.
+///
+/// CRITICAL — the WRITE side is explicit-selection-only: an opt-in target is
+/// snapshotted-as-LIVE ONLY when its `name()` is in `effective_names`. It is
+/// NEVER pulled in from detection or `--all` — neither path puts it in the
+/// effective list (its `detect` is inert).
+///
+/// The REMOVE side: a target that was previously selected leaves a managed
+/// artifact on disk (the `tome-op` bundle for an op target; `generic`'s own
+/// `mcp.json`). To clean it after the user drops the harness — when it is NO
+/// LONGER in `effective_names` — we ALSO snapshot a target whose artifact is
+/// present. Such a non-live snapshot dispatches through the REMOVE branch
+/// (structural-match for the bundle; tome-owned-only for the MCP entry), so a
+/// directory/entry Tome doesn't own is left untouched. The artifact probe is
+/// tight (the target's OWN file, never a co-owned `AGENTS.md`), so when nothing
+/// was ever written the returned `Vec` is empty and the snapshot set — and every
+/// downstream sink — is byte-identical to before.
+fn collect_opt_in_snapshots(
+    project_root: &Path,
+    deps: &SyncDeps<'_>,
+    effective_names: &HashSet<String>,
+) -> Vec<HarnessSnapshot> {
+    crate::harness::OPT_IN_TARGETS
+        .iter()
+        .copied()
+        // Load-bearing: only an opt-in target participates here.
+        .filter(|m| m.is_opt_in_target())
+        // Snapshot when EXPLICITLY selected (the write path) OR when its managed
+        // artifact is present (the remove-after-drop path). Detection / `--all`
+        // never reach here — they don't put an opt-in target in `effective_names`,
+        // and the artifact probe is the target's own Tome-written file.
+        .filter(|m| {
+            effective_names.contains(m.name())
+                || opt_in_artifact_present(*m, project_root, deps.home_root)
+        })
+        // Honour `--harness <name>...`: a filtered reconcile still touches
+        // only the named harnesses, opt-in targets included.
+        .filter(|m| match deps.only_harness.as_ref() {
+            Some(set) => set.contains(m.name()),
+            None => true,
+        })
+        .map(|m| snapshot_for(m, project_root, deps.home_root))
+        .collect()
+}
+
+/// Does this opt-in target have a Tome-managed artifact on disk (so it needs the
+/// remove-after-drop pass even when no longer in the effective list)?
+///
+/// Probes the target's OWN file only — never a co-owned `AGENTS.md` (which other
+/// harnesses may legitimately own), so a project that never selected this target
+/// returns `false` and the snapshot set stays byte-identical:
+///
+/// - op target (`open_plugins_root == Some`) → the bundle root exists.
+/// - `generic` → its dedicated `<project>/mcp.json` exists.
+fn opt_in_artifact_present(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) -> bool {
+    if let Some(root) = m.open_plugins_root(project_root) {
+        return root.exists();
+    }
+    // The standard-sink opt-in target (`generic`): probe its own MCP file, the
+    // one artifact it exclusively owns (its rules sink is the shared AGENTS.md).
+    m.mcp_config_path(project_root, home_root).exists()
 }
 
 /// Snapshot the FULL effective registry, ignoring `only_harness`. Used solely
@@ -572,23 +894,72 @@ fn collect_harness_snapshots(project_root: &Path, deps: &SyncDeps<'_>) -> Vec<Ha
 /// for every live co-owner, even ones not being reconciled this pass. The main
 /// per-harness write/leave-alone loop still iterates the FILTERED snapshots, so
 /// non-shared sinks for other harnesses stay untouched.
-fn collect_all_harness_snapshots(project_root: &Path, deps: &SyncDeps<'_>) -> Vec<HarnessSnapshot> {
-    with_effective_modules(|mods| {
+fn collect_all_harness_snapshots(
+    project_root: &Path,
+    deps: &SyncDeps<'_>,
+    effective_names: &HashSet<String>,
+) -> Vec<HarnessSnapshot> {
+    let mut snapshots = with_effective_modules(|mods| {
         mods.iter()
             .map(|m| snapshot_for(*m, project_root, deps.home_root))
-            .collect()
-    })
+            .collect::<Vec<_>>()
+    });
+    // Union the explicitly-selected opt-in targets, IGNORING `only_harness` (this
+    // pass exists precisely to compute the shared-rules-path body for every live
+    // co-owner, including ones not being reconciled this `--harness` pass). The
+    // explicit-selection filter inside `collect_opt_in_snapshots` is honoured by
+    // passing a deps clone with `only_harness = None`.
+    let unfiltered_deps = SyncDeps {
+        paths: deps.paths,
+        home_root: deps.home_root,
+        workspace_name: deps.workspace_name,
+        force: deps.force,
+        only_harness: None,
+    };
+    snapshots.extend(collect_opt_in_snapshots(
+        project_root,
+        &unfiltered_deps,
+        effective_names,
+    ));
+    // Open Plugins harnesses never share a per-sink rules path (their `AGENTS.md`
+    // lives inside the bundle), so they have no business in the shared-rules-path
+    // grouping. Excluding them keeps the grouping source consistent with the
+    // partitioned per-sink `snapshots`. This also drops `generic-op` (an
+    // open-plugins opt-in target) while keeping `generic` (a standard-sink
+    // opt-in target that DOES share `<project>/AGENTS.md`).
+    snapshots.retain(|s| s.open_plugins_root.is_none());
+    snapshots
+}
+
+/// The single source of truth for a harness's rules sink path (PW5).
+///
+/// Prefers the harness's dedicated, namespaced standalone file when it declares
+/// one ([`HarnessModule::rules_namespaced_file`]) — so Tome never inserts a
+/// block into (or owns) a developer-authored shared rules file — and otherwise
+/// falls back to [`HarnessModule::rules_file_target`]. For the namespaced
+/// overriders (cline/zed/kiro/jetbrains-ai) the namespaced accessor returns the
+/// SAME path as the target today, so behaviour is unchanged; routing every
+/// consumer through this ONE function makes the accessor load-bearing and means
+/// the sync snapshot and any teardown / doctor path can never disagree about
+/// which file a harness's rules content lives in.
+pub(crate) fn rules_sink_path(m: &dyn HarnessModule, project_root: &Path) -> PathBuf {
+    m.rules_namespaced_file(project_root)
+        .unwrap_or_else(|| m.rules_file_target(project_root))
 }
 
 fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) -> HarnessSnapshot {
     HarnessSnapshot {
         name: m.name().to_string(),
-        rules_path: m.rules_file_target(project_root),
+        // Phase 11 (G3, FR-024): the harness's dedicated rules sink, computed via
+        // the [`rules_sink_path`] SSOT so every consumer (this snapshot + any
+        // teardown / doctor path) resolves the SAME path and cannot drift.
+        rules_path: rules_sink_path(m, project_root),
         rules_strategy: m.rules_file_strategy(),
+        rules_frontmatter: m.rules_frontmatter(),
         block_body_style: m.block_body_style(),
         mcp_path: m.mcp_config_path(project_root, home_root),
-        mcp_format: m.mcp_config_format(),
-        mcp_parent_key: m.mcp_parent_key(),
+        mcp_dialect: m.mcp_dialect(),
+        mcp_manual_only: m.mcp_manual_only(),
         supports_native_agents: m.supports_native_agents(),
         // Only a `RealJson` harness with a settings path participates in real
         // hooks. A `GuardrailsOnly` harness — even one that returns a settings
@@ -598,7 +969,9 @@ fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) ->
             crate::harness::HooksStrategy::GuardrailsOnly => None,
         },
         tome_session_hook_path: m.tome_session_hook_path(project_root),
+        session_steering: m.session_steering(),
         guardrails_target: m.guardrails_target(project_root),
+        open_plugins_root: m.open_plugins_root(project_root),
     }
 }
 
@@ -746,6 +1119,18 @@ fn write_rules_for_path(snap: &HarnessSnapshot, body: &str) -> Result<Action, To
             Ok(classification)
         }
         RulesFileStrategy::StandaloneFile => {
+            // Phase 11 (G3, FR-026): a harness declaring `rules_frontmatter()`
+            // (kiro `inclusion: always`, jetbrains-ai apply-mode) gets a
+            // Tome-owned `---`-fenced header ABOVE the directive; every other
+            // harness (every Phase ≤10 module, all returning `None`) writes the
+            // verbatim body with no header, so their standalone bytes are
+            // byte-identical. The on-disk comparison classifies against the FULLY
+            // RENDERED payload so the idempotence + Created/Updated/LeftAlone
+            // distinction stays correct for both shapes.
+            let desired = match snap.rules_frontmatter {
+                Some(fm) => rules_file::render_standalone_with_frontmatter(&fm, body),
+                None => body.to_string(),
+            };
             let prior_bytes = match crate::util::bounded_read_to_string(
                 &snap.rules_path,
                 crate::util::HARNESS_RULES_MAX,
@@ -756,10 +1141,15 @@ fn write_rules_for_path(snap: &HarnessSnapshot, body: &str) -> Result<Action, To
             };
             let classification = match prior_bytes.as_deref() {
                 None => Action::Created,
-                Some(existing) if existing == body => Action::LeftAlone,
+                Some(existing) if existing == desired => Action::LeftAlone,
                 Some(_) => Action::Updated,
             };
-            rules_file::write_standalone(&snap.rules_path, body)?;
+            match snap.rules_frontmatter {
+                Some(fm) => {
+                    rules_file::write_standalone_with_frontmatter(&snap.rules_path, &fm, body)?
+                }
+                None => rules_file::write_standalone(&snap.rules_path, body)?,
+            }
             Ok(classification)
         }
     }
@@ -813,7 +1203,7 @@ fn classify_block(prior: &Option<rules_file::ParsedBlock>, new_body: &str) -> Ac
 // =====================================================================
 
 fn write_mcp_for_harness(snap: &HarnessSnapshot, deps: &SyncDeps<'_>) -> Result<Action, TomeError> {
-    let existing = mcp_config::read_entry(&snap.mcp_path, snap.mcp_format, snap.mcp_parent_key)?;
+    let existing = mcp_config::read_entry(&snap.mcp_path, &snap.mcp_dialect)?;
 
     if let Some(current) = existing.as_ref()
         && !mcp_config::is_tome_owned(current)
@@ -855,22 +1245,17 @@ fn write_mcp_for_harness(snap: &HarnessSnapshot, deps: &SyncDeps<'_>) -> Result<
         Some(_) => Action::Updated,
     };
 
-    mcp_config::write_entry(
-        &snap.mcp_path,
-        snap.mcp_format,
-        snap.mcp_parent_key,
-        &expected,
-    )?;
+    mcp_config::write_entry(&snap.mcp_path, &snap.mcp_dialect, &expected)?;
     Ok(classification)
 }
 
 fn clean_mcp_for_harness(snap: &HarnessSnapshot) -> Result<Action, TomeError> {
-    let existing = mcp_config::read_entry(&snap.mcp_path, snap.mcp_format, snap.mcp_parent_key)?;
+    let existing = mcp_config::read_entry(&snap.mcp_path, &snap.mcp_dialect)?;
     let was_tome = matches!(existing.as_ref(), Some(e) if mcp_config::is_tome_owned(e));
     if !was_tome {
         return Ok(Action::LeftAlone);
     }
-    mcp_config::remove_entry(&snap.mcp_path, snap.mcp_format, snap.mcp_parent_key)?;
+    mcp_config::remove_entry(&snap.mcp_path, &snap.mcp_dialect)?;
     Ok(Action::Removed)
 }
 

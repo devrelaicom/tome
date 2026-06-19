@@ -95,9 +95,9 @@ pub enum Command {
     /// applies the three safe repair classes (re-download models,
     /// re-clone broken catalog caches, forward-migrate the schema).
     Doctor(DoctorArgs),
-    /// Inspect and manage harness integrations (Claude Code, Codex,
-    /// Cursor, Gemini, OpenCode). Run with no subcommand to enumerate
-    /// every supported harness.
+    /// Inspect and manage harness integrations across ~16 coding harnesses
+    /// (Claude Code, Codex, Cursor, Gemini, OpenCode, Copilot, Cline, Zed,
+    /// and more). Run with no subcommand to enumerate every supported harness.
     Harness(HarnessArgs),
     /// Author, convert, and validate standalone skills. `create` scaffolds a
     /// new skill (wrapped in a minimal plugin by default; `--bare` for a
@@ -142,9 +142,12 @@ pub struct SyncArgs {
     /// Only reconcile harness files (skip the RULES.md write).
     #[arg(long)]
     pub harness_only: bool,
-    /// Restrict the harness reconcile to a single harness. Ignored with --rules-only. Errors on unknown name.
-    #[arg(long, value_name = "NAME")]
-    pub harness: Option<String>,
+    /// Restrict the harness reconcile to one or more harnesses (repeatable:
+    /// `--harness a --harness b`). Ignored with --rules-only. Errors on an
+    /// unknown name. Aliases resolve to their canonical module; empty (the
+    /// default) reconciles the full effective set.
+    #[arg(long, value_name = "NAME", action = clap::ArgAction::Append)]
+    pub harness: Vec<String>,
 }
 
 /// `tome tier <subcommand>` — manage per-workspace skill/command routing tiers.
@@ -324,7 +327,9 @@ pub enum HarnessCommand {
     /// the cleanup pass when the effective list changes.
     Remove(HarnessRemoveArgs),
     /// Report per-harness details for the current project: detection,
-    /// targets, integration state, and source-of-scope.
+    /// targets, integration state, and source-of-scope. Also prints the
+    /// paste-able Tome MCP-config snippet for harnesses with a manual MCP
+    /// setup (e.g. JetBrains AI, Pi).
     Info(HarnessInfoArgs),
     /// Reconcile the project, then print the workspace's skill-routing directive
     /// to stdout, generated fresh from live state. Intended as a SessionStart
@@ -342,9 +347,17 @@ pub struct HarnessListArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct HarnessUseArgs {
-    /// Harness name (one of the five supported: claude-code, codex,
-    /// cursor, gemini, opencode).
-    pub name: String,
+    /// Harness names (variadic). With NO names and without `--all`, every
+    /// auto-detected harness is configured. With names, exactly those are
+    /// configured (aliases + opt-in targets resolve by name). Mutually
+    /// exclusive with `--all`.
+    #[arg(conflicts_with = "all")]
+    pub names: Vec<String>,
+    /// Configure every supported (auto-detectable) harness, regardless of
+    /// detection. Excludes the opt-in `generic` / `generic-op` targets.
+    /// Mutually exclusive with explicit names.
+    #[arg(long)]
+    pub all: bool,
     /// Settings scope to edit. Defaults to `project` (requires a project
     /// marker above CWD; use `workspace` or `global` outside a project).
     #[arg(long, default_value_t = HarnessScopeArg::Project, value_enum)]
@@ -375,6 +388,13 @@ pub struct HarnessSessionStartArgs {
     /// Workspace name. Defaults to the resolved scope.
     #[arg(long)]
     pub workspace: Option<String>,
+    /// Host harness whose stdout envelope wraps the directive. Absent → emit
+    /// the raw directive (the Phase ≤10 claude-code / codex path, unchanged).
+    /// An unknown name fails closed (no output). A `CommandHook` harness wraps
+    /// the directive in its closed JSON envelope; a `TsPlugin`/`None` harness
+    /// receives the raw directive (its shim wraps it).
+    #[arg(long)]
+    pub harness: Option<String>,
 }
 
 /// Scope argument for `harness use` and `harness remove`. Distinct from

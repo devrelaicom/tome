@@ -44,9 +44,24 @@
 //! ## Atomic-write discipline (FR-349)
 //!
 //! Every read-modify-write follows: read → parse with the
-//! order-preserving library → modify the `mcpServers.tome` (or
-//! `mcp_servers.tome`) node → serialise → write to a sibling temp file
-//! on the same filesystem → fsync → atomic rename.
+//! order-preserving library → modify the `<parent_key>.tome` node →
+//! serialise → write to a sibling temp file on the same filesystem →
+//! fsync → atomic rename.
+//!
+//! ## Dialect-driven wire shapes (Phase 11, G1, FR-008)
+//!
+//! Every public fn takes a [`McpDialect`] (defined in
+//! [`crate::harness`]) rather than the Phase ≤10 `(McpConfigFormat,
+//! parent_key)` scalar pair. The dialect carries the file format, the
+//! parent key, the entry-body template ([`EntryShape`]), the optional
+//! `type` discriminator, the empty-`env` policy, and any always-present
+//! mandated fields. `TomeEntry { command, args, env }` stays the uniform
+//! in-memory model: on read, a `CommandArray` shape's single `command`
+//! array is normalised back to `command = arr[0]`, `args = arr[1..]`, so
+//! the ownership predicate ([`is_tome_owned`]) is shape-agnostic. On a
+//! rewrite the mandated `type`/`extra_fields` are always re-derived from
+//! the dialect (a stale/edited mandated value self-heals); the developer
+//! `env` is preserved (FR-503).
 
 use std::io::Write;
 use std::path::Path;
@@ -59,7 +74,7 @@ use toml_edit::{
 };
 
 use crate::error::TomeError;
-use crate::harness::{MCP_CONFIG_KEY, McpConfigFormat};
+use crate::harness::{EntryShape, ExtraValue, FileFormat, MCP_CONFIG_KEY, McpDialect};
 
 /// Parsed view of the existing Tome-owned entry in a harness MCP
 /// config. `env` is preserved on rewrite per FR-503 and is never
@@ -173,27 +188,61 @@ fn read_json_doc(path: &Path) -> Result<Option<JsonValue>, TomeError> {
         .map_err(|e| parse_err(path, e))
 }
 
-/// Parse a JSON value at `parent[MCP_CONFIG_KEY]` into a `TomeEntry`.
-fn json_entry_from_value(path: &Path, raw: &JsonValue) -> Result<TomeEntry, TomeError> {
+/// Parse a JSON value at `parent[MCP_CONFIG_KEY]` into a `TomeEntry`,
+/// using the dialect's [`EntryShape`] to extract `(command, args)`.
+///
+/// - `CommandArgs`: `command` is a string, `args` a string array.
+/// - `CommandArray`: `command` is a single array `[launcher, …args]`,
+///   normalised back to `command = arr[0]`, `args = arr[1..]`. There is
+///   no separate `args` key.
+fn json_entry_from_value(
+    path: &Path,
+    raw: &JsonValue,
+    shape: EntryShape,
+) -> Result<TomeEntry, TomeError> {
     let obj = raw
         .as_object()
         .ok_or_else(|| parse_err(path, format!("'{MCP_CONFIG_KEY}' entry must be an object")))?;
-    let command = obj
-        .get("command")
-        .and_then(JsonValue::as_str)
-        .ok_or_else(|| parse_err(path, "'tome.command' missing or not a string"))?
-        .to_string();
-    let args = obj
-        .get("args")
-        .and_then(JsonValue::as_array)
-        .ok_or_else(|| parse_err(path, "'tome.args' missing or not an array"))?
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .map(str::to_string)
-                .ok_or_else(|| parse_err(path, "'tome.args' must be an array of strings"))
-        })
-        .collect::<Result<Vec<String>, _>>()?;
+    let (command, args) = match shape {
+        EntryShape::CommandArgs => {
+            let command = obj
+                .get("command")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| parse_err(path, "'tome.command' missing or not a string"))?
+                .to_string();
+            let args = obj
+                .get("args")
+                .and_then(JsonValue::as_array)
+                .ok_or_else(|| parse_err(path, "'tome.args' missing or not an array"))?
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| parse_err(path, "'tome.args' must be an array of strings"))
+                })
+                .collect::<Result<Vec<String>, _>>()?;
+            (command, args)
+        }
+        EntryShape::CommandArray => {
+            let arr = obj
+                .get("command")
+                .and_then(JsonValue::as_array)
+                .ok_or_else(|| parse_err(path, "'tome.command' missing or not an array"))?
+                .iter()
+                .map(|v| {
+                    v.as_str().map(str::to_string).ok_or_else(|| {
+                        parse_err(path, "'tome.command' must be an array of strings")
+                    })
+                })
+                .collect::<Result<Vec<String>, _>>()?;
+            let mut it = arr.into_iter();
+            let command = it
+                .next()
+                .ok_or_else(|| parse_err(path, "'tome.command' array must be non-empty"))?;
+            let args = it.collect::<Vec<String>>();
+            (command, args)
+        }
+    };
     let env = match obj.get("env") {
         None => None,
         Some(JsonValue::Object(map)) => {
@@ -213,27 +262,74 @@ fn json_entry_from_value(path: &Path, raw: &JsonValue) -> Result<TomeEntry, Tome
     Ok(TomeEntry { command, args, env })
 }
 
-/// Build a JSON object representing a `TomeEntry`, preserving the
-/// `command → args → env` key order (insertion order with
-/// `preserve_order`).
-fn json_entry_object(entry: &TomeEntry) -> JsonValue {
+/// Build a JSON object representing a `TomeEntry` under `dialect`.
+///
+/// Field order (load-bearing for byte-stable pins, insertion order with
+/// `preserve_order`): `type` (iff `entry_type` is `Some`) → `command`
+/// → `args` (`CommandArgs` only) → `env` (iff developer env present, OR
+/// `emit_env` and no env) → each `extra_fields` entry in slice order.
+fn json_entry_object(entry: &TomeEntry, dialect: &McpDialect) -> JsonValue {
     let mut obj = JsonMap::new();
-    obj.insert(
-        "command".to_string(),
-        JsonValue::String(entry.command.clone()),
-    );
-    obj.insert(
-        "args".to_string(),
-        JsonValue::Array(entry.args.iter().cloned().map(JsonValue::String).collect()),
-    );
-    if let Some(env) = &entry.env {
-        let mut env_obj = JsonMap::new();
-        for (k, v) in env {
-            env_obj.insert(k.clone(), JsonValue::String(v.clone()));
-        }
-        obj.insert("env".to_string(), JsonValue::Object(env_obj));
+
+    if let Some(ty) = dialect.entry_type {
+        obj.insert(
+            "type".to_string(),
+            JsonValue::String(ty.as_str().to_string()),
+        );
     }
+
+    match dialect.entry_shape {
+        EntryShape::CommandArgs => {
+            obj.insert(
+                "command".to_string(),
+                JsonValue::String(entry.command.clone()),
+            );
+            obj.insert(
+                "args".to_string(),
+                JsonValue::Array(entry.args.iter().cloned().map(JsonValue::String).collect()),
+            );
+        }
+        EntryShape::CommandArray => {
+            // `command` carries the launcher AND the args as one array.
+            let mut arr = Vec::with_capacity(1 + entry.args.len());
+            arr.push(JsonValue::String(entry.command.clone()));
+            arr.extend(entry.args.iter().cloned().map(JsonValue::String));
+            obj.insert("command".to_string(), JsonValue::Array(arr));
+        }
+    }
+
+    match &entry.env {
+        Some(env) => {
+            let mut env_obj = JsonMap::new();
+            for (k, v) in env {
+                env_obj.insert(k.clone(), JsonValue::String(v.clone()));
+            }
+            obj.insert("env".to_string(), JsonValue::Object(env_obj));
+        }
+        None if dialect.emit_env => {
+            obj.insert("env".to_string(), JsonValue::Object(JsonMap::new()));
+        }
+        None => {}
+    }
+
+    for field in dialect.extra_fields {
+        obj.insert(field.key.to_string(), extra_value_to_json(field.value));
+    }
+
     JsonValue::Object(obj)
+}
+
+/// Render an [`ExtraValue`] into its JSON representation.
+fn extra_value_to_json(value: ExtraValue) -> JsonValue {
+    match value {
+        ExtraValue::Bool(b) => JsonValue::Bool(b),
+        ExtraValue::StringArray(items) => JsonValue::Array(
+            items
+                .iter()
+                .map(|s| JsonValue::String((*s).to_string()))
+                .collect(),
+        ),
+    }
 }
 
 // =====================================================================
@@ -254,29 +350,53 @@ fn read_toml_doc(path: &Path) -> Result<Option<DocumentMut>, TomeError> {
 }
 
 /// Extract a `TomeEntry` from a `TableLike` view at
-/// `parent[MCP_CONFIG_KEY]`.
+/// `parent[MCP_CONFIG_KEY]`, using the dialect's [`EntryShape`].
 fn toml_entry_from_table(
     path: &Path,
     entry: &dyn toml_edit::TableLike,
+    shape: EntryShape,
 ) -> Result<TomeEntry, TomeError> {
-    let command = entry
-        .get("command")
-        .and_then(TomlItem::as_str)
-        .ok_or_else(|| parse_err(path, "'tome.command' missing or not a string"))?
-        .to_string();
-    let args_item = entry
-        .get("args")
-        .ok_or_else(|| parse_err(path, "'tome.args' missing"))?;
-    let args = args_item
-        .as_array()
-        .ok_or_else(|| parse_err(path, "'tome.args' must be an array"))?
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .map(str::to_string)
-                .ok_or_else(|| parse_err(path, "'tome.args' must be an array of strings"))
-        })
-        .collect::<Result<Vec<String>, _>>()?;
+    let (command, args) = match shape {
+        EntryShape::CommandArgs => {
+            let command = entry
+                .get("command")
+                .and_then(TomlItem::as_str)
+                .ok_or_else(|| parse_err(path, "'tome.command' missing or not a string"))?
+                .to_string();
+            let args_item = entry
+                .get("args")
+                .ok_or_else(|| parse_err(path, "'tome.args' missing"))?;
+            let args = args_item
+                .as_array()
+                .ok_or_else(|| parse_err(path, "'tome.args' must be an array"))?
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| parse_err(path, "'tome.args' must be an array of strings"))
+                })
+                .collect::<Result<Vec<String>, _>>()?;
+            (command, args)
+        }
+        EntryShape::CommandArray => {
+            let arr = entry
+                .get("command")
+                .and_then(TomlItem::as_array)
+                .ok_or_else(|| parse_err(path, "'tome.command' missing or not an array"))?
+                .iter()
+                .map(|v| {
+                    v.as_str().map(str::to_string).ok_or_else(|| {
+                        parse_err(path, "'tome.command' must be an array of strings")
+                    })
+                })
+                .collect::<Result<Vec<String>, _>>()?;
+            let mut it = arr.into_iter();
+            let command = it
+                .next()
+                .ok_or_else(|| parse_err(path, "'tome.command' array must be non-empty"))?;
+            (command, it.collect::<Vec<String>>())
+        }
+    };
     let env = match entry.get("env") {
         None => None,
         Some(env_item) => {
@@ -297,24 +417,67 @@ fn toml_entry_from_table(
 }
 
 /// Construct a fresh standard `[parent.tome]` table populated from
-/// `entry`. The `env` table is added (and standalone) only when
-/// `entry.env` is `Some`.
-fn toml_new_entry_table(entry: &TomeEntry) -> TomlTable {
+/// `entry`, in the dialect's field order: `type` → `command` →
+/// `args` (`CommandArgs` only) → `env` (iff present, OR `emit_env`) →
+/// `extra_fields`. The `env` sub-table is standalone (non-implicit).
+fn toml_new_entry_table(entry: &TomeEntry, dialect: &McpDialect) -> TomlTable {
     let mut table = TomlTable::new();
-    table.insert("command", toml_value(entry.command.as_str()));
-    let mut args = TomlArray::new();
-    for a in &entry.args {
-        args.push(a.as_str());
+
+    if let Some(ty) = dialect.entry_type {
+        table.insert("type", toml_value(ty.as_str()));
     }
-    table.insert("args", toml_value(args));
-    if let Some(env) = &entry.env {
-        let mut env_table = TomlTable::new();
-        env_table.set_implicit(false);
-        for (k, v) in env {
-            env_table.insert(k, toml_value(v.as_str()));
+
+    match dialect.entry_shape {
+        EntryShape::CommandArgs => {
+            table.insert("command", toml_value(entry.command.as_str()));
+            let mut args = TomlArray::new();
+            for a in &entry.args {
+                args.push(a.as_str());
+            }
+            table.insert("args", toml_value(args));
         }
-        table.insert("env", TomlItem::Table(env_table));
+        EntryShape::CommandArray => {
+            let mut arr = TomlArray::new();
+            arr.push(entry.command.as_str());
+            for a in &entry.args {
+                arr.push(a.as_str());
+            }
+            table.insert("command", toml_value(arr));
+        }
     }
+
+    match &entry.env {
+        Some(env) => {
+            let mut env_table = TomlTable::new();
+            env_table.set_implicit(false);
+            for (k, v) in env {
+                env_table.insert(k, toml_value(v.as_str()));
+            }
+            table.insert("env", TomlItem::Table(env_table));
+        }
+        None if dialect.emit_env => {
+            let mut env_table = TomlTable::new();
+            env_table.set_implicit(false);
+            table.insert("env", TomlItem::Table(env_table));
+        }
+        None => {}
+    }
+
+    for field in dialect.extra_fields {
+        match field.value {
+            ExtraValue::Bool(b) => {
+                table.insert(field.key, toml_value(b));
+            }
+            ExtraValue::StringArray(items) => {
+                let mut arr = TomlArray::new();
+                for s in items {
+                    arr.push(*s);
+                }
+                table.insert(field.key, toml_value(arr));
+            }
+        }
+    }
+
     table
 }
 
@@ -329,14 +492,11 @@ fn toml_new_entry_table(entry: &TomeEntry) -> TomlTable {
 /// parsed entry otherwise. Lenient parse — unknown sibling keys are
 /// preserved through the underlying document model (`serde_json` with
 /// `preserve_order`, or `toml_edit`).
-pub fn read_entry(
-    path: &Path,
-    format: McpConfigFormat,
-    parent_key: &str,
-) -> Result<Option<TomeEntry>, TomeError> {
+pub fn read_entry(path: &Path, dialect: &McpDialect) -> Result<Option<TomeEntry>, TomeError> {
     refuse_symlink(path)?;
-    match format {
-        McpConfigFormat::Json => {
+    let parent_key = dialect.parent_key;
+    match dialect.file_format {
+        FileFormat::Json | FileFormat::Jsonc => {
             let Some(doc) = read_json_doc(path)? else {
                 return Ok(None);
             };
@@ -346,9 +506,9 @@ pub fn read_entry(
             let Some(raw) = parent.get(MCP_CONFIG_KEY) else {
                 return Ok(None);
             };
-            Ok(Some(json_entry_from_value(path, raw)?))
+            Ok(Some(json_entry_from_value(path, raw, dialect.entry_shape)?))
         }
-        McpConfigFormat::Toml => {
+        FileFormat::Toml => {
             let Some(doc) = read_toml_doc(path)? else {
                 return Ok(None);
             };
@@ -361,7 +521,11 @@ pub fn read_entry(
             let entry_table = entry_item
                 .as_table_like()
                 .ok_or_else(|| parse_err(path, format!("'{MCP_CONFIG_KEY}' must be a table")))?;
-            Ok(Some(toml_entry_from_table(path, entry_table)?))
+            Ok(Some(toml_entry_from_table(
+                path,
+                entry_table,
+                dialect.entry_shape,
+            )?))
         }
     }
 }
@@ -392,16 +556,17 @@ pub fn read_entry(
 /// `is_tome_owned`, and decide between exit-19 vs `--force` rewrite.
 /// `write_entry` itself always rewrites whatever's there — when
 /// invoked, the caller has already decided overwriting is safe.
-pub fn write_entry(
-    path: &Path,
-    format: McpConfigFormat,
-    parent_key: &str,
-    entry: &TomeEntry,
-) -> Result<(), TomeError> {
+pub fn write_entry(path: &Path, dialect: &McpDialect, entry: &TomeEntry) -> Result<(), TomeError> {
     refuse_symlink(path)?;
 
-    // Idempotence pre-check: same command+args means no write.
-    if let Some(current) = read_entry(path, format, parent_key)?
+    // Idempotence pre-check: same command+args means no write. The
+    // mandated `type`/`extra_fields` are re-derived from the dialect on
+    // every rewrite (R3/m6), so a *stale* mandated field is NOT covered
+    // by this idempotence check — but that only matters when the rest of
+    // the entry also matches, in which case the on-disk file is already
+    // correct (a freshly-written entry always carries the current
+    // dialect's mandated fields).
+    if let Some(current) = read_entry(path, dialect)?
         && super::mcp_config::is_tome_owned(&current)
         && current.command == entry.command
         && current.args == entry.args
@@ -409,13 +574,14 @@ pub fn write_entry(
         return Ok(());
     }
 
-    match format {
-        McpConfigFormat::Json => write_entry_json(path, parent_key, entry),
-        McpConfigFormat::Toml => write_entry_toml(path, parent_key, entry),
+    match dialect.file_format {
+        FileFormat::Json | FileFormat::Jsonc => write_entry_json(path, dialect, entry),
+        FileFormat::Toml => write_entry_toml(path, dialect, entry),
     }
 }
 
-fn write_entry_json(path: &Path, parent_key: &str, entry: &TomeEntry) -> Result<(), TomeError> {
+fn write_entry_json(path: &Path, dialect: &McpDialect, entry: &TomeEntry) -> Result<(), TomeError> {
+    let parent_key = dialect.parent_key;
     // Load the existing document or start with an empty object.
     let mut doc = read_json_doc(path)?.unwrap_or_else(|| JsonValue::Object(JsonMap::new()));
 
@@ -445,20 +611,24 @@ fn write_entry_json(path: &Path, parent_key: &str, entry: &TomeEntry) -> Result<
     let mut new_entry = entry.clone();
     if new_entry.env.is_none()
         && let Some(existing) = parent_obj.get(MCP_CONFIG_KEY)
-        && let Ok(parsed) = json_entry_from_value(path, existing)
+        && let Ok(parsed) = json_entry_from_value(path, existing, dialect.entry_shape)
         && is_tome_owned(&parsed)
     {
         new_entry.env = parsed.env;
     }
 
-    parent_obj.insert(MCP_CONFIG_KEY.to_string(), json_entry_object(&new_entry));
+    parent_obj.insert(
+        MCP_CONFIG_KEY.to_string(),
+        json_entry_object(&new_entry, dialect),
+    );
 
     let mut bytes = serde_json::to_vec_pretty(&doc).map_err(|e| parse_err(path, e))?;
     bytes.push(b'\n');
     atomic_write(path, &bytes)
 }
 
-fn write_entry_toml(path: &Path, parent_key: &str, entry: &TomeEntry) -> Result<(), TomeError> {
+fn write_entry_toml(path: &Path, dialect: &McpDialect, entry: &TomeEntry) -> Result<(), TomeError> {
+    let parent_key = dialect.parent_key;
     let mut doc = read_toml_doc(path)?.unwrap_or_else(DocumentMut::new);
 
     // Ensure the parent table exists. Use standard (non-implicit) so
@@ -482,7 +652,7 @@ fn write_entry_toml(path: &Path, parent_key: &str, entry: &TomeEntry) -> Result<
         if let Some(parent_view) = parent_view
             && let Some(existing_item) = parent_view.get(MCP_CONFIG_KEY)
             && let Some(existing_table) = existing_item.as_table_like()
-            && let Ok(parsed) = toml_entry_from_table(path, existing_table)
+            && let Ok(parsed) = toml_entry_from_table(path, existing_table, dialect.entry_shape)
             && is_tome_owned(&parsed)
         {
             new_entry.env = parsed.env;
@@ -501,27 +671,64 @@ fn write_entry_toml(path: &Path, parent_key: &str, entry: &TomeEntry) -> Result<
     );
 
     if existing_is_inline {
-        // Build an inline table replacement to keep shape.
+        // Build an inline table replacement to keep shape. Field order
+        // mirrors `toml_new_entry_table`: type → command → args
+        // (CommandArgs only) → env → extra_fields.
         let mut inline = toml_edit::InlineTable::new();
-        inline.insert("command", new_entry.command.as_str().into());
-        let mut args = TomlArray::new();
-        for a in &new_entry.args {
-            args.push(a.as_str());
+        if let Some(ty) = dialect.entry_type {
+            inline.insert("type", ty.as_str().into());
         }
-        inline.insert("args", TomlValue::Array(args));
-        if let Some(env) = &new_entry.env {
-            let mut env_inline = toml_edit::InlineTable::new();
-            for (k, v) in env {
-                env_inline.insert(k, v.as_str().into());
+        match dialect.entry_shape {
+            EntryShape::CommandArgs => {
+                inline.insert("command", new_entry.command.as_str().into());
+                let mut args = TomlArray::new();
+                for a in &new_entry.args {
+                    args.push(a.as_str());
+                }
+                inline.insert("args", TomlValue::Array(args));
             }
-            inline.insert("env", TomlValue::InlineTable(env_inline));
+            EntryShape::CommandArray => {
+                let mut arr = TomlArray::new();
+                arr.push(new_entry.command.as_str());
+                for a in &new_entry.args {
+                    arr.push(a.as_str());
+                }
+                inline.insert("command", TomlValue::Array(arr));
+            }
+        }
+        match &new_entry.env {
+            Some(env) => {
+                let mut env_inline = toml_edit::InlineTable::new();
+                for (k, v) in env {
+                    env_inline.insert(k, v.as_str().into());
+                }
+                inline.insert("env", TomlValue::InlineTable(env_inline));
+            }
+            None if dialect.emit_env => {
+                inline.insert("env", TomlValue::InlineTable(toml_edit::InlineTable::new()));
+            }
+            None => {}
+        }
+        for field in dialect.extra_fields {
+            match field.value {
+                ExtraValue::Bool(b) => {
+                    inline.insert(field.key, b.into());
+                }
+                ExtraValue::StringArray(items) => {
+                    let mut arr = TomlArray::new();
+                    for s in items {
+                        arr.push(*s);
+                    }
+                    inline.insert(field.key, TomlValue::Array(arr));
+                }
+            }
         }
         parent_table.insert(
             MCP_CONFIG_KEY,
             TomlItem::Value(TomlValue::InlineTable(inline)),
         );
     } else {
-        let new_table = toml_new_entry_table(&new_entry);
+        let new_table = toml_new_entry_table(&new_entry, dialect);
         parent_table.insert(MCP_CONFIG_KEY, TomlItem::Table(new_table));
     }
 
@@ -534,16 +741,13 @@ fn write_entry_toml(path: &Path, parent_key: &str, entry: &TomeEntry) -> Result<
 /// file itself is missing. After removal the parent object (`mcpServers`
 /// / `mcp_servers`) is left in place even if empty — other entries are
 /// unaffected.
-pub fn remove_entry(
-    path: &Path,
-    format: McpConfigFormat,
-    parent_key: &str,
-) -> Result<(), TomeError> {
+pub fn remove_entry(path: &Path, dialect: &McpDialect) -> Result<(), TomeError> {
     refuse_symlink(path)?;
+    let parent_key = dialect.parent_key;
 
     // Pre-check via `read_entry`: if the entry is absent or user-owned,
     // no write — idempotence preserved (mtime unchanged).
-    let current = read_entry(path, format, parent_key)?;
+    let current = read_entry(path, dialect)?;
     let Some(current) = current else {
         return Ok(());
     };
@@ -551,8 +755,8 @@ pub fn remove_entry(
         return Ok(());
     }
 
-    match format {
-        McpConfigFormat::Json => {
+    match dialect.file_format {
+        FileFormat::Json | FileFormat::Jsonc => {
             let Some(mut doc) = read_json_doc(path)? else {
                 return Ok(());
             };
@@ -570,7 +774,7 @@ pub fn remove_entry(
             bytes.push(b'\n');
             atomic_write(path, &bytes)
         }
-        McpConfigFormat::Toml => {
+        FileFormat::Toml => {
             let Some(mut doc) = read_toml_doc(path)? else {
                 return Ok(());
             };
@@ -593,6 +797,56 @@ pub fn remove_entry(
 /// shape-mismatch (e.g. missing `args`, `args[0] != "mcp"`).
 pub fn is_tome_owned(entry: &TomeEntry) -> bool {
     entry.command == "tome" && entry.args.first().map(String::as_str) == Some("mcp")
+}
+
+/// Render the EXACT bytes a user would paste to add the Tome MCP server to
+/// `dialect`'s harness — the paste-able snippet `tome harness info` prints
+/// (Phase 11 / US5, T063, contract cli-surface.md § `tome harness info`).
+///
+/// Pure: no I/O, no file access. The snippet is a fresh, minimal document
+/// containing ONLY the `{ "<parent_key>": { "tome": { …entry… } } }` shape
+/// (or the TOML `[<parent_key>.tome]` block for Codex). It is built from the
+/// SAME `json_entry_object` / `toml_new_entry_table` constructors the sync
+/// writer uses, so the snippet bytes are byte-identical to what `write_entry`
+/// lands for an otherwise-empty config (modulo the surrounding developer
+/// content `write_entry` preserves and the snippet — by design — omits).
+///
+/// For a manual-only harness (jetbrains-ai) this snippet is the primary
+/// recovery artifact; for every harness it is the self-heal paste-target the
+/// rules-file preamble points at.
+pub fn render_entry_snippet(dialect: &McpDialect, entry: &TomeEntry) -> String {
+    match dialect.file_format {
+        FileFormat::Json | FileFormat::Jsonc => {
+            // Build `{ "<parent_key>": { "tome": <entry-object> } }` and
+            // pretty-print it exactly as `write_entry_json` does (trailing
+            // newline included), so the snippet matches the on-disk bytes.
+            let mut parent = JsonMap::new();
+            parent.insert(
+                MCP_CONFIG_KEY.to_string(),
+                json_entry_object(entry, dialect),
+            );
+            let mut doc = JsonMap::new();
+            doc.insert(dialect.parent_key.to_string(), JsonValue::Object(parent));
+            let mut body = serde_json::to_string_pretty(&JsonValue::Object(doc))
+                .unwrap_or_else(|_| "{}".to_string());
+            body.push('\n');
+            body
+        }
+        FileFormat::Toml => {
+            // Build `[<parent_key>.tome]` via the same standard-table
+            // constructor `write_entry_toml` uses for a fresh entry, so the
+            // serialised bytes match.
+            let mut doc = DocumentMut::new();
+            let mut parent = TomlTable::new();
+            parent.set_implicit(true);
+            parent.insert(
+                MCP_CONFIG_KEY,
+                TomlItem::Table(toml_new_entry_table(entry, dialect)),
+            );
+            doc.insert(dialect.parent_key, TomlItem::Table(parent));
+            doc.to_string()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -642,5 +896,546 @@ mod tests {
     fn new_constructor_sets_env_to_none() {
         let e = TomeEntry::new("tome".to_string(), vec!["mcp".to_string()]);
         assert!(e.env.is_none());
+    }
+}
+
+// =====================================================================
+// Phase 11 — G1 dialect wire-shape pins + round-trips (T013).
+//
+// These pin the EXACT serialized bytes each dialect produces and assert
+// every shape round-trips through `write_entry → read_entry →
+// is_tome_owned`. The default + opencode + copilot-cli-shape full byte
+// strings are pinned verbatim. The copilot-cli-like dialect is built
+// inline (its harness lands in US1) purely to exercise the
+// `extra_fields` + `emit_env` ordering before it ships.
+// =====================================================================
+#[cfg(test)]
+mod dialect_pin_tests {
+    use super::*;
+    use crate::harness::{EntryShape, ExtraField, ExtraValue, FileFormat, McpDialect, ServerType};
+    use tempfile::TempDir;
+
+    /// The legacy JSON `mcpServers` + `CommandArgs` dialect (default).
+    const DEFAULT_DIALECT: McpDialect = McpDialect::LEGACY;
+
+    /// Codex's TOML `mcp_servers` + `CommandArgs` dialect.
+    const CODEX_DIALECT: McpDialect = McpDialect {
+        file_format: FileFormat::Toml,
+        parent_key: "mcp_servers",
+        entry_shape: EntryShape::CommandArgs,
+        entry_type: None,
+        emit_env: false,
+        extra_fields: &[],
+    };
+
+    /// OpenCode's `mcp` + `CommandArray` + `type:local` + `enabled:true`.
+    const OPENCODE_DIALECT: McpDialect = McpDialect {
+        file_format: FileFormat::Jsonc,
+        parent_key: "mcp",
+        entry_shape: EntryShape::CommandArray,
+        entry_type: Some(ServerType::Local),
+        emit_env: false,
+        extra_fields: &[ExtraField {
+            key: "enabled",
+            value: ExtraValue::Bool(true),
+        }],
+    };
+
+    /// A copilot-cli-like dialect: `mcpServers`, `CommandArgs`,
+    /// `type:local`, `emit_env:true` (→ `env:{}`), and a `tools:["*"]`
+    /// extra field. Exercises `extra_fields` + `emit_env` ordering. The
+    /// real harness lands in US1.
+    const COPILOT_CLI_DIALECT: McpDialect = McpDialect {
+        file_format: FileFormat::Json,
+        parent_key: "mcpServers",
+        entry_shape: EntryShape::CommandArgs,
+        entry_type: Some(ServerType::Local),
+        emit_env: true,
+        extra_fields: &[ExtraField {
+            key: "tools",
+            value: ExtraValue::StringArray(&["*"]),
+        }],
+    };
+
+    /// Copilot (VS Code): `servers` parent key + `type:stdio`, no env.
+    const COPILOT_DIALECT: McpDialect = McpDialect {
+        file_format: FileFormat::Json,
+        parent_key: "servers",
+        entry_shape: EntryShape::CommandArgs,
+        entry_type: Some(ServerType::Stdio),
+        emit_env: false,
+        extra_fields: &[],
+    };
+
+    /// Zed: `context_servers` parent key + `CommandArgs` + `emit_env`.
+    const ZED_DIALECT: McpDialect = McpDialect {
+        file_format: FileFormat::Json,
+        parent_key: "context_servers",
+        entry_shape: EntryShape::CommandArgs,
+        entry_type: None,
+        emit_env: true,
+        extra_fields: &[],
+    };
+
+    /// Generic (US4): `mcpServers` parent key + `CommandArgs` + `emit_env`
+    /// (`"env": {}`), no `type`, no extras — the portable `./mcp.json` shape.
+    const GENERIC_DIALECT: McpDialect = McpDialect {
+        file_format: FileFormat::Json,
+        parent_key: "mcpServers",
+        entry_shape: EntryShape::CommandArgs,
+        entry_type: None,
+        emit_env: true,
+        extra_fields: &[],
+    };
+
+    /// Crush: `mcp` parent key + `CommandArgs` + per-entry `type:stdio`, no env.
+    const CRUSH_DIALECT: McpDialect = McpDialect {
+        file_format: FileFormat::Json,
+        parent_key: "mcp",
+        entry_shape: EntryShape::CommandArgs,
+        entry_type: Some(ServerType::Stdio),
+        emit_env: false,
+        extra_fields: &[],
+    };
+
+    fn tome_entry() -> TomeEntry {
+        TomeEntry::new(
+            "tome".to_string(),
+            vec![
+                "mcp".to_string(),
+                "--workspace".to_string(),
+                "demo".to_string(),
+            ],
+        )
+    }
+
+    // ---- byte-stable wire pins ----------------------------------------
+
+    #[test]
+    fn default_dialect_pins_exact_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        write_entry(&target, &DEFAULT_DIALECT, &tome_entry()).unwrap();
+        let body = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            body,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ]\n    }\n  }\n}\n",
+        );
+    }
+
+    #[test]
+    fn codex_dialect_pins_exact_toml_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("config.toml");
+        write_entry(&target, &CODEX_DIALECT, &tome_entry()).unwrap();
+        let body = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            body,
+            "[mcp_servers.tome]\ncommand = \"tome\"\nargs = [\"mcp\", \"--workspace\", \"demo\"]\n",
+        );
+    }
+
+    #[test]
+    fn opencode_dialect_pins_exact_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("opencode.json");
+        write_entry(&target, &OPENCODE_DIALECT, &tome_entry()).unwrap();
+        let body = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            body,
+            "{\n  \"mcp\": {\n    \"tome\": {\n      \"type\": \"local\",\n      \"command\": [\n        \"tome\",\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n",
+        );
+    }
+
+    #[test]
+    fn copilot_cli_shape_pins_exact_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("mcp-config.json");
+        write_entry(&target, &COPILOT_CLI_DIALECT, &tome_entry()).unwrap();
+        let body = std::fs::read_to_string(&target).unwrap();
+        // type → command → args → env:{} (emit_env) → tools (extra) order.
+        assert_eq!(
+            body,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"type\": \"local\",\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ],\n      \"env\": {},\n      \"tools\": [\n        \"*\"\n      ]\n    }\n  }\n}\n",
+        );
+    }
+
+    #[test]
+    fn generic_dialect_pins_exact_mcp_json_bytes() {
+        // The `generic` harness's `./mcp.json`: `mcpServers` + CommandArgs +
+        // `"env": {}` (emit_env), no `type`, no extras.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("mcp.json");
+        write_entry(&target, &GENERIC_DIALECT, &tome_entry()).unwrap();
+        let body = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            body,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ],\n      \"env\": {}\n    }\n  }\n}\n",
+        );
+        // The shape the `generic` module returns matches this dialect.
+        use crate::harness::HarnessModule;
+        assert_eq!(
+            crate::harness::generic::GENERIC.mcp_dialect(),
+            GENERIC_DIALECT
+        );
+    }
+
+    #[test]
+    fn generic_dialect_round_trips_and_is_owned() {
+        round_trip(&GENERIC_DIALECT, "mcp.json");
+    }
+
+    // ---- write → read-back → is_tome_owned round-trips ----------------
+
+    fn round_trip(dialect: &McpDialect, file: &str) {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join(file);
+        let entry = tome_entry();
+        write_entry(&target, dialect, &entry).unwrap();
+        let read = read_entry(&target, dialect)
+            .unwrap()
+            .expect("entry should be present after write");
+        // The uniform in-memory model round-trips regardless of shape.
+        assert_eq!(read.command, "tome");
+        assert_eq!(read.args, vec!["mcp", "--workspace", "demo"]);
+        assert!(is_tome_owned(&read), "round-tripped entry must be owned");
+    }
+
+    #[test]
+    fn default_dialect_round_trips_and_is_owned() {
+        round_trip(&DEFAULT_DIALECT, "settings.json");
+    }
+
+    #[test]
+    fn codex_dialect_round_trips_and_is_owned() {
+        round_trip(&CODEX_DIALECT, "config.toml");
+    }
+
+    #[test]
+    fn opencode_command_array_round_trips_and_is_owned() {
+        // CommandArray specifically: the single `command` array is
+        // normalised back to command=arr[0], args=arr[1..], so the SAME
+        // `is_tome_owned` predicate (command=="tome" && args[0]=="mcp")
+        // applies — here arr[0]=="tome" && arr[1]=="mcp".
+        round_trip(&OPENCODE_DIALECT, "opencode.json");
+    }
+
+    #[test]
+    fn copilot_cli_shape_round_trips_and_is_owned() {
+        round_trip(&COPILOT_CLI_DIALECT, "mcp-config.json");
+    }
+
+    // ---- clash: a foreign entry named `tome` is NOT owned -------------
+
+    #[test]
+    fn foreign_entry_named_tome_is_not_owned_commandargs() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        std::fs::write(
+            &target,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"not-tome\",\n      \"args\": [\"serve\"]\n    }\n  }\n}\n",
+        )
+        .unwrap();
+        let read = read_entry(&target, &DEFAULT_DIALECT).unwrap().unwrap();
+        assert!(!is_tome_owned(&read));
+    }
+
+    #[test]
+    fn foreign_entry_named_tome_is_not_owned_commandarray() {
+        // CommandArray clash: a foreign `tome` whose command[0] != "tome".
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("opencode.json");
+        std::fs::write(
+            &target,
+            "{\n  \"mcp\": {\n    \"tome\": {\n      \"type\": \"local\",\n      \"command\": [\"not-tome\", \"serve\"],\n      \"enabled\": true\n    }\n  }\n}\n",
+        )
+        .unwrap();
+        let read = read_entry(&target, &OPENCODE_DIALECT).unwrap().unwrap();
+        assert_eq!(read.command, "not-tome");
+        assert_eq!(read.args, vec!["serve"]);
+        assert!(!is_tome_owned(&read));
+    }
+
+    // ---- mandated fields self-heal on rewrite (R3/m6) -----------------
+
+    #[test]
+    fn opencode_rewrite_reasserts_type_and_enabled() {
+        // A developer edits away the mandated `type`/`enabled` AND changes
+        // the workspace arg (so the idempotence pre-check doesn't short-
+        // circuit). The rewrite must re-derive both mandated fields.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("opencode.json");
+        std::fs::write(
+            &target,
+            "{\n  \"mcp\": {\n    \"tome\": {\n      \"command\": [\"tome\", \"mcp\", \"--workspace\", \"stale\"]\n    }\n  }\n}\n",
+        )
+        .unwrap();
+        write_entry(&target, &OPENCODE_DIALECT, &tome_entry()).unwrap();
+        let body = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            body.contains("\"type\": \"local\""),
+            "type re-derived:\n{body}"
+        );
+        assert!(
+            body.contains("\"enabled\": true"),
+            "enabled re-derived:\n{body}"
+        );
+        assert!(body.contains("\"--workspace\""));
+        assert!(body.contains("\"demo\""));
+    }
+
+    // ---- developer env is preserved across a rewrite ------------------
+
+    #[test]
+    fn default_dialect_preserves_developer_env_on_rewrite() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        // Seed an owned entry WITH a developer env and a stale workspace.
+        std::fs::write(
+            &target,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"tome\",\n      \"args\": [\"mcp\", \"--workspace\", \"stale\"],\n      \"env\": { \"MY_FLAG\": \"1\" }\n    }\n  }\n}\n",
+        )
+        .unwrap();
+        write_entry(&target, &DEFAULT_DIALECT, &tome_entry()).unwrap();
+        let read = read_entry(&target, &DEFAULT_DIALECT).unwrap().unwrap();
+        assert_eq!(
+            read.env,
+            Some(vec![("MY_FLAG".to_string(), "1".to_string())]),
+            "developer env must survive the rewrite",
+        );
+    }
+
+    // ---- remove_entry under the new dialect parent keys (the disable path) ----
+    //
+    // Each: seed a Tome-owned entry + a FOREIGN sibling server under the SAME
+    // parent key, `remove_entry`, then assert the `tome` key is gone and the
+    // foreign sibling survives byte-for-byte (value-equality, since serde_json's
+    // pretty-printer normalises whitespace).
+
+    /// Seed `{ "<parent_key>": { "tome": {<owned>}, "other": {<foreign>} } }`,
+    /// remove the Tome entry, and return the re-read parent object so the caller
+    /// can assert on the surviving siblings.
+    fn remove_entry_preserves_sibling(
+        dialect: &McpDialect,
+        file: &str,
+        owned: &str,
+        foreign: &str,
+    ) -> JsonValue {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join(file);
+        let seed = format!(
+            "{{\n  \"{key}\": {{\n    \"tome\": {owned},\n    \"other\": {foreign}\n  }}\n}}\n",
+            key = dialect.parent_key,
+        );
+        std::fs::write(&target, seed).unwrap();
+        // Sanity: the seeded Tome entry IS owned before removal.
+        assert!(is_tome_owned(
+            &read_entry(&target, dialect).unwrap().unwrap()
+        ));
+
+        remove_entry(&target, dialect).unwrap();
+
+        let body = std::fs::read_to_string(&target).unwrap();
+        let doc: JsonValue = serde_json::from_str(&body).unwrap();
+        let parent = doc
+            .get(dialect.parent_key)
+            .and_then(JsonValue::as_object)
+            .expect("parent object survives removal");
+        assert!(
+            parent.get("tome").is_none(),
+            "tome key must be gone after remove_entry:\n{body}",
+        );
+        assert!(
+            parent.get("other").is_some(),
+            "foreign sibling must survive remove_entry:\n{body}",
+        );
+        doc.get(dialect.parent_key).cloned().unwrap()
+    }
+
+    #[test]
+    fn remove_entry_servers_key_preserves_foreign_sibling() {
+        // copilot (VS Code): `servers` + type:stdio.
+        let parent = remove_entry_preserves_sibling(
+            &COPILOT_DIALECT,
+            "mcp.json",
+            "{ \"type\": \"stdio\", \"command\": \"tome\", \"args\": [\"mcp\"] }",
+            "{ \"type\": \"stdio\", \"command\": \"other-bin\", \"args\": [\"run\"] }",
+        );
+        let other = &parent["other"];
+        assert_eq!(other["command"], "other-bin");
+        assert_eq!(other["args"][0], "run");
+    }
+
+    #[test]
+    fn remove_entry_context_servers_key_preserves_foreign_sibling() {
+        // zed: `context_servers` + CommandArgs.
+        let parent = remove_entry_preserves_sibling(
+            &ZED_DIALECT,
+            "settings.json",
+            "{ \"command\": \"tome\", \"args\": [\"mcp\"] }",
+            "{ \"command\": \"other-bin\", \"args\": [\"run\"] }",
+        );
+        assert_eq!(parent["other"]["command"], "other-bin");
+    }
+
+    #[test]
+    fn remove_entry_mcp_key_type_stdio_preserves_foreign_sibling() {
+        // crush: `mcp` parent key + per-entry type:stdio.
+        let parent = remove_entry_preserves_sibling(
+            &CRUSH_DIALECT,
+            "crush.json",
+            "{ \"type\": \"stdio\", \"command\": \"tome\", \"args\": [\"mcp\"] }",
+            "{ \"type\": \"stdio\", \"command\": \"other-bin\", \"args\": [\"run\"] }",
+        );
+        assert_eq!(parent["other"]["command"], "other-bin");
+        assert_eq!(parent["other"]["type"], "stdio");
+    }
+
+    #[test]
+    fn remove_entry_mcpservers_tools_extra_preserves_foreign_sibling() {
+        // copilot-cli: `mcpServers` + type:local + env:{} + tools:["*"].
+        let parent = remove_entry_preserves_sibling(
+            &COPILOT_CLI_DIALECT,
+            "mcp-config.json",
+            "{ \"type\": \"local\", \"command\": \"tome\", \"args\": [\"mcp\"], \"env\": {}, \"tools\": [\"*\"] }",
+            "{ \"type\": \"local\", \"command\": \"other-bin\", \"args\": [\"run\"], \"tools\": [\"x\"] }",
+        );
+        assert_eq!(parent["other"]["command"], "other-bin");
+        assert_eq!(parent["other"]["tools"][0], "x");
+    }
+
+    // ---- write_entry preserves a foreign sibling under the new parent keys ----
+
+    #[test]
+    fn write_entry_servers_key_preserves_foreign_sibling() {
+        // Seed ONLY a foreign sibling under `servers`; writing the Tome entry
+        // must ADD `tome` and leave `other` intact.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("mcp.json");
+        std::fs::write(
+            &target,
+            "{\n  \"servers\": {\n    \"other\": { \"type\": \"stdio\", \"command\": \"other-bin\", \"args\": [\"run\"] }\n  }\n}\n",
+        )
+        .unwrap();
+        write_entry(&target, &COPILOT_DIALECT, &tome_entry()).unwrap();
+
+        let body = std::fs::read_to_string(&target).unwrap();
+        let doc: JsonValue = serde_json::from_str(&body).unwrap();
+        let servers = doc.get("servers").and_then(JsonValue::as_object).unwrap();
+        assert!(
+            servers.get("other").is_some(),
+            "foreign sibling must survive the write:\n{body}",
+        );
+        assert_eq!(servers["other"]["command"], "other-bin");
+        // The Tome entry was added and is owned.
+        let read = read_entry(&target, &COPILOT_DIALECT).unwrap().unwrap();
+        assert!(is_tome_owned(&read));
+    }
+
+    #[test]
+    fn write_entry_context_servers_key_preserves_foreign_sibling() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        std::fs::write(
+            &target,
+            "{\n  \"context_servers\": {\n    \"other\": { \"command\": \"other-bin\", \"args\": [\"run\"] }\n  }\n}\n",
+        )
+        .unwrap();
+        write_entry(&target, &ZED_DIALECT, &tome_entry()).unwrap();
+
+        let body = std::fs::read_to_string(&target).unwrap();
+        let doc: JsonValue = serde_json::from_str(&body).unwrap();
+        let parent = doc
+            .get("context_servers")
+            .and_then(JsonValue::as_object)
+            .unwrap();
+        assert!(
+            parent.get("other").is_some(),
+            "foreign sibling must survive the write:\n{body}",
+        );
+        assert_eq!(parent["other"]["command"], "other-bin");
+        let read = read_entry(&target, &ZED_DIALECT).unwrap().unwrap();
+        assert!(is_tome_owned(&read));
+    }
+
+    // ---- T063: render_entry_snippet exact bytes per dialect ------------
+    //
+    // The snippet a user pastes must be byte-identical to what `write_entry`
+    // lands into an otherwise-empty config. Each test renders the snippet AND
+    // (for JSON) cross-checks it against `write_entry`'s on-disk bytes.
+
+    #[test]
+    fn snippet_default_dialect_exact_bytes() {
+        let snippet = render_entry_snippet(&DEFAULT_DIALECT, &tome_entry());
+        assert_eq!(
+            snippet,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ]\n    }\n  }\n}\n",
+        );
+    }
+
+    #[test]
+    fn snippet_copilot_cli_tools_and_env_exact_bytes() {
+        // type → command → args → env:{} (emit_env) → tools (extra) order.
+        let snippet = render_entry_snippet(&COPILOT_CLI_DIALECT, &tome_entry());
+        assert_eq!(
+            snippet,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"type\": \"local\",\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ],\n      \"env\": {},\n      \"tools\": [\n        \"*\"\n      ]\n    }\n  }\n}\n",
+        );
+    }
+
+    #[test]
+    fn snippet_opencode_command_array_exact_bytes() {
+        // opencode is the CommandArray canary: a single `command` array
+        // [launcher, …args] + `type:local` + `enabled:true`, no separate
+        // `args` key, no `env`. Guards `render_entry_snippet` for the
+        // CommandArray shape the way the JSON pins guard CommandArgs.
+        let snippet = render_entry_snippet(&OPENCODE_DIALECT, &tome_entry());
+        assert_eq!(
+            snippet,
+            "{\n  \"mcp\": {\n    \"tome\": {\n      \"type\": \"local\",\n      \"command\": [\n        \"tome\",\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ],\n      \"enabled\": true\n    }\n  }\n}\n",
+        );
+    }
+
+    #[test]
+    fn snippet_crush_type_stdio_exact_bytes() {
+        // crush: `mcp` parent key + per-entry `type:stdio`, no env.
+        let snippet = render_entry_snippet(&CRUSH_DIALECT, &tome_entry());
+        assert_eq!(
+            snippet,
+            "{\n  \"mcp\": {\n    \"tome\": {\n      \"type\": \"stdio\",\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"demo\"\n      ]\n    }\n  }\n}\n",
+        );
+    }
+
+    #[test]
+    fn snippet_codex_toml_exact_bytes() {
+        let snippet = render_entry_snippet(&CODEX_DIALECT, &tome_entry());
+        assert_eq!(
+            snippet,
+            "[mcp_servers.tome]\ncommand = \"tome\"\nargs = [\"mcp\", \"--workspace\", \"demo\"]\n",
+        );
+    }
+
+    /// The snippet bytes MUST equal what `write_entry` lands into an
+    /// otherwise-empty config — the whole point of reusing the dialect
+    /// serializer. Verified for a JSON shape (copilot-cli) and a TOML shape.
+    #[test]
+    fn snippet_matches_write_entry_into_empty_config() {
+        for (dialect, file) in [
+            (&COPILOT_CLI_DIALECT, "mcp-config.json"),
+            (&DEFAULT_DIALECT, "settings.json"),
+            (&CRUSH_DIALECT, "crush.json"),
+            (&CODEX_DIALECT, "config.toml"),
+            (&OPENCODE_DIALECT, "opencode.json"),
+        ] {
+            let tmp = TempDir::new().unwrap();
+            let target = tmp.path().join(file);
+            write_entry(&target, dialect, &tome_entry()).unwrap();
+            let on_disk = std::fs::read_to_string(&target).unwrap();
+            let snippet = render_entry_snippet(dialect, &tome_entry());
+            assert_eq!(
+                snippet, on_disk,
+                "snippet must match write_entry bytes for {file}",
+            );
+        }
     }
 }

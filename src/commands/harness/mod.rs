@@ -84,13 +84,11 @@ pub fn run(args: HarnessArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), T
         None => bare::run(scope, &paths, mode),
         Some(HarnessCommand::List(a)) => list::run(a, scope, &paths, mode),
         Some(HarnessCommand::Use(a)) => {
-            // Capture the name before `run` consumes the args; emit on success.
-            let name = a.name.clone();
-            let r = use_::run(a, scope, &paths, mode);
-            if r.is_ok() {
-                emit_harness_action(&name, crate::telemetry::event::HarnessAction::Use);
-            }
-            r
+            // Phase 11 / US6: `use` is now multi-harness — telemetry is emitted
+            // per successfully-configured harness inside `use_::run` (it knows
+            // the resolved selection + which harnesses succeeded), so the
+            // dispatcher no longer references a single name.
+            use_::run(a, scope, &paths, mode)
         }
         Some(HarnessCommand::Remove(a)) => {
             let name = a.name.clone();
@@ -121,6 +119,25 @@ pub(crate) fn harness_name_to_enum(name: &str) -> Option<crate::telemetry::event
         "codex" => Some(Harness::Codex),
         "opencode" => Some(Harness::Opencode),
         "gemini" => Some(Harness::GeminiCli),
+        // Phase 11 — additional harnesses. For these the wire token equals the
+        // id, so this is a flat name→variant bridge — but NOT for `gemini`
+        // (id `gemini` → wire token `gemini-cli`, the one rename handled above).
+        // `antigravity-cli` is an alias of `gemini` and is resolved upstream,
+        // never reaching this function.
+        "copilot-cli" => Some(Harness::CopilotCli),
+        "copilot" => Some(Harness::Copilot),
+        "devin" => Some(Harness::Devin),
+        "cline" => Some(Harness::Cline),
+        "junie" => Some(Harness::Junie),
+        "jetbrains-ai" => Some(Harness::JetbrainsAi),
+        "antigravity" => Some(Harness::Antigravity),
+        "pi" => Some(Harness::Pi),
+        "crush" => Some(Harness::Crush),
+        "zed" => Some(Harness::Zed),
+        "kiro" => Some(Harness::Kiro),
+        "generic" => Some(Harness::Generic),
+        "generic-op" => Some(Harness::GenericOp),
+        "goose" => Some(Harness::Goose),
         // SKIP: unmapped — never guess a closed-enum value.
         _ => None,
     }
@@ -278,6 +295,18 @@ mod tests {
         assert_eq!(harness_name_to_enum("codex"), Some(Harness::Codex));
         assert_eq!(harness_name_to_enum("opencode"), Some(Harness::Opencode));
         assert_eq!(harness_name_to_enum("gemini"), Some(Harness::GeminiCli));
+        // Phase 11 additions — id == wire token (no rename beyond `gemini`).
+        assert_eq!(
+            harness_name_to_enum("copilot-cli"),
+            Some(Harness::CopilotCli)
+        );
+        assert_eq!(
+            harness_name_to_enum("jetbrains-ai"),
+            Some(Harness::JetbrainsAi)
+        );
+        assert_eq!(harness_name_to_enum("generic-op"), Some(Harness::GenericOp));
+        assert_eq!(harness_name_to_enum("pi"), Some(Harness::Pi));
+        assert_eq!(harness_name_to_enum("goose"), Some(Harness::Goose));
     }
 
     #[test]

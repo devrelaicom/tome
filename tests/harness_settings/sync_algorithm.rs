@@ -86,6 +86,41 @@ impl HarnessModule for SharingStubHarness {
     }
 }
 
+/// A THIRD synthetic harness also targeting `STUB_RULES.md`, so the
+/// shared-sink single-region invariant (M3 / FR-013a) can be exercised across
+/// ≥3 co-owners.
+struct ThirdSharingStubHarness;
+
+impl HarnessModule for ThirdSharingStubHarness {
+    fn name(&self) -> &'static str {
+        "third-sharing-stub"
+    }
+    fn description(&self) -> &'static str {
+        "third synthetic harness sharing STUB_RULES.md"
+    }
+    fn detect(&self, _home: &Path) -> bool {
+        true
+    }
+    fn rules_file_target(&self, project_root: &Path) -> PathBuf {
+        project_root.join("STUB_RULES.md") // intentionally same shared path
+    }
+    fn rules_file_strategy(&self) -> RulesFileStrategy {
+        RulesFileStrategy::BlockInExistingFile
+    }
+    fn block_body_style(&self) -> BlockBodyStyle {
+        BlockBodyStyle::Inline
+    }
+    fn mcp_config_path(&self, project_root: &Path, _home: &Path) -> PathBuf {
+        project_root.join("third-sharing-stub.mcp.json")
+    }
+    fn mcp_config_format(&self) -> McpConfigFormat {
+        McpConfigFormat::Json
+    }
+    fn mcp_parent_key(&self) -> &'static str {
+        "mcpServers"
+    }
+}
+
 struct Fixture {
     _home: TempDir,
     paths: tome::paths::Paths,
@@ -470,5 +505,168 @@ fn fr483_shared_rules_path_retained_while_any_sharer_is_live() {
     assert!(
         body.contains("<!-- tome:begin -->"),
         "rules block must survive while any sharer is live; got: {body}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// F3 (US2 closeout) — gemini MCP↔hook no-clobber through ONE real
+// `sync_project`. The MCP server writer and the command-hook writer touch
+// DIFFERENT files (global `~/.gemini/settings.json` vs project
+// `<project>/.gemini/settings.json`) and disjoint top-level keys. This drives
+// the REAL MCP writer + the REAL `reconcile_command_hooks` and asserts neither
+// clobbers the other: the global file has `mcpServers.tome` and NO top-level
+// `hooks`; the project file has `hooks.SessionStart` and NO `mcpServers`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn f3_gemini_mcp_and_command_hook_do_not_clobber_through_real_sync() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::gemini::GEMINI)]);
+
+    let fx = build_fixture(Some("harnesses = [\"gemini\"]"));
+    // Gemini's rules body style is `AtInclude` (`@.tome/RULES.md`); seed the
+    // workspace rules file so the rules sink has content to @-include.
+    std::fs::write(fx.project.join(".tome/RULES.md"), "# rules\n").unwrap();
+
+    sync::sync_project(&fx.project, &deps_for(&fx, false)).expect("sync");
+
+    // (a) GLOBAL `~/.gemini/settings.json` (under the test home) has the MCP
+    // server and NO top-level `hooks` key.
+    let global_settings = fx._home.path().join(".gemini/settings.json");
+    assert!(
+        global_settings.is_file(),
+        "gemini MCP server must be written to the GLOBAL ~/.gemini/settings.json",
+    );
+    let global: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&global_settings).unwrap()).unwrap();
+    assert!(
+        global["mcpServers"].get("tome").is_some(),
+        "global settings must carry mcpServers.tome; got: {global}",
+    );
+    assert!(
+        global.get("hooks").is_none(),
+        "the MCP writer must NOT add a `hooks` key to the global file; got: {global}",
+    );
+
+    // (b) PROJECT `<project>/.gemini/settings.json` has the command hook and NO
+    // `mcpServers` key.
+    let project_settings = fx.project.join(".gemini/settings.json");
+    assert!(
+        project_settings.is_file(),
+        "gemini command hook must be written to the PROJECT .gemini/settings.json",
+    );
+    let project: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&project_settings).unwrap()).unwrap();
+    assert!(
+        project["hooks"]["SessionStart"].is_array(),
+        "project settings must carry hooks.SessionStart; got: {project}",
+    );
+    assert_eq!(
+        project["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+        "tome harness session-start --workspace test-workspace --harness gemini",
+    );
+    assert!(
+        project.get("mcpServers").is_none(),
+        "the command-hook writer must NOT add `mcpServers` to the project file; got: {project}",
+    );
+
+    // The two files are genuinely distinct paths.
+    assert_ne!(global_settings, project_settings);
+}
+
+// ---------------------------------------------------------------------------
+// MINOR (US2 closeout) — orchestrator → reconcile_command_hooks → `hooks_action`
+// backfill for a LIVE command-hook harness. Drives a real `sync_project` with
+// gemini effective and asserts the per-harness decision's `hooks_action` is
+// `Created` AND the on-disk hook file exists (proving the
+// orchestrator→reconciler→decision-field chain, not just the reconciler in
+// isolation).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn command_hook_harness_backfills_hooks_action_and_writes_file() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::gemini::GEMINI)]);
+
+    let fx = build_fixture(Some("harnesses = [\"gemini\"]"));
+    std::fs::write(fx.project.join(".tome/RULES.md"), "# rules\n").unwrap();
+
+    let outcome = sync::sync_project(&fx.project, &deps_for(&fx, false)).expect("sync");
+
+    let decision = outcome
+        .decisions
+        .iter()
+        .find(|d| d.harness == "gemini")
+        .expect("gemini decision present");
+    assert_eq!(
+        decision.hooks_action,
+        Action::Created,
+        "the orchestrator must backfill hooks_action from reconcile_command_hooks",
+    );
+    // And the hook file exists on disk.
+    assert!(
+        fx.project.join(".gemini/settings.json").is_file(),
+        "the command-hook file must exist on disk",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M3 / FR-013a: N (>= 3) live harnesses resolving to the SAME rules file
+// produce EXACTLY ONE `<!-- tome:begin -->` region — not N.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn m3_three_sharers_collapse_to_single_region() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![
+        Box::new(StubHarness::default()),
+        Box::new(SharingStubHarness),
+        Box::new(ThirdSharingStubHarness),
+    ]);
+
+    let fx = build_fixture(Some(
+        "harnesses = [\"stub\", \"sharing-stub\", \"third-sharing-stub\"]",
+    ));
+    let outcome = sync::sync_project(&fx.project, &deps_for(&fx, false)).expect("sync");
+
+    // Exactly one rules change recorded across the three co-owners.
+    let rules_changes: Vec<_> = outcome
+        .added
+        .iter()
+        .chain(outcome.updated.iter())
+        .filter(|c| c.subsystem == SyncSubsystem::Rules)
+        .collect();
+    assert_eq!(
+        rules_changes.len(),
+        1,
+        "three sharers must produce exactly one rules change; got {rules_changes:?}",
+    );
+
+    // And the on-disk file has exactly ONE begin/end region.
+    let body = std::fs::read_to_string(fx.project.join("STUB_RULES.md")).unwrap();
+    assert_eq!(
+        body.matches("<!-- tome:begin -->").count(),
+        1,
+        "shared rules file must carry exactly one tome region; got:\n{body}",
+    );
+    assert_eq!(
+        body.matches("<!-- tome:end -->").count(),
+        1,
+        "shared rules file must carry exactly one tome end marker; got:\n{body}",
+    );
+
+    // Re-sync is idempotent: still exactly one region, no second region appended.
+    sync::sync_project(&fx.project, &deps_for(&fx, false)).expect("sync 2");
+    let body2 = std::fs::read_to_string(fx.project.join("STUB_RULES.md")).unwrap();
+    assert_eq!(
+        body2.matches("<!-- tome:begin -->").count(),
+        1,
+        "re-sync must keep exactly one region; got:\n{body2}",
     );
 }

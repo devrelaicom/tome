@@ -6,16 +6,44 @@
 //! - Rules-file target: `AGENTS.md` > `GEMINI.md` > `.gemini/GEMINI.md`
 //!   (first existing wins; falls back to `AGENTS.md` if none exist).
 //! - Strategy: `BlockInExistingFile`, body style `AtInclude`.
-//! - MCP config: `~/.gemini/settings.json` (global).
+//! - MCP config: `~/.gemini/settings.json` (GLOBAL, under `home`).
 //! - Parent key: `"mcpServers"`.
 //! - Guardrails target (Phase 6): `AGENTS.md` preferred else `GEMINI.md`,
 //!   in-file region, no suppression — the trait default (`InFileRegion` on
 //!   the rules-file target) yields exactly this, so no `guardrails_target`
 //!   override is needed (FR-012).
+//!
+//! ## Session steering (Phase 11, US2, T048) — MCP vs hook are DIFFERENT files
+//!
+//! Gemini gets a Tome-owned `SessionStart` command hook (the `GeminiSettings`
+//! spec) wrapped in [`Envelope::ClaudeNested`], delivered via the
+//! `reconcile_command_hooks` pass.
+//!
+//! CRITICAL distinction (no clobber):
+//!
+//! - The **MCP** server is written to the **GLOBAL** `~/.gemini/settings.json`
+//!   (`mcp_config_path` joins under `home`) — the `mcpServers` key.
+//! - The **hook** is written to the **PROJECT** `<project>/.gemini/settings.json`
+//!   (`HookFileSpec::GeminiSettings` resolves under `project_root`, see
+//!   `reconcile::hooks::hook_file_path`) — the `hooks` key.
+//!
+//! The PRIMARY guarantee is the **disjoint top-level keys**: the MCP writer owns
+//! only `mcpServers` and the hook writer owns only `hooks`, and both go through
+//! the lenient, preserve-order JSON read/modify/write path that retains every
+//! other key it finds. So even in the degenerate case where a user's `home` and
+//! `project_root` coincide and both writers target the SAME file, neither can
+//! clobber the other's key. The distinct-files property (`home` vs
+//! `project_root`) is the second, belt-and-braces layer — but the no-clobber
+//! correctness does not depend on it.
+//!
+//! [`Envelope::ClaudeNested`]: crate::harness::Envelope::ClaudeNested
 
 use std::path::{Path, PathBuf};
 
-use crate::harness::{BlockBodyStyle, HarnessModule, McpConfigFormat, RulesFileStrategy};
+use crate::harness::{
+    BlockBodyStyle, Envelope, HarnessModule, HookEvent, HookFileSpec, RulesFileStrategy,
+    SessionSteering,
+};
 
 /// Unit struct implementing [`HarnessModule`] for Gemini CLI.
 pub struct Gemini;
@@ -57,14 +85,75 @@ impl HarnessModule for Gemini {
     }
 
     fn mcp_config_path(&self, _project_root: &Path, home: &Path) -> PathBuf {
+        // GLOBAL `~/.gemini/settings.json` — distinct from the PROJECT
+        // `<project>/.gemini/settings.json` the `GeminiSettings` hook writes
+        // (see `session_steering`). Different files: no clobber.
         home.join(".gemini/settings.json")
     }
 
-    fn mcp_config_format(&self) -> McpConfigFormat {
-        McpConfigFormat::Json
+    // MCP dialect: the trait default ([`McpDialect::LEGACY`]) is exactly
+    // Gemini's shape (JSON `mcpServers` + `CommandArgs`), so no override.
+
+    /// Session steering (US2, T048): a `SessionStart` command hook in the
+    /// PROJECT `<project>/.gemini/settings.json` (the `GeminiSettings` spec,
+    /// `hooks` key) wrapped in the [`Envelope::ClaudeNested`] shape. This is a
+    /// DIFFERENT file from the GLOBAL `~/.gemini/settings.json` the MCP server
+    /// is written to (see the module doc comment) — no clobber.
+    fn session_steering(&self) -> SessionSteering {
+        SessionSteering::CommandHook {
+            file_spec: HookFileSpec::GeminiSettings,
+            event: HookEvent::SessionStart,
+            envelope: Envelope::ClaudeNested,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_and_paths() {
+        assert_eq!(GEMINI.name(), "gemini");
+        assert_eq!(GEMINI.detect_path(Path::new("/h")), Path::new("/h/.gemini"));
+        // MCP server → GLOBAL settings.json under home.
+        assert_eq!(
+            GEMINI.mcp_config_path(Path::new("/proj"), Path::new("/h")),
+            Path::new("/h/.gemini/settings.json"),
+        );
     }
 
-    fn mcp_parent_key(&self) -> &'static str {
-        "mcpServers"
+    /// US2 (T048): gemini steers via a `GeminiSettings` `SessionStart` command
+    /// hook wrapped in the `ClaudeNested` envelope.
+    #[test]
+    fn session_steering_is_gemini_settings_session_start_claude_nested() {
+        assert_eq!(
+            GEMINI.session_steering(),
+            SessionSteering::CommandHook {
+                file_spec: HookFileSpec::GeminiSettings,
+                event: HookEvent::SessionStart,
+                envelope: Envelope::ClaudeNested,
+            },
+        );
+    }
+
+    /// CRITICAL (T048): the MCP file (GLOBAL `~/.gemini/settings.json`) and the
+    /// hook file (PROJECT `<project>/.gemini/settings.json`) are DIFFERENT
+    /// files — a project root distinct from home keeps them disjoint, so the
+    /// MCP write and the hook write never clobber each other.
+    #[test]
+    fn mcp_file_and_hook_file_are_different_paths() {
+        let home = Path::new("/h");
+        let project = Path::new("/proj");
+        let mcp_path = GEMINI.mcp_config_path(project, home);
+        // The hook path is what `reconcile::hooks::hook_file_path` computes for
+        // the `GeminiSettings` spec: `<project_root>/.gemini/settings.json`.
+        let hook_path = project.join(".gemini/settings.json");
+        assert_eq!(mcp_path, Path::new("/h/.gemini/settings.json"));
+        assert_eq!(hook_path, Path::new("/proj/.gemini/settings.json"));
+        assert_ne!(
+            mcp_path, hook_path,
+            "gemini MCP (global) and hook (project) must be different files",
+        );
     }
 }

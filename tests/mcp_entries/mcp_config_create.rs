@@ -2,8 +2,8 @@
 //! missing-file, populated-file, and commented-TOML inputs.
 
 use tempfile::TempDir;
-use tome::harness::McpConfigFormat;
 use tome::harness::mcp_config::{TomeEntry, write_entry};
+use tome::harness::{McpConfigFormat, McpDialect};
 
 fn demo_entry() -> TomeEntry {
     TomeEntry::new(
@@ -22,7 +22,12 @@ fn creates_json_scaffold_when_file_missing() {
     let target = tmp.path().join(".claude").join("settings.json");
     assert!(!target.exists());
 
-    write_entry(&target, McpConfigFormat::Json, "mcpServers", &demo_entry()).unwrap();
+    write_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+        &demo_entry(),
+    )
+    .unwrap();
 
     let body = std::fs::read_to_string(&target).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -41,7 +46,12 @@ fn creates_toml_scaffold_when_file_missing() {
     let target = tmp.path().join(".codex").join("mcp.toml");
     assert!(!target.exists());
 
-    write_entry(&target, McpConfigFormat::Toml, "mcp_servers", &demo_entry()).unwrap();
+    write_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Toml, "mcp_servers"),
+        &demo_entry(),
+    )
+    .unwrap();
 
     let body = std::fs::read_to_string(&target).unwrap();
     // The standard table header should appear.
@@ -68,7 +78,12 @@ fn inserts_tome_entry_into_existing_json_with_other_entries() {
 "#;
     std::fs::write(&target, existing).unwrap();
 
-    write_entry(&target, McpConfigFormat::Json, "mcpServers", &demo_entry()).unwrap();
+    write_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+        &demo_entry(),
+    )
+    .unwrap();
 
     let body = std::fs::read_to_string(&target).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -98,7 +113,12 @@ args = []
 "#;
     std::fs::write(&target, existing).unwrap();
 
-    write_entry(&target, McpConfigFormat::Toml, "mcp_servers", &demo_entry()).unwrap();
+    write_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Toml, "mcp_servers"),
+        &demo_entry(),
+    )
+    .unwrap();
 
     let body = std::fs::read_to_string(&target).unwrap();
     // Comments preserved verbatim.
@@ -120,7 +140,12 @@ fn parent_dir_is_0700_on_unix() {
     let target = parent.join("settings.json");
     assert!(!parent.exists());
 
-    write_entry(&target, McpConfigFormat::Json, "mcpServers", &demo_entry()).unwrap();
+    write_entry(
+        &target,
+        &McpDialect::from_format(McpConfigFormat::Json, "mcpServers"),
+        &demo_entry(),
+    )
+    .unwrap();
 
     let mode = std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o700, "parent dir mode must be 0700, got {mode:o}");

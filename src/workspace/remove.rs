@@ -76,10 +76,9 @@ use tracing::{debug, warn};
 
 use crate::commands::plugin::registry_seeds;
 use crate::error::TomeError;
-use crate::harness::{self, McpConfigFormat, RulesFileStrategy, with_effective_modules};
+use crate::harness;
 use crate::index::{self, OpenOptions, acquire_lock, workspace_catalogs};
 use crate::paths::Paths;
-use crate::settings::{self, GlobalSettings, resolve_effective_list, resolver::StubScope};
 use crate::workspace::WorkspaceName;
 
 /// Outcome of [`remove`]. Serialised by the CLI's `--json` mode.
@@ -346,184 +345,40 @@ pub fn remove(
     })
 }
 
-/// Step-1 helper: for the harnesses in the per-project effective list,
-/// remove the Tome rules-file block / standalone file and the Tome MCP
-/// entry. Per-harness failures are logged at `warn!` and swallowed —
-/// best-effort teardown per the contract.
+/// Step-1 helper: tear down EVERY Tome-owned harness integration for this
+/// project. Routes through the sync orchestrator's empty-effective-set teardown
+/// ([`harness::sync::teardown_project`], PW4) so it unwinds the SAME set of
+/// sinks the writers populated — rules files, MCP entries, plugin hooks, Tome's
+/// own session hooks, the new `CommandHook` session entries, TS plugin shims,
+/// guardrails, native agents, AND the Open Plugins `tome-op` bundle — including
+/// the opt-in targets (`generic` `mcp.json`, `generic-op`/`goose` bundles),
+/// which the orchestrator picks up via its artifact-present probe.
 ///
-/// Per-project narrowing: the effective list is computed from the
-/// project's own marker (`<project>/.tome/config.toml`) composed with
-/// the bound workspace's `settings.toml` and the global settings — same
-/// algorithm `harness::sync` uses to populate, mirrored on the way out.
-/// A harness that was never enrolled for THIS project is left alone
-/// even if it's enrolled for some other workspace's projects.
+/// Using the orchestrator's removal path (rather than a bespoke rules+MCP
+/// teardown) means teardown inherits every safety guard the writers have:
+/// structural-match-only removal, marker-bounded edits, symlink refusal, and
+/// the never-mass-delete-what-we-don't-own checks. A harness that was never
+/// enrolled for THIS project leaves no artifact, so its removal branch is a
+/// no-op — nothing other than Tome's own content is touched.
 ///
-/// If the per-project marker is missing or any settings layer can't be
-/// read or parsed, log warn + skip teardown for THIS project (the
-/// workspace is being removed anyway; doctor surfaces residual drift).
+/// Best-effort per the contract: any error is logged at `warn!` and swallowed
+/// so the cascade always proceeds (the DB delete is authoritative). The
+/// teardown does NOT require a readable project marker (the empty effective set
+/// resolves no scope), so a project whose marker is already corrupt still tears
+/// down cleanly — doctor surfaces any residual drift.
 fn teardown_integration_for_project(
     project: &Path,
     home_root: &Path,
     workspace_name: &WorkspaceName,
     paths: &Paths,
 ) {
-    // Compute the per-project effective list. On any read/parse error
-    // we warn and fall back to an empty effective list — the cascade is
-    // best-effort and a remove of a no-longer-coherent workspace
-    // shouldn't get stuck.
-    let effective_names: std::collections::HashSet<String> =
-        match compute_effective_names_for_project(project, workspace_name, paths) {
-            Ok(names) => names,
-            Err(e) => {
-                warn!(
-                    project = %project.display(),
-                    workspace = %workspace_name.as_str(),
-                    error = %e,
-                    "could not compute effective harness list for project; skipping per-project teardown",
-                );
-                return;
-            }
-        };
-
-    // Capture per-harness specifics into owned values up front so we
-    // don't hold the registry's read guard across `std::fs` work.
-    struct Snapshot {
-        name: String,
-        rules_path: PathBuf,
-        rules_strategy: RulesFileStrategy,
-        mcp_path: PathBuf,
-        mcp_format: McpConfigFormat,
-        mcp_parent_key: &'static str,
+    let deps = harness::sync::build_deps(paths, home_root, workspace_name, false);
+    if let Err(e) = harness::sync::teardown_project(project, &deps) {
+        warn!(
+            project = %project.display(),
+            workspace = %workspace_name.as_str(),
+            error = %e,
+            "harness integration teardown reported an error; continuing cascade"
+        );
     }
-
-    let snapshots: Vec<Snapshot> = with_effective_modules(|mods| {
-        mods.iter()
-            .filter(|m| effective_names.contains(m.name()))
-            .map(|m| Snapshot {
-                name: m.name().to_string(),
-                rules_path: m.rules_file_target(project),
-                rules_strategy: m.rules_file_strategy(),
-                mcp_path: m.mcp_config_path(project, home_root),
-                mcp_format: m.mcp_config_format(),
-                mcp_parent_key: m.mcp_parent_key(),
-            })
-            .collect()
-    });
-
-    // Dedupe rules-file targets and MCP config paths — multiple
-    // harnesses may share the same on-disk file (FR-482 / FR-483).
-    let mut processed_rules: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    let mut processed_mcp: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-
-    for snap in &snapshots {
-        if processed_rules.insert(snap.rules_path.clone()) {
-            let rules_result = match snap.rules_strategy {
-                RulesFileStrategy::BlockInExistingFile => {
-                    if snap.rules_path.exists() {
-                        harness::rules_file::remove_block(&snap.rules_path)
-                    } else {
-                        Ok(())
-                    }
-                }
-                RulesFileStrategy::StandaloneFile => {
-                    if snap.rules_path.exists() {
-                        harness::rules_file::remove_standalone(&snap.rules_path)
-                    } else {
-                        Ok(())
-                    }
-                }
-            };
-            if let Err(e) = rules_result {
-                warn!(
-                    harness = %snap.name,
-                    rules_path = %snap.rules_path.display(),
-                    error = %e,
-                    "failed to remove rules-file integration; continuing teardown"
-                );
-            }
-        }
-
-        if processed_mcp.insert(snap.mcp_path.clone())
-            && let Err(e) = harness::mcp_config::remove_entry(
-                &snap.mcp_path,
-                snap.mcp_format,
-                snap.mcp_parent_key,
-            )
-        {
-            warn!(
-                harness = %snap.name,
-                mcp_path = %snap.mcp_path.display(),
-                error = %e,
-                "failed to remove mcp-config entry; continuing teardown"
-            );
-        }
-    }
-}
-
-/// Read the three settings layers (project marker, workspace
-/// `settings.toml`, global `settings.toml`) and compute the per-project
-/// effective harness name set. Mirrors `harness::sync::sync_project`'s
-/// composition path; uses an empty `StubScope` because the cascade does
-/// not need cross-workspace composition references resolved (they would
-/// only appear in the project marker's `harnesses` array, and an
-/// unresolvable reference there at cascade-time is moot — we're
-/// removing the binding regardless).
-fn compute_effective_names_for_project(
-    project: &Path,
-    _workspace_name: &WorkspaceName,
-    paths: &Paths,
-) -> Result<std::collections::HashSet<String>, TomeError> {
-    let marker_path = Paths::project_marker_config(project);
-    let marker_body =
-        crate::util::bounded_read_to_string(&marker_path, crate::util::TOME_CONFIG_MAX)?;
-    let marker = settings::parser::parse_project_marker(&marker_body).map_err(|e| {
-        TomeError::WorkspaceMalformed {
-            path: marker_path.clone(),
-            reason: format!("parse project marker: {e}"),
-        }
-    })?;
-
-    // Read the bound workspace's `settings.toml` (if present). The
-    // workspace name from the marker is authoritative — if it disagrees
-    // with the workspace being removed, that's a doctor-flaggable drift
-    // that we don't need to resolve here.
-    let workspace_settings = {
-        let path = paths.workspace_settings_file(&marker.workspace);
-        match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
-            Ok(body) => Some(settings::parser::parse_workspace(&body).map_err(|e| {
-                TomeError::WorkspaceMalformed {
-                    path: path.clone(),
-                    reason: format!("parse workspace settings: {e}"),
-                }
-            })?),
-            Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e),
-        }
-    };
-
-    let global_settings = match crate::util::bounded_read_to_string(
-        &paths.global_settings_file,
-        crate::util::TOME_CONFIG_MAX,
-    ) {
-        Ok(body) => {
-            settings::parser::parse_global(&body).map_err(|e| TomeError::WorkspaceMalformed {
-                path: paths.global_settings_file.clone(),
-                reason: format!("parse global settings: {e}"),
-            })?
-        }
-        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            GlobalSettings::default()
-        }
-        Err(e) => return Err(e),
-    };
-
-    let scope = StubScope::new();
-    let effective = resolve_effective_list(
-        Some(&marker),
-        workspace_settings.as_ref(),
-        &global_settings,
-        &scope,
-    )
-    .map_err(TomeError::from)?;
-    Ok(effective.harnesses.into_iter().map(|h| h.name).collect())
 }

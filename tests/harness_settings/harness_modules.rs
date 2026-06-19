@@ -21,8 +21,10 @@ use std::fs;
 use tempfile::TempDir;
 use tome::harness::{
     BlockBodyStyle, HarnessModule, MCP_CONFIG_KEY, McpConfigFormat, RulesFileStrategy,
-    SUPPORTED_HARNESSES, claude_code::CLAUDE_CODE, codex::CODEX, cursor::CURSOR, gemini::GEMINI,
-    lookup, opencode::OPENCODE,
+    SUPPORTED_HARNESSES, antigravity::ANTIGRAVITY, claude_code::CLAUDE_CODE, cline::CLINE,
+    codex::CODEX, copilot::COPILOT, copilot_cli::COPILOT_CLI, crush::CRUSH, cursor::CURSOR,
+    devin::DEVIN, gemini::GEMINI, goose::GOOSE, jetbrains_ai::JETBRAINS_AI, junie::JUNIE,
+    kiro::KIRO, lookup, opencode::OPENCODE, pi::PI, zed::ZED,
 };
 
 // ===========================================================================
@@ -516,12 +518,18 @@ mod opencode_tests {
 
     #[test]
     fn mcp_config_format_is_json() {
+        // Jsonc routes through the same serde_json read/write path as Json,
+        // so the coarse `mcp_config_format()` accessor still reports Json.
         assert_eq!(OPENCODE.mcp_config_format(), McpConfigFormat::Json);
     }
 
     #[test]
-    fn mcp_parent_key_is_camel_mcp_servers() {
-        assert_eq!(OPENCODE.mcp_parent_key(), "mcpServers");
+    fn mcp_parent_key_is_mcp_g1_fix() {
+        // Phase 11 G1 (the canary fix): OpenCode's parent key is `mcp`, NOT
+        // the legacy `mcpServers`. See `contracts/mcp-dialects.md` and the
+        // `mcp_dialect()` override — the full wire shape is the
+        // `mcp`+command-array+type:local+enabled shape.
+        assert_eq!(OPENCODE.mcp_parent_key(), "mcp");
     }
 }
 
@@ -530,11 +538,11 @@ mod opencode_tests {
 // ===========================================================================
 
 #[test]
-fn supported_harnesses_has_exactly_five_entries() {
+fn supported_harnesses_has_exactly_seventeen_entries() {
     assert_eq!(
         SUPPORTED_HARNESSES.len(),
-        5,
-        "Phase 4 ships exactly 5 harness modules",
+        17,
+        "Phase 11 (US1) widened the registry to 16; US4 added the detectable `goose` → 17",
     );
 }
 
@@ -568,7 +576,25 @@ fn supported_harness_names_match_expected_set() {
     let names: Vec<&str> = SUPPORTED_HARNESSES.iter().map(|m| m.name()).collect();
     assert_eq!(
         names,
-        vec!["claude-code", "codex", "cursor", "gemini", "opencode"],
+        vec![
+            "antigravity",
+            "claude-code",
+            "cline",
+            "codex",
+            "copilot",
+            "copilot-cli",
+            "crush",
+            "cursor",
+            "devin",
+            "gemini",
+            "goose",
+            "jetbrains-ai",
+            "junie",
+            "kiro",
+            "opencode",
+            "pi",
+            "zed",
+        ],
     );
 }
 
@@ -580,13 +606,24 @@ fn mcp_config_key_is_tome() {
 }
 
 #[test]
-fn every_harness_parent_key_is_one_of_the_two_documented_values() {
-    // JSON harnesses → `"mcpServers"`. The single TOML harness (Codex)
-    // → `"mcp_servers"`. Anything else would be a contract drift.
+fn every_harness_parent_key_is_one_of_the_documented_values() {
+    // JSON harnesses historically → `"mcpServers"`; the single TOML
+    // harness (Codex) → `"mcp_servers"`. Phase 11 G1 adds OpenCode's
+    // `"mcp"` (the canary fix). Anything else is contract drift. As the
+    // Phase 11 harness set widens, this allowlist grows per
+    // `contracts/mcp-dialects.md` — it is no longer "two documented
+    // values".
+    const DOCUMENTED: &[&str] = &[
+        "mcpServers",
+        "mcp_servers",
+        "mcp",
+        "servers",
+        "context_servers",
+    ];
     for m in SUPPORTED_HARNESSES {
         let key = m.mcp_parent_key();
         assert!(
-            key == "mcpServers" || key == "mcp_servers",
+            DOCUMENTED.contains(&key),
             "harness {} has unexpected mcp_parent_key {key:?}",
             m.name(),
         );
@@ -594,16 +631,23 @@ fn every_harness_parent_key_is_one_of_the_two_documented_values() {
 }
 
 #[test]
-fn json_format_implies_camel_parent_key_toml_implies_snake() {
-    // Pin the cross-axis invariant: format ↔ parent key naming.
+fn format_and_parent_key_match_the_dialect_contract() {
+    // Pin the format ↔ parent-key invariant per the Phase 11 dialect
+    // contract. The TOML harness uses `mcp_servers`. JSON/Jsonc harnesses
+    // historically used `mcpServers`, with OpenCode's G1 fix carving out
+    // `mcp`.
+    // The full set of JSON parent keys across the Phase 11 dialect contract.
+    const JSON_KEYS: &[&str] = &["mcpServers", "mcp", "servers", "context_servers"];
     for m in SUPPORTED_HARNESSES {
         match m.mcp_config_format() {
-            McpConfigFormat::Json => assert_eq!(
-                m.mcp_parent_key(),
-                "mcpServers",
-                "JSON harness {} must use mcpServers",
-                m.name(),
-            ),
+            McpConfigFormat::Json => {
+                let key = m.mcp_parent_key();
+                assert!(
+                    JSON_KEYS.contains(&key),
+                    "JSON harness {} has unexpected parent key {key:?}",
+                    m.name(),
+                );
+            }
             McpConfigFormat::Toml => assert_eq!(
                 m.mcp_parent_key(),
                 "mcp_servers",
@@ -713,8 +757,164 @@ fn explicit_5x9_method_matrix_covers_every_supported_harness() {
                 detect_dir_name: ".opencode",
                 rules_strategy: RulesFileStrategy::BlockInExistingFile,
                 block_body_style: BlockBodyStyle::Inline,
+                // Phase 11 G1 (canary fix): OpenCode's parent key is `mcp`,
+                // not the legacy `mcpServers`. Format stays Json (Jsonc → the
+                // serde_json path).
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcp",
+            },
+        ),
+        // ---- Phase 11 (US1) — the 11 new harnesses ----
+        (
+            &ANTIGRAVITY,
+            ExpectedValues {
+                name: "antigravity",
+                description_starts_with: "",
+                detect_dir_name: ".gemini",
+                rules_strategy: RulesFileStrategy::StandaloneFile,
+                block_body_style: BlockBodyStyle::Inline,
                 mcp_format: McpConfigFormat::Json,
                 mcp_parent_key: "mcpServers",
+            },
+        ),
+        (
+            &CLINE,
+            ExpectedValues {
+                name: "cline",
+                description_starts_with: "",
+                detect_dir_name: ".cline",
+                rules_strategy: RulesFileStrategy::StandaloneFile,
+                block_body_style: BlockBodyStyle::Inline,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcpServers",
+            },
+        ),
+        (
+            &COPILOT,
+            ExpectedValues {
+                name: "copilot",
+                description_starts_with: "",
+                detect_dir_name: ".vscode",
+                rules_strategy: RulesFileStrategy::BlockInExistingFile,
+                block_body_style: BlockBodyStyle::Inline,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "servers",
+            },
+        ),
+        (
+            &COPILOT_CLI,
+            ExpectedValues {
+                name: "copilot-cli",
+                description_starts_with: "",
+                detect_dir_name: ".copilot",
+                rules_strategy: RulesFileStrategy::BlockInExistingFile,
+                block_body_style: BlockBodyStyle::Inline,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcpServers",
+            },
+        ),
+        (
+            &CRUSH,
+            ExpectedValues {
+                name: "crush",
+                description_starts_with: "",
+                detect_dir_name: ".config/crush",
+                rules_strategy: RulesFileStrategy::BlockInExistingFile,
+                block_body_style: BlockBodyStyle::Inline,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcp",
+            },
+        ),
+        (
+            &DEVIN,
+            ExpectedValues {
+                name: "devin",
+                description_starts_with: "",
+                detect_dir_name: ".devin",
+                rules_strategy: RulesFileStrategy::BlockInExistingFile,
+                // Devin resolves `@`-includes (contract §"Body delivery rule",
+                // line 19). The shared-sink LCD may still write the region
+                // inline when an Inline co-owner is live; this pins the declared
+                // capability.
+                block_body_style: BlockBodyStyle::AtInclude,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcpServers",
+            },
+        ),
+        (
+            &GOOSE,
+            ExpectedValues {
+                name: "goose",
+                description_starts_with: "",
+                detect_dir_name: ".config/goose",
+                // Bundle-internal sinks (informational; the open_plugins emitter
+                // owns the bundle). AGENTS.md lives inside the bundle root.
+                rules_strategy: RulesFileStrategy::BlockInExistingFile,
+                block_body_style: BlockBodyStyle::Inline,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcpServers",
+            },
+        ),
+        (
+            &JETBRAINS_AI,
+            ExpectedValues {
+                name: "jetbrains-ai",
+                description_starts_with: "",
+                detect_dir_name: ".aiassistant",
+                rules_strategy: RulesFileStrategy::StandaloneFile,
+                block_body_style: BlockBodyStyle::Inline,
+                // Manual-only: the dialect is never consulted, but the default
+                // (LEGACY) still reports JSON `mcpServers`.
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcpServers",
+            },
+        ),
+        (
+            &JUNIE,
+            ExpectedValues {
+                name: "junie",
+                description_starts_with: "",
+                detect_dir_name: ".junie",
+                rules_strategy: RulesFileStrategy::BlockInExistingFile,
+                block_body_style: BlockBodyStyle::Inline,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcpServers",
+            },
+        ),
+        (
+            &KIRO,
+            ExpectedValues {
+                name: "kiro",
+                description_starts_with: "",
+                detect_dir_name: ".kiro",
+                rules_strategy: RulesFileStrategy::StandaloneFile,
+                block_body_style: BlockBodyStyle::Inline,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcpServers",
+            },
+        ),
+        (
+            &PI,
+            ExpectedValues {
+                name: "pi",
+                description_starts_with: "",
+                detect_dir_name: ".pi",
+                rules_strategy: RulesFileStrategy::BlockInExistingFile,
+                block_body_style: BlockBodyStyle::Inline,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "mcpServers",
+            },
+        ),
+        (
+            &ZED,
+            ExpectedValues {
+                name: "zed",
+                description_starts_with: "",
+                detect_dir_name: ".config/zed",
+                rules_strategy: RulesFileStrategy::StandaloneFile,
+                block_body_style: BlockBodyStyle::Inline,
+                mcp_format: McpConfigFormat::Json,
+                mcp_parent_key: "context_servers",
             },
         ),
     ];
@@ -745,7 +945,9 @@ fn explicit_5x9_method_matrix_covers_every_supported_harness() {
         // 3. detect — `<home>/<detect_dir_name>/` must register true,
         //    absent must register false.
         let home_present = TempDir::new().unwrap();
-        fs::create_dir(home_present.path().join(expected.detect_dir_name)).unwrap();
+        // `detect_dir_name` may be multi-component (e.g. `.config/crush`), so
+        // create the full chain.
+        fs::create_dir_all(home_present.path().join(expected.detect_dir_name)).unwrap();
         assert!(
             module.detect(home_present.path()),
             "detect() must be true for {} when {} exists",
