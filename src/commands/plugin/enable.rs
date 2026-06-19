@@ -197,10 +197,13 @@ fn ensure_models_or_prompt(
         missing_models_for_profile(paths, &conn)?
     } else {
         use crate::embedding::profile::{Profile, embedder_for, reranker_for};
-        [embedder_for(Profile::DEFAULT), reranker_for(Profile::DEFAULT)]
-            .into_iter()
-            .filter(|e| !super::model_manifest_ok(paths, e))
-            .collect::<Vec<_>>()
+        [
+            embedder_for(Profile::DEFAULT),
+            reranker_for(Profile::DEFAULT),
+        ]
+        .into_iter()
+        .filter(|e| !super::model_manifest_ok(paths, e))
+        .collect::<Vec<_>>()
     };
     if missing.is_empty() {
         return Ok(());

@@ -113,7 +113,10 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
         )
     } else {
         use crate::embedding::profile::{Profile, embedder_for, reranker_for};
-        (embedder_for(Profile::DEFAULT), reranker_for(Profile::DEFAULT))
+        (
+            embedder_for(Profile::DEFAULT),
+            reranker_for(Profile::DEFAULT),
+        )
     };
 
     // Model presence — embedder always required, reranker required unless

@@ -679,9 +679,7 @@ impl TomeError {
             Self::QueryNoResultsStrict { .. } => ErrorCategory::QueryNoResultsStrict,
             Self::EmbedderNameDrift { .. } => ErrorCategory::EmbedderNameDrift,
             Self::EmbedderVersionDrift { .. } => ErrorCategory::EmbedderVersionDrift,
-            Self::ReindexScopedEmbedderChange { .. } => {
-                ErrorCategory::ReindexScopedEmbedderChange
-            }
+            Self::ReindexScopedEmbedderChange { .. } => ErrorCategory::ReindexScopedEmbedderChange,
             Self::IndexBusy => ErrorCategory::IndexBusy,
             Self::IndexIntegrityCheckFailure(_) => ErrorCategory::IndexIntegrityCheckFailure,
             Self::SchemaTooNew { .. } => ErrorCategory::SchemaTooNew,

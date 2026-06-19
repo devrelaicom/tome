@@ -383,9 +383,11 @@ fn phase_p11_v5_to_v6(tx: &Transaction) -> Result<(), TomeError> {
             rusqlite::Error::QueryReturnedNoRows => Ok(false),
             other => Err(other),
         })
-        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!(
-            "phase_p11_v5_to_v6: probe skill_embeddings kind: {e}"
-        )))?;
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!(
+                "phase_p11_v5_to_v6: probe skill_embeddings kind: {e}"
+            ))
+        })?;
 
     if is_vec0 {
         tx.execute_batch(
@@ -398,9 +400,11 @@ fn phase_p11_v5_to_v6(tx: &Transaction) -> Result<(), TomeError> {
              DROP TABLE skill_embeddings;
              ALTER TABLE skill_embeddings_v6 RENAME TO skill_embeddings;",
         )
-        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!(
-            "phase_p11_v5_to_v6: rebuild skill_embeddings: {e}"
-        )))?;
+        .map_err(|e| {
+            TomeError::IndexIntegrityCheckFailure(format!(
+                "phase_p11_v5_to_v6: rebuild skill_embeddings: {e}"
+            ))
+        })?;
     }
 
     // Stamp the profile for the pre-existing install (idempotent INSERT..ON CONFLICT).
@@ -409,9 +413,11 @@ fn phase_p11_v5_to_v6(tx: &Transaction) -> Result<(), TomeError> {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [],
     )
-    .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!(
-        "phase_p11_v5_to_v6: stamp model_profile: {e}"
-    )))?;
+    .map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!(
+            "phase_p11_v5_to_v6: stamp model_profile: {e}"
+        ))
+    })?;
     Ok(())
 }
 

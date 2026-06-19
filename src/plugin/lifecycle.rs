@@ -23,9 +23,9 @@ use tracing::{debug, info, warn};
 
 use crate::catalog::git::was_cancelled;
 use crate::config::Config;
+use crate::embedding::Embedder;
 use crate::embedding::download::download_model;
 use crate::embedding::registry::{ModelEntry, ModelManifest};
-use crate::embedding::Embedder;
 use crate::error::{PluginState, TomeError};
 use crate::index::skills::{EnableSummary, PendingSkill};
 use crate::index::{
@@ -1019,7 +1019,10 @@ fn ensure_models_present(deps: &LifecycleDeps<'_>) -> Result<(), TomeError> {
         )
     } else {
         use crate::embedding::profile::{Profile, embedder_for, reranker_for};
-        (embedder_for(Profile::DEFAULT), reranker_for(Profile::DEFAULT))
+        (
+            embedder_for(Profile::DEFAULT),
+            reranker_for(Profile::DEFAULT),
+        )
     };
 
     for entry in [embedder, reranker] {

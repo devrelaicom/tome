@@ -17,8 +17,8 @@ use serde_json::Value;
 
 /// Pull `envelope.models` from a `--json` download envelope.
 fn models_array(stdout: &[u8]) -> Vec<Value> {
-    let envelope: Value = serde_json::from_slice(stdout)
-        .expect("--json envelope must parse as a single JSON object");
+    let envelope: Value =
+        serde_json::from_slice(stdout).expect("--json envelope must parse as a single JSON object");
     envelope["models"]
         .as_array()
         .expect("envelope.models must be an array")
@@ -98,9 +98,18 @@ fn download_default_targets_only_the_active_profile_set() {
     // The default profile is Medium, so the embedder/reranker are the medium
     // pair; the summariser is shared across profiles.
     let names: Vec<&str> = models.iter().map(|m| m["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"bge-base-en-v1.5"), "medium embedder targeted: {names:?}");
-    assert!(names.contains(&"bge-reranker-large"), "medium reranker targeted: {names:?}");
-    assert!(names.contains(&"qwen2.5-0.5b-instruct"), "summariser targeted: {names:?}");
+    assert!(
+        names.contains(&"bge-base-en-v1.5"),
+        "medium embedder targeted: {names:?}"
+    );
+    assert!(
+        names.contains(&"bge-reranker-large"),
+        "medium reranker targeted: {names:?}"
+    );
+    assert!(
+        names.contains(&"qwen2.5-0.5b-instruct"),
+        "summariser targeted: {names:?}"
+    );
 }
 
 #[test]
@@ -136,10 +145,23 @@ fn download_default_follows_the_active_profile_after_a_switch() {
 
     let models = models_array(&out.stdout);
     let names: Vec<&str> = models.iter().map(|m| m["name"].as_str().unwrap()).collect();
-    assert_eq!(models.len(), 3, "still three targets after the switch: {names:?}");
-    assert!(names.contains(&"bge-large-en-v1.5"), "large embedder targeted: {names:?}");
-    assert!(names.contains(&"bge-reranker-v2-m3"), "large reranker targeted: {names:?}");
-    assert!(names.contains(&"qwen2.5-0.5b-instruct"), "summariser still targeted: {names:?}");
+    assert_eq!(
+        models.len(),
+        3,
+        "still three targets after the switch: {names:?}"
+    );
+    assert!(
+        names.contains(&"bge-large-en-v1.5"),
+        "large embedder targeted: {names:?}"
+    );
+    assert!(
+        names.contains(&"bge-reranker-v2-m3"),
+        "large reranker targeted: {names:?}"
+    );
+    assert!(
+        names.contains(&"qwen2.5-0.5b-instruct"),
+        "summariser still targeted: {names:?}"
+    );
 }
 
 #[test]

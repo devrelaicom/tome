@@ -120,7 +120,10 @@ pub fn assemble_report(
         )
     } else {
         use crate::embedding::profile::{Profile, embedder_for, reranker_for};
-        (embedder_for(Profile::DEFAULT), reranker_for(Profile::DEFAULT))
+        (
+            embedder_for(Profile::DEFAULT),
+            reranker_for(Profile::DEFAULT),
+        )
     };
     let summariser_entry = crate::summarise::registry::summariser_entry();
 

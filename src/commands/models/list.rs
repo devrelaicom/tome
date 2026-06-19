@@ -87,9 +87,7 @@ fn profiles_for(entry: &ModelEntry) -> Vec<&'static str> {
     }
     Profile::ALL
         .iter()
-        .filter(|p| {
-            embedder_for(**p).name == entry.name || reranker_for(**p).name == entry.name
-        })
+        .filter(|p| embedder_for(**p).name == entry.name || reranker_for(**p).name == entry.name)
         .map(|p| p.as_str())
         .collect()
 }

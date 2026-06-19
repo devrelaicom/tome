@@ -51,7 +51,10 @@ fn active_models(
         ))
     } else {
         use crate::embedding::profile::{Profile, embedder_for, reranker_for};
-        Ok((embedder_for(Profile::DEFAULT), reranker_for(Profile::DEFAULT)))
+        Ok((
+            embedder_for(Profile::DEFAULT),
+            reranker_for(Profile::DEFAULT),
+        ))
     }
 }
 use crate::workspace::ResolvedScope;

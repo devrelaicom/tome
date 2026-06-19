@@ -109,7 +109,8 @@ pub fn registry_seeds() -> (
     let r = reranker_for(Profile::DEFAULT);
     let s = crate::summarise::registry::summariser_entry();
     let seed = |m: &crate::embedding::registry::ModelEntry| crate::index::MetaSeed {
-        name: m.name.to_owned(), version: m.version.to_owned(),
+        name: m.name.to_owned(),
+        version: m.version.to_owned(),
     };
     (seed(e), seed(r), seed(s))
 }

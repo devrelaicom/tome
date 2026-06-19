@@ -568,7 +568,8 @@ fn registry_seeds_for_test() -> (
     let r = reranker_for(Profile::DEFAULT);
     let s = tome::summarise::registry::summariser_entry();
     let seed = |m: &tome::embedding::registry::ModelEntry| tome::index::MetaSeed {
-        name: m.name.to_owned(), version: m.version.to_owned(),
+        name: m.name.to_owned(),
+        version: m.version.to_owned(),
     };
     (seed(e), seed(r), seed(s))
 }

@@ -176,7 +176,10 @@ pub fn bootstrap(
         ("reranker_version", reranker.version.as_str()),
         ("summariser_name", summariser.name.as_str()),
         ("summariser_version", summariser.version.as_str()),
-        ("model_profile", crate::embedding::profile::Profile::DEFAULT.as_str()),
+        (
+            "model_profile",
+            crate::embedding::profile::Profile::DEFAULT.as_str(),
+        ),
         ("created_at", now_rfc.as_str()),
     ];
     for (k, v) in rows {
@@ -213,15 +216,31 @@ mod schema_tests {
     fn bootstrap_creates_blob_embeddings_table_and_seeds_profile() {
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::index::vec_ext::register_globally().unwrap();
-        let seed = |n: &str, v: &str| MetaSeed { name: n.into(), version: v.into() };
-        bootstrap(&mut conn, &seed("e","1"), &seed("r","1"), &seed("s","1")).unwrap();
+        let seed = |n: &str, v: &str| MetaSeed {
+            name: n.into(),
+            version: v.into(),
+        };
+        bootstrap(&mut conn, &seed("e", "1"), &seed("r", "1"), &seed("s", "1")).unwrap();
         // skill_embeddings is a plain table whose DDL has no FLOAT[N] / vec0.
-        let ddl: String = conn.query_row(
-            "SELECT sql FROM sqlite_master WHERE name='skill_embeddings'", [], |r| r.get(0)).unwrap();
+        let ddl: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='skill_embeddings'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(ddl.contains("BLOB"), "embedding column must be BLOB: {ddl}");
-        assert!(!ddl.to_lowercase().contains("vec0"), "must not be a vec0 table: {ddl}");
-        let profile: String = conn.query_row(
-            "SELECT value FROM meta WHERE key='model_profile'", [], |r| r.get(0)).unwrap();
+        assert!(
+            !ddl.to_lowercase().contains("vec0"),
+            "must not be a vec0 table: {ddl}"
+        );
+        let profile: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='model_profile'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(profile, "medium");
     }
 }

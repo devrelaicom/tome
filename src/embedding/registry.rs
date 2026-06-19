@@ -218,7 +218,13 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
         size_bytes: 110_083_337,
         licence: "MIT",
         embedding_dim: Some(768),
-        files: &["model.onnx", "tokenizer.json", "config.json", "special_tokens_map.json", "tokenizer_config.json"],
+        files: &[
+            "model.onnx",
+            "tokenizer.json",
+            "config.json",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+        ],
         aux_urls: &[
             "https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/tokenizer.json",
             "https://huggingface.co/Xenova/bge-base-en-v1.5/resolve/main/config.json",
@@ -236,7 +242,13 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
         size_bytes: 336_983_162,
         licence: "MIT",
         embedding_dim: Some(1024),
-        files: &["model.onnx", "tokenizer.json", "config.json", "special_tokens_map.json", "tokenizer_config.json"],
+        files: &[
+            "model.onnx",
+            "tokenizer.json",
+            "config.json",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+        ],
         aux_urls: &[
             "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/tokenizer.json",
             "https://huggingface.co/Xenova/bge-large-en-v1.5/resolve/main/config.json",
@@ -254,7 +266,13 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
         size_bytes: 562_938_749,
         licence: "MIT",
         embedding_dim: None,
-        files: &["model.onnx", "tokenizer.json", "config.json", "special_tokens_map.json", "tokenizer_config.json"],
+        files: &[
+            "model.onnx",
+            "tokenizer.json",
+            "config.json",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+        ],
         aux_urls: &[
             "https://huggingface.co/Xenova/bge-reranker-large/resolve/main/tokenizer.json",
             "https://huggingface.co/Xenova/bge-reranker-large/resolve/main/config.json",
@@ -272,7 +290,13 @@ pub const MODEL_REGISTRY: &[ModelEntry] = &[
         size_bytes: 570_727_094,
         licence: "MIT",
         embedding_dim: None,
-        files: &["model.onnx", "tokenizer.json", "config.json", "special_tokens_map.json", "tokenizer_config.json"],
+        files: &[
+            "model.onnx",
+            "tokenizer.json",
+            "config.json",
+            "special_tokens_map.json",
+            "tokenizer_config.json",
+        ],
         aux_urls: &[
             "https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX/resolve/main/tokenizer.json",
             "https://huggingface.co/onnx-community/bge-reranker-v2-m3-ONNX/resolve/main/config.json",

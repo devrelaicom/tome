@@ -54,7 +54,9 @@ fn set(tier: &str, mode: Mode) -> Result<(), TomeError> {
     // strings, so `from_tier_str` cannot fail here; the `?`-style fallback
     // keeps the function total without an unreachable panic.
     let new_profile = Profile::from_tier_str(tier).ok_or_else(|| {
-        TomeError::Usage(format!("unknown model profile `{tier}` (expected small/medium/large)"))
+        TomeError::Usage(format!(
+            "unknown model profile `{tier}` (expected small/medium/large)"
+        ))
     })?;
 
     let paths = Paths::resolve()?;
@@ -94,8 +96,8 @@ fn set(tier: &str, mode: Mode) -> Result<(), TomeError> {
     // Embedder change → the stored vectors are now the wrong dimension. We do
     // NOT auto-reindex; the drift→reindex path (guard_embedder_drift) is the
     // single resolver. Surface a clear notice with the old/new dims.
-    let embedder_changed = !stored_embedder_name.is_empty()
-        && stored_embedder_name != new_embedder.name;
+    let embedder_changed =
+        !stored_embedder_name.is_empty() && stored_embedder_name != new_embedder.name;
     let prev_dim = embedder_dim(&stored_embedder_name);
     let new_dim = new_embedder.embedding_dim;
 
@@ -197,11 +199,7 @@ fn emit_show_human(record: &ProfileShowRecord) -> Result<(), TomeError> {
     Ok(())
 }
 
-fn write_model_line(
-    out: &mut impl Write,
-    role: &str,
-    line: &ModelLine,
-) -> Result<(), TomeError> {
+fn write_model_line(out: &mut impl Write, role: &str, line: &ModelLine) -> Result<(), TomeError> {
     let state_label = if line.state == ModelState::Ok.as_str() {
         colour::success(line.state)
     } else {
@@ -327,7 +325,8 @@ mod tests {
             reindex_required: true,
             reranker_download_hint: true,
         };
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(v["embedder_changed"], true);
         assert_eq!(v["prev_embedder_dim"], 768);
         assert_eq!(v["new_embedder_dim"], 1024);

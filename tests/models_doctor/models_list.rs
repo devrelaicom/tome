@@ -74,13 +74,25 @@ fn list_json_annotates_each_row_with_profiles_and_marks_the_active_set() {
             r["profiles"].as_array().is_some_and(|a| !a.is_empty()),
             "every row must carry a non-empty `profiles` array, got {r:?}",
         );
-        assert!(r["active"].is_boolean(), "every row carries a boolean `active`: {r:?}");
+        assert!(
+            r["active"].is_boolean(),
+            "every row carries a boolean `active`: {r:?}"
+        );
     }
 
     // Per-entry profile mapping.
-    assert_eq!(by_name("bge-small-en-v1.5")["profiles"], serde_json::json!(["small"]));
-    assert_eq!(by_name("bge-base-en-v1.5")["profiles"], serde_json::json!(["medium"]));
-    assert_eq!(by_name("bge-large-en-v1.5")["profiles"], serde_json::json!(["large"]));
+    assert_eq!(
+        by_name("bge-small-en-v1.5")["profiles"],
+        serde_json::json!(["small"])
+    );
+    assert_eq!(
+        by_name("bge-base-en-v1.5")["profiles"],
+        serde_json::json!(["medium"])
+    );
+    assert_eq!(
+        by_name("bge-large-en-v1.5")["profiles"],
+        serde_json::json!(["large"])
+    );
     assert_eq!(
         by_name("qwen2.5-0.5b-instruct")["profiles"],
         serde_json::json!(["small", "medium", "large"]),

@@ -176,7 +176,9 @@ pub fn detect_drift(
 
 /// The active model profile recorded in `meta`. Absent → Profile::DEFAULT
 /// (forward-compat for a DB written before this row existed).
-pub fn active_profile(conn: &Connection) -> Result<crate::embedding::profile::Profile, crate::error::TomeError> {
+pub fn active_profile(
+    conn: &Connection,
+) -> Result<crate::embedding::profile::Profile, crate::error::TomeError> {
     use crate::embedding::profile::Profile;
     Ok(read(conn, MetaKey::ModelProfile)?
         .as_deref()
@@ -191,7 +193,9 @@ pub fn active_profile(conn: &Connection) -> Result<crate::embedding::profile::Pr
 pub fn active_embedder(
     conn: &Connection,
 ) -> Result<&'static crate::embedding::registry::ModelEntry, TomeError> {
-    Ok(crate::embedding::profile::embedder_for(active_profile(conn)?))
+    Ok(crate::embedding::profile::embedder_for(active_profile(
+        conn,
+    )?))
 }
 
 /// The reranker registry entry the ACTIVE profile selects (B4). Companion to
@@ -199,7 +203,9 @@ pub fn active_embedder(
 pub fn active_reranker(
     conn: &Connection,
 ) -> Result<&'static crate::embedding::registry::ModelEntry, TomeError> {
-    Ok(crate::embedding::profile::reranker_for(active_profile(conn)?))
+    Ok(crate::embedding::profile::reranker_for(active_profile(
+        conn,
+    )?))
 }
 
 /// B3 / model-tiering drift guard. Refuses any partial-re-embed path
@@ -240,10 +246,8 @@ mod tests {
 
     fn open_mem() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;",
-        )
-        .unwrap();
+        conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;")
+            .unwrap();
         conn
     }
 
@@ -273,7 +277,11 @@ mod tests {
         let conn = open_mem();
         write(&conn, MetaKey::ModelProfile, "xl").unwrap();
         let p = active_profile(&conn).expect("should not error on unknown tier");
-        assert_eq!(p, Profile::DEFAULT, "unknown tier should fall back to DEFAULT");
+        assert_eq!(
+            p,
+            Profile::DEFAULT,
+            "unknown tier should fall back to DEFAULT"
+        );
     }
 
     #[test]

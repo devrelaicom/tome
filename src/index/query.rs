@@ -65,28 +65,42 @@ pub fn knn(
     let query_bytes = vector_to_bytes(query_vec);
 
     let mut params: Vec<ToSqlOutput<'_>> = Vec::with_capacity(5);
-    params.push(ToSqlOutput::from(query_bytes));          // ?1 query vector
+    params.push(ToSqlOutput::from(query_bytes)); // ?1 query vector
     params.push(ToSqlOutput::from(workspace_name.to_owned())); // ?2 workspace
-    params.push(ToSqlOutput::from(i64::from(top_k)));     // ?3 LIMIT
-    if let Some(c) = filters.catalog { params.push(ToSqlOutput::from(c.to_owned())); }
-    if let Some(p) = filters.plugin  { params.push(ToSqlOutput::from(p.to_owned())); }
+    params.push(ToSqlOutput::from(i64::from(top_k))); // ?3 LIMIT
+    if let Some(c) = filters.catalog {
+        params.push(ToSqlOutput::from(c.to_owned()));
+    }
+    if let Some(p) = filters.plugin {
+        params.push(ToSqlOutput::from(p.to_owned()));
+    }
 
-    let mut stmt = conn.prepare(&sql)
+    let mut stmt = conn
+        .prepare(&sql)
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("prepare knn: {e}")))?;
-    let rows = stmt.query_map(params_from_iter(params.iter()), |row| {
-        let kind_text: String = row.get(4)?;
-        let kind = kind_text.parse::<EntryKind>().map_err(|msg| {
-            rusqlite::Error::FromSqlConversionFailure(
-                4, rusqlite::types::Type::Text, Box::new(std::io::Error::other(msg)))
-        })?;
-        Ok(Candidate {
-            skill_id: row.get(0)?, catalog: row.get(1)?, plugin: row.get(2)?,
-            name: row.get(3)?, kind, description: row.get(5)?,
-            plugin_version: row.get(6)?, path: row.get(7)?,
-            distance: row.get::<_, f64>(8)? as f32,
+    let rows = stmt
+        .query_map(params_from_iter(params.iter()), |row| {
+            let kind_text: String = row.get(4)?;
+            let kind = kind_text.parse::<EntryKind>().map_err(|msg| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::other(msg)),
+                )
+            })?;
+            Ok(Candidate {
+                skill_id: row.get(0)?,
+                catalog: row.get(1)?,
+                plugin: row.get(2)?,
+                name: row.get(3)?,
+                kind,
+                description: row.get(5)?,
+                plugin_version: row.get(6)?,
+                path: row.get(7)?,
+                distance: row.get::<_, f64>(8)? as f32,
+            })
         })
-    })
-    .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query knn: {e}")))?;
+        .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("query knn: {e}")))?;
     rows.collect::<Result<_, _>>()
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("collect knn rows: {e}")))
 }
@@ -109,8 +123,13 @@ fn build_knn_sql(filters: &QueryFilters<'_>) -> String {
          WHERE s.searchable = 1",
     );
     let mut next = 4;
-    if filters.catalog.is_some() { sql.push_str(&format!(" AND s.catalog = ?{next}")); next += 1; }
-    if filters.plugin.is_some()  { sql.push_str(&format!(" AND s.plugin = ?{next}")); }
+    if filters.catalog.is_some() {
+        sql.push_str(&format!(" AND s.catalog = ?{next}"));
+        next += 1;
+    }
+    if filters.plugin.is_some() {
+        sql.push_str(&format!(" AND s.plugin = ?{next}"));
+    }
     sql.push_str(" ORDER BY distance LIMIT ?3");
     sql
 }
@@ -130,7 +149,10 @@ mod tests {
     #[test]
     fn build_knn_sql_no_filters() {
         let sql = build_knn_sql(&QueryFilters::default());
-        assert!(sql.contains("vec_distance_cosine(e.embedding, ?1)"), "must use cosine scalar");
+        assert!(
+            sql.contains("vec_distance_cosine(e.embedding, ?1)"),
+            "must use cosine scalar"
+        );
         assert!(sql.contains("WHERE name = ?2"), "workspace param is ?2");
         assert!(sql.contains("LIMIT ?3"), "limit param is ?3");
         assert!(!sql.contains("?4"), "no extra params when no filters");
@@ -139,23 +161,38 @@ mod tests {
 
     #[test]
     fn build_knn_sql_with_catalog_filter() {
-        let filters = QueryFilters { catalog: Some("my-catalog"), plugin: None };
+        let filters = QueryFilters {
+            catalog: Some("my-catalog"),
+            plugin: None,
+        };
         let sql = build_knn_sql(&filters);
         assert!(sql.contains("AND s.catalog = ?4"), "catalog filter is ?4");
-        assert!(!sql.contains("?5"), "no plugin param when only catalog is set");
+        assert!(
+            !sql.contains("?5"),
+            "no plugin param when only catalog is set"
+        );
     }
 
     #[test]
     fn build_knn_sql_with_plugin_filter() {
-        let filters = QueryFilters { catalog: None, plugin: Some("my-plugin") };
+        let filters = QueryFilters {
+            catalog: None,
+            plugin: Some("my-plugin"),
+        };
         let sql = build_knn_sql(&filters);
         // Without catalog, plugin is the first optional param: ?4
-        assert!(sql.contains("AND s.plugin = ?4"), "plugin-only filter is ?4");
+        assert!(
+            sql.contains("AND s.plugin = ?4"),
+            "plugin-only filter is ?4"
+        );
     }
 
     #[test]
     fn build_knn_sql_with_both_filters() {
-        let filters = QueryFilters { catalog: Some("c"), plugin: Some("p") };
+        let filters = QueryFilters {
+            catalog: Some("c"),
+            plugin: Some("p"),
+        };
         let sql = build_knn_sql(&filters);
         assert!(sql.contains("AND s.catalog = ?4"), "catalog filter is ?4");
         assert!(sql.contains("AND s.plugin = ?5"), "plugin filter is ?5");

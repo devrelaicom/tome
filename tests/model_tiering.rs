@@ -41,10 +41,7 @@ fn v5_to_v6_preserves_vector_bytes_and_sets_small_profile() {
 
     // Build a known 384-d f32 vector with recognizable byte pattern
     let known_vec: Vec<f32> = (0..384).map(|i| i as f32 * 0.001).collect();
-    let known_blob: Vec<u8> = known_vec
-        .iter()
-        .flat_map(|f| f.to_le_bytes())
-        .collect();
+    let known_blob: Vec<u8> = known_vec.iter().flat_map(|f| f.to_le_bytes()).collect();
 
     // Insert using the vec0 API (INSERT with the raw bytes)
     conn.execute(
@@ -93,7 +90,7 @@ fn v5_to_v6_preserves_vector_bytes_and_sets_small_profile() {
 fn new_models_load_and_infer() {
     use tome::embedding::download::download_model;
     use tome::embedding::fastembed::{FastembedEmbedder, FastembedReranker};
-    use tome::embedding::registry::{lookup, ModelKind};
+    use tome::embedding::registry::{ModelKind, lookup};
     use tome::embedding::{Embedder, Reranker};
     use tome::index::query::Candidate;
     use tome::plugin::identity::EntryKind;
@@ -109,7 +106,8 @@ fn new_models_load_and_infer() {
     let models_root = tmp.path();
 
     for &name in new_model_names {
-        let entry = lookup(name).unwrap_or_else(|| panic!("entry `{name}` must be in MODEL_REGISTRY"));
+        let entry =
+            lookup(name).unwrap_or_else(|| panic!("entry `{name}` must be in MODEL_REGISTRY"));
 
         // download_model creates <models_root>/<name>/ internally
         download_model(entry, models_root, None)
@@ -120,9 +118,13 @@ fn new_models_load_and_infer() {
             ModelKind::Embedder => {
                 let embedder = FastembedEmbedder::load(entry, &model_dir)
                     .unwrap_or_else(|e| panic!("load embedder `{name}` failed: {e}"));
-                let result = embedder.embed("hello world")
+                let result = embedder
+                    .embed("hello world")
                     .unwrap_or_else(|e| panic!("embed `{name}` failed: {e}"));
-                let expected_dim = entry.embedding_dim.expect("embedder must have embedding_dim") as usize;
+                let expected_dim = entry
+                    .embedding_dim
+                    .expect("embedder must have embedding_dim")
+                    as usize;
                 assert_eq!(
                     result.len(),
                     expected_dim,
@@ -134,27 +136,25 @@ fn new_models_load_and_infer() {
             ModelKind::Reranker => {
                 let reranker = FastembedReranker::load(entry, &model_dir)
                     .unwrap_or_else(|e| panic!("load reranker `{name}` failed: {e}"));
-                let candidates = vec![
-                    Candidate {
-                        skill_id: 1,
-                        catalog: "c".to_owned(),
-                        plugin: "p".to_owned(),
-                        name: "n".to_owned(),
-                        kind: EntryKind::Skill,
-                        description: "test candidate".to_owned(),
-                        plugin_version: "1.0.0".to_owned(),
-                        path: "p".to_owned(),
-                        distance: 0.1,
-                    },
-                ];
-                reranker.rerank("hello world", candidates)
+                let candidates = vec![Candidate {
+                    skill_id: 1,
+                    catalog: "c".to_owned(),
+                    plugin: "p".to_owned(),
+                    name: "n".to_owned(),
+                    kind: EntryKind::Skill,
+                    description: "test candidate".to_owned(),
+                    plugin_version: "1.0.0".to_owned(),
+                    path: "p".to_owned(),
+                    distance: 0.1,
+                }];
+                reranker
+                    .rerank("hello world", candidates)
                     .unwrap_or_else(|e| panic!("rerank `{name}` failed: {e}"));
             }
             ModelKind::Summariser => {}
         }
     }
 }
-
 
 // ===========================================================================
 // Task 8 / S1 — deterministic mixed-dimension regression test (NON-network).
@@ -211,7 +211,10 @@ fn open_writable(paths: &tome::paths::Paths) -> rusqlite::Connection {
     index::open(
         &paths.index_db,
         &OpenOptions {
-            embedder: MetaSeed { name: MEDIUM_EMBEDDER.into(), version: "1.5".into() },
+            embedder: MetaSeed {
+                name: MEDIUM_EMBEDDER.into(),
+                version: "1.5".into(),
+            },
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
         },
@@ -249,7 +252,10 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
             scope: &ws_scope,
             config: &config,
             embedder: &embedder_384,
-            embedder_seed: MetaSeed { name: MEDIUM_EMBEDDER.into(), version: "1.5".into() },
+            embedder_seed: MetaSeed {
+                name: MEDIUM_EMBEDDER.into(),
+                version: "1.5".into(),
+            },
             reranker_seed: stub_reranker_seed(),
             summariser_seed: stub_summariser_seed(),
             allow_model_download: false,
@@ -274,7 +280,10 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
     );
     meta::guard_embedder_drift(
         &conn,
-        &ModelIdent { name: MEDIUM_EMBEDDER.into(), version: "1.5".into() },
+        &ModelIdent {
+            name: MEDIUM_EMBEDDER.into(),
+            version: "1.5".into(),
+        },
     )
     .expect("no drift in the matched baseline");
 
@@ -285,7 +294,11 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
             |r| r.get(0),
         )
         .expect("read one stored embedding length");
-    assert_eq!(blob_len, 384 * 4, "stored vectors are 384-d (1536 LE bytes)");
+    assert_eq!(
+        blob_len,
+        384 * 4,
+        "stored vectors are 384-d (1536 LE bytes)"
+    );
     let row_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM skill_embeddings", [], |r| r.get(0))
         .unwrap();
@@ -341,7 +354,10 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
         project_root: None,
     };
     let update_err = catalog_update::run(
-        CatalogUpdateArgs { name: None, force: false },
+        CatalogUpdateArgs {
+            name: None,
+            force: false,
+        },
         &update_scope,
         Mode::Json,
     )
@@ -380,17 +396,20 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
     let embedder_768 = StubEmbedder::with_dim(768);
     // The seed identity the new embedder writes into `meta` after re-embed —
     // the LARGE-profile embedder name (what `active_embedder` now resolves).
-    let new_ident = ModelIdent { name: LARGE_EMBEDDER.into(), version: configured.version.to_owned() };
+    let new_ident = ModelIdent {
+        name: LARGE_EMBEDDER.into(),
+        version: configured.version.to_owned(),
+    };
 
     let conn = open_writable(&paths);
     let effective_force = reindex::embedder_change_policy(
-        &conn,
-        /* whole_index = */ true,
-        /* args_force = */ false,
-        &new_ident,
+        &conn, /* whole_index = */ true, /* args_force = */ false, &new_ident,
     )
     .expect("whole-index reindex under drift is allowed");
-    assert!(effective_force, "embedder change must force a full re-embed");
+    assert!(
+        effective_force,
+        "embedder change must force a full re-embed"
+    );
     drop(conn);
 
     let deps = LifecycleDeps {
@@ -398,13 +417,22 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
         scope: &ws_scope,
         config: &config,
         embedder: &embedder_768,
-        embedder_seed: MetaSeed { name: new_ident.name.clone(), version: new_ident.version.clone() },
+        embedder_seed: MetaSeed {
+            name: new_ident.name.clone(),
+            version: new_ident.version.clone(),
+        },
         reranker_seed: stub_reranker_seed(),
         summariser_seed: stub_summariser_seed(),
         allow_model_download: false,
     };
-    let agg = reindex::run_with_deps(Scope::All, std::slice::from_ref(&alpha), &deps, effective_force, Mode::Json)
-        .expect("whole-index force reindex");
+    let agg = reindex::run_with_deps(
+        Scope::All,
+        std::slice::from_ref(&alpha),
+        &deps,
+        effective_force,
+        Mode::Json,
+    )
+    .expect("whole-index force reindex");
     assert!(agg.skills_re_embedded >= 1, "every row must be re-embedded");
 
     // Stamp the GLOBAL meta exactly as the whole-index reindex does post-commit.
@@ -469,7 +497,11 @@ fn models_profile_show_reports_default_medium_when_no_db_exists() {
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
 
-    let out = env.cmd().args(["--json", "models", "profile"]).output().unwrap();
+    let out = env
+        .cmd()
+        .args(["--json", "models", "profile"])
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "stderr: {}",
@@ -489,7 +521,11 @@ fn models_profile_set_writes_meta_and_show_reports_it() {
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
 
-    let set = env.cmd().args(["--json", "models", "profile", "small"]).output().unwrap();
+    let set = env
+        .cmd()
+        .args(["--json", "models", "profile", "small"])
+        .output()
+        .unwrap();
     assert!(
         set.status.success(),
         "stderr: {}",
@@ -501,7 +537,11 @@ fn models_profile_set_writes_meta_and_show_reports_it() {
     assert_eq!(set_rec["reranker"], "bge-reranker-base");
 
     // `show` must now report `small` (persisted in meta.model_profile).
-    let show = env.cmd().args(["--json", "models", "profile"]).output().unwrap();
+    let show = env
+        .cmd()
+        .args(["--json", "models", "profile"])
+        .output()
+        .unwrap();
     assert!(show.status.success());
     let show_rec: Value = serde_json::from_slice(&show.stdout).unwrap();
     assert_eq!(show_rec["profile"], "small", "set must persist to meta");
@@ -522,19 +562,34 @@ fn models_profile_set_large_from_medium_prints_reindex_notice() {
     std::fs::create_dir_all(&paths.root).unwrap();
 
     // First touch creates the DB stamped with the medium embedder.
-    let _ = env.cmd().args(["models", "profile", "medium"]).output().unwrap();
+    let _ = env
+        .cmd()
+        .args(["models", "profile", "medium"])
+        .output()
+        .unwrap();
 
     // JSON proves the structured signal.
-    let json = env.cmd().args(["--json", "models", "profile", "large"]).output().unwrap();
+    let json = env
+        .cmd()
+        .args(["--json", "models", "profile", "large"])
+        .output()
+        .unwrap();
     assert!(json.status.success());
     let rec: Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(rec["embedder_changed"], true, "medium→large changes the embedder");
+    assert_eq!(
+        rec["embedder_changed"], true,
+        "medium→large changes the embedder"
+    );
     assert_eq!(rec["reindex_required"], true);
     assert_eq!(rec["prev_embedder_dim"], 768);
     assert_eq!(rec["new_embedder_dim"], 1024);
 
     // Human output names `reindex`.
-    let human = env.cmd().args(["models", "profile", "large"]).output().unwrap();
+    let human = env
+        .cmd()
+        .args(["models", "profile", "large"])
+        .output()
+        .unwrap();
     assert!(human.status.success());
     let text = String::from_utf8_lossy(&human.stdout);
     assert!(
@@ -553,7 +608,11 @@ fn models_profile_set_rejects_invalid_tier_via_clap() {
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
 
-    let out = env.cmd().args(["models", "profile", "extra-large"]).output().unwrap();
+    let out = env
+        .cmd()
+        .args(["models", "profile", "extra-large"])
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "invalid tier must be rejected");
     assert_eq!(out.status.code(), Some(2), "clap usage error exits 2");
     let stderr = String::from_utf8_lossy(&out.stderr);
