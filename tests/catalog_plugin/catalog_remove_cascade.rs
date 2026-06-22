@@ -122,7 +122,7 @@ fn refuse_remove_when_enabled_plugins_exist() {
     );
     // Catalog enrolment NOT removed from the DB (workspace_catalogs still has it).
     assert!(
-        count_workspace_enrolments(&paths, "global", "sample-plugin-catalog") > 0,
+        has_workspace_enrolment(&paths, "global", "sample-plugin-catalog"),
         "workspace_catalogs must still have the catalog row after a refused remove",
     );
     // Skill rows NOT dropped.

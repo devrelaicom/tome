@@ -147,7 +147,7 @@ pub struct DoctorConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase", deny_unknown_fields)]
+#[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     Off,
     Error,
@@ -172,7 +172,7 @@ impl LogLevel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase", deny_unknown_fields)]
+#[serde(rename_all = "lowercase")]
 pub enum ColorMode {
     #[default]
     Auto,
@@ -181,7 +181,7 @@ pub enum ColorMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase", deny_unknown_fields)]
+#[serde(rename_all = "lowercase")]
 pub enum HarnessScope {
     Project,
     Global,
@@ -285,6 +285,9 @@ verify_by_default = true
         assert_eq!(c.output.color, Some(ColorMode::Never));
         assert_eq!(c.mcp.description_max_chars, Some(300));
         assert_eq!(c.doctor.verify_by_default, Some(true));
+        assert_eq!(c.models.profile, Some(crate::embedding::Profile::Small));
+        assert_eq!(c.output.progress, Some(false));
+        assert_eq!(c.summariser.enabled, Some(false));
     }
 
     #[test]
