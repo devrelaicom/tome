@@ -415,6 +415,7 @@ pub fn fabricate_all_registry_models(paths: &Paths) {
 /// `&Config` in struct-field initialisation and function arguments, so
 /// existing `config: &config` / `write_config_for_cli(&paths, &config)` call
 /// sites continue to compile unchanged after `Config.catalogs` was removed.
+// TODO: remove this wrapper once LifecycleDeps.config is de-vestigialized (nothing reads .catalogs).
 pub struct TestCatalogConfig {
     /// The `Config` value (always `Config::default()` — the catalog registry
     /// field was removed from `Config` in Task 1).

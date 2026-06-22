@@ -288,6 +288,10 @@ verify_by_default = true
         assert_eq!(c.models.profile, Some(crate::embedding::Profile::Small));
         assert_eq!(c.output.progress, Some(false));
         assert_eq!(c.summariser.enabled, Some(false));
+        assert_eq!(c.harness.expose_agents_as_personas, Some(true));
+        assert_eq!(c.harness.strip_plugin_agent_privileges, Some(false));
+        assert_eq!(c.workspace.default.as_deref(), Some("work"));
+        assert!((c.query.strict_min_score.unwrap() - 0.7_f32).abs() < 1e-6);
     }
 
     #[test]

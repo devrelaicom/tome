@@ -1,11 +1,13 @@
-//! Atomic registry persistence. Writes go through `tempfile::NamedTempFile`
-//! in the same directory as the target file, then rename — POSIX-atomic on a
-//! single filesystem (FR-017b).
+//! Generic atomic, symlink-refusing, 0600 file writer.
 //!
-//! On Unix the persisted file is chmod 0o600 — `config.toml` holds catalog
-//! source URLs, which are not secrets today but can carry user-supplied
-//! tokens via the user-typed `tome catalog add` source. The umask-default
-//! 0644 would let any local user read those URLs.
+//! The public surface of this module is a single function — [`write_atomic`]
+//! — which writes bytes to a target path via a same-directory temp file and
+//! an atomic rename (POSIX-atomic on a single filesystem, FR-017b). The
+//! `load`/`save` helpers that previously read and wrote the catalog registry
+//! from `config.toml` were removed when the DB `workspace_catalogs` table
+//! became the authoritative catalog store (Phase 4). What remains is the
+//! shared, reusable write primitive used by every Tome sink that needs
+//! atomic, 0600, symlink-safe file persistence.
 
 use std::io::Write;
 use std::path::Path;

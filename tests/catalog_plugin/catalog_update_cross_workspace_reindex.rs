@@ -36,7 +36,7 @@ use tome::workspace::{Scope, WorkspaceName};
 
 // LifecycleDeps.config is vestigial; return default config (the catalog field
 // was removed from Config in Task 1 — DB workspace_catalogs is authoritative).
-fn config_pointing_at(_catalog_name: &str, _catalog_root: &std::path::Path) -> Config {
+fn default_config() -> Config {
     Config::default()
 }
 
@@ -99,7 +99,7 @@ fn catalog_update_reindexes_every_workspace_enabled_set() {
     // for upstream mutation. The Config points each workspace's
     // `lifecycle::resolve_plugin_dir` at this path.
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
-    let config = config_pointing_at("sample-plugin-catalog", &catalog_root);
+    let config = default_config();
 
     // Seed BOTH workspaces in the central DB. `global` is bootstrapped
     // automatically on first `index::open`; `second` we add.
