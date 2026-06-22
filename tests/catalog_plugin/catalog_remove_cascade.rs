@@ -120,9 +120,11 @@ fn refuse_remove_when_enabled_plugins_exist() {
         stderr.contains("sample-plugin-catalog/plugin-alpha"),
         "stderr should mention the enabled plugin id, got: {stderr}",
     );
-    // Catalog config NOT mutated.
-    let cfg_text = std::fs::read_to_string(&paths.global_config_file).unwrap();
-    assert!(cfg_text.contains("sample-plugin-catalog"));
+    // Catalog enrolment NOT removed from the DB (workspace_catalogs still has it).
+    assert!(
+        count_workspace_enrolments(&paths, "global", "sample-plugin-catalog") > 0,
+        "workspace_catalogs must still have the catalog row after a refused remove",
+    );
     // Skill rows NOT dropped.
     assert!(count_skill_rows(&paths, "sample-plugin-catalog") > 0);
 }
@@ -305,23 +307,9 @@ fn cascade_remove_in_workspace_does_not_remove_shared_clone() {
     let cache_dir = cache_dir_for(&env, &fix.url);
     assert!(cache_dir.is_dir(), "cache dir should exist post-add");
 
-    let synthetic_config = {
-        use std::collections::BTreeMap;
-        let mut catalogs = BTreeMap::new();
-        #[allow(deprecated)]
-        catalogs.insert(
-            "sample-plugin-catalog".to_owned(),
-            tome::config::CatalogEntry {
-                name: "sample-plugin-catalog".to_owned(),
-                url: fix.url.clone(),
-                ref_: "main".into(),
-                path: cache_dir.clone(),
-                last_synced: time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
-            },
-        );
-        #[allow(deprecated)]
-        tome::config::Config { catalogs }
-    };
+    // LifecycleDeps.config is vestigial (not read by the lifecycle); pass
+    // the default so we don't need the removed Config.catalogs field.
+    let synthetic_config = tome::config::Config::default();
 
     let second_scope = tome::workspace::Scope(
         tome::workspace::WorkspaceName::parse("second").expect("valid workspace name"),

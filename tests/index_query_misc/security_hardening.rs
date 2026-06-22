@@ -395,7 +395,7 @@ fn home_root_accepts_nonexistent_absolute_home() {
 //
 // Every Tome-owned file-creation site MUST land 0o600 on Unix:
 //
-//   - catalog::store::save (config.toml)
+//   - catalog::store::write_atomic (config.toml via config path)
 //   - settings::edit::save_settings (settings.toml under workspace dir)
 //   - mcp::log first-emit (logs/mcp.log)
 //   - workspace::init landed settings.toml
@@ -414,10 +414,14 @@ fn all_tome_owned_writes_emit_0o600_on_unix() {
     let root = tmp.path().to_path_buf();
     let paths = tome::paths::Paths::from_root(root.clone());
 
-    // 1. catalog::store::save -> global config.toml
+    // 1. catalog::store::write_atomic -> global config.toml
+    // (The old catalog::store::save shim is gone; write_atomic is the
+    // 0o600 mechanism it used internally — verify directly.)
     {
-        let cfg = tome::config::Config::default();
-        tome::catalog::store::save(&paths.global_config_file, &cfg).expect("save global config");
+        let text =
+            toml::to_string(&tome::config::Config::default()).expect("serialize default config");
+        tome::catalog::store::write_atomic(&paths.global_config_file, text.as_bytes())
+            .expect("write global config");
         let mode = std::fs::metadata(&paths.global_config_file)
             .unwrap()
             .permissions()

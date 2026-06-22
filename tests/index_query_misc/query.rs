@@ -13,8 +13,9 @@
 //! KNN query.
 
 use crate::common::{
-    config_with_catalog, copy_sample_plugin_catalog, enrol_catalog_symlinked, fabricate_models,
-    lifecycle_paths, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
+    TestCatalogConfig, config_with_catalog, copy_sample_plugin_catalog, enrol_catalog_symlinked,
+    fabricate_models, lifecycle_paths, stub_embedder_seed, stub_reranker_seed,
+    stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::cli::QueryArgs;
@@ -39,8 +40,8 @@ struct QueryEnv {
     paths: tome::paths::Paths,
     /// The catalog config used to bootstrap the env. Kept so library-API
     /// tests (`run_with_deps`) can pass it as `QueryDeps.config` without
-    /// re-reading from disk.
-    config: Config,
+    /// re-reading from disk. Deref coerces to `&Config` where needed.
+    config: TestCatalogConfig,
 }
 
 fn build_query_env() -> QueryEnv {

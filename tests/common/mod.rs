@@ -410,29 +410,55 @@ pub fn fabricate_all_registry_models(paths: &Paths) {
     fabricate_installed_models(paths, &entries);
 }
 
-/// Construct a minimal `Config` containing one catalog whose on-disk cache
-/// lives at `catalog_root`. The catalog `name` is recorded both as the
-/// `BTreeMap` key and the inner `CatalogEntry.name` so lookups via the CLI
-/// surface match the lifecycle library API.
-pub fn config_with_catalog(catalog_name: &str, catalog_root: &Path) -> Config {
-    use std::collections::BTreeMap;
-    let mut catalogs = BTreeMap::new();
-    catalogs.insert(
-        catalog_name.to_owned(),
-        CatalogEntry {
-            name: catalog_name.to_owned(),
-            url: format!("file://{}", catalog_root.display()),
-            ref_: "main".into(),
-            path: catalog_root.to_path_buf(),
-            last_synced: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
-        },
-    );
-    Config { catalogs }
+/// A test-only wrapper that carries a `Config` and the catalog entries that
+/// were used to create it. `Deref<Target = Config>` makes `&tc` coerce to
+/// `&Config` in struct-field initialisation and function arguments, so
+/// existing `config: &config` / `write_config_for_cli(&paths, &config)` call
+/// sites continue to compile unchanged after `Config.catalogs` was removed.
+pub struct TestCatalogConfig {
+    /// The `Config` value (always `Config::default()` — the catalog registry
+    /// field was removed from `Config` in Task 1).
+    pub config: Config,
+    /// Catalog entries carried separately so `write_config_for_cli` can seed
+    /// the DB without needing `config.catalogs`.
+    pub entries: Vec<CatalogEntry>,
 }
 
-/// Write the supplied [`Config`] to `paths.global_config_file` as TOML
-/// (legacy, F11b-deprecated) AND seed each enrolment into the central
-/// DB's `workspace_catalogs` table for the privileged `global` workspace.
+impl std::ops::Deref for TestCatalogConfig {
+    type Target = Config;
+    fn deref(&self) -> &Config {
+        &self.config
+    }
+}
+
+impl From<Config> for TestCatalogConfig {
+    fn from(config: Config) -> Self {
+        TestCatalogConfig {
+            config,
+            entries: Vec::new(),
+        }
+    }
+}
+
+/// Construct a minimal [`TestCatalogConfig`] containing one catalog whose
+/// on-disk cache lives at `catalog_root`.
+pub fn config_with_catalog(catalog_name: &str, catalog_root: &Path) -> TestCatalogConfig {
+    let entry = CatalogEntry {
+        name: catalog_name.to_owned(),
+        url: format!("file://{}", catalog_root.display()),
+        ref_: "main".into(),
+        path: catalog_root.to_path_buf(),
+        last_synced: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+    };
+    TestCatalogConfig {
+        config: Config::default(),
+        entries: vec![entry],
+    }
+}
+
+/// Write a default `Config` to `paths.global_config_file` as TOML AND seed
+/// each enrolment into the central DB's `workspace_catalogs` table for the
+/// privileged `global` workspace.
 ///
 /// **Seed discipline**: this helper opens the DB if it does not yet
 /// exist, stamping `meta` with the **registry** seeds (BGE) so the
@@ -443,13 +469,9 @@ pub fn config_with_catalog(catalog_name: &str, catalog_root: &Path) -> Config {
 ///
 /// If the DB already exists at call time, the seed step is a no-op
 /// (subsequent `index::open` calls ignore `opts`).
-pub fn write_config_for_cli(paths: &Paths, config: &Config) {
+pub fn write_config_for_cli(paths: &Paths, config: &TestCatalogConfig) {
     std::fs::create_dir_all(&paths.root).expect("create tome root");
-    // Legacy: still written so the (PR-2/PR-3) commands that continue to read
-    // `config.toml [catalogs]` keep finding the catalog while their migration
-    // is pending. `resolve_plugin_dir` no longer consults it (FF1).
-    #[allow(deprecated)]
-    let body = toml::to_string_pretty(config).expect("serialise config");
+    let body = toml::to_string_pretty(&config.config).expect("serialise config");
     std::fs::write(&paths.global_config_file, body).expect("write config.toml");
 
     // F11b: seed enrolments in the central DB so CLI catalog commands
@@ -465,8 +487,7 @@ pub fn write_config_for_cli(paths: &Paths, config: &Config) {
         },
     )
     .expect("open index db for catalog seed");
-    #[allow(deprecated)]
-    for entry in config.catalogs.values() {
+    for entry in &config.entries {
         // FF1: `resolve_plugin_dir` now resolves the catalog root from the
         // enrolment URL via `cache_dir_for(url)`. The fixture tree lives at
         // `entry.path`; SYMLINK (not copy) the content-addressed clone dir

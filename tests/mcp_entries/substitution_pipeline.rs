@@ -324,7 +324,9 @@ fn save_config(paths: &tome::paths::Paths, config: &Config) {
     if let Some(parent) = paths.global_config_file.parent() {
         fs::create_dir_all(parent).expect("create config parent");
     }
-    tome::catalog::store::save(&paths.global_config_file, config).expect("save config");
+    let text = toml::to_string(config).expect("serialize config");
+    tome::catalog::store::write_atomic(&paths.global_config_file, text.as_bytes())
+        .expect("save config");
 }
 
 fn write_plugin(

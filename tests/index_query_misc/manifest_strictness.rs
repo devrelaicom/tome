@@ -379,8 +379,12 @@ unexpected = "value"
     assert!(err.to_string().to_lowercase().contains("unknown"));
 }
 
+/// T1: the legacy `[catalogs]` table is TOLERATED on load (not rejected) and
+/// DROPPED on serialize — the robustness clause for pre-Phase-4 config.toml
+/// files that carry the old catalog registry. The `extra` field inside the
+/// legacy table does not surface as a hard-fail.
 #[test]
-fn config_unknown_field_inside_catalog_entry_rejected() {
+fn config_legacy_catalogs_table_tolerated_and_dropped() {
     let toml = r#"
 [catalogs.foo]
 name = "foo"
@@ -390,21 +394,26 @@ path = "/x"
 last_synced = "2026-01-01T00:00:00Z"
 extra = "nope"
 "#;
-    let err = toml::from_str::<Config>(toml).unwrap_err();
-    assert!(err.to_string().to_lowercase().contains("unknown"));
+    // No longer rejected — the legacy [catalogs] blob is captured in
+    // `_legacy_catalogs: Option<toml::Value>` and silently dropped.
+    let cfg: Config = toml::from_str(toml).expect("legacy [catalogs] table must be tolerated");
+    let back = toml::to_string(&cfg).expect("serialise");
+    assert!(
+        !back.contains("catalogs"),
+        "legacy [catalogs] must be dropped on serialize: {back}",
+    );
 }
 
 #[test]
 fn config_well_formed_round_trips() {
+    // Config with real sectioned fields round-trips cleanly.
     let toml = r#"
-[catalogs.midnight]
-name = "midnight"
-url = "https://github.com/midnight/x"
-ref = "main"
-path = "/x"
-last_synced = "2026-01-01T00:00:00Z"
+[query]
+top_k = 10
+rerank = true
 "#;
     let cfg: Config = toml::from_str(toml).expect("parse");
+    assert_eq!(cfg.query.top_k, Some(10));
     let back = toml::to_string(&cfg).expect("serialise");
     let cfg2: Config = toml::from_str(&back).expect("re-parse");
     assert_eq!(cfg, cfg2);
@@ -412,12 +421,11 @@ last_synced = "2026-01-01T00:00:00Z"
 
 /// FR-014 (F-CONFIG-GENERIC-ERR): a malformed `~/.tome/config.toml` must
 /// surface the specific manifest/TOML-parse failure (`ManifestInvalid::TomlParse`,
-/// exit 5) naming the file — not a generic `Internal`/exit 1. `store::load`
+/// exit 5) naming the file — not a generic `Internal`/exit 1. `config::load`
 /// is the single read path every command + the MCP server route config
 /// through, so the truthful exit code matters across the whole surface.
 #[test]
 fn malformed_config_toml_surfaces_manifest_invalid_exit_5() {
-    use tome::catalog::store;
     use tome::error::TomeError;
 
     let temp = TempDir::new().unwrap();
@@ -425,7 +433,8 @@ fn malformed_config_toml_surfaces_manifest_invalid_exit_5() {
     // Syntactically broken TOML: an unterminated array-of-tables header.
     fs::write(&config_file, "this is = = not valid toml [[").unwrap();
 
-    let err = store::load(&config_file).expect_err("malformed config must fail");
+    let paths = tome::paths::Paths::from_root(temp.path().to_path_buf());
+    let err = tome::config::load(&paths).expect_err("malformed config must fail");
     assert_eq!(
         err.exit_code(),
         5,
@@ -434,7 +443,11 @@ fn malformed_config_toml_surfaces_manifest_invalid_exit_5() {
     );
     match &err {
         TomeError::ManifestInvalid(ManifestInvalid::TomlParse { file, .. }) => {
-            assert_eq!(file, &config_file, "the error must name the offending file");
+            assert_eq!(
+                file.as_path(),
+                config_file.as_path(),
+                "the error must name the offending file"
+            );
         }
         other => panic!("expected ManifestInvalid::TomlParse, got {other:?}"),
     }

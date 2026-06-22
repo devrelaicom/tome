@@ -20,27 +20,10 @@ use std::path::Path;
 use crate::common::write_index_db_with_schema_version;
 use rusqlite::Transaction;
 use tempfile::TempDir;
-use time::OffsetDateTime;
-use tome::catalog::store::{save, write_atomic};
-use tome::config::{CatalogEntry, Config};
+use tome::catalog::store::write_atomic;
 use tome::error::TomeError;
 use tome::index::Migration;
 use tome::index::migrations::{MIGRATIONS_OVERRIDE, apply_pending, current_schema_version};
-
-fn make_config(name: &str) -> Config {
-    let mut cfg = Config::default();
-    cfg.catalogs.insert(
-        name.into(),
-        CatalogEntry {
-            name: name.into(),
-            url: format!("https://example/{}", name),
-            ref_: "main".into(),
-            path: std::path::PathBuf::from("/tmp/x"),
-            last_synced: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
-        },
-    );
-    cfg
-}
 
 #[test]
 fn write_atomic_does_not_leave_partial_file_when_target_dir_writable() {
@@ -56,7 +39,7 @@ fn write_atomic_does_not_leave_partial_file_when_target_dir_writable() {
 fn no_temp_file_left_behind_after_successful_write() {
     let dir = TempDir::new().unwrap();
     let target = dir.path().join("config.toml");
-    save(&target, &make_config("a")).unwrap();
+    write_atomic(&target, b"placeholder").unwrap();
     let entries: Vec<_> = fs::read_dir(dir.path())
         .unwrap()
         .filter_map(Result::ok)
@@ -74,7 +57,7 @@ fn failed_persist_into_nonexistent_dir_does_not_create_target() {
     let untouched = dir.path().join("other.toml");
     fs::write(&untouched, b"do not touch").unwrap();
     let target = dir.path().join("nested/config.toml");
-    save(&target, &make_config("a")).unwrap();
+    write_atomic(&target, b"placeholder").unwrap();
     let kept = fs::read(&untouched).unwrap();
     assert_eq!(kept, b"do not touch");
     assert!(target.exists());
@@ -119,7 +102,7 @@ fn missing_target_directory_is_created_on_save() {
     let nested = dir.path().join("a/b/c");
     let target = nested.join("config.toml");
     assert!(!nested.exists());
-    save(&target, &make_config("a")).unwrap();
+    write_atomic(&target, b"placeholder").unwrap();
     assert!(target.exists());
     assert!(is_dir(&nested));
 }
