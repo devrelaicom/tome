@@ -513,6 +513,12 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.4](https://github.com/devrelaicom/tome/compare/v0.7.3...v0.7.4) - 2026-06-22
+
+### Added
+
+- model tiering — small/medium/large profiles + dimension-free vector storage ([#247](https://github.com/devrelaicom/tome/pull/247))
+
 ## [0.7.3](https://github.com/devrelaicom/tome/compare/v0.7.2...v0.7.3) - 2026-06-19
 
 ### Other
