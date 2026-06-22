@@ -23,9 +23,9 @@ use tracing::{debug, info, warn};
 
 use crate::catalog::git::was_cancelled;
 use crate::config::Config;
+use crate::embedding::Embedder;
 use crate::embedding::download::download_model;
-use crate::embedding::registry::{MODEL_REGISTRY, ModelEntry, ModelManifest};
-use crate::embedding::{Embedder, ModelKind};
+use crate::embedding::registry::{ModelEntry, ModelManifest};
 use crate::error::{PluginState, TomeError};
 use crate::index::skills::{EnableSummary, PendingSkill};
 use crate::index::{
@@ -1004,15 +1004,28 @@ fn parse_one_entry(
 /// download iff `allow_model_download` is set; otherwise we error with
 /// `ModelMissing` (exit 30).
 fn ensure_models_present(deps: &LifecycleDeps<'_>) -> Result<(), TomeError> {
-    for entry in MODEL_REGISTRY {
-        // Only enforce embedder and reranker. The summariser is downloaded
-        // on the regen-summary path (US4) — gating enable on its presence
-        // would force every workspace to pull ~400 MB before the first
-        // skill is indexed.
-        match entry.kind {
-            ModelKind::Embedder | ModelKind::Reranker => {}
-            ModelKind::Summariser => continue,
-        }
+    // B2: enforce only the ACTIVE profile's embedder + reranker, not every
+    // profile's models in `MODEL_REGISTRY`. `LifecycleDeps` carries no conn, so
+    // open a read-only handle from `deps.paths.index_db` to resolve the active
+    // profile; on a fresh install (no DB yet) fall back to the default profile,
+    // which is exactly what the bootstrap stamps. The summariser is downloaded
+    // on the regen-summary path (US4) — gating enable on its presence would
+    // force every workspace to pull ~400 MB before the first skill is indexed.
+    let (embedder, reranker) = if deps.paths.index_db.is_file() {
+        let conn = crate::index::open_read_only(&deps.paths.index_db)?;
+        (
+            crate::index::meta::active_embedder(&conn)?,
+            crate::index::meta::active_reranker(&conn)?,
+        )
+    } else {
+        use crate::embedding::profile::{Profile, embedder_for, reranker_for};
+        (
+            embedder_for(Profile::DEFAULT),
+            reranker_for(Profile::DEFAULT),
+        )
+    };
+
+    for entry in [embedder, reranker] {
         if model_manifest_ok(deps.paths, entry)? {
             continue;
         }
@@ -1052,6 +1065,7 @@ fn model_manifest_ok(paths: &Paths, entry: &ModelEntry) -> Result<bool, TomeErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embedding::registry::MODEL_REGISTRY;
     use crate::embedding::stub::StubEmbedder;
     use std::fs;
     use tempfile::TempDir;

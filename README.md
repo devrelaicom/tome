@@ -216,11 +216,16 @@ tome reindex <catalog>/<plugin> --force     # one plugin, forced rebuild
 ### Model management
 
 ```sh
-tome models list                            # installed models + sizes
+tome models profile                         # show the active profile (small/medium/large) + its models
+tome models profile large                   # switch the active profile (prints a reindex notice if needed)
+tome models list                            # installed models, the profile(s) that use each, and the active set
 tome models list --verify                   # re-hash each artefact against its pinned SHA-256
-tome models download                        # fetch the pinned set up front
+tome models download                        # fetch the active profile's models up front
+tome models download --all                  # fetch every model in every profile
 tome models remove <name>
 ```
+
+`tome models list` annotates each row with the profile(s) that reference it and marks the active set with `*`. `tome models download` defaults to just the active profile's `{embedder, reranker, summariser}`; pass `--all` to fetch every tier's weights.
 
 ## Configuration
 
@@ -242,15 +247,42 @@ Every Tome-owned path lives under **`~/.tome/`**:
 
 ### Models
 
-Tome downloads three pinned models on demand into `~/.tome/models/`. Each download is verified against a pinned SHA-256; a mismatch aborts the install.
+Tome downloads pinned models on demand into `~/.tome/models/`. Each download is verified against a pinned SHA-256; a mismatch aborts the install.
 
-| Model | Role | Format | Approx. size | Licence |
-|-------|------|--------|--------------|---------|
-| `bge-small-en-v1.5` (Xenova INT8) | Embedder | ONNX | ~34 MB | MIT |
-| `bge-reranker-base` (ONNX INT8) | Reranker | ONNX | ~279 MB | MIT |
-| `qwen2.5-0.5b-instruct` (Q4_K_M) | Workspace summariser | GGUF | ~491 MB | Apache-2.0 |
+#### Profiles
 
-The first `tome plugin enable` on a fresh machine prompts to download **all three (~804 MB total)**. The summariser generates workspace summaries; if you decline it at enable time, summary generation is silently skipped until it's present — indexing and search still work with just the embedder + reranker.
+A **profile** (`small`, `medium`, `large`) selects which embedder + reranker Tome uses. Larger profiles trade disk and CPU for retrieval quality. The summariser is the same across every profile. The default for a fresh install is **`medium`**.
+
+| Profile | Embedder | Embedding dim | Reranker | Models to download |
+|---------|----------|---------------|----------|--------------------|
+| `small` | `bge-small-en-v1.5` (~34 MB) | 384 | `bge-reranker-base` (~279 MB) | ~804 MB |
+| `medium` *(default)* | `bge-base-en-v1.5` (~110 MB) | 768 | `bge-reranker-large` (~563 MB) | ~1.16 GB |
+| `large` | `bge-large-en-v1.5` (~337 MB) | 1024 | `bge-reranker-v2-m3` (~571 MB) | ~1.40 GB |
+
+Every embedder and reranker is a single-file quantized BGE model under the **MIT** licence; the shared summariser `qwen2.5-0.5b-instruct` (Q4_K_M GGUF, ~491 MB) is **Apache-2.0**. The "models to download" column includes the summariser.
+
+```sh
+tome models profile                         # show the active profile + its embedder/reranker/state
+tome models profile large                   # switch to the large profile
+```
+
+#### Switching the embedder requires a reindex, never a migration
+
+Each profile's embedder produces vectors of a different dimension (384 / 768 / 1024). When you switch to a profile whose embedder differs from the one your index was built with, `tome models profile <tier>` prints a notice and **does not** migrate or auto-rebuild your stored vectors:
+
+```
+! embedder changed (dim 768→1024); run `tome reindex` to re-embed the index
+```
+
+Run `tome reindex` to re-embed every enabled skill with the new embedder. Tome never attempts to "convert" existing vectors between dimensions — re-embedding from the source skills is the only correct path, and it is the one Tome takes. Until you reindex, the stored vectors still match the previous embedder; the drift is reported by `tome status` / `tome doctor` and blocks partial re-embeds (`plugin enable`, `catalog update`) so a half-migrated index can never occur. Switching the reranker only (or moving between profiles that share an embedder) needs no reindex; if the new reranker isn't downloaded yet, the switch hints `tome models download`.
+
+#### Existing installs
+
+An index created before profiles existed was built with `bge-small-en-v1.5`, so it is **auto-mapped to the `small` profile** on first open — no reindex, no re-download, seamless. Its stored 384-d vectors already match the small embedder, so nothing changes until you explicitly switch profiles.
+
+#### Downloading
+
+The first `tome plugin enable` on a fresh machine prompts to download the active profile's set. `tome models download` fetches the active profile's models; `tome models download --all` fetches every model in every profile. The summariser generates workspace summaries; if you decline it at enable time, summary generation is silently skipped until it's present — indexing and search still work with just the embedder + reranker.
 
 ### Privacy & telemetry
 

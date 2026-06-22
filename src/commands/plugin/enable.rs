@@ -25,8 +25,7 @@ use crate::presentation::{colour, progress, prompt};
 use crate::workspace::ResolvedScope;
 
 use super::{
-    embedder_entry, human_mb, missing_models, open_index_for_read, registry_seeds,
-    resolve_plugin_dir,
+    human_mb, missing_models_for_profile, open_index_for_read, registry_seeds, resolve_plugin_dir,
 };
 
 pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
@@ -43,6 +42,21 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     // the DB (F11b), so we open a read-only handle here.
     let conn = open_index_for_read(&paths, &scope.scope)?;
     let _ = resolve_plugin_dir(&id, &conn, scope.scope.name().as_str(), &paths)?;
+
+    // B4: resolve the ACTIVE profile's embedder (not the hard-coded default).
+    let embedder_meta = crate::index::meta::active_embedder(&conn)?;
+
+    // B3: refuse a partial re-embed under embedder drift BEFORE any model work.
+    // If the configured active-profile embedder no longer matches the embedder
+    // stamped in `meta`, enabling a plugin would land a new-dimension vector in
+    // a table of old-dimension vectors. Direct the user at `tome reindex`.
+    crate::index::meta::guard_embedder_drift(
+        &conn,
+        &crate::index::meta::ModelIdent {
+            name: embedder_meta.name.to_owned(),
+            version: embedder_meta.version.to_owned(),
+        },
+    )?;
     drop(conn);
 
     // Model-presence handling — T074 UI side. The lifecycle's
@@ -53,7 +67,6 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
 
     // Construct the real embedder. Reranker isn't loaded on enable (the
     // query path will load it on demand).
-    let embedder_meta = embedder_entry();
     let embedder_dir = paths.model_path(embedder_meta.name)?;
     let embedder = FastembedEmbedder::load(embedder_meta, &embedder_dir)?;
 
@@ -175,7 +188,23 @@ fn ensure_models_or_prompt(
     args: &PluginEnableArgs,
     mode: Mode,
 ) -> Result<(), TomeError> {
-    let missing = missing_models(paths);
+    // B2: only prompt for the ACTIVE profile's embedder + reranker, not every
+    // profile's models in the registry. Resolve the active profile from the
+    // index `meta`; on a fresh install (no DB yet) fall back to the default
+    // profile, which is exactly what the bootstrap will stamp.
+    let missing = if paths.index_db.is_file() {
+        let conn = crate::index::open_read_only(&paths.index_db)?;
+        missing_models_for_profile(paths, &conn)?
+    } else {
+        use crate::embedding::profile::{Profile, embedder_for, reranker_for};
+        [
+            embedder_for(Profile::DEFAULT),
+            reranker_for(Profile::DEFAULT),
+        ]
+        .into_iter()
+        .filter(|e| !super::model_manifest_ok(paths, e))
+        .collect::<Vec<_>>()
+    };
     if missing.is_empty() {
         return Ok(());
     }

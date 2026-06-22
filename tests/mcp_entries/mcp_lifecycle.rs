@@ -36,53 +36,26 @@
 use std::io::Write;
 
 use crate::common::{ToolEnv, fabricate_all_registry_models, paths_for};
-use tome::embedding::registry::{MODEL_REGISTRY, ModelKind};
 use tome::index::{MetaSeed, OpenOptions, SCHEMA_VERSION, open};
 
+/// Seed `meta` with the DEFAULT profile's embedder + reranker. Preflight (B4)
+/// resolves the active profile's models via `active_embedder`/`active_reranker`
+/// — the default is Medium (`bge-base-en-v1.5`) — so the seed must match or the
+/// embedder-drift check (41) would shadow the artefact checks (30/32) these
+/// tests target. The summariser keeps the registry's single summariser entry.
 fn open_opts() -> OpenOptions {
+    use tome::embedding::profile::{Profile, embedder_for, reranker_for};
+    let e = embedder_for(Profile::DEFAULT);
+    let r = reranker_for(Profile::DEFAULT);
+    let s = tome::summarise::registry::summariser_entry();
+    let seed = |name: &str, version: &str| MetaSeed {
+        name: name.into(),
+        version: version.into(),
+    };
     OpenOptions {
-        embedder: MetaSeed {
-            name: MODEL_REGISTRY
-                .iter()
-                .find(|m| m.kind == ModelKind::Embedder)
-                .unwrap()
-                .name
-                .into(),
-            version: MODEL_REGISTRY
-                .iter()
-                .find(|m| m.kind == ModelKind::Embedder)
-                .unwrap()
-                .version
-                .into(),
-        },
-        reranker: MetaSeed {
-            name: MODEL_REGISTRY
-                .iter()
-                .find(|m| m.kind == ModelKind::Reranker)
-                .unwrap()
-                .name
-                .into(),
-            version: MODEL_REGISTRY
-                .iter()
-                .find(|m| m.kind == ModelKind::Reranker)
-                .unwrap()
-                .version
-                .into(),
-        },
-        summariser: MetaSeed {
-            name: MODEL_REGISTRY
-                .iter()
-                .find(|m| m.kind == ModelKind::Summariser)
-                .unwrap()
-                .name
-                .into(),
-            version: MODEL_REGISTRY
-                .iter()
-                .find(|m| m.kind == ModelKind::Summariser)
-                .unwrap()
-                .version
-                .into(),
-        },
+        embedder: seed(e.name, e.version),
+        reranker: seed(r.name, r.version),
+        summariser: seed(s.name, s.version),
     }
 }
 

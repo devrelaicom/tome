@@ -556,21 +556,22 @@ fn registry_seeds_for_test() -> (
     tome::index::MetaSeed,
     tome::index::MetaSeed,
 ) {
-    let pick = |kind| {
-        let entry = tome::embedding::registry::MODEL_REGISTRY
-            .iter()
-            .find(|m| std::mem::discriminant(&m.kind) == std::mem::discriminant(&kind))
-            .unwrap();
-        tome::index::MetaSeed {
-            name: entry.name.to_owned(),
-            version: entry.version.to_owned(),
-        }
+    // Use the DEFAULT profile's models to match what `registry_seeds()` (the
+    // production function) returns. Previously this picked the first entry of
+    // each kind, but with multiple embedders/rerankers registered for Phase 2
+    // model tiering, "first" is no longer the default. Drift-checking tests
+    // that call `enrol_catalog_row` (which uses this function to bootstrap the
+    // DB) + later call `assemble_report` (which checks against the DEFAULT
+    // profile) must see the same identity here.
+    use tome::embedding::profile::{Profile, embedder_for, reranker_for};
+    let e = embedder_for(Profile::DEFAULT);
+    let r = reranker_for(Profile::DEFAULT);
+    let s = tome::summarise::registry::summariser_entry();
+    let seed = |m: &tome::embedding::registry::ModelEntry| tome::index::MetaSeed {
+        name: m.name.to_owned(),
+        version: m.version.to_owned(),
     };
-    (
-        pick(tome::embedding::registry::ModelKind::Embedder),
-        pick(tome::embedding::registry::ModelKind::Reranker),
-        pick(tome::embedding::registry::ModelKind::Summariser),
-    )
+    (seed(e), seed(r), seed(s))
 }
 
 /// Read every catalog enrolment for the privileged `global` workspace

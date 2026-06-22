@@ -63,6 +63,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - New exit codes **90/91/92** (`TelemetryEndpointUnreachable` /
   `TelemetryConfigInvalid` / `TelemetryQueueCorrupt`).
 
+### Model profiles
+
+- **Model tiering — `small` / `medium` / `large` profiles.** A profile selects
+  which embedder + reranker Tome uses, trading disk and CPU for retrieval
+  quality. `small` = `bge-small-en-v1.5` (384-d) + `bge-reranker-base`;
+  `medium` *(default)* = `bge-base-en-v1.5` (768-d) + `bge-reranker-large`;
+  `large` = `bge-large-en-v1.5` (1024-d) + `bge-reranker-v2-m3`. Every embedder
+  and reranker is a single-file quantized BGE model (MIT); the shared
+  `qwen2.5-0.5b-instruct` summariser (Apache-2.0) is unchanged across profiles.
+- **`tome models profile [<small|medium|large>]`** — show the active profile and
+  its embedder/reranker (with per-model install state), or set it. The active
+  profile is a global property stored in `index.db` `meta` (`model_profile`);
+  it is not per-workspace. `--json` supported.
+- **Switching the embedder requires a reindex, never a migration.** When a
+  profile switch changes the embedder (and therefore the embedding dimension),
+  `tome models profile <tier>` prints a clear `run \`tome reindex\`` notice and
+  does **not** auto-rebuild or attempt to convert existing vectors. Re-embedding
+  from the source skills is the only path; the existing drift→reindex mechanism
+  is the single resolver and still blocks partial re-embeds (`plugin enable`,
+  `catalog update`) until the whole index is rebuilt. A profile switch that only
+  changes the reranker needs no reindex (and hints `tome models download` when
+  the new reranker isn't installed).
+- **Existing installs auto-map to `small`.** An index created before profiles
+  existed was built with `bge-small-en-v1.5`, so it is mapped to the `small`
+  profile on first open — no reindex, no re-download, seamless.
+- **`tome models download` / `tome models list` are profile-aware.** `download`
+  defaults to the active profile's `{embedder, reranker, summariser}`; pass
+  `--all` to fetch every model in every profile. `list` annotates each row with
+  the profile(s) that reference it and marks the active set (`*` / JSON
+  `profiles` + `active`).
+
 ### Meta skills
 
 - **`tome meta {list,add,remove}`** — install Tome's own bundled, trusted

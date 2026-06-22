@@ -242,6 +242,14 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
             42,
             "embedder_version_drift",
         ),
+        (
+            TomeError::ReindexScopedEmbedderChange {
+                stored: "stub-embedder".into(),
+                configured: "bge-large-en-v1.5".into(),
+            },
+            47,
+            "reindex_scoped_embedder_change",
+        ),
         // 50–54 — index + catalog interaction
         (TomeError::IndexBusy, 50, "index_busy"),
         (
@@ -582,6 +590,7 @@ fn exhaustive_match_compile_check() {
             TomeError::QueryNoResultsStrict { .. } => 40,
             TomeError::EmbedderNameDrift { .. } => 41,
             TomeError::EmbedderVersionDrift { .. } => 42,
+            TomeError::ReindexScopedEmbedderChange { .. } => 47,
             TomeError::IndexBusy => 50,
             TomeError::IndexIntegrityCheckFailure(_) => 51,
             TomeError::SchemaTooNew { .. } => 52,

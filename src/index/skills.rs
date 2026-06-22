@@ -709,9 +709,10 @@ fn upsert_skill(
         )
         .map_err(|e| TomeError::IndexIntegrityCheckFailure(format!("look up skill id: {e}")))?;
 
-    // vec0 virtual tables do not support `INSERT OR REPLACE` or `ON CONFLICT`,
-    // so we DELETE-then-INSERT. The DELETE is a no-op when there's no prior
-    // row, so this is correct for both first-time inserts and re-embeds.
+    // The plain `skill_embeddings` BLOB table (schema v6) does not support
+    // `INSERT OR REPLACE` without a PRIMARY KEY conflict path, so we
+    // DELETE-then-INSERT. The DELETE is a no-op when there's no prior row,
+    // so this is correct for both first-time inserts and re-embeds.
     tx.execute(
         "DELETE FROM skill_embeddings WHERE skill_id = ?1",
         params![id],

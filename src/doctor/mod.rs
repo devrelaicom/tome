@@ -23,7 +23,6 @@ pub mod telemetry;
 
 use std::path::Path;
 
-use crate::commands::plugin::{embedder_entry, reranker_entry};
 use crate::commands::status::{check_drift, check_index, check_model};
 use crate::commands::workspace::info::assemble as assemble_workspace_info;
 use crate::error::TomeError;
@@ -31,6 +30,33 @@ use crate::index::meta::DriftStatus;
 use crate::paths::Paths;
 use crate::settings::{GlobalSettings, ProjectMarkerConfig, WorkspaceSettings};
 use crate::summarise::registry::summariser_entry;
+
+/// B4: resolve the ACTIVE profile's `(embedder, reranker)` registry entries.
+/// Opens the index read-only when present; on a fresh install (no DB yet) it
+/// falls back to the default profile, which the bootstrap will stamp.
+fn active_models(
+    paths: &Paths,
+) -> Result<
+    (
+        &'static crate::embedding::registry::ModelEntry,
+        &'static crate::embedding::registry::ModelEntry,
+    ),
+    TomeError,
+> {
+    if paths.index_db.is_file() {
+        let conn = crate::index::open_read_only(&paths.index_db)?;
+        Ok((
+            crate::index::meta::active_embedder(&conn)?,
+            crate::index::meta::active_reranker(&conn)?,
+        ))
+    } else {
+        use crate::embedding::profile::{Profile, embedder_for, reranker_for};
+        Ok((
+            embedder_for(Profile::DEFAULT),
+            reranker_for(Profile::DEFAULT),
+        ))
+    }
+}
 use crate::workspace::ResolvedScope;
 
 pub use report::{
@@ -91,8 +117,10 @@ pub fn assemble_report(
         Err(e) => return Err(e),
     };
 
-    let embedder_e = embedder_entry();
-    let reranker_e = reranker_entry();
+    // B4: the doctor checks only the ACTIVE profile's models (resolved from
+    // the index `meta`; default profile on a fresh install). Reporting every
+    // profile's models would surface spurious "missing" rows after Phase 2.
+    let (embedder_e, reranker_e) = active_models(paths)?;
     let summariser_e = summariser_entry();
     let embedder = check_model(paths, embedder_e, verify)?;
     let reranker = check_model(paths, reranker_e, verify)?;

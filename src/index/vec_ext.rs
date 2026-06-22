@@ -59,3 +59,46 @@ pub fn verify(conn: &Connection) -> Result<String, TomeError> {
     conn.query_row("SELECT vec_version()", [], |row| row.get::<_, String>(0))
         .map_err(|e| TomeError::VectorExtensionInitFailure(format!("vec_version() failed: {e}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn f32_blob(v: &[f32]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(v.len() * 4);
+        for f in v {
+            out.extend_from_slice(&f.to_le_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn vec_distance_cosine_works_on_raw_f32_blobs() {
+        register_globally().expect("register sqlite-vec");
+        let conn = Connection::open_in_memory().expect("open");
+        // identical vectors -> cosine distance 0; orthogonal -> 1.
+        let a = f32_blob(&[1.0, 0.0, 0.0]);
+        let b = f32_blob(&[1.0, 0.0, 0.0]);
+        let c = f32_blob(&[0.0, 1.0, 0.0]);
+        let same: f64 = conn
+            .query_row(
+                "SELECT vec_distance_cosine(?1, ?2)",
+                rusqlite::params![a, b],
+                |r| r.get(0),
+            )
+            .expect("cosine same");
+        let orth: f64 = conn
+            .query_row(
+                "SELECT vec_distance_cosine(?1, ?2)",
+                rusqlite::params![a, c],
+                |r| r.get(0),
+            )
+            .expect("cosine orth");
+        assert!(same.abs() < 1e-6, "identical vectors -> ~0, got {same}");
+        assert!(
+            (orth - 1.0).abs() < 1e-6,
+            "orthogonal vectors -> ~1, got {orth}"
+        );
+    }
+}

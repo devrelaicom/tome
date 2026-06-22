@@ -7,21 +7,15 @@
 
 use crate::common::ToolEnv;
 use serde_json::Value;
-use tome::embedding::ModelKind;
-use tome::embedding::registry::MODEL_REGISTRY;
 
 fn embedder_entry() -> &'static tome::embedding::registry::ModelEntry {
-    MODEL_REGISTRY
-        .iter()
-        .find(|e| matches!(e.kind, ModelKind::Embedder))
-        .expect("embedder entry")
+    use tome::embedding::profile::{Profile, embedder_for};
+    embedder_for(Profile::DEFAULT)
 }
 
 fn reranker_entry() -> &'static tome::embedding::registry::ModelEntry {
-    MODEL_REGISTRY
-        .iter()
-        .find(|e| matches!(e.kind, ModelKind::Reranker))
-        .expect("reranker entry")
+    use tome::embedding::profile::{Profile, reranker_for};
+    reranker_for(Profile::DEFAULT)
 }
 
 #[test]

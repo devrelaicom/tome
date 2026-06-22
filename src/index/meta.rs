@@ -30,6 +30,11 @@ pub enum MetaKey {
     SummariserName,
     SummariserVersion,
     CreatedAt,
+    /// Phase p11 / model tiering: which profile (small/medium/large) this
+    /// index was bootstrapped with. Written at bootstrap and at profile-switch
+    /// time. Absent in pre-v6 DBs — `active_profile` defaults to
+    /// `Profile::DEFAULT` in that case.
+    ModelProfile,
 }
 
 impl MetaKey {
@@ -43,6 +48,7 @@ impl MetaKey {
             Self::SummariserName => "summariser_name",
             Self::SummariserVersion => "summariser_version",
             Self::CreatedAt => "created_at",
+            Self::ModelProfile => "model_profile",
         }
     }
 }
@@ -166,4 +172,120 @@ pub fn detect_drift(
         });
     }
     Ok(DriftStatus::None)
+}
+
+/// The active model profile recorded in `meta`. Absent → Profile::DEFAULT
+/// (forward-compat for a DB written before this row existed).
+pub fn active_profile(
+    conn: &Connection,
+) -> Result<crate::embedding::profile::Profile, crate::error::TomeError> {
+    use crate::embedding::profile::Profile;
+    Ok(read(conn, MetaKey::ModelProfile)?
+        .as_deref()
+        .and_then(Profile::from_tier_str)
+        .unwrap_or(Profile::DEFAULT))
+}
+
+/// The embedder registry entry the ACTIVE profile selects (B4). Conn-bearing
+/// call sites resolve through this rather than the removed zero-arg
+/// `embedder_entry()` so a non-default profile's embedder is honoured
+/// everywhere a connection is in hand.
+pub fn active_embedder(
+    conn: &Connection,
+) -> Result<&'static crate::embedding::registry::ModelEntry, TomeError> {
+    Ok(crate::embedding::profile::embedder_for(active_profile(
+        conn,
+    )?))
+}
+
+/// The reranker registry entry the ACTIVE profile selects (B4). Companion to
+/// [`active_embedder`].
+pub fn active_reranker(
+    conn: &Connection,
+) -> Result<&'static crate::embedding::registry::ModelEntry, TomeError> {
+    Ok(crate::embedding::profile::reranker_for(active_profile(
+        conn,
+    )?))
+}
+
+/// B3 / model-tiering drift guard. Refuses any partial-re-embed path
+/// (`plugin enable`, `catalog update`) when the configured active-profile
+/// embedder no longer matches the embedder identity stamped in `meta`.
+///
+/// Embedder name OR version drift returns the corresponding
+/// [`TomeError::EmbedderNameDrift`] / [`TomeError::EmbedderVersionDrift`]
+/// (exit 41 / 42), each of which directs the user at `tome reindex --force`.
+/// Reranker / summariser drift do NOT block — only the embedder change
+/// invalidates the stored vectors' dimension. `reindex` is the sole resolver
+/// and is exempt (it forces the whole-index re-embed itself, B1).
+pub fn guard_embedder_drift(
+    conn: &Connection,
+    configured_embedder: &ModelIdent,
+) -> Result<(), TomeError> {
+    let stored_embedder_name = read(conn, MetaKey::EmbedderName)?.unwrap_or_default();
+    let stored_embedder_version = read(conn, MetaKey::EmbedderVersion)?.unwrap_or_default();
+
+    if stored_embedder_name != configured_embedder.name {
+        return Err(TomeError::EmbedderNameDrift {
+            stored: stored_embedder_name,
+            configured: configured_embedder.name.clone(),
+        });
+    }
+    if stored_embedder_version != configured_embedder.version {
+        return Err(TomeError::EmbedderVersionDrift {
+            stored: stored_embedder_version,
+            configured: configured_embedder.version.clone(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_mem() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;")
+            .unwrap();
+        conn
+    }
+
+    #[test]
+    fn active_profile_defaults_to_medium_when_absent() {
+        use crate::embedding::profile::Profile;
+        let conn = open_mem();
+        let p = active_profile(&conn).expect("active_profile should not fail on absent row");
+        assert_eq!(p, Profile::DEFAULT);
+        assert_eq!(p, Profile::Medium);
+    }
+
+    #[test]
+    fn active_profile_round_trips_all_tiers() {
+        use crate::embedding::profile::Profile;
+        let conn = open_mem();
+        for p in Profile::ALL {
+            write(&conn, MetaKey::ModelProfile, p.as_str()).unwrap();
+            let got = active_profile(&conn).expect("round-trip read");
+            assert_eq!(got, p, "round-trip failed for {:?}", p);
+        }
+    }
+
+    #[test]
+    fn active_profile_defaults_on_unknown_value() {
+        use crate::embedding::profile::Profile;
+        let conn = open_mem();
+        write(&conn, MetaKey::ModelProfile, "xl").unwrap();
+        let p = active_profile(&conn).expect("should not error on unknown tier");
+        assert_eq!(
+            p,
+            Profile::DEFAULT,
+            "unknown tier should fall back to DEFAULT"
+        );
+    }
+
+    #[test]
+    fn meta_key_model_profile_str_is_correct() {
+        assert_eq!(MetaKey::ModelProfile.as_str(), "model_profile");
+    }
 }

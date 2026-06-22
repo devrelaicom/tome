@@ -13,7 +13,6 @@ use crate::common::{
 use tempfile::TempDir;
 use tome::commands::plugin::registry_seeds;
 use tome::commands::status::{OverallHealth, assemble_report};
-use tome::embedding::registry::MODEL_REGISTRY;
 use tome::embedding::stub::StubEmbedder;
 use tome::index::meta::{DriftStatus, MetaKey, write as write_meta};
 use tome::index::{self, OpenOptions};
@@ -140,12 +139,10 @@ fn status_degraded_when_only_reranker_missing() {
     std::fs::create_dir_all(&paths.root).unwrap();
     crate::common::fabricate_all_registry_models(&paths);
 
-    // Now remove just the reranker dir.
-    let reranker_name = MODEL_REGISTRY
-        .iter()
-        .find(|e| matches!(e.kind, tome::embedding::ModelKind::Reranker))
-        .unwrap()
-        .name;
+    // Now remove just the reranker dir — use the DEFAULT profile's reranker
+    // so the removal matches what `assemble_report` checks.
+    use tome::embedding::profile::{Profile, reranker_for};
+    let reranker_name = reranker_for(Profile::DEFAULT).name;
     let reranker_dir = paths.models_dir.join(reranker_name);
     std::fs::remove_dir_all(&reranker_dir).unwrap();
 

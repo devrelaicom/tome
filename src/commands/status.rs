@@ -29,7 +29,6 @@ use crate::paths::Paths;
 use crate::workspace::{ResolvedScope, Scope};
 
 use crate::commands::models::{ModelState, cheap_state};
-use crate::commands::plugin::{embedder_entry, reranker_entry};
 
 mod art;
 
@@ -132,8 +131,22 @@ pub fn assemble_report(
     verify: bool,
 ) -> Result<StatusReport, TomeError> {
     let tome = env!("CARGO_PKG_VERSION").to_owned();
-    let embedder_entry = embedder_entry();
-    let reranker_entry = reranker_entry();
+    // B4: report the ACTIVE profile's models. Resolve from the index `meta`
+    // when the DB exists; on a fresh install fall back to the default profile
+    // (which the bootstrap will stamp).
+    let (embedder_entry, reranker_entry) = if paths.index_db.is_file() {
+        let conn = index::open_read_only(&paths.index_db)?;
+        (
+            crate::index::meta::active_embedder(&conn)?,
+            crate::index::meta::active_reranker(&conn)?,
+        )
+    } else {
+        use crate::embedding::profile::{Profile, embedder_for, reranker_for};
+        (
+            embedder_for(Profile::DEFAULT),
+            reranker_for(Profile::DEFAULT),
+        )
+    };
     let summariser_entry = crate::summarise::registry::summariser_entry();
 
     let embedder = check_model(paths, embedder_entry, verify)?;
@@ -791,8 +804,13 @@ fn dir_size(dir: &std::path::Path) -> u64 {
 /// When `json` is true, emits the structured form per
 /// `contracts/version-output.md`. Otherwise emits the three-line plain text.
 pub fn print_version(json: bool) {
-    let embedder = embedder_entry();
-    let reranker = reranker_entry();
+    // Conn-less: this runs pre-dispatch (a `main.rs` hook) before any DB is
+    // opened, so it reports the DEFAULT profile's models. `--version` therefore
+    // describes the default profile, not whatever a given index was
+    // bootstrapped with (documented in `contracts/version-output.md`).
+    use crate::embedding::profile::{Profile, embedder_for, reranker_for};
+    let embedder = embedder_for(Profile::DEFAULT);
+    let reranker = reranker_for(Profile::DEFAULT);
     let tome = env!("CARGO_PKG_VERSION");
     if json {
         #[derive(Serialize)]

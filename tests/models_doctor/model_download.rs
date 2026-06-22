@@ -89,6 +89,7 @@ fn entry_for(url: String, sha256: String, size: u64) -> &'static ModelEntry {
         sha256: Box::leak(sha256.into_boxed_str()),
         size_bytes: size,
         licence: "MIT",
+        embedding_dim: Some(384),
         files: &["model.onnx"],
         // Single-file fixture: no non-primary files, so no aux fetch.
         aux_urls: &[],

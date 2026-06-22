@@ -49,6 +49,11 @@ pub struct StubEmbedder {
     force_fail_after: Option<usize>,
     /// Shared counter so observers across clones see the same call total.
     call_count: Arc<AtomicUsize>,
+    /// Output vector length. `None` ⇒ the default 384-d. `Some(d)` lets the
+    /// model-tiering regression test (S1) stand in for a different-profile
+    /// embedder whose dimension differs, so a profile switch produces a real
+    /// dimension change without a network download.
+    dim: Option<usize>,
 }
 
 impl StubEmbedder {
@@ -63,6 +68,19 @@ impl StubEmbedder {
         Self {
             force_fail_after: Some(n),
             call_count: Arc::new(AtomicUsize::new(0)),
+            dim: None,
+        }
+    }
+
+    /// Construct a stub embedder whose output vectors have exactly `dim`
+    /// elements (S1). Used by the mixed-dimension regression test to model a
+    /// profile switch that changes the embedding dimension (e.g. 384 → 768)
+    /// with no real ONNX model.
+    pub fn with_dim(dim: usize) -> Self {
+        Self {
+            force_fail_after: None,
+            call_count: Arc::new(AtomicUsize::new(0)),
+            dim: Some(dim),
         }
     }
 
@@ -87,7 +105,7 @@ impl Embedder for StubEmbedder {
         } else {
             self.call_count.fetch_add(1, Ordering::SeqCst);
         }
-        Ok(deterministic_vector(text))
+        Ok(deterministic_vector(text, self.dim.unwrap_or(VECTOR_DIM)))
     }
 
     fn model_name(&self) -> &str {
@@ -182,16 +200,17 @@ pub fn make_test_pair() -> (StubEmbedder, StubReranker) {
     (StubEmbedder::new(), StubReranker)
 }
 
-fn deterministic_vector(text: &str) -> Vec<f32> {
-    // Build a 32-byte SHA-256, then tile it across the 384-element output as
+fn deterministic_vector(text: &str, dim: usize) -> Vec<f32> {
+    // Build a 32-byte SHA-256, then tile it across the `dim`-element output as
     // 4-byte chunks reinterpreted as i32 → f32. This is the construction
     // research §R10 calls out as a "simpler XOR-based hash that distributes
     // well"; the cosine distinguishability tests in tests/embedding_stub.rs
-    // pin the actual guarantee.
+    // pin the actual guarantee. `dim` defaults to `VECTOR_DIM` (384) for every
+    // caller except the dimension-parameterised regression stub (S1).
     let digest = Sha256::digest(text.as_bytes());
     let bytes: [u8; 32] = digest.into();
 
-    let mut out = vec![0.0f32; VECTOR_DIM];
+    let mut out = vec![0.0f32; dim];
     for (i, slot) in out.iter_mut().enumerate() {
         // Stride a window through the digest; mix in the index so different
         // positions get distinct values even when the digest happens to
