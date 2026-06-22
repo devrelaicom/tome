@@ -77,7 +77,6 @@ pub fn home_root() -> Result<PathBuf, TomeError> {
 pub struct Paths {
     pub root: PathBuf,
     pub global_config_file: PathBuf,
-    pub global_settings_file: PathBuf,
     pub index_db: PathBuf,
     pub index_lock: PathBuf,
     pub catalogs_dir: PathBuf,
@@ -103,7 +102,6 @@ impl Paths {
     /// [`home_root`] instead.
     pub fn from_root(root: PathBuf) -> Self {
         let global_config_file = root.join("config.toml");
-        let global_settings_file = root.join("settings.toml");
         let index_db = root.join("index.db");
         let index_lock = root.join("index.lock");
         let catalogs_dir = root.join("catalogs");
@@ -115,7 +113,6 @@ impl Paths {
         Self {
             root,
             global_config_file,
-            global_settings_file,
             index_db,
             index_lock,
             catalogs_dir,
@@ -339,7 +336,6 @@ mod tests {
         let p = fixture();
         assert_eq!(p.root, PathBuf::from("/tmp/tome-root"));
         assert_eq!(p.global_config_file, p.root.join("config.toml"));
-        assert_eq!(p.global_settings_file, p.root.join("settings.toml"));
         assert_eq!(p.index_db, p.root.join("index.db"));
         assert_eq!(p.index_lock, p.root.join("index.lock"));
         assert_eq!(p.catalogs_dir, p.root.join("catalogs"));

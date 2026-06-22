@@ -72,13 +72,9 @@ pub(crate) fn load_workspace_settings(
 ///
 /// The global harness layer now lives in `config.toml` under the `[harness]`
 /// section (Task 2). An absent file collapses to [`GlobalSettings::default`];
-/// a parse failure maps to [`TomeError::WorkspaceMalformed`] (exit 70) for
-/// backward-compatible error surfacing.
+/// a parse failure propagates as [`TomeError::ManifestInvalid`] (exit 5) —
+/// the same code `config::load` uses for all config-parse failures. The plan's
+/// Global Constraints mandate config-parse failures stay exit 5 (not exit 70).
 pub(crate) fn load_global_settings(paths: &Paths) -> Result<GlobalSettings, TomeError> {
-    crate::config::load(paths)
-        .map(|cfg| cfg.harness)
-        .map_err(|e| TomeError::WorkspaceMalformed {
-            path: paths.global_config_file.clone(),
-            reason: format!("parse global config: {e}"),
-        })
+    crate::config::load(paths).map(|cfg| cfg.harness)
 }

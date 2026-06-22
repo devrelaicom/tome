@@ -45,7 +45,7 @@
 //! | 16   | WorkspaceHasBoundProjects     | `workspace_remove_with_bound_projects_exits_16`           |
 //! | 17   | CompositionError              | `harness_list_with_composition_cycle_exits_17`            |
 //! | 18   | HarnessNotSupported           | `harness_list_with_unsupported_harness_exits_18`          |
-//! | 70   | WorkspaceMalformed            | `workspace_info_with_malformed_global_settings_exits_70`  |
+//! | 5    | ManifestInvalid               | `workspace_info_with_malformed_global_config_exits_5`     |
 //! | 7    | Io                            | `workspace_init_with_unwritable_parent_dir_exits_7` (unix)|
 //!
 //! Codes reachable only through embedder/inference paths (deferred to
@@ -390,11 +390,10 @@ fn workspace_use_harness_clash_exits_19_without_force() {
     )
     .expect("write global config");
 
-    // Task 2: use a separate TempDir for the project so walk_for_project_marker
-    // (which walks up from CWD) does not find `~/.tome/config.toml` as a
-    // project marker on its way up to the filesystem root.
-    let project_tmp = tempfile::TempDir::new().expect("project tempdir");
-    let project = project_tmp.path().to_path_buf();
+    // The project lives under $HOME. The walk guard (Critical fix) ensures that
+    // ~/.tome/config.toml is never mistaken for a project marker, so the
+    // project dir no longer needs to be in a separate TempDir outside $HOME.
+    let project = env.home_path().join("project");
     fs::create_dir_all(&project).expect("create project");
 
     // User-owned `tome` entry in .claude/settings.json.
@@ -954,11 +953,13 @@ fn harness_list_with_composition_cycle_exits_17() {
 }
 
 #[test]
-fn workspace_info_with_malformed_global_settings_exits_70() {
+fn workspace_info_with_malformed_global_config_exits_5() {
     // Write malformed TOML in the global config file, then call any
-    // command that parses it. `tome harness list` calls
-    // `config::load` → `WorkspaceMalformed` (exit 70).
-    // Task 2: global harness settings now live in config.toml [harness].
+    // command that parses it. `tome harness list` calls `config::load`
+    // which surfaces `ManifestInvalid::TomlParse` → exit 5.
+    // Task 2 / fix-3: config-parse failures must be exit 5 (not exit 70).
+    // The plan's Global Constraints mandate this: `config.toml` is a
+    // config-manifest, not a workspace settings file.
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     fs::create_dir_all(&paths.root).expect("data dir");
@@ -973,8 +974,56 @@ fn workspace_info_with_malformed_global_settings_exits_70() {
         .expect("spawn harness list");
     assert_eq!(
         out.status.code(),
+        Some(5),
+        "expected exit 5 ManifestInvalid (config parse failure), got {:?}, stdout:\n{}\nstderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+/// Critical fix (Task 2): `~/.tome/config.toml` (written by
+/// `harness use --scope global`) must NEVER be misidentified as a project
+/// marker by `walk_for_project_marker`. Running any command from a directory
+/// under `$HOME` (with no closer `.tome/config.toml`) must NOT exit 70
+/// (`WorkspaceMalformed`) from trying to parse the global config as a
+/// `ProjectMarkerConfig`. Instead it should resolve via the global fallback
+/// and exit 0 (or the expected code for the subcommand).
+#[test]
+fn global_config_present_does_not_cause_exit_70_for_commands_under_home() {
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    fs::create_dir_all(&paths.root).expect("data dir");
+
+    // Write a valid global config with [harness].enabled.
+    fs::write(
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"claude-code\"]\n",
+    )
+    .expect("write global config");
+
+    // A project directory UNDER $HOME with no .tome/ marker of its own.
+    // Before the walk guard fix, the walk would stop at $HOME/.tome/config.toml
+    // and try to parse it as a ProjectMarkerConfig → exit 70.
+    let project = env.home_path().join("unmarked-project");
+    fs::create_dir_all(&project).expect("create project dir");
+
+    // `tome harness list` resolves the effective harness list. With the walk
+    // guard it should either exit 0 (global fallback works) or 18 (unsupported
+    // harness in the list — but "claude-code" is valid so expect 0 or possibly
+    // a non-zero code from list printing, NOT 70).
+    let out = env
+        .cmd()
+        .current_dir(&project)
+        .args(["harness", "list"])
+        .output()
+        .expect("spawn harness list from unmarked project under home");
+
+    assert_ne!(
+        out.status.code(),
         Some(70),
-        "expected exit 70 WorkspaceMalformed, got {:?}, stdout:\n{}\nstderr:\n{}",
+        "global config.toml must NOT be misidentified as a project marker \
+         (walk guard fix); got {:?}, stdout:\n{}\nstderr:\n{}",
         out.status.code(),
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
@@ -1092,10 +1141,9 @@ fn workspace_use_malformed_hooks_exits_43() {
         .expect("enrol skill");
     }
 
-    // Task 2: use a separate TempDir so walk_for_project_marker doesn't
-    // find `~/.tome/config.toml` on its way up from the project directory.
-    let project_tmp = tempfile::TempDir::new().expect("project tempdir");
-    let project = project_tmp.path().to_path_buf();
+    // The project lives under $HOME. The walk guard (Critical fix) ensures that
+    // ~/.tome/config.toml is never mistaken for a project marker.
+    let project = env.home_path().join("project");
     fs::create_dir_all(&project).expect("create project");
 
     let out = env
@@ -1228,10 +1276,9 @@ fn workspace_use_malformed_agent_exits_45() {
         .expect("enrol agent");
     }
 
-    // Task 2: use a separate TempDir so walk_for_project_marker doesn't
-    // find `~/.tome/config.toml` on its way up from the project directory.
-    let project_tmp = tempfile::TempDir::new().expect("project tempdir");
-    let project = project_tmp.path().to_path_buf();
+    // The project lives under $HOME. The walk guard (Critical fix) ensures that
+    // ~/.tome/config.toml is never mistaken for a project marker.
+    let project = env.home_path().join("project");
     fs::create_dir_all(&project).expect("create project");
 
     let out = env

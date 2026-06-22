@@ -334,4 +334,12 @@ fn use_global_scope_writes_config_harness_table() {
         !paths.root.join("settings.toml").exists(),
         "settings.toml must not exist after global harness use"
     );
+    // Round-trip assertion: config::load must parse back the written file
+    // and return the harness name in the enabled list.
+    let parsed = tome::config::load(&paths).expect("round-trip load must succeed");
+    assert_eq!(
+        parsed.harness.enabled.as_deref(),
+        Some(&["stub".to_string()][..]),
+        "round-trip: harness.enabled must contain exactly [stub]"
+    );
 }

@@ -126,14 +126,61 @@ fn require_workspace_membership(name: &WorkspaceName, paths: &Paths) -> Result<(
 /// swallow and fall through to global with a debug log (per Phase 3
 /// discipline carried forward).
 ///
+/// **Global-config exclusion (Task 2 / Critical fix):** `~/.tome/config.toml`
+/// is the global config file written by `harness use --scope global`. Before
+/// Task 2 it was never written; now it is, so any directory under `$HOME`
+/// (with no closer `.tome/config.toml` marker) would falsely trigger the walk
+/// and have the resolver try to parse the GLOBAL `Config` as a
+/// `ProjectMarkerConfig` (`deny_unknown_fields`) → `WorkspaceMalformed` (exit
+/// 70). The fix: resolve the global config path once, and SKIP any candidate
+/// where `marker == global_config_file`. The walk continues upward so a
+/// genuine project marker closer to `$HOME` than `$HOME` itself is still
+/// found.
+///
 /// `pub(crate)` since Phase 8: the `${TOME_PROJECT_DIR}` built-in reuses this
 /// exact CWD-walk as its fresh-walk fallback (when `ResolvedScope.project_root`
 /// is `None`, e.g. a pinned `--workspace`). Promoted at the second consumer —
 /// the single-source-of-truth pattern.
 pub(crate) fn walk_for_project_marker() -> Option<(PathBuf, PathBuf)> {
+    // Derive the global config path once so we can skip it on every
+    // iteration. If `$HOME` is unset we degrade gracefully — no
+    // exclusion, same behaviour as before.
+    //
+    // On macOS `$HOME` may resolve via a symlink (e.g. `/var/folders/…` is
+    // really `/private/var/folders/…`), while `std::env::current_dir()`
+    // returns the kernel-resolved form (with the `/private/` prefix). A raw
+    // string compare between the marker path derived from `here` (canonical)
+    // and the global_config_file derived from raw `$HOME` would fail even when
+    // they refer to the same inode. We fix this by canonicalizing the `$HOME`
+    // string itself — the home directory must exist for Tome to function, so
+    // `canonicalize()` on it should succeed. We build the expected global
+    // config path as `<canonical_home>/.tome/config.toml`.
+    let global_config_canonical: Option<PathBuf> = std::env::var_os("HOME").map(|h| {
+        let home = PathBuf::from(h);
+        // Canonicalize $HOME so the path form matches `current_dir()` output.
+        let canon_home = home.canonicalize().unwrap_or(home);
+        canon_home.join(".tome").join("config.toml")
+    });
+
     let mut here = std::env::current_dir().ok()?;
     loop {
         let marker = Paths::project_marker_config(&here);
+
+        // Skip the global config file — it must never be interpreted as a
+        // project marker. `here` came from `current_dir()` which is already
+        // in canonical form on macOS; `global_config_canonical` was built
+        // from the canonicalized `$HOME`, so both sides are in the same form.
+        if global_config_canonical
+            .as_ref()
+            .is_some_and(|gc| gc == &marker)
+        {
+            // Continue walking upward — don't stop here.
+            if !here.pop() {
+                break;
+            }
+            continue;
+        }
+
         match marker.try_exists() {
             Ok(true) => {
                 let canon = here.canonicalize().unwrap_or(here.clone());

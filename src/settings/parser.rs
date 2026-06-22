@@ -1,4 +1,4 @@
-//! Thin TOML deserialisation entry points for the three settings shapes.
+//! Thin TOML deserialisation entry points for the two settings shapes.
 //!
 //! Each function takes the **content** of one settings file (UTF-8) and
 //! returns the strongly-typed value or a [`ParseError`] carrying the
@@ -10,11 +10,16 @@
 //! These functions are intentionally content-only — keeping them
 //! path-free lets the resolver tests construct fixtures inline without
 //! a `tempfile::TempDir` round-trip.
+//!
+//! Note: the former `parse_global` function has been removed (Task 2 /
+//! fix-4). The global harness layer now lives in `config.toml` under the
+//! `[harness]` section and is loaded via `crate::config::load`. There is
+//! no longer a separate `settings.toml` global file.
 
 use std::fmt;
 use std::path::Path;
 
-use super::{GlobalSettings, ProjectMarkerConfig, WorkspaceSettings};
+use super::{ProjectMarkerConfig, WorkspaceSettings};
 use crate::error::TomeError;
 
 /// Error returned by the parser functions. Path-free by design: the
@@ -32,7 +37,6 @@ pub struct ParseError {
 enum SettingsLayer {
     Workspace,
     ProjectMarker,
-    Global,
 }
 
 impl fmt::Display for SettingsLayer {
@@ -40,7 +44,6 @@ impl fmt::Display for SettingsLayer {
         match self {
             Self::Workspace => f.write_str("workspace settings"),
             Self::ProjectMarker => f.write_str("project marker config"),
-            Self::Global => f.write_str("global settings"),
         }
     }
 }
@@ -77,16 +80,6 @@ pub fn parse_workspace(content: &str) -> Result<WorkspaceSettings, ParseError> {
 pub fn parse_project_marker(content: &str) -> Result<ProjectMarkerConfig, ParseError> {
     toml::from_str(content).map_err(|source| ParseError {
         layer: SettingsLayer::ProjectMarker,
-        source,
-    })
-}
-
-/// Parse the global settings file (`<root>/settings.toml`). The empty
-/// string yields an empty [`GlobalSettings`] because every field is
-/// `#[serde(default)]`.
-pub fn parse_global(content: &str) -> Result<GlobalSettings, ParseError> {
-    toml::from_str(content).map_err(|source| ParseError {
-        layer: SettingsLayer::Global,
         source,
     })
 }
