@@ -69,12 +69,12 @@ impl Fixture {
         let paths = lifecycle_paths(&home_path.join(".tome"));
         fs::create_dir_all(&paths.root).expect("create tome root");
 
-        // Global settings.toml declares the effective harness list.
+        // Task 2: global harness settings now live in config.toml [harness].enabled.
         fs::write(
-            &paths.global_settings_file,
-            "harnesses = [\"claude-code\"]\n",
+            &paths.global_config_file,
+            "[harness]\nenabled = [\"claude-code\"]\n",
         )
-        .expect("write global settings");
+        .expect("write global config");
 
         // Seed the workspace row.
         seed_workspace(&paths, workspace_name);

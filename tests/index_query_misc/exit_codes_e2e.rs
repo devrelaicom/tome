@@ -382,14 +382,19 @@ fn workspace_use_harness_clash_exits_19_without_force() {
         seed_workspace(&paths, "test-ws");
     }
 
-    // Global settings declare claude-code as the only effective harness.
+    // Global config declares claude-code as the only effective harness.
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
     fs::write(
-        &paths.global_settings_file,
-        "harnesses = [\"claude-code\"]\n",
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"claude-code\"]\n",
     )
-    .expect("write global settings");
+    .expect("write global config");
 
-    let project = env.home_path().join("project");
+    // Task 2: use a separate TempDir for the project so walk_for_project_marker
+    // (which walks up from CWD) does not find `~/.tome/config.toml` as a
+    // project marker on its way up to the filesystem root.
+    let project_tmp = tempfile::TempDir::new().expect("project tempdir");
+    let project = project_tmp.path().to_path_buf();
     fs::create_dir_all(&project).expect("create project");
 
     // User-owned `tome` entry in .claude/settings.json.
@@ -511,12 +516,13 @@ fn doctor_fix_user_owned_mcp_exits_75() {
     fabricate_all_registry_models(&paths);
     seed_workspace_with_registry_seeds(&paths, "test-ws");
 
-    // Global settings declare claude-code.
+    // Global config declares claude-code.
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
     fs::write(
-        &paths.global_settings_file,
-        "harnesses = [\"claude-code\"]\n",
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"claude-code\"]\n",
     )
-    .expect("write global settings");
+    .expect("write global config");
 
     let project = env.home_path().join("project");
     fs::create_dir_all(project.join(".tome")).expect("create project marker dir");
@@ -611,11 +617,12 @@ fn doctor_fix_force_user_owned_mcp_exits_0() {
     fabricate_all_registry_models(&paths);
     seed_workspace_with_registry_seeds(&paths, "test-ws");
 
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
     fs::write(
-        &paths.global_settings_file,
-        "harnesses = [\"claude-code\"]\n",
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"claude-code\"]\n",
     )
-    .expect("write global settings");
+    .expect("write global config");
 
     let project = env.home_path().join("project");
     fs::create_dir_all(project.join(".tome")).expect("create project marker dir");
@@ -860,8 +867,12 @@ fn harness_list_with_unsupported_harness_exits_18() {
     let paths = paths_for(&env);
     fs::create_dir_all(&paths.root).expect("data dir");
 
-    fs::write(&paths.global_settings_file, "harnesses = [\"bogus\"]\n")
-        .expect("write global settings");
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
+    fs::write(
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"bogus\"]\n",
+    )
+    .expect("write global config");
 
     let out = env
         .cmd()
@@ -944,18 +955,16 @@ fn harness_list_with_composition_cycle_exits_17() {
 
 #[test]
 fn workspace_info_with_malformed_global_settings_exits_70() {
-    // Write malformed TOML in the global settings file, then call any
+    // Write malformed TOML in the global config file, then call any
     // command that parses it. `tome harness list` calls
-    // `parse_global` → `WorkspaceMalformed` (exit 70).
+    // `config::load` → `WorkspaceMalformed` (exit 70).
+    // Task 2: global harness settings now live in config.toml [harness].
     let env = ToolEnv::new();
     let paths = paths_for(&env);
     fs::create_dir_all(&paths.root).expect("data dir");
 
-    fs::write(
-        &paths.global_settings_file,
-        "this is = not = valid = toml\n",
-    )
-    .expect("write malformed settings");
+    fs::write(&paths.global_config_file, "this is = not = valid = toml\n")
+        .expect("write malformed config");
 
     let out = env
         .cmd()
@@ -1029,11 +1038,12 @@ fn workspace_use_malformed_hooks_exits_43() {
     seed_workspace_with_registry_seeds(&paths, "test-ws");
 
     // claude-code is the only effective harness (the sole RealJson harness).
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
     fs::write(
-        &paths.global_settings_file,
-        "harnesses = [\"claude-code\"]\n",
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"claude-code\"]\n",
     )
-    .expect("write global settings");
+    .expect("write global config");
 
     // Seed a catalog enrolment + an enabled `skill` row for `plugin-a`, and
     // plant a MALFORMED `hooks/hooks.json` under the plugin's on-disk root
@@ -1082,7 +1092,10 @@ fn workspace_use_malformed_hooks_exits_43() {
         .expect("enrol skill");
     }
 
-    let project = env.home_path().join("project");
+    // Task 2: use a separate TempDir so walk_for_project_marker doesn't
+    // find `~/.tome/config.toml` on its way up from the project directory.
+    let project_tmp = tempfile::TempDir::new().expect("project tempdir");
+    let project = project_tmp.path().to_path_buf();
     fs::create_dir_all(&project).expect("create project");
 
     let out = env
@@ -1160,11 +1173,12 @@ fn workspace_use_malformed_agent_exits_45() {
     seed_workspace_with_registry_seeds(&paths, "test-ws");
 
     // claude-code supports native agents → the sync agents pass translates.
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
     fs::write(
-        &paths.global_settings_file,
-        "harnesses = [\"claude-code\"]\n",
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"claude-code\"]\n",
     )
-    .expect("write global settings");
+    .expect("write global config");
 
     // Plant a MALFORMED agent source (no frontmatter delimiters at all) under
     // the plugin's on-disk root (manifest-less fallback:
@@ -1214,7 +1228,10 @@ fn workspace_use_malformed_agent_exits_45() {
         .expect("enrol agent");
     }
 
-    let project = env.home_path().join("project");
+    // Task 2: use a separate TempDir so walk_for_project_marker doesn't
+    // find `~/.tome/config.toml` on its way up from the project directory.
+    let project_tmp = tempfile::TempDir::new().expect("project tempdir");
+    let project = project_tmp.path().to_path_buf();
     fs::create_dir_all(&project).expect("create project");
 
     let out = env

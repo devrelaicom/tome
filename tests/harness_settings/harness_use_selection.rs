@@ -72,9 +72,10 @@ fn explicit_names_select_exactly_those() {
     assert_eq!(report.selection, "explicit");
     assert_eq!(ok_names(&report), vec!["claude-code", "codex", "cursor"]);
 
-    let body = std::fs::read_to_string(&paths.global_settings_file).unwrap();
+    // Task 2: global scope now writes to config.toml [harness].enabled.
+    let body = std::fs::read_to_string(&paths.global_config_file).unwrap();
     for h in ["claude-code", "codex", "cursor"] {
-        assert!(body.contains(h), "settings must include {h}: {body}");
+        assert!(body.contains(h), "config must include {h}: {body}");
     }
 }
 
@@ -121,15 +122,16 @@ fn all_flag_selects_every_supported_excluding_generics() {
     // goose IS supported (detectable), so --all includes it.
     assert!(names.contains(&"goose".to_string()), "goose is in --all");
 
-    // F3a: the report is not the only surface — the settings file must have been
+    // F3a: the report is not the only surface — the config file must have been
     // written too. Every SUPPORTED harness name is persisted, and NEITHER opt-in
     // generic appears (the write side mirrors the selection).
-    let body = std::fs::read_to_string(&paths.global_settings_file)
-        .expect("--all must write the global settings file");
+    // Task 2: global scope now writes to config.toml [harness].enabled.
+    let body = std::fs::read_to_string(&paths.global_config_file)
+        .expect("--all must write the global config file");
     for m in tome::harness::SUPPORTED_HARNESSES {
         assert!(
             body.contains(m.name()),
-            "settings file must persist {}: {body}",
+            "config file must persist {}: {body}",
             m.name(),
         );
     }
@@ -176,12 +178,13 @@ fn alias_and_canonical_collapse_to_single_pass() {
         "antigravity-cli + gemini must collapse to one gemini pass",
     );
 
-    // The settings array contains exactly one `gemini` entry (no double-write).
-    let body = std::fs::read_to_string(&paths.global_settings_file).unwrap();
+    // The config array contains exactly one `gemini` entry (no double-write).
+    // Task 2: global scope now writes to config.toml [harness].enabled.
+    let body = std::fs::read_to_string(&paths.global_config_file).unwrap();
     assert_eq!(
         body.matches("gemini").count(),
         1,
-        "gemini must appear exactly once in settings: {body}",
+        "gemini must appear exactly once in config: {body}",
     );
 }
 

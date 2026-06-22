@@ -64,11 +64,13 @@ harnesses = [[workspaces.bar]]
 fn harnesses_as_array_of_strings_parses_cleanly() {
     // Counter-test: the bracket-containing forms used as TOML strings
     // (the actual contract per FR-450) must parse cleanly.
+    // Task 2: global settings use `enabled` (not `harnesses`) per the
+    // migration to `config.toml [harness]`.
     let body = r#"
-harnesses = ["[workspace]", "[global]", "[workspaces.foo]", "!cursor", "claude-code"]
+enabled = ["[workspace]", "[global]", "[workspaces.foo]", "!cursor", "claude-code"]
 "#;
     let parsed = parser::parse_global(body).expect("must parse string array");
-    let list = parsed.harnesses.expect("declared");
+    let list = parsed.enabled.expect("declared");
     assert_eq!(list.len(), 5);
     assert_eq!(list[0], "[workspace]");
     assert_eq!(list[1], "[global]");

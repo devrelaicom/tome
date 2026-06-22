@@ -76,8 +76,10 @@ impl Fixture {
         }
 
         if let Some(global) = global_settings {
-            std::fs::write(&paths.global_settings_file, format!("{global}\n"))
-                .expect("write global settings");
+            // Task 2: global harness settings now live in config.toml [harness].
+            // Wrap flat key=value body in the [harness] section.
+            std::fs::write(&paths.global_config_file, format!("[harness]\n{global}\n"))
+                .expect("write global config");
         }
 
         Fixture {

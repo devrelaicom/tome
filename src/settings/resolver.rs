@@ -158,7 +158,7 @@ pub fn resolve_effective_list<P: ScopeProvider>(
         && let Some(list) = ws.harnesses.as_ref()
     {
         (ScopeKind::Workspace, list.clone())
-    } else if let Some(list) = global_settings.harnesses.as_ref() {
+    } else if let Some(list) = global_settings.enabled.as_ref() {
         (ScopeKind::Global, list.clone())
     } else {
         return Ok(EffectiveHarnessList {
@@ -429,7 +429,7 @@ fn resolve_list<P: ScopeProvider>(
             }
             CompositionRef::Global => {
                 state.enter(ScopeKind::Global, "<global>")?;
-                let sub_result = if let Some(global_list) = global_settings.harnesses.as_ref() {
+                let sub_result = if let Some(global_list) = global_settings.enabled.as_ref() {
                     let mut sub_chain = source_chain.clone();
                     sub_chain.push("[global]".to_string());
                     resolve_list(
@@ -524,9 +524,10 @@ mod tests {
     fn global_only_declaration_includes_listed_harnesses() {
         let stub = StubScope::new();
         let global = GlobalSettings {
-            harnesses: Some(vec!["claude-code".to_owned(), "codex".to_owned()]),
+            enabled: Some(vec!["claude-code".to_owned(), "codex".to_owned()]),
             expose_agents_as_personas: None,
             strip_plugin_agent_privileges: None,
+            default_scope: None,
         };
         let result = resolve_effective_list(None, None, &global, &stub).unwrap();
         assert_eq!(result.harnesses.len(), 2);
@@ -544,9 +545,10 @@ mod tests {
         // `lookup` — otherwise this would error `HarnessNotSupported`.
         let stub = StubScope::new();
         let global = GlobalSettings {
-            harnesses: Some(vec!["generic".to_owned(), "generic-op".to_owned()]),
+            enabled: Some(vec!["generic".to_owned(), "generic-op".to_owned()]),
             expose_agents_as_personas: None,
             strip_plugin_agent_privileges: None,
+            default_scope: None,
         };
         let result = resolve_effective_list(None, None, &global, &stub).unwrap();
         let names: Vec<&str> = result.harnesses.iter().map(|h| h.name.as_str()).collect();

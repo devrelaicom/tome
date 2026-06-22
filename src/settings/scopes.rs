@@ -23,7 +23,7 @@
 
 use crate::error::TomeError;
 use crate::paths::Paths;
-use crate::settings::parser::{parse_global, parse_workspace, read_project_marker};
+use crate::settings::parser::{parse_workspace, read_project_marker};
 use crate::settings::{GlobalSettings, ProjectMarkerConfig, WorkspaceSettings};
 use crate::workspace::WorkspaceName;
 
@@ -68,21 +68,17 @@ pub(crate) fn load_workspace_settings(
     Ok(Some(ws))
 }
 
-/// Load `<root>/settings.toml` (global Tome settings).
+/// Load the global harness-settings layer from `<root>/config.toml [harness]`.
 ///
-/// An absent file collapses to [`GlobalSettings::default`]; a parse
-/// failure surfaces as [`TomeError::WorkspaceMalformed`] (exit 70).
+/// The global harness layer now lives in `config.toml` under the `[harness]`
+/// section (Task 2). An absent file collapses to [`GlobalSettings::default`];
+/// a parse failure maps to [`TomeError::WorkspaceMalformed`] (exit 70) for
+/// backward-compatible error surfacing.
 pub(crate) fn load_global_settings(paths: &Paths) -> Result<GlobalSettings, TomeError> {
-    let path = &paths.global_settings_file;
-    let body = match crate::util::bounded_read_to_string(path, crate::util::TOME_CONFIG_MAX) {
-        Ok(b) => b,
-        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(GlobalSettings::default());
-        }
-        Err(e) => return Err(e),
-    };
-    parse_global(&body).map_err(|e| TomeError::WorkspaceMalformed {
-        path: path.clone(),
-        reason: format!("parse global settings: {e}"),
-    })
+    crate::config::load(paths)
+        .map(|cfg| cfg.harness)
+        .map_err(|e| TomeError::WorkspaceMalformed {
+            path: paths.global_config_file.clone(),
+            reason: format!("parse global config: {e}"),
+        })
 }

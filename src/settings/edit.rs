@@ -99,6 +99,57 @@ pub fn remove_harness(doc: &mut DocumentMut, harness_name: &str) -> bool {
     array.len() != original_len
 }
 
+/// Append `harness_name` to the `[harness].enabled` array in a unified
+/// config doc (`config.toml`). Used when writing at global scope.
+///
+/// Creates the `[harness]` table and the `enabled` inline array when absent.
+/// Returns `true` iff the document was modified.
+pub fn add_harness_to_config(doc: &mut DocumentMut, harness_name: &str) -> bool {
+    let harness_tbl = doc
+        .entry("harness")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .expect("[harness] is always a table");
+
+    let entry = harness_tbl.entry("enabled").or_insert_with(|| {
+        let arr = Array::new();
+        Item::Value(Value::Array(arr))
+    });
+
+    let Some(array) = entry.as_array_mut() else {
+        let mut arr = Array::new();
+        arr.push(harness_name);
+        *entry = Item::Value(Value::Array(arr));
+        return true;
+    };
+
+    if array_contains(array, harness_name) {
+        return false;
+    }
+    array.push(harness_name);
+    true
+}
+
+/// Remove `harness_name` from the `[harness].enabled` array in a unified
+/// config doc. Returns `true` iff the document was modified.
+pub fn remove_harness_from_config(doc: &mut DocumentMut, harness_name: &str) -> bool {
+    let Some(harness_item) = doc.get_mut("harness") else {
+        return false;
+    };
+    let Some(harness_tbl) = harness_item.as_table_mut() else {
+        return false;
+    };
+    let Some(item) = harness_tbl.get_mut("enabled") else {
+        return false;
+    };
+    let Some(array) = item.as_array_mut() else {
+        return false;
+    };
+    let original_len = array.len();
+    array.retain(|v| v.as_str().map(|s| s != harness_name).unwrap_or(true));
+    array.len() != original_len
+}
+
 fn array_contains(array: &Array, needle: &str) -> bool {
     array
         .iter()

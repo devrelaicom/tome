@@ -43,7 +43,7 @@ use crate::error::TomeError;
 use crate::harness::{resolve_alias, sync, with_effective_modules};
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
-use crate::settings::edit::{add_harness, open_settings, save_settings};
+use crate::settings::edit::{add_harness, add_harness_to_config, open_settings, save_settings};
 use crate::workspace::ResolvedScope;
 
 use super::home_root;
@@ -265,8 +265,14 @@ fn configure_one(
     };
 
     // 2. Read-modify-write settings file.
+    // Global scope writes to `config.toml [harness].enabled`; other scopes
+    // use the legacy `harnesses = [...]` key in workspace/project settings.
     let mut doc = open_settings(settings_path)?;
-    let changed = add_harness(&mut doc, name);
+    let changed = if settings_path == paths.global_config_file.as_path() {
+        add_harness_to_config(&mut doc, name)
+    } else {
+        add_harness(&mut doc, name)
+    };
     if changed {
         save_settings(settings_path, &doc)?;
     }
@@ -371,7 +377,7 @@ pub(crate) fn resolve_settings_path(
             Ok(Paths::project_marker_config(project_root))
         }
         HarnessScopeArg::Workspace => Ok(paths.workspace_settings_file(scope.scope.name())),
-        HarnessScopeArg::Global => Ok(paths.global_settings_file.clone()),
+        HarnessScopeArg::Global => Ok(paths.global_config_file.clone()),
     }
 }
 

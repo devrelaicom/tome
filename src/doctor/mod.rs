@@ -513,7 +513,7 @@ fn build_effective_harness_list(
     paths: &Paths,
 ) -> Result<Option<crate::settings::resolver::EffectiveHarnessList>, TomeError> {
     use crate::commands::harness::CentralDbScopeProvider;
-    use crate::settings::parser::{parse_global, parse_workspace, read_project_marker};
+    use crate::settings::parser::{parse_workspace, read_project_marker};
     use crate::settings::resolver::resolve_effective_list;
 
     // Polish R-M5: route through canonical reader and discard any
@@ -532,13 +532,9 @@ fn build_effective_harness_list(
             .and_then(|body| parse_workspace(&body).ok())
     };
 
-    let global_settings: GlobalSettings = crate::util::bounded_read_to_string(
-        &paths.global_settings_file,
-        crate::util::TOME_CONFIG_MAX,
-    )
-    .ok()
-    .and_then(|body| parse_global(&body).ok())
-    .unwrap_or_default();
+    // Global harness layer now lives in `config.toml [harness]`.
+    // Swallow parse errors (doctor degrades gracefully on malformed config).
+    let global_settings: GlobalSettings = crate::config::load_or_default(paths).harness;
 
     let scope_provider = CentralDbScopeProvider::new(paths);
     match resolve_effective_list(

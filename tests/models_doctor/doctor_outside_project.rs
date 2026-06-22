@@ -60,10 +60,11 @@ fn doctor_outside_project_with_global_harnesses_uses_global_effective_list() {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_registry_models(&paths);
     let home = TempDir::new().unwrap();
-    // Declare a harness in global settings.
+    // Declare a harness in global config.
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
     std::fs::write(
-        &paths.global_settings_file,
-        "harnesses = [\"claude-code\"]\n",
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"claude-code\"]\n",
     )
     .unwrap();
 

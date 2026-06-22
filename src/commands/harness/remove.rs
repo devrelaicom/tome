@@ -26,7 +26,9 @@ use crate::error::TomeError;
 use crate::harness::sync;
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
-use crate::settings::edit::{open_settings, remove_harness, save_settings};
+use crate::settings::edit::{
+    open_settings, remove_harness, remove_harness_from_config, save_settings,
+};
 use crate::workspace::ResolvedScope;
 
 use super::home_root;
@@ -58,8 +60,14 @@ pub fn run(
         None => None,
     };
 
+    // Global scope reads/writes `config.toml [harness].enabled`; other
+    // scopes use the legacy `harnesses = [...]` key.
     let mut doc = open_settings(&settings_path)?;
-    let changed = remove_harness(&mut doc, &args.name);
+    let changed = if settings_path == paths.global_config_file.as_path() {
+        remove_harness_from_config(&mut doc, &args.name)
+    } else {
+        remove_harness(&mut doc, &args.name)
+    };
     if changed {
         save_settings(&settings_path, &doc)?;
     }

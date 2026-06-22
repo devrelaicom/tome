@@ -139,9 +139,13 @@ fn binding_commits_even_when_harness_clash_returns_exit_19() {
     // Global settings declare the stub as effective. The bind step
     // writes a fresh marker (overwriting anything we'd pre-staged here)
     // so the harnesses list has to come from a layer the bind doesn't
-    // touch — global settings.toml is the natural fit.
-    std::fs::write(&fx.paths.global_settings_file, "harnesses = [\"stub\"]\n")
-        .expect("write global settings");
+    // touch — global config.toml is the natural fit.
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
+    std::fs::write(
+        &fx.paths.global_config_file,
+        "[harness]\nenabled = [\"stub\"]\n",
+    )
+    .expect("write global config");
 
     let (project_root, result) = fx.bind_then_sync(false);
 
@@ -243,14 +247,15 @@ fn binding_commits_even_when_harness_io_fails() {
     perms.set_mode(0o500);
     std::fs::set_permissions(&read_only_dir, perms).expect("chmod 0500");
 
-    // Global settings declare the failing stub as effective (the bind
+    // Global config declares the failing stub as effective (the bind
     // step would otherwise wipe a hand-written harnesses key from the
     // project marker).
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
     std::fs::write(
-        &fx.paths.global_settings_file,
-        "harnesses = [\"failing-stub\"]\n",
+        &fx.paths.global_config_file,
+        "[harness]\nenabled = [\"failing-stub\"]\n",
     )
-    .expect("write global settings");
+    .expect("write global config");
 
     let (project_root, result) = fx.bind_then_sync(false);
 

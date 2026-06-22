@@ -215,11 +215,14 @@ fn parse_global_empty_is_default() {
 
 #[test]
 fn parse_global_with_harnesses() {
+    // Task 2: global settings now use `enabled` (not `harnesses`) per the
+    // migration to `config.toml [harness]`. `parse_global` still works as a
+    // flat-TOML→HarnessConfig parser; the field name changed.
     let toml = r#"
-harnesses = ["claude-code", "codex"]
+enabled = ["claude-code", "codex"]
 "#;
     let parsed = parser::parse_global(toml).unwrap();
-    let harnesses = parsed.harnesses.expect("declared");
+    let harnesses = parsed.enabled.expect("declared");
     assert_eq!(
         harnesses,
         vec!["claude-code".to_owned(), "codex".to_owned()]
@@ -229,7 +232,7 @@ harnesses = ["claude-code", "codex"]
 #[test]
 fn parse_global_rejects_unknown_field() {
     let toml = r#"
-harnesses = []
+enabled = []
 mystery = 42
 "#;
     let err = parser::parse_global(toml).expect_err("must reject unknown field");

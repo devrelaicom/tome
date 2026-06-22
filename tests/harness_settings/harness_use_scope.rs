@@ -69,6 +69,8 @@ fn use_project_scope_without_project_errors_with_usage() {
 
 #[test]
 fn use_global_scope_writes_global_settings_file() {
+    // Task 2: global scope now writes to config.toml [harness].enabled,
+    // not settings.toml. This test is updated accordingly.
     let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -88,10 +90,10 @@ fn use_global_scope_writes_global_settings_file() {
     let scope = make_resolved_scope("global", None);
     use_::run(args, &scope, &paths, Mode::Json).expect("use ok");
 
-    let body = std::fs::read_to_string(&paths.global_settings_file).expect("global settings");
+    let body = std::fs::read_to_string(&paths.global_config_file).expect("global config");
     assert!(
         body.contains("stub"),
-        "global settings must include stub: {body}"
+        "global config must include stub: {body}"
     );
 }
 
@@ -125,10 +127,11 @@ fn use_generic_op_global_scope_is_accepted() {
     let scope = make_resolved_scope("global", None);
     use_::run(args, &scope, &paths, Mode::Json).expect("use generic-op ok (not exit 18)");
 
-    let body = std::fs::read_to_string(&paths.global_settings_file).expect("global settings");
+    // Task 2: global scope now writes to config.toml [harness].enabled.
+    let body = std::fs::read_to_string(&paths.global_config_file).expect("global config");
     assert!(
         body.contains("generic-op"),
-        "global settings must include generic-op: {body}",
+        "global config must include generic-op: {body}",
     );
 }
 
@@ -261,9 +264,14 @@ fn use_idempotent_when_name_already_present_does_not_invoke_sync() {
     std::fs::create_dir_all(&paths.root).unwrap();
     // `global` is auto-seeded by index bootstrap; no manual seed needed.
 
-    // Pre-write global settings with stub already present.
-    std::fs::write(&paths.global_settings_file, "harnesses = [\"stub\"]\n").unwrap();
-    let mtime_before = std::fs::metadata(&paths.global_settings_file)
+    // Task 2: global scope now writes to config.toml [harness].enabled.
+    // Pre-write global config with stub already present.
+    std::fs::write(
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"stub\"]\n",
+    )
+    .unwrap();
+    let mtime_before = std::fs::metadata(&paths.global_config_file)
         .unwrap()
         .modified()
         .unwrap();
@@ -280,12 +288,50 @@ fn use_idempotent_when_name_already_present_does_not_invoke_sync() {
     let scope = make_resolved_scope("global", None);
     use_::run(args, &scope, &paths, Mode::Json).expect("use ok");
 
-    let mtime_after = std::fs::metadata(&paths.global_settings_file)
+    let mtime_after = std::fs::metadata(&paths.global_config_file)
         .unwrap()
         .modified()
         .unwrap();
     assert_eq!(
         mtime_before, mtime_after,
-        "settings file must not be rewritten"
+        "config file must not be rewritten"
+    );
+}
+
+/// Task 2: global scope must write `[harness] enabled` in `config.toml`,
+/// not a top-level `harnesses` key in `settings.toml`.
+#[test]
+fn use_global_scope_writes_config_harness_table() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let args = HarnessUseArgs {
+        names: vec!["stub".to_string()],
+        all: false,
+        scope: HarnessScopeArg::Global,
+        force: false,
+    };
+    let scope = make_resolved_scope("global", None);
+    use_::run(args, &scope, &paths, Mode::Json).expect("use ok");
+
+    let body = std::fs::read_to_string(&paths.global_config_file).unwrap();
+    assert!(
+        body.contains("[harness]"),
+        "config.toml must have [harness]: {body}"
+    );
+    assert!(
+        body.contains("stub"),
+        "config.toml must include stub: {body}"
+    );
+    // settings.toml must NOT be created anymore
+    assert!(
+        !paths.root.join("settings.toml").exists(),
+        "settings.toml must not exist after global harness use"
     );
 }

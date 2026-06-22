@@ -60,9 +60,10 @@ fn workspace_ref_to_undeclared_workspace_resolves_to_empty_not_global() {
         // If the resolver mistakenly recursed through W's effective
         // list, it would surface these globals — that would be the bug
         // FR-449 forbids.
-        harnesses: Some(vec!["claude-code".to_owned(), "codex".to_owned()]),
+        enabled: Some(vec!["claude-code".to_owned(), "codex".to_owned()]),
         expose_agents_as_personas: None,
         strip_plugin_agent_privileges: None,
+        default_scope: None,
     };
 
     let result =
@@ -109,9 +110,10 @@ fn workspace_ref_with_global_in_it_does_not_recurse_through_workspace_effective_
     let proj = project("ws", Some(vec!["[workspace]".to_owned()]));
     let ws_settings = ws("ws", Some(vec!["[global]".to_owned()]));
     let global = GlobalSettings {
-        harnesses: Some(vec!["claude-code".to_owned()]),
+        enabled: Some(vec!["claude-code".to_owned()]),
         expose_agents_as_personas: None,
         strip_plugin_agent_privileges: None,
+        default_scope: None,
     };
 
     let result =
