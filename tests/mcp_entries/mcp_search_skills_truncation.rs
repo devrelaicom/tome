@@ -503,6 +503,12 @@ fn truncation_at_multibyte_char_boundary_does_not_split_codepoint() {
 
 /// Task 11: `[mcp] description_max_chars` in config.toml is used when the
 /// per-call `description_max_chars` is absent (`None`).
+///
+/// The input is deserialized from a JSON value that **omits** the
+/// `description_max_chars` key — mirroring the real MCP wire path and proving
+/// that `#[serde(default)]` → `None` → config fallback resolves correctly.
+/// The sanity cap on the RESOLVED value (after config fallback) applies if the
+/// config-supplied value exceeds `MAX_DESCRIPTION_MAX_CHARS`.
 #[test]
 fn config_description_max_chars_used_when_call_arg_absent() {
     let body = long_skill_body("toolong", 300);
@@ -517,14 +523,17 @@ fn config_description_max_chars_used_when_call_arg_absent() {
 
     let state = build_state(&paths);
 
-    // description_max_chars: None → must fall back to config value (50).
-    let input = Input {
-        query: "toolong".into(),
-        top_k: Some(10),
-        catalog: None,
-        plugin: None,
-        description_max_chars: None,
-    };
+    // Deserialise from JSON that OMITS description_max_chars — this is the real
+    // MCP wire path (the key is simply absent in the JSON payload).  The
+    // #[serde(default)] attribute must yield None, which the handler then
+    // resolves to the config value (50).
+    let raw = serde_json::json!({"query": "toolong", "top_k": 10});
+    let input: Input = serde_json::from_value(raw).expect("deserialise input without cap key");
+    assert_eq!(
+        input.description_max_chars, None,
+        "description_max_chars absent from JSON must deserialise to None (serde default)"
+    );
+
     let out = invoke(state, input).expect("search ok");
     assert!(!out.matches.is_empty(), "expected matches");
     let chars = out.matches[0].description.chars().count();

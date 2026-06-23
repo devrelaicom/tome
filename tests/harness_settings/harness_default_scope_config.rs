@@ -3,8 +3,8 @@
 //! remove`.
 
 use crate::common::{HarnessModulesGuard, ToolEnv, paths_for};
-use tome::cli::{HarnessScopeArg, HarnessUseArgs};
-use tome::commands::harness::use_;
+use tome::cli::{HarnessRemoveArgs, HarnessScopeArg, HarnessUseArgs};
+use tome::commands::harness::{remove, use_};
 use tome::harness::StubHarness;
 use tome::output::Mode;
 use tome::workspace::{ResolvedScope, Scope, ScopeSource, WorkspaceName};
@@ -114,5 +114,51 @@ fn no_config_default_scope_falls_back_to_project() {
         err.exit_code(),
         2,
         "fallback project scope with no root should exit 2"
+    );
+}
+
+// ── harness remove also uses effective_harness_scope ─────────────────────────
+
+/// T9 coverage gap: `harness remove` also routes through `effective_harness_scope`
+/// but was previously untested for the config-driven default.
+///
+/// When `--scope` is absent and `[harness] default_scope = "global"` in config,
+/// the remove command edits the GLOBAL config table (`[harness].enabled`), not
+/// a project-scope settings file.
+#[test]
+fn config_default_scope_global_drives_harness_remove() {
+    let _mutex = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(StubHarness::default())]);
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    // Seed the global harness list with "stub", and set default_scope = "global".
+    std::fs::write(
+        &paths.global_config_file,
+        "[harness]\ndefault_scope = \"global\"\nenabled = [\"stub\"]\n",
+    )
+    .unwrap();
+
+    // Remove with no --scope; should derive Global from config and edit config.toml.
+    let args = HarnessRemoveArgs {
+        name: "stub".to_string(),
+        scope: None, // no explicit flag — must come from config
+    };
+    let scope = global_scope();
+    // No project_root → remove succeeds only if effective scope is Global, not Project.
+    remove::run(args, &scope, &paths, Mode::Json).expect("remove should succeed with global scope");
+
+    // Verify "stub" was removed from [harness].enabled in config.toml.
+    let body = std::fs::read_to_string(&paths.global_config_file).unwrap();
+    let parsed: tome::config::Config =
+        toml::from_str(&body).expect("config.toml must remain valid TOML");
+    let enabled = parsed.harness.enabled.unwrap_or_default();
+    assert!(
+        !enabled.iter().any(|h| h == "stub"),
+        "stub must be absent from [harness].enabled after remove; got: {enabled:?}"
     );
 }

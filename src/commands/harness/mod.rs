@@ -82,22 +82,23 @@ pub fn sync_for_project_root(
 /// Precedence: explicit CLI `--scope` → `[harness] default_scope` in
 /// `~/.tome/config.toml` → `HarnessScopeArg::Project`.
 ///
-/// Config is loaded defensively (`load_or_default`) so a missing or malformed
-/// config does not prevent scope resolution; the fallback is `Project`.
+/// Config is loaded strictly (`config::load`) — aligned with T8/T10 and every
+/// other foreground config read — so a malformed `config.toml` surfaces exit 5
+/// rather than silently ignoring the user's configured default scope.
 pub(crate) fn effective_harness_scope(
     arg: Option<HarnessScopeArg>,
     paths: &Paths,
-) -> HarnessScopeArg {
+) -> Result<HarnessScopeArg, crate::error::TomeError> {
     if let Some(explicit) = arg {
-        return explicit;
+        return Ok(explicit);
     }
-    let cfg = crate::config::load_or_default(paths);
-    match cfg.harness.default_scope {
+    let cfg = crate::config::load(paths)?;
+    Ok(match cfg.harness.default_scope {
         Some(crate::config::HarnessScope::Global) => HarnessScopeArg::Global,
         Some(crate::config::HarnessScope::Project) | None => HarnessScopeArg::Project,
         // `Workspace` is not a valid `HarnessScope` in config (only Project/Global
         // are the two persisted options), so no third arm is needed.
-    }
+    })
 }
 
 /// Subcommand dispatcher invoked by `main.rs`.

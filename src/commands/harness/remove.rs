@@ -50,7 +50,7 @@ pub fn run(
     mode: Mode,
 ) -> Result<(), TomeError> {
     // Resolve effective scope: explicit flag → [harness] default_scope in config → project.
-    let eff_scope = effective_harness_scope(args.scope, paths);
+    let eff_scope = effective_harness_scope(args.scope, paths)?;
     let settings_path = resolve_settings_path(&eff_scope, scope, paths)?;
 
     // Lock for the entire read-modify-write + sync window.

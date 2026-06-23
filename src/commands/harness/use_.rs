@@ -159,7 +159,7 @@ pub fn run_inner(
     // 2. Resolve the effective scope then the target settings file path.
     //    Precedence: explicit --scope → [harness] default_scope in config → project.
     //    Loud on project scope with no project root (exit 2).
-    let eff_scope = effective_harness_scope(args.scope, paths);
+    let eff_scope = effective_harness_scope(args.scope, paths)?;
     let settings_path = resolve_settings_path(&eff_scope, scope, paths)?;
 
     // Hold the advisory lock across the ENTIRE multi-harness window so the
