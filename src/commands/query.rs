@@ -92,6 +92,33 @@ impl ScoringMode {
     }
 }
 
+/// Resolve per-invocation query knobs: explicit flag → `[query]` config →
+/// built-in default.  Pure function so it can be tested independently of the
+/// `run()` path (which requires real ONNX models to be present on disk).
+///
+/// Priority (highest to lowest):
+/// 1. Explicit per-call flag (`args.top_k` / `args.no_rerank` / `args.min_score`).
+/// 2. `[query]` section in `~/.tome/config.toml` (passed as `qcfg`).
+/// 3. Built-in default (`top_k = 10`, `rerank = true`, `strict_min_score = None`).
+///
+/// `no_rerank` semantics: if the caller explicitly passed `--no-rerank` that
+/// wins unconditionally.  Otherwise the *config* decides (`rerank = false` →
+/// reranker off; default or `rerank = true` → reranker on).
+pub fn resolve_query_args(args: QueryArgs, qcfg: &crate::config::QueryConfig) -> QueryArgs {
+    let effective_rerank = if args.no_rerank {
+        false
+    } else {
+        qcfg.rerank.unwrap_or(true)
+    };
+    let effective_top_k: u32 = args.top_k.or(qcfg.top_k).unwrap_or(10);
+    QueryArgs {
+        top_k: Some(effective_top_k),
+        no_rerank: !effective_rerank,
+        min_score: args.min_score.or(qcfg.strict_min_score),
+        ..args
+    }
+}
+
 pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
     // Strict load of the global config so a malformed `config.toml` surfaces
@@ -100,25 +127,10 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
     let cfg = crate::config::load(&paths)?;
 
     // Resolve per-invocation knobs: flag > config > built-in default.
-    // Rerank: `--no-rerank` forces the reranker off; otherwise the config
-    // value wins (default on). We compute this BEFORE the model-presence
-    // check so `--no-rerank` prevents a hard-fail on a missing reranker
-    // model when the flag is explicitly passed.
-    let effective_rerank = if args.no_rerank {
-        false
-    } else {
-        cfg.query.rerank.unwrap_or(true)
-    };
-    let effective_top_k: u32 = args.top_k.or(cfg.query.top_k).unwrap_or(10);
-    // Carry the resolved values forward in a new QueryArgs. The `pipeline`
-    // reads the already-resolved `top_k` and `no_rerank`/`min_score`; the
-    // callers of `run_with_deps` may also inspect `args.top_k`.
-    let args = QueryArgs {
-        top_k: Some(effective_top_k),
-        no_rerank: !effective_rerank,
-        min_score: args.min_score.or(cfg.query.strict_min_score),
-        ..args
-    };
+    // We compute this BEFORE the model-presence check so `--no-rerank`
+    // prevents a hard-fail on a missing reranker model when the flag is
+    // explicitly passed.
+    let args = resolve_query_args(args, &cfg.query);
 
     let config = Config::default();
 

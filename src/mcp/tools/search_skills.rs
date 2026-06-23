@@ -223,15 +223,23 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         .map_err(tome_to_mcp)?
         .clone();
 
-    // Translate Input → QueryArgs. `strict` / `no_rerank` / `min_score`
-    // have no MCP equivalents — the agent decides what to do with the
-    // scores. We always run the production pipeline with the resolved top_k.
+    // Translate Input → QueryArgs.
+    //
+    // `rerank` follows `cfg.query.rerank` (no per-call MCP arg exists today):
+    //   config `rerank = false` → `no_rerank: true` → reranker skipped.
+    //   This matters when the reranker model is not installed for the profile.
+    //
+    // `strict` / `min_score` (strict_min_score) are intentionally CLI-only.
+    // MCP returns the top_k scored results and lets the agent decide; applying
+    // a strict floor would silently drop results with no visible signal to the
+    // caller.  Leave `strict: false` / `min_score: None`.
+    let no_rerank = !cfg.query.rerank.unwrap_or(true);
     let args = QueryArgs {
         text: input.query.clone(),
         top_k: Some(effective_top_k),
         catalog: input.catalog.clone(),
         plugin: input.plugin.clone(),
-        no_rerank: false,
+        no_rerank,
         strict: false,
         min_score: None,
     };
@@ -249,9 +257,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     let reranker: Arc<dyn Reranker> = reranker_arc;
     let paths = state.paths.clone();
     let scope = state.scope.scope.clone();
-    // FF2: `QueryDeps.config` is vestigial — `query::pipeline` resolves
-    // `--catalog`/`--plugin` from the `workspace_catalogs` DB. Pass an empty
-    // default rather than reading the never-written `config.toml`.
+    // FF2 vestigial slot: `QueryDeps.config` is unused by `query::pipeline`
+    // (catalog/plugin validation was moved to the `workspace_catalogs` DB).
+    // Distinct from `cfg` above, which was loaded for `top_k` / `rerank`
+    // resolution; this slot receives a bare default so the FF2 DB-only path
+    // is preserved without a second config read.
     let config = crate::config::Config::default();
 
     // Capture the strict flag for the telemetry emit before `args` is moved
@@ -367,9 +377,9 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         surface: crate::telemetry::event::Surface::Mcp,
         latency_bucket: crate::telemetry::buckets::LatencyBucket::from(compute_elapsed),
         candidates_returned: crate::telemetry::buckets::CountBucket::from(matches.len()),
-        // The reranker is always loaded + used on the MCP search path (no
-        // `--no-rerank` equivalent — see the `QueryArgs` construction above).
-        reranker_used: true,
+        // Reranker used iff `no_rerank` was not set by the config resolution
+        // above.  Mirrors the `run_with_deps` emit: `reranker.is_some()`.
+        reranker_used: !no_rerank,
         strict,
         // Mirror the CLI: the bucketed whole-index corpus size the pipeline
         // already computed (best-effort `0` on a count failure).
