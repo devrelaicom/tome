@@ -797,8 +797,10 @@ pub struct QueryArgs {
     pub text: String,
 
     /// Cap on returned results (post-rerank when reranking).
-    #[arg(long = "top-k", default_value_t = 10)]
-    pub top_k: u32,
+    /// When absent, falls back to `[query] top_k` in `~/.tome/config.toml`,
+    /// then to the built-in default of 10.
+    #[arg(long = "top-k")]
+    pub top_k: Option<u32>,
 
     /// Restrict the search to a single catalog.
     #[arg(long)]

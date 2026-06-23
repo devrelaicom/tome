@@ -240,7 +240,7 @@ fn invoke(state: Arc<McpState>, input: Input) -> Result<search_skills::Output, r
 fn make_input(query: &str, description_max_chars: u32) -> Input {
     Input {
         query: query.into(),
-        top_k: 10,
+        top_k: Some(10),
         catalog: None,
         plugin: None,
         description_max_chars,

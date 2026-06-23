@@ -363,7 +363,7 @@ mod mcp_cold_start {
         let out = harness
             .call_search_skills(search_skills::Input {
                 query: "alpha widget configuration".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
                 description_max_chars: 150,

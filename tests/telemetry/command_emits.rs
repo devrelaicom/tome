@@ -486,7 +486,7 @@ mod cli_search {
         };
         let args = QueryArgs {
             text: "alpha widget configuration".into(),
-            top_k: 10,
+            top_k: Some(10),
             catalog: None,
             plugin: None,
             no_rerank: false,

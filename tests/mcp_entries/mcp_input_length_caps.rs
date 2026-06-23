@@ -56,7 +56,7 @@ fn rejects_query_strictly_longer_than_cap_with_dedicated_code() {
             state,
             search_skills::Input {
                 query,
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
                 description_max_chars: 150,
@@ -97,7 +97,7 @@ fn accepts_query_exactly_at_cap() {
         state,
         search_skills::Input {
             query,
-            top_k: 10,
+            top_k: Some(10),
             catalog: None,
             plugin: None,
             description_max_chars: 150,
@@ -135,7 +135,7 @@ fn rejects_empty_query_with_existing_error_path() {
             state,
             search_skills::Input {
                 query: "   ".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
                 description_max_chars: 150,

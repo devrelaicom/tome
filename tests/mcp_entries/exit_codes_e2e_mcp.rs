@@ -416,7 +416,7 @@ fn harness_drives_search_skills_end_to_end() {
     let out = harness
         .call_search_skills(search_skills::Input {
             query: "findable".into(),
-            top_k: 10,
+            top_k: Some(10),
             catalog: None,
             plugin: None,
             description_max_chars: 150,

@@ -621,7 +621,7 @@ fn matrix_plugin_filters_searches_and_prompts_per_flag_combination() {
             state_for_search,
             search_skills::Input {
                 query: "matrix".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
                 description_max_chars: 150,

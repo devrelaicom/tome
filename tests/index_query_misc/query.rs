@@ -286,7 +286,7 @@ fn knn_rejects_query_vector_of_wrong_length() {
 fn args_for(text: &str, top_k: u32) -> QueryArgs {
     QueryArgs {
         text: text.to_owned(),
-        top_k,
+        top_k: Some(top_k),
         catalog: None,
         plugin: None,
         no_rerank: true,

@@ -322,7 +322,7 @@ fn search_then_get_skill_emits_funnel_with_shared_session_and_rank() {
             state.clone(),
             search_skills::Input {
                 query: "alpha widget configuration".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
                 description_max_chars: 150,
@@ -412,7 +412,7 @@ fn get_skill_info_emits_entry_info_with_rank() {
             state.clone(),
             search_skills::Input {
                 query: "alpha widget configuration".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
                 description_max_chars: 150,
@@ -507,7 +507,7 @@ fn unknown_host_harness_omits_calling_harness() {
             state.clone(),
             search_skills::Input {
                 query: "alpha widget configuration".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
                 description_max_chars: 150,
@@ -546,7 +546,7 @@ fn tool_call_returns_promptly_with_nonroutable_endpoint() {
             state.clone(),
             search_skills::Input {
                 query: "alpha widget configuration".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
                 description_max_chars: 150,
@@ -642,7 +642,7 @@ fn search_on_allowlisted_catalog_emits_attributed_search_result() {
             state.clone(),
             search_skills::Input {
                 query: "alpha widget configuration".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
                 description_max_chars: 150,

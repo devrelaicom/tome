@@ -32,8 +32,10 @@ pub struct Input {
     /// Natural-language description of the task.
     pub query: String,
     /// Maximum results to return after reranking. 1..=100, default 10.
-    #[serde(default = "default_top_k")]
-    pub top_k: u32,
+    /// When absent, falls back to `[query] top_k` in `~/.tome/config.toml`,
+    /// then to the built-in default of 10.
+    #[serde(default)]
+    pub top_k: Option<u32>,
     /// Restrict to one catalog by name (must match an enabled catalog
     /// in the resolved scope).
     #[serde(default)]
@@ -50,10 +52,6 @@ pub struct Input {
     /// surface as `invalid_description_max_chars`.
     #[serde(default = "default_description_max_chars")]
     pub description_max_chars: u32,
-}
-
-fn default_top_k() -> u32 {
-    10
 }
 
 fn default_description_max_chars() -> u32 {
@@ -121,9 +119,14 @@ pub struct SkillMatch {
 pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpError> {
     let started = Instant::now();
 
-    // Bounds-check top_k. The schema's `default = 10` covers the
-    // missing case; here we enforce the 1..=100 range.
-    if input.top_k == 0 || input.top_k > 100 {
+    // Resolve effective top_k: per-call argument → config default → built-in 10.
+    // Load config defensively (MCP handlers must never hard-fail on a malformed
+    // config.toml — that's the CLI's job).
+    let cfg = crate::config::load_or_default(&state.paths);
+    let effective_top_k: u32 = input.top_k.or(cfg.query.top_k).unwrap_or(10);
+
+    // Bounds-check the RESOLVED value so the config default is also guarded.
+    if effective_top_k == 0 || effective_top_k > 100 {
         return Err(McpError::invalid_params(
             "top_k must be between 1 and 100",
             None,
@@ -222,10 +225,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
 
     // Translate Input → QueryArgs. `strict` / `no_rerank` / `min_score`
     // have no MCP equivalents — the agent decides what to do with the
-    // scores. We always run the production pipeline.
+    // scores. We always run the production pipeline with the resolved top_k.
     let args = QueryArgs {
         text: input.query.clone(),
-        top_k: input.top_k,
+        top_k: Some(effective_top_k),
         catalog: input.catalog.clone(),
         plugin: input.plugin.clone(),
         no_rerank: false,
@@ -468,7 +471,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     info!(
         target: "tome::mcp::tools::search_skills",
         query_len = input.query.len(),
-        top_k = input.top_k,
+        top_k = effective_top_k,
         filter_catalog = input.catalog.as_deref(),
         filter_plugin = input.plugin.as_deref(),
         matches = matches.len(),

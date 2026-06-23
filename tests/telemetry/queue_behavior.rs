@@ -471,7 +471,7 @@ fn mcp_tool_foreground_call_does_no_network() {
             state.clone(),
             search_skills::Input {
                 query: "alpha widget configuration".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
                 description_max_chars: 150,
