@@ -231,8 +231,7 @@ tome models remove <name>
 
 Every Tome-owned path lives under **`~/.tome/`**:
 
-- `~/.tome/config.toml` — global config (strict TOML, `0600` on Unix)
-- `~/.tome/settings.toml` — global harness composition settings
+- `~/.tome/config.toml` — global config (strict TOML, `0600` on Unix); see [Global config reference](#global-config-reference) below
 - `~/.tome/index.db` — central SQLite + `sqlite-vec` (one DB; workspaces and catalog enrolments are junction-keyed)
 - `~/.tome/index.lock` — single advisory lockfile
 - `~/.tome/catalogs/<sha>/` — shared catalog clones (reference-counted)
@@ -244,6 +243,100 @@ Every Tome-owned path lives under **`~/.tome/`**:
 
 - `<project>/.tome/config.toml` — a pointer marker (`workspace = "<name>"`); the central registry is the source of truth.
 - `<project>/.tome/RULES.md` — propagated from the workspace's `RULES.md` on every sync.
+
+### Global config reference
+
+`~/.tome/config.toml` is the single file for all global Tome settings. It is created with built-in defaults on first run (mode `0600` on Unix). Every key is optional; unset keys inherit the built-in default listed below.
+
+**Precedence:** CLI flag (per run) > environment variable (where one exists) > `~/.tome/config.toml` > built-in default.
+
+```toml
+# ~/.tome/config.toml
+
+[harness]
+# Harnesses active at global scope. Re-run `tome harness use <name>` to populate
+# this; the `enabled` list is written for you.
+enabled = ["claude-code"]
+expose_agents_as_personas = false
+strip_plugin_agent_privileges = false
+# Default --scope for `tome harness use` / `tome harness remove` (project|global).
+default_scope = "project"
+
+[query]
+# Default result count for `tome query` (CLI) and `search_skills` (MCP).
+top_k = 10
+# Cross-encoder reranker on/off (applies to both CLI and MCP).
+rerank = true
+# Minimum score threshold applied when --strict is passed.
+strict_min_score = 0.5
+
+[summariser]
+# Auto-regenerate workspace summaries on plugin enable/disable/reindex/update.
+enabled = true
+# Long-summary character cap. Clamped to the range 1500..=8000.
+long_max_chars = 2500
+
+[telemetry]
+# Set to false or run `tome telemetry off` to opt out.
+# TOME_TELEMETRY=0 and CI environments override this.
+enabled = true
+
+[logging]
+# Log level for the tracing subscriber (stderr).
+# Overridden by TOME_LOG / RUST_LOG env vars and the -v / -vv CLI flags.
+# Values: off | error | warn | info | debug | trace
+level = "warn"
+
+[output]
+# Colour output mode. Overridden by the NO_COLOR env var and --no-color flag.
+# Values: auto | always | never
+color = "auto"
+# Show spinners and progress bars even on a TTY. Set to false to suppress them.
+progress = true
+
+[workspace]
+# Workspace used when no --workspace flag, TOME_WORKSPACE env var, or project
+# marker is found.
+default = "global"
+
+[mcp]
+# Maximum characters for the description field returned by search_skills.
+description_max_chars = 150
+
+[models]
+# Bootstrap profile for a FRESH index (small | medium | large).
+# The value stored in index.db wins once the index has been created.
+profile = "medium"
+
+[doctor]
+# Make `tome doctor` behave as if --verify was always passed.
+verify_by_default = false
+```
+
+### Migration notes (pre-release breaking changes)
+
+The following changes land in the current unreleased version on `main`. They affect any existing Tome install that used the old separate config files.
+
+**`~/.tome/settings.toml` is no longer read.**
+Global harness settings (`enabled`, `expose_agents_as_personas`, etc.) have moved into `~/.tome/config.toml [harness]`. Tome will not migrate the old file automatically.
+
+- Re-run `tome harness use <name>` for each harness you had configured globally; this writes the `[harness] enabled` list for you.
+- Delete `~/.tome/settings.toml` for tidiness once you have re-declared your harnesses.
+
+**`~/.tome/telemetry/config.toml` is no longer read.**
+The telemetry opt-out now lives in `~/.tome/config.toml [telemetry] enabled = false`. Tome will not carry over the old opt-out automatically.
+
+- If you had previously run `tome telemetry off`, re-run it (or add `enabled = false` under `[telemetry]` in `~/.tome/config.toml`).
+- Delete `~/.tome/telemetry/config.toml` for tidiness.
+
+**`config.toml [catalogs]` table is dropped.**
+The `[catalogs]` table in the global config was dead (the SQLite DB is the authoritative registry). A stale `[catalogs]` table is tolerated and silently ignored on read; it will be dropped the next time the file is written.
+
+**A malformed `~/.tome/config.toml` now surfaces as exit 5.**
+Foreground commands that read the global config fail loudly with exit 5 if the file is unparsable. Best-effort paths (telemetry, logging, colour/progress, the post-commit summariser trigger) degrade gracefully instead of aborting.
+
+**New `--no-color` global flag.**
+`tome --no-color <command>` suppresses colour output regardless of TTY state. The `NO_COLOR` environment variable and `[output] color = "never"` in config also suppress colour.
 
 ### Models
 
