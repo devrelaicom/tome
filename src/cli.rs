@@ -30,6 +30,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Disable ANSI colour in human output. Overrides `[output] color` in
+    /// `~/.tome/config.toml` and the `NO_COLOR` environment variable.
+    /// The MCP path never emits colour regardless of this flag.
+    #[arg(long, global = true)]
+    pub no_color: bool,
+
     /// Increase log verbosity. `-v` = info, `-vv` = debug. Env: TOME_LOG.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,

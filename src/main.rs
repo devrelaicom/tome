@@ -3,7 +3,7 @@ use clap::Parser;
 use tome::catalog::git;
 use tome::cli::{Cli, Command};
 use tome::paths;
-use tome::presentation::colour;
+use tome::presentation::{colour, progress};
 use tome::workspace;
 use tome::{commands, logging, output};
 
@@ -26,20 +26,29 @@ fn main() {
     // Ctrl-C signal handler: the MCP server uses tokio's async
     // `signal::ctrl_c()` instead, and the CLI handler would race.
     if !matches!(cli.command, Command::Mcp(_)) {
-        // Resolve the config logging level defensively BEFORE calling
-        // `logging::init` so a malformed config.toml can't silence logging
-        // (the strict `config::load` exit-5 error is surfaced by the command
-        // itself, not the logging path).
-        let cfg_level = tome::paths::Paths::resolve()
-            .ok()
-            .and_then(|p| tome::config::load_or_default(&p).logging.level);
+        // Load config once defensively for logging + output knobs. A malformed
+        // config.toml falls back to defaults here; the strict error is surfaced
+        // by the command itself via `config::load`.
+        let output_cfg = tome::paths::Paths::resolve().ok().map(|p| {
+            let cfg = tome::config::load_or_default(&p);
+            (cfg.logging.level, cfg.output)
+        });
+        let cfg_level = output_cfg.as_ref().and_then(|(lvl, _)| *lvl);
         logging::init(cli.verbosity(), cfg_level);
         git::install_signal_handler();
+        // Forward the --no-color flag BEFORE init() so the OnceLock in
+        // `colour::init` sees it. The config is read defensively inside
+        // `colour::init` itself via `load_or_default`.
+        colour::set_disabled(cli.no_color);
         // Resolve the colour-enabled decision once, before any human output.
-        // Gated on TTY + `NO_COLOR` (see `presentation::colour`). Without this
-        // the cached decision defaults to disabled, so colour never renders.
-        // The MCP path emits only JSON-RPC, so it needs no colour.
+        // Precedence: --no-color flag > NO_COLOR env > config [output] color >
+        // auto (TTY). The MCP path emits only JSON-RPC, so it needs no colour.
         colour::init();
+        // Resolve progress visibility: config `[output] progress = false`
+        // suppresses bars/spinners even on a TTY; otherwise auto (TTY check).
+        // The MCP server never shows progress — do not init on that path.
+        let cfg_progress = output_cfg.and_then(|(_, out)| out.progress);
+        progress::init_progress(cfg_progress);
     }
 
     let mode = cli.mode();

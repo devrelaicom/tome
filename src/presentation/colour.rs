@@ -1,9 +1,10 @@
 //! Colour gating for human output.
 //!
-//! Colour is enabled when **all three** of the following are true:
-//! 1. stdout is connected to a terminal,
-//! 2. the `NO_COLOR` environment variable is not set (per <https://no-color.org>), and
-//! 3. the caller has not passed `--no-color` (forwarded via [`set_disabled`]).
+//! Colour is enabled according to the following precedence (highest wins):
+//! 1. `--no-color` CLI flag (forwarded via [`set_disabled`]) → always off,
+//! 2. `NO_COLOR` environment variable (per <https://no-color.org>) → always off,
+//! 3. `[output] color` in `~/.tome/config.toml` (`always` → on, `never` → off),
+//! 4. auto: stdout is connected to a terminal.
 //!
 //! The decision is computed once at startup via [`init`] and read by any code
 //! that wants to colour a fragment, so the result is consistent across the
@@ -31,17 +32,48 @@ pub fn set_disabled(disabled: bool) {
     let _ = FORCE_DISABLED.set(disabled);
 }
 
+/// Pure colour-enabled resolver. Precedence (highest wins):
+/// 1. `no_color_flag` (`--no-color`) → false
+/// 2. `no_color_env` (`NO_COLOR` present and non-empty) → false
+/// 3. `config` `Always` → true, `Never` → false
+/// 4. `Auto` / no config → `is_tty`
+///
+/// Kept pure and argument-driven so it is trivially unit-testable without
+/// touching any global state.
+pub(crate) fn resolve_color(
+    no_color_flag: bool,
+    no_color_env: Option<()>,
+    config: Option<crate::config::ColorMode>,
+    is_tty: bool,
+) -> bool {
+    if no_color_flag || no_color_env.is_some() {
+        return false;
+    }
+    match config {
+        Some(crate::config::ColorMode::Always) => true,
+        Some(crate::config::ColorMode::Never) => false,
+        Some(crate::config::ColorMode::Auto) | None => is_tty,
+    }
+}
+
 /// Compute and cache the colour-enabled decision. Idempotent — subsequent
 /// calls return the cached value.
+///
+/// Reads the config defensively (`load_or_default`) so a malformed
+/// `config.toml` never prevents colour/progress from initialising; the
+/// strict error is surfaced by the command itself.
 pub fn init() -> bool {
     *ENABLED.get_or_init(|| {
-        if *FORCE_DISABLED.get().unwrap_or(&false) {
-            return false;
-        }
-        if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
-            return false;
-        }
-        output::stdout_is_tty()
+        let no_color_flag = *FORCE_DISABLED.get().unwrap_or(&false);
+        let no_color_env = std::env::var_os("NO_COLOR")
+            .filter(|v| !v.is_empty())
+            .map(|_| ());
+        let config_color = crate::paths::Paths::resolve()
+            .ok()
+            .map(|p| crate::config::load_or_default(&p).output.color)
+            .and_then(|c| c);
+        let is_tty = output::stdout_is_tty();
+        resolve_color(no_color_flag, no_color_env, config_color, is_tty)
     })
 }
 
@@ -117,11 +149,48 @@ pub fn label(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ColorMode;
 
     // ENABLED is a global OnceLock, so we cannot reliably re-initialise it
     // mid-process. These tests therefore exercise only the public predicate
-    // forms; the actual gating logic is covered by visual inspection plus
-    // the integration tests that pipe `tome` to a file (FR-046).
+    // forms and the pure `resolve_color` function; the actual gating logic
+    // is covered by visual inspection plus the integration tests that pipe
+    // `tome` to a file (FR-046).
+
+    /// Verify the full precedence chain of `resolve_color`:
+    /// flag(--no-color) > NO_COLOR env > config(always/never) > auto(tty)
+    #[test]
+    fn resolve_color_precedence() {
+        // --no-color flag forces off even when config says always and tty=false
+        assert!(
+            !resolve_color(true, None, Some(ColorMode::Always), false),
+            "flag forces off"
+        );
+        // NO_COLOR env forces off even when tty=true
+        assert!(
+            !resolve_color(false, Some(()), Some(ColorMode::Always), true),
+            "NO_COLOR env forces off"
+        );
+        // config never overrides tty=true
+        assert!(
+            !resolve_color(false, None, Some(ColorMode::Never), true),
+            "config never"
+        );
+        // config always enables even when tty=false
+        assert!(
+            resolve_color(false, None, Some(ColorMode::Always), false),
+            "config always (non-tty)"
+        );
+        // auto: no flag, no env, no config → follow tty
+        assert!(resolve_color(false, None, None, true), "auto: tty");
+        // auto: no flag, no env, no config → follow tty (non-tty case)
+        assert!(!resolve_color(false, None, None, false), "auto: non-tty");
+        // config auto: equivalent to None → follow tty
+        assert!(
+            resolve_color(false, None, Some(ColorMode::Auto), true),
+            "config auto: tty"
+        );
+    }
 
     #[test]
     fn colour_helpers_return_plain_string_in_non_tty_context() {
