@@ -366,7 +366,7 @@ mod mcp_cold_start {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             })
             .expect("search_skills ok");
         assert!(

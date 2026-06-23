@@ -419,7 +419,7 @@ fn harness_drives_search_skills_end_to_end() {
             top_k: Some(10),
             catalog: None,
             plugin: None,
-            description_max_chars: 150,
+            description_max_chars: Some(150),
         })
         .expect("search_skills must succeed against the stub-seeded index");
 
@@ -465,7 +465,7 @@ fn search_skills_honors_query_top_k_from_config() {
             top_k: None, // absent → should fall back to config value of 1
             catalog: None,
             plugin: None,
-            description_max_chars: 150,
+            description_max_chars: Some(150),
         })
         .expect("search_skills must succeed");
 
@@ -509,7 +509,7 @@ fn search_skills_honors_query_rerank_false_from_config() {
             top_k: None,
             catalog: None,
             plugin: None,
-            description_max_chars: 150,
+            description_max_chars: Some(150),
         })
         .expect("search_skills must succeed with rerank = false in config");
 

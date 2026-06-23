@@ -45,17 +45,14 @@ pub struct Input {
     #[serde(default)]
     pub plugin: Option<String>,
     /// Truncate each result's description at this many characters
-    /// (Unicode scalar values), per FR-092. Default 150 — agent-consumed
-    /// search results preserve token budget. Set to a very large value
-    /// (e.g. 99999) to opt out. Negative values are rejected by the
-    /// `u32` deserialiser; values above [`MAX_DESCRIPTION_MAX_CHARS`]
-    /// surface as `invalid_description_max_chars`.
-    #[serde(default = "default_description_max_chars")]
-    pub description_max_chars: u32,
-}
-
-fn default_description_max_chars() -> u32 {
-    150
+    /// (Unicode scalar values), per FR-092. When absent, falls back to
+    /// `[mcp] description_max_chars` in `~/.tome/config.toml`, then to
+    /// the built-in default of 150. Set to a very large value (e.g. 99999)
+    /// to opt out. Negative values are rejected by the `u32` deserialiser;
+    /// the RESOLVED value above [`MAX_DESCRIPTION_MAX_CHARS`] surfaces as
+    /// `invalid_description_max_chars`.
+    #[serde(default)]
+    pub description_max_chars: Option<u32>,
 }
 
 /// Sanity cap on `description_max_chars`. Values strictly above this
@@ -132,11 +129,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             None,
         ));
     }
-    // Sanity-cap description_max_chars per `mcp-tools-p5.md` § Error
-    // responses. Serde's `u32` deserialisation already rejects negative
-    // values; this guards against absurdly-large values that would
-    // defeat the purpose of truncation.
-    if input.description_max_chars > MAX_DESCRIPTION_MAX_CHARS {
+    // Resolve effective description_max_chars:
+    // per-call arg → [mcp] description_max_chars in config → 150.
+    // Sanity-cap the RESOLVED value per `mcp-tools-p5.md` § Error responses.
+    let effective_dmc = input
+        .description_max_chars
+        .or(cfg.mcp.description_max_chars)
+        .unwrap_or(150);
+    if effective_dmc > MAX_DESCRIPTION_MAX_CHARS {
         return Err(McpError::invalid_params(
             format!("description_max_chars must be at most {MAX_DESCRIPTION_MAX_CHARS}"),
             Some(json!({
@@ -336,7 +336,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         }
     })?;
 
-    let description_max_chars = input.description_max_chars as usize;
+    let description_max_chars = effective_dmc as usize;
     let matches: Vec<SkillMatch> = outcome
         .results
         .iter()

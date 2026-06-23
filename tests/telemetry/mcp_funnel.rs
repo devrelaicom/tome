@@ -325,7 +325,7 @@ fn search_then_get_skill_emits_funnel_with_shared_session_and_rank() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             },
         ))
         .expect("search ok");
@@ -415,7 +415,7 @@ fn get_skill_info_emits_entry_info_with_rank() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             },
         ))
         .expect("search ok");
@@ -510,7 +510,7 @@ fn unknown_host_harness_omits_calling_harness() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             },
         ))
         .expect("search ok");
@@ -549,7 +549,7 @@ fn tool_call_returns_promptly_with_nonroutable_endpoint() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             },
         ))
         .expect("search ok");
@@ -645,7 +645,7 @@ fn search_on_allowlisted_catalog_emits_attributed_search_result() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             },
         ))
         .expect("search ok");

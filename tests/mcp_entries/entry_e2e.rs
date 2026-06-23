@@ -624,7 +624,7 @@ fn matrix_plugin_filters_searches_and_prompts_per_flag_combination() {
                 top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             },
         ))
         .expect("search_skills ok");
