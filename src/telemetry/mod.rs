@@ -89,10 +89,10 @@ const SPAWN_OLDEST_AGE: time::Duration = time::Duration::minutes(5);
 /// [`config::resolve_enabled`].
 ///
 /// FAIL-SAFE-OFF: any error — `$HOME` unresolvable, or a malformed
-/// `config.toml` (exit 91 on the *CLI* path) — collapses to `false` here. The
-/// silent path must NEVER emit under a broken config and must NEVER crash the
-/// user's foreground command, so it diverges from the CLI surface (which
-/// surfaces the 91): a background emit just stays quiet.
+/// `config.toml` (exit 5 via `config::load` on the *CLI* path) — collapses to
+/// `false` here. The silent path must NEVER emit under a broken config and must
+/// NEVER crash the user's foreground command, so it diverges from the CLI surface
+/// (which surfaces the exit 5): a background emit just stays quiet.
 pub fn is_enabled() -> bool {
     let paths = match crate::paths::Paths::resolve() {
         Ok(p) => p,
@@ -130,9 +130,9 @@ pub fn is_enabled() -> bool {
 /// this on the non-`Mcp`/non-`Telemetry` commands.
 pub fn cli_startup(paths: &crate::paths::Paths) {
     // 1. Gate — fail-safe-OFF. A disabled install (opt-out / CI / malformed
-    //    config → exit 91 on the CLI path) mints NOTHING here and emits nothing,
-    //    so a fresh CI checkout leaves no trace (FR-010). We never propagate the
-    //    resolve error: the startup path is best-effort.
+    //    config → exit 5 via config::load on the CLI path) mints NOTHING here and
+    //    emits nothing, so a fresh CI checkout leaves no trace (FR-010). We never
+    //    propagate the resolve error: the startup path is best-effort.
     match config::resolve_enabled(paths) {
         Ok(true) => {}
         Ok(false) => return,

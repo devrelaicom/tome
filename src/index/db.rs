@@ -81,15 +81,11 @@ pub fn open(db_path: &Path, opts: &OpenOptions) -> Result<Connection, TomeError>
                 db_path
                     .parent()
                     .and_then(|root| {
-                        // Load config defensively; any error → None → fallback.
-                        let config_path = root.join("config.toml");
-                        crate::util::bounded_read_to_string(
-                            &config_path,
-                            crate::util::TOME_CONFIG_MAX,
-                        )
-                        .ok()
-                        .and_then(|text| toml::from_str::<crate::config::Config>(&text).ok())
-                        .and_then(|cfg| cfg.models.profile)
+                        // Load config defensively via the SSOT helper; any error
+                        // → default Config → None profile → fallback below.
+                        crate::config::load_or_default_from_root(root)
+                            .models
+                            .profile
                     })
                     .unwrap_or(crate::embedding::profile::Profile::DEFAULT)
             });

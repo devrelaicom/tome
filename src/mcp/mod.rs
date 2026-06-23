@@ -139,8 +139,14 @@ pub fn run(
     // errors, the harness sees a TomeError on stderr instead of a
     // silent log.
     let log_file = log::open_appender(paths)?;
-    // Load the logging level from config defensively so a malformed config.toml
-    // doesn't prevent the MCP server from starting.
+    // Load the logging level from config defensively (any error → default level)
+    // so a malformed config.toml doesn't prevent the MCP server from starting
+    // once past the workspace resolve step. In practice `harness sync` always
+    // stamps `--workspace <ws>` into the `tome mcp` args, so the upstream
+    // `ResolvedScope::resolve()` takes the flag branch and skips the strict config
+    // read entirely. A hand-run `tome mcp` WITHOUT `--workspace` would hit the
+    // strict resolve and exit 5 before reaching this point. The defensive load
+    // here guards the logging initialisation only; it does not gate server startup.
     let cfg_level = crate::config::load_or_default(paths).logging.level;
     log::init_subscriber(log_file, cfg_level)?;
 

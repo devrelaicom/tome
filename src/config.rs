@@ -214,6 +214,53 @@ pub fn load_or_default(paths: &Paths) -> Config {
     load(paths).unwrap_or_default()
 }
 
+/// Defensive config load given a known tome root (the directory holding
+/// `config.toml`). Mirrors [`load_or_default`] but for callers that already
+/// know the root path rather than going through a [`Paths`] struct —
+/// e.g. `index::db::open`, which derives the root from the DB path. Any
+/// error (missing file, I/O failure, malformed TOML) → [`Config::default`].
+pub fn load_or_default_from_root(root: &std::path::Path) -> Config {
+    let path = root.join("config.toml");
+    match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
+        Ok(text) => toml::from_str(&text).unwrap_or_default(),
+        Err(_) => Config::default(),
+    }
+}
+
+#[cfg(test)]
+mod load_or_default_from_root_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn present_config_file_parses_profile() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[models]\nprofile = \"small\"\n",
+        )
+        .unwrap();
+        let cfg = load_or_default_from_root(dir.path());
+        assert_eq!(cfg.models.profile, Some(crate::embedding::Profile::Small));
+    }
+
+    #[test]
+    fn absent_file_returns_default() {
+        let dir = TempDir::new().unwrap();
+        // No config.toml written.
+        let cfg = load_or_default_from_root(dir.path());
+        assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn malformed_file_returns_default() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "this = is = broken\n").unwrap();
+        let cfg = load_or_default_from_root(dir.path());
+        assert_eq!(cfg, Config::default());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

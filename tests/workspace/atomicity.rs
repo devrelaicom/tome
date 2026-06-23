@@ -50,9 +50,10 @@ fn no_temp_file_left_behind_after_successful_write() {
 }
 
 #[test]
-fn failed_persist_into_nonexistent_dir_does_not_create_target() {
-    // Pre-existing file then attempt a write to a sub-path whose parent will
-    // be created. The pre-existing file is unrelated and must be untouched.
+fn write_to_nested_path_creates_target_and_leaves_sibling_untouched() {
+    // A write to a sub-path whose parent does not yet exist: the target is
+    // created (atomic write creates missing parent dirs), and a pre-existing
+    // sibling file in the root dir must be byte-for-byte untouched.
     let dir = TempDir::new().unwrap();
     let untouched = dir.path().join("other.toml");
     fs::write(&untouched, b"do not touch").unwrap();
