@@ -15,6 +15,7 @@ fn main() {
     let raw: Vec<String> = std::env::args().collect();
     if raw.iter().skip(1).any(|a| a == "--version" || a == "-V") {
         let json = raw.iter().any(|a| a == "--json");
+        // colour is not initialized yet — print_version must use plain output (no colour helpers).
         commands::status::print_version(json);
         std::process::exit(0);
     }
@@ -37,13 +38,15 @@ fn main() {
         logging::init(cli.verbosity(), cfg_level);
         git::install_signal_handler();
         // Forward the --no-color flag BEFORE init() so the OnceLock in
-        // `colour::init` sees it. The config is read defensively inside
-        // `colour::init` itself via `load_or_default`.
+        // `colour::init` sees it.
         colour::set_disabled(cli.no_color);
         // Resolve the colour-enabled decision once, before any human output.
+        // Pass the config value from the single `output_cfg` load above so
+        // colour, progress, and logging all derive from the same snapshot.
         // Precedence: --no-color flag > NO_COLOR env > config [output] color >
         // auto (TTY). The MCP path emits only JSON-RPC, so it needs no colour.
-        colour::init();
+        let cfg_color = output_cfg.as_ref().and_then(|(_, out)| out.color);
+        colour::init(cfg_color);
         // Resolve progress visibility: config `[output] progress = false`
         // suppresses bars/spinners even on a TTY; otherwise auto (TTY check).
         // The MCP server never shows progress — do not init on that path.

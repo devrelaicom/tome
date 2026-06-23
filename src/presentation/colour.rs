@@ -59,19 +59,16 @@ pub(crate) fn resolve_color(
 /// Compute and cache the colour-enabled decision. Idempotent — subsequent
 /// calls return the cached value.
 ///
-/// Reads the config defensively (`load_or_default`) so a malformed
-/// `config.toml` never prevents colour/progress from initialising; the
-/// strict error is surfaced by the command itself.
-pub fn init() -> bool {
+/// The caller (typically `main.rs`) is responsible for passing the resolved
+/// `config_color` value from the single `load_or_default` call it already
+/// performs for logging + progress. This avoids a second independent config
+/// snapshot inside this function.
+pub fn init(config_color: Option<crate::config::ColorMode>) -> bool {
     *ENABLED.get_or_init(|| {
         let no_color_flag = *FORCE_DISABLED.get().unwrap_or(&false);
         let no_color_env = std::env::var_os("NO_COLOR")
             .filter(|v| !v.is_empty())
             .map(|_| ());
-        let config_color = crate::paths::Paths::resolve()
-            .ok()
-            .map(|p| crate::config::load_or_default(&p).output.color)
-            .and_then(|c| c);
         let is_tty = output::stdout_is_tty();
         resolve_color(no_color_flag, no_color_env, config_color, is_tty)
     })
@@ -190,13 +187,18 @@ mod tests {
             resolve_color(false, None, Some(ColorMode::Auto), true),
             "config auto: tty"
         );
+        // config auto: non-tty → off
+        assert!(
+            !resolve_color(false, None, Some(ColorMode::Auto), false),
+            "config auto: non-tty follows TTY (off)"
+        );
     }
 
     #[test]
     fn colour_helpers_return_plain_string_in_non_tty_context() {
         // In a Cargo test harness stdout is not a TTY, so init() should
-        // settle on `false`.
-        init();
+        // settle on `false`. Pass None — no config override in this test.
+        init(None);
         assert!(!is_enabled());
 
         // Every helper must return its input verbatim when colour is off,
