@@ -96,6 +96,7 @@ fn db_row_exists(paths: &tome::paths::Paths, project_path: &Path) -> bool {
             embedder: crate::common::stub_embedder_seed(),
             reranker: crate::common::stub_reranker_seed(),
             summariser: crate::common::stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index");

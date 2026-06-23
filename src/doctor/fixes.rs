@@ -543,6 +543,7 @@ fn repair_schema(paths: &Paths, _scope: &Scope) -> Result<(), TomeError> {
             embedder: embedder_seed,
             reranker: reranker_seed,
             summariser: summariser_seed,
+            profile: None,
         },
     )?;
     let current = migrations::current_schema_version(&conn)?.unwrap_or(index::SCHEMA_VERSION);

@@ -48,6 +48,7 @@ fn count_skill_rows(paths: &tome::paths::Paths, catalog: &str) -> i64 {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();
@@ -72,6 +73,7 @@ fn count_workspace_enrolments(paths: &tome::paths::Paths, workspace: &str, catal
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();

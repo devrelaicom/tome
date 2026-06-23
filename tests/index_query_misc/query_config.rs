@@ -78,6 +78,7 @@ fn build_config_query_env() -> ConfigQueryEnv {
                 embedder: stub_embedder_seed(),
                 reranker: stub_reranker_seed(),
                 summariser: stub_summariser_seed(),
+                profile: None,
             },
         )
         .expect("bootstrap index meta with stub seeds"),

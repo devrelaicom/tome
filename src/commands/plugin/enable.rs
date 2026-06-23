@@ -114,6 +114,7 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
                 embedder: embedder_seed,
                 reranker: reranker_seed,
                 summariser: summariser_seed,
+                profile: None,
             },
         )?;
         let tier_lock = crate::index::acquire_lock(&paths.index_lock)?;

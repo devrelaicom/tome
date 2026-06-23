@@ -44,6 +44,7 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
             embedder: embedder_seed.clone(),
             reranker: reranker_seed.clone(),
             summariser: summariser_seed.clone(),
+            profile: None,
         },
     )?;
 
@@ -121,6 +122,7 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
                 embedder: embedder_seed.clone(),
                 reranker: reranker_seed.clone(),
                 summariser: summariser_seed.clone(),
+                profile: None,
             },
         )?;
         let affected = workspace_catalogs::workspaces_with_catalog_url(&conn, &target.url)?;
@@ -266,6 +268,7 @@ fn load_embedder(paths: &Paths) -> Result<FastembedEmbedder, TomeError> {
             embedder: e_seed,
             reranker: r_seed,
             summariser: s_seed,
+            profile: None,
         },
     )?;
     let entry = meta::active_embedder(&conn)?;
@@ -287,6 +290,7 @@ fn read_enabled_plugins_for(
             embedder: e_seed,
             reranker: r_seed,
             summariser: s_seed,
+            profile: None,
         },
     )?;
     enabled_plugins_for_catalog(&conn, workspace, catalog)

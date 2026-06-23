@@ -118,12 +118,17 @@ pub fn init(
     let lock = acquire_lock(&paths.index_lock)?;
 
     let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
+    // Seed the profile from config on a FRESH index only; subsequent opens
+    // use the DB's own stored profile. Load defensively so a malformed
+    // config.toml doesn't break workspace init.
+    let cfg_profile = crate::config::load_or_default(paths).models.profile;
     let mut conn = index::open(
         &paths.index_db,
         &OpenOptions {
             embedder: embedder_seed,
             reranker: reranker_seed,
             summariser: summariser_seed,
+            profile: cfg_profile,
         },
     )?;
 

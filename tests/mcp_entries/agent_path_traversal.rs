@@ -93,6 +93,7 @@ fn traversal_agent_name_is_rejected_exit_45_and_no_row_stored() {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open central db");

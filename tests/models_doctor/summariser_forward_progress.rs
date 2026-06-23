@@ -57,6 +57,7 @@ fn seed_enabled_skill(paths: &Paths, workspace_name: &str) {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open central DB");
@@ -171,6 +172,7 @@ fn enabled_skill_count(paths: &Paths, workspace_name: &str) -> i64 {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();

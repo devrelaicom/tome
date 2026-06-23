@@ -112,6 +112,7 @@ fn options() -> OpenOptions {
         embedder: stub_embedder_seed(),
         reranker: stub_reranker_seed(),
         summariser: stub_summariser_seed(),
+        profile: None,
     }
 }
 
@@ -490,6 +491,7 @@ fn seed_workspace_with_registry_seeds(paths: &tome::paths::Paths, name: &str) {
             embedder,
             reranker,
             summariser,
+            profile: None,
         },
     )
     .expect("open index for seeding workspace");

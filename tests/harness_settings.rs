@@ -18,6 +18,8 @@ mod guardrails_render;
 mod guardrails_suppression;
 #[path = "harness_settings/harness_bare.rs"]
 mod harness_bare;
+#[path = "harness_settings/harness_default_scope_config.rs"]
+mod harness_default_scope_config;
 #[path = "harness_settings/harness_info.rs"]
 mod harness_info;
 #[cfg(unix)]
@@ -35,8 +37,6 @@ mod harness_module_claude_code;
 mod harness_modules;
 #[path = "harness_settings/harness_open_plugins_bundle.rs"]
 mod harness_open_plugins_bundle;
-#[path = "harness_settings/harness_default_scope_config.rs"]
-mod harness_default_scope_config;
 #[path = "harness_settings/harness_p11_pins.rs"]
 mod harness_p11_pins;
 #[path = "harness_settings/harness_remove_scope.rs"]

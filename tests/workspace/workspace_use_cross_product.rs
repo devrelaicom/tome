@@ -76,6 +76,7 @@ fn read_bound_at(paths: &tome::paths::Paths, project_path: &std::path::Path) -> 
             embedder: crate::common::stub_embedder_seed(),
             reranker: crate::common::stub_reranker_seed(),
             summariser: crate::common::stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index");
@@ -95,6 +96,7 @@ fn count_rows(paths: &tome::paths::Paths, project_path: &std::path::Path) -> i64
             embedder: crate::common::stub_embedder_seed(),
             reranker: crate::common::stub_reranker_seed(),
             summariser: crate::common::stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index");

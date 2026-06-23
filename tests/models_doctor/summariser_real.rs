@@ -194,6 +194,7 @@ fn seed_enabled_skill_for_real(
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open central DB");

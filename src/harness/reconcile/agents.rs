@@ -577,6 +577,7 @@ mod tests {
                 embedder: stub_seed(),
                 reranker: stub_seed(),
                 summariser: stub_seed(),
+                profile: None,
             },
         )
         .expect("bootstrap central index db");

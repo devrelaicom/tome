@@ -233,6 +233,7 @@ fn enrol_catalog_row(paths: &Paths, workspace_name: &str, catalog_name: &str, ur
             embedder: e,
             reranker: r,
             summariser: s,
+            profile: None,
         },
     )
     .expect("open index for catalog enrolment");
@@ -485,6 +486,7 @@ pub fn write_config_for_cli(paths: &Paths, config: &TestCatalogConfig) {
             embedder: e,
             reranker: r,
             summariser: s,
+            profile: None,
         },
     )
     .expect("open index db for catalog seed");
@@ -610,6 +612,7 @@ pub fn read_global_enrolments(paths: &Paths) -> Vec<tome::index::CatalogEnrolmen
             embedder: e,
             reranker: r,
             summariser: s,
+            profile: None,
         },
     )
     .expect("open index db for enrolment read");
@@ -650,6 +653,7 @@ pub fn seed_workspace(paths: &Paths, name: &str) {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index for seeding workspace");
@@ -791,6 +795,7 @@ pub fn set_global_enrolment_ref(paths: &Paths, catalog_name: &str, new_ref: &str
             embedder: e,
             reranker: r,
             summariser: s,
+            profile: None,
         },
     )
     .unwrap();

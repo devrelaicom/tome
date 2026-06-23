@@ -36,6 +36,7 @@ fn bootstrap_v_current_with_enrolment(paths: &tome::paths::Paths, catalog: &str,
         embedder: crate::common::stub_embedder_seed(),
         reranker: crate::common::stub_reranker_seed(),
         summariser: crate::common::stub_summariser_seed(),
+        profile: None,
     };
     let conn = index::open(&paths.index_db, &opts).expect("bootstrap current-schema index db");
     index::workspace_catalogs::insert(&conn, "global", catalog, url, "main")

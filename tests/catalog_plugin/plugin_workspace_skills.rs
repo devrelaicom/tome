@@ -32,6 +32,7 @@ fn workspace_skill_count(paths: &tome::paths::Paths, workspace: &str) -> i64 {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index");
@@ -54,6 +55,7 @@ fn skills_row_count(paths: &tome::paths::Paths, catalog: &str, plugin: &str) -> 
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index");

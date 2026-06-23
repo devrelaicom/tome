@@ -37,6 +37,7 @@ fn options() -> OpenOptions {
             name: "test-summariser".into(),
             version: "1.0".into(),
         },
+        profile: None,
     }
 }
 

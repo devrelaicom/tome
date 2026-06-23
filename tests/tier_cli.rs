@@ -286,6 +286,7 @@ fn plugin_enable_with_tier_flag_bulk_sets() {
                 embedder: e,
                 reranker: r,
                 summariser: s,
+                profile: None,
             },
         )
         .expect("open writable index");

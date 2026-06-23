@@ -7,10 +7,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::common::{paths_for, seed_workspace, ToolEnv};
+use crate::common::{ToolEnv, paths_for, seed_workspace};
 use tome::cli::GlobalScopeArgs;
-use tome::workspace::resolution::resolve;
 use tome::workspace::ScopeSource;
+use tome::workspace::resolution::resolve;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -82,7 +82,11 @@ fn config_default_workspace_used_without_flag_or_env() {
 
     let r = resolve(&no_flag(), &paths).expect("resolve");
     assert_eq!(r.scope.name().as_str(), "work");
-    assert_eq!(r.source, ScopeSource::Config, "must be resolved from Config");
+    assert_eq!(
+        r.source,
+        ScopeSource::Config,
+        "must be resolved from Config"
+    );
     assert!(r.project_root.is_none());
 }
 

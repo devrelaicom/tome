@@ -55,6 +55,7 @@ fn bind_project_in_db(paths: &tome::paths::Paths, ws_name: &str, project_root: &
             embedder: e,
             reranker: r,
             summariser: s,
+            profile: None,
         },
     )
     .expect("open index for project bind");

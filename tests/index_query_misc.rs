@@ -8,6 +8,8 @@
 
 mod common;
 
+#[path = "index_query_misc/bootstrap_profile_config.rs"]
+mod bootstrap_profile_config;
 #[path = "index_query_misc/embedding_stub.rs"]
 mod embedding_stub;
 #[path = "index_query_misc/error_messages.rs"]

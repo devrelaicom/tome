@@ -48,7 +48,7 @@ pub mod use_;
 
 use std::path::Path;
 
-use crate::cli::{HarnessArgs, HarnessScopeArg, HarnessCommand};
+use crate::cli::{HarnessArgs, HarnessCommand, HarnessScopeArg};
 use crate::error::{CompositionErrorKind, TomeError};
 use crate::output::Mode;
 use crate::paths::Paths;

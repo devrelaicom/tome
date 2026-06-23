@@ -100,6 +100,7 @@ mod tests {
                 embedder,
                 reranker,
                 summariser,
+                profile: None,
             },
         )
         .expect("open seeded index")

@@ -114,6 +114,7 @@ fn read_only_open_does_not_block_writer_lock() {
             embedder: meta_seed("stub-embedder", "0"),
             reranker: meta_seed("stub-reranker", "0"),
             summariser: meta_seed("stub-summariser", "0"),
+            profile: None,
         },
     )
     .expect("bootstrap");

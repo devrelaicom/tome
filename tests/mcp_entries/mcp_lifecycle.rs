@@ -56,6 +56,7 @@ fn open_opts() -> OpenOptions {
         embedder: seed(e.name, e.version),
         reranker: seed(r.name, r.version),
         summariser: seed(s.name, s.version),
+        profile: None,
     }
 }
 

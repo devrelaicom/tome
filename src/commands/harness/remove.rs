@@ -31,8 +31,8 @@ use crate::settings::edit::{
 };
 use crate::workspace::ResolvedScope;
 
-use super::{effective_harness_scope, home_root};
 use super::use_::{compute_effective_names, resolve_settings_path};
+use super::{effective_harness_scope, home_root};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HarnessRemoveOutcome {

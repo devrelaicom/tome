@@ -54,6 +54,7 @@ fn open_with_registry_seeds(paths: &tome::paths::Paths) {
             embedder,
             reranker,
             summariser,
+            profile: None,
         },
     )
     .expect("open index db with registry seeds");

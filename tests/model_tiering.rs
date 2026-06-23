@@ -217,6 +217,7 @@ fn open_writable(paths: &tome::paths::Paths) -> rusqlite::Connection {
             },
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index")

@@ -80,6 +80,7 @@ fn enable_rolls_back_when_embedder_fails_mid_pipeline() {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();

@@ -32,6 +32,7 @@ fn seed_enabled_skill(paths: &Paths, workspace_name: &str, name: &str) {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();

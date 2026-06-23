@@ -144,6 +144,7 @@ fn read_alpha_enabled_state(paths: &Paths) -> (i64, i64) {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index DB");

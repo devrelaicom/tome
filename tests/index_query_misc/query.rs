@@ -75,6 +75,7 @@ fn build_query_env() -> QueryEnv {
                 embedder: stub_embedder_seed(),
                 reranker: stub_reranker_seed(),
                 summariser: stub_summariser_seed(),
+                profile: None,
             },
         )
         .expect("bootstrap index meta with stub seeds"),
@@ -113,6 +114,7 @@ fn open_conn(env: &QueryEnv) -> rusqlite::Connection {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap()

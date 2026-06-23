@@ -95,6 +95,7 @@ fn count_by_kind(paths: &tome::paths::Paths, kind: &str) -> i64 {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open");
@@ -178,6 +179,7 @@ fn same_name_different_kind_produces_two_rows() {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();
@@ -294,6 +296,7 @@ fn enable_synchronises_both_kinds_into_workspace_skills_junction() {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();
@@ -393,6 +396,7 @@ fn frontmatter_when_to_use_round_trips_through_enable_to_db() {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();
@@ -442,6 +446,7 @@ fn searchable_and_user_invocable_defaults_per_kind_persist_to_db() {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();

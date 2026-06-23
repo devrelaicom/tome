@@ -57,6 +57,7 @@ fn open_registry_seeded(paths: &tome::paths::Paths) -> rusqlite::Connection {
             embedder: pick(tome::embedding::registry::ModelKind::Embedder),
             reranker: pick(tome::embedding::registry::ModelKind::Reranker),
             summariser: pick(tome::embedding::registry::ModelKind::Summariser),
+            profile: None,
         },
     )
     .expect("open central DB (registry seeds)")

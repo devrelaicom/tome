@@ -1149,6 +1149,7 @@ mod tests {
                 embedder: e,
                 reranker: r,
                 summariser: s,
+                profile: None,
             },
         )
         .unwrap();

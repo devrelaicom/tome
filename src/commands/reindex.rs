@@ -101,6 +101,7 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
                 embedder: e_seed,
                 reranker: r_seed,
                 summariser: s_seed,
+                profile: None,
             },
         )?
     };
@@ -242,6 +243,7 @@ fn resolve_targets(
                     embedder: embedder_seed,
                     reranker: reranker_seed,
                     summariser: summariser_seed,
+                    profile: None,
                 },
             )?;
             let mut stmt = conn
@@ -287,6 +289,7 @@ fn read_enabled_plugins(
             embedder: embedder_seed,
             reranker: reranker_seed,
             summariser: summariser_seed,
+            profile: None,
         },
     )?;
     enabled_plugins_for_catalog(&conn, ws_scope.name().as_str(), catalog)
@@ -304,6 +307,7 @@ fn load_embedder(paths: &Paths) -> Result<FastembedEmbedder, TomeError> {
             embedder: e_seed,
             reranker: r_seed,
             summariser: s_seed,
+            profile: None,
         },
     )?;
     let entry = meta::active_embedder(&conn)?;

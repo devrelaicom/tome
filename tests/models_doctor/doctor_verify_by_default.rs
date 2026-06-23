@@ -4,8 +4,8 @@
 //! rehashes model files. Sparse / zeroed fabricated files differ from the
 //! registry SHA-256, so the embedder state becomes `checksum_mismatched`.
 //!
-//! Active models are resolved from Profile::DEFAULT (Medium = bge-base-en-v1.5
-//! + bge-reranker-large) when no index DB is present. We fabricate only those
+//! Active models are resolved from Profile::DEFAULT (Medium = bge-base-en-v1.5 +
+//! bge-reranker-large) when no index DB is present. We fabricate only those
 //! two so the doctor sees the files and can (or can't) hash them.
 
 use crate::common::{ToolEnv, fabricate_installed_models, paths_for};

@@ -162,6 +162,7 @@ fn real_model_filtered_knn_returns_min_top_k_matches() {
             embedder: embedder_seed(entry),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index");

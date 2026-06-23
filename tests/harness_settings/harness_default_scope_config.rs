@@ -47,8 +47,7 @@ fn config_default_scope_global_used_without_flag() {
     // Resolved scope has NO project_root → `project` scope would fail with exit 2.
     // If effective_harness_scope correctly returns Global, this succeeds.
     let scope = global_scope();
-    let r = use_::run(args, &scope, &paths, Mode::Json).expect("should succeed");
-    let _ = r;
+    use_::run(args, &scope, &paths, Mode::Json).expect("should succeed");
 }
 
 /// Explicit `--scope project` overrides `[harness] default_scope = "global"`.

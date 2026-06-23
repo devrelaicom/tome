@@ -115,6 +115,7 @@ fn stage_one_command_workspace() -> (TempDir, tome::paths::Paths) {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();
@@ -142,6 +143,7 @@ fn build_state(paths: &tome::paths::Paths) -> Arc<McpState> {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();

@@ -189,6 +189,7 @@ pub(crate) fn open_index_for_read(
                 embedder,
                 reranker,
                 summariser,
+                profile: None,
             },
         )?;
     }
