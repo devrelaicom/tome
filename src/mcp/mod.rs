@@ -139,7 +139,10 @@ pub fn run(
     // errors, the harness sees a TomeError on stderr instead of a
     // silent log.
     let log_file = log::open_appender(paths)?;
-    log::init_subscriber(log_file)?;
+    // Load the logging level from config defensively so a malformed config.toml
+    // doesn't prevent the MCP server from starting.
+    let cfg_level = crate::config::load_or_default(paths).logging.level;
+    log::init_subscriber(log_file, cfg_level)?;
 
     let runtime = runtime::build_runtime()?;
 

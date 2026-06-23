@@ -26,7 +26,16 @@ fn main() {
     // Ctrl-C signal handler: the MCP server uses tokio's async
     // `signal::ctrl_c()` instead, and the CLI handler would race.
     if !matches!(cli.command, Command::Mcp(_)) {
-        logging::init(cli.verbosity());
+        // Resolve the config logging level defensively BEFORE calling
+        // `logging::init` so a malformed config.toml can't silence logging
+        // (the strict `config::load` exit-5 error is surfaced by the command
+        // itself, not the logging path).
+        let paths_for_log = tome::paths::Paths::resolve().ok();
+        let cfg_level = paths_for_log
+            .as_ref()
+            .map(|p| tome::config::load_or_default(p).logging.level)
+            .unwrap_or(None);
+        logging::init(cli.verbosity(), cfg_level);
         git::install_signal_handler();
         // Resolve the colour-enabled decision once, before any human output.
         // Gated on TTY + `NO_COLOR` (see `presentation::colour`). Without this
