@@ -470,6 +470,7 @@ pub enum TomeError {
     /// `telemetry/config.toml` exists but is malformed (parse failure or an
     /// out-of-range field). The on-disk config is Tome-owned, so this is a
     /// strict-parse failure, not a third-party leniency case.
+    // Vestigial since Task 3 (telemetry opt-out folded into config.toml → exit 5); retained for the closed-set contract, no longer constructed.
     #[error("telemetry config invalid at {}: {detail}", path.display())]
     TelemetryConfigInvalid { path: PathBuf, detail: String },
 

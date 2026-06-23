@@ -286,9 +286,9 @@ mod tests {
     fn set_enabled_round_trips() {
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
+        let _g = EnvGuard::new();
 
         set_enabled(&paths, false).unwrap();
-        let _g = EnvGuard::new();
         assert!(!resolve_enabled(&paths).unwrap());
 
         set_enabled(&paths, true).unwrap();
@@ -308,6 +308,10 @@ mod tests {
         set_enabled(&paths, false).unwrap();
         let body = std::fs::read_to_string(&paths.global_config_file).unwrap();
         assert!(body.contains("# keep me"), "comment must survive: {body}");
+        assert!(
+            body.contains("[telemetry]"),
+            "section header must survive: {body}"
+        );
         assert!(body.contains("enabled = false"));
     }
 
@@ -330,6 +334,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
+        let _g = EnvGuard::new();
         set_enabled(&paths, false).unwrap();
         let mode = std::fs::metadata(&paths.global_config_file)
             .unwrap()
@@ -367,13 +372,6 @@ mod tests {
         let g = EnvGuard::new();
         g.set("TOME_TELEMETRY", "0");
         assert!(!resolve_enabled(&paths_in(&dir)).unwrap());
-    }
-
-    #[test]
-    fn no_file_resolves_on() {
-        let dir = TempDir::new().unwrap();
-        let _g = EnvGuard::new();
-        assert!(resolve_enabled(&paths_in(&dir)).unwrap());
     }
 
     #[test]

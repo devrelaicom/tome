@@ -272,7 +272,8 @@ fn emit_inspect_human(
 /// Scrub the queue path for inclusion in a [`TomeError::TelemetryQueueCorrupt`]
 /// surface. A filesystem path can't carry URL credentials, but routing it
 /// through the shared scrubber keeps "every telemetry-facing string is scrubbed"
-/// true by construction — mirrors `config::scrubbed_path`.
+/// true by construction — every path string routes through
+/// [`crate::catalog::git::scrub_credentials`].
 fn scrubbed_queue_path(paths: &Paths) -> std::path::PathBuf {
     let queue = paths.telemetry_queue();
     let bytes = queue.to_string_lossy();
