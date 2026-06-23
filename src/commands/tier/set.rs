@@ -27,6 +27,7 @@ pub fn run(args: TierSetArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), T
             embedder,
             reranker,
             summariser,
+            profile: None,
         },
     )?;
     let lock = crate::index::acquire_lock(&paths.index_lock)?;

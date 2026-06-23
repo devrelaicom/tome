@@ -19,6 +19,7 @@ pub mod stub;
 use crate::error::TomeError;
 use crate::index::query::Candidate;
 
+pub use profile::Profile;
 pub use registry::{MODEL_REGISTRY, ModelEntry, ModelKind, ModelManifest};
 
 /// Produces an embedding vector for arbitrary text. The output dimension

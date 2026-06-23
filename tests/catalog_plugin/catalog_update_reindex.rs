@@ -25,6 +25,7 @@ fn count_skills(paths: &tome::paths::Paths, catalog: &str, plugin: &str) -> (i64
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index");
@@ -197,6 +198,7 @@ fn update_auto_disables_plugin_whose_upstream_directory_is_gone() {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index");

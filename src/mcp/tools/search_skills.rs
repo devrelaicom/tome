@@ -32,8 +32,10 @@ pub struct Input {
     /// Natural-language description of the task.
     pub query: String,
     /// Maximum results to return after reranking. 1..=100, default 10.
-    #[serde(default = "default_top_k")]
-    pub top_k: u32,
+    /// When absent, falls back to `[query] top_k` in `~/.tome/config.toml`,
+    /// then to the built-in default of 10.
+    #[serde(default)]
+    pub top_k: Option<u32>,
     /// Restrict to one catalog by name (must match an enabled catalog
     /// in the resolved scope).
     #[serde(default)]
@@ -43,21 +45,14 @@ pub struct Input {
     #[serde(default)]
     pub plugin: Option<String>,
     /// Truncate each result's description at this many characters
-    /// (Unicode scalar values), per FR-092. Default 150 — agent-consumed
-    /// search results preserve token budget. Set to a very large value
-    /// (e.g. 99999) to opt out. Negative values are rejected by the
-    /// `u32` deserialiser; values above [`MAX_DESCRIPTION_MAX_CHARS`]
-    /// surface as `invalid_description_max_chars`.
-    #[serde(default = "default_description_max_chars")]
-    pub description_max_chars: u32,
-}
-
-fn default_top_k() -> u32 {
-    10
-}
-
-fn default_description_max_chars() -> u32 {
-    150
+    /// (Unicode scalar values), per FR-092. When absent, falls back to
+    /// `[mcp] description_max_chars` in `~/.tome/config.toml`, then to
+    /// the built-in default of 150. Set to a very large value (e.g. 99999)
+    /// to opt out. Negative values are rejected by the `u32` deserialiser;
+    /// the RESOLVED value above [`MAX_DESCRIPTION_MAX_CHARS`] surfaces as
+    /// `invalid_description_max_chars`.
+    #[serde(default)]
+    pub description_max_chars: Option<u32>,
 }
 
 /// Sanity cap on `description_max_chars`. Values strictly above this
@@ -121,19 +116,27 @@ pub struct SkillMatch {
 pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpError> {
     let started = Instant::now();
 
-    // Bounds-check top_k. The schema's `default = 10` covers the
-    // missing case; here we enforce the 1..=100 range.
-    if input.top_k == 0 || input.top_k > 100 {
+    // Resolve effective top_k: per-call argument → config default → built-in 10.
+    // Load config defensively (MCP handlers must never hard-fail on a malformed
+    // config.toml — that's the CLI's job).
+    let cfg = crate::config::load_or_default(&state.paths);
+    let effective_top_k: u32 = input.top_k.or(cfg.query.top_k).unwrap_or(10);
+
+    // Bounds-check the RESOLVED value so the config default is also guarded.
+    if effective_top_k == 0 || effective_top_k > 100 {
         return Err(McpError::invalid_params(
             "top_k must be between 1 and 100",
             None,
         ));
     }
-    // Sanity-cap description_max_chars per `mcp-tools-p5.md` § Error
-    // responses. Serde's `u32` deserialisation already rejects negative
-    // values; this guards against absurdly-large values that would
-    // defeat the purpose of truncation.
-    if input.description_max_chars > MAX_DESCRIPTION_MAX_CHARS {
+    // Resolve effective description_max_chars:
+    // per-call arg → [mcp] description_max_chars in config → 150.
+    // Sanity-cap the RESOLVED value per `mcp-tools-p5.md` § Error responses.
+    let effective_dmc = input
+        .description_max_chars
+        .or(cfg.mcp.description_max_chars)
+        .unwrap_or(150);
+    if effective_dmc > MAX_DESCRIPTION_MAX_CHARS {
         return Err(McpError::invalid_params(
             format!("description_max_chars must be at most {MAX_DESCRIPTION_MAX_CHARS}"),
             Some(json!({
@@ -220,15 +223,23 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         .map_err(tome_to_mcp)?
         .clone();
 
-    // Translate Input → QueryArgs. `strict` / `no_rerank` / `min_score`
-    // have no MCP equivalents — the agent decides what to do with the
-    // scores. We always run the production pipeline.
+    // Translate Input → QueryArgs.
+    //
+    // `rerank` follows `cfg.query.rerank` (no per-call MCP arg exists today):
+    //   config `rerank = false` → `no_rerank: true` → reranker skipped.
+    //   This matters when the reranker model is not installed for the profile.
+    //
+    // `strict` / `min_score` (strict_min_score) are intentionally CLI-only.
+    // MCP returns the top_k scored results and lets the agent decide; applying
+    // a strict floor would silently drop results with no visible signal to the
+    // caller.  Leave `strict: false` / `min_score: None`.
+    let no_rerank = !cfg.query.rerank.unwrap_or(true);
     let args = QueryArgs {
         text: input.query.clone(),
-        top_k: input.top_k,
+        top_k: Some(effective_top_k),
         catalog: input.catalog.clone(),
         plugin: input.plugin.clone(),
-        no_rerank: false,
+        no_rerank,
         strict: false,
         min_score: None,
     };
@@ -246,9 +257,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     let reranker: Arc<dyn Reranker> = reranker_arc;
     let paths = state.paths.clone();
     let scope = state.scope.scope.clone();
-    // FF2: `QueryDeps.config` is vestigial — `query::pipeline` resolves
-    // `--catalog`/`--plugin` from the `workspace_catalogs` DB. Pass an empty
-    // default rather than reading the never-written `config.toml`.
+    // FF2 vestigial slot: `QueryDeps.config` is unused by `query::pipeline`
+    // (catalog/plugin validation was moved to the `workspace_catalogs` DB).
+    // Distinct from `cfg` above, which was loaded for `top_k` / `rerank`
+    // resolution; this slot receives a bare default so the FF2 DB-only path
+    // is preserved without a second config read.
     let config = crate::config::Config::default();
 
     // Capture the strict flag for the telemetry emit before `args` is moved
@@ -323,7 +336,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         }
     })?;
 
-    let description_max_chars = input.description_max_chars as usize;
+    let description_max_chars = effective_dmc as usize;
     let matches: Vec<SkillMatch> = outcome
         .results
         .iter()
@@ -364,9 +377,9 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         surface: crate::telemetry::event::Surface::Mcp,
         latency_bucket: crate::telemetry::buckets::LatencyBucket::from(compute_elapsed),
         candidates_returned: crate::telemetry::buckets::CountBucket::from(matches.len()),
-        // The reranker is always loaded + used on the MCP search path (no
-        // `--no-rerank` equivalent — see the `QueryArgs` construction above).
-        reranker_used: true,
+        // Reranker used iff `no_rerank` was not set by the config resolution
+        // above.  Mirrors the `run_with_deps` emit: `reranker.is_some()`.
+        reranker_used: !no_rerank,
         strict,
         // Mirror the CLI: the bucketed whole-index corpus size the pipeline
         // already computed (best-effort `0` on a count failure).
@@ -468,7 +481,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     info!(
         target: "tome::mcp::tools::search_skills",
         query_len = input.query.len(),
-        top_k = input.top_k,
+        top_k = effective_top_k,
         filter_catalog = input.catalog.as_deref(),
         filter_plugin = input.plugin.as_deref(),
         matches = matches.len(),

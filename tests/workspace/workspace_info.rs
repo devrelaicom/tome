@@ -109,7 +109,7 @@ fn info_workspace_scope_reads_workspace_paths() {
     let catalog_root = copy_sample_plugin_catalog(&tmp, "ws-catalog");
     let config = config_with_catalog("ws-catalog", &catalog_root);
     let config_path = workspace_root.join(".tome/config.toml");
-    let body = toml::to_string_pretty(&config).unwrap();
+    let body = toml::to_string_pretty(&config.config).unwrap();
     std::fs::write(&config_path, body).unwrap();
 
     let scope = workspace_scope(&workspace_root);

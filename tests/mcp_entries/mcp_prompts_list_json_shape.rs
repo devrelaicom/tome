@@ -110,6 +110,7 @@ fn prompts_list_payload_is_byte_stable_for_two_entry_fixture() {
                 embedder: stub_embedder_seed(),
                 reranker: stub_reranker_seed(),
                 summariser: stub_summariser_seed(),
+                profile: None,
             },
         )
         .unwrap();
@@ -134,6 +135,7 @@ fn prompts_list_payload_is_byte_stable_for_two_entry_fixture() {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();

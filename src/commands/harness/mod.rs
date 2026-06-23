@@ -48,7 +48,7 @@ pub mod use_;
 
 use std::path::Path;
 
-use crate::cli::{HarnessArgs, HarnessCommand};
+use crate::cli::{HarnessArgs, HarnessCommand, HarnessScopeArg};
 use crate::error::{CompositionErrorKind, TomeError};
 use crate::output::Mode;
 use crate::paths::Paths;
@@ -75,6 +75,30 @@ pub fn sync_for_project_root(
     let sync_deps =
         crate::harness::sync::build_deps(deps.paths, deps.home_root, workspace_name, force);
     crate::harness::sync::sync_project(project_root, &sync_deps)
+}
+
+/// Resolve the effective harness `--scope` argument.
+///
+/// Precedence: explicit CLI `--scope` → `[harness] default_scope` in
+/// `~/.tome/config.toml` → `HarnessScopeArg::Project`.
+///
+/// Config is loaded strictly (`config::load`) — aligned with T8/T10 and every
+/// other foreground config read — so a malformed `config.toml` surfaces exit 5
+/// rather than silently ignoring the user's configured default scope.
+pub(crate) fn effective_harness_scope(
+    arg: Option<HarnessScopeArg>,
+    paths: &Paths,
+) -> Result<HarnessScopeArg, crate::error::TomeError> {
+    if let Some(explicit) = arg {
+        return Ok(explicit);
+    }
+    let cfg = crate::config::load(paths)?;
+    Ok(match cfg.harness.default_scope {
+        Some(crate::config::HarnessScope::Global) => HarnessScopeArg::Global,
+        Some(crate::config::HarnessScope::Project) | None => HarnessScopeArg::Project,
+        // `Workspace` is not a valid `HarnessScope` in config (only Project/Global
+        // are the two persisted options), so no third arm is needed.
+    })
 }
 
 /// Subcommand dispatcher invoked by `main.rs`.

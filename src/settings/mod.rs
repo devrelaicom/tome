@@ -223,27 +223,14 @@ pub struct ProjectMarkerConfig {
     pub strip_plugin_agent_privileges: Option<bool>,
 }
 
-/// Contents of `<root>/settings.toml` (global Tome settings).
+/// The global harness-settings layer. Now lives in `config.toml [harness]`.
 ///
-/// Mirrors data-model §8. `Default` is provided so callers can treat an
-/// absent file as the empty case.
-#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GlobalSettings {
-    #[serde(default)]
-    pub harnesses: Option<Vec<String>>,
-    /// Phase 6 (FR-060/FR-067): see [`WorkspaceSettings::expose_agents_as_personas`].
-    /// Declared at global scope it is the org-wide default when nearer
-    /// scopes leave the key absent.
-    #[serde(default)]
-    pub expose_agents_as_personas: Option<bool>,
-    /// Phase 6 (FR-050/FR-052/FR-053): see
-    /// [`WorkspaceSettings::strip_plugin_agent_privileges`]. Declared at
-    /// global scope it is the org-wide default when nearer scopes leave the
-    /// key absent — a security-conscious user enforces the strip org-wide here.
-    #[serde(default)]
-    pub strip_plugin_agent_privileges: Option<bool>,
-}
+/// Type alias for [`crate::config::HarnessConfig`] — every field previously
+/// in the old `GlobalSettings` struct (`harnesses` → `enabled`,
+/// `expose_agents_as_personas`, `strip_plugin_agent_privileges`) maps 1-to-1
+/// onto `HarnessConfig`. The alias keeps every `GlobalSettings` usage in this
+/// crate compiling unedited; callers access `.enabled` instead of `.harnesses`.
+pub type GlobalSettings = crate::config::HarnessConfig;
 
 #[cfg(test)]
 mod scalar_resolver_tests {
@@ -276,9 +263,10 @@ mod scalar_resolver_tests {
     #[test]
     fn closure_form_threads_the_accessor() {
         let global = GlobalSettings {
-            harnesses: None,
+            enabled: None,
             expose_agents_as_personas: Some(true),
             strip_plugin_agent_privileges: None,
+            default_scope: None,
         };
         let resolved = resolve_scalar_with(
             None,

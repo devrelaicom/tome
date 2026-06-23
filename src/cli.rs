@@ -30,6 +30,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Disable ANSI colour in human output. Overrides `[output] color` in
+    /// `~/.tome/config.toml` and the `NO_COLOR` environment variable.
+    /// The MCP path never emits colour regardless of this flag.
+    #[arg(long, global = true)]
+    pub no_color: bool,
+
     /// Increase log verbosity. `-v` = info, `-vv` = debug. Env: TOME_LOG.
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
@@ -358,10 +364,12 @@ pub struct HarnessUseArgs {
     /// Mutually exclusive with explicit names.
     #[arg(long)]
     pub all: bool,
-    /// Settings scope to edit. Defaults to `project` (requires a project
-    /// marker above CWD; use `workspace` or `global` outside a project).
-    #[arg(long, default_value_t = HarnessScopeArg::Project, value_enum)]
-    pub scope: HarnessScopeArg,
+    /// Settings scope to edit. When omitted, falls back to
+    /// `[harness] default_scope` in `~/.tome/config.toml`, then to
+    /// `project` (requires a project marker above CWD; use `workspace`
+    /// or `global` outside a project).
+    #[arg(long, value_enum)]
+    pub scope: Option<HarnessScopeArg>,
     /// Override a harness-clash on the MCP config write (without it, a
     /// clash exits 19).
     #[arg(long)]
@@ -372,9 +380,10 @@ pub struct HarnessUseArgs {
 pub struct HarnessRemoveArgs {
     /// Harness name.
     pub name: String,
-    /// Settings scope to edit. Defaults to `project`.
-    #[arg(long, default_value_t = HarnessScopeArg::Project, value_enum)]
-    pub scope: HarnessScopeArg,
+    /// Settings scope to edit. When omitted, falls back to
+    /// `[harness] default_scope` in `~/.tome/config.toml`, then to `project`.
+    #[arg(long, value_enum)]
+    pub scope: Option<HarnessScopeArg>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -797,8 +806,10 @@ pub struct QueryArgs {
     pub text: String,
 
     /// Cap on returned results (post-rerank when reranking).
-    #[arg(long = "top-k", default_value_t = 10)]
-    pub top_k: u32,
+    /// When absent, falls back to `[query] top_k` in `~/.tome/config.toml`,
+    /// then to the built-in default of 10.
+    #[arg(long = "top-k")]
+    pub top_k: Option<u32>,
 
     /// Restrict the search to a single catalog.
     #[arg(long)]

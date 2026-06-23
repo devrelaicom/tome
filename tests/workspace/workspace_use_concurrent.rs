@@ -30,6 +30,7 @@ fn open_db(paths: &tome::paths::Paths) -> rusqlite::Connection {
             embedder: crate::common::stub_embedder_seed(),
             reranker: crate::common::stub_reranker_seed(),
             summariser: crate::common::stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index")

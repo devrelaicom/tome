@@ -2,9 +2,12 @@
 //! reranker from `MODEL_REGISTRY` Tome uses. The summariser is profile-
 //! independent in this phase. The active profile is persisted in `meta`.
 
+use serde::{Deserialize, Serialize};
+
 use crate::embedding::registry::{ModelEntry, lookup};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Profile {
     Small,
     Medium,

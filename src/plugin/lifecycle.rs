@@ -205,6 +205,7 @@ pub fn disable(
             embedder: embedder_seed.clone(),
             reranker: reranker_seed.clone(),
             summariser: summariser_seed.clone(),
+            profile: None,
         },
     )?;
     let _plugin_dir = resolve_plugin_dir(id, &conn, scope.name().as_str(), paths)?;
@@ -327,6 +328,7 @@ pub fn cascade_disable_for_catalog(
                 embedder: embedder_seed,
                 reranker: reranker_seed,
                 summariser: summariser_seed,
+                profile: None,
             },
         )?;
         let mut breakdown: Vec<(String, u32)> = Vec::with_capacity(plugins.len());
@@ -448,6 +450,7 @@ fn open_for_lifecycle(deps: &LifecycleDeps<'_>) -> Result<rusqlite::Connection, 
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
             summariser: deps.summariser_seed.clone(),
+            profile: None,
         },
     )
 }
@@ -487,6 +490,7 @@ fn enable_locked(
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
             summariser: deps.summariser_seed.clone(),
+            profile: None,
         },
     )?;
 
@@ -532,6 +536,7 @@ fn disable_locked(
             embedder: embedder_seed,
             reranker: reranker_seed,
             summariser: summariser_seed,
+            profile: None,
         },
     )?;
 
@@ -584,6 +589,7 @@ fn reindex_locked(
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
             summariser: deps.summariser_seed.clone(),
+            profile: None,
         },
     )?;
 
@@ -619,6 +625,7 @@ fn auto_disable_locked(id: &PluginId, deps: &LifecycleDeps<'_>) -> Result<u32, T
             embedder: deps.embedder_seed.clone(),
             reranker: deps.reranker_seed.clone(),
             summariser: deps.summariser_seed.clone(),
+            profile: None,
         },
     )?;
     delete_by_plugin(&conn, &id.catalog, &id.plugin)
@@ -1149,6 +1156,7 @@ mod tests {
                 embedder: stub_seed(),
                 reranker: stub_reranker_seed(),
                 summariser: stub_summariser_seed(),
+                profile: None,
             },
         )
         .expect("open index for catalog enrolment");
@@ -1235,6 +1243,7 @@ mod tests {
                 embedder: stub_seed(),
                 reranker: stub_reranker_seed(),
                 summariser: stub_summariser_seed(),
+                profile: None,
             },
         )
         .expect("open index");
@@ -1603,6 +1612,7 @@ mod tests {
                 embedder: stub_seed(),
                 reranker: stub_reranker_seed(),
                 summariser: stub_summariser_seed(),
+                profile: None,
             },
         )
         .expect("open index");

@@ -32,6 +32,7 @@ fn seed_enabled_skill(paths: &Paths, workspace_name: &str, name: &str) {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();
@@ -76,7 +77,8 @@ fn trigger_overwrites_cached_summaries_and_advances_generated_at() {
 
     // Fire the explicit regen path with a stub summariser.
     let stub = StubSummariser::new();
-    workspace::regen_summary::regen(&ws, &stub, &paths).expect("regen");
+    workspace::regen_summary::regen(&ws, &stub, &paths, tome::summarise::LONG_MAX_CHARS)
+        .expect("regen");
 
     let after = std::fs::read_to_string(&settings_path).unwrap();
     assert!(

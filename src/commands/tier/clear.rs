@@ -30,6 +30,7 @@ pub fn run(args: TierClearArgs, scope: &ResolvedScope, mode: Mode) -> Result<(),
             embedder,
             reranker,
             summariser,
+            profile: None,
         },
     )?;
     let lock = crate::index::acquire_lock(&paths.index_lock)?;

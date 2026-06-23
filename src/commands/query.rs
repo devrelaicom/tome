@@ -92,11 +92,46 @@ impl ScoringMode {
     }
 }
 
+/// Resolve per-invocation query knobs: explicit flag → `[query]` config →
+/// built-in default.  Pure function so it can be tested independently of the
+/// `run()` path (which requires real ONNX models to be present on disk).
+///
+/// Priority (highest to lowest):
+/// 1. Explicit per-call flag (`args.top_k` / `args.no_rerank` / `args.min_score`).
+/// 2. `[query]` section in `~/.tome/config.toml` (passed as `qcfg`).
+/// 3. Built-in default (`top_k = 10`, `rerank = true`, `strict_min_score = None`).
+///
+/// `no_rerank` semantics: if the caller explicitly passed `--no-rerank` that
+/// wins unconditionally.  Otherwise the *config* decides (`rerank = false` →
+/// reranker off; default or `rerank = true` → reranker on).
+pub fn resolve_query_args(args: QueryArgs, qcfg: &crate::config::QueryConfig) -> QueryArgs {
+    let effective_rerank = if args.no_rerank {
+        false
+    } else {
+        qcfg.rerank.unwrap_or(true)
+    };
+    let effective_top_k: u32 = args.top_k.or(qcfg.top_k).unwrap_or(10);
+    QueryArgs {
+        top_k: Some(effective_top_k),
+        no_rerank: !effective_rerank,
+        min_score: args.min_score.or(qcfg.strict_min_score),
+        ..args
+    }
+}
+
 pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
-    // FF2: `validate_filters` resolves catalogs from the `workspace_catalogs`
-    // DB now, so the command no longer reads `config.toml [catalogs]`. The
-    // vestigial `QueryDeps.config` field is populated with an empty default.
+    // Strict load of the global config so a malformed `config.toml` surfaces
+    // as exit 5 rather than silently falling through to defaults. The vestigial
+    // `QueryDeps.config` field still receives a `Config::default()` (FF2).
+    let cfg = crate::config::load(&paths)?;
+
+    // Resolve per-invocation knobs: flag > config > built-in default.
+    // We compute this BEFORE the model-presence check so `--no-rerank`
+    // prevents a hard-fail on a missing reranker model when the flag is
+    // explicitly passed.
+    let args = resolve_query_args(args, &cfg.query);
+
     let config = Config::default();
 
     // B4: resolve the ACTIVE profile's embedder + reranker. Open the index
@@ -356,12 +391,18 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
     // applies only to skill ingestion.
     let query_vec = deps.embedder.embed(text)?;
 
+    // Resolve top_k — callers of `pipeline` (the CLI `run` path via `run_with_deps`,
+    // and the MCP handler) should always pass a `Some(resolved)` value; the
+    // `unwrap_or(10)` here is a belt-and-suspenders fallback for direct library
+    // callers (e.g. tests) that may omit the config-resolution step.
+    let top_k_resolved: u32 = args.top_k.unwrap_or(10);
+
     // Pull candidates. Reranking benefits from a wider pool — 4× per the
     // contract — and we trim back after.
     let candidate_k: u32 = if deps.reranker.is_some() {
-        args.top_k.saturating_mul(4).max(args.top_k)
+        top_k_resolved.saturating_mul(4).max(top_k_resolved)
     } else {
-        args.top_k
+        top_k_resolved
     };
     let filters = QueryFilters {
         catalog: args.catalog.as_deref(),
@@ -396,7 +437,7 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
         }
     };
 
-    let top_k = args.top_k as usize;
+    let top_k = top_k_resolved as usize;
     let mut trimmed: Vec<Scored> = scored.into_iter().take(top_k).collect();
 
     // Default threshold depends on the scoring mode. The contract distinguishes

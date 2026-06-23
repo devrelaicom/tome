@@ -21,9 +21,10 @@ fn gemini_dir_present_but_not_in_effective_list_is_detected_uninstalled() {
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_registry_models(&paths);
     // Effective list excludes gemini — only claude-code is declared.
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
     std::fs::write(
-        &paths.global_settings_file,
-        "harnesses = [\"claude-code\"]\n",
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"claude-code\"]\n",
     )
     .unwrap();
 

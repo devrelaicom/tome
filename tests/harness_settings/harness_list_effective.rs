@@ -27,10 +27,10 @@ fn list_with_only_global_settings_emits_global_source_chain() {
     std::fs::create_dir_all(&paths.root).unwrap();
     // Seed the global workspace.
     // `global` is auto-seeded by index bootstrap; no manual seed needed.
-    // Write global settings.toml declaring two harnesses.
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
     std::fs::write(
-        &paths.global_settings_file,
-        "harnesses = [\"alpha\", \"beta\"]\n",
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"alpha\", \"beta\"]\n",
     )
     .unwrap();
 
@@ -53,10 +53,11 @@ fn list_emits_excluded_names_section() {
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
     // `global` is auto-seeded by index bootstrap; no manual seed needed.
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
     // Global declares alpha, beta and excludes alpha.
     std::fs::write(
-        &paths.global_settings_file,
-        "harnesses = [\"alpha\", \"beta\", \"!alpha\"]\n",
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"alpha\", \"beta\", \"!alpha\"]\n",
     )
     .unwrap();
 

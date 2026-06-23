@@ -45,7 +45,8 @@ impl Fixture {
         let paths = lifecycle_paths(&home_path.join(".tome"));
         fs::create_dir_all(&paths.root).expect("create tome root");
 
-        fs::write(&paths.global_settings_file, global_settings).expect("write global settings");
+        // Task 2: global harness settings now live in config.toml [harness].
+        fs::write(&paths.global_config_file, global_settings).expect("write global config");
 
         seed_workspace(&paths, workspace_name);
         let workspace = WorkspaceName::parse(workspace_name).expect("parse workspace name");
@@ -99,7 +100,8 @@ fn cross_harness_resync_is_byte_for_byte_idempotent() {
         .unwrap_or_else(|e| e.into_inner());
     let _guard = install_two_harnesses();
 
-    let fx = Fixture::build("demo", "harnesses = [\"claude-code\", \"stub\"]\n");
+    // Task 2: global settings now use config.toml [harness].enabled format.
+    let fx = Fixture::build("demo", "[harness]\nenabled = [\"claude-code\", \"stub\"]\n");
 
     // First pass: bind + sync (the bind step copies the workspace's
     // RULES.md into the project marker, which the sync step's
@@ -200,10 +202,11 @@ fn cross_harness_empty_effective_list_resync_is_noop() {
         .unwrap_or_else(|e| e.into_inner());
     let _guard = install_two_harnesses();
 
-    // Empty `harnesses = []` → effective list is empty → cleanup runs
+    // Empty `[harness] enabled = []` → effective list is empty → cleanup runs
     // for every registered harness, but there's nothing to clean up
     // because no prior bind happened.
-    let fx = Fixture::build("demo", "harnesses = []\n");
+    // Task 2: global settings now use config.toml [harness].enabled format.
+    let fx = Fixture::build("demo", "[harness]\nenabled = []\n");
 
     let outcome = binding::bind_project(
         &fx.project_path,

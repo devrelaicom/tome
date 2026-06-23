@@ -115,6 +115,7 @@ pub fn rename(
             embedder: embedder_seed,
             reranker: reranker_seed,
             summariser: summariser_seed,
+            profile: None,
         },
     )?;
 

@@ -42,6 +42,7 @@ fn read_binding_row(paths: &tome::paths::Paths, project_path: &Path) -> Option<(
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index");
@@ -70,6 +71,7 @@ fn read_last_used_at(paths: &tome::paths::Paths, workspace: &str) -> i64 {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index");
@@ -319,6 +321,7 @@ fn rebind_to_different_workspace_upserts() {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();

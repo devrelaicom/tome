@@ -281,7 +281,7 @@ fn collect_references(
                     via: None,
                 });
             }
-            if let Some(list) = global_settings.harnesses.as_ref()
+            if let Some(list) = global_settings.enabled.as_ref()
                 && list.iter().any(|n| n == name)
             {
                 found.push(HarnessReference {

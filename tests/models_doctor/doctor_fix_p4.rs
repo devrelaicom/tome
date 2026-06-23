@@ -55,6 +55,7 @@ fn bind_project_in_db(paths: &tome::paths::Paths, ws_name: &str, project_root: &
             embedder: e,
             reranker: r,
             summariser: s,
+            profile: None,
         },
     )
     .expect("open index for project bind");
@@ -348,7 +349,10 @@ fn binding_broken_orphan_workspace_is_not_auto_fixable_with_force() {
     // Only the privileged `global` workspace is seeded — the project
     // points at `not-registered` which doesn't exist in the DB.
     // Stamp meta so the DB is reachable but the workspace is missing.
-    crate::common::write_config_for_cli(&paths, &tome::config::Config::default());
+    crate::common::write_config_for_cli(
+        &paths,
+        &crate::common::TestCatalogConfig::from(tome::config::Config::default()),
+    );
 
     let project_tmp = TempDir::new().unwrap();
     let project_root = project_tmp.path().to_path_buf();

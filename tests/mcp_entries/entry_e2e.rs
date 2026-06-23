@@ -101,7 +101,9 @@ fn save_config(paths: &tome::paths::Paths, config: &Config) {
     if let Some(parent) = paths.global_config_file.parent() {
         fs::create_dir_all(parent).expect("create config parent");
     }
-    tome::catalog::store::save(&paths.global_config_file, config).expect("save config");
+    let text = toml::to_string(config).expect("serialize config");
+    tome::catalog::store::write_atomic(&paths.global_config_file, text.as_bytes())
+        .expect("save config");
 }
 
 fn open_index(paths: &tome::paths::Paths) -> rusqlite::Connection {
@@ -111,6 +113,7 @@ fn open_index(paths: &tome::paths::Paths) -> rusqlite::Connection {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index db")
@@ -619,10 +622,10 @@ fn matrix_plugin_filters_searches_and_prompts_per_flag_combination() {
             state_for_search,
             search_skills::Input {
                 query: "matrix".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             },
         ))
         .expect("search_skills ok");

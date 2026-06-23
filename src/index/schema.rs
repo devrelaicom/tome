@@ -146,11 +146,16 @@ pub const CREATE_STATEMENTS: &[&str] = &[
 /// all-zero (US4.a flips it to the real digest); the placeholder name +
 /// version is still recorded here so drift detection and the doctor surface
 /// know what the bootstrap committed to.
+/// …`profile` is the value stamped as `model_profile` in the fresh `meta` row.
+/// Callers that have no config preference pass `Profile::DEFAULT`; callers that
+/// want config-driven seeding pass their resolved value. This is the ONLY site
+/// that writes `model_profile`.
 pub fn bootstrap(
     conn: &mut Connection,
     embedder: &MetaSeed,
     reranker: &MetaSeed,
     summariser: &MetaSeed,
+    profile: crate::embedding::profile::Profile,
 ) -> Result<(), TomeError> {
     let tx = conn
         .transaction()
@@ -176,10 +181,7 @@ pub fn bootstrap(
         ("reranker_version", reranker.version.as_str()),
         ("summariser_name", summariser.name.as_str()),
         ("summariser_version", summariser.version.as_str()),
-        (
-            "model_profile",
-            crate::embedding::profile::Profile::DEFAULT.as_str(),
-        ),
+        ("model_profile", profile.as_str()),
         ("created_at", now_rfc.as_str()),
     ];
     for (k, v) in rows {
@@ -220,7 +222,14 @@ mod schema_tests {
             name: n.into(),
             version: v.into(),
         };
-        bootstrap(&mut conn, &seed("e", "1"), &seed("r", "1"), &seed("s", "1")).unwrap();
+        bootstrap(
+            &mut conn,
+            &seed("e", "1"),
+            &seed("r", "1"),
+            &seed("s", "1"),
+            crate::embedding::profile::Profile::DEFAULT,
+        )
+        .unwrap();
         // skill_embeddings is a plain table whose DDL has no FLOAT[N] / vec0.
         let ddl: String = conn
             .query_row(

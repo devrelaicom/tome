@@ -155,6 +155,7 @@ fn open_index(paths: &Paths) -> rusqlite::Connection {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index db")
@@ -322,10 +323,10 @@ fn search_then_get_skill_emits_funnel_with_shared_session_and_rank() {
             state.clone(),
             search_skills::Input {
                 query: "alpha widget configuration".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             },
         ))
         .expect("search ok");
@@ -412,10 +413,10 @@ fn get_skill_info_emits_entry_info_with_rank() {
             state.clone(),
             search_skills::Input {
                 query: "alpha widget configuration".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             },
         ))
         .expect("search ok");
@@ -507,10 +508,10 @@ fn unknown_host_harness_omits_calling_harness() {
             state.clone(),
             search_skills::Input {
                 query: "alpha widget configuration".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             },
         ))
         .expect("search ok");
@@ -546,10 +547,10 @@ fn tool_call_returns_promptly_with_nonroutable_endpoint() {
             state.clone(),
             search_skills::Input {
                 query: "alpha widget configuration".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             },
         ))
         .expect("search ok");
@@ -642,10 +643,10 @@ fn search_on_allowlisted_catalog_emits_attributed_search_result() {
             state.clone(),
             search_skills::Input {
                 query: "alpha widget configuration".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             },
         ))
         .expect("search ok");

@@ -64,7 +64,7 @@ fn explicit_names_select_exactly_those() {
             "cursor".to_string(),
         ],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
@@ -72,9 +72,10 @@ fn explicit_names_select_exactly_those() {
     assert_eq!(report.selection, "explicit");
     assert_eq!(ok_names(&report), vec!["claude-code", "codex", "cursor"]);
 
-    let body = std::fs::read_to_string(&paths.global_settings_file).unwrap();
+    // Task 2: global scope now writes to config.toml [harness].enabled.
+    let body = std::fs::read_to_string(&paths.global_config_file).unwrap();
     for h in ["claude-code", "codex", "cursor"] {
-        assert!(body.contains(h), "settings must include {h}: {body}");
+        assert!(body.contains(h), "config must include {h}: {body}");
     }
 }
 
@@ -93,7 +94,7 @@ fn all_flag_selects_every_supported_excluding_generics() {
     let args = HarnessUseArgs {
         names: vec![],
         all: true,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use --all ok");
@@ -121,15 +122,16 @@ fn all_flag_selects_every_supported_excluding_generics() {
     // goose IS supported (detectable), so --all includes it.
     assert!(names.contains(&"goose".to_string()), "goose is in --all");
 
-    // F3a: the report is not the only surface — the settings file must have been
+    // F3a: the report is not the only surface — the config file must have been
     // written too. Every SUPPORTED harness name is persisted, and NEITHER opt-in
     // generic appears (the write side mirrors the selection).
-    let body = std::fs::read_to_string(&paths.global_settings_file)
-        .expect("--all must write the global settings file");
+    // Task 2: global scope now writes to config.toml [harness].enabled.
+    let body = std::fs::read_to_string(&paths.global_config_file)
+        .expect("--all must write the global config file");
     for m in tome::harness::SUPPORTED_HARNESSES {
         assert!(
             body.contains(m.name()),
-            "settings file must persist {}: {body}",
+            "config file must persist {}: {body}",
             m.name(),
         );
     }
@@ -164,7 +166,7 @@ fn alias_and_canonical_collapse_to_single_pass() {
         // gemini twice.
         names: vec!["antigravity-cli".to_string(), "gemini".to_string()],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
@@ -176,12 +178,13 @@ fn alias_and_canonical_collapse_to_single_pass() {
         "antigravity-cli + gemini must collapse to one gemini pass",
     );
 
-    // The settings array contains exactly one `gemini` entry (no double-write).
-    let body = std::fs::read_to_string(&paths.global_settings_file).unwrap();
+    // The config array contains exactly one `gemini` entry (no double-write).
+    // Task 2: global scope now writes to config.toml [harness].enabled.
+    let body = std::fs::read_to_string(&paths.global_config_file).unwrap();
     assert_eq!(
         body.matches("gemini").count(),
         1,
-        "gemini must appear exactly once in settings: {body}",
+        "gemini must appear exactly once in config: {body}",
     );
 }
 
@@ -199,7 +202,7 @@ fn duplicate_name_collapses_to_single_pass() {
     let args = HarnessUseArgs {
         names: vec!["cursor".to_string(), "cursor".to_string()],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
@@ -230,7 +233,7 @@ fn no_args_selects_detected_set_only() {
     let args = HarnessUseArgs {
         names: vec![],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
@@ -263,7 +266,7 @@ fn no_args_no_detected_harness_yields_empty_detected_report() {
     let args = HarnessUseArgs {
         names: vec![],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
@@ -320,7 +323,7 @@ fn forward_progress_attempts_all_and_surfaces_first_error() {
     let ok_args = HarnessUseArgs {
         names: vec!["stub_ok".to_string()],
         all: false,
-        scope: HarnessScopeArg::Project,
+        scope: Some(HarnessScopeArg::Project),
         force: false,
     };
     let (ok_report, ok_err) =
@@ -346,7 +349,7 @@ fn forward_progress_attempts_all_and_surfaces_first_error() {
     let args = HarnessUseArgs {
         names: vec!["stub_ok".to_string(), "stub_fail".to_string()],
         all: false,
-        scope: HarnessScopeArg::Project,
+        scope: Some(HarnessScopeArg::Project),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &project_scope("demo", project.clone()), &paths)

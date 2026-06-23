@@ -98,7 +98,7 @@ fn use_jetbrains_ai_succeeds_writes_rules_no_mcp_file() {
     let args = HarnessUseArgs {
         names: vec!["jetbrains-ai".to_string()],
         all: false,
-        scope: HarnessScopeArg::Project,
+        scope: Some(HarnessScopeArg::Project),
         force: false,
     };
     let scope = make_project_scope("demo", project.clone());
@@ -160,7 +160,7 @@ fn use_jetbrains_ai_still_errors_when_rules_write_fails() {
     let args = HarnessUseArgs {
         names: vec!["jetbrains-ai".to_string()],
         all: false,
-        scope: HarnessScopeArg::Project,
+        scope: Some(HarnessScopeArg::Project),
         force: false,
     };
     let scope = make_project_scope("demo", project.clone());
@@ -199,7 +199,7 @@ fn use_pi_writes_mcp_and_emits_adapter_notice() {
     let args = HarnessUseArgs {
         names: vec!["pi".to_string()],
         all: false,
-        scope: HarnessScopeArg::Project,
+        scope: Some(HarnessScopeArg::Project),
         force: false,
     };
     let scope = make_project_scope("demo", project.clone());
@@ -251,7 +251,7 @@ fn run_emits_mcp_notice_for_jetbrains_ai_and_pi() {
     let jb_args = HarnessUseArgs {
         names: vec!["jetbrains-ai".to_string()],
         all: false,
-        scope: HarnessScopeArg::Project,
+        scope: Some(HarnessScopeArg::Project),
         force: false,
     };
     let (jb_report, jb_err) =
@@ -278,7 +278,7 @@ fn run_emits_mcp_notice_for_jetbrains_ai_and_pi() {
     let pi_args = HarnessUseArgs {
         names: vec!["pi".to_string()],
         all: false,
-        scope: HarnessScopeArg::Project,
+        scope: Some(HarnessScopeArg::Project),
         force: false,
     };
     let (pi_report, pi_err) = use_::run_inner(pi_args, &scope, &paths).expect("use pi ok");

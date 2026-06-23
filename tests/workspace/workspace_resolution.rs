@@ -91,6 +91,7 @@ fn fresh_paths_with_seeded_workspaces(extra: &[&str]) -> (TempDir, Paths) {
         embedder: stub_embedder_seed(),
         reranker: stub_reranker_seed(),
         summariser: stub_summariser_seed(),
+        profile: None,
     };
     let conn = open(&paths.index_db, &opts).expect("bootstrap index db");
     for &name in extra {

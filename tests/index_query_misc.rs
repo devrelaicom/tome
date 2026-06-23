@@ -8,6 +8,8 @@
 
 mod common;
 
+#[path = "index_query_misc/bootstrap_profile_config.rs"]
+mod bootstrap_profile_config;
 #[path = "index_query_misc/embedding_stub.rs"]
 mod embedding_stub;
 #[path = "index_query_misc/error_messages.rs"]
@@ -34,6 +36,8 @@ mod no_phase3_paths;
 mod path_validation;
 #[path = "index_query_misc/query.rs"]
 mod query;
+#[path = "index_query_misc/query_config.rs"]
+mod query_config;
 #[path = "index_query_misc/readme_smoke.rs"]
 mod readme_smoke;
 #[path = "index_query_misc/reindex.rs"]

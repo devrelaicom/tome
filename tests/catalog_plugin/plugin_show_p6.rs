@@ -145,12 +145,14 @@ fn shows_agents_and_hooks_guardrails_presence_booleans() {
 /// Turn on `expose_agents_as_personas` at the global scope so the bare-CLI
 /// `plugin show` (which resolves to global fallback) surfaces persona names.
 fn enable_personas(fx: &Fixture) {
+    // Task 2: global harness settings (including expose_agents_as_personas) now
+    // live in config.toml [harness], not settings.toml.
     let paths = paths_for(&fx.env);
     fs::write(
-        &paths.global_settings_file,
-        "expose_agents_as_personas = true\n",
+        &paths.global_config_file,
+        "[harness]\nexpose_agents_as_personas = true\n",
     )
-    .expect("write global settings");
+    .expect("write global config");
 }
 
 fn show_human(fx: &Fixture) -> String {

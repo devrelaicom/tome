@@ -22,9 +22,10 @@ use tome::workspace::WorkspaceName;
 
 fn global(expose: Option<bool>) -> GlobalSettings {
     GlobalSettings {
-        harnesses: None,
+        enabled: None,
         expose_agents_as_personas: expose,
         strip_plugin_agent_privileges: None,
+        default_scope: None,
     }
 }
 
@@ -52,9 +53,10 @@ fn project(name: &str, expose: Option<bool>) -> ProjectMarkerConfig {
 
 fn global_strip(strip: Option<bool>) -> GlobalSettings {
     GlobalSettings {
-        harnesses: None,
+        enabled: None,
         expose_agents_as_personas: None,
         strip_plugin_agent_privileges: strip,
+        default_scope: None,
     }
 }
 

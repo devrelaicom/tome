@@ -26,7 +26,7 @@ use crate::common::{
 };
 use tempfile::TempDir;
 use tome::commands::catalog::update::reindex_catalog_plugins;
-use tome::config::{CatalogEntry, Config};
+use tome::config::Config;
 use tome::embedding::stub::StubEmbedder;
 use tome::index::workspace_catalogs;
 use tome::index::{self, OpenOptions, enabled_plugins_for_catalog};
@@ -34,22 +34,10 @@ use tome::plugin::PluginId;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
 use tome::workspace::{Scope, WorkspaceName};
 
-fn config_pointing_at(catalog_name: &str, catalog_root: &std::path::Path) -> Config {
-    use std::collections::BTreeMap;
-    let mut catalogs = BTreeMap::new();
-    #[allow(deprecated)]
-    catalogs.insert(
-        catalog_name.to_owned(),
-        CatalogEntry {
-            name: catalog_name.to_owned(),
-            url: format!("file://{}", catalog_root.display()),
-            ref_: "main".into(),
-            path: catalog_root.to_path_buf(),
-            last_synced: time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
-        },
-    );
-    #[allow(deprecated)]
-    Config { catalogs }
+// LifecycleDeps.config is vestigial; return default config (the catalog field
+// was removed from Config in Task 1 — DB workspace_catalogs is authoritative).
+fn default_config() -> Config {
+    Config::default()
 }
 
 fn enable_in(paths: &tome::paths::Paths, scope: &Scope, config: &Config, embedder: &StubEmbedder) {
@@ -85,6 +73,7 @@ fn skill_content_hash_for(
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .ok()?;
@@ -111,7 +100,7 @@ fn catalog_update_reindexes_every_workspace_enabled_set() {
     // for upstream mutation. The Config points each workspace's
     // `lifecycle::resolve_plugin_dir` at this path.
     let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
-    let config = config_pointing_at("sample-plugin-catalog", &catalog_root);
+    let config = default_config();
 
     // Seed BOTH workspaces in the central DB. `global` is bootstrapped
     // automatically on first `index::open`; `second` we add.

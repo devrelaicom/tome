@@ -537,6 +537,7 @@ fn source_label(source: ScopeSource) -> &'static str {
     match source {
         ScopeSource::Flag => "--workspace flag",
         ScopeSource::Env => "TOME_WORKSPACE env",
+        ScopeSource::Config => "config.toml [workspace] default",
         ScopeSource::ProjectMarker => "project marker walk",
         ScopeSource::GlobalFallback => "global fallback",
     }

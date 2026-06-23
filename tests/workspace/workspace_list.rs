@@ -19,6 +19,7 @@ fn open_central(paths: &tome::paths::Paths) -> rusqlite::Connection {
             embedder: e,
             reranker: r,
             summariser: s,
+            profile: None,
         },
     )
     .expect("open central DB")

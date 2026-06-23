@@ -108,6 +108,7 @@ fn cleanup_sweeps_bound_project_parents() {
             embedder: e,
             reranker: r,
             summariser: s,
+            profile: None,
         },
     )
     .unwrap();

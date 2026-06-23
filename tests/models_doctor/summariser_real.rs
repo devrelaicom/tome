@@ -130,7 +130,9 @@ fn real_summariser_produces_non_empty_within_window() {
     let summariser = LlamaSummariser::new(&paths).expect("LlamaSummariser::new");
 
     let input = fixture_input();
-    let output = summariser.summarise(&input).expect("summarise");
+    let output = summariser
+        .summarise(&input, tome::summarise::LONG_MAX_CHARS)
+        .expect("summarise");
 
     // Both outputs must be non-empty — the hard gate from FR-425.
     assert!(
@@ -192,6 +194,7 @@ fn seed_enabled_skill_for_real(
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open central DB");

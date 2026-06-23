@@ -36,6 +36,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::error::TomeError;
+use crate::logging::resolve_directive;
 use crate::paths::Paths;
 
 /// 10 MiB rotation cap per the log-format contract.
@@ -235,18 +236,37 @@ impl Visit for JsonFieldVisitor {
 }
 
 /// Build the MCP tracing subscriber. Wires the JSON file layer (filtered
-/// by `TOME_LOG` / `RUST_LOG`, default `info`) and a stderr layer
-/// restricted to `error!`-and-above so fatal startup diagnostics survive
-/// even if the file handle isn't open yet.
+/// by `TOME_LOG` / `RUST_LOG`, then `[logging] level` in `config.toml`,
+/// default `info`) and a stderr layer restricted to `error!`-and-above so
+/// fatal startup diagnostics survive even if the file handle isn't open yet.
+///
+/// Precedence for the MCP log level:
+/// 1. `TOME_LOG` env var
+/// 2. `RUST_LOG` env var
+/// 3. `[logging] level` in `config.toml` (`config_level`)
+/// 4. Built-in default: `"info"`
+///
+/// Note: the `-v`/`-vv` flag is a CLI-only concept and is not threaded into
+/// the MCP server, so `Verbosity` is not consulted here.
 ///
 /// Returns `Err(TomeError::McpStartupFailed)` if a subscriber is already
 /// installed for this thread — `try_init` is fallible to keep the call
 /// safe for tests that may have an existing global subscriber from the
 /// CLI logging module.
-pub fn init_subscriber(file: File) -> Result<(), TomeError> {
-    let env_filter = EnvFilter::try_from_env("TOME_LOG")
-        .or_else(|_| EnvFilter::try_from_env("RUST_LOG"))
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+pub fn init_subscriber(
+    file: File,
+    config_level: Option<crate::config::LogLevel>,
+) -> Result<(), TomeError> {
+    // Build the effective directive: same precedence as the CLI path but with
+    // no verbosity flag (MCP has none) and `"info"` as the built-in default.
+    let directive = resolve_directive(
+        None,
+        config_level,
+        std::env::var("TOME_LOG").ok(),
+        std::env::var("RUST_LOG").ok(),
+        "info",
+    );
+    let env_filter = EnvFilter::new(directive);
 
     let file_layer = fmt::layer()
         .event_format(ContractEventFormat)

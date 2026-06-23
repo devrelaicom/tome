@@ -53,7 +53,12 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
         }
     }
 
-    let mut report = doctor::assemble_report(scope, &paths, &home, args.verify)?;
+    // `verify_by_default` in config.toml: effective verify = flag OR config.
+    // Strict config load so a typo fails loudly (exit 5).
+    let cfg = crate::config::load(&paths)?;
+    let verify = args.verify || cfg.doctor.verify_by_default.unwrap_or(false);
+
+    let mut report = doctor::assemble_report(scope, &paths, &home, verify)?;
 
     if args.fix {
         let ctx = doctor::fixes::FixContext {
@@ -200,6 +205,7 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         match report.workspace.source {
             crate::workspace::ScopeSource::Flag => "--workspace flag",
             crate::workspace::ScopeSource::Env => "TOME_WORKSPACE env",
+            crate::workspace::ScopeSource::Config => "config.toml [workspace] default",
             crate::workspace::ScopeSource::ProjectMarker => "project marker walk",
             crate::workspace::ScopeSource::GlobalFallback => "global fallback",
         }

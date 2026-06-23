@@ -50,10 +50,11 @@ no sentences — just the comma-separated topics and example tasks. Example:
 Skill descriptions:
 {descriptions}";
 
-/// Second-pass prompt. `{topics}` is substituted with the output of the
-/// short pass (cascading from short to long; the long prompt benefits
-/// from the short summary's already-compressed topic list).
-pub const LONG_PROMPT: &str =
+/// Second-pass prompt template. Use [`long_prompt`] to build the actual
+/// prompt string with the configured character cap substituted in.
+/// `{topics}` is substituted with the output of the short pass; `{max_chars}`
+/// is substituted with the effective `long_max_chars` value.
+const LONG_PROMPT_TEMPLATE: &str =
     "You are writing a short rules section for an AI coding agent. The agent has access
 to a search tool that retrieves skills relevant to a task. Below are the topics the
 user's skill library covers. Write a 4–6 sentence rules section that
@@ -61,10 +62,22 @@ user's skill library covers. Write a 4–6 sentence rules section that
 (2) instructs the agent to call the search_skills tool when working on tasks
    involving those topics,
 (3) is written for the agent to read at session start.
-Plain prose, no headings, no bullet points. Maximum 2500 characters.
+Plain prose, no headings, no bullet points. Maximum {max_chars} characters.
 
 Topics:
 {topics}";
+
+/// Build the second-pass prompt with `max_chars` substituted for the
+/// character-limit instruction. Callers pass `effective_long_max` (resolved
+/// from `config.summariser.long_max_chars.unwrap_or(LONG_MAX_CHARS)`) so
+/// the model targets the user-configured budget rather than the hardcoded
+/// 2500 default.
+///
+/// The `{topics}` placeholder is left in the returned string for the
+/// caller to substitute with the short-pass output via `str::replace`.
+pub fn long_prompt(max_chars: usize) -> String {
+    LONG_PROMPT_TEMPLATE.replace("{max_chars}", &max_chars.to_string())
+}
 
 // The hard upper bounds [`SHORT_MAX_CHARS`] and [`LONG_MAX_CHARS`] live
 // in [`crate::summarise`] as the single source of truth across the
@@ -86,17 +99,71 @@ pub const LONG_TARGET_MIN: usize = 1500;
 /// Target upper bound for the long summary (advisory, no warning emitted).
 pub const LONG_TARGET_MAX: usize = 2500;
 
-// Compile-time guards on the length-window constants. A future tweak
-// that flips the inequality wakes the build, not the test suite.
+// Compile-time guards on the length-window constants that DON'T reference
+// the runtime `LONG_MAX_CHARS` (which can now be overridden per config).
+// Guards for LONG_TARGET_MIN < LONG_MAX_CHARS are checked at runtime via
+// `effective_long_max` validation in `regen_summary.rs`.
 const _: () = {
     assert!(SHORT_TARGET_MIN < SHORT_TARGET_MAX);
     assert!(SHORT_TARGET_MAX <= SHORT_MAX_CHARS);
     assert!(LONG_TARGET_MIN < LONG_TARGET_MAX);
     // After US4.d-1's consolidation `LONG_MAX_CHARS == LONG_TARGET_MAX`
     // — the long target band aligns with the hard cap rather than
-    // extending past it. The assert below stays valid (strict <).
+    // extending past it. The assert below stays valid (strict <) and
+    // validates the DEFAULT constant; runtime values are validated
+    // separately via `validate_long_max_chars`.
     assert!(LONG_TARGET_MIN < LONG_MAX_CHARS);
 };
+
+/// Hard upper bound for `long_max_chars`. Values above this are meaningless:
+/// `MAX_LONG_TOKENS = 1024` in `llama.rs` caps generation at roughly
+/// 4000–5000 chars, so a cap beyond this threshold makes the model
+/// instruction ("Maximum N characters") a lie and the post-gen warn
+/// threshold unreachable. The bound is set generously above what
+/// `MAX_LONG_TOKENS` can realistically produce.
+pub const LONG_MAX_CHARS_UPPER_BOUND: usize = 8000;
+
+/// Validate (and optionally clamp) a user-configured `long_max_chars` value.
+///
+/// Returns the effective cap to use. Two clamping rules apply:
+///
+/// - If the supplied value is 0 or below `LONG_TARGET_MIN` (1500), it is
+///   clamped to `LONG_MAX_CHARS` (the default) because a value that small
+///   produces a degenerate prompt. A `tracing::warn!` is emitted.
+/// - If the supplied value is above `LONG_MAX_CHARS_UPPER_BOUND` (8000), it
+///   is clamped to `LONG_MAX_CHARS_UPPER_BOUND`. Values beyond this limit
+///   cannot be reached by inference (`MAX_LONG_TOKENS` hard-caps generation)
+///   so the model instruction would be misleading. A `tracing::warn!` is
+///   emitted.
+///
+/// Values between `LONG_TARGET_MIN` and `LONG_MAX_CHARS_UPPER_BOUND`
+/// (inclusive) are accepted unchanged.
+pub fn validate_long_max_chars(configured: usize) -> usize {
+    if configured < LONG_TARGET_MIN {
+        tracing::warn!(
+            configured,
+            min = LONG_TARGET_MIN,
+            default = LONG_MAX_CHARS,
+            "config.summariser.long_max_chars is below minimum ({}); \
+             clamping to default {}",
+            LONG_TARGET_MIN,
+            LONG_MAX_CHARS,
+        );
+        LONG_MAX_CHARS
+    } else if configured > LONG_MAX_CHARS_UPPER_BOUND {
+        tracing::warn!(
+            configured,
+            upper_bound = LONG_MAX_CHARS_UPPER_BOUND,
+            "config.summariser.long_max_chars exceeds upper bound ({}); \
+             clamping to {}",
+            LONG_MAX_CHARS_UPPER_BOUND,
+            LONG_MAX_CHARS_UPPER_BOUND,
+        );
+        LONG_MAX_CHARS_UPPER_BOUND
+    } else {
+        configured
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -108,7 +175,66 @@ mod tests {
     }
 
     #[test]
-    fn long_prompt_includes_substitution_marker() {
-        assert!(LONG_PROMPT.contains("{topics}"));
+    fn long_prompt_includes_topics_substitution_marker() {
+        assert!(long_prompt(LONG_MAX_CHARS).contains("{topics}"));
+    }
+
+    #[test]
+    fn long_prompt_uses_configured_cap() {
+        // TDD: the long prompt builder with a custom cap embeds that cap,
+        // not the hardcoded 2500 default.
+        let prompt = long_prompt(4000);
+        assert!(
+            prompt.contains("4000"),
+            "long_prompt(4000) should embed '4000' in the instruction, got:\n{prompt}",
+        );
+        assert!(
+            !prompt.contains("2500"),
+            "long_prompt(4000) must NOT embed the default '2500', got:\n{prompt}",
+        );
+    }
+
+    #[test]
+    fn long_prompt_default_cap_embeds_2500() {
+        let prompt = long_prompt(LONG_MAX_CHARS);
+        assert!(
+            prompt.contains("2500"),
+            "long_prompt(LONG_MAX_CHARS=2500) should embed '2500', got:\n{prompt}",
+        );
+    }
+
+    #[test]
+    fn validate_long_max_chars_accepts_at_or_above_min() {
+        // LONG_TARGET_MIN = 1500: anything >= 1500 and <= 8000 is returned unchanged.
+        assert_eq!(validate_long_max_chars(LONG_TARGET_MIN), LONG_TARGET_MIN);
+        assert_eq!(validate_long_max_chars(2500), 2500);
+        assert_eq!(validate_long_max_chars(4000), 4000);
+        // Exactly at the upper bound passes through unchanged.
+        assert_eq!(
+            validate_long_max_chars(LONG_MAX_CHARS_UPPER_BOUND),
+            LONG_MAX_CHARS_UPPER_BOUND,
+        );
+    }
+
+    #[test]
+    fn validate_long_max_chars_clamps_below_min_to_default() {
+        // 0 and values below LONG_TARGET_MIN (1500) clamp to LONG_MAX_CHARS (2500).
+        assert_eq!(validate_long_max_chars(0), LONG_MAX_CHARS);
+        assert_eq!(validate_long_max_chars(100), LONG_MAX_CHARS);
+        assert_eq!(validate_long_max_chars(LONG_TARGET_MIN - 1), LONG_MAX_CHARS);
+    }
+
+    #[test]
+    fn validate_long_max_chars_clamps_above_upper_bound() {
+        // Values above LONG_MAX_CHARS_UPPER_BOUND (8000) are clamped to 8000.
+        assert_eq!(
+            validate_long_max_chars(LONG_MAX_CHARS_UPPER_BOUND + 1),
+            LONG_MAX_CHARS_UPPER_BOUND,
+        );
+        assert_eq!(validate_long_max_chars(20_000), LONG_MAX_CHARS_UPPER_BOUND,);
+        assert_eq!(
+            validate_long_max_chars(usize::MAX),
+            LONG_MAX_CHARS_UPPER_BOUND,
+        );
     }
 }

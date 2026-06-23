@@ -1,21 +1,22 @@
-//! On-disk telemetry config (`telemetry/config.toml`) + the enabled-state
-//! precedence resolver (Phase 10, US Foundational).
+//! Telemetry opt-out resolver — reads the `[telemetry]` section of the unified
+//! `~/.tome/config.toml` (Task 3 of the unified-global-config fold).
 //!
-//! Telemetry is **opt-OUT**: absent or default config means enabled. The config
-//! file is Tome-owned, so it parses strictly (`deny_unknown_fields`) — a
-//! malformed file is a [`TomeError::TelemetryConfigInvalid`] (exit 91), never a
-//! lenient third-party case.
+//! The opt-out config knob moved from the old `telemetry/config.toml` into the
+//! unified `config.toml [telemetry] enabled` key (Task 3). The other 7
+//! `telemetry/*` runtime files (id, queue, locks, stamps) are unchanged.
+//!
+//! Telemetry is **opt-OUT**: absent or default config means enabled. A malformed
+//! `config.toml` surfaces as `ManifestInvalid::TomlParse` (exit 5) — consistent
+//! with the unified config policy established in Task 1/2.
 //!
 //! Two layers of "is telemetry on?" live here:
-//! - [`load`] / [`set_enabled`] — the file itself.
+//! - [`set_enabled`] — surgically edits `config.toml [telemetry] enabled`.
 //! - [`resolve_enabled`] — the full precedence (env force-on > CI auto-off >
-//!   env force-off > file). This is the function the CLI status/subcommands
+//!   env force-off > config.toml). This is the function the CLI status/subcommands
 //!   call; the silent enqueue path ([`crate::telemetry::is_enabled`]) wraps it
 //!   in a fail-safe-off shim.
 
-use std::path::Path;
-
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::error::TomeError;
 use crate::paths::Paths;
@@ -34,78 +35,34 @@ pub enum Source {
     EnvOff,
     /// A CI environment was detected ⇒ auto-OFF.
     Ci,
-    /// The `telemetry/config.toml` file decided it (present and parsed).
+    /// The `config.toml [telemetry]` section decided it (present and parsed).
     Config,
     /// No env override, no CI, no file ⇒ the opt-out default (ON).
     Default,
 }
 
-/// The serde default for [`TelemetryConfig::enabled`]: telemetry is opt-out, so
-/// an omitted `enabled` key means ON.
-fn default_true() -> bool {
-    true
-}
-
-/// The Tome-owned `telemetry/config.toml` document.
-///
-/// `deny_unknown_fields` keeps this a strict parse — a typo'd key is a config
-/// error, not silently ignored. The only field today is the opt-out switch;
-/// the endpoint override is an *env* var (`TOME_TELEMETRY_ENDPOINT`), not a
-/// config key, so it stays out of this struct.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TelemetryConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for TelemetryConfig {
-    fn default() -> Self {
-        // Opt-out: the absence of any config means telemetry is enabled.
-        TelemetryConfig { enabled: true }
-    }
-}
-
-/// Read `telemetry/config.toml`.
-///
-/// - Missing file ⇒ `Ok(TelemetryConfig::default())` (opt-out default-on).
-/// - Present but malformed (parse error / unknown field) ⇒
-///   [`TomeError::TelemetryConfigInvalid`] (exit 91), carrying the scrubbed
-///   path. The path can't contain credentials, but we scrub it uniformly so
-///   every telemetry surface is scrubbed by construction.
-pub fn load(paths: &Paths) -> Result<TelemetryConfig, TomeError> {
-    let path = paths.telemetry_config();
-    let body = match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
-        Ok(s) => s,
-        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(TelemetryConfig::default());
-        }
-        Err(e) => return Err(e),
-    };
-    toml::from_str::<TelemetryConfig>(&body).map_err(|e| TomeError::TelemetryConfigInvalid {
-        path: scrubbed_path(&path),
-        detail: e.to_string(),
-    })
-}
-
-/// Surgically set `enabled` in `telemetry/config.toml`, preserving any existing
-/// comments/order, and write it back atomically with a `0600` mode.
+/// Surgically set `[telemetry] enabled` in `~/.tome/config.toml`, preserving
+/// any existing comments/order, and write it back atomically with `0600` mode.
 ///
 /// Mirrors the `settings/edit.rs` discipline: open as a `toml_edit::DocumentMut`
 /// (missing file ⇒ empty doc), mutate the single key, then route the bytes
-/// through [`crate::catalog::store::write_atomic`] — which creates the
-/// `telemetry/` dir, refuses a symlinked component, and chmod 0600 by default
-/// (the file may eventually carry user intent and pairs with the `0600` id).
+/// through [`crate::catalog::store::write_atomic`] (atomic, symlink-refusing,
+/// 0600).
+///
+/// A malformed `config.toml` maps to `ManifestInvalid::TomlParse` (exit 5),
+/// consistent with the unified config policy. A hand-edited non-table
+/// `[telemetry]` key returns a clean error rather than panicking (the
+/// `as_table_mut().ok_or_else(...)` pattern, not `.expect()`).
 pub fn set_enabled(paths: &Paths, enabled: bool) -> Result<(), TomeError> {
-    let path = paths.telemetry_config();
+    let path = &paths.global_config_file;
 
     // Read-modify-write through toml_edit so existing comments/order survive.
-    let mut doc = match crate::util::bounded_read_to_string(&path, crate::util::TOME_CONFIG_MAX) {
+    let mut doc = match crate::util::bounded_read_to_string(path, crate::util::TOME_CONFIG_MAX) {
         Ok(body) => body.parse::<toml_edit::DocumentMut>().map_err(|e| {
-            TomeError::TelemetryConfigInvalid {
-                path: scrubbed_path(&path),
-                detail: e.to_string(),
-            }
+            TomeError::ManifestInvalid(crate::error::ManifestInvalid::TomlParse {
+                file: path.clone(),
+                message: e.to_string(),
+            })
         })?,
         Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
             toml_edit::DocumentMut::new()
@@ -113,8 +70,22 @@ pub fn set_enabled(paths: &Paths, enabled: bool) -> Result<(), TomeError> {
         Err(e) => return Err(e),
     };
 
-    doc["enabled"] = toml_edit::value(enabled);
-    crate::catalog::store::write_atomic(&path, doc.to_string().as_bytes())
+    // Ensure `[telemetry]` is a table — use a let-else so a hand-edited
+    // non-table `telemetry` key returns a clean error rather than panicking
+    // under `panic = "abort"`.
+    let tbl = doc
+        .entry("telemetry")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| {
+            TomeError::ManifestInvalid(crate::error::ManifestInvalid::TomlParse {
+                file: path.clone(),
+                message: "[telemetry] is not a TOML table".to_string(),
+            })
+        })?;
+
+    tbl["enabled"] = toml_edit::value(enabled);
+    crate::catalog::store::write_atomic(path, doc.to_string().as_bytes())
 }
 
 /// Detect a CI environment from the conventional vendor env vars (research
@@ -151,13 +122,11 @@ pub fn is_ci() -> bool {
 /// 1. `TOME_TELEMETRY == "1"` ⇒ `(true, EnvOn)` — overrides CI + file.
 /// 2. CI detected ⇒ `(false, Ci)` — build farms never emit.
 /// 3. `TOME_TELEMETRY == "0"` ⇒ `(false, EnvOff)` — explicit force-off.
-/// 4. file present ⇒ `(load(..).enabled, Config)`; absent ⇒ `(true, Default)`.
+/// 4. `config.toml [telemetry] enabled` present ⇒ `(value, Config)`;
+///    absent/default ⇒ `(true, Default)`.
 ///
-/// A malformed config only surfaces (as exit 91) when step 4 reads a present
-/// file: an explicit env override or CI short-circuits before any file read.
-/// The present-vs-absent split is decided BEFORE `load` (which collapses a
-/// missing file to the opt-out default) so the source faithfully distinguishes
-/// `Config` from `Default`.
+/// A malformed `config.toml` only surfaces (as exit 5) when step 4 is reached:
+/// an explicit env override or CI short-circuits before any file read.
 pub fn resolve_enabled_with_source(paths: &Paths) -> Result<(bool, Source), TomeError> {
     let force = std::env::var("TOME_TELEMETRY").ok();
 
@@ -178,18 +147,12 @@ pub fn resolve_enabled_with_source(paths: &Paths) -> Result<(bool, Source), Tome
         return Ok((false, Source::EnvOff));
     }
 
-    // 4. Fall back to the file. Probe presence FIRST so we can report `Config`
-    //    vs `Default` truthfully — `load` itself folds a missing file into the
-    //    opt-out default and would erase that distinction. The presence probe
-    //    is cheap and racy-but-benign: a file appearing/disappearing between the
-    //    probe and the read only mislabels the source, never the enabled bool
-    //    (which `load` re-derives authoritatively).
-    if paths.telemetry_config().exists() {
-        // Present: `load` may surface a malformed-config error (exit 91).
-        Ok((load(paths)?.enabled, Source::Config))
-    } else {
-        // Absent: opt-out default-on, no file read.
-        Ok((true, Source::Default))
+    // 4. Fall back to config.toml [telemetry]. Present `[telemetry] enabled`
+    //    ⇒ Source::Config; absent ⇒ opt-out default-on (Source::Default).
+    let cfg = crate::config::load(paths)?;
+    match cfg.telemetry.enabled {
+        Some(enabled) => Ok((enabled, Source::Config)),
+        None => Ok((true, Source::Default)),
     }
 }
 
@@ -200,15 +163,6 @@ pub fn resolve_enabled_with_source(paths: &Paths) -> Result<(bool, Source), Tome
 /// tests) read unchanged.
 pub fn resolve_enabled(paths: &Paths) -> Result<bool, TomeError> {
     resolve_enabled_with_source(paths).map(|(enabled, _)| enabled)
-}
-
-/// Scrub a path for inclusion in a telemetry error/log surface. A filesystem
-/// path can't carry URL credentials, but routing it through the shared scrubber
-/// keeps "every telemetry-facing string is scrubbed" true by construction.
-fn scrubbed_path(path: &Path) -> std::path::PathBuf {
-    let bytes = path.to_string_lossy();
-    let scrubbed = crate::catalog::git::scrub_credentials(bytes.as_bytes());
-    std::path::PathBuf::from(String::from_utf8_lossy(&scrubbed).into_owned())
 }
 
 #[cfg(test)]
@@ -280,70 +234,97 @@ mod tests {
         Paths::from_root(dir.path().to_path_buf())
     }
 
-    fn write_config(dir: &TempDir, body: &str) {
+    /// Write `[telemetry]\nenabled = <bool>` to `config.toml` (the unified config).
+    fn write_telemetry(dir: &TempDir, enabled: bool) {
         let paths = paths_in(dir);
-        std::fs::create_dir_all(paths.telemetry_dir()).unwrap();
-        std::fs::write(paths.telemetry_config(), body).unwrap();
+        std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &paths.global_config_file,
+            format!("[telemetry]\nenabled = {enabled}\n"),
+        )
+        .unwrap();
     }
 
-    #[test]
-    fn default_is_enabled_opt_out() {
-        assert!(TelemetryConfig::default().enabled);
-    }
+    // --- config.toml-backed resolver tests ---
 
     #[test]
-    fn load_missing_file_is_default_on() {
+    fn disabled_in_config_resolves_off() {
         let dir = TempDir::new().unwrap();
-        let cfg = load(&paths_in(&dir)).unwrap();
-        assert_eq!(cfg, TelemetryConfig::default());
-        assert!(cfg.enabled);
+        write_telemetry(&dir, false);
+        let _g = EnvGuard::new();
+        assert!(!resolve_enabled(&paths_in(&dir)).unwrap());
     }
 
     #[test]
-    fn load_enabled_false_file() {
+    fn enabled_in_config_resolves_on() {
         let dir = TempDir::new().unwrap();
-        write_config(&dir, "enabled = false\n");
-        assert!(!load(&paths_in(&dir)).unwrap().enabled);
+        write_telemetry(&dir, true);
+        let _g = EnvGuard::new();
+        assert!(resolve_enabled(&paths_in(&dir)).unwrap());
     }
 
     #[test]
-    fn load_malformed_file_is_exit_91() {
+    fn no_config_resolves_on() {
         let dir = TempDir::new().unwrap();
-        write_config(&dir, "enabled = \"not a bool\"\n");
-        let err = load(&paths_in(&dir)).unwrap_err();
-        assert!(matches!(err, TomeError::TelemetryConfigInvalid { .. }));
-        assert_eq!(err.exit_code(), 91);
+        let _g = EnvGuard::new();
+        assert!(resolve_enabled(&paths_in(&dir)).unwrap());
     }
 
     #[test]
-    fn load_unknown_field_is_exit_91() {
+    fn no_telemetry_section_resolves_on() {
+        // A config.toml with other sections but no [telemetry] section.
         let dir = TempDir::new().unwrap();
-        write_config(&dir, "enabled = true\nendpoint = \"x\"\n");
-        let err = load(&paths_in(&dir)).unwrap_err();
-        assert!(matches!(err, TomeError::TelemetryConfigInvalid { .. }));
-        assert_eq!(err.exit_code(), 91);
+        let paths = paths_in(&dir);
+        std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
+        std::fs::write(&paths.global_config_file, "[query]\ntop_k = 5\n").unwrap();
+        let _g = EnvGuard::new();
+        // No [telemetry] section → enabled = None → Source::Default → true.
+        assert!(resolve_enabled(&paths).unwrap());
     }
 
     #[test]
     fn set_enabled_round_trips() {
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
+        let _g = EnvGuard::new();
 
         set_enabled(&paths, false).unwrap();
-        assert!(!load(&paths).unwrap().enabled);
+        assert!(!resolve_enabled(&paths).unwrap());
 
         set_enabled(&paths, true).unwrap();
-        assert!(load(&paths).unwrap().enabled);
+        assert!(resolve_enabled(&paths).unwrap());
     }
 
     #[test]
     fn set_enabled_preserves_comments() {
         let dir = TempDir::new().unwrap();
-        write_config(&dir, "# keep me\nenabled = true\n");
         let paths = paths_in(&dir);
+        std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &paths.global_config_file,
+            "# keep me\n[telemetry]\nenabled = true\n",
+        )
+        .unwrap();
         set_enabled(&paths, false).unwrap();
-        let body = std::fs::read_to_string(paths.telemetry_config()).unwrap();
+        let body = std::fs::read_to_string(&paths.global_config_file).unwrap();
         assert!(body.contains("# keep me"), "comment must survive: {body}");
+        assert!(
+            body.contains("[telemetry]"),
+            "section header must survive: {body}"
+        );
+        assert!(body.contains("enabled = false"));
+    }
+
+    #[test]
+    fn set_enabled_creates_config_file_when_absent() {
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        // No config.toml exists yet.
+        assert!(!paths.global_config_file.exists());
+        set_enabled(&paths, false).unwrap();
+        // Now config.toml exists and contains the telemetry section.
+        let body = std::fs::read_to_string(&paths.global_config_file).unwrap();
+        assert!(body.contains("[telemetry]"));
         assert!(body.contains("enabled = false"));
     }
 
@@ -353,8 +334,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
+        let _g = EnvGuard::new();
         set_enabled(&paths, false).unwrap();
-        let mode = std::fs::metadata(paths.telemetry_config())
+        let mode = std::fs::metadata(&paths.global_config_file)
             .unwrap()
             .permissions()
             .mode();
@@ -366,7 +348,7 @@ mod tests {
     #[test]
     fn force_on_beats_ci_and_disabled_file() {
         let dir = TempDir::new().unwrap();
-        write_config(&dir, "enabled = false\n");
+        write_telemetry(&dir, false);
         let g = EnvGuard::new();
         g.set("TOME_TELEMETRY", "1");
         g.set("CI", "true");
@@ -377,7 +359,7 @@ mod tests {
     fn ci_beats_absent_force_off_and_config() {
         let dir = TempDir::new().unwrap();
         // Config says ON; CI must still force OFF.
-        write_config(&dir, "enabled = true\n");
+        write_telemetry(&dir, true);
         let g = EnvGuard::new();
         g.set("GITHUB_ACTIONS", "true");
         assert!(!resolve_enabled(&paths_in(&dir)).unwrap());
@@ -386,35 +368,31 @@ mod tests {
     #[test]
     fn force_off_beats_config() {
         let dir = TempDir::new().unwrap();
-        write_config(&dir, "enabled = true\n");
+        write_telemetry(&dir, true);
         let g = EnvGuard::new();
         g.set("TOME_TELEMETRY", "0");
         assert!(!resolve_enabled(&paths_in(&dir)).unwrap());
     }
 
     #[test]
-    fn no_file_resolves_on() {
-        let dir = TempDir::new().unwrap();
-        let _g = EnvGuard::new();
-        assert!(resolve_enabled(&paths_in(&dir)).unwrap());
-    }
-
-    #[test]
     fn disabled_file_resolves_off() {
         let dir = TempDir::new().unwrap();
-        write_config(&dir, "enabled = false\n");
+        write_telemetry(&dir, false);
         let _g = EnvGuard::new();
         assert!(!resolve_enabled(&paths_in(&dir)).unwrap());
     }
 
     #[test]
-    fn malformed_config_surfaces_91_when_reached() {
+    fn malformed_config_surfaces_exit_5_when_reached() {
         let dir = TempDir::new().unwrap();
-        write_config(&dir, "enabled = 123\n");
+        // Write a malformed config.toml that the strict parser will reject.
+        let paths = paths_in(&dir);
+        std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
+        std::fs::write(&paths.global_config_file, "[telemetry]\nenabled = 123\n").unwrap();
         let _g = EnvGuard::new();
-        // No env override, no CI ⇒ we reach the file ⇒ 91 surfaces.
-        let err = resolve_enabled(&paths_in(&dir)).unwrap_err();
-        assert_eq!(err.exit_code(), 91);
+        // No env override, no CI ⇒ we reach the file ⇒ exit 5 (ManifestInvalid).
+        let err = resolve_enabled(&paths).unwrap_err();
+        assert_eq!(err.exit_code(), 5);
     }
 
     #[test]

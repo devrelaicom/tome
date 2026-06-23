@@ -36,6 +36,8 @@ mod doctor_read_only_by_default;
 mod doctor_readonly_schema;
 #[path = "models_doctor/doctor_subsystem_serialize.rs"]
 mod doctor_subsystem_serialize;
+#[path = "models_doctor/doctor_verify_by_default.rs"]
+mod doctor_verify_by_default;
 #[path = "models_doctor/model_download.rs"]
 mod model_download;
 #[path = "models_doctor/model_download_complete.rs"]

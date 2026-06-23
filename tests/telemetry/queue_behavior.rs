@@ -471,10 +471,10 @@ fn mcp_tool_foreground_call_does_no_network() {
             state.clone(),
             search_skills::Input {
                 query: "alpha widget configuration".into(),
-                top_k: 10,
+                top_k: Some(10),
                 catalog: None,
                 plugin: None,
-                description_max_chars: 150,
+                description_max_chars: Some(150),
             },
         ))
         .expect("search ok");
@@ -589,6 +589,7 @@ fn open_index(paths: &Paths) -> rusqlite::Connection {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index db")

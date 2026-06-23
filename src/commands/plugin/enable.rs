@@ -12,7 +12,6 @@ use std::str::FromStr;
 use serde::Serialize;
 use tracing::info;
 
-use crate::catalog::store;
 use crate::cli::PluginEnableArgs;
 use crate::embedding::download::download_model;
 use crate::embedding::fastembed::FastembedEmbedder;
@@ -33,7 +32,9 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
         .map_err(|e| TomeError::Usage(format!("invalid plugin id `{}`: {e}", args.id)))?;
     let paths = Paths::resolve()?;
     // F2a: single global config; F11 reintroduces workspace-aware view.
-    let config = store::load(&paths.global_config_file)?;
+    // LifecycleDeps.config is vestigial (the field is never read by the
+    // lifecycle); use the default until a later task wires config::load here.
+    let config = crate::config::Config::default();
 
     // Pre-check catalog + plugin existence so we can surface the right exit
     // code before doing any model work. Lifecycle re-checks this internally;
@@ -113,6 +114,7 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
                 embedder: embedder_seed,
                 reranker: reranker_seed,
                 summariser: summariser_seed,
+                profile: None,
             },
         )?;
         let tier_lock = crate::index::acquire_lock(&paths.index_lock)?;

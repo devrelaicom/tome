@@ -187,6 +187,7 @@ fn status_degraded_on_reranker_drift_in_meta() {
             embedder: embedder_seed,
             reranker: reranker_seed,
             summariser: summariser_seed,
+            profile: None,
         },
     )
     .unwrap();
@@ -233,6 +234,7 @@ fn status_unhealthy_on_embedder_drift() {
             embedder: embedder_seed,
             reranker: reranker_seed,
             summariser: summariser_seed,
+            profile: None,
         },
     )
     .unwrap();

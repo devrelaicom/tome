@@ -1224,6 +1224,7 @@ mod tests {
                 embedder: seed(),
                 reranker: seed(),
                 summariser: seed(),
+                profile: None,
             },
         )
         .expect("open index")

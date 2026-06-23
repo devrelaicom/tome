@@ -41,6 +41,7 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
             embedder: embedder_seed.clone(),
             reranker: reranker_seed.clone(),
             summariser: summariser_seed.clone(),
+            profile: None,
         },
     )?;
 
@@ -112,6 +113,7 @@ pub fn run(args: CatalogRemoveArgs, scope: &ResolvedScope, mode: Mode) -> Result
                 embedder: embedder_seed,
                 reranker: reranker_seed,
                 summariser: summariser_seed,
+                profile: None,
             },
         )?;
 

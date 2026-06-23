@@ -40,6 +40,8 @@ pub enum ScopeSource {
     Flag,
     /// `TOME_WORKSPACE` env var.
     Env,
+    /// `[workspace] default` in `~/.tome/config.toml`.
+    Config,
     /// `.tome/config.toml` project marker discovered by walking parents
     /// from the current working directory.
     ProjectMarker,

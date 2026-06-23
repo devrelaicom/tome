@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Unified global config (`~/.tome/config.toml`) — breaking changes
+
+All global Tome settings now live in **one file**: `~/.tome/config.toml`. The
+previously separate `~/.tome/settings.toml` (harness settings) and
+`~/.tome/telemetry/config.toml` (opt-out) are no longer read.
+
+**Migration steps for existing installs:**
+
+- **Harness settings** (`~/.tome/settings.toml` → `[harness]` in config.toml):
+  re-run `tome harness use <name>` for each harness you had configured globally;
+  this writes the `[harness] enabled` list for you. Delete the old file for
+  tidiness.
+- **Telemetry opt-out** (`~/.tome/telemetry/config.toml` → `[telemetry]
+  enabled = false` in config.toml): if you had run `tome telemetry off`,
+  re-run it. Delete `~/.tome/telemetry/config.toml` for tidiness.
+- **`[catalogs]` table** in the old config was already dead (the DB is
+  authoritative); a stale table is ignored and will be dropped on next write.
+- A malformed `~/.tome/config.toml` now surfaces as **exit 5** on foreground
+  commands; best-effort paths (telemetry, logging, colour, summariser trigger)
+  degrade gracefully.
+- New `--no-color` global flag (also `NO_COLOR` env var and `[output] color =
+  "never"` in config).
+
+The complete config schema and every key's default is documented in
+[README.md § Global config reference](./README.md#global-config-reference).
+
 ### Additional harness support
 
 - **Eleven new harnesses.** `tome harness use` / `tome sync` now configure

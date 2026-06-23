@@ -81,6 +81,7 @@ fn open_central(paths: &Paths) -> rusqlite::Connection {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open central db")
@@ -430,6 +431,7 @@ fn agents_absent_from_search() {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open central db");

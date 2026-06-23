@@ -13,8 +13,9 @@
 //! KNN query.
 
 use crate::common::{
-    config_with_catalog, copy_sample_plugin_catalog, enrol_catalog_symlinked, fabricate_models,
-    lifecycle_paths, stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
+    TestCatalogConfig, config_with_catalog, copy_sample_plugin_catalog, enrol_catalog_symlinked,
+    fabricate_models, lifecycle_paths, stub_embedder_seed, stub_reranker_seed,
+    stub_summariser_seed,
 };
 use tempfile::TempDir;
 use tome::cli::QueryArgs;
@@ -39,8 +40,8 @@ struct QueryEnv {
     paths: tome::paths::Paths,
     /// The catalog config used to bootstrap the env. Kept so library-API
     /// tests (`run_with_deps`) can pass it as `QueryDeps.config` without
-    /// re-reading from disk.
-    config: Config,
+    /// re-reading from disk. Deref coerces to `&Config` where needed.
+    config: TestCatalogConfig,
 }
 
 fn build_query_env() -> QueryEnv {
@@ -74,6 +75,7 @@ fn build_query_env() -> QueryEnv {
                 embedder: stub_embedder_seed(),
                 reranker: stub_reranker_seed(),
                 summariser: stub_summariser_seed(),
+                profile: None,
             },
         )
         .expect("bootstrap index meta with stub seeds"),
@@ -112,6 +114,7 @@ fn open_conn(env: &QueryEnv) -> rusqlite::Connection {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap()
@@ -285,7 +288,7 @@ fn knn_rejects_query_vector_of_wrong_length() {
 fn args_for(text: &str, top_k: u32) -> QueryArgs {
     QueryArgs {
         text: text.to_owned(),
-        top_k,
+        top_k: Some(top_k),
         catalog: None,
         plugin: None,
         no_rerank: true,

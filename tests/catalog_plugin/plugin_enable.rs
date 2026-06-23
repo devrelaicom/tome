@@ -72,6 +72,7 @@ fn enable_inserts_skill_rows_with_content_hash_and_enabled_flag() {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .unwrap();

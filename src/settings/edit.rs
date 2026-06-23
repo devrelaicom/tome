@@ -99,6 +99,68 @@ pub fn remove_harness(doc: &mut DocumentMut, harness_name: &str) -> bool {
     array.len() != original_len
 }
 
+/// Append `harness_name` to the `[harness].enabled` array in a unified
+/// config doc (`config.toml`). Used when writing at global scope.
+///
+/// Creates the `[harness]` table and the `enabled` inline array when absent.
+/// Returns `true` iff the document was modified.
+///
+/// Returns `false` without modifying `doc` if `[harness]` exists but is not
+/// a table (e.g. `harness = "a string"` after a hand-edit). The caller can
+/// treat the no-op as "not modified" — the file stays unchanged and the user
+/// can correct the hand-edited value themselves.
+pub fn add_harness_to_config(doc: &mut DocumentMut, harness_name: &str) -> bool {
+    let harness_tbl = {
+        let item = doc
+            .entry("harness")
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        let Some(tbl) = item.as_table_mut() else {
+            // Defensive: user hand-edited `harness` to a non-table value.
+            // Return false (no change) so the process does not abort.
+            return false;
+        };
+        tbl
+    };
+
+    let entry = harness_tbl.entry("enabled").or_insert_with(|| {
+        let arr = Array::new();
+        Item::Value(Value::Array(arr))
+    });
+
+    let Some(array) = entry.as_array_mut() else {
+        let mut arr = Array::new();
+        arr.push(harness_name);
+        *entry = Item::Value(Value::Array(arr));
+        return true;
+    };
+
+    if array_contains(array, harness_name) {
+        return false;
+    }
+    array.push(harness_name);
+    true
+}
+
+/// Remove `harness_name` from the `[harness].enabled` array in a unified
+/// config doc. Returns `true` iff the document was modified.
+pub fn remove_harness_from_config(doc: &mut DocumentMut, harness_name: &str) -> bool {
+    let Some(harness_item) = doc.get_mut("harness") else {
+        return false;
+    };
+    let Some(harness_tbl) = harness_item.as_table_mut() else {
+        return false;
+    };
+    let Some(item) = harness_tbl.get_mut("enabled") else {
+        return false;
+    };
+    let Some(array) = item.as_array_mut() else {
+        return false;
+    };
+    let original_len = array.len();
+    array.retain(|v| v.as_str().map(|s| s != harness_name).unwrap_or(true));
+    array.len() != original_len
+}
+
 fn array_contains(array: &Array, needle: &str) -> bool {
     array
         .iter()
@@ -173,5 +235,100 @@ mod tests {
         let s = doc.to_string();
         assert!(s.contains("name = \"demo\""));
         assert!(s.contains("claude-code"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // Tests for config-doc helpers (`add_harness_to_config` / `remove_harness_from_config`)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn add_to_config_creates_harness_table_and_enabled_array() {
+        // From an empty doc, the function must create `[harness]` + `enabled`.
+        let mut doc = DocumentMut::new();
+        assert!(
+            add_harness_to_config(&mut doc, "claude-code"),
+            "empty doc → modified"
+        );
+        let s = doc.to_string();
+        assert!(s.contains("harness"), "section header must be written");
+        assert!(s.contains("claude-code"), "harness name must appear");
+    }
+
+    #[test]
+    fn add_to_config_idempotent_second_add_is_noop() {
+        // Adding the same name twice must return false on the second call.
+        let mut doc = DocumentMut::new();
+        assert!(
+            add_harness_to_config(&mut doc, "codex"),
+            "first add modified"
+        );
+        assert!(
+            !add_harness_to_config(&mut doc, "codex"),
+            "second add must be no-op"
+        );
+        // The name must appear exactly once.
+        let s = doc.to_string();
+        assert_eq!(
+            s.matches("codex").count(),
+            1,
+            "name must appear exactly once: {s}"
+        );
+    }
+
+    #[test]
+    fn add_to_config_returns_false_when_harness_is_non_table() {
+        // A hand-edited `harness = "a string"` must NOT panic — returns false.
+        let mut doc: DocumentMut = "harness = \"oops\"\n".parse().unwrap();
+        assert!(
+            !add_harness_to_config(&mut doc, "stub"),
+            "non-table [harness] must return false, not panic"
+        );
+        // The doc must remain unchanged.
+        let s = doc.to_string();
+        assert!(s.contains("\"oops\""), "original value must be preserved");
+    }
+
+    #[test]
+    fn remove_from_config_absent_entry_is_noop() {
+        // Removing a name that isn't present must return false.
+        let mut doc: DocumentMut = "[harness]\nenabled = [\"codex\"]\n".parse().unwrap();
+        assert!(
+            !remove_harness_from_config(&mut doc, "gemini"),
+            "absent entry must be no-op"
+        );
+    }
+
+    #[test]
+    fn remove_from_config_last_entry_leaves_empty_array() {
+        // Removing the only entry must leave `enabled = []` (not delete the key).
+        let mut doc: DocumentMut = "[harness]\nenabled = [\"codex\"]\n".parse().unwrap();
+        assert!(
+            remove_harness_from_config(&mut doc, "codex"),
+            "present entry must be removed"
+        );
+        let s = doc.to_string();
+        assert!(!s.contains("codex"), "removed name must be gone");
+        // The `enabled` key must still be present (semantics: opt-out-of-all).
+        assert!(
+            s.contains("enabled"),
+            "enabled key must remain as empty array: {s}"
+        );
+    }
+
+    #[test]
+    fn add_remove_config_round_trips_via_toml_parse() {
+        // After add + save (simulated via to_string), config::HarnessConfig
+        // must parse back the name in enabled.
+        let mut doc = DocumentMut::new();
+        add_harness_to_config(&mut doc, "stub");
+        let toml_str = doc.to_string();
+        // Parse as the [harness] section by wrapping in [harness] — the doc
+        // already has a [harness] table, so parse the full config form.
+        let cfg: crate::config::Config = toml::from_str(&toml_str).expect("must round-trip");
+        assert_eq!(
+            cfg.harness.enabled.as_deref(),
+            Some(&["stub".to_string()][..]),
+            "round-trip must preserve the enabled list"
+        );
     }
 }

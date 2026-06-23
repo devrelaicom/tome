@@ -269,6 +269,7 @@ fn concurrent_remove_from_two_workspaces_is_serialised() {
                         embedder: crate::common::stub_embedder_seed(),
                         reranker: crate::common::stub_reranker_seed(),
                         summariser: crate::common::stub_summariser_seed(),
+                        profile: None,
                     },
                 )
                 .map_err(|e| format!("{workspace}: open {e}"))?;

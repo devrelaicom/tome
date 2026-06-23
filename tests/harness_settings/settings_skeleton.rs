@@ -2,17 +2,22 @@
 //!
 //! Covers:
 //! - `CompositionRef::parse` parse ladder per FR-443 / research §R-9
-//! - `parse_workspace` / `parse_project_marker` / `parse_global` round-trips
+//! - `parse_workspace` / `parse_project_marker` round-trips
+//! - `HarnessConfig` (global layer) round-trips via `toml::from_str`
 //! - `#[serde(deny_unknown_fields)]` rejection on every settings layer
 //!
 //! The resolver itself is exercised by the in-module unit tests in
 //! `src/settings/resolver.rs` and (in US3) by a dedicated `tests/settings_*.rs`
 //! suite per `contracts/settings-composition.md` §Test coverage.
+//!
+//! Note: `parse_global` was removed in Task 2 / fix-4. The global layer
+//! now lives in `config.toml [harness]` and is loaded via `crate::config::load`.
+//! Tests that previously called `parse_global` now parse `HarnessConfig`
+//! directly via `toml::from_str`.
 
+use tome::config::HarnessConfig;
 use tome::error::CompositionErrorKind;
-use tome::settings::{
-    CachedSummaries, CompositionRef, GlobalSettings, ProjectMarkerConfig, parser,
-};
+use tome::settings::{CachedSummaries, CompositionRef, ProjectMarkerConfig, parser};
 use tome::workspace::WorkspaceName;
 
 // ---------------------------------------------------------------------------
@@ -207,19 +212,27 @@ nope = true
     assert!(err.to_string().contains("nope") || err.to_string().contains("unknown field"));
 }
 
+// ---------------------------------------------------------------------------
+// Global harness layer (Task 2 / fix-4): `parse_global` is gone.
+// The global layer now lives in `config.toml [harness]` and is parsed as
+// `HarnessConfig` directly via `toml::from_str`.
+// ---------------------------------------------------------------------------
+
 #[test]
-fn parse_global_empty_is_default() {
-    let parsed: GlobalSettings = parser::parse_global("").unwrap();
-    assert_eq!(parsed, GlobalSettings::default());
+fn global_harness_config_empty_is_default() {
+    // An empty [harness] section → all fields are None / default.
+    let parsed: HarnessConfig = toml::from_str("").unwrap();
+    assert_eq!(parsed, HarnessConfig::default());
 }
 
 #[test]
-fn parse_global_with_harnesses() {
+fn global_harness_config_with_enabled() {
+    // The flat `enabled = [...]` shape under `[harness]` in config.toml.
     let toml = r#"
-harnesses = ["claude-code", "codex"]
+enabled = ["claude-code", "codex"]
 "#;
-    let parsed = parser::parse_global(toml).unwrap();
-    let harnesses = parsed.harnesses.expect("declared");
+    let parsed: HarnessConfig = toml::from_str(toml).unwrap();
+    let harnesses = parsed.enabled.expect("declared");
     assert_eq!(
         harnesses,
         vec!["claude-code".to_owned(), "codex".to_owned()]
@@ -227,11 +240,15 @@ harnesses = ["claude-code", "codex"]
 }
 
 #[test]
-fn parse_global_rejects_unknown_field() {
+fn global_harness_config_rejects_unknown_field() {
     let toml = r#"
-harnesses = []
+enabled = []
 mystery = 42
 "#;
-    let err = parser::parse_global(toml).expect_err("must reject unknown field");
-    assert!(err.to_string().contains("mystery") || err.to_string().contains("unknown field"));
+    let err = toml::from_str::<HarnessConfig>(toml).expect_err("must reject unknown field");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("mystery") || rendered.contains("unknown field"),
+        "error must surface unknown field: {rendered}"
+    );
 }

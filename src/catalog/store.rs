@@ -1,50 +1,20 @@
-//! Atomic registry persistence. Writes go through `tempfile::NamedTempFile`
-//! in the same directory as the target file, then rename — POSIX-atomic on a
-//! single filesystem (FR-017b).
+//! Generic atomic, symlink-refusing, 0600 file writer.
 //!
-//! On Unix the persisted file is chmod 0o600 — `config.toml` holds catalog
-//! source URLs, which are not secrets today but can carry user-supplied
-//! tokens via the user-typed `tome catalog add` source. The umask-default
-//! 0644 would let any local user read those URLs.
+//! The public surface of this module is a single function — [`write_atomic`]
+//! — which writes bytes to a target path via a same-directory temp file and
+//! an atomic rename (POSIX-atomic on a single filesystem, FR-017b). The
+//! `load`/`save` helpers that previously read and wrote the catalog registry
+//! from `config.toml` were removed when the DB `workspace_catalogs` table
+//! became the authoritative catalog store (Phase 4). What remains is the
+//! shared, reusable write primitive used by every Tome sink that needs
+//! atomic, 0600, symlink-safe file persistence.
 
 use std::io::Write;
 use std::path::Path;
 
 use tempfile::NamedTempFile;
 
-use crate::config::Config;
 use crate::error::TomeError;
-
-pub fn load(config_file: &Path) -> Result<Config, TomeError> {
-    match crate::util::bounded_read_to_string(config_file, crate::util::TOME_CONFIG_MAX) {
-        Ok(text) => {
-            // A `config.toml` parse failure IS a manifest-parse failure — reuse
-            // the existing `ManifestInvalid::TomlParse` variant (exit 5), the
-            // same code catalog manifests use. Routing this through `Internal`
-            // (exit 1) violated specific-over-generic: `Internal`'s own doc
-            // forbids a named failure class collapsing into it (FR-014, R-19).
-            let parsed: Config = toml::from_str(&text).map_err(|e| {
-                TomeError::ManifestInvalid(crate::error::ManifestInvalid::TomlParse {
-                    file: config_file.to_path_buf(),
-                    message: e.to_string(),
-                })
-            })?;
-            Ok(parsed)
-        }
-        Err(TomeError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-        Err(e) => Err(e),
-    }
-}
-
-pub fn save(config_file: &Path, config: &Config) -> Result<(), TomeError> {
-    let parent = config_file
-        .parent()
-        .ok_or_else(|| TomeError::Io(std::io::Error::other("config path has no parent")))?;
-    std::fs::create_dir_all(parent).map_err(TomeError::Io)?;
-    let text =
-        toml::to_string_pretty(config).map_err(|e| TomeError::Internal(anyhow::Error::new(e)))?;
-    write_atomic(config_file, text.as_bytes())
-}
 
 /// Write `bytes` to `target` atomically: write to a same-directory temp file,
 /// fsync, set the file mode, then rename. The rename is the only step
@@ -118,23 +88,5 @@ mod tests {
         write_atomic(&target, b"hello").unwrap();
         let read = std::fs::read(&target).unwrap();
         assert_eq!(read, b"hello");
-    }
-
-    #[test]
-    fn save_then_load_round_trips() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("config.toml");
-        let cfg = Config::default();
-        save(&file, &cfg).unwrap();
-        let back = load(&file).unwrap();
-        assert_eq!(cfg, back);
-    }
-
-    #[test]
-    fn load_missing_file_returns_empty_config() {
-        let dir = TempDir::new().unwrap();
-        let file = dir.path().join("does-not-exist.toml");
-        let cfg = load(&file).unwrap();
-        assert!(cfg.catalogs.is_empty());
     }
 }

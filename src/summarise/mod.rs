@@ -75,8 +75,17 @@ pub const LONG_MAX_CHARS: usize = 2500;
 /// comes from the registry entry, not from the runtime trait
 /// (mirrors the `Embedder`/`Reranker` precedent where production code
 /// reads identity from `MODEL_REGISTRY`, not from the trait).
+///
+/// `long_max_chars` is the effective character cap for the long summary,
+/// resolved from `config.summariser.long_max_chars.unwrap_or(LONG_MAX_CHARS)`
+/// at the call site. Implementations use it to set the "Maximum N characters"
+/// instruction in the long prompt and to apply the post-generation char cap.
 pub trait Summariser: Send + Sync {
-    fn summarise(&self, input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError>;
+    fn summarise(
+        &self,
+        input: &PluginSummariesInput,
+        long_max_chars: usize,
+    ) -> Result<SummariserOutput, TomeError>;
 }
 
 /// Input to the summariser: every enabled plugin and its skill set
@@ -274,7 +283,7 @@ mod tests {
         // US4 holds it for cross-trigger reuse.
         let s: std::sync::Arc<dyn Summariser> = std::sync::Arc::new(StubSummariser::new());
         let out = s
-            .summarise(&PluginSummariesInput::default())
+            .summarise(&PluginSummariesInput::default(), LONG_MAX_CHARS)
             .expect("stub never errors");
         assert!(out.short.is_empty());
         assert!(out.long.contains("This workspace covers"));

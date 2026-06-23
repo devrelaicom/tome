@@ -28,6 +28,7 @@ fn options() -> OpenOptions {
             name: "stub-summariser".to_owned(),
             version: "0".to_owned(),
         },
+        profile: None,
     }
 }
 

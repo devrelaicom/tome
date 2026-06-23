@@ -29,11 +29,17 @@ use crate::index::vec_ext;
 /// Inputs to [`open`] that the caller controls. `embedder`, `reranker`,
 /// and `summariser` are written into `meta` on bootstrap and used by
 /// drift detection later; they are ignored on subsequent opens.
+///
+/// `profile` seeds `model_profile` in `meta` on a **fresh** index only;
+/// it is ignored on subsequent opens (the DB's own stored profile wins).
+/// `None` (the default) falls back to `Profile::DEFAULT`.
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
     pub embedder: MetaSeed,
     pub reranker: MetaSeed,
     pub summariser: MetaSeed,
+    /// Profile to seed on fresh bootstrap. `None` → `Profile::DEFAULT`.
+    pub profile: Option<crate::embedding::profile::Profile>,
 }
 
 /// Open (or bootstrap) the index database at `db_path`. The parent directory
@@ -54,7 +60,42 @@ pub fn open(db_path: &Path, opts: &OpenOptions) -> Result<Connection, TomeError>
 
     match migrations::current_schema_version(&conn)? {
         None => {
-            schema::bootstrap(&mut conn, &opts.embedder, &opts.reranker, &opts.summariser)?;
+            // Resolve the bootstrap profile: explicit caller value → config file
+            // sibling → Profile::DEFAULT. The config file is `<tome-root>/config.toml`
+            // where `<tome-root>` is `db_path.parent()` (always `~/.tome/`).
+            // This is the ONE chokepoint that governs ALL fresh-index bootstraps
+            // regardless of which command first touches the DB, so every command
+            // (`catalog add`, `plugin enable`, `reindex`, …) honours the user's
+            // `[models] profile` setting without any caller changes.
+            //
+            // Loading is defensive: any error (missing parent, missing file, parse
+            // failure, I/O error) silently falls through to `Profile::DEFAULT` so
+            // unit tests that open a bare temp-dir DB without a full `~/.tome/`
+            // setup are unaffected, and a malformed `config.toml` never prevents
+            // an unrelated command from bootstrapping.
+            //
+            // Invariant: this path only runs ONCE per DB lifetime (bootstrap fires
+            // exactly when the schema is absent). Subsequent opens take the
+            // `Some(stored)` branch and never re-read or re-embed the profile.
+            let profile = opts.profile.unwrap_or_else(|| {
+                db_path
+                    .parent()
+                    .and_then(|root| {
+                        // Load config defensively via the SSOT helper; any error
+                        // → default Config → None profile → fallback below.
+                        crate::config::load_or_default_from_root(root)
+                            .models
+                            .profile
+                    })
+                    .unwrap_or(crate::embedding::profile::Profile::DEFAULT)
+            });
+            schema::bootstrap(
+                &mut conn,
+                &opts.embedder,
+                &opts.reranker,
+                &opts.summariser,
+                profile,
+            )?;
         }
         Some(stored) => {
             migrations::apply_pending(&mut conn, stored, schema::SCHEMA_VERSION)?;

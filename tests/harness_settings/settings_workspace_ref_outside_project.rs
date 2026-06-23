@@ -86,9 +86,10 @@ fn workspace_ref_in_global_settings_returns_error() {
     // (no project, no workspace settings) and refuses.
     let stub = StubScope::new();
     let global = GlobalSettings {
-        harnesses: Some(vec!["[workspace]".to_owned()]),
+        enabled: Some(vec!["[workspace]".to_owned()]),
         expose_agents_as_personas: None,
         strip_plugin_agent_privileges: None,
+        default_scope: None,
     };
     let err = resolve_effective_list(None, None, &global, &stub).expect_err("must reject");
     match err {

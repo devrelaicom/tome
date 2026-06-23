@@ -74,9 +74,10 @@ fn plain_include() {
     let _g = install_synthetic();
     let stub = StubScope::new();
     let global = GlobalSettings {
-        harnesses: Some(vec!["claude-code".to_owned()]),
+        enabled: Some(vec!["claude-code".to_owned()]),
         expose_agents_as_personas: None,
         strip_plugin_agent_privileges: None,
+        default_scope: None,
     };
     let result = resolve_effective_list(None, None, &global, &stub).expect("resolves");
     assert_eq!(
@@ -94,9 +95,10 @@ fn exclude_subtracts_from_union() {
     let proj = project("ws", Some(vec!["[global]".to_owned(), "!b".to_owned()]));
     let ws_settings = ws("ws", None);
     let global = GlobalSettings {
-        harnesses: Some(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]),
+        enabled: Some(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]),
         expose_agents_as_personas: None,
         strip_plugin_agent_privileges: None,
+        default_scope: None,
     };
     let result =
         resolve_effective_list(Some(&proj), Some(&ws_settings), &global, &stub).expect("resolves");
@@ -164,9 +166,10 @@ fn global_ref() {
     let stub = StubScope::new();
     let ws_settings = ws("ws", Some(vec!["[global]".to_owned()]));
     let global = GlobalSettings {
-        harnesses: Some(vec!["z".to_owned()]),
+        enabled: Some(vec!["z".to_owned()]),
         expose_agents_as_personas: None,
         strip_plugin_agent_privileges: None,
+        default_scope: None,
     };
     let result =
         resolve_effective_list(None, Some(&ws_settings), &global, &stub).expect("resolves");
@@ -214,9 +217,10 @@ fn explicit_add_and_remove_combined() {
     );
     let ws_settings = ws("ws", None);
     let global = GlobalSettings {
-        harnesses: Some(vec!["x".to_owned()]),
+        enabled: Some(vec!["x".to_owned()]),
         expose_agents_as_personas: None,
         strip_plugin_agent_privileges: None,
+        default_scope: None,
     };
     let result =
         resolve_effective_list(Some(&proj), Some(&ws_settings), &global, &stub).expect("resolves");
@@ -238,9 +242,10 @@ fn order_of_entries_does_not_affect_membership() {
     let ws_settings_a = ws("ws", None);
     let ws_settings_b = ws("ws", None);
     let global = GlobalSettings {
-        harnesses: Some(vec!["g1".to_owned(), "g2".to_owned()]),
+        enabled: Some(vec!["g1".to_owned(), "g2".to_owned()]),
         expose_agents_as_personas: None,
         strip_plugin_agent_privileges: None,
+        default_scope: None,
     };
 
     let proj_a = project(

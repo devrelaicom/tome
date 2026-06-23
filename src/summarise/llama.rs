@@ -59,9 +59,9 @@ use crate::embedding::download::sha256_file;
 use crate::error::{ShortOrLong, SummariserFailureKind, TomeError};
 use crate::paths::Paths;
 
-use super::prompts::{LONG_PROMPT, SHORT_PROMPT};
+use super::SHORT_MAX_CHARS;
+use super::prompts::{SHORT_PROMPT, long_prompt};
 use super::registry::summariser_entry;
-use super::{LONG_MAX_CHARS, SHORT_MAX_CHARS};
 use super::{PluginSummariesInput, Summariser, SummariserOutput};
 
 /// Filename inside `<models_dir>/qwen2.5-0.5b-instruct/` that holds the
@@ -100,8 +100,12 @@ const SAMPLING_PENALTY_LAST_N: i32 = -1;
 /// earlier on EOG (end-of-generation) tokens.
 const MAX_SHORT_TOKENS: i32 = 384;
 
-/// Hard cap on tokens generated for the LONG pass. ~3x the character
-/// maximum (`LONG_MAX_CHARS = 2500`); also broken out on EOG.
+/// Hard cap on tokens generated for the LONG pass. Calibrated against the
+/// DEFAULT long cap (`LONG_MAX_CHARS = 2500`); broken out on EOG. Note that
+/// `long_max_chars` is now user-configurable (clamped to 8000 by
+/// `validate_long_max_chars`) — at ~4–5 chars/token this hard token cap
+/// limits the realistic ceiling to roughly 4000–5000 chars regardless of the
+/// configured character budget.
 const MAX_LONG_TOKENS: i32 = 1024;
 
 /// Production summariser. Holds the cached `LlamaModel` after a
@@ -192,7 +196,11 @@ impl LlamaSummariser {
 }
 
 impl Summariser for LlamaSummariser {
-    fn summarise(&self, input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+    fn summarise(
+        &self,
+        input: &PluginSummariesInput,
+        long_max_chars: usize,
+    ) -> Result<SummariserOutput, TomeError> {
         let backend = super::backend()?;
 
         // SHORT pass.
@@ -200,13 +208,14 @@ impl Summariser for LlamaSummariser {
         let short_prompt = SHORT_PROMPT.replace("{descriptions}", &descriptions);
         let short = run_inference(backend, &self.model, &short_prompt, MAX_SHORT_TOKENS)?;
         validate_output(&short, ShortOrLong::Short)?;
-        check_length_window(&short, ShortOrLong::Short);
+        check_length_window(&short, ShortOrLong::Short, SHORT_MAX_CHARS);
 
-        // LONG pass — cascades from the short output.
-        let long_prompt = LONG_PROMPT.replace("{topics}", &short);
-        let long = run_inference(backend, &self.model, &long_prompt, MAX_LONG_TOKENS)?;
+        // LONG pass — cascades from the short output. Build the prompt with
+        // the configured cap so the model targets the right budget.
+        let long_prompt_str = long_prompt(long_max_chars).replace("{topics}", &short);
+        let long = run_inference(backend, &self.model, &long_prompt_str, MAX_LONG_TOKENS)?;
         validate_output(&long, ShortOrLong::Long)?;
-        check_length_window(&long, ShortOrLong::Long);
+        check_length_window(&long, ShortOrLong::Long, long_max_chars);
 
         Ok(SummariserOutput { short, long })
     }
@@ -418,21 +427,24 @@ fn validate_output(text: &str, which: ShortOrLong) -> Result<(), TomeError> {
     Ok(())
 }
 
-/// Emit a `tracing::warn!` when the output exceeds the documented hard
+/// Emit a `tracing::info!` when the output exceeds the documented hard
 /// cap (FR-425). The value is *still returned* — a too-long short
 /// summary that's already been embedded into the MCP tool description
-/// is a warning, not a hard error.
-fn check_length_window(text: &str, which: ShortOrLong) {
+/// is a warning, not a hard error. `max_chars` is the effective cap
+/// (SHORT_MAX_CHARS for short; `long_max_chars` from config for long).
+///
+/// `info!` level is intentional: this site and its sibling in
+/// `workspace::regen_summary` both use `info!` so the oversize check is
+/// consistently advisory rather than alarming. See the T-M5 test
+/// `regen_summary_long_window_emits_info_via_layer` which captures this
+/// level explicitly.
+fn check_length_window(text: &str, which: ShortOrLong, max_chars: usize) {
     let observed = text.chars().count();
-    let max = match which {
-        ShortOrLong::Short => SHORT_MAX_CHARS,
-        ShortOrLong::Long => LONG_MAX_CHARS,
-    };
-    if observed > max {
+    if observed > max_chars {
         info!(
             which = %which,
             observed_chars = observed,
-            max_chars = max,
+            max_chars,
             "summariser output exceeds recommended length window",
         );
     }
@@ -526,8 +538,12 @@ mod tests {
 
     #[test]
     fn check_length_window_does_not_panic_within_bounds() {
-        check_length_window(&"x".repeat(10), ShortOrLong::Short);
-        check_length_window(&"x".repeat(10), ShortOrLong::Long);
+        check_length_window(&"x".repeat(10), ShortOrLong::Short, SHORT_MAX_CHARS);
+        check_length_window(
+            &"x".repeat(10),
+            ShortOrLong::Long,
+            crate::summarise::LONG_MAX_CHARS,
+        );
     }
 
     #[test]

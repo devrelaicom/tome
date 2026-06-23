@@ -13,11 +13,44 @@
 //!
 //! Progress is on **stderr**, not stdout, so `--json` and command output on
 //! stdout stay byte-stable even when a progress bar is rendering live.
+//!
+//! `[output] progress = false` in `~/.tome/config.toml` suppresses progress
+//! bars and spinners even on a connected TTY. `true` or absent delegates back
+//! to the TTY check (the default auto behaviour).
 
 use std::io::IsTerminal;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+
+/// Cached progress-enabled decision. Computed once at startup via
+/// [`init_progress`]; `None` until then (auto-detect at each call site).
+static PROGRESS_ENABLED: OnceLock<bool> = OnceLock::new();
+
+/// Resolve and cache the progress-enabled decision from config.
+///
+/// Call this once at CLI startup (after config is available) on the non-MCP
+/// path. The MCP server never shows progress — do not call this there.
+///
+/// `config_progress`:
+/// - `Some(false)` → suppress even on a TTY,
+/// - `Some(true)` or `None` → auto (follow stderr TTY).
+pub fn init_progress(config_progress: Option<bool>) {
+    let _ = PROGRESS_ENABLED.set(resolve_progress(config_progress, stderr_is_tty()));
+}
+
+/// Pure progress-enabled resolver. Separated from global state for
+/// unit-testability.
+///
+/// - `Some(false)` → always hidden,
+/// - `Some(true)` | `None` → honour `is_tty`.
+pub(crate) fn resolve_progress(config_progress: Option<bool>, is_tty: bool) -> bool {
+    match config_progress {
+        Some(false) => false,
+        Some(true) | None => is_tty,
+    }
+}
 
 /// Whether stderr is a real terminal. Mirrors [`crate::output::stdout_is_tty`]
 /// but on the diagnostic stream where progress rendering happens.
@@ -26,7 +59,13 @@ pub fn stderr_is_tty() -> bool {
 }
 
 fn target() -> ProgressDrawTarget {
-    if stderr_is_tty() {
+    // If init_progress has been called, use the cached decision.
+    // If not (e.g. in tests or library use), fall back to the TTY check.
+    let show = PROGRESS_ENABLED
+        .get()
+        .copied()
+        .unwrap_or_else(stderr_is_tty);
+    if show {
         ProgressDrawTarget::stderr()
     } else {
         ProgressDrawTarget::hidden()
@@ -81,6 +120,23 @@ pub fn spinner(message: impl Into<String>) -> ProgressBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verify the progress suppression logic independent of global state.
+    #[test]
+    fn resolve_progress_suppression() {
+        // config false → always hidden regardless of tty
+        assert!(!resolve_progress(Some(false), true), "config false on tty");
+        assert!(
+            !resolve_progress(Some(false), false),
+            "config false off tty"
+        );
+        // config true → follow tty
+        assert!(resolve_progress(Some(true), true), "config true on tty");
+        assert!(!resolve_progress(Some(true), false), "config true off tty");
+        // no config → follow tty
+        assert!(resolve_progress(None, true), "auto on tty");
+        assert!(!resolve_progress(None, false), "auto off tty");
+    }
 
     #[test]
     fn bar_with_zero_total_does_not_panic() {

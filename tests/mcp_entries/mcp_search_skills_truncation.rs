@@ -73,6 +73,7 @@ fn open_index(paths: &tome::paths::Paths) -> rusqlite::Connection {
             embedder: stub_embedder_seed(),
             reranker: stub_reranker_seed(),
             summariser: stub_summariser_seed(),
+            profile: None,
         },
     )
     .expect("open index db")
@@ -240,10 +241,10 @@ fn invoke(state: Arc<McpState>, input: Input) -> Result<search_skills::Output, r
 fn make_input(query: &str, description_max_chars: u32) -> Input {
     Input {
         query: query.into(),
-        top_k: 10,
+        top_k: Some(10),
         catalog: None,
         plugin: None,
-        description_max_chars,
+        description_max_chars: Some(description_max_chars),
     }
 }
 
@@ -270,8 +271,8 @@ fn default_description_max_chars_truncates_at_150_with_ellipsis() {
     let raw = serde_json::json!({"query": "longish"});
     let input: Input = serde_json::from_value(raw).expect("deserialise default cap");
     assert_eq!(
-        input.description_max_chars, 150,
-        "default description_max_chars must be 150 per FR-092"
+        input.description_max_chars, None,
+        "description_max_chars absent from JSON → None (resolved to 150 during handle)"
     );
 
     let out = invoke(state, input).expect("search ok");
@@ -498,4 +499,50 @@ fn truncation_at_multibyte_char_boundary_does_not_split_codepoint() {
     assert!(truncated.ends_with('\u{2026}'), "must end with ellipsis");
     let prefix_emoji_count = truncated.chars().filter(|c| *c == '🎯').count();
     assert_eq!(prefix_emoji_count, 50, "must contain exactly 50 emoji");
+}
+
+/// Task 11: `[mcp] description_max_chars` in config.toml is used when the
+/// per-call `description_max_chars` is absent (`None`).
+///
+/// The input is deserialized from a JSON value that **omits** the
+/// `description_max_chars` key — mirroring the real MCP wire path and proving
+/// that `#[serde(default)]` → `None` → config fallback resolves correctly.
+/// The sanity cap on the RESOLVED value (after config fallback) applies if the
+/// config-supplied value exceeds `MAX_DESCRIPTION_MAX_CHARS`.
+#[test]
+fn config_description_max_chars_used_when_call_arg_absent() {
+    let body = long_skill_body("toolong", 300);
+    let (_tmp, paths) = stage_workspace(&[("toolong", body.as_str())], &[]);
+
+    // Write description_max_chars = 50 to config — no per-call arg.
+    std::fs::write(
+        &paths.global_config_file,
+        "[catalogs]\n\n[mcp]\ndescription_max_chars = 50\n",
+    )
+    .unwrap();
+
+    let state = build_state(&paths);
+
+    // Deserialise from JSON that OMITS description_max_chars — this is the real
+    // MCP wire path (the key is simply absent in the JSON payload).  The
+    // #[serde(default)] attribute must yield None, which the handler then
+    // resolves to the config value (50).
+    let raw = serde_json::json!({"query": "toolong", "top_k": 10});
+    let input: Input = serde_json::from_value(raw).expect("deserialise input without cap key");
+    assert_eq!(
+        input.description_max_chars, None,
+        "description_max_chars absent from JSON must deserialise to None (serde default)"
+    );
+
+    let out = invoke(state, input).expect("search ok");
+    assert!(!out.matches.is_empty(), "expected matches");
+    let chars = out.matches[0].description.chars().count();
+    assert_eq!(
+        chars, 51,
+        "config description_max_chars=50 should give 50 chars + ellipsis (51 total), got {chars}"
+    );
+    assert!(
+        out.matches[0].description.ends_with('\u{2026}'),
+        "truncated description must end with ellipsis"
+    );
 }

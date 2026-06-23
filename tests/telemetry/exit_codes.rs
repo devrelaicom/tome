@@ -2,9 +2,16 @@
 //! pins, driven through the REAL `tome` binary over an isolated `$HOME`.
 //!
 //! The closed-set round-trip table (every `TomeError` variant → code → slug)
-//! lives in `tests/index_query_misc/exit_codes.rs`; this file covers the two
+//! lives in `tests/index_query_misc/exit_codes.rs`; this file covers the
 //! telemetry surfaces that only manifest end-to-end: the malformed-config exit
-//! 91 and the deterministic (uuid-free) `status --json` wire shapes.
+//! code and the deterministic (uuid-free) `status --json` wire shapes.
+//!
+//! **Task-3 note (unified-global-config):** telemetry opt-out moved from the
+//! old `telemetry/config.toml` into `config.toml [telemetry] enabled`. A
+//! malformed `config.toml` now surfaces as `ManifestInvalid::TomlParse`
+//! (exit 5), consistent with the unified config policy. `TelemetryConfigInvalid`
+//! (exit 91) is vestigial (the variant is kept in `error.rs` so the closed-set
+//! coverage test keeps passing, but it is never constructed by this code path).
 
 use std::process::Command;
 
@@ -34,24 +41,26 @@ fn clean_cmd(env: &ToolEnv) -> Command {
     cmd
 }
 
-/// Write a `telemetry/config.toml` under the isolated home.
+/// Write a `config.toml` (unified config) under the isolated home.
 fn write_config(env: &ToolEnv, body: &str) {
-    let dir = env.tome_root().join("telemetry");
-    std::fs::create_dir_all(&dir).expect("create telemetry dir");
-    std::fs::write(dir.join("config.toml"), body).expect("write telemetry config");
+    let root = env.tome_root();
+    std::fs::create_dir_all(&root).expect("create tome root dir");
+    std::fs::write(root.join("config.toml"), body).expect("write config.toml");
 }
 
 // ---------------------------------------------------------------------------
-// 91 — malformed telemetry config surfaces loudly on the foreground CLI
+// 5 — malformed config.toml surfaces as ManifestInvalid (exit 5) on the
+//     foreground telemetry CLI path (Task-3: old exit 91 is vestigial).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn malformed_config_is_exit_91() {
+fn malformed_config_toml_is_exit_5() {
     let env = ToolEnv::new();
-    // A wrong-typed value for `enabled` fails the strict (deny_unknown_fields,
-    // typed) parse → TelemetryConfigInvalid (exit 91). CI + TOME_TELEMETRY are
-    // cleared (via clean_cmd) so the resolver actually reaches the file.
-    write_config(&env, "enabled = \"not a bool\"\n");
+    // A wrong-typed value for `[telemetry] enabled` causes the unified
+    // config.toml strict parse to fail → ManifestInvalid::TomlParse (exit 5).
+    // CI + TOME_TELEMETRY are cleared (via clean_cmd) so the resolver actually
+    // reaches the file.
+    write_config(&env, "[telemetry]\nenabled = \"not a bool\"\n");
 
     let out = clean_cmd(&env)
         .args(["telemetry", "status"])
@@ -59,8 +68,8 @@ fn malformed_config_is_exit_91() {
         .expect("spawn tome");
     assert_eq!(
         out.status.code(),
-        Some(91),
-        "malformed config must be TelemetryConfigInvalid (91); stderr: {}",
+        Some(5),
+        "malformed config.toml must be ManifestInvalid (5); stderr: {}",
         String::from_utf8_lossy(&out.stderr),
     );
 }

@@ -587,7 +587,7 @@ mod tests {
         purge(&paths).unwrap();
         assert!(!paths.telemetry_id().exists(), "id removed");
         assert!(!paths.telemetry_queue().exists(), "queue cleared");
-        // Telemetry now reads disabled from the config file.
-        assert!(!crate::telemetry::config::load(&paths).unwrap().enabled);
+        // Telemetry now reads disabled from config.toml [telemetry] (unified config).
+        assert!(!crate::telemetry::config::resolve_enabled(&paths).unwrap());
     }
 }

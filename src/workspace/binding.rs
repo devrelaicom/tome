@@ -165,6 +165,7 @@ pub fn bind_project(
             embedder: embedder_seed,
             reranker: reranker_seed,
             summariser: summariser_seed,
+            profile: None,
         },
     )?;
 

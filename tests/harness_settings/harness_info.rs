@@ -95,9 +95,10 @@ fn info_reports_direct_scope_when_global_declares() {
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
     // `global` is auto-seeded by index bootstrap; no manual seed needed.
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
     std::fs::write(
-        &paths.global_settings_file,
-        "harnesses = [\"claude-code\"]\n",
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"claude-code\"]\n",
     )
     .unwrap();
 

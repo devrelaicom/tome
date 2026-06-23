@@ -171,13 +171,14 @@ fn ship_booleans_false_when_not_shipped() {
 fn persona_name_present_and_derived_when_toggle_on() {
     let fx = setup(true, true);
     // Turn on personas at the global scope (the bare CLI resolves to global
-    // fallback, whose resolver reads the global settings file).
+    // fallback, whose resolver reads the global config file).
+    // Task 2: global harness settings now live in config.toml [harness].
     let paths = paths_for(&fx.env);
     fs::write(
-        &paths.global_settings_file,
-        "expose_agents_as_personas = true\n",
+        &paths.global_config_file,
+        "[harness]\nexpose_agents_as_personas = true\n",
     )
-    .expect("write global settings");
+    .expect("write global config");
 
     let v = show_json(&fx);
     let a = &v["agents"][0];

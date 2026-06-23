@@ -398,11 +398,12 @@ fn harness_subsystems_not_applicable_when_no_project_root() {
     let paths = paths_for(&env);
     std::fs::create_dir_all(&paths.root).unwrap();
     fabricate_all_registry_models(&paths);
-    // Set the global settings.toml to declare a harness; binding is None
+    // Set the global config.toml to declare a harness; binding is None
     // so harness subsystems resolve to NotApplicable entries.
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
     std::fs::write(
-        &paths.global_settings_file,
-        "harnesses = [\"claude-code\"]\n",
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"claude-code\"]\n",
     )
     .unwrap();
     let home = empty_home();
@@ -441,9 +442,10 @@ fn harness_unsupported_resolves_to_broken_subsystem() {
     let home = empty_home();
 
     // Project bound to the global workspace; global declares claude-code.
+    // Task 2: global harness settings now live in config.toml [harness].enabled.
     std::fs::write(
-        &paths.global_settings_file,
-        "harnesses = [\"claude-code\"]\n",
+        &paths.global_config_file,
+        "[harness]\nenabled = [\"claude-code\"]\n",
     )
     .unwrap();
 

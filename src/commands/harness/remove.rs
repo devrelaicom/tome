@@ -26,11 +26,13 @@ use crate::error::TomeError;
 use crate::harness::sync;
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
-use crate::settings::edit::{open_settings, remove_harness, save_settings};
+use crate::settings::edit::{
+    open_settings, remove_harness, remove_harness_from_config, save_settings,
+};
 use crate::workspace::ResolvedScope;
 
-use super::home_root;
 use super::use_::{compute_effective_names, resolve_settings_path};
+use super::{effective_harness_scope, home_root};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HarnessRemoveOutcome {
@@ -47,7 +49,9 @@ pub fn run(
     paths: &Paths,
     mode: Mode,
 ) -> Result<(), TomeError> {
-    let settings_path = resolve_settings_path(&args.scope, scope, paths)?;
+    // Resolve effective scope: explicit flag → [harness] default_scope in config → project.
+    let eff_scope = effective_harness_scope(args.scope, paths)?;
+    let settings_path = resolve_settings_path(&eff_scope, scope, paths)?;
 
     // Lock for the entire read-modify-write + sync window.
     std::fs::create_dir_all(&paths.root)?;
@@ -58,8 +62,14 @@ pub fn run(
         None => None,
     };
 
+    // Global scope reads/writes `config.toml [harness].enabled`; other
+    // scopes use the legacy `harnesses = [...]` key.
     let mut doc = open_settings(&settings_path)?;
-    let changed = remove_harness(&mut doc, &args.name);
+    let changed = if settings_path == paths.global_config_file.as_path() {
+        remove_harness_from_config(&mut doc, &args.name)
+    } else {
+        remove_harness(&mut doc, &args.name)
+    };
     if changed {
         save_settings(&settings_path, &doc)?;
     }
@@ -83,7 +93,7 @@ pub fn run(
     }
 
     let outcome = HarnessRemoveOutcome {
-        scope: args.scope.to_string(),
+        scope: eff_scope.to_string(),
         name: args.name,
         settings_path: settings_path.clone(),
         list_changed: changed,

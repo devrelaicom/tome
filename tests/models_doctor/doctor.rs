@@ -503,6 +503,7 @@ fn fix_runs_forward_schema_migration_end_to_end() {
                 embedder,
                 reranker,
                 summariser,
+                profile: None,
             },
         )
         .expect("bootstrap v2 index");
@@ -605,6 +606,7 @@ fn bootstrap_index_with_stub_seeds(paths: &tome::paths::Paths) {
                 name: "stub-summariser".into(),
                 version: "0".into(),
             },
+            profile: None,
         },
     )
     .expect("bootstrap v1 index with stub seeds");
@@ -684,6 +686,7 @@ fn reranker_drift_alone_classifies_degraded() {
                 version: "0".into(),
             },
             summariser: real_summariser_seed,
+            profile: None,
         },
     )
     .expect("bootstrap");
@@ -730,6 +733,7 @@ fn no_drift_reported_when_seeds_match_registry() {
             embedder,
             reranker,
             summariser,
+            profile: None,
         },
     )
     .expect("bootstrap");
