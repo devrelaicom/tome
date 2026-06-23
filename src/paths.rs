@@ -260,12 +260,6 @@ impl Paths {
         self.telemetry_dir().join("queue.jsonl")
     }
 
-    /// `<root>/telemetry/config.toml` — opt-out + endpoint config (Tome-owned,
-    /// strict-parsed).
-    pub fn telemetry_config(&self) -> PathBuf {
-        self.telemetry_dir().join("config.toml")
-    }
-
     /// `<root>/telemetry/flush.lock` — the non-blocking advisory lock that
     /// serialises concurrent flushers (one delivery at a time).
     pub fn telemetry_flush_lock(&self) -> PathBuf {

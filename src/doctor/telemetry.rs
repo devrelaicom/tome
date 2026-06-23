@@ -190,7 +190,7 @@ fn age_seconds_from(instant: OffsetDateTime) -> Option<u64> {
 
 /// Scrub a path for the report. A filesystem path can't carry URL credentials,
 /// but routing it through the shared scrubber keeps "every telemetry-facing
-/// string is scrubbed" true by construction (mirrors `config::scrubbed_path`).
+/// string is scrubbed" true by construction.
 fn scrubbed_path(path: &str) -> String {
     let scrubbed = crate::catalog::git::scrub_credentials(path.as_bytes());
     String::from_utf8_lossy(&scrubbed).into_owned()

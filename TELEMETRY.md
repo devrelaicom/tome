@@ -270,7 +270,7 @@ guarantee is that this disclosure is **seeable on your next CLI run** (the 10-mi
 grace period, §4) — not that it was shown before any possible send.
 
 **Precedence:** `TOME_TELEMETRY=1` (force on) > CI auto-disable > `TOME_TELEMETRY=0`
-(force off) > the config file (`~/.tome/telemetry/config.toml`) > default-on.
+(force off) > `~/.tome/config.toml` `[telemetry]` > default-on.
 
 | Command | What it does |
 |---|---|
