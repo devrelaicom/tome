@@ -539,6 +539,12 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.5](https://github.com/devrelaicom/tome/compare/v0.7.4...v0.7.5) - 2026-06-23
+
+### Added
+
+- *(config)* unify global config into ~/.tome/config.toml ([#255](https://github.com/devrelaicom/tome/pull/255))
+
 ## [0.7.4](https://github.com/devrelaicom/tome/compare/v0.7.3...v0.7.4) - 2026-06-22
 
 ### Added
