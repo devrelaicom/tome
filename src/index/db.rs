@@ -60,13 +60,45 @@ pub fn open(db_path: &Path, opts: &OpenOptions) -> Result<Connection, TomeError>
 
     match migrations::current_schema_version(&conn)? {
         None => {
+            // Resolve the bootstrap profile: explicit caller value → config file
+            // sibling → Profile::DEFAULT. The config file is `<tome-root>/config.toml`
+            // where `<tome-root>` is `db_path.parent()` (always `~/.tome/`).
+            // This is the ONE chokepoint that governs ALL fresh-index bootstraps
+            // regardless of which command first touches the DB, so every command
+            // (`catalog add`, `plugin enable`, `reindex`, …) honours the user's
+            // `[models] profile` setting without any caller changes.
+            //
+            // Loading is defensive: any error (missing parent, missing file, parse
+            // failure, I/O error) silently falls through to `Profile::DEFAULT` so
+            // unit tests that open a bare temp-dir DB without a full `~/.tome/`
+            // setup are unaffected, and a malformed `config.toml` never prevents
+            // an unrelated command from bootstrapping.
+            //
+            // Invariant: this path only runs ONCE per DB lifetime (bootstrap fires
+            // exactly when the schema is absent). Subsequent opens take the
+            // `Some(stored)` branch and never re-read or re-embed the profile.
+            let profile = opts.profile.unwrap_or_else(|| {
+                db_path
+                    .parent()
+                    .and_then(|root| {
+                        // Load config defensively; any error → None → fallback.
+                        let config_path = root.join("config.toml");
+                        crate::util::bounded_read_to_string(
+                            &config_path,
+                            crate::util::TOME_CONFIG_MAX,
+                        )
+                        .ok()
+                        .and_then(|text| toml::from_str::<crate::config::Config>(&text).ok())
+                        .and_then(|cfg| cfg.models.profile)
+                    })
+                    .unwrap_or(crate::embedding::profile::Profile::DEFAULT)
+            });
             schema::bootstrap(
                 &mut conn,
                 &opts.embedder,
                 &opts.reranker,
                 &opts.summariser,
-                opts.profile
-                    .unwrap_or(crate::embedding::profile::Profile::DEFAULT),
+                profile,
             )?;
         }
         Some(stored) => {
