@@ -200,6 +200,7 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         match report.workspace.source {
             crate::workspace::ScopeSource::Flag => "--workspace flag",
             crate::workspace::ScopeSource::Env => "TOME_WORKSPACE env",
+            crate::workspace::ScopeSource::Config => "config.toml [workspace] default",
             crate::workspace::ScopeSource::ProjectMarker => "project marker walk",
             crate::workspace::ScopeSource::GlobalFallback => "global fallback",
         }

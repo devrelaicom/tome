@@ -5,9 +5,10 @@
 //!
 //! 1. `--workspace <name>` CLI flag → [`ScopeSource::Flag`].
 //! 2. `TOME_WORKSPACE` env var → [`ScopeSource::Env`].
-//! 3. Project marker walk → [`ScopeSource::ProjectMarker`] if any ancestor
+//! 3. `[workspace] default` in `~/.tome/config.toml` → [`ScopeSource::Config`].
+//! 4. Project marker walk → [`ScopeSource::ProjectMarker`] if any ancestor
 //!    of CWD contains `.tome/config.toml`.
-//! 4. Global fallback → [`ScopeSource::GlobalFallback`].
+//! 5. Global fallback → [`ScopeSource::GlobalFallback`].
 //!
 //! Phase 4 collapses workspace identity from on-disk paths into validated
 //! [`WorkspaceName`]s. The central `workspaces` table is the source of
@@ -61,7 +62,24 @@ pub fn resolve(args: &GlobalScopeArgs, paths: &Paths) -> Result<ResolvedScope, T
         }
     }
 
-    // 3. Project-marker walk.
+    // 3. `[workspace] default` in `~/.tome/config.toml`.
+    // Loaded strict (exit 5 on malformed config) so a typo fails loudly.
+    // An invalid/unknown name surfaces the existing workspace-* error.
+    {
+        let cfg = crate::config::load(paths)?;
+        if let Some(raw) = cfg.workspace.default {
+            let name = WorkspaceName::parse(&raw)?;
+            require_workspace_membership(&name, paths)?;
+            log_resolution(&name, ScopeSource::Config, None);
+            return Ok(ResolvedScope {
+                scope: Scope(name),
+                source: ScopeSource::Config,
+                project_root: None,
+            });
+        }
+    }
+
+    // 4. Project-marker walk.
     if let Some((project_root, marker_path)) = walk_for_project_marker() {
         let cfg = read_project_marker(&marker_path)?;
         require_workspace_membership(&cfg.workspace, paths)?;
@@ -77,7 +95,7 @@ pub fn resolve(args: &GlobalScopeArgs, paths: &Paths) -> Result<ResolvedScope, T
         });
     }
 
-    // 4. Global fallback.
+    // 5. Global fallback.
     let fallback = ResolvedScope::global_fallback();
     log_resolution(fallback.scope.name(), ScopeSource::GlobalFallback, None);
     Ok(fallback)

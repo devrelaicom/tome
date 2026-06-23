@@ -50,6 +50,8 @@ mod workspace_remove_json_shape;
 mod workspace_rename;
 #[path = "workspace/workspace_rename_json_shape.rs"]
 mod workspace_rename_json_shape;
+#[path = "workspace/workspace_default_config.rs"]
+mod workspace_default_config;
 #[path = "workspace/workspace_resolution.rs"]
 mod workspace_resolution;
 #[path = "workspace/workspace_sync.rs"]
