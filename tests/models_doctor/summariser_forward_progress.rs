@@ -37,7 +37,11 @@ use tome::workspace::{self, WorkspaceName};
 struct FailingSummariser;
 
 impl Summariser for FailingSummariser {
-    fn summarise(&self, _input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+    fn summarise(
+        &self,
+        _input: &PluginSummariesInput,
+        _long_max_chars: usize,
+    ) -> Result<SummariserOutput, TomeError> {
         Err(TomeError::SummariserFailure {
             kind: SummariserFailureKind::OutputEmpty {
                 which: tome::error::ShortOrLong::Short,
@@ -98,7 +102,13 @@ fn summariser_failure_preserves_prior_cached_summary() {
 
     // Trigger with a failing summariser.
     let failing = FailingSummariser;
-    let err = regenerate_for_trigger_with_summariser(&ws, &failing, &paths).expect_err("must fail");
+    let err = regenerate_for_trigger_with_summariser(
+        &ws,
+        &failing,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect_err("must fail");
     match err {
         TomeError::SummariserFailure { kind } => {
             assert!(
@@ -138,8 +148,13 @@ fn summariser_failure_keeps_workspace_skills_committed() {
     assert_eq!(before, 1);
 
     let failing = FailingSummariser;
-    let _ = regenerate_for_trigger_with_summariser(&ws, &failing, &paths)
-        .expect_err("must fail with OutputEmpty");
+    let _ = regenerate_for_trigger_with_summariser(
+        &ws,
+        &failing,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect_err("must fail with OutputEmpty");
 
     // Row still in place — FR-385 forward-progress.
     let after = enabled_skill_count(&paths, "mine");

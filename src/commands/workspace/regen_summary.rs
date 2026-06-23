@@ -15,7 +15,8 @@ use crate::cli::WorkspaceRegenSummaryArgs;
 use crate::error::TomeError;
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
-use crate::summarise::{LlamaSummariser, Summariser};
+use crate::summarise::prompts::validate_long_max_chars;
+use crate::summarise::{LONG_MAX_CHARS, LlamaSummariser, Summariser};
 use crate::workspace::{self, RegenSummaryOutcome, ResolvedScope, WorkspaceName};
 
 pub fn run(
@@ -31,13 +32,21 @@ pub fn run(
 
 /// Dependency-injection variant used by tests. Production code goes
 /// through [`run`] which constructs the [`LlamaSummariser`].
+///
+/// Loads the global config strictly (exit 5 on malformed) to resolve
+/// `effective_long_max`. The explicit regen-summary command surfaces
+/// config errors loudly — unlike the trigger path which uses
+/// `load_or_default` to never fail a post-commit summarisation step.
 pub fn run_with_summariser(
     name: &WorkspaceName,
     summariser: &dyn Summariser,
     paths: &Paths,
     mode: Mode,
 ) -> Result<(), TomeError> {
-    let outcome = workspace::regen_summary::regen(name, summariser, paths)?;
+    let cfg = crate::config::load(paths)?;
+    let effective_long_max =
+        validate_long_max_chars(cfg.summariser.long_max_chars.unwrap_or(LONG_MAX_CHARS));
+    let outcome = workspace::regen_summary::regen(name, summariser, paths, effective_long_max)?;
     emit(&outcome, mode)
 }
 

@@ -51,7 +51,11 @@ impl StubSummariser {
 }
 
 impl Summariser for StubSummariser {
-    fn summarise(&self, input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+    fn summarise(
+        &self,
+        input: &PluginSummariesInput,
+        _long_max_chars: usize,
+    ) -> Result<SummariserOutput, TomeError> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         // `short` is a deterministic comma-separated list of the
         // workspace's skill names — it stands in for the real model's
@@ -100,7 +104,9 @@ mod tests {
                 ],
             }],
         };
-        let out = StubSummariser::default().summarise(&input).unwrap();
+        let out = StubSummariser::default()
+            .summarise(&input, crate::summarise::LONG_MAX_CHARS)
+            .unwrap();
         assert_eq!(out.short, "alpha, beta");
     }
 }

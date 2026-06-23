@@ -70,7 +70,7 @@ fn new_stub_has_zero_call_count() {
 fn summarise_returns_deterministic_short_output() {
     let s = StubSummariser::new();
     let out = s
-        .summarise(&input_two_plugins())
+        .summarise(&input_two_plugins(), tome::summarise::LONG_MAX_CHARS)
         .expect("stub never errors");
 
     // Per `StubSummariser`'s algorithm: skill names flattened in order,
@@ -82,7 +82,7 @@ fn summarise_returns_deterministic_short_output() {
 fn summarise_returns_deterministic_long_output() {
     let s = StubSummariser::new();
     let out = s
-        .summarise(&input_two_plugins())
+        .summarise(&input_two_plugins(), tome::summarise::LONG_MAX_CHARS)
         .expect("stub never errors");
     assert_eq!(
         out.long,
@@ -95,10 +95,10 @@ fn summarise_returns_deterministic_long_output() {
 fn summarise_is_idempotent_for_identical_input() {
     let s = StubSummariser::new();
     let a = s
-        .summarise(&input_two_plugins())
+        .summarise(&input_two_plugins(), tome::summarise::LONG_MAX_CHARS)
         .expect("stub never errors");
     let b = s
-        .summarise(&input_two_plugins())
+        .summarise(&input_two_plugins(), tome::summarise::LONG_MAX_CHARS)
         .expect("stub never errors");
     assert_eq!(a.short, b.short);
     assert_eq!(a.long, b.long);
@@ -107,11 +107,17 @@ fn summarise_is_idempotent_for_identical_input() {
 #[test]
 fn call_count_increments_once_per_invocation() {
     let s = StubSummariser::new();
-    let _ = s.summarise(&input_two_plugins()).unwrap();
+    let _ = s
+        .summarise(&input_two_plugins(), tome::summarise::LONG_MAX_CHARS)
+        .unwrap();
     assert_eq!(s.call_count(), 1);
-    let _ = s.summarise(&input_two_plugins()).unwrap();
+    let _ = s
+        .summarise(&input_two_plugins(), tome::summarise::LONG_MAX_CHARS)
+        .unwrap();
     assert_eq!(s.call_count(), 2);
-    let _ = s.summarise(&input_two_plugins()).unwrap();
+    let _ = s
+        .summarise(&input_two_plugins(), tome::summarise::LONG_MAX_CHARS)
+        .unwrap();
     assert_eq!(s.call_count(), 3);
 }
 
@@ -122,8 +128,12 @@ fn clones_share_the_call_counter() {
     // uses for its force-fail-after counter.
     let original = StubSummariser::new();
     let clone = original.clone();
-    let _ = original.summarise(&input_two_plugins()).unwrap();
-    let _ = clone.summarise(&input_two_plugins()).unwrap();
+    let _ = original
+        .summarise(&input_two_plugins(), tome::summarise::LONG_MAX_CHARS)
+        .unwrap();
+    let _ = clone
+        .summarise(&input_two_plugins(), tome::summarise::LONG_MAX_CHARS)
+        .unwrap();
     assert_eq!(original.call_count(), 2);
     assert_eq!(clone.call_count(), 2);
 }
@@ -136,7 +146,10 @@ fn empty_input_does_not_error() {
     // summary and a long summary with no topics.
     let s = StubSummariser::new();
     let out = s
-        .summarise(&PluginSummariesInput::default())
+        .summarise(
+            &PluginSummariesInput::default(),
+            tome::summarise::LONG_MAX_CHARS,
+        )
         .expect("stub never errors");
     assert_eq!(out.short, "");
     assert!(out.long.starts_with("This workspace covers: ."));
@@ -149,7 +162,7 @@ fn summariser_coerces_to_trait_object() {
     // triggers.
     let boxed: Box<dyn Summariser> = Box::new(StubSummariser::new());
     let out = boxed
-        .summarise(&input_two_plugins())
+        .summarise(&input_two_plugins(), tome::summarise::LONG_MAX_CHARS)
         .expect("trait dispatch fires the stub");
     assert!(!out.short.is_empty());
 }

@@ -22,6 +22,8 @@ mod concurrency;
 mod paths_phase2;
 #[path = "workspace/paths_phase3.rs"]
 mod paths_phase3;
+#[path = "workspace/summariser_disabled.rs"]
+mod summariser_disabled;
 #[path = "workspace/workspace_commands.rs"]
 mod workspace_commands;
 #[path = "workspace/workspace_info.rs"]

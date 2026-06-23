@@ -108,7 +108,13 @@ fn regen_summary_writes_settings_and_rules() {
     seed_enabled_skill(&paths, "mine", "cat1", "plugA", "skill-y", "Second skill");
 
     let stub = StubSummariser::new();
-    let outcome = workspace::regen_summary::regen(&parse("mine"), &stub, &paths).expect("regen");
+    let outcome = workspace::regen_summary::regen(
+        &parse("mine"),
+        &stub,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("regen");
 
     assert!(outcome.short_chars > 0);
     assert!(outcome.long_chars > 0);
@@ -171,7 +177,13 @@ fn regen_summary_rules_is_routing_directive() {
     seed_enabled_skill(&paths, "mine", "cat1", "plugA", "skill-x", "First skill");
 
     let stub = StubSummariser::new();
-    let _ = workspace::regen_summary::regen(&parse("mine"), &stub, &paths).expect("regen");
+    let _ = workspace::regen_summary::regen(
+        &parse("mine"),
+        &stub,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("regen");
 
     let rules_body = std::fs::read_to_string(paths.workspace_rules_file(&parse("mine"))).unwrap();
     assert!(
@@ -198,7 +210,13 @@ fn regen_summary_syncs_bound_projects() {
     seed_bound_project(&paths, "mine", &project_b);
 
     let stub = StubSummariser::new();
-    let outcome = workspace::regen_summary::regen(&parse("mine"), &stub, &paths).expect("regen");
+    let outcome = workspace::regen_summary::regen(
+        &parse("mine"),
+        &stub,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("regen");
 
     assert_eq!(outcome.bound_projects_synced, 2);
 
@@ -227,7 +245,13 @@ fn regen_summary_invokes_summariser_with_enabled_plugins() {
     let stub = StubSummariser::new();
     assert_eq!(stub.call_count(), 0);
 
-    let outcome = workspace::regen_summary::regen(&parse("mine"), &stub, &paths).expect("regen");
+    let outcome = workspace::regen_summary::regen(
+        &parse("mine"),
+        &stub,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("regen");
     assert_eq!(stub.call_count(), 1);
 
     // Stub's short = topics.join(", "); topics = skill names. Order is
@@ -241,7 +265,13 @@ fn regen_summary_invokes_summariser_with_enabled_plugins() {
     assert!(outcome.short_chars >= "alpha, beta".len());
 
     // Second call increments the counter.
-    let _ = workspace::regen_summary::regen(&parse("mine"), &stub, &paths).expect("regen #2");
+    let _ = workspace::regen_summary::regen(
+        &parse("mine"),
+        &stub,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("regen #2");
     assert_eq!(stub.call_count(), 2);
 }
 
@@ -249,7 +279,11 @@ fn regen_summary_invokes_summariser_with_enabled_plugins() {
 struct FailingSummariser;
 
 impl Summariser for FailingSummariser {
-    fn summarise(&self, _input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+    fn summarise(
+        &self,
+        _input: &PluginSummariesInput,
+        _long_max_chars: usize,
+    ) -> Result<SummariserOutput, TomeError> {
         Err(TomeError::SummariserFailure {
             kind: SummariserFailureKind::ModelMissing,
         })
@@ -266,14 +300,26 @@ fn regen_summary_failure_keeps_prior_cached_summaries() {
 
     // Pre-seed a [summaries] block via a successful first run.
     let stub = StubSummariser::new();
-    workspace::regen_summary::regen(&parse("mine"), &stub, &paths).expect("seed cache");
+    workspace::regen_summary::regen(
+        &parse("mine"),
+        &stub,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("seed cache");
     let body_before =
         std::fs::read_to_string(paths.workspace_settings_file(&parse("mine"))).unwrap();
     let rules_before = std::fs::read_to_string(paths.workspace_rules_file(&parse("mine"))).unwrap();
 
     // Second run with a failing summariser must NOT touch the cache.
     let failing = FailingSummariser;
-    let err = workspace::regen_summary::regen(&parse("mine"), &failing, &paths).unwrap_err();
+    let err = workspace::regen_summary::regen(
+        &parse("mine"),
+        &failing,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .unwrap_err();
     // T-M4: tighten the matcher to assert the `kind` payload too — the
     // `ModelMissing` discriminant is what makes the test actually
     // exercise the documented failure path.
@@ -309,7 +355,11 @@ fn regen_summary_failure_keeps_prior_cached_summaries() {
 struct OversizeSummariser;
 
 impl Summariser for OversizeSummariser {
-    fn summarise(&self, _input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+    fn summarise(
+        &self,
+        _input: &PluginSummariesInput,
+        _long_max_chars: usize,
+    ) -> Result<SummariserOutput, TomeError> {
         Ok(SummariserOutput {
             short: "x".repeat(900),
             long: "y".repeat(3000),
@@ -331,7 +381,13 @@ fn regen_summary_long_window_oversize_is_still_cached() {
     seed_enabled_skill(&paths, "mine", "c", "p", "s", "");
 
     let s = OversizeSummariser;
-    let outcome = workspace::regen_summary::regen(&parse("mine"), &s, &paths).expect("regen");
+    let outcome = workspace::regen_summary::regen(
+        &parse("mine"),
+        &s,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("regen");
     assert_eq!(outcome.short_chars, 900);
     assert_eq!(outcome.long_chars, 3000);
 
@@ -444,7 +500,13 @@ fn regen_summary_long_window_emits_info_via_layer() {
     seed_enabled_skill(&paths, "warns", "c", "p", "s", "");
 
     let s = OversizeSummariser;
-    let _ = workspace::regen_summary::regen(&parse("warns"), &s, &paths).expect("regen");
+    let _ = workspace::regen_summary::regen(
+        &parse("warns"),
+        &s,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("regen");
 
     // Detach the buffer before asserting so any subsequent warns on
     // this thread don't accumulate into our assertion target.
@@ -509,7 +571,13 @@ ref = \"v1\"
     std::fs::write(&settings_path, pre).expect("seed settings.toml");
 
     let stub = StubSummariser::new();
-    let _ = workspace::regen_summary::regen(&parse("mine"), &stub, &paths).expect("regen");
+    let _ = workspace::regen_summary::regen(
+        &parse("mine"),
+        &stub,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("regen");
 
     let post = std::fs::read_to_string(&settings_path).expect("read post");
     // The toml_edit rewrite must keep the developer-authored top-level
@@ -602,7 +670,13 @@ fn regen_summary_bumps_last_used_at() {
     std::thread::sleep(std::time::Duration::from_secs(1));
 
     let stub = StubSummariser::new();
-    let _ = workspace::regen_summary::regen(&parse("mine"), &stub, &paths).expect("regen");
+    let _ = workspace::regen_summary::regen(
+        &parse("mine"),
+        &stub,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("regen");
 
     let post: i64 = {
         let conn = open_central(&paths);
@@ -627,7 +701,13 @@ fn regen_summary_missing_workspace_exits_13() {
     // No `init` for "ghost"; only the privileged `global` is seeded on
     // bootstrap.
     let stub = StubSummariser::new();
-    let err = workspace::regen_summary::regen(&parse("ghost"), &stub, &paths).unwrap_err();
+    let err = workspace::regen_summary::regen(
+        &parse("ghost"),
+        &stub,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .unwrap_err();
     assert!(
         matches!(err, TomeError::WorkspaceNotFound { .. }),
         "expected WorkspaceNotFound, got {err:?}",

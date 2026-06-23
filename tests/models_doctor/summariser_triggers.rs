@@ -135,7 +135,13 @@ fn enable_then_trigger_invokes_summariser_once() {
     let stub_handle = StubSummariser::new(); // separate handle for the call_count probe
     // Re-construct the same shape so the trigger sees a counter we can read:
     let probe = stub_handle.clone();
-    regenerate_for_trigger_with_summariser(&ws_name, &probe, &paths).expect("trigger");
+    regenerate_for_trigger_with_summariser(
+        &ws_name,
+        &probe,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("trigger");
 
     assert_eq!(
         probe.call_count(),
@@ -170,7 +176,13 @@ fn disable_then_trigger_invokes_summariser() {
     .expect("disable");
 
     let stub = StubSummariser::new();
-    regenerate_for_trigger_with_summariser(&ws_name, &stub, &paths).expect("trigger");
+    regenerate_for_trigger_with_summariser(
+        &ws_name,
+        &stub,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("trigger");
     assert_eq!(stub.call_count(), 1, "summariser fires after disable");
 }
 
@@ -236,7 +248,9 @@ fn explicit_regen_summary_invokes_summariser_once() {
     lifecycle::enable(&id, &deps).expect("enable");
 
     let stub = StubSummariser::new();
-    let _outcome = workspace::regen_summary::regen(&ws_name, &stub, &paths).expect("regen-summary");
+    let _outcome =
+        workspace::regen_summary::regen(&ws_name, &stub, &paths, tome::summarise::LONG_MAX_CHARS)
+            .expect("regen-summary");
     assert_eq!(
         stub.call_count(),
         1,
@@ -257,10 +271,20 @@ fn cross_workspace_triggers_count_independently() {
     workspace::init::init(WorkspaceName::parse("beta").unwrap(), false, &paths).unwrap();
 
     let stub = StubSummariser::new();
-    regenerate_for_trigger_with_summariser(&WorkspaceName::parse("alpha").unwrap(), &stub, &paths)
-        .expect("trigger alpha");
-    regenerate_for_trigger_with_summariser(&WorkspaceName::parse("beta").unwrap(), &stub, &paths)
-        .expect("trigger beta");
+    regenerate_for_trigger_with_summariser(
+        &WorkspaceName::parse("alpha").unwrap(),
+        &stub,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("trigger alpha");
+    regenerate_for_trigger_with_summariser(
+        &WorkspaceName::parse("beta").unwrap(),
+        &stub,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect("trigger beta");
     assert_eq!(
         stub.call_count(),
         2,

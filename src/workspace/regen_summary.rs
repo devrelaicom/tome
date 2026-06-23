@@ -49,8 +49,7 @@ use crate::error::TomeError;
 use crate::index::{self, OpenOptions, acquire_lock};
 use crate::paths::Paths;
 use crate::summarise::{
-    LONG_MAX_CHARS, PluginSummariesInput, PluginSummaryItem, SHORT_MAX_CHARS, SkillSummaryItem,
-    Summariser,
+    PluginSummariesInput, PluginSummaryItem, SHORT_MAX_CHARS, SkillSummaryItem, Summariser,
 };
 use crate::workspace::WorkspaceName;
 
@@ -76,10 +75,17 @@ pub struct RegenSummaryOutcome {
 
 /// Regenerate the cached short + long summaries for `name`. See
 /// module-level docs for the full algorithm.
+///
+/// `long_max_chars` is the effective character cap for the long summary,
+/// resolved from `config.summariser.long_max_chars.unwrap_or(LONG_MAX_CHARS)`
+/// at the call site and validated via `validate_long_max_chars`. The explicit
+/// `tome workspace regen-summary` command loads config strictly (exit 5 on
+/// malformed); the trigger path uses `load_or_default` (defensive).
 pub fn regen(
     name: &WorkspaceName,
     summariser: &dyn Summariser,
     paths: &Paths,
+    long_max_chars: usize,
 ) -> Result<RegenSummaryOutcome, TomeError> {
     if let Some(parent) = paths.index_lock.parent()
         && !parent.exists()
@@ -111,9 +117,11 @@ pub fn regen(
     // ordering is important for the post-summarise `last_used_at` bump.
     // Performance trade-off documented in `us2-disposition.md` (R-M5
     // deferred).
-    let output = summariser.summarise(&input)?;
+    let output = summariser.summarise(&input, long_max_chars)?;
 
-    // Length-window warning per FR-425.
+    // Length-window warning per FR-425. Use the EFFECTIVE cap (from
+    // config) for the long-summary warn threshold so a user-raised cap
+    // doesn't trigger spurious warns for intentionally longer summaries.
     let short_chars = output.short.chars().count();
     let long_chars = output.long.chars().count();
     if short_chars > SHORT_MAX_CHARS {
@@ -124,11 +132,11 @@ pub fn regen(
             "summariser output exceeds recommended length window (short)",
         );
     }
-    if long_chars > LONG_MAX_CHARS {
+    if long_chars > long_max_chars {
         tracing::info!(
             workspace = name.as_str(),
             long_chars,
-            limit = LONG_MAX_CHARS,
+            limit = long_max_chars,
             "summariser output exceeds recommended length window (long)",
         );
     }

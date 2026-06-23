@@ -45,7 +45,8 @@ use std::sync::Arc;
 
 use crate::error::{SummariserFailureKind, TomeError};
 use crate::paths::Paths;
-use crate::summarise::{LlamaSummariser, Summariser};
+use crate::summarise::prompts::validate_long_max_chars;
+use crate::summarise::{LONG_MAX_CHARS, LlamaSummariser, Summariser};
 use crate::workspace::{self, WorkspaceName};
 
 thread_local! {
@@ -119,16 +120,36 @@ impl Drop for SummariserOverrideGuard {
 /// Per FR-385, the caller MUST commit the skill-state mutation BEFORE
 /// invoking this function.
 pub fn regenerate_for_trigger(name: &WorkspaceName, paths: &Paths) -> Result<(), TomeError> {
+    // `enabled` gate: if the user has explicitly set `[summariser] enabled = false`
+    // in `~/.tome/config.toml`, skip auto-regeneration entirely. Use
+    // `load_or_default` (defensive) — a malformed config.toml must NOT abort a
+    // post-commit trigger and give the user a broken `plugin enable` experience.
+    // Explicit `tome workspace regen-summary` is unaffected (it doesn't route
+    // through this function).
+    let cfg = crate::config::load_or_default(paths);
+    if cfg.summariser.enabled == Some(false) {
+        tracing::debug!(
+            workspace = name.as_str(),
+            "summariser disabled in config; skipping auto-regeneration",
+        );
+        return Ok(());
+    }
+
+    // Resolve effective long_max_chars from config. Use load_or_default so
+    // a malformed config degrades to the default rather than aborting the trigger.
+    let effective_long_max =
+        validate_long_max_chars(cfg.summariser.long_max_chars.unwrap_or(LONG_MAX_CHARS));
+
     // Test-only override hook (gated by `SUMMARISER_OVERRIDE`). Production
     // paths never set the slot; the `if let Some(...)` collapses to the
     // real-summariser branch on every real invocation.
     let override_summariser = SUMMARISER_OVERRIDE.with(|slot| slot.borrow().as_ref().cloned());
 
     let result = if let Some(s) = override_summariser {
-        regenerate_for_trigger_with_summariser(name, s.as_ref(), paths)
+        regenerate_for_trigger_with_summariser(name, s.as_ref(), paths, effective_long_max)
     } else {
         match LlamaSummariser::new(paths) {
-            Ok(s) => regenerate_for_trigger_with_summariser(name, &s, paths),
+            Ok(s) => regenerate_for_trigger_with_summariser(name, &s, paths, effective_long_max),
             Err(e) => Err(e),
         }
     };
@@ -165,11 +186,16 @@ pub fn regenerate_for_trigger(name: &WorkspaceName, paths: &Paths) -> Result<(),
 /// Dependency-injection variant. Production code goes through
 /// [`regenerate_for_trigger`]; tests pass a [`StubSummariser`] to
 /// exercise the trigger plumbing without touching real models.
+///
+/// `long_max_chars` is the effective character cap, already validated
+/// by the caller via `validate_long_max_chars`. Tests that bypass the
+/// production trigger may pass `LONG_MAX_CHARS` directly.
 pub fn regenerate_for_trigger_with_summariser(
     name: &WorkspaceName,
     summariser: &dyn Summariser,
     paths: &Paths,
+    long_max_chars: usize,
 ) -> Result<(), TomeError> {
-    let _outcome = workspace::regen_summary::regen(name, summariser, paths)?;
+    let _outcome = workspace::regen_summary::regen(name, summariser, paths, long_max_chars)?;
     Ok(())
 }

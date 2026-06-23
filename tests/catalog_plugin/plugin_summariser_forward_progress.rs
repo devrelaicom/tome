@@ -38,7 +38,11 @@ use tome::workspace::{self, WorkspaceName};
 struct FailingSummariser;
 
 impl Summariser for FailingSummariser {
-    fn summarise(&self, _input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+    fn summarise(
+        &self,
+        _input: &PluginSummariesInput,
+        _long_max_chars: usize,
+    ) -> Result<SummariserOutput, TomeError> {
         Err(TomeError::SummariserFailure {
             kind: SummariserFailureKind::OutputEmpty {
                 which: ShortOrLong::Short,
@@ -112,8 +116,13 @@ fn workspace_skills_commits_before_summariser_failure() {
     drop(conn);
 
     let failing = FailingSummariser;
-    let err = regenerate_for_trigger_with_summariser(&ws, &failing, &paths)
-        .expect_err("trigger should fail");
+    let err = regenerate_for_trigger_with_summariser(
+        &ws,
+        &failing,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect_err("trigger should fail");
     assert!(matches!(err, TomeError::SummariserFailure { .. }));
 
     let conn = index::open(
@@ -155,8 +164,13 @@ fn cached_summary_survives_summariser_failure() {
     let prior_bytes = std::fs::read(&settings_path).unwrap();
 
     let failing = FailingSummariser;
-    let _ = regenerate_for_trigger_with_summariser(&ws, &failing, &paths)
-        .expect_err("trigger should fail");
+    let _ = regenerate_for_trigger_with_summariser(
+        &ws,
+        &failing,
+        &paths,
+        tome::summarise::LONG_MAX_CHARS,
+    )
+    .expect_err("trigger should fail");
 
     let after_bytes = std::fs::read(&settings_path).unwrap();
     assert_eq!(

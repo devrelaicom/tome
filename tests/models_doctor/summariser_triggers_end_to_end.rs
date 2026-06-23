@@ -59,9 +59,13 @@ impl CountingSummariser {
 }
 
 impl Summariser for CountingSummariser {
-    fn summarise(&self, input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+    fn summarise(
+        &self,
+        input: &PluginSummariesInput,
+        long_max_chars: usize,
+    ) -> Result<SummariserOutput, TomeError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.summarise(input)
+        self.inner.summarise(input, long_max_chars)
     }
 }
 
@@ -161,7 +165,11 @@ fn override_guard_drop_clears_slot_so_subsequent_call_falls_through() {
 struct AlwaysFailsSummariser;
 
 impl Summariser for AlwaysFailsSummariser {
-    fn summarise(&self, _input: &PluginSummariesInput) -> Result<SummariserOutput, TomeError> {
+    fn summarise(
+        &self,
+        _input: &PluginSummariesInput,
+        _long_max_chars: usize,
+    ) -> Result<SummariserOutput, TomeError> {
         Err(TomeError::SummariserFailure {
             kind: SummariserFailureKind::BackendInitFailed {
                 source: "injected failure for issue #208 regression test".to_owned(),
@@ -221,6 +229,7 @@ fn di_variant_still_propagates_backend_init_failed() {
         &WorkspaceName::parse("di-ws").unwrap(),
         &failing,
         &paths,
+        tome::summarise::LONG_MAX_CHARS,
     )
     .expect_err("_with_summariser must propagate errors — not degrade them");
 
