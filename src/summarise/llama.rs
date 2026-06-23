@@ -100,8 +100,12 @@ const SAMPLING_PENALTY_LAST_N: i32 = -1;
 /// earlier on EOG (end-of-generation) tokens.
 const MAX_SHORT_TOKENS: i32 = 384;
 
-/// Hard cap on tokens generated for the LONG pass. ~3x the character
-/// maximum (`LONG_MAX_CHARS = 2500`); also broken out on EOG.
+/// Hard cap on tokens generated for the LONG pass. Calibrated against the
+/// DEFAULT long cap (`LONG_MAX_CHARS = 2500`); broken out on EOG. Note that
+/// `long_max_chars` is now user-configurable (clamped to 8000 by
+/// `validate_long_max_chars`) — at ~4–5 chars/token this hard token cap
+/// limits the realistic ceiling to roughly 4000–5000 chars regardless of the
+/// configured character budget.
 const MAX_LONG_TOKENS: i32 = 1024;
 
 /// Production summariser. Holds the cached `LlamaModel` after a
@@ -428,6 +432,12 @@ fn validate_output(text: &str, which: ShortOrLong) -> Result<(), TomeError> {
 /// summary that's already been embedded into the MCP tool description
 /// is a warning, not a hard error. `max_chars` is the effective cap
 /// (SHORT_MAX_CHARS for short; `long_max_chars` from config for long).
+///
+/// `info!` level is intentional: this site and its sibling in
+/// `workspace::regen_summary` both use `info!` so the oversize check is
+/// consistently advisory rather than alarming. See the T-M5 test
+/// `regen_summary_long_window_emits_info_via_layer` which captures this
+/// level explicitly.
 fn check_length_window(text: &str, which: ShortOrLong, max_chars: usize) {
     let observed = text.chars().count();
     if observed > max_chars {

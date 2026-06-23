@@ -115,16 +115,29 @@ const _: () = {
     assert!(LONG_TARGET_MIN < LONG_MAX_CHARS);
 };
 
+/// Hard upper bound for `long_max_chars`. Values above this are meaningless:
+/// `MAX_LONG_TOKENS = 1024` in `llama.rs` caps generation at roughly
+/// 4000–5000 chars, so a cap beyond this threshold makes the model
+/// instruction ("Maximum N characters") a lie and the post-gen warn
+/// threshold unreachable. The bound is set generously above what
+/// `MAX_LONG_TOKENS` can realistically produce.
+pub const LONG_MAX_CHARS_UPPER_BOUND: usize = 8000;
+
 /// Validate (and optionally clamp) a user-configured `long_max_chars` value.
 ///
-/// Returns the effective cap to use. If the supplied value is 0 or below
-/// `LONG_TARGET_MIN` (1500), it is clamped to `LONG_MAX_CHARS` (the default)
-/// because a value that small produces a degenerate prompt — either the
-/// character limit is smaller than the minimum target window, or it is zero
-/// which makes no sense at all. A `tracing::warn!` is emitted so the user
-/// can correct their configuration.
+/// Returns the effective cap to use. Two clamping rules apply:
 ///
-/// Values equal to or above `LONG_TARGET_MIN` are accepted unchanged.
+/// - If the supplied value is 0 or below `LONG_TARGET_MIN` (1500), it is
+///   clamped to `LONG_MAX_CHARS` (the default) because a value that small
+///   produces a degenerate prompt. A `tracing::warn!` is emitted.
+/// - If the supplied value is above `LONG_MAX_CHARS_UPPER_BOUND` (8000), it
+///   is clamped to `LONG_MAX_CHARS_UPPER_BOUND`. Values beyond this limit
+///   cannot be reached by inference (`MAX_LONG_TOKENS` hard-caps generation)
+///   so the model instruction would be misleading. A `tracing::warn!` is
+///   emitted.
+///
+/// Values between `LONG_TARGET_MIN` and `LONG_MAX_CHARS_UPPER_BOUND`
+/// (inclusive) are accepted unchanged.
 pub fn validate_long_max_chars(configured: usize) -> usize {
     if configured < LONG_TARGET_MIN {
         tracing::warn!(
@@ -137,6 +150,16 @@ pub fn validate_long_max_chars(configured: usize) -> usize {
             LONG_MAX_CHARS,
         );
         LONG_MAX_CHARS
+    } else if configured > LONG_MAX_CHARS_UPPER_BOUND {
+        tracing::warn!(
+            configured,
+            upper_bound = LONG_MAX_CHARS_UPPER_BOUND,
+            "config.summariser.long_max_chars exceeds upper bound ({}); \
+             clamping to {}",
+            LONG_MAX_CHARS_UPPER_BOUND,
+            LONG_MAX_CHARS_UPPER_BOUND,
+        );
+        LONG_MAX_CHARS_UPPER_BOUND
     } else {
         configured
     }
@@ -182,10 +205,15 @@ mod tests {
 
     #[test]
     fn validate_long_max_chars_accepts_at_or_above_min() {
-        // LONG_TARGET_MIN = 1500: anything >= 1500 is returned unchanged.
+        // LONG_TARGET_MIN = 1500: anything >= 1500 and <= 8000 is returned unchanged.
         assert_eq!(validate_long_max_chars(LONG_TARGET_MIN), LONG_TARGET_MIN);
         assert_eq!(validate_long_max_chars(2500), 2500);
         assert_eq!(validate_long_max_chars(4000), 4000);
+        // Exactly at the upper bound passes through unchanged.
+        assert_eq!(
+            validate_long_max_chars(LONG_MAX_CHARS_UPPER_BOUND),
+            LONG_MAX_CHARS_UPPER_BOUND,
+        );
     }
 
     #[test]
@@ -194,5 +222,19 @@ mod tests {
         assert_eq!(validate_long_max_chars(0), LONG_MAX_CHARS);
         assert_eq!(validate_long_max_chars(100), LONG_MAX_CHARS);
         assert_eq!(validate_long_max_chars(LONG_TARGET_MIN - 1), LONG_MAX_CHARS);
+    }
+
+    #[test]
+    fn validate_long_max_chars_clamps_above_upper_bound() {
+        // Values above LONG_MAX_CHARS_UPPER_BOUND (8000) are clamped to 8000.
+        assert_eq!(
+            validate_long_max_chars(LONG_MAX_CHARS_UPPER_BOUND + 1),
+            LONG_MAX_CHARS_UPPER_BOUND,
+        );
+        assert_eq!(validate_long_max_chars(20_000), LONG_MAX_CHARS_UPPER_BOUND,);
+        assert_eq!(
+            validate_long_max_chars(usize::MAX),
+            LONG_MAX_CHARS_UPPER_BOUND,
+        );
     }
 }

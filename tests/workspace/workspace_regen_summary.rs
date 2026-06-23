@@ -351,8 +351,13 @@ fn regen_summary_failure_keeps_prior_cached_summaries() {
 }
 
 /// Stub that returns oversize summaries to exercise the length-window
-/// warning path (FR-425). The value is still cached.
+/// info-event path (FR-425). The value is still cached.
 struct OversizeSummariser;
+
+/// Long output length used by `OversizeSummariser`. Must exceed
+/// `LONG_MAX_CHARS` (2500) so the oversize check fires; +500 gives a clear
+/// margin above the default cap while staying well within the upper bound.
+const OVERSIZE_LONG_CHARS: usize = tome::summarise::LONG_MAX_CHARS + 500; // 3000
 
 impl Summariser for OversizeSummariser {
     fn summarise(
@@ -362,18 +367,18 @@ impl Summariser for OversizeSummariser {
     ) -> Result<SummariserOutput, TomeError> {
         Ok(SummariserOutput {
             short: "x".repeat(900),
-            long: "y".repeat(3000),
+            long: "y".repeat(OVERSIZE_LONG_CHARS),
         })
     }
 }
 
 #[test]
 fn regen_summary_long_window_oversize_is_still_cached() {
-    // FR-425: too-long output emits a tracing::warn but the value is
+    // FR-425: too-long output emits a tracing::info! but the value is
     // still written. The forward-progress assertion (value cached) is
     // the user-facing contract. The
-    // `regen_summary_long_window_emits_warn_via_layer` companion test
-    // below captures the warn via a custom `tracing-subscriber` layer.
+    // `regen_summary_long_window_emits_info_via_layer` companion test
+    // below captures the info event via a custom `tracing-subscriber` layer.
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
     std::fs::create_dir_all(&paths.root).unwrap();
@@ -389,15 +394,18 @@ fn regen_summary_long_window_oversize_is_still_cached() {
     )
     .expect("regen");
     assert_eq!(outcome.short_chars, 900);
-    assert_eq!(outcome.long_chars, 3000);
+    assert_eq!(outcome.long_chars, OVERSIZE_LONG_CHARS);
 
     // RULES.md is now the routing directive wrapping the (oversize) long
-    // summary, so it is LONGER than the raw 3000-char summary — but it must
+    // summary, so it is LONGER than the raw long summary — but it must
     // still embed the full summary verbatim in the Tier 3 prose.
     let rules_body = std::fs::read_to_string(paths.workspace_rules_file(&parse("mine"))).unwrap();
-    assert!(rules_body.len() > 3000, "directive wraps the summary");
     assert!(
-        rules_body.contains(&"y".repeat(3000)),
+        rules_body.len() > OVERSIZE_LONG_CHARS,
+        "directive wraps the summary",
+    );
+    assert!(
+        rules_body.contains(&"y".repeat(OVERSIZE_LONG_CHARS)),
         "RULES.md should embed the full long summary verbatim",
     );
     assert!(rules_body.contains("# Tome — Skill Routing"));
@@ -508,16 +516,17 @@ fn regen_summary_long_window_emits_info_via_layer() {
     )
     .expect("regen");
 
-    // Detach the buffer before asserting so any subsequent warns on
+    // Detach the buffer before asserting so any subsequent info events on
     // this thread don't accumulate into our assertion target.
     THREAD_BUF.with(|slot| {
         *slot.borrow_mut() = None;
     });
 
     let captured = warns.lock().unwrap();
-    // The regen path emits info events for short > SHORT_MAX_CHARS (800) and
-    // long > LONG_MAX_CHARS (2500). Oversize stub returns 900 and 3000
-    // respectively, so we expect TWO info events from this run.
+    // The regen path emits tracing::info! events for short > SHORT_MAX_CHARS (800)
+    // and long > LONG_MAX_CHARS (2500). Oversize stub returns 900 and
+    // OVERSIZE_LONG_CHARS (3000) respectively, so we expect TWO info events from
+    // this run.
     let oversize_events: Vec<&String> = captured
         .iter()
         .filter(|s| s.contains("exceeds recommended length window"))

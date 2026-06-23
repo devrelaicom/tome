@@ -168,20 +168,51 @@ fn auto_regen_runs_when_enabled_or_default() {
     );
 }
 
-/// TDD: `effective_long_max` from config flows into the regen warn threshold.
-/// When config sets `long_max_chars = 3000` and the summariser returns a
-/// 3001-char long summary, the regen path does NOT warn (3001 <= 3000 is
-/// false — wait, 3001 > 3000 → warn IS emitted). Let's test a smaller cap
-/// — a 2000-char cap with a 2500-char summary → oversize by both the new
-/// cap (2000) but not by the old const (2500). This confirms the effective
-/// cap is 2000, not 2500.
+/// TDD: when NO config.toml exists at all (Config::default() → enabled: None),
+/// `regenerate_for_trigger` MUST still run (None is treated as enabled).
+/// Verifies the `None` branch of the enabled gate, complementing
+/// `auto_regen_runs_when_enabled_or_default` which only tests `enabled = true`.
+#[test]
+fn auto_regen_runs_when_config_absent() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    // Deliberately do NOT write any config.toml — the config directory
+    // itself need not even exist; Config::load will fall back to default()
+    // which produces enabled: None.
+
+    workspace::init::init(parse("mine"), false, &paths).expect("init");
+    seed_enabled_skill(&paths, "mine");
+
+    let counting = CountingSummariser::new();
+    let _guard =
+        SummariserOverrideGuard::install(Arc::new(counting.clone()) as Arc<dyn Summariser>);
+
+    // Drive the PRODUCTION trigger function. With no config, enabled is None
+    // which the gate treats as "not disabled" → regeneration must run.
+    regenerate_for_trigger(&parse("mine"), &paths).expect("trigger must not fail");
+
+    assert_eq!(
+        counting.call_count(),
+        1,
+        "summariser MUST be called when no config.toml exists (enabled: None → default enabled)",
+    );
+}
+
+/// TDD: `effective_long_max` from config flows into the regen warn threshold
+/// AND is structurally passed through to the summariser itself.
 ///
-/// We assert via `RegenSummaryOutcome::long_chars` that the long output is
-/// accepted AND verify no panics occur; the `tracing::info!` event is a
-/// side-channel we don't capture here (the `regen_summary_long_window_emits_info_via_layer`
-/// test in workspace_regen_summary.rs covers the tracing signal).
+/// Strategy: a `RecordingSummariser` captures the `long_max_chars` argument it
+/// receives. We set `long_max_chars = 2000` in config, run `regenerate_for_trigger`,
+/// and assert the captured value equals 2000 — so a broken threading path fails
+/// structurally, not only via the oversize side-channel.
+///
+/// Secondary check: the regen outcome reflects the ACTUAL char count (2100),
+/// confirming the oversize check ran against 2000 (not the 2500 default).
 #[test]
 fn configured_long_max_chars_threads_through_to_regen() {
+    use std::sync::Mutex;
     use tome::workspace::regen_summary;
 
     let tmp = TempDir::new().unwrap();
@@ -199,15 +230,21 @@ fn configured_long_max_chars_threads_through_to_regen() {
     workspace::init::init(parse("mine"), false, &paths).expect("init");
     seed_enabled_skill(&paths, "mine");
 
-    // Summariser that returns exactly 2100 chars for `long` — above the
-    // configured 2000 cap but below the default 2500 const.
-    struct FixedLongSummariser;
-    impl Summariser for FixedLongSummariser {
+    // Recording summariser: captures the `long_max_chars` parameter so we can
+    // assert it equals the configured value, not the hardcoded default.
+    struct RecordingSummariser {
+        captured: Arc<Mutex<Option<usize>>>,
+    }
+    impl Summariser for RecordingSummariser {
         fn summarise(
             &self,
             _input: &PluginSummariesInput,
-            _long_max_chars: usize,
+            long_max_chars: usize,
         ) -> Result<SummariserOutput, TomeError> {
+            *self.captured.lock().unwrap() = Some(long_max_chars);
+            // Return 2100 chars for `long` — above the configured 2000 cap but
+            // below the default 2500 const, so the oversize check is sensitive
+            // to which cap was threaded through.
             Ok(SummariserOutput {
                 short: "topics".to_owned(),
                 long: "a".repeat(2100),
@@ -215,25 +252,31 @@ fn configured_long_max_chars_threads_through_to_regen() {
         }
     }
 
+    let captured = Arc::new(Mutex::new(None::<usize>));
+    let recorder = RecordingSummariser {
+        captured: captured.clone(),
+    };
+
     let effective_long_max = tome::summarise::prompts::validate_long_max_chars(2000);
     assert_eq!(
         effective_long_max, 2000,
-        "2000 >= LONG_TARGET_MIN so accepted"
+        "2000 >= LONG_TARGET_MIN so accepted unchanged",
     );
 
-    let outcome = regen_summary::regen(
-        &parse("mine"),
-        &FixedLongSummariser,
-        &paths,
-        effective_long_max,
-    )
-    .expect("regen should succeed even with oversize output");
+    let outcome = regen_summary::regen(&parse("mine"), &recorder, &paths, effective_long_max)
+        .expect("regen should succeed even with oversize output");
+
+    // The summariser must have received the configured cap, not the default.
+    let received = captured.lock().unwrap().expect("summariser was called");
+    assert_eq!(
+        received, 2000,
+        "long_max_chars must thread through as 2000 (not the default 2500)",
+    );
 
     // The outcome must reflect the ACTUAL char count (2100), not a clamped value.
     assert_eq!(outcome.long_chars, 2100);
-    // And the threshold was 2000, not 2500 — meaning the "oversize" check ran
-    // against 2000. We can confirm by checking that 2100 > effective_long_max
-    // (the condition that would have emitted the warn event).
+    // 2100 > effective_long_max (2000) confirms the oversize check ran against
+    // the configured cap, not the default.
     assert!(
         outcome.long_chars > effective_long_max,
         "2100 should exceed the configured cap of 2000",
