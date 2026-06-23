@@ -31,7 +31,7 @@ use crate::settings::edit::{
 };
 use crate::workspace::ResolvedScope;
 
-use super::home_root;
+use super::{effective_harness_scope, home_root};
 use super::use_::{compute_effective_names, resolve_settings_path};
 
 #[derive(Debug, Clone, Serialize)]
@@ -49,7 +49,9 @@ pub fn run(
     paths: &Paths,
     mode: Mode,
 ) -> Result<(), TomeError> {
-    let settings_path = resolve_settings_path(&args.scope, scope, paths)?;
+    // Resolve effective scope: explicit flag → [harness] default_scope in config → project.
+    let eff_scope = effective_harness_scope(args.scope, paths);
+    let settings_path = resolve_settings_path(&eff_scope, scope, paths)?;
 
     // Lock for the entire read-modify-write + sync window.
     std::fs::create_dir_all(&paths.root)?;
@@ -91,7 +93,7 @@ pub fn run(
     }
 
     let outcome = HarnessRemoveOutcome {
-        scope: args.scope.to_string(),
+        scope: eff_scope.to_string(),
         name: args.name,
         settings_path: settings_path.clone(),
         list_changed: changed,

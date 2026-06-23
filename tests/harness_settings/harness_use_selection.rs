@@ -64,7 +64,7 @@ fn explicit_names_select_exactly_those() {
             "cursor".to_string(),
         ],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
@@ -94,7 +94,7 @@ fn all_flag_selects_every_supported_excluding_generics() {
     let args = HarnessUseArgs {
         names: vec![],
         all: true,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use --all ok");
@@ -166,7 +166,7 @@ fn alias_and_canonical_collapse_to_single_pass() {
         // gemini twice.
         names: vec!["antigravity-cli".to_string(), "gemini".to_string()],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
@@ -202,7 +202,7 @@ fn duplicate_name_collapses_to_single_pass() {
     let args = HarnessUseArgs {
         names: vec!["cursor".to_string(), "cursor".to_string()],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
@@ -233,7 +233,7 @@ fn no_args_selects_detected_set_only() {
     let args = HarnessUseArgs {
         names: vec![],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
@@ -266,7 +266,7 @@ fn no_args_no_detected_harness_yields_empty_detected_report() {
     let args = HarnessUseArgs {
         names: vec![],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
@@ -323,7 +323,7 @@ fn forward_progress_attempts_all_and_surfaces_first_error() {
     let ok_args = HarnessUseArgs {
         names: vec!["stub_ok".to_string()],
         all: false,
-        scope: HarnessScopeArg::Project,
+        scope: Some(HarnessScopeArg::Project),
         force: false,
     };
     let (ok_report, ok_err) =
@@ -349,7 +349,7 @@ fn forward_progress_attempts_all_and_surfaces_first_error() {
     let args = HarnessUseArgs {
         names: vec!["stub_ok".to_string(), "stub_fail".to_string()],
         all: false,
-        scope: HarnessScopeArg::Project,
+        scope: Some(HarnessScopeArg::Project),
         force: false,
     };
     let (report, err) = use_::run_inner(args, &project_scope("demo", project.clone()), &paths)

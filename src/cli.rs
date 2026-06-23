@@ -364,10 +364,12 @@ pub struct HarnessUseArgs {
     /// Mutually exclusive with explicit names.
     #[arg(long)]
     pub all: bool,
-    /// Settings scope to edit. Defaults to `project` (requires a project
-    /// marker above CWD; use `workspace` or `global` outside a project).
-    #[arg(long, default_value_t = HarnessScopeArg::Project, value_enum)]
-    pub scope: HarnessScopeArg,
+    /// Settings scope to edit. When omitted, falls back to
+    /// `[harness] default_scope` in `~/.tome/config.toml`, then to
+    /// `project` (requires a project marker above CWD; use `workspace`
+    /// or `global` outside a project).
+    #[arg(long, value_enum)]
+    pub scope: Option<HarnessScopeArg>,
     /// Override a harness-clash on the MCP config write (without it, a
     /// clash exits 19).
     #[arg(long)]
@@ -378,9 +380,10 @@ pub struct HarnessUseArgs {
 pub struct HarnessRemoveArgs {
     /// Harness name.
     pub name: String,
-    /// Settings scope to edit. Defaults to `project`.
-    #[arg(long, default_value_t = HarnessScopeArg::Project, value_enum)]
-    pub scope: HarnessScopeArg,
+    /// Settings scope to edit. When omitted, falls back to
+    /// `[harness] default_scope` in `~/.tome/config.toml`, then to `project`.
+    #[arg(long, value_enum)]
+    pub scope: Option<HarnessScopeArg>,
 }
 
 #[derive(Debug, clap::Args)]

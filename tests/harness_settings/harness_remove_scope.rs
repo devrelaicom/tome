@@ -29,7 +29,7 @@ fn remove_from_empty_global_settings_is_noop() {
 
     let args = HarnessRemoveArgs {
         name: "stub".to_string(),
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
     };
     let scope = make_resolved_scope("global");
     remove::run(args, &scope, &paths, Mode::Json).expect("remove ok");
@@ -60,7 +60,7 @@ fn remove_existing_entry_from_global_drops_it() {
 
     let args = HarnessRemoveArgs {
         name: "stub".to_string(),
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
     };
     let scope = make_resolved_scope("global");
     remove::run(args, &scope, &paths, Mode::Json).expect("remove ok");
@@ -89,7 +89,7 @@ fn remove_last_entry_leaves_empty_array() {
 
     let args = HarnessRemoveArgs {
         name: "stub".to_string(),
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
     };
     let scope = make_resolved_scope("global");
     remove::run(args, &scope, &paths, Mode::Json).expect("remove ok");
@@ -132,7 +132,7 @@ fn remove_from_workspace_scope_writes_workspace_settings_file() {
 
     let args = HarnessRemoveArgs {
         name: "stub".to_string(),
-        scope: HarnessScopeArg::Workspace,
+        scope: Some(HarnessScopeArg::Workspace),
     };
     let scope = make_resolved_scope("demo");
     remove::run(args, &scope, &paths, Mode::Json).expect("remove ok");

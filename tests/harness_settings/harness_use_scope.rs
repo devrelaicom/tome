@@ -36,7 +36,7 @@ fn use_unknown_harness_errors_with_exit_18() {
     let args = HarnessUseArgs {
         names: vec!["totally-not-a-harness".to_string()],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let scope = make_resolved_scope("global", None);
@@ -59,7 +59,7 @@ fn use_project_scope_without_project_errors_with_usage() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
-        scope: HarnessScopeArg::Project,
+        scope: Some(HarnessScopeArg::Project),
         force: false,
     };
     let scope = make_resolved_scope("global", None);
@@ -84,7 +84,7 @@ fn use_global_scope_writes_global_settings_file() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let scope = make_resolved_scope("global", None);
@@ -121,7 +121,7 @@ fn use_generic_op_global_scope_is_accepted() {
     let args = HarnessUseArgs {
         names: vec!["generic-op".to_string()],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let scope = make_resolved_scope("global", None);
@@ -150,7 +150,7 @@ fn use_workspace_scope_writes_workspace_settings_file() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
-        scope: HarnessScopeArg::Workspace,
+        scope: Some(HarnessScopeArg::Workspace),
         force: false,
     };
     let scope = make_resolved_scope("demo", None);
@@ -188,7 +188,7 @@ fn use_project_scope_writes_project_marker() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
-        scope: HarnessScopeArg::Project,
+        scope: Some(HarnessScopeArg::Project),
         force: false,
     };
     let scope = make_resolved_scope("global", Some(project_dir.path().to_path_buf()));
@@ -235,7 +235,7 @@ fn use_with_force_true_propagates_to_sync_deps() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
-        scope: HarnessScopeArg::Project,
+        scope: Some(HarnessScopeArg::Project),
         force: true,
     };
     let scope = make_resolved_scope("global", Some(project_dir.path().to_path_buf()));
@@ -282,7 +282,7 @@ fn use_idempotent_when_name_already_present_does_not_invoke_sync() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let scope = make_resolved_scope("global", None);
@@ -314,7 +314,7 @@ fn use_global_scope_writes_config_harness_table() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
-        scope: HarnessScopeArg::Global,
+        scope: Some(HarnessScopeArg::Global),
         force: false,
     };
     let scope = make_resolved_scope("global", None);

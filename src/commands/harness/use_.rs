@@ -46,7 +46,7 @@ use crate::paths::Paths;
 use crate::settings::edit::{add_harness, add_harness_to_config, open_settings, save_settings};
 use crate::workspace::ResolvedScope;
 
-use super::home_root;
+use super::{effective_harness_scope, home_root};
 
 /// One harness's `tome harness use` outcome.
 #[derive(Debug, Clone, Serialize)]
@@ -156,9 +156,11 @@ pub fn run_inner(
     //    any settings edit.
     let (selection, names) = resolve_selection(&args, &home)?;
 
-    // 2. Resolve the target settings file path (loud on `--scope project` with
-    //    no project root, exit 2).
-    let settings_path = resolve_settings_path(&args.scope, scope, paths)?;
+    // 2. Resolve the effective scope then the target settings file path.
+    //    Precedence: explicit --scope → [harness] default_scope in config → project.
+    //    Loud on project scope with no project root (exit 2).
+    let eff_scope = effective_harness_scope(args.scope, paths);
+    let settings_path = resolve_settings_path(&eff_scope, scope, paths)?;
 
     // Hold the advisory lock across the ENTIRE multi-harness window so the
     // whole selection is one atomic settings transaction.
@@ -169,7 +171,7 @@ pub fn run_inner(
     let mut first_error: Option<TomeError> = None;
 
     for name in names {
-        match configure_one(&name, &args, scope, paths, &settings_path, &home) {
+        match configure_one(&name, &args, eff_scope, scope, paths, &settings_path, &home) {
             Ok(outcome) => results.push(HarnessUseResult::Ok(outcome)),
             Err(e) => {
                 // Forward-progress: record + continue so every selected harness
@@ -252,6 +254,7 @@ fn resolve_selection(
 fn configure_one(
     name: &str,
     args: &HarnessUseArgs,
+    eff_scope: HarnessScopeArg,
     scope: &ResolvedScope,
     paths: &Paths,
     settings_path: &std::path::Path,
@@ -309,7 +312,7 @@ fn configure_one(
     let mcp_notice = compute_mcp_notice(name, scope.scope.name().as_str());
 
     Ok(HarnessUseOutcome {
-        scope: args.scope.to_string(),
+        scope: eff_scope.to_string(),
         name: name.to_string(),
         settings_path: settings_path.to_path_buf(),
         list_changed: changed,
