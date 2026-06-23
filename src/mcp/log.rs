@@ -36,6 +36,7 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::error::TomeError;
+use crate::logging::resolve_directive;
 use crate::paths::Paths;
 
 /// 10 MiB rotation cap per the log-format contract.
@@ -256,20 +257,15 @@ pub fn init_subscriber(
     file: File,
     config_level: Option<crate::config::LogLevel>,
 ) -> Result<(), TomeError> {
-    // Build the effective directive using the same precedence helper as the
-    // CLI path, but without a verbosity flag (MCP has none) and with `"info"`
-    // as the built-in default rather than CLI's `"warn"`.
-    let tome_log = std::env::var("TOME_LOG").ok();
-    let rust_log = std::env::var("RUST_LOG").ok();
-    let directive = if let Some(d) = tome_log.filter(|s| !s.is_empty()) {
-        d
-    } else if let Some(d) = rust_log.filter(|s| !s.is_empty()) {
-        d
-    } else if let Some(level) = config_level {
-        level.as_directive().to_string()
-    } else {
-        "info".to_string()
-    };
+    // Build the effective directive: same precedence as the CLI path but with
+    // no verbosity flag (MCP has none) and `"info"` as the built-in default.
+    let directive = resolve_directive(
+        None,
+        config_level,
+        std::env::var("TOME_LOG").ok(),
+        std::env::var("RUST_LOG").ok(),
+        "info",
+    );
     let env_filter = EnvFilter::new(directive);
 
     let file_layer = fmt::layer()

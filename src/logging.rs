@@ -47,23 +47,28 @@ impl Verbosity {
 /// Pure precedence resolver for the effective `EnvFilter` directive.
 ///
 /// Precedence (highest to lowest):
-/// 1. `-v`/`-vv` flag (any non-default [`Verbosity`])
-/// 2. `TOME_LOG` env var (`tome_log`)
-/// 3. `RUST_LOG` env var (`rust_log`)
+/// 1. `-v`/`-vv` flag — only when `verbosity` is `Some(v)` and `v.is_explicit()`
+///    (i.e. a non-default [`Verbosity`]). Pass `None` for callers that have no
+///    verbosity flag (e.g. the MCP server).
+/// 2. `TOME_LOG` env var (`tome_log`, non-empty)
+/// 3. `RUST_LOG` env var (`rust_log`, non-empty)
 /// 4. `[logging] level` in `config.toml` (`config_level`)
-/// 5. Built-in default: `"warn"` for CLI, `"info"` for MCP (callers supply
-///    the right default via the `default` parameter)
+/// 5. `default` — callers supply the right default: `"warn"` for the CLI,
+///    `"info"` for the MCP server.
 ///
 /// `tome_log` / `rust_log` are the raw env values (pass `None` when unset) so
 /// this function is pure and unit-testable without touching the real environment.
 pub(crate) fn resolve_directive(
-    verbosity: Verbosity,
+    verbosity: Option<Verbosity>,
     config_level: Option<crate::config::LogLevel>,
     tome_log: Option<String>,
     rust_log: Option<String>,
+    default: &str,
 ) -> String {
-    if verbosity.is_explicit() {
-        return verbosity.default_directive().to_string();
+    if let Some(v) = verbosity
+        && v.is_explicit()
+    {
+        return v.default_directive().to_string();
     }
     if let Some(d) = tome_log.filter(|s| !s.is_empty()) {
         return d;
@@ -74,7 +79,7 @@ pub(crate) fn resolve_directive(
     if let Some(level) = config_level {
         return level.as_directive().to_string();
     }
-    "warn".to_string()
+    default.to_string()
 }
 
 /// Initialise the global tracing subscriber. Safe to call once at startup.
@@ -85,10 +90,11 @@ pub(crate) fn resolve_directive(
 /// and the `-v`/`-vv` flag take precedence over this value.
 pub fn init(verbosity: Verbosity, config_level: Option<crate::config::LogLevel>) {
     let directive = resolve_directive(
-        verbosity,
+        Some(verbosity),
         config_level,
         std::env::var("TOME_LOG").ok(),
         std::env::var("RUST_LOG").ok(),
+        "warn",
     );
 
     let filter = EnvFilter::new(directive);
@@ -112,24 +118,36 @@ mod tests {
     #[test]
     fn config_level_used_when_no_flag_no_env() {
         // verbosity default (no -v), no TOME_LOG/RUST_LOG → config level wins.
-        let directive = resolve_directive(Verbosity::default(), Some(LogLevel::Info), None, None);
+        let directive = resolve_directive(
+            Some(Verbosity::default()),
+            Some(LogLevel::Info),
+            None,
+            None,
+            "warn",
+        );
         assert_eq!(directive, "info");
     }
 
     #[test]
     fn flag_beats_config() {
-        let directive =
-            resolve_directive(Verbosity::from_count(1), Some(LogLevel::Error), None, None);
+        let directive = resolve_directive(
+            Some(Verbosity::from_count(1)),
+            Some(LogLevel::Error),
+            None,
+            None,
+            "warn",
+        );
         assert_eq!(directive, "info"); // -v = info, beats config error
     }
 
     #[test]
     fn env_beats_config() {
         let directive = resolve_directive(
-            Verbosity::default(),
+            Some(Verbosity::default()),
             Some(LogLevel::Error),
             Some("debug".into()),
             None,
+            "warn",
         );
         assert_eq!(directive, "debug"); // TOME_LOG=debug beats config
     }
@@ -137,7 +155,7 @@ mod tests {
     #[test]
     fn default_when_nothing_set() {
         assert_eq!(
-            resolve_directive(Verbosity::default(), None, None, None),
+            resolve_directive(Some(Verbosity::default()), None, None, None, "warn"),
             "warn"
         );
     }
@@ -145,10 +163,11 @@ mod tests {
     #[test]
     fn rust_log_beats_config() {
         let directive = resolve_directive(
-            Verbosity::default(),
+            Some(Verbosity::default()),
             Some(LogLevel::Warn),
             None,
             Some("trace".into()),
+            "warn",
         );
         assert_eq!(directive, "trace");
     }
@@ -156,34 +175,70 @@ mod tests {
     #[test]
     fn tome_log_beats_rust_log() {
         let directive = resolve_directive(
-            Verbosity::default(),
+            Some(Verbosity::default()),
             None,
             Some("info".into()),
             Some("trace".into()),
+            "warn",
         );
         assert_eq!(directive, "info");
     }
 
     #[test]
     fn flag_beats_tome_log() {
-        let directive =
-            resolve_directive(Verbosity::from_count(1), None, Some("error".into()), None);
+        let directive = resolve_directive(
+            Some(Verbosity::from_count(1)),
+            None,
+            Some("error".into()),
+            None,
+            "warn",
+        );
         assert_eq!(directive, "info"); // -v = info
     }
 
     #[test]
     fn double_v_gives_debug() {
-        let directive = resolve_directive(Verbosity::from_count(2), None, None, None);
+        let directive = resolve_directive(Some(Verbosity::from_count(2)), None, None, None, "warn");
         assert_eq!(directive, "debug");
     }
 
     #[test]
     fn empty_tome_log_falls_through_to_config() {
         let directive = resolve_directive(
-            Verbosity::default(),
+            Some(Verbosity::default()),
             Some(LogLevel::Debug),
             Some(String::new()),
             None,
+            "warn",
+        );
+        assert_eq!(directive, "debug");
+    }
+
+    // MCP-shape tests: verbosity=None, default="info"
+
+    #[test]
+    fn mcp_default_is_info() {
+        // No verbosity flag, no env, no config → MCP default "info".
+        let directive = resolve_directive(None, None, None, None, "info");
+        assert_eq!(directive, "info");
+    }
+
+    #[test]
+    fn mcp_config_beats_default() {
+        // No verbosity flag, no env, config=debug → "debug" (config beats "info" default).
+        let directive = resolve_directive(None, Some(LogLevel::Debug), None, None, "info");
+        assert_eq!(directive, "debug");
+    }
+
+    #[test]
+    fn empty_rust_log_falls_through_to_config() {
+        // RUST_LOG="" with config_level=debug, no TOME_LOG, no explicit verbosity → "debug".
+        let directive = resolve_directive(
+            Some(Verbosity::default()),
+            Some(LogLevel::Debug),
+            None,
+            Some(String::new()),
+            "warn",
         );
         assert_eq!(directive, "debug");
     }
