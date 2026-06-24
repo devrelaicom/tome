@@ -41,11 +41,24 @@ pub(crate) fn reset_cancellation_for_tests() {
 
 /// Scrub credential-bearing patterns from a captured stderr/stdout byte
 /// stream. The rules are applied in the order documented in research.md R-8.
+///
+/// Phase 12 (FR-014a) extends this — the ONE shared scrubber — to also redact
+/// remote-provider credentials wherever they surface, including bare reflection
+/// in a JSON response body:
+/// - `x-api-key` header values (folded into the `kv_secret` key alternation,
+///   alongside the existing `authorization`/`bearer`/`api-key` keys).
+/// - Provider key FORMATS as bare tokens (the `provider_key` step below):
+///   OpenAI `sk-…` (covers `sk-ant-…`/`sk-proj-…`), Voyage `pa-…`, Google
+///   `AIza…`. This runs AFTER the bearer/header KV step so a key in a
+///   `Authorization: Bearer <k>` / `x-api-key: <k>` / `?key=<k>` context is
+///   first collapsed by the KV/url rules, then the format step catches anything
+///   that was reflected raw with no surrounding key context.
 pub fn scrub_credentials(input: &[u8]) -> Vec<u8> {
     static URL_LOGIN: OnceLock<Regex> = OnceLock::new();
     static SSH_LOGIN: OnceLock<Regex> = OnceLock::new();
     static KV_SECRET: OnceLock<Regex> = OnceLock::new();
     static LONG_HEX: OnceLock<Regex> = OnceLock::new();
+    static PROVIDER_KEY: OnceLock<Regex> = OnceLock::new();
 
     // Match any URI scheme (RFC 3986 §3.1) followed by `userinfo@`. Covers
     // `https://`, `http://`, `git://`, `ssh://`, and — relevant for
@@ -68,7 +81,7 @@ pub fn scrub_credentials(input: &[u8]) -> Vec<u8> {
     // already matches; we just teach the key alternation to recognise them.
     let kv_secret = KV_SECRET.get_or_init(|| {
         Regex::new(
-            r"(?i)\b(?P<key>token|password|api[-_]?key|bearer|authorization|signature|x-amz-signature|x-amz-credential|x-amz-security-token)(?P<sep>\s*[:=]\s*)(?:(?:token|password|api[-_]?key|bearer|authorization)\s+)?[^\s&]+",
+            r"(?i)\b(?P<key>x-api-key|token|password|api[-_]?key|bearer|authorization|signature|x-amz-signature|x-amz-credential|x-amz-security-token)(?P<sep>\s*[:=]\s*)(?:(?:token|password|api[-_]?key|bearer|authorization)\s+)?[^\s&]+",
         )
         .expect("valid regex")
     });
@@ -82,6 +95,21 @@ pub fn scrub_credentials(input: &[u8]) -> Vec<u8> {
         )
         .expect("valid regex")
     });
+    // Phase 12 (FR-014a): bare provider key FORMATS, redacted wherever they
+    // appear — including raw reflection in a JSON response body with no
+    // surrounding `key=` context. The three alternatives cover:
+    //   * OpenAI:  `sk-` + ≥16 url-safe chars (also matches `sk-ant-…`,
+    //              `sk-proj-…` — the hyphen is inside the char class).
+    //   * Voyage:  `pa-` + ≥16 url-safe chars.
+    //   * Google:  `AIza` + ≥20 url-safe chars (the AIza… API-key shape; the
+    //              value the `?key=AIza…` query also carries).
+    // The whole match is replaced with `<scrubbed>`. Runs LAST so a key already
+    // collapsed by the KV/url steps is untouched, and a raw reflected one is
+    // still caught.
+    let provider_key = PROVIDER_KEY.get_or_init(|| {
+        Regex::new(r"(?:sk-[A-Za-z0-9_-]{16,}|pa-[A-Za-z0-9_-]{16,}|AIza[A-Za-z0-9_-]{20,})")
+            .expect("valid regex")
+    });
 
     let step1 = url_login.replace_all(input, &b"${scheme}"[..]);
     let step2 = ssh_login.replace_all(&step1, &b"${at}<host>:"[..]);
@@ -93,7 +121,8 @@ pub fn scrub_credentials(input: &[u8]) -> Vec<u8> {
             b"<scrubbed>".to_vec()
         }
     });
-    step4.into_owned()
+    let step5 = provider_key.replace_all(&step4, &b"<scrubbed>"[..]);
+    step5.into_owned()
 }
 
 /// Convert captured `git` stderr into a UTF-8-ish, scrubbed `String` suitable
