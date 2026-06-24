@@ -87,7 +87,7 @@ impl Summariser for RemoteSummariser {
 
         // LONG pass — cascades from the (trimmed) short output, with the
         // configured cap, exactly as the bundled path does.
-        let long_prompt_str = long_prompt(long_max_chars).replace("{topics}", short.trim());
+        let long_prompt_str = long_prompt(long_max_chars).replace("{topics}", &short);
         let long = self
             .chat(&long_prompt_str)
             .map_err(ProviderError::into_tome_error)?
