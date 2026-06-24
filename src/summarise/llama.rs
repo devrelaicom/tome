@@ -230,7 +230,13 @@ impl Summariser for LlamaSummariser {
 /// tells the model "no bullet points"; rendering input lines AS bullets
 /// gave the model a contradictory example. Lines now go in as plain
 /// `"<plugin>: <skill-name> — <skill-description>"` records.
-fn format_input_descriptions(input: &PluginSummariesInput) -> String {
+///
+/// Phase 12 (US1): `pub(crate)` so the [`crate::summarise::remote::RemoteSummariser`]
+/// reuses the EXACT same input rendering as the bundled path — the input block
+/// is the single source of truth; bundled and remote summaries must be built
+/// from byte-identical descriptions (NFR-006 keeps the bundled path unchanged,
+/// and the remote path must not diverge in how it renders the catalogue).
+pub(crate) fn format_input_descriptions(input: &PluginSummariesInput) -> String {
     let mut out = String::new();
     for plugin in &input.plugins {
         for skill in &plugin.skills {

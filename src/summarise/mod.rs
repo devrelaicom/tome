@@ -22,19 +22,25 @@
 //! there's no async involved. Tokio is restricted to `src/mcp/`.
 
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use llama_cpp_2::llama_backend::LlamaBackend;
 
+use crate::config::Config;
 use crate::error::{SummariserFailureKind, TomeError};
+use crate::paths::Paths;
+use crate::provider::Capability;
 
 pub mod download;
 pub mod llama;
 pub mod prompts;
 pub mod registry;
+pub mod remote;
 pub mod stub;
 pub mod trigger;
 
 pub use llama::LlamaSummariser;
+pub use remote::RemoteSummariser;
 pub use stub::StubSummariser;
 pub use trigger::{regenerate_for_trigger, regenerate_for_trigger_with_summariser};
 
@@ -86,6 +92,48 @@ pub trait Summariser: Send + Sync {
         input: &PluginSummariesInput,
         long_max_chars: usize,
     ) -> Result<SummariserOutput, TomeError>;
+}
+
+/// The tighter per-call timeout used by the POST-COMMIT auto-regen trigger
+/// (FR-027). The trigger runs after a `plugin enable`/`disable`/etc. has already
+/// committed; a slow remote summariser must not make the command feel hung, so
+/// the trigger caps the provider timeout lower than the foreground default
+/// ([`crate::provider::config::DEFAULT_PROVIDER_TIMEOUT`], 30s) and degrades any
+/// timeout to a non-fatal `warn!`.
+pub const TRIGGER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Build the summariser the workspace should use: a [`RemoteSummariser`] when
+/// `[summariser] provider` references a configured provider, else the bundled
+/// [`LlamaSummariser`].
+///
+/// This is the single selection chokepoint both the foreground
+/// (`tome workspace regen-summary`) and the post-commit trigger route through,
+/// so "remote vs bundled" is decided in exactly one place.
+///
+/// - `tighter_timeout`: when `true` (the auto-trigger path) the resolved
+///   provider's per-call timeout is lowered to [`TRIGGER_TIMEOUT`] so a slow
+///   remote can't make `plugin enable` feel hung.
+/// - On the remote path, the one-time first-run notice
+///   ([`crate::provider::notice::notify_remote_use`]) fires so the user is told
+///   that skill text is sent off-box.
+///
+/// NFR-006: the `None` (bundled) branch is byte-identical to the pre-Phase-12
+/// behaviour — `LlamaSummariser::new(paths)`.
+pub fn build_summariser(
+    cfg: &Config,
+    paths: &Paths,
+    tighter_timeout: bool,
+) -> Result<Box<dyn Summariser>, TomeError> {
+    match crate::provider::resolve(cfg, Capability::Summariser)? {
+        Some(mut resolved) => {
+            if tighter_timeout {
+                resolved.timeout = TRIGGER_TIMEOUT;
+            }
+            crate::provider::notice::notify_remote_use(paths, &resolved.name);
+            Ok(Box::new(RemoteSummariser::new(resolved)))
+        }
+        None => Ok(Box::new(LlamaSummariser::new(paths)?)),
+    }
 }
 
 /// Input to the summariser: every enabled plugin and its skill set

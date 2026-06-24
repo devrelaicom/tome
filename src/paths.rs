@@ -290,6 +290,15 @@ impl Paths {
         self.telemetry_dir().join("last-flush-attempt")
     }
 
+    /// `<root>/provider_notice_seen` — newline-delimited list of provider
+    /// registry names for which the first-run remote-use notice (Phase 12 /
+    /// FR-023) has already been printed. Sidecar state in `~/.tome/`, NOT in
+    /// `config.toml` (mirrors the telemetry first-run-notice precedent: the
+    /// "seen" set is local bookkeeping, not user-edited config).
+    pub fn provider_notice_seen(&self) -> PathBuf {
+        self.root.join("provider_notice_seen")
+    }
+
     // --- Project marker accessors ---------------------------------------
     //
     // Project markers live at `<project_root>/.tome/`. They are

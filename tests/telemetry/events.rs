@@ -31,8 +31,8 @@ use tome::telemetry::event::{
     CatalogAction, CatalogActionEvent, ColdStart, DoctorRun, EntryInfo, EntryInvoked, EntryKind,
     ErrorEvent, Harness, HarnessAction, HarnessActionEvent, Heartbeat, Install, InstallMethod,
     MetaAction, MetaActionEvent, ModelDownload, Outcome, PluginAction, PluginActionEvent,
-    PromptInvoked, PromptKind, Reindex, ReindexScope, Search, SourceFormat, SourceType, Surface,
-    Upgrade, VersionStr, WorkspaceAction, WorkspaceActionEvent,
+    PromptInvoked, PromptKind, ProviderKind, Reindex, ReindexScope, Search, SourceFormat,
+    SourceType, Summary, Surface, Upgrade, VersionStr, WorkspaceAction, WorkspaceActionEvent,
 };
 
 /// Serialize `event` behind the canonical fixed envelope for its event type and
@@ -355,6 +355,60 @@ fn error_full_literal_pin() {
 ,\"surface\":\"cli\"\
 ,\"calling_harness\":\"claude-code\"}";
     assert_eq!(line(&event), expected);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 12 — `tome.summary` (provider-kind attribution). Byte-stable pin +
+// privacy assertion: only the closed `ProviderKind` token can appear; no
+// provider name / model id / base url is on the wire.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn summary_full_literal_pin() {
+    let event = Summary {
+        summariser_provider_kind: ProviderKind::Anthropic,
+        outcome: Outcome::Ok,
+    };
+    let expected = envelope_prefix("tome.summary")
+        + ",\"summariser_provider_kind\":\"anthropic\",\"outcome\":\"ok\"}";
+    assert_eq!(line(&event), expected);
+}
+
+#[test]
+fn summary_provider_kind_only_closed_tokens_no_free_form_string() {
+    // Every ProviderKind variant must serialise to its closed lowercase token —
+    // there is structurally no way to put a registry name / model / url on the
+    // wire (the field type is a closed enum, not a String).
+    let cases = [
+        (ProviderKind::Bundled, "bundled"),
+        (ProviderKind::Openai, "openai"),
+        (ProviderKind::Anthropic, "anthropic"),
+        (ProviderKind::Gemini, "gemini"),
+        (ProviderKind::Voyage, "voyage"),
+    ];
+    for (kind, expected_token) in cases {
+        let event = Summary {
+            summariser_provider_kind: kind,
+            outcome: Outcome::Failed,
+        };
+        let serialised = line(&event);
+        assert!(
+            serialised.contains(&format!(
+                "\"summariser_provider_kind\":\"{expected_token}\""
+            )),
+            "expected closed token `{expected_token}` in: {serialised}"
+        );
+        // Defence-in-depth: a representative secret-shaped string must NEVER
+        // appear — the type system already prevents it, this catches a future
+        // regression that swaps the field to a String.
+        assert!(
+            !serialised.contains("api.openai.com")
+                && !serialised.contains("sk-")
+                && !serialised.contains("gpt-4")
+                && !serialised.contains("my-provider"),
+            "summary event must carry no provider name/model/url: {serialised}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

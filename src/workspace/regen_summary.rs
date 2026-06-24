@@ -118,7 +118,21 @@ pub fn regen(
     // ordering is important for the post-summarise `last_used_at` bump.
     // Performance trade-off documented in `us2-disposition.md` (R-M5
     // deferred).
-    let output = summariser.summarise(&input, long_max_chars)?;
+    //
+    // Phase 12: emit one `tome.summary` event recording the CLOSED
+    // summariser provider kind + outcome. Best-effort, never blocks; the
+    // kind is derived from config defensively (telemetry must never fail the
+    // command). NO provider name / model / url is recorded.
+    let output = match summariser.summarise(&input, long_max_chars) {
+        Ok(output) => {
+            emit_summary_telemetry(paths, crate::telemetry::event::Outcome::Ok);
+            output
+        }
+        Err(e) => {
+            emit_summary_telemetry(paths, crate::telemetry::event::Outcome::Failed);
+            return Err(e);
+        }
+    };
 
     // Length-window warning per FR-425. Use the EFFECTIVE cap (from
     // config) for the long-summary warn threshold so a user-raised cap
@@ -193,6 +207,36 @@ pub fn regen(
         long_chars,
         bound_projects_synced,
     })
+}
+
+/// Emit one `tome.summary` telemetry event with the closed summariser provider
+/// kind + outcome. The kind is derived from config defensively
+/// (`load_or_default` — a malformed config must NOT break the summary path or
+/// the telemetry emit). `telemetry::enqueue` is itself gated + best-effort, so
+/// this is a no-op when telemetry is disabled. NO provider name / model / url is
+/// recorded — only the closed [`crate::telemetry::event::ProviderKind`].
+fn emit_summary_telemetry(paths: &Paths, outcome: crate::telemetry::event::Outcome) {
+    let cfg = crate::config::load_or_default(paths);
+    let kind = summariser_provider_kind(&cfg);
+    crate::telemetry::enqueue(crate::telemetry::event::Summary {
+        summariser_provider_kind: kind,
+        outcome,
+    });
+}
+
+/// Map the configured summariser provider to the closed telemetry kind:
+/// `Bundled` when no provider is referenced (or the reference can't be
+/// resolved), else the provider entry's kind. Resolution failures degrade to
+/// `Bundled` — telemetry never propagates a config error.
+fn summariser_provider_kind(cfg: &crate::config::Config) -> crate::telemetry::event::ProviderKind {
+    use crate::telemetry::event::ProviderKind as TKind;
+    let Some(name) = cfg.summariser.provider.as_deref() else {
+        return TKind::Bundled;
+    };
+    match cfg.providers.get(name) {
+        Some(entry) => TKind::from(entry.kind),
+        None => TKind::Bundled,
+    }
 }
 
 /// Collect the enabled plugins + their skills for the workspace, in

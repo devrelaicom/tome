@@ -55,12 +55,42 @@ pub enum Method {
 
 /// A fully-shaped HTTP request, ready for the transport. Auth is ALREADY placed
 /// (header or query) by [`build_spec`], so the transport just sends it.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is hand-written to REDACT: this is the most credential-dense struct
+/// in the tree — `url` can carry the gemini `?key=` credential and `headers`
+/// carry the `Authorization: Bearer` / `x-api-key` value; `body` can carry user
+/// content (skill text / queries on the embedding path). So a stray
+/// `tracing::debug!(?spec)` must never leak a secret or content. The URL and
+/// header values route through the SSOT scrubber; the body shows only its
+/// length. (Do NOT re-derive `Debug` — that would reintroduce the leak.)
+#[derive(Clone)]
 pub struct RequestSpec {
     pub method: Method,
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+}
+
+impl std::fmt::Debug for RequestSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let url = crate::catalog::git::scrub_to_string(self.url.as_bytes());
+        let headers: Vec<(String, String)> = self
+            .headers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    crate::catalog::git::scrub_to_string(v.as_bytes()),
+                )
+            })
+            .collect();
+        f.debug_struct("RequestSpec")
+            .field("method", &self.method)
+            .field("url", &url)
+            .field("headers", &headers)
+            .field("body_len", &self.body.len())
+            .finish()
+    }
 }
 
 /// A completed HTTP response (status + optional `Retry-After` + raw body).
@@ -509,6 +539,46 @@ mod tests {
             retry_after: None,
             body: serde_json::to_vec(&value).unwrap(),
         }
+    }
+
+    #[test]
+    fn request_spec_debug_redacts_url_key_and_auth_headers() {
+        // The most credential-dense struct: gemini `?key=` in the URL + a
+        // Bearer / x-api-key header. A stray `{:?}` must leak neither, and must
+        // not dump the body.
+        let spec = RequestSpec {
+            method: Method::Post,
+            url: "https://generativelanguage.googleapis.com/v1beta/models/m:generateContent?key=AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ012345".to_string(),
+            headers: vec![
+                (
+                    "Authorization".to_string(),
+                    "Bearer sk-ABCDEFGHIJKLMNOPQRSTUVWX".to_string(),
+                ),
+                (
+                    "x-api-key".to_string(),
+                    "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV".to_string(),
+                ),
+            ],
+            body: b"{\"model\":\"m\",\"messages\":[]}".to_vec(),
+        };
+        let rendered = format!("{spec:?}");
+        assert!(
+            !rendered.contains("AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ012345"),
+            "gemini url key leaked in Debug: {rendered}",
+        );
+        assert!(
+            !rendered.contains("sk-ABCDEFGHIJKLMNOPQRSTUVWX"),
+            "bearer key leaked in Debug: {rendered}",
+        );
+        assert!(
+            !rendered.contains("sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV"),
+            "x-api-key value leaked in Debug: {rendered}",
+        );
+        // Body is summarised by length, not dumped.
+        assert!(
+            rendered.contains("body_len"),
+            "expected body_len: {rendered}"
+        );
     }
 
     #[test]
