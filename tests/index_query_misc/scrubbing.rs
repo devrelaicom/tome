@@ -256,3 +256,82 @@ fn signed_url_keys_in_colon_form_also_redact() {
         "colon-form credential leaked: {out}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 12 — BYOK/BYOM provider key formats (FR-014a / SC-006).
+//
+// The SSOT scrubber is extended to redact each supported provider key format
+// wherever it could surface — bare in a response body AND in the per-kind auth
+// contexts (Bearer header, `x-api-key` header, `?key=` query). Real provider
+// keys exceed the format length bounds (`sk-`/`pa-` ≥16, `AIza` ≥20), so the
+// bare-token fallback always catches a reflected key; the KV/header contexts
+// catch the value regardless of length.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bare_provider_keys_in_a_response_body_are_redacted() {
+    // A provider that reflects the request (including the key) in its error
+    // body is the pre-mortem's load-bearing leak case.
+    for key in [
+        "sk-ABCDEFGHIJKLMNOPQRSTUVWX",            // OpenAI legacy
+        "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV",    // Anthropic
+        "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWX",       // OpenAI project
+        "pa-ABCDEFGHIJKLMNOPQRSTUVWXYZ01",        // Voyage
+        "AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ012345", // Google
+    ] {
+        let body = format!("{{\"error\":\"invalid api key {key} supplied\"}}");
+        let out = scrub_to_string(body.as_bytes());
+        assert!(
+            !out.contains(key),
+            "bare provider key leaked in body: key={key} out={out}",
+        );
+    }
+}
+
+#[test]
+fn provider_keys_in_bearer_context_are_redacted() {
+    let input = "request failed: Authorization: Bearer sk-ABCDEFGHIJKLMNOPQRSTUVWX";
+    let out = scrub_to_string(input.as_bytes());
+    assert!(
+        !out.contains("sk-ABCDEFGHIJKLMNOPQRSTUVWX"),
+        "bearer-context key leaked: {out}",
+    );
+}
+
+#[test]
+fn provider_keys_in_x_api_key_header_context_are_redacted() {
+    // Anthropic uses `x-api-key`; the value must be scrubbed, header name kept.
+    let input = "headers: x-api-key: sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV";
+    let out = scrub_to_string(input.as_bytes());
+    assert!(
+        !out.contains("sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV"),
+        "x-api-key value leaked: {out}",
+    );
+    assert!(
+        out.contains("x-api-key"),
+        "x-api-key header name should be preserved: {out}",
+    );
+}
+
+#[test]
+fn google_key_in_query_string_is_redacted() {
+    // Gemini places the credential as `?key=<k>`.
+    let input = "GET https://generativelanguage.googleapis.com/v1beta/models/x:generateContent?key=AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ012345";
+    let out = scrub_to_string(input.as_bytes());
+    assert!(
+        !out.contains("AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ012345"),
+        "gemini query key leaked: {out}",
+    );
+}
+
+#[test]
+fn provider_scrub_preserves_existing_behaviour_on_clean_text() {
+    // No false positives on ordinary prose / identifiers that merely contain a
+    // short `sk`/`pa` fragment without the key shape.
+    let clean = "the skill `pa11y-audit` ran ok; see sk for details";
+    let out = scrub_to_string(clean.as_bytes());
+    assert_eq!(
+        out, clean,
+        "clean text mutated by provider-key scrub: {out}"
+    );
+}

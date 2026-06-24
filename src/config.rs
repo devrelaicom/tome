@@ -211,7 +211,22 @@ pub struct DoctorConfig {
 ///
 /// `Debug` is intentionally NOT derived (a derive would print the inner string);
 /// `Clone`/`PartialEq`/`Eq` are safe to derive (they don't render).
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// ## ⚠️ Serialize asymmetry — credential-leak vector
+///
+/// `#[serde(transparent)]` makes `Serialize` emit the **real** value (required
+/// for lossless `config.toml` round-trips). So redaction protects `Debug`/
+/// `Display` ONLY — not `Serialize`. Today the only `Serialize` consumer of
+/// `ProviderEntry`/`Secret` is on-disk `config.toml` persistence (the
+/// legitimate home for an inline key). Any NEW `Serialize` surface that reaches
+/// a user-facing channel — a `tome config show --json`, a `doctor` provider
+/// dump, a telemetry event — would leak the inline `api_key` silently. Such a
+/// surface MUST redact (serialise a masked form / the `Credential`, never a raw
+/// `ProviderEntry`).
+// not-strict: `#[serde(transparent)]` newtype over a String — it has no named
+// fields, so `#[serde(deny_unknown_fields)]` is inapplicable (and rejected by
+// serde). Exempt from the `manifest_strictness` deny-unknown-fields gate.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)] // not-strict
 #[serde(transparent)]
 pub struct Secret(String);
 
