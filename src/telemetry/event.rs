@@ -503,6 +503,38 @@ pub enum ReindexScope {
     Plugin,
 }
 
+/// Phase 12 — which model PROVIDER served a capability, as a CLOSED enum. This
+/// is the ONLY thing telemetry records about provider configuration: the kind,
+/// never the registry name / model id / `base_url` / credential. `Bundled` is
+/// the default-local path (no provider configured). Being a closed enum, it can
+/// NEVER carry a free-form string — the typed-event privacy guarantee
+/// (data-model / contracts/telemetry.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    Bundled,
+    Openai,
+    Anthropic,
+    Gemini,
+    Voyage,
+}
+
+impl From<crate::config::ProviderKind> for ProviderKind {
+    /// Bridge the config provider kind into the closed telemetry enum. The
+    /// config enum has no `Bundled` (it only describes a configured remote
+    /// provider); the `Bundled` telemetry value is supplied at the emit site
+    /// when no provider is configured. This exhaustive match surfaces a future
+    /// config-kind addition as a compile error.
+    fn from(kind: crate::config::ProviderKind) -> Self {
+        match kind {
+            crate::config::ProviderKind::Openai => ProviderKind::Openai,
+            crate::config::ProviderKind::Anthropic => ProviderKind::Anthropic,
+            crate::config::ProviderKind::Gemini => ProviderKind::Gemini,
+            crate::config::ProviderKind::Voyage => ProviderKind::Voyage,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Anonymous event trait + the 18 event structs
 // ---------------------------------------------------------------------------
@@ -660,6 +692,15 @@ pub struct Reindex {
     pub outcome: Outcome,
 }
 
+/// `tome.summary` — a workspace summary was (re)generated. Records WHICH
+/// provider kind served the summariser (Phase 12) plus the outcome. NO provider
+/// name / model id / `base_url` is recorded — only the closed [`ProviderKind`].
+#[derive(Debug, Clone, Serialize)]
+pub struct Summary {
+    pub summariser_provider_kind: ProviderKind,
+    pub outcome: Outcome,
+}
+
 /// `tome.error` — a classified error surfaced to a user-facing command.
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorEvent {
@@ -719,6 +760,9 @@ impl AnonymousEvent for DoctorRun {
 }
 impl AnonymousEvent for Reindex {
     const EVENT_TYPE: &'static str = "tome.reindex";
+}
+impl AnonymousEvent for Summary {
+    const EVENT_TYPE: &'static str = "tome.summary";
 }
 impl AnonymousEvent for ErrorEvent {
     const EVENT_TYPE: &'static str = "tome.error";
@@ -1145,6 +1189,53 @@ mod tests {
             .with_time(Time::from_hms_milli(16, 11, 45, 123).unwrap())
             .assume_offset(UtcOffset::from_hms(2, 0, 0).unwrap());
         assert_eq!(format_rfc3339_millis(dt), "2026-06-11T14:11:45.123Z");
+    }
+
+    #[test]
+    fn provider_kind_serialises_lowercase_closed_tokens() {
+        // Closed enum — exactly these five wire tokens, never a free-form string.
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Bundled).unwrap(),
+            "\"bundled\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Openai).unwrap(),
+            "\"openai\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Anthropic).unwrap(),
+            "\"anthropic\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Gemini).unwrap(),
+            "\"gemini\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Voyage).unwrap(),
+            "\"voyage\""
+        );
+    }
+
+    #[test]
+    fn config_provider_kind_bridges_to_telemetry_kind() {
+        use crate::config::ProviderKind as Cfg;
+        assert_eq!(ProviderKind::from(Cfg::Openai), ProviderKind::Openai);
+        assert_eq!(ProviderKind::from(Cfg::Anthropic), ProviderKind::Anthropic);
+        assert_eq!(ProviderKind::from(Cfg::Gemini), ProviderKind::Gemini);
+        assert_eq!(ProviderKind::from(Cfg::Voyage), ProviderKind::Voyage);
+    }
+
+    #[test]
+    fn summary_event_wire_shape_is_pinned() {
+        // Byte-stable pin: closed enum tokens only, never a provider name/model.
+        let envelope = fixed_envelope_for_tests(Summary::EVENT_TYPE);
+        let event = Summary {
+            summariser_provider_kind: ProviderKind::Openai,
+            outcome: Outcome::Ok,
+        };
+        let line = to_line(&envelope, &event).unwrap();
+        let expected = "{\"schema_version\":1,\"install_uuid\":\"0b9c1f2e-3a4d-4b6c-8e1f-2a3b4c5d6e7f\",\"session_uuid\":\"7f6e5d4c-3b2a-4f1e-9c8b-1a2b3c4d5e6f\",\"tome_version\":\"0.6.0\",\"os\":\"macos\",\"arch\":\"aarch64\",\"timestamp\":\"2026-06-11T14:11:45.123Z\",\"event_type\":\"tome.summary\",\"sample_rate\":1.0,\"summariser_provider_kind\":\"openai\",\"outcome\":\"ok\"}";
+        assert_eq!(line, expected);
     }
 
     #[test]

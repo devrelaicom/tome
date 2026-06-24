@@ -46,7 +46,7 @@ use std::sync::Arc;
 use crate::error::{SummariserFailureKind, TomeError};
 use crate::paths::Paths;
 use crate::summarise::prompts::validate_long_max_chars;
-use crate::summarise::{LONG_MAX_CHARS, LlamaSummariser, Summariser};
+use crate::summarise::{LONG_MAX_CHARS, Summariser, build_summariser};
 use crate::workspace::{self, WorkspaceName};
 
 thread_local! {
@@ -148,8 +148,16 @@ pub fn regenerate_for_trigger(name: &WorkspaceName, paths: &Paths) -> Result<(),
     let result = if let Some(s) = override_summariser {
         regenerate_for_trigger_with_summariser(name, s.as_ref(), paths, effective_long_max)
     } else {
-        match LlamaSummariser::new(paths) {
-            Ok(s) => regenerate_for_trigger_with_summariser(name, &s, paths, effective_long_max),
+        // Select remote (when `[summariser] provider` is set) or the bundled
+        // Qwen, with the TIGHTER trigger timeout so a slow remote can't make the
+        // triggering command (e.g. `plugin enable`) feel hung. ALL failures —
+        // a provider request failure (94), a provider-config error (93), or a
+        // bundled model error — are degraded uniformly below (FR-027 /
+        // issue #208).
+        match build_summariser(&cfg, paths, true) {
+            Ok(s) => {
+                regenerate_for_trigger_with_summariser(name, s.as_ref(), paths, effective_long_max)
+            }
             Err(e) => Err(e),
         }
     };

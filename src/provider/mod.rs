@@ -28,6 +28,7 @@ pub mod config;
 pub mod error;
 pub mod gemini;
 pub mod http;
+pub mod notice;
 pub mod openai;
 pub mod voyage;
 
