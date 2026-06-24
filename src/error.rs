@@ -482,6 +482,45 @@ pub enum TomeError {
     TelemetryQueueCorrupt { path: PathBuf, count: usize },
 
     // -----------------------------------------------------------------------
+    // Phase 12 — BYOK/BYOM providers (codes 93–95).
+    //
+    // Three NEW failure classes (principle II — new classes get new codes,
+    // none repurposed), continuing the 90s decade Phase 10 opened. They split
+    // along the resolve-time / runtime / content-validation boundary:
+    //
+    //  * 93 `ProviderConfigInvalid` — resolve-time semantic config error: a
+    //    capability references an undefined provider, a kind illegal for the
+    //    capability, or a `provider` set without `model`. (A malformed config
+    //    *field* stays exit 5 / `ManifestInvalid::TomlParse`.)
+    //  * 94 `ProviderRequestFailed` — a remote call failed. Phase 2 maps the
+    //    structured `ProviderError` (kind + retryable, credentials redacted)
+    //    into the `detail` carrier; for now it is a plain string.
+    //  * 95 `RemoteEmbeddingInvalid` — a remote embedding failed content
+    //    validation (empty / non-finite / wrong dimension). Fail-closed: never
+    //    written to the index, never used for KNN.
+    //
+    // See `specs/012-phase-12-byok-providers/contracts/error-and-validation.md`.
+    // -----------------------------------------------------------------------
+    /// A capability section references a provider that cannot be resolved into a
+    /// usable connection: undefined provider name, a kind not legal for the
+    /// capability, or a `provider` set without a `model`. `detail` names the
+    /// offending provider/capability.
+    #[error("provider config invalid: {detail}")]
+    ProviderConfigInvalid { detail: String },
+
+    /// A remote provider call failed (auth, rate-limit, timeout, unreachable,
+    /// malformed response, …). `detail` is the redacted, structured
+    /// `ProviderError` summary (Phase 2); credentials never reach this field.
+    #[error("provider request failed: {detail}")]
+    ProviderRequestFailed { detail: String },
+
+    /// A remote embedding failed content validation. `detail` states which
+    /// check failed (empty / non-finite / dimension). The vector is discarded —
+    /// never stored, never used for KNN.
+    #[error("remote embedding invalid: {detail}")]
+    RemoteEmbeddingInvalid { detail: String },
+
+    // -----------------------------------------------------------------------
     // Internal — last-resort variant for panics caught at top level, etc.
     // No named failure above may collapse into this — that would defeat the
     // closed-set guarantee.
@@ -621,6 +660,12 @@ impl TomeError {
             Self::TelemetryEndpointUnreachable { .. } => 90,
             Self::TelemetryConfigInvalid { .. } => 91,
             Self::TelemetryQueueCorrupt { .. } => 92,
+            // 93–95 — Phase 12 BYOK/BYOM providers. Resolve-time config error
+            // (93), runtime remote-call failure (94), and remote-embedding
+            // content-validation failure (95).
+            Self::ProviderConfigInvalid { .. } => 93,
+            Self::ProviderRequestFailed { .. } => 94,
+            Self::RemoteEmbeddingInvalid { .. } => 95,
         }
     }
 
@@ -712,6 +757,10 @@ impl TomeError {
             }
             Self::TelemetryConfigInvalid { .. } => ErrorCategory::TelemetryConfigInvalid,
             Self::TelemetryQueueCorrupt { .. } => ErrorCategory::TelemetryQueueCorrupt,
+            // Phase 12 — BYOK/BYOM providers
+            Self::ProviderConfigInvalid { .. } => ErrorCategory::ProviderConfigInvalid,
+            Self::ProviderRequestFailed { .. } => ErrorCategory::ProviderRequestFailed,
+            Self::RemoteEmbeddingInvalid { .. } => ErrorCategory::RemoteEmbeddingInvalid,
         }
     }
 }
@@ -793,6 +842,9 @@ pub enum ErrorCategory {
     TelemetryEndpointUnreachable,
     TelemetryConfigInvalid,
     TelemetryQueueCorrupt,
+    ProviderConfigInvalid,
+    ProviderRequestFailed,
+    RemoteEmbeddingInvalid,
 }
 
 impl ErrorCategory {
@@ -865,6 +917,9 @@ impl ErrorCategory {
             Self::TelemetryEndpointUnreachable => "telemetry_endpoint_unreachable",
             Self::TelemetryConfigInvalid => "telemetry_config_invalid",
             Self::TelemetryQueueCorrupt => "telemetry_queue_corrupt",
+            Self::ProviderConfigInvalid => "provider_config_invalid",
+            Self::ProviderRequestFailed => "provider_request_failed",
+            Self::RemoteEmbeddingInvalid => "remote_embedding_invalid",
         }
     }
 }
@@ -1236,6 +1291,9 @@ mod tests {
             ),
             (TelemetryConfigInvalid, "telemetry_config_invalid"),
             (TelemetryQueueCorrupt, "telemetry_queue_corrupt"),
+            (ProviderConfigInvalid, "provider_config_invalid"),
+            (ProviderRequestFailed, "provider_request_failed"),
+            (RemoteEmbeddingInvalid, "remote_embedding_invalid"),
         ];
 
         // Each table row's slug matches `as_str()`, and Serialize agrees.
@@ -1338,6 +1396,9 @@ mod tests {
             TelemetryEndpointUnreachable => assert_covered(TelemetryEndpointUnreachable),
             TelemetryConfigInvalid => assert_covered(TelemetryConfigInvalid),
             TelemetryQueueCorrupt => assert_covered(TelemetryQueueCorrupt),
+            ProviderConfigInvalid => assert_covered(ProviderConfigInvalid),
+            ProviderRequestFailed => assert_covered(ProviderRequestFailed),
+            RemoteEmbeddingInvalid => assert_covered(RemoteEmbeddingInvalid),
         };
         for (variant, _) in table {
             probe(*variant);
