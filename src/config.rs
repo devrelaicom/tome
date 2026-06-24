@@ -223,7 +223,10 @@ pub struct DoctorConfig {
 /// dump, a telemetry event — would leak the inline `api_key` silently. Such a
 /// surface MUST redact (serialise a masked form / the `Credential`, never a raw
 /// `ProviderEntry`).
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+// not-strict: `#[serde(transparent)]` newtype over a String — it has no named
+// fields, so `#[serde(deny_unknown_fields)]` is inapplicable (and rejected by
+// serde). Exempt from the `manifest_strictness` deny-unknown-fields gate.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)] // not-strict
 #[serde(transparent)]
 pub struct Secret(String);
 
