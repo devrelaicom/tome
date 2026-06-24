@@ -30,3 +30,9 @@ pub mod gemini;
 pub mod http;
 pub mod openai;
 pub mod voyage;
+
+// Re-export the load-bearing types later phases (embedding/summarise remote
+// impls + CLI/MCP wiring) import as `crate::provider::{…}`.
+pub use config::{Capability, Credential, ResolvedProvider, resolve};
+pub use error::{ProviderError, ProviderErrorKind};
+pub use http::{ProviderTransportGuard, RawResponse, RequestSpec, request_with_retry};

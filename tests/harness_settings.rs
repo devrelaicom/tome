@@ -67,6 +67,8 @@ mod harness_use_selection;
 mod hooks_merge;
 #[path = "harness_settings/hooks_rewrite.rs"]
 mod hooks_rewrite;
+#[path = "harness_settings/provider_deny_unknown_fields.rs"]
+mod provider_deny_unknown_fields;
 #[path = "harness_settings/rules_file_block_in_existing.rs"]
 mod rules_file_block_in_existing;
 #[path = "harness_settings/rules_file_claude_correction.rs"]
