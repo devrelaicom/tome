@@ -156,6 +156,29 @@ pub fn resolve_enabled_with_source(paths: &Paths) -> Result<(bool, Source), Tome
     }
 }
 
+/// The pinned default Gauge collector endpoint.
+pub const DEFAULT_ENDPOINT: &str = "https://gauge-telemetry.fly.dev";
+
+/// Resolve the telemetry endpoint: `TOME_GAUGE_ENDPOINT` env >
+/// `[telemetry].endpoint` config > the pinned default. Defensive (best-effort
+/// config load): a malformed config falls through to the default.
+pub fn resolve_endpoint(paths: &crate::paths::Paths) -> String {
+    if let Ok(v) = std::env::var("TOME_GAUGE_ENDPOINT") {
+        let v = v.trim().to_string();
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    let cfg = crate::config::load_or_default(paths);
+    if let Some(ep) = cfg.telemetry.endpoint.as_deref() {
+        let ep = ep.trim();
+        if !ep.is_empty() {
+            return ep.to_string();
+        }
+    }
+    DEFAULT_ENDPOINT.to_string()
+}
+
 /// The full enabled-state precedence (the function the CLI surfaces call).
 ///
 /// A thin wrapper over [`resolve_enabled_with_source`] that drops the deciding
@@ -393,6 +416,42 @@ mod tests {
         // No env override, no CI ⇒ we reach the file ⇒ exit 5 (ManifestInvalid).
         let err = resolve_enabled(&paths).unwrap_err();
         assert_eq!(err.exit_code(), 5);
+    }
+
+    #[test]
+    fn resolve_endpoint_prefers_env_then_config_then_default() {
+        let _serial = crate::telemetry::test_serial();
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = crate::paths::Paths::from_root(dir.path().to_path_buf());
+
+        // Default when nothing set — clear any ambient TOME_GAUGE_ENDPOINT.
+        let g = EnvGuard::new();
+        // EnvGuard::new() only clears telemetry CI vars; clear our key separately.
+        // SAFETY: ENV_MUTEX held via the EnvGuard above.
+        unsafe { std::env::remove_var("TOME_GAUGE_ENDPOINT") };
+        assert_eq!(resolve_endpoint(&paths), "https://gauge-telemetry.fly.dev");
+
+        // Env wins.
+        // SAFETY: ENV_MUTEX held via the EnvGuard above.
+        unsafe { std::env::set_var("TOME_GAUGE_ENDPOINT", "https://example.test/") };
+        assert_eq!(resolve_endpoint(&paths), "https://example.test/");
+
+        // Config tier: env absent ⇒ the `[telemetry].endpoint` value wins over
+        // the default. Write the config and clear the env (we hold ENV_MUTEX).
+        std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &paths.global_config_file,
+            "[telemetry]\nendpoint = \"https://config.test/\"\n",
+        )
+        .unwrap();
+        // SAFETY: ENV_MUTEX held via the EnvGuard above.
+        unsafe { std::env::remove_var("TOME_GAUGE_ENDPOINT") };
+        assert_eq!(resolve_endpoint(&paths), "https://config.test/");
+
+        // Restore to clean state (EnvGuard::drop restores CI vars; clear ours).
+        // SAFETY: ENV_MUTEX held via the EnvGuard above.
+        unsafe { std::env::remove_var("TOME_GAUGE_ENDPOINT") };
+        drop(g);
     }
 
     #[test]
