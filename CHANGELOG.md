@@ -572,6 +572,12 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.6](https://github.com/devrelaicom/tome/compare/v0.7.5...v0.7.6) - 2026-06-25
+
+### Other
+
+- Phase 12 — BYOK/BYOM model providers ([#263](https://github.com/devrelaicom/tome/pull/263))
+
 ## [0.7.5](https://github.com/devrelaicom/tome/compare/v0.7.4...v0.7.5) - 2026-06-23
 
 ### Added
