@@ -132,7 +132,7 @@ pub fn assemble_report(
     // surfaces that doctor should *report*, not propagate. Collapse to
     // a `present: true, integrity_ok: false` `IndexHealth` so the
     // overall classifier flips to Unhealthy and the report still emits.
-    let index = check_index(paths, &scope.scope).unwrap_or_else(|err| {
+    let mut index = check_index(paths, &scope.scope).unwrap_or_else(|err| {
         tracing::warn!(error = %err, "doctor: check_index failed; reporting Broken state");
         // R-m5 (US5.c): when `check_index` errors but the file IS on
         // disk (e.g. `SchemaTooNew`, parse failure on `meta` row), the
@@ -262,6 +262,17 @@ pub fn assemble_report(
     // applicable (bundled / no remote reindex / no rows / match).
     let corrupt_index = checks::check_corrupt_index(paths);
 
+    // A corrupt-remote-index IS a broken index condition: KNN fails closed on a
+    // mixed/wrong-dimension store (`vec_distance_cosine` hard-errors), so the
+    // index subsystem must read as non-Ok. Folding it into `index.integrity_ok`
+    // routes it through the existing `classify` rule (`present && !integrity_ok`
+    // → Unhealthy) so `tome doctor` exits non-zero while it holds — without any
+    // new `DoctorReport` field (the JSON wire shape is unchanged; the existing
+    // `index.integrity_ok` bool + the `suggested_fixes` entry below carry it).
+    if corrupt_index.is_some() {
+        index.integrity_ok = false;
+    }
+
     let mut suggested_fixes = build_suggested_fixes(
         &embedder,
         &reranker,
@@ -365,10 +376,14 @@ pub fn assemble_report(
 /// holds, append its cost-aware fix to `report.suggested_fixes`. Called by the
 /// `--fix` command path AFTER `fixes::re_assemble` (which rebuilds the
 /// suggested-fix list via the 8-arg SSOT that does not know about the
-/// corrupt-index fix). Read-only re-check: a bundled-local repair that
-/// succeeded clears the mismatch (no fix re-appended); a remote mismatch (never
-/// auto-fixed) re-appears so it drives the exit-75 path. `paths` + `cfg` come
-/// from the command layer.
+/// corrupt-index fix). Read-only re-check: a BUNDLED-local repair that succeeded
+/// cleared `meta.embedder_dimension` (via the bundled `reindex --force`), so
+/// `check_corrupt_index` now reads "meta absent → N/A → no finding" and nothing
+/// is re-appended; the re-assembled `index.integrity_ok` is back to true and
+/// `overall` returns to Ok → exit 0. A REMOTE mismatch is never auto-fixed
+/// (paid API cost), so it re-appears as an `auto_fixable: false` fix while the
+/// retained `index.integrity_ok = false` keeps `overall` non-Ok →
+/// `DoctorFixNotSafe` (exit 75). `paths` + `cfg` come from the command layer.
 pub(crate) fn reappend_corrupt_index_fix(
     report: &mut DoctorReport,
     paths: &Paths,
@@ -712,7 +727,8 @@ pub(crate) fn build_suggested_fixes_pub(
 ///
 /// Unhealthy:
 /// - Embedder missing/corrupt
-/// - Index integrity failure
+/// - Index integrity failure (`PRAGMA integrity_check`, OR a corrupt-remote-
+///   index dimension mismatch the assembler folds into `index.integrity_ok`)
 /// - Embedder drift (stored vectors invalidated)
 /// - Schema too new (folds into embedder/index failure paths)
 /// - Summariser missing/corrupt (US5.a — summarisation is the new pillar
@@ -1119,5 +1135,78 @@ fn catalog_fix(c: &CatalogCacheHealth) -> Option<SuggestedFix> {
             auto_fixable: false,
         }),
         CatalogCacheState::Ok => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::status::{IndexHealth, ModelHealth};
+
+    fn ok_model() -> ModelHealth {
+        ModelHealth {
+            name: "m".to_owned(),
+            version: "1".to_owned(),
+            state: "ok".to_owned(),
+        }
+    }
+
+    fn healthy_index(integrity_ok: bool) -> IndexHealth {
+        IndexHealth {
+            present: true,
+            schema_version: Some(crate::index::SCHEMA_VERSION),
+            plugins_enabled: 1,
+            skills_indexed: 1,
+            size_bytes: 4096,
+            integrity_ok,
+        }
+    }
+
+    /// MINOR-1 (Phase 12 / US4 review): a corrupt-remote-index is folded into
+    /// `index.integrity_ok = false` by the assembler. `classify` must then read
+    /// the index subsystem as non-Ok (`present && !integrity_ok → Unhealthy`),
+    /// so `tome doctor` (no `--fix`) exits non-zero while the corruption holds.
+    #[test]
+    fn corrupt_index_folded_into_integrity_drives_unhealthy() {
+        let overall = classify(
+            &ok_model(),
+            &ok_model(),
+            &ok_model(),
+            &healthy_index(/* integrity_ok = */ false),
+            &DriftStatus::None,
+            &[],
+            None,
+            &[],
+            &[],
+        );
+        assert_eq!(
+            overall,
+            DoctorClassification::Unhealthy,
+            "an otherwise-healthy install with a corrupt index must classify Unhealthy",
+        );
+    }
+
+    /// The healed counterpart: once a bundled `--fix` (→ reindex → clear
+    /// `meta.embedder_dimension`) extinguishes the finding, the assembler no
+    /// longer flips `integrity_ok`, so the same otherwise-healthy report
+    /// classifies `Ok` → `tome doctor` exits 0.
+    #[test]
+    fn healthy_index_with_integrity_ok_classifies_ok() {
+        let overall = classify(
+            &ok_model(),
+            &ok_model(),
+            &ok_model(),
+            &healthy_index(/* integrity_ok = */ true),
+            &DriftStatus::None,
+            &[],
+            None,
+            &[],
+            &[],
+        );
+        assert_eq!(
+            overall,
+            DoctorClassification::Ok,
+            "with the corrupt-index extinguished the install must classify Ok (exit 0)",
+        );
     }
 }

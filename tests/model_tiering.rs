@@ -483,6 +483,110 @@ fn mixed_dimension_profile_switch_is_refused_until_reindex() {
 }
 
 // ===========================================================================
+// Phase 12 / US4 review fix — corrupt-index self-heals to EXTINCTION on a
+// bundled whole-index reindex.
+//
+// The MAJOR bug: a bundled `doctor --fix` runs `reindex --force` to repair a
+// remote→bundled corrupt-index, but the reindex never cleared
+// `meta.embedder_dimension`. So after the repair the stored vectors were
+// bundled-dimension while `meta.embedder_dimension` still held the stale REMOTE
+// value → `check_corrupt_index` re-surfaced the SAME finding on every run and it
+// could never self-heal.
+//
+// This test proves the fix at the production reconcile path
+// (`reindex::reconcile_embedder_dimension`, the function `run_inner` calls on a
+// whole-index reindex):
+//   1. stand up a real stub-embedded index (a 384-d corpus);
+//   2. stamp `meta.embedder_dimension` to a WRONG (stale remote) value so
+//      `check_corrupt_index` reports the finding;
+//   3. run the BUNDLED whole-index reconcile (exactly as `run_inner` does);
+//   4. assert `read_embedder_dimension == None` afterward AND
+//      `check_corrupt_index` returns no finding — the finding is extinguished
+//      and cannot re-surface, so a subsequent `doctor`/`doctor --fix` exits 0.
+// ===========================================================================
+
+#[test]
+fn bundled_whole_index_reindex_extinguishes_corrupt_index_finding() {
+    use tome::doctor::checks::check_corrupt_index;
+
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().to_path_buf();
+    let _home_guard = HomeGuard::install(&home);
+    let paths = lifecycle_paths(&home.join(".tome"));
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    enrol_catalog_symlinked(&paths, "global", "sample-plugin-catalog", &catalog_root);
+
+    let ws_scope = WsScope(WorkspaceName::global());
+    let alpha: PluginId = "sample-plugin-catalog/plugin-alpha".parse().unwrap();
+
+    // (1) Enable a plugin with the 384-d stub so the index has real stored
+    // vectors (LENGTH(embedding)/4 == 384).
+    let embedder_384 = StubEmbedder::with_dim(384);
+    {
+        let deps = LifecycleDeps {
+            paths: &paths,
+            scope: &ws_scope,
+            config: &config,
+            embedder: &embedder_384,
+            embedder_seed: MetaSeed {
+                name: MEDIUM_EMBEDDER.into(),
+                version: "1.5".into(),
+            },
+            reranker_seed: stub_reranker_seed(),
+            summariser_seed: stub_summariser_seed(),
+            allow_model_download: false,
+        };
+        lifecycle::enable(&alpha, &deps).expect("enable alpha with 384-d stub");
+    }
+
+    // (2) Stamp a WRONG (stale remote) `meta.embedder_dimension`. Stored vectors
+    // are 384-d; pretend the index last reindexed against a 1024-d remote model.
+    let conn = open_writable(&paths);
+    meta::write_embedder_dimension(&conn, 1024).unwrap();
+    assert_eq!(
+        meta::read_embedder_dimension(&conn).unwrap(),
+        Some(1024),
+        "stale remote dimension is stamped",
+    );
+    drop(conn);
+
+    // The finding is present: 384-d stored vs 1024-d meta.
+    let finding = check_corrupt_index(&paths).expect("corrupt-index finding must be present");
+    assert_eq!(finding.stored, 384);
+    assert_eq!(finding.expected, 1024);
+
+    // (3) Run the BUNDLED whole-index reconcile EXACTLY as `run_inner` does on a
+    // bundled (`remote = false`) whole-index reindex. This is the production
+    // function the bundled `doctor --fix` → `reindex --force` ultimately calls.
+    let conn = open_writable(&paths);
+    reindex::reconcile_embedder_dimension(
+        &conn, /* remote = */ false, /* persisted_dim = */ None,
+    )
+    .expect("bundled whole-index reconcile clears the stale dimension");
+
+    // (4a) The key is GONE — the stale remote dimension can no longer be read.
+    assert_eq!(
+        meta::read_embedder_dimension(&conn).unwrap(),
+        None,
+        "bundled reindex must clear meta.embedder_dimension",
+    );
+    drop(conn);
+
+    // (4b) `check_corrupt_index` now reads "meta absent → N/A → no finding". The
+    // finding is extinguished — it cannot re-surface on the next `doctor` run.
+    assert_eq!(
+        check_corrupt_index(&paths),
+        None,
+        "the corrupt-index finding must be extinguished after the bundled reindex \
+         clears meta.embedder_dimension (self-heals to 0)",
+    );
+}
+
+// ===========================================================================
 // Task 9 — `tome models profile [show | set <tier>]` CLI surface.
 //
 // Driven through the compiled binary so the clap value_parser, the meta write,

@@ -168,24 +168,14 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
         stamp_embedder_after_whole_index(&policy_conn, &configured_ident)?;
     }
 
-    // Phase 12 / US2 (FR-015a): on a REMOTE whole-index reindex, persist the
-    // active embedder's expected output dimension — `[embedding] dimensions` if
-    // the user pinned one (authoritative), else the dimension established from
-    // the first successful embed of this run. Written ONLY here (the remote
-    // reindex path) and ONLY for a remote embedder; the bundled path NEVER
-    // writes the key (NFR-006: a new meta row would change stored artefacts).
-    // Gated on `whole_index` so a partial reindex can't stamp a dimension the
-    // out-of-scope rows may not share. A run that re-embedded nothing (e.g. an
-    // unchanged tree with no `--force`) leaves any prior value untouched.
-    if remote_embedding && whole_index {
-        let persisted = cfg
-            .embedding
-            .dimensions
-            .map(|d| d as usize)
-            .or_else(|| embedder.established_dimension());
-        if let Some(dim) = persisted {
-            meta::write_embedder_dimension(&policy_conn, dim)?;
-        }
+    // Phase 12 / US2 (FR-015a) + US4: reconcile `meta.embedder_dimension` on a
+    // WHOLE-INDEX reindex. The remote branch's persisted dimension is
+    // `[embedding] dimensions` (authoritative) else the dimension established
+    // from the first successful embed of this run.
+    if whole_index {
+        let established = embedder.established_dimension();
+        let persisted_dim = cfg.embedding.dimensions.map(|d| d as usize).or(established);
+        reconcile_embedder_dimension(&policy_conn, remote_embedding, persisted_dim)?;
     }
     drop(policy_conn);
 
@@ -415,6 +405,46 @@ pub fn stamp_embedder_after_whole_index(
 ) -> Result<(), TomeError> {
     meta::write(conn, MetaKey::EmbedderName, &configured_embedder.name)?;
     meta::write(conn, MetaKey::EmbedderVersion, &configured_embedder.version)?;
+    Ok(())
+}
+
+/// Phase 12 / US2 (FR-015a) + US4: reconcile `meta.embedder_dimension` after a
+/// WHOLE-INDEX re-embed has committed. `embedder_dimension` is a REMOTE-only
+/// concept — the bundled storage is dimension-free (there is no registry
+/// dimension to record). The caller gates this on `whole_index` so a partial
+/// (scoped) reindex can never stamp/clear a dimension the out-of-scope rows may
+/// not share.
+///
+/// * `remote == true` — PERSIST `persisted_dim` (the `[embedding] dimensions`
+///   knob if the user pinned one, else the dimension established from the first
+///   successful embed of the run). `persisted_dim == None` (a run that
+///   re-embedded nothing AND established no dimension) leaves any prior value
+///   untouched.
+/// * `remote == false` (BUNDLED) — DELETE any stale remote value. After a
+///   remote→bundled switch the stored vectors are bundled-dimension, but
+///   `meta.embedder_dimension` would still carry the old remote value — so the
+///   doctor corrupt-index check (FR-017) would compare bundled-dim vectors
+///   against the stale remote dim FOREVER, a finding that could never
+///   self-heal. Clearing the key here makes a bundled `doctor --fix`
+///   (→ reindex → delete) self-healing AND extends the same heal to a manual
+///   `tome reindex`. A no-op when the row is already absent (the common
+///   bundled case).
+///
+/// Exposed (`pub`) so the corrupt-index-to-extinction regression test can drive
+/// the exact reconcile `run_inner` uses with a `StubEmbedder`, without loading a
+/// real on-disk model.
+pub fn reconcile_embedder_dimension(
+    conn: &rusqlite::Connection,
+    remote: bool,
+    persisted_dim: Option<usize>,
+) -> Result<(), TomeError> {
+    if remote {
+        if let Some(dim) = persisted_dim {
+            meta::write_embedder_dimension(conn, dim)?;
+        }
+    } else {
+        meta::delete_embedder_dimension(conn)?;
+    }
     Ok(())
 }
 

@@ -116,10 +116,16 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
 
         // Phase 12 / US4 (FR-017): `re_assemble` rebuilds `suggested_fixes` via
         // the 8-arg SSOT, which doesn't know about the corrupt-remote-index
-        // fix. Re-check it read-only and re-append when it still holds: a
-        // bundled-local repair that succeeded clears the mismatch (nothing
-        // re-appended); a REMOTE mismatch (never auto-fixed — paid API cost)
-        // re-appears so it drives the exit-75 path.
+        // fix. Re-check it read-only and re-append when it still holds. A
+        // BUNDLED-local repair (`reindex --force`) clears
+        // `meta.embedder_dimension`, so `check_corrupt_index` then reads
+        // "meta absent → N/A → no finding": nothing is re-appended, the
+        // re-assembled `index.integrity_ok` is back to true, and `overall`
+        // returns to Ok → exit 0 (self-healed). A REMOTE mismatch is never
+        // auto-fixed (paid API cost), so it re-appears as an
+        // `auto_fixable: false` fix while `index.integrity_ok` stays false from
+        // assembly — `overall` remains non-Ok and `has_remaining_manual_fixes`
+        // is true → `DoctorFixNotSafe` (exit 75).
         doctor::reappend_corrupt_index_fix(&mut report, &paths, &cfg);
     }
 

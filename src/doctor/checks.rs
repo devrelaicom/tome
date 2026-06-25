@@ -1276,8 +1276,18 @@ fn probe_capability(cfg: &Config, paths: &Paths, capability: Capability) -> Resu
             Ok(())
         }
         Capability::Reranker => {
-            let active =
-                crate::embedding::profile::reranker_for(crate::embedding::Profile::DEFAULT);
+            // Resolve the ACTIVE profile's reranker (mirroring the embedding
+            // probe + `models test`'s `active_reranker_entry`) so the probe
+            // targets the in-use bundled model on a non-default profile rather
+            // than always `Profile::DEFAULT`. Harmless for a remote Voyage
+            // reranker (the registry entry is ignored once a provider resolves),
+            // but correct for parity.
+            let active = if paths.index_db.is_file() {
+                let conn = index::open_read_only(&paths.index_db)?;
+                crate::index::meta::active_reranker(&conn)?
+            } else {
+                crate::embedding::profile::reranker_for(crate::embedding::Profile::DEFAULT)
+            };
             let reranker = crate::embedding::build_reranker(cfg, paths, active)?;
             let candidates: Vec<crate::index::query::Candidate> = ["alpha", "bravo"]
                 .iter()

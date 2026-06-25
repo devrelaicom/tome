@@ -2,14 +2,16 @@
 //! round-trip against the ACTIVE model for a capability (the configured
 //! remote provider, else the bundled local model) plus a success assertion.
 //!
-//! ## Read-only
+//! ## Read-only (index state)
 //!
-//! `models test` writes NO stored state (FR-019): it never reindexes, never
-//! writes `meta`, never touches the index. A remote embedder establishes its
-//! run dimension purely IN MEMORY; the bundled path loads the on-disk model
-//! and does one inference. The only read is `meta.embedder_dimension` (the
+//! `models test` writes NO INDEX state (FR-019): it never reindexes, never
+//! writes `meta`, never touches the index DB. A remote embedder establishes its
+//! run dimension purely IN MEMORY; the bundled path loads the on-disk model and
+//! does one inference. The index reads are `meta.embedder_dimension` (the
 //! expected dimension a remote embedding is validated against) plus the active
-//! profile — both via `open_read_only`.
+//! profile — both via `open_read_only`. The one non-index write the remote path
+//! may perform is the first-run remote-provider notice sidecar under `~/.tome/`
+//! (FR-023, `provider::notice`), printed once before bytes leave the box.
 //!
 //! ## Actionable failure, never a crash
 //!
