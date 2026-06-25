@@ -71,15 +71,16 @@ pub struct McpState {
     /// attribute), so it never grows unbounded. The lock is held only for the
     /// sub-µs clear/insert/lookup; it is never held across an `.await`.
     pub last_search_ranks: Mutex<HashMap<String, u32>>,
-    /// Phase 10 / US3 (FR-050): "flush soon" signal driving the background
-    /// flush task in [`crate::mcp::run`]. The timer task selects between its
-    /// 5-min interval tick and this notification; on either it `spawn_blocking`s
-    /// the one shared sync drain ([`crate::telemetry::flush`]). A tool handler
-    /// raises it (via [`Self::note_enqueue`]) when its enqueue count crosses the
-    /// [`FLUSH_SOON_THRESHOLD`], scheduling an OFF-PATH flush — the handler never
-    /// flushes inline (SC-009). A default `Notify` when the task is absent (the
-    /// integration-test states build one) is harmless: nobody is listening, so
-    /// `notify_one` just no-ops.
+    /// FR-050: "flush soon" signal driving the background flush task in
+    /// [`crate::mcp::run`]. The timer task selects between its 5-min interval tick
+    /// and this notification; on either it dispatches the off-reactor drain. That
+    /// drain is currently a no-op stub — the kernel-backed `gauge_telemetry::Flusher`
+    /// is wired in a later task; the signal/threshold plumbing here is unchanged.
+    /// A tool handler raises this (via [`Self::note_enqueue`]) when its emit count
+    /// crosses the [`FLUSH_SOON_THRESHOLD`], scheduling an OFF-PATH flush — the
+    /// handler never flushes inline (SC-009). A default `Notify` when the task is
+    /// absent (the integration-test states build one) is harmless: nobody is
+    /// listening, so `notify_one` just no-ops.
     pub flush_signal: Arc<Notify>,
     /// Phase 10 / US3 (FR-050): events enqueued by this server SINCE the last
     /// scheduled "flush soon". Bumped once per tool-handler enqueue via

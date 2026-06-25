@@ -203,8 +203,19 @@ pub fn cli_startup(paths: &crate::paths::Paths) {
 /// `Telemetry` command — never forks ANOTHER flusher).
 ///
 /// Best-effort throughout: an unresolvable `$HOME`, a disabled install, or a spawn
-/// failure all just return. The kernel's own drain lock makes concurrent children
-/// contend-and-skip, so only the sequential stamp is needed here.
+/// failure all just return.
+///
+/// SC-003 tradeoff (honest): the 1-min `last-flush-attempt` stamp throttles a
+/// SEQUENTIAL loop (each run sees the prior run's fresh stamp), but it is NOT a
+/// cross-process lock — under a BURST of concurrent CLI exits, up to N children
+/// may be spawned at once (the bespoke `claim_spawn_window`/`lock.rs` that made
+/// the burst fork ≤ 1 child was retired with the rest of the bespoke machinery).
+/// This is acceptable because only ONE of those children actually DRAINS: the
+/// kernel's internal queue drain lock makes the rest skip-drain and exit
+/// immediately (no duplicate sends, no storm of POSTs). And the original #225
+/// trigger — the local test suite spawning a flusher storm — is independently
+/// prevented by the kernel's CI auto-off (telemetry is disabled under CI, so no
+/// child spawns there at all).
 pub fn teardown_at_exit() {
     let Some(h) = HANDLE.get() else {
         return;

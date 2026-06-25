@@ -285,7 +285,7 @@ pub fn run_with_deps(
     let telemetry_cfg = crate::config::load_or_default(deps.paths);
     crate::telemetry::emit(crate::telemetry::event::Search {
         surface: crate::telemetry::event::Surface::Cli,
-        latency_ms: elapsed.as_millis() as u32,
+        latency_ms: elapsed.as_millis().min(u32::MAX as u128) as u32,
         candidates_returned: outcome.results.len() as u32,
         reranker_used,
         strict: args.strict,

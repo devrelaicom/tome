@@ -244,8 +244,10 @@ pub fn run(
         // no first-run notice (the notice is a CLI-only concern). Best-effort —
         // a sub-ms local append that never blocks startup or flushes.
         crate::telemetry::emit(crate::telemetry::event::ColdStart {
-            embedder_load_ms: embedder_load_elapsed.as_millis() as u32,
-            index_ready_ms: index_ready_elapsed.as_millis() as u32,
+            // clamp: any realistic latency fits u32 (ms); saturate rather than
+            // wrap (`Duration::as_millis()` is u128, `as u32` wraps at ~49 days).
+            embedder_load_ms: embedder_load_elapsed.as_millis().min(u32::MAX as u128) as u32,
+            index_ready_ms: index_ready_elapsed.as_millis().min(u32::MAX as u128) as u32,
             embedder_model_id: Some(embedder_model_id),
         });
         info!(
@@ -276,12 +278,13 @@ pub fn run(
         });
 
         // FR-049/050: the background telemetry flush task. It owns the 5-min
-        // interval + the shared "flush soon" `Notify`, and on EITHER trigger
-        // `spawn_blocking`s the one sync drain (`telemetry::flush`). It NEVER
-        // calls `flush()` on the async thread — that does a blocking
-        // `reqwest::blocking` POST and would stall this single-thread runtime.
-        // Its `JoinHandle` is aborted after `serve_server` returns so the task
-        // can't outlive the server (no leak).
+        // interval + the shared "flush soon" `Notify` and dispatches on EITHER
+        // trigger. Its drain is currently a no-op stub (`dispatch_flush`) — the
+        // kernel-backed `gauge_telemetry::Flusher` that drives the real drain off
+        // the reactor is wired in a later task; the interval/`Notify` plumbing is
+        // kept intact so that is a one-function change. Its `JoinHandle` is
+        // aborted after `serve_server` returns so the task can't outlive the
+        // server (no leak).
         let flush_task = tokio::spawn(telemetry_flush_loop(flush_signal));
 
         // The live-sync watcher needs its own `McpState` handle (it shares the
@@ -401,10 +404,11 @@ pub fn run(
 
         // Tie the background flush task's lifetime to the server: once serving
         // has ended (either arm above), abort it so it can't outlive the server
-        // or leak past the `block_on`. The drain it might be mid-running is the
-        // sync `telemetry::flush` on the blocking pool, which self-locks + is
-        // best-effort — losing an in-flight final flush is acceptable (the next
-        // process run's exit hook / timer re-drains the queue).
+        // or leak past the `block_on`. Today the loop's `dispatch_flush` is a
+        // no-op stub, so there is nothing in flight to lose; once the
+        // kernel-backed `Flusher` lands, any mid-flight drain it runs is
+        // best-effort (the next process run's exit hook / timer re-drains the
+        // queue), so aborting here is still safe.
         flush_task.abort();
 
         // Same lifetime tie for the live-sync watcher: abort it once serving
@@ -418,21 +422,19 @@ pub fn run(
     })
 }
 
-/// Phase 10 / US3 (FR-049/050): the background telemetry flush loop.
+/// FR-049/050: the background telemetry flush loop.
 ///
 /// Holds the 5-min interval and the shared "flush soon" [`Notify`]; on EITHER
-/// trigger it `spawn_blocking`s the one sync drain ([`crate::telemetry::flush`]).
-/// This is the ONLY bridge from the async island into the `tokio`-free
-/// `telemetry/` module, and it crosses via `spawn_blocking` per the sync-boundary
-/// discipline — `flush()` does a blocking `reqwest::blocking` POST that must
-/// NEVER run on this single-thread runtime's reactor.
+/// trigger it calls [`dispatch_flush`]. That dispatch is currently a no-op stub
+/// — the kernel-backed `gauge_telemetry::Flusher` that drives the real drain off
+/// the reactor (via `spawn_blocking`, the one bridge out of the async island) is
+/// wired in a later task. The interval/`Notify` plumbing is kept intact so that
+/// wiring is a one-function change.
 ///
-/// Best-effort throughout (NFR-001): the drain's result is discarded
-/// (background flushes fail silent by design; the foreground `tome telemetry
-/// flush` is the loud one). `flush()` self-acquires its non-blocking `flush.lock`
-/// and self-gates on the grace period, so overlapping interval/notify flushes
-/// are safe — the loser no-ops. The loop runs until its `JoinHandle` is aborted
-/// on server shutdown.
+/// Best-effort throughout (NFR-001): background flushes fail silent by design
+/// (the foreground `tome telemetry flush` is the loud one), and the kernel's own
+/// drain lock + grace gate make overlapping dispatches safe (the loser no-ops).
+/// The loop runs until its `JoinHandle` is aborted on server shutdown.
 async fn telemetry_flush_loop(flush_signal: Arc<tokio::sync::Notify>) {
     // FR-049: the 5-min cadence. `MissedTickBehavior::Skip` (the default for a
     // fresh interval is `Burst`; a blocking drain could overrun a tick, so skip

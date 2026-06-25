@@ -395,7 +395,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // the `calling_harness` dimension (CLI has no host harness).
     crate::telemetry::emit(crate::telemetry::event::Search {
         surface: crate::telemetry::event::Surface::Mcp,
-        latency_ms: compute_elapsed.as_millis() as u32,
+        latency_ms: compute_elapsed.as_millis().min(u32::MAX as u128) as u32,
         candidates_returned: matches.len() as u32,
         // Reranker used iff `no_rerank` was not set by the config resolution
         // above.  Mirrors the `run_with_deps` emit: `reranker.is_some()`.
