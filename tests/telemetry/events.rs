@@ -163,6 +163,7 @@ fn search_full_literal_pin() {
         corpus_size_bucket: CountBucket::TwentyToNinetyNine,
         embedder_model_id: Some("bge-small-en-v1.5"),
         embedding_provider_kind: ProviderKind::Bundled,
+        reranker_provider_kind: ProviderKind::Voyage,
         calling_harness: Some(Harness::ClaudeCode),
     };
     let expected = envelope_prefix("tome.search")
@@ -174,6 +175,7 @@ fn search_full_literal_pin() {
 ,\"corpus_size_bucket\":\"20-99\"\
 ,\"embedder_model_id\":\"bge-small-en-v1.5\"\
 ,\"embedding_provider_kind\":\"bundled\"\
+,\"reranker_provider_kind\":\"voyage\"\
 ,\"calling_harness\":\"claude-code\"}";
     assert_eq!(line(&event), expected);
 }
@@ -517,6 +519,7 @@ fn search_optionals_are_omitted_when_none() {
         corpus_size_bucket: CountBucket::FiveToNineteen,
         embedder_model_id: None,
         embedding_provider_kind: ProviderKind::Bundled,
+        reranker_provider_kind: ProviderKind::Bundled,
         calling_harness: None,
     };
     let got = line(&event);
@@ -533,7 +536,12 @@ fn search_optionals_are_omitted_when_none() {
         got.contains("\"embedding_provider_kind\":\"bundled\""),
         "embedding_provider_kind must always be present: {got}"
     );
-    // Exact tail with both optionals absent; `embedding_provider_kind` stays.
+    // `reranker_provider_kind` is ALWAYS present (no `skip`).
+    assert!(
+        got.contains("\"reranker_provider_kind\":\"bundled\""),
+        "reranker_provider_kind must always be present: {got}"
+    );
+    // Exact tail with both optionals absent; both provider kinds stay.
     let expected = envelope_prefix("tome.search")
         + ",\"surface\":\"cli\"\
 ,\"latency_bucket\":\"<50ms\"\
@@ -541,7 +549,8 @@ fn search_optionals_are_omitted_when_none() {
 ,\"reranker_used\":true\
 ,\"strict\":false\
 ,\"corpus_size_bucket\":\"5-19\"\
-,\"embedding_provider_kind\":\"bundled\"}";
+,\"embedding_provider_kind\":\"bundled\"\
+,\"reranker_provider_kind\":\"bundled\"}";
     assert_eq!(got, expected);
 }
 
@@ -556,6 +565,7 @@ fn search_optionals_are_present_when_some() {
         corpus_size_bucket: CountBucket::FiveToNineteen,
         embedder_model_id: Some("bge-small-en-v1.5"),
         embedding_provider_kind: ProviderKind::Openai,
+        reranker_provider_kind: ProviderKind::Voyage,
         calling_harness: Some(Harness::Opencode),
     };
     let got = line(&event);
@@ -566,6 +576,12 @@ fn search_optionals_are_present_when_some() {
     assert!(
         got.contains("\"embedding_provider_kind\":\"openai\""),
         "embedding_provider_kind must be present: {got}"
+    );
+    // Independent per-capability attribution (FR-022): remote reranker +
+    // remote (openai) embedder, each its own kind.
+    assert!(
+        got.contains("\"reranker_provider_kind\":\"voyage\""),
+        "reranker_provider_kind must be present: {got}"
     );
     assert!(
         got.contains("\"calling_harness\":\"opencode\""),

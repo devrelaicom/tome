@@ -553,6 +553,24 @@ impl ProviderKind {
             None => ProviderKind::Bundled,
         }
     }
+
+    /// Map the configured RERANKING provider to the closed telemetry kind:
+    /// `Bundled` when no `[reranker]` provider is referenced (or the reference
+    /// can't be resolved to a registry entry), else the entry's kind (Voyage in
+    /// v1). The SSOT both the CLI (`query::run_with_deps`) and the MCP
+    /// (`search_skills`) emit sites call so the per-capability kind can never
+    /// diverge (FR-022 — three independent fields). Records ONLY the kind, never
+    /// the provider name / model / `base_url`. A missing/unresolvable reference
+    /// degrades to `Bundled`; telemetry never propagates a config error.
+    pub fn for_reranker(cfg: &crate::config::Config) -> Self {
+        let Some(name) = cfg.reranker.provider.as_deref() else {
+            return ProviderKind::Bundled;
+        };
+        match cfg.providers.get(name) {
+            Some(entry) => ProviderKind::from(entry.kind),
+            None => ProviderKind::Bundled,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -612,6 +630,13 @@ pub struct Search {
     /// configured). NEVER the provider name / model id / `base_url` — only the
     /// kind. Always serialised (no `skip`) so the wire shape is stable.
     pub embedding_provider_kind: ProviderKind,
+    /// Phase 12 / US3 — which PROVIDER served the RERANKING for this search, as
+    /// the closed [`ProviderKind`] (`Bundled` when no `[reranker]` provider is
+    /// configured, including when reranking is disabled — `reranker_used` already
+    /// distinguishes that). Independent of `embedding_provider_kind` (FR-022 —
+    /// a remote reranker with a bundled embedder is attributed accurately). NEVER
+    /// the provider name / model id / `base_url`. Always serialised (no `skip`).
+    pub reranker_provider_kind: ProviderKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub calling_harness: Option<Harness>,
 }
@@ -1251,6 +1276,35 @@ mod tests {
     }
 
     #[test]
+    fn for_reranker_maps_configured_kind_and_defaults_bundled() {
+        use crate::config::{Config, ProviderEntry, ProviderKind as Cfg};
+
+        // No `[reranker]` provider → Bundled.
+        let bare = Config::default();
+        assert_eq!(ProviderKind::for_reranker(&bare), ProviderKind::Bundled);
+
+        // A configured Voyage `[reranker]` → Voyage.
+        let mut config = Config::default();
+        config.providers.insert(
+            "vp".to_string(),
+            ProviderEntry {
+                kind: Cfg::Voyage,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        config.reranker.provider = Some("vp".to_string());
+        config.reranker.model = Some("rerank-2".to_string());
+        assert_eq!(ProviderKind::for_reranker(&config), ProviderKind::Voyage);
+
+        // An UNRESOLVABLE reference (name not in [providers]) degrades to Bundled
+        // — telemetry never propagates a config error.
+        let mut dangling = Config::default();
+        dangling.reranker.provider = Some("ghost".to_string());
+        assert_eq!(ProviderKind::for_reranker(&dangling), ProviderKind::Bundled);
+    }
+
+    #[test]
     fn summary_event_wire_shape_is_pinned() {
         // Byte-stable pin: closed enum tokens only, never a provider name/model.
         let envelope = fixed_envelope_for_tests(Summary::EVENT_TYPE);
@@ -1276,6 +1330,7 @@ mod tests {
             corpus_size_bucket: CountBucket::FiveToNineteen,
             embedder_model_id: None,
             embedding_provider_kind: ProviderKind::Bundled,
+            reranker_provider_kind: ProviderKind::Bundled,
             calling_harness: None,
         };
         let line = to_line(&envelope, &event).unwrap();
@@ -1283,6 +1338,8 @@ mod tests {
         assert!(!line.contains("calling_harness"));
         // `embedding_provider_kind` is always serialised (no `skip`).
         assert!(line.contains("\"embedding_provider_kind\":\"bundled\""));
+        // `reranker_provider_kind` is always serialised (no `skip`).
+        assert!(line.contains("\"reranker_provider_kind\":\"bundled\""));
         // And present when `Some`.
         let event2 = Search {
             calling_harness: Some(Harness::ClaudeCode),

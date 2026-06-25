@@ -15,7 +15,6 @@ use tracing::{error, info};
 use crate::cli::QueryArgs;
 use crate::commands::query;
 use crate::embedding::Reranker;
-use crate::embedding::fastembed::FastembedReranker;
 use crate::error::TomeError;
 use crate::index::MetaSeed;
 use crate::mcp::state::McpState;
@@ -200,24 +199,30 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         }
     }
 
-    // Lazy-load the reranker. `tokio::sync::OnceCell::get_or_try_init`
-    // dedupes concurrent first-call requests; the model load runs once.
+    // Lazy-build the reranker. `tokio::sync::OnceCell::get_or_try_init`
+    // dedupes concurrent first-call requests; the build runs once and the
+    // resulting `Arc<dyn Reranker>` is startup-frozen for the rest of the
+    // server's lifetime (mirroring the startup-frozen embedder).
+    //
+    // Phase 12 / US3: select remote-vs-bundled INSIDE the `spawn_blocking` (the
+    // RemoteReranker is sync). `build_reranker` resolves `[reranker]` from config
+    // (loaded defensively — MCP handlers never hard-fail on a malformed config;
+    // a malformed config resolves to bundled here). A remote build is infallible
+    // at construction; a missing bundled model still surfaces via `load`.
     let reranker_entry = state.reranker_entry;
-    let reranker_dir = state
-        .paths
-        .model_path(reranker_entry.name)
-        .map_err(tome_to_mcp)?;
+    let reranker_paths = state.paths.clone();
     let reranker_arc = state
         .reranker
         .get_or_try_init(|| async move {
             tokio::task::spawn_blocking(move || {
-                FastembedReranker::load(reranker_entry, &reranker_dir)
+                let cfg = crate::config::load_or_default(&reranker_paths);
+                crate::embedding::build_reranker(&cfg, &reranker_paths, reranker_entry)
             })
             .await
             .map_err(|e| TomeError::McpStartupFailed {
-                reason: format!("reranker load join: {e}"),
+                reason: format!("reranker build join: {e}"),
             })?
-            .map(|r| Arc::new(r) as Arc<dyn Reranker>)
+            .map(Arc::from)
         })
         .await
         .map_err(tome_to_mcp)?
@@ -249,9 +254,23 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // registry identity) — NOT re-derived from `embedder_entry`, so drift
     // detection on a remote index compares against the right stored `meta` rows.
     let embedder_seed = state.embedder_seed.clone();
-    let reranker_seed = MetaSeed {
-        name: state.reranker_entry.name.into(),
-        version: state.reranker_entry.version.into(),
+    // Phase 12 / US3: the reranker drift seed reflects the ACTIVE reranker
+    // identity (remote `"<provider>/<model>"`/`"external"` when `[reranker]` is
+    // configured, else the bundled registry identity), mirroring the CLI. Resolve
+    // defensively from the already-loaded `cfg`; a malformed reference degrades to
+    // the bundled identity (telemetry/drift is best-effort on the MCP surface —
+    // reranker drift is a soft, non-fatal label the handler never surfaces). The
+    // build above already picked remote-vs-bundled from the same config.
+    let reranker_seed = match crate::provider::resolve(&cfg, crate::provider::Capability::Reranker)
+    {
+        Ok(Some(resolved)) => MetaSeed {
+            name: format!("{}/{}", resolved.name, resolved.model),
+            version: crate::embedding::REMOTE_EMBEDDER_VERSION.to_owned(),
+        },
+        _ => MetaSeed {
+            name: state.reranker_entry.name.into(),
+            version: state.reranker_entry.version.into(),
+        },
     };
 
     let embedder = state.embedder.clone();
@@ -390,10 +409,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         // remote-embedding server this still names the active profile's bundled
         // registry entry (the per-search provider kind is the new field below).
         embedder_model_id: Some(state.embedder_entry.name),
-        // Phase 12: which provider kind served the embedding for this MCP
-        // search. Same SSOT mapping as the CLI; `cfg` was loaded defensively
-        // above. Records ONLY the kind.
+        // Phase 12: which provider kind served the embedding + the reranking for
+        // this MCP search. Same SSOT mappers as the CLI; `cfg` was loaded
+        // defensively above. Records ONLY the kind. FR-022: independent fields.
         embedding_provider_kind: crate::telemetry::event::ProviderKind::for_embedding(&cfg),
+        reranker_provider_kind: crate::telemetry::event::ProviderKind::for_reranker(&cfg),
         calling_harness: crate::mcp::calling_harness(&state),
     });
     // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
