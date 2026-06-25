@@ -291,6 +291,42 @@ impl StagedWorkspace {
     pub fn harness(&self) -> McpHarness {
         McpHarness::new(&self.paths)
     }
+
+    /// Build a [`McpHarness`] over this workspace whose embedder is the supplied
+    /// one (Phase 12 / US2 — e.g. a `RemoteEmbedder` over a failing transport
+    /// seam) and whose startup-frozen drift identity is `embedder_seed`. The
+    /// `PromptRegistry` is built from the on-disk index exactly as `harness()`.
+    pub fn harness_with_embedder(
+        &self,
+        embedder: Arc<dyn tome::embedding::Embedder>,
+        embedder_seed: tome::index::MetaSeed,
+    ) -> McpHarness {
+        let registry = {
+            let conn = open_index(&self.paths);
+            let reg = PromptRegistry::build_for_workspace(
+                &WorkspaceName::global(),
+                &self.paths,
+                &conn,
+                false,
+            )
+            .expect("build prompt registry");
+            drop(conn);
+            reg
+        };
+        McpHarness::with_embedder(&self.paths, registry, None, None, embedder, embedder_seed)
+    }
+}
+
+/// Build a `search_skills::Input` with defaults (top_k 10, no filters). Shared
+/// by US2 tests that only vary the query text.
+pub fn search_input(query: &str) -> search_skills::Input {
+    search_skills::Input {
+        query: query.into(),
+        top_k: Some(10),
+        catalog: None,
+        plugin: None,
+        description_max_chars: Some(150),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -341,17 +377,46 @@ impl McpHarness {
         host_harness: Option<String>,
         project_root: Option<std::path::PathBuf>,
     ) -> Self {
+        Self::with_embedder(
+            paths,
+            registry,
+            host_harness,
+            project_root,
+            Arc::new(StubEmbedder::new()),
+            tome::index::MetaSeed {
+                name: STUB_EMBEDDER_ENTRY.name.into(),
+                version: STUB_EMBEDDER_ENTRY.version.into(),
+            },
+        )
+    }
+
+    /// Build the harness with a caller-supplied embedder + the drift identity
+    /// (`embedder_seed`) the on-disk index was stamped with. Phase 12 / US2: a
+    /// `RemoteEmbedder` over a failing transport seam + the remote seed proves
+    /// the MCP `search_skills` path fails CLOSED on a bad remote embedding (a
+    /// clear tool error, never a degenerate KNN). The `embedder_entry` stays the
+    /// stub registry entry (it only feeds the `embedder_model_id` telemetry
+    /// field — a `&'static`; the DRIFT comparison uses `embedder_seed`).
+    pub fn with_embedder(
+        paths: &Paths,
+        registry: PromptRegistry,
+        host_harness: Option<String>,
+        project_root: Option<std::path::PathBuf>,
+        embedder: Arc<dyn tome::embedding::Embedder>,
+        embedder_seed: tome::index::MetaSeed,
+    ) -> Self {
         let reranker: Arc<dyn Reranker> = Arc::new(StubReranker::new());
         let mut scope = ResolvedScope::global_fallback();
         scope.project_root = project_root;
         let state = Arc::new(McpState {
-            embedder: Arc::new(StubEmbedder::new()),
+            embedder,
             reranker: OnceCell::new_with(Some(reranker)),
             scope,
             paths: paths.clone(),
-            // Stub identity entries so search_skills' drift check agrees
-            // with the stub-seeded index `meta`.
+            // `embedder_entry` only feeds the `embedder_model_id` telemetry
+            // field; the drift comparison uses `embedder_seed`.
             embedder_entry: &STUB_EMBEDDER_ENTRY,
+            embedder_seed,
             reranker_entry: &STUB_RERANKER_ENTRY,
             prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(registry))),
             host_harness,
@@ -581,6 +646,20 @@ pub fn mcp_error_exit_code(err: &McpError) -> i32 {
             source: std::io::Error::other("x"),
         },
         "no_harness_detected" => TomeError::NoHarnessDetected,
+        // Phase 12 / US2 — a remote embedding failed content validation.
+        "remote_embedding_invalid" => TomeError::RemoteEmbeddingInvalid { detail: "x".into() },
+        // `search_skills` maps embedder drift to a custom `embedder_drift` code
+        // (NOT `category().as_str()`), so this slug does not match a single
+        // canonical category. Both name + version drift surface it; return the
+        // shared drift exit code (41) and SKIP the category cross-check below by
+        // returning early.
+        "embedder_drift" => {
+            return TomeError::EmbedderNameDrift {
+                stored: "x".into(),
+                configured: "x".into(),
+            }
+            .exit_code();
+        }
         other => panic!(
             "unrecognised MCP error slug `{other}` — extend mcp_error_exit_code \
              when wiring a new error class through the in-process harness",

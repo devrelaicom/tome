@@ -535,6 +535,26 @@ impl From<crate::config::ProviderKind> for ProviderKind {
     }
 }
 
+impl ProviderKind {
+    /// Map the configured EMBEDDING provider to the closed telemetry kind:
+    /// `Bundled` when no `[embedding]` provider is referenced (or the reference
+    /// can't be resolved to a registry entry), else the entry's kind. This is
+    /// the SSOT both the CLI (`query::run_with_deps`) and the MCP
+    /// (`search_skills`) emit sites call so they can never diverge. Records ONLY
+    /// the kind — never the provider name / model / `base_url` (the typed-event
+    /// privacy guarantee). A missing/unresolvable reference degrades to
+    /// `Bundled`; telemetry never propagates a config error.
+    pub fn for_embedding(cfg: &crate::config::Config) -> Self {
+        let Some(name) = cfg.embedding.provider.as_deref() else {
+            return ProviderKind::Bundled;
+        };
+        match cfg.providers.get(name) {
+            Some(entry) => ProviderKind::from(entry.kind),
+            None => ProviderKind::Bundled,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Anonymous event trait + the 18 event structs
 // ---------------------------------------------------------------------------
@@ -587,6 +607,11 @@ pub struct Search {
     pub corpus_size_bucket: CountBucket,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedder_model_id: Option<&'static str>,
+    /// Phase 12 — which PROVIDER served the embedding for this search, as the
+    /// closed [`ProviderKind`] (`Bundled` when no `[embedding]` provider is
+    /// configured). NEVER the provider name / model id / `base_url` — only the
+    /// kind. Always serialised (no `skip`) so the wire shape is stable.
+    pub embedding_provider_kind: ProviderKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub calling_harness: Option<Harness>,
 }
@@ -1250,11 +1275,14 @@ mod tests {
             strict: false,
             corpus_size_bucket: CountBucket::FiveToNineteen,
             embedder_model_id: None,
+            embedding_provider_kind: ProviderKind::Bundled,
             calling_harness: None,
         };
         let line = to_line(&envelope, &event).unwrap();
         assert!(!line.contains("embedder_model_id"));
         assert!(!line.contains("calling_harness"));
+        // `embedding_provider_kind` is always serialised (no `skip`).
+        assert!(line.contains("\"embedding_provider_kind\":\"bundled\""));
         // And present when `Some`.
         let event2 = Search {
             calling_harness: Some(Harness::ClaudeCode),

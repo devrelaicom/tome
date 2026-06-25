@@ -52,6 +52,10 @@ fn build_state(paths: &Paths, ws: &WorkspaceName) -> Arc<McpState> {
         scope,
         paths: paths.clone(),
         embedder_entry: entry_for(ModelKind::Embedder),
+        embedder_seed: tome::index::MetaSeed {
+            name: entry_for(ModelKind::Embedder).name.into(),
+            version: entry_for(ModelKind::Embedder).version.into(),
+        },
         reranker_entry: entry_for(ModelKind::Reranker),
         prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(PromptRegistry::default()))),
         host_harness: None,

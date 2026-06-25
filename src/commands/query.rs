@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use crate::cli::QueryArgs;
 use crate::config::Config;
-use crate::embedding::fastembed::{FastembedEmbedder, FastembedReranker};
+use crate::embedding::fastembed::FastembedReranker;
 use crate::embedding::{Embedder, Reranker, Scored};
 use crate::error::TomeError;
 use crate::index::meta::{self, DriftStatus, ModelIdent};
@@ -154,12 +154,19 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
         )
     };
 
-    // Model presence — embedder always required, reranker required unless
-    // `--no-rerank`. We check before constructing the heavy
-    // `FastembedEmbedder` so a missing-model error doesn't pay the load
-    // cost first.
+    // Phase 12 / US2: is an `[embedding]` provider configured? When so, the
+    // query embeds remotely (no local embedder model required) and drift fires
+    // against the remote identity. `resolve` failures (a bad reference) are a
+    // 93 surfaced here, the same as any other command.
+    let remote_embedding =
+        crate::provider::resolve(&cfg, crate::provider::Capability::Embedding)?.is_some();
+
+    // Model presence — embedder always required (BUNDLED only — a remote
+    // embedder has no local model), reranker required unless `--no-rerank`. We
+    // check before constructing the heavy `FastembedEmbedder` so a missing-model
+    // error doesn't pay the load cost first.
     let missing = missing_models(&paths);
-    if missing.iter().any(|e| e.name == embedder_meta.name) {
+    if !remote_embedding && missing.iter().any(|e| e.name == embedder_meta.name) {
         return Err(TomeError::ModelMissing {
             model: embedder_meta.name.to_owned(),
         });
@@ -170,11 +177,19 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
         });
     }
 
-    // Load models. Wrap each in a spinner; non-TTY stderr → hidden draw
-    // target (see presentation::progress::target).
-    let embedder = {
+    // Build the embedder: remote when `[embedding]` is configured, else the
+    // bundled active-profile model. On the remote path seed the validator's
+    // expected dimension from the persisted `meta.embedder_dimension` so
+    // query-time validation asserts the SAME dimension the index was built at.
+    let persisted_dim = if remote_embedding && paths.index_db.is_file() {
+        let conn = crate::index::open_read_only(&paths.index_db)?;
+        crate::index::read_embedder_dimension(&conn)?
+    } else {
+        None
+    };
+    let embedder: Box<dyn Embedder> = {
         let pb = progress::spinner(format!("loading embedder ({})", embedder_meta.name));
-        let result = FastembedEmbedder::load(embedder_meta, &paths.model_path(embedder_meta.name)?);
+        let result = crate::embedding::build_embedder(&cfg, &paths, embedder_meta, persisted_dim);
         pb.finish_and_clear();
         result?
     };
@@ -188,13 +203,12 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
     };
     let reranker: Option<&dyn Reranker> = reranker_loaded.as_ref().map(|r| r as &dyn Reranker);
 
-    // The drift-detection seeds must match the models we just loaded (the
-    // ACTIVE profile's), so build them from the resolved metas rather than the
-    // default-profile `registry_seeds()`.
-    let embedder_seed = MetaSeed {
-        name: embedder_meta.name.to_owned(),
-        version: embedder_meta.version.to_owned(),
-    };
+    // The drift-detection seed must reflect the ACTIVE embedder identity —
+    // remote (`"<provider>/<model>"`/`"external"`) when configured, else the
+    // active-profile registry identity — so switching `[embedding]` model
+    // surfaces as embedder drift on the query path. The reranker stays bundled
+    // in US2 (remote rerank is US3).
+    let embedder_seed = crate::embedding::embedder_seed(&cfg, embedder_meta)?;
     let reranker_seed = MetaSeed {
         name: reranker_meta.name.to_owned(),
         version: reranker_meta.version.to_owned(),
@@ -203,7 +217,7 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
         paths: &paths,
         scope: &scope.scope,
         config: &config,
-        embedder: &embedder,
+        embedder: embedder.as_ref(),
         reranker,
         embedder_seed,
         reranker_seed,
@@ -261,6 +275,13 @@ pub fn run_with_deps(
                     )
                     .name
                 }),
+        ),
+        // Phase 12: which provider kind served the embedding. Derived
+        // defensively from config (telemetry is best-effort — a malformed
+        // config must not break the emit); `Bundled` when no `[embedding]`
+        // provider is configured. Records ONLY the kind.
+        embedding_provider_kind: crate::telemetry::event::ProviderKind::for_embedding(
+            &crate::config::load_or_default(deps.paths),
         ),
         // CLI surface has no calling harness (that's an MCP-only dimension).
         calling_harness: None,

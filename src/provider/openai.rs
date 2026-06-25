@@ -60,6 +60,168 @@ struct ApiError {
     message: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Embeddings (single-text, one request per `embed()`). Shared with Voyage —
+// the two providers use the identical `{ "data": [{ "embedding": [..] }] }`
+// success shape (only Voyage RERANK differs, and that is US3, not here). The
+// per-kind wrapper (`voyage::embed_one`) re-dispatches here.
+// ---------------------------------------------------------------------------
+
+/// The embeddings request body. `input` is ALWAYS a single-element array
+/// (FR-011: one text per request → positional batch-misalignment is
+/// structurally impossible). `dimensions` is emitted only when the caller
+/// supplies an authoritative `[embedding] dimensions` (openai supports it; a
+/// provider that ignores it simply returns its native dimension, which the
+/// shared validator then asserts against the persisted value).
+#[derive(Debug, Serialize)]
+struct EmbeddingRequest<'a> {
+    model: &'a str,
+    input: [&'a str; 1],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dimensions: Option<u32>,
+}
+
+/// The embeddings success response. LENIENT — only `data[].embedding`, plus the
+/// optional 200-with-error envelope some compatible gateways emit. `embedding`
+/// is `Vec<f32>`: serde parses each JSON number into `f32` directly, so an
+/// integer-typed value (Voyage int8/dtype surprise) round-trips to its `f32`
+/// magnitude and is caught by the shared finite/dimension validator downstream.
+#[derive(Debug, Deserialize)]
+struct EmbeddingResponse {
+    #[serde(default)]
+    data: Vec<EmbeddingData>,
+    #[serde(default)]
+    error: Option<ApiError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingData {
+    #[serde(default)]
+    embedding: Vec<f32>,
+}
+
+/// Embed exactly one text against an OpenAI-compatible (or Voyage) `/embeddings`
+/// endpoint. Returns the RAW vector — content validation (non-empty / finite /
+/// dimension) is centralised in [`crate::embedding::remote::validate_embedding`]
+/// so the SAME checks run at index-time AND query-time, CLI AND MCP. This
+/// function asserts only the structural single-embedding contract (FR-011):
+/// the response MUST carry exactly one embedding (a `data.len() != 1` is a
+/// `MalformedResponse`/94, never a silent first-of-many).
+///
+/// `dimensions` is the OpenAI `dimensions` body field; the Voyage wrapper maps
+/// it to `output_dimension` before delegating here.
+pub fn embed_one(
+    resolved: &ResolvedProvider,
+    text: &str,
+    dimensions: Option<u32>,
+) -> Result<Vec<f32>, ProviderError> {
+    embed_with_dimensions_field(resolved, text, dimensions, EmbeddingDimensionsField::Openai)
+}
+
+/// Which JSON field name carries the requested output dimension for this kind.
+/// OpenAI uses `dimensions`; Voyage uses `output_dimension`. Kept here (rather
+/// than in `voyage.rs`) so the single request-shaping + parse path is the SSOT.
+#[derive(Debug, Clone, Copy)]
+pub enum EmbeddingDimensionsField {
+    Openai,
+    Voyage,
+}
+
+/// Shared embeddings round-trip. Voyage's wrapper passes
+/// [`EmbeddingDimensionsField::Voyage`] so the dimension knob serialises as
+/// `output_dimension`; everything else (path, auth via `http`, single-element
+/// input, single-embedding assertion) is identical.
+pub fn embed_with_dimensions_field(
+    resolved: &ResolvedProvider,
+    text: &str,
+    dimensions: Option<u32>,
+    field: EmbeddingDimensionsField,
+) -> Result<Vec<f32>, ProviderError> {
+    // Build the body. For openai the `dimensions` key lives on the typed
+    // struct; for voyage we rename it to `output_dimension` after serialising
+    // (the request struct is a private detail — a post-serialise key swap keeps
+    // one struct rather than two near-identical ones).
+    let mut body = serde_json::to_value(EmbeddingRequest {
+        model: &resolved.model,
+        input: [text],
+        dimensions,
+    })
+    .map_err(|e| {
+        ProviderError::new(
+            &resolved.name,
+            ProviderErrorKind::BadRequest,
+            false,
+            format!("failed to serialise embeddings request: {e}"),
+        )
+    })?;
+    if let (EmbeddingDimensionsField::Voyage, Some(d)) = (field, dimensions)
+        && let Some(obj) = body.as_object_mut()
+    {
+        obj.remove("dimensions");
+        obj.insert("output_dimension".to_string(), serde_json::json!(d));
+    }
+
+    let value = http::request_with_retry(resolved, "/embeddings", &body)?;
+    extract_one_embedding(&resolved.name, value)
+}
+
+/// Extract exactly one embedding vector from a parsed embeddings response,
+/// detecting the 200-with-error envelope and enforcing the single-embedding
+/// structural contract (FR-011). Returns the RAW vector; content validation is
+/// the caller's (shared validator's) job.
+fn extract_one_embedding(
+    provider: &str,
+    value: serde_json::Value,
+) -> Result<Vec<f32>, ProviderError> {
+    let response: EmbeddingResponse = serde_json::from_value(value).map_err(|e| {
+        ProviderError::new(
+            provider,
+            ProviderErrorKind::MalformedResponse,
+            false,
+            format!("embeddings response did not match the expected shape: {e}"),
+        )
+    })?;
+
+    // A 200-with-error envelope and no usable data ⇒ BadRequest (per-kind
+    // detection, FR-013b) — never a silent empty success.
+    if response.data.is_empty()
+        && let Some(err) = response.error
+    {
+        let detail = err
+            .message
+            .unwrap_or_else(|| "provider returned an error object on a 2xx".to_string());
+        return Err(ProviderError::new(
+            provider,
+            ProviderErrorKind::BadRequest,
+            false,
+            detail,
+        ));
+    }
+
+    // FR-011: the single-text request MUST yield exactly one embedding. A
+    // `data.len() != 1` is a malformed response — refuse rather than pick the
+    // first of many (which is the batch-misalignment hazard the single-text
+    // design exists to make structurally impossible).
+    if response.data.len() != 1 {
+        return Err(ProviderError::new(
+            provider,
+            ProviderErrorKind::MalformedResponse,
+            false,
+            format!(
+                "expected exactly one embedding for a single-text request, got {}",
+                response.data.len()
+            ),
+        ));
+    }
+
+    Ok(response
+        .data
+        .into_iter()
+        .next()
+        .expect("data.len() == 1 verified immediately above")
+        .embedding)
+}
+
 /// One chat round-trip. `system` is an optional system message; `user` is the
 /// user turn. Returns the assistant text (`choices[0].message.content`).
 ///

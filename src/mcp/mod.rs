@@ -273,6 +273,7 @@ pub fn run(
             scope: scope.clone(),
             paths: paths.clone(),
             embedder_entry: handle.embedder_entry,
+            embedder_seed: handle.embedder_seed.clone(),
             reranker_entry: handle.reranker_entry,
             prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(prompt_registry))),
             host_harness: host_harness.clone(),

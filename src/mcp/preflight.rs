@@ -15,6 +15,7 @@ use crate::embedding::download;
 use crate::embedding::registry::ModelEntry;
 use crate::embedding::{Embedder, fastembed::FastembedEmbedder};
 use crate::error::TomeError;
+use crate::index::MetaSeed;
 use crate::index::meta::{DriftStatus, ModelIdent, detect_drift};
 use crate::index::{db, migrations, schema};
 use crate::paths::Paths;
@@ -25,6 +26,14 @@ pub struct EmbedderHandle {
     pub embedder: Box<dyn Embedder>,
     pub embedder_entry: &'static ModelEntry,
     pub reranker_entry: &'static ModelEntry,
+    /// Phase 12 / US2: the ACTIVE embedder's drift identity. Remote
+    /// (`"<provider>/<model>"`/`"external"`) when an `[embedding]` provider is
+    /// configured, else the bundled `embedder_entry`'s `(name, version)`. The
+    /// `search_skills` handler passes THIS (not `embedder_entry`) to
+    /// `detect_drift`, so on a remote index the comparison is against the right
+    /// stored identity and the server refuses to serve under a real embedder
+    /// change rather than reporting spurious drift on every search.
+    pub embedder_seed: MetaSeed,
 }
 
 /// Run the pre-flight against the resolved scope's index and the
@@ -90,13 +99,26 @@ pub fn run(_scope: &ResolvedScope, paths: &Paths) -> Result<EmbedderHandle, Tome
     let embedder_entry = crate::index::meta::active_embedder(&conn)?;
     let reranker_entry = crate::index::meta::active_reranker(&conn)?;
 
+    // Phase 12 / US2: the MCP server embeds remotely when `[embedding]` is
+    // configured. Load config defensively-strict here: a malformed config is a
+    // startup failure (the server cannot resolve which embedder to bind), so we
+    // use the strict loader and surface the parse error. The remote-aware seed
+    // is the ACTIVE embedder identity used for BOTH drift detection and the
+    // handle the server carries.
+    let cfg = crate::config::load(paths)?;
+    let remote_embedding =
+        crate::provider::resolve(&cfg, crate::provider::Capability::Embedding)?.is_some();
+    let embedder_seed = crate::embedding::embedder_seed(&cfg, embedder_entry)?;
+
     // Drift detection. The reranker comparison still happens here for
     // observability, but reranker drift is *not* a startup failure —
     // FR-109 defers reranker loading until first use, so the running
-    // server can survive reranker drift by re-downloading on demand.
+    // server can survive reranker drift by re-downloading on demand. The
+    // embedder ident reflects the ACTIVE (remote-or-bundled) identity so a
+    // remote-embedder change is detected against the stored `meta` rows.
     let embedder_ident = ModelIdent {
-        name: embedder_entry.name.into(),
-        version: embedder_entry.version.into(),
+        name: embedder_seed.name.clone(),
+        version: embedder_seed.version.clone(),
     };
     let reranker_ident = ModelIdent {
         name: reranker_entry.name.into(),
@@ -121,22 +143,41 @@ pub fn run(_scope: &ResolvedScope, paths: &Paths) -> Result<EmbedderHandle, Tome
         | DriftStatus::SummariserDrift { .. }
         | DriftStatus::None => {}
     }
+
+    // Phase 12 / US2: on the remote path, seed the embedder's expected dimension
+    // from the persisted `meta.embedder_dimension` so query-time validation (run
+    // for every `search_skills`) asserts the dimension the index was built at.
+    // Read while the conn is still in hand.
+    let persisted_dim = if remote_embedding {
+        crate::index::read_embedder_dimension(&conn)?
+    } else {
+        None
+    };
     drop(conn);
 
-    // Embedder artefacts on disk. The contract demands SHA-256
-    // verification of the primary file rather than the cheap "exists +
-    // size" check that `tome status` uses — the MCP server is a
-    // long-running process, so paying the full hash once at startup is
-    // the right trade-off.
-    verify_embedder_artefacts(paths, embedder_entry)?;
-
-    let model_dir = paths.model_path(embedder_entry.name)?;
-    let embedder = FastembedEmbedder::load(embedder_entry, &model_dir)?;
+    let embedder: Box<dyn Embedder> = if remote_embedding {
+        // A remote embedder has no local model artefacts to verify; the
+        // first-run notice + RemoteEmbedder construction route through the
+        // shared `build_embedder`. The startup-frozen embedder validates every
+        // search at query time (the in-memory embedder is built ONCE here, so a
+        // later config change is NOT picked up until restart — by design).
+        crate::embedding::build_embedder(&cfg, paths, embedder_entry, persisted_dim)?
+    } else {
+        // Bundled: verify artefacts (SHA-256 of the primary file) then load.
+        // The contract demands SHA-256 verification rather than the cheap
+        // "exists + size" check that `tome status` uses — the MCP server is a
+        // long-running process, so paying the full hash once at startup is the
+        // right trade-off.
+        verify_embedder_artefacts(paths, embedder_entry)?;
+        let model_dir = paths.model_path(embedder_entry.name)?;
+        Box::new(FastembedEmbedder::load(embedder_entry, &model_dir)?)
+    };
 
     Ok(EmbedderHandle {
-        embedder: Box::new(embedder),
+        embedder,
         embedder_entry,
         reranker_entry,
+        embedder_seed,
     })
 }
 

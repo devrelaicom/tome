@@ -22,7 +22,10 @@ pub mod workspaces;
 
 pub use db::{OpenOptions, open, open_read_only};
 pub use lock::{LockGuard, acquire as acquire_lock};
-pub use meta::{DriftStatus, MetaKey, ModelIdent, detect_drift};
+pub use meta::{
+    DriftStatus, MetaKey, ModelIdent, detect_drift, read_embedder_dimension,
+    write_embedder_dimension,
+};
 pub use migrations::{MIGRATIONS, Migration, apply_pending, current_schema_version};
 // Phase 5 re-export: the `EntryKind` discriminator threads through every
 // `index::skills` entry point. Keep the type accessible from

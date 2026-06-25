@@ -221,6 +221,10 @@ fn build_state(paths: &tome::paths::Paths) -> Arc<McpState> {
         scope: ResolvedScope::global_fallback(),
         paths: paths.clone(),
         embedder_entry: &STUB_EMBEDDER_ENTRY,
+        embedder_seed: tome::index::MetaSeed {
+            name: STUB_EMBEDDER_ENTRY.name.into(),
+            version: STUB_EMBEDDER_ENTRY.version.into(),
+        },
         reranker_entry: &STUB_RERANKER_ENTRY,
         prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(PromptRegistry::default()))),
         host_harness: None,

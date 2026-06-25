@@ -428,6 +428,10 @@ fn build_state_for_prompts(paths: &tome::paths::Paths) -> Arc<McpState> {
         scope: ResolvedScope::global_fallback(),
         paths: paths.clone(),
         embedder_entry,
+        embedder_seed: tome::index::MetaSeed {
+            name: embedder_entry.name.into(),
+            version: embedder_entry.version.into(),
+        },
         reranker_entry,
         prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(registry))),
         host_harness: None,
@@ -448,6 +452,10 @@ fn build_state_for_get_skill(paths: &tome::paths::Paths) -> Arc<McpState> {
         scope: ResolvedScope::global_fallback(),
         paths: paths.clone(),
         embedder_entry,
+        embedder_seed: tome::index::MetaSeed {
+            name: embedder_entry.name.into(),
+            version: embedder_entry.version.into(),
+        },
         reranker_entry,
         prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(PromptRegistry::default()))),
         host_harness: None,
