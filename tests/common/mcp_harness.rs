@@ -315,6 +315,38 @@ impl StagedWorkspace {
         };
         McpHarness::with_embedder(&self.paths, registry, None, None, embedder, embedder_seed)
     }
+
+    /// Build a [`McpHarness`] over this workspace whose RERANKER is the supplied
+    /// one (Phase 12 / US3 — e.g. a `RemoteReranker` over a failing transport
+    /// seam) while keeping the stub embedder + stub embedder seed (so embedder
+    /// drift never fires and only the rerank path is under test). The injected
+    /// reranker pre-fills the `OnceCell`, so `search_skills` never builds its own.
+    pub fn harness_with_reranker(
+        &self,
+        reranker: Arc<dyn tome::embedding::Reranker>,
+    ) -> McpHarness {
+        let registry = {
+            let conn = open_index(&self.paths);
+            let reg = PromptRegistry::build_for_workspace(
+                &WorkspaceName::global(),
+                &self.paths,
+                &conn,
+                false,
+            )
+            .expect("build prompt registry");
+            drop(conn);
+            reg
+        };
+        McpHarness::with_embedder_and_reranker(
+            &self.paths,
+            registry,
+            None,
+            None,
+            Arc::new(StubEmbedder::new()),
+            stub_embedder_seed(),
+            Some(reranker),
+        )
+    }
 }
 
 /// Build a `search_skills::Input` with defaults (top_k 10, no filters). Shared
@@ -405,7 +437,37 @@ impl McpHarness {
         embedder: Arc<dyn tome::embedding::Embedder>,
         embedder_seed: tome::index::MetaSeed,
     ) -> Self {
-        let reranker: Arc<dyn Reranker> = Arc::new(StubReranker::new());
+        Self::with_embedder_and_reranker(
+            paths,
+            registry,
+            host_harness,
+            project_root,
+            embedder,
+            embedder_seed,
+            // `None` ⇒ the StubReranker is pre-installed (the default). Phase 12 /
+            // US3 tests that exercise the remote-reranker MCP path pass a custom
+            // `Some(reranker)` (a `RemoteReranker` over a failing transport) so the
+            // lazy build path is replaced with a controlled one.
+            None,
+        )
+    }
+
+    /// Build the harness with a caller-supplied embedder + optional reranker.
+    /// When `reranker` is `Some`, it is pre-installed into the `OnceCell` so the
+    /// `search_skills` lazy-build is bypassed (Phase 12 / US3 — inject a
+    /// `RemoteReranker` over a failing transport seam to prove the MCP path
+    /// surfaces a clear tool error / exit 94 rather than a silent unranked
+    /// result). When `None`, the StubReranker is pre-installed (today's default).
+    pub fn with_embedder_and_reranker(
+        paths: &Paths,
+        registry: PromptRegistry,
+        host_harness: Option<String>,
+        project_root: Option<std::path::PathBuf>,
+        embedder: Arc<dyn tome::embedding::Embedder>,
+        embedder_seed: tome::index::MetaSeed,
+        reranker: Option<Arc<dyn Reranker>>,
+    ) -> Self {
+        let reranker: Arc<dyn Reranker> = reranker.unwrap_or_else(|| Arc::new(StubReranker::new()));
         let mut scope = ResolvedScope::global_fallback();
         scope.project_root = project_root;
         let state = Arc::new(McpState {
@@ -648,6 +710,10 @@ pub fn mcp_error_exit_code(err: &McpError) -> i32 {
         "no_harness_detected" => TomeError::NoHarnessDetected,
         // Phase 12 / US2 — a remote embedding failed content validation.
         "remote_embedding_invalid" => TomeError::RemoteEmbeddingInvalid { detail: "x".into() },
+        // Phase 12 / US3 — a remote provider call failed (e.g. an unreachable
+        // remote reranker) → 94, and a resolve-time config error → 93.
+        "provider_request_failed" => TomeError::ProviderRequestFailed { detail: "x".into() },
+        "provider_config_invalid" => TomeError::ProviderConfigInvalid { detail: "x".into() },
         // `search_skills` maps embedder drift to a custom `embedder_drift` code
         // (NOT `category().as_str()`), so this slug does not match a single
         // canonical category. Both name + version drift surface it; return the

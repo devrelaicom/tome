@@ -37,13 +37,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::config::{Config, ProviderKind};
 use crate::error::TomeError;
 use crate::index::MetaSeed;
+use crate::index::query::Candidate;
 use crate::paths::Paths;
 use crate::provider::config::ResolvedProvider;
 use crate::provider::error::{ProviderError, ProviderErrorKind};
 use crate::provider::{Capability, voyage};
 
-use super::Embedder;
-use super::fastembed::FastembedEmbedder;
+use super::fastembed::{FastembedEmbedder, FastembedReranker, rerank_document_text};
+use super::{Embedder, Reranker, Scored};
 
 /// The model-version sentinel recorded for ANY remote embedder. A remote model
 /// has no pinned registry version; `"external"` is the stable identity token so
@@ -304,6 +305,140 @@ pub fn embedder_seed(
     }
 }
 
+// ===========================================================================
+// RemoteReranker (Phase 12 / US3) — the BYOK reranker over a remote provider's
+// `/rerank` endpoint (Voyage only in v1).
+// ===========================================================================
+
+/// A [`Reranker`] backed by a remote provider's `/rerank` endpoint (Voyage).
+///
+/// ## Reranking is stateless — no index drift
+///
+/// Unlike the embedder, the reranker reorders an already-retrieved candidate set
+/// at QUERY time; nothing it produces is persisted. So a remote reranker has no
+/// stored artefact to corrupt and no `meta` row — this is the narrowest remote
+/// slice. The one safety property that still matters is *never positional*: the
+/// provider's `results[].index` is mapped back to the INPUT candidates by index,
+/// so a permuted or partial result set can never silently mis-attribute scores
+/// to the wrong candidate. An out-of-range index fails CLOSED (a clear
+/// `RerankingFailure`), never a panic and never a wrong-candidate score.
+///
+/// ## Document text is the same as the bundled reranker
+///
+/// Both rerankers feed the model [`rerank_document_text`] (`"{name}\n\n{desc}"`),
+/// so switching `[reranker]` between bundled and remote never changes what the
+/// cross-encoder scores.
+pub struct RemoteReranker {
+    resolved: ResolvedProvider,
+    /// `"<provider-name>/<model>"` — the stable `model_name()` identity, mirroring
+    /// [`RemoteEmbedder`].
+    name: String,
+}
+
+impl RemoteReranker {
+    /// Construct from a resolved provider connection. Infallible — construction
+    /// just stores the connection; the request happens in [`rerank`](Self::rerank).
+    pub fn new(resolved: ResolvedProvider) -> Self {
+        let name = format!("{}/{}", resolved.name, resolved.model);
+        Self { resolved, name }
+    }
+}
+
+impl Reranker for RemoteReranker {
+    fn rerank(&self, query: &str, candidates: Vec<Candidate>) -> Result<Vec<Scored>, TomeError> {
+        // Empty input → empty output with NO HTTP call (cheap + avoids sending a
+        // pointless request; mirrors FastembedReranker's early return).
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // SAME document text as the bundled reranker (the SSOT helper), so the
+        // model scores byte-identical inputs regardless of bundled-vs-remote.
+        let documents: Vec<String> = candidates.iter().map(rerank_document_text).collect();
+
+        // Rerank ALL candidates (top_k = len). A provider failure maps once onto
+        // the closed TomeError set (94) — an UNREACHABLE remote reranker surfaces
+        // as ProviderRequestFailed/94 here, NEVER a silent unranked fallthrough
+        // (US3.3): the pipeline propagates this `Err`.
+        let pairs = voyage::rerank(&self.resolved, query, &documents, candidates.len())
+            .map_err(ProviderError::into_tome_error)?;
+
+        // Map EACH (index, score) back to the INPUT candidate BY INDEX — never
+        // positionally. An out-of-range index is a clear error, never a panic and
+        // never a wrong-candidate score. We `cloned()` (Candidate: Clone) rather
+        // than consume `candidates`, because two results could (pathologically)
+        // reference the same index; cloning keeps the mapping total and robust.
+        let mut out: Vec<Scored> = Vec::with_capacity(pairs.len());
+        for (index, score) in pairs {
+            let candidate = candidates.get(index).cloned().ok_or_else(|| {
+                TomeError::RerankingFailure(format!(
+                    "remote reranker returned out-of-range index {index} (n={})",
+                    candidates.len()
+                ))
+            })?;
+            out.push(Scored { candidate, score });
+        }
+
+        // Sort by DESCENDING score (higher = better) so the final ordering is
+        // deterministic regardless of the provider's own sort. Voyage already
+        // sorts, but we never depend on that — a future provider on the shared
+        // shape might not.
+        out.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Ok(out)
+    }
+
+    fn model_name(&self) -> &str {
+        &self.name
+    }
+
+    fn model_version(&self) -> &str {
+        REMOTE_EMBEDDER_VERSION
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Remote-vs-bundled reranker construction (T060). The single chokepoint every
+// reranker-constructing site routes through — mirrors [`build_embedder`].
+// ---------------------------------------------------------------------------
+
+/// Build the reranker a command should use: a [`RemoteReranker`] when
+/// `[reranker] provider` references a configured provider (Voyage only — the
+/// capability↔kind matrix in `resolve` rejects any other kind as
+/// `ProviderConfigInvalid`/93), else the bundled [`FastembedReranker`] for the
+/// active profile's registry entry.
+///
+/// - On the REMOTE branch the one-time first-run notice
+///   ([`crate::provider::notice::notify_remote_use`]) fires and a
+///   [`RemoteReranker`] is boxed.
+/// - On the BUNDLED branch the behaviour and artefacts are IDENTICAL to today
+///   (NFR-006): `FastembedReranker::load` against the active reranker's on-disk
+///   model dir.
+///
+/// A resolve failure (a non-Voyage kind, an undefined reference, or a missing
+/// `model`) propagates the same `ProviderConfigInvalid`/93 the rest of the
+/// command would hit — it never silently falls back to bundled.
+pub fn build_reranker(
+    cfg: &Config,
+    paths: &Paths,
+    active_reranker: &'static crate::embedding::registry::ModelEntry,
+) -> Result<Box<dyn Reranker>, TomeError> {
+    match crate::provider::resolve(cfg, Capability::Reranker)? {
+        Some(resolved) => {
+            crate::provider::notice::notify_remote_use(paths, &resolved.name);
+            Ok(Box::new(RemoteReranker::new(resolved)))
+        }
+        None => {
+            let dir = paths.model_path(active_reranker.name)?;
+            Ok(Box::new(FastembedReranker::load(active_reranker, &dir)?))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,5 +665,231 @@ mod tests {
         let seed = embedder_seed(&config, bundled).unwrap();
         assert_eq!(seed.name, bundled.name);
         assert_eq!(seed.version, bundled.version);
+    }
+
+    // --- RemoteReranker (US3): index-remap is never positional -----------------
+
+    use crate::index::query::Candidate;
+    use crate::plugin::identity::EntryKind;
+    use std::sync::atomic::AtomicUsize;
+
+    /// A resolved Voyage RERANKER connection through the real `resolve` path.
+    fn reranker(api_key: Option<&str>) -> RemoteReranker {
+        let mut config = Config::default();
+        config.providers.insert(
+            "vp".to_string(),
+            ProviderEntry {
+                kind: ProviderKind::Voyage,
+                base_url: None,
+                api_key: api_key.map(|k| Secret::from(k.to_string())),
+            },
+        );
+        config.reranker.provider = Some("vp".to_string());
+        config.reranker.model = Some("rerank-2".to_string());
+        let resolved = resolve(&config, Capability::Reranker).unwrap().unwrap();
+        RemoteReranker::new(resolved)
+    }
+
+    /// A candidate whose `name` makes it identifiable in assertions.
+    fn candidate(name: &str) -> Candidate {
+        Candidate {
+            skill_id: 0,
+            catalog: "cat".to_string(),
+            plugin: "plug".to_string(),
+            name: name.to_string(),
+            kind: EntryKind::Skill,
+            description: format!("desc of {name}"),
+            plugin_version: "1.0.0".to_string(),
+            path: format!("/p/{name}/SKILL.md"),
+            distance: 0.0,
+        }
+    }
+
+    fn rerank_body(results: serde_json::Value) -> RawResponse {
+        RawResponse {
+            status: 200,
+            retry_after: None,
+            body: serde_json::to_vec(&serde_json::json!({ "results": results })).unwrap(),
+        }
+    }
+
+    #[test]
+    fn rerank_maps_results_index_back_to_input_never_positional() {
+        // Three input candidates [c0, c1, c2]. Voyage returns indices 2 then 0
+        // (1 omitted entirely). The output must be candidate-at-input-index-2
+        // first (highest score), then index-0 — by INDEX, never positionally.
+        let _g = set_transport_override(|_spec| {
+            Ok(rerank_body(serde_json::json!([
+                { "index": 2, "relevance_score": 0.9 },
+                { "index": 0, "relevance_score": 0.5 },
+            ])))
+        });
+        let r = reranker(Some("voyage-key"));
+        let candidates = vec![candidate("c0"), candidate("c1"), candidate("c2")];
+        let scored = r.rerank("anything", candidates).unwrap();
+        assert_eq!(scored.len(), 2, "only the two returned results map back");
+        // First result is the INPUT candidate at index 2 (NOT the 0th positionally).
+        assert_eq!(scored[0].candidate.name, "c2");
+        assert_eq!(scored[0].score, 0.9);
+        assert_eq!(scored[1].candidate.name, "c0");
+        assert_eq!(scored[1].score, 0.5);
+    }
+
+    #[test]
+    fn rerank_resorts_descending_even_if_provider_unsorted() {
+        // A provider that returns results out of score order must still yield a
+        // descending-by-score output (the caller re-sorts defensively).
+        let _g = set_transport_override(|_spec| {
+            Ok(rerank_body(serde_json::json!([
+                { "index": 0, "relevance_score": 0.1 },
+                { "index": 1, "relevance_score": 0.8 },
+            ])))
+        });
+        let r = reranker(Some("k"));
+        let candidates = vec![candidate("c0"), candidate("c1")];
+        let scored = r.rerank("q", candidates).unwrap();
+        assert_eq!(scored[0].candidate.name, "c1", "higher score first");
+        assert_eq!(scored[0].score, 0.8);
+        assert_eq!(scored[1].candidate.name, "c0");
+    }
+
+    #[test]
+    fn rerank_out_of_range_index_is_clear_error_not_panic() {
+        // A buggy/hostile provider returns an index past the input length →
+        // RerankingFailure, NEVER a panic and NEVER a wrong-candidate score.
+        let _g = set_transport_override(|_spec| {
+            Ok(rerank_body(serde_json::json!([
+                { "index": 9, "relevance_score": 0.9 },
+            ])))
+        });
+        let r = reranker(Some("k"));
+        let candidates = vec![candidate("c0"), candidate("c1")];
+        let err = r.rerank("q", candidates).unwrap_err();
+        assert!(
+            matches!(err, TomeError::RerankingFailure(_)),
+            "out-of-range index must be a clear RerankingFailure, got {err:?}"
+        );
+        assert!(err.to_string().contains("out-of-range"), "{err}");
+    }
+
+    #[test]
+    fn rerank_empty_candidates_makes_no_http_call() {
+        // An empty candidate set returns empty with NO transport call. The
+        // override counts invocations; it must stay at zero.
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let _g = set_transport_override(move |_spec| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(rerank_body(serde_json::json!([])))
+        });
+        let r = reranker(Some("k"));
+        let scored = r.rerank("q", Vec::new()).unwrap();
+        assert!(scored.is_empty(), "empty input → empty output");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "empty candidates must not make an HTTP call"
+        );
+    }
+
+    #[test]
+    fn rerank_unreachable_remote_surfaces_94_not_unranked() {
+        // US3.3: an UNREACHABLE remote reranker must surface as
+        // ProviderRequestFailed/94, never a silent unranked result.
+        let _g = set_transport_override(|_spec| {
+            Ok(RawResponse {
+                status: 503,
+                retry_after: Some(std::time::Duration::from_secs(0)),
+                body: Vec::new(),
+            })
+        });
+        let r = reranker(Some("k"));
+        let candidates = vec![candidate("c0")];
+        let err = r.rerank("q", candidates).unwrap_err();
+        assert_eq!(
+            err.exit_code(),
+            94,
+            "unreachable remote reranker → 94 (not unranked): {err:?}"
+        );
+    }
+
+    #[test]
+    fn rerank_model_identity_is_provider_slash_model_external() {
+        let r = reranker(None);
+        assert_eq!(r.model_name(), "vp/rerank-2");
+        assert_eq!(r.model_version(), "external");
+    }
+
+    #[test]
+    fn rerank_uses_shared_document_text_helper() {
+        // The documents sent must be the SAME "{name}\n\n{description}" text the
+        // bundled reranker feeds its model (the SSOT helper).
+        let _g = set_transport_override(|spec| {
+            let body: serde_json::Value = serde_json::from_slice(&spec.body).unwrap();
+            let docs = body["documents"].as_array().unwrap();
+            assert_eq!(docs[0], serde_json::json!("c0\n\ndesc of c0"));
+            assert_eq!(docs[1], serde_json::json!("c1\n\ndesc of c1"));
+            Ok(rerank_body(serde_json::json!([
+                { "index": 0, "relevance_score": 0.5 },
+                { "index": 1, "relevance_score": 0.4 },
+            ])))
+        });
+        let r = reranker(Some("k"));
+        let candidates = vec![candidate("c0"), candidate("c1")];
+        let _ = r.rerank("q", candidates).unwrap();
+    }
+
+    // --- build_reranker (US3): remote vs bundled selection ---------------------
+
+    #[test]
+    fn build_reranker_remote_for_voyage_provider() {
+        // A Voyage `[reranker]` builds a RemoteReranker (identity proves it).
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = Paths::from_root(dir.path().to_path_buf());
+        let mut config = Config::default();
+        config.providers.insert(
+            "vp".to_string(),
+            ProviderEntry {
+                kind: ProviderKind::Voyage,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        config.reranker.provider = Some("vp".to_string());
+        config.reranker.model = Some("rerank-2".to_string());
+        let bundled = crate::embedding::profile::reranker_for(crate::embedding::Profile::DEFAULT);
+        let reranker = build_reranker(&config, &paths, bundled).unwrap();
+        assert_eq!(reranker.model_name(), "vp/rerank-2");
+        assert_eq!(reranker.model_version(), "external");
+    }
+
+    #[test]
+    fn build_reranker_non_voyage_kind_is_93() {
+        // A non-Voyage `[reranker]` kind surfaces ProviderConfigInvalid/93 through
+        // build_reranker (the resolve matrix rejects it) — never a silent bundled
+        // fallback.
+        let dir = tempfile::TempDir::new().unwrap();
+        let paths = Paths::from_root(dir.path().to_path_buf());
+        let mut config = Config::default();
+        config.providers.insert(
+            "op".to_string(),
+            ProviderEntry {
+                kind: ProviderKind::Openai,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        config.reranker.provider = Some("op".to_string());
+        config.reranker.model = Some("some-model".to_string());
+        let bundled = crate::embedding::profile::reranker_for(crate::embedding::Profile::DEFAULT);
+        // `Box<dyn Reranker>` is not `Debug`, so match rather than `unwrap_err`.
+        match build_reranker(&config, &paths, bundled) {
+            Err(err) => assert_eq!(
+                err.exit_code(),
+                93,
+                "non-voyage reranker kind → 93: {err:?}"
+            ),
+            Ok(_) => panic!("a non-voyage reranker kind must fail with 93, not build a reranker"),
+        }
     }
 }

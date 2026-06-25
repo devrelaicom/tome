@@ -18,7 +18,6 @@ use serde::Serialize;
 
 use crate::cli::QueryArgs;
 use crate::config::Config;
-use crate::embedding::fastembed::FastembedReranker;
 use crate::embedding::{Embedder, Reranker, Scored};
 use crate::error::TomeError;
 use crate::index::meta::{self, DriftStatus, ModelIdent};
@@ -161,6 +160,14 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
     let remote_embedding =
         crate::provider::resolve(&cfg, crate::provider::Capability::Embedding)?.is_some();
 
+    // Phase 12 / US3: is a `[reranker]` provider configured? When so, reranking
+    // is remote (no local reranker model required). A non-Voyage kind / undefined
+    // reference / missing model surfaces as `ProviderConfigInvalid`/93 here — the
+    // same code `build_reranker` would later produce, surfaced before the (now
+    // skippable) missing-model check.
+    let remote_reranking =
+        crate::provider::resolve(&cfg, crate::provider::Capability::Reranker)?.is_some();
+
     // Model presence — embedder always required (BUNDLED only — a remote
     // embedder has no local model), reranker required unless `--no-rerank`. We
     // check before constructing the heavy `FastembedEmbedder` so a missing-model
@@ -171,7 +178,8 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
             model: embedder_meta.name.to_owned(),
         });
     }
-    if !args.no_rerank && missing.iter().any(|e| e.name == reranker_meta.name) {
+    if !args.no_rerank && !remote_reranking && missing.iter().any(|e| e.name == reranker_meta.name)
+    {
         return Err(TomeError::ModelMissing {
             model: reranker_meta.name.to_owned(),
         });
@@ -193,25 +201,42 @@ pub fn run(args: QueryArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), Tom
         pb.finish_and_clear();
         result?
     };
-    let reranker_loaded: Option<FastembedReranker> = if args.no_rerank {
+    // Build the reranker: remote when `[reranker]` is configured, else the
+    // bundled active-profile model. `build_reranker` fires the one-time remote
+    // notice and surfaces a non-Voyage kind as 93. `--no-rerank` (or `[query]
+    // rerank=false` via `resolve_query_args`) skips it entirely.
+    let reranker_loaded: Option<Box<dyn Reranker>> = if args.no_rerank {
         None
     } else {
         let pb = progress::spinner(format!("loading reranker ({})", reranker_meta.name));
-        let result = FastembedReranker::load(reranker_meta, &paths.model_path(reranker_meta.name)?);
+        let result = crate::embedding::build_reranker(&cfg, &paths, reranker_meta);
         pb.finish_and_clear();
         Some(result?)
     };
-    let reranker: Option<&dyn Reranker> = reranker_loaded.as_ref().map(|r| r as &dyn Reranker);
+    let reranker: Option<&dyn Reranker> = reranker_loaded.as_deref();
 
     // The drift-detection seed must reflect the ACTIVE embedder identity —
     // remote (`"<provider>/<model>"`/`"external"`) when configured, else the
     // active-profile registry identity — so switching `[embedding]` model
-    // surfaces as embedder drift on the query path. The reranker stays bundled
-    // in US2 (remote rerank is US3).
+    // surfaces as embedder drift on the query path.
     let embedder_seed = crate::embedding::embedder_seed(&cfg, embedder_meta)?;
-    let reranker_seed = MetaSeed {
-        name: reranker_meta.name.to_owned(),
-        version: reranker_meta.version.to_owned(),
+    // Phase 12 / US3: the reranker drift seed reflects the ACTIVE reranker
+    // identity too. A remote `[reranker]` has identity `"<provider>/<model>"` /
+    // `"external"`; bundled keeps the registry identity. Reranking is stateless
+    // (no persisted artefact), so reranker drift is only a soft warning at query
+    // time — but the seed must still match the active reranker so a bundled index
+    // queried under a remote reranker (or vice-versa) reports the drift honestly
+    // rather than a spurious or missing one.
+    let reranker_seed = match crate::provider::resolve(&cfg, crate::provider::Capability::Reranker)?
+    {
+        Some(resolved) => MetaSeed {
+            name: format!("{}/{}", resolved.name, resolved.model),
+            version: crate::embedding::REMOTE_EMBEDDER_VERSION.to_owned(),
+        },
+        None => MetaSeed {
+            name: reranker_meta.name.to_owned(),
+            version: reranker_meta.version.to_owned(),
+        },
     };
     let deps = QueryDeps {
         paths: &paths,
@@ -254,6 +279,10 @@ pub fn run_with_deps(
     // error the pipeline returns `Err` and the app-boundary `tome.error` covers
     // it, so we do NOT reach here on failure (no double-emit). Best-effort
     // enqueue — never blocks or alters the result.
+    //
+    // Load config ONCE (defensively) for BOTH provider-kind fields — telemetry
+    // must never hard-fail on a malformed config.
+    let telemetry_cfg = crate::config::load_or_default(deps.paths);
     crate::telemetry::enqueue(crate::telemetry::event::Search {
         surface: crate::telemetry::event::Surface::Cli,
         latency_bucket: crate::telemetry::buckets::LatencyBucket::from(elapsed),
@@ -276,13 +305,15 @@ pub fn run_with_deps(
                     .name
                 }),
         ),
-        // Phase 12: which provider kind served the embedding. Derived
-        // defensively from config (telemetry is best-effort — a malformed
-        // config must not break the emit); `Bundled` when no `[embedding]`
-        // provider is configured. Records ONLY the kind.
+        // Phase 12: which provider kind served the embedding + the reranking,
+        // each derived defensively from config (telemetry is best-effort — a
+        // malformed config must not break the emit) via the shared SSOT mappers.
+        // `Bundled` when no provider is configured for that capability. Records
+        // ONLY the kind. Load config ONCE for both. FR-022: independent fields.
         embedding_provider_kind: crate::telemetry::event::ProviderKind::for_embedding(
-            &crate::config::load_or_default(deps.paths),
+            &telemetry_cfg,
         ),
+        reranker_provider_kind: crate::telemetry::event::ProviderKind::for_reranker(&telemetry_cfg),
         // CLI surface has no calling harness (that's an MCP-only dimension).
         calling_harness: None,
     });

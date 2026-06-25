@@ -23,7 +23,8 @@ use crate::index::query::Candidate;
 pub use profile::Profile;
 pub use registry::{MODEL_REGISTRY, ModelEntry, ModelKind, ModelManifest};
 pub use remote::{
-    REMOTE_EMBEDDER_VERSION, RemoteEmbedder, build_embedder, embedder_seed, validate_embedding,
+    REMOTE_EMBEDDER_VERSION, RemoteEmbedder, RemoteReranker, build_embedder, build_reranker,
+    embedder_seed, validate_embedding,
 };
 
 /// Produces an embedding vector for arbitrary text. The output dimension
