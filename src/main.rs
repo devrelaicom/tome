@@ -78,6 +78,13 @@ fn main() {
         }
     };
 
+    // Build the process-global telemetry handle ONCE, unconditionally — every
+    // command needs it: the CLI emit/teardown paths, the spawned `flush --quiet`
+    // child, and the MCP server (its `commands::mcp::run` path emits + flushes
+    // through the same global handle). A disabled handle (consent off / build
+    // error) is a pure no-op, so this is safe on every path.
+    tome::telemetry::init(&paths);
+
     // CLI process-start telemetry (FR-013/014/015 first-run notice + FR-026
     // `tome.install`/`tome.upgrade` lifecycle emits). Skip the MCP path (no
     // human stderr; it mints silently on its first enqueue) AND the `telemetry`
@@ -161,7 +168,7 @@ fn main() {
             // read-only / byte-identical guarantee stays intact — see the
             // `is_telemetry_cmd` capture above).
             if !is_telemetry_cmd {
-                tome::telemetry::enqueue(tome::telemetry::event::ErrorEvent {
+                tome::telemetry::emit(tome::telemetry::event::ErrorEvent {
                     error_class: err.category(),
                     surface: tome::telemetry::event::Surface::Cli,
                     calling_harness: None,

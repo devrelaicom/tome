@@ -31,7 +31,7 @@ use crate::doctor::report::{
     TelemetrySection,
 };
 use crate::paths::Paths;
-use crate::telemetry::{allowlist, config, queue, transport};
+use crate::telemetry::{allowlist, config};
 
 /// The `last-flush` stamp shape — written by the flusher as
 /// `{"timestamp":"<rfc3339>","last_status":<u16|null>}`. Local mirror of the
@@ -73,7 +73,7 @@ pub fn assemble(paths: &Paths) -> TelemetrySection {
         install_id: install_id_report(paths),
         queue: queue_report(paths),
         last_flush: last_flush_report(paths),
-        endpoint: transport::resolve_endpoint(),
+        endpoint: config::resolve_endpoint(paths),
         allowlist: allowlist_report(),
     }
 }
@@ -118,18 +118,14 @@ fn file_mode(_meta: &std::fs::Metadata) -> Option<u32> {
     None
 }
 
-/// Pending depth, corrupt-line count, and the oldest event's age. All three
-/// reads are read-only (`count_pending` / `classify_lines` never mutate).
+/// Pending depth, corrupt-line count, and the oldest event's age. All reads are
+/// read-only direct reads of the kernel queue file (never mutate).
 fn queue_report(paths: &Paths) -> TelemetryQueueReport {
-    let pending = queue::count_pending(paths) as u64;
+    let (events, corrupt) = classify_queue_lines(paths);
+    let pending = events.len() as u64;
 
-    // `classify_lines` returns the parsed values (oldest first) + a corrupt
-    // count. Degrade any read error to `(empty, 0)` — a read-only report never
-    // fails on the queue.
-    let (events, corrupt) = queue::classify_lines(paths).unwrap_or_default();
-
-    // FIFO: the first parsable event is the oldest. Its envelope `timestamp` is
-    // the RFC3339-millis string the enqueue path stamped; age it against now.
+    // FIFO: the first parsable event is the oldest. Its kernel envelope
+    // `timestamp` is an RFC3339 string; age it against now.
     let oldest_age_seconds = events
         .iter()
         .find_map(|v| v.get("timestamp").and_then(serde_json::Value::as_str))
@@ -141,6 +137,29 @@ fn queue_report(paths: &Paths) -> TelemetryQueueReport {
         corrupt,
         oldest_age_seconds,
     }
+}
+
+/// Read the kernel queue file and split each non-blank line into a parsed JSON
+/// value (oldest first) or a corrupt count. Read-only; a missing/unreadable
+/// queue is `(empty, 0)` — a read-only report never fails on the queue.
+fn classify_queue_lines(paths: &Paths) -> (Vec<serde_json::Value>, usize) {
+    let body = match std::fs::read_to_string(paths.telemetry_queue()) {
+        Ok(b) => b,
+        Err(_) => return (Vec::new(), 0),
+    };
+    let mut events = Vec::new();
+    let mut corrupt = 0usize;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(v) => events.push(v),
+            Err(_) => corrupt += 1,
+        }
+    }
+    (events, corrupt)
 }
 
 /// The `last-flush` stamp (time + HTTP status), when present. Bounded,
@@ -237,14 +256,25 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn assemble_reports_id_mode_and_queue_depth() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
-        // Mint an id and seed two queue lines via the real telemetry writers.
-        crate::telemetry::identity::ensure_install_id(&paths).unwrap();
-        crate::telemetry::queue::append(&paths, "{\"timestamp\":\"2020-01-01T00:00:00.000Z\"}")
+        // Plant a `0600` id file and two queue lines directly (the kernel owns the
+        // real writers; doctor only READS these, so a hand-planted state is fine).
+        std::fs::create_dir_all(paths.telemetry_dir()).unwrap();
+        std::fs::write(
+            paths.telemetry_id(),
+            "0b9c1f2e-3a4d-4b6c-8e1f-2a3b4c5d6e7f\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(paths.telemetry_id(), std::fs::Permissions::from_mode(0o600))
             .unwrap();
-        crate::telemetry::queue::append(&paths, "{\"timestamp\":\"2020-01-02T00:00:00.000Z\"}")
-            .unwrap();
+        std::fs::write(
+            paths.telemetry_queue(),
+            "{\"timestamp\":\"2020-01-01T00:00:00.000Z\"}\n\
+             {\"timestamp\":\"2020-01-02T00:00:00.000Z\"}\n",
+        )
+        .unwrap();
 
         let section = with_telemetry_env_cleared(|| super::assemble(&paths));
         assert!(section.install_id.present);

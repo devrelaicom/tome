@@ -283,13 +283,13 @@ pub fn run_with_deps(
     // Load config ONCE (defensively) for BOTH provider-kind fields — telemetry
     // must never hard-fail on a malformed config.
     let telemetry_cfg = crate::config::load_or_default(deps.paths);
-    crate::telemetry::enqueue(crate::telemetry::event::Search {
+    crate::telemetry::emit(crate::telemetry::event::Search {
         surface: crate::telemetry::event::Surface::Cli,
-        latency_bucket: crate::telemetry::buckets::LatencyBucket::from(elapsed),
-        candidates_returned: crate::telemetry::buckets::CountBucket::from(outcome.results.len()),
+        latency_ms: elapsed.as_millis() as u32,
+        candidates_returned: outcome.results.len() as u32,
         reranker_used,
         strict: args.strict,
-        corpus_size_bucket: crate::telemetry::buckets::CountBucket::from(outcome.corpus_size),
+        corpus_size: outcome.corpus_size as u32,
         // The embedder identity is the one the caller loaded. The telemetry
         // field is `&'static str`, so recover the pinned registry entry by the
         // seed name; a non-registry seed (e.g. a test stub) falls back to the
@@ -334,15 +334,14 @@ pub fn run_with_deps(
     // we hold in a throwaway `ResolvedScope` (provenance/project_root are unused
     // by the attribution read) rather than thread a `ResolvedScope` through the
     // whole dep struct.
-    // R-L1: gate the loop ONCE. The public `enqueue_attributed` re-runs
-    // `is_enabled()` (a `Paths::resolve()` + a `config.toml` read) PER result —
-    // N config reads per search. Resolve `Paths` + the enabled state a single
-    // time here, then call the un-gated `enqueue_attributed_to(&paths, …)`
-    // primitive inside the loop. The exact rank, the per-catalog memoised
-    // resolution, and the alongside-the-anonymous semantics are unchanged.
-    // Best-effort: an unresolvable `$HOME` or a disabled/failed gate skips the
-    // whole attributed loop (the anonymous `tome.search` already fired above).
-    if let Some(paths) = telemetry_attribution_paths() {
+    // R-L1: gate the attribution work ONCE. `resolve_attribution` opens the
+    // read-only index per distinct catalog, so skip the whole loop when telemetry
+    // is disabled (the `emit`s would no-op anyway, but the attribution reads would
+    // still run). The exact rank, the per-catalog memoised resolution, and the
+    // alongside-the-anonymous semantics are unchanged. Best-effort: a disabled
+    // install skips the attributed loop (the anonymous `tome.search` already
+    // fired above).
+    if telemetry_attribution_enabled() {
         let attribution_scope = ResolvedScope {
             scope: deps.scope.clone(),
             source: ScopeSource::GlobalFallback,
@@ -358,19 +357,16 @@ pub fn run_with_deps(
                     crate::telemetry::resolve_attribution(&attribution_scope, &c.catalog)
                 });
             if let Some(catalog_id) = catalog_id {
-                crate::telemetry::enqueue_attributed_to(
-                    &paths,
-                    crate::telemetry::event::SearchResult {
-                        entry_name: c.name.clone(),
-                        entry_kind: c.kind.into(),
-                        plugin_name: c.plugin.clone(),
-                        // EXACT 1-indexed rank (FR-057) — `idx + 1`, never bucketed.
-                        rank: (idx + 1) as u32,
-                        catalog_id,
-                        // CLI surface has no calling harness.
-                        calling_harness: None,
-                    },
-                );
+                crate::telemetry::emit(crate::telemetry::event::SearchResult {
+                    catalog: catalog_id,
+                    entry_name: c.name.clone(),
+                    entry_kind: c.kind.into(),
+                    plugin_name: c.plugin.clone(),
+                    // EXACT 1-indexed rank (FR-057) — `idx + 1`, never bucketed.
+                    rank: (idx + 1) as u32,
+                    // CLI surface has no calling harness.
+                    calling_harness: None,
+                });
             }
         }
     }
@@ -393,19 +389,14 @@ pub fn run_with_deps(
     Ok(outcome)
 }
 
-/// Resolve `Paths` ONCE for the attributed-search loop, gated on the telemetry
-/// enabled state. Returns `Some(paths)` only when telemetry is enabled and
-/// `$HOME` resolves — so the per-result loop can call the un-gated
-/// `enqueue_attributed_to(&paths, …)` primitive without re-reading `config.toml`
-/// on every entry (R-L1). FAIL-SAFE-OFF: an unresolvable `$HOME` or a malformed
-/// config collapses to `None` (skip the attributed loop), mirroring the
-/// silent-path contract in [`crate::telemetry::is_enabled`].
-fn telemetry_attribution_paths() -> Option<Paths> {
-    let paths = Paths::resolve().ok()?;
-    match crate::telemetry::config::resolve_enabled(&paths) {
-        Ok(true) => Some(paths),
-        _ => None,
-    }
+/// Whether to do the attributed-search work, gated ONCE on the telemetry enabled
+/// state (R-L1). When telemetry is disabled the whole attributed loop is skipped
+/// — the per-result `resolve_attribution` reads (a read-only index open per
+/// distinct catalog) are then never run, and the `emit`s would no-op anyway. The
+/// enabled state is the process-global handle's (built in `main` before dispatch),
+/// so no per-result `config.toml` read happens.
+fn telemetry_attribution_enabled() -> bool {
+    crate::telemetry::is_enabled()
 }
 
 /// The silent compute path. Runs filter validation → drift check →

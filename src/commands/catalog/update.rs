@@ -111,7 +111,7 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
         } else {
             crate::telemetry::event::SourceType::Git
         };
-        crate::telemetry::enqueue(crate::telemetry::event::CatalogActionEvent {
+        crate::telemetry::emit(crate::telemetry::event::CatalogActionEvent {
             action: crate::telemetry::event::CatalogAction::Updated,
             source_type,
         });
@@ -195,11 +195,11 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
                     if from == to {
                         continue;
                     }
-                    crate::telemetry::enqueue_attributed(crate::telemetry::event::PluginUpdated {
+                    crate::telemetry::emit(crate::telemetry::event::PluginUpdated {
+                        catalog: catalog_id,
                         plugin_name: plugin_name.clone(),
                         from_version: from,
                         to_version: to,
-                        catalog_id,
                     });
                 }
             }

@@ -63,6 +63,6 @@ pub fn run(
 /// never alters control flow, exit code, or output.
 fn emit_on_ok(result: &Result<(), TomeError>, action: crate::telemetry::event::WorkspaceAction) {
     if result.is_ok() {
-        crate::telemetry::enqueue(crate::telemetry::event::WorkspaceActionEvent { action });
+        crate::telemetry::emit(crate::telemetry::event::WorkspaceActionEvent { action });
     }
 }

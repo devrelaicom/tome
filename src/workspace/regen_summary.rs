@@ -222,7 +222,7 @@ fn emit_summary_telemetry(paths: &Paths, outcome: crate::telemetry::event::Outco
     // mappers. `Bundled` when no provider is referenced or the reference can't
     // be resolved; telemetry never propagates a config error.
     let kind = crate::telemetry::event::ProviderKind::for_summariser(&cfg);
-    crate::telemetry::enqueue(crate::telemetry::event::Summary {
+    crate::telemetry::emit(crate::telemetry::event::Summary {
         summariser_provider_kind: kind,
         outcome,
     });

@@ -393,17 +393,17 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // endpoint never blocks the handler — enqueue does NOT flush). Mirrors the
     // CLI `query::run_with_deps` emit; the divergence is `surface = Mcp` plus
     // the `calling_harness` dimension (CLI has no host harness).
-    crate::telemetry::enqueue(crate::telemetry::event::Search {
+    crate::telemetry::emit(crate::telemetry::event::Search {
         surface: crate::telemetry::event::Surface::Mcp,
-        latency_bucket: crate::telemetry::buckets::LatencyBucket::from(compute_elapsed),
-        candidates_returned: crate::telemetry::buckets::CountBucket::from(matches.len()),
+        latency_ms: compute_elapsed.as_millis() as u32,
+        candidates_returned: matches.len() as u32,
         // Reranker used iff `no_rerank` was not set by the config resolution
         // above.  Mirrors the `run_with_deps` emit: `reranker.is_some()`.
         reranker_used: !no_rerank,
         strict,
-        // Mirror the CLI: the bucketed whole-index corpus size the pipeline
-        // already computed (best-effort `0` on a count failure).
-        corpus_size_bucket: crate::telemetry::buckets::CountBucket::from(outcome.corpus_size),
+        // Mirror the CLI: the whole-index corpus size the pipeline already
+        // computed (best-effort `0` on a count failure; the kernel buckets it).
+        corpus_size: outcome.corpus_size as u32,
         // The embedder identity is the pinned registry entry's `&'static str`
         // name — a closed-set value from `MODEL_REGISTRY`, never free-form. On a
         // remote-embedding server this still names the active profile's bundled
@@ -464,17 +464,12 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         })
         .collect();
     let _ = tokio::task::spawn_blocking(move || {
-        // R-L1: gate the loop ONCE. The public `enqueue_attributed` re-runs
-        // `is_enabled()` (`Paths::resolve()` + a `config.toml` read) per result;
-        // resolve `Paths` + the enabled state a single time in the closure, then
-        // call the un-gated `enqueue_attributed_to(&paths, …)` inside the loop.
-        // FAIL-SAFE-OFF: an unresolvable `$HOME` or a disabled/failed gate skips
-        // the whole attributed loop (the anonymous `tome.search` already fired).
-        let paths = match crate::paths::Paths::resolve() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        if !matches!(crate::telemetry::config::resolve_enabled(&paths), Ok(true)) {
+        // R-L1: gate the attribution work ONCE on the handle-backed enabled state.
+        // When telemetry is disabled, skip the whole loop — the per-result
+        // `resolve_attribution` reads (a read-only index open per distinct
+        // catalog) are then never run, and the `emit`s would no-op anyway. The
+        // anonymous `tome.search` already fired above.
+        if !crate::telemetry::is_enabled() {
             return;
         }
         let mut attribution_cache: std::collections::HashMap<String, Option<&'static str>> =
@@ -484,17 +479,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                 crate::telemetry::resolve_attribution(&attribution_scope, &catalog)
             });
             if let Some(catalog_id) = catalog_id {
-                crate::telemetry::enqueue_attributed_to(
-                    &paths,
-                    crate::telemetry::event::SearchResult {
-                        entry_name,
-                        entry_kind,
-                        plugin_name,
-                        rank,
-                        catalog_id,
-                        calling_harness: search_harness,
-                    },
-                );
+                crate::telemetry::emit(crate::telemetry::event::SearchResult {
+                    catalog: catalog_id,
+                    entry_name,
+                    entry_kind,
+                    plugin_name,
+                    rank,
+                    calling_harness: search_harness,
+                });
             }
         }
     })

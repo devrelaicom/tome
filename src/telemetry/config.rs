@@ -156,6 +156,21 @@ pub fn resolve_enabled_with_source(paths: &Paths) -> Result<(bool, Source), Tome
     }
 }
 
+/// The `[telemetry].enabled` config value (default ON). Defensive: a malformed
+/// config reads as ON here; the kernel's other consent inputs (env/CI/global)
+/// still apply on top. Strict config errors surface on the foreground path via
+/// the normal [`resolve_enabled_with_source`] (used by the `tome telemetry`
+/// surface), unchanged.
+///
+/// This is the single bool [`crate::telemetry::init`] hands the kernel builder —
+/// the kernel folds env/CI/global itself, so we never double-gate.
+pub fn config_enabled_value(paths: &crate::paths::Paths) -> bool {
+    crate::config::load_or_default(paths)
+        .telemetry
+        .enabled
+        .unwrap_or(true)
+}
+
 /// The pinned default Gauge collector endpoint.
 pub const DEFAULT_ENDPOINT: &str = "https://gauge-telemetry.fly.dev";
 

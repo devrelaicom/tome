@@ -101,12 +101,12 @@ pub fn run(args: ModelsDownloadArgs, mode: Mode) -> Result<(), TomeError> {
         // outcome (Ok on success / Failed on error). `model_id` is the closed
         // `&'static str` registry id; `error_class` is the failure's category.
         match &result {
-            Ok(_) => crate::telemetry::enqueue(crate::telemetry::event::ModelDownload {
+            Ok(_) => crate::telemetry::emit(crate::telemetry::event::ModelDownload {
                 model_id: entry.name,
                 outcome: crate::telemetry::event::Outcome::Ok,
                 error_class: None,
             }),
-            Err(e) => crate::telemetry::enqueue(crate::telemetry::event::ModelDownload {
+            Err(e) => crate::telemetry::emit(crate::telemetry::event::ModelDownload {
                 model_id: entry.name,
                 outcome: crate::telemetry::event::Outcome::Failed,
                 error_class: Some(e.category()),

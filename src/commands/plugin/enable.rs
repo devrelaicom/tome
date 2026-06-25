@@ -171,7 +171,7 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     // surfaces and the prior `[summaries]` cache survives.
     crate::summarise::regenerate_for_trigger(scope.scope.name(), &paths)?;
 
-    crate::telemetry::enqueue(crate::telemetry::event::PluginActionEvent {
+    crate::telemetry::emit(crate::telemetry::event::PluginActionEvent {
         action: crate::telemetry::event::PluginAction::Enabled,
     });
 
@@ -183,10 +183,10 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     // attribution read and the version read are read-only, never lock, never
     // fail the command.
     if let Some(catalog_id) = crate::telemetry::resolve_attribution(scope, &id.catalog) {
-        crate::telemetry::enqueue_attributed(crate::telemetry::event::PluginEnabled {
+        crate::telemetry::emit(crate::telemetry::event::PluginEnabled {
+            catalog: catalog_id,
             plugin_name: id.plugin.clone(),
             plugin_version: super::attributed_plugin_version(&paths, &scope.scope, &id),
-            catalog_id,
         });
     }
 

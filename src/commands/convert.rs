@@ -153,7 +153,7 @@ fn emit_authoring_telemetry(level: ArtifactLevel, result: &Result<ConvertOutcome
         // best-effort: a failure before detection has no source format to read.
         Err(_) => (SourceFormat::Unknown, AuthoringOutcome::Errors),
     };
-    crate::telemetry::enqueue(AuthoringActionEvent {
+    crate::telemetry::emit(AuthoringActionEvent {
         verb: AuthoringVerb::Convert,
         artifact: artifact_of(level),
         source_format,

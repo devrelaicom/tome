@@ -72,27 +72,22 @@ pub(crate) fn calling_harness(state: &state::McpState) -> Option<Harness> {
         .and_then(crate::commands::harness::harness_name_to_enum)
 }
 
-/// Resolve the funnel `rank_bucket` for `entry_name` from this session's
+/// Resolve the funnel `rank` for `entry_name` from this session's
 /// most-recent-search state (FR-028), for the `tome.entry_info` /
 /// `tome.entry_invoked` events.
 ///
 /// Looks the name up in [`state.last_search_ranks`](state::McpState::last_search_ranks),
-/// which `search_skills::handle` clears + repopulates on every search. An
-/// entry with no preceding search this session (or one absent from the latest
-/// result list) yields [`RankBucket::None`] — `RankBucket::from_rank` also maps
-/// a defensive `0` to `None`. A poisoned lock degrades to `None` (best-effort).
-pub(crate) fn rank_bucket_for(
-    state: &state::McpState,
-    entry_name: &str,
-) -> crate::telemetry::buckets::RankBucket {
-    use crate::telemetry::buckets::RankBucket;
-    let rank = state
+/// which `search_skills::handle` clears + repopulates on every search. An entry
+/// with no preceding search this session (or one absent from the latest result
+/// list) yields `0` (the kernel buckets `0` to "no rank"). A poisoned lock
+/// degrades to `0` (best-effort).
+pub(crate) fn rank_for(state: &state::McpState, entry_name: &str) -> u32 {
+    state
         .last_search_ranks
         .lock()
         .ok()
         .and_then(|ranks| ranks.get(entry_name).copied())
-        .unwrap_or(0);
-    RankBucket::from_rank(rank)
+        .unwrap_or(0)
 }
 
 /// Emit a best-effort MCP-surface `tome.error` (FR-029/029a) for an error a tool
@@ -108,7 +103,7 @@ pub(crate) fn rank_bucket_for(
 /// it NEVER alters the returned `McpError`, produces user output, blocks, or
 /// flushes. Call it at each handler's terminal `TomeError`-bearing error site.
 pub(crate) fn enqueue_tool_error(state: &state::McpState, category: crate::error::ErrorCategory) {
-    crate::telemetry::enqueue(crate::telemetry::event::ErrorEvent {
+    crate::telemetry::emit(crate::telemetry::event::ErrorEvent {
         error_class: category,
         surface: crate::telemetry::event::Surface::Mcp,
         calling_harness: calling_harness(state),
@@ -248,11 +243,9 @@ pub fn run(
         // trigger (AC#7): the first `enqueue` lazily mints the install id with
         // no first-run notice (the notice is a CLI-only concern). Best-effort —
         // a sub-ms local append that never blocks startup or flushes.
-        crate::telemetry::enqueue(crate::telemetry::event::ColdStart {
-            embedder_load_bucket: crate::telemetry::buckets::LoadBucket::from(
-                embedder_load_elapsed,
-            ),
-            index_ready_bucket: crate::telemetry::buckets::LoadBucket::from(index_ready_elapsed),
+        crate::telemetry::emit(crate::telemetry::event::ColdStart {
+            embedder_load_ms: embedder_load_elapsed.as_millis() as u32,
+            index_ready_ms: index_ready_elapsed.as_millis() as u32,
             embedder_model_id: Some(embedder_model_id),
         });
         info!(
@@ -475,16 +468,16 @@ async fn flush_loop_turn(interval: &mut tokio::time::Interval, flush_signal: &to
     dispatch_flush();
 }
 
-/// Dispatch the one sync drain OFF the reactor (NFR-001 / SC-009): the drain does
-/// a blocking `reqwest::blocking` POST that must NEVER run on the single-thread
-/// runtime's reactor, so it is `spawn_blocking`ed. Fire-and-forget — the join is
-/// deliberately NOT awaited so the loop stays responsive to the next trigger; the
-/// drain self-serialises on its own non-blocking `flush.lock` and self-gates on
-/// the grace period, so overlapping dispatches are safe (the loser no-ops).
+/// Dispatch the one sync drain OFF the reactor (NFR-001 / SC-009).
+///
+/// TEMPORARY no-op: the bespoke `telemetry::flush()` was retired with the rest of
+/// the bespoke queue/transport machinery; the real background `Flusher` (which
+/// drives the kernel's drain off the reactor) is wired in a later task. The
+/// `flush_signal`/interval plumbing stays in place so wiring the `Flusher` is a
+/// one-function change. Until then this is a no-op so a `flush_signal` notify or
+/// the 5-min tick simply does nothing.
 fn dispatch_flush() {
-    tokio::task::spawn_blocking(|| {
-        let _ = crate::telemetry::flush();
-    });
+    // replaced by Flusher in a later task
 }
 
 /// Build the per-session [`prompts::PromptRegistry`] from the resolved
@@ -576,117 +569,19 @@ mod telemetry_flush_loop_tests {
     use super::*;
     use std::sync::Arc;
     use std::time::Duration;
-    use tempfile::TempDir;
 
-    use crate::telemetry::flush::TransportGuard;
-    use crate::telemetry::{identity, queue};
+    // The bespoke drain (`telemetry::flush()` + the queue/transport/lock seams)
+    // was retired in the gauge-telemetry cutover; `dispatch_flush` is a temporary
+    // no-op until the kernel-backed background `Flusher` is wired in a later task.
+    // The end-to-end "a notify drains the queue" assertions belong to that task's
+    // tests; here we only assert the loop plumbing the cutover keeps stable:
+    // `flush_loop_turn` returns when a trigger fires, and `dispatch_flush` is
+    // non-blocking.
 
-    // The flush loop drains the DEFAULT `Paths` (`telemetry::flush()` resolves
-    // `$HOME`), and it POSTs through the process-global flush `TransportGuard` +
-    // moves the `transport::NETWORK_CALLS` counter. Those seams are ALSO touched
-    // by the `flush.rs` and `transport.rs` lib tests, so a per-module mutex is
-    // NOT enough — a concurrent `flush.rs` seam test clobbered this one's
-    // transport override / `$HOME` queue (the `notify_drives_exactly_one_drain`
-    // flake). So this guard holds the ONE shared `crate::telemetry::test_serial()`
-    // lock EVERY seam-touching lib test acquires, guaranteeing no two run at once.
-    /// RAII: point `$HOME` at `dir` for the test, restoring the prior value on
-    /// drop, while holding the shared telemetry-test serial lock so the
-    /// process-global `$HOME` + flush seams can't be clobbered by a concurrent
-    /// seam-touching test anywhere in this binary.
-    struct HomeAndSerial {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        prior_home: Option<std::ffi::OsString>,
-    }
-    impl HomeAndSerial {
-        fn install(home: &std::path::Path) -> Self {
-            let lock = crate::telemetry::test_serial();
-            let prior_home = std::env::var_os("HOME");
-            // SAFETY: we hold the telemetry test serial lock for the lifetime of
-            // `Self`, so no other seam-touching test reads/writes `$HOME` or the
-            // flush seams concurrently.
-            unsafe { std::env::set_var("HOME", home) };
-            Self {
-                _lock: lock,
-                prior_home,
-            }
-        }
-    }
-    impl Drop for HomeAndSerial {
-        fn drop(&mut self) {
-            // SAFETY: still under the telemetry test serial lock.
-            unsafe {
-                match self.prior_home.take() {
-                    Some(v) => std::env::set_var("HOME", v),
-                    None => std::env::remove_var("HOME"),
-                }
-            }
-        }
-    }
-
-    /// The `<home>/.tome`-rooted `Paths` the default resolver produces for `home`.
-    fn paths_for_home(home: &std::path::Path) -> crate::paths::Paths {
-        crate::paths::Paths::from_root(home.join(".tome"))
-    }
-
-    /// Mint an install id, backdate its mtime (the mint time) well past the
-    /// 10-min grace, and seed the queue so a drain actually sends. The mtime is
-    /// backdated rather than installing a `ClockGuard` because the drain runs on a
-    /// `spawn_blocking` pool THREAD, where a thread-local clock override would NOT
-    /// be visible — the grace gate must be satisfied in real wall-clock terms.
-    fn seed_drainable(paths: &crate::paths::Paths) {
-        identity::ensure_install_id(paths).expect("mint id");
-        let past = filetime::FileTime::from_system_time(
-            std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
-        );
-        filetime::set_file_mtime(paths.telemetry_id(), past).expect("backdate id mtime");
-        queue::rewrite(
-            paths,
-            &[r#"{"event_type":"tome.search","n":1}"#.to_string()],
-        )
-        .expect("seed queue");
-    }
-
-    /// A recording transport that counts every POST and returns 2xx.
-    fn counting_transport() -> (TransportGuard, Arc<std::sync::atomic::AtomicUsize>) {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let posts = Arc::new(AtomicUsize::new(0));
-        let p2 = Arc::clone(&posts);
-        let guard = TransportGuard::install(move |_s, _b| {
-            p2.fetch_add(1, Ordering::SeqCst);
-            Ok(200)
-        });
-        (guard, posts)
-    }
-
-    /// Await the queue draining to empty (the `spawn_blocking` drain is async to
-    /// the test), bounded so a regression fails fast rather than hanging.
-    async fn await_drained(paths: &crate::paths::Paths) {
-        for _ in 0..200 {
-            if queue::count_pending(paths) == 0 {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("queue did not drain within the bounded wait");
-    }
-
-    /// (a) A `notify_one()` drives EXACTLY ONE drain through `flush_loop_turn`: the
-    /// notify arm fires, `dispatch_flush` `spawn_blocking`s the sync drain, and the
-    /// seeded queue is emptied (the recording transport received the batch).
-    ///
-    /// On the current-thread runtime (the MCP server's flavour — `tokio` is built
-    /// without `rt-multi-thread`), `spawn_blocking` still runs the drain on the
-    /// blocking pool; the test awaits (yielding to the reactor) until the queue
-    /// empties, which is exactly how the production loop observes its drains.
+    /// `flush_loop_turn` resolves when the notify arm fires and returns promptly
+    /// (the `dispatch_flush` it calls is a no-op stub, off the reactor regardless).
     #[tokio::test]
-    async fn notify_drives_exactly_one_drain() {
-        let home = TempDir::new().unwrap();
-        let _home = HomeAndSerial::install(home.path());
-        let paths = paths_for_home(home.path());
-
-        seed_drainable(&paths);
-        let (_t, posts) = counting_transport();
-
+    async fn flush_loop_turn_returns_on_notify() {
         // A long interval so ONLY the notify arm can fire within the test.
         let mut interval = tokio::time::interval(Duration::from_secs(3600));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -695,99 +590,33 @@ mod telemetry_flush_loop_tests {
         let signal = Arc::new(tokio::sync::Notify::new());
         signal.notify_one();
 
-        // One turn: the notify arm resolves, then `dispatch_flush` runs the drain.
+        let started = std::time::Instant::now();
         flush_loop_turn(&mut interval, &signal).await;
-        await_drained(&paths).await;
-
-        assert_eq!(
-            queue::count_pending(&paths),
-            0,
-            "the notify-triggered turn drained the queue exactly once"
-        );
-        assert_eq!(
-            posts.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "exactly one batch POST reached the transport"
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the notify arm resolved the turn promptly"
         );
     }
 
-    /// (b, off-reactor) `dispatch_flush` runs the drain OFF the reactor via
-    /// `spawn_blocking`: the call returns IMMEDIATELY (it does not block on the
-    /// `reqwest::blocking` POST) and the queue drains afterwards on the blocking
-    /// pool. On the current-thread runtime we prove this by showing the synchronous
-    /// `dispatch_flush()` returns in well under the drain's own wall time, then the
-    /// queue empties once the test yields to the reactor / blocking pool. (The
-    /// fuller "a concurrently-awaited future stays responsive" form needs a
-    /// multi-thread runtime, which `tokio` is not built with here; this is the
-    /// current-thread-appropriate proof that the drain is NOT inline.)
-    #[tokio::test]
-    async fn dispatch_runs_drain_off_the_reactor() {
-        let home = TempDir::new().unwrap();
-        let _home = HomeAndSerial::install(home.path());
-        let paths = paths_for_home(home.path());
-
-        seed_drainable(&paths);
-        let (_t, _posts) = counting_transport();
-
-        // `dispatch_flush` must NOT block on the drain — it only `spawn_blocking`s.
-        // The call itself returns promptly (the queue is still pending here).
+    /// `dispatch_flush` returns immediately (it must never block the reactor).
+    #[test]
+    fn dispatch_flush_is_non_blocking() {
         let started = std::time::Instant::now();
         dispatch_flush();
-        let dispatch_elapsed = started.elapsed();
         assert!(
-            dispatch_elapsed < Duration::from_millis(100),
-            "dispatch_flush returns immediately (off-reactor), took {dispatch_elapsed:?}"
-        );
-
-        // The drain completes on the blocking pool once the test yields the reactor.
-        await_drained(&paths).await;
-        assert_eq!(
-            queue::count_pending(&paths),
-            0,
-            "the off-reactor drain completed"
+            started.elapsed() < Duration::from_millis(100),
+            "dispatch_flush returns immediately"
         );
     }
 
-    /// (c) Aborting the loop's `JoinHandle` stops further drains: after `abort()`,
-    /// a new `notify_one` produces NO further drain (the aborted task never reaches
-    /// `flush_loop_turn` again). We spawn the REAL `telemetry_flush_loop`, let one
-    /// notify drain, abort, then re-seed + re-notify and assert the queue is
-    /// untouched.
+    /// Aborting the loop's `JoinHandle` stops it cleanly (no panic on cancel).
     #[tokio::test]
-    async fn abort_stops_further_drains() {
-        let home = TempDir::new().unwrap();
-        let _home = HomeAndSerial::install(home.path());
-        let paths = paths_for_home(home.path());
-
-        seed_drainable(&paths);
-        let (_t, _posts) = counting_transport();
-
+    async fn abort_stops_the_loop() {
         let signal = Arc::new(tokio::sync::Notify::new());
         let handle = tokio::spawn(telemetry_flush_loop(signal.clone()));
-
-        // First notify ⇒ one drain empties the seeded queue.
         signal.notify_one();
-        await_drained(&paths).await;
-        assert_eq!(queue::count_pending(&paths), 0, "first notify drained");
-
-        // Abort the loop; it can no longer reach `flush_loop_turn`.
+        tokio::time::sleep(Duration::from_millis(20)).await;
         handle.abort();
-        let _ = handle.await; // observe the cancellation
-        // Give any already-spawned blocking task a beat to settle.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Re-seed and re-notify: an aborted loop ignores the signal ⇒ no drain.
-        queue::rewrite(
-            &paths,
-            &[r#"{"event_type":"tome.search","n":2}"#.to_string()],
-        )
-        .expect("re-seed queue");
-        signal.notify_one();
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        assert_eq!(
-            queue::count_pending(&paths),
-            1,
-            "after abort, a new notify produces no further drain"
-        );
+        let _ = handle.await; // observe the cancellation; must not panic
     }
 }

@@ -518,7 +518,7 @@ fn run_disable_action(paths: &Paths, scope: &ResolvedScope, id: &PluginId) -> Lo
         summariser_seed,
     )?;
 
-    crate::telemetry::enqueue(crate::telemetry::event::PluginActionEvent {
+    crate::telemetry::emit(crate::telemetry::event::PluginActionEvent {
         action: crate::telemetry::event::PluginAction::Disabled,
     });
 
@@ -526,10 +526,10 @@ fn run_disable_action(paths: &Paths, scope: &ResolvedScope, id: &PluginId) -> Lo
     // `plugin_disabled` when this plugin's catalog resolves (by SOURCE) to an
     // allowlisted catalog — mirrors the non-interactive `disable::run` path.
     if let Some(catalog_id) = crate::telemetry::resolve_attribution(scope, &id.catalog) {
-        crate::telemetry::enqueue_attributed(crate::telemetry::event::PluginDisabled {
+        crate::telemetry::emit(crate::telemetry::event::PluginDisabled {
+            catalog: catalog_id,
             plugin_name: id.plugin.clone(),
             plugin_version: super::attributed_plugin_version(paths, &scope.scope, id),
-            catalog_id,
         });
     }
 

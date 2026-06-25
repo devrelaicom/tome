@@ -91,7 +91,7 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
         // progress: `repair` returns the first error after continuing past
         // per-location failures → all-ok = Ok, an Err carries at least one
         // failure (some may have still landed) = Partial. One infallible emit.
-        crate::telemetry::enqueue(crate::telemetry::event::MetaActionEvent {
+        crate::telemetry::emit(crate::telemetry::event::MetaActionEvent {
             action: crate::telemetry::event::MetaAction::Fix,
             outcome: if meta_repair.is_ok() {
                 crate::telemetry::event::Outcome::Ok
@@ -133,13 +133,11 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
 
     // `tome.doctor_run`: emit AFTER the report renders but BEFORE any of the
     // exit paths below (one of which is a hard `std::process::exit(1)` that
-    // would otherwise skip the emit). `findings_bucket` buckets the number of
-    // suggested-fix issues the report surfaced.
-    crate::telemetry::enqueue(crate::telemetry::event::DoctorRun {
+    // would otherwise skip the emit). `findings` is the raw number of
+    // suggested-fix issues the report surfaced (the kernel buckets it).
+    crate::telemetry::emit(crate::telemetry::event::DoctorRun {
         fix: args.fix,
-        findings_bucket: crate::telemetry::buckets::FindingsBucket::from(
-            report.suggested_fixes.len(),
-        ),
+        findings: report.suggested_fixes.len() as u32,
     });
 
     // Exit-code semantics per `contracts/doctor.md`:

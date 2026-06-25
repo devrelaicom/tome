@@ -1,19 +1,16 @@
-//! `tome telemetry {status,on,off,reset,purge}` — the user-facing controls for
-//! the local-first telemetry subsystem (Phase 10, US1).
+//! `tome telemetry {status,inspect,on,off,reset,purge,flush}` — the user-facing
+//! controls for the local-first telemetry subsystem, routed through the
+//! `gauge-telemetry` kernel handle.
 //!
 //! Every subcommand here is a foreground, user-invoked command, so — unlike the
-//! silent enqueue/flush path — it surfaces errors loudly (config parse → exit
-//! 91, non-TTY reset → exit 54). Reports land on **stdout**; the global `--json`
-//! flag (carried in `mode`) shapes them. `status` is strictly read-only: it must
-//! never mint the install id or write any state.
+//! silent emit path — it surfaces config errors loudly (a malformed config →
+//! exit 5 via [`config::resolve_enabled_with_source`]). Reports land on
+//! **stdout**; the global `--json` flag (carried in `mode`) shapes them.
+//! `status`/`inspect` are strictly read-only.
 //!
-//! `inspect` (US2) is a read-only reporter: it pretty-prints the pending queue
-//! WITHOUT sending it, leaves the queue file byte-identical, and exits 92
-//! ([`TomeError::TelemetryQueueCorrupt`]) when unparsable lines exist (after the
-//! report). `flush` (US3) drains the queue in the FOREGROUND: it reports the
-//! outcome and exits 90 ([`TomeError::TelemetryEndpointUnreachable`]) on a
-//! transport error, EXCEPT under `--quiet` (the detached child) which is silent
-//! and always exits 0. The enum is the CLI's [`crate::cli::TelemetryCommand`].
+//! The kernel owns the install id, the queue, and `reset`; this surface drives
+//! the global [`crate::telemetry::handle`] for delivery (`flush`) and identity
+//! reset, and edits `config.toml [telemetry] enabled` for the on/off switch.
 
 use std::io::Write;
 
@@ -25,17 +22,10 @@ use crate::output::{Mode, write_json};
 use crate::paths::Paths;
 use crate::presentation::prompt;
 use crate::telemetry::config::{self, Source};
-use crate::telemetry::event::Uuid;
-use crate::telemetry::{identity, transport};
 use crate::util;
 use crate::workspace::ResolvedScope;
 
 /// Subcommand dispatcher invoked by `main.rs`.
-///
-/// `paths` is resolved here from the default `$HOME` layout (via
-/// [`Paths::resolve`]) rather than read off `scope` — `ResolvedScope` carries
-/// workspace identity, not a `Paths`, and telemetry state is per-install (not
-/// per-workspace). This mirrors how `status`/`harness` obtain `Paths`.
 pub fn run(cmd: TelemetryCommand, _scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
     match cmd {
@@ -53,9 +43,7 @@ pub fn run(cmd: TelemetryCommand, _scope: &ResolvedScope, mode: Mode) -> Result<
 // status — read-only report
 // ---------------------------------------------------------------------------
 
-/// The byte-stable `tome telemetry status` record (pin-tested). Field order and
-/// the `skip_serializing_if` gates are load-bearing: a JSON consumer parses this
-/// exact shape.
+/// The `tome telemetry status` record.
 #[derive(Debug, Serialize)]
 struct StatusReport {
     /// Whether telemetry is enabled for this install (resolved precedence).
@@ -74,13 +62,8 @@ struct StatusReport {
     last_flush: Option<LastFlush>,
 }
 
-/// The `telemetry/last-flush` stamp shape — written by the flusher (US3,
-/// `flush::stamp_last_flush`) as `{"timestamp":"<rfc3339>","last_status":<u16|null>}`.
-///
-/// `status` deserializes from the stamp's `last_status` key and is an `Option`
-/// so a failed-drain `null` status (no batch acknowledged a 2xx) is
-/// distinguished from a successful 2xx. `#[serde(default)]` lets a stamp that
-/// omits the field (shouldn't happen — the writer always emits it) still parse.
+/// The kernel `last-flush` stamp shape (best-effort — the kernel writes it on a
+/// successful drain). `status` only reads it.
 #[derive(Debug, Serialize, Deserialize)]
 struct LastFlush {
     timestamp: String,
@@ -90,14 +73,14 @@ struct LastFlush {
 
 fn status(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
     // Resolve the enabled-state precedence. This is the ONLY fallible read here
-    // — a malformed config surfaces as exit 91 (loud, on the foreground CLI).
+    // — a malformed config surfaces loudly on the foreground CLI.
     let (enabled, source) = config::resolve_enabled_with_source(paths)?;
 
     let report = StatusReport {
         enabled,
         source,
         install_uuid: read_install_uuid(paths),
-        endpoint: transport::resolve_endpoint(),
+        endpoint: config::resolve_endpoint(paths),
         pending: pending_count(paths),
         last_flush: read_last_flush(paths),
     };
@@ -108,35 +91,56 @@ fn status(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
     }
 }
 
-/// Read the install UUID from `telemetry/id` WITHOUT minting it. `status` is
-/// read-only (FR), so an absent or corrupt id is simply `None` — we never call
-/// `ensure_install_id` (which would mint). The id file is one trimmed line.
+/// Read the install UUID from the kernel id file WITHOUT minting it. `status` is
+/// read-only, so an absent/unreadable id is simply `None`. The id file is one
+/// trimmed line; we surface it only when it has the v4 UUID shape (lowercase hex
+/// `8-4-4-4-12` with the version/variant nibbles), so a garbage file reports
+/// `None` rather than echoing junk.
 fn read_install_uuid(paths: &Paths) -> Option<String> {
     let body = util::bounded_read_to_string(&paths.telemetry_id(), util::TOME_CONFIG_MAX).ok()?;
     let first = body.lines().next().unwrap_or("").trim();
-    Uuid::parse(first).map(|u| u.as_str().to_string())
+    if looks_like_v4_uuid(first) {
+        Some(first.to_string())
+    } else {
+        None
+    }
 }
 
-/// Count queued events = non-blank lines in `telemetry/queue.jsonl`. Routes
-/// through the queue module's SSOT [`queue::count_pending`] (read-only, missing
-/// queue ⇒ 0, any error ⇒ 0) rather than re-counting lines inline, so the
-/// "what counts as a pending line" rule lives in exactly one place. The `as u64`
-/// keeps the byte-stable `pending` JSON field type unchanged.
+/// A lenient v4-UUID shape check (lowercase-hex `8-4-4-4-12`, version nibble `4`,
+/// variant nibble in `{8,9,a,b}`). Used only to decide whether to surface the
+/// stored id in `status`; the authoritative id is the kernel's.
+fn looks_like_v4_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    for &i in &[8usize, 13, 18, 23] {
+        if b[i] != b'-' {
+            return false;
+        }
+    }
+    for (i, &c) in b.iter().enumerate() {
+        if matches!(i, 8 | 13 | 18 | 23) {
+            continue;
+        }
+        if !(c.is_ascii_digit() || (b'a'..=b'f').contains(&c)) {
+            return false;
+        }
+    }
+    b[14] == b'4' && matches!(b[19], b'8' | b'9' | b'a' | b'b')
+}
+
+/// Count pending events = non-blank lines in the kernel queue file. Read-only; a
+/// missing queue or any read error ⇒ 0.
 fn pending_count(paths: &Paths) -> u64 {
-    crate::telemetry::queue::count_pending(paths) as u64
+    std::fs::read_to_string(paths.telemetry_queue())
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+        .unwrap_or(0)
 }
 
-/// Read the `telemetry/last-flush` stamp, if present.
-///
-/// Best-effort and read-only (like every `status` read): an absent file, an
-/// unreadable/over-cap file, or an unparsable body all degrade to `None` — a
-/// `status` report never fails on the stamp. The flusher (US3) writes the stamp
-/// as `{"timestamp":...,"last_status":<u16|null>}`; we parse exactly that shape.
+/// Read the kernel `last-flush` stamp, if present. Best-effort and read-only.
 fn read_last_flush(paths: &Paths) -> Option<LastFlush> {
     let path = paths.telemetry_last_flush();
-    // Sec-L1: read/write containment parity — the flusher writes the stamp via the
-    // shared atomic (symlink-refusing) writer; refuse a symlinked component on the
-    // read too. A hostile stamp degrades to `None` (absent), never propagated.
     util::refuse_symlinked_component(&path).ok()?;
     let body = util::bounded_read_to_string(&path, util::TOME_CONFIG_MAX).ok()?;
     serde_json::from_str::<LastFlush>(&body).ok()
@@ -165,8 +169,6 @@ fn emit_status_human(report: &StatusReport) -> Result<(), TomeError> {
     match &report.last_flush {
         Some(lf) => match lf.status {
             Some(s) => writeln!(out, "last flush: {} (status {})", lf.timestamp, s)?,
-            // A `null` status means the drain ran but no batch was acknowledged
-            // (empty queue, or a transport error before any 2xx).
             None => writeln!(out, "last flush: {} (no successful delivery)", lf.timestamp)?,
         },
         None => writeln!(out, "last flush: never")?,
@@ -188,11 +190,9 @@ fn source_label(source: Source) -> &'static str {
 // inspect — read-only dump of the pending queue (NEVER sends, NEVER repairs)
 // ---------------------------------------------------------------------------
 
-/// The byte-stable `tome telemetry inspect --json` record (pin-tested). Field
-/// order is load-bearing. `events` preserves queue (FIFO) order and embeds the
-/// parsed JSON values verbatim. `corrupt` is the count of unparsable lines that
-/// were skipped — inspect reports them but NEVER repairs the queue (the flusher
-/// self-heals on drain).
+/// The `tome telemetry inspect --json` record. `events` preserves queue (FIFO)
+/// order and embeds the parsed JSON values verbatim. `corrupt` counts unparsable
+/// lines that were skipped — inspect reports them but NEVER repairs the queue.
 #[derive(Debug, Serialize)]
 struct InspectReport {
     /// Total parsable pending events (the length of `events`).
@@ -205,15 +205,12 @@ struct InspectReport {
 
 /// `tome telemetry inspect` — pretty-print the pending queue without sending it.
 ///
-/// Strictly read-only: routes through [`queue::classify_lines`] /
-/// [`queue::read_lines`], which never mutate the file, so the queue is
-/// byte-identical afterwards. The report (human or JSON) is emitted FIRST; then,
-/// if any line was unparsable, we surface [`TomeError::TelemetryQueueCorrupt`]
-/// (exit 92) carrying the SCRUBBED queue path. A clean queue exits 0.
+/// Strictly read-only: reads the queue lines and classifies them, leaving the
+/// file byte-identical. The report is emitted FIRST; then, if any line was
+/// unparsable, we surface [`TomeError::TelemetryQueueCorrupt`] (exit 92) carrying
+/// the SCRUBBED queue path. A clean queue exits 0.
 fn inspect_run(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
-    // Read-only classification: parsed values + a count of unparsable lines.
-    // `classify_lines` (and the `read_lines` it calls) only read the file.
-    let (events, corrupt) = crate::telemetry::queue::classify_lines(paths)?;
+    let (events, corrupt) = classify_queue_lines(paths);
     let pending = events.len() as u64;
 
     match mode {
@@ -228,10 +225,6 @@ fn inspect_run(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
         Mode::Human => emit_inspect_human(pending, corrupt, &events)?,
     }
 
-    // The report has already been printed. If the queue held unparsable lines,
-    // surface exit 92 — but NEVER mutate the queue (no repair); the flusher
-    // self-heals on its next drain. The path is scrubbed like every other
-    // telemetry-facing string.
     if corrupt > 0 {
         return Err(TomeError::TelemetryQueueCorrupt {
             path: scrubbed_queue_path(paths),
@@ -239,6 +232,28 @@ fn inspect_run(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
         });
     }
     Ok(())
+}
+
+/// Read the kernel queue file and split each non-blank line into a parsed JSON
+/// value or a corrupt count. Read-only; a missing/unreadable queue is `(empty, 0)`.
+fn classify_queue_lines(paths: &Paths) -> (Vec<serde_json::Value>, usize) {
+    let body = match std::fs::read_to_string(paths.telemetry_queue()) {
+        Ok(b) => b,
+        Err(_) => return (Vec::new(), 0),
+    };
+    let mut events = Vec::new();
+    let mut corrupt = 0usize;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(v) => events.push(v),
+            Err(_) => corrupt += 1,
+        }
+    }
+    (events, corrupt)
 }
 
 fn emit_inspect_human(
@@ -249,14 +264,14 @@ fn emit_inspect_human(
     let mut out = std::io::stdout().lock();
     writeln!(out, "pending: {pending}")?;
     for (i, ev) in events.iter().enumerate() {
-        // Surface the event_type when present (the wire field is `event_type`);
+        // The kernel envelope namespaces the event under an `event.name` field;
         // fall back to "(unknown)" so a value missing it still lists.
         let kind = ev
-            .get("event_type")
+            .get("event")
+            .and_then(|e| e.get("name"))
             .and_then(serde_json::Value::as_str)
+            .or_else(|| ev.get("event_type").and_then(serde_json::Value::as_str))
             .unwrap_or("(unknown)");
-        // A compact, one-line rendering of the value (no pretty-print: keep it
-        // to a single line per event).
         let compact = serde_json::to_string(ev).unwrap_or_else(|_| "<unrenderable>".to_string());
         writeln!(out, "  [{i}] {kind}: {compact}")?;
     }
@@ -270,10 +285,8 @@ fn emit_inspect_human(
 }
 
 /// Scrub the queue path for inclusion in a [`TomeError::TelemetryQueueCorrupt`]
-/// surface. A filesystem path can't carry URL credentials, but routing it
-/// through the shared scrubber keeps "every telemetry-facing string is scrubbed"
-/// true by construction — every path string routes through
-/// [`crate::catalog::git::scrub_credentials`].
+/// surface. A filesystem path can't carry URL credentials, but routing it through
+/// the shared scrubber keeps "every telemetry-facing string is scrubbed" true.
 fn scrubbed_queue_path(paths: &Paths) -> std::path::PathBuf {
     let queue = paths.telemetry_queue();
     let bytes = queue.to_string_lossy();
@@ -286,10 +299,9 @@ fn scrubbed_queue_path(paths: &Paths) -> std::path::PathBuf {
 // ---------------------------------------------------------------------------
 
 fn on(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
+    // The kernel mints the install id lazily on its first emit; we only flip the
+    // config switch here (a later command's emit mints, no eager mint needed).
     config::set_enabled(paths, true)?;
-    // Mint the install id if absent so an identity exists for the funnel join
-    // key. `ensure_install_id` is idempotent (no-op when present).
-    identity::ensure_install_id(paths)?;
     if mode == Mode::Human {
         let mut out = std::io::stdout().lock();
         writeln!(out, "Telemetry enabled.")?;
@@ -314,9 +326,8 @@ fn off(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
 
 fn reset(paths: &Paths, args: TelemetryResetArgs, mode: Mode) -> Result<(), TomeError> {
     if !args.yes {
-        // Confirm-or-refuse. `prompt::confirm` refuses up front on a non-TTY
-        // with `NotATerminal` (exit 54) — the same pattern as `models remove` —
-        // so a scripted reset MUST pass `--yes`. A Ctrl-C maps to `Interrupted`.
+        // Confirm-or-refuse. `prompt::confirm` refuses up front on a non-TTY with
+        // `NotATerminal` (exit 54), so a scripted reset MUST pass `--yes`.
         let proceed = prompt::confirm(
             "This severs telemetry continuity (new install UUID, queue cleared). Continue?",
             false,
@@ -330,16 +341,15 @@ fn reset(paths: &Paths, args: TelemetryResetArgs, mode: Mode) -> Result<(), Tome
         }
     }
 
-    // `identity::reset` acquires the flush lock first, then mints a fresh id and
-    // clears the queue. Returns the new UUID.
-    let fresh = identity::reset(paths)?;
+    // The kernel `reset` mints a fresh install id and clears the queue.
+    if let Some(h) = crate::telemetry::handle() {
+        h.reset().map_err(TomeError::Io)?;
+    }
+
     if mode == Mode::Human {
         let mut out = std::io::stdout().lock();
-        writeln!(
-            out,
-            "Telemetry identity reset. New install UUID: {}",
-            fresh.as_str()
-        )?;
+        let fresh = read_install_uuid(paths).unwrap_or_else(|| "(unavailable)".to_string());
+        writeln!(out, "Telemetry identity reset. New install UUID: {fresh}")?;
     }
     Ok(())
 }
@@ -349,9 +359,19 @@ fn reset(paths: &Paths, args: TelemetryResetArgs, mode: Mode) -> Result<(), Tome
 // ---------------------------------------------------------------------------
 
 fn purge(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
-    // Unconditional (no confirm): purge deletes the id, clears the queue, and
-    // sets enabled=false. It acquires the flush lock first.
-    identity::purge(paths)?;
+    // Disable in config first, then remove all telemetry state files (id + queue
+    // + the Tome-owned stamps). A missing file is fine.
+    config::set_enabled(paths, false)?;
+    for p in [
+        paths.telemetry_id(),
+        paths.telemetry_queue(),
+        paths.telemetry_last_version(),
+        paths.telemetry_last_heartbeat(),
+        paths.telemetry_last_flush(),
+        paths.telemetry_last_flush_attempt(),
+    ] {
+        let _ = std::fs::remove_file(p);
+    }
     if mode == Mode::Human {
         let mut out = std::io::stdout().lock();
         writeln!(
@@ -366,50 +386,32 @@ fn purge(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
 // flush — FOREGROUND drain (and the detached child's `--quiet` entry point)
 // ---------------------------------------------------------------------------
 
-/// `tome telemetry flush [--quiet]` — drain the pending queue to the collector
-/// in the FOREGROUND (this is NOT the spawn site; it calls
-/// [`crate::telemetry::flush::run`] directly).
+/// `tome telemetry flush [--quiet]` — drain the pending queue to the collector in
+/// the FOREGROUND via the kernel handle's `run_flush` (this process IS the
+/// detached child under `--quiet`). Best-effort: the kernel drain never fails the
+/// caller, so this always exits 0 (the former exit-90 path is vestigial).
 ///
-/// Two modes, both routing through the ONE shared drain:
-/// - **default (loud)**: report the outcome on stdout and exit 0 on a clean
-///   drain; surface [`TelemetryEndpointUnreachable`](TomeError::TelemetryEndpointUnreachable)
-///   (exit 90, scrubbed endpoint) on a transport error, and propagate any other
-///   error.
-/// - **`--quiet`** (the spawned detached child, FR-020): discard the `Result`
-///   entirely — NO stdout/stderr, ALWAYS exit 0. A transport failure is invisible
-///   to the background child (it leaves the queue intact to retry next drain).
-///
-/// The `--quiet` child neither enqueues nor spawns: it is a `Telemetry` command,
-/// so `main.rs` skips `cli_startup` (no mint/notice) AND skips `teardown_at_exit`
+/// The `--quiet` child neither emits nor spawns: it is a `Telemetry` command, so
+/// `main.rs` skips `cli_startup` (no mint/notice) AND skips `teardown_at_exit`
 /// (no recursive flusher fork) — that gating is the fork-bomb guard.
 fn flush_run(paths: &Paths, args: TelemetryFlushArgs, mode: Mode) -> Result<(), TomeError> {
-    let result = crate::telemetry::flush::run(paths);
+    if let Some(h) = crate::telemetry::handle() {
+        h.run_flush();
+    }
 
     if args.quiet {
-        // FR-020: the detached child must be silent and always exit 0. Swallow
-        // the outcome wholesale — a transport failure stays in the queue for the
-        // next drain and is never surfaced.
+        // The detached child must be silent and always exit 0.
         return Ok(());
     }
 
-    match result {
-        Ok(()) => {
-            if mode == Mode::Human {
-                let mut out = std::io::stdout().lock();
-                // A best-effort, concise outcome: the pending count after the
-                // drain distinguishes "sent everything" from "nothing queued".
-                let pending = crate::telemetry::queue::count_pending(paths);
-                if pending == 0 {
-                    writeln!(out, "Telemetry flushed.")?;
-                } else {
-                    writeln!(out, "Telemetry flush: {pending} event(s) still pending.")?;
-                }
-            }
-            Ok(())
+    if mode == Mode::Human {
+        let mut out = std::io::stdout().lock();
+        let pending = pending_count(paths);
+        if pending == 0 {
+            writeln!(out, "Telemetry flushed.")?;
+        } else {
+            writeln!(out, "Telemetry flush: {pending} event(s) still pending.")?;
         }
-        // A transport/non-https/unreachable error surfaces as exit 90 with the
-        // SCRUBBED endpoint (the error variant already carries the scrubbed form).
-        // Any other error propagates unchanged.
-        Err(e) => Err(e),
     }
+    Ok(())
 }

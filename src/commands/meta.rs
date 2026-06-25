@@ -260,7 +260,7 @@ fn emit_meta_telemetry(action: crate::telemetry::event::MetaAction, report: Opti
             }
         }
     };
-    crate::telemetry::enqueue(MetaActionEvent { action, outcome });
+    crate::telemetry::emit(MetaActionEvent { action, outcome });
 }
 
 /// Install `skill_id` into every target, forward-progress. An up-to-date
