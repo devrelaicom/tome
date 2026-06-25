@@ -22,7 +22,6 @@ use crate::catalog::manifest::CatalogManifest;
 use crate::cli::CatalogUpdateArgs;
 use crate::commands::plugin::registry_seeds;
 use crate::config::Config;
-use crate::embedding::fastembed::FastembedEmbedder;
 use crate::error::TomeError;
 use crate::index::meta::{self, ModelIdent};
 use crate::index::skills::ReindexSummary;
@@ -36,6 +35,10 @@ use crate::workspace::{Scope, WorkspaceName};
 
 pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
+
+    // Phase 12 / US2: load the global config strictly so the embedder resolves
+    // remote-vs-bundled and the drift guard compares the right identity.
+    let cfg = crate::config::load(&paths)?;
 
     let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
     let conn = index::open(
@@ -52,17 +55,17 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
     // any git fetch or model load. `catalog update` re-embeds the affected
     // plugins (a PARTIAL re-embed), so landing new-dimension vectors against an
     // old-dimension index would corrupt it. The configured embedder is the
-    // ACTIVE profile's; reindex is the only path allowed to switch it.
-    {
-        let configured = meta::active_embedder(&conn)?;
-        meta::guard_embedder_drift(
-            &conn,
-            &ModelIdent {
-                name: configured.name.to_owned(),
-                version: configured.version.to_owned(),
-            },
-        )?;
-    }
+    // ACTIVE (remote-or-bundled) identity; reindex is the only path allowed to
+    // switch it.
+    let active_embedder = meta::active_embedder(&conn)?;
+    let active_embedder_seed = crate::embedding::embedder_seed(&cfg, active_embedder)?;
+    meta::guard_embedder_drift(
+        &conn,
+        &ModelIdent {
+            name: active_embedder_seed.name.clone(),
+            version: active_embedder_seed.version.clone(),
+        },
+    )?;
 
     // Resolve the URL/ref pairs to refresh. With `--name`, only the
     // resolved workspace's enrolment of that catalog. Without, the
@@ -88,8 +91,9 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
     drop(conn);
 
     // Lazy embedder — only paid for once we hit the first catalog with
-    // at least one enabled plugin in any workspace.
-    let mut embedder: Option<FastembedEmbedder> = None;
+    // at least one enabled plugin in any workspace. `Box<dyn Embedder>` so the
+    // remote-or-bundled choice (Phase 12) is uniform.
+    let mut embedder: Option<Box<dyn crate::embedding::Embedder>> = None;
 
     for target in targets {
         let cache_dir = paths.cache_dir_for(&target.url);
@@ -134,8 +138,8 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
                 continue;
             }
 
-            let embedder_ref =
-                embedder.get_or_insert_with_result::<TomeError, _>(|| load_embedder(&paths))?;
+            let embedder_ref = embedder
+                .get_or_insert_with_result::<TomeError, _>(|| load_embedder(&cfg, &paths))?;
 
             // F11b + FF1: `lifecycle::reindex_plugin` resolves the plugin
             // directory from the `workspace_catalogs` enrolment, so the
@@ -144,13 +148,15 @@ pub fn run(args: CatalogUpdateArgs, scope: &ResolvedScopeArg, mode: Mode) -> Res
             let config = Config::default();
             let ws_scope =
                 Scope(WorkspaceName::parse(&ws_name).unwrap_or_else(|_| WorkspaceName::global()));
-            let (e_seed, r_seed, s_seed) = registry_seeds();
+            let (_e_seed, r_seed, s_seed) = registry_seeds();
             let deps = LifecycleDeps {
                 paths: &paths,
                 scope: &ws_scope,
                 config: &config,
-                embedder: embedder_ref,
-                embedder_seed: e_seed,
+                embedder: embedder_ref.as_ref(),
+                // Phase 12: the meta seed reflects the ACTIVE (remote-or-bundled)
+                // embedder identity, proven above to match the stored identity.
+                embedder_seed: active_embedder_seed.clone(),
                 reranker_seed: r_seed,
                 summariser_seed: s_seed,
                 allow_model_download: false,
@@ -257,10 +263,15 @@ impl<T> GetOrInsertWithResult<T> for Option<T> {
     }
 }
 
-fn load_embedder(paths: &Paths) -> Result<FastembedEmbedder, TomeError> {
-    // B4: resolve the ACTIVE profile's embedder via `meta`. The B3 guard above
-    // has already proven the configured embedder matches the stored one, so
-    // this loads the model that produced the index's vectors.
+fn load_embedder(
+    cfg: &Config,
+    paths: &Paths,
+) -> Result<Box<dyn crate::embedding::Embedder>, TomeError> {
+    // B4 / Phase 12: build the ACTIVE (remote-or-bundled) embedder. The B3 guard
+    // above has already proven the configured embedder matches the stored one,
+    // so this constructs the embedder that produced the index's vectors. On the
+    // remote path the validator's expected dimension is seeded from the
+    // persisted `meta.embedder_dimension`.
     let (e_seed, r_seed, s_seed) = registry_seeds();
     let conn = index::open(
         &paths.index_db,
@@ -272,8 +283,13 @@ fn load_embedder(paths: &Paths) -> Result<FastembedEmbedder, TomeError> {
         },
     )?;
     let entry = meta::active_embedder(&conn)?;
-    let dir = paths.model_path(entry.name)?;
-    FastembedEmbedder::load(entry, &dir)
+    let persisted_dim =
+        if crate::provider::resolve(cfg, crate::provider::Capability::Embedding)?.is_some() {
+            meta::read_embedder_dimension(&conn)?
+        } else {
+            None
+        };
+    crate::embedding::build_embedder(cfg, paths, entry, persisted_dim)
 }
 
 /// Look up enabled plugins for one `(workspace, catalog)`. Opens its

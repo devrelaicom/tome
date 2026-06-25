@@ -162,6 +162,7 @@ fn search_full_literal_pin() {
         strict: false,
         corpus_size_bucket: CountBucket::TwentyToNinetyNine,
         embedder_model_id: Some("bge-small-en-v1.5"),
+        embedding_provider_kind: ProviderKind::Bundled,
         calling_harness: Some(Harness::ClaudeCode),
     };
     let expected = envelope_prefix("tome.search")
@@ -172,6 +173,7 @@ fn search_full_literal_pin() {
 ,\"strict\":false\
 ,\"corpus_size_bucket\":\"20-99\"\
 ,\"embedder_model_id\":\"bge-small-en-v1.5\"\
+,\"embedding_provider_kind\":\"bundled\"\
 ,\"calling_harness\":\"claude-code\"}";
     assert_eq!(line(&event), expected);
 }
@@ -514,6 +516,7 @@ fn search_optionals_are_omitted_when_none() {
         strict: false,
         corpus_size_bucket: CountBucket::FiveToNineteen,
         embedder_model_id: None,
+        embedding_provider_kind: ProviderKind::Bundled,
         calling_harness: None,
     };
     let got = line(&event);
@@ -525,14 +528,20 @@ fn search_optionals_are_omitted_when_none() {
         !got.contains("calling_harness"),
         "None calling_harness must be omitted: {got}"
     );
-    // Exact tail with both optionals absent.
+    // `embedding_provider_kind` is ALWAYS present (no `skip`).
+    assert!(
+        got.contains("\"embedding_provider_kind\":\"bundled\""),
+        "embedding_provider_kind must always be present: {got}"
+    );
+    // Exact tail with both optionals absent; `embedding_provider_kind` stays.
     let expected = envelope_prefix("tome.search")
         + ",\"surface\":\"cli\"\
 ,\"latency_bucket\":\"<50ms\"\
 ,\"candidates_returned\":\"1-4\"\
 ,\"reranker_used\":true\
 ,\"strict\":false\
-,\"corpus_size_bucket\":\"5-19\"}";
+,\"corpus_size_bucket\":\"5-19\"\
+,\"embedding_provider_kind\":\"bundled\"}";
     assert_eq!(got, expected);
 }
 
@@ -546,12 +555,17 @@ fn search_optionals_are_present_when_some() {
         strict: true,
         corpus_size_bucket: CountBucket::FiveToNineteen,
         embedder_model_id: Some("bge-small-en-v1.5"),
+        embedding_provider_kind: ProviderKind::Openai,
         calling_harness: Some(Harness::Opencode),
     };
     let got = line(&event);
     assert!(
         got.contains("\"embedder_model_id\":\"bge-small-en-v1.5\""),
         "Some embedder_model_id must be present: {got}"
+    );
+    assert!(
+        got.contains("\"embedding_provider_kind\":\"openai\""),
+        "embedding_provider_kind must be present: {got}"
     );
     assert!(
         got.contains("\"calling_harness\":\"opencode\""),

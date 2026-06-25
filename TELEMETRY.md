@@ -112,7 +112,8 @@ meta-skill ids, never from user content.
 version), `heartbeat` (bucketed skills/commands/agents/workspaces/catalogs counts
 + a sorted list of detected harnesses; at most once per UTC day), `search`
 (`surface`, `latency_bucket`, `candidates_returned`, `reranker_used`, `strict`,
-`corpus_size_bucket`, `embedder_model_id?`, `calling_harness?`), `entry_info`
+`corpus_size_bucket`, `embedder_model_id?`, `embedding_provider_kind` — the
+closed `ProviderKind`, `calling_harness?`), `entry_info`
 (`rank_bucket`, `calling_harness?`), `entry_invoked` (`entry_kind`, `rank_bucket`,
 `calling_harness?`), `prompt_invoked` (`prompt_kind`, `calling_harness?`),
 `catalog_action` (`action`, `source_type`), `plugin_action` (`action`),

@@ -14,7 +14,6 @@ use tracing::info;
 
 use crate::cli::PluginEnableArgs;
 use crate::embedding::download::download_model;
-use crate::embedding::fastembed::FastembedEmbedder;
 use crate::error::TomeError;
 use crate::output::{self, Mode};
 use crate::paths::Paths;
@@ -33,8 +32,12 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     let paths = Paths::resolve()?;
     // F2a: single global config; F11 reintroduces workspace-aware view.
     // LifecycleDeps.config is vestigial (the field is never read by the
-    // lifecycle); use the default until a later task wires config::load here.
+    // lifecycle); use the default for that slot. Phase 12: the GLOBAL config is
+    // loaded strictly (`cfg`) so the embedder can resolve remote-vs-bundled and
+    // the drift guard compares the right identity — a malformed config is a
+    // loud exit 5, not a silent fallback to bundled.
     let config = crate::config::Config::default();
+    let cfg = crate::config::load(&paths)?;
 
     // Pre-check catalog + plugin existence so we can surface the right exit
     // code before doing any model work. Lifecycle re-checks this internally;
@@ -47,37 +50,61 @@ pub fn run(args: PluginEnableArgs, scope: &ResolvedScope, mode: Mode) -> Result<
     // B4: resolve the ACTIVE profile's embedder (not the hard-coded default).
     let embedder_meta = crate::index::meta::active_embedder(&conn)?;
 
+    // Phase 12 / US2: the drift-guard + meta seed must reflect the ACTIVE
+    // embedder identity — remote (`"<provider>/<model>"`/`"external"`) when an
+    // `[embedding]` provider is configured, else the active-profile registry
+    // identity. So switching the embedding model HARD-fails this write path
+    // (41/42) rather than landing mismatched vectors.
+    let active_embedder_seed = crate::embedding::embedder_seed(&cfg, embedder_meta)?;
+
     // B3: refuse a partial re-embed under embedder drift BEFORE any model work.
-    // If the configured active-profile embedder no longer matches the embedder
-    // stamped in `meta`, enabling a plugin would land a new-dimension vector in
-    // a table of old-dimension vectors. Direct the user at `tome reindex`.
+    // If the configured (remote-or-bundled) embedder no longer matches the
+    // embedder stamped in `meta`, enabling a plugin would land a new-dimension
+    // vector in a table of old-dimension vectors. Direct the user at
+    // `tome reindex`.
     crate::index::meta::guard_embedder_drift(
         &conn,
         &crate::index::meta::ModelIdent {
-            name: embedder_meta.name.to_owned(),
-            version: embedder_meta.version.to_owned(),
+            name: active_embedder_seed.name.clone(),
+            version: active_embedder_seed.version.clone(),
         },
     )?;
     drop(conn);
 
+    // Phase 12: is the embedder remote? On the remote path the local-model
+    // download prompt is skipped (there is no embedder model to fetch — the
+    // reranker is loaded lazily by `query`, not here).
+    let remote_embedding =
+        crate::provider::resolve(&cfg, crate::provider::Capability::Embedding)?.is_some();
+
     // Model-presence handling — T074 UI side. The lifecycle's
     // `allow_model_download` boolean is always set to false because we own
     // the download path here. Lifecycle re-checks the manifests after we
-    // return.
-    ensure_models_or_prompt(&paths, &args, mode)?;
+    // return. Skipped on the remote path (no local embedder model).
+    if !remote_embedding {
+        ensure_models_or_prompt(&paths, &args, mode)?;
+    }
 
-    // Construct the real embedder. Reranker isn't loaded on enable (the
-    // query path will load it on demand).
-    let embedder_dir = paths.model_path(embedder_meta.name)?;
-    let embedder = FastembedEmbedder::load(embedder_meta, &embedder_dir)?;
+    // Construct the embedder: remote when `[embedding]` is configured, else the
+    // bundled active-profile model. Reranker isn't loaded on enable (the query
+    // path loads it on demand). The drift guard above has already proven the
+    // configured embedder matches the stored identity, so a remote embedder's
+    // index-time validation asserts the persisted dimension; pass it as the seed.
+    let persisted_dim = if remote_embedding {
+        let conn = open_index_for_read(&paths, &scope.scope)?;
+        crate::index::read_embedder_dimension(&conn)?
+    } else {
+        None
+    };
+    let embedder = crate::embedding::build_embedder(&cfg, &paths, embedder_meta, persisted_dim)?;
 
-    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
+    let (_e_seed, reranker_seed, summariser_seed) = registry_seeds();
     let deps = LifecycleDeps {
         paths: &paths,
         scope: &scope.scope,
         config: &config,
-        embedder: &embedder,
-        embedder_seed,
+        embedder: embedder.as_ref(),
+        embedder_seed: active_embedder_seed,
         reranker_seed,
         summariser_seed,
         allow_model_download: false,

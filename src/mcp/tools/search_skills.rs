@@ -244,10 +244,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         min_score: None,
     };
 
-    let embedder_seed = MetaSeed {
-        name: state.embedder_entry.name.into(),
-        version: state.embedder_entry.version.into(),
-    };
+    // Phase 12 / US2: the embedder seed is the ACTIVE identity computed at
+    // startup (remote `"<provider>/<model>"`/`"external"` or the bundled
+    // registry identity) — NOT re-derived from `embedder_entry`, so drift
+    // detection on a remote index compares against the right stored `meta` rows.
+    let embedder_seed = state.embedder_seed.clone();
     let reranker_seed = MetaSeed {
         name: state.reranker_entry.name.into(),
         version: state.reranker_entry.version.into(),
@@ -385,8 +386,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         // already computed (best-effort `0` on a count failure).
         corpus_size_bucket: crate::telemetry::buckets::CountBucket::from(outcome.corpus_size),
         // The embedder identity is the pinned registry entry's `&'static str`
-        // name — a closed-set value from `MODEL_REGISTRY`, never free-form.
+        // name — a closed-set value from `MODEL_REGISTRY`, never free-form. On a
+        // remote-embedding server this still names the active profile's bundled
+        // registry entry (the per-search provider kind is the new field below).
         embedder_model_id: Some(state.embedder_entry.name),
+        // Phase 12: which provider kind served the embedding for this MCP
+        // search. Same SSOT mapping as the CLI; `cfg` was loaded defensively
+        // above. Records ONLY the kind.
+        embedding_provider_kind: crate::telemetry::event::ProviderKind::for_embedding(&cfg),
         calling_harness: crate::mcp::calling_harness(&state),
     });
     // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
