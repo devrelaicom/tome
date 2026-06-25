@@ -723,6 +723,37 @@ pub struct TelemetryAllowlistEntry {
     pub canonical_source: String,
 }
 
+/// Phase 12 / US4 (FR-018): one configured remote provider that a model
+/// capability references, surfaced read-only by the doctor pass.
+///
+/// `reachable` is `None` without `--verify` (the default, no network); with
+/// `--verify` it is `Some(true|false)` after ONE lightweight real round-trip
+/// against the capability the provider serves. `credential_resolvable` reflects
+/// whether an env (`TOME_<NAME>_API_KEY`) or inline `api_key` credential
+/// resolves — NEVER the credential itself (the value is never serialised).
+///
+/// Plain `Serialize` (output only). The `name` + `kind` are non-secret config;
+/// the `reachable` `Option` carries `skip_serializing_if` so the
+/// without-`--verify` shape omits it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderReport {
+    /// The registry name (the `[providers.<name>]` key).
+    pub name: String,
+    /// The provider kind (`openai` / `anthropic` / `gemini` / `voyage`).
+    pub kind: String,
+    /// The capabilities this provider serves in the current config
+    /// (`summariser` / `embedding` / `reranker`), sorted + deduped. A provider
+    /// referenced by more than one capability appears once with every role.
+    pub capabilities: Vec<String>,
+    /// Whether a credential resolves for this provider (env override or inline).
+    /// The credential value is NEVER serialised — only its presence.
+    pub credential_resolvable: bool,
+    /// Reachability verdict. `None` without `--verify`; `Some(ok)` after one
+    /// lightweight real round-trip with `--verify`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reachable: Option<bool>,
+}
+
 /// Full doctor report. Field order matches `contracts/doctor.md` +
 /// `contracts/doctor-extensions-p4.md` so the rendered JSON is
 /// deterministic.
@@ -842,6 +873,13 @@ pub struct DoctorReport {
     /// existing wire shape unchanged. `assemble_report` always populates it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<TelemetrySection>,
+    /// Phase 12 / US4 (FR-018): one entry per configured remote provider a model
+    /// capability references. Empty when no `[providers]` are configured (the
+    /// default) → `skip_serializing_if = "Vec::is_empty"` omits it from the wire
+    /// shape, so the byte-stable minimal-report pin stays unchanged (NFR-006).
+    /// `reachable` per entry is populated only under `--verify`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<ProviderReport>,
     pub overall: DoctorClassification,
     pub suggested_fixes: Vec<SuggestedFix>,
 }

@@ -1122,6 +1122,269 @@ pub fn build_persona_report(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Phase 12 / US4 — provider report (FR-018) + corrupt-index check (FR-017).
+// ---------------------------------------------------------------------------
+
+use crate::config::Config;
+use crate::doctor::report::ProviderReport;
+use crate::provider::config::{Capability, derive_env_var_name};
+
+/// Build the read-only provider report (FR-018): one [`ProviderReport`] per
+/// configured remote provider that a MODEL CAPABILITY references. A provider
+/// defined in `[providers]` but referenced by no capability is omitted — the
+/// report surfaces the providers Tome would actually use.
+///
+/// `credential_resolvable` is the SAME precedence the real path uses (env
+/// `TOME_<NAME>_API_KEY` → inline `api_key`), but it NEVER exposes the value.
+/// `reachable` is left `None` here; [`verify_provider_reachability`] fills it
+/// under `--verify`.
+///
+/// Read-only: this only reads config + the process env. It never writes, never
+/// opens the index, never makes a network call.
+pub fn build_provider_report(cfg: &Config) -> Vec<ProviderReport> {
+    use std::collections::BTreeMap;
+
+    // Map provider-name → the set of capabilities referencing it. A capability
+    // references a provider only via a *valid* `provider` field that names a
+    // defined entry; a dangling reference is a resolve-time error surfaced
+    // elsewhere (exit 93), not a provider row here.
+    let mut by_provider: BTreeMap<String, Vec<&'static str>> = BTreeMap::new();
+    let mut record = |provider: Option<&str>, capability: &'static str| {
+        if let Some(name) = provider
+            && cfg.providers.contains_key(name)
+        {
+            by_provider
+                .entry(name.to_string())
+                .or_default()
+                .push(capability);
+        }
+    };
+    record(cfg.summariser.provider.as_deref(), "summariser");
+    record(cfg.embedding.provider.as_deref(), "embedding");
+    record(cfg.reranker.provider.as_deref(), "reranker");
+
+    by_provider
+        .into_iter()
+        .map(|(name, mut capabilities)| {
+            capabilities.sort_unstable();
+            capabilities.dedup();
+            // SAFETY of the unwrap: `record` only inserts names that
+            // `contains_key`, so the entry is always present.
+            let entry = cfg.providers.get(&name).expect("provider present");
+            let credential_resolvable = credential_resolves(&name, entry.api_key.is_some());
+            ProviderReport {
+                name,
+                kind: entry.kind.as_str().to_string(),
+                capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+                credential_resolvable,
+                reachable: None,
+            }
+        })
+        .collect()
+}
+
+/// Whether a credential resolves for a provider WITHOUT exposing it: the
+/// derived env var `TOME_<NAME>_API_KEY` (set & non-empty) OR an inline
+/// `api_key`. Mirrors `provider::config::resolve_credential`'s precedence so
+/// doctor and the real path never disagree on "is a credential present".
+fn credential_resolves(name: &str, has_inline: bool) -> bool {
+    let env_var = derive_env_var_name(name);
+    if let Ok(value) = std::env::var(&env_var)
+        && !value.is_empty()
+    {
+        return true;
+    }
+    has_inline
+}
+
+/// `--verify` reachability (FR-018): for each provider in `report`, perform ONE
+/// lightweight real round-trip against a capability it serves and set
+/// `reachable = Some(ok)`. Read-only — the round-trips never persist anything (a
+/// remote embedder establishes its dimension in memory; the reranker is
+/// stateless; the summariser writes nothing). A round-trip failure sets
+/// `reachable = Some(false)` (NOT an error — doctor never crashes on a probe).
+///
+/// The capability chosen per provider is the FIRST it serves, in the fixed
+/// order summariser → embedding → reranker, so the probe is deterministic.
+pub fn verify_provider_reachability(report: &mut [ProviderReport], cfg: &Config, paths: &Paths) {
+    for entry in report.iter_mut() {
+        // Pick the first capability the provider serves (deterministic order).
+        let capability = entry.capabilities.iter().find_map(|c| match c.as_str() {
+            "summariser" => Some(Capability::Summariser),
+            "embedding" => Some(Capability::Embedding),
+            "reranker" => Some(Capability::Reranker),
+            _ => None,
+        });
+        let Some(capability) = capability else {
+            continue;
+        };
+        entry.reachable = Some(probe_capability(cfg, paths, capability).is_ok());
+    }
+}
+
+/// ONE lightweight real round-trip for a capability, used by the `--verify`
+/// provider probe. Builds the active model via the shared `build_*` helpers and
+/// performs a single embed / summarise / rerank. Read-only by construction.
+fn probe_capability(cfg: &Config, paths: &Paths, capability: Capability) -> Result<(), TomeError> {
+    match capability {
+        Capability::Embedding => {
+            // Read the persisted dimension read-only so the probe validates
+            // against the index's expected length; absent ⇒ establish in-memory.
+            let (active, persisted) = if paths.index_db.is_file() {
+                let conn = index::open_read_only(&paths.index_db)?;
+                (
+                    crate::index::meta::active_embedder(&conn)?,
+                    crate::index::meta::read_embedder_dimension(&conn)?,
+                )
+            } else {
+                (
+                    crate::embedding::profile::embedder_for(crate::embedding::Profile::DEFAULT),
+                    None,
+                )
+            };
+            let embedder = crate::embedding::build_embedder(cfg, paths, active, persisted)?;
+            let v = embedder.embed("connectivity check")?;
+            if v.is_empty() {
+                return Err(TomeError::RemoteEmbeddingInvalid {
+                    detail: "provider verify: empty embedding".to_string(),
+                });
+            }
+            Ok(())
+        }
+        Capability::Summariser => {
+            let summariser = crate::summarise::build_summariser(cfg, paths, false)?;
+            let input = crate::summarise::PluginSummariesInput {
+                plugins: vec![crate::summarise::PluginSummaryItem {
+                    catalog: "test".to_string(),
+                    plugin: "connectivity".to_string(),
+                    description: "doctor --verify connectivity probe".to_string(),
+                    skills: vec![crate::summarise::SkillSummaryItem {
+                        name: "ping".to_string(),
+                        description: "verify the summariser is reachable".to_string(),
+                    }],
+                }],
+            };
+            let out = summariser.summarise(&input, crate::summarise::LONG_MAX_CHARS)?;
+            if out.short.trim().is_empty() || out.long.trim().is_empty() {
+                return Err(TomeError::SummariserFailure {
+                    kind: crate::error::SummariserFailureKind::OutputEmpty {
+                        which: crate::error::ShortOrLong::Short,
+                    },
+                });
+            }
+            Ok(())
+        }
+        Capability::Reranker => {
+            // Resolve the ACTIVE profile's reranker (mirroring the embedding
+            // probe + `models test`'s `active_reranker_entry`) so the probe
+            // targets the in-use bundled model on a non-default profile rather
+            // than always `Profile::DEFAULT`. Harmless for a remote Voyage
+            // reranker (the registry entry is ignored once a provider resolves),
+            // but correct for parity.
+            let active = if paths.index_db.is_file() {
+                let conn = index::open_read_only(&paths.index_db)?;
+                crate::index::meta::active_reranker(&conn)?
+            } else {
+                crate::embedding::profile::reranker_for(crate::embedding::Profile::DEFAULT)
+            };
+            let reranker = crate::embedding::build_reranker(cfg, paths, active)?;
+            let candidates: Vec<crate::index::query::Candidate> = ["alpha", "bravo"]
+                .iter()
+                .enumerate()
+                .map(|(i, name)| crate::index::query::Candidate {
+                    skill_id: i as i64,
+                    catalog: "test".to_string(),
+                    plugin: "connectivity".to_string(),
+                    name: (*name).to_string(),
+                    kind: crate::plugin::identity::EntryKind::Skill,
+                    description: format!("probe candidate {name}"),
+                    plugin_version: "0.0.0".to_string(),
+                    path: format!("/dev/null/{name}"),
+                    distance: 0.0,
+                })
+                .collect();
+            let scored = reranker.rerank("test query", candidates)?;
+            if scored.is_empty() {
+                return Err(TomeError::RerankingFailure(
+                    "provider verify: reranker returned no scored candidates".to_string(),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Corrupt-remote-index verdict (FR-017): a stored-vector dimension that
+/// disagrees with the persisted `meta.embedder_dimension`.
+///
+/// `None` means "not applicable / no mismatch":
+/// - no index DB on disk, or it is unreadable (the index/embedder subsystem
+///   checks classify the underlying failure);
+/// - `meta.embedder_dimension` is absent (bundled / never-remote-reindexed —
+///   the dimension-free storage is fine);
+/// - no stored vectors yet (nothing to compare);
+/// - the stored dimension matches the meta dimension.
+///
+/// `Some(CorruptIndex { stored, expected })` means a sampled `skill_embeddings`
+/// BLOB is `stored` f32s long while `meta.embedder_dimension` says `expected`.
+/// This is the silent-mis-index the pre-mortem targets: a remote model whose
+/// output length changed since the last reindex.
+///
+/// Read-only: opens the index read-only, reads one BLOB length + one meta row.
+pub fn check_corrupt_index(paths: &Paths) -> Option<CorruptIndex> {
+    if !paths.index_db.is_file() {
+        return None;
+    }
+    let conn = match index::open_read_only(&paths.index_db) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "doctor: corrupt-index check open failed; skipping");
+            return None;
+        }
+    };
+    // Only applicable when a remote reindex persisted an expected dimension.
+    let expected = match crate::index::meta::read_embedder_dimension(&conn) {
+        Ok(Some(d)) => d,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::warn!(error = %e, "doctor: read meta.embedder_dimension failed; skipping");
+            return None;
+        }
+    };
+    // Sample one stored vector's byte length. `LENGTH(BLOB)` is the byte count;
+    // an f32 is 4 bytes, so `stored_dim = blob_len / 4`. No rows ⇒ nothing to
+    // compare.
+    let blob_len: i64 = conn
+        .query_row(
+            "SELECT LENGTH(embedding) FROM skill_embeddings LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .ok()?;
+    if blob_len < 0 {
+        return None;
+    }
+    let stored = (blob_len as usize) / 4;
+    if stored == expected {
+        None
+    } else {
+        Some(CorruptIndex { stored, expected })
+    }
+}
+
+/// A corrupt-remote-index finding: the stored vector dimension (`blob_len/4`)
+/// disagrees with `meta.embedder_dimension`. Carried internally by the
+/// assembler to drive the `corrupt-remote-index` suggested fix; not a
+/// `DoctorReport` field (the suggested-fix list IS the surface).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorruptIndex {
+    /// The stored vectors' dimension (`LENGTH(embedding) / 4`).
+    pub stored: usize,
+    /// The dimension `meta.embedder_dimension` says they should be.
+    pub expected: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1203,5 +1466,187 @@ mod tests {
         let out =
             check_catalogs(&paths, &Scope(crate::workspace::WorkspaceName::global())).unwrap();
         assert_eq!(out[0].state, CatalogCacheState::ManifestInvalid);
+    }
+
+    // --- Phase 12 / US4: provider report (FR-018) --------------------------
+
+    use crate::config::{Config, ProviderEntry, ProviderKind, Secret};
+    use std::sync::Mutex;
+
+    /// Serialises tests mutating `TOME_<NAME>_API_KEY` (process-global env).
+    static PROVIDER_ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn config_with_provider(name: &str, kind: ProviderKind, inline_key: Option<&str>) -> Config {
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            name.to_string(),
+            ProviderEntry {
+                kind,
+                base_url: None,
+                api_key: inline_key.map(|k| Secret::from(k.to_string())),
+            },
+        );
+        cfg
+    }
+
+    #[test]
+    fn provider_report_omits_unreferenced_providers() {
+        // A provider defined but referenced by no capability is omitted.
+        let cfg = config_with_provider("p", ProviderKind::Openai, Some("sk"));
+        let report = build_provider_report(&cfg);
+        assert!(
+            report.is_empty(),
+            "an unreferenced provider must not appear in the report: {report:?}"
+        );
+    }
+
+    #[test]
+    fn provider_report_surfaces_referencing_capabilities_and_credential() {
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // Ensure no env override interferes.
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_P_API_KEY");
+        }
+        let mut cfg = config_with_provider("p", ProviderKind::Openai, Some("sk-inline"));
+        cfg.summariser.provider = Some("p".to_string());
+        cfg.summariser.model = Some("gpt-4o".to_string());
+        cfg.embedding.provider = Some("p".to_string());
+        cfg.embedding.model = Some("text-embed".to_string());
+
+        let report = build_provider_report(&cfg);
+        assert_eq!(report.len(), 1);
+        let p = &report[0];
+        assert_eq!(p.name, "p");
+        assert_eq!(p.kind, "openai");
+        // Both capabilities reference it; sorted + deduped.
+        assert_eq!(p.capabilities, vec!["embedding", "summariser"]);
+        assert!(p.credential_resolvable, "inline key resolves");
+        assert_eq!(p.reachable, None, "reachable is None without --verify");
+    }
+
+    #[test]
+    fn provider_report_credential_not_resolvable_without_env_or_inline() {
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_VP_API_KEY");
+        }
+        let mut cfg = config_with_provider("vp", ProviderKind::Voyage, None);
+        cfg.reranker.provider = Some("vp".to_string());
+        cfg.reranker.model = Some("rerank-2".to_string());
+
+        let report = build_provider_report(&cfg);
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].kind, "voyage");
+        assert!(
+            !report[0].credential_resolvable,
+            "no env + no inline → not resolvable"
+        );
+    }
+
+    #[test]
+    fn provider_report_env_var_resolves_credential() {
+        let _g = PROVIDER_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::set_var("TOME_VP_API_KEY", "env-secret");
+        }
+        let mut cfg = config_with_provider("vp", ProviderKind::Voyage, None);
+        cfg.reranker.provider = Some("vp".to_string());
+        cfg.reranker.model = Some("rerank-2".to_string());
+
+        let report = build_provider_report(&cfg);
+        assert!(
+            report[0].credential_resolvable,
+            "env override resolves the credential"
+        );
+        // SAFETY: guarded by PROVIDER_ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("TOME_VP_API_KEY");
+        }
+    }
+
+    // --- Phase 12 / US4: corrupt-index check (FR-017) ----------------------
+
+    /// Seed a bootstrapped DB and insert one `skill_embeddings` BLOB of
+    /// `blob_dim` f32s, plus a `meta.embedder_dimension` of `meta_dim`.
+    fn seed_index_with_dim(paths: &Paths, meta_dim: Option<usize>, blob_dim: Option<usize>) {
+        let (e, r, s) = registry_seeds();
+        let conn = index::open(
+            &paths.index_db,
+            &OpenOptions {
+                embedder: e,
+                reranker: r,
+                summariser: s,
+                profile: None,
+            },
+        )
+        .unwrap();
+        if let Some(d) = meta_dim {
+            crate::index::meta::write_embedder_dimension(&conn, d).unwrap();
+        }
+        if let Some(d) = blob_dim {
+            // Insert a skill row then a matching embedding BLOB of `d` f32s.
+            let now = time::OffsetDateTime::now_utc().unix_timestamp();
+            conn.execute(
+                "INSERT INTO skills
+                   (catalog, plugin, name, description, plugin_version, path, content_hash, indexed_at)
+                 VALUES ('c', 'p', 's', 'd', '0.0.0', '/dev/null', 'h', ?1)",
+                rusqlite::params![now],
+            )
+            .unwrap();
+            let skill_id = conn.last_insert_rowid();
+            let bytes: Vec<u8> = vec![0u8; d * 4]; // d f32s little-endian
+            conn.execute(
+                "INSERT INTO skill_embeddings (skill_id, embedding) VALUES (?1, ?2)",
+                rusqlite::params![skill_id, bytes],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn corrupt_index_none_when_no_db() {
+        let tmp = TempDir::new().unwrap();
+        let paths = fixture_paths(tmp.path());
+        assert_eq!(check_corrupt_index(&paths), None);
+    }
+
+    #[test]
+    fn corrupt_index_none_when_meta_dim_absent() {
+        // Bundled / never-remote-reindexed: no meta dim → not applicable.
+        let tmp = TempDir::new().unwrap();
+        let paths = fixture_paths(tmp.path());
+        seed_index_with_dim(&paths, None, Some(384));
+        assert_eq!(check_corrupt_index(&paths), None);
+    }
+
+    #[test]
+    fn corrupt_index_none_when_dims_match() {
+        let tmp = TempDir::new().unwrap();
+        let paths = fixture_paths(tmp.path());
+        seed_index_with_dim(&paths, Some(1024), Some(1024));
+        assert_eq!(check_corrupt_index(&paths), None);
+    }
+
+    #[test]
+    fn corrupt_index_none_when_no_rows() {
+        // Meta dim set but no stored vectors yet → nothing to compare.
+        let tmp = TempDir::new().unwrap();
+        let paths = fixture_paths(tmp.path());
+        seed_index_with_dim(&paths, Some(1024), None);
+        assert_eq!(check_corrupt_index(&paths), None);
+    }
+
+    #[test]
+    fn corrupt_index_detected_on_dimension_mismatch() {
+        // Stored vectors are 768-d but meta says 1024-d → corrupt-remote-index.
+        let tmp = TempDir::new().unwrap();
+        let paths = fixture_paths(tmp.path());
+        seed_index_with_dim(&paths, Some(1024), Some(768));
+        let ci = check_corrupt_index(&paths).expect("mismatch must be detected");
+        assert_eq!(ci.stored, 768);
+        assert_eq!(ci.expected, 1024);
     }
 }

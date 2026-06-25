@@ -270,6 +270,9 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
         // Phase 10 / US5: `None` → omitted from the wire shape, byte-stable pin
         // unchanged. `assemble_report` always populates it in production.
         telemetry: None,
+        // Phase 12 / US4: empty → `skip_serializing_if = "Vec::is_empty"` omits
+        // it from the wire shape, so the byte-stable pin below stays unchanged.
+        providers: Vec::new(),
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -475,6 +478,9 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
         // Phase 10 / US5: `None` → omitted from the wire shape, byte-stable pin
         // unchanged. `assemble_report` always populates it in production.
         telemetry: None,
+        // Phase 12 / US4: empty → `skip_serializing_if = "Vec::is_empty"` omits
+        // it from the wire shape, so the byte-stable pin below stays unchanged.
+        providers: Vec::new(),
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -612,6 +618,9 @@ fn doctor_json_phase6_fields_appended_last_in_order() {
         // Phase 10 / US5: `None` → omitted from the wire shape, byte-stable pin
         // unchanged. `assemble_report` always populates it in production.
         telemetry: None,
+        // Phase 12 / US4: empty → `skip_serializing_if = "Vec::is_empty"` omits
+        // it from the wire shape, so the byte-stable pin below stays unchanged.
+        providers: Vec::new(),
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };

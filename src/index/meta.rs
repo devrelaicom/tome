@@ -202,6 +202,28 @@ pub fn write_embedder_dimension(conn: &Connection, dim: usize) -> Result<(), Tom
     write(conn, MetaKey::EmbedderDimension, &dim.to_string())
 }
 
+/// Clear the persisted `embedder_dimension` (Phase 12 / US4). Called on a
+/// BUNDLED whole-index reindex: `embedder_dimension` is a remote-only concept
+/// (bundled storage is dimension-free), so a remote→bundled switch must drop any
+/// stale remote value left in `meta`. Without this, the doctor corrupt-index
+/// check (`check_corrupt_index`, FR-017) would compare bundled-dimension stored
+/// vectors against the stale remote dimension forever — a finding that can never
+/// self-heal. A no-op when the row is already absent (the common bundled case).
+/// k/v delete, no DDL → `SCHEMA_VERSION` unchanged.
+pub fn delete_embedder_dimension(conn: &Connection) -> Result<(), TomeError> {
+    conn.execute(
+        "DELETE FROM meta WHERE key = ?1",
+        params![MetaKey::EmbedderDimension.as_str()],
+    )
+    .map_err(|e| {
+        TomeError::IndexIntegrityCheckFailure(format!(
+            "delete meta `{}`: {e}",
+            MetaKey::EmbedderDimension.as_str()
+        ))
+    })?;
+    Ok(())
+}
+
 /// The active model profile recorded in `meta`. Absent → Profile::DEFAULT
 /// (forward-compat for a DB written before this row existed).
 pub fn active_profile(
@@ -342,6 +364,31 @@ mod tests {
     fn embedder_dimension_malformed_value_reads_as_none() {
         let conn = open_mem();
         write(&conn, MetaKey::EmbedderDimension, "not-a-number").unwrap();
+        assert_eq!(read_embedder_dimension(&conn).unwrap(), None);
+    }
+
+    #[test]
+    fn delete_embedder_dimension_clears_a_stale_value() {
+        let conn = open_mem();
+        // Stamp a (stale remote) dimension, then clear it as a bundled
+        // whole-index reindex would.
+        write_embedder_dimension(&conn, 1024).unwrap();
+        assert_eq!(read_embedder_dimension(&conn).unwrap(), Some(1024));
+        delete_embedder_dimension(&conn).unwrap();
+        assert_eq!(
+            read_embedder_dimension(&conn).unwrap(),
+            None,
+            "the key must be gone after delete"
+        );
+        // The row is genuinely absent (not just unparsable).
+        assert_eq!(read(&conn, MetaKey::EmbedderDimension).unwrap(), None);
+    }
+
+    #[test]
+    fn delete_embedder_dimension_is_a_no_op_when_absent() {
+        let conn = open_mem();
+        // Deleting an absent key must succeed (the common bundled case).
+        delete_embedder_dimension(&conn).unwrap();
         assert_eq!(read_embedder_dimension(&conn).unwrap(), None);
     }
 }

@@ -629,6 +629,32 @@ pub enum ModelsCommand {
     /// selects which embedder + reranker Tome uses; the summariser is shared
     /// across every profile. Omit `<tier>` to show the current profile.
     Profile(ModelsProfileArgs),
+    /// Run ONE real round-trip against the active model for a capability
+    /// (the configured remote provider, else the bundled local model) and
+    /// report whether it succeeded. Read-only — writes no stored state.
+    /// `tome models test embedding` embeds a fixed string and validates the
+    /// vector; `summariser` summarises a tiny input; `reranker` reranks a
+    /// small candidate set. Honours `--json`.
+    Test(ModelsTestArgs),
+}
+
+/// Which model capability `tome models test` exercises. Each value drives a
+/// distinct round-trip + success assertion (see `commands::models::test`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum TestCapability {
+    /// Summarise a tiny fixed input; success = non-empty short AND long.
+    Summariser,
+    /// Embed a fixed string; success = non-empty, finite, matching dimension.
+    Embedding,
+    /// Rerank a small fixed candidate set; success = a scored ordering.
+    Reranker,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ModelsTestArgs {
+    /// The capability to test: `summariser`, `embedding`, or `reranker`.
+    #[arg(value_enum)]
+    pub capability: TestCapability,
 }
 
 #[derive(Debug, clap::Args)]
