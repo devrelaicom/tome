@@ -35,6 +35,14 @@ pub enum MetaKey {
     /// time. Absent in pre-v6 DBs — `active_profile` defaults to
     /// `Profile::DEFAULT` in that case.
     ModelProfile,
+    /// Phase 12 / US2: the active embedder's expected output vector length.
+    /// Written ONLY on the REMOTE reindex path (from `[embedding] dimensions`
+    /// if set, else the first successful embed's length) — a remote embedder
+    /// has no registry dimension constant. The bundled path NEVER writes this
+    /// key (NFR-006: a new meta row would change stored artefacts). Read by the
+    /// write-time validator (FR-015a) and the doctor corrupt-index check
+    /// (FR-017). k/v only, no DDL → `SCHEMA_VERSION` unchanged.
+    EmbedderDimension,
 }
 
 impl MetaKey {
@@ -49,6 +57,7 @@ impl MetaKey {
             Self::SummariserVersion => "summariser_version",
             Self::CreatedAt => "created_at",
             Self::ModelProfile => "model_profile",
+            Self::EmbedderDimension => "embedder_dimension",
         }
     }
 }
@@ -174,6 +183,25 @@ pub fn detect_drift(
     Ok(DriftStatus::None)
 }
 
+/// Read the persisted `embedder_dimension` (Phase 12 / US2 / FR-015a). Absent
+/// (the common case — bundled embedder, or a remote index built before this
+/// key existed) → `Ok(None)`. A malformed (non-numeric) stored value is treated
+/// as absent rather than an error: the validator then falls back to
+/// establishing the dimension from the first embed of the run, and a future
+/// remote reindex rewrites the key with a clean value.
+pub fn read_embedder_dimension(conn: &Connection) -> Result<Option<usize>, TomeError> {
+    Ok(read(conn, MetaKey::EmbedderDimension)?
+        .as_deref()
+        .and_then(|v| v.trim().parse::<usize>().ok()))
+}
+
+/// Persist the active embedder's expected output dimension (Phase 12 / US2 /
+/// FR-015a). Written ONLY on the REMOTE reindex path — the bundled path never
+/// calls this (NFR-006). k/v upsert, no DDL.
+pub fn write_embedder_dimension(conn: &Connection, dim: usize) -> Result<(), TomeError> {
+    write(conn, MetaKey::EmbedderDimension, &dim.to_string())
+}
+
 /// The active model profile recorded in `meta`. Absent → Profile::DEFAULT
 /// (forward-compat for a DB written before this row existed).
 pub fn active_profile(
@@ -287,5 +315,33 @@ mod tests {
     #[test]
     fn meta_key_model_profile_str_is_correct() {
         assert_eq!(MetaKey::ModelProfile.as_str(), "model_profile");
+    }
+
+    #[test]
+    fn meta_key_embedder_dimension_str_is_correct() {
+        assert_eq!(MetaKey::EmbedderDimension.as_str(), "embedder_dimension");
+    }
+
+    #[test]
+    fn embedder_dimension_absent_is_none() {
+        let conn = open_mem();
+        assert_eq!(read_embedder_dimension(&conn).unwrap(), None);
+    }
+
+    #[test]
+    fn embedder_dimension_round_trips() {
+        let conn = open_mem();
+        write_embedder_dimension(&conn, 1024).unwrap();
+        assert_eq!(read_embedder_dimension(&conn).unwrap(), Some(1024));
+        // Upsert: a second write replaces.
+        write_embedder_dimension(&conn, 768).unwrap();
+        assert_eq!(read_embedder_dimension(&conn).unwrap(), Some(768));
+    }
+
+    #[test]
+    fn embedder_dimension_malformed_value_reads_as_none() {
+        let conn = open_mem();
+        write(&conn, MetaKey::EmbedderDimension, "not-a-number").unwrap();
+        assert_eq!(read_embedder_dimension(&conn).unwrap(), None);
     }
 }
