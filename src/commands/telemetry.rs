@@ -80,7 +80,11 @@ fn status(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
         enabled,
         source,
         install_uuid: read_install_uuid(paths),
-        endpoint: config::resolve_endpoint(paths),
+        // Scrub at the DISPLAY site: `resolve_endpoint` returns the raw configured
+        // value (the credentialed handle still authenticates against it), but a
+        // `https://user:token@host` endpoint must never reach stdout/logs. Mirror
+        // the `scrubbed_queue_path` pattern.
+        endpoint: scrubbed_endpoint(paths),
         pending: pending_count(paths),
         last_flush: read_last_flush(paths),
     };
@@ -242,13 +246,13 @@ fn emit_inspect_human(
     let mut out = std::io::stdout().lock();
     writeln!(out, "pending: {pending}")?;
     for (i, ev) in events.iter().enumerate() {
-        // The kernel envelope namespaces the event under an `event.name` field;
-        // fall back to "(unknown)" so a value missing it still lists.
+        // The kernel queue envelope is
+        // `{"event_name":..,"time_unix_nano":..,"attributes":{..}}` — the event
+        // identity is the top-level `event_name`. Fall back to "(unknown)" so a
+        // value missing it still lists.
         let kind = ev
-            .get("event")
-            .and_then(|e| e.get("name"))
+            .get("event_name")
             .and_then(serde_json::Value::as_str)
-            .or_else(|| ev.get("event_type").and_then(serde_json::Value::as_str))
             .unwrap_or("(unknown)");
         let compact = serde_json::to_string(ev).unwrap_or_else(|_| "<unrenderable>".to_string());
         writeln!(out, "  [{i}] {kind}: {compact}")?;
@@ -260,6 +264,17 @@ fn emit_inspect_human(
         )?;
     }
     Ok(())
+}
+
+/// The configured collector endpoint, credential-scrubbed for DISPLAY. The raw
+/// value is left untouched in [`config::resolve_endpoint`] (the kernel build uses
+/// it verbatim so a credentialed collector still authenticates); the scrub lives
+/// here, at the one place the endpoint reaches a user-facing surface, so a
+/// `https://user:token@host` endpoint cannot leak to stdout/logs.
+fn scrubbed_endpoint(paths: &Paths) -> String {
+    let raw = config::resolve_endpoint(paths);
+    let scrubbed = crate::catalog::git::scrub_credentials(raw.as_bytes());
+    String::from_utf8_lossy(&scrubbed).into_owned()
 }
 
 /// Scrub the queue path for inclusion in a [`TomeError::TelemetryQueueCorrupt`]

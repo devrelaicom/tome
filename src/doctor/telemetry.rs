@@ -16,7 +16,9 @@
 //! - queue: [`queue::count_pending`] / [`queue::classify_lines`] — the SAME
 //!   bounded, fail-closed reads `inspect`/`status` use; they never mutate;
 //! - last flush: a bounded read of the `last-flush` stamp;
-//! - endpoint: [`transport::resolve_endpoint`] (already credential-scrubbed);
+//! - endpoint: [`config::resolve_endpoint`] (the RAW configured value),
+//!   credential-scrubbed at the display site via [`scrubbed_endpoint`] before it
+//!   lands in the report — the raw value never reaches stdout/logs;
 //! - allowlist: the compiled-in [`allowlist::ATTRIBUTED_TELEMETRY_CATALOGS`].
 //!
 //! `--fix` gains NOTHING here (FR-065): disabling is a user action and a corrupt
@@ -73,9 +75,20 @@ pub fn assemble(paths: &Paths) -> TelemetrySection {
         install_id: install_id_report(paths),
         queue: queue_report(paths),
         last_flush: last_flush_report(paths),
-        endpoint: config::resolve_endpoint(paths),
+        endpoint: scrubbed_endpoint(paths),
         allowlist: allowlist_report(),
     }
+}
+
+/// The configured collector endpoint, credential-scrubbed for DISPLAY.
+/// [`config::resolve_endpoint`] returns the raw configured value (the kernel
+/// build authenticates against it verbatim); the scrub lives here, at the display
+/// site, so a `https://user:token@host` endpoint cannot leak into the doctor
+/// section. Mirrors the `scrubbed_path` pattern below.
+fn scrubbed_endpoint(paths: &Paths) -> String {
+    let raw = config::resolve_endpoint(paths);
+    let scrubbed = crate::catalog::git::scrub_credentials(raw.as_bytes());
+    String::from_utf8_lossy(&scrubbed).into_owned()
 }
 
 /// The install-id file's path (scrubbed), existence, mode, and age. Reads only
@@ -124,12 +137,14 @@ fn queue_report(paths: &Paths) -> TelemetryQueueReport {
     let (events, corrupt) = crate::telemetry::classify_queue_lines(paths);
     let pending = events.len() as u64;
 
-    // FIFO: the first parsable event is the oldest. Its kernel envelope
-    // `timestamp` is an RFC3339 string; age it against now.
+    // FIFO: the first parsable event is the oldest. The kernel queue envelope is
+    // `{"event_name":..,"time_unix_nano":<u64 nanos>,"attributes":{..}}` — age
+    // the oldest event's `time_unix_nano` (nanoseconds since the Unix epoch)
+    // against now.
     let oldest_age_seconds = events
         .iter()
-        .find_map(|v| v.get("timestamp").and_then(serde_json::Value::as_str))
-        .and_then(parse_rfc3339)
+        .find_map(|v| v.get("time_unix_nano").and_then(serde_json::Value::as_u64))
+        .and_then(offset_from_unix_nano)
         .and_then(age_seconds_from);
 
     TelemetryQueueReport {
@@ -169,11 +184,14 @@ fn allowlist_report() -> Vec<TelemetryAllowlistEntry> {
         .collect()
 }
 
-/// Parse the envelope's RFC3339-millis timestamp (`YYYY-MM-DDTHH:MM:SS.mmmZ`).
-/// Returns `None` on any parse failure (a corrupt timestamp is data, not a
-/// fault — the read-only report simply omits the oldest-age field).
-fn parse_rfc3339(s: &str) -> Option<OffsetDateTime> {
-    OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+/// Convert the kernel queue envelope's `time_unix_nano` (u64 nanoseconds since
+/// the Unix epoch) to an `OffsetDateTime`. `None` if the value is out of range.
+///
+/// NOTE: the kernel queue envelope ages via this integer field; the Tome-written
+/// `last-flush` stamp (a separate file) carries an RFC3339 string read verbatim
+/// by `last_flush_report` (it is never re-parsed here).
+fn offset_from_unix_nano(nanos: u64) -> Option<OffsetDateTime> {
+    OffsetDateTime::from_unix_timestamp_nanos(i128::from(nanos)).ok()
 }
 
 /// Whole-seconds age (now − `instant`), clamped at 0 (a clock skew that puts the
@@ -246,10 +264,18 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(paths.telemetry_id(), std::fs::Permissions::from_mode(0o600))
             .unwrap();
+        // Plant REAL kernel-shaped queue lines (the kernel envelope is
+        // `{"event_name":..,"time_unix_nano":<u64 nanos>,"attributes":{..}}`), so
+        // the oldest-age read asserts against reality, not a legacy fiction. The
+        // oldest event's `time_unix_nano` corresponds to 2020-01-01T00:00:00Z.
+        const NANOS_2020_01_01: u64 = 1_577_836_800_000_000_000; // 2020-01-01T00:00:00Z
+        const NANOS_2020_01_02: u64 = 1_577_923_200_000_000_000; // 2020-01-02T00:00:00Z
         std::fs::write(
             paths.telemetry_queue(),
-            "{\"timestamp\":\"2020-01-01T00:00:00.000Z\"}\n\
-             {\"timestamp\":\"2020-01-02T00:00:00.000Z\"}\n",
+            format!(
+                "{{\"event_name\":\"tome.search\",\"time_unix_nano\":{NANOS_2020_01_01},\"attributes\":{{}}}}\n\
+                 {{\"event_name\":\"tome.search\",\"time_unix_nano\":{NANOS_2020_01_02},\"attributes\":{{}}}}\n"
+            ),
         )
         .unwrap();
 
@@ -277,6 +303,55 @@ mod tests {
         let flush = section.last_flush.expect("stamp present");
         assert_eq!(flush.timestamp, "2026-06-11T14:11:45.123Z");
         assert_eq!(flush.status, Some(200));
+    }
+
+    /// C2: a credentialed endpoint (`https://user:token@host`) must NOT appear
+    /// verbatim in the doctor section — the userinfo is credential-scrubbed at
+    /// the display site. Configured via `[telemetry].endpoint` (no env mutation):
+    /// `resolve_endpoint` reads config when `TOME_GAUGE_ENDPOINT` is absent, so we
+    /// clear that one ambient var under the shared serial lock.
+    #[test]
+    fn assemble_scrubs_credentialed_endpoint() {
+        let _serial = crate::telemetry::test_serial();
+        // `resolve_endpoint` prefers `TOME_GAUGE_ENDPOINT`; clear it so the
+        // config-file endpoint is the one resolved. Restore on the way out.
+        let saved = std::env::var_os("TOME_GAUGE_ENDPOINT");
+        // SAFETY: serialised by the telemetry seam lock; sole mutator here.
+        unsafe { std::env::remove_var("TOME_GAUGE_ENDPOINT") };
+
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &paths.global_config_file,
+            "[telemetry]\nendpoint = \"https://user:token@collector.test/path\"\n",
+        )
+        .unwrap();
+
+        let section = with_telemetry_env_cleared(|| super::assemble(&paths));
+
+        // SAFETY: still under the serial lock.
+        match saved {
+            Some(v) => unsafe { std::env::set_var("TOME_GAUGE_ENDPOINT", v) },
+            None => unsafe { std::env::remove_var("TOME_GAUGE_ENDPOINT") },
+        }
+
+        assert!(
+            !section.endpoint.contains("user:token@"),
+            "credentialed userinfo must be scrubbed from the endpoint: {}",
+            section.endpoint
+        );
+        assert!(
+            !section.endpoint.contains("token"),
+            "the token must not survive scrubbing: {}",
+            section.endpoint
+        );
+        // The host survives (the scrub strips only the userinfo).
+        assert!(
+            section.endpoint.contains("collector.test"),
+            "the host should remain after scrubbing: {}",
+            section.endpoint
+        );
     }
 
     /// Run `f` with `TOME_TELEMETRY` cleared so the resolver takes the

@@ -159,6 +159,11 @@ fn build_handle(paths: &crate::paths::Paths) -> Telemetry {
         .app_env_var("TOME_TELEMETRY")
         .config_enabled(config_enabled)
         .runtime_enabled(true)
+        // Thread Tome's richer 8-vendor CI detection into the kernel's consent
+        // (the kernel default only inspects `CI`). Without this, a Jenkins box
+        // (`JENKINS_URL` set, `CI` unset) would EMIT while `tome telemetry status`
+        // reports "CI auto-off" — a disagreement between consent and the report.
+        .ci(config::is_ci())
         .accel("cpu")
         .flush_args(vec!["telemetry".into(), "flush".into(), "--quiet".into()])
         .build()
@@ -416,7 +421,12 @@ pub(crate) fn classify_queue_lines(paths: &crate::paths::Paths) -> (Vec<serde_js
 
 /// Whether the OLDEST queued event (first FIFO line) is older than `max_age`.
 /// Best-effort: a missing queue, an empty queue, an unparsable first line, or a
-/// first line without a `timestamp` field all return `false` (no age trigger).
+/// first line without a `time_unix_nano` field all return `false` (no age
+/// trigger).
+///
+/// The kernel queue envelope is `{"event_name":..,"time_unix_nano":<u64 nanos>,
+/// "attributes":{..}}` — the age key is `time_unix_nano` (nanoseconds since the
+/// Unix epoch), NOT an RFC3339 `timestamp` string.
 fn oldest_event_age_exceeds(
     paths: &crate::paths::Paths,
     now: time::OffsetDateTime,
@@ -433,9 +443,9 @@ fn oldest_event_age_exceeds(
     let ts = serde_json::from_str::<serde_json::Value>(first)
         .ok()
         .and_then(|v| {
-            v.get("timestamp")
-                .and_then(|t| t.as_str())
-                .and_then(parse_kernel_timestamp)
+            v.get("time_unix_nano")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(unix_nano_to_offset)
         });
     match ts {
         // Only a parseable, forward-in-time-enough timestamp triggers. A future
@@ -445,9 +455,10 @@ fn oldest_event_age_exceeds(
     }
 }
 
-/// Parse the kernel envelope's `timestamp` (RFC3339, possibly with millis + `Z`).
-fn parse_kernel_timestamp(s: &str) -> Option<time::OffsetDateTime> {
-    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+/// Convert the kernel envelope's `time_unix_nano` (u64 nanoseconds since the
+/// Unix epoch) to an `OffsetDateTime`. `None` if the value is out of range.
+fn unix_nano_to_offset(nanos: u64) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(nanos)).ok()
 }
 
 /// Re-assert `0600` on the throttle stamp after an atomic replace (`write_atomic`
@@ -507,13 +518,26 @@ mod tests {
         }
     }
 
-    /// Seed the kernel queue file with `n` lines, each carrying a `timestamp`
-    /// set to `ts`.
-    fn seed_queue_with_ts(paths: &Paths, n: usize, ts: &str) {
+    /// Seed the kernel queue file with `n` REAL kernel-shaped lines, each
+    /// carrying `time_unix_nano` set to `at` (the kernel envelope is
+    /// `{"event_name":..,"time_unix_nano":<u64 nanos>,"attributes":{..}}`).
+    fn seed_queue_at(paths: &Paths, n: usize, at: time::OffsetDateTime) {
         std::fs::create_dir_all(paths.telemetry_dir()).unwrap();
-        let line = format!("{{\"event_type\":\"tome.search\",\"timestamp\":\"{ts}\"}}\n");
+        let nanos = at.unix_timestamp_nanos().max(0) as u64;
+        let line = format!(
+            "{{\"event_name\":\"tome.search\",\"time_unix_nano\":{nanos},\"attributes\":{{}}}}\n"
+        );
         let body: String = std::iter::repeat_n(line, n).collect();
         std::fs::write(paths.telemetry_queue(), body).unwrap();
+    }
+
+    /// A fixed, far-past instant (2020-01-01T00:00:00Z) for the threshold tests
+    /// where the depth/throttle gate decides and the event age is irrelevant.
+    fn old_2020() -> time::OffsetDateTime {
+        time::Date::from_calendar_date(2020, time::Month::January, 1)
+            .unwrap()
+            .midnight()
+            .assume_utc()
     }
 
     #[test]
@@ -534,7 +558,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
         // 60 events past the threshold, but a JUST-written attempt stamp.
-        seed_queue_with_ts(&paths, 60, "2020-01-01T00:00:00.000Z");
+        seed_queue_at(&paths, 60, old_2020());
         record_attempt(&paths);
         let before = std::fs::read_to_string(paths.telemetry_last_flush_attempt()).unwrap();
 
@@ -550,7 +574,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
         // A queue at/over the 50-event threshold.
-        seed_queue_with_ts(&paths, 50, "2020-01-01T00:00:00.000Z");
+        seed_queue_at(&paths, 50, old_2020());
         // Plant a STALE attempt stamp (older than the 1-min window).
         let now = clock::now_utc();
         let stale = (now - time::Duration::minutes(5))
@@ -570,12 +594,9 @@ mod tests {
         let _minted = MintedGuard::install(false);
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
-        // A small, recent queue (timestamp = now) and no attempt stamp.
+        // A small, recent queue (event time = now) and no attempt stamp.
         let now = clock::now_utc();
-        let fresh = now
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap();
-        seed_queue_with_ts(&paths, 3, &fresh);
+        seed_queue_at(&paths, 3, now);
         assert!(
             !should_spawn(&paths),
             "few recent events + no mint ⇒ no spawn"
@@ -594,12 +615,9 @@ mod tests {
             .unwrap()
             .assume_utc();
         let _clk = ClockGuard::install(now);
-        let old = (now - time::Duration::minutes(6))
-            .format(&time::format_description::well_known::Rfc3339)
-            .unwrap();
         // Just a couple of events (below the depth threshold), but the oldest is
         // older than 5 min ⇒ age trigger.
-        seed_queue_with_ts(&paths, 2, &old);
+        seed_queue_at(&paths, 2, now - time::Duration::minutes(6));
         assert!(should_spawn(&paths), "an old oldest-event triggers a spawn");
     }
 
@@ -616,6 +634,44 @@ mod tests {
     }
 
     #[test]
+    fn oldest_event_age_exceeds_reads_kernel_time_unix_nano() {
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        let now = time::Date::from_calendar_date(2026, time::Month::June, 25)
+            .unwrap()
+            .with_hms(14, 0, 0)
+            .unwrap()
+            .assume_utc();
+
+        // A real kernel-shaped queue whose oldest event is 6 min old ⇒ exceeds 5 min.
+        seed_queue_at(&paths, 1, now - time::Duration::minutes(6));
+        assert!(
+            oldest_event_age_exceeds(&paths, now, SPAWN_OLDEST_AGE),
+            "a kernel `time_unix_nano` 6 min in the past must exceed the 5-min age"
+        );
+
+        // A fresh (now) event does NOT exceed the age.
+        seed_queue_at(&paths, 1, now);
+        assert!(
+            !oldest_event_age_exceeds(&paths, now, SPAWN_OLDEST_AGE),
+            "a current-time event must not trip the age trigger"
+        );
+
+        // The OLD envelope key (`timestamp`) must NOT be read — an envelope
+        // carrying only the legacy key reports "not old" (no false age trigger),
+        // proving the reader keys on `time_unix_nano`.
+        std::fs::write(
+            paths.telemetry_queue(),
+            "{\"event_type\":\"tome.search\",\"timestamp\":\"2020-01-01T00:00:00.000Z\"}\n",
+        )
+        .unwrap();
+        assert!(
+            !oldest_event_age_exceeds(&paths, now, SPAWN_OLDEST_AGE),
+            "a legacy `timestamp`-only line carries no `time_unix_nano` ⇒ no age trigger"
+        );
+    }
+
+    #[test]
     fn record_attempt_writes_a_parseable_stamp() {
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
@@ -626,6 +682,56 @@ mod tests {
         assert!(
             clock::parse_rfc3339(body.trim()).is_some(),
             "attempt stamp is a parseable timestamp: {body:?}"
+        );
+    }
+
+    /// I1: `build_handle` threads Tome's 8-vendor CI detection into the kernel
+    /// consent. A Jenkins box (`JENKINS_URL` set, `CI` unset) must build a
+    /// DISABLED handle — otherwise it would emit while `tome telemetry status`
+    /// reports "CI auto-off".
+    #[test]
+    fn build_handle_disabled_under_jenkins_only_env() {
+        // Serialise on the telemetry seam lock (env is process-global) and clear
+        // every CI/opt-out var so only the planted `JENKINS_URL` is in play.
+        let _serial = test_serial();
+
+        const CI_VARS: &[&str] = &[
+            "TOME_TELEMETRY",
+            "GAUGE_TELEMETRY_DISABLE",
+            "CI",
+            "GITHUB_ACTIONS",
+            "GITLAB_CI",
+            "CIRCLECI",
+            "BUILDKITE",
+            "JENKINS_URL",
+            "TF_BUILD",
+            "TEAMCITY_VERSION",
+        ];
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            CI_VARS.iter().map(|&k| (k, std::env::var_os(k))).collect();
+        // SAFETY: serialised by `test_serial()`; this is the only mutator.
+        for &k in CI_VARS {
+            unsafe { std::env::remove_var(k) };
+        }
+        // Jenkins: `JENKINS_URL` set, `CI` unset.
+        unsafe { std::env::set_var("JENKINS_URL", "http://ci.local/") };
+
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        let handle = build_handle_for_test(&paths);
+        let enabled = handle.is_enabled();
+
+        // Restore the prior env before asserting (so a failure can't leak state).
+        for (k, v) in saved {
+            match v {
+                Some(val) => unsafe { std::env::set_var(k, val) },
+                None => unsafe { std::env::remove_var(k) },
+            }
+        }
+
+        assert!(
+            !enabled,
+            "Jenkins-only env (JENKINS_URL set, CI unset) must disable the handle"
         );
     }
 

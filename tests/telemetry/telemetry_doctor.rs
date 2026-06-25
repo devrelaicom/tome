@@ -127,10 +127,14 @@ fn doctor_surfaces_seeded_id_queue_and_last_flush() {
         std::fs::write(id_path(&env), b"0b9c1f2e-3a4d-4b6c-8e1f-2a3b4c5d6e7f\n").unwrap();
         std::fs::set_permissions(id_path(&env), std::fs::Permissions::from_mode(0o600)).unwrap();
     }
+    // REAL kernel-shaped queue lines (the kernel envelope is
+    // `{"event_name":..,"time_unix_nano":<u64 nanos>,"attributes":{..}}`), so the
+    // oldest-age read asserts against reality, not a legacy `timestamp` fiction.
+    // The `time_unix_nano` values correspond to 2020-01-01/02T00:00:00Z.
     std::fs::write(
         queue_path(&env),
-        b"{\"timestamp\":\"2020-01-01T00:00:00.000Z\",\"event_type\":\"tome.search\"}\n\
-          {\"timestamp\":\"2020-01-02T00:00:00.000Z\",\"event_type\":\"tome.install\"}\n",
+        b"{\"event_name\":\"tome.search\",\"time_unix_nano\":1577836800000000000,\"attributes\":{}}\n\
+          {\"event_name\":\"tome.install\",\"time_unix_nano\":1577923200000000000,\"attributes\":{}}\n",
     )
     .unwrap();
     std::fs::write(
@@ -192,9 +196,11 @@ fn doctor_fix_performs_no_telemetry_write() {
 
     std::fs::create_dir_all(telemetry_dir(&env)).unwrap();
     std::fs::write(id_path(&env), b"0b9c1f2e-3a4d-4b6c-8e1f-2a3b4c5d6e7f\n").unwrap();
+    // A REAL kernel-shaped queue line (the read-only assertion below is about
+    // `--fix` not mutating it; the content matches the live envelope shape).
     std::fs::write(
         queue_path(&env),
-        b"{\"timestamp\":\"2020-01-01T00:00:00.000Z\"}\n",
+        b"{\"event_name\":\"tome.search\",\"time_unix_nano\":1577836800000000000,\"attributes\":{}}\n",
     )
     .unwrap();
     let id_before = std::fs::read(id_path(&env)).unwrap();
