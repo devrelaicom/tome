@@ -246,3 +246,22 @@ fn planted_tome_marker_leak_is_caught_negative_control() {
     };
     assert_no_forbidden(&leaky, &forbidden());
 }
+
+#[test]
+#[should_panic(expected = "leaked forbidden substring")]
+fn planted_harnesses_detected_leak_is_caught_negative_control() {
+    // `Heartbeat.harnesses_detected` is the ONE free-form `String` on an anonymous
+    // event (in production a comma-joined closed-vocabulary token set from the
+    // harness registry). Prove the canary covers THAT branch too: a path-shaped
+    // token planted in `harnesses_detected` must be CAUGHT.
+    let leaky = Heartbeat {
+        skills: 1,
+        commands: 0,
+        agents: 0,
+        workspaces: 1,
+        catalogs: 1,
+        harnesses_detected: "claude-code,/Users/alice/evil".into(),
+        env: benign_env(),
+    };
+    assert_no_forbidden(&leaky, &forbidden());
+}

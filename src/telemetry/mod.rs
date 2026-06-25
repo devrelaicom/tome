@@ -40,10 +40,14 @@ static HANDLE: OnceLock<Telemetry> = OnceLock::new();
 /// `OnceLock`, so a test that drives an in-process emit path (a `query`/MCP
 /// handler that routes through [`emit`]) can't re-point the global at its own
 /// isolated `TempDir`-rooted queue across multiple tests in one binary. This slot,
-/// when `Some`, takes precedence over `HANDLE` everywhere the handle is read
-/// ([`handle`]/[`is_enabled`]/[`emit`]). Installed + restored by a RAII guard
-/// (see [`TelemetryHandleGuard`]); cleared back to `None` on drop so the next
-/// test sees the real global. Doc-hidden, test-only.
+/// when `Some`, takes precedence over `HANDLE` in the two readers that route
+/// through [`with_handle`]: [`is_enabled`] and [`emit`]. By contrast [`handle`],
+/// [`cli_startup`], and [`teardown_at_exit`] deliberately read the global
+/// [`HANDLE`] directly (the first needs a `&'static`, the latter two are the
+/// startup/exit paths) — so those are exercised via the real-binary subprocess
+/// tests, NOT this override. Installed + restored by a RAII guard (see
+/// [`TelemetryHandleGuard`]); cleared back to `None` on drop so the next test sees
+/// the real global. Doc-hidden, test-only.
 #[doc(hidden)]
 pub static HANDLE_OVERRIDE: std::sync::RwLock<Option<Telemetry>> = std::sync::RwLock::new(None);
 
