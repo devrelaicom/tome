@@ -223,7 +223,10 @@ tome models list --verify                   # re-hash each artefact against its 
 tome models download                        # fetch the active profile's models up front
 tome models download --all                  # fetch every model in every profile
 tome models remove <name>
+tome models test <summariser|embedding|reranker>  # one real round-trip against the active model
 ```
+
+`tome models test` exercises the **active** model for a capability — the configured external provider if one is set (see [External model providers](#external-model-providers-byokbyom)), otherwise the bundled local model — and reports success (with latency + the validated result shape) or a precise failure, without writing any state.
 
 `tome models list` annotates each row with the profile(s) that reference it and marks the active set with `*`. `tome models download` defaults to just the active profile's `{embedder, reranker, summariser}`; pass `--all` to fetch every tier's weights.
 
@@ -275,6 +278,27 @@ strict_min_score = 0.5
 enabled = true
 # Long-summary character cap. Clamped to the range 1500..=8000.
 long_max_chars = 2500
+# BYOK (optional): name of a [providers.*] entry to summarise with, instead of
+# the bundled Qwen. When set, `model` is required. Omit → bundled local model.
+# provider = "openai"
+# model    = "gpt-4o-mini"
+
+# BYOK/BYOM — external model providers (optional). See "External model
+# providers" below. Each [providers.<name>] declares a `kind` and an optional
+# `base_url` (defaulted per kind) + optional inline `api_key` (env wins).
+# [providers.openai]
+# kind     = "openai"            # openai | anthropic | gemini | voyage
+# base_url = "https://api.openai.com/v1"   # or e.g. http://localhost:11434/v1 (Ollama)
+# api_key  = "sk-..."            # optional; env TOME_OPENAI_API_KEY wins if set
+
+# [embedding]                    # omit → bundled bge per [models] profile
+# provider   = "openai"          # allowed kinds: openai, voyage
+# model      = "text-embedding-3-small"
+# dimensions = 1536              # optional; authoritative expected dimension
+
+# [reranker]                     # omit → bundled reranker per profile
+# provider = "voyage"            # voyage only (v1)
+# model    = "rerank-2"
 
 [telemetry]
 # Set to false or run `tome telemetry off` to opt out.
@@ -337,6 +361,33 @@ Foreground commands that read the global config fail loudly with exit 5 if the f
 
 **New `--no-color` global flag.**
 `tome --no-color <command>` suppresses colour output regardless of TTY state. The `NO_COLOR` environment variable and `[output] color = "never"` in config also suppress colour.
+
+### External model providers (BYOK/BYOM)
+
+Each of Tome's three model capabilities — **summarisation**, **embedding**, and **reranking** — can be pointed at an external provider instead of the bundled local model. Leave a capability unconfigured to keep today's bundled behaviour exactly. Configure a provider in `~/.tome/config.toml`:
+
+1. Declare a provider in the `[providers.<name>]` registry: a `kind` (`openai` | `anthropic` | `gemini` | `voyage`), an optional `base_url` (defaulted per kind; set it explicitly for a local OpenAI-compatible server such as Ollama or LM Studio), and an optional inline `api_key`.
+2. Point a capability at it: `provider` + `model` on `[summariser]`, or the `[embedding]` / `[reranker]` sections.
+
+| Capability | Allowed provider kinds | Apply the switch with |
+|---|---|---|
+| summarisation | `openai`, `anthropic`, `gemini` | `tome workspace regen-summary` |
+| embedding | `openai`, `voyage` | `tome reindex` (a drift guard requires it) |
+| reranking | `voyage` | takes effect on the next `tome query` |
+
+**Credentials** resolve in this order: the environment variable `TOME_<NAME>_API_KEY` (where `<NAME>` is the registry name uppercased with non-alphanumerics → `_`) → the inline `api_key` → none (valid for a local no-auth server). Tome never reads a generic `OPENAI_API_KEY`; credentials are never written to logs or error output.
+
+**Verify before a (paid) reindex:**
+
+```sh
+tome models test embedding                  # one real round-trip against the active model
+tome models test summariser                 # — remote if configured, else bundled local
+tome models test reranker
+tome doctor                                  # provider report: kind + credential resolvable?
+tome doctor --verify                         # + one lightweight reachability call per provider
+```
+
+Switching the embedding model invalidates the index: `tome query` and the embedding-writing commands (`tome plugin enable`, `tome catalog update`) fail with a clear "run `tome reindex`" error until you reindex — Tome never auto-incurs a (possibly paid) reindex. A malformed remote embedding (empty, non-finite, zero-norm, or wrong-dimension) is rejected fail-closed and never written to the index. No streaming, no batch embedding, and no per-workspace overrides in v1 (embedding is global — there is one shared index).
 
 ### Models
 

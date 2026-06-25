@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### BYOK/BYOM — external model providers
+
+Each of Tome's three model capabilities can now be pointed at an external
+provider instead of the bundled local model; the bundled local model stays the
+default when a capability is left unconfigured (no behaviour change).
+
+- **Added** a `[providers.<name>]` registry (`kind` = `openai` | `anthropic` |
+  `gemini` | `voyage`, optional `base_url`, optional inline `api_key`) referenced
+  by `provider`/`model` on `[summariser]` and the new `[embedding]` /
+  `[reranker]` sections. Summarisation supports OpenAI-compatible/Anthropic/
+  Gemini; embedding supports OpenAI-compatible/Voyage; reranking supports Voyage.
+  OpenAI-compatible covers local servers (Ollama, LM Studio) via an explicit
+  `base_url`.
+- **Added** `tome models test <summariser|embedding|reranker>` — one real
+  round-trip against the active configured model (remote or bundled), reporting
+  latency + validated shape, writing no state.
+- **Added** a `tome doctor` provider report (kind + credential-resolvable, and
+  with `--verify` a reachability check) and a corrupt-index check (cost-aware
+  `--fix`: bundled-local auto-reindexes; remote prints the command).
+- **Credentials** resolve from `TOME_<NAME>_API_KEY` → inline `api_key` → none;
+  generic third-party env vars (e.g. `OPENAI_API_KEY`) are never read, and
+  credentials never appear in logs or error output.
+- **Safety:** every remote embedding is content-validated fail-closed
+  (non-empty, finite, non-zero-norm, correct dimension) at index time and query
+  time, on both the CLI and the MCP `search_skills` path — a malformed remote
+  embedding can never be written to the index or used for KNN. Switching the
+  embedding model surfaces an explicit "run `tome reindex`" error rather than
+  silently mixing vectors; no automatic (possibly paid) reindex is triggered.
+- New exit codes **93** `ProviderConfigInvalid`, **94** `ProviderRequestFailed`,
+  **95** `RemoteEmbeddingInvalid`. No new dependency; no index schema change.
+- v1 non-goals: streaming, batch embedding, per-workspace overrides, reranking
+  via non-Voyage providers.
+
 ### Unified global config (`~/.tome/config.toml`) — breaking changes
 
 All global Tome settings now live in **one file**: `~/.tome/config.toml`. The

@@ -416,6 +416,145 @@ fn summary_provider_kind_only_closed_tokens_no_free_form_string() {
 }
 
 // ---------------------------------------------------------------------------
+// T081 — telemetry privacy pin across ALL THREE `*_provider_kind` fields
+// (FR-022). The three live across two events:
+//   * `tome.search`  — `embedding_provider_kind` + `reranker_provider_kind`
+//   * `tome.summary` — `summariser_provider_kind`
+//
+// For each field, every closed `ProviderKind` token may appear and nothing else
+// — no provider registry name, model id, or base_url string ever reaches the
+// wire. The field types are closed enums, so this is structurally guaranteed;
+// these tests are the defence-in-depth that catches a future regression
+// swapping a field to a `String`, mirroring the existing
+// `summary_provider_kind_only_closed_tokens_no_free_form_string`.
+// ---------------------------------------------------------------------------
+
+/// A representative set of secret-shaped strings that MUST NEVER appear on any
+/// provider-attributed event: a base_url, two key formats, model ids, and a
+/// registry name. Shared by the per-field assertions below.
+const FORBIDDEN_PROVIDER_STRINGS: &[&str] = &[
+    "api.openai.com",
+    "api.voyageai.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com",
+    "sk-",
+    "pa-",
+    "AIza",
+    "gpt-4",
+    "voyage-rerank-2",
+    "text-embedding-3-small",
+    "my-provider",
+];
+
+/// Assert `serialised` carries none of the forbidden provider name/model/url
+/// strings.
+fn assert_no_forbidden_provider_strings(serialised: &str, context: &str) {
+    for needle in FORBIDDEN_PROVIDER_STRINGS {
+        assert!(
+            !serialised.contains(needle),
+            "{context}: forbidden provider string `{needle}` on the wire: {serialised}"
+        );
+    }
+}
+
+#[test]
+fn search_provider_kinds_only_closed_tokens_no_free_form_string() {
+    // Both `tome.search` provider-kind fields: every ProviderKind variant must
+    // serialise to its closed lowercase token, independently per capability
+    // (FR-022 — a remote reranker with a bundled embedder is attributed
+    // accurately). Cross-product the two fields so each is exercised against
+    // every kind.
+    let kinds = [
+        (ProviderKind::Bundled, "bundled"),
+        (ProviderKind::Openai, "openai"),
+        (ProviderKind::Anthropic, "anthropic"),
+        (ProviderKind::Gemini, "gemini"),
+        (ProviderKind::Voyage, "voyage"),
+    ];
+    for (embed_kind, embed_token) in kinds {
+        for (rerank_kind, rerank_token) in kinds {
+            let event = Search {
+                surface: Surface::Cli,
+                latency_bucket: LatencyBucket::Under50,
+                candidates_returned: CountBucket::OneToFour,
+                reranker_used: true,
+                strict: false,
+                corpus_size_bucket: CountBucket::FiveToNineteen,
+                // A `Some` model id is the ONLY non-enum optional; it is the
+                // bundled embedder's static id, never a remote model string —
+                // assert it can't be mistaken for a provider model below.
+                embedder_model_id: Some("bge-small-en-v1.5"),
+                embedding_provider_kind: embed_kind,
+                reranker_provider_kind: rerank_kind,
+                calling_harness: None,
+            };
+            let serialised = line(&event);
+            assert!(
+                serialised.contains(&format!("\"embedding_provider_kind\":\"{embed_token}\"")),
+                "expected closed embedding token `{embed_token}` in: {serialised}"
+            );
+            assert!(
+                serialised.contains(&format!("\"reranker_provider_kind\":\"{rerank_token}\"")),
+                "expected closed reranker token `{rerank_token}` in: {serialised}"
+            );
+            assert_no_forbidden_provider_strings(
+                &serialised,
+                &format!("search(embed={embed_token},rerank={rerank_token})"),
+            );
+        }
+    }
+}
+
+#[test]
+fn all_three_provider_kind_fields_are_present_and_independently_attributed() {
+    // The three fields, across the two events, are each present and each carries
+    // its OWN closed kind — a search with a bundled embedder + remote (voyage)
+    // reranker, and a summary with a remote (gemini) summariser — proving the
+    // three are independently attributed (FR-022) and that no event leaks the
+    // OTHER capabilities' provider details.
+    let search = Search {
+        surface: Surface::Mcp,
+        latency_bucket: LatencyBucket::Under50,
+        candidates_returned: CountBucket::OneToFour,
+        reranker_used: true,
+        strict: false,
+        corpus_size_bucket: CountBucket::FiveToNineteen,
+        embedder_model_id: None,
+        embedding_provider_kind: ProviderKind::Bundled,
+        reranker_provider_kind: ProviderKind::Voyage,
+        calling_harness: None,
+    };
+    let search_line = line(&search);
+    assert!(
+        search_line.contains("\"embedding_provider_kind\":\"bundled\""),
+        "{search_line}"
+    );
+    assert!(
+        search_line.contains("\"reranker_provider_kind\":\"voyage\""),
+        "{search_line}"
+    );
+    assert_no_forbidden_provider_strings(&search_line, "search(independent)");
+
+    let summary = Summary {
+        summariser_provider_kind: ProviderKind::Gemini,
+        outcome: Outcome::Ok,
+    };
+    let summary_line = line(&summary);
+    assert!(
+        summary_line.contains("\"summariser_provider_kind\":\"gemini\""),
+        "{summary_line}"
+    );
+    // The summary event carries ONLY the summariser kind — never the search
+    // fields, and never a provider name/model/url.
+    assert!(
+        !summary_line.contains("embedding_provider_kind")
+            && !summary_line.contains("reranker_provider_kind"),
+        "summary must not carry the search provider-kind fields: {summary_line}"
+    );
+    assert_no_forbidden_provider_strings(&summary_line, "summary(independent)");
+}
+
+// ---------------------------------------------------------------------------
 // Bucket token pins — exact wire token per enum variant. (Mirrors the lib unit
 // tests; the cross-crate assertion guards the public buckets API.)
 // ---------------------------------------------------------------------------
