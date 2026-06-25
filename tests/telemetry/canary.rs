@@ -44,15 +44,32 @@ fn forbidden() -> Vec<&'static str> {
         .collect()
 }
 
-/// A benign env snapshot with no host-identifying free-form fields (so the
-/// `Install`/`Heartbeat` flatten can't carry an OS string that trips `:`-free
-/// markers). Counts only.
-fn benign_env() -> EnvAttributes {
+/// A FULLY-POPULATED env snapshot — every host-id field the kernel
+/// `EnvAttributes` flattens into `Install`/`Heartbeat` is set to a representative
+/// value (`os_version`/`language`/`shell`/`cpu_cores`/`ram_gb`/`accel`/`libc`).
+///
+/// The disclosure decision (C1) is "keep the full env snapshot", so the canary
+/// must run over the POPULATED snapshot — not an empty one — to guard against a
+/// FUTURE env field leaking a path/credential/marker. (`benign_env` excluded the
+/// host-id fields, making the canary vacuous for them.)
+fn populated_env() -> EnvAttributes {
     EnvAttributes {
+        os_version: Some("darwin:14".into()),
         cpu_cores: Some(8),
         ram_gb: Some(16),
-        ..Default::default()
+        accel: Some("cpu".into()),
+        libc: Some("glibc".into()),
+        language: Some("en".into()),
+        shell: Some("zsh".into()),
     }
+}
+
+/// A real detected env snapshot (cross-checks the populated fixture against the
+/// kernel's actual `detect`): a live host's `os_version`/`language`/`shell`/…
+/// must ALSO be marker-free. Run alongside the fixture so the canary covers the
+/// real values this host produces, not only the hand-written fixture.
+fn detected_env() -> EnvAttributes {
+    gauge_telemetry::env::detect(Some("cpu".into()))
 }
 
 // ---------------------------------------------------------------------------
@@ -148,26 +165,32 @@ fn benign_anonymous_events_pass_the_canary() {
         &forbidden,
     );
 
-    assert_no_forbidden(
-        &Install {
-            install_method: InstallMethod::Brew,
-            env: benign_env(),
-        },
-        &forbidden,
-    );
+    // C1: run the canary over the FULLY-POPULATED env snapshot (every host-id
+    // field set) AND the live-detected snapshot — both `Install` and `Heartbeat`
+    // flatten the env, so a future env field carrying a path/credential/marker
+    // would be caught here.
+    for env in [populated_env(), detected_env()] {
+        assert_no_forbidden(
+            &Install {
+                install_method: InstallMethod::Brew,
+                env: env.clone(),
+            },
+            &forbidden,
+        );
 
-    assert_no_forbidden(
-        &Heartbeat {
-            skills: 3,
-            commands: 1,
-            agents: 0,
-            workspaces: 2,
-            catalogs: 1,
-            harnesses_detected: "claude-code,cursor".into(),
-            env: benign_env(),
-        },
-        &forbidden,
-    );
+        assert_no_forbidden(
+            &Heartbeat {
+                skills: 3,
+                commands: 1,
+                agents: 0,
+                workspaces: 2,
+                catalogs: 1,
+                harnesses_detected: "claude-code,cursor".into(),
+                env,
+            },
+            &forbidden,
+        );
+    }
 
     assert_no_forbidden(
         &CatalogActionEvent {
@@ -249,6 +272,22 @@ fn planted_tome_marker_leak_is_caught_negative_control() {
 
 #[test]
 #[should_panic(expected = "leaked forbidden substring")]
+fn planted_env_field_leak_is_caught_negative_control() {
+    // C1: the env snapshot now flattens onto `Install`/`Heartbeat`, so a path/
+    // credential planted in ANY env string field must be CAUGHT. This proves the
+    // canary is non-vacuous over the host-id env fields (the gap `benign_env`
+    // left). Plant a `/Users/...` value in `os_version`.
+    let mut env = populated_env();
+    env.os_version = Some("/Users/alice/leaked".into());
+    let leaky = Install {
+        install_method: InstallMethod::Brew,
+        env,
+    };
+    assert_no_forbidden(&leaky, &forbidden());
+}
+
+#[test]
+#[should_panic(expected = "leaked forbidden substring")]
 fn planted_harnesses_detected_leak_is_caught_negative_control() {
     // `Heartbeat.harnesses_detected` is the ONE free-form `String` on an anonymous
     // event (in production a comma-joined closed-vocabulary token set from the
@@ -261,7 +300,7 @@ fn planted_harnesses_detected_leak_is_caught_negative_control() {
         workspaces: 1,
         catalogs: 1,
         harnesses_detected: "claude-code,/Users/alice/evil".into(),
-        env: benign_env(),
+        env: populated_env(),
     };
     assert_no_forbidden(&leaky, &forbidden());
 }

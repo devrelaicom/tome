@@ -62,14 +62,20 @@ or a single MCP server session.
 ## 3. The two event tiers
 
 Every event is a **typed, closed record**. Each field is a closed enum, a raw
-integer, a UUID, a boolean, or a string drawn from a closed set — never a
-free-form string on the anonymous tier.
+integer, a UUID, a boolean, or a string drawn from a closed/derived, coarse set
+— never an arbitrary free-form string on the anonymous tier.
 
 ### Tier 1 — Anonymous (`tome.*`)
 
-Anonymous events carry only closed enum values, raw integers (e.g. latency in
-milliseconds, result counts, inventory sizes), booleans, and UUIDs. No
-free-form string appears on this tier.
+Anonymous events carry closed enum values, raw integers (e.g. latency in
+milliseconds, result counts, inventory sizes), booleans, and UUIDs. The
+low-frequency lifecycle events (`install`, `heartbeat`) additionally carry the
+coarse **environment snapshot** of §6 — `os_version` (OS major version + id, e.g.
+`darwin:14`), `language` (locale subtag only, e.g. `en`), `shell` (shell name
+only, e.g. `zsh`), `cpu_cores`, `ram_gb`, `accel`, and `libc`. These string
+fields are derived, low-cardinality values, not arbitrary free text; see §6 for
+the exact derivation and what is dropped. No other free-form string appears on
+this tier.
 
 **Privacy model for quantities:** counts and durations are shipped as **raw
 integers**. The server applies bucket groupings at read time; the client never
@@ -154,23 +160,46 @@ a hard, tested invariant.
 
 ---
 
-## 6. What is never emitted
+## 6. Environment snapshot, and what is never emitted
 
-Tome **never** emits, in any event:
+The low-frequency lifecycle events (`install`, `heartbeat`) carry a small,
+coarse **environment snapshot** so we can understand the platforms Tome runs on.
+Every field is low-cardinality and best-effort (an undetectable field is simply
+omitted):
+
+- `os_version` — the OS **major version and id only**, e.g. `darwin:14`,
+  `ubuntu:22`, `windows:11`. The minor/patch/build/kernel numbers are dropped
+  before sending — only the major version survives.
+- `language` — the **locale subtag only**, derived from `$LANG`, e.g. `en`,
+  `de`. The country, encoding, and any `@modifier` are stripped (`en_US.UTF-8`
+  → `en`); the no-locale values `C`/`POSIX`/`C.UTF-8` are treated as absent.
+- `shell` — the **shell name only**, derived from `$SHELL`, classified to a
+  closed set (`bash`, `zsh`, `fish`, `pwsh`, `cmd`, or `other`). The shell's
+  path is never sent.
+- `cpu_cores` — the CPU core count (an integer).
+- `ram_gb` — total physical RAM rounded to whole GB (an integer).
+- `accel` — Tome's inference backend (always `cpu`).
+- `libc` — on Linux only, `glibc` or `musl` (a compile-time property).
+
+`os_version`, `language`, and `shell` are **derived** values: the full `$LANG`
+and `$SHELL` environment-variable values are never sent — only the locale subtag
+and the shell name. No other environment-variable value is read or emitted.
+
+With that snapshot disclosed, Tome **never** emits, in any event:
 
 - artefact names from **non-allowlisted** sources;
 - query strings, search terms, or tool inputs/outputs;
 - file paths, file contents, or project / workspace / catalog **names or URLs**;
-- environment variable values;
+- full environment-variable values (only the derived `language`/`shell` above);
+- OS minor / patch / build / kernel versions (only the major version + id);
 - hostnames, usernames, emails, or IP addresses;
-- OS minor / build / kernel versions;
-- geographic or locale data;
 - raw error messages (only the closed `error_class` category);
 - any free-form string that is not explicitly part of the schema.
 
-This is enforced **structurally** by the typed event API: a field that is not in
-the schema cannot be constructed, so it cannot be sent. The only place a
-published artefact name appears is the catalog-attributed stream, gated by §4.
+Beyond the disclosed environment snapshot, this is enforced **structurally** by
+the typed event API: a field that is not in the schema cannot be constructed, so
+it cannot be sent. The only place a published artefact name appears is the
+catalog-attributed stream, gated by §4.
 
 ---
 
