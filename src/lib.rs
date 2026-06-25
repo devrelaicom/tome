@@ -18,6 +18,7 @@ pub mod output;
 pub mod paths;
 pub mod plugin;
 pub mod presentation;
+pub mod provider;
 pub mod settings;
 pub mod substitution;
 pub mod summarise;

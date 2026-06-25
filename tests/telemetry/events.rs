@@ -31,8 +31,8 @@ use tome::telemetry::event::{
     CatalogAction, CatalogActionEvent, ColdStart, DoctorRun, EntryInfo, EntryInvoked, EntryKind,
     ErrorEvent, Harness, HarnessAction, HarnessActionEvent, Heartbeat, Install, InstallMethod,
     MetaAction, MetaActionEvent, ModelDownload, Outcome, PluginAction, PluginActionEvent,
-    PromptInvoked, PromptKind, Reindex, ReindexScope, Search, SourceFormat, SourceType, Surface,
-    Upgrade, VersionStr, WorkspaceAction, WorkspaceActionEvent,
+    PromptInvoked, PromptKind, ProviderKind, Reindex, ReindexScope, Search, SourceFormat,
+    SourceType, Summary, Surface, Upgrade, VersionStr, WorkspaceAction, WorkspaceActionEvent,
 };
 
 /// Serialize `event` behind the canonical fixed envelope for its event type and
@@ -162,6 +162,8 @@ fn search_full_literal_pin() {
         strict: false,
         corpus_size_bucket: CountBucket::TwentyToNinetyNine,
         embedder_model_id: Some("bge-small-en-v1.5"),
+        embedding_provider_kind: ProviderKind::Bundled,
+        reranker_provider_kind: ProviderKind::Voyage,
         calling_harness: Some(Harness::ClaudeCode),
     };
     let expected = envelope_prefix("tome.search")
@@ -172,6 +174,8 @@ fn search_full_literal_pin() {
 ,\"strict\":false\
 ,\"corpus_size_bucket\":\"20-99\"\
 ,\"embedder_model_id\":\"bge-small-en-v1.5\"\
+,\"embedding_provider_kind\":\"bundled\"\
+,\"reranker_provider_kind\":\"voyage\"\
 ,\"calling_harness\":\"claude-code\"}";
     assert_eq!(line(&event), expected);
 }
@@ -358,6 +362,199 @@ fn error_full_literal_pin() {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 12 — `tome.summary` (provider-kind attribution). Byte-stable pin +
+// privacy assertion: only the closed `ProviderKind` token can appear; no
+// provider name / model id / base url is on the wire.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn summary_full_literal_pin() {
+    let event = Summary {
+        summariser_provider_kind: ProviderKind::Anthropic,
+        outcome: Outcome::Ok,
+    };
+    let expected = envelope_prefix("tome.summary")
+        + ",\"summariser_provider_kind\":\"anthropic\",\"outcome\":\"ok\"}";
+    assert_eq!(line(&event), expected);
+}
+
+#[test]
+fn summary_provider_kind_only_closed_tokens_no_free_form_string() {
+    // Every ProviderKind variant must serialise to its closed lowercase token —
+    // there is structurally no way to put a registry name / model / url on the
+    // wire (the field type is a closed enum, not a String).
+    let cases = [
+        (ProviderKind::Bundled, "bundled"),
+        (ProviderKind::Openai, "openai"),
+        (ProviderKind::Anthropic, "anthropic"),
+        (ProviderKind::Gemini, "gemini"),
+        (ProviderKind::Voyage, "voyage"),
+    ];
+    for (kind, expected_token) in cases {
+        let event = Summary {
+            summariser_provider_kind: kind,
+            outcome: Outcome::Failed,
+        };
+        let serialised = line(&event);
+        assert!(
+            serialised.contains(&format!(
+                "\"summariser_provider_kind\":\"{expected_token}\""
+            )),
+            "expected closed token `{expected_token}` in: {serialised}"
+        );
+        // Defence-in-depth: a representative secret-shaped string must NEVER
+        // appear — the type system already prevents it, this catches a future
+        // regression that swaps the field to a String.
+        assert!(
+            !serialised.contains("api.openai.com")
+                && !serialised.contains("sk-")
+                && !serialised.contains("gpt-4")
+                && !serialised.contains("my-provider"),
+            "summary event must carry no provider name/model/url: {serialised}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T081 — telemetry privacy pin across ALL THREE `*_provider_kind` fields
+// (FR-022). The three live across two events:
+//   * `tome.search`  — `embedding_provider_kind` + `reranker_provider_kind`
+//   * `tome.summary` — `summariser_provider_kind`
+//
+// For each field, every closed `ProviderKind` token may appear and nothing else
+// — no provider registry name, model id, or base_url string ever reaches the
+// wire. The field types are closed enums, so this is structurally guaranteed;
+// these tests are the defence-in-depth that catches a future regression
+// swapping a field to a `String`, mirroring the existing
+// `summary_provider_kind_only_closed_tokens_no_free_form_string`.
+// ---------------------------------------------------------------------------
+
+/// A representative set of secret-shaped strings that MUST NEVER appear on any
+/// provider-attributed event: a base_url, two key formats, model ids, and a
+/// registry name. Shared by the per-field assertions below.
+const FORBIDDEN_PROVIDER_STRINGS: &[&str] = &[
+    "api.openai.com",
+    "api.voyageai.com",
+    "api.anthropic.com",
+    "generativelanguage.googleapis.com",
+    "sk-",
+    "pa-",
+    "AIza",
+    "gpt-4",
+    "voyage-rerank-2",
+    "text-embedding-3-small",
+    "my-provider",
+];
+
+/// Assert `serialised` carries none of the forbidden provider name/model/url
+/// strings.
+fn assert_no_forbidden_provider_strings(serialised: &str, context: &str) {
+    for needle in FORBIDDEN_PROVIDER_STRINGS {
+        assert!(
+            !serialised.contains(needle),
+            "{context}: forbidden provider string `{needle}` on the wire: {serialised}"
+        );
+    }
+}
+
+#[test]
+fn search_provider_kinds_only_closed_tokens_no_free_form_string() {
+    // Both `tome.search` provider-kind fields: every ProviderKind variant must
+    // serialise to its closed lowercase token, independently per capability
+    // (FR-022 — a remote reranker with a bundled embedder is attributed
+    // accurately). Cross-product the two fields so each is exercised against
+    // every kind.
+    let kinds = [
+        (ProviderKind::Bundled, "bundled"),
+        (ProviderKind::Openai, "openai"),
+        (ProviderKind::Anthropic, "anthropic"),
+        (ProviderKind::Gemini, "gemini"),
+        (ProviderKind::Voyage, "voyage"),
+    ];
+    for (embed_kind, embed_token) in kinds {
+        for (rerank_kind, rerank_token) in kinds {
+            let event = Search {
+                surface: Surface::Cli,
+                latency_bucket: LatencyBucket::Under50,
+                candidates_returned: CountBucket::OneToFour,
+                reranker_used: true,
+                strict: false,
+                corpus_size_bucket: CountBucket::FiveToNineteen,
+                // A `Some` model id is the ONLY non-enum optional; it is the
+                // bundled embedder's static id, never a remote model string —
+                // assert it can't be mistaken for a provider model below.
+                embedder_model_id: Some("bge-small-en-v1.5"),
+                embedding_provider_kind: embed_kind,
+                reranker_provider_kind: rerank_kind,
+                calling_harness: None,
+            };
+            let serialised = line(&event);
+            assert!(
+                serialised.contains(&format!("\"embedding_provider_kind\":\"{embed_token}\"")),
+                "expected closed embedding token `{embed_token}` in: {serialised}"
+            );
+            assert!(
+                serialised.contains(&format!("\"reranker_provider_kind\":\"{rerank_token}\"")),
+                "expected closed reranker token `{rerank_token}` in: {serialised}"
+            );
+            assert_no_forbidden_provider_strings(
+                &serialised,
+                &format!("search(embed={embed_token},rerank={rerank_token})"),
+            );
+        }
+    }
+}
+
+#[test]
+fn all_three_provider_kind_fields_are_present_and_independently_attributed() {
+    // The three fields, across the two events, are each present and each carries
+    // its OWN closed kind — a search with a bundled embedder + remote (voyage)
+    // reranker, and a summary with a remote (gemini) summariser — proving the
+    // three are independently attributed (FR-022) and that no event leaks the
+    // OTHER capabilities' provider details.
+    let search = Search {
+        surface: Surface::Mcp,
+        latency_bucket: LatencyBucket::Under50,
+        candidates_returned: CountBucket::OneToFour,
+        reranker_used: true,
+        strict: false,
+        corpus_size_bucket: CountBucket::FiveToNineteen,
+        embedder_model_id: None,
+        embedding_provider_kind: ProviderKind::Bundled,
+        reranker_provider_kind: ProviderKind::Voyage,
+        calling_harness: None,
+    };
+    let search_line = line(&search);
+    assert!(
+        search_line.contains("\"embedding_provider_kind\":\"bundled\""),
+        "{search_line}"
+    );
+    assert!(
+        search_line.contains("\"reranker_provider_kind\":\"voyage\""),
+        "{search_line}"
+    );
+    assert_no_forbidden_provider_strings(&search_line, "search(independent)");
+
+    let summary = Summary {
+        summariser_provider_kind: ProviderKind::Gemini,
+        outcome: Outcome::Ok,
+    };
+    let summary_line = line(&summary);
+    assert!(
+        summary_line.contains("\"summariser_provider_kind\":\"gemini\""),
+        "{summary_line}"
+    );
+    // The summary event carries ONLY the summariser kind — never the search
+    // fields, and never a provider name/model/url.
+    assert!(
+        !summary_line.contains("embedding_provider_kind")
+            && !summary_line.contains("reranker_provider_kind"),
+        "summary must not carry the search provider-kind fields: {summary_line}"
+    );
+    assert_no_forbidden_provider_strings(&summary_line, "summary(independent)");
+}
+
+// ---------------------------------------------------------------------------
 // Bucket token pins — exact wire token per enum variant. (Mirrors the lib unit
 // tests; the cross-crate assertion guards the public buckets API.)
 // ---------------------------------------------------------------------------
@@ -460,6 +657,8 @@ fn search_optionals_are_omitted_when_none() {
         strict: false,
         corpus_size_bucket: CountBucket::FiveToNineteen,
         embedder_model_id: None,
+        embedding_provider_kind: ProviderKind::Bundled,
+        reranker_provider_kind: ProviderKind::Bundled,
         calling_harness: None,
     };
     let got = line(&event);
@@ -471,14 +670,26 @@ fn search_optionals_are_omitted_when_none() {
         !got.contains("calling_harness"),
         "None calling_harness must be omitted: {got}"
     );
-    // Exact tail with both optionals absent.
+    // `embedding_provider_kind` is ALWAYS present (no `skip`).
+    assert!(
+        got.contains("\"embedding_provider_kind\":\"bundled\""),
+        "embedding_provider_kind must always be present: {got}"
+    );
+    // `reranker_provider_kind` is ALWAYS present (no `skip`).
+    assert!(
+        got.contains("\"reranker_provider_kind\":\"bundled\""),
+        "reranker_provider_kind must always be present: {got}"
+    );
+    // Exact tail with both optionals absent; both provider kinds stay.
     let expected = envelope_prefix("tome.search")
         + ",\"surface\":\"cli\"\
 ,\"latency_bucket\":\"<50ms\"\
 ,\"candidates_returned\":\"1-4\"\
 ,\"reranker_used\":true\
 ,\"strict\":false\
-,\"corpus_size_bucket\":\"5-19\"}";
+,\"corpus_size_bucket\":\"5-19\"\
+,\"embedding_provider_kind\":\"bundled\"\
+,\"reranker_provider_kind\":\"bundled\"}";
     assert_eq!(got, expected);
 }
 
@@ -492,12 +703,24 @@ fn search_optionals_are_present_when_some() {
         strict: true,
         corpus_size_bucket: CountBucket::FiveToNineteen,
         embedder_model_id: Some("bge-small-en-v1.5"),
+        embedding_provider_kind: ProviderKind::Openai,
+        reranker_provider_kind: ProviderKind::Voyage,
         calling_harness: Some(Harness::Opencode),
     };
     let got = line(&event);
     assert!(
         got.contains("\"embedder_model_id\":\"bge-small-en-v1.5\""),
         "Some embedder_model_id must be present: {got}"
+    );
+    assert!(
+        got.contains("\"embedding_provider_kind\":\"openai\""),
+        "embedding_provider_kind must be present: {got}"
+    );
+    // Independent per-capability attribution (FR-022): remote reranker +
+    // remote (openai) embedder, each its own kind.
+    assert!(
+        got.contains("\"reranker_provider_kind\":\"voyage\""),
+        "reranker_provider_kind must be present: {got}"
     );
     assert!(
         got.contains("\"calling_harness\":\"opencode\""),

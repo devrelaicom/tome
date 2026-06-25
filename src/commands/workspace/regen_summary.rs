@@ -1,13 +1,14 @@
 //! `tome workspace regen-summary [<name>]` CLI wrapper.
 //!
 //! The compute path lives in [`crate::workspace::regen_summary`]; this
-//! module resolves the workspace name, constructs the production
-//! summariser, and emits the outcome.
+//! module resolves the workspace name, selects the summariser via
+//! [`crate::summarise::build_summariser`] (a configured remote provider, else
+//! the bundled Qwen), and emits the outcome. A foreground provider failure
+//! PROPAGATES (fail-loud, exit 94 — FR-027).
 //!
 //! `run_with_summariser` is the dependency-injection seam used by
-//! tests — it bypasses the production `LlamaSummariser` (which is
-//! currently a `BackendInitFailed` stub) and accepts a `&dyn
-//! Summariser` directly.
+//! tests — it bypasses the production summariser selection and accepts a
+//! `&dyn Summariser` directly.
 
 use std::io::Write;
 
@@ -16,7 +17,7 @@ use crate::error::TomeError;
 use crate::output::{Mode, write_json};
 use crate::paths::Paths;
 use crate::summarise::prompts::validate_long_max_chars;
-use crate::summarise::{LONG_MAX_CHARS, LlamaSummariser, Summariser};
+use crate::summarise::{LONG_MAX_CHARS, Summariser, build_summariser};
 use crate::workspace::{self, RegenSummaryOutcome, ResolvedScope, WorkspaceName};
 
 pub fn run(
@@ -26,12 +27,18 @@ pub fn run(
     mode: Mode,
 ) -> Result<(), TomeError> {
     let name = WorkspaceName::parse(&args.name)?;
-    let summariser = LlamaSummariser::new(paths)?;
-    run_with_summariser(&name, &summariser, paths, mode)
+    // Load config strictly (exit 5 on malformed) — the explicit regen-summary
+    // command surfaces config errors loudly. `build_summariser` selects a remote
+    // provider summariser when `[summariser] provider` is set, else the bundled
+    // Qwen. A foreground provider failure PROPAGATES (exit 94, fail-loud).
+    let cfg = crate::config::load(paths)?;
+    let summariser = build_summariser(&cfg, paths, false)?;
+    run_with_summariser(&name, summariser.as_ref(), paths, mode)
 }
 
 /// Dependency-injection variant used by tests. Production code goes
-/// through [`run`] which constructs the [`LlamaSummariser`].
+/// through [`run`], which selects the summariser via
+/// [`crate::summarise::build_summariser`].
 ///
 /// Loads the global config strictly (exit 5 on malformed) to resolve
 /// `effective_long_max`. The explicit regen-summary command surfaces

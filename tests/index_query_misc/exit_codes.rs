@@ -505,6 +505,31 @@ fn build_each_variant() -> Vec<(TomeError, i32, &'static str)> {
             92,
             "telemetry_queue_corrupt",
         ),
+        // 93–95 — Phase 12 BYOK/BYOM providers. Resolve-time config error (93),
+        // runtime remote-call failure (94), remote-embedding content-validation
+        // failure (95). See
+        // specs/012-phase-12-byok-providers/contracts/error-and-validation.md.
+        (
+            TomeError::ProviderConfigInvalid {
+                detail: "summariser references undefined provider `myprov`".into(),
+            },
+            93,
+            "provider_config_invalid",
+        ),
+        (
+            TomeError::ProviderRequestFailed {
+                detail: "voyage: rate limited (retryable)".into(),
+            },
+            94,
+            "provider_request_failed",
+        ),
+        (
+            TomeError::RemoteEmbeddingInvalid {
+                detail: "expected dimension 1536, got 768".into(),
+            },
+            95,
+            "remote_embedding_invalid",
+        ),
     ]
 }
 
@@ -615,6 +640,9 @@ fn exhaustive_match_compile_check() {
             TomeError::TelemetryEndpointUnreachable { .. } => 90,
             TomeError::TelemetryConfigInvalid { .. } => 91,
             TomeError::TelemetryQueueCorrupt { .. } => 92,
+            TomeError::ProviderConfigInvalid { .. } => 93,
+            TomeError::ProviderRequestFailed { .. } => 94,
+            TomeError::RemoteEmbeddingInvalid { .. } => 95,
         }
     }
 }

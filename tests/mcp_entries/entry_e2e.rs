@@ -207,6 +207,10 @@ fn build_state(paths: &tome::paths::Paths, registry: PromptRegistry) -> Arc<McpS
         scope: ResolvedScope::global_fallback(),
         paths: paths.clone(),
         embedder_entry,
+        embedder_seed: tome::index::MetaSeed {
+            name: embedder_entry.name.into(),
+            version: embedder_entry.version.into(),
+        },
         reranker_entry,
         prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(registry))),
         host_harness: None,
@@ -272,6 +276,10 @@ fn build_state_with_stub_entries(
         scope: ResolvedScope::global_fallback(),
         paths: paths.clone(),
         embedder_entry: &STUB_EMBEDDER_ENTRY,
+        embedder_seed: tome::index::MetaSeed {
+            name: STUB_EMBEDDER_ENTRY.name.into(),
+            version: STUB_EMBEDDER_ENTRY.version.into(),
+        },
         reranker_entry: &STUB_RERANKER_ENTRY,
         prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(registry))),
         host_harness: None,

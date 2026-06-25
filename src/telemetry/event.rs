@@ -503,6 +503,94 @@ pub enum ReindexScope {
     Plugin,
 }
 
+/// Phase 12 — which model PROVIDER served a capability, as a CLOSED enum. This
+/// is the ONLY thing telemetry records about provider configuration: the kind,
+/// never the registry name / model id / `base_url` / credential. `Bundled` is
+/// the default-local path (no provider configured). Being a closed enum, it can
+/// NEVER carry a free-form string — the typed-event privacy guarantee
+/// (data-model / contracts/telemetry.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    Bundled,
+    Openai,
+    Anthropic,
+    Gemini,
+    Voyage,
+}
+
+impl From<crate::config::ProviderKind> for ProviderKind {
+    /// Bridge the config provider kind into the closed telemetry enum. The
+    /// config enum has no `Bundled` (it only describes a configured remote
+    /// provider); the `Bundled` telemetry value is supplied at the emit site
+    /// when no provider is configured. This exhaustive match surfaces a future
+    /// config-kind addition as a compile error.
+    fn from(kind: crate::config::ProviderKind) -> Self {
+        match kind {
+            crate::config::ProviderKind::Openai => ProviderKind::Openai,
+            crate::config::ProviderKind::Anthropic => ProviderKind::Anthropic,
+            crate::config::ProviderKind::Gemini => ProviderKind::Gemini,
+            crate::config::ProviderKind::Voyage => ProviderKind::Voyage,
+        }
+    }
+}
+
+impl ProviderKind {
+    /// Map the configured EMBEDDING provider to the closed telemetry kind:
+    /// `Bundled` when no `[embedding]` provider is referenced (or the reference
+    /// can't be resolved to a registry entry), else the entry's kind. This is
+    /// the SSOT both the CLI (`query::run_with_deps`) and the MCP
+    /// (`search_skills`) emit sites call so they can never diverge. Records ONLY
+    /// the kind — never the provider name / model / `base_url` (the typed-event
+    /// privacy guarantee). A missing/unresolvable reference degrades to
+    /// `Bundled`; telemetry never propagates a config error.
+    pub fn for_embedding(cfg: &crate::config::Config) -> Self {
+        let Some(name) = cfg.embedding.provider.as_deref() else {
+            return ProviderKind::Bundled;
+        };
+        match cfg.providers.get(name) {
+            Some(entry) => ProviderKind::from(entry.kind),
+            None => ProviderKind::Bundled,
+        }
+    }
+
+    /// Map the configured RERANKING provider to the closed telemetry kind:
+    /// `Bundled` when no `[reranker]` provider is referenced (or the reference
+    /// can't be resolved to a registry entry), else the entry's kind (Voyage in
+    /// v1). The SSOT both the CLI (`query::run_with_deps`) and the MCP
+    /// (`search_skills`) emit sites call so the per-capability kind can never
+    /// diverge (FR-022 — three independent fields). Records ONLY the kind, never
+    /// the provider name / model / `base_url`. A missing/unresolvable reference
+    /// degrades to `Bundled`; telemetry never propagates a config error.
+    pub fn for_reranker(cfg: &crate::config::Config) -> Self {
+        let Some(name) = cfg.reranker.provider.as_deref() else {
+            return ProviderKind::Bundled;
+        };
+        match cfg.providers.get(name) {
+            Some(entry) => ProviderKind::from(entry.kind),
+            None => ProviderKind::Bundled,
+        }
+    }
+
+    /// Map the configured SUMMARISER provider to the closed telemetry kind:
+    /// `Bundled` when no `[summariser]` provider is referenced (or the reference
+    /// can't be resolved to a registry entry), else the entry's kind. This is the
+    /// SSOT the summary emit site (`workspace::regen_summary`) calls so it can
+    /// never diverge from the `[embedding]`/`[reranker]` mappers above. Records
+    /// ONLY the kind — never the provider name / model / `base_url` (the
+    /// typed-event privacy guarantee). A missing/unresolvable reference degrades
+    /// to `Bundled`; telemetry never propagates a config error.
+    pub fn for_summariser(cfg: &crate::config::Config) -> Self {
+        let Some(name) = cfg.summariser.provider.as_deref() else {
+            return ProviderKind::Bundled;
+        };
+        match cfg.providers.get(name) {
+            Some(entry) => ProviderKind::from(entry.kind),
+            None => ProviderKind::Bundled,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Anonymous event trait + the 18 event structs
 // ---------------------------------------------------------------------------
@@ -555,6 +643,18 @@ pub struct Search {
     pub corpus_size_bucket: CountBucket,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embedder_model_id: Option<&'static str>,
+    /// Phase 12 — which PROVIDER served the embedding for this search, as the
+    /// closed [`ProviderKind`] (`Bundled` when no `[embedding]` provider is
+    /// configured). NEVER the provider name / model id / `base_url` — only the
+    /// kind. Always serialised (no `skip`) so the wire shape is stable.
+    pub embedding_provider_kind: ProviderKind,
+    /// Phase 12 / US3 — which PROVIDER served the RERANKING for this search, as
+    /// the closed [`ProviderKind`] (`Bundled` when no `[reranker]` provider is
+    /// configured, including when reranking is disabled — `reranker_used` already
+    /// distinguishes that). Independent of `embedding_provider_kind` (FR-022 —
+    /// a remote reranker with a bundled embedder is attributed accurately). NEVER
+    /// the provider name / model id / `base_url`. Always serialised (no `skip`).
+    pub reranker_provider_kind: ProviderKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub calling_harness: Option<Harness>,
 }
@@ -660,6 +760,15 @@ pub struct Reindex {
     pub outcome: Outcome,
 }
 
+/// `tome.summary` — a workspace summary was (re)generated. Records WHICH
+/// provider kind served the summariser (Phase 12) plus the outcome. NO provider
+/// name / model id / `base_url` is recorded — only the closed [`ProviderKind`].
+#[derive(Debug, Clone, Serialize)]
+pub struct Summary {
+    pub summariser_provider_kind: ProviderKind,
+    pub outcome: Outcome,
+}
+
 /// `tome.error` — a classified error surfaced to a user-facing command.
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorEvent {
@@ -719,6 +828,9 @@ impl AnonymousEvent for DoctorRun {
 }
 impl AnonymousEvent for Reindex {
     const EVENT_TYPE: &'static str = "tome.reindex";
+}
+impl AnonymousEvent for Summary {
+    const EVENT_TYPE: &'static str = "tome.summary";
 }
 impl AnonymousEvent for ErrorEvent {
     const EVENT_TYPE: &'static str = "tome.error";
@@ -1148,6 +1260,149 @@ mod tests {
     }
 
     #[test]
+    fn provider_kind_serialises_lowercase_closed_tokens() {
+        // Closed enum — exactly these five wire tokens, never a free-form string.
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Bundled).unwrap(),
+            "\"bundled\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Openai).unwrap(),
+            "\"openai\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Anthropic).unwrap(),
+            "\"anthropic\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Gemini).unwrap(),
+            "\"gemini\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Voyage).unwrap(),
+            "\"voyage\""
+        );
+    }
+
+    #[test]
+    fn config_provider_kind_bridges_to_telemetry_kind() {
+        use crate::config::ProviderKind as Cfg;
+        assert_eq!(ProviderKind::from(Cfg::Openai), ProviderKind::Openai);
+        assert_eq!(ProviderKind::from(Cfg::Anthropic), ProviderKind::Anthropic);
+        assert_eq!(ProviderKind::from(Cfg::Gemini), ProviderKind::Gemini);
+        assert_eq!(ProviderKind::from(Cfg::Voyage), ProviderKind::Voyage);
+    }
+
+    #[test]
+    fn for_reranker_maps_configured_kind_and_defaults_bundled() {
+        use crate::config::{Config, ProviderEntry, ProviderKind as Cfg};
+
+        // No `[reranker]` provider → Bundled.
+        let bare = Config::default();
+        assert_eq!(ProviderKind::for_reranker(&bare), ProviderKind::Bundled);
+
+        // A configured Voyage `[reranker]` → Voyage.
+        let mut config = Config::default();
+        config.providers.insert(
+            "vp".to_string(),
+            ProviderEntry {
+                kind: Cfg::Voyage,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        config.reranker.provider = Some("vp".to_string());
+        config.reranker.model = Some("rerank-2".to_string());
+        assert_eq!(ProviderKind::for_reranker(&config), ProviderKind::Voyage);
+
+        // An UNRESOLVABLE reference (name not in [providers]) degrades to Bundled
+        // — telemetry never propagates a config error.
+        let mut dangling = Config::default();
+        dangling.reranker.provider = Some("ghost".to_string());
+        assert_eq!(ProviderKind::for_reranker(&dangling), ProviderKind::Bundled);
+    }
+
+    #[test]
+    fn for_embedding_maps_configured_kind_and_defaults_bundled() {
+        use crate::config::{Config, ProviderEntry, ProviderKind as Cfg};
+
+        // No `[embedding]` provider → Bundled.
+        let bare = Config::default();
+        assert_eq!(ProviderKind::for_embedding(&bare), ProviderKind::Bundled);
+
+        // A configured OpenAI `[embedding]` → Openai.
+        let mut config = Config::default();
+        config.providers.insert(
+            "ep".to_string(),
+            ProviderEntry {
+                kind: Cfg::Openai,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        config.embedding.provider = Some("ep".to_string());
+        config.embedding.model = Some("text-embedding-3-small".to_string());
+        assert_eq!(ProviderKind::for_embedding(&config), ProviderKind::Openai);
+
+        // An UNRESOLVABLE / undefined reference degrades to Bundled (never panic,
+        // never leak the name) — telemetry never propagates a config error.
+        let mut dangling = Config::default();
+        dangling.embedding.provider = Some("ghost".to_string());
+        assert_eq!(
+            ProviderKind::for_embedding(&dangling),
+            ProviderKind::Bundled
+        );
+    }
+
+    #[test]
+    fn for_summariser_maps_configured_kind_and_defaults_bundled() {
+        use crate::config::{Config, ProviderEntry, ProviderKind as Cfg};
+
+        // No `[summariser]` provider → Bundled.
+        let bare = Config::default();
+        assert_eq!(ProviderKind::for_summariser(&bare), ProviderKind::Bundled);
+
+        // A configured Anthropic `[summariser]` → Anthropic.
+        let mut config = Config::default();
+        config.providers.insert(
+            "sp".to_string(),
+            ProviderEntry {
+                kind: Cfg::Anthropic,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        config.summariser.provider = Some("sp".to_string());
+        config.summariser.model = Some("claude-haiku".to_string());
+        assert_eq!(
+            ProviderKind::for_summariser(&config),
+            ProviderKind::Anthropic
+        );
+
+        // An UNRESOLVABLE / undefined reference degrades to Bundled (never panic,
+        // never leak the name) — telemetry never propagates a config error.
+        let mut dangling = Config::default();
+        dangling.summariser.provider = Some("ghost".to_string());
+        assert_eq!(
+            ProviderKind::for_summariser(&dangling),
+            ProviderKind::Bundled
+        );
+    }
+
+    #[test]
+    fn summary_event_wire_shape_is_pinned() {
+        // Byte-stable pin: closed enum tokens only, never a provider name/model.
+        let envelope = fixed_envelope_for_tests(Summary::EVENT_TYPE);
+        let event = Summary {
+            summariser_provider_kind: ProviderKind::Openai,
+            outcome: Outcome::Ok,
+        };
+        let line = to_line(&envelope, &event).unwrap();
+        let expected = "{\"schema_version\":1,\"install_uuid\":\"0b9c1f2e-3a4d-4b6c-8e1f-2a3b4c5d6e7f\",\"session_uuid\":\"7f6e5d4c-3b2a-4f1e-9c8b-1a2b3c4d5e6f\",\"tome_version\":\"0.6.0\",\"os\":\"macos\",\"arch\":\"aarch64\",\"timestamp\":\"2026-06-11T14:11:45.123Z\",\"event_type\":\"tome.summary\",\"sample_rate\":1.0,\"summariser_provider_kind\":\"openai\",\"outcome\":\"ok\"}";
+        assert_eq!(line, expected);
+    }
+
+    #[test]
     fn optional_event_fields_are_skipped_when_none() {
         // A `Search` with both optionals `None` must omit those keys entirely.
         let envelope = fixed_envelope_for_tests(Search::EVENT_TYPE);
@@ -1159,11 +1414,17 @@ mod tests {
             strict: false,
             corpus_size_bucket: CountBucket::FiveToNineteen,
             embedder_model_id: None,
+            embedding_provider_kind: ProviderKind::Bundled,
+            reranker_provider_kind: ProviderKind::Bundled,
             calling_harness: None,
         };
         let line = to_line(&envelope, &event).unwrap();
         assert!(!line.contains("embedder_model_id"));
         assert!(!line.contains("calling_harness"));
+        // `embedding_provider_kind` is always serialised (no `skip`).
+        assert!(line.contains("\"embedding_provider_kind\":\"bundled\""));
+        // `reranker_provider_kind` is always serialised (no `skip`).
+        assert!(line.contains("\"reranker_provider_kind\":\"bundled\""));
         // And present when `Some`.
         let event2 = Search {
             calling_harness: Some(Harness::ClaudeCode),

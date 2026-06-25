@@ -96,7 +96,9 @@ Counts and durations are never sent as raw numbers. They map to closed buckets:
 (`Outcome{ok,partial,failed}`, `CatalogAction{added,removed,updated}`,
 `PluginAction{enabled,disabled}`, `WorkspaceAction`, `HarnessAction`,
 `AuthoringVerb`, `Artifact`, `SourceFormat`, `MetaAction`, `ReindexScope`,
-`SourceType`, and the authoring `Outcome{ok,warnings,errors,strict_refused}`).
+`SourceType`, the authoring `Outcome{ok,warnings,errors,strict_refused}`, and
+`ProviderKind{bundled,openai,anthropic,gemini,voyage}` — the summariser's model
+provider kind, never its registry name / model id / base URL).
 `error_class` is the closed `ErrorCategory` set (the same slugs Tome uses for its
 exit-code categories) — **never** a raw error message.
 
@@ -104,13 +106,15 @@ exit-code categories) — **never** a raw error message.
 construction — they come from Tome's pinned model registry or its own embedded
 meta-skill ids, never from user content.
 
-### Anonymous events (`tome.*`) — 18 types
+### Anonymous events (`tome.*`) — 19 types
 
 `install` (`install_method`), `upgrade` (`from_version` — Tome's own prior
 version), `heartbeat` (bucketed skills/commands/agents/workspaces/catalogs counts
 + a sorted list of detected harnesses; at most once per UTC day), `search`
 (`surface`, `latency_bucket`, `candidates_returned`, `reranker_used`, `strict`,
-`corpus_size_bucket`, `embedder_model_id?`, `calling_harness?`), `entry_info`
+`corpus_size_bucket`, `embedder_model_id?`, `embedding_provider_kind` and
+`reranker_provider_kind` — the closed `ProviderKind`, independent per capability,
+`calling_harness?`), `entry_info`
 (`rank_bucket`, `calling_harness?`), `entry_invoked` (`entry_kind`, `rank_bucket`,
 `calling_harness?`), `prompt_invoked` (`prompt_kind`, `calling_harness?`),
 `catalog_action` (`action`, `source_type`), `plugin_action` (`action`),
@@ -119,6 +123,7 @@ version), `heartbeat` (bucketed skills/commands/agents/workspaces/catalogs count
 (`action`, `outcome`), `model_download` (`model_id`, `outcome`, `error_class?`),
 `cold_start` (`embedder_load_bucket`, `index_ready_bucket`, `embedder_model_id?`),
 `doctor_run` (`fix`, `findings_bucket`), `reindex` (`scope`, `forced`, `outcome`),
+`summary` (`summariser_provider_kind` — the closed `ProviderKind`, `outcome`),
 `error` (`error_class`, `surface`, `calling_harness?`).
 
 ### Catalog-attributed events (`catalog.<id>.*`) — 6 types

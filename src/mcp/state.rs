@@ -35,6 +35,13 @@ pub struct McpState {
     /// `search_skills` pipeline to record drift / pass identity into
     /// `query::run_with_deps`.
     pub embedder_entry: &'static ModelEntry,
+    /// Phase 12 / US2: the ACTIVE embedder's drift identity (remote
+    /// `"<provider>/<model>"`/`"external"` when an `[embedding]` provider is
+    /// configured, else the bundled `embedder_entry`'s `(name, version)`). The
+    /// `search_skills` handler passes THIS to the drift check so a remote-index
+    /// server compares against the right stored identity. Computed once at
+    /// startup in `preflight`; the in-memory embedder is startup-frozen with it.
+    pub embedder_seed: crate::index::MetaSeed,
     /// Registry entry for the reranker that will be loaded on first
     /// `search_skills` call.
     pub reranker_entry: &'static ModelEntry,

@@ -17,7 +17,6 @@ use std::time::Instant;
 use serde::Serialize;
 
 use crate::cli::ReindexArgs;
-use crate::embedding::fastembed::FastembedEmbedder;
 use crate::error::TomeError;
 use crate::index::skills::ReindexSummary;
 use crate::index::{self, OpenOptions, enabled_plugins_for_catalog};
@@ -76,6 +75,11 @@ fn reindex_scope_of(raw: Option<&str>) -> crate::telemetry::event::ReindexScope 
 fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     let paths = Paths::resolve()?;
 
+    // Phase 12 / US2: load the global config strictly so the embedder resolves
+    // remote-vs-bundled, the policy gate compares the right identity, and (on a
+    // remote whole-index run) the established dimension can be persisted.
+    let cfg = crate::config::load(&paths)?;
+
     let scope = parse_scope(args.scope.as_deref(), &paths, &ws.scope)?;
     let plugins = resolve_targets(&scope, &paths, &ws.scope)?;
 
@@ -107,16 +111,26 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
     };
     let whole_index = matches!(scope, Scope::All);
     let configured = meta::active_embedder(&policy_conn)?;
+    // Phase 12: the configured identity is the ACTIVE (remote-or-bundled)
+    // embedder. The policy gate compares THIS against the stored `meta` stamp,
+    // so a remote-embedder switch forces a whole-index re-embed exactly as a
+    // profile change does.
+    let active_embedder_seed = crate::embedding::embedder_seed(&cfg, configured)?;
     let configured_ident = ModelIdent {
-        name: configured.name.to_owned(),
-        version: configured.version.to_owned(),
+        name: active_embedder_seed.name.clone(),
+        version: active_embedder_seed.version.clone(),
     };
     // Refuses a scoped reindex under embedder drift; otherwise returns the
     // effective force flag (args.force || embedder_changed).
     let force = embedder_change_policy(&policy_conn, whole_index, args.force, &configured_ident)?;
 
-    let embedder = load_embedder(&paths)?;
-    let (embedder_seed, reranker_seed, summariser_seed) = registry_seeds();
+    // Phase 12: is the embedder remote? Drives both the embedder construction
+    // and (on a whole-index run) the persisted-dimension write.
+    let remote_embedding =
+        crate::provider::resolve(&cfg, crate::provider::Capability::Embedding)?.is_some();
+
+    let embedder = load_embedder(&cfg, &paths)?;
+    let (_e_seed, reranker_seed, summariser_seed) = registry_seeds();
     // `LifecycleDeps.config` is vestigial since the catalog-enrolment
     // migration to the DB — `resolve_plugin_dir` reads `workspace_catalogs`
     // and nothing in the lifecycle consults `config`. Pass an empty default.
@@ -125,13 +139,24 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
         paths: &paths,
         scope: &ws.scope,
         config: &config,
-        embedder: &embedder,
-        embedder_seed,
+        embedder: embedder.as_ref(),
+        // Phase 12: stamp `meta` with the ACTIVE (remote-or-bundled) identity.
+        embedder_seed: active_embedder_seed.clone(),
         reranker_seed,
         summariser_seed,
         allow_model_download: false,
     };
 
+    // Each plugin re-embeds in its OWN transaction + lock (lifecycle.rs), and
+    // `execute` stops on the first error. So a mid-run failure (e.g. a remote
+    // `RemoteEmbeddingInvalid`/95 on plugin N during a model switch) is NOT
+    // silent corruption: plugins 1..N-1 committed at the new dimension, N+1..
+    // remain at the old, and the GLOBAL `meta` embedder + `embedder_dimension`
+    // stamps below are SKIPPED (they only run after `execute` returns Ok). Every
+    // subsequent read/write is then fail-closed — `query`/MCP hit embedder drift
+    // (41), `plugin enable`/`catalog update` hit `guard_embedder_drift` (41/42),
+    // and `vec_distance_cosine` hard-errors on any mixed-dimension row. A re-run
+    // of `tome reindex --force` re-embeds everything and is fully self-healing.
     let aggregate = execute(&scope, &plugins, &deps, force)?;
 
     // B1: stamp the GLOBAL `meta` embedder rows ONLY after a WHOLE-INDEX
@@ -141,6 +166,16 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
     // rows do not carry. `force` is true here whenever the embedder changed.
     if whole_index && force {
         stamp_embedder_after_whole_index(&policy_conn, &configured_ident)?;
+    }
+
+    // Phase 12 / US2 (FR-015a) + US4: reconcile `meta.embedder_dimension` on a
+    // WHOLE-INDEX reindex. The remote branch's persisted dimension is
+    // `[embedding] dimensions` (authoritative) else the dimension established
+    // from the first successful embed of this run.
+    if whole_index {
+        let established = embedder.established_dimension();
+        let persisted_dim = cfg.embedding.dimensions.map(|d| d as usize).or(established);
+        reconcile_embedder_dimension(&policy_conn, remote_embedding, persisted_dim)?;
     }
     drop(policy_conn);
 
@@ -295,11 +330,17 @@ fn read_enabled_plugins(
     enabled_plugins_for_catalog(&conn, ws_scope.name().as_str(), catalog)
 }
 
-fn load_embedder(paths: &Paths) -> Result<FastembedEmbedder, TomeError> {
-    // B4: resolve the ACTIVE profile's embedder from the index `meta`, not the
-    // hard-coded default. Reindex is the sole drift resolver, so it loads
-    // whatever the active profile now selects and (for a whole-index run)
-    // re-embeds + restamps to match.
+fn load_embedder(
+    cfg: &crate::config::Config,
+    paths: &Paths,
+) -> Result<Box<dyn crate::embedding::Embedder>, TomeError> {
+    // B4 / Phase 12: build the ACTIVE (remote-or-bundled) embedder. Reindex is
+    // the sole drift resolver, so it loads whatever the active config now
+    // selects and (for a whole-index run) re-embeds + restamps to match. On the
+    // remote path the validator's expected dimension is seeded from
+    // `[embedding] dimensions` (authoritative) — when unset, the embedder
+    // ESTABLISHES the dimension from its first successful embed of this run, and
+    // `run_inner` persists it to `meta.embedder_dimension` afterwards.
     let (e_seed, r_seed, s_seed) = registry_seeds();
     let conn = index::open(
         &paths.index_db,
@@ -311,8 +352,11 @@ fn load_embedder(paths: &Paths) -> Result<FastembedEmbedder, TomeError> {
         },
     )?;
     let entry = meta::active_embedder(&conn)?;
-    let dir = paths.model_path(entry.name)?;
-    FastembedEmbedder::load(entry, &dir)
+    // A reindex deliberately does NOT seed from any persisted dimension — it is
+    // the path that ESTABLISHES the dimension. Passing `None` lets the
+    // `[embedding] dimensions` knob (read inside `build_embedder`) win when set,
+    // and otherwise the first embed establishes the run dimension.
+    crate::embedding::build_embedder(cfg, paths, entry, None)
 }
 
 /// B1 policy gate for `tome reindex`. Decides whether the embedder changed
@@ -361,6 +405,46 @@ pub fn stamp_embedder_after_whole_index(
 ) -> Result<(), TomeError> {
     meta::write(conn, MetaKey::EmbedderName, &configured_embedder.name)?;
     meta::write(conn, MetaKey::EmbedderVersion, &configured_embedder.version)?;
+    Ok(())
+}
+
+/// Phase 12 / US2 (FR-015a) + US4: reconcile `meta.embedder_dimension` after a
+/// WHOLE-INDEX re-embed has committed. `embedder_dimension` is a REMOTE-only
+/// concept — the bundled storage is dimension-free (there is no registry
+/// dimension to record). The caller gates this on `whole_index` so a partial
+/// (scoped) reindex can never stamp/clear a dimension the out-of-scope rows may
+/// not share.
+///
+/// * `remote == true` — PERSIST `persisted_dim` (the `[embedding] dimensions`
+///   knob if the user pinned one, else the dimension established from the first
+///   successful embed of the run). `persisted_dim == None` (a run that
+///   re-embedded nothing AND established no dimension) leaves any prior value
+///   untouched.
+/// * `remote == false` (BUNDLED) — DELETE any stale remote value. After a
+///   remote→bundled switch the stored vectors are bundled-dimension, but
+///   `meta.embedder_dimension` would still carry the old remote value — so the
+///   doctor corrupt-index check (FR-017) would compare bundled-dim vectors
+///   against the stale remote dim FOREVER, a finding that could never
+///   self-heal. Clearing the key here makes a bundled `doctor --fix`
+///   (→ reindex → delete) self-healing AND extends the same heal to a manual
+///   `tome reindex`. A no-op when the row is already absent (the common
+///   bundled case).
+///
+/// Exposed (`pub`) so the corrupt-index-to-extinction regression test can drive
+/// the exact reconcile `run_inner` uses with a `StubEmbedder`, without loading a
+/// real on-disk model.
+pub fn reconcile_embedder_dimension(
+    conn: &rusqlite::Connection,
+    remote: bool,
+    persisted_dim: Option<usize>,
+) -> Result<(), TomeError> {
+    if remote {
+        if let Some(dim) = persisted_dim {
+            meta::write_embedder_dimension(conn, dim)?;
+        }
+    } else {
+        meta::delete_embedder_dimension(conn)?;
+    }
     Ok(())
 }
 

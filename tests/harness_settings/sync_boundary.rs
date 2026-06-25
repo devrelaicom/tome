@@ -127,3 +127,39 @@ fn telemetry_is_sync() {
         violations.join("\n"),
     );
 }
+
+/// Phase 12 — the BYOK/BYOM provider layer is the MOST LIKELY future async-leak
+/// surface: it does network I/O (`reqwest::blocking`) and is reached from the
+/// MCP island (which `spawn_blocking`s into it for the remote embedder/reranker).
+/// The user explicitly chose a hand-rolled ALL-SYNC transport over a second async
+/// island, so `src/provider/`, `src/embedding/remote.rs`, and
+/// `src/summarise/remote.rs` MUST stay sync. The generic `sync_boundary_outside_mcp`
+/// walker above already covers these structurally (none are under `mcp/`); this
+/// names them explicitly so a future `tokio`/`async`/`.await` leak in this exact
+/// surface is caught with a pointed, self-documenting message.
+#[test]
+fn provider_layer_is_sync() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    // The whole `src/provider/` tree (transport, config, per-kind shapes, …).
+    collect_rs_files(&manifest.join("src/provider"), &mut files);
+    // Plus the two remote-capability shims that live outside `provider/`.
+    files.push(manifest.join("src/embedding/remote.rs"));
+    files.push(manifest.join("src/summarise/remote.rs"));
+
+    let mut violations: Vec<String> = Vec::new();
+    for file in &files {
+        let contents =
+            fs::read_to_string(file).unwrap_or_else(|e| panic!("read {}: {e}", file.display()));
+        for needle in FORBIDDEN {
+            if contents.contains(needle) {
+                violations.push(format!("  {}: contains {needle:?}", file.display()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "the provider layer must stay sync (hand-rolled reqwest::blocking, no second async island):\n{}",
+        violations.join("\n"),
+    );
+}

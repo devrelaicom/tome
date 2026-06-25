@@ -291,6 +291,74 @@ impl StagedWorkspace {
     pub fn harness(&self) -> McpHarness {
         McpHarness::new(&self.paths)
     }
+
+    /// Build a [`McpHarness`] over this workspace whose embedder is the supplied
+    /// one (Phase 12 / US2 — e.g. a `RemoteEmbedder` over a failing transport
+    /// seam) and whose startup-frozen drift identity is `embedder_seed`. The
+    /// `PromptRegistry` is built from the on-disk index exactly as `harness()`.
+    pub fn harness_with_embedder(
+        &self,
+        embedder: Arc<dyn tome::embedding::Embedder>,
+        embedder_seed: tome::index::MetaSeed,
+    ) -> McpHarness {
+        let registry = {
+            let conn = open_index(&self.paths);
+            let reg = PromptRegistry::build_for_workspace(
+                &WorkspaceName::global(),
+                &self.paths,
+                &conn,
+                false,
+            )
+            .expect("build prompt registry");
+            drop(conn);
+            reg
+        };
+        McpHarness::with_embedder(&self.paths, registry, None, None, embedder, embedder_seed)
+    }
+
+    /// Build a [`McpHarness`] over this workspace whose RERANKER is the supplied
+    /// one (Phase 12 / US3 — e.g. a `RemoteReranker` over a failing transport
+    /// seam) while keeping the stub embedder + stub embedder seed (so embedder
+    /// drift never fires and only the rerank path is under test). The injected
+    /// reranker pre-fills the `OnceCell`, so `search_skills` never builds its own.
+    pub fn harness_with_reranker(
+        &self,
+        reranker: Arc<dyn tome::embedding::Reranker>,
+    ) -> McpHarness {
+        let registry = {
+            let conn = open_index(&self.paths);
+            let reg = PromptRegistry::build_for_workspace(
+                &WorkspaceName::global(),
+                &self.paths,
+                &conn,
+                false,
+            )
+            .expect("build prompt registry");
+            drop(conn);
+            reg
+        };
+        McpHarness::with_embedder_and_reranker(
+            &self.paths,
+            registry,
+            None,
+            None,
+            Arc::new(StubEmbedder::new()),
+            stub_embedder_seed(),
+            Some(reranker),
+        )
+    }
+}
+
+/// Build a `search_skills::Input` with defaults (top_k 10, no filters). Shared
+/// by US2 tests that only vary the query text.
+pub fn search_input(query: &str) -> search_skills::Input {
+    search_skills::Input {
+        query: query.into(),
+        top_k: Some(10),
+        catalog: None,
+        plugin: None,
+        description_max_chars: Some(150),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -341,17 +409,76 @@ impl McpHarness {
         host_harness: Option<String>,
         project_root: Option<std::path::PathBuf>,
     ) -> Self {
-        let reranker: Arc<dyn Reranker> = Arc::new(StubReranker::new());
+        Self::with_embedder(
+            paths,
+            registry,
+            host_harness,
+            project_root,
+            Arc::new(StubEmbedder::new()),
+            tome::index::MetaSeed {
+                name: STUB_EMBEDDER_ENTRY.name.into(),
+                version: STUB_EMBEDDER_ENTRY.version.into(),
+            },
+        )
+    }
+
+    /// Build the harness with a caller-supplied embedder + the drift identity
+    /// (`embedder_seed`) the on-disk index was stamped with. Phase 12 / US2: a
+    /// `RemoteEmbedder` over a failing transport seam + the remote seed proves
+    /// the MCP `search_skills` path fails CLOSED on a bad remote embedding (a
+    /// clear tool error, never a degenerate KNN). The `embedder_entry` stays the
+    /// stub registry entry (it only feeds the `embedder_model_id` telemetry
+    /// field — a `&'static`; the DRIFT comparison uses `embedder_seed`).
+    pub fn with_embedder(
+        paths: &Paths,
+        registry: PromptRegistry,
+        host_harness: Option<String>,
+        project_root: Option<std::path::PathBuf>,
+        embedder: Arc<dyn tome::embedding::Embedder>,
+        embedder_seed: tome::index::MetaSeed,
+    ) -> Self {
+        Self::with_embedder_and_reranker(
+            paths,
+            registry,
+            host_harness,
+            project_root,
+            embedder,
+            embedder_seed,
+            // `None` ⇒ the StubReranker is pre-installed (the default). Phase 12 /
+            // US3 tests that exercise the remote-reranker MCP path pass a custom
+            // `Some(reranker)` (a `RemoteReranker` over a failing transport) so the
+            // lazy build path is replaced with a controlled one.
+            None,
+        )
+    }
+
+    /// Build the harness with a caller-supplied embedder + optional reranker.
+    /// When `reranker` is `Some`, it is pre-installed into the `OnceCell` so the
+    /// `search_skills` lazy-build is bypassed (Phase 12 / US3 — inject a
+    /// `RemoteReranker` over a failing transport seam to prove the MCP path
+    /// surfaces a clear tool error / exit 94 rather than a silent unranked
+    /// result). When `None`, the StubReranker is pre-installed (today's default).
+    pub fn with_embedder_and_reranker(
+        paths: &Paths,
+        registry: PromptRegistry,
+        host_harness: Option<String>,
+        project_root: Option<std::path::PathBuf>,
+        embedder: Arc<dyn tome::embedding::Embedder>,
+        embedder_seed: tome::index::MetaSeed,
+        reranker: Option<Arc<dyn Reranker>>,
+    ) -> Self {
+        let reranker: Arc<dyn Reranker> = reranker.unwrap_or_else(|| Arc::new(StubReranker::new()));
         let mut scope = ResolvedScope::global_fallback();
         scope.project_root = project_root;
         let state = Arc::new(McpState {
-            embedder: Arc::new(StubEmbedder::new()),
+            embedder,
             reranker: OnceCell::new_with(Some(reranker)),
             scope,
             paths: paths.clone(),
-            // Stub identity entries so search_skills' drift check agrees
-            // with the stub-seeded index `meta`.
+            // `embedder_entry` only feeds the `embedder_model_id` telemetry
+            // field; the drift comparison uses `embedder_seed`.
             embedder_entry: &STUB_EMBEDDER_ENTRY,
+            embedder_seed,
             reranker_entry: &STUB_RERANKER_ENTRY,
             prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(registry))),
             host_harness,
@@ -581,6 +708,24 @@ pub fn mcp_error_exit_code(err: &McpError) -> i32 {
             source: std::io::Error::other("x"),
         },
         "no_harness_detected" => TomeError::NoHarnessDetected,
+        // Phase 12 / US2 — a remote embedding failed content validation.
+        "remote_embedding_invalid" => TomeError::RemoteEmbeddingInvalid { detail: "x".into() },
+        // Phase 12 / US3 — a remote provider call failed (e.g. an unreachable
+        // remote reranker) → 94, and a resolve-time config error → 93.
+        "provider_request_failed" => TomeError::ProviderRequestFailed { detail: "x".into() },
+        "provider_config_invalid" => TomeError::ProviderConfigInvalid { detail: "x".into() },
+        // `search_skills` maps embedder drift to a custom `embedder_drift` code
+        // (NOT `category().as_str()`), so this slug does not match a single
+        // canonical category. Both name + version drift surface it; return the
+        // shared drift exit code (41) and SKIP the category cross-check below by
+        // returning early.
+        "embedder_drift" => {
+            return TomeError::EmbedderNameDrift {
+                stored: "x".into(),
+                configured: "x".into(),
+            }
+            .exit_code();
+        }
         other => panic!(
             "unrecognised MCP error slug `{other}` — extend mcp_error_exit_code \
              when wiring a new error class through the in-process harness",

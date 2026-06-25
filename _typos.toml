@@ -15,6 +15,9 @@ mis = "mis"
 flate2 = "flate2"
 INSER = "INSER"
 INSERTs = "INSERTs"
+# "undet" = deliberate "undetected" abbreviation in harness selection test
+# fixture names (Phase 11); newer typos-cli flags it as "under".
+undet = "undet"
 
 [files]
 extend-exclude = [

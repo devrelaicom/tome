@@ -7,6 +7,7 @@
 //! registry is gone (the DB `workspace_catalogs` table is authoritative), but
 //! `settings::WorkspaceSettings` still embeds `CatalogEntry`.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,10 @@ pub struct Config {
     #[serde(default)]
     pub summariser: SummariserConfig,
     #[serde(default)]
+    pub embedding: EmbeddingConfig,
+    #[serde(default)]
+    pub reranker: RerankerConfig,
+    #[serde(default)]
     pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -50,6 +55,14 @@ pub struct Config {
     pub models: ModelsConfig,
     #[serde(default)]
     pub doctor: DoctorConfig,
+
+    /// Phase 12 — BYOK/BYOM model providers. A registry of external providers
+    /// keyed by user-chosen name; capability sections (`[summariser]`,
+    /// `[embedding]`, `[reranker]`) reference an entry by name via their
+    /// `provider` field. Empty by default → bundled local models everywhere.
+    /// Serialises to `[providers.<name>]` tables.
+    #[serde(default)]
+    pub providers: BTreeMap<String, ProviderEntry>,
 
     // Robustness, not migration: silently accept-and-drop a legacy [catalogs]
     // table so a pre-Phase-4 config.toml doesn't hard-fail the strict parse.
@@ -93,6 +106,46 @@ pub struct SummariserConfig {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub long_max_chars: Option<usize>,
+    /// Phase 12 — name of a `[providers.<name>]` entry to summarise with.
+    /// Omitted → the bundled Qwen2.5-0.5B summariser. When set, `model` is
+    /// required (validated at resolve time → exit 93).
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Phase 12 — the remote model identifier (required when `provider` is set).
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// Phase 12 — `[embedding]`. Points the embedding capability at an external
+/// provider. Absent / `provider` omitted → the bundled `bge-small` embedder
+/// selected by `[models] profile`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingConfig {
+    /// Name of a `[providers.<name>]` entry. Allowed kinds: openai, voyage.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// The remote model identifier (required when `provider` is set).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// When set, the authoritative expected output vector length — a remote
+    /// embedding whose length differs is rejected (`RemoteEmbeddingInvalid`).
+    #[serde(default)]
+    pub dimensions: Option<u32>,
+}
+
+/// Phase 12 — `[reranker]`. Points the reranking capability at an external
+/// provider (Voyage only in v1). Absent / `provider` omitted → the bundled
+/// `bge-reranker` selected by `[models] profile`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RerankerConfig {
+    /// Name of a `[providers.<name>]` entry. Allowed kind: voyage.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// The remote model identifier (required when `provider` is set).
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -144,6 +197,103 @@ pub struct ModelsConfig {
 pub struct DoctorConfig {
     #[serde(default)]
     pub verify_by_default: Option<bool>,
+}
+
+/// Phase 12 — a redacting wrapper around an inline API key.
+///
+/// Deserialises from a plain TOML string and serialises back to its real value,
+/// so a `config.toml` carrying an inline `api_key` round-trips losslessly. The
+/// **`Debug` and `Display` impls are hand-written to redact** — neither ever
+/// renders the inner value, so a stray `{:?}`/`{}` in a log line, an error
+/// chain, or a panic message cannot leak the credential. The one consumer that
+/// genuinely needs the bytes calls [`Secret::expose`] explicitly, which makes
+/// every real-value access greppable.
+///
+/// `Debug` is intentionally NOT derived (a derive would print the inner string);
+/// `Clone`/`PartialEq`/`Eq` are safe to derive (they don't render).
+///
+/// ## ⚠️ Serialize asymmetry — credential-leak vector
+///
+/// `#[serde(transparent)]` makes `Serialize` emit the **real** value (required
+/// for lossless `config.toml` round-trips). So redaction protects `Debug`/
+/// `Display` ONLY — not `Serialize`. Today the only `Serialize` consumer of
+/// `ProviderEntry`/`Secret` is on-disk `config.toml` persistence (the
+/// legitimate home for an inline key). Any NEW `Serialize` surface that reaches
+/// a user-facing channel — a `tome config show --json`, a `doctor` provider
+/// dump, a telemetry event — would leak the inline `api_key` silently. Such a
+/// surface MUST redact (serialise a masked form / the `Credential`, never a raw
+/// `ProviderEntry`).
+// not-strict: `#[serde(transparent)]` newtype over a String — it has no named
+// fields, so `#[serde(deny_unknown_fields)]` is inapplicable (and rejected by
+// serde). Exempt from the `manifest_strictness` deny-unknown-fields gate.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)] // not-strict
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    /// The real, unredacted credential. The only path to the inner value —
+    /// every call site is an explicit, auditable "I need the actual secret".
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for Secret {
+    fn from(s: String) -> Self {
+        Secret(s)
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Mirror the derived tuple-struct shape but redact the payload.
+        f.write_str("Secret(\"***redacted***\")")
+    }
+}
+
+impl std::fmt::Display for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("***redacted***")
+    }
+}
+
+/// Phase 12 — the kind of external provider a `[providers.<name>]` entry names.
+/// Fixes the wire shape, default base URL, and credential placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+pub enum ProviderKind {
+    Openai,
+    Anthropic,
+    Gemini,
+    Voyage,
+}
+
+impl ProviderKind {
+    /// The stable lowercase token for this kind — the `kind = "…"` wire value,
+    /// reused by messages and telemetry. Byte-identical to the serde rename.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProviderKind::Openai => "openai",
+            ProviderKind::Anthropic => "anthropic",
+            ProviderKind::Gemini => "gemini",
+            ProviderKind::Voyage => "voyage",
+        }
+    }
+}
+
+/// Phase 12 — one `[providers.<name>]` registry entry.
+///
+/// The registry name (the map key) is documented to derive an env-var override
+/// `TOME_<NAME>_API_KEY`; credential resolution is env → inline `api_key` →
+/// none. `base_url` defaults per [`ProviderKind`] when omitted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderEntry {
+    pub kind: ProviderKind,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<Secret>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,6 +445,25 @@ strict_min_score = 0.7
 [summariser]
 enabled = false
 long_max_chars = 4000
+provider = "myprov"
+model = "gpt-4o-mini"
+
+[embedding]
+provider = "myprov"
+model = "text-embedding-3-small"
+dimensions = 1536
+
+[reranker]
+provider = "voyageprov"
+model = "rerank-2"
+
+[providers.myprov]
+kind = "openai"
+base_url = "http://localhost:11434/v1"
+api_key = "sk-test"
+
+[providers.voyageprov]
+kind = "voyage"
 
 [telemetry]
 enabled = false
@@ -339,12 +508,67 @@ verify_by_default = true
         assert_eq!(c.harness.strip_plugin_agent_privileges, Some(false));
         assert_eq!(c.workspace.default.as_deref(), Some("work"));
         assert!((c.query.strict_min_score.unwrap() - 0.7_f32).abs() < 1e-6);
+
+        // Phase 12 — summariser provider/model.
+        assert_eq!(c.summariser.provider.as_deref(), Some("myprov"));
+        assert_eq!(c.summariser.model.as_deref(), Some("gpt-4o-mini"));
+
+        // Phase 12 — embedding section.
+        assert_eq!(c.embedding.provider.as_deref(), Some("myprov"));
+        assert_eq!(c.embedding.model.as_deref(), Some("text-embedding-3-small"));
+        assert_eq!(c.embedding.dimensions, Some(1536));
+
+        // Phase 12 — reranker section.
+        assert_eq!(c.reranker.provider.as_deref(), Some("voyageprov"));
+        assert_eq!(c.reranker.model.as_deref(), Some("rerank-2"));
+
+        // Phase 12 — the provider registry parses each entry's kind/base_url/key.
+        assert_eq!(c.providers.len(), 2);
+        let myprov = c.providers.get("myprov").expect("myprov entry");
+        assert_eq!(myprov.kind, ProviderKind::Openai);
+        assert_eq!(
+            myprov.base_url.as_deref(),
+            Some("http://localhost:11434/v1")
+        );
+        assert_eq!(myprov.api_key.as_ref().map(Secret::expose), Some("sk-test"));
+        let voyage = c.providers.get("voyageprov").expect("voyageprov entry");
+        assert_eq!(voyage.kind, ProviderKind::Voyage);
+        assert_eq!(voyage.base_url, None);
+        assert_eq!(voyage.api_key, None);
     }
 
     #[test]
     fn unknown_section_field_rejected() {
         let err = toml::from_str::<Config>("[query]\nnope = 1\n").unwrap_err();
         assert!(err.to_string().to_lowercase().contains("unknown"));
+    }
+
+    #[test]
+    fn providers_unknown_field_rejected() {
+        // `ProviderEntry` is Tome-owned and strict — an unknown key fails the
+        // parse (exit 5), not a silent accept.
+        let err = toml::from_str::<Config>("[providers.x]\nkind=\"openai\"\nnope=1\n").unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("unknown"), "{err}");
+    }
+
+    #[test]
+    fn secret_debug_and_display_redact() {
+        let s = Secret::from("sk-abc123".to_string());
+        let dbg = format!("{s:?}");
+        let disp = format!("{s}");
+        assert!(
+            !dbg.contains("sk-abc123"),
+            "Debug must redact the inner value: {dbg}"
+        );
+        assert!(
+            !disp.contains("sk-abc123"),
+            "Display must redact the inner value: {disp}"
+        );
+        // The redacted markers are present, and `expose()` still returns the real
+        // value for the one consumer that needs it.
+        assert!(dbg.contains("redacted"), "{dbg}");
+        assert!(disp.contains("redacted"), "{disp}");
+        assert_eq!(s.expose(), "sk-abc123");
     }
 
     #[test]

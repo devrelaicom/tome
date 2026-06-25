@@ -10,6 +10,7 @@ mod download;
 mod list;
 mod profile;
 mod remove;
+mod test;
 
 use std::path::PathBuf;
 
@@ -22,16 +23,20 @@ use crate::workspace::ResolvedScope;
 
 pub fn run(cmd: ModelsCommand, scope: &ResolvedScope, mode: Mode) -> Result<(), TomeError> {
     // Models live under `data_dir` and are deliberately shared across
-    // workspace + global scopes (FR-021: no per-scope models). The scope
-    // is threaded for signature uniformity with the rest of the
-    // commands; download / list / remove behaviour is independent of
-    // it.
-    let _ = scope;
+    // workspace + global scopes (FR-021: no per-scope models). The scope is
+    // threaded for signature uniformity with the rest of the commands;
+    // download / list / remove / profile / test behaviour is independent of it.
+    // `test` does NOT branch on scope: there is a single central index DB, so it
+    // reads the active embedder/reranker profile + the persisted
+    // `meta.embedder_dimension` from that one DB (the scope arg is accepted but
+    // discarded inside `test`) so a remote embedding round-trip is validated
+    // against the dimension the index believes in.
     match cmd {
         ModelsCommand::Download(args) => download::run(args, mode),
         ModelsCommand::List(args) => list::run(args, mode),
         ModelsCommand::Remove(args) => remove::run(args, mode),
         ModelsCommand::Profile(args) => profile::run(args, mode),
+        ModelsCommand::Test(args) => test::run(args, scope, mode),
     }
 }
 

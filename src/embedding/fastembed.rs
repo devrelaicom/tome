@@ -26,6 +26,18 @@ use crate::embedding::{Embedder, Reranker, Scored};
 use crate::error::TomeError;
 use crate::index::query::Candidate;
 
+/// The cross-encoder document text for a candidate: its `name` and
+/// `description` joined by a blank line. This is the SSOT both rerankers feed
+/// their model — the bundled [`FastembedReranker`] AND the
+/// [`RemoteReranker`](crate::embedding::remote::RemoteReranker) — so switching
+/// `[reranker]` between bundled and remote never changes the text the model
+/// scores. Promote-at-the-second-consumer (US3): the literal lived inline in
+/// `FastembedReranker::rerank` until the remote reranker needed the identical
+/// text; it is now this one function.
+pub(crate) fn rerank_document_text(candidate: &Candidate) -> String {
+    format!("{}\n\n{}", candidate.name, candidate.description)
+}
+
 /// fastembed-backed text embedder.
 pub struct FastembedEmbedder {
     inner: TextEmbedding,
@@ -125,10 +137,7 @@ impl Reranker for FastembedReranker {
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
-        let documents: Vec<String> = candidates
-            .iter()
-            .map(|c| format!("{}\n\n{}", c.name, c.description))
-            .collect();
+        let documents: Vec<String> = candidates.iter().map(rerank_document_text).collect();
         let document_refs: Vec<&str> = documents.iter().map(String::as_str).collect();
         let scored = self
             .inner
