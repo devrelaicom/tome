@@ -16,22 +16,7 @@
 use std::process::Command;
 
 use crate::common::ToolEnv;
-
-/// Every env var that can flip the telemetry enabled-state precedence — cleared
-/// on every spawned command so the resolver reaches a deterministic state
-/// regardless of the host/CI environment.
-const TELEMETRY_ENV_VARS: &[&str] = &[
-    "TOME_TELEMETRY",
-    "TOME_TELEMETRY_ENDPOINT",
-    "CI",
-    "GITHUB_ACTIONS",
-    "GITLAB_CI",
-    "CIRCLECI",
-    "BUILDKITE",
-    "JENKINS_URL",
-    "TF_BUILD",
-    "TEAMCITY_VERSION",
-];
+use crate::queue_util::TELEMETRY_ENV_VARS;
 
 fn clean_cmd(env: &ToolEnv) -> Command {
     let mut cmd = env.cmd();
@@ -134,20 +119,33 @@ fn status_json_bytes(cmd: &mut Command) -> String {
 }
 
 #[test]
-fn status_json_fresh_default_is_byte_stable() {
+fn status_json_fresh_default_has_stable_fields_and_a_minted_uuid() {
     let env = ToolEnv::new();
-    // No id minted (status is read-only) ⇒ no install_uuid; default endpoint
-    // (TOME_TELEMETRY_ENDPOINT cleared); opt-out default-on.
+    // Default-on (CI/TOME_TELEMETRY cleared): `init` builds an ENABLED handle and
+    // mints the install id, so `status --json` surfaces a fresh `install_uuid`.
+    // The uuid is non-deterministic, so we pin the deterministic fields + the
+    // default kernel endpoint and assert the uuid is present + shaped.
     let body = status_json_bytes(clean_cmd(&env).args(["telemetry", "status", "--json"]));
+    let v: serde_json::Value = serde_json::from_str(&body).expect("status --json is JSON");
+    assert_eq!(v["enabled"], serde_json::Value::Bool(true));
+    assert_eq!(v["source"], "default");
+    assert_eq!(v["endpoint"], "https://gauge-telemetry.fly.dev");
+    assert_eq!(v["pending"], 0);
+    let uuid = v["install_uuid"]
+        .as_str()
+        .expect("a default-on status surfaces the minted install_uuid");
     assert_eq!(
-        body,
-        r#"{"enabled":true,"source":"default","endpoint":"https://telemetry.tome-mcp.app/v1/events","pending":0}"#,
+        uuid.split('-').count(),
+        5,
+        "install_uuid is uuid-shaped: {uuid}"
     );
 }
 
 #[test]
 fn status_json_ci_disabled_is_byte_stable() {
     let env = ToolEnv::new();
+    // Under CI the kernel auto-disables and mints nothing, so the wire shape is
+    // fully deterministic (no install_uuid).
     let body = status_json_bytes(clean_cmd(&env).env("CI", "true").args([
         "telemetry",
         "status",
@@ -155,7 +153,7 @@ fn status_json_ci_disabled_is_byte_stable() {
     ]));
     assert_eq!(
         body,
-        r#"{"enabled":false,"source":"ci","endpoint":"https://telemetry.tome-mcp.app/v1/events","pending":0}"#,
+        r#"{"enabled":false,"source":"ci","endpoint":"https://gauge-telemetry.fly.dev","pending":0}"#,
     );
 }
 

@@ -210,7 +210,7 @@ struct InspectReport {
 /// unparsable, we surface [`TomeError::TelemetryQueueCorrupt`] (exit 92) carrying
 /// the SCRUBBED queue path. A clean queue exits 0.
 fn inspect_run(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
-    let (events, corrupt) = classify_queue_lines(paths);
+    let (events, corrupt) = crate::telemetry::classify_queue_lines(paths);
     let pending = events.len() as u64;
 
     match mode {
@@ -232,28 +232,6 @@ fn inspect_run(paths: &Paths, mode: Mode) -> Result<(), TomeError> {
         });
     }
     Ok(())
-}
-
-/// Read the kernel queue file and split each non-blank line into a parsed JSON
-/// value or a corrupt count. Read-only; a missing/unreadable queue is `(empty, 0)`.
-fn classify_queue_lines(paths: &Paths) -> (Vec<serde_json::Value>, usize) {
-    let body = match std::fs::read_to_string(paths.telemetry_queue()) {
-        Ok(b) => b,
-        Err(_) => return (Vec::new(), 0),
-    };
-    let mut events = Vec::new();
-    let mut corrupt = 0usize;
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<serde_json::Value>(trimmed) {
-            Ok(v) => events.push(v),
-            Err(_) => corrupt += 1,
-        }
-    }
-    (events, corrupt)
 }
 
 fn emit_inspect_human(

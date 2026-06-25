@@ -121,7 +121,7 @@ fn file_mode(_meta: &std::fs::Metadata) -> Option<u32> {
 /// Pending depth, corrupt-line count, and the oldest event's age. All reads are
 /// read-only direct reads of the kernel queue file (never mutate).
 fn queue_report(paths: &Paths) -> TelemetryQueueReport {
-    let (events, corrupt) = classify_queue_lines(paths);
+    let (events, corrupt) = crate::telemetry::classify_queue_lines(paths);
     let pending = events.len() as u64;
 
     // FIFO: the first parsable event is the oldest. Its kernel envelope
@@ -137,29 +137,6 @@ fn queue_report(paths: &Paths) -> TelemetryQueueReport {
         corrupt,
         oldest_age_seconds,
     }
-}
-
-/// Read the kernel queue file and split each non-blank line into a parsed JSON
-/// value (oldest first) or a corrupt count. Read-only; a missing/unreadable
-/// queue is `(empty, 0)` — a read-only report never fails on the queue.
-fn classify_queue_lines(paths: &Paths) -> (Vec<serde_json::Value>, usize) {
-    let body = match std::fs::read_to_string(paths.telemetry_queue()) {
-        Ok(b) => b,
-        Err(_) => return (Vec::new(), 0),
-    };
-    let mut events = Vec::new();
-    let mut corrupt = 0usize;
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<serde_json::Value>(trimmed) {
-            Ok(v) => events.push(v),
-            Err(_) => corrupt += 1,
-        }
-    }
-    (events, corrupt)
 }
 
 /// The `last-flush` stamp (time + HTTP status), when present. Bounded,

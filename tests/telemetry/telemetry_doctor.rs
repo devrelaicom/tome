@@ -17,22 +17,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use crate::common::{ToolEnv, fabricate_all_registry_models, paths_for};
-
-/// Every env var that can flip the telemetry enabled-state precedence. Cleared
-/// on every spawned `Command` so the run is deterministic regardless of a CI
-/// runner's ambient `CI=true`. Mirrors the sibling telemetry suites.
-const TELEMETRY_ENV_VARS: &[&str] = &[
-    "TOME_TELEMETRY",
-    "TOME_TELEMETRY_ENDPOINT",
-    "CI",
-    "GITHUB_ACTIONS",
-    "GITLAB_CI",
-    "CIRCLECI",
-    "BUILDKITE",
-    "JENKINS_URL",
-    "TF_BUILD",
-    "TEAMCITY_VERSION",
-];
+use crate::queue_util::TELEMETRY_ENV_VARS;
 
 /// A `tome` command over the isolated `$HOME` with every CI/telemetry var
 /// removed, then telemetry FORCE-OFF. Force-off makes the process-start hook a

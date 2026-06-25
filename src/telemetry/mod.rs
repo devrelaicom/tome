@@ -36,6 +36,51 @@ use gauge_telemetry::Telemetry;
 /// (its inner is plain config + an env snapshot), so a `OnceLock` global is sound.
 static HANDLE: OnceLock<Telemetry> = OnceLock::new();
 
+/// Test-only override for [`HANDLE`]. The production handle is a set-once
+/// `OnceLock`, so a test that drives an in-process emit path (a `query`/MCP
+/// handler that routes through [`emit`]) can't re-point the global at its own
+/// isolated `TempDir`-rooted queue across multiple tests in one binary. This slot,
+/// when `Some`, takes precedence over `HANDLE` everywhere the handle is read
+/// ([`handle`]/[`is_enabled`]/[`emit`]). Installed + restored by a RAII guard
+/// (see [`TelemetryHandleGuard`]); cleared back to `None` on drop so the next
+/// test sees the real global. Doc-hidden, test-only.
+#[doc(hidden)]
+pub static HANDLE_OVERRIDE: std::sync::RwLock<Option<Telemetry>> = std::sync::RwLock::new(None);
+
+/// Resolve the active handle: the test override if installed, else the global.
+/// The override is read under a short-lived read lock; the borrow is handed to
+/// `f` so the lock guard stays alive for the call (a `Telemetry` is not `Clone`).
+fn with_handle<R>(f: impl FnOnce(Option<&Telemetry>) -> R) -> R {
+    let guard = HANDLE_OVERRIDE.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(h) = guard.as_ref() {
+        return f(Some(h));
+    }
+    drop(guard);
+    f(HANDLE.get())
+}
+
+/// RAII guard installing a test handle into [`HANDLE_OVERRIDE`], cleared on drop.
+/// Lets an in-process emit test point the process-global emit path at a
+/// `TempDir`-rooted queue for the duration of the test. Hold the
+/// [`test_serial`]/`HOME_MUTEX` lock around it so co-resident tests don't clobber
+/// the single slot. Doc-hidden, test-only.
+#[doc(hidden)]
+pub struct TelemetryHandleGuard;
+
+impl TelemetryHandleGuard {
+    /// Install `handle` as the active override for the test's duration.
+    pub fn install(handle: Telemetry) -> Self {
+        *HANDLE_OVERRIDE.write().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+        Self
+    }
+}
+
+impl Drop for TelemetryHandleGuard {
+    fn drop(&mut self) {
+        *HANDLE_OVERRIDE.write().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
 /// THE one serialisation lock every lib test that touches a PROCESS-GLOBAL
 /// telemetry seam (the default-`$HOME` queue, the clock guard) must hold for its
 /// whole duration. Doc-hidden, test-only. Acquire it via [`test_serial`].
@@ -85,11 +130,23 @@ const SPAWN_OLDEST_AGE: time::Duration = time::Duration::minutes(5);
 /// double-gate here.
 pub fn init(paths: &crate::paths::Paths) {
     let first_run = !paths.telemetry_id().exists();
+    let handle = build_handle(paths);
 
+    if handle.is_enabled() && first_run {
+        MINTED_THIS_RUN.store(true, Ordering::Relaxed);
+    }
+    let _ = HANDLE.set(handle);
+}
+
+/// Build the telemetry handle for `paths` from the resolved config + endpoint.
+/// The shared body of [`init`]; also the seam an in-process emit test installs
+/// via [`TelemetryHandleGuard`] (the production `init` sets the set-once global,
+/// which a test can't re-point at its own `TempDir` queue).
+fn build_handle(paths: &crate::paths::Paths) -> Telemetry {
     let config_enabled = config::config_enabled_value(paths);
     let endpoint = config::resolve_endpoint(paths);
 
-    let handle = Telemetry::builder()
+    Telemetry::builder()
         .app("tome")
         .app_version(env!("CARGO_PKG_VERSION"))
         .endpoint(endpoint)
@@ -99,21 +156,19 @@ pub fn init(paths: &crate::paths::Paths) {
         .config_enabled(config_enabled)
         .runtime_enabled(true)
         .accel("cpu")
-        .flush_args(vec![
-            "telemetry".into(),
-            "flush".into(),
-            "--quiet".into(),
-        ])
+        .flush_args(vec!["telemetry".into(), "flush".into(), "--quiet".into()])
         .build()
         .unwrap_or_else(|e| {
             tracing::debug!(target: "telemetry", error = %e, "telemetry disabled: handle build failed");
             disabled_handle(paths)
-        });
+        })
+}
 
-    if handle.is_enabled() && first_run {
-        MINTED_THIS_RUN.store(true, Ordering::Relaxed);
-    }
-    let _ = HANDLE.set(handle);
+/// Build a handle for `paths` exactly as [`init`] would, for installation into
+/// the [`HANDLE_OVERRIDE`] test slot. Doc-hidden, test-only.
+#[doc(hidden)]
+pub fn build_handle_for_test(paths: &crate::paths::Paths) -> Telemetry {
+    build_handle(paths)
 }
 
 /// A guaranteed-disabled handle (the kernel has no `disabled()` constructor): a
@@ -140,19 +195,23 @@ pub fn handle() -> Option<&'static Telemetry> {
 }
 
 /// Whether telemetry is enabled for this process (the resolved kernel consent).
-/// `false` before [`init`] runs or on a disabled handle.
+/// `false` before [`init`] runs or on a disabled handle. Honours the test
+/// override slot when installed.
 pub fn is_enabled() -> bool {
-    HANDLE.get().map(|h| h.is_enabled()).unwrap_or(false)
+    with_handle(|h| h.map(|h| h.is_enabled()).unwrap_or(false))
 }
 
 /// Emit one event. Best-effort, infallible, no-op if the handle is absent or
 /// disabled. Both tiers route through here — Tier-2 (attributed) events are just
 /// `Event`s with bounded artefact-name fields. The kernel appends one bounded
-/// line to the queue (no network, never fails the caller).
+/// line to the queue (no network, never fails the caller). Honours the test
+/// override slot when installed.
 pub fn emit<E: gauge_telemetry::event::Event>(event: E) {
-    if let Some(h) = HANDLE.get() {
-        h.emit(&event);
-    }
+    with_handle(|h| {
+        if let Some(h) = h {
+            h.emit(&event);
+        }
+    });
 }
 
 /// CLI process-start telemetry: the first-run notice, the `tome.install` /
@@ -321,6 +380,34 @@ fn count_queue_lines(paths: &crate::paths::Paths) -> usize {
     std::fs::read_to_string(paths.telemetry_queue())
         .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
         .unwrap_or(0)
+}
+
+/// Read the kernel queue file and split each non-blank line into a parsed JSON
+/// value (oldest first, FIFO) or a corrupt count. Read-only; a missing/unreadable
+/// queue is `(empty, 0)` — a read-only report never fails on the queue.
+///
+/// This is the ONE shared classifier both `commands::telemetry::inspect` and
+/// `doctor::telemetry::queue_report` route through (they emitted byte-identical
+/// copies before this SSOT lift): one place owns "how a queue line is parsed and
+/// what counts as corrupt".
+pub(crate) fn classify_queue_lines(paths: &crate::paths::Paths) -> (Vec<serde_json::Value>, usize) {
+    let body = match std::fs::read_to_string(paths.telemetry_queue()) {
+        Ok(b) => b,
+        Err(_) => return (Vec::new(), 0),
+    };
+    let mut events = Vec::new();
+    let mut corrupt = 0usize;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(v) => events.push(v),
+            Err(_) => corrupt += 1,
+        }
+    }
+    (events, corrupt)
 }
 
 /// Whether the OLDEST queued event (first FIFO line) is older than `max_age`.

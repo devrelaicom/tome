@@ -20,23 +20,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use crate::common::ToolEnv;
-
-/// Every env var that can flip the telemetry enabled-state precedence. Cleared
-/// on every spawned `Command` so a test sees a deterministic baseline
-/// (default-on) regardless of the host/CI environment it runs under. Mirrors
-/// the `TELEMETRY_ENV_VARS` list the in-module unit tests use.
-const TELEMETRY_ENV_VARS: &[&str] = &[
-    "TOME_TELEMETRY",
-    "TOME_TELEMETRY_ENDPOINT",
-    "CI",
-    "GITHUB_ACTIONS",
-    "GITLAB_CI",
-    "CIRCLECI",
-    "BUILDKITE",
-    "JENKINS_URL",
-    "TF_BUILD",
-    "TEAMCITY_VERSION",
-];
+use crate::queue_util::TELEMETRY_ENV_VARS;
 
 /// Build a `tome` command over the isolated `$HOME` with EVERY telemetry/CI env
 /// var removed. The caller then `.env(...)`s only the vars the case needs.
@@ -108,7 +92,7 @@ fn looks_like_uuid(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn status_on_fresh_install_is_default_on_and_does_not_mint() {
+fn status_on_fresh_install_is_default_on() {
     let env = ToolEnv::new();
     let v = status_json(&env);
 
@@ -119,16 +103,16 @@ fn status_on_fresh_install_is_default_on_and_does_not_mint() {
     );
     assert_eq!(v["source"], "default");
     assert_eq!(v["pending"], 0);
-    // Read-only: status never mints the id, so the field is absent (skip-if-none).
-    assert!(
-        v.get("install_uuid").is_none(),
-        "status must not mint an install_uuid: {v}"
-    );
-    // And it leaves no id file on disk.
-    assert!(
-        !id_path(&env).exists(),
-        "status is read-only — it must not create telemetry/id"
-    );
+    // Kernel migration: `init` builds an ENABLED handle for every command on a
+    // default-on install, and the kernel mints the install id at build time — so
+    // a default-on `status` surfaces a freshly-minted `install_uuid`. (The
+    // read-only-never-mint guarantee now holds only when telemetry is DISABLED —
+    // see `ci_auto_disables_with_no_mint_and_no_notice`.)
+    let uuid = v["install_uuid"]
+        .as_str()
+        .expect("a default-on status surfaces the minted install_uuid");
+    assert!(looks_like_uuid(uuid), "install_uuid shape: {uuid}");
+    assert!(id_path(&env).exists(), "default-on init mints telemetry/id");
 }
 
 // ---------------------------------------------------------------------------
