@@ -10,6 +10,7 @@ mod download;
 mod list;
 mod profile;
 mod remove;
+mod test;
 
 use std::path::PathBuf;
 
@@ -24,14 +25,18 @@ pub fn run(cmd: ModelsCommand, scope: &ResolvedScope, mode: Mode) -> Result<(), 
     // Models live under `data_dir` and are deliberately shared across
     // workspace + global scopes (FR-021: no per-scope models). The scope
     // is threaded for signature uniformity with the rest of the
-    // commands; download / list / remove behaviour is independent of
-    // it.
-    let _ = scope;
+    // commands; download / list / remove / profile behaviour is independent
+    // of it. `test` DOES consult the scope: it resolves the active
+    // embedder/reranker profile and reads the persisted
+    // `meta.embedder_dimension` from the resolved workspace's index so a
+    // remote embedding round-trip is validated against the same dimension
+    // the index believes in.
     match cmd {
         ModelsCommand::Download(args) => download::run(args, mode),
         ModelsCommand::List(args) => list::run(args, mode),
         ModelsCommand::Remove(args) => remove::run(args, mode),
         ModelsCommand::Profile(args) => profile::run(args, mode),
+        ModelsCommand::Test(args) => test::run(args, scope, mode),
     }
 }
 

@@ -62,9 +62,9 @@ use crate::workspace::ResolvedScope;
 pub use report::{
     CatalogCacheHealth, CatalogCacheState, DoctorClassification, DoctorReport, EntryCountsByKind,
     HarnessPresence, HarnessSubsystemReport, MetaSkillDrift, OrphanDataDirReport,
-    ProjectBindingState, PromptsReport, RulesCopyState, Subsystem, SubsystemHealth, SuggestedFix,
-    TelemetryAllowlistEntry, TelemetryFlushReport, TelemetryIdReport, TelemetryQueueReport,
-    TelemetrySection,
+    ProjectBindingState, PromptsReport, ProviderReport, RulesCopyState, Subsystem, SubsystemHealth,
+    SuggestedFix, TelemetryAllowlistEntry, TelemetryFlushReport, TelemetryIdReport,
+    TelemetryQueueReport, TelemetrySection,
 };
 
 /// Build a [`DoctorReport`] from the on-disk state. Read-only; never
@@ -242,7 +242,27 @@ pub fn assemble_report(
         personas,
     } = build_phase6_surfaces(scope, paths).unwrap_or_default();
 
-    let suggested_fixes = build_suggested_fixes(
+    // ---- Phase 12 / US4 additions (read-only) -----------------------
+    //
+    // Defensive config load (doctor never crashes on a malformed config —
+    // the foreground command surfaces the parse error; here a malformed
+    // config degrades to defaults so the rest of the report still renders).
+    let cfg = crate::config::load_or_default(paths);
+
+    // Provider report (FR-018): one row per configured remote provider a
+    // capability references. `--verify` performs one lightweight round-trip
+    // per provider and fills `reachable`. Both are read-only.
+    let mut providers = checks::build_provider_report(&cfg);
+    if verify {
+        checks::verify_provider_reachability(&mut providers, &cfg, paths);
+    }
+
+    // Corrupt-remote-index check (FR-017): a stored-vector dimension that
+    // disagrees with the persisted `meta.embedder_dimension`. `None` when not
+    // applicable (bundled / no remote reindex / no rows / match).
+    let corrupt_index = checks::check_corrupt_index(paths);
+
+    let mut suggested_fixes = build_suggested_fixes(
         &embedder,
         &reranker,
         &summariser,
@@ -253,6 +273,21 @@ pub fn assemble_report(
         &harness_rules,
         &harness_mcp,
     );
+
+    // Append the cost-aware corrupt-remote-index fix (FR-017). A BUNDLED-local
+    // embedder is `auto_fixable` (re-runs `reindex --force` under the lock); a
+    // REMOTE embedder PRINTS the command (`auto_fixable: false`) so doctor
+    // never silently incurs paid API cost. The bundled-vs-remote decision uses
+    // the SAME resolve the embedder build path uses (a malformed reference is
+    // already reported elsewhere; here a resolve error degrades to "treat as
+    // bundled" so the conservative auto-fix is never wrongly suppressed).
+    if let Some(ci) = corrupt_index {
+        let active_is_remote = matches!(
+            crate::provider::resolve(&cfg, crate::provider::Capability::Embedding),
+            Ok(Some(_))
+        );
+        suggested_fixes.push(corrupt_index_fix(ci, active_is_remote));
+    }
     let overall = classify(
         &embedder,
         &reranker,
@@ -320,9 +355,53 @@ pub fn assemble_report(
         unconverted_plugins,
         meta_skills,
         telemetry,
+        providers,
         overall,
         suggested_fixes,
     })
+}
+
+/// Re-check the corrupt-remote-index condition (FR-017) and, when it still
+/// holds, append its cost-aware fix to `report.suggested_fixes`. Called by the
+/// `--fix` command path AFTER `fixes::re_assemble` (which rebuilds the
+/// suggested-fix list via the 8-arg SSOT that does not know about the
+/// corrupt-index fix). Read-only re-check: a bundled-local repair that
+/// succeeded clears the mismatch (no fix re-appended); a remote mismatch (never
+/// auto-fixed) re-appears so it drives the exit-75 path. `paths` + `cfg` come
+/// from the command layer.
+pub(crate) fn reappend_corrupt_index_fix(
+    report: &mut DoctorReport,
+    paths: &Paths,
+    cfg: &crate::config::Config,
+) {
+    if let Some(ci) = checks::check_corrupt_index(paths) {
+        let active_is_remote = matches!(
+            crate::provider::resolve(cfg, crate::provider::Capability::Embedding),
+            Ok(Some(_))
+        );
+        report
+            .suggested_fixes
+            .push(corrupt_index_fix(ci, active_is_remote));
+    }
+}
+
+/// The cost-aware corrupt-remote-index suggested fix (FR-017). A BUNDLED-local
+/// embedder is `auto_fixable` — `doctor --fix` re-runs the existing
+/// `reindex --force` under the advisory lock. A REMOTE embedder is NOT
+/// auto-fixable: re-embedding incurs paid API cost, so doctor only PRINTS the
+/// command for the user to run deliberately.
+fn corrupt_index_fix(ci: checks::CorruptIndex, active_is_remote: bool) -> SuggestedFix {
+    SuggestedFix {
+        subsystem: Subsystem::Index,
+        diagnosis: format!(
+            "corrupt-remote-index: stored vectors are {}-d but meta.embedder_dimension is {} \
+             (the embedding model's output length changed since the last reindex)",
+            ci.stored, ci.expected,
+        ),
+        command: "tome reindex --force".to_owned(),
+        // Remote → print only (no surprise paid API cost). Bundled → auto.
+        auto_fixable: !active_is_remote,
+    }
 }
 
 /// The five Phase 6 / US5 doctor surfaces. All `None` under

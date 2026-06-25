@@ -50,6 +50,10 @@ mod models_download;
 mod models_list;
 #[path = "models_doctor/models_remove.rs"]
 mod models_remove;
+#[path = "models_doctor/models_test.rs"]
+mod models_test;
+#[path = "models_doctor/provider_doctor.rs"]
+mod provider_doctor;
 #[path = "models_doctor/provider_trigger_degradation.rs"]
 mod provider_trigger_degradation;
 #[path = "models_doctor/reranker_cpu_inference.rs"]

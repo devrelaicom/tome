@@ -113,6 +113,14 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
             );
         }
         doctor::fixes::re_assemble(&mut report);
+
+        // Phase 12 / US4 (FR-017): `re_assemble` rebuilds `suggested_fixes` via
+        // the 8-arg SSOT, which doesn't know about the corrupt-remote-index
+        // fix. Re-check it read-only and re-append when it still holds: a
+        // bundled-local repair that succeeded clears the mismatch (nothing
+        // re-appended); a REMOTE mismatch (never auto-fixed — paid API cost)
+        // re-appears so it drives the exit-75 path.
+        doctor::reappend_corrupt_index_fix(&mut report, &paths, &cfg);
     }
 
     emit(&report, mode)?;
@@ -609,6 +617,33 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
             for e in &t.allowlist {
                 writeln!(out, "    {} -> {}", e.short_id, e.canonical_source)?;
             }
+        }
+        writeln!(out)?;
+    }
+
+    // Phase 12 / US4: remote provider report (only when providers configured).
+    if !report.providers.is_empty() {
+        writeln!(out, "Providers:")?;
+        for p in &report.providers {
+            let cred = if p.credential_resolvable {
+                "credential resolved"
+            } else {
+                "no credential"
+            };
+            let reach = match p.reachable {
+                Some(true) => format!("  {ok} reachable"),
+                Some(false) => format!("  {fail} unreachable"),
+                None => String::new(),
+            };
+            writeln!(
+                out,
+                "  {} ({}) [{}] — {}{}",
+                p.name,
+                p.kind,
+                p.capabilities.join(", "),
+                cred,
+                reach,
+            )?;
         }
         writeln!(out)?;
     }

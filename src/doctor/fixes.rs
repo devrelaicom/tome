@@ -367,6 +367,18 @@ fn apply_one(
             report.index = check_index(paths, scope)?;
             Ok(())
         }
+        Subsystem::Index => {
+            // Phase 12 / US4 (FR-017): the ONLY `auto_fixable` Index fix is the
+            // corrupt-remote-index repair on a BUNDLED-local embedder — re-run
+            // the idempotent `reindex --force` (which acquires the advisory lock
+            // itself). A REMOTE-embedder corrupt-index fix is `auto_fixable:
+            // false` (it would incur paid API cost) and so never reaches this
+            // handler. `index::check_index` is re-run so the report reflects the
+            // rebuilt index.
+            repair_corrupt_index(ctx)?;
+            report.index = check_index(paths, scope)?;
+            Ok(())
+        }
         Subsystem::Summariser => {
             repair_summariser(paths)?;
             report.summariser = check_model(paths, summariser_entry(), false)?;
@@ -526,6 +538,26 @@ fn repair_harness_sync_with(ctx: &FixContext<'_>, force: bool) -> Result<(), Tom
         crate::harness::sync::build_deps(ctx.paths, ctx.home, ctx.scope.scope.name(), force);
     crate::harness::sync::sync_project(project_root, &sync_deps)?;
     Ok(())
+}
+
+/// Phase 12 / US4 (FR-017): repair a corrupt-remote-index on a BUNDLED-local
+/// embedder by re-running the existing `tome reindex --force` over the resolved
+/// scope. This re-derives every stored vector from the bundled model, so the
+/// stored dimension realigns with the index's expectations. `reindex::run`
+/// acquires the advisory lock itself (the doctor read-only-projection +
+/// idempotent-op pattern — we don't re-implement reindex). Human mode is used
+/// because the doctor `--fix` is a foreground command; the reindex progress
+/// surfaces inline.
+fn repair_corrupt_index(ctx: &FixContext<'_>) -> Result<(), TomeError> {
+    use crate::cli::ReindexArgs;
+    crate::commands::reindex::run(
+        ReindexArgs {
+            scope: None,
+            force: true,
+        },
+        ctx.scope,
+        crate::output::Mode::Human,
+    )
 }
 
 fn repair_schema(paths: &Paths, _scope: &Scope) -> Result<(), TomeError> {
