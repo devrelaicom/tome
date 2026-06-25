@@ -147,6 +147,16 @@ fn run_inner(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), To
         allow_model_download: false,
     };
 
+    // Each plugin re-embeds in its OWN transaction + lock (lifecycle.rs), and
+    // `execute` stops on the first error. So a mid-run failure (e.g. a remote
+    // `RemoteEmbeddingInvalid`/95 on plugin N during a model switch) is NOT
+    // silent corruption: plugins 1..N-1 committed at the new dimension, N+1..
+    // remain at the old, and the GLOBAL `meta` embedder + `embedder_dimension`
+    // stamps below are SKIPPED (they only run after `execute` returns Ok). Every
+    // subsequent read/write is then fail-closed — `query`/MCP hit embedder drift
+    // (41), `plugin enable`/`catalog update` hit `guard_embedder_drift` (41/42),
+    // and `vec_distance_cosine` hard-errors on any mixed-dimension row. A re-run
+    // of `tome reindex --force` re-embeds everything and is fully self-healing.
     let aggregate = execute(&scope, &plugins, &deps, force)?;
 
     // B1: stamp the GLOBAL `meta` embedder rows ONLY after a WHOLE-INDEX

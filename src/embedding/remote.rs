@@ -61,8 +61,9 @@ pub const REMOTE_EMBEDDER_VERSION: &str = "external";
 /// the same `TomeError` becomes a clear MCP tool error). The `detail` names the
 /// specific check that failed so an operator can diagnose without seeing the
 /// vector. This routine is the SINGLE point every remote embedding flows
-/// through — it is called from [`RemoteEmbedder::embed`] and from the
-/// `tome models test embedding` round-trip, so CLI and MCP can never diverge.
+/// through — today it is called from [`RemoteEmbedder::embed`] (and, once US4
+/// lands, also the `tome models test embedding` round-trip), so the index path,
+/// the query path, the CLI, and the MCP server can never diverge.
 ///
 /// When `expected_dim` is `None` (no `[embedding] dimensions` set and no
 /// persisted `meta.embedder_dimension` yet — the first embed of a fresh

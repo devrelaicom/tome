@@ -214,7 +214,12 @@ fn extract_one_embedding(
         ));
     }
 
-    Ok(response.data.into_iter().next().unwrap().embedding)
+    Ok(response
+        .data
+        .into_iter()
+        .next()
+        .expect("data.len() == 1 verified immediately above")
+        .embedding)
 }
 
 /// One chat round-trip. `system` is an optional system message; `user` is the
