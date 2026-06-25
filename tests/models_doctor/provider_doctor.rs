@@ -221,7 +221,27 @@ model = "text-embedding-3-small"
     );
     let home = empty_home();
 
+    // Read-only discipline (FR-124, mirroring `models_test_writes_no_stored_state`):
+    // `assemble_report` must NOT mutate the index DB. Snapshot the DB file's exact
+    // bytes (and size) BEFORE the report; assert they are byte-identical AFTER.
+    // A full-content comparison is strictly stronger than a hash and needs no
+    // extra dev-dep.
+    let db_before = std::fs::read(&paths.index_db).expect("read index DB before report");
+    let len_before = db_before.len();
+
     let report = doctor::assemble_report(&global_scope(), &paths, home.path(), false).unwrap();
+
+    let db_after = std::fs::read(&paths.index_db).expect("read index DB after report");
+    assert_eq!(
+        db_after.len(),
+        len_before,
+        "assemble_report must not change the index DB size (read-only)"
+    );
+    assert!(
+        db_after == db_before,
+        "assemble_report must leave the index DB byte-identical (read-only, FR-124)"
+    );
+
     let fix = report
         .suggested_fixes
         .iter()

@@ -571,6 +571,24 @@ impl ProviderKind {
             None => ProviderKind::Bundled,
         }
     }
+
+    /// Map the configured SUMMARISER provider to the closed telemetry kind:
+    /// `Bundled` when no `[summariser]` provider is referenced (or the reference
+    /// can't be resolved to a registry entry), else the entry's kind. This is the
+    /// SSOT the summary emit site (`workspace::regen_summary`) calls so it can
+    /// never diverge from the `[embedding]`/`[reranker]` mappers above. Records
+    /// ONLY the kind — never the provider name / model / `base_url` (the
+    /// typed-event privacy guarantee). A missing/unresolvable reference degrades
+    /// to `Bundled`; telemetry never propagates a config error.
+    pub fn for_summariser(cfg: &crate::config::Config) -> Self {
+        let Some(name) = cfg.summariser.provider.as_deref() else {
+            return ProviderKind::Bundled;
+        };
+        match cfg.providers.get(name) {
+            Some(entry) => ProviderKind::from(entry.kind),
+            None => ProviderKind::Bundled,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,6 +1320,73 @@ mod tests {
         let mut dangling = Config::default();
         dangling.reranker.provider = Some("ghost".to_string());
         assert_eq!(ProviderKind::for_reranker(&dangling), ProviderKind::Bundled);
+    }
+
+    #[test]
+    fn for_embedding_maps_configured_kind_and_defaults_bundled() {
+        use crate::config::{Config, ProviderEntry, ProviderKind as Cfg};
+
+        // No `[embedding]` provider → Bundled.
+        let bare = Config::default();
+        assert_eq!(ProviderKind::for_embedding(&bare), ProviderKind::Bundled);
+
+        // A configured OpenAI `[embedding]` → Openai.
+        let mut config = Config::default();
+        config.providers.insert(
+            "ep".to_string(),
+            ProviderEntry {
+                kind: Cfg::Openai,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        config.embedding.provider = Some("ep".to_string());
+        config.embedding.model = Some("text-embedding-3-small".to_string());
+        assert_eq!(ProviderKind::for_embedding(&config), ProviderKind::Openai);
+
+        // An UNRESOLVABLE / undefined reference degrades to Bundled (never panic,
+        // never leak the name) — telemetry never propagates a config error.
+        let mut dangling = Config::default();
+        dangling.embedding.provider = Some("ghost".to_string());
+        assert_eq!(
+            ProviderKind::for_embedding(&dangling),
+            ProviderKind::Bundled
+        );
+    }
+
+    #[test]
+    fn for_summariser_maps_configured_kind_and_defaults_bundled() {
+        use crate::config::{Config, ProviderEntry, ProviderKind as Cfg};
+
+        // No `[summariser]` provider → Bundled.
+        let bare = Config::default();
+        assert_eq!(ProviderKind::for_summariser(&bare), ProviderKind::Bundled);
+
+        // A configured Anthropic `[summariser]` → Anthropic.
+        let mut config = Config::default();
+        config.providers.insert(
+            "sp".to_string(),
+            ProviderEntry {
+                kind: Cfg::Anthropic,
+                base_url: None,
+                api_key: None,
+            },
+        );
+        config.summariser.provider = Some("sp".to_string());
+        config.summariser.model = Some("claude-haiku".to_string());
+        assert_eq!(
+            ProviderKind::for_summariser(&config),
+            ProviderKind::Anthropic
+        );
+
+        // An UNRESOLVABLE / undefined reference degrades to Bundled (never panic,
+        // never leak the name) — telemetry never propagates a config error.
+        let mut dangling = Config::default();
+        dangling.summariser.provider = Some("ghost".to_string());
+        assert_eq!(
+            ProviderKind::for_summariser(&dangling),
+            ProviderKind::Bundled
+        );
     }
 
     #[test]

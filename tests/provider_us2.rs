@@ -257,6 +257,59 @@ fn index_time_wrong_dimension_is_rejected_and_writes_nothing() {
 }
 
 #[test]
+fn index_time_all_zero_embedding_is_rejected_and_writes_nothing() {
+    // The load-bearing zero-norm case: a FINITE, correct-length, ALL-ZEROS
+    // embedding (a truncated/stub/model-not-found remote response) reaches the
+    // real `lifecycle::enable` write path. It must be rejected fail-closed
+    // (RemoteEmbeddingInvalid/95) and `skill_embeddings` must stay EMPTY — the
+    // `enable_with_remote_embedder` driver asserts the zero-row count on failure.
+    let _g = set_transport_override(|_spec| Ok(ok_embedding(&[0.0, 0.0, 0.0])));
+    let err = enable_with_remote_embedder(&[("alpha", SKILL)]).expect_err("must fail closed");
+    assert_eq!(
+        err.exit_code(),
+        95,
+        "index-time all-zero (zero-norm) embedding → 95: {err:?}"
+    );
+}
+
+#[test]
+fn query_time_all_zero_embedding_is_95_on_cli() {
+    // Stage a VALID stub index, then run the real `query::pipeline` with a
+    // RemoteEmbedder whose transport returns an ALL-ZEROS vector → fails closed
+    // (95) BEFORE any KNN, never a degenerate cosine. Drift does NOT fire (the
+    // seed matches the stub-seeded index).
+    let ws = StagedWorkspace::stage(&[("alpha", SKILL)], &[]);
+    let _g = set_transport_override(|_spec| Ok(ok_embedding(&[0.0, 0.0, 0.0])));
+    let err = query_with_embedder(&ws, Box::new(remote_embedder(None))).expect_err("fail closed");
+    assert_eq!(
+        err.exit_code(),
+        95,
+        "query-time all-zero embedding → 95 (never a degenerate KNN): {err:?}"
+    );
+}
+
+#[test]
+fn query_time_all_zero_embedding_is_tool_error_on_mcp() {
+    // The MCP `search_skills` path embeds through the SAME trait method. An
+    // ALL-ZEROS remote embedding must surface a CLEAR tool error (mapped from
+    // RemoteEmbeddingInvalid/95), NOT a degenerate cosine ranking.
+    let ws = StagedWorkspace::stage(&[("alpha", SKILL)], &[]);
+    let _g = set_transport_override(|_spec| Ok(ok_embedding(&[0.0, 0.0, 0.0])));
+    let harness = ws.harness_with_embedder(
+        Arc::new(remote_embedder(None)) as Arc<dyn Embedder>,
+        stub_embedder_seed(),
+    );
+    let err = harness
+        .call_search_skills(common::mcp_harness::search_input("anything"))
+        .expect_err("MCP search must fail closed on a zero-norm embedding, not rank degenerately");
+    assert_eq!(
+        mcp_error_exit_code(&err),
+        95,
+        "MCP fail-closed on all-zero must map to RemoteEmbeddingInvalid/95: {err:?}"
+    );
+}
+
+#[test]
 fn query_time_invalid_embedding_is_95_on_cli() {
     // Stage a VALID index with the stub embedder, then run the query pipeline
     // with a RemoteEmbedder whose transport returns a non-finite-via-overflow

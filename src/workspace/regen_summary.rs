@@ -217,26 +217,15 @@ pub fn regen(
 /// recorded — only the closed [`crate::telemetry::event::ProviderKind`].
 fn emit_summary_telemetry(paths: &Paths, outcome: crate::telemetry::event::Outcome) {
     let cfg = crate::config::load_or_default(paths);
-    let kind = summariser_provider_kind(&cfg);
+    // Route through the shared SSOT mapper in `telemetry::event` so the
+    // summariser kind can never diverge from the `[embedding]`/`[reranker]`
+    // mappers. `Bundled` when no provider is referenced or the reference can't
+    // be resolved; telemetry never propagates a config error.
+    let kind = crate::telemetry::event::ProviderKind::for_summariser(&cfg);
     crate::telemetry::enqueue(crate::telemetry::event::Summary {
         summariser_provider_kind: kind,
         outcome,
     });
-}
-
-/// Map the configured summariser provider to the closed telemetry kind:
-/// `Bundled` when no provider is referenced (or the reference can't be
-/// resolved), else the provider entry's kind. Resolution failures degrade to
-/// `Bundled` — telemetry never propagates a config error.
-fn summariser_provider_kind(cfg: &crate::config::Config) -> crate::telemetry::event::ProviderKind {
-    use crate::telemetry::event::ProviderKind as TKind;
-    let Some(name) = cfg.summariser.provider.as_deref() else {
-        return TKind::Bundled;
-    };
-    match cfg.providers.get(name) {
-        Some(entry) => TKind::from(entry.kind),
-        None => TKind::Bundled,
-    }
 }
 
 /// Collect the enabled plugins + their skills for the workspace, in

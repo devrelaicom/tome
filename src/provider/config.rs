@@ -116,7 +116,16 @@ impl std::fmt::Debug for Credential {
 
 /// A fully-resolved provider connection — everything a `Remote*` impl needs to
 /// make a request. Produced by [`resolve`].
-#[derive(Debug)]
+///
+/// `Debug` is hand-written to redact the credential (mirroring the `RequestSpec`
+/// guard in `http.rs`): it renders `name`/`kind`/`base_url`/`model`/`timeout`
+/// and routes the [`Credential`] through ITS OWN redacting `Debug`, never the
+/// raw secret. This is credential-bearing, so a stray `tracing::debug!(?resolved)`
+/// must never leak a key. (Do NOT re-derive `Debug` — that would reintroduce the
+/// leak. The deriving impl is safe TODAY because `Credential` redacts and
+/// `base_url` is key-free, but the carve-out is latent: a future `api_key`-in-url
+/// kind or a Debug-printing inner type would expose it. The hand-written impl
+/// makes the redaction explicit and greppable.)
 pub struct ResolvedProvider {
     /// The registry name (the `[providers.<name>]` key).
     pub name: String,
@@ -132,6 +141,23 @@ pub struct ResolvedProvider {
     /// The per-call timeout (default [`DEFAULT_PROVIDER_TIMEOUT`], overridable
     /// via `TOME_PROVIDER_TIMEOUT_SECS`).
     pub timeout: Duration,
+}
+
+impl std::fmt::Debug for ResolvedProvider {
+    /// Redacting `Debug`: prints every field EXCEPT the raw credential, which is
+    /// rendered via [`Credential`]'s own redacting `Debug`. Mirrors the
+    /// `RequestSpec` guard in `http.rs`. Do NOT replace this with `#[derive]`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedProvider")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("base_url", &self.base_url)
+            // `Credential`'s Debug renders `<present>`/`<absent>`, never the key.
+            .field("credential", &self.credential)
+            .field("model", &self.model)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 /// The default base URL for a provider kind when the entry omits `base_url`.
@@ -759,6 +785,8 @@ mod tests {
 
     #[test]
     fn resolved_provider_debug_does_not_leak_credential() {
+        // An INLINE api_key must NOT appear in the hand-written redacting Debug;
+        // the credential renders via `Credential`'s own `<present>` token.
         let _g = EnvGuard::new(&["TOME_P_API_KEY", TIMEOUT_ENV_VAR]);
         let config = config_with(
             "p",
@@ -773,5 +801,13 @@ mod tests {
             !dbg.contains("leaky-secret"),
             "ResolvedProvider Debug leaked the credential: {dbg}"
         );
+        // The redaction is positive (the credential is rendered, just as the
+        // redacting `<present>` token) and the other fields are still present.
+        assert!(
+            dbg.contains("Credential(<present>)"),
+            "credential must render via its redacting Debug: {dbg}"
+        );
+        assert!(dbg.contains("ResolvedProvider"), "{dbg}");
+        assert!(dbg.contains("\"p\""), "name should be present: {dbg}");
     }
 }

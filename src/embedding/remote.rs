@@ -56,7 +56,12 @@ pub const REMOTE_EMBEDDER_VERSION: &str = "external";
 /// Checks, in order:
 /// 1. non-empty,
 /// 2. all values finite (no NaN / +∞ / −∞),
-/// 3. when `expected_dim` is `Some(d)`: `vec.len() == d`.
+/// 3. not all-zero (zero-norm): an all-zeros vector is finite and can be the
+///    right length, so it slips past 1 and 2 — but it is the most common
+///    well-formed-but-wrong remote output (a truncated/stub/model-not-found
+///    response) and yields a degenerate/NaN cosine in `vec_distance_cosine`
+///    → garbage KNN. Reject it explicitly here, fail-closed,
+/// 4. when `expected_dim` is `Some(d)`: `vec.len() == d`.
 ///
 /// A failure returns [`TomeError::RemoteEmbeddingInvalid`] (exit 95 on the CLI;
 /// the same `TomeError` becomes a clear MCP tool error). The `detail` names the
@@ -82,6 +87,17 @@ pub fn validate_embedding(vec: &[f32], expected_dim: Option<usize>) -> Result<()
             detail: format!(
                 "remote embedding contains a non-finite value (NaN/Inf) at index {idx}"
             ),
+        });
+    }
+    // Zero-norm degenerate vector: every element is exactly 0.0. The finite
+    // check above passes (0.0 is finite) and the length can be correct, so this
+    // is the load-bearing well-formed-but-wrong case a truncated/stub/
+    // model-not-found response produces. A zero-norm vector has no direction, so
+    // cosine similarity is undefined (a 0/0 → NaN in `vec_distance_cosine`);
+    // indexing it silently corrupts KNN. Fail closed.
+    if vec.iter().all(|f| *f == 0.0) {
+        return Err(TomeError::RemoteEmbeddingInvalid {
+            detail: "embedding is all-zero (zero-norm)".to_string(),
         });
     }
     if let Some(d) = expected_dim
@@ -482,6 +498,33 @@ mod tests {
     #[test]
     fn validate_accepts_correct_dimension() {
         assert!(validate_embedding(&[0.1, 0.2, 0.3], Some(3)).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_all_zero_zero_norm() {
+        // A finite, correct-length, ALL-ZEROS vector (the common
+        // truncated/stub/model-not-found remote output) must be rejected
+        // fail-closed — it would yield a degenerate/NaN cosine in KNN.
+        let err = validate_embedding(&[0.0, 0.0, 0.0], Some(3)).unwrap_err();
+        assert_eq!(err.exit_code(), 95);
+        assert!(err.to_string().contains("zero-norm"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_all_zero_even_when_dim_unset() {
+        // All-zero is rejected before/with the dimension check, so it fails even
+        // on the first embed of a fresh reindex (no expected dim yet).
+        let err = validate_embedding(&[0.0, 0.0], None).unwrap_err();
+        assert_eq!(err.exit_code(), 95);
+        assert!(err.to_string().contains("zero-norm"), "{err}");
+    }
+
+    #[test]
+    fn validate_accepts_vector_with_some_zeros() {
+        // A vector that merely CONTAINS zeros (but is not all-zero) has a
+        // non-zero norm and is accepted — the check is "every element is 0.0",
+        // not "any element is 0.0".
+        assert!(validate_embedding(&[0.0, 0.0, 0.7], Some(3)).is_ok());
     }
 
     #[test]
