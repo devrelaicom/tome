@@ -257,11 +257,6 @@ pub fn run(
             "prompt registry built",
         );
 
-        // FR-050: the "flush soon" signal, shared between the tool handlers
-        // (which raise it on the ≥50-enqueue crossing via `McpState::note_enqueue`)
-        // and the background flush task spawned below.
-        let flush_signal = Arc::new(tokio::sync::Notify::new());
-
         let state = Arc::new(state::McpState {
             embedder: Arc::from(handle.embedder),
             reranker: OnceCell::new(),
@@ -273,19 +268,14 @@ pub fn run(
             prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(prompt_registry))),
             host_harness: host_harness.clone(),
             last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
-            flush_signal: flush_signal.clone(),
-            enqueued_since_flush: std::sync::atomic::AtomicUsize::new(0),
         });
 
-        // FR-049/050: the background telemetry flush task. It owns the 5-min
-        // interval + the shared "flush soon" `Notify` and dispatches on EITHER
-        // trigger. Its drain is currently a no-op stub (`dispatch_flush`) — the
-        // kernel-backed `gauge_telemetry::Flusher` that drives the real drain off
-        // the reactor is wired in a later task; the interval/`Notify` plumbing is
-        // kept intact so that is a one-function change. Its `JoinHandle` is
-        // aborted after `serve_server` returns so the task can't outlive the
-        // server (no leak).
-        let flush_task = tokio::spawn(telemetry_flush_loop(flush_signal));
+        // Long-running background flusher: interval drain (std thread; sync). None when
+        // telemetry is disabled (Flusher::start returns None). Held for the server's
+        // lifetime; dropped at shutdown stops the thread.
+        let _flusher = crate::telemetry::handle().and_then(|h| {
+            gauge_telemetry::Flusher::start(h, std::time::Duration::from_secs(300), 0)
+        });
 
         // The live-sync watcher needs its own `McpState` handle (it shares the
         // server's swappable prompt-registry cell through it). Clone the `Arc`
@@ -402,14 +392,15 @@ pub fn run(
             }
         };
 
-        // Tie the background flush task's lifetime to the server: once serving
-        // has ended (either arm above), abort it so it can't outlive the server
-        // or leak past the `block_on`. Today the loop's `dispatch_flush` is a
-        // no-op stub, so there is nothing in flight to lose; once the
-        // kernel-backed `Flusher` lands, any mid-flight drain it runs is
-        // best-effort (the next process run's exit hook / timer re-drains the
-        // queue), so aborting here is still safe.
-        flush_task.abort();
+        // Stop the background flusher (signals its std thread and joins it), then
+        // do one final synchronous drain so events enqueued since the last 5-min
+        // tick are delivered before the process exits. `flush_blocking` spawns a
+        // worker thread internally and waits up to 3s — safe to call from async
+        // on the shutdown path where brief blocking is acceptable.
+        drop(_flusher);
+        if let Some(h) = crate::telemetry::handle() {
+            h.flush_blocking(gauge_telemetry::client::DEFAULT_FLUSH_TIMEOUT);
+        }
 
         // Same lifetime tie for the live-sync watcher: abort it once serving
         // has ended so it can't outlive the server or leak past the `block_on`.
@@ -420,66 +411,6 @@ pub fn run(
 
         shutdown_result
     })
-}
-
-/// FR-049/050: the background telemetry flush loop.
-///
-/// Holds the 5-min interval and the shared "flush soon" [`Notify`]; on EITHER
-/// trigger it calls [`dispatch_flush`]. That dispatch is currently a no-op stub
-/// — the kernel-backed `gauge_telemetry::Flusher` that drives the real drain off
-/// the reactor (via `spawn_blocking`, the one bridge out of the async island) is
-/// wired in a later task. The interval/`Notify` plumbing is kept intact so that
-/// wiring is a one-function change.
-///
-/// Best-effort throughout (NFR-001): background flushes fail silent by design
-/// (the foreground `tome telemetry flush` is the loud one), and the kernel's own
-/// drain lock + grace gate make overlapping dispatches safe (the loser no-ops).
-/// The loop runs until its `JoinHandle` is aborted on server shutdown.
-async fn telemetry_flush_loop(flush_signal: Arc<tokio::sync::Notify>) {
-    // FR-049: the 5-min cadence. `MissedTickBehavior::Skip` (the default for a
-    // fresh interval is `Burst`; a blocking drain could overrun a tick, so skip
-    // missed ticks rather than firing a backlog of flushes back-to-back).
-    let mut interval = tokio::time::interval(Duration::from_secs(300));
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // The first `interval.tick()` resolves immediately; consume it so the first
-    // real flush is one full period out (the cold-start enqueue is already on
-    // the queue and the exit/notify paths cover early delivery — we don't want a
-    // flush in the first reactor poll of the loop).
-    interval.tick().await;
-
-    loop {
-        // One select-arm await per loop turn, factored into `flush_loop_turn` so a
-        // test can drive ONE iteration deterministically (a `Notify` permit, no
-        // 5-min interval wait). The production loop and the test share the SAME
-        // arm-dispatch shape — `flush_loop_turn` awaits either trigger, then
-        // `dispatch_flush`es OFF the reactor.
-        flush_loop_turn(&mut interval, &flush_signal).await;
-    }
-}
-
-/// One turn of [`telemetry_flush_loop`]: await EITHER the interval tick OR the
-/// "flush soon" notify, then dispatch the drain off the reactor via
-/// [`dispatch_flush`]. Factored out so a `#[tokio::test]` can drive a single
-/// iteration without the 5-min interval wait (it fires the `Notify` arm). The
-/// production loop calls this in a bare `loop`, so the behaviour is unchanged.
-async fn flush_loop_turn(interval: &mut tokio::time::Interval, flush_signal: &tokio::sync::Notify) {
-    tokio::select! {
-        _ = interval.tick() => {}
-        _ = flush_signal.notified() => {}
-    }
-    dispatch_flush();
-}
-
-/// Dispatch the one sync drain OFF the reactor (NFR-001 / SC-009).
-///
-/// TEMPORARY no-op: the bespoke `telemetry::flush()` was retired with the rest of
-/// the bespoke queue/transport machinery; the real background `Flusher` (which
-/// drives the kernel's drain off the reactor) is wired in a later task. The
-/// `flush_signal`/interval plumbing stays in place so wiring the `Flusher` is a
-/// one-function change. Until then this is a no-op so a `flush_signal` notify or
-/// the 5-min tick simply does nothing.
-fn dispatch_flush() {
-    // replaced by Flusher in a later task
 }
 
 /// Build the per-session [`prompts::PromptRegistry`] from the resolved
@@ -563,62 +494,5 @@ async fn wait_for_shutdown_signal() -> &'static str {
     {
         tokio::signal::ctrl_c().await.ok();
         "SIGINT"
-    }
-}
-
-#[cfg(test)]
-mod telemetry_flush_loop_tests {
-    use super::*;
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    // The bespoke drain (`telemetry::flush()` + the queue/transport/lock seams)
-    // was retired in the gauge-telemetry cutover; `dispatch_flush` is a temporary
-    // no-op until the kernel-backed background `Flusher` is wired in a later task.
-    // The end-to-end "a notify drains the queue" assertions belong to that task's
-    // tests; here we only assert the loop plumbing the cutover keeps stable:
-    // `flush_loop_turn` returns when a trigger fires, and `dispatch_flush` is
-    // non-blocking.
-
-    /// `flush_loop_turn` resolves when the notify arm fires and returns promptly
-    /// (the `dispatch_flush` it calls is a no-op stub, off the reactor regardless).
-    #[tokio::test]
-    async fn flush_loop_turn_returns_on_notify() {
-        // A long interval so ONLY the notify arm can fire within the test.
-        let mut interval = tokio::time::interval(Duration::from_secs(3600));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await; // consume the immediate first tick
-
-        let signal = Arc::new(tokio::sync::Notify::new());
-        signal.notify_one();
-
-        let started = std::time::Instant::now();
-        flush_loop_turn(&mut interval, &signal).await;
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "the notify arm resolved the turn promptly"
-        );
-    }
-
-    /// `dispatch_flush` returns immediately (it must never block the reactor).
-    #[test]
-    fn dispatch_flush_is_non_blocking() {
-        let started = std::time::Instant::now();
-        dispatch_flush();
-        assert!(
-            started.elapsed() < Duration::from_millis(100),
-            "dispatch_flush returns immediately"
-        );
-    }
-
-    /// Aborting the loop's `JoinHandle` stops it cleanly (no panic on cancel).
-    #[tokio::test]
-    async fn abort_stops_the_loop() {
-        let signal = Arc::new(tokio::sync::Notify::new());
-        let handle = tokio::spawn(telemetry_flush_loop(signal.clone()));
-        signal.notify_one();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        handle.abort();
-        let _ = handle.await; // observe the cancellation; must not panic
     }
 }

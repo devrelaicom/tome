@@ -99,8 +99,6 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                 // allowlisted source. Fabricating a version would be worse than
                 // the anonymous-only `tome.error` already emitted above, so the
                 // attributed error stays deferred at this boundary.
-                // FR-050: nudge the off-path flush timer on the ≥50 crossing.
-                state.note_enqueue();
                 internal(&input, started, e.to_string(), e.category().as_str())
             })?;
 
@@ -340,8 +338,6 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         }
     })
     .await;
-    // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
-    state.note_enqueue();
 
     // The `Output.path` field is documented as the absolute path to the
     // skill body (see the `Output` struct's doc comment) — emit the
@@ -731,9 +727,6 @@ async fn emit_post_resolution_error_telemetry(
         }
     })
     .await;
-
-    // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
-    state.note_enqueue();
 }
 
 impl Input {

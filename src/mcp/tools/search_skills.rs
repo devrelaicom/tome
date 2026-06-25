@@ -330,10 +330,6 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         // failure), so there is no `plugin_name`/`plugin_version` to attribute —
         // the attributed `catalog.<id>.error` stays deferred here. Anonymous
         // `tome.error` above is the right granularity for a search failure.
-        // FR-050: nudge the off-path flush timer if this enqueue crossed the
-        // ≥50 threshold. Cheap atomic bump + maybe a `Notify` — never an inline
-        // flush (SC-009).
-        state.note_enqueue();
         // Translate filter-validation results into the contract's
         // structured error codes.
         match &e {
@@ -416,8 +412,6 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         reranker_provider_kind: crate::telemetry::event::ProviderKind::for_reranker(&cfg),
         calling_harness: crate::mcp::calling_harness(&state),
     });
-    // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
-    state.note_enqueue();
 
     // FR-052 + FR-057: ALONGSIDE the anonymous `tome.search` above, emit one
     // catalog-attributed `catalog.<id>.search_result` per result entry whose
