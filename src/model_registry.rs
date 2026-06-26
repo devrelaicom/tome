@@ -119,7 +119,8 @@ pub fn parse_snapshot(bytes: &[u8]) -> Result<RegistrySnapshot, String> {
 }
 
 // Lenient mirror of models.dev/api.json — third-party input, so only the
-// fields we trim to are declared and everything else is ignored. // not-strict
+// fields we trim to are declared and everything else is ignored.
+// not-strict
 #[derive(Debug, Deserialize)]
 struct RawApi {
     #[serde(flatten)]
@@ -304,7 +305,25 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_low_count_and_missing_vendor() {
+    fn resolve_tier_breaks_same_date_ties_by_id_descending() {
+        // Two non-preview opus models sharing the SAME release_date: the
+        // lexicographically-higher id wins (id-descending tie-break), so the
+        // result is deterministic regardless of insertion order.
+        let reg = ModelRegistry {
+            source: RegistrySource::Baked,
+            snapshot: snap(vec![
+                ("claude-opus-4-1", "Claude Opus 4.1", "2026-03-01"),
+                ("claude-opus-4-5", "Claude Opus 4.5", "2026-03-01"),
+            ]),
+        };
+        assert_eq!(
+            reg.resolve_tier("anthropic", "opus").as_deref(),
+            Some("claude-opus-4-5")
+        );
+    }
+
+    #[test]
+    fn validate_rejects_low_model_count() {
         let ok = parse_raw_api(test_api_bytes(), "2026-06-20T00:00:00Z").unwrap();
         assert!(validate_snapshot(&ok).is_ok());
 
@@ -318,10 +337,30 @@ mod tests {
         too_few.providers.remove("openai");
         too_few.providers.remove("google");
         assert!(validate_snapshot(&too_few).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_missing_required_vendor() {
+        let ok = parse_raw_api(test_api_bytes(), "2026-06-20T00:00:00Z").unwrap();
 
         let mut no_anthropic = ok.clone();
         no_anthropic.providers.remove("anthropic");
         assert!(validate_snapshot(&no_anthropic).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_unparsable_release_date() {
+        let mut bad = parse_raw_api(test_api_bytes(), "2026-06-20T00:00:00Z").unwrap();
+        // Corrupt one model's release_date; the rest of the snapshot stays
+        // valid (count + required vendor) so this isolates the date check.
+        bad.providers
+            .get_mut("anthropic")
+            .unwrap()
+            .models
+            .first_mut()
+            .unwrap()
+            .release_date = "not-a-date".to_owned();
+        assert!(validate_snapshot(&bad).is_err());
     }
 
     #[test]
