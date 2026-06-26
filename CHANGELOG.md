@@ -572,6 +572,12 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.7](https://github.com/devrelaicom/tome/compare/v0.7.6...v0.7.7) - 2026-06-26
+
+### Added
+
+- *(telemetry)* migrate to gauge-telemetry kernel (keep 2-tier streams) ([#265](https://github.com/devrelaicom/tome/pull/265))
+
 ## [0.7.6](https://github.com/devrelaicom/tome/compare/v0.7.5...v0.7.6) - 2026-06-25
 
 ### Other
