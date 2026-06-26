@@ -14,6 +14,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
 
+// Build-generated: `pub static MODEL_REGISTRY_SNAPSHOT: &[u8]`
+include!(concat!(env!("OUT_DIR"), "/model_registry_snapshot.rs"));
+
 /// Our Tome-owned trimmed snapshot shape (strict).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -110,6 +113,63 @@ impl ModelRegistry {
             fetched_at: self.snapshot.fetched_at.clone(),
             model_count,
         }
+    }
+
+    /// Parse the build-embedded snapshot. `build.rs` gates the asset, so a
+    /// parse failure here is a build/packaging bug, not a runtime condition.
+    pub fn baked() -> ModelRegistry {
+        let snapshot = parse_snapshot(MODEL_REGISTRY_SNAPSHOT)
+            .expect("baked model registry snapshot must parse (gated by build.rs)");
+        ModelRegistry {
+            source: RegistrySource::Baked,
+            snapshot,
+        }
+    }
+
+    /// Override-if-valid, else baked. A present-but-corrupt override falls back
+    /// to baked (never errors a sync); `doctor` surfaces the corruption via
+    /// [`override_health`].
+    pub fn load(paths: &crate::paths::Paths) -> ModelRegistry {
+        let path = paths.model_registry_cache_path();
+        if let Ok(bytes) = std::fs::read(&path)
+            && let Ok(snapshot) = parse_snapshot(&bytes)
+            && validate_snapshot(&snapshot).is_ok()
+        {
+            return ModelRegistry {
+                source: RegistrySource::Override,
+                snapshot,
+            };
+        }
+        ModelRegistry::baked()
+    }
+}
+
+/// Read-only health of the model-registry override file (for `doctor`).
+#[derive(Debug, Clone)]
+pub enum OverrideHealth {
+    /// No override file at `~/.tome/cache/model-registry.json`.
+    Absent,
+    /// Override present and passes `validate_snapshot`.
+    Valid(RegistryInfo),
+    /// Override present but fails to parse or validate.
+    Corrupt,
+}
+
+/// Read-only health check on the override file (for `doctor`). Never writes.
+pub fn override_health(paths: &crate::paths::Paths) -> OverrideHealth {
+    let path = paths.model_registry_cache_path();
+    match std::fs::read(&path) {
+        Err(_) => OverrideHealth::Absent,
+        Ok(bytes) => match parse_snapshot(&bytes) {
+            Ok(s) if validate_snapshot(&s).is_ok() => {
+                let reg = ModelRegistry {
+                    source: RegistrySource::Override,
+                    snapshot: s,
+                };
+                OverrideHealth::Valid(reg.info())
+            }
+            _ => OverrideHealth::Corrupt,
+        },
     }
 }
 
@@ -251,6 +311,17 @@ pub fn test_registry() -> ModelRegistry {
 mod tests {
     use super::*;
 
+    /// Return a `RegistrySnapshot` that passes `validate_snapshot` (≥ 50 models)
+    /// for use in override-precedence tests. Derived from the same fixture used
+    /// by the Task-1 parse/validate tests.
+    fn test_registry_snapshot_for_override() -> RegistrySnapshot {
+        parse_raw_api(
+            include_bytes!("../tests/fixtures/model_registry/api_min.json"),
+            "2026-06-20T00:00:00Z",
+        )
+        .expect("fixture parses")
+    }
+
     fn snap(models: Vec<(&str, &str, &str)>) -> RegistrySnapshot {
         let mut providers = BTreeMap::new();
         providers.insert(
@@ -380,5 +451,57 @@ mod tests {
     fn test_api_bytes() -> &'static [u8] {
         // A static fixture file keeps the test readable; see fixtures note.
         include_bytes!("../tests/fixtures/model_registry/api_min.json")
+    }
+
+    #[test]
+    fn baked_parses_and_reports_baked_source() {
+        let reg = ModelRegistry::baked();
+        let info = reg.info();
+        assert!(matches!(info.source, RegistrySource::Baked));
+        assert!(info.model_count >= MIN_MODEL_COUNT);
+    }
+
+    #[test]
+    fn override_takes_precedence_then_falls_back_when_corrupt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".tome");
+        let paths = crate::paths::Paths::from_root(root);
+        let cache = paths.model_registry_cache_path();
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+
+        // Valid override → Override source.
+        let valid_snap = test_registry_snapshot_for_override();
+        let valid = serde_json::to_vec(&valid_snap).unwrap();
+        std::fs::write(&cache, &valid).unwrap();
+        assert!(
+            matches!(
+                ModelRegistry::load(&paths).info().source,
+                RegistrySource::Override
+            ),
+            "expected Override source when valid override is present"
+        );
+        assert!(matches!(override_health(&paths), OverrideHealth::Valid(_)));
+
+        // Corrupt override → fall back to Baked.
+        std::fs::write(&cache, b"{ not json").unwrap();
+        assert!(
+            matches!(
+                ModelRegistry::load(&paths).info().source,
+                RegistrySource::Baked
+            ),
+            "expected Baked source when override is corrupt"
+        );
+        assert!(matches!(override_health(&paths), OverrideHealth::Corrupt));
+
+        // Absent (remove) → Absent health + Baked source.
+        std::fs::remove_file(&cache).unwrap();
+        assert!(
+            matches!(
+                ModelRegistry::load(&paths).info().source,
+                RegistrySource::Baked
+            ),
+            "expected Baked source when override is absent"
+        );
+        assert!(matches!(override_health(&paths), OverrideHealth::Absent));
     }
 }

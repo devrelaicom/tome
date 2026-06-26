@@ -58,6 +58,7 @@ include = [
     "/src/**",
     "/build.rs",
     "/vendor/**",
+    "/assets/**",
     "/Cargo.toml",
     "/Cargo.lock",
     "/README.md",
@@ -222,6 +223,10 @@ cc = "1"
 # evaluates the same graph, and the "no new top-level dependency" invariant holds.
 sha2 = "0.10"
 hex = "0.4"
+# Phase 13 (Task 2) — build-time validation of the vendored model-registry
+# snapshot. Already a normal dependency; reusing it under `[build-dependencies]`
+# adds NO new Cargo.lock package (same pattern as sha2/hex above).
+serde_json = { version = "1", features = ["preserve_order"] }
 
 [dev-dependencies]
 # Drive the interactive `tome plugin` browse flow through a real pty.
