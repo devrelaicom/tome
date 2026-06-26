@@ -8,7 +8,8 @@
 //! * the displayed / registered name is ALWAYS the filename-derived
 //!   `<plugin>__<name>` (FR-042 — the prefix cannot be hidden), even when
 //!   `clashes = false`;
-//! * `model: opus` maps to the same-vendor `anthropic/claude-opus-4.7`;
+//! * `model: opus` maps to the same-vendor `anthropic/claude-opus-4-5`
+//!   (resolved from the registry — newest opus tier for anthropic vendor);
 //! * `description` is required — the FR-035 fallback chain: source
 //!   description → first non-empty trimmed body line → placeholder.
 
@@ -69,8 +70,8 @@ fn model_opus_maps_to_anthropic_same_vendor_id() {
         .translate_agent(&base("reviewer", "First line.\n"), false, &reg)
         .expect("translate");
     assert!(
-        t.rendered.contains("model: anthropic/claude-opus-4.7"),
-        "opus → opencode same-vendor anthropic id (FR-037):\n{}",
+        t.rendered.contains("model: anthropic/claude-opus-4-5"),
+        "opus → newest same-vendor anthropic id from the registry:\n{}",
         t.rendered,
     );
 }

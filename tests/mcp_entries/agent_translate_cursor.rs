@@ -5,11 +5,11 @@
 //!
 //! * Markdown + YAML emission (`MarkdownYaml`), filename
 //!   `<plugin>__<name>.md`;
-//! * an unsupported field is DROPPED and RECORDED in `dropped_fields`.
-//!   Cursor carries `name` / `description` / `tools` but has no carrier for
-//!   `model` (no enumerated same-vendor Anthropic id yet, FR-034) nor for the
-//!   privileged fields — all of those drop. We assert both the model drop and
-//!   a privileged-field drop.
+//! * `tools:` is DROPPED (Cursor has no tools field) and recorded in
+//!   `dropped_fields`;
+//! * a pinned `model` maps to `inherit` (Cursor's proprietary ids are not in
+//!   the registry; `inherit` preserves intent) and is EMITTED, not dropped;
+//! * the privileged fields have no Cursor carrier and drop.
 
 use tome::harness::AgentFormat;
 use tome::harness::HarnessModule;
@@ -48,23 +48,23 @@ fn emits_markdown_yaml_with_namespaced_filename() {
     );
     // The carried-through fields are present.
     assert!(t.rendered.contains("name: reviewer"));
-    assert!(t.rendered.contains("tools:"));
+    assert!(!t.rendered.contains("tools:"), "Cursor has no tools field");
 }
 
 #[test]
-fn unsupported_model_is_dropped_and_recorded() {
+fn pinned_model_becomes_inherit() {
     let reg = tome::model_registry::test_registry();
     let t = CURSOR
         .translate_agent(&agent(), false, &reg)
         .expect("translate");
     assert!(
-        !t.rendered.contains("model:"),
-        "Cursor drops model (no enumerated same-vendor id, FR-034):\n{}",
+        t.rendered.contains("model: inherit"),
+        "Cursor: pinned model → inherit (proprietary ids not in registry, FR-034):\n{}",
         t.rendered,
     );
     assert!(
-        t.dropped_fields.contains(&"model".to_owned()),
-        "dropped model must be recorded; got {:?}",
+        !t.dropped_fields.contains(&"model".to_owned()),
+        "model maps to inherit, so it is NOT in dropped_fields; got {:?}",
         t.dropped_fields,
     );
 }
@@ -116,8 +116,8 @@ fn indeterminate_posture_omits_readonly_key() {
 }
 
 /// T-2 / C-2: an explicit not-read-only allowlist emits NO `readonly` key.
-/// Cursor KEEPS the `tools` allowlist verbatim, so no source field is dropped
-/// for the read-only intent and the harness target name is never recorded.
+/// Cursor has no `tools` field — the allowlist is DROPPED and recorded in
+/// `dropped_fields`. The `readonly` harness target name is never recorded.
 #[test]
 fn not_read_only_allowlist_omits_readonly_and_keeps_tools() {
     let agent = CanonicalAgent {
@@ -135,11 +135,17 @@ fn not_read_only_allowlist_omits_readonly_and_keeps_tools() {
         "not-read-only allowlist must not assert readonly:\n{}",
         t.rendered,
     );
-    // The allowlist itself is carried through verbatim.
+    // Cursor has no tools field — the allowlist is dropped.
     assert!(
-        t.rendered.contains("tools:"),
-        "Cursor keeps the tools allowlist:\n{}",
+        !t.rendered.contains("tools:"),
+        "Cursor has no tools field; allowlist must be dropped:\n{}",
         t.rendered,
+    );
+    // The source `tools` field IS recorded in dropped_fields.
+    assert!(
+        t.dropped_fields.contains(&"tools".to_owned()),
+        "`tools` must be recorded in dropped_fields; got {:?}",
+        t.dropped_fields,
     );
     // C-2: the harness target name is never recorded as a dropped field.
     assert!(

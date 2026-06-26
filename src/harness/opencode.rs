@@ -323,8 +323,8 @@ mod tests {
         };
         let t = OPENCODE.translate_agent(&agent, false, &reg).unwrap();
         assert!(t.rendered.contains("mode: subagent"));
-        // opus → opencode same-vendor anthropic id.
-        assert!(t.rendered.contains("model: anthropic/claude-opus-4.7"));
+        // opus → opencode same-vendor anthropic id (registry-driven).
+        assert!(t.rendered.contains("model: anthropic/claude-opus-4-5"));
         // read-only intent → per-tool permission deny block.
         assert!(t.rendered.contains("permission:"));
         assert!(t.rendered.contains("edit: deny"));
