@@ -53,9 +53,14 @@ fn run(asset: &Path) -> Result<String, String> {
         .map_err(|e| format!("trim: {e}"))?;
     tome::model_registry::validate_snapshot(&snapshot).map_err(|e| format!("validate: {e}"))?;
 
-    // Only now write to disk.
+    // Only now write to disk — atomically, via temp-file-then-rename in the
+    // same directory (POSIX-atomic, same-FS), per the constitution's
+    // atomic-writes requirement for the registry/cache. A crash mid-write can
+    // never leave the vendored asset truncated.
     let json = serde_json::to_vec_pretty(&snapshot).map_err(|e| format!("serialise: {e}"))?;
-    std::fs::write(asset, &json).map_err(|e| format!("write: {e}"))?;
+    let tmp = asset.with_extension("json.tmp");
+    std::fs::write(&tmp, &json).map_err(|e| format!("write tmp: {e}"))?;
+    std::fs::rename(&tmp, asset).map_err(|e| format!("rename: {e}"))?;
 
     Ok("refreshed".to_owned())
 }

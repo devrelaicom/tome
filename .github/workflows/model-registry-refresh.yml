@@ -58,26 +58,33 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Date-granular throwaway branch. A second same-day run (manual
+          # dispatch + the schedule, or a re-run) must converge, not hard-fail:
+          # `-B` resets the local branch, the force-push overwrites the remote,
+          # and an existing open PR for this head is tolerated (the branch is
+          # already updated, so there is nothing more to do).
           BRANCH="chore/model-registry-$(date -u +%Y%m%d)"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b "${BRANCH}"
+          git checkout -B "${BRANCH}"
           git add assets/model-registry/registry.json
           git commit -m "chore(model-registry): refresh from models.dev"
-          git push origin "${BRANCH}"
+          git push --force origin "${BRANCH}"
           gh pr create \
             --title "chore(model-registry): weekly registry refresh" \
             --body "Automated weekly refresh of \`assets/model-registry/registry.json\` from models.dev/api.json.
 
 Please review the diff to confirm the upstream data looks reasonable before merging." \
             --base main \
-            --head "${BRANCH}"
+            --head "${BRANCH}" \
+            || echo "PR already exists for ${BRANCH}; branch updated."
 
       # --- failed:… : file an issue so the team can investigate --------------
       - name: File issue on refresh failure
         if: startsWith(steps.refresh.outputs.status, 'failed')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
           gh issue create \
             --title "Model registry refresh failed ($(date -u +%Y-%m-%d))" \
