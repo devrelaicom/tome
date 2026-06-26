@@ -88,6 +88,20 @@ name = "tome"
 name = "tome"
 path = "src/main.rs"
 
+# CI-only: a scheduled workflow refreshes the vendored model registry. Gated
+# behind `registry-refresh` so a default `cargo build` / cargo-dist release
+# build NEVER compiles this bin — it is not shipped in release artifacts.
+# Deliberate deviation from the plan's `release.yml` step: a tag-triggered
+# workflow cannot cleanly commit/push (detached tag checkout), so this lives
+# in its own `model-registry-refresh.yml` (schedule + workflow_dispatch).
+[features]
+registry-refresh = []
+
+[[bin]]
+name = "refresh_model_registry"
+path = "src/bin/refresh_model_registry.rs"
+required-features = ["registry-refresh"]
+
 [dependencies]
 # Phase 1 — unchanged
 clap = { version = "4", features = ["derive"] }
