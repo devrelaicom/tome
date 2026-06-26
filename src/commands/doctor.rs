@@ -652,6 +652,27 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         writeln!(out)?;
     }
 
+    // Phase 13 (native-agent model-registry): model-registry source line.
+    {
+        let mr = &report.model_registry;
+        writeln!(
+            out,
+            "Model registry:  {} ({} models, fetched {})",
+            mr.source, mr.model_count, mr.fetched_at,
+        )?;
+        if mr.override_corrupt {
+            writeln!(
+                out,
+                "  {warn} override file is corrupt (active registry fell back to baked)",
+            )?;
+            writeln!(
+                out,
+                "    run `tome models update --include-registry` to refresh",
+            )?;
+        }
+        writeln!(out)?;
+    }
+
     if !report.suggested_fixes.is_empty() {
         writeln!(out, "Suggested fixes:")?;
         for f in &report.suggested_fixes {

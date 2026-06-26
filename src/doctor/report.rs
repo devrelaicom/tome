@@ -233,6 +233,9 @@ pub enum Subsystem {
     BindingRulesCopy,
     HarnessRules(String),
     HarnessMcp(String),
+    /// Phase 13 (native-agent model-registry): the on-disk override registry
+    /// file that `tome models update --include-registry` refreshes.
+    ModelRegistry,
 }
 
 impl Subsystem {
@@ -252,6 +255,7 @@ impl Subsystem {
             Subsystem::BindingRulesCopy => "binding-rules-copy".to_owned(),
             Subsystem::HarnessRules(n) => format!("harness-rules:{n}"),
             Subsystem::HarnessMcp(n) => format!("harness-mcp:{n}"),
+            Subsystem::ModelRegistry => "model-registry".to_owned(),
         }
     }
 
@@ -267,6 +271,7 @@ impl Subsystem {
             "summariser" => Subsystem::Summariser,
             "binding" => Subsystem::Binding,
             "binding-rules-copy" => Subsystem::BindingRulesCopy,
+            "model-registry" => Subsystem::ModelRegistry,
             other => {
                 if let Some(name) = other.strip_prefix("catalog:") {
                     Subsystem::Catalog(name.to_owned())
@@ -726,6 +731,26 @@ pub struct TelemetryAllowlistEntry {
     pub canonical_source: String,
 }
 
+/// Phase 13 (native-agent model-registry): the read-only model-registry
+/// subsystem report surfaced by `tome doctor`.
+///
+/// `source` is `"baked"` (embedded asset) or `"override"` (user-fetched
+/// `~/.tome/cache/model-registry.json`). `fetched_at` is the RFC3339
+/// timestamp stamped into the registry at fetch time. `override_corrupt`
+/// is `true` when the override file exists but fails to parse or validate
+/// — the active registry falls back to baked in that case, but `doctor`
+/// surfaces the corruption so the user knows to re-run
+/// `tome models update --include-registry`.
+///
+/// Plain `Serialize` (output only — no `deny_unknown_fields`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelRegistryReport {
+    pub source: String,
+    pub fetched_at: String,
+    pub model_count: usize,
+    pub override_corrupt: bool,
+}
+
 /// Phase 12 / US4 (FR-018): one configured remote provider that a model
 /// capability references, surfaced read-only by the doctor pass.
 ///
@@ -883,6 +908,9 @@ pub struct DoctorReport {
     /// `reachable` per entry is populated only under `--verify`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<ProviderReport>,
+    /// Phase 13 (native-agent model-registry): the read-only model-registry
+    /// subsystem report. Always present (baked at minimum) — NOT `Option`.
+    pub model_registry: ModelRegistryReport,
     pub overall: DoctorClassification,
     pub suggested_fixes: Vec<SuggestedFix>,
 }
