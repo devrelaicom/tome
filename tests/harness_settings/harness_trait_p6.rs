@@ -149,9 +149,10 @@ fn stub_translate_agent_round_trips_body() {
         mcp_servers: None,
         permission_mode: None,
     };
+    let reg = tome::model_registry::test_registry();
     // `clashes = false` → the displayed name stays the clean `<name>`.
     let translated = h
-        .translate_agent(&canonical, false)
+        .translate_agent(&canonical, false, &reg)
         .expect("stub translation succeeds");
     assert_eq!(translated.displayed_name, "reviewer");
     assert_eq!(translated.filename, "myplugin__reviewer.md");
@@ -161,7 +162,7 @@ fn stub_translate_agent_round_trips_body() {
     // `clashes = true` → the displayed name is plugin-prefixed; the filename
     // stays `<plugin>__<name>` regardless (FR-041).
     let clashed = h
-        .translate_agent(&canonical, true)
+        .translate_agent(&canonical, true, &reg)
         .expect("stub translation succeeds");
     assert_eq!(clashed.displayed_name, "myplugin-reviewer");
     assert_eq!(clashed.filename, "myplugin__reviewer.md");

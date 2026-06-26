@@ -101,6 +101,10 @@ pub(crate) fn reconcile_agents(
         None => Vec::new(),
     };
 
+    // Phase 1: load the model registry ONCE per sync (override-if-valid else
+    // baked) and thread it into every agent translation.
+    let model_registry = crate::model_registry::ModelRegistry::load(deps.paths);
+
     // The set of plugins with at least one enabled agent — drives which
     // owned files survive the per-harness cleanup.
     let enabled_plugins: HashSet<String> = enabled.iter().map(|a| a.plugin.clone()).collect();
@@ -161,6 +165,7 @@ pub(crate) fn reconcile_agents(
                     &prepared,
                     &enabled_plugins,
                     strip_agent_privileges,
+                    &model_registry,
                     outcome,
                     &mut recon,
                 )
@@ -227,12 +232,14 @@ fn prepare_agent(
 /// when any file was written, `Removed` when only removals happened, else
 /// `LeftAlone`. A translate or write failure for one agent is recorded on
 /// `recon.first_error` and the rest still process (FR-084).
+#[allow(clippy::too_many_arguments)]
 fn emit_agents_for_harness(
     m: &dyn HarnessModule,
     dir: &Path,
     prepared: &[PreparedAgent],
     enabled_plugins: &HashSet<String>,
     strip_agent_privileges: bool,
+    model_registry: &crate::model_registry::ModelRegistry,
     outcome: &mut SyncOutcome,
     recon: &mut AgentReconciliation,
 ) -> Action {
@@ -261,7 +268,7 @@ fn emit_agents_for_harness(
         } else {
             &agent.canonical
         };
-        let translated = match m.translate_agent(canonical, agent.clashes) {
+        let translated = match m.translate_agent(canonical, agent.clashes, model_registry) {
             Ok(t) => t,
             Err(e) => {
                 if recon.first_error.is_none() {

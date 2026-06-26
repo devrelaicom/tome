@@ -914,6 +914,8 @@ pub fn build_agents_report(
         prepared.push((canonical, clashes));
     }
 
+    let model_registry = crate::model_registry::ModelRegistry::load(paths);
+
     let mut harnesses: Vec<AgentHarnessEntry> = Vec::new();
     crate::harness::with_effective_modules(|mods| {
         for m in mods {
@@ -940,7 +942,7 @@ pub fn build_agents_report(
             // Dropped fields from re-translation (informational).
             let mut dropped_fields: Vec<DroppedFieldEntry> = Vec::new();
             for (canonical, clashes) in &prepared {
-                if let Ok(translated) = m.translate_agent(canonical, *clashes)
+                if let Ok(translated) = m.translate_agent(canonical, *clashes, &model_registry)
                     && !translated.dropped_fields.is_empty()
                 {
                     let stem = translated

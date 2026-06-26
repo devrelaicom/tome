@@ -36,8 +36,9 @@ fn base(name: &str, body: &str) -> CanonicalAgent {
 
 #[test]
 fn mode_defaults_to_subagent() {
+    let reg = tome::model_registry::test_registry();
     let t = OPENCODE
-        .translate_agent(&base("reviewer", "First line.\n"), false)
+        .translate_agent(&base("reviewer", "First line.\n"), false, &reg)
         .expect("translate");
     assert!(
         t.rendered.contains("mode: subagent"),
@@ -50,8 +51,9 @@ fn mode_defaults_to_subagent() {
 fn displayed_name_is_filename_derived_even_without_clash() {
     // `clashes = false`, yet OpenCode derives the name from the filename, so
     // the registered name is ALWAYS `<plugin>__<name>` (FR-042).
+    let reg = tome::model_registry::test_registry();
     let t = OPENCODE
-        .translate_agent(&base("reviewer", "First line.\n"), false)
+        .translate_agent(&base("reviewer", "First line.\n"), false, &reg)
         .expect("translate");
     assert_eq!(
         t.displayed_name, "midnight-expert__reviewer",
@@ -62,8 +64,9 @@ fn displayed_name_is_filename_derived_even_without_clash() {
 
 #[test]
 fn model_opus_maps_to_anthropic_same_vendor_id() {
+    let reg = tome::model_registry::test_registry();
     let t = OPENCODE
-        .translate_agent(&base("reviewer", "First line.\n"), false)
+        .translate_agent(&base("reviewer", "First line.\n"), false, &reg)
         .expect("translate");
     assert!(
         t.rendered.contains("model: anthropic/claude-opus-4.7"),
@@ -75,10 +78,12 @@ fn model_opus_maps_to_anthropic_same_vendor_id() {
 #[test]
 fn description_falls_back_to_first_non_empty_body_line() {
     // No source description → first non-empty, trimmed body line.
+    let reg = tome::model_registry::test_registry();
     let t = OPENCODE
         .translate_agent(
             &base("reviewer", "\n   First real line.   \nSecond line.\n"),
             false,
+            &reg,
         )
         .expect("translate");
     assert!(
@@ -91,8 +96,9 @@ fn description_falls_back_to_first_non_empty_body_line() {
 #[test]
 fn description_falls_back_to_placeholder_when_body_empty() {
     // No source description AND an empty body → documented placeholder.
+    let reg = tome::model_registry::test_registry();
     let t = OPENCODE
-        .translate_agent(&base("solo", ""), false)
+        .translate_agent(&base("solo", ""), false, &reg)
         .expect("translate");
     assert!(
         t.rendered.contains("Agent solo (no description provided)."),
@@ -110,7 +116,10 @@ fn indeterminate_posture_omits_permission_block() {
         disallowed_tools: None,
         ..base("reviewer", "First line.\n")
     };
-    let t = OPENCODE.translate_agent(&agent, false).expect("translate");
+    let reg = tome::model_registry::test_registry();
+    let t = OPENCODE
+        .translate_agent(&agent, false, &reg)
+        .expect("translate");
     assert!(
         !t.rendered.contains("permission:"),
         "indeterminate posture must inherit OpenCode's default (no permission block):\n{}",
@@ -140,7 +149,10 @@ fn not_read_only_allowlist_records_source_field() {
         disallowed_tools: None,
         ..base("reviewer", "First line.\n")
     };
-    let t = OPENCODE.translate_agent(&agent, false).expect("translate");
+    let reg = tome::model_registry::test_registry();
+    let t = OPENCODE
+        .translate_agent(&agent, false, &reg)
+        .expect("translate");
     assert!(
         !t.rendered.contains("permission:"),
         "not-read-only allowlist must not assert a read-only permission block:\n{}",
@@ -167,7 +179,10 @@ fn source_description_wins_over_body_fallback() {
         description: Some("Explicit source description".into()),
         ..base("reviewer", "Body line that must NOT be used.\n")
     };
-    let t = OPENCODE.translate_agent(&agent, false).expect("translate");
+    let reg = tome::model_registry::test_registry();
+    let t = OPENCODE
+        .translate_agent(&agent, false, &reg)
+        .expect("translate");
     assert!(
         t.rendered
             .contains("description: Explicit source description"),

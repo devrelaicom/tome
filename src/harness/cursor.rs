@@ -117,6 +117,7 @@ impl HarnessModule for Cursor {
         &self,
         canonical: &CanonicalAgent,
         clashes: bool,
+        _models: &crate::model_registry::ModelRegistry,
     ) -> Result<TranslatedAgent, TomeError> {
         let mut frontmatter: Vec<(String, serde_yaml::Value)> = Vec::new();
         let mut dropped: Vec<String> = Vec::new();
@@ -216,7 +217,8 @@ mod tests {
             mcp_servers: None,
             permission_mode: None,
         };
-        let t = CURSOR.translate_agent(&agent, false).unwrap();
+        let reg = crate::model_registry::test_registry();
+        let t = CURSOR.translate_agent(&agent, false, &reg).unwrap();
         assert_eq!(t.filename, "myplugin__reviewer.md");
         assert!(t.rendered.contains("tools:"), "tools kept:\n{}", t.rendered);
         assert!(t.rendered.contains("readonly: true"), "read-only inferred");

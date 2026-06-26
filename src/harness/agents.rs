@@ -385,11 +385,15 @@ pub(crate) fn render_codex_toml(scalars: &[(String, String)], body: &str) -> Str
 
 /// Per-harness model alias table — SAME-VENDOR ONLY (FR-034/037, R-8).
 ///
-/// `map_model(harness, source)` returns the harness-native identifier for a
-/// canonical model value, or `None` to DROP the field (harness default
+/// `map_model(registry, harness, source)` returns the harness-native identifier
+/// for a canonical model value, or `None` to DROP the field (harness default
 /// inherited). Cross-vendor mapping is FORBIDDEN: `opus → codex` is `None`,
 /// never an OpenAI id. `inherit` drops everywhere. Any source value with no
 /// same-vendor target for the harness drops.
+///
+/// The `_registry` parameter is threaded through so Task 4 can replace the
+/// static alias table with registry-driven resolution without changing any
+/// caller signature. The body is unchanged in this task.
 ///
 /// This is the named artefact SC-002 verifies against; the table is pinned
 /// in `contracts/agent-translation.md`.
@@ -397,7 +401,11 @@ pub(crate) fn render_codex_toml(scalars: &[(String, String)], body: &str) -> Str
 /// Ecosystem caveat: the exact harness-native identifiers are confirmed
 /// against current harness docs at implementation time; the *policy*
 /// (same-vendor-only, drop-on-no-target) is fixed.
-pub(crate) fn map_model(harness: &str, source: &str) -> Option<String> {
+pub(crate) fn map_model(
+    _registry: &crate::model_registry::ModelRegistry,
+    harness: &str,
+    source: &str,
+) -> Option<String> {
     // `inherit` is always dropped — there is no native "inherit the caller's
     // model" value that ports across harnesses.
     if source == "inherit" {
@@ -573,32 +581,37 @@ mod tests {
 
     #[test]
     fn map_model_same_vendor_only() {
+        let reg = crate::model_registry::test_registry();
         // opus → opencode is the same-vendor Anthropic id.
         assert_eq!(
-            map_model("opencode", "opus").as_deref(),
+            map_model(&reg, "opencode", "opus").as_deref(),
             Some("anthropic/claude-opus-4.7")
         );
         assert_eq!(
-            map_model("opencode", "sonnet").as_deref(),
+            map_model(&reg, "opencode", "sonnet").as_deref(),
             Some("anthropic/claude-sonnet-4.7")
         );
         assert_eq!(
-            map_model("opencode", "haiku").as_deref(),
+            map_model(&reg, "opencode", "haiku").as_deref(),
             Some("anthropic/claude-haiku-4.7")
         );
         // opus → codex is DROP, never an OpenAI id.
-        assert_eq!(map_model("codex", "opus"), None);
+        assert_eq!(map_model(&reg, "codex", "opus"), None);
         // claude-code passes the alias through verbatim.
-        assert_eq!(map_model("claude-code", "opus").as_deref(), Some("opus"));
+        assert_eq!(
+            map_model(&reg, "claude-code", "opus").as_deref(),
+            Some("opus")
+        );
         // cursor drops Anthropic aliases (no enumerated same-vendor id yet).
-        assert_eq!(map_model("cursor", "opus"), None);
+        assert_eq!(map_model(&reg, "cursor", "opus"), None);
     }
 
     #[test]
     fn map_model_inherit_drops_everywhere() {
+        let reg = crate::model_registry::test_registry();
         for harness in ["claude-code", "codex", "cursor", "opencode"] {
             assert_eq!(
-                map_model(harness, "inherit"),
+                map_model(&reg, harness, "inherit"),
                 None,
                 "inherit must drop for {harness}"
             );
@@ -607,11 +620,12 @@ mod tests {
 
     #[test]
     fn never_cross_vendor_model() {
+        let reg = crate::model_registry::test_registry();
         // SC-002: no emitted file ever carries a cross-vendor id. codex is
         // OpenAI-vendored — every Anthropic source must drop.
         for source in ["opus", "sonnet", "haiku", "inherit", "something-else"] {
             assert_eq!(
-                map_model("codex", source),
+                map_model(&reg, "codex", source),
                 None,
                 "codex must never carry an Anthropic-sourced model ({source})"
             );

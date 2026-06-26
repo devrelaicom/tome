@@ -35,7 +35,10 @@ fn agent() -> CanonicalAgent {
 
 #[test]
 fn emits_markdown_yaml_with_namespaced_filename() {
-    let t = CURSOR.translate_agent(&agent(), false).expect("translate");
+    let reg = tome::model_registry::test_registry();
+    let t = CURSOR
+        .translate_agent(&agent(), false, &reg)
+        .expect("translate");
     assert_eq!(t.format, AgentFormat::MarkdownYaml, "Cursor is MD+YAML");
     assert_eq!(t.filename, "midnight-expert__reviewer.md");
     assert!(
@@ -50,7 +53,10 @@ fn emits_markdown_yaml_with_namespaced_filename() {
 
 #[test]
 fn unsupported_model_is_dropped_and_recorded() {
-    let t = CURSOR.translate_agent(&agent(), false).expect("translate");
+    let reg = tome::model_registry::test_registry();
+    let t = CURSOR
+        .translate_agent(&agent(), false, &reg)
+        .expect("translate");
     assert!(
         !t.rendered.contains("model:"),
         "Cursor drops model (no enumerated same-vendor id, FR-034):\n{}",
@@ -65,7 +71,10 @@ fn unsupported_model_is_dropped_and_recorded() {
 
 #[test]
 fn unsupported_privileged_field_is_dropped_and_recorded() {
-    let t = CURSOR.translate_agent(&agent(), false).expect("translate");
+    let reg = tome::model_registry::test_registry();
+    let t = CURSOR
+        .translate_agent(&agent(), false, &reg)
+        .expect("translate");
     // The privileged `hooks` blob has no Cursor carrier.
     assert!(
         !t.rendered.contains("hooks"),
@@ -89,7 +98,10 @@ fn indeterminate_posture_omits_readonly_key() {
         hooks: None,
         ..agent()
     };
-    let t = CURSOR.translate_agent(&agent, false).expect("translate");
+    let reg = tome::model_registry::test_registry();
+    let t = CURSOR
+        .translate_agent(&agent, false, &reg)
+        .expect("translate");
     assert!(
         !t.rendered.contains("readonly:"),
         "indeterminate posture must inherit Cursor's default (no readonly key):\n{}",
@@ -114,7 +126,10 @@ fn not_read_only_allowlist_omits_readonly_and_keeps_tools() {
         hooks: None,
         ..agent()
     };
-    let t = CURSOR.translate_agent(&agent, false).expect("translate");
+    let reg = tome::model_registry::test_registry();
+    let t = CURSOR
+        .translate_agent(&agent, false, &reg)
+        .expect("translate");
     assert!(
         !t.rendered.contains("readonly:"),
         "not-read-only allowlist must not assert readonly:\n{}",

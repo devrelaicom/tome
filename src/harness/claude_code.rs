@@ -155,6 +155,7 @@ impl HarnessModule for ClaudeCode {
         &self,
         canonical: &CanonicalAgent,
         clashes: bool,
+        models: &crate::model_registry::ModelRegistry,
     ) -> Result<TranslatedAgent, TomeError> {
         let mut frontmatter: Vec<(String, serde_yaml::Value)> = Vec::new();
         let mut dropped: Vec<String> = Vec::new();
@@ -168,7 +169,7 @@ impl HarnessModule for ClaudeCode {
 
         // `model` is same-vendor; Claude Code passes its aliases verbatim.
         if let Some(src) = canonical.model.as_deref() {
-            match agents::map_model("claude-code", src) {
+            match agents::map_model(models, "claude-code", src) {
                 Some(mapped) => frontmatter.push(("model".to_owned(), yaml_str(&mapped))),
                 None => dropped.push("model".to_owned()),
             }
@@ -262,7 +263,8 @@ mod tests {
 
     #[test]
     fn passes_privileged_fields_through_verbatim() {
-        let t = CLAUDE_CODE.translate_agent(&agent(), false).unwrap();
+        let reg = crate::model_registry::test_registry();
+        let t = CLAUDE_CODE.translate_agent(&agent(), false, &reg).unwrap();
         assert_eq!(t.filename, "myplugin__reviewer.md");
         assert_eq!(t.displayed_name, "reviewer");
         // Privileged fields survive (FR-050 default, no stripping in US1).
@@ -283,7 +285,8 @@ mod tests {
 
     #[test]
     fn clash_prefixes_displayed_name_only() {
-        let t = CLAUDE_CODE.translate_agent(&agent(), true).unwrap();
+        let reg = crate::model_registry::test_registry();
+        let t = CLAUDE_CODE.translate_agent(&agent(), true, &reg).unwrap();
         // Filename unchanged; displayed name is plugin-prefixed.
         assert_eq!(t.filename, "myplugin__reviewer.md");
         assert_eq!(t.displayed_name, "myplugin-reviewer");

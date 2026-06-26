@@ -270,6 +270,7 @@ impl HarnessModule for StubHarness {
         &self,
         canonical: &CanonicalAgent,
         clashes: bool,
+        _models: &crate::model_registry::ModelRegistry,
     ) -> Result<TranslatedAgent, crate::error::TomeError> {
         Ok(self.translation.clone().unwrap_or_else(|| {
             // Minimal deterministic translation when no canned result is

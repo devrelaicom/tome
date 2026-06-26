@@ -68,8 +68,9 @@ fn split_frontmatter_body(rendered: &str) -> (String, String) {
 
 #[test]
 fn emits_markdown_yaml_with_namespaced_filename() {
+    let reg = tome::model_registry::test_registry();
     let t = CLAUDE_CODE
-        .translate_agent(&full_agent(), false)
+        .translate_agent(&full_agent(), false, &reg)
         .expect("translate");
 
     assert_eq!(
@@ -89,9 +90,10 @@ fn emits_markdown_yaml_with_namespaced_filename() {
 
 #[test]
 fn body_lands_in_file_body_not_frontmatter() {
+    let reg = tome::model_registry::test_registry();
     let agent = full_agent();
     let t = CLAUDE_CODE
-        .translate_agent(&agent, false)
+        .translate_agent(&agent, false, &reg)
         .expect("translate");
     let (frontmatter, body) = split_frontmatter_body(&t.rendered);
 
@@ -111,8 +113,9 @@ fn body_lands_in_file_body_not_frontmatter() {
 
 #[test]
 fn name_description_model_tools_in_frontmatter() {
+    let reg = tome::model_registry::test_registry();
     let t = CLAUDE_CODE
-        .translate_agent(&full_agent(), false)
+        .translate_agent(&full_agent(), false, &reg)
         .expect("translate");
     let (frontmatter, _body) = split_frontmatter_body(&t.rendered);
 
@@ -141,8 +144,9 @@ fn privileged_fields_pass_through_by_default() {
     // advantage and are passed through by DEFAULT in US1 — the
     // `strip_plugin_agent_privileges` suppression is US5 and is NOT applied
     // here. Assert the default behaviour explicitly.
+    let reg = tome::model_registry::test_registry();
     let t = CLAUDE_CODE
-        .translate_agent(&full_agent(), false)
+        .translate_agent(&full_agent(), false, &reg)
         .expect("translate");
     let (frontmatter, _body) = split_frontmatter_body(&t.rendered);
 
@@ -195,8 +199,9 @@ fn dropped_fields_wire_shape_placeholder_is_byte_stable() {
         model: Some("inherit".into()),
         ..full_agent()
     };
+    let reg = tome::model_registry::test_registry();
     let t = CLAUDE_CODE
-        .translate_agent(&agent, false)
+        .translate_agent(&agent, false, &reg)
         .expect("translate");
     assert_eq!(
         t.dropped_fields,
