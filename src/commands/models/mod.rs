@@ -11,6 +11,7 @@ mod list;
 mod profile;
 mod remove;
 mod test;
+mod update;
 
 use std::path::PathBuf;
 
@@ -37,6 +38,7 @@ pub fn run(cmd: ModelsCommand, scope: &ResolvedScope, mode: Mode) -> Result<(), 
         ModelsCommand::Remove(args) => remove::run(args, mode),
         ModelsCommand::Profile(args) => profile::run(args, mode),
         ModelsCommand::Test(args) => test::run(args, scope, mode),
+        ModelsCommand::Update(args) => update::run(args, mode),
     }
 }
 

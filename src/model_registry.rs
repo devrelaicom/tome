@@ -10,6 +10,7 @@
 //! bytes in).
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
 
 use serde::{Deserialize, Serialize};
 use time::{Duration, OffsetDateTime};
@@ -294,6 +295,64 @@ pub fn validate_snapshot(s: &RegistrySnapshot) -> Result<(), String> {
     Ok(())
 }
 
+/// The canonical URL for the upstream model registry.
+pub const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
+
+/// Fetch (via the injected `fetch`), trim, validate, and atomically write the
+/// override. Fail-loud: any error returns `TomeError::Io` with a scrubbed
+/// message and leaves any existing override untouched.
+///
+/// The injected `fetch` closure takes the URL string and returns the raw bytes;
+/// in production that is a `reqwest::blocking::get` call; in tests it is a
+/// closure that returns fixture bytes.
+pub fn refresh_override(
+    paths: &crate::paths::Paths,
+    fetched_at: &str,
+    fetch: impl FnOnce(&str) -> Result<Vec<u8>, crate::error::TomeError>,
+) -> Result<RegistryInfo, crate::error::TomeError> {
+    // 1. Fetch — propagate the fetcher's error directly (already a TomeError::Io).
+    let bytes = fetch(MODELS_DEV_API_URL)?;
+
+    // 2. Parse + validate before touching any file on disk.
+    let snapshot = parse_raw_api(&bytes, fetched_at)
+        .and_then(|s| validate_snapshot(&s).map(|()| s))
+        .map_err(|msg| {
+            crate::error::TomeError::Io(std::io::Error::other(format!(
+                "model registry refresh: {msg}"
+            )))
+        })?;
+
+    // 3. Serialise the validated snapshot.
+    let json = serde_json::to_vec_pretty(&snapshot).map_err(|e| {
+        crate::error::TomeError::Io(std::io::Error::other(format!(
+            "model registry serialise: {e}"
+        )))
+    })?;
+
+    // 4. Atomically write via temp-file + rename (same-FS, POSIX-atomic).
+    let path = paths.model_registry_cache_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(crate::error::TomeError::Io)?;
+    }
+    let mut tmp = tempfile::NamedTempFile::new_in(
+        path.parent()
+            .expect("model_registry_cache_path has a parent"),
+    )
+    .map_err(crate::error::TomeError::Io)?;
+    tmp.write_all(&json).map_err(crate::error::TomeError::Io)?;
+    tmp.persist(&path).map_err(|e| {
+        crate::error::TomeError::Io(std::io::Error::other(format!(
+            "model registry write (persist): {e}"
+        )))
+    })?;
+
+    Ok(ModelRegistry {
+        source: RegistrySource::Override,
+        snapshot,
+    }
+    .info())
+}
+
 /// True when the vendored file is old enough to refresh.
 pub fn should_refresh(fetched_at: &str, now: OffsetDateTime, min_age: Duration) -> bool {
     let parsed = OffsetDateTime::parse(fetched_at, &time::format_description::well_known::Rfc3339);
@@ -522,6 +581,26 @@ mod tests {
             "expected Baked source when override is absent"
         );
         assert!(matches!(override_health(&paths), OverrideHealth::Absent));
+    }
+
+    #[test]
+    fn refresh_override_writes_on_valid_and_fails_loud_on_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = crate::paths::Paths::from_root(tmp.path().join(".tome"));
+
+        // Valid fetch → override written, source becomes Override.
+        let info = refresh_override(&paths, "2026-06-26T00:00:00Z", |_url| {
+            Ok(include_bytes!("../tests/fixtures/model_registry/api_min.json").to_vec())
+        })
+        .expect("valid fetch writes override");
+        assert!(matches!(info.source, RegistrySource::Override));
+        assert!(matches!(override_health(&paths), OverrideHealth::Valid(_)));
+
+        // Invalid fetch → Err, override unchanged (still the valid one).
+        let err = refresh_override(&paths, "2026-06-26T00:00:00Z", |_url| Ok(b"{bad".to_vec()))
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 7); // TomeError::Io
+        assert!(matches!(override_health(&paths), OverrideHealth::Valid(_)));
     }
 
     /// An override file that exists but cannot be read must report `Corrupt`,
