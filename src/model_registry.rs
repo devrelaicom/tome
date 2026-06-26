@@ -120,6 +120,11 @@ impl ModelRegistry {
     pub fn baked() -> ModelRegistry {
         let snapshot = parse_snapshot(MODEL_REGISTRY_SNAPSHOT)
             .expect("baked model registry snapshot must parse (gated by build.rs)");
+        // A parse-ok-but-semantically-invalid baked asset (e.g. too few models,
+        // missing required vendor) is also a packaging bug — fail loudly at
+        // startup rather than silently serving a degenerate registry.
+        validate_snapshot(&snapshot)
+            .expect("baked model registry snapshot must be valid (gated by build.rs)");
         ModelRegistry {
             source: RegistrySource::Baked,
             snapshot,
@@ -156,20 +161,34 @@ pub enum OverrideHealth {
 }
 
 /// Read-only health check on the override file (for `doctor`). Never writes.
+///
+/// A genuinely-missing file is [`OverrideHealth::Absent`]. A file that exists
+/// but cannot be read (permissions, an I/O error) is NOT the same as "no
+/// override" — it is reported as [`OverrideHealth::Corrupt`] (with a `warn!`),
+/// so `doctor` surfaces it instead of treating it as a clean default.
 pub fn override_health(paths: &crate::paths::Paths) -> OverrideHealth {
     let path = paths.model_registry_cache_path();
-    match std::fs::read(&path) {
-        Err(_) => OverrideHealth::Absent,
-        Ok(bytes) => match parse_snapshot(&bytes) {
-            Ok(s) if validate_snapshot(&s).is_ok() => {
-                let reg = ModelRegistry {
-                    source: RegistrySource::Override,
-                    snapshot: s,
-                };
-                OverrideHealth::Valid(reg.info())
-            }
-            _ => OverrideHealth::Corrupt,
-        },
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return OverrideHealth::Absent,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "model-registry override present but unreadable; treating as corrupt"
+            );
+            return OverrideHealth::Corrupt;
+        }
+    };
+    match parse_snapshot(&bytes) {
+        Ok(s) if validate_snapshot(&s).is_ok() => {
+            let reg = ModelRegistry {
+                source: RegistrySource::Override,
+                snapshot: s,
+            };
+            OverrideHealth::Valid(reg.info())
+        }
+        _ => OverrideHealth::Corrupt,
     }
 }
 
@@ -503,5 +522,40 @@ mod tests {
             "expected Baked source when override is absent"
         );
         assert!(matches!(override_health(&paths), OverrideHealth::Absent));
+    }
+
+    /// An override file that exists but cannot be read must report `Corrupt`,
+    /// not `Absent` — an unreadable-but-present file is a real problem `doctor`
+    /// should surface. Unix-only (mode bits); self-skips when the file stays
+    /// readable anyway (e.g. running as root, or a filesystem that ignores the
+    /// mode), so it is never flaky.
+    #[cfg(unix)]
+    #[test]
+    fn override_health_unreadable_present_file_is_corrupt() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".tome");
+        let paths = crate::paths::Paths::from_root(root);
+        let cache = paths.model_registry_cache_path();
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        std::fs::write(&cache, b"anything").unwrap();
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // If the platform/user still lets us read it (root, or a mode-ignoring
+        // FS), the precondition isn't met — skip rather than assert falsely.
+        if std::fs::read(&cache).is_ok() {
+            // Restore so the tempdir cleanup can remove the file.
+            let _ = std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o644));
+            return;
+        }
+
+        assert!(
+            matches!(override_health(&paths), OverrideHealth::Corrupt),
+            "an unreadable present override must report Corrupt, not Absent"
+        );
+
+        // Restore permissions so TempDir cleanup succeeds.
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 }

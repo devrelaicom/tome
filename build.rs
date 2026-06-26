@@ -519,13 +519,45 @@ fn generate_model_registry_manifest() {
         "vendored model-registry {} bytes over the {MODEL_REGISTRY_BYTE_BUDGET}-byte budget",
         bytes.len()
     );
-    // Build-time shape gate: parses as an object with a non-empty `providers`.
+    // Build-time structural gate. Mirrors `model_registry::validate_snapshot`
+    // inline (build.rs can't call the crate's runtime fns): the asset must
+    // carry a non-empty `providers` map, the required `anthropic` vendor with a
+    // non-empty `models` array, and >= 50 models across all providers. This is
+    // the backstop that must catch a degenerate registry produced by the Task-7
+    // CI refresh before it is ever embedded.
     let v: serde_json::Value = serde_json::from_slice(&bytes)
         .unwrap_or_else(|e| panic!("model registry asset is not valid JSON: {e}"));
-    let providers = v.get("providers").and_then(|p| p.as_object());
+    let providers = v
+        .get("providers")
+        .and_then(|p| p.as_object())
+        .unwrap_or_else(|| panic!("model registry asset has no `providers` object"));
     assert!(
-        providers.map(|p| !p.is_empty()).unwrap_or(false),
-        "model registry asset has no `providers`"
+        !providers.is_empty(),
+        "model registry asset has an empty `providers` object"
+    );
+    // Required vendor `anthropic` present with a non-empty `models` array.
+    let anthropic_models = providers
+        .get("anthropic")
+        .and_then(|p| p.get("models"))
+        .and_then(|m| m.as_array())
+        .unwrap_or_else(|| {
+            panic!("model registry asset missing required vendor `anthropic` with a `models` array")
+        });
+    assert!(
+        !anthropic_models.is_empty(),
+        "model registry asset vendor `anthropic` has no models"
+    );
+    // Total model count across every provider's `models` array must clear the
+    // `MIN_MODEL_COUNT` floor (kept in sync with the runtime constant by value).
+    const MIN_MODEL_COUNT: usize = 50;
+    let total_models: usize = providers
+        .values()
+        .filter_map(|p| p.get("models").and_then(|m| m.as_array()))
+        .map(|m| m.len())
+        .sum();
+    assert!(
+        total_models >= MIN_MODEL_COUNT,
+        "model registry asset has {total_models} models, below the {MIN_MODEL_COUNT} floor"
     );
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
