@@ -53,9 +53,11 @@ fn fetch_models_dev(url: &str) -> Result<Vec<u8>, TomeError> {
             resp.status()
         ))));
     }
-    resp.bytes()
-        .map(|b| b.to_vec())
-        .map_err(|e| TomeError::Io(std::io::Error::other(format!("read response body: {e}"))))
+    resp.bytes().map(|b| b.to_vec()).map_err(|e| {
+        TomeError::Io(std::io::Error::other(crate::catalog::git::scrub_to_string(
+            format!("read response body: {e}").as_bytes(),
+        )))
+    })
 }
 
 /// Emit a brief human-readable or JSON summary of the refresh result.

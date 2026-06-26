@@ -296,7 +296,7 @@ pub fn validate_snapshot(s: &RegistrySnapshot) -> Result<(), String> {
 }
 
 /// The canonical URL for the upstream model registry.
-pub const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
+pub(crate) const MODELS_DEV_API_URL: &str = "https://models.dev/api.json";
 
 /// Fetch (via the injected `fetch`), trim, validate, and atomically write the
 /// override. Fail-loud: any error returns `TomeError::Io` with a scrubbed
@@ -331,14 +331,13 @@ pub fn refresh_override(
 
     // 4. Atomically write via temp-file + rename (same-FS, POSIX-atomic).
     let path = paths.model_registry_cache_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(crate::error::TomeError::Io)?;
-    }
-    let mut tmp = tempfile::NamedTempFile::new_in(
-        path.parent()
-            .expect("model_registry_cache_path has a parent"),
-    )
-    .map_err(crate::error::TomeError::Io)?;
+    let parent = path.parent().ok_or_else(|| {
+        crate::error::TomeError::Io(std::io::Error::other(
+            "model_registry_cache_path has no parent directory",
+        ))
+    })?;
+    std::fs::create_dir_all(parent).map_err(crate::error::TomeError::Io)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent).map_err(crate::error::TomeError::Io)?;
     tmp.write_all(&json).map_err(crate::error::TomeError::Io)?;
     tmp.persist(&path).map_err(|e| {
         crate::error::TomeError::Io(std::io::Error::other(format!(
