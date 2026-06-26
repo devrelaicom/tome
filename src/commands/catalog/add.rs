@@ -196,7 +196,7 @@ pub fn run(args: CatalogAddArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
     } else {
         crate::telemetry::event::SourceType::Git
     };
-    crate::telemetry::enqueue(crate::telemetry::event::CatalogActionEvent {
+    crate::telemetry::emit(crate::telemetry::event::CatalogActionEvent {
         action: crate::telemetry::event::CatalogAction::Added,
         source_type,
     });

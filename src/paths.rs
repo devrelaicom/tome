@@ -260,12 +260,6 @@ impl Paths {
         self.telemetry_dir().join("queue.jsonl")
     }
 
-    /// `<root>/telemetry/flush.lock` — the non-blocking advisory lock that
-    /// serialises concurrent flushers (one delivery at a time).
-    pub fn telemetry_flush_lock(&self) -> PathBuf {
-        self.telemetry_dir().join("flush.lock")
-    }
-
     /// `<root>/telemetry/last-version` — the binary version stamped at the last
     /// flush, used to detect an upgrade for the version-change event.
     pub fn telemetry_last_version(&self) -> PathBuf {

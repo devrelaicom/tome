@@ -1,151 +1,104 @@
-//! Phase 10 / US2 (T-H3) — process-start telemetry: the CLI `cli_startup`
-//! install/upgrade lifecycle, the disabled no-emit gate, and the MCP cold-start
-//! SILENT mint (the `identity.rs` AC#7 obligation).
+//! Process-start telemetry: the CLI `cli_startup` install/upgrade lifecycle, the
+//! disabled no-emit gate, and the MCP cold-start SILENT mint.
 //!
-//! `cli_startup` resolves the DEFAULT `$HOME` `Paths` only when the caller passes
-//! them — but its sub-calls (`enqueue`) resolve the default `$HOME` internally —
-//! so every test here pins `$HOME` to a tempdir via `HomeGuard`, making the
-//! default-resolved queue == the test tree's `<home>/.tome/telemetry/queue.jsonl`.
-//! Telemetry is force-enabled (`TOME_TELEMETRY=1`, overriding CI auto-off) except
-//! the disabled-gate test, which forces it OFF (`TOME_TELEMETRY=0`).
-//!
-//! Scope note (documented in the report): the REAL `tome.cold_start` emit site is
-//! inside `mcp::run`, which loads real ONNX via `preflight::run` — unreachable in
-//! stub-only fast CI. The in-process MCP harness builds `McpState` directly and
-//! never runs `mcp::run`, so a harness tool call mints the id SILENTLY (the AC#7
-//! property we assert) but does NOT itself emit `tome.cold_start`. To still pin
-//! the cold-start event lands on the MCP-surface queue, the cold-start test emits
-//! the EXACT `ColdStart` event `mcp::run` constructs through the same gated
-//! `enqueue`, under the same forced-on isolated `$HOME`.
+//! `cli_startup` runs through the process-global handle (`HANDLE.get()`), which is
+//! a set-once `OnceLock`. So the install/upgrade/disabled cases are driven through
+//! the REAL `tome` binary (each subprocess gets a fresh global), reading the
+//! kernel queue file the child produced. The MCP cold-start mint is driven
+//! in-process via the MCP harness, whose emits route through the override-aware
+//! `telemetry::emit`; a `TelemetryHandleGuard` points that at the staged queue.
+
+use std::process::Command;
 
 use serde_json::Value;
-use tempfile::TempDir;
-use tome::paths::Paths;
-use tome::telemetry::queue;
 
-use crate::common::HomeGuard;
+use crate::common::ToolEnv;
+use crate::queue_util::{
+    LOOPBACK_ENDPOINT, TELEMETRY_ENV_VARS, count_named, first_named, queue_events_in_root,
+};
 
-/// Telemetry/CI env vars cleared before forcing the desired state.
-const TELEMETRY_ENV_VARS: &[&str] = &[
-    "TOME_TELEMETRY",
-    "TOME_TELEMETRY_ENDPOINT",
-    "CI",
-    "GITHUB_ACTIONS",
-    "GITLAB_CI",
-    "CIRCLECI",
-    "BUILDKITE",
-    "JENKINS_URL",
-    "TF_BUILD",
-    "TEAMCITY_VERSION",
-];
-
-/// Snapshot + clear the telemetry/CI env vars, force `TOME_TELEMETRY` to the
-/// given value, restore everything on drop. Pairs with a held `HomeGuard` so the
-/// env mutation can't race a sibling test.
-struct EnvForceTo {
-    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
-}
-
-impl EnvForceTo {
-    /// Force `TOME_TELEMETRY=<value>` (`"1"` = on, `"0"` = off).
-    fn install(value: &str) -> Self {
-        let saved = TELEMETRY_ENV_VARS
-            .iter()
-            .map(|&k| (k, std::env::var_os(k)))
-            .collect::<Vec<_>>();
-        // SAFETY: the caller holds `HOME_MUTEX` via a `HomeGuard` for the whole
-        // test, so no other test mutates these process-global vars concurrently.
-        for &k in TELEMETRY_ENV_VARS {
-            unsafe { std::env::remove_var(k) };
-        }
-        unsafe {
-            std::env::set_var("TOME_TELEMETRY", value);
-            std::env::set_var("TOME_TELEMETRY_ENDPOINT", "http://192.0.2.0:0/telemetry");
-        }
-        Self { saved }
+/// A `tome` command over the isolated `$HOME`, every CI/telemetry var removed,
+/// then telemetry FORCE-ENABLED with a loopback endpoint.
+fn force_on_cmd(env: &ToolEnv) -> Command {
+    let mut cmd = env.cmd();
+    for &k in TELEMETRY_ENV_VARS {
+        cmd.env_remove(k);
     }
+    cmd.env("TOME_TELEMETRY", "1");
+    cmd.env("TOME_GAUGE_ENDPOINT", LOOPBACK_ENDPOINT);
+    cmd
 }
 
-impl Drop for EnvForceTo {
-    fn drop(&mut self) {
-        for (k, v) in &self.saved {
-            // SAFETY: still under the test's `HomeGuard`/`HOME_MUTEX`.
-            match v {
-                Some(val) => unsafe { std::env::set_var(k, val) },
-                None => unsafe { std::env::remove_var(k) },
-            }
-        }
+/// A `tome` command with telemetry FORCE-OFF (`TOME_TELEMETRY=0`).
+fn force_off_cmd(env: &ToolEnv) -> Command {
+    let mut cmd = env.cmd();
+    for &k in TELEMETRY_ENV_VARS {
+        cmd.env_remove(k);
     }
+    cmd.env("TOME_TELEMETRY", "0");
+    cmd
 }
 
-/// The default `Paths` for the HomeGuard-pinned `$HOME` tempdir.
-fn default_paths(home: &TempDir) -> Paths {
-    Paths::from_root(home.path().join(".tome"))
+fn telemetry_dir(env: &ToolEnv) -> std::path::PathBuf {
+    env.tome_root().join("telemetry")
+}
+fn id_path(env: &ToolEnv) -> std::path::PathBuf {
+    telemetry_dir(env).join("id")
+}
+fn last_version_path(env: &ToolEnv) -> std::path::PathBuf {
+    telemetry_dir(env).join("last-version")
+}
+fn queue_path(env: &ToolEnv) -> std::path::PathBuf {
+    telemetry_dir(env).join("queue.jsonl")
 }
 
-/// Read the queue under the given paths as parsed JSON objects.
-fn queue_events(paths: &Paths) -> Vec<Value> {
-    queue::read_lines(paths)
-        .unwrap_or_default()
-        .iter()
-        .map(|l| serde_json::from_str::<Value>(l).expect("queued line is JSON"))
-        .collect()
-}
-
-fn count_of(events: &[Value], event_type: &str) -> usize {
-    events
-        .iter()
-        .filter(|e| e["event_type"] == event_type)
-        .count()
-}
-
-fn first_of<'a>(events: &'a [Value], event_type: &str) -> Option<&'a Value> {
-    events.iter().find(|e| e["event_type"] == event_type)
+fn queue_events(env: &ToolEnv) -> Vec<Value> {
+    queue_events_in_root(&env.tome_root())
 }
 
 // ===========================================================================
 // cli_startup — first run (install), upgrade, and the disabled no-emit gate.
 // ===========================================================================
 
-/// First-ever run (no `last-version`, fresh id): `cli_startup` enqueues
-/// `tome.install` (with an `install_method`) and NO `tome.upgrade`, and stamps
-/// `last-version` to the running binary's `CARGO_PKG_VERSION`.
+/// First-ever run (no `last-version`, fresh id): the binary's `cli_startup`
+/// emits `tome.install` (with an `install_method`) and NO `tome.upgrade`, and
+/// stamps `last-version` to the running binary's `CARGO_PKG_VERSION`.
 #[test]
 fn cli_startup_first_run_emits_install_and_stamps_version() {
-    let home = TempDir::new().unwrap();
-    let _home_guard = HomeGuard::install(home.path());
-    let _env = EnvForceTo::install("1");
-
-    let paths = default_paths(&home);
+    let env = ToolEnv::new();
     assert!(
-        !paths.telemetry_last_version().exists(),
-        "no last-version stamp before the first run",
+        !last_version_path(&env).exists(),
+        "no last-version stamp before"
     );
 
-    tome::telemetry::cli_startup(&paths);
+    let out = force_on_cmd(&env)
+        .args(["catalog", "list"])
+        .output()
+        .expect("spawn tome");
+    assert!(
+        out.status.success(),
+        "catalog list exited {:?}",
+        out.status.code()
+    );
 
-    let events = queue_events(&paths);
-    let install = first_of(&events, "tome.install")
+    let events = queue_events(&env);
+    let install = first_named(&events, "tome.install")
         .unwrap_or_else(|| panic!("first run must emit tome.install: {events:?}"));
     assert!(
-        install
+        install["attributes"]
             .get("install_method")
             .and_then(Value::as_str)
             .is_some(),
         "tome.install carries an install_method: {install}",
     );
     assert_eq!(
-        count_of(&events, "tome.upgrade"),
+        count_named(&events, "tome.upgrade"),
         0,
         "a first install is NOT an upgrade: {events:?}",
     );
 
-    // The id was minted and the version stamped to the running binary's version.
-    assert!(
-        paths.telemetry_id().exists(),
-        "first run mints telemetry/id"
-    );
-    let stamped = std::fs::read_to_string(paths.telemetry_last_version())
+    assert!(id_path(&env).exists(), "first run mints telemetry/id");
+    let stamped = std::fs::read_to_string(last_version_path(&env))
         .expect("last-version stamped")
         .trim()
         .to_string();
@@ -156,77 +109,77 @@ fn cli_startup_first_run_emits_install_and_stamps_version() {
     );
 }
 
-/// Pre-seeding an OLDER `last-version` (and an existing id) makes the next
-/// `cli_startup` emit `tome.upgrade { from_version: "0.0.1" }` and NO second
+/// Pre-seeding an OLDER `last-version` (and an existing id) makes the binary's
+/// next `cli_startup` emit `tome.upgrade { from_version: "0.0.1" }` and NO second
 /// `tome.install`, and re-stamps `last-version` to the current version.
 #[test]
 fn cli_startup_upgrade_emits_upgrade_with_from_version() {
-    let home = TempDir::new().unwrap();
-    let _home_guard = HomeGuard::install(home.path());
-    let _env = EnvForceTo::install("1");
-
-    let paths = default_paths(&home);
+    let env = ToolEnv::new();
     // Pre-seed an existing id (so the id is NOT just-minted ⇒ no install) and an
     // older version stamp (so a version change is detected ⇒ upgrade).
-    std::fs::create_dir_all(paths.telemetry_dir()).unwrap();
-    std::fs::write(
-        paths.telemetry_id(),
-        "11111111-2222-4333-8444-555555555555\n",
-    )
-    .unwrap();
-    std::fs::write(paths.telemetry_last_version(), "0.0.1\n").unwrap();
+    std::fs::create_dir_all(telemetry_dir(&env)).unwrap();
+    std::fs::write(id_path(&env), "11111111-2222-4333-8444-555555555555\n").unwrap();
+    std::fs::write(last_version_path(&env), "0.0.1\n").unwrap();
 
-    tome::telemetry::cli_startup(&paths);
+    let out = force_on_cmd(&env)
+        .args(["catalog", "list"])
+        .output()
+        .expect("spawn tome");
+    assert!(
+        out.status.success(),
+        "catalog list exited {:?}",
+        out.status.code()
+    );
 
-    let events = queue_events(&paths);
-    let upgrade = first_of(&events, "tome.upgrade")
+    let events = queue_events(&env);
+    let upgrade = first_named(&events, "tome.upgrade")
         .unwrap_or_else(|| panic!("a version change must emit tome.upgrade: {events:?}"));
     assert_eq!(
-        upgrade["from_version"], "0.0.1",
+        upgrade["attributes"]["from_version"], "0.0.1",
         "upgrade carries the prior version: {upgrade}",
     );
     assert_eq!(
-        count_of(&events, "tome.install"),
+        count_named(&events, "tome.install"),
         0,
         "a pre-existing id ⇒ NOT a fresh install ⇒ no second tome.install: {events:?}",
     );
 
-    // The stamp now records the current version.
-    let stamped = std::fs::read_to_string(paths.telemetry_last_version())
+    let stamped = std::fs::read_to_string(last_version_path(&env))
         .unwrap()
         .trim()
         .to_string();
     assert_eq!(stamped, env!("CARGO_PKG_VERSION"), "re-stamped to current");
 }
 
-/// Telemetry disabled (`TOME_TELEMETRY=0`): `cli_startup` enqueues NOTHING — no
-/// install, no upgrade, no heartbeat. The startup path self-gates on
-/// `resolve_enabled` and returns before any mint/emit (FR-010).
+/// Telemetry disabled (`TOME_TELEMETRY=0`): the binary's startup path enqueues
+/// NOTHING — no install, no upgrade, no heartbeat — and mints NO id.
 #[test]
 fn cli_startup_disabled_emits_nothing() {
-    let home = TempDir::new().unwrap();
-    let _home_guard = HomeGuard::install(home.path());
-    let _env = EnvForceTo::install("0");
+    let env = ToolEnv::new();
 
-    let paths = default_paths(&home);
-    tome::telemetry::cli_startup(&paths);
+    let out = force_off_cmd(&env)
+        .args(["catalog", "list"])
+        .output()
+        .expect("spawn tome");
+    assert!(
+        out.status.success(),
+        "catalog list exited {:?}",
+        out.status.code()
+    );
 
-    // The queue is absent/empty and no id was minted (the disabled gate returns
-    // before `ensure_install_id`).
-    assert_eq!(
-        queue::count_pending(&paths),
-        0,
+    assert!(
+        !queue_path(&env).exists(),
         "a disabled install must enqueue nothing on startup",
     );
     assert!(
-        !paths.telemetry_id().exists(),
+        !id_path(&env).exists(),
         "a disabled startup must NOT mint an install id",
     );
 }
 
 // ===========================================================================
-// MCP cold-start silent mint (identity.rs AC#7) — Unix-only (catalog-cache
-// symlink staging, like `mcp_funnel.rs`).
+// MCP cold-start silent mint — Unix-only (catalog-cache symlink staging, like
+// `mcp_funnel.rs`).
 // ===========================================================================
 
 #[cfg(unix)]
@@ -234,19 +187,57 @@ mod mcp_cold_start {
     use super::*;
 
     use std::path::Path;
-    use std::time::Duration;
 
+    use tempfile::TempDir;
     use tome::embedding::stub::StubEmbedder;
     use tome::index::{self, OpenOptions};
     use tome::mcp::tools::search_skills;
+    use tome::paths::Paths;
     use tome::plugin::PluginId;
     use tome::plugin::lifecycle::{self, LifecycleDeps};
     use tome::workspace::{Scope, WorkspaceName};
 
     use crate::common::{
-        config_with_catalog, fabricate_models, mcp_harness::McpHarness, stub_embedder_seed,
-        stub_reranker_seed, stub_summariser_seed,
+        HomeGuard, config_with_catalog, fabricate_models, mcp_harness::McpHarness,
+        stub_embedder_seed, stub_reranker_seed, stub_summariser_seed,
     };
+    use crate::queue_util::queue_events;
+
+    /// Snapshot + clear the telemetry/CI env vars, force `TOME_TELEMETRY=1` plus a
+    /// loopback endpoint, restore on drop. Pairs with a held `HomeGuard`.
+    struct EnvForce {
+        saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvForce {
+        fn install() -> Self {
+            let saved = TELEMETRY_ENV_VARS
+                .iter()
+                .map(|&k| (k, std::env::var_os(k)))
+                .collect::<Vec<_>>();
+            // SAFETY: the caller holds `HOME_MUTEX` via a `HomeGuard`.
+            for &k in TELEMETRY_ENV_VARS {
+                unsafe { std::env::remove_var(k) };
+            }
+            unsafe {
+                std::env::set_var("TOME_TELEMETRY", "1");
+                std::env::set_var("TOME_GAUGE_ENDPOINT", LOOPBACK_ENDPOINT);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvForce {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                // SAFETY: still under the test's `HomeGuard`/`HOME_MUTEX`.
+                match v {
+                    Some(val) => unsafe { std::env::set_var(k, val) },
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+        }
+    }
 
     fn open_index(paths: &Paths) -> rusqlite::Connection {
         index::open(
@@ -283,8 +274,6 @@ mod mcp_cold_start {
         )
     }
 
-    /// Stage `acme/plug` rooted at `home/.tome` (so the MCP handler's
-    /// default-`Paths` enqueue lands under the HomeGuard-pinned `$HOME`).
     fn stage_at_home(home: &Path, skills: &[(&str, &str)]) -> Paths {
         let root = home.join(".tome");
         let paths = Paths::from_root(root.clone());
@@ -332,34 +321,32 @@ mod mcp_cold_start {
         paths
     }
 
-    /// MCP cold-start silent mint (AC#7): against a FRESH `$HOME` with NO
-    /// pre-existing `telemetry/id`, force-on, the FIRST MCP tool call (a
-    /// `search_skills` through the live in-process server) mints `telemetry/id`
-    /// at mode 0600 with NO first-run notice (MCP is silent — the notice is a
-    /// CLI-only concern, never called on this path). The `tome.cold_start` event
-    /// (the exact event `mcp::run` emits at server start) is then shown to land
-    /// on the MCP-surface queue.
+    /// MCP cold-start silent mint: against a FRESH `$HOME` with NO pre-existing
+    /// `telemetry/id`, force-on, the FIRST MCP tool call (`search_skills` through
+    /// the live in-process server) mints `telemetry/id` at mode 0600 with NO
+    /// first-run notice (the notice is a CLI-only concern, never called on the MCP
+    /// path), and lands a `surface=mcp` `tome.search`.
     #[test]
-    fn mcp_first_call_mints_id_silently_and_cold_start_lands() {
+    fn mcp_first_call_mints_id_silently_and_search_lands() {
         let home = TempDir::new().unwrap();
         let _home_guard = HomeGuard::install(home.path());
-        let _env = EnvForceTo::install("1");
+        let _env = EnvForce::install();
 
         let paths = stage_at_home(
             home.path(),
             &[("alpha", &skill_body("alpha", "alpha widget configuration"))],
         );
-        // Truly fresh identity: the staging above does not mint the id (it only
-        // enables/indexes), so assert the precondition explicitly.
         assert!(
             !paths.telemetry_id().exists(),
             "precondition: no telemetry/id before the first MCP call",
         );
 
-        // Build the live in-process server over the staged workspace and drive
-        // the first tool call — this is the MCP server's first `enqueue`, which
-        // lazily mints the id SILENTLY (no notice; the notice is never called on
-        // the MCP path).
+        // Point the override-aware process-global emit at this staged queue so the
+        // MCP handler's `telemetry::emit` lands here AND lazily mints the id.
+        let _handle = tome::telemetry::TelemetryHandleGuard::install(
+            tome::telemetry::build_handle_for_test(&paths),
+        );
+
         let harness = McpHarness::new(&paths);
         let out = harness
             .call_search_skills(search_skills::Input {
@@ -375,7 +362,7 @@ mod mcp_cold_start {
             "the staged corpus must return a result (the funnel emit reflects a real call)",
         );
 
-        // SILENT MINT: the id now exists at 0600.
+        // SILENT MINT: the id now exists at 0600 (the first emit minted it).
         assert!(
             paths.telemetry_id().exists(),
             "the first MCP tool call must lazily mint telemetry/id",
@@ -388,56 +375,15 @@ mod mcp_cold_start {
                 .mode();
             assert_eq!(mode & 0o777, 0o600, "the minted id must be 0600");
         }
-        // The MCP path printed NO first-run notice (it has no human stderr gate).
-        // `print_first_run_notice` is only reachable from `cli_startup`, which the
-        // MCP server never calls; the mint here therefore prints nothing. We
-        // assert structurally: the funnel `tome.search` landed but no
-        // CLI-notice-bearing artefact exists (the notice writes to stderr only,
-        // never to a file or the queue), and the `surface` is mcp.
+
+        // The MCP path printed NO first-run notice (it has no human stderr gate);
+        // the funnel `tome.search` landed with `surface=mcp`.
         let events = queue_events(&paths);
-        let search = first_of(&events, "tome.search")
+        let search = first_named(&events, "tome.search")
             .unwrap_or_else(|| panic!("the first MCP call must enqueue tome.search: {events:?}"));
         assert_eq!(
-            search["surface"], "mcp",
+            search["attributes"]["surface"], "mcp",
             "the MCP-surface search event: {search}",
-        );
-
-        // The `tome.cold_start` event the MCP server emits at start: the harness
-        // builds `McpState` directly (it does NOT run `mcp::run`, which would
-        // load real ONNX), so we enqueue the EXACT event `mcp::run` constructs
-        // through the same gated default-`enqueue` to prove the event type lands
-        // on this MCP-surface queue with the right shape. (The real `mcp::run`
-        // cold-start site is a real-model gate, out of stub-only fast CI.)
-        tome::telemetry::enqueue(tome::telemetry::event::ColdStart {
-            embedder_load_bucket: tome::telemetry::buckets::LoadBucket::from(
-                Duration::from_millis(10),
-            ),
-            index_ready_bucket: tome::telemetry::buckets::LoadBucket::from(Duration::from_millis(
-                5,
-            )),
-            embedder_model_id: Some("stub-embedder"),
-        });
-
-        let events = queue_events(&paths);
-        let cold = first_of(&events, "tome.cold_start")
-            .unwrap_or_else(|| panic!("tome.cold_start must land on the queue: {events:?}"));
-        assert!(
-            cold.get("embedder_load_bucket")
-                .and_then(Value::as_str)
-                .is_some(),
-            "cold_start carries an embedder_load_bucket string: {cold}",
-        );
-        assert!(
-            cold.get("index_ready_bucket")
-                .and_then(Value::as_str)
-                .is_some(),
-            "cold_start carries an index_ready_bucket string: {cold}",
-        );
-        // The cold_start shares the SAME install uuid the silent mint produced
-        // (it was minted by the first MCP call, reused by this enqueue).
-        assert_eq!(
-            search["install_uuid"], cold["install_uuid"],
-            "the cold_start reuses the silently-minted install uuid",
         );
     }
 }

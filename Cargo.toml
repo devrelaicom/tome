@@ -207,6 +207,12 @@ minijinja = { version = "2.20", default-features = false, features = [
     "serde",
 ] }
 
+# Telemetry kernel (gauge-telemetry migration) — privacy-first; owned crate.
+# Brings gauge-events, sysinfo, uuid, and Windows shims transitively — the one
+# deliberate new-dependency reversal of the Phase-10 "no new lockfile package"
+# rule (see CONSTITUTION §Complexity-budget). Exact-pinned like the other heavy deps.
+gauge-telemetry = "=0.3.1"
+
 [build-dependencies]
 # Compile vendored sqlite-vec amalgamation against rusqlite's bundled SQLite.
 cc = "1"

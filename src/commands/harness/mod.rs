@@ -172,7 +172,7 @@ pub(crate) fn harness_name_to_enum(name: &str) -> Option<crate::telemetry::event
 /// not map to the closed [`Harness`](crate::telemetry::event::Harness) enum.
 pub(crate) fn emit_harness_action(name: &str, action: crate::telemetry::event::HarnessAction) {
     if let Some(harness) = harness_name_to_enum(name) {
-        crate::telemetry::enqueue(crate::telemetry::event::HarnessActionEvent { action, harness });
+        crate::telemetry::emit(crate::telemetry::event::HarnessActionEvent { action, harness });
     }
 }
 

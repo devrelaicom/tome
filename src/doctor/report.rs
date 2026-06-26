@@ -633,8 +633,9 @@ pub struct MetaSkillDrift {
 /// (the doctor-as-projection precedent): nothing here writes, mints, or
 /// creates a directory (FR-124). Every field routes through an existing
 /// telemetry reader (`config::resolve_enabled_with_source`, `identity`,
-/// `queue`, the `last-flush` stamp, `transport::resolve_endpoint`,
-/// `allowlist`), so doctor and `tome telemetry status` cannot diverge.
+/// `queue`, the `last-flush` stamp, `config::resolve_endpoint` — scrubbed at the
+/// display site, see `doctor::telemetry::scrubbed_endpoint` — `allowlist`), so
+/// doctor and `tome telemetry status` cannot diverge.
 ///
 /// Plain `Serialize` (no `deny_unknown_fields` — this is an output). Field
 /// order is the wire order; nested optionals carry `skip_serializing_if` so an
@@ -660,7 +661,9 @@ pub struct TelemetrySection {
     /// The `last-flush` stamp (time + HTTP status), when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_flush: Option<TelemetryFlushReport>,
-    /// The collector endpoint in effect, credential-scrubbed.
+    /// The collector endpoint in effect, credential-scrubbed at the display site
+    /// (`doctor::telemetry::scrubbed_endpoint`) so a `user:token@host` endpoint
+    /// never lands in the report.
     pub endpoint: String,
     /// The compiled-in attribution allowlist (short id + canonical source).
     pub allowlist: Vec<TelemetryAllowlistEntry>,

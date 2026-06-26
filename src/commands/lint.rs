@@ -77,7 +77,7 @@ fn emit_lint_telemetry(level: ArtifactLevel, strict: bool, result: &Result<LintR
         }
         Err(_) => AuthoringOutcome::Errors,
     };
-    crate::telemetry::enqueue(AuthoringActionEvent {
+    crate::telemetry::emit(AuthoringActionEvent {
         verb: AuthoringVerb::Lint,
         artifact: crate::commands::convert::artifact_of(level),
         source_format: SourceFormat::Unknown,

@@ -47,7 +47,7 @@ pub fn run(args: ReindexArgs, ws: &ResolvedScope, mode: Mode) -> Result<(), Tome
     // OUTCOME-bearing: emit on BOTH success and failure. A failed reindex emits
     // `Reindex{outcome:Failed}` here AND the boundary emits `tome.error` — two
     // distinct signals (intentional). One infallible `enqueue`.
-    crate::telemetry::enqueue(crate::telemetry::event::Reindex {
+    crate::telemetry::emit(crate::telemetry::event::Reindex {
         scope: tele_scope,
         forced,
         outcome: if result.is_ok() {

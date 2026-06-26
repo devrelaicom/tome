@@ -215,8 +215,6 @@ fn build_state(paths: &tome::paths::Paths, registry: PromptRegistry) -> Arc<McpS
         prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(registry))),
         host_harness: None,
         last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
-        flush_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
-        enqueued_since_flush: std::sync::atomic::AtomicUsize::new(0),
     })
 }
 
@@ -284,8 +282,6 @@ fn build_state_with_stub_entries(
         prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(registry))),
         host_harness: None,
         last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
-        flush_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
-        enqueued_since_flush: std::sync::atomic::AtomicUsize::new(0),
     })
 }
 

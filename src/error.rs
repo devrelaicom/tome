@@ -455,29 +455,50 @@ pub enum TomeError {
     // Phase 10 — telemetry (codes 90–92).
     //
     // Three NEW failure classes (principle II — new classes get new codes,
-    // none repurposed), opening the 90s decade. Only the *foreground*
-    // `tome telemetry flush` surfaces these; background/`--quiet` flushes fail
-    // silent by design (the scoped Principle-V exception, plan §Constitution).
+    // none repurposed), opening the 90s decade. Retained for the closed-set
+    // contract after the gauge-telemetry kernel migration (Phase 13).
     // See `specs/010-phase-10-telemetry/data-model.md`.
     // -----------------------------------------------------------------------
-    /// The foreground flusher could not deliver the queue to the collector
-    /// endpoint. `endpoint` is ALREADY scrubbed by the caller (no credentials
-    /// reach this variant) — it names the host the POST targeted, for the
-    /// operator's benefit.
+    /// **VESTIGIAL (exit 90).** Retained for the closed-set contract.
+    ///
+    /// After the `gauge-telemetry` kernel migration the foreground flush
+    /// (`tome telemetry flush`) routes through `handle().run_flush()`, which is
+    /// best-effort and never returns an error to the caller. This variant is
+    /// therefore **not constructed anywhere in `src/`** — the exit-90 path no
+    /// longer exists in practice. The variant (and its `ErrorCategory` mapping)
+    /// are kept so the closed error set stays monotonic: no code in the 90s
+    /// decade is ever repurposed.
+    ///
+    /// If a future foreground-flush failure surface is added (e.g. a
+    /// `gauge_telemetry::BuildError::InsecureEndpoint` check on the init path),
+    /// this is the variant it should map to.
     #[error("telemetry endpoint unreachable: {endpoint}")]
     TelemetryEndpointUnreachable { endpoint: String },
 
-    /// `telemetry/config.toml` exists but is malformed (parse failure or an
-    /// out-of-range field). The on-disk config is Tome-owned, so this is a
-    /// strict-parse failure, not a third-party leniency case.
-    // Vestigial since Task 3 (telemetry opt-out folded into config.toml → exit 5); retained for the closed-set contract, no longer constructed.
+    /// **VESTIGIAL (exit 91).** Retained for the closed-set contract.
+    ///
+    /// Originally surfaced when the standalone `~/.tome/telemetry/config.toml`
+    /// was malformed. That file was removed when telemetry opt-out was folded
+    /// into the unified `~/.tome/config.toml` (parse errors on that file are
+    /// exit 5 / `ManifestInvalid::TomlParse`). This variant is therefore **not
+    /// constructed anywhere in `src/`**.
+    ///
+    /// If a `gauge_telemetry::BuildError::InsecureEndpoint` (non-HTTPS endpoint
+    /// supplied) is ever surfaced on a foreground telemetry path, this is the
+    /// appropriate mapping: it is a resolve-time config semantic error, analogous
+    /// to exit 93 (`ProviderConfigInvalid`) on the provider path.
     #[error("telemetry config invalid at {}: {detail}", path.display())]
     TelemetryConfigInvalid { path: PathBuf, detail: String },
 
-    /// The local JSONL queue is unreadable as a sequence of telemetry events —
-    /// `count` records were dropped while self-healing the file. Distinct from
-    /// `Io` (7): the bytes were readable but not valid events (e.g. a torn
-    /// non-local line), which the flusher recovers from rather than aborting.
+    /// The local JSONL queue contains lines that are not parseable as telemetry
+    /// events — `count` records were dropped while self-healing the file.
+    ///
+    /// **Actively constructed** by `tome telemetry inspect` (exit 92) when any
+    /// queue line is unparsable. Distinct from `Io` (7): the bytes were readable
+    /// but not valid events (e.g. a torn non-local line), which the background
+    /// flusher recovers from rather than aborting. The foreground `inspect`
+    /// command surfaces this to the user so they can see the damage before it is
+    /// silently healed on the next flush.
     #[error("telemetry queue corrupt at {}: dropped {count} record(s)", path.display())]
     TelemetryQueueCorrupt { path: PathBuf, count: usize },
 

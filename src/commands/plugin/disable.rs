@@ -86,7 +86,7 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
     // for the forward-progress invariant.
     crate::summarise::regenerate_for_trigger(scope.scope.name(), &paths)?;
 
-    crate::telemetry::enqueue(crate::telemetry::event::PluginActionEvent {
+    crate::telemetry::emit(crate::telemetry::event::PluginActionEvent {
         action: crate::telemetry::event::PluginAction::Disabled,
     });
 
@@ -97,10 +97,10 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
     // but RETAINS the `skills` rows (hence `skills_retained`), so the plugin's
     // `plugin_version` is still in the index. Best-effort throughout.
     if let Some(catalog_id) = crate::telemetry::resolve_attribution(scope, &id.catalog) {
-        crate::telemetry::enqueue_attributed(crate::telemetry::event::PluginDisabled {
+        crate::telemetry::emit(crate::telemetry::event::PluginDisabled {
+            catalog: catalog_id,
             plugin_name: id.plugin.clone(),
             plugin_version: super::attributed_plugin_version(&paths, &scope.scope, &id),
-            catalog_id,
         });
     }
 

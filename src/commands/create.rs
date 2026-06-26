@@ -62,7 +62,7 @@ pub fn run(req: CreateRequest, scope: &ResolvedScope, mode: Mode) -> Result<(), 
     } else {
         AuthoringOutcome::Errors
     };
-    crate::telemetry::enqueue(AuthoringActionEvent {
+    crate::telemetry::emit(AuthoringActionEvent {
         verb: AuthoringVerb::Create,
         artifact: crate::commands::convert::artifact_of(level),
         source_format: SourceFormat::Unknown,

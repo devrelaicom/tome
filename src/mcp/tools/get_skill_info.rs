@@ -131,8 +131,6 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
         // `McpError`. The other error arms below are non-`TomeError` lookup/walk
         // outcomes already shaped to the contract codes.
         crate::mcp::enqueue_tool_error(&state, e.category());
-        // FR-050: nudge the off-path flush timer on the ≥50 crossing.
-        state.note_enqueue();
         internal(&input, started, e.to_string(), e.category().as_str())
     })?;
 
@@ -213,12 +211,10 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
     // `rank_bucket` of THIS entry from the preceding search this session (the
     // funnel join). `None` ⇒ no preceding search ranked it ⇒ `RankBucket::None`.
     // Best-effort enqueue (a sub-ms local append; never blocks, never flushes).
-    crate::telemetry::enqueue(crate::telemetry::event::EntryInfo {
-        rank_bucket: crate::mcp::rank_bucket_for(&state, &input.name),
+    crate::telemetry::emit(crate::telemetry::event::EntryInfo {
+        rank: crate::mcp::rank_for(&state, &input.name),
         calling_harness: crate::mcp::calling_harness(&state),
     });
-    // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
-    state.note_enqueue();
 
     Ok(SkillInfo {
         catalog: input.catalog,

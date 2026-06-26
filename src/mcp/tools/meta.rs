@@ -155,8 +155,6 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                 // `TomeError`→`McpError` conversion (the earlier guard arms are
                 // non-`TomeError` fail-closed contract codes).
                 crate::mcp::enqueue_tool_error(&state, e.category());
-                // FR-050: nudge the off-path flush timer on the ≥50 crossing.
-                state.note_enqueue();
                 // Carry the CLI exit-code slug (meta_skill_not_found /
                 // meta_install_failed) so the MCP error stays consistent.
                 McpError::invalid_params(

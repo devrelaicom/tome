@@ -967,7 +967,7 @@ pub async fn handle_get(
     // `Persona`, the reserved meta-install built-in is `Builtin`, and a Phase 5
     // command/skill entry-prompt is `Command`. Best-effort enqueue — a sub-ms
     // local append that never blocks the render or flushes.
-    crate::telemetry::enqueue(crate::telemetry::event::PromptInvoked {
+    crate::telemetry::emit(crate::telemetry::event::PromptInvoked {
         prompt_kind: prompt_kind_for(entry.persona),
         calling_harness: crate::mcp::calling_harness(&state),
     });

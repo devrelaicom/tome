@@ -1,113 +1,65 @@
-//! Phase 10 / US2 (T-H1 / T-H2) — per-command anonymous emits, asserted at the
-//! produced queue line.
+//! Per-command anonymous emits, asserted at the produced kernel queue line.
+//!
+//! Re-homed onto the `gauge-telemetry` kernel: the produced queue line is the
+//! kernel `QueuedEvent` (`{"event_name":...,"attributes":{...}}`), so the event
+//! name is read from `event_name` and the dimensions from `attributes`. Emits no
+//! longer carry a per-line install/session uuid (the kernel attaches identity as
+//! OTLP resource attributes at drain time only), and quantities are RAW integers
+//! (the kernel buckets at read time) — `latency_ms`/`candidates_returned`/
+//! `corpus_size`/`findings`/`rank`, never the old bucket-token strings.
 //!
 //! Two driving models live here, each used where it is the faithful one:
 //!
-//! 1. **In-process, stub-embedder** (`query::run_with_deps`): the CLI
+//! 1. **Real binary** (`ToolEnv` + `Command`): the catalog / workspace / doctor
+//!    command paths, whose telemetry emits live in the CLI command WRAPPERS and
+//!    which do NOT load ONNX. Each spawned `Command` clears every CI /
+//!    `TOME_TELEMETRY*` var then force-enables telemetry (`TOME_TELEMETRY=1`,
+//!    overriding CI auto-off) with a loopback endpoint so the kernel `build()`
+//!    validates without ever connecting (emit only appends).
+//! 2. **In-process, stub-embedder** (`query::run_with_deps`): the CLI
 //!    `tome.search { surface: cli }` path. The real `tome query` binary loads
-//!    real ONNX models, so the only stub-only way to reach the CLI search emit
-//!    is its `pub` library entry — which runs the SAME `enqueue` the binary
-//!    does. The whole staged tree is rooted at `$HOME/.tome` (a `HomeGuard`
-//!    pins it) and telemetry is force-enabled, so the handler's default-`Paths`
-//!    enqueue lands where the test reads it. This mirrors `mcp_funnel.rs`.
-//!
-//! 2. **Real binary** (`ToolEnv` + `Command`): the catalog / workspace / doctor
-//!    command paths, whose telemetry emits live in the CLI command WRAPPERS (not
-//!    the stub-injectable library fns) and which do NOT load ONNX. Each spawned
-//!    `Command` clears every CI / `TOME_TELEMETRY*` var then force-enables
-//!    telemetry, exactly the `identity.rs` hygiene, so the emit isn't CI-auto-off.
-//!
-//! Scope notes (documented in the report):
-//! - `plugin_action`: the enable/disable CLI wrappers construct a real
-//!   `FastembedEmbedder` (ONNX) with no stub seam, so the enable/disable emit is
-//!   NOT reachable end-to-end with stubs via the binary. The highest-value
-//!   stub-only coverage is the produced-line round-trip through the gated default
-//!   `enqueue` (the exact event + gate the wrapper uses), asserted below.
-//! - catalog `source_type == "git"`: a git-URL `catalog add` FAILS the clone
-//!   (exit 6) before reaching the success-gated emit, so the `Git` branch value
-//!   is unreachable via a real clone. We cover the `Local` branch end-to-end AND
-//!   the success-gate (a failed add emits NOTHING); the `Git` enum VALUE is
-//!   pinned by the `events.rs` `CatalogActionEvent { SourceType::Git }` line.
+//!    real ONNX models, so the only stub-only way to reach the CLI search emit is
+//!    its `pub` library entry — which routes through the SAME process-global
+//!    `telemetry::emit` the binary does. The staged tree is rooted at
+//!    `$HOME/.tome` (a `HomeGuard` pins it) and telemetry is force-enabled, so the
+//!    handler's process-global emit lands where the test reads it.
 
 use std::process::Command;
 
-use serde_json::Value;
-
-use crate::common::{Fixture, ToolEnv};
-
-// ---------------------------------------------------------------------------
-// Env hygiene — shared by the real-binary tests below.
-// ---------------------------------------------------------------------------
-
-/// Every env var that can flip the telemetry enabled-state precedence. Cleared
-/// on every spawned `Command` for a deterministic (force-on) baseline. Mirrors
-/// the `identity` / `inspect` suites' list.
-const TELEMETRY_ENV_VARS: &[&str] = &[
-    "TOME_TELEMETRY",
-    "TOME_TELEMETRY_ENDPOINT",
-    "CI",
-    "GITHUB_ACTIONS",
-    "GITLAB_CI",
-    "CIRCLECI",
-    "BUILDKITE",
-    "JENKINS_URL",
-    "TF_BUILD",
-    "TEAMCITY_VERSION",
-];
+use crate::common::ToolEnv;
+use crate::queue_util::{
+    LOOPBACK_ENDPOINT, TELEMETRY_ENV_VARS, attr, count_named, first_named, queue_events_in_root,
+};
 
 /// A `tome` command over the isolated `$HOME`, every CI/telemetry var removed,
 /// then telemetry FORCE-ENABLED (`TOME_TELEMETRY=1`, overriding CI auto-off) and
-/// pointed at a non-routable endpoint so an accidental inline flush would fail
-/// loudly rather than hang silently.
+/// pointed at a loopback endpoint the kernel `build()` accepts (emit only
+/// appends, so nothing ever connects).
 fn force_on_cmd(env: &ToolEnv) -> Command {
     let mut cmd = env.cmd();
     for &k in TELEMETRY_ENV_VARS {
         cmd.env_remove(k);
     }
     cmd.env("TOME_TELEMETRY", "1");
-    cmd.env("TOME_TELEMETRY_ENDPOINT", "http://192.0.2.0:0/telemetry");
+    cmd.env("TOME_GAUGE_ENDPOINT", LOOPBACK_ENDPOINT);
     cmd
 }
 
-/// The `telemetry/queue.jsonl` path under the isolated home.
-fn queue_path(env: &ToolEnv) -> std::path::PathBuf {
-    env.tome_root().join("telemetry").join("queue.jsonl")
-}
-
-/// Read the queued telemetry lines under the isolated `$HOME/.tome` as parsed
-/// JSON objects. Empty when the queue file doesn't exist yet.
-fn queue_events(env: &ToolEnv) -> Vec<Value> {
-    let body = match std::fs::read_to_string(queue_path(env)) {
-        Ok(b) => b,
-        Err(_) => return Vec::new(),
-    };
-    body.lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str::<Value>(l).expect("queued line is JSON"))
-        .collect()
-}
-
-/// First event of a given `event_type`, if any.
-fn first_of<'a>(events: &'a [Value], event_type: &str) -> Option<&'a Value> {
-    events.iter().find(|e| e["event_type"] == event_type)
-}
-
-/// Count events of a given `event_type`.
-fn count_of(events: &[Value], event_type: &str) -> usize {
-    events
-        .iter()
-        .filter(|e| e["event_type"] == event_type)
-        .count()
+/// Read the queued telemetry lines under the isolated `$HOME/.tome`.
+fn queue_events(env: &ToolEnv) -> Vec<serde_json::Value> {
+    queue_events_in_root(&env.tome_root())
 }
 
 // ===========================================================================
-// T-H2 — catalog_action (local) + the success-gate on a failed add.
+// catalog_action (local) + the success-gate on a failed add.
 // ===========================================================================
 
 /// `catalog add <file:// fixture>` ⇒ a `tome.catalog_action { action: added,
 /// source_type: local }`. The resolved `file://` URL drives the `Local` branch.
 #[test]
 fn catalog_add_local_emits_catalog_action_added_local() {
+    use crate::common::Fixture;
+
     let fix = Fixture::build_sample();
     let env = ToolEnv::new();
 
@@ -123,19 +75,22 @@ fn catalog_add_local_emits_catalog_action_added_local() {
     );
 
     let events = queue_events(&env);
-    let ev = first_of(&events, "tome.catalog_action")
+    let ev = first_named(&events, "tome.catalog_action")
         .unwrap_or_else(|| panic!("no tome.catalog_action in queue: {events:?}"));
-    assert_eq!(ev["action"], "added", "catalog add ⇒ action=added: {ev}");
     assert_eq!(
-        ev["source_type"], "local",
+        attr(ev, "action"),
+        "added",
+        "catalog add ⇒ action=added: {ev}"
+    );
+    assert_eq!(
+        attr(ev, "source_type"),
+        "local",
         "a file:// source resolves to source_type=local: {ev}"
     );
 }
 
 /// A FAILED `catalog add` (a git URL pointing at nothing → exit 6) emits NO
-/// `tome.catalog_action` — the emit is gated on a successful add. This proves the
-/// success-gate (a dropped or ungated emit would surface a spurious line); the
-/// `Git` source_type VALUE itself is pinned in `events.rs`.
+/// `tome.catalog_action` — the emit is gated on a successful add.
 #[test]
 fn failed_catalog_add_emits_no_catalog_action() {
     let env = ToolEnv::new();
@@ -156,14 +111,14 @@ fn failed_catalog_add_emits_no_catalog_action() {
 
     let events = queue_events(&env);
     assert_eq!(
-        count_of(&events, "tome.catalog_action"),
+        count_named(&events, "tome.catalog_action"),
         0,
         "a failed catalog add must emit no catalog_action (success-gated): {events:?}",
     );
 }
 
 // ===========================================================================
-// T-H2 — workspace_action: init emits; a no-op `use` does NOT (emit_on_ok gate).
+// workspace_action: init emits; a no-op `use` does NOT (success gate).
 // ===========================================================================
 
 /// `workspace init <name>` ⇒ a `tome.workspace_action { action: init }`.
@@ -183,19 +138,20 @@ fn workspace_init_emits_workspace_action_init() {
     );
 
     let events = queue_events(&env);
-    let ev = first_of(&events, "tome.workspace_action")
+    let ev = first_named(&events, "tome.workspace_action")
         .unwrap_or_else(|| panic!("no tome.workspace_action in queue: {events:?}"));
-    assert_eq!(ev["action"], "init", "workspace init ⇒ action=init: {ev}");
+    assert_eq!(
+        attr(ev, "action"),
+        "init",
+        "workspace init ⇒ action=init: {ev}"
+    );
 }
 
 /// A no-op `workspace use <nonexistent>` (exit 13, WorkspaceNotFound) emits NO
-/// `tome.workspace_action` — proving the `emit_on_ok` success-gate (the verb only
-/// emits when the mutation actually happened).
+/// `tome.workspace_action` — proving the success-gate.
 #[test]
 fn noop_workspace_use_emits_no_workspace_action() {
     let env = ToolEnv::new();
-    // Run from an isolated CWD so a stray bind can't pollute the test process's
-    // working dir (a failed `use` writes nothing, but be defensive).
     let cwd = tempfile::TempDir::new().unwrap();
 
     let out = force_on_cmd(&env)
@@ -212,29 +168,27 @@ fn noop_workspace_use_emits_no_workspace_action() {
 
     let events = queue_events(&env);
     assert_eq!(
-        count_of(&events, "tome.workspace_action"),
+        count_named(&events, "tome.workspace_action"),
         0,
-        "a failed `workspace use` must emit nothing (emit_on_ok gate): {events:?}",
+        "a failed `workspace use` must emit nothing (success gate): {events:?}",
     );
 }
 
 // ===========================================================================
-// T-H2 — doctor_run: a `tome doctor` invocation emits the run event.
+// doctor_run: a `tome doctor` invocation emits the run event.
 // ===========================================================================
 
-/// `tome doctor` ⇒ a `tome.doctor_run { fix: false, findings_bucket: <bucket> }`.
+/// `tome doctor` ⇒ a `tome.doctor_run { fix: false, findings: <int> }`.
 /// `doctor` may classify a fresh home as degraded (exit 1), but the emit fires
 /// BEFORE the exit path, so it lands regardless of the exit code.
 #[test]
-fn doctor_emits_doctor_run_with_fix_flag_and_findings_bucket() {
+fn doctor_emits_doctor_run_with_fix_flag_and_findings() {
     let env = ToolEnv::new();
 
     let out = force_on_cmd(&env)
         .args(["doctor"])
         .output()
         .expect("spawn tome");
-    // Exit may be 0 or 1 (degraded) depending on the fresh-home report; either
-    // way the emit happened before the exit branch.
     let code = out.status.code();
     assert!(
         code == Some(0) || code == Some(1),
@@ -243,21 +197,20 @@ fn doctor_emits_doctor_run_with_fix_flag_and_findings_bucket() {
     );
 
     let events = queue_events(&env);
-    let ev = first_of(&events, "tome.doctor_run")
+    let ev = first_named(&events, "tome.doctor_run")
         .unwrap_or_else(|| panic!("no tome.doctor_run in queue: {events:?}"));
     assert_eq!(
-        ev["fix"],
-        Value::Bool(false),
+        attr(ev, "fix"),
+        &serde_json::Value::Bool(false),
         "doctor (no --fix) ⇒ fix=false: {ev}"
     );
     assert!(
-        ev.get("findings_bucket").and_then(Value::as_str).is_some(),
-        "doctor_run carries a findings_bucket string: {ev}"
+        attr(ev, "findings").is_number(),
+        "doctor_run carries a raw integer findings count: {ev}"
     );
 }
 
-/// `tome doctor --fix` ⇒ a `tome.doctor_run { fix: true, .. }`. Pins the `fix`
-/// bool flips with the flag (the other half of the bucketed-emit contract).
+/// `tome doctor --fix` ⇒ a `tome.doctor_run { fix: true, .. }`.
 #[test]
 fn doctor_fix_emits_doctor_run_with_fix_true() {
     let env = ToolEnv::new();
@@ -267,8 +220,6 @@ fn doctor_fix_emits_doctor_run_with_fix_true() {
         .output()
         .expect("spawn tome");
     let code = out.status.code();
-    // `--fix` may exit 0, 1, or 75 (fix ran, manual work remains) on a fresh
-    // home; the emit fires before any of those exit branches.
     assert!(
         matches!(code, Some(0) | Some(1) | Some(75)),
         "doctor --fix exit {code:?}; stderr: {}",
@@ -276,29 +227,29 @@ fn doctor_fix_emits_doctor_run_with_fix_true() {
     );
 
     let events = queue_events(&env);
-    let ev = first_of(&events, "tome.doctor_run")
+    let ev = first_named(&events, "tome.doctor_run")
         .unwrap_or_else(|| panic!("no tome.doctor_run in queue: {events:?}"));
     assert_eq!(
-        ev["fix"],
-        Value::Bool(true),
+        attr(ev, "fix"),
+        &serde_json::Value::Bool(true),
         "doctor --fix ⇒ fix=true: {ev}"
     );
 }
 
 // ===========================================================================
-// T-H2 — plugin_action: the gated default-`enqueue` round-trip (stub-only).
+// plugin_action: the process-global `emit` round-trip (stub-only).
 //
 // The enable/disable CLI wrappers load real ONNX with no stub seam, so the
 // enable/disable emit is NOT reachable end-to-end with stubs via the binary.
 // This asserts the EXACT events those wrappers emit (`PluginActionEvent` with
-// `Enabled` / `Disabled`) round-trip through the gated default-`Paths`
-// `enqueue` — the produced-line + enabled-gate primitive the wrappers depend on,
-// which the binary path can't exercise in fast CI.
+// `Enabled` / `Disabled`) round-trip through the process-global `telemetry::emit`
+// the wrappers depend on, which the binary path can't exercise in fast CI.
 // ===========================================================================
 
 #[test]
-fn plugin_action_enqueue_round_trips_enabled_and_disabled() {
+fn plugin_action_emit_round_trips_enabled_and_disabled() {
     use crate::common::HomeGuard;
+    use crate::queue_util::queue_events;
     use tome::paths::Paths;
     use tome::telemetry::event::{PluginAction, PluginActionEvent};
 
@@ -306,26 +257,28 @@ fn plugin_action_enqueue_round_trips_enabled_and_disabled() {
     let _home_guard = HomeGuard::install(home.path());
     let _env = EnvForce::install();
 
-    // Both variants through the REAL default-Paths gated `enqueue` (the exact
-    // call the CLI wrappers make).
-    tome::telemetry::enqueue(PluginActionEvent {
+    let paths = Paths::from_root(home.path().join(".tome"));
+    // Point the process-global emit path at this isolated queue. `init`'s global
+    // is set-once, so an in-process emit test installs an ENABLED handle (built
+    // from the forced-on env + loopback endpoint) into the test override slot.
+    let _handle = tome::telemetry::TelemetryHandleGuard::install(
+        tome::telemetry::build_handle_for_test(&paths),
+    );
+
+    // Both variants through the process-global `emit` (the exact call the CLI
+    // wrappers make).
+    tome::telemetry::emit(PluginActionEvent {
         action: PluginAction::Enabled,
     });
-    tome::telemetry::enqueue(PluginActionEvent {
+    tome::telemetry::emit(PluginActionEvent {
         action: PluginAction::Disabled,
     });
 
-    let paths = Paths::from_root(home.path().join(".tome"));
-    let lines = tome::telemetry::queue::read_lines(&paths).expect("read queue");
-    let events: Vec<Value> = lines
-        .iter()
-        .map(|l| serde_json::from_str(l).expect("json"))
-        .collect();
-
+    let events = queue_events(&paths);
     let actions: Vec<&str> = events
         .iter()
-        .filter(|e| e["event_type"] == "tome.plugin_action")
-        .map(|e| e["action"].as_str().expect("action string"))
+        .filter(|e| e["event_name"] == "tome.plugin_action")
+        .map(|e| e["attributes"]["action"].as_str().expect("action string"))
         .collect();
     assert_eq!(
         actions,
@@ -335,7 +288,7 @@ fn plugin_action_enqueue_round_trips_enabled_and_disabled() {
 }
 
 // ===========================================================================
-// T-H1 — CLI `tome.search { surface: cli }` end-to-end via the library entry.
+// CLI `tome.search { surface: cli }` end-to-end via the library entry.
 //
 // Unix-only: the staging symlinks the catalog cache dir (the same shape
 // `mcp_funnel.rs` uses), so this section is gated like its peer.
@@ -347,6 +300,7 @@ mod cli_search {
 
     use std::path::Path;
 
+    use serde_json::Value;
     use tempfile::TempDir;
     use tome::cli::QueryArgs;
     use tome::commands::query;
@@ -363,13 +317,11 @@ mod cli_search {
         HomeGuard, config_with_catalog, fabricate_models, stub_embedder_seed, stub_reranker_seed,
         stub_summariser_seed,
     };
+    use crate::queue_util::queue_events;
 
     /// The pinned registry embedder name — the value `Search.embedder_model_id`
-    /// carries (`Some(embedder_entry().name)`), derived from the public registry
-    /// so the test doesn't need the `pub(crate)` accessor.
+    /// carries (the DEFAULT profile's pinned embedder).
     fn registry_embedder_name() -> &'static str {
-        // The telemetry `embedder_model_id` reports the DEFAULT profile's pinned
-        // embedder (B4: a non-registry stub seed falls back to the default).
         tome::embedding::profile::embedder_for(tome::embedding::profile::Profile::DEFAULT).name
     }
 
@@ -408,8 +360,9 @@ mod cli_search {
         )
     }
 
-    /// Stage `acme/plug` with the supplied skills rooted at `home/.tome`, enabled
-    /// + indexed against `global` with the StubEmbedder. Mirrors `mcp_funnel.rs`.
+    /// Stage `acme/plug` rooted at `home/.tome`, enabled + indexed against
+    /// `global` with the StubEmbedder. The process-global telemetry handle is
+    /// built (enabled, loopback endpoint) so the search emit appends.
     fn stage_at_home(home: &Path, skills: &[(&str, &str)]) -> Paths {
         let root = home.join(".tome");
         let paths = Paths::from_root(root.clone());
@@ -459,8 +412,8 @@ mod cli_search {
 
     /// Driving the CLI search through `query::run_with_deps` (the `pub` library
     /// entry the binary's `tome query` wraps) emits EXACTLY ONE `tome.search`
-    /// with `surface == "cli"`, `calling_harness` OMITTED (a CLI-only-absent
-    /// dimension), a present `embedder_model_id`, and the bucketed fields.
+    /// with `surface == "cli"`, `calling_harness` OMITTED, a present
+    /// `embedder_model_id`, and the RAW integer fields.
     #[test]
     fn cli_query_emits_search_surface_cli() {
         let home = TempDir::new().unwrap();
@@ -470,6 +423,10 @@ mod cli_search {
         let paths = stage_at_home(
             home.path(),
             &[("alpha", &skill_body("alpha", "alpha widget configuration"))],
+        );
+        // Point the process-global emit at this isolated queue for the test.
+        let _handle = tome::telemetry::TelemetryHandleGuard::install(
+            tome::telemetry::build_handle_for_test(&paths),
         );
 
         let scope = Scope(WorkspaceName::global());
@@ -501,60 +458,51 @@ mod cli_search {
             "the staged corpus must return at least one result so the emit reflects a real search",
         );
 
-        // The emit landed at the default-`$HOME` queue (HomeGuard-pinned to the
-        // staged home), so it reads back here.
-        let lines = tome::telemetry::queue::read_lines(&paths).expect("read queue");
-        let searches: Vec<Value> = lines
+        let events = queue_events(&paths);
+        let searches: Vec<&Value> = events
             .iter()
-            .map(|l| serde_json::from_str::<Value>(l).expect("json line"))
-            .filter(|e| e["event_type"] == "tome.search")
+            .filter(|e| e["event_name"] == "tome.search")
             .collect();
         assert_eq!(
             searches.len(),
             1,
-            "exactly one tome.search emitted by one CLI query: {lines:?}",
+            "exactly one tome.search emitted by one CLI query: {events:?}",
         );
-        let search = &searches[0];
+        let search = searches[0];
+        let a = &search["attributes"];
 
-        assert_eq!(search["surface"], "cli", "CLI surface: {search}");
+        assert_eq!(a["surface"], "cli", "CLI surface: {search}");
         assert!(
-            search.get("calling_harness").is_none(),
+            a.get("calling_harness").is_none(),
             "the CLI surface OMITS calling_harness (an MCP-only dimension): {search}",
         );
         assert_eq!(
-            search["embedder_model_id"],
+            a["embedder_model_id"],
             Value::String(registry_embedder_name().to_string()),
             "embedder_model_id is the pinned registry embedder name: {search}",
         );
-        // The bucketed fields are present (closed-enum string tokens).
-        for field in [
-            "latency_bucket",
-            "candidates_returned",
-            "corpus_size_bucket",
-        ] {
+        // RAW integer quantities (the kernel buckets at read time).
+        for field in ["latency_ms", "candidates_returned", "corpus_size"] {
             assert!(
-                search.get(field).and_then(Value::as_str).is_some(),
-                "bucketed field {field} present as a string: {search}",
+                a.get(field).map(Value::is_number).unwrap_or(false),
+                "field {field} present as a raw integer: {search}",
             );
         }
+        // The bundled-local providers report `bundled` (Phase 12 closed enum).
+        assert_eq!(a["embedding_provider_kind"], "bundled");
+        assert_eq!(a["reranker_provider_kind"], "bundled");
         // `reranker_used` reflects the reranker we passed; `strict` reflects args.
-        assert_eq!(
-            search["reranker_used"],
-            Value::Bool(true),
-            "reranker passed"
-        );
-        assert_eq!(search["strict"], Value::Bool(false), "non-strict query");
+        assert_eq!(a["reranker_used"], Value::Bool(true), "reranker passed");
+        assert_eq!(a["strict"], Value::Bool(false), "non-strict query");
     }
 }
 
 // ---------------------------------------------------------------------------
-// Shared in-process env force (for the `HomeGuard`-pinned default-`Paths` emit
-// paths). Lifted from the `mcp_funnel.rs` / `queue_behavior.rs` shape.
+// Shared in-process env force (for the `HomeGuard`-pinned process-global emit
+// paths). Forces `TOME_TELEMETRY=1` + a loopback endpoint so `init` builds an
+// ENABLED handle; restores on drop.
 // ---------------------------------------------------------------------------
 
-/// Snapshot + clear the telemetry/CI env vars, force `TOME_TELEMETRY=1` plus a
-/// non-routable endpoint, restore everything on drop. Pairs with a `HomeGuard`
-/// (held for the whole test) so the env mutation can't race a sibling.
 struct EnvForce {
     saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
 }
@@ -572,7 +520,7 @@ impl EnvForce {
         }
         unsafe {
             std::env::set_var("TOME_TELEMETRY", "1");
-            std::env::set_var("TOME_TELEMETRY_ENDPOINT", "http://192.0.2.0:0/telemetry");
+            std::env::set_var("TOME_GAUGE_ENDPOINT", LOOPBACK_ENDPOINT);
         }
         Self { saved }
     }

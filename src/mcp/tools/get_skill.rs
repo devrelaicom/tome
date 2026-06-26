@@ -99,8 +99,6 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
                 // allowlisted source. Fabricating a version would be worse than
                 // the anonymous-only `tome.error` already emitted above, so the
                 // attributed error stays deferred at this boundary.
-                // FR-050: nudge the off-path flush timer on the ≥50 crossing.
-                state.note_enqueue();
                 internal(&input, started, e.to_string(), e.category().as_str())
             })?;
 
@@ -298,9 +296,9 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // is THIS entry's position in the preceding search this session (the funnel
     // join; `None` when no search ranked it). Best-effort enqueue — a sub-ms
     // local append that never blocks the tool call or flushes.
-    crate::telemetry::enqueue(crate::telemetry::event::EntryInvoked {
+    crate::telemetry::emit(crate::telemetry::event::EntryInvoked {
         entry_kind: crate::telemetry::event::EntryKind::Skill,
-        rank_bucket: crate::mcp::rank_bucket_for(&state, &input.name),
+        rank: crate::mcp::rank_for(&state, &input.name),
         calling_harness: crate::mcp::calling_harness(&state),
     });
 
@@ -329,19 +327,17 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
         if let Some(catalog_id) =
             crate::telemetry::resolve_attribution(&attribution_scope, &attribution_catalog)
         {
-            crate::telemetry::enqueue_attributed(crate::telemetry::event::AttributedEntryInvoked {
+            crate::telemetry::emit(crate::telemetry::event::AttributedEntryInvoked {
+                catalog: catalog_id,
                 entry_name: attribution_entry_name,
                 entry_kind: crate::telemetry::event::EntryKind::Skill,
                 plugin_name: attribution_plugin_name,
                 plugin_version: attributed_plugin_version,
-                catalog_id,
                 calling_harness: attribution_harness,
             });
         }
     })
     .await;
-    // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
-    state.note_enqueue();
 
     // The `Output.path` field is documented as the absolute path to the
     // skill body (see the `Output` struct's doc comment) — emit the
@@ -721,19 +717,16 @@ async fn emit_post_resolution_error_telemetry(
     let entry_name = input.name.clone();
     let _ = tokio::task::spawn_blocking(move || {
         if let Some(catalog_id) = crate::telemetry::resolve_attribution(&scope, &catalog) {
-            crate::telemetry::enqueue_attributed(crate::telemetry::event::AttributedError {
+            crate::telemetry::emit(crate::telemetry::event::AttributedError {
+                catalog: catalog_id,
                 plugin_name,
                 entry_name: Some(entry_name),
                 error_class: category,
                 plugin_version,
-                catalog_id,
             });
         }
     })
     .await;
-
-    // FR-050: nudge the off-path flush timer on the ≥50-enqueue crossing.
-    state.note_enqueue();
 }
 
 impl Input {

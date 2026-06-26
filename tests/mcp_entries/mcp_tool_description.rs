@@ -60,8 +60,6 @@ fn build_state(paths: &Paths, ws: &WorkspaceName) -> Arc<McpState> {
         prompt_registry: Arc::new(std::sync::RwLock::new(Arc::new(PromptRegistry::default()))),
         host_harness: None,
         last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
-        flush_signal: std::sync::Arc::new(tokio::sync::Notify::new()),
-        enqueued_since_flush: std::sync::atomic::AtomicUsize::new(0),
     })
 }
 

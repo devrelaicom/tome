@@ -153,6 +153,11 @@ pub struct RerankerConfig {
 pub struct TelemetryConfig {
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Override the Gauge collector endpoint. `TOME_GAUGE_ENDPOINT` env wins
+    /// over this; default is the pinned prod URL. Must be https or loopback
+    /// (validated by the kernel at handle build).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
