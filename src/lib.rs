@@ -14,6 +14,7 @@ pub mod harness;
 pub mod index;
 pub mod logging;
 pub mod mcp;
+pub mod model_registry;
 pub mod output;
 pub mod paths;
 pub mod plugin;
