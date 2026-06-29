@@ -51,6 +51,8 @@ fn harness_info_outcome_serialises_byte_stable_with_references() {
         // Phase 11 / US5 (T063): `None` → `skip_serializing_if` omits it, so
         // the pre-Phase-11 byte pin below is UNCHANGED.
         mcp_snippet: None,
+        // Task 14: `None` → `skip_serializing_if` omits it; pin UNCHANGED.
+        unrepresented_agents_notice: None,
     };
     let json = serde_json::to_string(&outcome).expect("serialise");
     assert_eq!(
@@ -60,7 +62,9 @@ fn harness_info_outcome_serialises_byte_stable_with_references() {
     );
 }
 
-/// Phase 11 / US5 (T063): when `mcp_snippet` IS populated it is APPENDED LAST.
+/// Phase 11 / US5 (T063): when `mcp_snippet` IS populated it is APPENDED LAST
+/// (when `unrepresented_agents_notice` is absent, which is the common case for
+/// native-supporting harnesses).
 #[test]
 fn harness_info_outcome_mcp_snippet_appends_last_when_present() {
     let outcome = HarnessInfoOutcome {
@@ -75,11 +79,14 @@ fn harness_info_outcome_mcp_snippet_appends_last_when_present() {
         mcp_tome_owned: None,
         references: vec![],
         mcp_snippet: Some("SNIP".to_string()),
+        // Task 14: notice absent → omitted (skip_serializing_if), so
+        // mcp_snippet remains last.
+        unrepresented_agents_notice: None,
     };
     let json = serde_json::to_string(&outcome).expect("serialise");
     assert!(
         json.ends_with(r#""references":[],"mcp_snippet":"SNIP"}"#),
-        "mcp_snippet must be the LAST field; got: {json}",
+        "mcp_snippet must be the LAST field when notice absent; got: {json}",
     );
 }
 
