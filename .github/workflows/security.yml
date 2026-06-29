@@ -9,6 +9,12 @@ on:
     # top-of-the-hour stampede on GitHub-hosted runners.
     - cron: "17 4 * * 1"
 
+# Cancel a superseded run on the same ref (mirrors ci.yml) so rapid pushes to
+# an open PR don't pile up duplicate audits.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   # Force telemetry off on the runner (defence-in-depth beyond CI auto-off, #225).
@@ -17,6 +23,10 @@ env:
 jobs:
   audit:
     name: cargo audit
+    # Skip release-plz "Release vX.Y.Z" PRs: they bump version + CHANGELOG only,
+    # never dependencies, so there is nothing new to audit (empty head_ref on
+    # push/schedule, so those still run).
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -35,6 +45,8 @@ jobs:
 
   deny:
     name: cargo deny
+    # Skip release-plz version-bump PRs (see the audit job).
+    if: ${{ !startsWith(github.head_ref, 'release-plz-') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
