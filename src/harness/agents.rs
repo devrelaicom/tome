@@ -434,6 +434,26 @@ pub(crate) fn map_model(
             other if other.contains('/') => Some(other.to_owned()),
             _ => None,
         },
+        // Gemini (Google vendor): no Anthropic id maps; `inherit` is the
+        // literal default Gemini accepts, so a pinned model becomes `inherit`.
+        "gemini" => Some("inherit".to_owned()),
+        // Kiro: ids are dotted (`claude-sonnet-4.5`) so the registry's
+        // hyphenated ids are rejected, and the field is ignored in programmatic
+        // subagent dispatch (issue #6637) — DROP, Kiro uses the current chat LLM.
+        "kiro" => None,
+        // Goose + Pi pass a bare provider model id verbatim to the session's
+        // provider: a tier alias resolves to the registry's bare anthropic id;
+        // a concrete id passes through.
+        "goose" | "pi" => match source {
+            "opus" | "sonnet" | "haiku" => registry.resolve_tier("anthropic", source),
+            other => Some(other.to_owned()),
+        },
+        // Devin uses its own short aliases (`opus`/`sonnet`); `haiku` has no
+        // Devin alias and concrete/registry ids are unconfirmed → DROP those.
+        "devin" => match source {
+            "opus" | "sonnet" => Some(source.to_owned()),
+            _ => None,
+        },
         // Unknown harness: drop conservatively.
         _ => None,
     }
@@ -1139,6 +1159,44 @@ mod tests {
         // Literal input hyphens collapse too (not only replacement dashes).
         assert_eq!(slugify_agent_name("a--b", false), "a-b");
         assert_eq!(slugify_agent_name("a--b", true), "a-b");
+    }
+
+    #[test]
+    fn map_model_phase2_arms() {
+        let reg = crate::model_registry::test_registry(); // opus→claude-opus-4-5, etc.
+        // Gemini: any pinned model → inherit literal.
+        assert_eq!(
+            map_model(&reg, "gemini", "opus").as_deref(),
+            Some("inherit")
+        );
+        assert_eq!(
+            map_model(&reg, "gemini", "claude-x").as_deref(),
+            Some("inherit")
+        );
+        assert_eq!(map_model(&reg, "gemini", "inherit"), None);
+        // Kiro: always drop (dotted-only ids; ignored in dispatch).
+        assert_eq!(map_model(&reg, "kiro", "opus"), None);
+        // Goose + Pi: tier → registry bare id; concrete id passes through.
+        assert_eq!(
+            map_model(&reg, "goose", "opus").as_deref(),
+            Some("claude-opus-4-5")
+        );
+        assert_eq!(
+            map_model(&reg, "pi", "sonnet").as_deref(),
+            Some("claude-sonnet-4-5")
+        );
+        assert_eq!(
+            map_model(&reg, "pi", "claude-custom-1").as_deref(),
+            Some("claude-custom-1")
+        );
+        // Devin: opus/sonnet pass through; haiku + concrete drop.
+        assert_eq!(map_model(&reg, "devin", "opus").as_deref(), Some("opus"));
+        assert_eq!(
+            map_model(&reg, "devin", "sonnet").as_deref(),
+            Some("sonnet")
+        );
+        assert_eq!(map_model(&reg, "devin", "haiku"), None);
+        assert_eq!(map_model(&reg, "devin", "claude-opus-4-5"), None);
     }
 
     #[test]
