@@ -612,6 +612,151 @@ pub fn plugin_of_owned_file_pub(filename: &str) -> Option<&str> {
     plugin_of_owned_file(filename)
 }
 
+/// Canonical Claude-Code tool kinds Tome can translate. Unknown CC tools
+/// classify to `None` and are dropped by every renderer.
+// Consumed by the per-harness translate_agent impls (Tasks 5–12). The allow
+// silences the dead-code lint until those callers land.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CcToolKind {
+    Read,
+    Grep,
+    Glob,
+    Ls,
+    Edit,
+    Write,
+    MultiEdit,
+    NotebookEdit,
+    Bash,
+    WebFetch,
+    WebSearch,
+}
+
+/// Classify a Claude-Code tool name (case-insensitive) into a canonical kind.
+/// The single source of truth for the CC tool vocabulary; each harness renderer
+/// maps `CcToolKind` to its own target string.
+// Consumed by the per-harness translate_agent impls (Tasks 5–12). The allow
+// silences the dead-code lint until those callers land.
+#[allow(dead_code)]
+pub(crate) fn classify_cc_tool(cc_tool: &str) -> Option<CcToolKind> {
+    match cc_tool.trim().to_ascii_lowercase().as_str() {
+        "read" => Some(CcToolKind::Read),
+        "grep" => Some(CcToolKind::Grep),
+        "glob" => Some(CcToolKind::Glob),
+        "ls" => Some(CcToolKind::Ls),
+        "edit" => Some(CcToolKind::Edit),
+        "write" => Some(CcToolKind::Write),
+        "multiedit" => Some(CcToolKind::MultiEdit),
+        "notebookedit" => Some(CcToolKind::NotebookEdit),
+        "bash" => Some(CcToolKind::Bash),
+        "webfetch" => Some(CcToolKind::WebFetch),
+        "websearch" => Some(CcToolKind::WebSearch),
+        _ => None,
+    }
+}
+
+/// Gemini: 1:1 native tool names (verified 2026-06-29 — write-side is
+/// `write_file`/`replace`, NOT `edit_file`). Drops unknown (Gemini's `.strict()`
+/// schema forbids unknown values). Preserves order; de-dupes.
+// Consumed by the Gemini harness module (Task 5). The allow silences the
+// dead-code lint until that caller lands.
+#[allow(dead_code)]
+pub(crate) fn gemini_tools(tools: &[String]) -> Vec<String> {
+    map_tools_dedup(tools, |k| {
+        Some(match k {
+            CcToolKind::Read => "read_file",
+            CcToolKind::Grep => "grep_search",
+            CcToolKind::Glob => "glob",
+            CcToolKind::Ls => "list_directory",
+            CcToolKind::Edit | CcToolKind::MultiEdit | CcToolKind::NotebookEdit => "replace",
+            CcToolKind::Write => "write_file",
+            CcToolKind::Bash => "run_shell_command",
+            CcToolKind::WebFetch => "web_fetch",
+            CcToolKind::WebSearch => "google_web_search",
+        })
+    })
+}
+
+/// Kiro: category tags (`read`/`write`/`shell`/`web`), deduped, first-appearance order.
+// Consumed by the Kiro harness module (Task 6). The allow silences the
+// dead-code lint until that caller lands.
+#[allow(dead_code)]
+pub(crate) fn kiro_tools(tools: &[String]) -> Vec<String> {
+    map_tools_dedup(tools, |k| {
+        Some(match k {
+            CcToolKind::Read | CcToolKind::Grep | CcToolKind::Glob | CcToolKind::Ls => "read",
+            CcToolKind::Edit
+            | CcToolKind::Write
+            | CcToolKind::MultiEdit
+            | CcToolKind::NotebookEdit => "write",
+            CcToolKind::Bash => "shell",
+            CcToolKind::WebFetch | CcToolKind::WebSearch => "web",
+        })
+    })
+}
+
+/// Devin: `allowed-tools` Devin-lowercase names (`Bash`→`exec`). Deduped.
+// Consumed by the Devin harness module (Task 7). The allow silences the
+// dead-code lint until that caller lands.
+#[allow(dead_code)]
+pub(crate) fn devin_tools(tools: &[String]) -> Vec<String> {
+    map_tools_dedup(tools, |k| {
+        Some(match k {
+            CcToolKind::Read => "read",
+            CcToolKind::Write => "write",
+            CcToolKind::Edit | CcToolKind::MultiEdit | CcToolKind::NotebookEdit => "edit",
+            CcToolKind::Grep => "grep",
+            CcToolKind::Glob => "glob",
+            CcToolKind::Bash => "exec",
+            // No documented Devin name for these → drop.
+            CcToolKind::Ls | CcToolKind::WebFetch | CcToolKind::WebSearch => return None,
+        })
+    })
+}
+
+/// Pi: comma-separated string (`read, grep, bash`). `None` when nothing maps.
+// Consumed by the Pi harness module (Task 8). The allow silences the
+// dead-code lint until that caller lands.
+#[allow(dead_code)]
+pub(crate) fn pi_tools(tools: &[String]) -> Option<String> {
+    let mapped = map_tools_dedup(tools, |k| {
+        Some(match k {
+            CcToolKind::Read => "read",
+            CcToolKind::Grep => "grep",
+            CcToolKind::Glob => "find",
+            CcToolKind::Ls => "ls",
+            CcToolKind::Edit | CcToolKind::MultiEdit | CcToolKind::NotebookEdit => "edit",
+            CcToolKind::Write => "write",
+            CcToolKind::Bash => "bash",
+            // No Pi name for web tools → drop.
+            CcToolKind::WebFetch | CcToolKind::WebSearch => return None,
+        })
+    });
+    if mapped.is_empty() {
+        None
+    } else {
+        Some(mapped.join(", "))
+    }
+}
+
+/// Classify each CC tool, map it via `f`, drop `None`s, de-dupe preserving order.
+fn map_tools_dedup(
+    tools: &[String],
+    f: impl Fn(CcToolKind) -> Option<&'static str>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in tools {
+        let Some(kind) = classify_cc_tool(t) else {
+            continue;
+        };
+        let Some(target) = f(kind) else { continue };
+        if !out.iter().any(|x| x == target) {
+            out.push(target.to_owned());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,6 +1069,42 @@ mod tests {
             synthesize_description(&a),
             "Agent solo (no description provided)."
         );
+    }
+
+    #[test]
+    fn gemini_tools_maps_names_and_drops_unknown() {
+        let t = vec![
+            "Read".into(),
+            "Bash".into(),
+            "Edit".into(),
+            "Frobnicate".into(),
+        ];
+        assert_eq!(
+            gemini_tools(&t),
+            vec!["read_file", "run_shell_command", "replace"]
+        );
+    }
+    #[test]
+    fn kiro_tools_collapses_to_categories_deduped() {
+        let t = vec![
+            "Read".into(),
+            "Grep".into(),
+            "Glob".into(),
+            "Edit".into(),
+            "Bash".into(),
+            "WebFetch".into(),
+        ];
+        // read (x3 collapse), write (Edit), shell (Bash), web (WebFetch) — order = first appearance.
+        assert_eq!(kiro_tools(&t), vec!["read", "write", "shell", "web"]);
+    }
+    #[test]
+    fn pi_tools_comma_joins_and_devin_lowercases() {
+        let t = vec!["Read".into(), "Grep".into(), "Bash".into()];
+        assert_eq!(pi_tools(&t).as_deref(), Some("read, grep, bash"));
+        let d = vec!["Bash".into(), "Write".into(), "Read".into()];
+        assert_eq!(devin_tools(&d), vec!["exec", "write", "read"]);
+        // Nothing maps → Pi returns None (omit the field).
+        assert_eq!(pi_tools(&["Nope".to_owned()]), None);
     }
 
     #[test]
