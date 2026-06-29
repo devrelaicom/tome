@@ -5,6 +5,14 @@ on:
   push:
     branches: [main]
 
+# Cancel an in-flight run when a newer commit lands on the same ref. Pushing
+# fixups to an open PR no longer leaves three full cross-platform matrices
+# racing to completion — only the latest commit's run survives. Scoped per ref
+# so PRs never cancel each other or a main-branch run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -20,22 +28,115 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
 
 jobs:
-  test:
-    name: ${{ matrix.os }} / ${{ matrix.toolchain }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-        toolchain: [stable, msrv]
+  # ---------------------------------------------------------------------------
+  # Decide what this run needs, so the same workflow serves three very
+  # different triggers without re-running everything four times per feature:
+  #
+  #   * release-plz "Release vX.Y.Z" PRs only bump version + CHANGELOG (no Rust
+  #     changes), so they compile NOTHING — every heavy job is skipped.
+  #   * pull requests get the full cross-platform matrix (the real signal).
+  #   * pushes to (unprotected) main get a single ubuntu/stable smoke cell: the
+  #     squash-merged PR already ran the full matrix green, so re-running all of
+  #     it — including the 10x-billed macOS cells — is pure duplication.
+  #
+  # `github.head_ref` is set only for pull_request events (empty on push), so
+  # the release-plz test stays scoped to PRs.
+  # ---------------------------------------------------------------------------
+  config:
+    name: Configure run
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      size: ${{ steps.decide.outputs.size }}
+      matrix: ${{ steps.decide.outputs.matrix }}
+    steps:
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # PRs: ubuntu+macos on stable run the full build+test; msrv builds
+          # only (compile-compatibility check — no need to re-run the suite, and
+          # never on the 10x-billed macOS runner).
+          pr_matrix='{"include":[{"os":"ubuntu-latest","toolchain":"stable"},{"os":"macos-latest","toolchain":"stable"},{"os":"ubuntu-latest","toolchain":"msrv"}]}'
+          # main push: one cheap smoke cell (the PR matrix already passed).
+          main_matrix='{"include":[{"os":"ubuntu-latest","toolchain":"stable"}]}'
+          if [[ "$HEAD_REF" == release-plz-* ]]; then
+            # Version/CHANGELOG-only PR: skip every heavy job. matrix is unused
+            # (jobs are gated off) but must stay valid JSON for fromJSON.
+            run=false; size=false; matrix="$main_matrix"
+          elif [[ "$EVENT" == "push" ]]; then
+            # main push: smoke cell + size gate (PR already ran the full matrix).
+            run=true; size=true; matrix="$main_matrix"
+          else
+            run=true; size=false; matrix="$pr_matrix"
+          fi
+          {
+            echo "run=$run"
+            echo "size=$size"
+            echo "matrix=$matrix"
+          } >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Lint ONCE (ubuntu/stable), not once per matrix cell. `cargo fmt --check` is
+  # toolchain- and OS-independent, and clippy on the primary target catches the
+  # lints that matter — running both across all four old matrix cells was 4x
+  # wasted work.
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint (fmt + clippy)
+    needs: config
+    if: ${{ needs.config.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      # ubuntu/stable also runs a release build for the size check, so the
-      # heavy C/C++ deps (ort, llama-cpp-2, sqlite-vec, bundled SQLite) compile
-      # into two profiles AND link into ~175 test binaries — exhausting the
-      # runner's free root disk (first "No space left", then a linker SIGBUS).
-      # Reclaim every large preinstalled SDK we never use so linking has room.
+      # Defeat the repo-local `rust-toolchain.toml` (which pins channel =
+      # "stable" for local dev) so the dtolnay install below is authoritative
+      # and the rustup proxy can't race the first `cargo fmt` call (signature:
+      # "error: unexpected argument 'fmt' found").
+      - name: Defeat rust-toolchain.toml in CI
+        shell: bash
+        run: rm -f rust-toolchain.toml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+          # See the matrix job for why cache-bin must stay false.
+          cache-bin: false
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Build + test. Matrix is computed by `config`: full on PRs, single smoke
+  # cell on main. msrv cells compile only (no suite run, ubuntu only).
+  # ---------------------------------------------------------------------------
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.toolchain }}
+    needs: config
+    if: ${{ needs.config.outputs.run == 'true' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.config.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # The dev build links the heavy C/C++ deps (ort, llama-cpp-2, sqlite-vec,
+      # bundled SQLite) into ~175 test binaries — enough to exhaust the runner's
+      # free root disk (first "No space left", then a linker SIGBUS). Reclaim
+      # every large preinstalled SDK we never use so linking has room.
       - name: Free disk space (Linux runners)
         if: runner.os == 'Linux'
         shell: bash
@@ -53,12 +154,10 @@ jobs:
           version=$(grep '^rust-version' Cargo.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # Defeat the repo-local `rust-toolchain.toml` (which pins channel =
-      # "stable" for local dev). In CI, the matrix is the source of truth
-      # for which toolchain to test against; leaving the file in place
-      # silently routes the MSRV job through stable AND races with the
-      # rustup proxy on the first `cargo fmt` call (signature: "error:
-      # unexpected argument 'fmt' found"). Removing it in CI defangs both.
+      # In CI the matrix is the source of truth for the toolchain; leaving the
+      # repo-local file in place silently routes the MSRV cell through stable
+      # AND races the rustup proxy on the first cargo subcommand. Removing it
+      # defangs both.
       - name: Defeat rust-toolchain.toml in CI
         shell: bash
         run: rm -f rust-toolchain.toml
@@ -67,12 +166,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.toolchain == 'msrv' && steps.msrv.outputs.version || 'stable' }}
-          components: rustfmt, clippy
 
-      # Sanity-check materialisation of the toolchain. Forces rustup to
-      # fully resolve the proxy for the matrix toolchain before any cargo
-      # subcommand runs, eliminating the race that produced the "unexpected
-      # argument 'fmt' found" flake on macOS runners.
+      # Force rustup to fully resolve the proxy for the matrix toolchain before
+      # any cargo subcommand runs, eliminating the "unexpected argument 'fmt'
+      # found" flake seen on macOS runners.
       - name: Confirm active toolchain
         shell: bash
         run: |
@@ -84,28 +181,62 @@ jobs:
         with:
           shared-key: ${{ matrix.os }}-${{ matrix.toolchain }}
           # Do NOT cache `~/.cargo/bin`. The action's default (`cache-bin:
-          # true`) restores the cargo binary from cache, which on macOS
-          # MSRV ends up pointing back at the rustup proxy and undoes the
-          # dtolnay toolchain install — `cargo fmt` then fails with the
-          # signature "error: unexpected argument 'fmt' found". The cargo
-          # binary itself is cheap to provision; the registry + target
-          # cache are what's expensive, and those are still cached.
+          # true`) restores the cargo binary from cache, which on macOS MSRV
+          # ends up pointing back at the rustup proxy and undoes the dtolnay
+          # toolchain install — `cargo fmt` then fails with "error: unexpected
+          # argument 'fmt' found". The registry + target cache (the expensive
+          # part) are still cached.
           cache-bin: false
-
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: cargo build
         run: cargo build --all-targets --all-features
 
+      # Run the suite on stable only. msrv cells exist purely to prove the crate
+      # still compiles on the floor toolchain; re-running the ~7-min suite there
+      # (and on macOS) added cost without catching MSRV-specific regressions.
+      # --all-features matches the build step's feature set so the test compile
+      # reuses those artifacts instead of recompiling under default features.
       - name: cargo test
-        run: cargo test --workspace
+        if: matrix.toolchain != 'msrv'
+        run: cargo test --workspace --all-features
 
-      - name: Release binary size check (< 50 MB stripped)
-        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+  # ---------------------------------------------------------------------------
+  # Release-binary size gate (< 50 MB stripped, NFR-001). Runs on main pushes
+  # only — building a SECOND (release) profile of the heavy native deps on every
+  # PR iteration was the single most expensive step, and release.yml already
+  # re-checks the cap per-target at tag time. Its own job (own runner) so the
+  # release profile no longer shares a disk with the dev `--all-targets` build.
+  # ---------------------------------------------------------------------------
+  size:
+    name: Release binary size check (< 50 MB)
+    needs: config
+    if: ${{ needs.config.outputs.size == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Free disk space (Linux runners)
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache /usr/local/share/boost \
+            /usr/local/share/powershell /usr/share/swift
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Defeat rust-toolchain.toml in CI
+        shell: bash
+        run: rm -f rust-toolchain.toml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: size-release
+          cache-bin: false
+
+      - name: Release binary size check
         shell: bash
         run: |
           cargo build --release --locked
