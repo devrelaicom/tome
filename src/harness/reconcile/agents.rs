@@ -996,4 +996,98 @@ mod tests {
             "a non-live co-owner must NOT delete a live co-owner's file in a shared agent_dir"
         );
     }
+
+    /// Phase 2 — Copilot co-ownership (Task 10 / Task 9 reconciler rule).
+    ///
+    /// Selecting only `copilot` (live) while `copilot-cli` is NOT in the
+    /// effective set must NOT let `copilot-cli`'s cleanup pass delete
+    /// `.github/agents/<plugin>__<name>.agent.md` that `copilot` just wrote.
+    ///
+    /// Uses the REAL `COPILOT` + `COPILOT_CLI` modules (via
+    /// `HARNESS_MODULES_OVERRIDE`) instead of anonymous stubs, so this test
+    /// directly proves the production co-ownership is wired correctly.
+    #[test]
+    fn copilot_coownership_copilot_live_copilot_cli_idle_file_survives() {
+        use crate::harness::copilot::COPILOT;
+        use crate::harness::copilot_cli::COPILOT_CLI;
+
+        // Serialize all lib tests that write HARNESS_MODULES_OVERRIDE so cargo's
+        // parallel test runner cannot let two override-installing tests clobber
+        // each other.
+        let _override_guard = crate::harness::HARNESS_OVERRIDE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let home = TempDir::new().expect("home tempdir");
+        let paths = Paths::from_root(home.path().join(".tome"));
+        std::fs::create_dir_all(&paths.root).expect("create tome root");
+        let project = home.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project root");
+
+        // The shared `.github/agents/` directory that both modules point at.
+        let shared_dir = project.join(".github/agents");
+        std::fs::create_dir_all(&shared_dir).expect("create .github/agents");
+
+        // Pre-seed the owned agent file (as if a prior sync wrote it).
+        // `.agent.md` double extension — same as translate_copilot_agent emits.
+        let owned = shared_dir.join("myplugin__reviewer.agent.md");
+        std::fs::write(
+            &owned,
+            "---\nname: reviewer\ndescription: Reviews code.\n---\nYou review code.\n",
+        )
+        .expect("seed owned agent file");
+
+        bootstrap_db(&paths);
+        insert_enabled_agent(&paths, "cat", "myplugin", "reviewer");
+
+        let workspace = WorkspaceName::global();
+        let deps = SyncDeps {
+            paths: &paths,
+            home_root: home.path(),
+            workspace_name: &workspace,
+            force: false,
+            only_harness: None,
+        };
+
+        // Snapshot both real modules.
+        let snapshots = vec![
+            crate::harness::sync::snapshot_for_test(&COPILOT, &project, home.path()),
+            crate::harness::sync::snapshot_for_test(&COPILOT_CLI, &project, home.path()),
+        ];
+        // Only `copilot` is live; `copilot-cli` is NOT in the effective set.
+        let effective_names: HashSet<String> = std::iter::once("copilot".to_string()).collect();
+        let mut outcome = SyncOutcome::default();
+
+        // Install both real modules so `with_effective_modules` resolves them.
+        *crate::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("override write lock") = Some(vec![
+            Box::new(crate::harness::copilot::Copilot),
+            Box::new(crate::harness::copilot_cli::CopilotCli),
+        ]);
+
+        let result = reconcile_agents(
+            &project,
+            &deps,
+            &effective_names,
+            &snapshots,
+            false,
+            &mut outcome,
+        );
+
+        // Restore the override before any assert that could panic.
+        *crate::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("override write lock (restore)") = None;
+
+        result.expect("reconcile ok");
+
+        // The owned `.agent.md` file survives: `copilot-cli` (not live) must
+        // NOT clean up the shared `.github/agents/` dir because `copilot`
+        // (live) co-owns it.
+        assert!(
+            owned.is_file(),
+            "copilot-cli (idle) must NOT delete files in .github/agents/ while copilot (live) co-owns it"
+        );
+    }
 }

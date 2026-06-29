@@ -20,6 +20,8 @@ mod agent_removal;
 mod agent_translate_claude_code;
 #[path = "mcp_entries/agent_translate_codex.rs"]
 mod agent_translate_codex;
+#[path = "mcp_entries/agent_translate_copilot.rs"]
+mod agent_translate_copilot;
 #[path = "mcp_entries/agent_translate_cursor.rs"]
 mod agent_translate_cursor;
 #[path = "mcp_entries/agent_translate_gemini.rs"]
