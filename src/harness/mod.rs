@@ -1058,6 +1058,15 @@ pub fn resolve_alias(name: &str) -> &str {
 pub static HARNESS_MODULES_OVERRIDE: RwLock<Option<Vec<Box<dyn HarnessModule>>>> =
     RwLock::new(None);
 
+/// Serializes lib tests that install [`HARNESS_MODULES_OVERRIDE`] (a
+/// process-global seam) so cargo's parallel test runner cannot let two
+/// override-installing tests clobber each other. Integration tests use the
+/// separate `HARNESS_OVERRIDE_MUTEX` in `tests/common/`; this is its lib-test
+/// counterpart. Lock it for the whole body of any lib test that writes the
+/// override.
+#[cfg(test)]
+pub(crate) static HARNESS_OVERRIDE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Look up a harness by exact-match name.
 ///
 /// Returns `None` for any name not in the effective registry. Callers

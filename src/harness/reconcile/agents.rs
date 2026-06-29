@@ -150,7 +150,7 @@ pub(crate) fn reconcile_agents(
         // selecting only one of two co-owners (copilot / copilot-cli, same
         // `.github/agents/`) would delete the live one's freshly-written files.
         // Computed once, up front, so the rule is order-independent.
-        let live_owned_dirs: std::collections::HashSet<PathBuf> = mods
+        let live_owned_dirs: HashSet<PathBuf> = mods
             .iter()
             .filter(|m| {
                 snap_names.contains(m.name())
@@ -920,11 +920,18 @@ mod tests {
     /// `.github/agents/` hazard). Two stubs share one agent_dir; one is live.
     #[test]
     fn coowned_dir_is_not_cleaned_by_a_non_live_coowner() {
-        let home = TempDir::new().unwrap();
+        // Serialize all lib tests that write HARNESS_MODULES_OVERRIDE so cargo's
+        // parallel test runner cannot let two override-installing tests clobber
+        // each other (Task 11 will add a second override-installing test here).
+        let _override_guard = crate::harness::HARNESS_OVERRIDE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let home = TempDir::new().expect("home tempdir");
         let paths = Paths::from_root(home.path().join(".tome"));
-        std::fs::create_dir_all(&paths.root).unwrap();
+        std::fs::create_dir_all(&paths.root).expect("create tome root");
         let project = home.path().join("project");
-        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&project).expect("create project root");
 
         // Two native-supporting stubs sharing ONE agent_dir; one live, one not.
         let shared = project.join(".shared/agents");
@@ -937,9 +944,9 @@ mod tests {
             .with_native_agents(AgentFormat::MarkdownYaml)
             .with_agent_dir(shared.clone());
 
-        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(&shared).expect("create shared agent_dir");
         let owned = shared.join("plugin-keep__reviewer.md");
-        std::fs::write(&owned, "---\nname: reviewer\n---\nbody\n").unwrap();
+        std::fs::write(&owned, "---\nname: reviewer\n---\nbody\n").expect("seed owned agent file");
 
         bootstrap_db(&paths);
         insert_enabled_agent(&paths, "cat", "plugin-keep", "reviewer");
@@ -964,10 +971,10 @@ mod tests {
         // `with_effective_modules` sees them (otherwise it walks
         // `SUPPORTED_HARNESSES` whose real harnesses never match "co-live" /
         // "co-idle", making the rule a no-op vacuously — not a real proof).
-        {
-            *crate::harness::HARNESS_MODULES_OVERRIDE.write().unwrap() =
-                Some(vec![Box::new(live.clone()), Box::new(idle.clone())]);
-        }
+        *crate::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("override write lock") =
+            Some(vec![Box::new(live.clone()), Box::new(idle.clone())]);
         let result = reconcile_agents(
             &project,
             &deps,
@@ -977,7 +984,9 @@ mod tests {
             &mut outcome,
         );
         // Restore the override immediately — before any assert that could panic.
-        *crate::harness::HARNESS_MODULES_OVERRIDE.write().unwrap() = None;
+        *crate::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("override write lock (restore)") = None;
 
         result.expect("reconcile ok");
 
