@@ -508,6 +508,25 @@ pub(crate) fn infer_read_only(
     None
 }
 
+/// Resolve a harness-required `description` (FR-035): the canonical
+/// `description` if present; else the first non-empty trimmed body line; else
+/// a documented placeholder. The single source every required-`description`
+/// harness (OpenCode, Gemini, Copilot, Pi) routes through.
+pub(crate) fn synthesize_description(canonical: &CanonicalAgent) -> String {
+    if let Some(desc) = &canonical.description {
+        return desc.clone();
+    }
+    if let Some(line) = canonical
+        .body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+    {
+        return line.to_owned();
+    }
+    format!("Agent {} (no description provided).", canonical.name)
+}
+
 /// Resolve the displayed / registered agent name (FR-041).
 ///
 /// Uses the clean `<name>` normally, and the plugin-prefixed
@@ -839,6 +858,35 @@ mod tests {
         assert_eq!(plugin_of_owned_file("__reviewer.md"), None);
         // Empty stem.
         assert_eq!(plugin_of_owned_file("myplugin__.md"), None);
+    }
+
+    #[test]
+    fn synthesize_description_prefers_frontmatter_then_body_then_placeholder() {
+        let mut a = CanonicalAgent {
+            catalog: "c".into(),
+            plugin: "p".into(),
+            name: "solo".into(),
+            description: Some("  Reviews code  ".into()),
+            body: "Body line.\n".into(),
+            model: None,
+            tools: None,
+            disallowed_tools: None,
+            hooks: None,
+            mcp_servers: None,
+            permission_mode: None,
+        };
+        // Frontmatter wins (already trimmed at parse time; pass through verbatim).
+        assert_eq!(synthesize_description(&a), "  Reviews code  ");
+        // No description → first non-empty trimmed body line.
+        a.description = None;
+        a.body = "\n  First real line.  \nSecond.\n".into();
+        assert_eq!(synthesize_description(&a), "First real line.");
+        // Empty body → placeholder.
+        a.body = "   \n\n".into();
+        assert_eq!(
+            synthesize_description(&a),
+            "Agent solo (no description provided)."
+        );
     }
 
     #[test]
