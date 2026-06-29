@@ -17,9 +17,13 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::error::TomeError;
+use crate::harness::agents::{
+    self, CanonicalAgent, TranslatedAgent, agent_extension, agent_filename,
+};
 use crate::harness::{
-    EntryShape, FileFormat, GuardrailsPlacement, GuardrailsTarget, HarnessModule, McpDialect,
-    RulesFileStrategy, RulesFrontmatter,
+    AgentFormat, EntryShape, FileFormat, GuardrailsPlacement, GuardrailsTarget, HarnessModule,
+    McpDialect, RulesFileStrategy, RulesFrontmatter,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Kiro.
@@ -96,6 +100,87 @@ impl HarnessModule for Kiro {
             emit_env: true,
             extra_fields: &[],
         }
+    }
+
+    // -- Native agents (Phase 2, Task 8) -------------------------------------
+
+    fn supports_native_agents(&self) -> bool {
+        true
+    }
+
+    fn agent_dir(&self, project_root: &Path) -> Option<PathBuf> {
+        Some(project_root.join(".kiro/agents"))
+    }
+
+    fn agent_format(&self) -> Option<AgentFormat> {
+        Some(AgentFormat::MarkdownYaml)
+    }
+
+    /// Kiro IDE: MD+YAML; `name` required, lowercase+hyphens only; `description`
+    /// optional; `tools` are category tags (`read`/`write`/`shell`/`web`);
+    /// `model` is DROPPED (Kiro's ids are dotted and the field is ignored in
+    /// programmatic subagent dispatch, issue #6637 — emitting one errors).
+    fn translate_agent(
+        &self,
+        canonical: &CanonicalAgent,
+        clashes: bool,
+        models: &crate::model_registry::ModelRegistry,
+    ) -> Result<TranslatedAgent, TomeError> {
+        let mut frontmatter: Vec<(String, serde_yaml::Value)> = Vec::new();
+        let mut dropped: Vec<String> = Vec::new();
+
+        let displayed = agents::displayed_name(&canonical.plugin, &canonical.name, clashes);
+        let name = agents::slugify_agent_name(&displayed, false); // hyphens only
+        frontmatter.push(("name".to_owned(), serde_yaml::Value::String(name)));
+        if let Some(desc) = &canonical.description {
+            frontmatter.push((
+                "description".to_owned(),
+                serde_yaml::Value::String(desc.clone()),
+            ));
+        }
+        // `map_model(.., "kiro", ..)` is always None → record the drop.
+        if let Some(src) = canonical.model.as_deref() {
+            match agents::map_model(models, "kiro", src) {
+                Some(m) => frontmatter.push(("model".to_owned(), serde_yaml::Value::String(m))),
+                None => dropped.push("model".to_owned()),
+            }
+        }
+        if let Some(tools) = &canonical.tools {
+            let tags = agents::kiro_tools(tools);
+            if tags.is_empty() {
+                dropped.push("tools".to_owned());
+            } else {
+                let seq = tags.into_iter().map(serde_yaml::Value::String).collect();
+                frontmatter.push(("tools".to_owned(), serde_yaml::Value::Sequence(seq)));
+            }
+        }
+        if canonical.disallowed_tools.is_some() {
+            dropped.push("disallowedTools".to_owned());
+        }
+        if canonical.hooks.is_some() {
+            dropped.push("hooks".to_owned());
+        }
+        if canonical.mcp_servers.is_some() {
+            dropped.push("mcpServers".to_owned());
+        }
+        if canonical.permission_mode.is_some() {
+            dropped.push("permissionMode".to_owned());
+        }
+
+        let rendered = agents::render_markdown_yaml(&frontmatter, &canonical.body);
+        let filename = agent_filename(
+            &canonical.plugin,
+            &canonical.name,
+            agent_extension(AgentFormat::MarkdownYaml),
+        );
+        Ok(TranslatedAgent {
+            dir: PathBuf::from(".kiro/agents"),
+            filename,
+            displayed_name: displayed,
+            format: AgentFormat::MarkdownYaml,
+            rendered,
+            dropped_fields: dropped,
+        })
     }
 }
 

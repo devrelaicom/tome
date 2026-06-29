@@ -693,9 +693,7 @@ pub(crate) fn gemini_tools(tools: &[String]) -> Vec<String> {
 }
 
 /// Kiro: category tags (`read`/`write`/`shell`/`web`), deduped, first-appearance order.
-// Consumed by the Kiro harness module (Task 6). The allow silences the
-// dead-code lint until that caller lands.
-#[allow(dead_code)]
+// Consumed by the Kiro harness module (Task 8).
 pub(crate) fn kiro_tools(tools: &[String]) -> Vec<String> {
     map_tools_dedup(tools, |k| {
         Some(match k {

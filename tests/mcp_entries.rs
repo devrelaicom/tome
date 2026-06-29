@@ -26,6 +26,8 @@ mod agent_translate_cursor;
 mod agent_translate_gemini;
 #[path = "mcp_entries/agent_translate_goose.rs"]
 mod agent_translate_goose;
+#[path = "mcp_entries/agent_translate_kiro.rs"]
+mod agent_translate_kiro;
 #[path = "mcp_entries/agent_translate_opencode.rs"]
 mod agent_translate_opencode;
 #[path = "mcp_entries/agent_translate_pi.rs"]
