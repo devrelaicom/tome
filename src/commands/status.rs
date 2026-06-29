@@ -181,14 +181,6 @@ pub fn assemble_report(
     // DB-derived workspace/global stats.
     let db = gather_db_stats(paths, scope)?;
 
-    // Phase 2 / Task 14: count enabled agents for the unrepresented-agents
-    // field. Read-only; zero when the DB is absent. The effective-harness-list
-    // check in `run` (via `fill_unrepresented_agents`) gates whether any
-    // rules-only harness is present; here we provide the raw enabled count so
-    // `run` can decide. When called directly from tests (no project root),
-    // `run` doesn't gate it — we provide the agent count and set to zero if no
-    // rules-only harness resolves (handled in `fill_unrepresented_agents`).
-    // For `assemble_report` (no project root), we record 0; `run` overwrites.
     Ok(StatusReport {
         tome,
         embedder,
@@ -207,8 +199,7 @@ pub fn assemble_report(
         // `run` fills this via `fill_harness_mcp` (needs the project root /
         // effective list, which `Scope` alone doesn't carry).
         harness_mcp: Vec::new(),
-        // `run` fills this via `fill_unrepresented_agents` (needs the
-        // effective harness list). Default 0 for library-API callers.
+        // `run` fills this via `fill_unrepresented_agents` (read-only).
         unrepresented_agents: 0,
     })
 }
