@@ -70,11 +70,14 @@ jobs:
           git add assets/model-registry/registry.json
           git commit -m "chore(model-registry): refresh from models.dev"
           git push --force origin "${BRANCH}"
+          # Build the body with printf so the multi-line markdown stays inside
+          # the YAML `run: |` block scalar — a column-0 continuation line would
+          # terminate the block and break workflow parsing. Single-quoted format
+          # keeps backticks literal (no shell command substitution).
+          BODY=$(printf 'Automated weekly refresh of `assets/model-registry/registry.json` from models.dev/api.json.\n\nReview the diff to confirm the upstream data looks reasonable before merging.\n')
           gh pr create \
             --title "chore(model-registry): weekly registry refresh" \
-            --body "Automated weekly refresh of \`assets/model-registry/registry.json\` from models.dev/api.json.
-
-Please review the diff to confirm the upstream data looks reasonable before merging." \
+            --body "${BODY}" \
             --base main \
             --head "${BRANCH}" \
             || echo "PR already exists for ${BRANCH}; branch updated."
@@ -84,18 +87,16 @@ Please review the diff to confirm the upstream data looks reasonable before merg
         if: startsWith(steps.refresh.outputs.status, 'failed')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pass the step output via env (not inline `${{ }}` in the script) so
+          # the value can't break the surrounding shell quoting.
+          STATUS: ${{ steps.refresh.outputs.status }}
         shell: bash
         run: |
+          # printf keeps the multi-line body inside the YAML block scalar and
+          # the single-quoted format keeps backticks literal; %s injects STATUS.
+          BODY=$(printf 'The scheduled model-registry refresh returned an error.\n\n**Status:** `%s`\n\nThe vendored `assets/model-registry/registry.json` was **not** modified; the existing snapshot is unchanged. Investigate and refresh manually with:\n\n```\ncargo run --features registry-refresh --bin refresh_model_registry\n```\n' "${STATUS}")
           gh issue create \
             --title "Model registry refresh failed ($(date -u +%Y-%m-%d))" \
-            --body "The scheduled model-registry refresh returned an error.
-
-**Status:** \`${{ steps.refresh.outputs.status }}\`
-
-The vendored \`assets/model-registry/registry.json\` was **not** modified — the release will use the existing snapshot.  Investigate and refresh manually with:
-
-\`\`\`
-cargo run --features registry-refresh --bin refresh_model_registry
-\`\`\`"
+            --body "${BODY}"
 
       # skipped: nothing to do — the vendored asset is still fresh.
