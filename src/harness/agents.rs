@@ -540,8 +540,17 @@ pub(crate) fn slugify_agent_name(name: &str, allow_underscore: bool) -> String {
     for ch in name.chars().flat_map(|c| c.to_lowercase()) {
         let keep = ch.is_ascii_alphanumeric() || ch == '-' || (allow_underscore && ch == '_');
         if keep {
-            out.push(ch);
-            last_dash = false;
+            // Track whether the emitted char was a dash so runs of LITERAL
+            // input hyphens collapse too (not only replacement dashes).
+            if ch == '-' {
+                if !last_dash {
+                    out.push(ch);
+                    last_dash = true;
+                }
+            } else {
+                out.push(ch);
+                last_dash = false;
+            }
         } else if !last_dash {
             out.push('-');
             last_dash = true;
@@ -934,6 +943,9 @@ mod tests {
         // Collapse repeats / trim edges; empty → fallback.
         assert_eq!(slugify_agent_name("--a  b--", true), "a-b");
         assert_eq!(slugify_agent_name("!!!", false), "agent");
+        // Literal input hyphens collapse too (not only replacement dashes).
+        assert_eq!(slugify_agent_name("a--b", false), "a-b");
+        assert_eq!(slugify_agent_name("a--b", true), "a-b");
     }
 
     #[test]
