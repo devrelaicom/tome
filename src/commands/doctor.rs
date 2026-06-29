@@ -489,6 +489,25 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         writeln!(out)?;
     }
 
+    // Phase 2 (native-agent expansion): unrepresented agents drop-report.
+    if let Some(u) = &report.unrepresented_agents {
+        let count = u.agents.len();
+        let harness_list = u.rules_only_harnesses.join(", ");
+        writeln!(
+            out,
+            "Agents without native form on rules-only harnesses ({harness_list}):"
+        )?;
+        writeln!(
+            out,
+            "  {warn} {count} agent{s} — reachable via MCP persona when expose_agents_as_personas is enabled",
+            s = if count == 1 { "" } else { "s" },
+        )?;
+        for a in &u.agents {
+            writeln!(out, "    {}:{}/{}", a.catalog, a.plugin, a.name)?;
+        }
+        writeln!(out)?;
+    }
+
     // Phase 6 / US5: privilege-escalation audit (FR-051).
     if let Some(p) = &report.privilege_escalation
         && !p.plugins.is_empty()

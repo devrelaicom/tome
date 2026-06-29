@@ -270,6 +270,9 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
         hooks: None,
         guardrails: None,
         agents: None,
+        // Phase 2 (native-agent expansion): `None` → omitted from the wire shape
+        // (skip_serializing_if = "Option::is_none"), byte-stable pin unchanged.
+        unrepresented_agents: None,
         privilege_escalation: None,
         personas: None,
         legacy_model_manifests: Vec::new(),
@@ -485,6 +488,7 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
         hooks: None,
         guardrails: None,
         agents: None,
+        unrepresented_agents: None,
         privilege_escalation: None,
         personas: None,
         legacy_model_manifests: Vec::new(),
@@ -629,6 +633,9 @@ fn doctor_json_phase6_fields_appended_last_in_order() {
         agents: Some(AgentsReport {
             harnesses: Vec::new(),
         }),
+        // Phase 2 (native-agent expansion): `None` → omitted from the wire shape
+        // (skip_serializing_if = "Option::is_none"), does not affect field order pin.
+        unrepresented_agents: None,
         privilege_escalation: Some(PrivilegeEscalationReport {
             plugins: Vec::new(),
         }),
@@ -696,4 +703,134 @@ fn doctor_json_phase6_fields_appended_last_in_order() {
         privilege < personas,
         "privilege_escalation < personas: {json}"
     );
+}
+
+// ---- Phase 2 (native-agent expansion): unrepresented_agents wire-shape pin --
+//
+// When agents are enabled the `unrepresented_agents` field serialises as:
+//   {"rules_only_harnesses":[...], "agents":[{"catalog":..,"plugin":..,"name":..}]}
+// When absent (no enabled agents / None) the field is elided via
+// `skip_serializing_if = "Option::is_none"` — the minimal-report pin above
+// already covers that case. This test pins the POPULATED wire shape.
+
+#[test]
+fn doctor_json_unrepresented_agents_populated_wire_shape() {
+    use tome::commands::status::{IndexHealth, ModelHealth};
+    use tome::doctor::report::{
+        ModelRegistryReport, UnrepresentedAgentEntry, UnrepresentedAgentsReport,
+        WorkspaceRegistryStatus,
+    };
+    use tome::doctor::{CatalogCacheHealth, DoctorClassification, DoctorReport};
+    use tome::index::meta::DriftStatus;
+    use tome::workspace::{ScopeKind, WorkspaceInfo, scope::ScopeSource};
+
+    let mr_info = tome::model_registry::ModelRegistry::baked().info();
+
+    let report = DoctorReport {
+        tome_version: env!("CARGO_PKG_VERSION").to_owned(),
+        workspace: WorkspaceInfo {
+            scope: ScopeKind::Global,
+            path: None,
+            source: ScopeSource::Flag,
+            catalogs: 0,
+            plugins_total: 0,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            schema_version: None,
+            embedder: None,
+            enrolled_catalogs: Vec::new(),
+            enabled_plugins: Vec::new(),
+            bound_projects: Vec::new(),
+            summary_cache: None,
+            plugin_details: None,
+        },
+        project_binding: None,
+        embedder: ModelHealth {
+            name: "bge-small-en-v1.5".to_owned(),
+            version: "1.5".to_owned(),
+            state: "ok".to_owned(),
+        },
+        reranker: ModelHealth {
+            name: "bge-reranker-base".to_owned(),
+            version: "1".to_owned(),
+            state: "ok".to_owned(),
+        },
+        summariser: ModelHealth {
+            name: "qwen2.5-0.5b-instruct".to_owned(),
+            version: "2.5".to_owned(),
+            state: "ok".to_owned(),
+        },
+        index: IndexHealth {
+            present: false,
+            schema_version: None,
+            plugins_enabled: 0,
+            skills_indexed: 0,
+            size_bytes: 0,
+            integrity_ok: true,
+        },
+        drift: DriftStatus::None,
+        catalogs: Vec::<CatalogCacheHealth>::new(),
+        workspace_registry: WorkspaceRegistryStatus {
+            present: false,
+            tracked: 0,
+        },
+        harnesses: Vec::new(),
+        effective_harness_list: None,
+        harness_rules: Vec::new(),
+        harness_mcp: Vec::new(),
+        detected_uninstalled_harnesses: Vec::new(),
+        prompts: None,
+        orphan_data_dirs: None,
+        entry_counts: None,
+        hooks: None,
+        guardrails: None,
+        agents: None,
+        unrepresented_agents: Some(UnrepresentedAgentsReport {
+            rules_only_harnesses: vec!["cline".to_owned(), "junie".to_owned()],
+            agents: vec![UnrepresentedAgentEntry {
+                catalog: "mycat".to_owned(),
+                plugin: "myplugin".to_owned(),
+                name: "myagent".to_owned(),
+            }],
+        }),
+        privilege_escalation: None,
+        personas: None,
+        legacy_model_manifests: Vec::new(),
+        unconverted_plugins: Vec::new(),
+        meta_skills: Vec::new(),
+        telemetry: None,
+        providers: Vec::new(),
+        model_registry: ModelRegistryReport {
+            source: "baked".to_owned(),
+            fetched_at: mr_info.fetched_at.clone(),
+            model_count: mr_info.model_count,
+            override_corrupt: false,
+        },
+        overall: DoctorClassification::Ok,
+        suggested_fixes: Vec::new(),
+    };
+
+    let json = serde_json::to_value(&report).expect("serialise");
+
+    // `unrepresented_agents` must be present and carry both sub-fields.
+    let u = json
+        .get("unrepresented_agents")
+        .expect("unrepresented_agents must be present when Some");
+
+    let harnesses = u["rules_only_harnesses"]
+        .as_array()
+        .expect("rules_only_harnesses is an array");
+    assert_eq!(
+        harnesses.len(),
+        2,
+        "rules_only_harnesses length: {harnesses:?}"
+    );
+    assert_eq!(harnesses[0], "cline");
+    assert_eq!(harnesses[1], "junie");
+
+    let agents = u["agents"].as_array().expect("agents is an array");
+    assert_eq!(agents.len(), 1, "agents length: {agents:?}");
+    assert_eq!(agents[0]["catalog"], "mycat");
+    assert_eq!(agents[0]["plugin"], "myplugin");
+    assert_eq!(agents[0]["name"], "myagent");
 }
