@@ -728,9 +728,7 @@ pub(crate) fn devin_tools(tools: &[String]) -> Vec<String> {
 }
 
 /// Pi: comma-separated string (`read, grep, bash`). `None` when nothing maps.
-// Consumed by the Pi harness module (Task 8). The allow silences the
-// dead-code lint until that caller lands.
-#[allow(dead_code)]
+// Consumed by the Pi harness module (Phase 2 / Task 7).
 pub(crate) fn pi_tools(tools: &[String]) -> Option<String> {
     let mapped = map_tools_dedup(tools, |k| match k {
         CcToolKind::Read => Some("read"),
