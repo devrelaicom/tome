@@ -572,6 +572,12 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.8](https://github.com/devrelaicom/tome/compare/v0.7.7...v0.7.8) - 2026-06-29
+
+### Added
+
+- *(model-registry)* models.dev-sourced registry + map_model overhaul; fix OpenCode/Cursor agent emit ([#267](https://github.com/devrelaicom/tome/pull/267))
+
 ## [0.7.7](https://github.com/devrelaicom/tome/compare/v0.7.6...v0.7.7) - 2026-06-26
 
 ### Added
