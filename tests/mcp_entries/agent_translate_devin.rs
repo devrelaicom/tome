@@ -47,5 +47,34 @@ fn devin_dir_per_agent_allowed_tools_alias_model() {
 }
 
 #[test]
+fn devin_no_description_haiku_dropped_privileged_dropped() {
+    let reg = tome::model_registry::test_registry();
+    let canonical = CanonicalAgent {
+        catalog: "cat".into(),
+        plugin: "myplugin".into(),
+        name: "helper".into(),
+        description: None,
+        body: "You help.\n".into(),
+        model: Some("haiku".into()),
+        tools: None,
+        disallowed_tools: None,
+        hooks: Some(serde_json::json!({"x": 1})),
+        mcp_servers: None,
+        permission_mode: Some("ask".into()),
+    };
+    let t = DEVIN
+        .translate_agent(&canonical, false, &reg)
+        .expect("translate");
+    // description omitted when absent — Devin does NOT synthesize one.
+    assert!(!t.rendered.contains("description:"), "{}", t.rendered);
+    // haiku has no Devin alias → model is dropped, not emitted.
+    assert!(t.dropped_fields.contains(&"model".to_owned()));
+    assert!(!t.rendered.contains("model:"), "{}", t.rendered);
+    // privileged fields recorded as dropped.
+    assert!(t.dropped_fields.contains(&"hooks".to_owned()));
+    assert!(t.dropped_fields.contains(&"permissionMode".to_owned()));
+}
+
+#[test]
 #[ignore = "live-probe: confirm Devin reads .devin/agents/<plugin>__<name>/AGENT.md (dir-per-agent)"]
 fn devin_reads_dir_per_agent_live_probe() {}

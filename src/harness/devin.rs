@@ -127,22 +127,26 @@ impl HarnessModule for Devin {
         Some(AgentFormat::MarkdownYaml)
     }
 
-    /// Devin CLI: dir-per-agent `<plugin>__<name>/AGENT.md`. The `filename`
-    /// returned is the SUBDIR name (no extension) — the reconciler appends
-    /// `/AGENT.md` to form the final on-disk path.
-    ///
-    /// `description` is optional; emit 1:1 when present, else omit entirely
-    /// (do NOT synthesize). Tools are emitted under the `allowed-tools` key
-    /// (Devin-lowercase, `Bash`→`exec`). `model` passes `opus`/`sonnet`
-    /// through verbatim (Devin's own aliases); `haiku`/concrete ids are
-    /// dropped. Privileged fields (`hooks`, `mcpServers`, `permissionMode`)
-    /// and `disallowedTools` are dropped and recorded.
+    /// Devin lays out one directory per agent: `<plugin>__<name>/AGENT.md`.
     fn agent_path_strategy(&self) -> AgentPathStrategy {
         AgentPathStrategy::DirPerAgent {
             inner_filename: "AGENT.md",
         }
     }
 
+    /// Translate a canonical agent into Devin's MD+YAML format.
+    ///
+    /// The `filename` returned is the SUBDIR name (no extension) —
+    /// `<plugin>__<name>` — and the reconciler appends `/AGENT.md` to form
+    /// the final on-disk path.
+    ///
+    /// `description` is optional; emitted 1:1 when present, omitted entirely
+    /// otherwise (do NOT synthesize). Tools are emitted under the
+    /// `allowed-tools` key (Devin-lowercase, `Bash`→`exec`). `model` passes
+    /// `opus`/`sonnet` through verbatim (Devin's own aliases);
+    /// `haiku`/concrete ids are dropped. Privileged fields (`hooks`,
+    /// `mcpServers`, `permissionMode`) and `disallowedTools` are dropped and
+    /// recorded in `dropped_fields`.
     fn translate_agent(
         &self,
         canonical: &CanonicalAgent,
