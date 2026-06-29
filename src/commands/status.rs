@@ -38,6 +38,9 @@ pub fn run(args: StatusArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     // Phase 11 / US5 (T065): augment with per-harness MCP integration state
     // (needs the ResolvedScope's project root, which `assemble_report` lacks).
     fill_harness_mcp(&mut report, scope, &paths);
+    // Phase 2 / Task 14: populate the unrepresented-agents count (needs the
+    // effective harness list and DB — read-only, best-effort).
+    fill_unrepresented_agents(&mut report, scope, &paths);
     emit(&report, mode)?;
     if !matches!(report.overall, OverallHealth::Ok) {
         std::process::exit(1);
@@ -114,6 +117,13 @@ pub struct StatusReport {
     /// populates it via [`fill_harness_mcp`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub harness_mcp: Vec<HarnessMcpStatus>,
+    /// Phase 2 (native-agent expansion) / Task 14: the number of enabled
+    /// agents that have no native representation on any rules-only harness in
+    /// the current effective harness list. `0` when there are no rules-only
+    /// harnesses among the effective modules, when there are no enabled agents,
+    /// or when the DB is absent. Always serialised (plain `u32`); the minimal
+    /// case emits `"unrepresented_agents":0`.
+    pub unrepresented_agents: u32,
 }
 
 // ---- Assembly --------------------------------------------------------------
@@ -189,6 +199,8 @@ pub fn assemble_report(
         // `run` fills this via `fill_harness_mcp` (needs the project root /
         // effective list, which `Scope` alone doesn't carry).
         harness_mcp: Vec::new(),
+        // `run` fills this via `fill_unrepresented_agents` (read-only).
+        unrepresented_agents: 0,
     })
 }
 
@@ -222,6 +234,44 @@ fn fill_harness_mcp(report: &mut StatusReport, scope: &ResolvedScope, paths: &Pa
             state: m.health.as_str().to_owned(),
         })
         .collect();
+}
+
+/// Phase 2 / Task 14: populate `report.unrepresented_agents` with the count of
+/// enabled agents when any rules-only (non-opt-in) harness is among the
+/// effective modules. Read-only; silently leaves the field 0 on any failure
+/// (status must always render). "Rules-only" means `!supports_native_agents()`
+/// AND `!is_opt_in_target()` — matching the doctor drop-report definition.
+fn fill_unrepresented_agents(report: &mut StatusReport, scope: &ResolvedScope, paths: &Paths) {
+    // Need a resolvable effective list to know if any rules-only harness is present.
+    let Some(effective) = resolve_effective_for_status(scope, paths) else {
+        return;
+    };
+
+    // Check whether any effective harness is rules-only. Look up each harness
+    // by name (alias-aware) and test its trait methods. Unrecognised names are
+    // treated as rules-only-capable (safe: they cannot have a native-agent dir
+    // either way) but we conservatively skip them to avoid false positives.
+    let has_rules_only = effective.harnesses.iter().any(|h| {
+        crate::harness::lookup(&h.name)
+            .is_some_and(|m| !m.supports_native_agents() && !m.is_opt_in_target())
+    });
+
+    if !has_rules_only {
+        return;
+    }
+
+    // Count enabled agents from the DB. Guard on the DB existing.
+    if !paths.index_db.is_file() {
+        return;
+    }
+    let Ok(conn) = index::open_read_only(&paths.index_db) else {
+        return;
+    };
+    let ws_name = scope.scope.name();
+    if let Ok(agents) = crate::index::skills::enabled_agents_for_workspace(&conn, ws_name.as_str())
+    {
+        report.unrepresented_agents = u32::try_from(agents.len()).unwrap_or(u32::MAX);
+    }
 }
 
 /// Resolve the effective harness list for `status` (read-only), or `None` on any
@@ -565,13 +615,21 @@ fn render_panel(report: &StatusReport) -> Vec<String> {
         report.current_workspace,
         report.current_scope
     ));
-    lines.push(format!(
-        "{} {} skills, {} commands, {} agents",
-        key("Entries:"),
-        report.entries.skills,
-        report.entries.commands,
-        report.entries.agents
-    ));
+    let agents_line = if report.unrepresented_agents > 0 {
+        format!(
+            "{} skills, {} commands, {} agents ({} not natively representable)",
+            report.entries.skills,
+            report.entries.commands,
+            report.entries.agents,
+            report.unrepresented_agents,
+        )
+    } else {
+        format!(
+            "{} skills, {} commands, {} agents",
+            report.entries.skills, report.entries.commands, report.entries.agents,
+        )
+    };
+    lines.push(format!("{} {}", key("Entries:"), agents_line));
     lines.push(format!(
         "{} {} enrolled",
         key("Catalogs:"),
@@ -900,11 +958,13 @@ mod harness_mcp_status_tests {
             reindexed_at: None,
             models_on_disk_bytes: 0,
             harness_mcp,
+            unrepresented_agents: 0,
         }
     }
 
     /// T065: `harness_mcp` is `skip_serializing_if`-gated — an EMPTY Vec omits
-    /// the key, so the pre-Phase-11 `tome status --json` byte pin is unchanged.
+    /// the key. Task 14: `unrepresented_agents` (plain u32) is always emitted;
+    /// the minimal JSON now ends with `"models_on_disk_bytes":0,"unrepresented_agents":0}`.
     #[test]
     fn empty_harness_mcp_is_omitted_from_json() {
         let json = serde_json::to_string(&base_report(Vec::new())).unwrap();
@@ -912,12 +972,64 @@ mod harness_mcp_status_tests {
             !json.contains("harness_mcp"),
             "empty harness_mcp must be omitted; got: {json}",
         );
-        // It is also the LAST field, so a populated value appends last.
-        assert!(json.ends_with("\"models_on_disk_bytes\":0}"));
+        // Task 14: `unrepresented_agents` is a plain u32 — always serialised.
+        // The minimal JSON ends with models_on_disk_bytes then unrepresented_agents.
+        assert!(
+            json.ends_with("\"models_on_disk_bytes\":0,\"unrepresented_agents\":0}"),
+            "minimal pin: expected models_on_disk_bytes then unrepresented_agents; got: {json}",
+        );
     }
 
-    /// T065: a populated `harness_mcp` appends LAST, carrying the
-    /// ok/manual/unverified/drift vocabulary.
+    /// Task 14: `unrepresented_agents` serialises after `harness_mcp` (last).
+    /// When harness_mcp is absent (empty, skip_serializing_if), unrepresented_agents
+    /// follows models_on_disk_bytes. When harness_mcp is present, unrepresented_agents
+    /// follows it (appended LAST).
+    #[test]
+    fn unrepresented_agents_appended_last() {
+        // Zero agents + no harness_mcp → field present with value 0, last.
+        let json_zero = serde_json::to_string(&base_report(Vec::new())).unwrap();
+        assert!(
+            json_zero.ends_with("\"unrepresented_agents\":0}"),
+            "zero unrepresented_agents must be last; got: {json_zero}",
+        );
+        assert!(
+            json_zero.contains("\"unrepresented_agents\":0"),
+            "zero count must still emit the key; got: {json_zero}",
+        );
+
+        // Populated count → last.
+        let mut rep = base_report(Vec::new());
+        rep.unrepresented_agents = 5;
+        let json_pop = serde_json::to_string(&rep).unwrap();
+        assert!(
+            json_pop.ends_with("\"unrepresented_agents\":5}"),
+            "populated unrepresented_agents must be last; got: {json_pop}",
+        );
+
+        // With harness_mcp present: unrepresented_agents is after harness_mcp.
+        let rep_with_mcp = base_report(vec![HarnessMcpStatus {
+            harness: "gemini".to_string(),
+            state: "ok".to_string(),
+        }]);
+        let json_mcp = serde_json::to_string(&rep_with_mcp).unwrap();
+        let mcp_pos = json_mcp.find("harness_mcp").unwrap();
+        let ua_pos = json_mcp.find("unrepresented_agents").unwrap();
+        assert!(
+            ua_pos > mcp_pos,
+            "unrepresented_agents must come after harness_mcp; got: {json_mcp}",
+        );
+        assert!(
+            json_mcp.ends_with("\"unrepresented_agents\":0}"),
+            "unrepresented_agents must be last even with harness_mcp; got: {json_mcp}",
+        );
+    }
+
+    /// T065: a populated `harness_mcp` precedes `unrepresented_agents`, carrying
+    /// the ok/manual/unverified/drift vocabulary.
+    ///
+    /// Task 14: `unrepresented_agents` is now the last key; `harness_mcp` is
+    /// second-to-last when populated (first-to-last when empty, since it's
+    /// skip_serializing_if-gated and omitted).
     #[test]
     fn populated_harness_mcp_appends_last() {
         let report = base_report(vec![
@@ -935,13 +1047,26 @@ mod harness_mcp_status_tests {
             },
         ]);
         let json = serde_json::to_string(&report).unwrap();
+        // harness_mcp comes before unrepresented_agents (Task 14 adds that last).
         assert!(
-            json.ends_with(
+            json.contains(
                 "\"harness_mcp\":[{\"harness\":\"crush\",\"state\":\"ok\"},\
                  {\"harness\":\"jetbrains-ai\",\"state\":\"manual\"},\
-                 {\"harness\":\"pi\",\"state\":\"unverified\"}]}"
+                 {\"harness\":\"pi\",\"state\":\"unverified\"}]"
             ),
-            "harness_mcp must append last with the state vocabulary; got: {json}",
+            "harness_mcp must carry the state vocabulary; got: {json}",
+        );
+        // unrepresented_agents is the actual last key.
+        assert!(
+            json.ends_with("\"unrepresented_agents\":0}"),
+            "unrepresented_agents must be the last key; got: {json}",
+        );
+        // The harness_mcp entry appears before unrepresented_agents in the JSON.
+        let mcp_pos = json.find("harness_mcp").unwrap();
+        let ua_pos = json.find("unrepresented_agents").unwrap();
+        assert!(
+            mcp_pos < ua_pos,
+            "harness_mcp must precede unrepresented_agents; got: {json}",
         );
     }
 

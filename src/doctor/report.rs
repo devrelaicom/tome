@@ -559,6 +559,30 @@ pub struct AgentsReport {
     pub harnesses: Vec<AgentHarnessEntry>,
 }
 
+/// One enabled agent with no native form on the rules-only harnesses.
+///
+/// Phase 2 (native-agent expansion) drop-report: these agents are enabled in
+/// the workspace but cannot be translated to any rules-only harness (Cline,
+/// Antigravity, Crush, JetBrains AI, Junie). They remain reachable via MCP
+/// prompt personas when `expose_agents_as_personas` is enabled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnrepresentedAgentEntry {
+    pub catalog: String,
+    pub plugin: String,
+    pub name: String,
+}
+
+/// Phase 2 drop-report: enabled agents that have no native agent file on any
+/// rules-only harness (Cline, Antigravity, Crush, JetBrains AI, Junie). They
+/// remain reachable only as MCP-prompt personas (when `expose_agents_as_personas`
+/// is enabled). Empty `agents` when every harness is native-supporting or no
+/// agents are enabled — keeps the byte-stable wire shape minimal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnrepresentedAgentsReport {
+    pub rules_only_harnesses: Vec<String>,
+    pub agents: Vec<UnrepresentedAgentEntry>,
+}
+
 /// One agent carrying privilege-escalation fields. `name` is the agent's
 /// `<name>`; `fields` lists which of `hooks` / `mcpServers` /
 /// `permissionMode` the SOURCE agent declares (read regardless of
@@ -867,6 +891,14 @@ pub struct DoctorReport {
     /// a workspace context.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agents: Option<AgentsReport>,
+    /// Phase 2 (native-agent expansion): enabled agents with no native form on
+    /// the rules-only harnesses (Cline, Antigravity, Crush, JetBrains AI,
+    /// Junie). Workspace-scoped (read-only; writes nothing) — surfaced whenever
+    /// the workspace has at least one enabled agent, in any scope including
+    /// `--scope global`. `None` when there are no enabled agents (keeps the
+    /// byte-stable wire shape unchanged for a clean system).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unrepresented_agents: Option<UnrepresentedAgentsReport>,
     /// Phase 6 / US5: privilege-escalation audit (FR-051). `None` outside
     /// a workspace context.
     #[serde(skip_serializing_if = "Option::is_none")]

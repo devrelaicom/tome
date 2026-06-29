@@ -23,9 +23,12 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::error::TomeError;
+use crate::harness::agents::{self, CanonicalAgent, TranslatedAgent};
 use crate::harness::open_plugins::TOME_OP_NAME;
 use crate::harness::{
-    BlockBodyStyle, EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy,
+    AgentFormat, BlockBodyStyle, EntryShape, FileFormat, HarnessModule, McpDialect,
+    RulesFileStrategy,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Goose.
@@ -96,6 +99,79 @@ impl HarnessModule for Goose {
             emit_env: true,
             extra_fields: &[],
         }
+    }
+
+    fn supports_native_agents(&self) -> bool {
+        true
+    }
+
+    fn agent_dir(&self, project_root: &Path) -> Option<PathBuf> {
+        Some(project_root.join(".agents/agents"))
+    }
+
+    fn agent_format(&self) -> Option<AgentFormat> {
+        Some(AgentFormat::MarkdownYaml)
+    }
+
+    /// Goose Custom Agent: MD+YAML; `name` required (underscores OK → emit the
+    /// displayed name verbatim); `description` optional; `model` is a bare
+    /// provider id (registry-resolved); NO per-agent tools (session-inherited).
+    fn translate_agent(
+        &self,
+        canonical: &CanonicalAgent,
+        clashes: bool,
+        models: &crate::model_registry::ModelRegistry,
+    ) -> Result<TranslatedAgent, TomeError> {
+        let mut frontmatter: Vec<(String, serde_yaml::Value)> = Vec::new();
+        let mut dropped: Vec<String> = Vec::new();
+
+        let name = agents::displayed_name(&canonical.plugin, &canonical.name, clashes);
+        frontmatter.push(("name".to_owned(), serde_yaml::Value::String(name.clone())));
+        if let Some(desc) = &canonical.description {
+            frontmatter.push((
+                "description".to_owned(),
+                serde_yaml::Value::String(desc.clone()),
+            ));
+        }
+        if let Some(src) = canonical.model.as_deref() {
+            match agents::map_model(models, "goose", src) {
+                Some(m) => {
+                    frontmatter.push(("model".to_owned(), serde_yaml::Value::String(m)));
+                }
+                None => dropped.push("model".to_owned()),
+            }
+        }
+        // Goose Custom Agents inherit session extensions/tools — no carrier.
+        if canonical.tools.is_some() {
+            dropped.push("tools".to_owned());
+        }
+        if canonical.disallowed_tools.is_some() {
+            dropped.push("disallowedTools".to_owned());
+        }
+        if canonical.hooks.is_some() {
+            dropped.push("hooks".to_owned());
+        }
+        if canonical.mcp_servers.is_some() {
+            dropped.push("mcpServers".to_owned());
+        }
+        if canonical.permission_mode.is_some() {
+            dropped.push("permissionMode".to_owned());
+        }
+
+        let rendered = agents::render_markdown_yaml(&frontmatter, &canonical.body);
+        let filename = agents::agent_filename(
+            &canonical.plugin,
+            &canonical.name,
+            agents::agent_extension(AgentFormat::MarkdownYaml),
+        );
+        Ok(TranslatedAgent {
+            dir: PathBuf::from(".agents/agents"),
+            filename,
+            displayed_name: name,
+            format: AgentFormat::MarkdownYaml,
+            rendered,
+            dropped_fields: dropped,
+        })
     }
 }
 

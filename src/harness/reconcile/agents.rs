@@ -145,6 +145,21 @@ pub(crate) fn reconcile_agents(
     // reconcile is unchanged).
     let snap_names: HashSet<&str> = snapshots.iter().map(|s| s.name.as_str()).collect();
     with_effective_modules(|mods| {
+        // Co-ownership (Copilot): a non-live harness must NOT mass-clean an
+        // agent_dir that a LIVE native-supporting harness also owns — otherwise
+        // selecting only one of two co-owners (copilot / copilot-cli, same
+        // `.github/agents/`) would delete the live one's freshly-written files.
+        // Computed once, up front, so the rule is order-independent.
+        let live_owned_dirs: HashSet<PathBuf> = mods
+            .iter()
+            .filter(|m| {
+                snap_names.contains(m.name())
+                    && effective_names.contains(m.name())
+                    && m.supports_native_agents()
+            })
+            .filter_map(|m| m.agent_dir(project_root))
+            .collect();
+
         for m in mods {
             let name = m.name();
             if !snap_names.contains(name) {
@@ -169,9 +184,12 @@ pub(crate) fn reconcile_agents(
                     outcome,
                     &mut recon,
                 )
+            } else if live_owned_dirs.contains(&dir) {
+                // A live co-owner maintains this dir; leave it untouched.
+                Action::LeftAlone
             } else {
-                // Non-live or non-supporting: remove all Tome-owned files.
-                cleanup_all_owned_agents(name, &dir, outcome, &mut recon)
+                // Non-live or non-supporting: remove all Tome-owned files/dirs.
+                cleanup_all_owned_agents(name, &dir, m.agent_path_strategy(), outcome, &mut recon)
             };
             recon.actions.insert(name.to_string(), action);
         }
@@ -277,14 +295,26 @@ fn emit_agents_for_harness(
                 continue;
             }
         };
-        let target = dir.join(&translated.filename);
-        // S-1 defence-in-depth: the agent `name` is validated as a single
-        // safe path segment at index time, but assert here too that the
-        // joined target stays directly inside `dir` (no `ParentDir`/separator
-        // component snuck through the filename). A failed assert records
-        // `AgentTranslationFailed` on the forward-progress path and SKIPS the
-        // write — never write outside `dir`.
-        if target.parent() != Some(dir) {
+        let strategy = m.agent_path_strategy();
+        let (target, containment_dir): (PathBuf, PathBuf) = match strategy {
+            crate::harness::AgentPathStrategy::FlatFile => {
+                (dir.join(&translated.filename), dir.to_path_buf())
+            }
+            crate::harness::AgentPathStrategy::DirPerAgent { inner_filename } => {
+                let sub = dir.join(&translated.filename); // filename == `<plugin>__<name>`
+                (sub.join(inner_filename), sub)
+            }
+        };
+        // Containment: the agent's own node (file, or dir-per-agent subdir) must
+        // sit directly inside `dir`. For DirPerAgent that is `containment_dir`'s
+        // parent; for FlatFile it is the file's parent.
+        let parent_ok = match strategy {
+            crate::harness::AgentPathStrategy::FlatFile => target.parent() == Some(dir),
+            crate::harness::AgentPathStrategy::DirPerAgent { .. } => {
+                containment_dir.parent() == Some(dir)
+            }
+        };
+        if !parent_ok {
             if recon.first_error.is_none() {
                 recon.first_error = Some(TomeError::AgentTranslationFailed {
                     agent: format!("{}/{}", agent.canonical.plugin, agent.canonical.name),
@@ -326,31 +356,15 @@ fn emit_agents_for_harness(
         }
     }
 
-    // Remove owned files for plugins no longer enabled. We scan once per
+    // Remove owned files/dirs for plugins no longer enabled. We scan once per
     // plugin known to OWN a file in `dir` but no longer enabled; the owned-
     // file glob already filters by `<plugin>__` prefix. Enumerate the dir's
     // owned files for any plugin not in `enabled_plugins`.
+    let removal_strategy = m.agent_path_strategy();
     match removed_disabled_owned(dir, enabled_plugins) {
         Ok(paths) => {
             for path in paths {
-                // Symlink refusal on this owned-file removal is the agents
-                // sink's concern → exit 45, never `Io` (7). Run the SSOT guard
-                // (FR-007) explicitly and map its refusal onto the agents
-                // variant; `remove_standalone` then performs the actual unlink
-                // (it re-checks via the same guard, idempotent here).
-                if crate::util::refuse_symlinked_component(&path).is_err() {
-                    if recon.first_error.is_none() {
-                        let label = path
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("agent")
-                            .to_string();
-                        recon.first_error =
-                            Some(TomeError::AgentTranslationFailed { agent: label });
-                    }
-                    continue;
-                }
-                match rules_file::remove_standalone(&path) {
+                match remove_owned_agent(&path, removal_strategy) {
                     Ok(()) => {
                         removed = true;
                         record_action(
@@ -387,13 +401,14 @@ fn emit_agents_for_harness(
     }
 }
 
-/// Remove EVERY Tome-owned `<plugin>__*` agent file from `dir` (orphan
+/// Remove EVERY Tome-owned `<plugin>__*` agent file/dir from `dir` (orphan
 /// cleanup for a non-live / non-supporting harness `name`). Since this
-/// harness is not emitting, ALL of its Tome-owned files are removed
+/// harness is not emitting, ALL of its Tome-owned entries are removed
 /// regardless of which plugins are currently enabled.
 fn cleanup_all_owned_agents(
     name: &str,
     dir: &Path,
+    strategy: crate::harness::AgentPathStrategy,
     outcome: &mut SyncOutcome,
     recon: &mut AgentReconciliation,
 ) -> Action {
@@ -401,28 +416,7 @@ fn cleanup_all_owned_agents(
     match all_owned_in_dir(dir) {
         Ok(paths) => {
             for path in paths {
-                // CON-1: a symlink refusal on this owned-file removal is the
-                // agents sink's concern → exit 45 (AgentTranslationFailed),
-                // never generic `Io` (7). Mirror the live-removal path
-                // (`emit_agents_for_harness`): run the SSOT guard (FR-007)
-                // explicitly and map its refusal onto the agents variant before
-                // `remove_standalone` performs the unlink (it re-checks via the
-                // same guard, idempotent here). Without this pre-check the
-                // refusal would flow through `remove_standalone`'s `refuse_symlink`
-                // → `Io` (7), the very asymmetry MAJOR-1 flagged.
-                if crate::util::refuse_symlinked_component(&path).is_err() {
-                    if recon.first_error.is_none() {
-                        let label = path
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("agent")
-                            .to_string();
-                        recon.first_error =
-                            Some(TomeError::AgentTranslationFailed { agent: label });
-                    }
-                    continue;
-                }
-                match rules_file::remove_standalone(&path) {
+                match remove_owned_agent(&path, strategy) {
                     Ok(()) => {
                         any_removed = true;
                         record_action(outcome, name, SyncSubsystem::Agents, &path, Action::Removed);
@@ -445,6 +439,29 @@ fn cleanup_all_owned_agents(
         Action::Removed
     } else {
         Action::LeftAlone
+    }
+}
+
+/// Remove one owned agent node, honouring the harness's path strategy. Refuses
+/// a symlinked component first → exit 45 (the agents-sink dedicated code).
+fn remove_owned_agent(
+    path: &Path,
+    strategy: crate::harness::AgentPathStrategy,
+) -> Result<(), TomeError> {
+    crate::util::refuse_symlinked_component(path).map_err(|_| {
+        TomeError::AgentTranslationFailed {
+            agent: path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("agent")
+                .to_string(),
+        }
+    })?;
+    match strategy {
+        crate::harness::AgentPathStrategy::FlatFile => rules_file::remove_standalone(path),
+        crate::harness::AgentPathStrategy::DirPerAgent { .. } => {
+            std::fs::remove_dir_all(path).map_err(TomeError::Io)
+        }
     }
 }
 
@@ -869,7 +886,13 @@ mod tests {
             actions: std::collections::HashMap::new(),
             first_error: None,
         };
-        let action = cleanup_all_owned_agents("stub", &dir, &mut outcome, &mut recon);
+        let action = cleanup_all_owned_agents(
+            "stub",
+            &dir,
+            crate::harness::AgentPathStrategy::FlatFile,
+            &mut outcome,
+            &mut recon,
+        );
 
         // The refusal is recorded on the forward-progress `first_error` (the
         // shape this fn already uses) and must carry the agents-sink dedicated
@@ -895,5 +918,334 @@ mod tests {
         assert!(base.join("decoy.md").is_file(), "decoy target untouched");
         // No removal succeeded → the aggregate action is LeftAlone, not Removed.
         assert_eq!(action, Action::LeftAlone);
+    }
+
+    /// Co-ownership: a not-live native-supporting harness must NOT delete files
+    /// in a dir that a LIVE native-supporting harness co-owns (the Copilot
+    /// `.github/agents/` hazard). Two stubs share one agent_dir; one is live.
+    #[test]
+    fn coowned_dir_is_not_cleaned_by_a_non_live_coowner() {
+        // Serialize all lib tests that write HARNESS_MODULES_OVERRIDE so cargo's
+        // parallel test runner cannot let two override-installing tests clobber
+        // each other (Task 11 will add a second override-installing test here).
+        let _override_guard = crate::harness::HARNESS_OVERRIDE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let home = TempDir::new().expect("home tempdir");
+        let paths = Paths::from_root(home.path().join(".tome"));
+        std::fs::create_dir_all(&paths.root).expect("create tome root");
+        let project = home.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project root");
+
+        // Two native-supporting stubs sharing ONE agent_dir; one live, one not.
+        let shared = project.join(".shared/agents");
+        let live = StubHarness::default()
+            .with_name("co-live")
+            .with_native_agents(AgentFormat::MarkdownYaml)
+            .with_agent_dir(shared.clone());
+        let idle = StubHarness::default()
+            .with_name("co-idle")
+            .with_native_agents(AgentFormat::MarkdownYaml)
+            .with_agent_dir(shared.clone());
+
+        std::fs::create_dir_all(&shared).expect("create shared agent_dir");
+        let owned = shared.join("plugin-keep__reviewer.md");
+        std::fs::write(&owned, "---\nname: reviewer\n---\nbody\n").expect("seed owned agent file");
+
+        bootstrap_db(&paths);
+        insert_enabled_agent(&paths, "cat", "plugin-keep", "reviewer");
+
+        let workspace = WorkspaceName::global();
+        let deps = SyncDeps {
+            paths: &paths,
+            home_root: home.path(),
+            workspace_name: &workspace,
+            force: false,
+            only_harness: None,
+        };
+        let snapshots = vec![
+            crate::harness::sync::snapshot_for_test(&live, &project, home.path()),
+            crate::harness::sync::snapshot_for_test(&idle, &project, home.path()),
+        ];
+        // Only `co-live` is live; `co-idle` is NOT in the effective set.
+        let effective_names: HashSet<String> = std::iter::once("co-live".to_string()).collect();
+        let mut outcome = SyncOutcome::default();
+
+        // Install both stubs into the process-global registry so
+        // `with_effective_modules` sees them (otherwise it walks
+        // `SUPPORTED_HARNESSES` whose real harnesses never match "co-live" /
+        // "co-idle", making the rule a no-op vacuously — not a real proof).
+        *crate::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("override write lock") =
+            Some(vec![Box::new(live.clone()), Box::new(idle.clone())]);
+        let result = reconcile_agents(
+            &project,
+            &deps,
+            &effective_names,
+            &snapshots,
+            false,
+            &mut outcome,
+        );
+        // Restore the override immediately — before any assert that could panic.
+        *crate::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("override write lock (restore)") = None;
+
+        result.expect("reconcile ok");
+
+        // The owned file written by the live co-owner survives the idle co-owner's pass.
+        assert!(
+            owned.is_file(),
+            "a non-live co-owner must NOT delete a live co-owner's file in a shared agent_dir"
+        );
+    }
+
+    /// Phase 2 — Copilot co-ownership (Task 10 / Task 9 reconciler rule).
+    ///
+    /// Selecting only `copilot` (live) while `copilot-cli` is NOT in the
+    /// effective set must NOT let `copilot-cli`'s cleanup pass delete
+    /// `.github/agents/<plugin>__<name>.agent.md` that `copilot` just wrote.
+    ///
+    /// Uses the REAL `COPILOT` + `COPILOT_CLI` modules (via
+    /// `HARNESS_MODULES_OVERRIDE`) instead of anonymous stubs, so this test
+    /// directly proves the production co-ownership is wired correctly.
+    #[test]
+    fn copilot_coownership_copilot_live_copilot_cli_idle_file_survives() {
+        use crate::harness::copilot::COPILOT;
+        use crate::harness::copilot_cli::COPILOT_CLI;
+
+        // Serialize all lib tests that write HARNESS_MODULES_OVERRIDE so cargo's
+        // parallel test runner cannot let two override-installing tests clobber
+        // each other.
+        let _override_guard = crate::harness::HARNESS_OVERRIDE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let home = TempDir::new().expect("home tempdir");
+        let paths = Paths::from_root(home.path().join(".tome"));
+        std::fs::create_dir_all(&paths.root).expect("create tome root");
+        let project = home.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project root");
+
+        // The shared `.github/agents/` directory that both modules point at.
+        let shared_dir = project.join(".github/agents");
+        std::fs::create_dir_all(&shared_dir).expect("create .github/agents");
+
+        // Pre-seed the owned agent file (as if a prior sync wrote it).
+        // `.agent.md` double extension — same as translate_copilot_agent emits.
+        let owned = shared_dir.join("myplugin__reviewer.agent.md");
+        std::fs::write(
+            &owned,
+            "---\nname: reviewer\ndescription: Reviews code.\n---\nYou review code.\n",
+        )
+        .expect("seed owned agent file");
+
+        bootstrap_db(&paths);
+        insert_enabled_agent(&paths, "cat", "myplugin", "reviewer");
+
+        let workspace = WorkspaceName::global();
+        let deps = SyncDeps {
+            paths: &paths,
+            home_root: home.path(),
+            workspace_name: &workspace,
+            force: false,
+            only_harness: None,
+        };
+
+        // Snapshot both real modules.
+        let snapshots = vec![
+            crate::harness::sync::snapshot_for_test(&COPILOT, &project, home.path()),
+            crate::harness::sync::snapshot_for_test(&COPILOT_CLI, &project, home.path()),
+        ];
+        // Only `copilot` is live; `copilot-cli` is NOT in the effective set.
+        let effective_names: HashSet<String> = std::iter::once("copilot".to_string()).collect();
+        let mut outcome = SyncOutcome::default();
+
+        // Install both real modules so `with_effective_modules` resolves them.
+        *crate::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("override write lock") = Some(vec![
+            Box::new(crate::harness::copilot::Copilot),
+            Box::new(crate::harness::copilot_cli::CopilotCli),
+        ]);
+
+        let result = reconcile_agents(
+            &project,
+            &deps,
+            &effective_names,
+            &snapshots,
+            false,
+            &mut outcome,
+        );
+
+        // Restore the override before any assert that could panic.
+        *crate::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("override write lock (restore)") = None;
+
+        result.expect("reconcile ok");
+
+        // The owned `.agent.md` file survives: `copilot-cli` (not live) must
+        // NOT clean up the shared `.github/agents/` dir because `copilot`
+        // (live) co-owns it.
+        assert!(
+            owned.is_file(),
+            "copilot-cli (idle) must NOT delete files in .github/agents/ while copilot (live) co-owns it"
+        );
+    }
+
+    /// Task 11: A `DirPerAgent { inner_filename: "AGENT.md" }` stub emits a
+    /// subdirectory per agent (containing the inner file) and removal cleans
+    /// the entire subdirectory.
+    ///
+    /// Asserts:
+    ///   - After a sync with one enabled agent, `<dir>/<plugin>__<name>/AGENT.md` exists.
+    ///   - After disabling the plugin (re-reconcile with the plugin not in
+    ///     `enabled_plugins`), the whole `<dir>/<plugin>__<name>/` dir is gone.
+    ///
+    /// The test seeds the full catalog → plugin → agent source-file chain so
+    /// `prepare_agent` succeeds and the translate+emit path runs for real.
+    #[test]
+    fn dir_per_agent_emits_subdir_and_cleanup_removes_directory() {
+        use crate::index::workspace_catalogs;
+
+        // Serialize all lib tests that write HARNESS_MODULES_OVERRIDE so cargo's
+        // parallel test runner cannot let two override-installing tests clobber
+        // each other.
+        let _override_guard = crate::harness::HARNESS_OVERRIDE_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let home = TempDir::new().expect("home tempdir");
+        let paths = Paths::from_root(home.path().join(".tome"));
+        std::fs::create_dir_all(&paths.root).expect("create tome root");
+        let project = home.path().join("project");
+        std::fs::create_dir_all(&project).expect("create project root");
+
+        let agent_dir = project.join(".stub-devin/agents");
+        let stub = StubHarness::default()
+            .with_name("stub-devin")
+            .with_native_agents(AgentFormat::MarkdownYaml)
+            .with_agent_dir(agent_dir.clone())
+            .with_agent_path_strategy(crate::harness::AgentPathStrategy::DirPerAgent {
+                inner_filename: "AGENT.md",
+            });
+
+        // Bootstrap a genuine central DB.
+        bootstrap_db(&paths);
+
+        // Enrol a catalog (URL `test://cat`) in the global workspace so
+        // `prepare_agent`'s `resolve_entry_body_path` can locate the plugin dir.
+        const CATALOG_URL: &str = "test://cat";
+        {
+            let conn =
+                rusqlite::Connection::open(&paths.index_db).expect("open rw for catalog enrol");
+            workspace_catalogs::insert(&conn, "global", "cat", CATALOG_URL, "HEAD")
+                .expect("enrol test catalog");
+        }
+
+        // Create the plugin directory + agent source file on disk at the path
+        // `prepare_agent` will derive: `paths.cache_dir_for(URL)/myplugin/agents/myagent.md`.
+        // (No catalog manifest → plugin dir is `<catalog_cache>/myplugin`.)
+        let catalog_cache = paths.cache_dir_for(CATALOG_URL);
+        let plugin_dir = catalog_cache.join("myplugin");
+        let agents_source_dir = plugin_dir.join("agents");
+        std::fs::create_dir_all(&agents_source_dir).expect("create source agents dir");
+        std::fs::write(
+            agents_source_dir.join("myagent.md"),
+            "---\nname: myagent\ndescription: A test agent.\n---\nYou are a test agent.\n",
+        )
+        .expect("write source agent file");
+
+        // Insert the skill + workspace_skills rows (reusing the existing helper
+        // which references `path = 'agents/myagent.md'` — the same relative path
+        // we just created under the plugin dir above).
+        insert_enabled_agent(&paths, "cat", "myplugin", "myagent");
+
+        let workspace = WorkspaceName::global();
+        let deps = SyncDeps {
+            paths: &paths,
+            home_root: home.path(),
+            workspace_name: &workspace,
+            force: false,
+            only_harness: None,
+        };
+        let snapshots = vec![crate::harness::sync::snapshot_for_test(
+            &stub,
+            &project,
+            home.path(),
+        )];
+        let effective_names: HashSet<String> = std::iter::once("stub-devin".to_string()).collect();
+        let mut outcome = SyncOutcome::default();
+
+        // Install stub into the override so `with_effective_modules` resolves it.
+        *crate::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("override write lock") = Some(vec![Box::new(stub.clone())]);
+
+        let result = reconcile_agents(
+            &project,
+            &deps,
+            &effective_names,
+            &snapshots,
+            false,
+            &mut outcome,
+        );
+        // Clear the override before any assert that could panic.
+        *crate::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("override write lock (restore)") = None;
+
+        result.expect("first reconcile (emit) must succeed");
+
+        // The inner file inside the per-agent subdirectory must exist.
+        let subdir = agent_dir.join("myplugin__myagent");
+        let inner_file = subdir.join("AGENT.md");
+        assert!(
+            inner_file.is_file(),
+            "DirPerAgent: inner file <dir>/<plugin>__<name>/AGENT.md must be emitted; got subdir={subdir:?}"
+        );
+        assert!(
+            subdir.is_dir(),
+            "DirPerAgent: <plugin>__<name>/ must be a directory"
+        );
+
+        // --- Second reconcile: disable the plugin. ---
+        // Clear workspace_skills so `enabled_agents_for_workspace` returns empty →
+        // `enabled_plugins` is empty → `removed_disabled_owned` enumerates
+        // `myplugin__myagent` (owned, plugin not enabled) → removes the subdir.
+        {
+            let conn = rusqlite::Connection::open(&paths.index_db).expect("open rw for disable");
+            conn.execute("DELETE FROM workspace_skills", [])
+                .expect("clear workspace_skills");
+        }
+
+        let mut outcome2 = SyncOutcome::default();
+
+        *crate::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("override write lock (2nd)") = Some(vec![Box::new(stub.clone())]);
+
+        let result2 = reconcile_agents(
+            &project,
+            &deps,
+            &effective_names,
+            &snapshots,
+            false,
+            &mut outcome2,
+        );
+        *crate::harness::HARNESS_MODULES_OVERRIDE
+            .write()
+            .expect("override write lock (restore 2nd)") = None;
+
+        result2.expect("second reconcile (cleanup) must succeed");
+
+        // The whole subdirectory must be gone.
+        assert!(
+            !subdir.exists(),
+            "DirPerAgent removal must delete the entire <plugin>__<name>/ subdirectory"
+        );
     }
 }

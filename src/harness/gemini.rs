@@ -40,9 +40,13 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::error::TomeError;
+use crate::harness::agents::{
+    self, CanonicalAgent, TranslatedAgent, agent_extension, agent_filename,
+};
 use crate::harness::{
-    BlockBodyStyle, Envelope, HarnessModule, HookEvent, HookFileSpec, RulesFileStrategy,
-    SessionSteering,
+    AgentFormat, BlockBodyStyle, Envelope, HarnessModule, HookEvent, HookFileSpec,
+    RulesFileStrategy, SessionSteering,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Gemini CLI.
@@ -105,6 +109,88 @@ impl HarnessModule for Gemini {
             event: HookEvent::SessionStart,
             envelope: Envelope::ClaudeNested,
         }
+    }
+
+    // -- Native agents (Phase 2, native-agent-gemini) -----------------------
+
+    fn supports_native_agents(&self) -> bool {
+        true
+    }
+
+    fn agent_dir(&self, project_root: &Path) -> Option<PathBuf> {
+        Some(project_root.join(".gemini/agents"))
+    }
+
+    fn agent_format(&self) -> Option<AgentFormat> {
+        Some(AgentFormat::MarkdownYaml)
+    }
+
+    /// Gemini CLI: MD+YAML. `name` is a slug (`^[a-z0-9-_]+$`, underscores OK);
+    /// `description` required (synthesized); `tools` → Gemini native names;
+    /// `model` → `inherit` (Google vendor). Schema is `.strict()` — emit ONLY
+    /// `name`/`description`/`tools`/`model`; everything else drops + records.
+    fn translate_agent(
+        &self,
+        canonical: &CanonicalAgent,
+        clashes: bool,
+        models: &crate::model_registry::ModelRegistry,
+    ) -> Result<TranslatedAgent, TomeError> {
+        let mut frontmatter: Vec<(String, serde_yaml::Value)> = Vec::new();
+        let mut dropped: Vec<String> = Vec::new();
+
+        let displayed = agents::displayed_name(&canonical.plugin, &canonical.name, clashes);
+        let name = agents::slugify_agent_name(&displayed, true);
+        frontmatter.push(("name".to_owned(), serde_yaml::Value::String(name.clone())));
+        frontmatter.push((
+            "description".to_owned(),
+            serde_yaml::Value::String(agents::synthesize_description(canonical)),
+        ));
+
+        if let Some(src) = canonical.model.as_deref() {
+            match agents::map_model(models, "gemini", src) {
+                Some(m) => frontmatter.push(("model".to_owned(), serde_yaml::Value::String(m))),
+                None => dropped.push("model".to_owned()),
+            }
+        }
+
+        if let Some(tools) = &canonical.tools {
+            let mapped = agents::gemini_tools(tools);
+            if mapped.is_empty() {
+                dropped.push("tools".to_owned());
+            } else {
+                let seq = mapped.into_iter().map(serde_yaml::Value::String).collect();
+                frontmatter.push(("tools".to_owned(), serde_yaml::Value::Sequence(seq)));
+            }
+        }
+
+        // No Gemini carrier (and `.strict()` forbids them as frontmatter).
+        if canonical.disallowed_tools.is_some() {
+            dropped.push("disallowedTools".to_owned());
+        }
+        if canonical.hooks.is_some() {
+            dropped.push("hooks".to_owned());
+        }
+        if canonical.mcp_servers.is_some() {
+            dropped.push("mcpServers".to_owned());
+        }
+        if canonical.permission_mode.is_some() {
+            dropped.push("permissionMode".to_owned());
+        }
+
+        let rendered = agents::render_markdown_yaml(&frontmatter, &canonical.body);
+        let filename = agent_filename(
+            &canonical.plugin,
+            &canonical.name,
+            agent_extension(AgentFormat::MarkdownYaml),
+        );
+        Ok(TranslatedAgent {
+            dir: PathBuf::from(".gemini/agents"),
+            filename,
+            displayed_name: displayed,
+            format: AgentFormat::MarkdownYaml,
+            rendered,
+            dropped_fields: dropped,
+        })
     }
 }
 

@@ -2,6 +2,10 @@
 //!
 //! Phase 11. Baseline integration: rules-file + MCP dialect (US1) plus the
 //! G2 `CommandHook` SessionStart entry (US2).
+//! Phase 2 (native agents). Delegates to
+//! [`crate::harness::copilot::translate_copilot_agent`] — the single shared
+//! renderer that guarantees `copilot` and `copilot-cli` emit byte-identical
+//! `.github/agents/<plugin>__<name>.agent.md` files (co-ownership contract).
 //!
 //! ## Session steering (US2, T046)
 //!
@@ -28,9 +32,11 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::error::TomeError;
+use crate::harness::agents::{CanonicalAgent, TranslatedAgent};
 use crate::harness::{
-    EntryShape, Envelope, ExtraField, ExtraValue, FileFormat, HarnessModule, HookEvent,
-    HookFileSpec, McpDialect, RulesFileStrategy, ServerType, SessionSteering,
+    AgentFormat, EntryShape, Envelope, ExtraField, ExtraValue, FileFormat, HarnessModule,
+    HookEvent, HookFileSpec, McpDialect, RulesFileStrategy, ServerType, SessionSteering,
 };
 
 /// Unit struct implementing [`HarnessModule`] for GitHub Copilot CLI.
@@ -100,6 +106,30 @@ impl HarnessModule for CopilotCli {
             event: HookEvent::SessionStart,
             envelope: Envelope::FlatAdditionalContext,
         }
+    }
+
+    fn supports_native_agents(&self) -> bool {
+        true
+    }
+
+    fn agent_dir(&self, project_root: &Path) -> Option<PathBuf> {
+        Some(project_root.join(".github/agents"))
+    }
+
+    fn agent_format(&self) -> Option<AgentFormat> {
+        Some(AgentFormat::MarkdownYaml)
+    }
+
+    /// Delegates to [`crate::harness::copilot::translate_copilot_agent`] — the
+    /// single shared renderer guaranteeing byte-identical output with the
+    /// `copilot` (VS Code) harness (co-ownership contract).
+    fn translate_agent(
+        &self,
+        canonical: &CanonicalAgent,
+        clashes: bool,
+        _models: &crate::model_registry::ModelRegistry,
+    ) -> Result<TranslatedAgent, TomeError> {
+        crate::harness::copilot::translate_copilot_agent(canonical, clashes)
     }
 }
 

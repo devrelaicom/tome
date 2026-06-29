@@ -430,6 +430,15 @@ pub enum AgentFormat {
     Toml,
 }
 
+/// How a harness lays out an agent on disk. Most harnesses write one flat
+/// file (`FlatFile`); Devin writes a directory per agent containing a fixed
+/// inner file (`DirPerAgent { inner_filename: "AGENT.md" }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPathStrategy {
+    FlatFile,
+    DirPerAgent { inner_filename: &'static str },
+}
+
 // =====================================================================
 // Phase 11 — G2: session steering (contract session-steering.md).
 //
@@ -814,6 +823,12 @@ pub trait HarnessModule: Send + Sync {
         None
     }
 
+    /// On-disk layout for this harness's agents (FR-031). Default `FlatFile`;
+    /// Devin overrides to `DirPerAgent`.
+    fn agent_path_strategy(&self) -> AgentPathStrategy {
+        AgentPathStrategy::FlatFile
+    }
+
     /// Translate a canonical agent into this harness's native form (FR-030,
     /// FR-032). Only ever called when `supports_native_agents()` is `true`;
     /// non-supporting harnesses need no override.
@@ -1057,6 +1072,15 @@ pub fn resolve_alias(name: &str) -> &str {
 #[doc(hidden)]
 pub static HARNESS_MODULES_OVERRIDE: RwLock<Option<Vec<Box<dyn HarnessModule>>>> =
     RwLock::new(None);
+
+/// Serializes lib tests that install [`HARNESS_MODULES_OVERRIDE`] (a
+/// process-global seam) so cargo's parallel test runner cannot let two
+/// override-installing tests clobber each other. Integration tests use the
+/// separate `HARNESS_OVERRIDE_MUTEX` in `tests/common/`; this is its lib-test
+/// counterpart. Lock it for the whole body of any lib test that writes the
+/// override.
+#[cfg(test)]
+pub(crate) static HARNESS_OVERRIDE_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Look up a harness by exact-match name.
 ///

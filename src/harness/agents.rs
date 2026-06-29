@@ -391,11 +391,11 @@ pub(crate) fn render_codex_toml(scalars: &[(String, String)], body: &str) -> Str
 /// never an OpenAI id. `inherit` drops everywhere. Any source value with no
 /// same-vendor target for the harness drops.
 ///
-/// The `registry` is used by OpenCode to resolve tier aliases (`opus` /
-/// `sonnet` / `haiku`) to the newest non-preview same-vendor id at call time
-/// (registry-driven, not a static string). For Cursor, any pinned model maps
-/// to `inherit` (Cursor's proprietary model ids are not in models.dev; the
-/// `inherit` value preserves the intent of the original pin).
+/// The `registry` is used by OpenCode, Goose, and Pi to resolve tier aliases
+/// (`opus` / `sonnet` / `haiku`) to the newest non-preview same-vendor id at
+/// call time (registry-driven, not a static string). For Cursor, any pinned
+/// model maps to `inherit` (Cursor's proprietary model ids are not in
+/// models.dev; the `inherit` value preserves the intent of the original pin).
 ///
 /// This is the named artefact SC-002 verifies against; the table is pinned
 /// in `contracts/agent-translation.md`.
@@ -432,6 +432,26 @@ pub(crate) fn map_model(
             // An already-namespaced concrete id passes through; a bare one
             // can't be safely namespaced → drop.
             other if other.contains('/') => Some(other.to_owned()),
+            _ => None,
+        },
+        // Gemini (Google vendor): no Anthropic id maps; `inherit` is the
+        // literal default Gemini accepts, so a pinned model becomes `inherit`.
+        "gemini" => Some("inherit".to_owned()),
+        // Kiro: ids are dotted (`claude-sonnet-4.5`) so the registry's
+        // hyphenated ids are rejected, and the field is ignored in programmatic
+        // subagent dispatch (issue #6637) — DROP, Kiro uses the current chat LLM.
+        "kiro" => None,
+        // Goose + Pi pass a bare provider model id verbatim to the session's
+        // provider: a tier alias resolves to the registry's bare anthropic id;
+        // a concrete id passes through.
+        "goose" | "pi" => match source {
+            "opus" | "sonnet" | "haiku" => registry.resolve_tier("anthropic", source),
+            other => Some(other.to_owned()),
+        },
+        // Devin uses its own short aliases (`opus`/`sonnet`); `haiku` has no
+        // Devin alias and concrete/registry ids are unconfirmed → DROP those.
+        "devin" => match source {
+            "opus" | "sonnet" => Some(source.to_owned()),
             _ => None,
         },
         // Unknown harness: drop conservatively.
@@ -508,6 +528,60 @@ pub(crate) fn infer_read_only(
     None
 }
 
+/// Resolve a harness-required `description` (FR-035): the canonical
+/// `description` if present; else the first non-empty trimmed body line; else
+/// a documented placeholder. The single source every required-`description`
+/// harness (OpenCode, Gemini, Copilot, Pi) routes through.
+pub(crate) fn synthesize_description(canonical: &CanonicalAgent) -> String {
+    if let Some(desc) = &canonical.description {
+        return desc.clone();
+    }
+    if let Some(line) = canonical
+        .body
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+    {
+        return line.to_owned();
+    }
+    format!("Agent {} (no description provided).", canonical.name)
+}
+
+/// Normalise a displayed agent name to a harness's slug rules. `allow_underscore`
+/// keeps `_` (Gemini: `^[a-z0-9-_]+$`); when false, `_` becomes `-` (Kiro:
+/// lowercase + hyphens only). Lowercases; maps any other char to `-`; collapses
+/// runs of `-`; trims leading/trailing `-`; empties fall back to `"agent"`.
+// Consumed by the Gemini harness module (Task 5) and the Kiro module (Task 8).
+pub(crate) fn slugify_agent_name(name: &str, allow_underscore: bool) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_dash = false;
+    for ch in name.chars().flat_map(|c| c.to_lowercase()) {
+        let keep = ch.is_ascii_alphanumeric() || ch == '-' || (allow_underscore && ch == '_');
+        if keep {
+            // Track whether the emitted char was a dash so runs of LITERAL
+            // input hyphens collapse too (not only replacement dashes).
+            if ch == '-' {
+                if !last_dash {
+                    out.push(ch);
+                    last_dash = true;
+                }
+            } else {
+                out.push(ch);
+                last_dash = false;
+            }
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "agent".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 /// Resolve the displayed / registered agent name (FR-041).
 ///
 /// Uses the clean `<name>` normally, and the plugin-prefixed
@@ -554,6 +628,131 @@ pub(crate) fn plugin_of_owned_file(filename: &str) -> Option<&str> {
 /// ownership split rule stays single-sourced — this is a thin forwarder.
 pub fn plugin_of_owned_file_pub(filename: &str) -> Option<&str> {
     plugin_of_owned_file(filename)
+}
+
+/// Canonical Claude-Code tool kinds Tome can translate. Unknown CC tools
+/// classify to `None` and are dropped by every renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CcToolKind {
+    Read,
+    Grep,
+    Glob,
+    Ls,
+    Edit,
+    Write,
+    MultiEdit,
+    NotebookEdit,
+    Bash,
+    WebFetch,
+    WebSearch,
+}
+
+/// Classify a Claude-Code tool name (case-insensitive) into a canonical kind.
+/// The single source of truth for the CC tool vocabulary; each harness renderer
+/// maps `CcToolKind` to its own target string.
+pub(crate) fn classify_cc_tool(cc_tool: &str) -> Option<CcToolKind> {
+    match cc_tool.trim().to_ascii_lowercase().as_str() {
+        "read" => Some(CcToolKind::Read),
+        "grep" => Some(CcToolKind::Grep),
+        "glob" => Some(CcToolKind::Glob),
+        "ls" => Some(CcToolKind::Ls),
+        "edit" => Some(CcToolKind::Edit),
+        "write" => Some(CcToolKind::Write),
+        "multiedit" => Some(CcToolKind::MultiEdit),
+        "notebookedit" => Some(CcToolKind::NotebookEdit),
+        "bash" => Some(CcToolKind::Bash),
+        "webfetch" => Some(CcToolKind::WebFetch),
+        "websearch" => Some(CcToolKind::WebSearch),
+        _ => None,
+    }
+}
+
+/// Gemini: 1:1 native tool names (verified 2026-06-29 — write-side is
+/// `write_file`/`replace`, NOT `edit_file`). Drops unknown (Gemini's `.strict()`
+/// schema forbids unknown values). Preserves order; de-dupes.
+pub(crate) fn gemini_tools(tools: &[String]) -> Vec<String> {
+    map_tools_dedup(tools, |k| {
+        Some(match k {
+            CcToolKind::Read => "read_file",
+            CcToolKind::Grep => "grep_search",
+            CcToolKind::Glob => "glob",
+            CcToolKind::Ls => "list_directory",
+            CcToolKind::Edit | CcToolKind::MultiEdit | CcToolKind::NotebookEdit => "replace",
+            CcToolKind::Write => "write_file",
+            CcToolKind::Bash => "run_shell_command",
+            CcToolKind::WebFetch => "web_fetch",
+            CcToolKind::WebSearch => "google_web_search",
+        })
+    })
+}
+
+/// Kiro: category tags (`read`/`write`/`shell`/`web`), deduped, first-appearance order.
+// Consumed by the Kiro harness module (Task 8).
+pub(crate) fn kiro_tools(tools: &[String]) -> Vec<String> {
+    map_tools_dedup(tools, |k| {
+        Some(match k {
+            CcToolKind::Read | CcToolKind::Grep | CcToolKind::Glob | CcToolKind::Ls => "read",
+            CcToolKind::Edit
+            | CcToolKind::Write
+            | CcToolKind::MultiEdit
+            | CcToolKind::NotebookEdit => "write",
+            CcToolKind::Bash => "shell",
+            CcToolKind::WebFetch | CcToolKind::WebSearch => "web",
+        })
+    })
+}
+
+/// Devin: `allowed-tools` Devin-lowercase names (`Bash`→`exec`). Deduped.
+pub(crate) fn devin_tools(tools: &[String]) -> Vec<String> {
+    map_tools_dedup(tools, |k| match k {
+        CcToolKind::Read => Some("read"),
+        CcToolKind::Write => Some("write"),
+        CcToolKind::Edit | CcToolKind::MultiEdit | CcToolKind::NotebookEdit => Some("edit"),
+        CcToolKind::Grep => Some("grep"),
+        CcToolKind::Glob => Some("glob"),
+        CcToolKind::Bash => Some("exec"),
+        // No documented Devin name for these → drop.
+        CcToolKind::Ls | CcToolKind::WebFetch | CcToolKind::WebSearch => None,
+    })
+}
+
+/// Pi: comma-separated string (`read, grep, bash`). `None` when nothing maps.
+// Consumed by the Pi harness module (Phase 2 / Task 7).
+pub(crate) fn pi_tools(tools: &[String]) -> Option<String> {
+    let mapped = map_tools_dedup(tools, |k| match k {
+        CcToolKind::Read => Some("read"),
+        CcToolKind::Grep => Some("grep"),
+        CcToolKind::Glob => Some("find"),
+        CcToolKind::Ls => Some("ls"),
+        CcToolKind::Edit | CcToolKind::MultiEdit | CcToolKind::NotebookEdit => Some("edit"),
+        CcToolKind::Write => Some("write"),
+        CcToolKind::Bash => Some("bash"),
+        // No Pi name for web tools → drop.
+        CcToolKind::WebFetch | CcToolKind::WebSearch => None,
+    });
+    if mapped.is_empty() {
+        None
+    } else {
+        Some(mapped.join(", "))
+    }
+}
+
+/// Classify each CC tool, map it via `f`, drop `None`s, de-dupe preserving order.
+fn map_tools_dedup(
+    tools: &[String],
+    f: impl Fn(CcToolKind) -> Option<&'static str>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in tools {
+        let Some(kind) = classify_cc_tool(t) else {
+            continue;
+        };
+        let Some(target) = f(kind) else { continue };
+        if !out.iter().any(|x| x == target) {
+            out.push(target.to_owned());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -610,7 +809,17 @@ mod tests {
     #[test]
     fn map_model_inherit_drops_everywhere() {
         let reg = crate::model_registry::test_registry();
-        for harness in ["claude-code", "codex", "cursor", "opencode"] {
+        for harness in [
+            "claude-code",
+            "codex",
+            "cursor",
+            "opencode",
+            "gemini",
+            "kiro",
+            "goose",
+            "pi",
+            "devin",
+        ] {
             assert_eq!(
                 map_model(&reg, harness, "inherit"),
                 None,
@@ -839,6 +1048,152 @@ mod tests {
         assert_eq!(plugin_of_owned_file("__reviewer.md"), None);
         // Empty stem.
         assert_eq!(plugin_of_owned_file("myplugin__.md"), None);
+    }
+
+    #[test]
+    fn synthesize_description_prefers_frontmatter_then_body_then_placeholder() {
+        let mut a = CanonicalAgent {
+            catalog: "c".into(),
+            plugin: "p".into(),
+            name: "solo".into(),
+            description: Some("  Reviews code  ".into()),
+            body: "Body line.\n".into(),
+            model: None,
+            tools: None,
+            disallowed_tools: None,
+            hooks: None,
+            mcp_servers: None,
+            permission_mode: None,
+        };
+        // Frontmatter wins (already trimmed at parse time; pass through verbatim).
+        assert_eq!(synthesize_description(&a), "  Reviews code  ");
+        // No description → first non-empty trimmed body line.
+        a.description = None;
+        a.body = "\n  First real line.  \nSecond.\n".into();
+        assert_eq!(synthesize_description(&a), "First real line.");
+        // Empty body → placeholder.
+        a.body = "   \n\n".into();
+        assert_eq!(
+            synthesize_description(&a),
+            "Agent solo (no description provided)."
+        );
+    }
+
+    #[test]
+    fn gemini_tools_maps_names_and_drops_unknown() {
+        let t = vec![
+            "Read".into(),
+            "Bash".into(),
+            "Edit".into(),
+            "Frobnicate".into(),
+        ];
+        assert_eq!(
+            gemini_tools(&t),
+            vec!["read_file", "run_shell_command", "replace"]
+        );
+    }
+    #[test]
+    fn kiro_tools_collapses_to_categories_deduped() {
+        let t = vec![
+            "Read".into(),
+            "Grep".into(),
+            "Glob".into(),
+            "Edit".into(),
+            "Bash".into(),
+            "WebFetch".into(),
+        ];
+        // read (x3 collapse), write (Edit), shell (Bash), web (WebFetch) — order = first appearance.
+        assert_eq!(kiro_tools(&t), vec!["read", "write", "shell", "web"]);
+    }
+    #[test]
+    fn pi_tools_comma_joins_and_devin_lowercases() {
+        let t = vec!["Read".into(), "Grep".into(), "Bash".into()];
+        assert_eq!(pi_tools(&t).as_deref(), Some("read, grep, bash"));
+        let d = vec!["Bash".into(), "Write".into(), "Read".into()];
+        assert_eq!(devin_tools(&d), vec!["exec", "write", "read"]);
+        // Nothing maps → Pi returns None (omit the field).
+        assert_eq!(pi_tools(&["Nope".to_owned()]), None);
+    }
+
+    #[test]
+    fn devin_tools_drops_ls_and_web() {
+        let t = vec![
+            "Ls".into(),
+            "WebFetch".into(),
+            "WebSearch".into(),
+            "Bash".into(),
+        ];
+        assert_eq!(devin_tools(&t), vec!["exec"]); // Ls/Web dropped, Bash maps
+    }
+    #[test]
+    fn pi_tools_drops_web_but_keeps_others() {
+        let t = vec!["WebFetch".into(), "Read".into(), "WebSearch".into()];
+        assert_eq!(pi_tools(&t).as_deref(), Some("read")); // web dropped, Read maps
+    }
+
+    #[test]
+    fn slugify_agent_name_handles_both_modes() {
+        // allow_underscore = true (Gemini: [a-z0-9-_]).
+        assert_eq!(
+            slugify_agent_name("MyPlugin__Reviewer", true),
+            "myplugin__reviewer"
+        );
+        assert_eq!(slugify_agent_name("Code Review!", true), "code-review");
+        // allow_underscore = false (Kiro: lowercase + hyphens only).
+        assert_eq!(
+            slugify_agent_name("MyPlugin__Reviewer", false),
+            "myplugin-reviewer"
+        );
+        assert_eq!(slugify_agent_name("a__b", false), "a-b");
+        // Collapse repeats / trim edges; empty → fallback.
+        assert_eq!(slugify_agent_name("--a  b--", true), "a-b");
+        assert_eq!(slugify_agent_name("!!!", false), "agent");
+        // Literal input hyphens collapse too (not only replacement dashes).
+        assert_eq!(slugify_agent_name("a--b", false), "a-b");
+        assert_eq!(slugify_agent_name("a--b", true), "a-b");
+    }
+
+    #[test]
+    fn map_model_phase2_arms() {
+        let reg = crate::model_registry::test_registry(); // opus→claude-opus-4-5, etc.
+        // Gemini: any pinned model → inherit literal.
+        assert_eq!(
+            map_model(&reg, "gemini", "opus").as_deref(),
+            Some("inherit")
+        );
+        assert_eq!(
+            map_model(&reg, "gemini", "claude-x").as_deref(),
+            Some("inherit")
+        );
+        assert_eq!(map_model(&reg, "gemini", "inherit"), None);
+        // Kiro: always drop (dotted-only ids; ignored in dispatch).
+        assert_eq!(map_model(&reg, "kiro", "opus"), None);
+        // Goose + Pi: tier → registry bare id; concrete id passes through.
+        assert_eq!(
+            map_model(&reg, "goose", "opus").as_deref(),
+            Some("claude-opus-4-5")
+        );
+        assert_eq!(
+            map_model(&reg, "pi", "sonnet").as_deref(),
+            Some("claude-sonnet-4-5")
+        );
+        assert_eq!(
+            map_model(&reg, "pi", "claude-custom-1").as_deref(),
+            Some("claude-custom-1")
+        );
+        // Third tier alias (haiku) resolves via the registry too.
+        assert_eq!(
+            map_model(&reg, "goose", "haiku").as_deref(),
+            Some("claude-haiku-4-5")
+        );
+        // Devin: opus/sonnet pass through; haiku + concrete drop.
+        assert_eq!(map_model(&reg, "devin", "opus").as_deref(), Some("opus"));
+        assert_eq!(
+            map_model(&reg, "devin", "sonnet").as_deref(),
+            Some("sonnet")
+        );
+        assert_eq!(map_model(&reg, "devin", "haiku"), None);
+        assert_eq!(map_model(&reg, "devin", "claude-opus-4-5"), None);
     }
 
     #[test]

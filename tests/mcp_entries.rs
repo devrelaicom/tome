@@ -20,10 +20,22 @@ mod agent_removal;
 mod agent_translate_claude_code;
 #[path = "mcp_entries/agent_translate_codex.rs"]
 mod agent_translate_codex;
+#[path = "mcp_entries/agent_translate_copilot.rs"]
+mod agent_translate_copilot;
 #[path = "mcp_entries/agent_translate_cursor.rs"]
 mod agent_translate_cursor;
+#[path = "mcp_entries/agent_translate_devin.rs"]
+mod agent_translate_devin;
+#[path = "mcp_entries/agent_translate_gemini.rs"]
+mod agent_translate_gemini;
+#[path = "mcp_entries/agent_translate_goose.rs"]
+mod agent_translate_goose;
+#[path = "mcp_entries/agent_translate_kiro.rs"]
+mod agent_translate_kiro;
 #[path = "mcp_entries/agent_translate_opencode.rs"]
 mod agent_translate_opencode;
+#[path = "mcp_entries/agent_translate_pi.rs"]
+mod agent_translate_pi;
 #[path = "mcp_entries/entry_e2e.rs"]
 mod entry_e2e;
 #[path = "mcp_entries/entry_e2e_p6.rs"]

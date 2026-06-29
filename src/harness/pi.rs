@@ -16,8 +16,13 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::error::TomeError;
+use crate::harness::agents::{
+    self, CanonicalAgent, TranslatedAgent, agent_extension, agent_filename,
+};
 use crate::harness::{
-    EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy, SessionSteering, ShimKind,
+    AgentFormat, EntryShape, FileFormat, HarnessModule, McpDialect, RulesFileStrategy,
+    SessionSteering, ShimKind,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Pi.
@@ -92,6 +97,81 @@ impl HarnessModule for Pi {
             dir: PathBuf::from(".pi/extensions"),
             kind: ShimKind::Pi,
         }
+    }
+
+    // -- Native agents (Phase 2) -----------------------------------------------
+
+    fn supports_native_agents(&self) -> bool {
+        true
+    }
+
+    fn agent_dir(&self, project_root: &Path) -> Option<PathBuf> {
+        Some(project_root.join(".pi/agents"))
+    }
+
+    fn agent_format(&self) -> Option<AgentFormat> {
+        Some(AgentFormat::MarkdownYaml)
+    }
+
+    /// Pi subagent: MD+YAML; `name` AND `description` required (Pi silently
+    /// skips a file missing either); `tools` is a comma-separated string;
+    /// `model` is free-form (registry-resolved for tier aliases, else
+    /// pass-through). Emit is inert until the user opts into `agentScope`.
+    fn translate_agent(
+        &self,
+        canonical: &CanonicalAgent,
+        clashes: bool,
+        models: &crate::model_registry::ModelRegistry,
+    ) -> Result<TranslatedAgent, TomeError> {
+        let mut frontmatter: Vec<(String, serde_yaml::Value)> = Vec::new();
+        let mut dropped: Vec<String> = Vec::new();
+
+        let name = agents::displayed_name(&canonical.plugin, &canonical.name, clashes);
+        frontmatter.push(("name".to_owned(), serde_yaml::Value::String(name.clone())));
+        frontmatter.push((
+            "description".to_owned(),
+            serde_yaml::Value::String(agents::synthesize_description(canonical)),
+        ));
+
+        if let Some(src) = canonical.model.as_deref() {
+            match agents::map_model(models, "pi", src) {
+                Some(m) => frontmatter.push(("model".to_owned(), serde_yaml::Value::String(m))),
+                None => dropped.push("model".to_owned()),
+            }
+        }
+        if let Some(tools) = &canonical.tools {
+            match agents::pi_tools(tools) {
+                Some(s) => frontmatter.push(("tools".to_owned(), serde_yaml::Value::String(s))),
+                None => dropped.push("tools".to_owned()),
+            }
+        }
+        if canonical.disallowed_tools.is_some() {
+            dropped.push("disallowedTools".to_owned());
+        }
+        if canonical.hooks.is_some() {
+            dropped.push("hooks".to_owned());
+        }
+        if canonical.mcp_servers.is_some() {
+            dropped.push("mcpServers".to_owned());
+        }
+        if canonical.permission_mode.is_some() {
+            dropped.push("permissionMode".to_owned());
+        }
+
+        let rendered = agents::render_markdown_yaml(&frontmatter, &canonical.body);
+        let filename = agent_filename(
+            &canonical.plugin,
+            &canonical.name,
+            agent_extension(AgentFormat::MarkdownYaml),
+        );
+        Ok(TranslatedAgent {
+            dir: PathBuf::from(".pi/agents"),
+            filename,
+            displayed_name: name,
+            format: AgentFormat::MarkdownYaml,
+            rendered,
+            dropped_fields: dropped,
+        })
     }
 }
 

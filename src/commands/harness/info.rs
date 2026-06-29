@@ -20,6 +20,7 @@ use crate::output::{Mode, write_json};
 use crate::paths::Paths;
 use crate::settings::resolver::resolve_effective_list;
 use crate::workspace::ResolvedScope;
+use crate::{index, index::skills::enabled_agents_for_workspace};
 
 use super::home_root;
 
@@ -74,6 +75,20 @@ pub struct HarnessInfoOutcome {
     /// additive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_snippet: Option<String>,
+    /// Phase 2 (native-agent expansion) / Task 14: advisory notice when this
+    /// harness is rules-only (does not support native agents AND is not an
+    /// opt-in target) AND there are ≥1 enabled agents in scope. The notice
+    /// explains how to surface the agents as MCP prompts via
+    /// `expose_agents_as_personas`. `None` for native-supporting harnesses
+    /// (claude-code/codex/cursor/opencode/gemini), opt-in targets
+    /// (generic/generic-op), or when zero agents are enabled. Rules-only
+    /// harnesses such as jetbrains-ai, cline, junie, crush, and antigravity
+    /// WILL show the notice when agents are enabled.
+    ///
+    /// Appended after `mcp_snippet` + `skip_serializing_if`-gated (absent ⇒
+    /// key omitted) to keep the byte-stable pin additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unrepresented_agents_notice: Option<String>,
 }
 
 /// Per-harness snapshot captured outside the registry's read guard.
@@ -88,6 +103,15 @@ struct ModuleSnapshot {
     mcp_target: Option<PathBuf>,
     #[allow(dead_code)]
     block_body_style: BlockBodyStyle,
+    /// Whether this harness supports native translated agents. Captured from
+    /// [`HarnessModule::supports_native_agents`] so callers outside the read
+    /// guard can test it.
+    module_supports_native_agents: bool,
+    /// Whether this harness is an opt-in target (generic/generic-op). Captured
+    /// from [`HarnessModule::is_opt_in_target`] so the notice gate outside the
+    /// read guard can exclude opt-in targets (which have no native-agent
+    /// directory either way, making the notice misleading).
+    module_is_opt_in_target: bool,
 }
 
 pub fn run(
@@ -111,6 +135,8 @@ pub fn run(
         rules_target: project_root.as_deref().map(|p| m.rules_file_target(p)),
         mcp_target: project_root.as_deref().map(|p| m.mcp_config_path(p, &home)),
         block_body_style: m.block_body_style(),
+        module_supports_native_agents: m.supports_native_agents(),
+        module_is_opt_in_target: m.is_opt_in_target(),
     };
     // Phase 11 / US4 (M1): resolve via the effective registry FIRST (so a test
     // override and the supported harnesses both work), then fall back to the
@@ -141,6 +167,45 @@ pub fn run(
         };
 
     let references = collect_references(scope, paths, &snap.name)?;
+
+    // Phase 2 / Task 14: compute the enabled-agent count for this workspace,
+    // used to gate the unrepresented-agents notice. Read-only; guards on the
+    // DB existing and the workspace being resolvable. Zero when the DB is
+    // absent or the query fails (notice omitted — prefer silence over noise).
+    let enabled_agent_count: u32 = if paths.index_db.is_file() {
+        index::open_read_only(&paths.index_db)
+            .ok()
+            .and_then(|conn| {
+                let ws_name = scope.scope.name();
+                enabled_agents_for_workspace(&conn, ws_name.as_str())
+                    .ok()
+                    .map(|v| u32::try_from(v.len()).unwrap_or(u32::MAX))
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+
+    // "Rules-only" means not a native-agent-capable harness AND not an opt-in
+    // target (generic/generic-op). This matches the definition used by
+    // `fill_unrepresented_agents` in `status.rs` and the doctor drop-report.
+    let unrepresented_agents_notice = if !snap.module_supports_native_agents
+        && !snap.module_is_opt_in_target
+        && enabled_agent_count > 0
+    {
+        Some(if enabled_agent_count == 1 {
+            "1 enabled agent has no native agent form on this harness; \
+                 enable `expose_agents_as_personas` to surface it as an MCP prompt."
+                .to_string()
+        } else {
+            format!(
+                "{enabled_agent_count} enabled agents have no native agent form on this \
+                     harness; enable `expose_agents_as_personas` to surface them as MCP prompts."
+            )
+        })
+    } else {
+        None
+    };
 
     // Phase 11 / US5 (T063): render the paste-able MCP snippet from the
     // harness's dialect, built with the canonical args the sync writer uses
@@ -174,6 +239,7 @@ pub fn run(
         mcp_tome_owned,
         references,
         mcp_snippet,
+        unrepresented_agents_notice,
     };
 
     match mode {
@@ -344,6 +410,12 @@ fn emit_human(outcome: &HarnessInfoOutcome) -> Result<(), TomeError> {
         // Emit verbatim (already carries its own trailing newline).
         write!(out, "{snippet}")?;
     }
+    // Phase 2 / Task 14: advisory notice for rules-only harnesses with
+    // enabled agents that have no native form.
+    if let Some(notice) = &outcome.unrepresented_agents_notice {
+        writeln!(out)?;
+        writeln!(out, "  Note: {notice}")?;
+    }
     Ok(())
 }
 
@@ -364,6 +436,24 @@ mod tests {
             mcp_tome_owned: None,
             references: Vec::new(),
             mcp_snippet: snippet,
+            unrepresented_agents_notice: None,
+        }
+    }
+
+    fn outcome_with_notice(notice: Option<String>) -> HarnessInfoOutcome {
+        HarnessInfoOutcome {
+            name: "gemini".to_string(),
+            description: "Gemini CLI".to_string(),
+            detected: false,
+            detected_path: PathBuf::from("/h/.gemini"),
+            rules_target: None,
+            mcp_target: None,
+            rules_block_present: None,
+            mcp_entry_present: None,
+            mcp_tome_owned: None,
+            references: Vec::new(),
+            mcp_snippet: None,
+            unrepresented_agents_notice: notice,
         }
     }
 
@@ -372,9 +462,10 @@ mod tests {
     #[test]
     fn mcp_snippet_is_appended_last_and_gated() {
         let with = serde_json::to_string(&outcome_with_snippet(Some("SNIP".to_string()))).unwrap();
+        // When notice is None, mcp_snippet is last.
         assert!(
             with.ends_with("\"mcp_snippet\":\"SNIP\"}"),
-            "mcp_snippet must be the LAST field; got: {with}",
+            "mcp_snippet must be the LAST field when notice absent; got: {with}",
         );
 
         // Absent → the key is omitted entirely (skip_serializing_if).
@@ -383,7 +474,100 @@ mod tests {
             !without.contains("mcp_snippet"),
             "absent snippet must omit the key; got: {without}",
         );
-        // The prior-last field (`references`) remains last when snippet absent.
-        assert!(without.ends_with("\"references\":[]}"));
+        // The prior-last field (`references`) remains last when both snippet
+        // and notice are absent.
+        assert!(
+            without.ends_with("\"references\":[]}"),
+            "references must be last when both optional fields absent; got: {without}",
+        );
+    }
+
+    /// Task 14: `unrepresented_agents_notice` is `Some` only for a rules-only
+    /// harness with ≥1 enabled agents; absent (and key omitted) otherwise.
+    ///
+    /// The notice field is appended after `mcp_snippet` in the struct; when
+    /// both are present it appears last. When only the notice is set (mcp_snippet
+    /// absent), the notice is the last key.
+    #[test]
+    fn unrepresented_notice_present_only_for_rules_only_harness_with_agents() {
+        // A rules-only harness (Gemini) with a notice → Some, and it is the
+        // last key in the JSON.
+        let notice_text = "3 enabled agents have no native agent form on this harness; \
+                           enable `expose_agents_as_personas` to surface them as MCP prompts.";
+        let with_notice =
+            serde_json::to_string(&outcome_with_notice(Some(notice_text.to_string()))).unwrap();
+        assert!(
+            with_notice.contains("unrepresented_agents_notice"),
+            "notice key must be present when Some; got: {with_notice}",
+        );
+        assert!(
+            with_notice.ends_with(&format!(
+                "\"unrepresented_agents_notice\":\"{notice_text}\"}}"
+            )),
+            "notice must be the last key; got: {with_notice}",
+        );
+
+        // Native-supporting harness or zero agents → None → key omitted.
+        let without_notice = serde_json::to_string(&outcome_with_notice(None)).unwrap();
+        assert!(
+            !without_notice.contains("unrepresented_agents_notice"),
+            "absent notice must omit the key; got: {without_notice}",
+        );
+        // When both mcp_snippet and notice are absent, references is last.
+        assert!(
+            without_notice.ends_with("\"references\":[]}"),
+            "references must be last when both optional fields absent; got: {without_notice}",
+        );
+
+        // Both present: notice is after mcp_snippet (last field).
+        let both = HarnessInfoOutcome {
+            mcp_snippet: Some("SNIP".to_string()),
+            unrepresented_agents_notice: Some(notice_text.to_string()),
+            ..outcome_with_notice(None)
+        };
+        let both_json = serde_json::to_string(&both).unwrap();
+        // mcp_snippet appears before notice in the serialized output.
+        let snippet_pos = both_json.find("mcp_snippet").unwrap();
+        let notice_pos = both_json.find("unrepresented_agents_notice").unwrap();
+        assert!(
+            snippet_pos < notice_pos,
+            "mcp_snippet must precede unrepresented_agents_notice; got: {both_json}",
+        );
+        assert!(
+            both_json.ends_with(&format!(
+                "\"unrepresented_agents_notice\":\"{notice_text}\"}}"
+            )),
+            "notice must be the last key when both present; got: {both_json}",
+        );
+    }
+
+    /// Task 14 (Change 2): singular grammar is correct for count == 1.
+    ///
+    /// "1 enabled agent has ... surface it as an MCP prompt." (singular verb +
+    /// pronoun). Plural form is already covered by
+    /// `unrepresented_notice_present_only_for_rules_only_harness_with_agents`.
+    #[test]
+    fn notice_singular_grammar_for_count_one() {
+        let singular_notice = "1 enabled agent has no native agent form on this harness; \
+                               enable `expose_agents_as_personas` to surface it as an MCP prompt.";
+        let outcome = outcome_with_notice(Some(singular_notice.to_string()));
+        let json = serde_json::to_string(&outcome).unwrap();
+        assert!(
+            json.contains("\"1 enabled agent has"),
+            "singular notice must use 'has'; got: {json}",
+        );
+        assert!(
+            json.contains("surface it as an MCP prompt"),
+            "singular notice must use 'it' (not 'them'); got: {json}",
+        );
+        // Verify it does NOT accidentally use 'have' or 'them'.
+        assert!(
+            !json.contains("agents have"),
+            "singular notice must not contain 'agents have'; got: {json}",
+        );
+        assert!(
+            !json.contains("surface them"),
+            "singular notice must not contain 'them'; got: {json}",
+        );
     }
 }

@@ -173,8 +173,8 @@ impl HarnessModule for OpenCode {
         // Filename-derived name: always the full `<plugin>__<name>` form.
         let displayed_name = format!("{}__{}", canonical.plugin, canonical.name);
 
-        // `description` is required — resolve via the FR-035 fallback chain.
-        let description = resolve_description(canonical);
+        // `description` is required — resolve via the FR-035 SSOT fallback chain.
+        let description = agents::synthesize_description(canonical);
         frontmatter.push((
             "description".to_owned(),
             serde_yaml::Value::String(description),
@@ -260,25 +260,6 @@ impl HarnessModule for OpenCode {
             dropped_fields: dropped,
         })
     }
-}
-
-/// Resolve OpenCode's required `description` (FR-035).
-///
-/// Precedence: the canonical `description` if present; else the first
-/// non-empty trimmed line of the body; else the documented placeholder.
-fn resolve_description(canonical: &CanonicalAgent) -> String {
-    if let Some(desc) = &canonical.description {
-        return desc.clone();
-    }
-    if let Some(line) = canonical
-        .body
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-    {
-        return line.to_owned();
-    }
-    format!("Agent {} (no description provided).", canonical.name)
 }
 
 #[cfg(test)]

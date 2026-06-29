@@ -29,6 +29,7 @@ use std::time::SystemTime;
 use crate::catalog::manifest::CatalogManifest;
 use crate::doctor::report::{
     CatalogCacheHealth, CatalogCacheState, EntryCountsByKind, OrphanDataDirReport, PromptsReport,
+    UnrepresentedAgentEntry, UnrepresentedAgentsReport,
 };
 use crate::error::TomeError;
 use crate::index::{self, workspace_catalogs};
@@ -1375,6 +1376,47 @@ pub fn check_corrupt_index(paths: &Paths) -> Option<CorruptIndex> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2 (native-agent expansion): unrepresented agents drop-report.
+// ---------------------------------------------------------------------------
+
+/// Build the Phase 2 drop-report: every enabled agent paired with the
+/// rules-only harnesses that cannot represent it natively. Read-only.
+///
+/// A rules-only harness is one where `supports_native_agents()` is `false`
+/// AND `is_opt_in_target()` is also `false`. The returned list is sorted
+/// alphabetically. The returned `agents` list preserves the DB enumeration
+/// order (catalog, plugin, name).
+pub fn build_unrepresented_agents_report(
+    conn: &rusqlite::Connection,
+    workspace: &crate::workspace::WorkspaceName,
+) -> Result<UnrepresentedAgentsReport, TomeError> {
+    let enabled = crate::index::skills::enabled_agents_for_workspace(conn, workspace.as_str())?;
+    let agents: Vec<UnrepresentedAgentEntry> = enabled
+        .iter()
+        .map(|a| UnrepresentedAgentEntry {
+            catalog: a.catalog.clone(),
+            plugin: a.plugin.clone(),
+            name: a.name.clone(),
+        })
+        .collect();
+
+    let mut rules_only_harnesses: Vec<String> = Vec::new();
+    crate::harness::with_effective_modules(|mods| {
+        for m in mods {
+            if !m.supports_native_agents() && !m.is_opt_in_target() {
+                rules_only_harnesses.push(m.name().to_string());
+            }
+        }
+    });
+    rules_only_harnesses.sort();
+
+    Ok(UnrepresentedAgentsReport {
+        rules_only_harnesses,
+        agents,
+    })
+}
+
 /// A corrupt-remote-index finding: the stored vector dimension (`blob_len/4`)
 /// disagrees with `meta.embedder_dimension`. Carried internally by the
 /// assembler to drive the `corrupt-remote-index` suggested fix; not a
@@ -1499,6 +1541,83 @@ mod tests {
         let out =
             check_catalogs(&paths, &Scope(crate::workspace::WorkspaceName::global())).unwrap();
         assert_eq!(out[0].state, CatalogCacheState::ManifestInvalid);
+    }
+
+    // --- Phase 2 (native-agent expansion): unrepresented agents report ------
+
+    #[test]
+    fn unrepresented_report_lists_enabled_agents_and_rules_only_harnesses() {
+        let tmp = TempDir::new().unwrap();
+        let paths = fixture_paths(tmp.path());
+        let workspace = crate::workspace::WorkspaceName::global();
+
+        // Seed one enabled agent in the global workspace.
+        let (e, r, s) = registry_seeds();
+        let conn = index::open(
+            &paths.index_db,
+            &crate::index::OpenOptions {
+                embedder: e,
+                reranker: r,
+                summariser: s,
+                profile: None,
+            },
+        )
+        .unwrap();
+        // Insert the agent row and enrol it.
+        conn.execute(
+            "INSERT INTO skills
+                (catalog, plugin, name, kind, description, plugin_version,
+                 path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+             VALUES ('mycat', 'myplugin', 'myagent', 'agent', 'd', '0.0.0', 'agents/myagent.md', 'h', 0, 0, NULL, '1970-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("insert agent");
+        let skill_id: i64 = conn
+            .query_row(
+                "SELECT id FROM skills WHERE catalog='mycat' AND plugin='myplugin' AND kind='agent' AND name='myagent'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("agent id");
+        let ws_id: i64 = conn
+            .query_row("SELECT id FROM workspaces WHERE name = 'global'", [], |r| {
+                r.get(0)
+            })
+            .expect("global ws id");
+        conn.execute(
+            "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+            rusqlite::params![ws_id, skill_id],
+        )
+        .expect("enrol agent");
+
+        let report = build_unrepresented_agents_report(&conn, &workspace)
+            .expect("build_unrepresented_agents_report");
+
+        // The one enabled agent must appear.
+        assert_eq!(report.agents.len(), 1);
+        assert_eq!(report.agents[0].catalog, "mycat");
+        assert_eq!(report.agents[0].plugin, "myplugin");
+        assert_eq!(report.agents[0].name, "myagent");
+
+        // The rules-only harnesses from the default registry must include
+        // "cline" and "junie" (and others), sorted alphabetically.
+        assert!(
+            report.rules_only_harnesses.contains(&"cline".to_owned()),
+            "cline must be in rules_only_harnesses: {:?}",
+            report.rules_only_harnesses,
+        );
+        assert!(
+            report.rules_only_harnesses.contains(&"junie".to_owned()),
+            "junie must be in rules_only_harnesses: {:?}",
+            report.rules_only_harnesses,
+        );
+        // The list must be sorted.
+        let mut sorted = report.rules_only_harnesses.clone();
+        sorted.sort();
+        assert_eq!(
+            report.rules_only_harnesses, sorted,
+            "rules_only_harnesses must be sorted"
+        );
     }
 
     // --- Phase 12 / US4: provider report (FR-018) --------------------------

@@ -64,7 +64,8 @@ pub use report::{
     HarnessPresence, HarnessSubsystemReport, MetaSkillDrift, ModelRegistryReport,
     OrphanDataDirReport, ProjectBindingState, PromptsReport, ProviderReport, RulesCopyState,
     Subsystem, SubsystemHealth, SuggestedFix, TelemetryAllowlistEntry, TelemetryFlushReport,
-    TelemetryIdReport, TelemetryQueueReport, TelemetrySection,
+    TelemetryIdReport, TelemetryQueueReport, TelemetrySection, UnrepresentedAgentEntry,
+    UnrepresentedAgentsReport,
 };
 
 /// Build a [`DoctorReport`] from the on-disk state. Read-only; never
@@ -238,6 +239,7 @@ pub fn assemble_report(
         hooks,
         guardrails,
         agents,
+        unrepresented_agents,
         privilege_escalation,
         personas,
     } = build_phase6_surfaces(scope, paths).unwrap_or_default();
@@ -376,6 +378,7 @@ pub fn assemble_report(
         hooks,
         guardrails,
         agents,
+        unrepresented_agents,
         privilege_escalation,
         personas,
         legacy_model_manifests,
@@ -436,15 +439,18 @@ fn corrupt_index_fix(ci: checks::CorruptIndex, active_is_remote: bool) -> Sugges
     }
 }
 
-/// The five Phase 6 / US5 doctor surfaces. All `None` under
-/// `GlobalFallback` / no-DB; the three project-relative surfaces are also
-/// `None` without a resolved project root; `personas` is additionally
-/// `None` when `expose_agents_as_personas` resolves false at the scope.
+/// The five Phase 6 / US5 doctor surfaces plus the Phase 2 native-agent
+/// expansion drop-report. All `None` under `GlobalFallback` / no-DB; the
+/// three project-relative surfaces are also `None` without a resolved project
+/// root; `personas` is additionally `None` when `expose_agents_as_personas`
+/// resolves false at the scope; `unrepresented_agents` is `None` when no
+/// agents are enabled.
 #[derive(Default)]
 struct Phase6Surfaces {
     hooks: Option<report::HooksReport>,
     guardrails: Option<report::GuardrailsReport>,
     agents: Option<report::AgentsReport>,
+    unrepresented_agents: Option<report::UnrepresentedAgentsReport>,
     privilege_escalation: Option<report::PrivilegeEscalationReport>,
     personas: Option<report::PersonaReport>,
 }
@@ -509,6 +515,21 @@ fn build_phase6_surfaces(
             }
         };
     }
+
+    // Phase 2 (native-agent expansion): unrepresented agents drop-report.
+    // Only set when there are enabled agents — a workspace with no agents
+    // keeps the field `None` so the wire shape stays minimal.
+    out.unrepresented_agents = match checks::build_unrepresented_agents_report(
+        &conn,
+        workspace_name,
+    ) {
+        Ok(r) if !r.agents.is_empty() => Some(r),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "doctor: build_unrepresented_agents_report failed; emitting None");
+            None
+        }
+    };
 
     out.privilege_escalation = match checks::build_privilege_escalation_report(
         paths,
