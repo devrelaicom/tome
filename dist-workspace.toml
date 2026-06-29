@@ -36,6 +36,9 @@ allow-dirty = ["ci"]
 # Apple-silicon macOS (FR-018). Windows is explicitly out of scope this phase
 # (research §R-24). Intel macOS (x86_64-apple-darwin) was dropped: the
 # macos-13 runner pool stalls release builds and the target is not supported.
+# NOTE: any target added here MUST also be added to the `[dist.binaries]` map at
+# the bottom of this file, or its archive will revert to packing the CI-only
+# `refresh_model_registry` bin and break the release.
 targets = [
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
@@ -79,3 +82,25 @@ cargo-build-args = ["--locked"]
 [dist.github-custom-runners]
 x86_64-unknown-linux-gnu = "ubuntu-22.04"
 aarch64-unknown-linux-gnu = "ubuntu-22.04-arm"
+
+# Ship ONLY the `tome` binary in release archives (per-platform allowlist).
+#
+# The crate declares a second `[[bin]]`, `refresh_model_registry`, gated behind
+# `required-features = ["registry-refresh"]` (Cargo.toml). It is a CI-only helper
+# run by `model-registry-refresh.yml` and must NEVER be in a user release. The
+# author's assumption that `required-features` would keep it out of cargo-dist
+# was wrong: cargo-dist enumerates ALL `[[bin]]` targets from `cargo metadata`
+# and ignores `required-features`, so `dist plan` packed `refresh_model_registry`
+# into every archive and `dist build` (which never enables `registry-refresh`)
+# failed with `× failed to find bin refresh_model_registry` — this broke the
+# v0.7.8 and v0.7.9 releases (the bin was added in #267, after v0.7.7).
+#
+# `[dist.binaries]` overrides the binary list per target triple, restricting each
+# archive/installer to `tome` only. This matches historical behaviour (releases
+# through v0.7.7 shipped just `tome`). The map MUST be kept in sync with the
+# `targets` array above: any new target added there must also be listed here, or
+# its archive reverts to including both bins and the release breaks again.
+[dist.binaries]
+"aarch64-apple-darwin" = ["tome"]
+"aarch64-unknown-linux-gnu" = ["tome"]
+"x86_64-unknown-linux-gnu" = ["tome"]
