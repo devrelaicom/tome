@@ -527,6 +527,34 @@ pub(crate) fn synthesize_description(canonical: &CanonicalAgent) -> String {
     format!("Agent {} (no description provided).", canonical.name)
 }
 
+/// Normalise a displayed agent name to a harness's slug rules. `allow_underscore`
+/// keeps `_` (Gemini: `^[a-z0-9-_]+$`); when false, `_` becomes `-` (Kiro:
+/// lowercase + hyphens only). Lowercases; maps any other char to `-`; collapses
+/// runs of `-`; trims leading/trailing `-`; empties fall back to `"agent"`.
+// Consumed by the Gemini and Kiro harness modules (later tasks). The allow
+// silences the dead-code lint until those callers land.
+#[allow(dead_code)]
+pub(crate) fn slugify_agent_name(name: &str, allow_underscore: bool) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut last_dash = false;
+    for ch in name.chars().flat_map(|c| c.to_lowercase()) {
+        let keep = ch.is_ascii_alphanumeric() || ch == '-' || (allow_underscore && ch == '_');
+        if keep {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "agent".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 /// Resolve the displayed / registered agent name (FR-041).
 ///
 /// Uses the clean `<name>` normally, and the plugin-prefixed
@@ -887,6 +915,25 @@ mod tests {
             synthesize_description(&a),
             "Agent solo (no description provided)."
         );
+    }
+
+    #[test]
+    fn slugify_agent_name_handles_both_modes() {
+        // allow_underscore = true (Gemini: [a-z0-9-_]).
+        assert_eq!(
+            slugify_agent_name("MyPlugin__Reviewer", true),
+            "myplugin__reviewer"
+        );
+        assert_eq!(slugify_agent_name("Code Review!", true), "code-review");
+        // allow_underscore = false (Kiro: lowercase + hyphens only).
+        assert_eq!(
+            slugify_agent_name("MyPlugin__Reviewer", false),
+            "myplugin-reviewer"
+        );
+        assert_eq!(slugify_agent_name("a__b", false), "a-b");
+        // Collapse repeats / trim edges; empty → fallback.
+        assert_eq!(slugify_agent_name("--a  b--", true), "a-b");
+        assert_eq!(slugify_agent_name("!!!", false), "agent");
     }
 
     #[test]
