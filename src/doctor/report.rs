@@ -891,10 +891,12 @@ pub struct DoctorReport {
     /// a workspace context.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agents: Option<AgentsReport>,
-    /// Phase 2 (native-agent expansion): agents with no native form on
-    /// rules-only harnesses. `None` outside a workspace context / when there
-    /// are no enabled agents — keeps the byte-stable wire shape unchanged for
-    /// a clean system.
+    /// Phase 2 (native-agent expansion): enabled agents with no native form on
+    /// the rules-only harnesses (Cline, Antigravity, Crush, JetBrains AI,
+    /// Junie). Workspace-scoped (read-only; writes nothing) — surfaced whenever
+    /// the workspace has at least one enabled agent, in any scope including
+    /// `--scope global`. `None` when there are no enabled agents (keeps the
+    /// byte-stable wire shape unchanged for a clean system).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unrepresented_agents: Option<UnrepresentedAgentsReport>,
     /// Phase 6 / US5: privilege-escalation audit (FR-051). `None` outside

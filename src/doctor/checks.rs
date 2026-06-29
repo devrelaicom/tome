@@ -29,6 +29,7 @@ use std::time::SystemTime;
 use crate::catalog::manifest::CatalogManifest;
 use crate::doctor::report::{
     CatalogCacheHealth, CatalogCacheState, EntryCountsByKind, OrphanDataDirReport, PromptsReport,
+    UnrepresentedAgentEntry, UnrepresentedAgentsReport,
 };
 use crate::error::TomeError;
 use crate::index::{self, workspace_catalogs};
@@ -1378,8 +1379,6 @@ pub fn check_corrupt_index(paths: &Paths) -> Option<CorruptIndex> {
 // ---------------------------------------------------------------------------
 // Phase 2 (native-agent expansion): unrepresented agents drop-report.
 // ---------------------------------------------------------------------------
-
-use crate::doctor::report::{UnrepresentedAgentEntry, UnrepresentedAgentsReport};
 
 /// Build the Phase 2 drop-report: every enabled agent paired with the
 /// rules-only harnesses that cannot represent it natively. Read-only.
