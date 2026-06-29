@@ -145,6 +145,21 @@ pub(crate) fn reconcile_agents(
     // reconcile is unchanged).
     let snap_names: HashSet<&str> = snapshots.iter().map(|s| s.name.as_str()).collect();
     with_effective_modules(|mods| {
+        // Co-ownership (Copilot): a non-live harness must NOT mass-clean an
+        // agent_dir that a LIVE native-supporting harness also owns — otherwise
+        // selecting only one of two co-owners (copilot / copilot-cli, same
+        // `.github/agents/`) would delete the live one's freshly-written files.
+        // Computed once, up front, so the rule is order-independent.
+        let live_owned_dirs: std::collections::HashSet<PathBuf> = mods
+            .iter()
+            .filter(|m| {
+                snap_names.contains(m.name())
+                    && effective_names.contains(m.name())
+                    && m.supports_native_agents()
+            })
+            .filter_map(|m| m.agent_dir(project_root))
+            .collect();
+
         for m in mods {
             let name = m.name();
             if !snap_names.contains(name) {
@@ -169,6 +184,9 @@ pub(crate) fn reconcile_agents(
                     outcome,
                     &mut recon,
                 )
+            } else if live_owned_dirs.contains(&dir) {
+                // A live co-owner maintains this dir; leave it untouched.
+                Action::LeftAlone
             } else {
                 // Non-live or non-supporting: remove all Tome-owned files.
                 cleanup_all_owned_agents(name, &dir, outcome, &mut recon)
@@ -895,5 +913,78 @@ mod tests {
         assert!(base.join("decoy.md").is_file(), "decoy target untouched");
         // No removal succeeded → the aggregate action is LeftAlone, not Removed.
         assert_eq!(action, Action::LeftAlone);
+    }
+
+    /// Co-ownership: a not-live native-supporting harness must NOT delete files
+    /// in a dir that a LIVE native-supporting harness co-owns (the Copilot
+    /// `.github/agents/` hazard). Two stubs share one agent_dir; one is live.
+    #[test]
+    fn coowned_dir_is_not_cleaned_by_a_non_live_coowner() {
+        let home = TempDir::new().unwrap();
+        let paths = Paths::from_root(home.path().join(".tome"));
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let project = home.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        // Two native-supporting stubs sharing ONE agent_dir; one live, one not.
+        let shared = project.join(".shared/agents");
+        let live = StubHarness::default()
+            .with_name("co-live")
+            .with_native_agents(AgentFormat::MarkdownYaml)
+            .with_agent_dir(shared.clone());
+        let idle = StubHarness::default()
+            .with_name("co-idle")
+            .with_native_agents(AgentFormat::MarkdownYaml)
+            .with_agent_dir(shared.clone());
+
+        std::fs::create_dir_all(&shared).unwrap();
+        let owned = shared.join("plugin-keep__reviewer.md");
+        std::fs::write(&owned, "---\nname: reviewer\n---\nbody\n").unwrap();
+
+        bootstrap_db(&paths);
+        insert_enabled_agent(&paths, "cat", "plugin-keep", "reviewer");
+
+        let workspace = WorkspaceName::global();
+        let deps = SyncDeps {
+            paths: &paths,
+            home_root: home.path(),
+            workspace_name: &workspace,
+            force: false,
+            only_harness: None,
+        };
+        let snapshots = vec![
+            crate::harness::sync::snapshot_for_test(&live, &project, home.path()),
+            crate::harness::sync::snapshot_for_test(&idle, &project, home.path()),
+        ];
+        // Only `co-live` is live; `co-idle` is NOT in the effective set.
+        let effective_names: HashSet<String> = std::iter::once("co-live".to_string()).collect();
+        let mut outcome = SyncOutcome::default();
+
+        // Install both stubs into the process-global registry so
+        // `with_effective_modules` sees them (otherwise it walks
+        // `SUPPORTED_HARNESSES` whose real harnesses never match "co-live" /
+        // "co-idle", making the rule a no-op vacuously — not a real proof).
+        {
+            *crate::harness::HARNESS_MODULES_OVERRIDE.write().unwrap() =
+                Some(vec![Box::new(live.clone()), Box::new(idle.clone())]);
+        }
+        let result = reconcile_agents(
+            &project,
+            &deps,
+            &effective_names,
+            &snapshots,
+            false,
+            &mut outcome,
+        );
+        // Restore the override immediately — before any assert that could panic.
+        *crate::harness::HARNESS_MODULES_OVERRIDE.write().unwrap() = None;
+
+        result.expect("reconcile ok");
+
+        // The owned file written by the live co-owner survives the idle co-owner's pass.
+        assert!(
+            owned.is_file(),
+            "a non-live co-owner must NOT delete a live co-owner's file in a shared agent_dir"
+        );
     }
 }
