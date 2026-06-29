@@ -700,17 +700,15 @@ pub(crate) fn kiro_tools(tools: &[String]) -> Vec<String> {
 // dead-code lint until that caller lands.
 #[allow(dead_code)]
 pub(crate) fn devin_tools(tools: &[String]) -> Vec<String> {
-    map_tools_dedup(tools, |k| {
-        Some(match k {
-            CcToolKind::Read => "read",
-            CcToolKind::Write => "write",
-            CcToolKind::Edit | CcToolKind::MultiEdit | CcToolKind::NotebookEdit => "edit",
-            CcToolKind::Grep => "grep",
-            CcToolKind::Glob => "glob",
-            CcToolKind::Bash => "exec",
-            // No documented Devin name for these → drop.
-            CcToolKind::Ls | CcToolKind::WebFetch | CcToolKind::WebSearch => return None,
-        })
+    map_tools_dedup(tools, |k| match k {
+        CcToolKind::Read => Some("read"),
+        CcToolKind::Write => Some("write"),
+        CcToolKind::Edit | CcToolKind::MultiEdit | CcToolKind::NotebookEdit => Some("edit"),
+        CcToolKind::Grep => Some("grep"),
+        CcToolKind::Glob => Some("glob"),
+        CcToolKind::Bash => Some("exec"),
+        // No documented Devin name for these → drop.
+        CcToolKind::Ls | CcToolKind::WebFetch | CcToolKind::WebSearch => None,
     })
 }
 
@@ -719,18 +717,16 @@ pub(crate) fn devin_tools(tools: &[String]) -> Vec<String> {
 // dead-code lint until that caller lands.
 #[allow(dead_code)]
 pub(crate) fn pi_tools(tools: &[String]) -> Option<String> {
-    let mapped = map_tools_dedup(tools, |k| {
-        Some(match k {
-            CcToolKind::Read => "read",
-            CcToolKind::Grep => "grep",
-            CcToolKind::Glob => "find",
-            CcToolKind::Ls => "ls",
-            CcToolKind::Edit | CcToolKind::MultiEdit | CcToolKind::NotebookEdit => "edit",
-            CcToolKind::Write => "write",
-            CcToolKind::Bash => "bash",
-            // No Pi name for web tools → drop.
-            CcToolKind::WebFetch | CcToolKind::WebSearch => return None,
-        })
+    let mapped = map_tools_dedup(tools, |k| match k {
+        CcToolKind::Read => Some("read"),
+        CcToolKind::Grep => Some("grep"),
+        CcToolKind::Glob => Some("find"),
+        CcToolKind::Ls => Some("ls"),
+        CcToolKind::Edit | CcToolKind::MultiEdit | CcToolKind::NotebookEdit => Some("edit"),
+        CcToolKind::Write => Some("write"),
+        CcToolKind::Bash => Some("bash"),
+        // No Pi name for web tools → drop.
+        CcToolKind::WebFetch | CcToolKind::WebSearch => None,
     });
     if mapped.is_empty() {
         None
@@ -1105,6 +1101,22 @@ mod tests {
         assert_eq!(devin_tools(&d), vec!["exec", "write", "read"]);
         // Nothing maps → Pi returns None (omit the field).
         assert_eq!(pi_tools(&["Nope".to_owned()]), None);
+    }
+
+    #[test]
+    fn devin_tools_drops_ls_and_web() {
+        let t = vec![
+            "Ls".into(),
+            "WebFetch".into(),
+            "WebSearch".into(),
+            "Bash".into(),
+        ];
+        assert_eq!(devin_tools(&t), vec!["exec"]); // Ls/Web dropped, Bash maps
+    }
+    #[test]
+    fn pi_tools_drops_web_but_keeps_others() {
+        let t = vec!["WebFetch".into(), "Read".into(), "WebSearch".into()];
+        assert_eq!(pi_tools(&t).as_deref(), Some("read")); // web dropped, Read maps
     }
 
     #[test]
