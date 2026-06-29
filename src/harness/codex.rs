@@ -120,6 +120,7 @@ impl HarnessModule for Codex {
         &self,
         canonical: &CanonicalAgent,
         clashes: bool,
+        _models: &crate::model_registry::ModelRegistry,
     ) -> Result<TranslatedAgent, TomeError> {
         let mut scalars: Vec<(String, String)> = Vec::new();
         let mut dropped: Vec<String> = Vec::new();
@@ -226,7 +227,10 @@ mod tests {
 
     #[test]
     fn body_in_developer_instructions_model_drops_sandbox_read_only() {
-        let t = CODEX.translate_agent(&read_only_agent(), false).unwrap();
+        let reg = crate::model_registry::test_registry();
+        let t = CODEX
+            .translate_agent(&read_only_agent(), false, &reg)
+            .unwrap();
         assert_eq!(t.filename, "myplugin__reviewer.toml");
         // Body lands in a triple-quoted developer_instructions string.
         assert!(

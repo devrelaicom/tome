@@ -293,6 +293,16 @@ impl Paths {
         self.root.join("provider_notice_seen")
     }
 
+    // --- Model registry accessors (Phase 13 Task 2) ----------------------
+
+    /// Override location for the model registry snapshot. A fresher registry
+    /// fetched at runtime (e.g. by the CI refresh job) is written here and
+    /// takes precedence over the baked snapshot when present and valid.
+    /// `doctor` surfaces corruption via `override_health`.
+    pub fn model_registry_cache_path(&self) -> PathBuf {
+        self.root.join("cache").join("model-registry.json")
+    }
+
     // --- Project marker accessors ---------------------------------------
     //
     // Project markers live at `<project_root>/.tome/`. They are
@@ -399,5 +409,14 @@ mod tests {
                 "model_path({bad:?}) should have errored",
             );
         }
+    }
+
+    #[test]
+    fn model_registry_cache_path_is_under_root() {
+        let p = Paths::from_root(PathBuf::from("/home/u/.tome"));
+        assert_eq!(
+            p.model_registry_cache_path(),
+            PathBuf::from("/home/u/.tome/cache/model-registry.json"),
+        );
     }
 }

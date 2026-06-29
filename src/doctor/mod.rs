@@ -61,10 +61,10 @@ use crate::workspace::ResolvedScope;
 
 pub use report::{
     CatalogCacheHealth, CatalogCacheState, DoctorClassification, DoctorReport, EntryCountsByKind,
-    HarnessPresence, HarnessSubsystemReport, MetaSkillDrift, OrphanDataDirReport,
-    ProjectBindingState, PromptsReport, ProviderReport, RulesCopyState, Subsystem, SubsystemHealth,
-    SuggestedFix, TelemetryAllowlistEntry, TelemetryFlushReport, TelemetryIdReport,
-    TelemetryQueueReport, TelemetrySection,
+    HarnessPresence, HarnessSubsystemReport, MetaSkillDrift, ModelRegistryReport,
+    OrphanDataDirReport, ProjectBindingState, PromptsReport, ProviderReport, RulesCopyState,
+    Subsystem, SubsystemHealth, SuggestedFix, TelemetryAllowlistEntry, TelemetryFlushReport,
+    TelemetryIdReport, TelemetryQueueReport, TelemetrySection,
 };
 
 /// Build a [`DoctorReport`] from the on-disk state. Read-only; never
@@ -311,6 +311,22 @@ pub fn assemble_report(
         &harness_mcp,
     );
 
+    // Phase 13 (native-agent model-registry): read-only model-registry
+    // subsystem report. Always present (baked at minimum). Read-only.
+    let model_registry = checks::check_model_registry(paths);
+    // If the override file is present-but-corrupt, surface a non-auto-fixable
+    // SuggestedFix. `--fix` must NOT fetch; the user runs the command manually.
+    if model_registry.override_corrupt {
+        suggested_fixes.push(SuggestedFix {
+            subsystem: Subsystem::ModelRegistry,
+            diagnosis: "model-registry override file is corrupt; active registry fell back to \
+                        baked"
+                .to_owned(),
+            command: "tome models update --include-registry".to_owned(),
+            auto_fixable: false,
+        });
+    }
+
     // Phase 8 cutover surfaces (read-only). The migration of any legacy model
     // `manifest.json` runs under `--fix` (in the command layer); the report
     // here only surfaces what would be migrated / converted.
@@ -367,6 +383,7 @@ pub fn assemble_report(
         meta_skills,
         telemetry,
         providers,
+        model_registry,
         overall,
         suggested_fixes,
     })

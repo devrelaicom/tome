@@ -914,6 +914,8 @@ pub fn build_agents_report(
         prepared.push((canonical, clashes));
     }
 
+    let model_registry = crate::model_registry::ModelRegistry::load(paths);
+
     let mut harnesses: Vec<AgentHarnessEntry> = Vec::new();
     crate::harness::with_effective_modules(|mods| {
         for m in mods {
@@ -940,7 +942,7 @@ pub fn build_agents_report(
             // Dropped fields from re-translation (informational).
             let mut dropped_fields: Vec<DroppedFieldEntry> = Vec::new();
             for (canonical, clashes) in &prepared {
-                if let Ok(translated) = m.translate_agent(canonical, *clashes)
+                if let Ok(translated) = m.translate_agent(canonical, *clashes, &model_registry)
                     && !translated.dropped_fields.is_empty()
                 {
                     let stem = translated
@@ -1383,6 +1385,37 @@ pub struct CorruptIndex {
     pub stored: usize,
     /// The dimension `meta.embedder_dimension` says they should be.
     pub expected: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Phase 13 (native-agent model-registry): read-only registry report.
+// ---------------------------------------------------------------------------
+
+use crate::doctor::report::ModelRegistryReport;
+
+/// Build the read-only model-registry subsystem report for `tome doctor`.
+///
+/// Calls [`crate::model_registry::ModelRegistry::load`] (which prefers a
+/// valid override over the baked asset) to determine the active source,
+/// then [`crate::model_registry::override_health`] (independently, so a
+/// corrupt override is surfaced even though `load` already fell back to
+/// baked). Read-only — no fetch, no writes.
+pub fn check_model_registry(paths: &Paths) -> ModelRegistryReport {
+    let active = crate::model_registry::ModelRegistry::load(paths);
+    let info = active.info();
+    let override_corrupt = matches!(
+        crate::model_registry::override_health(paths),
+        crate::model_registry::OverrideHealth::Corrupt
+    );
+    ModelRegistryReport {
+        source: match info.source {
+            crate::model_registry::RegistrySource::Baked => "baked".to_owned(),
+            crate::model_registry::RegistrySource::Override => "override".to_owned(),
+        },
+        fetched_at: info.fetched_at,
+        model_count: info.model_count,
+        override_corrupt,
+    }
 }
 
 #[cfg(test)]

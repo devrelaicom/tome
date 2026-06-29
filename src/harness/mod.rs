@@ -839,6 +839,7 @@ pub trait HarnessModule: Send + Sync {
         &self,
         _canonical: &agents::CanonicalAgent,
         _clashes: bool,
+        _models: &crate::model_registry::ModelRegistry,
     ) -> Result<agents::TranslatedAgent, crate::error::TomeError> {
         unreachable!(
             "translate_agent called on a harness without native agent support: {}",

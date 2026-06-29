@@ -58,6 +58,7 @@ include = [
     "/src/**",
     "/build.rs",
     "/vendor/**",
+    "/assets/**",
     "/Cargo.toml",
     "/Cargo.lock",
     "/README.md",
@@ -86,6 +87,20 @@ name = "tome"
 [[bin]]
 name = "tome"
 path = "src/main.rs"
+
+# CI-only: a scheduled workflow refreshes the vendored model registry. Gated
+# behind `registry-refresh` so a default `cargo build` / cargo-dist release
+# build NEVER compiles this bin — it is not shipped in release artifacts.
+# Deliberate deviation from the plan's `release.yml` step: a tag-triggered
+# workflow cannot cleanly commit/push (detached tag checkout), so this lives
+# in its own `model-registry-refresh.yml` (schedule + workflow_dispatch).
+[features]
+registry-refresh = []
+
+[[bin]]
+name = "refresh_model_registry"
+path = "src/bin/refresh_model_registry.rs"
+required-features = ["registry-refresh"]
 
 [dependencies]
 # Phase 1 — unchanged
@@ -222,6 +237,10 @@ cc = "1"
 # evaluates the same graph, and the "no new top-level dependency" invariant holds.
 sha2 = "0.10"
 hex = "0.4"
+# Phase 13 (Task 2) — build-time validation of the vendored model-registry
+# snapshot. Already a normal dependency; reusing it under `[build-dependencies]`
+# adds NO new Cargo.lock package (same pattern as sha2/hex above).
+serde_json = { version = "1", features = ["preserve_order"] }
 
 [dev-dependencies]
 # Drive the interactive `tome plugin` browse flow through a real pty.

@@ -109,14 +109,16 @@ impl HarnessModule for Cursor {
     }
 
     /// Cursor uses Markdown + YAML frontmatter with the body in the file
-    /// body. It keeps `name` + `description` + `tools`. `model` DROPs (no
-    /// same-vendor Cursor Anthropic id is enumerated yet, FR-034). Read-only
-    /// intent maps to `readonly: true` (FR-036). The privileged fields and
-    /// `disallowedTools` have no Cursor carrier and DROP.
+    /// body. It keeps `name` + `description`. `tools` DROPs (Cursor has no
+    /// `tools` field — FR-034). A pinned `model` maps to `inherit` (Cursor's
+    /// proprietary ids are not in the registry; `inherit` preserves intent).
+    /// Read-only intent maps to `readonly: true` (FR-036). The privileged
+    /// fields and `disallowedTools` have no Cursor carrier and DROP.
     fn translate_agent(
         &self,
         canonical: &CanonicalAgent,
         clashes: bool,
+        models: &crate::model_registry::ModelRegistry,
     ) -> Result<TranslatedAgent, TomeError> {
         let mut frontmatter: Vec<(String, serde_yaml::Value)> = Vec::new();
         let mut dropped: Vec<String> = Vec::new();
@@ -131,33 +133,31 @@ impl HarnessModule for Cursor {
             ));
         }
 
-        // `model` drops for Cursor (no enumerated same-vendor id yet).
-        if canonical.model.is_some() {
-            dropped.push("model".to_owned());
+        // A pinned model maps to `inherit` (Cursor's proprietary ids aren't
+        // in the registry); `inherit`/absent → omit.
+        if let Some(src) = canonical.model.as_deref() {
+            match agents::map_model(models, "cursor", src) {
+                Some(mapped) => {
+                    frontmatter.push(("model".to_owned(), serde_yaml::Value::String(mapped)))
+                }
+                None => dropped.push("model".to_owned()),
+            }
         }
 
-        if let Some(tools) = &canonical.tools {
-            frontmatter.push((
-                "tools".to_owned(),
-                serde_yaml::Value::Sequence(
-                    tools
-                        .iter()
-                        .map(|t| serde_yaml::Value::String(t.clone()))
-                        .collect(),
-                ),
-            ));
+        // Cursor has no `tools` field — record the source posture as dropped.
+        if canonical.tools.is_some() {
+            dropped.push("tools".to_owned());
         }
 
         // Read-only intent → `readonly: true`. Indeterminate / not-read-only
-        // → no `readonly` key (inherit Cursor's default). C-2: Cursor KEEPS
-        // the `tools` allowlist verbatim and records `disallowedTools` as a
-        // drop below, so when the read-only intent is not reconstructed the
-        // responsible canonical SOURCE fields are already accounted for — we
-        // do NOT record the harness target name `readonly`.
+        // → no `readonly` key (inherit Cursor's default). C-2: Cursor has no
+        // `tools` field (dropped above), so when the read-only intent is not
+        // reconstructed the responsible canonical SOURCE field is already
+        // accounted for — we do NOT record the harness target name `readonly`.
         //
-        // C-1: only read-only *intent* is reconstructed; a non-read-only
-        // restrictive `tools` allowlist is carried through as-is, not
-        // translated into a finer-grained permission model.
+        // C-1: only read-only *intent* is reconstructed; the original `tools`
+        // allowlist is used for inference here (before it is dropped) so the
+        // `readonly` key is still correctly derived.
         if let Some(true) = agents::infer_read_only(
             canonical.tools.as_deref(),
             canonical.disallowed_tools.as_deref(),
@@ -202,7 +202,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keeps_tools_drops_model_infers_readonly() {
+    fn drops_tools_emits_inherit_infers_readonly() {
         let agent = CanonicalAgent {
             catalog: "cat".into(),
             plugin: "myplugin".into(),
@@ -216,12 +216,22 @@ mod tests {
             mcp_servers: None,
             permission_mode: None,
         };
-        let t = CURSOR.translate_agent(&agent, false).unwrap();
+        let reg = crate::model_registry::test_registry();
+        let t = CURSOR.translate_agent(&agent, false, &reg).unwrap();
         assert_eq!(t.filename, "myplugin__reviewer.md");
-        assert!(t.rendered.contains("tools:"), "tools kept:\n{}", t.rendered);
+        assert!(
+            !t.rendered.contains("tools:"),
+            "Cursor has no tools field:\n{}",
+            t.rendered
+        );
         assert!(t.rendered.contains("readonly: true"), "read-only inferred");
-        // model drops for Cursor (no enumerated same-vendor id yet).
-        assert!(!t.rendered.contains("model:"));
-        assert!(t.dropped_fields.contains(&"model".to_owned()));
+        assert!(
+            t.rendered.contains("model: inherit"),
+            "pinned model → inherit"
+        );
+        assert!(
+            t.dropped_fields.contains(&"tools".to_owned()),
+            "tools recorded dropped"
+        );
     }
 }

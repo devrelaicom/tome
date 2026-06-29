@@ -190,10 +190,20 @@ fn doctor_json_includes_suggested_fix_record_on_broken_catalog() {
 #[test]
 fn doctor_json_shape_is_byte_stable_for_minimal_report() {
     use tome::commands::status::{IndexHealth, ModelHealth};
-    use tome::doctor::report::WorkspaceRegistryStatus;
+    use tome::doctor::report::{ModelRegistryReport, WorkspaceRegistryStatus};
     use tome::doctor::{CatalogCacheHealth, DoctorClassification, DoctorReport};
     use tome::index::meta::DriftStatus;
     use tome::workspace::{ScopeKind, WorkspaceInfo, scope::ScopeSource};
+
+    // Derive model-registry fields from the baked asset so the expected string
+    // stays in sync without hard-coding the vendored `fetched_at`/`model_count`.
+    let mr_info = tome::model_registry::ModelRegistry::baked().info();
+    let mr = ModelRegistryReport {
+        source: "baked".to_owned(),
+        fetched_at: mr_info.fetched_at.clone(),
+        model_count: mr_info.model_count,
+        override_corrupt: false,
+    };
 
     // Literal minimal report — empty everywhere a field is Vec /
     // Option / default. Pin every Phase 4 addition into the wire shape.
@@ -273,14 +283,18 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
         // Phase 12 / US4: empty → `skip_serializing_if = "Vec::is_empty"` omits
         // it from the wire shape, so the byte-stable pin below stays unchanged.
         providers: Vec::new(),
+        // Phase 13: always-present model-registry report (not Option).
+        model_registry: mr,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
 
     let json = serde_json::to_string(&report).expect("serialise");
     let expected = format!(
-        r#"{{"tome_version":"{v}","workspace":{{"scope":"global","path":null,"source":"global_fallback","catalogs":0,"plugins_total":0,"plugins_enabled":0,"skills_indexed":0,"schema_version":null,"embedder":null,"enrolled_catalogs":[],"enabled_plugins":[],"bound_projects":[],"summary_cache":null}},"embedder":{{"name":"bge-small-en-v1.5","version":"1.5","state":"ok"}},"reranker":{{"name":"bge-reranker-base","version":"1","state":"ok"}},"summariser":{{"name":"qwen2.5-0.5b-instruct","version":"2.5","state":"ok"}},"index":{{"present":false,"schema_version":null,"plugins_enabled":0,"skills_indexed":0,"size_bytes":0,"integrity_ok":true}},"drift":{{"kind":"none"}},"catalogs":[],"workspace_registry":{{"present":false,"tracked":0}},"harnesses":[],"harness_rules":[],"harness_mcp":[],"detected_uninstalled_harnesses":[],"overall":"ok","suggested_fixes":[]}}"#,
+        r#"{{"tome_version":"{v}","workspace":{{"scope":"global","path":null,"source":"global_fallback","catalogs":0,"plugins_total":0,"plugins_enabled":0,"skills_indexed":0,"schema_version":null,"embedder":null,"enrolled_catalogs":[],"enabled_plugins":[],"bound_projects":[],"summary_cache":null}},"embedder":{{"name":"bge-small-en-v1.5","version":"1.5","state":"ok"}},"reranker":{{"name":"bge-reranker-base","version":"1","state":"ok"}},"summariser":{{"name":"qwen2.5-0.5b-instruct","version":"2.5","state":"ok"}},"index":{{"present":false,"schema_version":null,"plugins_enabled":0,"skills_indexed":0,"size_bytes":0,"integrity_ok":true}},"drift":{{"kind":"none"}},"catalogs":[],"workspace_registry":{{"present":false,"tracked":0}},"harnesses":[],"harness_rules":[],"harness_mcp":[],"detected_uninstalled_harnesses":[],"model_registry":{{"source":"baked","fetched_at":"{fat}","model_count":{mc},"override_corrupt":false}},"overall":"ok","suggested_fixes":[]}}"#,
         v = env!("CARGO_PKG_VERSION"),
+        fat = mr_info.fetched_at,
+        mc = mr_info.model_count,
     );
     assert_eq!(json, expected);
 }
@@ -392,11 +406,14 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
     use std::path::PathBuf;
     use tome::commands::status::{IndexHealth, ModelHealth};
     use tome::doctor::report::{
-        EntryCountsByKind, OrphanDataDirReport, PromptsReport, WorkspaceRegistryStatus,
+        EntryCountsByKind, ModelRegistryReport, OrphanDataDirReport, PromptsReport,
+        WorkspaceRegistryStatus,
     };
     use tome::doctor::{CatalogCacheHealth, DoctorClassification, DoctorReport};
     use tome::index::meta::DriftStatus;
     use tome::workspace::{ScopeKind, WorkspaceInfo, scope::ScopeSource};
+
+    let mr_info = tome::model_registry::ModelRegistry::baked().info();
 
     let report = DoctorReport {
         tome_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -481,6 +498,13 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
         // Phase 12 / US4: empty → `skip_serializing_if = "Vec::is_empty"` omits
         // it from the wire shape, so the byte-stable pin below stays unchanged.
         providers: Vec::new(),
+        // Phase 13: always-present model-registry report (not Option).
+        model_registry: ModelRegistryReport {
+            source: "baked".to_owned(),
+            fetched_at: mr_info.fetched_at.clone(),
+            model_count: mr_info.model_count,
+            override_corrupt: false,
+        },
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -524,12 +548,14 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
 fn doctor_json_phase6_fields_appended_last_in_order() {
     use tome::commands::status::{IndexHealth, ModelHealth};
     use tome::doctor::report::{
-        AgentsReport, EntryCountsByKind, GuardrailsReport, HooksReport, PersonaReport,
-        PrivilegeEscalationReport, WorkspaceRegistryStatus,
+        AgentsReport, EntryCountsByKind, GuardrailsReport, HooksReport, ModelRegistryReport,
+        PersonaReport, PrivilegeEscalationReport, WorkspaceRegistryStatus,
     };
     use tome::doctor::{CatalogCacheHealth, DoctorClassification, DoctorReport};
     use tome::index::meta::DriftStatus;
     use tome::workspace::{ScopeKind, WorkspaceInfo, scope::ScopeSource};
+
+    let mr_info = tome::model_registry::ModelRegistry::baked().info();
 
     let report = DoctorReport {
         tome_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -621,6 +647,13 @@ fn doctor_json_phase6_fields_appended_last_in_order() {
         // Phase 12 / US4: empty → `skip_serializing_if = "Vec::is_empty"` omits
         // it from the wire shape, so the byte-stable pin below stays unchanged.
         providers: Vec::new(),
+        // Phase 13: always-present model-registry report (not Option).
+        model_registry: ModelRegistryReport {
+            source: "baked".to_owned(),
+            fetched_at: mr_info.fetched_at.clone(),
+            model_count: mr_info.model_count,
+            override_corrupt: false,
+        },
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };

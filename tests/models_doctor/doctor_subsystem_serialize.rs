@@ -33,6 +33,8 @@ fn every_variant_round_trips_via_documented_wire_string() {
             Subsystem::HarnessMcp("codex".into()),
             "\"harness-mcp:codex\"",
         ),
+        // Phase 13 (native-agent model-registry):
+        (Subsystem::ModelRegistry, "\"model-registry\""),
     ];
     for (variant, wire) in cases {
         let serialised = serde_json::to_string(&variant).unwrap();

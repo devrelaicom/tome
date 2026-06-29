@@ -36,8 +36,9 @@ fn read_only_agent() -> CanonicalAgent {
 
 #[test]
 fn emits_toml_with_namespaced_filename() {
+    let reg = tome::model_registry::test_registry();
     let t = CODEX
-        .translate_agent(&read_only_agent(), false)
+        .translate_agent(&read_only_agent(), false, &reg)
         .expect("translate");
     assert_eq!(t.format, AgentFormat::Toml, "Codex emits TOML");
     assert_eq!(
@@ -48,8 +49,11 @@ fn emits_toml_with_namespaced_filename() {
 
 #[test]
 fn body_lands_in_triple_quoted_developer_instructions() {
+    let reg = tome::model_registry::test_registry();
     let agent = read_only_agent();
-    let t = CODEX.translate_agent(&agent, false).expect("translate");
+    let t = CODEX
+        .translate_agent(&agent, false, &reg)
+        .expect("translate");
 
     // Triple-quote form is the contract-mandated multi-line basic string.
     assert!(
@@ -70,8 +74,9 @@ fn body_lands_in_triple_quoted_developer_instructions() {
 
 #[test]
 fn model_is_dropped_and_recorded() {
+    let reg = tome::model_registry::test_registry();
     let t = CODEX
-        .translate_agent(&read_only_agent(), false)
+        .translate_agent(&read_only_agent(), false, &reg)
         .expect("translate");
 
     // Absent from the rendered output: no `model` key at all.
@@ -91,8 +96,9 @@ fn model_is_dropped_and_recorded() {
 
 #[test]
 fn read_only_posture_maps_to_sandbox_mode() {
+    let reg = tome::model_registry::test_registry();
     let t = CODEX
-        .translate_agent(&read_only_agent(), false)
+        .translate_agent(&read_only_agent(), false, &reg)
         .expect("translate");
     let doc: toml_edit::DocumentMut = t.rendered.parse().expect("parse");
     assert_eq!(
@@ -113,7 +119,10 @@ fn indeterminate_posture_omits_sandbox_mode() {
         disallowed_tools: None,
         ..read_only_agent()
     };
-    let t = CODEX.translate_agent(&agent, false).expect("translate");
+    let reg = tome::model_registry::test_registry();
+    let t = CODEX
+        .translate_agent(&agent, false, &reg)
+        .expect("translate");
     let doc: toml_edit::DocumentMut = t.rendered.parse().expect("parse");
     assert!(
         doc.get("sandbox_mode").is_none(),
@@ -138,7 +147,10 @@ fn not_read_only_allowlist_records_source_field() {
         disallowed_tools: None,
         ..read_only_agent()
     };
-    let t = CODEX.translate_agent(&agent, false).expect("translate");
+    let reg = tome::model_registry::test_registry();
+    let t = CODEX
+        .translate_agent(&agent, false, &reg)
+        .expect("translate");
     let doc: toml_edit::DocumentMut = t.rendered.parse().expect("parse");
     assert!(
         doc.get("sandbox_mode").is_none(),

@@ -165,6 +165,7 @@ impl HarnessModule for OpenCode {
         &self,
         canonical: &CanonicalAgent,
         _clashes: bool,
+        models: &crate::model_registry::ModelRegistry,
     ) -> Result<TranslatedAgent, TomeError> {
         let mut frontmatter: Vec<(String, serde_yaml::Value)> = Vec::new();
         let mut dropped: Vec<String> = Vec::new();
@@ -187,7 +188,7 @@ impl HarnessModule for OpenCode {
 
         // `model` ports via the OpenCode same-vendor table (anthropic/...).
         if let Some(src) = canonical.model.as_deref() {
-            match agents::map_model("opencode", src) {
+            match agents::map_model(models, "opencode", src) {
                 Some(mapped) => {
                     frontmatter.push(("model".to_owned(), serde_yaml::Value::String(mapped)));
                 }
@@ -302,26 +303,28 @@ mod tests {
 
     #[test]
     fn name_always_filename_derived_even_without_clash() {
+        let reg = crate::model_registry::test_registry();
         let agent = CanonicalAgent {
             body: "Body line.\n".into(),
             ..base("reviewer")
         };
         // `clashes = false` but OpenCode name is ALWAYS `<plugin>__<name>`.
-        let t = OPENCODE.translate_agent(&agent, false).unwrap();
+        let t = OPENCODE.translate_agent(&agent, false, &reg).unwrap();
         assert_eq!(t.displayed_name, "myplugin__reviewer");
         assert_eq!(t.filename, "myplugin__reviewer.md");
     }
 
     #[test]
     fn mode_subagent_model_mapped_readonly_permission() {
+        let reg = crate::model_registry::test_registry();
         let agent = CanonicalAgent {
             body: "First body line.\n".into(),
             ..base("reviewer")
         };
-        let t = OPENCODE.translate_agent(&agent, false).unwrap();
+        let t = OPENCODE.translate_agent(&agent, false, &reg).unwrap();
         assert!(t.rendered.contains("mode: subagent"));
-        // opus → opencode same-vendor anthropic id.
-        assert!(t.rendered.contains("model: anthropic/claude-opus-4.7"));
+        // opus → opencode same-vendor anthropic id (registry-driven).
+        assert!(t.rendered.contains("model: anthropic/claude-opus-4-5"));
         // read-only intent → per-tool permission deny block.
         assert!(t.rendered.contains("permission:"));
         assert!(t.rendered.contains("edit: deny"));
@@ -330,12 +333,13 @@ mod tests {
 
     #[test]
     fn description_falls_back_to_first_body_line_then_placeholder() {
+        let reg = crate::model_registry::test_registry();
         // No frontmatter description → first non-empty body line.
         let agent = CanonicalAgent {
             body: "\n  First real line.  \nSecond line.\n".into(),
             ..base("reviewer")
         };
-        let t = OPENCODE.translate_agent(&agent, false).unwrap();
+        let t = OPENCODE.translate_agent(&agent, false, &reg).unwrap();
         assert!(
             t.rendered.contains("description: First real line."),
             "first non-empty body line is the description:\n{}",
@@ -344,7 +348,7 @@ mod tests {
 
         // Empty body → documented placeholder.
         let empty = base("solo");
-        let t2 = OPENCODE.translate_agent(&empty, false).unwrap();
+        let t2 = OPENCODE.translate_agent(&empty, false, &reg).unwrap();
         assert!(
             t2.rendered
                 .contains("Agent solo (no description provided)."),

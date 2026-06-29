@@ -1,0 +1,101 @@
+name: Refresh model registry
+
+# Runs weekly (Mondays at 06:00 UTC) and on demand.
+#
+# PLACEMENT NOTE: the plan originally called for wiring the refresh step inside
+# `release.yml`, but that workflow is tag-triggered (`on: push: tags`).  A
+# tag-triggered checkout produces a detached HEAD, making a clean commit/push
+# back to main require a fragile branch dance.  This standalone workflow checks
+# out `main` directly and either opens a PR (on `refreshed`) or files an issue
+# (on `failed:…`) — human-reviewed either way, never auto-merging.
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  workflow_dispatch:        # also triggerable manually
+
+# Least privilege: read for checkout; write only when the PR/issue step needs
+# it (handled by gh CLI with the built-in GITHUB_TOKEN).
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  refresh:
+    name: Refresh vendored model registry
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      # Keep telemetry off on the runner (defence-in-depth, mirrors ci.yml).
+      TOME_TELEMETRY: "0"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Check out main so we can commit & push back if the registry changed.
+          ref: main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: model-registry-refresh
+          cache-bin: false
+
+      # The bin always exits 0 and prints one of: refreshed / skipped / failed:…
+      - name: Run refresh bin
+        id: refresh
+        run: |
+          STATUS=$(cargo run --quiet --features registry-refresh --bin refresh_model_registry)
+          echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+          echo "Refresh status: ${STATUS}"
+
+      # --- refreshed: open a PR so a human reviews the asset change ----------
+      - name: Open PR with updated registry
+        if: steps.refresh.outputs.status == 'refreshed'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Date-granular throwaway branch. A second same-day run (manual
+          # dispatch + the schedule, or a re-run) must converge, not hard-fail:
+          # `-B` resets the local branch, the force-push overwrites the remote,
+          # and an existing open PR for this head is tolerated (the branch is
+          # already updated, so there is nothing more to do).
+          BRANCH="chore/model-registry-$(date -u +%Y%m%d)"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B "${BRANCH}"
+          git add assets/model-registry/registry.json
+          git commit -m "chore(model-registry): refresh from models.dev"
+          git push --force origin "${BRANCH}"
+          gh pr create \
+            --title "chore(model-registry): weekly registry refresh" \
+            --body "Automated weekly refresh of \`assets/model-registry/registry.json\` from models.dev/api.json.
+
+Please review the diff to confirm the upstream data looks reasonable before merging." \
+            --base main \
+            --head "${BRANCH}" \
+            || echo "PR already exists for ${BRANCH}; branch updated."
+
+      # --- failed:… : file an issue so the team can investigate --------------
+      - name: File issue on refresh failure
+        if: startsWith(steps.refresh.outputs.status, 'failed')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh issue create \
+            --title "Model registry refresh failed ($(date -u +%Y-%m-%d))" \
+            --body "The scheduled model-registry refresh returned an error.
+
+**Status:** \`${{ steps.refresh.outputs.status }}\`
+
+The vendored \`assets/model-registry/registry.json\` was **not** modified — the release will use the existing snapshot.  Investigate and refresh manually with:
+
+\`\`\`
+cargo run --features registry-refresh --bin refresh_model_registry
+\`\`\`"
+
+      # skipped: nothing to do — the vendored asset is still fresh.

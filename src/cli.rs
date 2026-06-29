@@ -636,6 +636,10 @@ pub enum ModelsCommand {
     /// vector; `summariser` summarises a tiny input; `reranker` reranks a
     /// small candidate set. Honours `--json`.
     Test(ModelsTestArgs),
+    /// Bring local model assets up to date. Ensures the active profile's
+    /// models are present (re-downloading any missing). `--include-registry`
+    /// also refreshes the harness model-id registry override from models.dev.
+    Update(ModelsUpdateArgs),
 }
 
 /// Which model capability `tome models test` exercises. Each value drives a
@@ -690,6 +694,14 @@ pub struct ModelsRemoveArgs {
     /// Skip the confirmation prompt. Required when stdin is not a TTY.
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ModelsUpdateArgs {
+    /// Also refresh the model-id registry override (~/.tome/cache/model-registry.json)
+    /// by fetching the latest data from models.dev.
+    #[arg(long)]
+    pub include_registry: bool,
 }
 
 #[derive(Debug, Subcommand)]

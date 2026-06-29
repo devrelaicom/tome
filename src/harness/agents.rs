@@ -385,11 +385,17 @@ pub(crate) fn render_codex_toml(scalars: &[(String, String)], body: &str) -> Str
 
 /// Per-harness model alias table — SAME-VENDOR ONLY (FR-034/037, R-8).
 ///
-/// `map_model(harness, source)` returns the harness-native identifier for a
-/// canonical model value, or `None` to DROP the field (harness default
+/// `map_model(registry, harness, source)` returns the harness-native identifier
+/// for a canonical model value, or `None` to DROP the field (harness default
 /// inherited). Cross-vendor mapping is FORBIDDEN: `opus → codex` is `None`,
 /// never an OpenAI id. `inherit` drops everywhere. Any source value with no
 /// same-vendor target for the harness drops.
+///
+/// The `registry` is used by OpenCode to resolve tier aliases (`opus` /
+/// `sonnet` / `haiku`) to the newest non-preview same-vendor id at call time
+/// (registry-driven, not a static string). For Cursor, any pinned model maps
+/// to `inherit` (Cursor's proprietary model ids are not in models.dev; the
+/// `inherit` value preserves the intent of the original pin).
 ///
 /// This is the named artefact SC-002 verifies against; the table is pinned
 /// in `contracts/agent-translation.md`.
@@ -397,36 +403,35 @@ pub(crate) fn render_codex_toml(scalars: &[(String, String)], body: &str) -> Str
 /// Ecosystem caveat: the exact harness-native identifiers are confirmed
 /// against current harness docs at implementation time; the *policy*
 /// (same-vendor-only, drop-on-no-target) is fixed.
-pub(crate) fn map_model(harness: &str, source: &str) -> Option<String> {
+pub(crate) fn map_model(
+    registry: &crate::model_registry::ModelRegistry,
+    harness: &str,
+    source: &str,
+) -> Option<String> {
     // `inherit` is always dropped — there is no native "inherit the caller's
     // model" value that ports across harnesses.
     if source == "inherit" {
         return None;
     }
     match harness {
-        // Claude Code is the canonical vendor: the aliases pass through
-        // verbatim (they ARE Claude Code's native identifiers).
+        // Claude Code is the canonical vendor: aliases ARE its native ids.
         "claude-code" => match source {
             "opus" | "sonnet" | "haiku" => Some(source.to_owned()),
-            // Any other value: Claude Code supports its own native ids, so
-            // we pass an unrecognised value through unchanged rather than
-            // dropping a legitimate Claude Code model id we don't enumerate.
             other => Some(other.to_owned()),
         },
-        // Codex is OpenAI-vendored: no Anthropic alias maps. DROP always.
+        // Codex is OpenAI-vendored: no Anthropic alias maps. DROP.
         "codex" => None,
-        // Cursor: drop unless a same-vendor Anthropic id exists. We do not
-        // currently enumerate Cursor's Anthropic identifiers, so every
-        // Anthropic-vendored source drops for now (documented gap; the
-        // policy slot is here so chunk C / a later slice can fill the
-        // same-vendor ids without touching callers).
-        "cursor" => None,
-        // OpenCode is multi-vendor and namespaces models `<vendor>/<id>`;
-        // the Anthropic aliases map to their fully-qualified same-vendor ids.
+        // Cursor's model ids are proprietary and not in models.dev; a pinned
+        // model becomes `inherit` (Cursor accepts it), preserving intent.
+        "cursor" => Some("inherit".to_owned()),
+        // OpenCode needs a concrete `<vendor>/<id>` resolved from the registry.
         "opencode" => match source {
-            "opus" => Some("anthropic/claude-opus-4.7".to_owned()),
-            "sonnet" => Some("anthropic/claude-sonnet-4.7".to_owned()),
-            "haiku" => Some("anthropic/claude-haiku-4.7".to_owned()),
+            "opus" | "sonnet" | "haiku" => registry
+                .resolve_tier("anthropic", source)
+                .map(|id| format!("anthropic/{id}")),
+            // An already-namespaced concrete id passes through; a bare one
+            // can't be safely namespaced → drop.
+            other if other.contains('/') => Some(other.to_owned()),
             _ => None,
         },
         // Unknown harness: drop conservatively.
@@ -573,32 +578,41 @@ mod tests {
 
     #[test]
     fn map_model_same_vendor_only() {
-        // opus → opencode is the same-vendor Anthropic id.
+        let reg = crate::model_registry::test_registry();
+        // opus → opencode resolves the newest same-vendor Anthropic id from
+        // the registry (registry-driven, not a static string).
         assert_eq!(
-            map_model("opencode", "opus").as_deref(),
-            Some("anthropic/claude-opus-4.7")
+            map_model(&reg, "opencode", "opus").as_deref(),
+            Some("anthropic/claude-opus-4-5")
         );
         assert_eq!(
-            map_model("opencode", "sonnet").as_deref(),
-            Some("anthropic/claude-sonnet-4.7")
+            map_model(&reg, "opencode", "sonnet").as_deref(),
+            Some("anthropic/claude-sonnet-4-5")
         );
         assert_eq!(
-            map_model("opencode", "haiku").as_deref(),
-            Some("anthropic/claude-haiku-4.7")
+            map_model(&reg, "opencode", "haiku").as_deref(),
+            Some("anthropic/claude-haiku-4-5")
         );
         // opus → codex is DROP, never an OpenAI id.
-        assert_eq!(map_model("codex", "opus"), None);
+        assert_eq!(map_model(&reg, "codex", "opus"), None);
         // claude-code passes the alias through verbatim.
-        assert_eq!(map_model("claude-code", "opus").as_deref(), Some("opus"));
-        // cursor drops Anthropic aliases (no enumerated same-vendor id yet).
-        assert_eq!(map_model("cursor", "opus"), None);
+        assert_eq!(
+            map_model(&reg, "claude-code", "opus").as_deref(),
+            Some("opus")
+        );
+        // cursor: any pinned model → `inherit` (proprietary ids, not in registry).
+        assert_eq!(
+            map_model(&reg, "cursor", "opus").as_deref(),
+            Some("inherit")
+        );
     }
 
     #[test]
     fn map_model_inherit_drops_everywhere() {
+        let reg = crate::model_registry::test_registry();
         for harness in ["claude-code", "codex", "cursor", "opencode"] {
             assert_eq!(
-                map_model(harness, "inherit"),
+                map_model(&reg, harness, "inherit"),
                 None,
                 "inherit must drop for {harness}"
             );
@@ -607,11 +621,12 @@ mod tests {
 
     #[test]
     fn never_cross_vendor_model() {
+        let reg = crate::model_registry::test_registry();
         // SC-002: no emitted file ever carries a cross-vendor id. codex is
         // OpenAI-vendored — every Anthropic source must drop.
         for source in ["opus", "sonnet", "haiku", "inherit", "something-else"] {
             assert_eq!(
-                map_model("codex", source),
+                map_model(&reg, "codex", source),
                 None,
                 "codex must never carry an Anthropic-sourced model ({source})"
             );
