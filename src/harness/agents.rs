@@ -551,9 +551,7 @@ pub(crate) fn synthesize_description(canonical: &CanonicalAgent) -> String {
 /// keeps `_` (Gemini: `^[a-z0-9-_]+$`); when false, `_` becomes `-` (Kiro:
 /// lowercase + hyphens only). Lowercases; maps any other char to `-`; collapses
 /// runs of `-`; trims leading/trailing `-`; empties fall back to `"agent"`.
-// Consumed by the Gemini and Kiro harness modules (later tasks). The allow
-// silences the dead-code lint until those callers land.
-#[allow(dead_code)]
+// Consumed by the Gemini harness module (Task 5) and the Kiro module (Task 8).
 pub(crate) fn slugify_agent_name(name: &str, allow_underscore: bool) -> String {
     let mut out = String::with_capacity(name.len());
     let mut last_dash = false;
@@ -678,9 +676,6 @@ pub(crate) fn classify_cc_tool(cc_tool: &str) -> Option<CcToolKind> {
 /// Gemini: 1:1 native tool names (verified 2026-06-29 — write-side is
 /// `write_file`/`replace`, NOT `edit_file`). Drops unknown (Gemini's `.strict()`
 /// schema forbids unknown values). Preserves order; de-dupes.
-// Consumed by the Gemini harness module (Task 5). The allow silences the
-// dead-code lint until that caller lands.
-#[allow(dead_code)]
 pub(crate) fn gemini_tools(tools: &[String]) -> Vec<String> {
     map_tools_dedup(tools, |k| {
         Some(match k {

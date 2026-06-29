@@ -22,6 +22,8 @@ mod agent_translate_claude_code;
 mod agent_translate_codex;
 #[path = "mcp_entries/agent_translate_cursor.rs"]
 mod agent_translate_cursor;
+#[path = "mcp_entries/agent_translate_gemini.rs"]
+mod agent_translate_gemini;
 #[path = "mcp_entries/agent_translate_opencode.rs"]
 mod agent_translate_opencode;
 #[path = "mcp_entries/entry_e2e.rs"]
