@@ -42,5 +42,23 @@ fn goose_emits_name_desc_resolved_model_drops_tools() {
 }
 
 #[test]
+fn goose_omits_description_when_absent_does_not_synthesize() {
+    let reg = tome::model_registry::test_registry();
+    let agent = CanonicalAgent {
+        description: None,
+        body: "Some body line that must NOT become the description.\n".into(),
+        ..agent()
+    };
+    let t = GOOSE
+        .translate_agent(&agent, false, &reg)
+        .expect("translate");
+    assert!(
+        !t.rendered.contains("description:"),
+        "Goose must omit description when absent (no synthesis):\n{}",
+        t.rendered
+    );
+}
+
+#[test]
 #[ignore = "live-probe: confirm Goose loads .agents/agents/<plugin>__<name>.md as a Custom Agent"]
 fn goose_reads_custom_agent_live_probe() {}
