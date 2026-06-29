@@ -39,9 +39,11 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::error::TomeError;
+use crate::harness::agents::{self, CanonicalAgent, TranslatedAgent};
 use crate::harness::{
-    BlockBodyStyle, EntryShape, Envelope, FileFormat, HarnessModule, HookEvent, HookFileSpec,
-    McpDialect, RulesFileStrategy, SessionSteering,
+    AgentFormat, AgentPathStrategy, BlockBodyStyle, EntryShape, Envelope, FileFormat,
+    HarnessModule, HookEvent, HookFileSpec, McpDialect, RulesFileStrategy, SessionSteering,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Devin.
@@ -109,6 +111,107 @@ impl HarnessModule for Devin {
             event: HookEvent::SessionStart,
             envelope: Envelope::ClaudeNested,
         }
+    }
+
+    // -- Native agents (Phase 2, Task 12) ------------------------------------
+
+    fn supports_native_agents(&self) -> bool {
+        true
+    }
+
+    fn agent_dir(&self, project_root: &Path) -> Option<PathBuf> {
+        Some(project_root.join(".devin/agents"))
+    }
+
+    fn agent_format(&self) -> Option<AgentFormat> {
+        Some(AgentFormat::MarkdownYaml)
+    }
+
+    /// Devin CLI: dir-per-agent `<plugin>__<name>/AGENT.md`. The `filename`
+    /// returned is the SUBDIR name (no extension) — the reconciler appends
+    /// `/AGENT.md` to form the final on-disk path.
+    ///
+    /// `description` is optional; emit 1:1 when present, else omit entirely
+    /// (do NOT synthesize). Tools are emitted under the `allowed-tools` key
+    /// (Devin-lowercase, `Bash`→`exec`). `model` passes `opus`/`sonnet`
+    /// through verbatim (Devin's own aliases); `haiku`/concrete ids are
+    /// dropped. Privileged fields (`hooks`, `mcpServers`, `permissionMode`)
+    /// and `disallowedTools` are dropped and recorded.
+    fn agent_path_strategy(&self) -> AgentPathStrategy {
+        AgentPathStrategy::DirPerAgent {
+            inner_filename: "AGENT.md",
+        }
+    }
+
+    fn translate_agent(
+        &self,
+        canonical: &CanonicalAgent,
+        clashes: bool,
+        models: &crate::model_registry::ModelRegistry,
+    ) -> Result<TranslatedAgent, TomeError> {
+        let mut frontmatter: Vec<(String, serde_yaml::Value)> = Vec::new();
+        let mut dropped: Vec<String> = Vec::new();
+
+        let name = agents::displayed_name(&canonical.plugin, &canonical.name, clashes);
+        frontmatter.push(("name".to_owned(), serde_yaml::Value::String(name.clone())));
+
+        // `description` is optional — emit 1:1 if present, else omit entirely.
+        if let Some(desc) = &canonical.description {
+            frontmatter.push((
+                "description".to_owned(),
+                serde_yaml::Value::String(desc.clone()),
+            ));
+        }
+
+        // `model`: pass `opus`/`sonnet` through; drop `haiku`/concrete ids.
+        if let Some(src) = canonical.model.as_deref() {
+            match agents::map_model(models, "devin", src) {
+                Some(m) => {
+                    frontmatter.push(("model".to_owned(), serde_yaml::Value::String(m)));
+                }
+                None => dropped.push("model".to_owned()),
+            }
+        }
+
+        // `allowed-tools` (Devin-lowercase, `Bash`→`exec`).
+        if let Some(tools) = &canonical.tools {
+            let mapped = agents::devin_tools(tools);
+            if mapped.is_empty() {
+                dropped.push("tools".to_owned());
+            } else {
+                let seq = mapped.into_iter().map(serde_yaml::Value::String).collect();
+                frontmatter.push(("allowed-tools".to_owned(), serde_yaml::Value::Sequence(seq)));
+            }
+        }
+
+        // Privileged / unsupported fields — record as dropped.
+        if canonical.disallowed_tools.is_some() {
+            dropped.push("disallowedTools".to_owned());
+        }
+        if canonical.hooks.is_some() {
+            dropped.push("hooks".to_owned());
+        }
+        if canonical.mcp_servers.is_some() {
+            dropped.push("mcpServers".to_owned());
+        }
+        if canonical.permission_mode.is_some() {
+            dropped.push("permissionMode".to_owned());
+        }
+
+        let rendered = agents::render_markdown_yaml(&frontmatter, &canonical.body);
+
+        // Dir-per-agent: `filename` is the SUBDIR name (no extension).
+        // The reconciler will write the content to `<dir>/<filename>/AGENT.md`.
+        let filename = format!("{}__{}", canonical.plugin, canonical.name);
+
+        Ok(TranslatedAgent {
+            dir: PathBuf::from(".devin/agents"),
+            filename,
+            displayed_name: name,
+            format: AgentFormat::MarkdownYaml,
+            rendered,
+            dropped_fields: dropped,
+        })
     }
 }
 

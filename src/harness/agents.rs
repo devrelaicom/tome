@@ -632,9 +632,6 @@ pub fn plugin_of_owned_file_pub(filename: &str) -> Option<&str> {
 
 /// Canonical Claude-Code tool kinds Tome can translate. Unknown CC tools
 /// classify to `None` and are dropped by every renderer.
-// Consumed by the per-harness translate_agent impls (Tasks 5–12). The allow
-// silences the dead-code lint until those callers land.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CcToolKind {
     Read,
@@ -653,9 +650,6 @@ pub(crate) enum CcToolKind {
 /// Classify a Claude-Code tool name (case-insensitive) into a canonical kind.
 /// The single source of truth for the CC tool vocabulary; each harness renderer
 /// maps `CcToolKind` to its own target string.
-// Consumed by the per-harness translate_agent impls (Tasks 5–12). The allow
-// silences the dead-code lint until those callers land.
-#[allow(dead_code)]
 pub(crate) fn classify_cc_tool(cc_tool: &str) -> Option<CcToolKind> {
     match cc_tool.trim().to_ascii_lowercase().as_str() {
         "read" => Some(CcToolKind::Read),
@@ -709,9 +703,6 @@ pub(crate) fn kiro_tools(tools: &[String]) -> Vec<String> {
 }
 
 /// Devin: `allowed-tools` Devin-lowercase names (`Bash`→`exec`). Deduped.
-// Consumed by the Devin harness module (Task 7). The allow silences the
-// dead-code lint until that caller lands.
-#[allow(dead_code)]
 pub(crate) fn devin_tools(tools: &[String]) -> Vec<String> {
     map_tools_dedup(tools, |k| match k {
         CcToolKind::Read => Some("read"),
