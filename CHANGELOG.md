@@ -572,6 +572,12 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.9](https://github.com/devrelaicom/tome/compare/v0.7.8...v0.7.9) - 2026-06-29
+
+### Fixed
+
+- *(deps)* bump anyhow to 1.0.103 (RUSTSEC unsoundness) ([#272](https://github.com/devrelaicom/tome/pull/272))
+
 ## [0.7.8](https://github.com/devrelaicom/tome/compare/v0.7.7...v0.7.8) - 2026-06-29
 
 ### Added
