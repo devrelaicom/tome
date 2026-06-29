@@ -40,8 +40,8 @@ use std::path::{Path, PathBuf};
 
 use crate::harness::agents::{CanonicalAgent, TranslatedAgent};
 use crate::harness::{
-    AgentFormat, BlockBodyStyle, GuardrailsPlacement, GuardrailsTarget, HarnessModule,
-    HooksStrategy, RulesFileStrategy, SessionSteering,
+    AgentFormat, AgentPathStrategy, BlockBodyStyle, GuardrailsPlacement, GuardrailsTarget,
+    HarnessModule, HooksStrategy, RulesFileStrategy, SessionSteering,
 };
 
 /// Test-configurable [`HarnessModule`]. All fields default to the original
@@ -83,6 +83,9 @@ pub struct StubHarness {
     /// to the MCP sink (which never shares the rules/guardrails path) lets a
     /// co-selected healthy stub still succeed.
     fail_mcp: bool,
+    /// Task 11 (AgentPathStrategy): canned `agent_path_strategy()`. Defaults
+    /// to [`AgentPathStrategy::FlatFile`] (the trait floor).
+    agent_path_strategy: AgentPathStrategy,
 }
 
 impl Default for StubHarness {
@@ -99,6 +102,7 @@ impl Default for StubHarness {
             name: "stub",
             detect: true,
             fail_mcp: false,
+            agent_path_strategy: AgentPathStrategy::FlatFile,
         }
     }
 }
@@ -170,6 +174,15 @@ impl StubHarness {
     /// DIFFERENT clean path, succeed for a co-selected healthy stub).
     pub fn with_failing_mcp(mut self) -> Self {
         self.fail_mcp = true;
+        self
+    }
+
+    /// Task 11: override the on-disk agent layout strategy. Default
+    /// [`AgentPathStrategy::FlatFile`]. Use
+    /// `with_agent_path_strategy(AgentPathStrategy::DirPerAgent { inner_filename:
+    /// "AGENT.md" })` to exercise the dir-per-agent emit + cleanup paths.
+    pub fn with_agent_path_strategy(mut self, strategy: AgentPathStrategy) -> Self {
+        self.agent_path_strategy = strategy;
         self
     }
 }
@@ -262,6 +275,10 @@ impl HarnessModule for StubHarness {
         self.agent_format
     }
 
+    fn agent_path_strategy(&self) -> AgentPathStrategy {
+        self.agent_path_strategy
+    }
+
     fn session_steering(&self) -> SessionSteering {
         self.session_steering.clone()
     }
@@ -277,15 +294,25 @@ impl HarnessModule for StubHarness {
             // supplied: echo the canonical name + body into a Markdown body.
             // Honours `clashes` so dispatch tests can assert the displayed
             // name is plugin-prefixed without a canned result.
+            // For DirPerAgent the filename is the subdir name (no extension);
+            // for FlatFile it is `<plugin>__<name>.md`.
             let format = self.agent_format.unwrap_or(AgentFormat::MarkdownYaml);
             let displayed_name = if clashes {
                 format!("{}-{}", canonical.plugin, canonical.name)
             } else {
                 canonical.name.clone()
             };
+            let filename = match self.agent_path_strategy {
+                AgentPathStrategy::FlatFile => {
+                    format!("{}__{}.md", canonical.plugin, canonical.name)
+                }
+                AgentPathStrategy::DirPerAgent { .. } => {
+                    format!("{}__{}", canonical.plugin, canonical.name)
+                }
+            };
             TranslatedAgent {
                 dir: PathBuf::from(".stub/agents"),
-                filename: format!("{}__{}.md", canonical.plugin, canonical.name),
+                filename,
                 displayed_name,
                 format,
                 rendered: canonical.body.clone(),

@@ -430,6 +430,15 @@ pub enum AgentFormat {
     Toml,
 }
 
+/// How a harness lays out an agent on disk. Most harnesses write one flat
+/// file (`FlatFile`); Devin writes a directory per agent containing a fixed
+/// inner file (`DirPerAgent { inner_filename: "AGENT.md" }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentPathStrategy {
+    FlatFile,
+    DirPerAgent { inner_filename: &'static str },
+}
+
 // =====================================================================
 // Phase 11 — G2: session steering (contract session-steering.md).
 //
@@ -812,6 +821,12 @@ pub trait HarnessModule: Send + Sync {
     /// `supports_native_agents()`.
     fn agent_format(&self) -> Option<AgentFormat> {
         None
+    }
+
+    /// On-disk layout for this harness's agents (FR-031). Default `FlatFile`;
+    /// Devin overrides to `DirPerAgent`.
+    fn agent_path_strategy(&self) -> AgentPathStrategy {
+        AgentPathStrategy::FlatFile
     }
 
     /// Translate a canonical agent into this harness's native form (FR-030,
