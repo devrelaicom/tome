@@ -391,11 +391,11 @@ pub(crate) fn render_codex_toml(scalars: &[(String, String)], body: &str) -> Str
 /// never an OpenAI id. `inherit` drops everywhere. Any source value with no
 /// same-vendor target for the harness drops.
 ///
-/// The `registry` is used by OpenCode to resolve tier aliases (`opus` /
-/// `sonnet` / `haiku`) to the newest non-preview same-vendor id at call time
-/// (registry-driven, not a static string). For Cursor, any pinned model maps
-/// to `inherit` (Cursor's proprietary model ids are not in models.dev; the
-/// `inherit` value preserves the intent of the original pin).
+/// The `registry` is used by OpenCode, Goose, and Pi to resolve tier aliases
+/// (`opus` / `sonnet` / `haiku`) to the newest non-preview same-vendor id at
+/// call time (registry-driven, not a static string). For Cursor, any pinned
+/// model maps to `inherit` (Cursor's proprietary model ids are not in
+/// models.dev; the `inherit` value preserves the intent of the original pin).
 ///
 /// This is the named artefact SC-002 verifies against; the table is pinned
 /// in `contracts/agent-translation.md`.
@@ -827,7 +827,17 @@ mod tests {
     #[test]
     fn map_model_inherit_drops_everywhere() {
         let reg = crate::model_registry::test_registry();
-        for harness in ["claude-code", "codex", "cursor", "opencode"] {
+        for harness in [
+            "claude-code",
+            "codex",
+            "cursor",
+            "opencode",
+            "gemini",
+            "kiro",
+            "goose",
+            "pi",
+            "devin",
+        ] {
             assert_eq!(
                 map_model(&reg, harness, "inherit"),
                 None,
@@ -1188,6 +1198,11 @@ mod tests {
         assert_eq!(
             map_model(&reg, "pi", "claude-custom-1").as_deref(),
             Some("claude-custom-1")
+        );
+        // Third tier alias (haiku) resolves via the registry too.
+        assert_eq!(
+            map_model(&reg, "goose", "haiku").as_deref(),
+            Some("claude-haiku-4-5")
         );
         // Devin: opus/sonnet pass through; haiku + concrete drop.
         assert_eq!(map_model(&reg, "devin", "opus").as_deref(), Some("opus"));
