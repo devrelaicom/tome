@@ -572,6 +572,12 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.11](https://github.com/devrelaicom/tome/compare/v0.7.10...v0.7.11) - 2026-06-29
+
+### Other
+
+- Native-agent expansion Phase 2: 6 new harnesses (Gemini/Copilot/Kiro/Goose/Devin/Pi) ([#276](https://github.com/devrelaicom/tome/pull/276))
+
 ## [0.7.10](https://github.com/devrelaicom/tome/compare/v0.7.9...v0.7.10) - 2026-06-29
 
 ### Fixed
