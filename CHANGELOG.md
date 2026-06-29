@@ -572,6 +572,12 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.10](https://github.com/devrelaicom/tome/compare/v0.7.9...v0.7.10) - 2026-06-29
+
+### Fixed
+
+- *(release)* exclude CI-only refresh_model_registry bin from dist archives ([#274](https://github.com/devrelaicom/tome/pull/274))
+
 ## [0.7.9](https://github.com/devrelaicom/tome/compare/v0.7.8...v0.7.9) - 2026-06-29
 
 ### Fixed
