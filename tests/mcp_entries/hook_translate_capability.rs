@@ -17,8 +17,16 @@ fn gemini_hook_support_declares_events_and_event_names() {
         "BeforeTool"
     );
     assert_eq!(
+        tome::harness::gemini::GEMINI.hook_event_name(PortableEvent::PostToolUse),
+        "AfterTool"
+    );
+    assert_eq!(
         tome::harness::gemini::GEMINI.hook_event_name(PortableEvent::Stop),
         "AfterAgent"
+    );
+    assert_eq!(
+        tome::harness::gemini::GEMINI.hook_event_name(PortableEvent::UserPromptSubmit),
+        "BeforeAgent"
     );
     assert_eq!(
         tome::harness::gemini::GEMINI.hook_event_name(PortableEvent::PreCompact),
@@ -27,6 +35,10 @@ fn gemini_hook_support_declares_events_and_event_names() {
     assert_eq!(
         tome::harness::gemini::GEMINI.hook_event_name(PortableEvent::SessionStart),
         "SessionStart"
+    );
+    assert_eq!(
+        tome::harness::gemini::GEMINI.hook_event_name(PortableEvent::SessionEnd),
+        "SessionEnd"
     );
 }
 
@@ -84,12 +96,24 @@ fn cursor_hook_support_declares_all_events_and_camel_names() {
         "preToolUse"
     );
     assert_eq!(
+        tome::harness::cursor::CURSOR.hook_event_name(PortableEvent::PostToolUse),
+        "postToolUse"
+    );
+    assert_eq!(
         tome::harness::cursor::CURSOR.hook_event_name(PortableEvent::UserPromptSubmit),
         "beforeSubmitPrompt"
     );
     assert_eq!(
         tome::harness::cursor::CURSOR.hook_event_name(PortableEvent::Stop),
         "stop"
+    );
+    assert_eq!(
+        tome::harness::cursor::CURSOR.hook_event_name(PortableEvent::SessionStart),
+        "sessionStart"
+    );
+    assert_eq!(
+        tome::harness::cursor::CURSOR.hook_event_name(PortableEvent::SessionEnd),
+        "sessionEnd"
     );
     assert_eq!(
         tome::harness::cursor::CURSOR.hook_event_name(PortableEvent::PreCompact),
@@ -107,10 +131,15 @@ fn copilot_cli_hook_support_declares_all_events_and_identity_names() {
     assert!(s.events.contains(&PortableEvent::PreCompact));
     assert!(matches!(s.timeout_unit, TimeoutUnit::Seconds));
     assert!(matches!(s.wire, HookWire::CopilotFlat));
-    // Identity (PascalCase = CC names)
+    // Identity (PascalCase = CC names) — pins the C7/C8 decision to use
+    // PascalCase keys rather than Copilot's renamed camelCase variants.
     assert_eq!(
         tome::harness::copilot_cli::COPILOT_CLI.hook_event_name(PortableEvent::PreToolUse),
         "PreToolUse"
+    );
+    assert_eq!(
+        tome::harness::copilot_cli::COPILOT_CLI.hook_event_name(PortableEvent::UserPromptSubmit),
+        "UserPromptSubmit"
     );
     assert_eq!(
         tome::harness::copilot_cli::COPILOT_CLI.hook_event_name(PortableEvent::Stop),
