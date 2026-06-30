@@ -128,6 +128,13 @@ impl HarnessModule for CopilotCli {
         })
     }
 
+    // Copilot accepts both camelCase and PascalCase event keys, but its
+    // camelCase keys are past-tense/renamed (`userPromptSubmitted`,
+    // `agentStop`) AND send a DIFFERENT stdin shape (`toolName`/`toolArgs`/
+    // `sessionId` + integer timestamp). Tome registers Copilot under
+    // PascalCase (= CC names), which yields the CC-compatible stdin shape →
+    // so this override is deliberately identity. Do NOT "normalize" to
+    // camelCase — that would break US4.2 stdin translation. (re-verify C7/C8)
     fn hook_event_name(&self, event: PortableEvent) -> &'static str {
         event.cc_name()
     }

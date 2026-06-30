@@ -269,7 +269,8 @@ pub(crate) fn parse_canonical_hooks(
 
 /// Apply CC matcher semantics: `None`/`""`/`"*"` = all; a token of only
 /// `[A-Za-z0-9_|, ]` = exact set (pipe/comma alternation); anything else =
-/// unanchored regex (compile failure → no match / fail-open).
+/// unanchored regex. An unparsable regex returns `false` — the hook is
+/// skipped (fail-closed for this matcher), not run.
 #[allow(dead_code)]
 pub(crate) fn matcher_matches(matcher: Option<&str>, cc_tool_name: &str) -> bool {
     let Some(m) = matcher else { return true };
@@ -546,6 +547,8 @@ mod tests {
         assert!(matcher_matches(Some("Bash"), "Bash"));
         assert!(!matcher_matches(Some("Bash"), "Edit"));
         assert!(matcher_matches(Some("Edit|Write"), "Write"));
+        assert!(matcher_matches(Some("Edit,Write"), "Write"));
+        assert!(!matcher_matches(Some("Edit,Write"), "Bash"));
         assert!(matcher_matches(Some("mcp__.*__write"), "mcp__gh__write"));
         assert!(!matcher_matches(Some("mcp__.*__write"), "Bash"));
     }
@@ -557,6 +560,18 @@ mod tests {
         assert_eq!(cc_tool_name("codex", "Bash"), Some("Bash"));
         assert_eq!(cc_tool_name("devin", "exec"), Some("Bash"));
         assert_eq!(cc_tool_name("gemini", "unknown_tool"), None);
+        // copilot-cli arm: every mapping present in cc_tool_name
+        assert_eq!(cc_tool_name("copilot-cli", "bash"), Some("Bash"));
+        assert_eq!(cc_tool_name("copilot-cli", "view"), Some("Read"));
+        assert_eq!(cc_tool_name("copilot-cli", "create"), Some("Write"));
+        assert_eq!(cc_tool_name("copilot-cli", "edit"), Some("Edit"));
+        assert_eq!(cc_tool_name("copilot-cli", "grep"), Some("Grep"));
+        assert_eq!(cc_tool_name("copilot-cli", "rg"), Some("Grep"));
+        assert_eq!(cc_tool_name("copilot-cli", "glob"), Some("Glob"));
+        assert_eq!(cc_tool_name("copilot-cli", "web_fetch"), Some("WebFetch"));
+        assert_eq!(cc_tool_name("copilot-cli", "web_search"), Some("WebSearch"));
+        // unmapped copilot-cli tool returns None
+        assert_eq!(cc_tool_name("copilot-cli", "ask_user"), None);
     }
 
     #[test]
