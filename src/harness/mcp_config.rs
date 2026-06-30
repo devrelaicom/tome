@@ -790,13 +790,32 @@ pub fn remove_entry(path: &Path, dialect: &McpDialect) -> Result<(), TomeError> 
     }
 }
 
-/// Predicate matching the ownership marker (FR-501).
+/// Predicate matching the ownership marker (FR-501, launcher-tolerant per #337).
 ///
-/// An entry is Tome-owned iff `command == "tome"` and `args[0] ==
-/// "mcp"`. The `env` field is ignored. Returns `false` for any
-/// shape-mismatch (e.g. missing `args`, `args[0] != "mcp"`).
+/// An entry is Tome-owned iff its `command` is a reference to the Tome launcher
+/// AND `args[0] == "mcp"`. The `env` field is ignored.
+///
+/// **Launcher tolerance (#337).** The `command` is recognised by its file-name
+/// component (`looks_like_tome_launcher`): the bare `"tome"`, an absolute path
+/// like `/usr/local/bin/tome`, the running binary's `current_exe`, and the
+/// Windows `tome.exe` all match. Before #337 the marker was the exact string
+/// `command == "tome"`; a PATH-less / sandboxed host (CI, a non-IDE agent)
+/// could not start a bare-`tome` MCP server, so the sync now emits the
+/// absolute [`crate::harness::launcher::tome_command`]. Keying ownership on the
+/// launcher BASENAME lets the emitted launcher vary per machine while
+/// idempotence / clash (exit 19) / removal keep recognising the entry across a
+/// launcher change.
+///
+/// **Not over-broadened.** The basename check alone is insufficient (a user
+/// could have an unrelated server named `tome`), so it is combined (logical
+/// AND) with the Tome arg shape `args[0] == "mcp"`. A foreign entry whose
+/// command is `not-tome`,
+/// `tome-wrapper`, or whose `args[0] != "mcp"` is NOT claimed. Returns `false`
+/// for any shape-mismatch (missing `args`, `args[0] != "mcp"`, a non-tome
+/// command).
 pub fn is_tome_owned(entry: &TomeEntry) -> bool {
-    entry.command == "tome" && entry.args.first().map(String::as_str) == Some("mcp")
+    crate::harness::launcher::looks_like_tome_launcher(&entry.command)
+        && entry.args.first().map(String::as_str) == Some("mcp")
 }
 
 /// Render the EXACT bytes a user would paste to add the Tome MCP server to
@@ -883,6 +902,43 @@ mod tests {
     fn is_tome_owned_rejects_empty_args() {
         let e = entry("tome", &[]);
         assert!(!is_tome_owned(&e));
+    }
+
+    // ---- #337: launcher-tolerant ownership ------------------------------
+
+    #[test]
+    fn is_tome_owned_matches_absolute_launcher() {
+        // The #337 core: an entry whose command is an ABSOLUTE launcher path
+        // (the kind `tome_command()` resolves via `current_exe`) is still
+        // recognised as Tome-owned, because the basename is `tome` AND
+        // `args[0] == "mcp"`.
+        for launcher in [
+            "/usr/local/bin/tome",
+            "/opt/tome/bin/tome",
+            "/Users/dev/.cargo/bin/tome",
+            "/tmp/target/release/tome",
+        ] {
+            let e = entry(launcher, &["mcp", "--workspace", "demo"]);
+            assert!(is_tome_owned(&e), "{launcher} must be recognised as Tome");
+        }
+    }
+
+    #[test]
+    fn is_tome_owned_does_not_over_broaden_absolute_command() {
+        // A foreign server whose command is an absolute path NOT named tome —
+        // even with `args[0] == "mcp"` — must NOT be claimed.
+        assert!(!is_tome_owned(&entry("/usr/bin/not-tome", &["mcp"])));
+        assert!(!is_tome_owned(&entry("/opt/tome/bin/other", &["mcp"])));
+        assert!(!is_tome_owned(&entry("/usr/bin/tome-wrapper", &["mcp"])));
+    }
+
+    #[test]
+    fn is_tome_owned_absolute_launcher_still_needs_mcp_arg() {
+        // The basename match is combined (logical AND) with the arg shape: an
+        // absolute `tome` launcher whose `args[0] != "mcp"` is a user's own use
+        // of the binary, NOT Tome's MCP entry — not claimed.
+        assert!(!is_tome_owned(&entry("/usr/local/bin/tome", &["serve"])));
+        assert!(!is_tome_owned(&entry("/usr/local/bin/tome", &[])));
     }
 
     #[test]
@@ -1437,5 +1493,156 @@ mod dialect_pin_tests {
                 "snippet must match write_entry bytes for {file}",
             );
         }
+    }
+}
+
+// =====================================================================
+// #337 — launcher-change idempotence / clash / removal for the standard MCP
+// sink. The issue's load-bearing coverage: an entry WRITTEN with launcher A
+// must be RECOGNISED (idempotence, clash classification, removal) after the
+// emitted launcher becomes B — modelling a per-machine `current_exe` path or
+// the bare→absolute upgrade. Exercised through the real `write_entry` /
+// `read_entry` / `remove_entry` file round-trip, not just the predicate.
+// =====================================================================
+#[cfg(test)]
+mod launcher_change_tests {
+    use super::*;
+    use crate::harness::McpDialect;
+    use tempfile::TempDir;
+
+    const DIALECT: McpDialect = McpDialect::LEGACY;
+
+    /// A Tome MCP entry pinned to an explicit launcher (so the test does not
+    /// depend on the machine's `current_exe`).
+    fn entry_with_launcher(launcher: &str) -> TomeEntry {
+        TomeEntry::new(
+            launcher.to_string(),
+            vec![
+                "mcp".to_string(),
+                "--workspace".to_string(),
+                "demo".to_string(),
+            ],
+        )
+    }
+
+    fn read_command(target: &Path) -> String {
+        read_entry(target, &DIALECT).unwrap().unwrap().command
+    }
+
+    /// Write with launcher A; re-write with the IDENTICAL launcher A → no
+    /// rewrite (the `write_entry` idempotence pre-check holds for an absolute
+    /// launcher exactly as it did for the bare name). Asserted via mtime.
+    #[test]
+    fn idempotent_when_launcher_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        let a = "/opt/tome/bin/tome";
+        write_entry(&target, &DIALECT, &entry_with_launcher(a)).unwrap();
+        let mtime1 = std::fs::metadata(&target).unwrap().modified().unwrap();
+        // A second write with the SAME launcher + args is a no-op.
+        write_entry(&target, &DIALECT, &entry_with_launcher(a)).unwrap();
+        let mtime2 = std::fs::metadata(&target).unwrap().modified().unwrap();
+        assert_eq!(mtime1, mtime2, "identical launcher must not rewrite");
+    }
+
+    /// Write with the bare `tome` (the pre-#337 on-disk shape), then re-sync
+    /// with an ABSOLUTE launcher B. The old entry is still RECOGNISED as owned
+    /// (so no clash), and the rewrite swaps the command to B — the bare→absolute
+    /// upgrade path. After that, re-writing with B is idempotent.
+    #[test]
+    fn recognises_and_upgrades_across_launcher_change() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        // Seed the legacy bare-name entry.
+        write_entry(&target, &DIALECT, &entry_with_launcher("tome")).unwrap();
+        assert!(is_tome_owned(
+            &read_entry(&target, &DIALECT).unwrap().unwrap()
+        ));
+
+        // Re-sync emits an absolute launcher B. The old entry is owned, so this
+        // rewrites (no clash) and the on-disk command becomes B.
+        let b = "/usr/local/bin/tome";
+        write_entry(&target, &DIALECT, &entry_with_launcher(b)).unwrap();
+        assert_eq!(read_command(&target), b, "command upgraded to launcher B");
+        assert!(
+            is_tome_owned(&read_entry(&target, &DIALECT).unwrap().unwrap()),
+            "the absolute-launcher entry is still recognised as owned",
+        );
+
+        // A re-write with the SAME launcher B is now idempotent.
+        let mtime1 = std::fs::metadata(&target).unwrap().modified().unwrap();
+        write_entry(&target, &DIALECT, &entry_with_launcher(b)).unwrap();
+        let mtime2 = std::fs::metadata(&target).unwrap().modified().unwrap();
+        assert_eq!(mtime1, mtime2, "stable launcher B must not rewrite");
+    }
+
+    /// A user-owned entry named `tome` whose command is NOT a tome launcher
+    /// (and whose args are not the Tome shape) is NOT claimed as owned — so the
+    /// sync orchestrator raises `HarnessClash` (exit 19) rather than silently
+    /// overwriting it. Verified at the predicate boundary the orchestrator
+    /// branches on, across the absolute-command case #337 introduces.
+    #[test]
+    fn foreign_absolute_command_is_a_clash_not_owned() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        std::fs::write(
+            &target,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"/usr/bin/not-tome\",\n      \"args\": [\"serve\"]\n    }\n  }\n}\n",
+        )
+        .unwrap();
+        let read = read_entry(&target, &DIALECT).unwrap().unwrap();
+        assert!(
+            !is_tome_owned(&read),
+            "a foreign absolute command must NOT be claimed (would be a clash)",
+        );
+    }
+
+    /// Removal must recognise a Tome entry that was written with an ABSOLUTE
+    /// launcher — the `remove_entry` no-write-on-not-owned guard would
+    /// otherwise ORPHAN it. Seed an owned entry with launcher A + a foreign
+    /// sibling, remove, assert the Tome entry is gone and the sibling survives.
+    #[test]
+    fn remove_recognises_absolute_launcher_entry() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        // The Tome entry carries an absolute launcher; a foreign sibling stays.
+        std::fs::write(
+            &target,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"/opt/tome/bin/tome\",\n      \"args\": [\"mcp\", \"--workspace\", \"demo\"]\n    },\n    \"other\": {\n      \"command\": \"other-bin\",\n      \"args\": [\"run\"]\n    }\n  }\n}\n",
+        )
+        .unwrap();
+        assert!(is_tome_owned(
+            &read_entry(&target, &DIALECT).unwrap().unwrap()
+        ));
+
+        remove_entry(&target, &DIALECT).unwrap();
+
+        let doc: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        let parent = doc["mcpServers"].as_object().unwrap();
+        assert!(
+            parent.get("tome").is_none(),
+            "the absolute-launcher Tome entry must be removed, not orphaned",
+        );
+        assert!(parent.get("other").is_some(), "foreign sibling survives");
+    }
+
+    /// Removal must NOT delete a foreign `tome`-keyed entry whose command is
+    /// not a tome launcher — the basename guard protects a user's own server.
+    #[test]
+    fn remove_leaves_foreign_absolute_command_entry() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.json");
+        std::fs::write(
+            &target,
+            "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"/usr/bin/not-tome\",\n      \"args\": [\"mcp\"]\n    }\n  }\n}\n",
+        )
+        .unwrap();
+        remove_entry(&target, &DIALECT).unwrap();
+        let read = read_entry(&target, &DIALECT).unwrap();
+        assert!(
+            read.is_some(),
+            "a foreign tome-keyed entry must NOT be removed",
+        );
     }
 }

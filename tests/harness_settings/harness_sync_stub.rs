@@ -120,7 +120,14 @@ fn bind_writes_stub_rules_block_and_mcp_entry() {
         .get("mcpServers")
         .and_then(|v| v.get("tome"))
         .expect("tome entry under mcpServers");
-    assert_eq!(entry["command"], "tome");
+    // #337: the command is the resolved absolute launcher (`current_exe` /
+    // `$TOME_BIN`), not the bare `tome`. Assert it is a recognised Tome
+    // launcher rather than an exact string (the value is machine-specific).
+    assert!(
+        tome::harness::launcher::looks_like_tome_launcher(entry["command"].as_str().unwrap()),
+        "command must be a recognised Tome launcher; got {}",
+        entry["command"],
+    );
     let args = entry["args"].as_array().unwrap();
     assert_eq!(args[0], "mcp");
     assert_eq!(args[1], "--workspace");
@@ -254,8 +261,13 @@ fn force_overrides_user_owned_clash_drops_unowned_env() {
         serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
     let entry = &parsed["mcpServers"]["tome"];
 
-    // The entry was rewritten to Tome-owned shape.
-    assert_eq!(entry["command"], "tome");
+    // The entry was rewritten to Tome-owned shape (#337: command is the
+    // resolved launcher, recognised by basename / self-equality).
+    assert!(
+        tome::harness::launcher::looks_like_tome_launcher(entry["command"].as_str().unwrap()),
+        "force-rewritten command must be a recognised Tome launcher; got {}",
+        entry["command"],
+    );
     let args = entry["args"].as_array().unwrap();
     assert_eq!(args[0], "mcp");
 
