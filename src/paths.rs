@@ -379,6 +379,15 @@ mod tests {
             p.workspace_rules_file(&name),
             p.workspaces_dir.join("global/RULES.md"),
         );
+        assert_eq!(
+            p.workspace_harness_dir(&name, "codex"),
+            p.workspaces_dir.join("global/harnesses/codex"),
+        );
+        assert_eq!(
+            p.hooks_manifest(&name, "codex"),
+            p.workspaces_dir
+                .join("global/harnesses/codex/hooks-manifest.json"),
+        );
     }
 
     #[test]
