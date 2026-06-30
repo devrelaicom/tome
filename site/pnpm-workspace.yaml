@@ -1,18 +1,26 @@
+# Build scripts — BOTH EXPLICITLY DENIED. No dependency build script runs.
+# pnpm 11.5 requires every package that ships a build script to be explicitly
+# decided (true = allow, false = decided-skip); `false` is a decided-skip that
+# avoids the ERR_PNPM_IGNORED_BUILDS hard error while running nothing.
+# @swc/core is denied: its postinstall only validates the native platform
+# binary (@swc/core-darwin-arm64, installed via optional deps), which the
+# Docusaurus build does not need. core-js is denied: its postinstall is a
+# donation banner only. LavaMoat `allowScripts` in package.json is also empty.
+# If a dependency genuinely needs its build script, add a single justified
+# `true` entry here rather than relaxing the posture broadly.
 allowBuilds:
-  '@swc/core': true
+  '@swc/core': false
   core-js: false
 
 # Supply chain defence — release-age gating for pnpm.
 #
-# minimumReleaseAge is in minutes: 7200 = 5 days. It delays installing
-# newly published package versions, giving the community time to detect and
-# report malicious releases before they can reach this project.
+# minimumReleaseAge is in MINUTES: 5760 = 4 days. It delays installing newly
+# published package versions, giving the community time to detect and report
+# malicious releases before they can reach this project.
 #
 # Natively enforced by pnpm >= 10.16 (which defaults it to 1440 = 1 day).
-# This project is on pnpm 10.12.4, where pnpm itself does not yet enforce it —
-# upgrade pnpm to >= 10.16 for enforcement. The supply-chain-defence hooks
-# read this value regardless of pnpm version.
-minimumReleaseAge: 3600
+# The supply-chain-defence hooks read this value regardless of pnpm version.
+minimumReleaseAge: 5760
 
 # Security overrides. pnpm >= 10.16 reads `overrides` from HERE, not from the
 # package.json `pnpm` field (that field is ignored with a warning under pnpm
