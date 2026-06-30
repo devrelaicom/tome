@@ -523,10 +523,23 @@ fn emit_decision(wire: HookWire, event_cc: &str, decision: &CcDecision) -> Dispa
     }
 }
 
+/// The `hookSpecificOutput` rewrite field name for a ClaudeStyle/Codex wire:
+/// PreToolUse rewrites the tool INPUT (`updatedInput`); PostToolUse rewrites the
+/// tool OUTPUT (`updatedToolOutput` for Devin/Gemini, `updatedMCPToolOutput` for
+/// Codex — Codex-specific, C10/CONFIRMED).
+fn rewrite_field(event_cc: &str, is_codex: bool) -> &'static str {
+    match (event_cc, is_codex) {
+        ("PostToolUse", true) => "updatedMCPToolOutput",
+        ("PostToolUse", false) => "updatedToolOutput",
+        _ => "updatedInput",
+    }
+}
+
 /// ClaudeStyle (Devin/Gemini) + Codex emit. A block is the top-level
 /// `{"decision":"block","reason"}`; Devin/Gemini ALSO exit 2 (they block on
 /// exit-2), while Codex blocks via the JSON at exit 0 (its exit-2 semantics are
-/// unverified — never depend on them). `ask` rides `hookSpecificOutput`.
+/// unverified — never depend on them). The non-blocking signals (`ask`,
+/// `additionalContext`, the input/output rewrite) ride `hookSpecificOutput`.
 fn emit_claude_style(event_cc: &str, decision: &CcDecision, is_codex: bool) -> DispatchOutput {
     if is_blocking(decision) {
         let reason = decision.reason.clone().unwrap_or_default();
@@ -537,12 +550,16 @@ fn emit_claude_style(event_cc: &str, decision: &CcDecision, is_codex: bool) -> D
             exit_code,
         };
     }
+
+    // Non-blocking: assemble a hookSpecificOutput carrying ask / additionalContext
+    // / the input-or-output rewrite. Emit only if there is something to say.
+    let mut hso = serde_json::Map::new();
+    hso.insert(
+        "hookEventName".to_string(),
+        Value::String(event_cc.to_string()),
+    );
+    let mut payload = false;
     if matches!(decision.permission, Some(Permission::Ask)) {
-        let mut hso = serde_json::Map::new();
-        hso.insert(
-            "hookEventName".to_string(),
-            Value::String(event_cc.to_string()),
-        );
         hso.insert(
             "permissionDecision".to_string(),
             Value::String("ask".to_string()),
@@ -553,22 +570,41 @@ fn emit_claude_style(event_cc: &str, decision: &CcDecision, is_codex: bool) -> D
                 Value::String(r.clone()),
             );
         }
-        let body = serde_json::json!({ "hookSpecificOutput": Value::Object(hso) });
+        payload = true;
+    }
+    if !decision.additional_context.is_empty() {
+        hso.insert(
+            "additionalContext".to_string(),
+            Value::String(decision.additional_context.join("\n")),
+        );
+        payload = true;
+    }
+    if let Some(updated) = &decision.updated_input {
+        hso.insert(
+            rewrite_field(event_cc, is_codex).to_string(),
+            updated.clone(),
+        );
+        payload = true;
+    }
+
+    if !payload {
+        // Allow / no-op → empty stdout + exit 0.
         return DispatchOutput {
-            stdout: body.to_string(),
+            stdout: String::new(),
             exit_code: 0,
         };
     }
-    // Allow / no-op → empty stdout + exit 0.
+    let body = serde_json::json!({ "hookSpecificOutput": Value::Object(hso) });
     DispatchOutput {
-        stdout: String::new(),
+        stdout: body.to_string(),
         exit_code: 0,
     }
 }
 
-/// Cursor emit: snake_case `{permission, agent_message, …}` ALWAYS at exit 0.
-/// Cursor blocks via JSON `permission:"deny"`; Tome leaves `failClosed` off, so
-/// a non-zero exit fails OPEN — Tome NEVER exits 2 here.
+/// Cursor emit: snake_case `{permission, agent_message, additional_context,
+/// updated_input}` ALWAYS at exit 0. Cursor blocks via JSON `permission:"deny"`;
+/// Tome leaves `failClosed` off, so a non-zero exit fails OPEN — Tome NEVER
+/// exits 2 here.
 fn emit_cursor(decision: &CcDecision) -> DispatchOutput {
     let mut obj = serde_json::Map::new();
     if let Some(p) = permission_token(decision) {
@@ -577,6 +613,15 @@ fn emit_cursor(decision: &CcDecision) -> DispatchOutput {
     if let Some(r) = &decision.reason {
         // `agent_message` is Cursor's reason channel (sent to the agent).
         obj.insert("agent_message".to_string(), Value::String(r.clone()));
+    }
+    if !decision.additional_context.is_empty() {
+        obj.insert(
+            "additional_context".to_string(),
+            Value::String(decision.additional_context.join("\n")),
+        );
+    }
+    if let Some(updated) = &decision.updated_input {
+        obj.insert("updated_input".to_string(), updated.clone());
     }
     if obj.is_empty() {
         return DispatchOutput {
@@ -590,9 +635,11 @@ fn emit_cursor(decision: &CcDecision) -> DispatchOutput {
     }
 }
 
-/// Copilot CLI emit: flat `{permissionDecision, permissionDecisionReason}`.
-/// Copilot blocks ONLY via JSON `permissionDecision:"deny"` — exit-2 is a mere
-/// warning for most events, so Tome NEVER exits 2 for a block.
+/// Copilot CLI emit: flat `{permissionDecision, permissionDecisionReason,
+/// modifiedArgs, additionalContext}`. Copilot blocks ONLY via JSON
+/// `permissionDecision:"deny"` — exit-2 is a mere warning for most events, so
+/// Tome NEVER exits 2 for a block. `additionalContext` is FLAT (top-level), not
+/// nested under `hookSpecificOutput`.
 fn emit_copilot(decision: &CcDecision) -> DispatchOutput {
     let mut obj = serde_json::Map::new();
     if let Some(pd) = permission_token(decision) {
@@ -606,6 +653,15 @@ fn emit_copilot(decision: &CcDecision) -> DispatchOutput {
                 Value::String(r.clone()),
             );
         }
+    }
+    if let Some(updated) = &decision.updated_input {
+        obj.insert("modifiedArgs".to_string(), updated.clone());
+    }
+    if !decision.additional_context.is_empty() {
+        obj.insert(
+            "additionalContext".to_string(),
+            Value::String(decision.additional_context.join("\n")),
+        );
     }
     if obj.is_empty() {
         return DispatchOutput {
@@ -805,6 +861,120 @@ mod tests {
         let decision = command_outcome_to_decision(&outcome);
         assert!(!is_blocking(&decision));
         assert_eq!(decision.permission, None);
+    }
+
+    /// Cursor deny is snake_case `{permission:"deny", agent_message}` at exit 0
+    /// (Cursor blocks via JSON, never exit-2 from Tome).
+    #[test]
+    fn cursor_emit_deny_is_snake_case_exit_0() {
+        let d = CcDecision {
+            permission: Some(Permission::Deny),
+            reason: Some("[cat:p] no".to_string()),
+            ..Default::default()
+        };
+        let out = emit_decision(HookWire::CursorSnake, "PreToolUse", &d);
+        assert!(out.stdout.contains("\"permission\":\"deny\""));
+        assert!(out.stdout.contains("\"agent_message\""));
+        assert_eq!(out.exit_code, 0);
+    }
+
+    /// ClaudeStyle (Devin/Gemini) deny emits `{"decision":"block",…}` AND exits
+    /// 2; Codex emits the same JSON block but at exit 0 (its exit-2 is unverified).
+    #[test]
+    fn claude_style_deny_exit2_codex_block_exit0() {
+        let d = CcDecision {
+            permission: Some(Permission::Deny),
+            reason: Some("[cat:p] no".to_string()),
+            ..Default::default()
+        };
+        let dev = emit_decision(HookWire::ClaudeStyle, "PreToolUse", &d);
+        assert!(dev.stdout.contains("\"decision\":\"block\""));
+        assert!(dev.stdout.contains("[cat:p] no"));
+        assert_eq!(dev.exit_code, 2);
+        let cdx = emit_decision(HookWire::Codex, "PreToolUse", &d);
+        assert!(cdx.stdout.contains("\"decision\":\"block\""));
+        assert_eq!(cdx.exit_code, 0);
+    }
+
+    /// `additionalContext` emits per-wire: ClaudeStyle nests it under
+    /// `hookSpecificOutput` (with `hookEventName`); Cursor uses snake_case
+    /// `additional_context`; Copilot uses a FLAT top-level `additionalContext`.
+    #[test]
+    fn additional_context_emit_per_wire() {
+        let d = CcDecision {
+            additional_context: vec!["ctx1".to_string(), "ctx2".to_string()],
+            ..Default::default()
+        };
+        let claude = emit_decision(HookWire::ClaudeStyle, "PostToolUse", &d);
+        let v: Value = serde_json::from_str(&claude.stdout).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+        assert_eq!(v["hookSpecificOutput"]["additionalContext"], "ctx1\nctx2");
+        assert_eq!(claude.exit_code, 0);
+
+        let cursor = emit_decision(HookWire::CursorSnake, "PostToolUse", &d);
+        let v: Value = serde_json::from_str(&cursor.stdout).unwrap();
+        assert_eq!(v["additional_context"], "ctx1\nctx2");
+
+        let copilot = emit_decision(HookWire::CopilotFlat, "PostToolUse", &d);
+        let v: Value = serde_json::from_str(&copilot.stdout).unwrap();
+        assert_eq!(v["additionalContext"], "ctx1\nctx2");
+    }
+
+    /// The input/output rewrite field varies by wire + event: PreToolUse rewrites
+    /// the input (`updatedInput`/`updated_input`/`modifiedArgs`); PostToolUse
+    /// rewrites the output (`updatedToolOutput` for ClaudeStyle,
+    /// `updatedMCPToolOutput` for Codex).
+    #[test]
+    fn updated_input_emit_rewrite_fields() {
+        let d = CcDecision {
+            updated_input: Some(serde_json::json!({ "x": 1 })),
+            ..Default::default()
+        };
+
+        let pre = emit_decision(HookWire::ClaudeStyle, "PreToolUse", &d);
+        let v: Value = serde_json::from_str(&pre.stdout).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["updatedInput"],
+            serde_json::json!({ "x": 1 })
+        );
+
+        let post = emit_decision(HookWire::ClaudeStyle, "PostToolUse", &d);
+        let v: Value = serde_json::from_str(&post.stdout).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["updatedToolOutput"],
+            serde_json::json!({ "x": 1 })
+        );
+
+        let codex_post = emit_decision(HookWire::Codex, "PostToolUse", &d);
+        let v: Value = serde_json::from_str(&codex_post.stdout).unwrap();
+        assert_eq!(
+            v["hookSpecificOutput"]["updatedMCPToolOutput"],
+            serde_json::json!({ "x": 1 })
+        );
+
+        let cursor = emit_decision(HookWire::CursorSnake, "PreToolUse", &d);
+        let v: Value = serde_json::from_str(&cursor.stdout).unwrap();
+        assert_eq!(v["updated_input"], serde_json::json!({ "x": 1 }));
+
+        let copilot = emit_decision(HookWire::CopilotFlat, "PreToolUse", &d);
+        let v: Value = serde_json::from_str(&copilot.stdout).unwrap();
+        assert_eq!(v["modifiedArgs"], serde_json::json!({ "x": 1 }));
+    }
+
+    /// A pure allow / no-op is empty stdout + exit 0 on ALL four wires.
+    #[test]
+    fn allow_no_op_is_empty_exit_0_on_all_wires() {
+        let allow = CcDecision::default();
+        for wire in [
+            HookWire::ClaudeStyle,
+            HookWire::Codex,
+            HookWire::CursorSnake,
+            HookWire::CopilotFlat,
+        ] {
+            let out = emit_decision(wire, "PreToolUse", &allow);
+            assert!(out.stdout.is_empty(), "{wire:?} allow must be empty");
+            assert_eq!(out.exit_code, 0);
+        }
     }
 
     /// (a) Cursor's `conversation_id` maps to CC `session_id`; (b) Gemini's
