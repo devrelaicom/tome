@@ -28,6 +28,27 @@ pub const DEFAULT_PROVIDER_TIMEOUT: Duration = Duration::from_secs(30);
 /// The env var consulted to override [`DEFAULT_PROVIDER_TIMEOUT`].
 const TIMEOUT_ENV_VAR: &str = "TOME_PROVIDER_TIMEOUT_SECS";
 
+/// The default number of *retries* (additional attempts beyond the first) for a
+/// remote provider request. The retry loop makes `1 + retries` total attempts,
+/// so this default of `2` yields 3 total attempts — byte-identical to the
+/// pre-override behaviour (FR-012: "1 initial + 2 retries"). Overridable via the
+/// `TOME_PROVIDER_MAX_RETRIES` env var.
+pub const DEFAULT_PROVIDER_MAX_RETRIES: u32 = 2;
+
+/// Upper bound on `TOME_PROVIDER_MAX_RETRIES`. A *retries* count of `10` (11
+/// total attempts) is already far beyond any sane provider-failure scenario;
+/// the cap stops a typo (`100000`) from turning a transient 5xx into a
+/// multi-minute foreground stall (each backoff/`Retry-After` wait compounds).
+/// A value above the cap clamps DOWN to it rather than being rejected.
+pub const MAX_PROVIDER_MAX_RETRIES: u32 = 10;
+
+/// The env var consulted to override [`DEFAULT_PROVIDER_MAX_RETRIES`]. Parsed as
+/// a whole non-negative integer of *retries* (NOT total attempts): `0` means no
+/// retries (exactly one attempt), `2` is the default (three attempts). A
+/// missing, unparsable, or out-of-range value falls back to the default;
+/// a value above [`MAX_PROVIDER_MAX_RETRIES`] clamps down to the cap.
+const MAX_RETRIES_ENV_VAR: &str = "TOME_PROVIDER_MAX_RETRIES";
+
 /// Which model capability a resolution targets. Each capability pulls its
 /// `provider`/`model` from a different config section and accepts a different
 /// set of provider kinds (the FR-005 matrix).
@@ -146,6 +167,11 @@ pub struct ResolvedProvider {
     /// The per-call timeout (default [`DEFAULT_PROVIDER_TIMEOUT`], overridable
     /// via `TOME_PROVIDER_TIMEOUT_SECS`).
     pub timeout: Duration,
+    /// The maximum total attempts the retry loop makes (`1 + retries`). Default
+    /// `3` (1 initial + [`DEFAULT_PROVIDER_MAX_RETRIES`] retries), overridable
+    /// via `TOME_PROVIDER_MAX_RETRIES`; always `>= 1`, so at least one attempt
+    /// is always made.
+    pub max_attempts: u32,
 }
 
 impl std::fmt::Debug for ResolvedProvider {
@@ -161,6 +187,7 @@ impl std::fmt::Debug for ResolvedProvider {
             .field("credential", &self.credential)
             .field("model", &self.model)
             .field("timeout", &self.timeout)
+            .field("max_attempts", &self.max_attempts)
             .finish()
     }
 }
@@ -213,6 +240,40 @@ fn resolve_timeout() -> Duration {
         },
         Err(_) => DEFAULT_PROVIDER_TIMEOUT,
     }
+}
+
+/// Pull the retry count from the env override and translate it into the
+/// `max_attempts` the retry loop uses (`1 + retries`), falling back to the
+/// default. Mirrors [`resolve_timeout`]: a missing or unparsable value uses the
+/// default ([`DEFAULT_PROVIDER_MAX_RETRIES`]); a value above the cap
+/// ([`MAX_PROVIDER_MAX_RETRIES`]) clamps DOWN to the cap (logged at debug). The
+/// returned value is always `>= 1`, so at least one attempt is always made
+/// (`0` retries → exactly one attempt).
+fn resolve_max_attempts() -> u32 {
+    let retries = match std::env::var(MAX_RETRIES_ENV_VAR) {
+        Ok(v) => match v.trim().parse::<u32>() {
+            Ok(retries) if retries <= MAX_PROVIDER_MAX_RETRIES => retries,
+            Ok(too_many) => {
+                tracing::debug!(
+                    value = %too_many,
+                    cap = MAX_PROVIDER_MAX_RETRIES,
+                    "clamping {MAX_RETRIES_ENV_VAR} to the maximum"
+                );
+                MAX_PROVIDER_MAX_RETRIES
+            }
+            Err(_) => {
+                tracing::debug!(
+                    value = %v,
+                    "ignoring unparsable {MAX_RETRIES_ENV_VAR}; using default provider retries"
+                );
+                DEFAULT_PROVIDER_MAX_RETRIES
+            }
+        },
+        Err(_) => DEFAULT_PROVIDER_MAX_RETRIES,
+    };
+    // Total attempts = 1 initial + N retries. `+ 1` cannot overflow: `retries`
+    // is clamped to MAX_PROVIDER_MAX_RETRIES (10).
+    retries + 1
 }
 
 /// Resolve a capability's credential (FR-007): the derived env var
@@ -327,6 +388,7 @@ pub fn resolve(
         credential,
         model: model.to_string(),
         timeout: resolve_timeout(),
+        max_attempts: resolve_max_attempts(),
     }))
 }
 
@@ -794,6 +856,86 @@ mod tests {
         );
         let resolved = resolve(&config, Capability::Embedding).unwrap().unwrap();
         assert_eq!(resolved.timeout, DEFAULT_PROVIDER_TIMEOUT);
+    }
+
+    // --- max-retries default / override --------------------------------------
+    //
+    // The env var sets the number of RETRIES (additional attempts); the
+    // resolved `max_attempts` is `1 + retries`. The default of 2 retries yields
+    // 3 attempts — byte-identical to the pre-override behaviour.
+
+    /// A small helper: resolve a default-config embedding provider with the
+    /// `TOME_PROVIDER_MAX_RETRIES` env var set to `value` (or unset for `None`),
+    /// returning the resolved `max_attempts`. `TOME_P_API_KEY` / the timeout var
+    /// are also cleared so neither leaks in from the host environment.
+    fn resolved_max_attempts_for(value: Option<&str>) -> u32 {
+        let g = EnvGuard::new(&["TOME_P_API_KEY", TIMEOUT_ENV_VAR, MAX_RETRIES_ENV_VAR]);
+        if let Some(v) = value {
+            g.set(MAX_RETRIES_ENV_VAR, v);
+        }
+        let config = config_with(
+            "p",
+            entry(ProviderKind::Openai, None, None),
+            Capability::Embedding,
+            Some("p"),
+            Some("model"),
+        );
+        resolve(&config, Capability::Embedding)
+            .unwrap()
+            .unwrap()
+            .max_attempts
+    }
+
+    #[test]
+    fn max_attempts_defaults_when_env_unset() {
+        // Unset → default (1 + DEFAULT_PROVIDER_MAX_RETRIES == 3). Byte-identical
+        // to the prior fixed `MAX_ATTEMPTS = 3`.
+        assert_eq!(
+            resolved_max_attempts_for(None),
+            DEFAULT_PROVIDER_MAX_RETRIES + 1
+        );
+        assert_eq!(resolved_max_attempts_for(None), 3);
+    }
+
+    #[test]
+    fn max_attempts_env_override_is_honoured() {
+        // 4 retries → 5 total attempts. Whitespace is trimmed (mirroring the
+        // timeout override).
+        assert_eq!(resolved_max_attempts_for(Some("4")), 5);
+        assert_eq!(resolved_max_attempts_for(Some("  4 ")), 5);
+    }
+
+    #[test]
+    fn max_attempts_zero_retries_is_one_attempt() {
+        // 0 retries → exactly one attempt (no retry).
+        assert_eq!(resolved_max_attempts_for(Some("0")), 1);
+    }
+
+    #[test]
+    fn max_attempts_unparsable_env_falls_back_to_default() {
+        // Non-numeric, negative (u32 can't parse "-1"), and empty all fall back.
+        assert_eq!(resolved_max_attempts_for(Some("not-a-number")), 3);
+        assert_eq!(resolved_max_attempts_for(Some("-1")), 3);
+        assert_eq!(resolved_max_attempts_for(Some("")), 3);
+        assert_eq!(resolved_max_attempts_for(Some("3.5")), 3);
+    }
+
+    #[test]
+    fn max_attempts_over_cap_clamps_down() {
+        // A value above the cap clamps DOWN to MAX_PROVIDER_MAX_RETRIES retries
+        // (not rejected), so the resolved attempt count is `cap + 1`.
+        let expected = MAX_PROVIDER_MAX_RETRIES + 1;
+        assert_eq!(resolved_max_attempts_for(Some("100000")), expected);
+        // The exact cap value is accepted as-is (boundary).
+        assert_eq!(
+            resolved_max_attempts_for(Some(&MAX_PROVIDER_MAX_RETRIES.to_string())),
+            expected
+        );
+        // One below the cap is accepted as-is.
+        assert_eq!(
+            resolved_max_attempts_for(Some(&(MAX_PROVIDER_MAX_RETRIES - 1).to_string())),
+            MAX_PROVIDER_MAX_RETRIES // (cap - 1) retries + 1
+        );
     }
 
     // --- env-var collision warning (non-fatal) -------------------------------
