@@ -577,15 +577,18 @@ fn reconcile_against_effective(
         }
     }
 
-    // US3: plugin-hook DISPATCH registration — for every harness declaring a
-    // `hook_support()` capability, register Tome's match-all `run-hook` entries
+    // US3 + US6.1: plugin-hook DISPATCH registration — for every harness declaring
+    // a `hook_support()` capability, register Tome's match-all `run-hook` entries
     // (used-event-only) into its native hook file AND write the resolved
     // per-(workspace, harness) manifest. SEPARATE leaf from the session-steering
     // entry above (additive — composes, never clobbers), so its action backfills
-    // `hooks_action` ONLY when non-`LeftAlone`. Always-on (US6.1 adds the opt-out
-    // gate). The `first_error` joins the precedence chain after `command_hook_error`.
+    // `hooks_action` ONLY when non-`LeftAlone`. Gated by
+    // `[hooks] translate_plugin_hooks` (default true / on). The `first_error`
+    // joins the precedence chain after `command_hook_error`.
+    let hooks_cfg = crate::config::load_or_default(deps.paths);
     let (dispatch_actions, dispatch_error) = reconcile_plugin_hook_dispatch(
         deps,
+        &hooks_cfg,
         effective_names,
         &snapshots,
         project_root,

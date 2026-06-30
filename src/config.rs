@@ -55,6 +55,8 @@ pub struct Config {
     pub models: ModelsConfig,
     #[serde(default)]
     pub doctor: DoctorConfig,
+    #[serde(default)]
+    pub hooks: HooksConfig,
 
     /// Phase 12 — BYOK/BYOM model providers. A registry of external providers
     /// keyed by user-chosen name; capability sections (`[summariser]`,
@@ -202,6 +204,31 @@ pub struct ModelsConfig {
 pub struct DoctorConfig {
     #[serde(default)]
     pub verify_by_default: Option<bool>,
+}
+
+/// US6 — `[hooks]`. Controls plugin-hook translation and the BYOM prompt model.
+/// All fields are absent by default (opt-in semantics for the prompt sub-feature;
+/// `translate_plugin_hooks` defaults to `true` when absent so the feature stays on).
+///
+/// `translate_plugin_hooks = false` disables the whole dispatch subsystem and
+/// tears down any previously written run-hook entries + manifests on the next sync.
+/// `prompt_provider`/`prompt_model` wire a BYOM LLM for `Handler::Prompt` hooks;
+/// when absent, prompt handlers in the manifest are suppressed by the sync gate.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct HooksConfig {
+    /// When `Some(false)`, the plugin-hook dispatch subsystem is disabled and
+    /// the reconciler removes any existing Tome run-hook entries and manifests.
+    /// Absent or `Some(true)` → enabled (the default).
+    #[serde(default)]
+    pub translate_plugin_hooks: Option<bool>,
+    /// Name of a `[providers.<name>]` entry to use for prompt handler dispatch.
+    /// When set, `prompt_model` is also required (validated at resolve time → exit 93).
+    #[serde(default)]
+    pub prompt_provider: Option<String>,
+    /// Remote model identifier for prompt handler dispatch (required when `prompt_provider` is set).
+    #[serde(default)]
+    pub prompt_model: Option<String>,
 }
 
 /// Phase 12 — a redacting wrapper around an inline API key.
@@ -491,6 +518,11 @@ profile = "small"
 
 [doctor]
 verify_by_default = true
+
+[hooks]
+translate_plugin_hooks = true
+prompt_provider = "myprov"
+prompt_model = "gpt-4o-mini"
 "#;
         let c: Config = toml::from_str(toml).unwrap();
         assert_eq!(
@@ -507,6 +539,11 @@ verify_by_default = true
         assert_eq!(c.mcp.description_max_chars, Some(300));
         assert_eq!(c.doctor.verify_by_default, Some(true));
         assert_eq!(c.models.profile, Some(crate::embedding::Profile::Small));
+
+        // US6 — hooks config.
+        assert_eq!(c.hooks.translate_plugin_hooks, Some(true));
+        assert_eq!(c.hooks.prompt_provider.as_deref(), Some("myprov"));
+        assert_eq!(c.hooks.prompt_model.as_deref(), Some("gpt-4o-mini"));
         assert_eq!(c.output.progress, Some(false));
         assert_eq!(c.summariser.enabled, Some(false));
         assert_eq!(c.harness.expose_agents_as_personas, Some(true));

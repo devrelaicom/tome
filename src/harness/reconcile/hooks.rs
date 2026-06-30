@@ -35,7 +35,7 @@ use tempfile::NamedTempFile;
 
 use crate::error::TomeError;
 use crate::harness::hooks_ir::{
-    CanonicalHook, HookManifest, ManifestEntry, PortableEvent, parse_canonical_hooks,
+    CanonicalHook, Handler, HookManifest, ManifestEntry, PortableEvent, parse_canonical_hooks,
     read_manifest, write_manifest,
 };
 use crate::harness::reconcile::record_action;
@@ -1133,11 +1133,9 @@ fn prune_empty(doc: &mut JsonValue, spec: HookFileSpec, event: HookEvent) {
 /// `hooks_action` decision field and reuses the hook error classes (exit 43
 /// parse / 44 write).
 //
-// US6.1: add a `cfg: &Config` opt-out gate (`translate_plugin_hooks`, default
-// true) here. US3 is unconditionally on (translation always runs); the enabled
-// set comes from the central DB via `deps`, never from config.
 pub(crate) fn reconcile_plugin_hook_dispatch(
     deps: &SyncDeps<'_>,
+    cfg: &crate::config::Config,
     effective_names: &HashSet<String>,
     snapshots: &[HarnessSnapshot],
     project_root: &Path,
@@ -1149,6 +1147,32 @@ pub(crate) fn reconcile_plugin_hook_dispatch(
     // Fast exit: no in-scope harness declares hook support → no work. With every
     // GuardrailsOnly harness this keeps the orchestrator output byte-identical.
     if !snapshots.iter().any(|s| s.hook_support.is_some()) {
+        return (actions, first_error);
+    }
+
+    // US6.1: opt-out gate. When `translate_plugin_hooks = false`, treat every
+    // harness as non-live so any previously written run-hook entries + manifests
+    // are removed (same teardown path as a non-live harness). Toggling off is
+    // a clean, reversible operation — the next sync with the flag re-enabled
+    // (or absent, which defaults to true) re-writes everything from scratch.
+    if !cfg.hooks.translate_plugin_hooks.unwrap_or(true) {
+        for snap in snapshots {
+            let Some(support) = &snap.hook_support else {
+                continue;
+            };
+            let action = reconcile_one_harness_dispatch(
+                deps,
+                project_root,
+                snap,
+                support,
+                &[],   // empty canonical → no hooks to register
+                false, // is_live=false → teardown path
+                outcome,
+                &mut first_error,
+                cfg,
+            );
+            actions.insert(snap.name.clone(), action);
+        }
         return (actions, first_error);
     }
 
@@ -1175,6 +1199,7 @@ pub(crate) fn reconcile_plugin_hook_dispatch(
             is_live,
             outcome,
             &mut first_error,
+            cfg,
         );
         actions.insert(snap.name.clone(), action);
     }
@@ -1245,6 +1270,7 @@ fn reconcile_one_harness_dispatch(
     is_live: bool,
     outcome: &mut SyncOutcome,
     first_error: &mut Option<TomeError>,
+    cfg: &crate::config::Config,
 ) -> Action {
     let workspace = deps.workspace_name.as_str();
     let manifest_path = deps.paths.hooks_manifest(deps.workspace_name, &snap.name);
@@ -1252,6 +1278,24 @@ fn reconcile_one_harness_dispatch(
         // Only `ClaudeSettingsLocal` returns `None`, and no `hook_support()`
         // harness uses it — skip defensively.
         return Action::LeftAlone;
+    };
+
+    // US6.2 prompt gate: when neither prompt_provider nor prompt_model is
+    // configured, exclude Handler::Prompt entries from the manifest. The
+    // HookDropReason::PromptDisabled variant is available for the US11 doctor
+    // to surface; for now the drops are silently elided (matches the existing
+    // `let _ = drops;` pattern in resolve_enabled_canonical_hooks).
+    let prompt_enabled = cfg.hooks.prompt_provider.is_some() || cfg.hooks.prompt_model.is_some();
+    let filtered: Vec<CanonicalHook>;
+    let effective_canonical: &[CanonicalHook] = if prompt_enabled {
+        canonical
+    } else {
+        filtered = canonical
+            .iter()
+            .filter(|h| !matches!(h.handler, Handler::Prompt { .. }))
+            .cloned()
+            .collect();
+        &filtered
     };
 
     // The USED events: events in this harness's support set that ≥1 enabled
@@ -1262,7 +1306,7 @@ fn reconcile_one_harness_dispatch(
             .events
             .iter()
             .copied()
-            .filter(|ev| canonical.iter().any(|h| h.event == *ev))
+            .filter(|ev| effective_canonical.iter().any(|h| h.event == *ev))
             .collect()
     } else {
         Vec::new()
@@ -1281,7 +1325,7 @@ fn reconcile_one_harness_dispatch(
     let manifest_action = reconcile_dispatch_manifest(
         &snap.name,
         &manifest_path,
-        canonical,
+        effective_canonical,
         &used,
         is_live,
         outcome,
