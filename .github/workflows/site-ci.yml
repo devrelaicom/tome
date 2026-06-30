@@ -23,6 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          # action-setup is a `uses:` step, so it ignores defaults.run.working-directory
+          # and runs at the repo root (no package.json there). The pnpm version lives
+          # in site/package.json "packageManager" — point it there explicitly.
+          package_json_file: site/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

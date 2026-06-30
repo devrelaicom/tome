@@ -52,10 +52,13 @@ jobs:
           fi
           echo "OK — no foreign lockfiles."
 
-      # Version comes from package.json "packageManager" (pnpm@11.5.0) — single
-      # source of truth, kept in sync with local dev. Do NOT also set `version`
-      # here: action-setup@v4 errors when the two disagree.
+      # Version comes from site/package.json "packageManager" (pnpm@11.5.0).
+      # action-setup is a `uses:` step, so it ignores defaults.run.working-directory
+      # and runs at the repo root — where there is no package.json. Point it at
+      # site/package.json explicitly (do NOT also set `version`: they'd disagree).
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: site/package.json
 
       - uses: actions/setup-node@v4
         with:

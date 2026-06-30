@@ -42,6 +42,10 @@ jobs:
         run: cargo build --release --bin tome
 
       - uses: pnpm/action-setup@v4
+        with:
+          # action-setup runs at the repo root (a `uses:` step); the pnpm version
+          # lives in site/package.json "packageManager".
+          package_json_file: site/package.json
 
       - uses: actions/setup-node@v4
         with:
