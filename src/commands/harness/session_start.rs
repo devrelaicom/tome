@@ -146,6 +146,9 @@ pub fn wrap_in_envelope(envelope: Envelope, directive: &str) -> String {
         Envelope::AntigravityInjectSteps => serde_json::json!({
             "injectSteps": [ { "ephemeralMessage": directive } ]
         }),
+        Envelope::CursorAdditionalContext => serde_json::json!({
+            "additional_context": directive,
+        }),
     };
     // `to_string` (not pretty) → compact single-line object, the stdout-hook
     // convention. Serialisation of a plain `Value` is infallible here.
@@ -222,6 +225,11 @@ mod tests {
             Some(Envelope::FlatAdditionalContext)
         );
         assert_eq!(envelope_for("gemini"), Some(Envelope::ClaudeNested));
+        // Cursor → CursorAdditionalContext (snake_case `additional_context`, US7).
+        assert_eq!(
+            envelope_for("cursor"),
+            Some(Envelope::CursorAdditionalContext)
+        );
         // Antigravity is rules-only (US2 T047): no command-hook envelope.
         assert_eq!(envelope_for("antigravity"), None);
     }

@@ -44,9 +44,10 @@ use crate::error::TomeError;
 use crate::harness::agents::{
     self, CanonicalAgent, TranslatedAgent, agent_extension, agent_filename,
 };
+use crate::harness::hooks_ir::PortableEvent;
 use crate::harness::{
-    AgentFormat, BlockBodyStyle, Envelope, HarnessModule, HookEvent, HookFileSpec,
-    RulesFileStrategy, SessionSteering,
+    AgentFormat, BlockBodyStyle, Envelope, HarnessModule, HookEvent, HookFileSpec, HookSupport,
+    HookWire, RulesFileStrategy, SessionSteering, TimeoutUnit,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Gemini CLI.
@@ -108,6 +109,37 @@ impl HarnessModule for Gemini {
             file_spec: HookFileSpec::GeminiSettings,
             event: HookEvent::SessionStart,
             envelope: Envelope::ClaudeNested,
+        }
+    }
+
+    fn hook_support(&self) -> Option<HookSupport> {
+        use PortableEvent::*;
+        Some(HookSupport {
+            file_spec: HookFileSpec::GeminiSettings,
+            events: &[
+                PreToolUse,
+                PostToolUse,
+                UserPromptSubmit,
+                Stop,
+                SessionStart,
+                SessionEnd,
+                PreCompact,
+            ],
+            wire: HookWire::ClaudeStyle,
+            timeout_unit: TimeoutUnit::Millis,
+        })
+    }
+
+    fn hook_event_name(&self, event: PortableEvent) -> &'static str {
+        use PortableEvent::*;
+        match event {
+            PreToolUse => "BeforeTool",
+            PostToolUse => "AfterTool",
+            UserPromptSubmit => "BeforeAgent",
+            Stop => "AfterAgent",
+            PreCompact => "PreCompress",
+            SessionStart => "SessionStart",
+            SessionEnd => "SessionEnd",
         }
     }
 

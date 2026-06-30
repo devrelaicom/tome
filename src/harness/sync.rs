@@ -41,7 +41,8 @@ use crate::error::TomeError;
 use crate::harness::reconcile::agents::reconcile_agents;
 use crate::harness::reconcile::guardrails::reconcile_guardrails;
 use crate::harness::reconcile::hooks::{
-    reconcile_command_hooks, reconcile_hooks, reconcile_tome_session_hooks,
+    reconcile_command_hooks, reconcile_hooks, reconcile_plugin_hook_dispatch,
+    reconcile_tome_session_hooks,
 };
 use crate::harness::reconcile::open_plugins::reconcile_open_plugins;
 use crate::harness::reconcile::plugins::reconcile_plugins;
@@ -576,6 +577,31 @@ fn reconcile_against_effective(
         }
     }
 
+    // US3 + US6.1: plugin-hook DISPATCH registration — for every harness declaring
+    // a `hook_support()` capability, register Tome's match-all `run-hook` entries
+    // (used-event-only) into its native hook file AND write the resolved
+    // per-(workspace, harness) manifest. SEPARATE leaf from the session-steering
+    // entry above (additive — composes, never clobbers), so its action backfills
+    // `hooks_action` ONLY when non-`LeftAlone`. Gated by
+    // `[hooks] translate_plugin_hooks` (default true / on). The `first_error`
+    // joins the precedence chain after `command_hook_error`.
+    let hooks_cfg = crate::config::load_or_default(deps.paths);
+    let (dispatch_actions, dispatch_error) = reconcile_plugin_hook_dispatch(
+        deps,
+        &hooks_cfg,
+        effective_names,
+        &snapshots,
+        project_root,
+        &mut outcome,
+    );
+    for decision in &mut outcome.decisions {
+        if let Some(action) = dispatch_actions.get(&decision.harness)
+            && *action != Action::LeftAlone
+        {
+            decision.hooks_action = *action;
+        }
+    }
+
     // -----------------------------------------------------------------
     // 3c2. Guardrails (Phase 6 / US3) — SECOND among the Phase 6 sinks.
     //
@@ -691,6 +717,12 @@ fn reconcile_against_effective(
     if let Some(command_hook_err) = command_hook_error {
         return Err(command_hook_err);
     }
+    // US3: the plugin-hook dispatch sink shares the hooks error classes (43/44)
+    // and is surfaced right after the session-steering command-hook sink, before
+    // guardrails/agents — keeping the fixed hooks-before-guardrails precedence.
+    if let Some(dispatch_err) = dispatch_error {
+        return Err(dispatch_err);
+    }
     if let Some(guardrails_err) = guardrails_recon.first_error {
         return Err(guardrails_err);
     }
@@ -769,6 +801,17 @@ pub(crate) struct HarnessSnapshot {
     /// [`crate::harness::SessionSteering::None`], so the reconciler is a no-op
     /// for them and the orchestrator output stays byte-identical.
     pub(crate) session_steering: crate::harness::SessionSteering,
+    /// US3: this harness's plugin-hook translation capability (`None` for a
+    /// guardrails-only harness). Drives the dispatch reconciler's fast-exit +
+    /// per-harness `run-hook` registration + manifest write. `pub(crate)` so the
+    /// reconciler reads it across the module boundary.
+    pub(crate) hook_support: Option<crate::harness::HookSupport>,
+    /// US3: the harness-NATIVE event-name for each supported event, RESOLVED at
+    /// snapshot time. `hook_event_name` is `&self`, so capturing the names here
+    /// lets the dispatch reconciler / manifest builder register under e.g.
+    /// gemini's `BeforeTool` without re-entering the registry. Empty when
+    /// `hook_support` is `None`.
+    pub(crate) hook_event_names: Vec<(crate::harness::hooks_ir::PortableEvent, &'static str)>,
     /// Phase 6 / US3: the harness's guardrails sink (in-file region or Cursor
     /// standalone sibling) plus its hooks-driven suppression flag.
     pub(crate) guardrails_target: crate::harness::GuardrailsTarget,
@@ -948,6 +991,19 @@ pub(crate) fn rules_sink_path(m: &dyn HarnessModule, project_root: &Path) -> Pat
 }
 
 fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) -> HarnessSnapshot {
+    // US3: capture the harness's hook capability + resolve each supported event's
+    // native name ONCE here (`hook_event_name` is `&self`), so the dispatch
+    // reconciler never re-enters the registry.
+    let hook_support = m.hook_support();
+    let hook_event_names = hook_support
+        .as_ref()
+        .map(|s| {
+            s.events
+                .iter()
+                .map(|&e| (e, m.hook_event_name(e)))
+                .collect()
+        })
+        .unwrap_or_default();
     HarnessSnapshot {
         name: m.name().to_string(),
         // Phase 11 (G3, FR-024): the harness's dedicated rules sink, computed via
@@ -970,6 +1026,8 @@ fn snapshot_for(m: &dyn HarnessModule, project_root: &Path, home_root: &Path) ->
         },
         tome_session_hook_path: m.tome_session_hook_path(project_root),
         session_steering: m.session_steering(),
+        hook_support,
+        hook_event_names,
         guardrails_target: m.guardrails_target(project_root),
         open_plugins_root: m.open_plugins_root(project_root),
     }

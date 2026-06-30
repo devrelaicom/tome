@@ -583,6 +583,36 @@ pub struct UnrepresentedAgentsReport {
     pub agents: Vec<UnrepresentedAgentEntry>,
 }
 
+/// US11 (native plugin-hook translation): per-harness plugin-hook dispatch
+/// state for `tome doctor`. Derived read-only from the on-disk dispatch
+/// manifest + config (FR-124). Plain `Serialize` — NO `deny_unknown_fields`
+/// (output struct, not input).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookHarnessStatus {
+    pub harness: String,
+    /// `true` when `translate_plugin_hooks` is unset (defaults on) or `Some(true)`.
+    pub enabled: bool,
+    /// CC event-name keys present in the on-disk dispatch manifest.
+    pub registered_events: Vec<String>,
+    /// Portable events the harness CANNOT translate → go to GUARDRAILS instead.
+    pub dropped_to_guardrails: Vec<String>,
+    /// `true` when the on-disk manifest is out of sync with the current config
+    /// (e.g. translation disabled in config but the manifest still exists).
+    pub manifest_stale: bool,
+    /// `true` when a prompt-provider is configured → first execution of a
+    /// `prompt` handler may surface a trust prompt.
+    pub trust_prompt_note: bool,
+}
+
+/// US11: the read-only plugin-hook translation surface for `tome doctor`.
+/// Carries one [`HookHarnessStatus`] per in-scope harness that supports
+/// hook translation (`hook_support().is_some()`). Plain `Serialize` —
+/// NO `deny_unknown_fields` (output struct).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookTranslationReport {
+    pub per_harness: Vec<HookHarnessStatus>,
+}
+
 /// One agent carrying privilege-escalation fields. `name` is the agent's
 /// `<name>`; `fields` lists which of `hooks` / `mcpServers` /
 /// `permissionMode` the SOURCE agent declares (read regardless of
@@ -945,4 +975,16 @@ pub struct DoctorReport {
     pub model_registry: ModelRegistryReport,
     pub overall: DoctorClassification,
     pub suggested_fixes: Vec<SuggestedFix>,
+    /// US11 (native plugin-hook translation): read-only per-harness hook-dispatch
+    /// state. Populated when any effective harness supports hook translation.
+    /// `None` when no hook-translating harness is in scope → key omitted from
+    /// JSON (`skip_serializing_if`), so the byte-stable minimal-report pin stays
+    /// unchanged. `assemble_report` populates it via `build_phase6_surfaces`.
+    ///
+    /// Field is LAST so it is truly "trailing" per the byte-stable-pin
+    /// discipline: `skip_serializing_if` keeps the minimal-report JSON shape
+    /// unchanged (key absent when `None`), and new per-harness rows appended in
+    /// future phases do not shift the positions of `overall` / `suggested_fixes`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_translation: Option<HookTranslationReport>,
 }

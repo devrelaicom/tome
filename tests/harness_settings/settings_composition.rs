@@ -53,6 +53,7 @@ fn ws(name: &str, harnesses: Option<Vec<String>>) -> WorkspaceSettings {
         harnesses,
         expose_agents_as_personas: None,
         strip_plugin_agent_privileges: None,
+        raw_event_passthrough: None,
     }
 }
 

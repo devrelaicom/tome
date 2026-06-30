@@ -63,6 +63,27 @@ mod harness_use_manual_mcp;
 mod harness_use_scope;
 #[path = "harness_settings/harness_use_selection.rs"]
 mod harness_use_selection;
+#[path = "harness_settings/hook_dispatch_command.rs"]
+mod hook_dispatch_command;
+#[path = "harness_settings/hook_dispatch_e2e.rs"]
+mod hook_dispatch_e2e;
+#[path = "harness_settings/hook_dispatch_emit.rs"]
+mod hook_dispatch_emit;
+#[path = "harness_settings/hook_dispatch_failopen.rs"]
+mod hook_dispatch_failopen;
+#[path = "harness_settings/hook_dispatch_http.rs"]
+mod hook_dispatch_http;
+#[path = "harness_settings/hook_dispatch_if_pred.rs"]
+mod hook_dispatch_if_pred;
+#[path = "harness_settings/hook_dispatch_opt_out.rs"]
+mod hook_dispatch_opt_out;
+#[path = "harness_settings/hook_dispatch_prompt.rs"]
+mod hook_dispatch_prompt;
+#[path = "harness_settings/hook_dispatch_register.rs"]
+mod hook_dispatch_register;
+#[cfg(unix)]
+#[path = "harness_settings/hook_dispatch_symlink.rs"]
+mod hook_dispatch_symlink;
 #[path = "harness_settings/hooks_merge.rs"]
 mod hooks_merge;
 #[path = "harness_settings/hooks_rewrite.rs"]

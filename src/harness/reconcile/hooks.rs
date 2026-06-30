@@ -26,7 +26,7 @@
 //! enabled plugins". This is the single biggest behaviour-preservation risk of
 //! the decomposition and is carried into this module verbatim.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -34,9 +34,13 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use tempfile::NamedTempFile;
 
 use crate::error::TomeError;
+use crate::harness::hooks_ir::{
+    CanonicalHook, Handler, HookManifest, ManifestEntry, PortableEvent, parse_canonical_hooks,
+    read_manifest, write_manifest,
+};
 use crate::harness::reconcile::record_action;
 use crate::harness::sync::{Action, HarnessSnapshot, SyncDeps, SyncOutcome, SyncSubsystem};
-use crate::harness::{HookEvent, HookFileSpec, SessionSteering};
+use crate::harness::{HookEvent, HookFileSpec, HookSupport, SessionSteering};
 
 // =====================================================================
 // Real-hooks reconciliation (Phase 6 / US2)
@@ -497,8 +501,14 @@ fn session_start_command(harness: &str, workspace: &str) -> String {
     format!("tome harness session-start --workspace {workspace} --harness {harness}")
 }
 
-/// Resolve the on-disk hook file for a NEW-harness [`HookFileSpec`] under
-/// `project_root`. The two Phase ≤10 specs return `None` (unreachable here).
+/// Resolve the on-disk hook file for a [`HookFileSpec`] under `project_root`.
+///
+/// `CodexHooks` resolves to `<project>/.codex/hooks.json` (wired in US3.1 so the
+/// plugin-hook dispatch reconciler can register `run-hook` entries there — the
+/// session-steering `reconcile_command_hooks` still never reaches this arm,
+/// since codex keeps [`SessionSteering::None`]). Only `ClaudeSettingsLocal`
+/// returns `None` — that sink is the Claude `settings.local.json` reconciled by
+/// `reconcile_hooks`, never through a `HookFileSpec` path.
 fn hook_file_path(spec: HookFileSpec, project_root: &Path) -> Option<PathBuf> {
     let rel: &[&str] = match spec {
         HookFileSpec::DevinHooksV1 => &[".devin", "hooks.v1.json"],
@@ -508,8 +518,11 @@ fn hook_file_path(spec: HookFileSpec, project_root: &Path) -> Option<PathBuf> {
         HookFileSpec::CopilotHooks => &[".github", "hooks", "tome.json"],
         HookFileSpec::GeminiSettings => &[".gemini", "settings.json"],
         HookFileSpec::AntigravityHooks => &[".agents", "hooks.json"],
-        // Phase ≤10 sinks — NOT reachable via the new CommandHook reconciler.
-        HookFileSpec::ClaudeSettingsLocal | HookFileSpec::CodexHooks => return None,
+        HookFileSpec::CursorHooks => &[".cursor", "hooks.json"],
+        HookFileSpec::CodexHooks => &[".codex", "hooks.json"],
+        // The Claude `settings.local.json` sink is reconciled by `reconcile_hooks`
+        // (the `RealJson` plugin-hooks pass), never through a `HookFileSpec` path.
+        HookFileSpec::ClaudeSettingsLocal => return None,
     };
     let mut path = project_root.to_path_buf();
     for seg in rel {
@@ -543,8 +556,52 @@ fn tome_hook_entry(spec: HookFileSpec, command: &str) -> JsonValue {
         HookFileSpec::AntigravityHooks => serde_json::json!({
             "type": "command", "command": command
         }),
+        // Cursor: `{ "type": "command", "command": "…" }`.
+        HookFileSpec::CursorHooks => serde_json::json!({
+            "type": "command", "command": command
+        }),
         // Unreachable (filtered upstream); return a benign placeholder.
         HookFileSpec::ClaudeSettingsLocal | HookFileSpec::CodexHooks => JsonValue::Null,
+    }
+}
+
+/// The Tome-owned `run-hook` dispatcher command for `(harness, event)` under
+/// `workspace` (US3). The harness fires this on its native event; the
+/// `--event <cc>` argument carries the CANONICAL CC event name (the manifest
+/// key the dispatcher reads), so for a harness with a renamed native event
+/// (e.g. gemini's `BeforeTool`) the file-key is native but the command names
+/// the CC event. Mirrors the bare-`"tome"` convention used by the MCP + session
+/// hooks; the trailing `--harness <name>` selects this harness's wire dialect.
+fn run_hook_command(harness: &str, event_cc: &str, workspace: &str) -> String {
+    format!("tome harness run-hook --event {event_cc} --harness {harness} --workspace {workspace}")
+}
+
+/// Build the Tome-owned MATCH-ALL `run-hook` dispatcher ENTRY for a spec — the
+/// single registration leaf per used event. Distinct from
+/// [`tome_hook_entry`] (the session-steering entry): the per-plugin matchers
+/// live in the resolved manifest, applied by the dispatcher at runtime, so the
+/// registered entry is always match-all. The entry's exact bytes ARE the
+/// ownership marker (re-derived deep-equal), so keep them stable.
+///
+/// Match-all per wire: Devin/Codex use `"matcher": ""`; Cursor/Copilot omit the
+/// matcher key (= all); Gemini wraps a named handler under `hooks` (the name
+/// `tome-hook-dispatch` keeps it distinct from session-steering's `tome`).
+fn tome_run_hook_entry(spec: HookFileSpec, command: &str) -> JsonValue {
+    match spec {
+        HookFileSpec::DevinHooksV1 | HookFileSpec::CodexHooks => serde_json::json!({
+            "matcher": "",
+            "hooks": [ { "type": "command", "command": command } ]
+        }),
+        HookFileSpec::GeminiSettings => serde_json::json!({
+            "hooks": [ { "name": "tome-hook-dispatch", "type": "command", "command": command } ]
+        }),
+        HookFileSpec::CursorHooks | HookFileSpec::CopilotHooks => serde_json::json!({
+            "type": "command", "command": command
+        }),
+        // Antigravity exposes no plugin-hook translation surface (rules-only),
+        // and the Claude sink is reconciled elsewhere — both are unreachable for
+        // a `hook_support()` harness; return a benign placeholder.
+        HookFileSpec::AntigravityHooks | HookFileSpec::ClaudeSettingsLocal => JsonValue::Null,
     }
 }
 
@@ -553,6 +610,17 @@ fn event_key(event: HookEvent) -> &'static str {
     match event {
         HookEvent::SessionStart => "SessionStart",
         HookEvent::PreInvocation => "PreInvocation",
+    }
+}
+
+/// Per-spec event-key string for the SESSION-STEERING reconciler. Identical to
+/// [`event_key`] for every spec except `CursorHooks`: Cursor uses camelCase
+/// native event names (`sessionStart`), while every other `CommandHook` spec
+/// uses the PascalCase CC event name that [`event_key`] returns.
+fn effective_event_key(spec: HookFileSpec, event: HookEvent) -> &'static str {
+    match (spec, event) {
+        (HookFileSpec::CursorHooks, HookEvent::SessionStart) => "sessionStart",
+        _ => event_key(event),
     }
 }
 
@@ -566,13 +634,14 @@ fn event_key(event: HookEvent) -> &'static str {
 /// - Copilot: `<root>.hooks[event]`.
 /// - Gemini: `<root>.hooks[event]`.
 /// - Antigravity: `<root>.tome[event]`.
+/// - Cursor: `<root>.hooks[event]` (camelCase key via [`effective_event_key`]).
 fn entry_array<'a>(
     doc: &'a mut JsonValue,
     spec: HookFileSpec,
     event: HookEvent,
     path: &Path,
 ) -> Result<&'a mut Vec<JsonValue>, TomeError> {
-    let key = event_key(event);
+    let key = effective_event_key(spec, event);
     let root = doc
         .as_object_mut()
         .ok_or_else(|| TomeError::HookSpecParseError {
@@ -582,16 +651,19 @@ fn entry_array<'a>(
     // T087 live-probe confirms Copilot CLI silently ignores a hook file that
     // omits the top-level `version`. Stamp it on the CREATE path (or any file
     // that lacks it) but NEVER overwrite a developer-set value: `or_insert`
-    // only fills it when absent. Other specs (devin: no wrapper, gemini/
-    // antigravity: their own container key) are untouched by this.
-    if matches!(spec, HookFileSpec::CopilotHooks) {
+    // only fills it when absent. Cursor also uses `{ "version": 1, "hooks": { … } }`.
+    // Other specs (devin: no wrapper, gemini/antigravity: their own container key)
+    // are untouched by this.
+    if matches!(spec, HookFileSpec::CopilotHooks | HookFileSpec::CursorHooks) {
         root.entry("version".to_string())
             .or_insert(JsonValue::from(1));
     }
     // The intermediate container object (if any) the event array nests under.
     let container_key: Option<&str> = match spec {
         HookFileSpec::DevinHooksV1 => None,
-        HookFileSpec::CopilotHooks | HookFileSpec::GeminiSettings => Some("hooks"),
+        HookFileSpec::CopilotHooks | HookFileSpec::GeminiSettings | HookFileSpec::CursorHooks => {
+            Some("hooks")
+        }
         HookFileSpec::AntigravityHooks => Some("tome"),
         HookFileSpec::ClaudeSettingsLocal | HookFileSpec::CodexHooks => {
             return Err(TomeError::HookSpecParseError {
@@ -628,11 +700,13 @@ fn entry_array_opt(
     spec: HookFileSpec,
     event: HookEvent,
 ) -> Option<&mut Vec<JsonValue>> {
-    let key = event_key(event);
+    let key = effective_event_key(spec, event);
     let root = doc.as_object_mut()?;
     let container_key: Option<&str> = match spec {
         HookFileSpec::DevinHooksV1 => None,
-        HookFileSpec::CopilotHooks | HookFileSpec::GeminiSettings => Some("hooks"),
+        HookFileSpec::CopilotHooks | HookFileSpec::GeminiSettings | HookFileSpec::CursorHooks => {
+            Some("hooks")
+        }
         HookFileSpec::AntigravityHooks => Some("tome"),
         HookFileSpec::ClaudeSettingsLocal | HookFileSpec::CodexHooks => return None,
     };
@@ -641,6 +715,123 @@ fn entry_array_opt(
         Some(ck) => root.get_mut(ck)?.as_object_mut()?,
     };
     holder.get_mut(key)?.as_array_mut()
+}
+
+/// The intermediate container object (if any) a `run-hook` entry nests under,
+/// for the five `hook_support()` specs (US3). Devin nests at the document root;
+/// Codex/Cursor/Copilot/Gemini nest under `"hooks"`. The two non-hook-support
+/// specs are unreachable for a registering harness and fail closed (exit 43).
+fn run_hook_container_key(
+    spec: HookFileSpec,
+    path: &Path,
+) -> Result<Option<&'static str>, TomeError> {
+    match spec {
+        HookFileSpec::DevinHooksV1 => Ok(None),
+        HookFileSpec::CodexHooks
+        | HookFileSpec::CursorHooks
+        | HookFileSpec::CopilotHooks
+        | HookFileSpec::GeminiSettings => Ok(Some("hooks")),
+        HookFileSpec::AntigravityHooks | HookFileSpec::ClaudeSettingsLocal => {
+            Err(TomeError::HookSpecParseError {
+                path: path.to_path_buf(),
+            })
+        }
+    }
+}
+
+/// US3 sibling of [`entry_array`] keyed by the harness-NATIVE event-name STRING
+/// (from `hook_event_name`) rather than the [`HookEvent`] enum, so the `run-hook`
+/// reconciler registers under e.g. gemini's `BeforeTool` / cursor's `preToolUse`.
+/// Navigates (creating containers as needed) to the entry array the run-hook
+/// entry lives in and returns a mutable borrow. Generalizes container nesting
+/// for `CodexHooks` (nests under `"hooks"`). Stamps the required top-level
+/// `version: 1` for Copilot/Cursor (never overwriting a developer value). Fails
+/// closed (exit 43) on a wrong-typed slot — never coerces a developer's value.
+fn entry_array_by_key<'a>(
+    doc: &'a mut JsonValue,
+    spec: HookFileSpec,
+    event_key: &str,
+    path: &Path,
+) -> Result<&'a mut Vec<JsonValue>, TomeError> {
+    let root = doc
+        .as_object_mut()
+        .ok_or_else(|| TomeError::HookSpecParseError {
+            path: path.to_path_buf(),
+        })?;
+    // Copilot CLI + Cursor require a top-level `version: 1` (T087 live-probe for
+    // Copilot; Cursor's `{version:1, hooks:{…}}` shape). Stamp on create / any
+    // file lacking it, but NEVER overwrite a developer-set value.
+    if matches!(spec, HookFileSpec::CopilotHooks | HookFileSpec::CursorHooks) {
+        root.entry("version".to_string())
+            .or_insert(JsonValue::from(1));
+    }
+    let event_holder: &mut JsonMap<String, JsonValue> = match run_hook_container_key(spec, path)? {
+        None => root,
+        Some(ck) => {
+            let container = root
+                .entry(ck.to_string())
+                .or_insert_with(|| JsonValue::Object(JsonMap::new()));
+            container
+                .as_object_mut()
+                .ok_or_else(|| TomeError::HookSpecParseError {
+                    path: path.to_path_buf(),
+                })?
+        }
+    };
+    let arr = event_holder
+        .entry(event_key.to_string())
+        .or_insert_with(|| JsonValue::Array(Vec::new()));
+    arr.as_array_mut()
+        .ok_or_else(|| TomeError::HookSpecParseError {
+            path: path.to_path_buf(),
+        })
+}
+
+/// Read-only sibling of [`entry_array_opt`] keyed by the native event-name
+/// STRING (US3 remove path); `None` when any container/array on the path is
+/// absent or wrong-typed (nothing to remove).
+fn entry_array_opt_by_key<'a>(
+    doc: &'a mut JsonValue,
+    spec: HookFileSpec,
+    event_key: &str,
+) -> Option<&'a mut Vec<JsonValue>> {
+    let root = doc.as_object_mut()?;
+    let container_key = run_hook_container_key(spec, Path::new("")).ok()?;
+    let holder = match container_key {
+        None => root,
+        Some(ck) => root.get_mut(ck)?.as_object_mut()?,
+    };
+    holder.get_mut(event_key)?.as_array_mut()
+}
+
+/// Drop the now-empty native-keyed event array a removed `run-hook` entry left
+/// behind (US3). Unlike [`prune_empty`], the shared `"hooks"` container is NOT
+/// dropped when empty: for codex the session hook
+/// ([`reconcile_tome_session_hooks`]) co-owns `"hooks"`, and for the other specs
+/// a developer may own sibling keys — an empty `"hooks": {}` is harmless.
+fn prune_empty_by_key(doc: &mut JsonValue, spec: HookFileSpec, event_key: &str) {
+    let Some(root) = doc.as_object_mut() else {
+        return;
+    };
+    let Ok(container_key) = run_hook_container_key(spec, Path::new("")) else {
+        return;
+    };
+    let holder = match container_key {
+        None => root,
+        Some(ck) => {
+            let Some(h) = root.get_mut(ck).and_then(JsonValue::as_object_mut) else {
+                return;
+            };
+            h
+        }
+    };
+    if holder
+        .get(event_key)
+        .and_then(JsonValue::as_array)
+        .is_some_and(|a| a.is_empty())
+    {
+        holder.shift_remove(event_key);
+    }
 }
 
 /// Load a spec hook file, returning `(value, existed)`. Absent → a fresh empty
@@ -690,7 +881,7 @@ fn hook_symlink_refusal(path: &Path, e: std::io::Error) -> TomeError {
 /// refusal AND every other write failure map to `HookSettingsWriteFailed`
 /// (exit 44) — PW6 exit-code parity with the Claude hook sink (the P6 7→44
 /// precedent). Mirrors `harness::hooks::write_settings` / `mcp_config::atomic_write`.
-fn write_hook_file(path: &Path, doc: &JsonValue) -> Result<(), TomeError> {
+pub(crate) fn write_hook_file(path: &Path, doc: &JsonValue) -> Result<(), TomeError> {
     // Symlink refusal on the write path → `HookSettingsWriteFailed` (exit 44),
     // the same code the Claude hook sink uses for a refused symlinked component.
     crate::util::refuse_symlinked_component(path).map_err(|e| hook_symlink_refusal(path, e))?;
@@ -879,17 +1070,20 @@ fn remove_command_hook(
 
 /// Drop the now-empty event array so a removed Tome hook leaves no scaffolding.
 /// This prunes the container the spec nests under: the bare root for devin, the
-/// `hooks` container for copilot-cli and gemini, and the named `tome` container
-/// for antigravity (the antigravity container is additionally dropped once empty,
-/// since its only content is Tome's own event).
+/// `hooks` container for copilot-cli, gemini, and cursor, and the named `tome`
+/// container for antigravity (additionally dropped once empty). Uses
+/// [`effective_event_key`] so the Cursor `sessionStart` (camelCase) key is
+/// pruned correctly.
 fn prune_empty(doc: &mut JsonValue, spec: HookFileSpec, event: HookEvent) {
-    let key = event_key(event);
+    let key = effective_event_key(spec, event);
     let Some(root) = doc.as_object_mut() else {
         return;
     };
     let container_key: Option<&str> = match spec {
         HookFileSpec::DevinHooksV1 => None,
-        HookFileSpec::CopilotHooks | HookFileSpec::GeminiSettings => Some("hooks"),
+        HookFileSpec::CopilotHooks | HookFileSpec::GeminiSettings | HookFileSpec::CursorHooks => {
+            Some("hooks")
+        }
         HookFileSpec::AntigravityHooks => Some("tome"),
         HookFileSpec::ClaudeSettingsLocal | HookFileSpec::CodexHooks => return,
     };
@@ -921,6 +1115,508 @@ fn prune_empty(doc: &mut JsonValue, spec: HookFileSpec, event: HookEvent) {
             }
         }
     }
+}
+
+// =====================================================================
+// US3 — plugin-hook dispatch registration + manifest write (sync-time).
+//
+// For every in-scope harness that declares a `hook_support()` capability,
+// register a Tome-owned MATCH-ALL `run-hook` dispatcher entry into the harness's
+// native hook file (one per USED event — an event ≥1 enabled plugin's hook
+// targets) AND write the resolved per-(workspace, harness) `hooks-manifest.json`
+// the runtime dispatcher reads. A non-live harness has its run-hook entries
+// removed (structural-equal) + its manifest deleted.
+//
+// Ownership is structural deep-equal (no sidecar), mirroring the session-steering
+// `reconcile_command_hooks` above: the `run-hook` entry is a SEPARATE leaf from
+// the session-start entry (a `BeforeTool`/`preToolUse`/… event key vs
+// `SessionStart`), so the two compose additively and neither clobbers the other.
+//
+// The enabled-plugin enumeration follows `reconcile_hooks`' mass-delete
+// safeguard: a genuinely ABSENT central DB means "no enabled plugins", but an
+// EXISTING-yet-unopenable DB PROPAGATES its error (collapsing it to empty would
+// strip every live harness's manifest + registered entries).
+// =====================================================================
+
+/// Reconcile Tome's plugin-hook DISPATCH registration for every harness that
+/// declares a [`HookSupport`] (US3.2). Returns the per-harness aggregate action
+/// map (keyed on `name()`) plus the first error (forward progress).
+///
+/// Wired into the orchestrator AFTER `reconcile_command_hooks` so it shares the
+/// `hooks_action` decision field and reuses the hook error classes (exit 43
+/// parse / 44 write).
+//
+pub(crate) fn reconcile_plugin_hook_dispatch(
+    deps: &SyncDeps<'_>,
+    cfg: &crate::config::Config,
+    effective_names: &HashSet<String>,
+    snapshots: &[HarnessSnapshot],
+    project_root: &Path,
+    outcome: &mut SyncOutcome,
+) -> (std::collections::HashMap<String, Action>, Option<TomeError>) {
+    let mut actions = std::collections::HashMap::new();
+    let mut first_error: Option<TomeError> = None;
+
+    // Fast exit: no in-scope harness declares hook support → no work. With every
+    // GuardrailsOnly harness this keeps the orchestrator output byte-identical.
+    if !snapshots.iter().any(|s| s.hook_support.is_some()) {
+        return (actions, first_error);
+    }
+
+    // US8.2: resolve the workspace-level `raw_event_passthrough` flag once,
+    // shared across all harnesses in this pass. Fail-open: any settings read
+    // error → flag is `false` (passthrough off, never a block).
+    let raw_event_passthrough: bool =
+        crate::settings::scopes::load_workspace_settings(deps.paths, deps.workspace_name)
+            .ok()
+            .flatten()
+            .and_then(|w| w.raw_event_passthrough)
+            .unwrap_or(false);
+
+    // US6.1: opt-out gate. When `translate_plugin_hooks = false`, treat every
+    // harness as non-live so any previously written run-hook entries + manifests
+    // are removed (same teardown path as a non-live harness). Toggling off is
+    // a clean, reversible operation — the next sync with the flag re-enabled
+    // (or absent, which defaults to true) re-writes everything from scratch.
+    if !cfg.hooks.translate_plugin_hooks.unwrap_or(true) {
+        for snap in snapshots {
+            let Some(support) = &snap.hook_support else {
+                continue;
+            };
+            let action = reconcile_one_harness_dispatch(
+                deps,
+                project_root,
+                snap,
+                support,
+                &[],   // empty canonical → no hooks to register
+                false, // is_live=false → teardown path
+                outcome,
+                &mut first_error,
+                cfg,
+                raw_event_passthrough,
+            );
+            actions.insert(snap.name.clone(), action);
+        }
+        return (actions, first_error);
+    }
+
+    // Resolve the enabled plugins' canonical hooks ONCE, shared across harnesses.
+    // A hard DB-open error PROPAGATES (mass-delete guard); a per-plugin parse
+    // failure is recorded on `first_error` (forward progress) and that plugin is
+    // skipped.
+    let canonical = match resolve_enabled_canonical_hooks(deps, &mut first_error) {
+        Ok(c) => c,
+        Err(e) => return (actions, Some(e)),
+    };
+
+    for snap in snapshots {
+        let Some(support) = &snap.hook_support else {
+            continue;
+        };
+        let is_live = effective_names.contains(&snap.name);
+        let action = reconcile_one_harness_dispatch(
+            deps,
+            project_root,
+            snap,
+            support,
+            &canonical,
+            is_live,
+            outcome,
+            &mut first_error,
+            cfg,
+            raw_event_passthrough,
+        );
+        actions.insert(snap.name.clone(), action);
+    }
+
+    (actions, first_error)
+}
+
+/// Resolve every enabled plugin's typed [`CanonicalHook`]s for the bound
+/// workspace, reading the central DB READ-ONLY (US3.2).
+///
+/// Mass-delete safeguard (mirrors [`reconcile_hooks`]): a genuinely ABSENT DB is
+/// `Ok(empty)`; an EXISTING-yet-unopenable DB PROPAGATES via `Err` (the caller
+/// aborts the pass — collapsing to empty would mass-delete live manifests). A
+/// per-plugin malformed `hooks.json` (exit 43) is recorded on `first_error`
+/// (forward progress) and the plugin is skipped; a plugin whose root can't be
+/// resolved (catalog cache evicted) is likewise skipped.
+fn resolve_enabled_canonical_hooks(
+    deps: &SyncDeps<'_>,
+    first_error: &mut Option<TomeError>,
+) -> Result<Vec<CanonicalHook>, TomeError> {
+    if !deps.paths.index_db.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = crate::index::open_read_only(&deps.paths.index_db)?;
+    let workspace = deps.workspace_name.as_str();
+    let enabled = crate::index::skills::enabled_plugins_for_workspace(&conn, workspace)?;
+
+    let mut out = Vec::new();
+    // Collected for the US11 doctor surfacing; US3 needs them collected, not
+    // rendered (a non-portable event / unsupported handler keeps its GUARDRAILS
+    // floor).
+    let mut drops = Vec::new();
+    for (catalog, plugin) in &enabled {
+        let plugin_root = match crate::index::skills::plugin_root_dir(
+            &conn, deps.paths, workspace, catalog, plugin,
+        ) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let plugin_data = deps.paths.plugin_data_dir_for(catalog, plugin);
+        match crate::harness::hooks::read_rewritten_entries(&plugin_root, &plugin_data) {
+            Ok(Some(rewritten)) => {
+                // Fix 1 (US8 review): bake the DB-resolved plugin_root into every
+                // hook at this site (the only place it is available). `to_string_lossy`
+                // handles non-UTF-8 paths safely — this is a provenance field, not
+                // an executed command, so U+FFFD replacement is acceptable.
+                let root_str = plugin_root.to_string_lossy().into_owned();
+                let mut hooks = parse_canonical_hooks(catalog, plugin, &rewritten, &mut drops);
+                for h in &mut hooks {
+                    h.plugin_root = root_str.clone();
+                }
+                out.extend(hooks);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // Forward progress: record once, skip this plugin, keep going.
+                if first_error.is_none() {
+                    *first_error = Some(e);
+                }
+            }
+        }
+    }
+    let _ = drops;
+    Ok(out)
+}
+
+/// Reconcile the run-hook registration + manifest for ONE harness (US3.2).
+#[allow(clippy::too_many_arguments)]
+fn reconcile_one_harness_dispatch(
+    deps: &SyncDeps<'_>,
+    project_root: &Path,
+    snap: &HarnessSnapshot,
+    support: &HookSupport,
+    canonical: &[CanonicalHook],
+    is_live: bool,
+    outcome: &mut SyncOutcome,
+    first_error: &mut Option<TomeError>,
+    cfg: &crate::config::Config,
+    raw_event_passthrough: bool,
+) -> Action {
+    let workspace = deps.workspace_name.as_str();
+    let manifest_path = deps.paths.hooks_manifest(deps.workspace_name, &snap.name);
+    let Some(hook_path) = hook_file_path(support.file_spec, project_root) else {
+        // Only `ClaudeSettingsLocal` returns `None`, and no `hook_support()`
+        // harness uses it — skip defensively.
+        return Action::LeftAlone;
+    };
+
+    // US6.2 prompt gate: when neither prompt_provider nor prompt_model is
+    // configured, exclude Handler::Prompt entries from the manifest. The
+    // HookDropReason::PromptDisabled variant is available for the US11 doctor
+    // to surface; for now the drops are silently elided (matches the existing
+    // `let _ = drops;` pattern in resolve_enabled_canonical_hooks).
+    let prompt_enabled = cfg.hooks.prompt_provider.is_some() || cfg.hooks.prompt_model.is_some();
+    let filtered: Vec<CanonicalHook>;
+    let effective_canonical: &[CanonicalHook] = if prompt_enabled {
+        canonical
+    } else {
+        filtered = canonical
+            .iter()
+            .filter(|h| !matches!(h.handler, Handler::Prompt { .. }))
+            .cloned()
+            .collect();
+        &filtered
+    };
+
+    // The USED events: events in this harness's support set that ≥1 enabled
+    // canonical hook targets. For a non-live harness the desired set is empty
+    // (every Tome run-hook entry is removed + the manifest deleted).
+    let used: Vec<PortableEvent> = if is_live {
+        support
+            .events
+            .iter()
+            .copied()
+            .filter(|ev| effective_canonical.iter().any(|h| h.event == *ev))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let hook_action = reconcile_dispatch_hook_file(
+        &snap.name,
+        &hook_path,
+        support,
+        &snap.hook_event_names,
+        workspace,
+        &used,
+        outcome,
+        first_error,
+    );
+    let manifest_action = reconcile_dispatch_manifest(
+        &snap.name,
+        &manifest_path,
+        effective_canonical,
+        &used,
+        is_live,
+        outcome,
+        first_error,
+        raw_event_passthrough,
+    );
+    stronger(hook_action, manifest_action)
+}
+
+/// Merge / prune Tome's per-event `run-hook` registration entries in the
+/// harness's native hook file. Ensure-PRESENT for each used event; ensure-ABSENT
+/// for each supported-but-unused event (pruning a previously-registered event).
+/// Structural deep-equal append/removal — developer hooks are preserved.
+#[allow(clippy::too_many_arguments)]
+fn reconcile_dispatch_hook_file(
+    name: &str,
+    path: &Path,
+    support: &HookSupport,
+    event_names: &[(PortableEvent, &'static str)],
+    workspace: &str,
+    used: &[PortableEvent],
+    outcome: &mut SyncOutcome,
+    first_error: &mut Option<TomeError>,
+) -> Action {
+    // Refuse a symlinked component up front (PW6 exit-44 parity with the Claude /
+    // command-hook sinks).
+    if let Err(e) =
+        crate::util::refuse_symlinked_component(path).map_err(|e| hook_symlink_refusal(path, e))
+    {
+        if first_error.is_none() {
+            *first_error = Some(e);
+        }
+        return Action::LeftAlone;
+    }
+    let (mut doc, existed) = match load_hook_file(path) {
+        Ok(v) => v,
+        Err(e) => {
+            if first_error.is_none() {
+                *first_error = Some(e);
+            }
+            return Action::LeftAlone;
+        }
+    };
+
+    // Fix 2: track whether entry_array_by_key will stamp `version:1` on a
+    // Copilot/Cursor file that currently lacks it. That stamp is a real
+    // on-disk mutation even when no run-hook entry is added or removed.
+    let version_absent_before = matches!(
+        support.file_spec,
+        HookFileSpec::CopilotHooks | HookFileSpec::CursorHooks
+    ) && doc
+        .as_object()
+        .map(|o| !o.contains_key("version"))
+        .unwrap_or(false);
+
+    let mut added_any = false;
+    let mut removed_any = false;
+    for &event in support.events {
+        let Some(native) = event_names
+            .iter()
+            .find(|(e, _)| *e == event)
+            .map(|(_, n)| *n)
+        else {
+            continue;
+        };
+        let command = run_hook_command(name, event.cc_name(), workspace);
+        let entry = tome_run_hook_entry(support.file_spec, &command);
+        if used.contains(&event) {
+            let arr = match entry_array_by_key(&mut doc, support.file_spec, native, path) {
+                Ok(a) => a,
+                Err(e) => {
+                    if first_error.is_none() {
+                        *first_error = Some(e);
+                    }
+                    return Action::LeftAlone;
+                }
+            };
+            if !arr.contains(&entry) {
+                arr.push(entry);
+                added_any = true;
+            }
+        } else {
+            // Ensure-absent: strip a stale Tome entry (structural-equal), then
+            // prune the now-empty event array. Scoped so the `arr` borrow ends
+            // before the prune re-borrows `doc`.
+            let removed_this =
+                if let Some(arr) = entry_array_opt_by_key(&mut doc, support.file_spec, native) {
+                    let before = arr.len();
+                    arr.retain(|existing| *existing != entry);
+                    before != arr.len()
+                } else {
+                    false
+                };
+            if removed_this {
+                removed_any = true;
+                prune_empty_by_key(&mut doc, support.file_spec, native);
+            }
+        }
+    }
+
+    // version_stamped is true when entry_array_by_key wrote `version:1` into
+    // a Copilot/Cursor doc that lacked it. This is a real mutation that must
+    // be flushed even when no run-hook entry changed.
+    let version_stamped = version_absent_before
+        && doc
+            .as_object()
+            .map(|o| o.contains_key("version"))
+            .unwrap_or(false);
+
+    if !added_any && !removed_any && !version_stamped {
+        return Action::LeftAlone;
+    }
+    if let Err(e) = write_hook_file(path, &doc) {
+        if first_error.is_none() {
+            *first_error = Some(e);
+        }
+        return Action::LeftAlone;
+    }
+    let action = if !existed {
+        Action::Created
+    } else if added_any || version_stamped {
+        Action::Updated
+    } else {
+        Action::Removed
+    };
+    record_action(outcome, name, SyncSubsystem::Hooks, path, action);
+    action
+}
+
+/// Build + write (or remove) the resolved per-(workspace, harness) dispatch
+/// manifest. Keyed by the CC event name; per-plugin matcher / `if` carried
+/// verbatim; `timeout_ms` = CC-seconds × 1000 (the dispatcher always reads ms,
+/// regardless of the harness's registration `timeout_unit`). An empty desired
+/// set (non-live, or no enabled hook targets a supported event) removes a stale
+/// manifest. Idempotent: a byte-equal manifest is left untouched.
+///
+/// `raw_event_passthrough` is the workspace-level US8.2 flag; when `true` the
+/// dispatcher will include the original harness payload verbatim as
+/// `tome.raw_event` in the synthesized CC stdin (default `false`).
+#[allow(clippy::too_many_arguments)]
+fn reconcile_dispatch_manifest(
+    name: &str,
+    path: &Path,
+    canonical: &[CanonicalHook],
+    used: &[PortableEvent],
+    is_live: bool,
+    outcome: &mut SyncOutcome,
+    first_error: &mut Option<TomeError>,
+    raw_event_passthrough: bool,
+) -> Action {
+    let mut events: BTreeMap<String, Vec<ManifestEntry>> = BTreeMap::new();
+    if is_live {
+        for hook in canonical {
+            if !used.contains(&hook.event) {
+                continue;
+            }
+            events
+                .entry(hook.event.cc_name().to_string())
+                .or_default()
+                .push(ManifestEntry {
+                    plugin: format!("{}:{}", hook.catalog, hook.plugin),
+                    // Fix 1 (US8 review): bake the resolved install root into the
+                    // manifest so the hot-path dispatcher reads it directly and
+                    // never re-derives it from the plugin-data path.
+                    plugin_root: if hook.plugin_root.is_empty() {
+                        None
+                    } else {
+                        Some(hook.plugin_root.clone())
+                    },
+                    matcher: hook.matcher.clone(),
+                    if_pred: hook.if_pred.clone(),
+                    handler: hook.handler.clone(),
+                    // Manifest timeout is ALWAYS ms = CC-seconds × 1000; the
+                    // harness's `timeout_unit` only governs per-plugin timeouts
+                    // written INTO a harness hook file, which the match-all
+                    // run-hook registration never carries.
+                    timeout_ms: hook.timeout_secs.map(|s| s.saturating_mul(1000)),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                });
+        }
+    }
+
+    let manifest_existed = path.exists();
+
+    if events.is_empty() {
+        // No dispatch needed → remove a stale manifest if present.
+        if !manifest_existed {
+            return Action::LeftAlone;
+        }
+        // Guard against symlink attacks before removing (PW6 exit-44 parity).
+        if let Err(e) =
+            crate::util::refuse_symlinked_component(path).map_err(|e| hook_symlink_refusal(path, e))
+        {
+            if first_error.is_none() {
+                *first_error = Some(e);
+            }
+            return Action::LeftAlone;
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => {
+                record_action(outcome, name, SyncSubsystem::Hooks, path, Action::Removed);
+                Action::Removed
+            }
+            Err(e) => {
+                if first_error.is_none() {
+                    *first_error = Some(TomeError::HookSettingsWriteFailed {
+                        path: path.to_path_buf(),
+                        source: e,
+                    });
+                }
+                Action::LeftAlone
+            }
+        }
+    } else {
+        let manifest = HookManifest {
+            harness: name.to_string(),
+            raw_event_passthrough,
+            events,
+        };
+        // Idempotent: only write when the on-disk manifest differs (a malformed /
+        // unreadable Tome-owned manifest is healed by overwriting).
+        let need_write = if manifest_existed {
+            !read_manifest(path).is_ok_and(|existing| existing == manifest)
+        } else {
+            true
+        };
+        if !need_write {
+            return Action::LeftAlone;
+        }
+        if let Err(e) = write_manifest(path, &manifest) {
+            if first_error.is_none() {
+                *first_error = Some(e);
+            }
+            return Action::LeftAlone;
+        }
+        let action = if manifest_existed {
+            Action::Updated
+        } else {
+            Action::Created
+        };
+        record_action(outcome, name, SyncSubsystem::Hooks, path, action);
+        action
+    }
+}
+
+/// The "stronger" of two aggregate sink actions for the composed
+/// `hooks_action`: `Created` > `Updated` > `Removed` > `LeftAlone`.
+fn stronger(a: Action, b: Action) -> Action {
+    fn rank(x: Action) -> u8 {
+        match x {
+            Action::Created => 3,
+            Action::Updated => 2,
+            Action::Removed => 1,
+            Action::LeftAlone => 0,
+        }
+    }
+    if rank(a) >= rank(b) { a } else { b }
 }
 
 #[cfg(test)]
@@ -1004,6 +1700,28 @@ mod command_hook_tests {
         );
     }
 
+    /// US7: the REAL cursor module writes `.cursor/hooks.json` with the
+    /// `{ version:1, hooks:{ sessionStart:[…] } }` shape, using the camelCase
+    /// native event key (NOT PascalCase `SessionStart`). Tome stamps the required
+    /// `version:1` on create.
+    #[test]
+    fn cursor_spec_writes_exact_shape() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".cursor/hooks.json");
+        merge_once(HookFileSpec::CursorHooks, HookEvent::SessionStart, &path);
+        let v: JsonValue = serde_json::from_str(&read(&path)).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                // Cursor requires the top-level `version` (same as Copilot-CLI).
+                "version": 1,
+                "hooks": {
+                    "sessionStart": [ { "type": "command", "command": CMD } ]
+                }
+            })
+        );
+    }
+
     #[test]
     fn antigravity_spec_writes_exact_shape() {
         let tmp = TempDir::new().unwrap();
@@ -1021,6 +1739,24 @@ mod command_hook_tests {
                     "PreInvocation": [ { "type": "command", "command": CMD } ]
                 }
             })
+        );
+    }
+
+    /// Drift-pin: `effective_event_key(CursorHooks, SessionStart)` and
+    /// `Cursor::hook_event_name(SessionStart)` are two independent literals that
+    /// MUST stay equal. A drift would place the session-steering entry and the
+    /// run-hook dispatch entry under DIFFERENT keys in `.cursor/hooks.json`,
+    /// breaking their documented coexistence (US3 + US7 compose additively).
+    #[test]
+    fn cursor_session_start_key_matches_hook_event_name() {
+        use crate::harness::HarnessModule;
+        use crate::harness::cursor::CURSOR;
+        use crate::harness::hooks_ir::PortableEvent;
+        assert_eq!(
+            effective_event_key(HookFileSpec::CursorHooks, HookEvent::SessionStart),
+            CURSOR.hook_event_name(PortableEvent::SessionStart),
+            "sessionStart literals must stay in sync: drift would split the \
+             session-steering and run-hook entries under different keys",
         );
     }
 
@@ -1697,5 +2433,34 @@ mod us2_real_harness_tests {
             "the hook reconciler must not touch the GLOBAL gemini settings.json",
         );
         let _ = project_root;
+    }
+}
+
+// =====================================================================
+// US3 — plugin-hook dispatch registration tests.
+// =====================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::harness::HookFileSpec;
+
+    /// US3.1: the `run-hook` match-all dispatcher entry is shaped per spec, and
+    /// the two formerly-`None` file specs (Cursor already wired in US2; Codex
+    /// newly wired here) now resolve to their on-disk hook files.
+    #[test]
+    fn run_hook_entry_is_match_all_per_spec() {
+        // Devin: {matcher:"", hooks:[{type:command, command}]} (match-all).
+        let e = tome_run_hook_entry(
+            HookFileSpec::DevinHooksV1,
+            "tome harness run-hook --event PreToolUse --harness devin --workspace w",
+        );
+        assert_eq!(e["matcher"], serde_json::json!(""));
+        assert_eq!(e["hooks"][0]["type"], "command");
+        // Cursor file path resolves now.
+        let p = hook_file_path(HookFileSpec::CursorHooks, std::path::Path::new("/proj")).unwrap();
+        assert!(p.ends_with(".cursor/hooks.json"));
+        // Codex file path resolves now (was None).
+        let p = hook_file_path(HookFileSpec::CodexHooks, std::path::Path::new("/proj")).unwrap();
+        assert!(p.ends_with(".codex/hooks.json"));
     }
 }

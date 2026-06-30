@@ -341,6 +341,10 @@ pub enum HarnessCommand {
     /// to stdout, generated fresh from live state. Intended as a SessionStart
     /// hook target; not usually run by hand.
     SessionStart(HarnessSessionStartArgs),
+    /// Translate a plugin hook event from the target harness's native format,
+    /// run the enabled plugins' matching hooks, and emit the harness's wire
+    /// decision. A hook-dispatch target; not run by hand. Fails open.
+    RunHook(HarnessRunHookArgs),
 }
 
 #[derive(Debug, clap::Args)]
@@ -404,6 +408,22 @@ pub struct HarnessSessionStartArgs {
     /// receives the raw directive (its shim wraps it).
     #[arg(long)]
     pub harness: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct HarnessRunHookArgs {
+    /// The CC event name (PreToolUse, PostToolUse, …).
+    #[arg(long)]
+    pub event: String,
+    /// The host harness (devin, codex, cursor, gemini, copilot-cli).
+    #[arg(long)]
+    pub harness: String,
+    /// Workspace name. Defaults to the resolved scope.
+    #[arg(long)]
+    pub workspace: Option<String>,
+    /// Dry-run: print what WOULD fire (US10), run nothing.
+    #[arg(long)]
+    pub explain: bool,
 }
 
 /// Scope argument for `harness use` and `harness remove`. Distinct from

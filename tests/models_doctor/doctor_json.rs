@@ -288,6 +288,8 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
         providers: Vec::new(),
         // Phase 13: always-present model-registry report (not Option).
         model_registry: mr,
+        // US11: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
+        hook_translation: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -509,6 +511,8 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
             model_count: mr_info.model_count,
             override_corrupt: false,
         },
+        // US11: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
+        hook_translation: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -661,6 +665,8 @@ fn doctor_json_phase6_fields_appended_last_in_order() {
             model_count: mr_info.model_count,
             override_corrupt: false,
         },
+        // US11: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
+        hook_translation: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -806,6 +812,8 @@ fn doctor_json_unrepresented_agents_populated_wire_shape() {
             model_count: mr_info.model_count,
             override_corrupt: false,
         },
+        // US11: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
+        hook_translation: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -833,4 +841,51 @@ fn doctor_json_unrepresented_agents_populated_wire_shape() {
     assert_eq!(agents[0]["catalog"], "mycat");
     assert_eq!(agents[0]["plugin"], "myplugin");
     assert_eq!(agents[0]["name"], "myagent");
+}
+
+/// US11: `HookTranslationReport` wire shape pin — populated + absent.
+#[test]
+fn doctor_hook_translation_report_wire_shape() {
+    use tome::doctor::report::{HookHarnessStatus, HookTranslationReport};
+
+    // Populated wire shape.
+    let ht = HookTranslationReport {
+        per_harness: vec![HookHarnessStatus {
+            harness: "devin".to_owned(),
+            enabled: true,
+            registered_events: vec!["PreToolUse".to_owned(), "Stop".to_owned()],
+            dropped_to_guardrails: vec!["PreCompact".to_owned()],
+            manifest_stale: false,
+            trust_prompt_note: true,
+        }],
+    };
+    let json = serde_json::to_value(&ht).expect("serialise");
+    let ph = json["per_harness"]
+        .as_array()
+        .expect("per_harness is array");
+    assert_eq!(ph.len(), 1);
+    let h = &ph[0];
+    assert_eq!(h["harness"], "devin");
+    assert_eq!(h["enabled"], true);
+    let evts = h["registered_events"].as_array().unwrap();
+    assert_eq!(evts.len(), 2);
+    assert_eq!(evts[0], "PreToolUse");
+    let dtg = h["dropped_to_guardrails"].as_array().unwrap();
+    assert_eq!(dtg.len(), 1);
+    assert_eq!(dtg[0], "PreCompact");
+    assert_eq!(h["manifest_stale"], false);
+    assert_eq!(h["trust_prompt_note"], true);
+
+    // Verify the 6 field names are exactly right.
+    let keys: Vec<&str> = h.as_object().unwrap().keys().map(String::as_str).collect();
+    for k in [
+        "harness",
+        "enabled",
+        "registered_events",
+        "dropped_to_guardrails",
+        "manifest_stale",
+        "trust_prompt_note",
+    ] {
+        assert!(keys.contains(&k), "missing field {k}; got: {keys:?}");
+    }
 }

@@ -508,6 +508,37 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         writeln!(out)?;
     }
 
+    // US11: plugin-hook translation surface (per-harness dispatch state).
+    if let Some(ht) = &report.hook_translation {
+        writeln!(out, "Hook translation:")?;
+        for h in &ht.per_harness {
+            let state = if h.enabled { "on" } else { "off" };
+            let events = if h.registered_events.is_empty() {
+                "—".to_string()
+            } else {
+                h.registered_events.join(", ")
+            };
+            writeln!(out, "  {} [{}]  registered: {}", h.harness, state, events)?;
+            if !h.dropped_to_guardrails.is_empty() {
+                let dropped = h.dropped_to_guardrails.join(", ");
+                writeln!(out, "    {info} dropped to GUARDRAILS: {dropped}")?;
+            }
+            if h.manifest_stale {
+                writeln!(
+                    out,
+                    "    {warn} manifest stale — run `tome sync` to reconcile",
+                )?;
+            }
+            if h.trust_prompt_note {
+                writeln!(
+                    out,
+                    "    {info} prompt-model configured (first execution may request trust)",
+                )?;
+            }
+        }
+        writeln!(out)?;
+    }
+
     // Phase 6 / US5: privilege-escalation audit (FR-051).
     if let Some(p) = &report.privilege_escalation
         && !p.plugins.is_empty()

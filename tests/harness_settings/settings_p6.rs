@@ -37,6 +37,7 @@ fn workspace(name: &str, expose: Option<bool>) -> WorkspaceSettings {
         harnesses: None,
         expose_agents_as_personas: expose,
         strip_plugin_agent_privileges: None,
+        raw_event_passthrough: None,
     }
 }
 
@@ -68,6 +69,7 @@ fn workspace_strip(name: &str, strip: Option<bool>) -> WorkspaceSettings {
         harnesses: None,
         expose_agents_as_personas: None,
         strip_plugin_agent_privileges: strip,
+        raw_event_passthrough: None,
     }
 }
 

@@ -194,6 +194,19 @@ impl Paths {
         self.workspace_dir(name).join("RULES.md")
     }
 
+    /// `<root>/workspaces/<name>/harnesses/<harness>/` — Tome-owned per-harness
+    /// state (the hook dispatch manifest).
+    pub fn workspace_harness_dir(&self, name: &WorkspaceName, harness: &str) -> PathBuf {
+        self.workspace_dir(name).join("harnesses").join(harness)
+    }
+
+    /// The per-(workspace, harness) hook dispatch manifest the `run-hook`
+    /// dispatcher reads.
+    pub fn hooks_manifest(&self, name: &WorkspaceName, harness: &str) -> PathBuf {
+        self.workspace_harness_dir(name, harness)
+            .join("hooks-manifest.json")
+    }
+
     // --- Plugin / workspace data directories (Phase 5 / R-9) -----------
     //
     // Per substitution-engine.md §"Stage 1 — Built-ins", the
@@ -365,6 +378,15 @@ mod tests {
         assert_eq!(
             p.workspace_rules_file(&name),
             p.workspaces_dir.join("global/RULES.md"),
+        );
+        assert_eq!(
+            p.workspace_harness_dir(&name, "codex"),
+            p.workspaces_dir.join("global/harnesses/codex"),
+        );
+        assert_eq!(
+            p.hooks_manifest(&name, "codex"),
+            p.workspaces_dir
+                .join("global/harnesses/codex/hooks-manifest.json"),
         );
     }
 

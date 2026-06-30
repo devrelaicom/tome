@@ -16,9 +16,11 @@ use crate::error::TomeError;
 use crate::harness::agents::{
     self, CanonicalAgent, TranslatedAgent, agent_extension, agent_filename,
 };
+use crate::harness::hooks_ir::PortableEvent;
 use crate::harness::{
-    AgentFormat, BlockBodyStyle, GuardrailsPlacement, GuardrailsTarget, HarnessModule,
-    RulesFileStrategy,
+    AgentFormat, BlockBodyStyle, Envelope, GuardrailsPlacement, GuardrailsTarget, HarnessModule,
+    HookEvent, HookFileSpec, HookSupport, HookWire, RulesFileStrategy, SessionSteering,
+    TimeoutUnit,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Cursor.
@@ -70,13 +72,69 @@ impl HarnessModule for Cursor {
     /// (`TOME_SKILLS.md`). Each plugin is still individually marker-wrapped
     /// inside it so per-plugin removal works; the file is deleted entirely
     /// when no plugin contributes (FR-015). No hooks-driven suppression
-    /// (Cursor has no native JSON hooks).
+    /// (design D6, keep-both): Cursor now receives a `SessionStart` command
+    /// hook (US7), but hook translation is LOSSY — not every portable event
+    /// maps to a supported native hook, and decision tiers carried in guardrails
+    /// prose degrade when translated. The prose guardrails therefore stay as
+    /// the honest floor for what the hook cannot enforce. Both the rules-file
+    /// channel and the hook channel coexist; the hook augments, never replaces,
+    /// the prose delivery. The `suppress_if_hooks_present` flag remains `false`.
     fn guardrails_target(&self, project_root: &Path) -> GuardrailsTarget {
         GuardrailsTarget {
             placement: GuardrailsPlacement::StandaloneSibling {
                 file: project_root.join(".cursor/rules/TOME_GUARDRAILS.md"),
             },
             suppress_if_hooks_present: false,
+        }
+    }
+
+    /// Session steering (US7, T046): Cursor joins the keep-both pattern — the
+    /// directive is delivered to BOTH `.cursor/rules/TOME_SKILLS.md` (rules file)
+    /// AND this `SessionStart` command hook written into `.cursor/hooks.json` by
+    /// [`reconcile_command_hooks`]. This mirrors Devin / Gemini / Copilot CLI,
+    /// all of which also keep the rules-file delivery (verified in
+    /// `routing.rs::build_directive` — no suppression for any `CommandHook`
+    /// harness). The hook's stdout is wrapped in the
+    /// [`Envelope::CursorAdditionalContext`] shape (`{"additional_context":"…"}`
+    /// snake_case) that Cursor consumes.
+    ///
+    /// [`reconcile_command_hooks`]: crate::harness::reconcile::hooks::reconcile_command_hooks
+    fn session_steering(&self) -> SessionSteering {
+        SessionSteering::CommandHook {
+            file_spec: HookFileSpec::CursorHooks,
+            event: HookEvent::SessionStart,
+            envelope: Envelope::CursorAdditionalContext,
+        }
+    }
+
+    fn hook_support(&self) -> Option<HookSupport> {
+        use PortableEvent::*;
+        Some(HookSupport {
+            file_spec: HookFileSpec::CursorHooks,
+            events: &[
+                PreToolUse,
+                PostToolUse,
+                UserPromptSubmit,
+                Stop,
+                SessionStart,
+                SessionEnd,
+                PreCompact,
+            ],
+            wire: HookWire::CursorSnake,
+            timeout_unit: TimeoutUnit::Seconds,
+        })
+    }
+
+    fn hook_event_name(&self, event: PortableEvent) -> &'static str {
+        use PortableEvent::*;
+        match event {
+            PreToolUse => "preToolUse",
+            PostToolUse => "postToolUse",
+            UserPromptSubmit => "beforeSubmitPrompt",
+            Stop => "stop",
+            SessionStart => "sessionStart",
+            SessionEnd => "sessionEnd",
+            PreCompact => "preCompact",
         }
     }
 
@@ -232,6 +290,22 @@ mod tests {
         assert!(
             t.dropped_fields.contains(&"tools".to_owned()),
             "tools recorded dropped"
+        );
+    }
+
+    /// US7 (T046): Cursor steers via a `CursorHooks` `SessionStart` command
+    /// hook wrapped in the `CursorAdditionalContext` envelope (snake_case key).
+    /// Mirrors the keep-both pattern of Devin / Gemini / Copilot CLI — the
+    /// rules file directive is NOT suppressed (verified in routing.rs).
+    #[test]
+    fn session_steering_is_cursor_hooks_session_start_cursor_additional_context() {
+        assert_eq!(
+            CURSOR.session_steering(),
+            SessionSteering::CommandHook {
+                file_spec: HookFileSpec::CursorHooks,
+                event: HookEvent::SessionStart,
+                envelope: Envelope::CursorAdditionalContext,
+            },
         );
     }
 }

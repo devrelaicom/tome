@@ -12,9 +12,11 @@
 //!
 //! Test #3 (`codex_session_hook_never_contains_plugin_hooks`) is the
 //! load-bearing guard: it enables a plugin that ships a VALID `hooks/hooks.json`
-//! (a `PreToolUse` entry) in the workspace, then asserts the Codex sink's
-//! top-level `hooks` object has EXACTLY the `SessionStart` key — proving plugin
-//! hooks are not mapped onto Codex.
+//! (a `PreToolUse` entry) in the workspace, then asserts the Codex hook file
+//! carries ONLY Tome-OWNED entries — the `SessionStart` session-start hook plus
+//! (US3) Tome's match-all `run-hook` DISPATCHER under `PreToolUse`. The plugin's
+//! VERBATIM hook command never leaks into the harness file; it lives only in the
+//! resolved per-(workspace, harness) manifest the dispatcher reads.
 
 use std::path::PathBuf;
 
@@ -229,11 +231,13 @@ fn sync_removes_tome_session_start_hook_when_codex_non_live() {
     );
 }
 
-/// THE LOAD-BEARING GUARD: an enabled plugin that ships a VALID
-/// `hooks/hooks.json` (a `PreToolUse` entry) must NOT leak into the Codex sink.
-/// Codex carries ONLY Tome's own `SessionStart` routing hook — plugin hooks are
-/// never mapped onto Codex. A regression that started mapping plugin hooks to
-/// Codex would surface a `PreToolUse` key here and fail this test.
+/// THE LOAD-BEARING GUARD (US3-refined): an enabled plugin that ships a VALID
+/// `hooks/hooks.json` (a `PreToolUse` entry) must NEVER have its VERBATIM command
+/// written into the Codex hook file. Codex carries ONLY Tome-owned entries: the
+/// `SessionStart` routing hook plus (US3) Tome's match-all `run-hook` DISPATCHER
+/// under `PreToolUse`. The plugin's actual command (`guard.sh`) lives ONLY in the
+/// resolved manifest the dispatcher reads — a regression that wrote the plugin's
+/// command straight into `.codex/hooks.json` would surface `guard.sh` here.
 #[test]
 fn codex_session_hook_never_contains_plugin_hooks() {
     let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
@@ -259,19 +263,20 @@ fn codex_session_hook_never_contains_plugin_hooks() {
 
     let doc = read_codex_hooks(&fx.project);
 
-    // The Codex sink's top-level `hooks` object must have EXACTLY one key:
-    // `SessionStart`. No `PreToolUse` (or any other plugin event) may leak in.
+    // The Codex `hooks` object carries exactly the two Tome-owned keys, in
+    // reconciler order: `SessionStart` (session-start hook, written first) then
+    // `PreToolUse` (US3 run-hook dispatcher). NO other plugin event leaks in.
     let hooks_obj = doc["hooks"]
         .as_object()
         .expect("top-level `hooks` object present");
     let keys: Vec<&str> = hooks_obj.keys().map(String::as_str).collect();
     assert_eq!(
         keys,
-        vec!["SessionStart"],
-        "Codex `hooks` keys must be exactly [\"SessionStart\"] — no plugin event leaked; got: {doc}"
+        vec!["SessionStart", "PreToolUse"],
+        "Codex `hooks` keys must be [\"SessionStart\", \"PreToolUse\"] — the two Tome-owned entries; got: {doc}"
     );
 
-    // And the single SessionStart entry is the Tome one.
+    // The single SessionStart entry is the Tome session-start hook (unchanged).
     let session_start = doc["hooks"]["SessionStart"]
         .as_array()
         .expect("SessionStart event array present");
@@ -285,5 +290,40 @@ fn codex_session_hook_never_contains_plugin_hooks() {
             .as_str()
             .is_some_and(|c| c.contains("harness session-start")),
         "the single SessionStart entry must be the Tome routing hook; got: {doc}"
+    );
+
+    // The PreToolUse entry is Tome's match-all `run-hook` DISPATCHER, NOT the
+    // plugin's verbatim command. It dispatches into the plugin's hook via the
+    // manifest at runtime.
+    let pre_tool = doc["hooks"]["PreToolUse"]
+        .as_array()
+        .expect("PreToolUse run-hook dispatcher present");
+    assert_eq!(
+        pre_tool.len(),
+        1,
+        "exactly one Tome run-hook entry; got: {doc}"
+    );
+    assert!(
+        pre_tool[0]["hooks"][0]["command"]
+            .as_str()
+            .is_some_and(|c| c.contains("harness run-hook")),
+        "the PreToolUse entry must be Tome's run-hook dispatcher; got: {doc}"
+    );
+
+    // CRITICAL: the plugin's VERBATIM command never appears anywhere in the
+    // harness hook file — only the manifest carries it.
+    let raw = std::fs::read_to_string(fx.project.join(".codex/hooks.json")).unwrap();
+    assert!(
+        !raw.contains("guard.sh"),
+        "the plugin's verbatim command must NOT leak into .codex/hooks.json; got:\n{raw}"
+    );
+
+    // The dispatch indirection: the plugin's rewritten command lives in the
+    // resolved manifest the run-hook dispatcher reads.
+    let manifest_path = fx.paths.hooks_manifest(&fx.workspace, "codex");
+    let manifest = std::fs::read_to_string(&manifest_path).expect("codex manifest written");
+    assert!(
+        manifest.contains("guard.sh"),
+        "the plugin command must live in the resolved manifest; got:\n{manifest}"
     );
 }

@@ -120,6 +120,13 @@ pub struct WorkspaceSettings {
     /// `settings-p6.md`.
     #[serde(default)]
     pub strip_plugin_agent_privileges: Option<bool>,
+    /// US8 (hook raw-event passthrough). When `Some(true)`, the dispatcher
+    /// includes the original harness-native hook payload verbatim as
+    /// `tome.raw_event` in the synthesized CC stdin delivered to each handler.
+    /// `None` = key absent (defaults to `false` = passthrough OFF).
+    /// Workspace-scope only; not cascaded from the global settings layer.
+    #[serde(default)]
+    pub raw_event_passthrough: Option<bool>,
 }
 
 /// Cached short + long summaries with their generation timestamp.

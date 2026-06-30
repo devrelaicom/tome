@@ -177,6 +177,7 @@ fn select_output_wraps_per_harness_envelope_and_fails_closed() {
         Box::new(tome::harness::devin::DEVIN),
         Box::new(tome::harness::copilot_cli::COPILOT_CLI),
         Box::new(tome::harness::gemini::GEMINI),
+        Box::new(tome::harness::cursor::CURSOR),
     ]);
 
     // A representative NON-empty directive (content is opaque to the channel
@@ -207,6 +208,14 @@ fn select_output_wraps_per_harness_envelope_and_fails_closed() {
             serde_json::to_string(directive).unwrap()
         )),
     );
+    // cursor → CursorAdditionalContext (snake_case key, US7).
+    assert_eq!(
+        select_output(Some("cursor"), directive),
+        Some(format!(
+            r#"{{"additional_context":{}}}"#,
+            serde_json::to_string(directive).unwrap()
+        )),
+    );
 
     // ABSENT `--harness` → raw directive byte-identical (Phase ≤10 parity).
     assert_eq!(select_output(None, directive), Some(directive.to_string()),);
@@ -219,6 +228,7 @@ fn select_output_wraps_per_harness_envelope_and_fails_closed() {
     assert_eq!(select_output(Some("devin"), ""), None);
     assert_eq!(select_output(Some("copilot-cli"), ""), None);
     assert_eq!(select_output(Some("gemini"), ""), None);
+    assert_eq!(select_output(Some("cursor"), ""), None);
 }
 
 // ---------------------------------------------------------------------------
