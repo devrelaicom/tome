@@ -153,6 +153,13 @@ fn gemini_run_hook_registration_and_manifest_pins() {
         "run-hook entry bytes drifted for gemini",
     );
 
+    // Non-leak: the plugin's verbatim command must NOT appear in the hook file.
+    let raw = read(&hook_path);
+    assert!(
+        !raw.contains("/opt/guard.sh check"),
+        "plugin command must not leak into hook file:\n{raw}",
+    );
+
     // Composition: the session-steering `SessionStart` entry coexists (additive).
     assert!(
         doc["hooks"]["SessionStart"]

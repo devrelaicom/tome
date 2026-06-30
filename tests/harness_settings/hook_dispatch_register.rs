@@ -193,3 +193,79 @@ fn sync_writes_run_hook_entries_and_manifest_for_used_events_only() {
         "the unused Stop event must not appear in the manifest",
     );
 }
+
+#[test]
+fn non_live_dispatch_teardown_strips_run_hook_entries_and_deletes_manifest() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::cursor::Cursor)]);
+
+    // ---- Sync 1: cursor is LIVE with one enabled plugin ----
+    let fx = Fixture::build("test-workspace", "\"cursor\"");
+
+    let url = seed_hooks_source(
+        &fx.paths,
+        "plugin-a",
+        r#"{ "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "/opt/guard.sh check" } ] } ] }"#,
+    );
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw");
+    tome::index::workspace_catalogs::insert(&conn, "test-workspace", "cat", &url, "main")
+        .expect("enrol catalog");
+    drop(conn);
+    insert_enabled_skill_row(&fx.paths, "test-workspace", "cat", "plugin-a");
+
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync 1 (LIVE)");
+
+    let hooks_path = fx.project.join(".cursor/hooks.json");
+    let manifest_path = fx.paths.hooks_manifest(&fx.workspace, "cursor");
+
+    // Both the hook entry and the manifest must be present after the LIVE sync.
+    assert!(
+        hooks_path.is_file(),
+        "cursor hook file must exist after LIVE sync"
+    );
+    assert!(
+        manifest_path.is_file(),
+        "manifest must exist after LIVE sync"
+    );
+    {
+        let doc: serde_json::Value = serde_json::from_str(&read(&hooks_path)).unwrap();
+        assert!(
+            doc["hooks"]["preToolUse"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty()),
+            "preToolUse run-hook entry must be present after LIVE sync",
+        );
+    }
+
+    // ---- Transition: remove cursor from the effective harness set ----
+    std::fs::write(
+        fx.project.join(".tome/config.toml"),
+        "workspace = \"test-workspace\"\nharnesses = []\n",
+    )
+    .expect("rewrite config to non-live");
+
+    // ---- Sync 2: NON-LIVE — reconciler must clean up ----
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync 2 (NON-LIVE)");
+
+    // (a) The manifest must be deleted.
+    assert!(
+        !manifest_path.exists(),
+        "manifest must be deleted after NON-LIVE sync",
+    );
+
+    // (b) The run-hook entry must be stripped from the hook file. Cursor has no
+    // session-steering, so the file is entirely tome-dispatch-owned; the
+    // `preToolUse` key must be absent (pruned) after the only entry is removed.
+    if hooks_path.exists() {
+        let doc: serde_json::Value = serde_json::from_str(&read(&hooks_path)).unwrap();
+        assert!(
+            doc["hooks"].get("preToolUse").is_none()
+                || doc["hooks"]["preToolUse"]
+                    .as_array()
+                    .is_some_and(|a| a.is_empty()),
+            "preToolUse run-hook entry must be stripped after NON-LIVE sync:\n{doc}",
+        );
+    }
+}
