@@ -253,8 +253,17 @@ pub fn run(
     // Phase 11 / US5 (T063): render the paste-able MCP snippet from the
     // harness's dialect, built with the canonical args the sync writer uses
     // (`mcp --workspace <ws> --harness <name>`, the `--harness` trailing so
-    // the ownership marker survives) — so the snippet bytes match what sync
-    // writes. Keyed off the resolved workspace name + the harness name.
+    // the ownership marker survives). Keyed off the resolved workspace name +
+    // the harness name.
+    //
+    // #337: the snippet's `command` is the PORTABLE bare `tome` (a human pastes
+    // it, so the readable PATH-resolved name copy-pastes across machines),
+    // whereas `sync` now writes the RESOLVED ABSOLUTE launcher via
+    // `tome_command()` (so a PATH-less host can start the server). The two
+    // deliberately DIVERGE: the snippet `command` is NOT byte-identical to the
+    // synced `command` (only the args / dialect shape are). A bare-`tome`
+    // snippet is still recognised as Tome-owned (basename match), so pasting it
+    // is valid. (Making the snippet PATH-tolerant on manual hosts is Phase B.)
     let snippet_entry = mcp_config::TomeEntry::new(
         "tome".to_string(),
         vec![

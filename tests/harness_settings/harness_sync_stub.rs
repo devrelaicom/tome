@@ -23,6 +23,8 @@ use std::time::{Duration, SystemTime};
 
 use crate::common::{HarnessModulesGuard, HomeGuard, ToolEnv, paths_for, seed_workspace};
 use tempfile::TempDir;
+#[allow(unused_imports)] // HarnessModule::mcp_dialect used by the #337 launcher tests
+use tome::harness::HarnessModule;
 use tome::harness::StubHarness;
 use tome::harness::sync::{self, Action, SyncDeps, SyncSubsystem};
 use tome::workspace::WorkspaceName;
@@ -120,7 +122,14 @@ fn bind_writes_stub_rules_block_and_mcp_entry() {
         .get("mcpServers")
         .and_then(|v| v.get("tome"))
         .expect("tome entry under mcpServers");
-    assert_eq!(entry["command"], "tome");
+    // #337: the command is the resolved absolute launcher (`current_exe` /
+    // `$TOME_BIN`), not the bare `tome`. Assert it is a recognised Tome
+    // launcher rather than an exact string (the value is machine-specific).
+    assert!(
+        tome::harness::launcher::looks_like_tome_launcher(entry["command"].as_str().unwrap()),
+        "command must be a recognised Tome launcher; got {}",
+        entry["command"],
+    );
     let args = entry["args"].as_array().unwrap();
     assert_eq!(args[0], "mcp");
     assert_eq!(args[1], "--workspace");
@@ -254,8 +263,13 @@ fn force_overrides_user_owned_clash_drops_unowned_env() {
         serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
     let entry = &parsed["mcpServers"]["tome"];
 
-    // The entry was rewritten to Tome-owned shape.
-    assert_eq!(entry["command"], "tome");
+    // The entry was rewritten to Tome-owned shape (#337: command is the
+    // resolved launcher, recognised by basename / self-equality).
+    assert!(
+        tome::harness::launcher::looks_like_tome_launcher(entry["command"].as_str().unwrap()),
+        "force-rewritten command must be a recognised Tome launcher; got {}",
+        entry["command"],
+    );
     let args = entry["args"].as_array().unwrap();
     assert_eq!(args[0], "mcp");
 
@@ -267,6 +281,132 @@ fn force_overrides_user_owned_clash_drops_unowned_env() {
     assert!(
         entry.get("env").is_none(),
         "env not preserved when rewriting user-owned"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 4b. #337 (R3): launcher-tolerant ownership through the REAL sync orchestrator.
+//
+// Closes the gap between "the predicate says not-owned" and "the user actually
+// sees exit 19". Two foreign shapes must CLASH (exit 19) through `sync_project`,
+// and a legitimate bare→absolute launcher upgrade of an OWNED entry must NOT.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_clashes_on_foreign_absolute_command_under_tome_key() {
+    // A non-tome absolute command WITH the Tome arg shape (`args[0]=="mcp"`) is
+    // still a user-owned entry — the basename guard means it is NOT claimed, so
+    // the orchestrator raises HarnessClash (exit 19) rather than overwriting it.
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = install_stub();
+    let fx = Fixture::build("test-workspace", Some("harnesses = [\"stub\"]"));
+
+    let mcp_path = fx.project.join("stub.mcp.json");
+    let conflict = serde_json::json!({
+        "mcpServers": {
+            "tome": { "command": "/usr/bin/not-tome", "args": ["mcp", "--workspace", "x"] }
+        }
+    });
+    std::fs::write(&mcp_path, serde_json::to_string_pretty(&conflict).unwrap()).unwrap();
+
+    let err = sync::sync_project(&fx.project, &fx.deps(false)).expect_err("must clash");
+    assert_eq!(err.exit_code(), 19, "want HarnessClash; got {err:?}");
+    match &err {
+        tome::error::TomeError::HarnessClash { command, .. } => {
+            assert_eq!(command, "/usr/bin/not-tome");
+        }
+        other => panic!("expected HarnessClash, got {other:?}"),
+    }
+    // The user entry is left untouched.
+    let body = std::fs::read_to_string(&mcp_path).unwrap();
+    assert!(
+        body.contains("/usr/bin/not-tome"),
+        "user entry preserved; got {body}"
+    );
+}
+
+#[test]
+fn sync_clashes_on_tome_launcher_with_wrong_arg_shape() {
+    // A `tome`-BASENAME launcher whose `args[0] != "mcp"` is a user's own use of
+    // the binary, NOT Tome's MCP entry — the arg-shape half of the predicate
+    // fails, so the orchestrator clashes (exit 19) instead of overwriting it.
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = install_stub();
+    let fx = Fixture::build("test-workspace", Some("harnesses = [\"stub\"]"));
+
+    let mcp_path = fx.project.join("stub.mcp.json");
+    let conflict = serde_json::json!({
+        "mcpServers": {
+            "tome": { "command": "/usr/local/bin/tome", "args": ["serve", "--port", "9000"] }
+        }
+    });
+    std::fs::write(&mcp_path, serde_json::to_string_pretty(&conflict).unwrap()).unwrap();
+
+    let err = sync::sync_project(&fx.project, &fx.deps(false)).expect_err("must clash");
+    assert_eq!(err.exit_code(), 19, "want HarnessClash; got {err:?}");
+    match &err {
+        tome::error::TomeError::HarnessClash {
+            command, first_arg, ..
+        } => {
+            assert_eq!(command, "/usr/local/bin/tome");
+            assert_eq!(first_arg, "serve");
+        }
+        other => panic!("expected HarnessClash, got {other:?}"),
+    }
+    let body = std::fs::read_to_string(&mcp_path).unwrap();
+    assert!(
+        body.contains("\"serve\""),
+        "user entry preserved; got {body}"
+    );
+}
+
+#[test]
+fn sync_upgrades_legacy_bare_launcher_without_clash() {
+    // A LEGITIMATE Tome-owned entry written with the legacy bare `tome` launcher
+    // must be RECOGNISED as owned and UPGRADED to the resolved launcher on the
+    // next sync — NO clash (the bare→absolute launcher-change path the #337 fix
+    // is for), driven through the real orchestrator.
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = install_stub();
+    let fx = Fixture::build("test-workspace", Some("harnesses = [\"stub\"]"));
+
+    let mcp_path = fx.project.join("stub.mcp.json");
+    let legacy = serde_json::json!({
+        "mcpServers": {
+            "tome": { "command": "tome", "args": ["mcp", "--workspace", "stale"] }
+        }
+    });
+    std::fs::write(&mcp_path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+    // No --force: the bare-`tome` entry is OWNED, so sync rewrites it in place
+    // (no clash) to the resolved launcher + the canonical/current args.
+    sync::sync_project(&fx.project, &fx.deps(false)).expect("owned entry must not clash");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
+    let entry = &parsed["mcpServers"]["tome"];
+    assert!(
+        tome::harness::launcher::looks_like_tome_launcher(entry["command"].as_str().unwrap()),
+        "upgraded command must be a recognised Tome launcher; got {}",
+        entry["command"],
+    );
+    let args = entry["args"].as_array().unwrap();
+    assert_eq!(args[0], "mcp");
+    assert_eq!(args[2], "test-workspace", "stale workspace arg rewritten");
+    // The round-tripped entry is recognised as Tome-owned by the predicate.
+    let read =
+        tome::harness::mcp_config::read_entry(&mcp_path, &StubHarness::default().mcp_dialect())
+            .unwrap()
+            .unwrap();
+    assert!(
+        tome::harness::mcp_config::is_tome_owned(&read),
+        "the upgraded entry must be recognised as Tome-owned",
     );
 }
 

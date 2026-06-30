@@ -30,6 +30,7 @@ use std::time::Duration;
 
 use crate::common::{ToolEnv, paths_for, seed_workspace};
 use tempfile::TempDir;
+use tome::harness::HarnessModule;
 use tome::harness::sync::{self, Action, SyncDeps, SyncSubsystem};
 use tome::workspace::WorkspaceName;
 
@@ -267,12 +268,48 @@ fn generic_target_writes_agents_and_mcp_through_standard_sinks() {
         "the Inline region carries the verbatim directive; got {agents}",
     );
 
-    // `<project>/mcp.json` matches the pinned bytes (mcpServers + CommandArgs +
-    // env:{} + the real --workspace/--harness args).
+    // `<project>/mcp.json`: mcpServers + CommandArgs + env:{} + the real
+    // --workspace/--harness args. #337: the `command` is now the resolved
+    // absolute launcher (machine-specific `current_exe` / `$TOME_BIN`), so the
+    // structure is asserted field-by-field rather than as a byte-pin — the
+    // command is checked to be a RECOGNISED Tome launcher (the #337 fix on the
+    // `generic` target the issue specifically calls out).
     let mcp_path = fx.project.join("mcp.json");
     let mcp = std::fs::read_to_string(&mcp_path).expect("mcp.json written");
-    let expected_mcp = "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"test-workspace\",\n        \"--harness\",\n        \"generic\"\n      ],\n      \"env\": {}\n    }\n  }\n}\n";
-    assert_eq!(mcp, expected_mcp, "generic mcp.json bytes pinned");
+    let parsed: serde_json::Value = serde_json::from_str(&mcp).expect("mcp.json parses");
+    let entry = &parsed["mcpServers"]["tome"];
+    assert!(
+        tome::harness::launcher::looks_like_tome_launcher(entry["command"].as_str().unwrap()),
+        "generic mcp.json command must be a recognised Tome launcher; got {}",
+        entry["command"],
+    );
+    assert_eq!(
+        entry["args"],
+        serde_json::json!([
+            "mcp",
+            "--workspace",
+            "test-workspace",
+            "--harness",
+            "generic"
+        ]),
+        "generic mcp.json args pinned",
+    );
+    assert_eq!(
+        entry["env"],
+        serde_json::json!({}),
+        "generic mcp.json env:{{}}"
+    );
+    // The Tome-owned entry round-trips through the ownership predicate.
+    let read = tome::harness::mcp_config::read_entry(
+        &mcp_path,
+        &tome::harness::generic::GENERIC.mcp_dialect(),
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        tome::harness::mcp_config::is_tome_owned(&read),
+        "generic mcp.json entry must be recognised as Tome-owned",
+    );
 
     // The change is recorded under the standard Rules + Mcp subsystems, NOT
     // OpenPlugins (generic goes through the per-sink loop). The shared

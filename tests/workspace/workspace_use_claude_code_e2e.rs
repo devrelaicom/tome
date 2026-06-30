@@ -220,7 +220,13 @@ fn bind_then_sync_writes_claude_code_artefacts() {
         .get("mcpServers")
         .and_then(|v| v.get("tome"))
         .expect("mcpServers.tome must exist");
-    assert_eq!(tome_entry["command"], "tome");
+    // #337: command is the resolved absolute launcher, recognised by basename /
+    // self-equality (not the bare `tome`, which a PATH-less host can't start).
+    assert!(
+        tome::harness::launcher::looks_like_tome_launcher(tome_entry["command"].as_str().unwrap()),
+        "command must be a recognised Tome launcher; got {}",
+        tome_entry["command"],
+    );
     let args = tome_entry["args"]
         .as_array()
         .expect("args must be an array");
@@ -361,7 +367,12 @@ fn existing_claude_settings_json_preserves_other_entries() {
 
     // The Tome entry must have been inserted alongside it.
     let tome = servers.get("tome").expect("tome must be inserted");
-    assert_eq!(tome["command"], "tome");
+    // #337: command is the resolved launcher, recognised by basename / self-eq.
+    assert!(
+        tome::harness::launcher::looks_like_tome_launcher(tome["command"].as_str().unwrap()),
+        "command must be a recognised Tome launcher; got {}",
+        tome["command"],
+    );
 
     // Order: `preserve_order` should keep `other` first, `tome` appended.
     let object = servers.as_object().expect("mcpServers is an object");

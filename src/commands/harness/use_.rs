@@ -327,10 +327,16 @@ fn configure_one(
 ///
 /// - `mcp_manual_only` (jetbrains-ai): no MCP file is written; the notice tells
 ///   the user to add the server by hand and includes the EXACT paste-able
-///   snippet (the same bytes `tome harness info` prints), plus a pointer to
-///   `tome harness info`.
+///   snippet (byte-identical to what `tome harness info` prints — both build it
+///   via `render_entry_snippet`), plus a pointer to `tome harness info`.
 /// - `mcp_adapter_notice` (pi): the MCP file IS written, but an external adapter
 ///   must be installed; the notice carries the harness's install instruction.
+///
+/// #337: the snippet `command` is the PORTABLE bare `tome` (human-pasteable),
+/// which deliberately DIVERGES from the resolved absolute launcher `sync` now
+/// writes via `tome_command()` (matches the `info` snippet's note). A bare-`tome`
+/// pasted entry is still recognised as Tome-owned (basename match). Making the
+/// manual-host snippet PATH-tolerant is deferred to Phase B.
 ///
 /// `#[doc(hidden)] pub` for integration-test reachability (the outcome is
 /// emitted, not returned, so tests assert the notice via this fn).

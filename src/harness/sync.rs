@@ -1274,14 +1274,33 @@ fn write_mcp_for_harness(snap: &HarnessSnapshot, deps: &SyncDeps<'_>) -> Result<
         });
     }
 
+    // #337: emit the ABSOLUTE launcher (`$TOME_BIN` → `current_exe` → bare
+    // `tome`) instead of a bare-PATH `"tome"`, so a PATH-less / sandboxed host
+    // (CI, a non-IDE agent) can still start the MCP server. Ownership stays
+    // recognisable because `is_tome_owned` now matches the launcher BASENAME
+    // (`looks_like_tome_launcher`), not the exact string — so idempotence /
+    // clash / removal survive a per-machine launcher.
+    //
+    // INTENTIONAL self-healing on launcher drift: the stored `command` is
+    // rewritten to the CURRENTLY-running binary's path, so the launcher on disk
+    // always points at a binary that actually exists. If the same workspace is
+    // later synced by a `tome` at a DIFFERENT absolute path (Homebrew
+    // relocation, a symlink vs its resolved target, cargo-install vs a system
+    // package), the idempotence comparison below sees `current.command !=
+    // expected.command` and performs ONE benign rewrite to the new path —
+    // classified `Updated`, still owned (no clash), no orphan. This is correct,
+    // not a churning bug: each machine converges its stored launcher to its own
+    // valid binary and then stays idempotent. (Do NOT "fix" this by pinning a
+    // bare name — that reintroduces the PATH-less-host failure #337 closes.)
+    //
     // Phase 9 / US3 / FR-030: stamp `--harness <name>` so the running
     // `tome mcp` server knows which harness hosts it (the built-in `meta`
     // tool resolves the install target from it). It is a LATER arg, so the
-    // ownership marker (`command == "tome" && args[0] == "mcp"`) is
-    // preserved; an existing entry without it re-stamps as `Updated` on the
-    // next sync (idempotent thereafter).
+    // ownership marker (basename `tome` + `args[0] == "mcp"`) is preserved; an
+    // existing entry without it re-stamps as `Updated` on the next sync
+    // (idempotent thereafter).
     let expected = mcp_config::TomeEntry::new(
-        "tome".to_string(),
+        crate::harness::launcher::tome_command(),
         vec![
             "mcp".to_string(),
             "--workspace".to_string(),

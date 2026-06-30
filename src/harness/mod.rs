@@ -100,6 +100,10 @@ pub mod hooks_ir;
 pub mod jetbrains_ai;
 pub mod junie;
 pub mod kiro;
+/// Shared launcher resolution (`tome_command`/`shell_quote`, promoted from the
+/// #290 `open_plugins` SSOT) + the launcher-tolerant ownership recogniser
+/// (`looks_like_tome_launcher`, #337). Sync-only.
+pub mod launcher;
 pub mod mcp_config;
 /// The Open Plugins `tome-op` portable-plugin emitter (Phase 11 / US4). A
 /// self-contained bundle (`.plugin/plugin.json` + `hooks/hooks.json` +

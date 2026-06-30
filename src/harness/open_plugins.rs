@@ -37,11 +37,12 @@
 //!
 //! The bundle's `.mcp.json` server command and SessionStart hook command are run
 //! by the *host* (a CI runner / sandboxed non-IDE agent), whose `PATH` need not
-//! contain `tome`. So both are emitted as an absolute launcher resolved by
-//! [`tome_command`] (`$TOME_BIN` → `current_exe` → bare `"tome"` fallback), never
-//! a bare-PATH name. Bundle ownership is by the `.plugin/plugin.json` `name`
-//! field (see [`is_tome_op_bundle`]), NOT the command string, so the launcher is
-//! free to vary per machine without affecting recognition / removal.
+//! contain `tome`. So both are emitted as an absolute launcher resolved by the
+//! shared [`crate::harness::launcher::tome_command`] (`$TOME_BIN` →
+//! `current_exe` → bare `"tome"` fallback), never a bare-PATH name. Bundle
+//! ownership is by the `.plugin/plugin.json` `name` field (see
+//! [`is_tome_op_bundle`]), NOT the command string, so the launcher is free to
+//! vary per machine without affecting recognition / removal.
 //!
 //! ## JSON byte convention
 //!
@@ -57,6 +58,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use crate::error::TomeError;
+use crate::harness::launcher::{shell_quote, tome_command};
 use crate::harness::rules_file;
 use crate::paths::Paths;
 use crate::plugin::identity::open_plugins_name_ok;
@@ -71,12 +73,6 @@ const MANIFEST_REL: &str = ".plugin/plugin.json";
 const HOOKS_REL: &str = "hooks/hooks.json";
 const MCP_REL: &str = ".mcp.json";
 const AGENTS_REL: &str = "AGENTS.md";
-
-/// Env var overriding the launcher this bundle invokes (`TOME_BIN`). When set
-/// and non-empty it wins the [`tome_command`] resolution; otherwise the running
-/// binary's absolute path (`current_exe`) is used, falling back to the bare
-/// `"tome"` name. The override is also the test seam for the byte pins.
-const TOME_BIN_ENV: &str = "TOME_BIN";
 
 /// Emit the whole `tome-op` Open Plugins bundle into `plugin_root`, atomically.
 ///
@@ -178,73 +174,6 @@ pub enum RemoveOutcome {
     /// `plugin_root` exists but is NOT a recognisable `tome-op` bundle — left
     /// untouched by the mass-delete safeguard.
     NotTomeOp,
-}
-
-// =====================================================================
-// Launcher resolution (#290)
-// =====================================================================
-
-/// Resolve the absolute launcher this bundle should invoke (`tome` issue #290).
-///
-/// The bundle's `.mcp.json` server command and its SessionStart hook command are
-/// executed by the *host* (a CI runner or a sandboxed non-IDE agent), whose
-/// `PATH` need not contain `tome`. A bare `"tome"` therefore silently fails to
-/// start the MCP server and the agent gets zero skills. Resolution order:
-///
-/// 1. `$TOME_BIN`, if set and non-empty — an explicit operator override (and the
-///    deterministic test seam, since `current_exe` is machine-specific). It MUST
-///    be an ABSOLUTE path: the value is used verbatim, NOT shell-expanded, so a
-///    leading `~` is treated literally (the host will not find `~/…/tome`).
-/// 2. [`std::env::current_exe`] — the absolute path of the running binary, so the
-///    emitted command points at the exact `tome` that ran the sync.
-/// 3. The bare name `"tome"` — the old behaviour, used only when both above
-///    fail (an exotic platform / a deleted binary). Never panics, never errors
-///    the sync: this resolver is infallible by design.
-///
-/// The tiers are tried in order and each falls through INDEPENDENTLY:
-/// - A non-empty but non-UTF-8 `$TOME_BIN` is IGNORED and resolution continues
-///   at tier 2 (`current_exe`) — it does NOT short-circuit to the bare fallback
-///   (we cannot embed a non-UTF-8 value in JSON / a shell command cleanly).
-/// - A `current_exe` that fails to resolve, or whose path is not valid UTF-8,
-///   falls through to tier 3 (the bare name).
-fn tome_command() -> String {
-    // (1) Explicit override wins.
-    if let Some(value) = std::env::var_os(TOME_BIN_ENV)
-        && !value.is_empty()
-        && let Some(s) = value.to_str()
-    {
-        return s.to_string();
-    }
-
-    // (2) The running binary's absolute path. UTF-8-fail and `current_exe`-fail
-    //     both fall through to the bare name.
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(s) = exe.to_str()
-    {
-        return s.to_string();
-    }
-
-    // (3) Last-resort fallback: the old bare-PATH behaviour.
-    "tome".to_string()
-}
-
-/// Quote a launcher path for safe interpolation into the SessionStart hook's
-/// single shell-command string (`"<cmd> harness session-start …"`). An absolute
-/// `current_exe` path can contain spaces (e.g. macOS `Application Support`),
-/// which would otherwise split into multiple shell words. POSIX single-quoting
-/// wraps the path and escapes any embedded single quote via the `'\''` idiom.
-/// The bare name `"tome"` (no shell-special chars) is returned unquoted so the
-/// fallback string stays identical to the historical bytes.
-fn shell_quote(cmd: &str) -> String {
-    if !cmd.is_empty() && cmd.bytes().all(is_shell_safe_byte) {
-        return cmd.to_string();
-    }
-    format!("'{}'", cmd.replace('\'', "'\\''"))
-}
-
-/// Bytes that need no shell quoting (a conservative POSIX-portable set).
-fn is_shell_safe_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/')
 }
 
 // =====================================================================
@@ -416,6 +345,7 @@ fn is_tome_op_bundle(plugin_root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness::launcher::TOME_BIN_ENV;
     use std::sync::Mutex;
     use tempfile::TempDir;
 
@@ -746,68 +676,11 @@ mod tests {
         );
     }
 
-    // ---- launcher resolution (#290) -------------------------------------
-
-    #[test]
-    fn tome_command_honors_tome_bin_override() {
-        let guard = EnvGuard::new(&[TOME_BIN_ENV]);
-        guard.set(TOME_BIN_ENV, "/custom/path/to/tome");
-        assert_eq!(tome_command(), "/custom/path/to/tome");
-    }
-
-    #[test]
-    fn tome_command_falls_back_to_current_exe_when_override_unset() {
-        // With TOME_BIN unset, the resolver returns the running binary's path —
-        // which is absolute (the test binary) and, crucially, NOT the bare name.
-        let _guard = EnvGuard::new(&[TOME_BIN_ENV]);
-        let cmd = tome_command();
-        let exe = std::env::current_exe().expect("current_exe");
-        assert_eq!(
-            cmd,
-            exe.to_str().expect("test binary path is UTF-8"),
-            "with TOME_BIN unset, the launcher is current_exe",
-        );
-        assert_ne!(cmd, "tome", "the launcher must not be the bare name");
-        assert!(
-            Path::new(&cmd).is_absolute(),
-            "the resolved launcher must be an absolute path; got {cmd}",
-        );
-    }
-
-    #[test]
-    fn tome_command_ignores_empty_override() {
-        // An empty TOME_BIN is treated as unset → falls through to current_exe,
-        // never emitting an empty command.
-        let guard = EnvGuard::new(&[TOME_BIN_ENV]);
-        guard.set(TOME_BIN_ENV, "");
-        let cmd = tome_command();
-        assert!(!cmd.is_empty());
-        assert_ne!(cmd, "");
-    }
-
-    #[test]
-    fn shell_quote_leaves_simple_paths_unquoted() {
-        assert_eq!(shell_quote("tome"), "tome");
-        assert_eq!(shell_quote("/usr/local/bin/tome"), "/usr/local/bin/tome");
-        assert_eq!(
-            shell_quote("/opt/tome-1.2/bin/tome"),
-            "/opt/tome-1.2/bin/tome"
-        );
-    }
-
-    #[test]
-    fn shell_quote_wraps_paths_with_spaces() {
-        assert_eq!(
-            shell_quote("/Applications/My Tome.app/tome"),
-            "'/Applications/My Tome.app/tome'",
-        );
-    }
-
-    #[test]
-    fn shell_quote_escapes_embedded_single_quote() {
-        // The POSIX `'\''` idiom closes the quote, escapes a literal quote, reopens.
-        assert_eq!(shell_quote("/o'dd/tome"), "'/o'\\''dd/tome'");
-    }
+    // ---- launcher integration through hooks_bytes/mcp_bytes (#290) -------
+    //
+    // The bare `tome_command` / `shell_quote` unit tests live in
+    // `harness::launcher` (the shared SSOT). These exercise the launcher
+    // composing end-to-end through THIS module's byte builders.
 
     #[test]
     fn hook_command_quotes_a_spaced_launcher() {
