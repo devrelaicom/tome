@@ -86,10 +86,11 @@ pub fn run(
     let mut stdin = String::new();
     let _ = std::io::stdin().lock().read_to_string(&mut stdin);
 
-    // US10: `--explain` prints what WOULD fire and runs nothing. Stubbed here —
-    // a no-op that emits nothing and never blocks (returns Ok → exit 0).
+    // US10: `--explain` prints what WOULD fire and runs nothing. Stdin is read
+    // above and passed in so `explain` can apply the matcher + if filter against
+    // the incoming event; stdin cannot be re-read from inside `explain`.
     if args.explain {
-        return explain(&args, scope, paths);
+        return explain(&args, scope, paths, &stdin);
     }
 
     let out = compute(&args, scope, paths, &stdin);
@@ -245,14 +246,176 @@ fn fail_open_output(_harness: &str) -> DispatchOutput {
     }
 }
 
-/// US10 `--explain` stub: print what WOULD fire, run nothing. For now a no-op
-/// that emits nothing and returns `Ok` (exit 0) — never blocks.
+/// US10 `--explain`: print what WOULD fire for the given event, run nothing.
+///
+/// Resolves the workspace + manifest path (same logic as [`compute`]) and calls
+/// [`explain_core`] to filter entries and format the output lines. A bad
+/// workspace or unreadable manifest degrades gracefully (a message is printed
+/// and `Ok(())` is returned — never blocks the caller).
+///
+/// `stdin` is the harness event JSON already read by [`run`]; it is forwarded so
+/// the matcher + `if` filter sees the incoming tool name and tool_input.
 fn explain(
-    _args: &HarnessRunHookArgs,
-    _scope: &ResolvedScope,
-    _paths: &Paths,
+    args: &HarnessRunHookArgs,
+    scope: &ResolvedScope,
+    paths: &Paths,
+    stdin: &str,
 ) -> Result<(), TomeError> {
+    let workspace: WorkspaceName = match args.workspace.as_deref() {
+        Some(raw) => match WorkspaceName::parse(raw) {
+            Ok(w) => w,
+            Err(_) => {
+                // Fail-open: a malformed --workspace must not block the caller.
+                println!(
+                    "[explain] malformed --workspace argument; \
+                     manifest lookup skipped — dispatch would be allow (fail-open)"
+                );
+                return Ok(());
+            }
+        },
+        None => scope.scope.name().clone(),
+    };
+
+    let manifest_path = paths.hooks_manifest(&workspace, &args.harness);
+    let manifest = crate::harness::hooks_ir::read_manifest(&manifest_path).ok();
+
+    let lines = explain_core(&args.harness, &args.event, stdin, manifest.as_ref());
+    for line in &lines {
+        println!("{line}");
+    }
     Ok(())
+}
+
+/// Pure explain core: returns the human-readable lines describing which manifest
+/// entries WOULD fire for `(harness, event_cc)` against the given `stdin`,
+/// without executing any handler.
+///
+/// Applies the identical matcher + `if`-predicate filter as [`dispatch_inner`]
+/// (including CC tool-name normalisation via [`harness_event_to_cc`]). Each
+/// matching entry produces one line:
+/// `plugin=<p> event=<e> matcher=<m> if=<pred|none> kind=<command|http|prompt> -> would run`
+///
+/// All user-authored values (plugin, matcher, `if` predicate) are scrubbed
+/// through [`crate::catalog::git::scrub_credentials`] before inclusion. The
+/// handler body (command text, URL, prompt text) is NEVER printed — only the
+/// KIND. Tool-input values are also not echoed.
+///
+/// Returns a fallback message for degenerate inputs (no manifest, no entries).
+/// Never panics; never executes any handler.
+fn explain_core(
+    harness: &str,
+    event_cc: &str,
+    stdin: &str,
+    manifest: Option<&HookManifest>,
+) -> Vec<String> {
+    let Some(manifest) = manifest else {
+        return vec!["[explain] no manifest found — dispatch would fail-open (allow)".to_string()];
+    };
+    let Some(entries) = manifest.events.get(event_cc) else {
+        return vec![format!(
+            "[explain] no entries registered for event={event_cc} \
+             — dispatch would fail-open (allow)"
+        )];
+    };
+
+    // Translate the harness stdin → CC format, identical to dispatch_inner, so
+    // the matcher + if filter operates on the normalised CC tool name.
+    let raw: Value = serde_json::from_str(stdin).unwrap_or(Value::Null);
+    let cc_base = match wire_for(harness) {
+        Some(wire) => harness_event_to_cc(
+            wire, event_cc, harness, "", // workspace: not needed for the matcher/if filter
+            false, &raw,
+        ),
+        // Unknown harness: use the raw JSON as-is (best-effort explain).
+        None => raw,
+    };
+    let cc_tool = cc_base
+        .get("tool_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let tool_input_null = Value::Null;
+    let tool_input = cc_base.get("tool_input").unwrap_or(&tool_input_null);
+
+    let mut lines = Vec::new();
+    let mut any_matched = false;
+    for entry in entries {
+        if !matcher_matches(entry.matcher.as_deref(), cc_tool) {
+            continue;
+        }
+        if let Some(if_pred) = entry.if_pred.as_deref()
+            && !if_predicate_matches(if_pred, cc_tool, tool_input)
+        {
+            continue;
+        }
+        any_matched = true;
+
+        // Handler KIND: the only safe piece of handler metadata to expose.
+        // The command body, URL, prompt text, and header values are NEVER printed.
+        let kind = handler_kind(&entry.handler);
+
+        // Scrub all plugin-authored metadata through the shared credential
+        // scrubber before printing (defensive; unlikely to contain secrets but
+        // the security invariant is unconditional).
+        let plugin_scrubbed = crate::catalog::git::scrub_to_string(entry.plugin.as_bytes());
+        let matcher_scrubbed = crate::catalog::git::scrub_to_string(
+            entry.matcher.as_deref().unwrap_or("*").as_bytes(),
+        );
+        let if_scrubbed = entry
+            .if_pred
+            .as_deref()
+            .map(|p| crate::catalog::git::scrub_to_string(p.as_bytes()))
+            .unwrap_or_else(|| "(none)".to_string());
+
+        lines.push(format!(
+            "plugin={plugin_scrubbed} event={event_cc} \
+             matcher={matcher_scrubbed} if={if_scrubbed} \
+             kind={kind} -> would run"
+        ));
+    }
+
+    if !any_matched {
+        lines.push(format!(
+            "[explain] no entries match for event={event_cc} tool={cc_tool} \
+             — dispatch would be allow (no-op)"
+        ));
+    }
+    lines
+}
+
+/// Return the short kind label for a handler (for --explain and TOME_HOOK_DEBUG).
+/// Never prints the handler body, URL, or prompt text.
+fn handler_kind(handler: &Handler) -> &'static str {
+    match handler {
+        Handler::Command { .. } => "command",
+        Handler::Http { .. } => "http",
+        Handler::Prompt { .. } => "prompt",
+    }
+}
+
+/// Format one TOME_HOOK_DEBUG trace line for a handler's decision. All values
+/// are scrubbed through [`crate::catalog::git::scrub_credentials`] before
+/// inclusion. Never panics.
+///
+/// The handler body (command text, URL, prompt text) is NOT included — only the
+/// handler kind. This function is `pub(super)` only for direct unit testing.
+fn debug_trace_line(plugin: &str, kind: &str, decision: &CcDecision) -> String {
+    let label = if is_blocking(decision) {
+        "deny"
+    } else if matches!(decision.permission, Some(Permission::Ask)) {
+        "ask"
+    } else {
+        "allow"
+    };
+    let plugin_scrubbed = crate::catalog::git::scrub_to_string(plugin.as_bytes());
+    let reason_scrubbed = decision
+        .reason
+        .as_deref()
+        .map(|r| crate::catalog::git::scrub_to_string(r.as_bytes()))
+        .unwrap_or_default();
+    format!(
+        "[TOME_HOOK_DEBUG] plugin={plugin_scrubbed} kind={kind} \
+         decision={label} reason={reason_scrubbed}"
+    )
 }
 
 /// The pipeline core (stdin-translate → filter → exec → merge → emit), built up
@@ -419,6 +582,25 @@ fn dispatch_inner(
                 run_prompt_handler(prompt, &per_entry_cc_stdin, cfg, entry.timeout_ms)
             }
         };
+
+        // US10: TOME_HOOK_DEBUG trace — observe-only, best-effort. When the env
+        // var is set (non-empty), log plugin + decision to stderr so an operator
+        // can see which hook produced which decision. A logging failure MUST NOT
+        // affect the decision (eprintln! is infallible in practice; ignore the
+        // compile-time Result via the trailing `;`). The handler body/url/prompt
+        // is NOT logged — only the kind. All values are scrubbed.
+        //
+        // The `unwrap_or_default()` is a deliberate fail-open: if the env lookup
+        // errors (e.g., non-UTF-8 env on some platforms), we skip the trace
+        // rather than panicking (panic=abort in the release binary).
+        if !std::env::var("TOME_HOOK_DEBUG")
+            .unwrap_or_default()
+            .is_empty()
+        {
+            let kind = handler_kind(&entry.handler);
+            eprintln!("{}", debug_trace_line(&entry.plugin, kind, &decision));
+        }
+
         decisions.push((entry.plugin.clone(), decision));
     }
 
@@ -2402,6 +2584,235 @@ mod tests {
         assert_eq!(
             out_on.exit_code, 2,
             "passthrough-on: raw_event must be present → hook exits 2 → deny (exit 2)"
+        );
+    }
+
+    // --- US10 unit tests -----------------------------------------------------------
+
+    /// Build a minimal [`HookManifest`] for explain_core / dispatch tests.
+    fn make_manifest_for_explain(command: Option<&str>, http_url: Option<&str>) -> HookManifest {
+        use crate::harness::hooks_ir::{Handler, HookManifest, ManifestEntry};
+        use std::collections::BTreeMap;
+
+        let mut entries = Vec::new();
+        if let Some(cmd) = command {
+            entries.push(ManifestEntry {
+                plugin: "cat:cmd-guard".to_string(),
+                plugin_root: None,
+                matcher: Some("Bash".to_string()),
+                if_pred: None,
+                handler: Handler::Command {
+                    command: cmd.to_string(),
+                },
+                timeout_ms: Some(5_000),
+                cwd: None,
+                env: BTreeMap::new(),
+            });
+        }
+        if let Some(url) = http_url {
+            entries.push(ManifestEntry {
+                plugin: "cat:http-guard".to_string(),
+                plugin_root: None,
+                matcher: Some("Bash".to_string()),
+                if_pred: None,
+                handler: Handler::Http {
+                    url: url.to_string(),
+                    headers: BTreeMap::new(),
+                    allowed_env_vars: vec![],
+                },
+                timeout_ms: Some(2_000),
+                cwd: None,
+                env: BTreeMap::new(),
+            });
+        }
+        let mut events = std::collections::BTreeMap::new();
+        events.insert("PreToolUse".to_string(), entries);
+        HookManifest {
+            harness: "cursor".to_string(),
+            raw_event_passthrough: false,
+            events,
+        }
+    }
+
+    /// `explain_core` with a command entry + http entry prints each matching
+    /// entry (plugin, event, matcher, kind) and "would run", but executes NO
+    /// handler: the command's sentinel file must not be created.
+    #[test]
+    fn explain_core_prints_entries_runs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("was_run_by_explain.txt");
+        // Command that would create a sentinel file if executed.
+        let cmd = format!("touch '{}'", sentinel.display());
+
+        let m = make_manifest_for_explain(Some(&cmd), Some("https://example.invalid/hook"));
+
+        let stdin = r#"{"tool_name":"Bash"}"#;
+        let lines = explain_core("cursor", "PreToolUse", stdin, Some(&m));
+
+        // Handler was NOT run: the sentinel file must be absent.
+        assert!(
+            !sentinel.exists(),
+            "explain_core must run no handlers (command sentinel created by accident)"
+        );
+
+        let joined = lines.join("\n");
+        // Both entries are reported.
+        assert!(
+            joined.contains("cat:cmd-guard"),
+            "output must name the command plugin; got: {joined}"
+        );
+        assert!(
+            joined.contains("kind=command"),
+            "output must show handler kind=command; got: {joined}"
+        );
+        assert!(
+            joined.contains("cat:http-guard"),
+            "output must name the http plugin; got: {joined}"
+        );
+        assert!(
+            joined.contains("kind=http"),
+            "output must show handler kind=http; got: {joined}"
+        );
+        assert!(
+            joined.contains("would run"),
+            "output must contain 'would run'; got: {joined}"
+        );
+
+        // Handler BODY is not printed.
+        assert!(
+            !joined.contains("touch"),
+            "command body must NOT appear in explain output; got: {joined}"
+        );
+        assert!(
+            !joined.contains("example.invalid"),
+            "http URL must NOT appear in explain output; got: {joined}"
+        );
+    }
+
+    /// A non-matching tool name produces the "no entries match" fallback and
+    /// still runs nothing.
+    #[test]
+    fn explain_core_no_match_produces_fallback_message() {
+        let m = make_manifest_for_explain(Some("exit 2"), None);
+        // `Edit` does not match the `Bash` matcher.
+        let stdin = r#"{"tool_name":"Edit"}"#;
+        let lines = explain_core("cursor", "PreToolUse", stdin, Some(&m));
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("no entries match") || joined.contains("allow"),
+            "no-match must produce a fallback allow message; got: {joined}"
+        );
+    }
+
+    /// A missing manifest produces the "no manifest" fallback, never panics.
+    #[test]
+    fn explain_core_no_manifest_produces_fallback_message() {
+        let lines = explain_core("cursor", "PreToolUse", "{}", None);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("no manifest"),
+            "missing manifest must produce a fallback message; got: {joined}"
+        );
+    }
+
+    /// The scrubber elides a secret in the plugin name (provider_key pattern):
+    /// a `sk-...` token embedded in the plugin provenance string must NOT appear
+    /// in the explain output — it must be replaced by `<scrubbed>`.
+    ///
+    /// In practice, plugin names do not contain API keys; this test is the
+    /// security regression pin that the unconditional scrub pass is wired in.
+    #[test]
+    fn explain_core_scrubs_secret_in_plugin_metadata() {
+        use crate::harness::hooks_ir::{Handler, HookManifest, ManifestEntry};
+        use std::collections::BTreeMap;
+
+        // A secret that matches the provider_key regex in scrub_credentials:
+        // `sk-` + ≥16 url-safe chars.
+        let secret = "sk-ant-api03-SecretSecretSecretSecretSecret";
+
+        let entry = ManifestEntry {
+            // Embed the secret in the plugin field (the scrubber must catch it).
+            plugin: format!("cat:guard-{secret}"),
+            plugin_root: None,
+            matcher: Some("Bash".to_string()),
+            if_pred: None,
+            handler: Handler::Command {
+                command: "exit 0".to_string(),
+            },
+            timeout_ms: None,
+            cwd: None,
+            env: BTreeMap::new(),
+        };
+        let mut events = BTreeMap::new();
+        events.insert("PreToolUse".to_string(), vec![entry]);
+        let m = HookManifest {
+            harness: "cursor".to_string(),
+            raw_event_passthrough: false,
+            events,
+        };
+
+        let lines = explain_core("cursor", "PreToolUse", r#"{"tool_name":"Bash"}"#, Some(&m));
+        let joined = lines.join("\n");
+
+        // The raw secret must not appear.
+        assert!(
+            !joined.contains(secret),
+            "secret must be scrubbed from explain output; got: {joined}"
+        );
+        // The scrub marker must be present, proving the scrubber ran.
+        assert!(
+            joined.contains("<scrubbed>"),
+            "scrub marker '<scrubbed>' must appear in explain output; got: {joined}"
+        );
+    }
+
+    /// `debug_trace_line` formats an allow decision correctly.
+    #[test]
+    fn debug_trace_line_formats_allow_correctly() {
+        let decision = CcDecision::default(); // allow / no-op
+        let line = debug_trace_line("cat:plug", "command", &decision);
+        assert!(
+            line.starts_with("[TOME_HOOK_DEBUG]"),
+            "trace line must start with marker; got: {line}"
+        );
+        assert!(
+            line.contains("plugin=cat:plug"),
+            "trace line must contain plugin; got: {line}"
+        );
+        assert!(
+            line.contains("kind=command"),
+            "trace line must contain kind; got: {line}"
+        );
+        assert!(
+            line.contains("decision=allow"),
+            "trace line must indicate allow; got: {line}"
+        );
+    }
+
+    /// `debug_trace_line` formats a deny decision and scrubs a secret in the reason.
+    #[test]
+    fn debug_trace_line_scrubs_secret_in_reason() {
+        let secret = "sk-ant-api03-SecretSecretSecretSecretSecret";
+        let decision = CcDecision {
+            permission: Some(Permission::Deny),
+            block: true,
+            reason: Some(format!("rejected because bearer: {secret}")),
+            ..Default::default()
+        };
+        let line = debug_trace_line("cat:plug", "command", &decision);
+
+        assert!(
+            line.contains("[TOME_HOOK_DEBUG]"),
+            "trace line must carry the debug marker; got: {line}"
+        );
+        assert!(
+            line.contains("decision=deny"),
+            "trace line must indicate deny; got: {line}"
+        );
+        // The raw secret must be scrubbed.
+        assert!(
+            !line.contains(secret),
+            "secret must not appear raw in the debug trace; got: {line}"
         );
     }
 
