@@ -62,7 +62,7 @@ impl PortableEvent {
 /// CC's `mcp_tool`/`agent` handler kinds are NOT representable here and are
 /// dropped at parse time (→ GUARDRAILS).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Handler {
     /// Relocated verbatim (only the 2 path tokens rewritten by the parser).
     Command { command: String },
@@ -332,6 +332,105 @@ mod tests {
         );
         assert!(drops.is_empty());
 
+        // An http hook: non-string header value (X-Num: 123) must be silently
+        // filtered by json_string_map; allowedEnvVars (camelCase) maps to
+        // allowed_env_vars (snake_case).
+        let rw = rewritten(
+            "Stop",
+            serde_json::json!([
+                { "hooks": [
+                    {
+                        "type": "http",
+                        "url": "https://example.com/hook",
+                        "headers": { "Authorization": "Bearer x", "X-Num": 123 },
+                        "allowedEnvVars": ["TOKEN"]
+                    }
+                ]}
+            ]),
+        );
+        let mut drops = Vec::new();
+        let hooks = parse_canonical_hooks("cat", "plug", &rw, &mut drops);
+        assert_eq!(hooks.len(), 1);
+        assert!(drops.is_empty());
+        let Handler::Http {
+            ref url,
+            ref headers,
+            ref allowed_env_vars,
+        } = hooks[0].handler
+        else {
+            panic!("expected Http handler, got {:?}", hooks[0].handler);
+        };
+        assert_eq!(url, "https://example.com/hook");
+        assert_eq!(allowed_env_vars, &["TOKEN"]);
+        // Non-string header X-Num:123 is filtered; only the string-valued
+        // Authorization header survives.
+        assert_eq!(headers.len(), 1, "only string headers survive: {headers:?}");
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer x")
+        );
+
+        // A prompt hook → KEPT (the parse layer does not gate prompts; US6's
+        // config-gate is applied by the caller).
+        let rw = rewritten(
+            "PreToolUse",
+            serde_json::json!([
+                { "hooks": [ { "type": "prompt", "prompt": "Check this tool call" } ] }
+            ]),
+        );
+        let mut drops = Vec::new();
+        let hooks = parse_canonical_hooks("cat", "plug", &rw, &mut drops);
+        assert_eq!(hooks.len(), 1);
+        assert!(drops.is_empty());
+        assert_eq!(
+            hooks[0].handler,
+            Handler::Prompt {
+                prompt: "Check this tool call".into()
+            }
+        );
+
+        // A command hook missing the required "command" field → UnsupportedHandler.
+        let rw = rewritten(
+            "PreToolUse",
+            serde_json::json!([
+                { "hooks": [ { "type": "command" } ] }
+            ]),
+        );
+        let mut drops = Vec::new();
+        let hooks = parse_canonical_hooks("cat", "plug", &rw, &mut drops);
+        assert!(hooks.is_empty());
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].reason, HookDropReason::UnsupportedHandler);
+
+        // An http hook missing the required "url" field → UnsupportedHandler.
+        let rw = rewritten(
+            "PreToolUse",
+            serde_json::json!([
+                { "hooks": [ { "type": "http" } ] }
+            ]),
+        );
+        let mut drops = Vec::new();
+        let hooks = parse_canonical_hooks("cat", "plug", &rw, &mut drops);
+        assert!(hooks.is_empty());
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].reason, HookDropReason::UnsupportedHandler);
+
+        // A group with an "if" predicate → the predicate is extracted verbatim
+        // into CanonicalHook.if_pred.
+        let rw = rewritten(
+            "PreToolUse",
+            serde_json::json!([
+                { "if": "Bash(git push *)", "hooks": [
+                    { "type": "command", "command": "/p/check.sh" }
+                ]}
+            ]),
+        );
+        let mut drops = Vec::new();
+        let hooks = parse_canonical_hooks("cat", "plug", &rw, &mut drops);
+        assert_eq!(hooks.len(), 1);
+        assert!(drops.is_empty());
+        assert_eq!(hooks[0].if_pred.as_deref(), Some("Bash(git push *)"));
+
         // A non-portable event → dropped.
         let rw = rewritten(
             "Notification",
@@ -365,17 +464,38 @@ mod tests {
             raw_event_passthrough: false,
             events: BTreeMap::from([(
                 "PreToolUse".to_owned(),
-                vec![ManifestEntry {
-                    plugin: "cat:plug".into(),
-                    matcher: Some("Bash".into()),
-                    if_pred: None,
-                    handler: Handler::Command {
-                        command: "/p/guard.sh".into(),
+                vec![
+                    ManifestEntry {
+                        plugin: "cat:plug".into(),
+                        matcher: Some("Bash".into()),
+                        if_pred: None,
+                        handler: Handler::Command {
+                            command: "/p/guard.sh".into(),
+                        },
+                        timeout_ms: Some(30_000),
+                        cwd: None,
+                        env: BTreeMap::new(),
                     },
-                    timeout_ms: Some(30_000),
-                    cwd: None,
-                    env: BTreeMap::new(),
-                }],
+                    // Second entry: Http handler with if_pred, exercising
+                    // the rename="if" serialisation and the
+                    // skip_serializing_if guards on headers/allowed_env_vars.
+                    ManifestEntry {
+                        plugin: "cat:plug2".into(),
+                        matcher: None,
+                        if_pred: Some("Bash(git push *)".into()),
+                        handler: Handler::Http {
+                            url: "https://example.com/hook".into(),
+                            headers: BTreeMap::from([(
+                                "Authorization".to_owned(),
+                                "Bearer token".to_owned(),
+                            )]),
+                            allowed_env_vars: vec!["TOKEN".to_owned()],
+                        },
+                        timeout_ms: None,
+                        cwd: None,
+                        env: BTreeMap::new(),
+                    },
+                ],
             )]),
         };
         let dir = tempfile::tempdir().unwrap();
@@ -385,6 +505,14 @@ mod tests {
         assert_eq!(back, m);
         // Strict: an unknown top-level key is rejected.
         std::fs::write(&path, r#"{"harness":"x","events":{},"bogus":1}"#).unwrap();
+        assert!(read_manifest(&path).is_err());
+        // Strict (locks Fix 1): a handler object with an unknown key must also
+        // be rejected because Handler carries deny_unknown_fields.
+        std::fs::write(
+            &path,
+            r#"{"harness":"x","events":{"PreToolUse":[{"plugin":"p","handler":{"type":"command","command":"x","bogus":1}}]}}"#,
+        )
+        .unwrap();
         assert!(read_manifest(&path).is_err());
     }
 }
