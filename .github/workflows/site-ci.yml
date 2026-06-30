@@ -1,5 +1,18 @@
-name: CI
-on: [push, pull_request]
+name: Site CI
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/site-ci.yml'
+  pull_request:
+    paths:
+      - 'site/**'
+      - '.github/workflows/site-ci.yml'
+
+defaults:
+  run:
+    working-directory: site
 
 permissions:
   contents: read
@@ -14,6 +27,7 @@ jobs:
         with:
           node-version: "22"
           cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - name: Doc drift check
         run: pnpm drift:check

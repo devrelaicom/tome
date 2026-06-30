@@ -2,8 +2,12 @@ name: Security
 
 on:
   pull_request:
+    paths-ignore:
+      - 'site/**'
   push:
     branches: [main]
+    paths-ignore:
+      - 'site/**'
   schedule:
     # Weekly on Mondays at 04:17 UTC. Drift the minute to avoid the
     # top-of-the-hour stampede on GitHub-hosted runners.
