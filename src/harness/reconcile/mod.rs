@@ -63,6 +63,13 @@ pub(crate) mod plugins;
 /// and the orchestrator's rules/MCP loop — `pub(crate)` so each caller reuses
 /// the one path. Moved out of `agents` in the Phase 7 decomposition (FR-011)
 /// once all three sinks shared it.
+///
+/// Deduplication: for harnesses whose session-steering reconciler AND dispatch
+/// reconciler both visit the same hook file (codex/devin/gemini/copilot-cli),
+/// the second `record_action` call for the same `(harness, subsystem, path)`
+/// triplet is silently dropped so the path appears exactly ONCE in
+/// `outcome.added/updated/removed`. This does NOT apply to `LeftAlone` (which
+/// only increments a counter, never creates a change record).
 pub(crate) fn record_action(
     outcome: &mut SyncOutcome,
     harness: &str,
@@ -70,15 +77,31 @@ pub(crate) fn record_action(
     path: &Path,
     action: Action,
 ) {
+    if action == Action::LeftAlone {
+        outcome.leave_alones += 1;
+        return;
+    }
     let change = SyncChange {
         harness: harness.to_string(),
         subsystem,
         path: path.to_path_buf(),
     };
+    // Dedupe: skip if (harness, subsystem, path) is already in any change list.
+    if outcome
+        .added
+        .iter()
+        .chain(outcome.updated.iter())
+        .chain(outcome.removed.iter())
+        .any(|c| {
+            c.harness == change.harness && c.subsystem == change.subsystem && c.path == change.path
+        })
+    {
+        return;
+    }
     match action {
         Action::Created => outcome.added.push(change),
         Action::Updated => outcome.updated.push(change),
         Action::Removed => outcome.removed.push(change),
-        Action::LeftAlone => outcome.leave_alones += 1,
+        Action::LeftAlone => unreachable!("LeftAlone handled above"),
     }
 }

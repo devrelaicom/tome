@@ -1325,6 +1325,17 @@ fn reconcile_dispatch_hook_file(
         }
     };
 
+    // Fix 2: track whether entry_array_by_key will stamp `version:1` on a
+    // Copilot/Cursor file that currently lacks it. That stamp is a real
+    // on-disk mutation even when no run-hook entry is added or removed.
+    let version_absent_before = matches!(
+        support.file_spec,
+        HookFileSpec::CopilotHooks | HookFileSpec::CursorHooks
+    ) && doc
+        .as_object()
+        .map(|o| !o.contains_key("version"))
+        .unwrap_or(false);
+
     let mut added_any = false;
     let mut removed_any = false;
     for &event in support.events {
@@ -1370,7 +1381,16 @@ fn reconcile_dispatch_hook_file(
         }
     }
 
-    if !added_any && !removed_any {
+    // version_stamped is true when entry_array_by_key wrote `version:1` into
+    // a Copilot/Cursor doc that lacked it. This is a real mutation that must
+    // be flushed even when no run-hook entry changed.
+    let version_stamped = version_absent_before
+        && doc
+            .as_object()
+            .map(|o| o.contains_key("version"))
+            .unwrap_or(false);
+
+    if !added_any && !removed_any && !version_stamped {
         return Action::LeftAlone;
     }
     if let Err(e) = write_hook_file(path, &doc) {
@@ -1381,7 +1401,7 @@ fn reconcile_dispatch_hook_file(
     }
     let action = if !existed {
         Action::Created
-    } else if added_any {
+    } else if added_any || version_stamped {
         Action::Updated
     } else {
         Action::Removed
@@ -1435,6 +1455,15 @@ fn reconcile_dispatch_manifest(
     if events.is_empty() {
         // No dispatch needed → remove a stale manifest if present.
         if !manifest_existed {
+            return Action::LeftAlone;
+        }
+        // Guard against symlink attacks before removing (PW6 exit-44 parity).
+        if let Err(e) =
+            crate::util::refuse_symlinked_component(path).map_err(|e| hook_symlink_refusal(path, e))
+        {
+            if first_error.is_none() {
+                *first_error = Some(e);
+            }
             return Action::LeftAlone;
         }
         match std::fs::remove_file(path) {
