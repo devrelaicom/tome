@@ -581,6 +581,44 @@ mod tests {
         assert!(err.to_string().contains("no model"), "{err}");
     }
 
+    /// Fix 4, US6 review: `resolve(cfg, HookPrompt)` → exit 93 when
+    /// `prompt_provider` is set but `prompt_model` is absent.
+    #[test]
+    fn hook_prompt_provider_without_model_is_93() {
+        let config = config_with(
+            "p",
+            entry(ProviderKind::Openai, None, None),
+            Capability::HookPrompt,
+            Some("p"),
+            None, // no model → must be rejected with exit 93
+        );
+        let err = resolve(&config, Capability::HookPrompt).unwrap_err();
+        assert_eq!(err.exit_code(), 93, "missing prompt_model must be exit 93");
+        assert!(err.to_string().contains("no model"), "{err}");
+    }
+
+    /// Fix 4, US6 review: an illegal provider kind for HookPrompt (voyage is
+    /// only valid for embedding/reranker) → exit 93.
+    #[test]
+    fn hook_prompt_illegal_kind_voyage_is_93() {
+        let config = config_with(
+            "p",
+            entry(ProviderKind::Voyage, None, None),
+            Capability::HookPrompt,
+            Some("p"),
+            Some("voyage-rerank-2"),
+        );
+        let err = resolve(&config, Capability::HookPrompt).unwrap_err();
+        assert_eq!(
+            err.exit_code(),
+            93,
+            "voyage kind must be illegal for hook_prompt"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("voyage"), "{msg}");
+        assert!(msg.contains("hook_prompt"), "{msg}");
+    }
+
     // --- base_url default vs explicit ----------------------------------------
 
     #[test]

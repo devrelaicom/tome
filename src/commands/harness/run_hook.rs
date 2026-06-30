@@ -282,7 +282,12 @@ fn dispatch_inner(
             }
             // US6.2: execute the prompt handler via the configured BYOM provider.
             // Fails open (CcDecision::default) on any Tome-side fault.
-            Handler::Prompt { prompt } => run_prompt_handler(prompt, &cc_stdin, cfg),
+            // entry.timeout_ms is forwarded so the hook's declared budget is
+            // honoured (Fix 2, US6 review — uses the smaller of the hook
+            // timeout and the provider default).
+            Handler::Prompt { prompt } => {
+                run_prompt_handler(prompt, &cc_stdin, cfg, entry.timeout_ms)
+            }
         };
         decisions.push((entry.plugin.clone(), decision));
     }
@@ -622,11 +627,19 @@ fn run_http_handler(
 ///
 /// ## I/O contract (our internal protocol with the model)
 ///
-/// * **System message**: the hook's `prompt` text (the plugin author's policy).
+/// * **System message**: the hook's `prompt` text (the plugin author's policy)
+///   PLUS an explicit JSON-only reply contract instruction (Fix 1a, US6 review).
 /// * **User message**: the CC context JSON from stdin (the event payload).
 /// * **Expected reply**: `{"ok":true}` (allow) or `{"ok":false,"reason":"…"}` (deny).
 ///
-/// The parse is lenient: any reply that is not `{"ok":false,...}` → allow.
+/// The parse is lenient (Fix 1b): strips markdown code fences, falls back to
+/// extracting the first balanced `{…}` from prose, then applies the deny rule.
+/// Any reply that is not `{"ok":false,...}` → allow (fail-open).
+///
+/// ## Timeout (Fix 2)
+///
+/// When the manifest entry carries a `timeout_ms`, Tome uses the SMALLER of the
+/// hook's timeout and the provider's default, capping the LLM call on the hot path.
 ///
 /// ## Fail-open totality
 ///
@@ -639,33 +652,70 @@ fn run_http_handler(
 /// When `prompt_model` is set but `prompt_provider` is unset, `resolve` returns
 /// `Ok(None)` (bundled-only). This path is currently UNAVAILABLE (deferred to a
 /// future US): `run_inference` is private in `summarise/llama.rs` and wiring llama
-/// here is out of scope for US6. The handler fails open with a TODO comment.
+/// here is out of scope for US6. The handler fails open with a debug log.
 /// The manifest gate in `reconcile_one_harness_dispatch` still carries the handler
 /// (both `prompt_model` and `prompt_provider` absent → gate drops it; only
 /// `prompt_model` set, `prompt_provider` unset → gate allows it, runtime no-ops).
-fn run_prompt_handler(prompt: &str, cc_stdin: &str, cfg: &crate::config::Config) -> CcDecision {
+fn run_prompt_handler(
+    prompt: &str,
+    cc_stdin: &str,
+    cfg: &crate::config::Config,
+    timeout_ms: Option<u64>,
+) -> CcDecision {
     use crate::config::ProviderKind;
     use crate::provider::config::{Capability, resolve};
     use crate::provider::{anthropic, gemini, openai};
 
-    let resolved = match resolve(cfg, Capability::HookPrompt) {
+    let mut resolved = match resolve(cfg, Capability::HookPrompt) {
         Ok(Some(r)) => r,
         Ok(None) => {
-            // No BYOM provider. Bundled-only path (prompt_model set, no
-            // prompt_provider) is DEFERRED.
-            // US-future: bundled-local prompt via llama (run_inference is private
-            //   in summarise/llama.rs). Treat as unavailable → fail-open.
+            // No BYOM provider resolved. Bundled-only path (prompt_model set, no
+            // prompt_provider) is DEFERRED — run_inference is private in
+            // summarise/llama.rs and wiring it here is out of scope for US6.
+            // US-future: honor entry.timeout_ms for prompt eval once the
+            //   bundled-local path is wired.
+            // Fix 3: make this silent no-op observable at debug level so operators
+            // can diagnose why a prompt hook is not evaluating without log spam on
+            // every dispatch.
+            tracing::debug!(
+                "prompt hook is configured but no BYOM provider is resolved \
+                 (bundled-local path deferred) — failing open"
+            );
             return CcDecision::default();
         }
         // Config error (e.g. provider set but model missing) → fail-open.
         Err(_) => return CcDecision::default(),
     };
 
-    // Dispatch to the BYOM provider: system = policy prompt, user = event payload.
+    // Fix 2: honor the hook entry's timeout_ms on the prompt path, using the
+    // SMALLER of the hook timeout and the provider default so a long-running
+    // LLM call cannot block the agent's hot path for longer than the plugin
+    // author's declared budget.
+    //
+    // `resolved.timeout` is a public `Duration` field set by `resolve()` from
+    // `TOME_PROVIDER_TIMEOUT_SECS` (or the 30-second default). We simply cap it
+    // here; the HTTP layer in `provider/http.rs` reads `resolved.timeout`
+    // directly when building the per-call reqwest client.
+    if let Some(ms) = timeout_ms {
+        let hook_timeout = std::time::Duration::from_millis(ms);
+        resolved.timeout = resolved.timeout.min(hook_timeout);
+    }
+
+    // Fix 1a: build the system message as the plugin's policy prompt PLUS an
+    // explicit JSON-only contract instruction. A real LLM given a free-form policy
+    // prompt replies in natural language or fenced JSON; the instruction steers it
+    // to the exact wire format `parse_prompt_reply` expects.
+    let system = format!(
+        "{prompt}\n\nYou are a hook policy evaluator. Reply with ONLY a single JSON object \
+         and no other text: {{\"ok\": true}} to ALLOW the action, or \
+         {{\"ok\": false, \"reason\": \"<brief reason>\"}} to BLOCK it."
+    );
+
+    // Dispatch to the BYOM provider: system = policy + contract, user = event payload.
     let reply = match resolved.kind {
-        ProviderKind::Openai => openai::chat(&resolved, Some(prompt), cc_stdin),
-        ProviderKind::Anthropic => anthropic::chat(&resolved, Some(prompt), cc_stdin),
-        ProviderKind::Gemini => gemini::chat(&resolved, Some(prompt), cc_stdin),
+        ProviderKind::Openai => openai::chat(&resolved, Some(&system), cc_stdin),
+        ProviderKind::Anthropic => anthropic::chat(&resolved, Some(&system), cc_stdin),
+        ProviderKind::Gemini => gemini::chat(&resolved, Some(&system), cc_stdin),
         // voyage is rejected by resolve() for HookPrompt (allows_kind returns false);
         // unreachable at runtime but required for exhaustiveness — fail-open.
         ProviderKind::Voyage => return CcDecision::default(),
@@ -679,31 +729,132 @@ fn run_prompt_handler(prompt: &str, cc_stdin: &str, cfg: &crate::config::Config)
     }
 }
 
-/// Parse the model's text reply into a [`CcDecision`]. Lenient and fail-open:
-/// only a well-formed `{"ok":false,...}` produces a Deny; anything else allows.
+/// Strip a leading and trailing markdown code fence from `s` so a model
+/// that wraps its JSON reply in ` ```json … ``` ` or ` ``` … ``` ` is still
+/// parseable. Returns the inner content (trimmed), or `s` unchanged when no
+/// matching fence pair is found.
 ///
-/// The internal contract with the model: `{"ok":false,"reason":"…"}` to deny,
-/// `{"ok":true}` (or any other JSON, or non-JSON) to allow. The reason field is
-/// optional; if absent the decision carries no reason string.
-fn parse_prompt_reply(text: &str) -> CcDecision {
-    let trimmed = text.trim();
-    // Try our internal JSON contract: `{"ok":false,"reason":"…"}`.
-    // Any other value for `ok` (true, missing, non-bool) → fail-open allow.
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
-        && v.get("ok").and_then(|o| o.as_bool()) == Some(false)
-    {
-        let reason = v
-            .get("reason")
-            .and_then(|r| r.as_str())
-            .map(|s| s.to_string());
-        return CcDecision {
-            permission: Some(Permission::Deny),
-            block: true,
-            reason,
-            ..Default::default()
-        };
+/// Never panics: all indexing is bounds-checked via `str` APIs.
+fn strip_fences(s: &str) -> &str {
+    // Only process strings that start with the fence marker.
+    let Some(after_open) = s.strip_prefix("```") else {
+        return s;
+    };
+    // Find the closing ``` (must be AFTER the opening fence).
+    let Some(close_pos) = s[3..].rfind("```") else {
+        return s; // no closing fence — treat as raw text.
+    };
+    let close_start = 3 + close_pos; // byte offset of the closing ``` in `s`
+
+    // Skip the optional language tag (e.g. "json\n") on the opening fence line.
+    let inner_start = after_open.find('\n').map_or(after_open.len(), |p| p + 1);
+    // `inner_start` is a byte offset inside `after_open` = `s[3..]`.
+    let content_start = 3 + inner_start;
+
+    if content_start > close_start {
+        // Degenerate: the content region is empty or inverted — return as-is.
+        return s;
     }
-    // Non-JSON reply or ok≠false → fail-open allow.
+    s[content_start..close_start].trim()
+}
+
+/// Extract the FIRST balanced `{ … }` substring from `s`. Used as a fallback
+/// when the whole string does not parse as JSON (e.g. the model prepends prose
+/// before the JSON object). Returns `None` when no balanced brace pair exists.
+///
+/// Never panics: `depth` only decrements when already >0; string/escape
+/// tracking prevents treating a `}` inside a quoted value as closing.
+fn first_json_object(s: &str) -> Option<&str> {
+    let start = s.find('{')?;
+    let bytes = s.as_bytes();
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    for (i, &b) in bytes[start..].iter().enumerate() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            match b {
+                b'\\' => escape = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                // depth is always ≥1 here because the outer `{` increments it
+                // before any `}` is seen; saturating_sub keeps it panic-free.
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(&s[start..start + i + 1]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Parse the model's text reply into a [`CcDecision`]. Lenient and fail-open:
+/// only a well-formed `{"ok":false,...}` (anywhere in the reply) produces a
+/// Deny; anything else allows.
+///
+/// Fix 1b parsing pipeline:
+/// 1. Strip markdown code fences (` ```json … ``` ` or ` ``` … ``` `).
+/// 2. Try parsing the stripped text directly as a JSON object.
+/// 3. If that fails, extract the first balanced `{ … }` substring and parse it.
+/// 4. Apply the deny rule: `ok == false` (bool) → Deny + optional `reason`.
+/// 5. Everything else (ok != false, no JSON object, parse failure) → fail-open allow.
+///
+/// Never panics: no bare indexing on untrusted input; all Results are matched.
+fn parse_prompt_reply(text: &str) -> CcDecision {
+    // Helper: check whether a parsed JSON Value is a deny decision.
+    let to_deny = |v: &serde_json::Value| -> Option<CcDecision> {
+        if v.get("ok").and_then(|o| o.as_bool()) == Some(false) {
+            let reason = v
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .map(|s| s.to_owned());
+            Some(CcDecision {
+                permission: Some(Permission::Deny),
+                block: true,
+                reason,
+                ..Default::default()
+            })
+        } else {
+            None
+        }
+    };
+
+    // 1. Strip markdown code fences so a model-wrapped ` ```json {…} ``` ` parses.
+    let stripped = strip_fences(text.trim());
+
+    // 2. Try direct parse of the whole stripped text.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(stripped) {
+        if let Some(d) = to_deny(&v) {
+            return d;
+        }
+        // Valid JSON but ok ≠ false → fail-open allow. No need to probe for
+        // an embedded object: the entire text WAS valid JSON.
+        return CcDecision::default();
+    }
+
+    // 3. Whole text did not parse — try extracting the first `{…}` substring.
+    //    This handles "I've reviewed the request. {\"ok\":false,\"reason\":\"x\"}" style
+    //    prose replies where the model ignored the JSON-only instruction.
+    if let Some(obj_str) = first_json_object(stripped)
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(obj_str)
+        && let Some(d) = to_deny(&v)
+    {
+        return d;
+    }
+
+    // 4. Non-JSON reply or ok≠false in every candidate → fail-open allow.
     CcDecision::default()
 }
 
@@ -1611,6 +1762,149 @@ mod tests {
         assert_eq!(cc["cwd"], "");
         assert_eq!(cc["session_id"], "");
         assert_eq!(cc["tool_name"], "Bash");
+    }
+
+    // --- parse_prompt_reply unit tests (Fix 1b, US6 review) ---------------------
+
+    /// A fenced `{"ok":false,"reason":"x"}` → Deny with the reason forwarded.
+    /// This is the primary regression for Fix 1b: a real model wrapping its JSON
+    /// in a markdown code fence was previously opaque to the parser.
+    #[test]
+    fn parse_prompt_reply_fenced_deny_extracts_reason() {
+        let reply = "```json\n{\"ok\":false,\"reason\":\"blocked by policy\"}\n```";
+        let d = parse_prompt_reply(reply);
+        assert_eq!(d.permission, Some(Permission::Deny));
+        assert!(d.block);
+        assert_eq!(d.reason.as_deref(), Some("blocked by policy"));
+    }
+
+    /// An `{"ok":false}` object embedded mid-prose → Deny. Models sometimes
+    /// prepend an explanation before the JSON despite the JSON-only instruction.
+    #[test]
+    fn parse_prompt_reply_embedded_in_prose_deny() {
+        let reply = "After careful consideration of the request, I believe this is unsafe. \
+                     {\"ok\":false,\"reason\":\"dangerous command\"} Hope that helps.";
+        let d = parse_prompt_reply(reply);
+        assert_eq!(d.permission, Some(Permission::Deny));
+        assert!(d.block);
+        assert_eq!(d.reason.as_deref(), Some("dangerous command"));
+    }
+
+    /// `{"ok":true}` → non-blocking allow (empty decision).
+    #[test]
+    fn parse_prompt_reply_ok_true_allows() {
+        let reply = "{\"ok\":true}";
+        let d = parse_prompt_reply(reply);
+        assert_eq!(d.permission, None);
+        assert!(!d.block);
+        assert!(d.reason.is_none());
+    }
+
+    /// Free-text natural-language response → fail-open allow. The model
+    /// ignored the JSON-only instruction but Tome must not block.
+    #[test]
+    fn parse_prompt_reply_free_text_fails_open() {
+        let reply = "This looks unsafe and I recommend blocking it.";
+        let d = parse_prompt_reply(reply);
+        assert_eq!(d.permission, None);
+        assert!(!d.block);
+    }
+
+    /// Structurally malformed / truncated text → fail-open allow.
+    #[test]
+    fn parse_prompt_reply_malformed_fails_open() {
+        for bad in &[
+            "",
+            "   ",
+            "{not valid json at all",
+            "null",
+            "42",
+            "{\"ok\":\"maybe\"}", // ok is a string, not bool
+            "{\"ok\":null}",      // ok is null
+        ] {
+            let d = parse_prompt_reply(bad);
+            assert_eq!(
+                d.permission, None,
+                "malformed input {bad:?} must fail open (permission = None)"
+            );
+            assert!(!d.block, "malformed input {bad:?} must not block");
+        }
+    }
+
+    /// `{"ok":false}` without a `reason` field → Deny with `reason: None`.
+    #[test]
+    fn parse_prompt_reply_deny_without_reason() {
+        let d = parse_prompt_reply("{\"ok\":false}");
+        assert_eq!(d.permission, Some(Permission::Deny));
+        assert!(d.block);
+        assert!(d.reason.is_none());
+    }
+
+    /// A ` ``` ` (no language tag) fence is also stripped.
+    #[test]
+    fn parse_prompt_reply_bare_fence_stripped() {
+        let reply = "```\n{\"ok\":false,\"reason\":\"bare fence\"}\n```";
+        let d = parse_prompt_reply(reply);
+        assert_eq!(d.permission, Some(Permission::Deny));
+        assert_eq!(d.reason.as_deref(), Some("bare fence"));
+    }
+
+    // --- strip_fences unit tests --------------------------------------------------
+
+    #[test]
+    fn strip_fences_json_lang_tag() {
+        assert_eq!(strip_fences("```json\n{\"ok\":true}\n```"), "{\"ok\":true}");
+    }
+
+    #[test]
+    fn strip_fences_no_lang_tag() {
+        assert_eq!(strip_fences("```\nhello\n```"), "hello");
+    }
+
+    #[test]
+    fn strip_fences_no_fence_unchanged() {
+        assert_eq!(strip_fences("{\"ok\":true}"), "{\"ok\":true}");
+    }
+
+    #[test]
+    fn strip_fences_unclosed_fence_unchanged() {
+        // Opening ``` without a matching closing ``` → return unchanged.
+        let s = "```json\n{\"ok\":true}";
+        assert_eq!(strip_fences(s), s);
+    }
+
+    // --- first_json_object unit tests --------------------------------------------
+
+    #[test]
+    fn first_json_object_plain() {
+        assert_eq!(first_json_object("{\"a\":1}"), Some("{\"a\":1}"));
+    }
+
+    #[test]
+    fn first_json_object_prose_prefix() {
+        assert_eq!(
+            first_json_object("Some text before {\"ok\":false} and more text"),
+            Some("{\"ok\":false}")
+        );
+    }
+
+    #[test]
+    fn first_json_object_no_object() {
+        assert!(first_json_object("no braces here").is_none());
+        assert!(first_json_object("").is_none());
+    }
+
+    #[test]
+    fn first_json_object_nested_braces() {
+        // The outermost balanced pair is extracted, including nested content.
+        let s = "{\"a\":{\"b\":1}}";
+        assert_eq!(first_json_object(s), Some(s));
+    }
+
+    #[test]
+    fn first_json_object_unbalanced_ignores_inner() {
+        // Opening brace without a matching close → None.
+        assert!(first_json_object("{unclosed").is_none());
     }
 
     /// An unmapped native tool name falls back to itself (so a matcher that

@@ -221,3 +221,87 @@ fn dispatch_core_prompt_handler_is_still_fail_open() {
         out.stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// Fix 1b: parser hardening — integration tests through the full transport seam
+// ---------------------------------------------------------------------------
+
+/// Fix 1b: a model that wraps its JSON reply in a markdown code fence
+/// (`\`\`\`json … \`\`\``) is now parsed correctly → Deny.
+///
+/// Before Fix 1b the fenced reply fell through as non-JSON and the handler
+/// failed open (silently allowing a request the plugin author meant to block).
+#[test]
+fn byom_fenced_json_deny_is_parsed() {
+    let _guard = set_transport_override(|_spec| {
+        Ok(openai_ok_response(
+            "```json\n{\"ok\":false,\"reason\":\"fenced deny\"}\n```",
+        ))
+    });
+
+    let m = manifest_with_prompt("Is this tool use safe?");
+    let cfg = cfg_with_openai_prompt();
+    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg);
+
+    assert_eq!(out.exit_code, 0, "Cursor deny must be exit 0");
+    assert!(
+        out.stdout.contains("\"permission\":\"deny\""),
+        "fenced deny must map to Cursor deny: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("fenced deny"),
+        "deny reason must be forwarded: {}",
+        out.stdout
+    );
+}
+
+/// Fix 1b: a model that embeds the JSON object mid-prose is now parsed → Deny.
+/// The extractor finds the first balanced `{…}` and parses it.
+#[test]
+fn byom_prose_with_embedded_deny_is_parsed() {
+    let _guard = set_transport_override(|_spec| {
+        Ok(openai_ok_response(
+            "After careful review I think this is unsafe. \
+             {\"ok\":false,\"reason\":\"embedded deny\"} Please reconsider.",
+        ))
+    });
+
+    let m = manifest_with_prompt("Is this tool use safe?");
+    let cfg = cfg_with_openai_prompt();
+    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg);
+
+    assert_eq!(out.exit_code, 0);
+    assert!(
+        out.stdout.contains("\"permission\":\"deny\""),
+        "prose-embedded deny must map to Cursor deny: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("embedded deny"),
+        "deny reason must be forwarded: {}",
+        out.stdout
+    );
+}
+
+/// Fix 1b: a model that embeds `{"ok":true}` mid-prose → fail-open allow.
+/// The extractor finds the object but `ok=true` is not a deny.
+#[test]
+fn byom_prose_with_embedded_allow_fails_open() {
+    let _guard = set_transport_override(|_spec| {
+        Ok(openai_ok_response(
+            "This looks fine to me. {\"ok\":true} Go ahead.",
+        ))
+    });
+
+    let m = manifest_with_prompt("Is this tool use safe?");
+    let cfg = cfg_with_openai_prompt();
+    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg);
+
+    assert_eq!(out.exit_code, 0);
+    assert!(
+        out.stdout.is_empty(),
+        "prose ok:true must produce an empty allow: {}",
+        out.stdout
+    );
+}
