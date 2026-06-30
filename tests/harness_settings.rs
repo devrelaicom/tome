@@ -65,6 +65,8 @@ mod harness_use_scope;
 mod harness_use_selection;
 #[path = "harness_settings/hook_dispatch_command.rs"]
 mod hook_dispatch_command;
+#[path = "harness_settings/hook_dispatch_e2e.rs"]
+mod hook_dispatch_e2e;
 #[path = "harness_settings/hook_dispatch_emit.rs"]
 mod hook_dispatch_emit;
 #[path = "harness_settings/hook_dispatch_failopen.rs"]

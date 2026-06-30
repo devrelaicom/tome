@@ -851,6 +851,22 @@ mod tests {
         assert_eq!(m.updated_input, Some(serde_json::json!({"v": 2})));
     }
 
+    /// A malformed manifest on disk reads as `None` (the `.ok()` swallow), which
+    /// `dispatch_core` turns into a fail-open allow at exit 0. This is the only
+    /// layer that can exercise `read_manifest` (crate-private), so the malformed
+    /// → None → fail-open chain is pinned here rather than in an integration test.
+    #[test]
+    fn malformed_manifest_reads_as_none_then_fail_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks-manifest.json");
+        std::fs::write(&path, "{ this is not valid json").unwrap();
+        let manifest = crate::harness::hooks_ir::read_manifest(&path).ok();
+        assert!(manifest.is_none(), "malformed manifest must read as None");
+        let out = dispatch_core("cursor", "PreToolUse", "{}", manifest.as_ref());
+        assert_eq!(out.exit_code, 0);
+        assert!(out.stdout.is_empty());
+    }
+
     /// A timed-out command is killed and degrades to a non-blocking allow
     /// (exit 0, empty) — a Tome timeout is NEVER a block.
     #[test]
