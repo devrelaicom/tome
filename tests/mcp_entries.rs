@@ -48,6 +48,16 @@ mod entry_kind_indexing;
 mod exit_codes_e2e_mcp;
 #[path = "mcp_entries/hook_translate_capability.rs"]
 mod hook_translate_capability;
+#[path = "mcp_entries/hook_translate_codex.rs"]
+mod hook_translate_codex;
+#[path = "mcp_entries/hook_translate_copilot_cli.rs"]
+mod hook_translate_copilot_cli;
+#[path = "mcp_entries/hook_translate_cursor.rs"]
+mod hook_translate_cursor;
+#[path = "mcp_entries/hook_translate_devin.rs"]
+mod hook_translate_devin;
+#[path = "mcp_entries/hook_translate_gemini.rs"]
+mod hook_translate_gemini;
 #[path = "mcp_entries/live_sync.rs"]
 mod live_sync;
 #[path = "mcp_entries/mcp_config_clash.rs"]
