@@ -301,11 +301,21 @@ fn fill_hook_translation_harnesses(
     let Some(effective) = resolve_effective_for_status(scope, paths) else {
         return;
     };
-    let count = effective
-        .harnesses
-        .iter()
-        .filter(|h| crate::harness::lookup(&h.name).is_some_and(|m| m.hook_support().is_some()))
-        .count();
+    // Resolve `hook_support()` through `with_effective_modules` so the
+    // `HARNESS_MODULES_OVERRIDE` test seam is honoured — consistent with
+    // how doctor's `build_hook_translation_report` resolves it (P11 fix).
+    // Using `lookup` here would bypass the override and diverge from doctor
+    // under a test-installed module set.
+    let count = crate::harness::with_effective_modules(|mods| {
+        effective
+            .harnesses
+            .iter()
+            .filter(|h| {
+                mods.iter()
+                    .any(|m| m.name() == h.name && m.hook_support().is_some())
+            })
+            .count()
+    });
     report.hook_translation_harnesses = u32::try_from(count).unwrap_or(u32::MAX);
 }
 

@@ -973,13 +973,18 @@ pub struct DoctorReport {
     /// Phase 13 (native-agent model-registry): the read-only model-registry
     /// subsystem report. Always present (baked at minimum) — NOT `Option`.
     pub model_registry: ModelRegistryReport,
+    pub overall: DoctorClassification,
+    pub suggested_fixes: Vec<SuggestedFix>,
     /// US11 (native plugin-hook translation): read-only per-harness hook-dispatch
     /// state. Populated when any effective harness supports hook translation.
     /// `None` when no hook-translating harness is in scope → key omitted from
     /// JSON (`skip_serializing_if`), so the byte-stable minimal-report pin stays
     /// unchanged. `assemble_report` populates it via `build_phase6_surfaces`.
+    ///
+    /// Field is LAST so it is truly "trailing" per the byte-stable-pin
+    /// discipline: `skip_serializing_if` keeps the minimal-report JSON shape
+    /// unchanged (key absent when `None`), and new per-harness rows appended in
+    /// future phases do not shift the positions of `overall` / `suggested_fixes`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hook_translation: Option<HookTranslationReport>,
-    pub overall: DoctorClassification,
-    pub suggested_fixes: Vec<SuggestedFix>,
 }

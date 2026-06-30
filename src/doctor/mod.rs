@@ -243,7 +243,7 @@ pub fn assemble_report(
         privilege_escalation,
         personas,
         hook_translation,
-    } = build_phase6_surfaces(scope, paths).unwrap_or_default();
+    } = build_phase6_surfaces(scope, paths, effective_harness_list.as_ref()).unwrap_or_default();
 
     // ---- Phase 12 / US4 additions (read-only) -----------------------
     //
@@ -462,9 +462,15 @@ struct Phase6Surfaces {
 /// [`build_phase5_surfaces`]'s `GlobalFallback` + no-DB + read-only-DB
 /// gating. Returns the all-`None` default when the scope is `GlobalFallback`
 /// or the index DB is absent / unopenable.
+///
+/// `effective` is the scope's resolved harness list (computed by the caller
+/// via `build_effective_harness_list`); it is threaded into
+/// `build_hook_translation_report` so the hook-translation surface and the
+/// `status` surface are gated on the SAME effective set (the P11 bug-fix).
 fn build_phase6_surfaces(
     scope: &ResolvedScope,
     paths: &Paths,
+    effective: Option<&crate::settings::resolver::EffectiveHarnessList>,
 ) -> Result<Phase6Surfaces, TomeError> {
     use crate::workspace::ScopeSource;
     if matches!(scope.source, ScopeSource::GlobalFallback) {
@@ -564,8 +570,11 @@ fn build_phase6_surfaces(
     // US11: plugin-hook translation read-only surface. Populated when any
     // effective harness supports hook translation. Config loaded defensively
     // (malformed → defaults) to keep doctor infallible.
+    // `effective` is threaded in from `assemble_report` (P11 fix) so the
+    // hook-translation surface is gated on the SAME scope-effective set as
+    // `status`, not the full module registry.
     let cfg_hooks = crate::config::load_or_default(paths);
-    let ht = checks::build_hook_translation_report(paths, workspace_name, &cfg_hooks);
+    let ht = checks::build_hook_translation_report(paths, workspace_name, &cfg_hooks, effective);
     out.hook_translation = if ht.per_harness.is_empty() {
         None
     } else {

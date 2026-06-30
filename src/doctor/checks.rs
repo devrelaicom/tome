@@ -1474,30 +1474,68 @@ pub fn check_model_registry(paths: &Paths) -> ModelRegistryReport {
 /// never creates directories. Missing or unreadable manifests are treated as
 /// "no registered events" — not an error (unsynced or no hooks yet).
 ///
-/// Returns a `HookTranslationReport` with one entry per effective harness that
-/// has `hook_support().is_some()`. Returns an empty `per_harness` when no such
-/// harness is in the effective list.
+/// `effective` is the scope's resolved harness list (same
+/// `EffectiveHarnessList` that `harness_mcp` and `status` use). A harness
+/// row is emitted iff:
+///
+/// * **(a) Registered case** — the harness is in `effective` AND
+///   `hook_support().is_some()`: the translation is active (or would be if
+///   `translate_plugin_hooks` is on).
+/// * **(b) Stale/drift case** — the harness has a dispatch manifest file on
+///   disk even though it is NOT in `effective` (or was globally disabled): the
+///   `manifest_stale` signal tells operators a `tome sync` is needed to remove
+///   the orphaned manifest.
+///
+/// Harnesses that are neither in scope nor have an on-disk manifest are
+/// silently omitted — this removes the noise of the other hook-capable modules
+/// that a user never declared. Returns an empty `per_harness` when no harness
+/// qualifies under either rule.
+///
+/// `hook_support()` is resolved through `with_effective_modules` (honours the
+/// `HARNESS_MODULES_OVERRIDE` test seam) so this surface stays consistent with
+/// `status`'s count (which uses the same resolution path after the P11 fix).
 pub fn build_hook_translation_report(
     paths: &Paths,
     workspace: &crate::workspace::WorkspaceName,
     cfg: &crate::config::Config,
+    effective: Option<&crate::settings::resolver::EffectiveHarnessList>,
 ) -> crate::doctor::report::HookTranslationReport {
     use crate::doctor::report::{HookHarnessStatus, HookTranslationReport};
     use crate::harness::hooks_ir::{PortableEvent, read_manifest};
 
-    let enabled = cfg.hooks.translate_plugin_hooks.unwrap_or(true);
+    let cfg_enabled = cfg.hooks.translate_plugin_hooks.unwrap_or(true);
     let has_prompt_settings =
         cfg.hooks.prompt_provider.is_some() || cfg.hooks.prompt_model.is_some();
 
+    // Build a lookup set of the scope-effective harness names so the inner
+    // loop doesn't iterate `effective` twice per module.
+    let effective_names: std::collections::HashSet<&str> = effective
+        .map(|e| e.harnesses.iter().map(|h| h.name.as_str()).collect())
+        .unwrap_or_default();
+
     let mut per_harness: Vec<HookHarnessStatus> = Vec::new();
 
+    // Resolve `hook_support()` through `with_effective_modules` so the
+    // `HARNESS_MODULES_OVERRIDE` test seam is honoured — identical to the
+    // mechanism `status` uses after the P11 fix.
     crate::harness::with_effective_modules(|mods| {
         for m in mods {
             let Some(hs) = m.hook_support() else {
                 continue;
             };
 
+            let in_effective = effective_names.contains(m.name());
             let manifest_path = paths.hooks_manifest(workspace, m.name());
+            let manifest_exists = manifest_path.exists();
+
+            // Row inclusion rule (see doc comment above):
+            // (a) in scope AND hook-capable → registered row.
+            // (b) not in scope but manifest on disk → stale/drift row.
+            // Anything else → skip (no noise for never-touched registry modules).
+            if !in_effective && !manifest_exists {
+                continue;
+            }
+
             let manifest = read_manifest(&manifest_path).ok();
 
             // Events present in the on-disk dispatch manifest (successfully translated).
@@ -1514,13 +1552,19 @@ pub fn build_hook_translation_report(
                 .map(|e| e.cc_name().to_string())
                 .collect();
 
-            // Stale: translation disabled in config but the manifest still
-            // exists on disk (needs a `tome sync` to tear it down).
-            let manifest_stale = !enabled && manifest_path.exists();
+            // enabled: config allows translation AND this harness is in scope.
+            // A stale-row harness (b) reports `enabled = false` so consumers can
+            // distinguish it from an active registered row.
+            let scope_enabled = cfg_enabled && in_effective;
+
+            // Stale: manifest on disk but the harness is not scope-enabled
+            // (either the harness was removed from the effective list, or
+            // `translate_plugin_hooks` was turned off). Needs a `tome sync`.
+            let manifest_stale = !scope_enabled && manifest_exists;
 
             per_harness.push(HookHarnessStatus {
                 harness: m.name().to_string(),
-                enabled,
+                enabled: scope_enabled,
                 registered_events,
                 dropped_to_guardrails,
                 manifest_stale,
@@ -1789,6 +1833,132 @@ mod tests {
         unsafe {
             std::env::remove_var("TOME_VP_API_KEY");
         }
+    }
+
+    // --- US11 (P11 fix): doctor–status hook-translation surface agreement ----
+
+    /// Verify that `build_hook_translation_report` (doctor) and the
+    /// `fill_hook_translation_harnesses` resolution strategy (status) agree
+    /// on the number of active (scope-enabled, hook-capable) harnesses.
+    ///
+    /// This is the regression net for the P11 bug where doctor iterated the
+    /// FULL module registry while status iterated only the scope-effective
+    /// subset, causing them to report different counts for the same scope.
+    ///
+    /// The test uses REAL production harness modules (no override needed)
+    /// because it passes the effective list explicitly to `build_hook_translation_report`
+    /// and uses `with_effective_modules` for the status-side count — both
+    /// paths honour the override seam and produce the same result with the
+    /// real registry since the effective list gates inclusion.
+    #[test]
+    fn hook_translation_doctor_and_status_agree_on_scope_effective_set() {
+        use crate::settings::resolver::{EffectiveHarness, EffectiveHarnessList};
+
+        let tmp = TempDir::new().unwrap();
+        let paths = fixture_paths(tmp.path());
+        let workspace = crate::workspace::WorkspaceName::parse("test-ws").unwrap();
+        let cfg = crate::config::Config::default(); // translate_plugin_hooks = None (defaults on)
+
+        // ---- scenario A: only gemini enabled --------------------------------
+
+        let effective_gemini = EffectiveHarnessList {
+            harnesses: vec![EffectiveHarness {
+                name: "gemini".to_owned(),
+                source_chain: vec!["project".to_owned()],
+            }],
+            excluded: vec![],
+        };
+
+        let report_a =
+            build_hook_translation_report(&paths, &workspace, &cfg, Some(&effective_gemini));
+
+        // Doctor must report exactly one row: gemini.
+        assert_eq!(
+            report_a.per_harness.len(),
+            1,
+            "scenario A (gemini only): doctor must have 1 row, got harnesses: {:?}",
+            report_a
+                .per_harness
+                .iter()
+                .map(|h| &h.harness)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            report_a.per_harness[0].harness, "gemini",
+            "scenario A: the one doctor row must be gemini",
+        );
+        assert!(
+            report_a.per_harness[0].enabled,
+            "scenario A: gemini row must be enabled (config defaults on + in scope)",
+        );
+
+        // Status side: count via with_effective_modules (same override-aware path).
+        let status_count_a = crate::harness::with_effective_modules(|mods| {
+            effective_gemini
+                .harnesses
+                .iter()
+                .filter(|h| {
+                    mods.iter()
+                        .any(|m| m.name() == h.name && m.hook_support().is_some())
+                })
+                .count()
+        });
+        assert_eq!(status_count_a, 1, "scenario A: status-side count must be 1");
+
+        // Agreement: the two surfaces report the same active harness count.
+        let doctor_active_a = report_a.per_harness.iter().filter(|h| h.enabled).count();
+        assert_eq!(
+            doctor_active_a, status_count_a,
+            "scenario A: doctor active-row count ({doctor_active_a}) != status count ({status_count_a})",
+        );
+
+        // ---- scenario B: gemini + codex enabled → both surfaces report 2 ---
+
+        let effective_two = EffectiveHarnessList {
+            harnesses: vec![
+                EffectiveHarness {
+                    name: "gemini".to_owned(),
+                    source_chain: vec!["project".to_owned()],
+                },
+                EffectiveHarness {
+                    name: "codex".to_owned(),
+                    source_chain: vec!["project".to_owned()],
+                },
+            ],
+            excluded: vec![],
+        };
+
+        let report_b =
+            build_hook_translation_report(&paths, &workspace, &cfg, Some(&effective_two));
+
+        assert_eq!(
+            report_b.per_harness.len(),
+            2,
+            "scenario B (gemini+codex): doctor must have 2 rows, got: {:?}",
+            report_b
+                .per_harness
+                .iter()
+                .map(|h| &h.harness)
+                .collect::<Vec<_>>(),
+        );
+
+        let status_count_b = crate::harness::with_effective_modules(|mods| {
+            effective_two
+                .harnesses
+                .iter()
+                .filter(|h| {
+                    mods.iter()
+                        .any(|m| m.name() == h.name && m.hook_support().is_some())
+                })
+                .count()
+        });
+        assert_eq!(status_count_b, 2, "scenario B: status-side count must be 2");
+
+        let doctor_active_b = report_b.per_harness.iter().filter(|h| h.enabled).count();
+        assert_eq!(
+            doctor_active_b, status_count_b,
+            "scenario B: doctor active-row count ({doctor_active_b}) != status count ({status_count_b})",
+        );
     }
 
     // --- Phase 12 / US4: corrupt-index check (FR-017) ----------------------
