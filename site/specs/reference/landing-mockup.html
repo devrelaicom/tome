@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tome — full landing shape (low-fi)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#f4f1e8; --ink:#16201b; --ink-soft:#5a655c;
+    --green:#0f9d63; --green-hi:#6ef0ad; --blue:#2b4a8a;
+    --rule:rgba(22,32,27,.16); --dark:#0c130f;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:var(--paper);color:var(--ink);font-family:'Space Grotesk',system-ui,sans-serif;-webkit-font-smoothing:antialiased;
+    background-image:radial-gradient(rgba(22,32,27,.05) 1px,transparent 1px);background-size:22px 22px;}
+  .mono{font-family:'IBM Plex Mono',monospace}
+  .wrap{width:min(1120px,100%);margin:0 auto;padding:0 28px}
+  a{color:inherit}
+  /* nav */
+  nav{position:sticky;top:0;z-index:5;background:rgba(244,241,232,.9);backdrop-filter:blur(6px);border-bottom:1.5px solid var(--ink)}
+  .navin{display:flex;align-items:center;justify-content:space-between;padding:12px 0}
+  .brand{font-weight:700;font-size:22px;letter-spacing:.02em}
+  .brand .b{font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--ink-soft);margin-left:8px;letter-spacing:.12em;text-transform:uppercase}
+  .nav-links{display:flex;gap:22px;align-items:center;font-family:'IBM Plex Mono',monospace;font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-soft)}
+  .nav-links a{text-decoration:none}
+  .nav-cta{border:1.5px solid var(--green);background:var(--green);color:#04130d;padding:8px 14px;font-weight:600;text-decoration:none}
+  /* section scaffolding */
+  section{border-bottom:1.5px solid var(--ink)}
+  .marker{font-family:'IBM Plex Mono',monospace;font-size:11.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--green);padding:14px 0 0}
+  .marker .n{color:var(--ink-soft)}
+  h2.sec{font-size:38px;font-weight:700;letter-spacing:-.01em;margin:6px 0 24px}
+  .hi{background:linear-gradient(transparent 56%,var(--green-hi) 56% 94%,transparent 94%);padding:0 .04em}
+  /* status + hero (from v5) */
+  .status{display:flex;justify-content:space-between;align-items:center;padding:11px 0;font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.05em;color:var(--ink-soft);text-transform:uppercase}
+  .status .dot{color:var(--green)} .status b{color:var(--ink);font-weight:600}
+  .hero{display:grid;grid-template-columns:1.08fr .92fr;gap:34px;padding:40px 0 34px;align-items:center}
+  .kicker{font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--green);margin-bottom:16px}
+  h1{font-weight:700;font-size:104px;line-height:.9;letter-spacing:-.02em}
+  .tagline{font-weight:500;font-size:28px;line-height:1.15;margin:12px 0 0}
+  .lede{color:#3a443d;font-size:17px;line-height:1.55;max-width:32em;margin:18px 0 24px}
+  .lede b,.fblock b{color:var(--ink);font-weight:600}
+  .ctas{display:flex;gap:12px;flex-wrap:wrap}
+  .btn{font-family:'IBM Plex Mono',monospace;font-size:13px;letter-spacing:.05em;text-transform:uppercase;padding:12px 18px;text-decoration:none;border:1.5px solid var(--ink)}
+  .btn.solid{background:var(--green);border-color:var(--green);color:#04130d;font-weight:600}
+  .plate{position:relative;border:1.5px solid var(--ink);background:#fbfaf5;padding:14px}
+  .crop{position:absolute;color:var(--blue);font-family:'IBM Plex Mono',monospace;font-size:14px}
+  .crop.tl{top:5px;left:7px}.crop.tr{top:5px;right:7px}.crop.bl{bottom:5px;left:7px}.crop.br{bottom:5px;right:7px}
+  .illo{display:block;width:100%;max-height:440px;object-fit:contain;margin:0 auto}
+  .platecap{display:flex;justify-content:space-between;margin-top:10px;padding-top:8px;border-top:1px solid var(--rule);font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.06em;color:var(--ink-soft);text-transform:uppercase}
+  .platecap b{color:var(--ink)}
+  .works{display:flex;gap:20px;align-items:center;flex-wrap:wrap;padding:15px 0;border-top:1px solid var(--rule);font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--ink-soft)}
+  .works .lbl{color:var(--green);text-transform:uppercase;font-size:11px;letter-spacing:.16em}
+  .works .h{color:var(--ink)} .works .x{color:var(--rule)}
+  /* highlights */
+  .pad{padding:30px 0 40px}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1.5px solid var(--ink)}
+  .card{padding:20px 18px;border-right:1.5px solid var(--ink)}
+  .card:last-child{border-right:0}
+  .card .fl{font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--green);letter-spacing:.1em;margin-bottom:12px}
+  .card h3{font-size:20px;font-weight:700;margin-bottom:8px;line-height:1.05}
+  .card p{font-size:14px;color:#3a443d;line-height:1.5}
+  /* steps */
+  .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:26px}
+  .step .num{font-size:74px;font-weight:700;color:transparent;-webkit-text-stroke:1.5px var(--green);line-height:1}
+  .step h3{font-size:20px;font-weight:700;margin:6px 0 8px}
+  .step p{font-size:15px;color:#3a443d;line-height:1.5}
+  .step .cmd{font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--ink);background:#fbfaf5;border:1px solid var(--rule);padding:7px 9px;margin-top:10px;display:inline-block}
+  /* spec sheet */
+  table.spec{width:100%;border-collapse:collapse;border:1.5px solid var(--ink);font-size:14px}
+  table.spec th{font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft);text-align:left;padding:10px 14px;border-bottom:1.5px solid var(--ink)}
+  table.spec td{padding:11px 14px;border-bottom:1px solid var(--rule);vertical-align:top}
+  table.spec tr:last-child td{border-bottom:0}
+  table.spec td.c{font-family:'IBM Plex Mono',monospace;color:var(--green);font-weight:500;white-space:nowrap}
+  table.spec td.t{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink-soft);text-transform:uppercase;white-space:nowrap}
+  /* feature two-col */
+  .twocol{display:grid;grid-template-columns:1fr 1fr;gap:30px;align-items:center}
+  .fblock p{font-size:16px;color:#3a443d;line-height:1.6;margin-bottom:14px;max-width:34em}
+  .pill{display:inline-flex;gap:8px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.06em;margin-top:6px}
+  .pill b{color:var(--ink)}
+  /* terminal */
+  .term{background:var(--dark);border:1.5px solid var(--ink);color:#dfe7e1;font-family:'IBM Plex Mono',monospace}
+  .term .bar{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid rgba(255,255,255,.12);font-size:11px;color:#7c887f;letter-spacing:.08em;text-transform:uppercase}
+  .term .bar i{width:10px;height:10px;border-radius:50%;display:inline-block}
+  .term .bar .r{background:#e2574b}.term .bar .y{background:#e6b94f}.term .bar .g{background:#3fbf78}
+  .term .body{padding:16px 16px;font-size:13.5px;line-height:1.7}
+  .term .p{color:var(--green-hi)} .term .c{color:#7c887f} .term .o{color:#aeb9b2}
+  /* author band */
+  .band{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;padding:30px 0}
+  .band h2{font-size:28px;font-weight:700} .band p{color:#3a443d;margin-top:4px}
+  /* footer (dark back-cover) */
+  footer{background:var(--dark);color:#cdd6cf;border-top:1.5px solid var(--ink)}
+  .foot{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:24px;padding:46px 0 26px}
+  .foot h4{font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--green);margin-bottom:12px}
+  .foot a{display:block;color:#aeb9b2;text-decoration:none;font-size:14px;margin-bottom:7px}
+  .foot .wm{font-size:64px;font-weight:700;color:transparent;-webkit-text-stroke:1.5px rgba(110,240,173,.5);line-height:.9;margin-bottom:10px}
+  .foot .made{font-family:'IBM Plex Mono',monospace;font-size:12px;color:#7c887f;line-height:1.7}
+  .footbar{border-top:1px solid rgba(255,255,255,.12);padding:14px 0;display:flex;justify-content:space-between;flex-wrap:wrap;gap:10px;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:#7c887f;letter-spacing:.04em}
+</style>
+</head>
+<body>
+
+<nav><div class="wrap navin">
+  <div class="brand">Tome<span class="b">owners workshop manual</span></div>
+  <div class="nav-links">
+    <a href="#">Docs</a><a href="#">Catalogs</a><a href="#">Blog</a><a href="#">GitHub</a>
+    <a href="#" class="nav-cta">Install</a>
+  </div>
+</div></nav>
+
+<!-- HERO -->
+<section><div class="wrap">
+  <div class="status"><div><span class="dot">&#9679;</span> TOME &nbsp;&nbsp;<b>v0.6.0</b> &nbsp;/&nbsp; beta</div><div>FIG. 001 &mdash; HERO</div></div>
+  <div class="hero">
+    <div>
+      <div class="kicker">// cross-harness plugin manager for AI coding agents</div>
+      <h1>Tome</h1>
+      <p class="tagline">One catalog, <span class="hi">every coding agent</span>.</p>
+      <p class="lede">Manage your <b>skills, commands, agents &amp; hooks</b> in one place &mdash; then <b>search and load them on demand</b>, protecting the context window and cutting token spend, across <b>Claude Code, Cursor, Codex, Gemini &amp; OpenCode</b>.</p>
+      <div class="ctas"><a class="btn solid" href="#">&#9656; Install Tome</a><a class="btn" href="#">View on GitHub</a></div>
+    </div>
+    <div class="plate">
+      <span class="crop tl">+</span><span class="crop tr">+</span><span class="crop bl">+</span><span class="crop br">+</span>
+      <img class="illo" src="http://localhost:50990/tome-exploded-v1.png" alt="Tome — exploded view">
+      <div class="platecap"><span>FIG. 001 &mdash; <b>Tome</b>, exploded view</span><span>DWG <b>TOME-001</b></span></div>
+    </div>
+  </div>
+  <div class="works"><span class="lbl">Works with</span><span class="h">Claude&nbsp;Code</span><span class="x">/</span><span class="h">Cursor</span><span class="x">/</span><span class="h">Codex</span><span class="x">/</span><span class="h">Gemini&nbsp;CLI</span><span class="x">/</span><span class="h">OpenCode</span></div>
+</div></section>
+
+<!-- HIGHLIGHTS -->
+<section><div class="wrap pad">
+  <div class="marker"><span class="n">§ 02</span> &nbsp;/&nbsp; Highlights</div>
+  <h2 class="sec">Why Tome</h2>
+  <div class="cards">
+    <div class="card"><div class="fl">FEAT.01</div><h3>Cross-harness management</h3><p>Enable a plugin once; Tome serves it natively to every harness &mdash; hooks, agents, rules and all.</p></div>
+    <div class="card"><div class="fl">FEAT.02</div><h3>Search &amp; load on demand</h3><p>Semantic search finds the right skill; the MCP server loads only what's needed. Protects context, cuts tokens, saves $$$.</p></div>
+    <div class="card"><div class="fl">FEAT.03</div><h3>Workspaces</h3><p>Per-project composition &mdash; different catalogs and plugins enabled per workspace, bound to your projects.</p></div>
+    <div class="card"><div class="fl">FEAT.04</div><h3>Local &amp; private</h3><p>Runs on your machine. No telemetry; the index and models stay local.</p></div>
+  </div>
+</div></section>
+
+<!-- HOW IT WORKS -->
+<section><div class="wrap pad">
+  <div class="marker"><span class="n">§ 03</span> &nbsp;/&nbsp; Procedure</div>
+  <h2 class="sec">How it works</h2>
+  <div class="steps">
+    <div class="step"><div class="num">01</div><h3>Add a catalog</h3><p>Point Tome at a git repo of plugins. It clones, parses and indexes everything.</p><span class="cmd">tome catalog add &lt;repo&gt;</span></div>
+    <div class="step"><div class="num">02</div><h3>Enable plugins</h3><p>Turn on the plugins you want. Skills, commands, agents and hooks become available.</p><span class="cmd">tome plugin enable &lt;name&gt;</span></div>
+    <div class="step"><div class="num">03</div><h3>Use any harness</h3><p>Tome writes native config for each harness and serves search over MCP.</p><span class="cmd">tome harness use cursor</span></div>
+  </div>
+</div></section>
+
+<!-- SPEC SHEET -->
+<section><div class="wrap pad">
+  <div class="marker"><span class="n">§ 04</span> &nbsp;/&nbsp; Specifications</div>
+  <h2 class="sec">What you get</h2>
+  <table class="spec">
+    <thead><tr><th style="width:18%">Command</th><th>Function</th><th style="width:16%">Class</th></tr></thead>
+    <tbody>
+      <tr><td class="c">catalog</td><td>Add, remove, list &amp; update catalogs of plugins</td><td class="t">sources</td></tr>
+      <tr><td class="c">plugin</td><td>Enable, disable &amp; inspect plugins and their entries</td><td class="t">lifecycle</td></tr>
+      <tr><td class="c">query</td><td>Semantic search across skills &amp; commands (KNN + rerank)</td><td class="t">retrieval</td></tr>
+      <tr><td class="c">mcp</td><td>MCP server &mdash; search_skills, get_skill, prompts</td><td class="t">serve</td></tr>
+      <tr><td class="c">harness</td><td>Configure Claude Code, Cursor, Codex, Gemini, OpenCode</td><td class="t">targets</td></tr>
+      <tr><td class="c">workspace</td><td>Per-project scopes &amp; composition</td><td class="t">scope</td></tr>
+      <tr><td class="c">models</td><td>Manage local embedding &amp; rerank models</td><td class="t">inference</td></tr>
+      <tr><td class="c">doctor</td><td>Diagnose &amp; repair every subsystem</td><td class="t">health</td></tr>
+    </tbody>
+  </table>
+</div></section>
+
+<!-- FEATURED CATALOG -->
+<section><div class="wrap pad">
+  <div class="marker"><span class="n">§ 05</span> &nbsp;/&nbsp; Featured catalog</div>
+  <div class="twocol">
+    <div class="fblock">
+      <h2 class="sec" style="margin-bottom:14px">Midnight&nbsp;Expert</h2>
+      <p>The flagship catalog from the <b>Midnight Foundation</b>: AI plugins for building, testing and verifying <b>Compact</b> smart contracts &mdash; privacy patterns, formal verification, devnet tooling and more, available across every harness Tome supports.</p>
+      <div class="pill">CATALOG &nbsp;<b>midnight-expert-tome</b> &nbsp;&middot;&nbsp; <b>12</b> plugins &nbsp;&middot;&nbsp; <b>85</b> skills &nbsp;&middot;&nbsp; <b>18</b> agents</div>
+    </div>
+    <div class="term">
+      <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i> &nbsp; install midnight expert</div>
+      <div class="body"><span class="c"># add the catalog</span><br><span class="p">$</span> tome catalog add devrelaicom/midnight-expert-tome<br><span class="o">&nbsp; Cloned &middot; indexed 85 skills, 18 agents.</span><br><br><span class="c"># enable it everywhere</span><br><span class="p">$</span> tome plugin enable midnight-expert<br><span class="o">&nbsp; Ready. &#9673;</span></div>
+    </div>
+  </div>
+</div></section>
+
+<!-- GET STARTED -->
+<section><div class="wrap pad">
+  <div class="marker"><span class="n">§ 06</span> &nbsp;/&nbsp; Installation</div>
+  <h2 class="sec">Get started in seconds</h2>
+  <div class="twocol">
+    <div class="term">
+      <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i> &nbsp; install tome</div>
+      <div class="body"><span class="c"># macOS &middot; Homebrew</span><br><span class="p">$</span> brew install aaronbassett/homebrew-tap/tome<br><br><span class="c"># or with cargo</span><br><span class="p">$</span> cargo install tome-mcp<br><br><span class="c"># first run</span><br><span class="p">$</span> tome catalog add devrelaicom/midnight-expert-tome<br><span class="p">$</span> tome plugin enable midnight-expert</div>
+    </div>
+    <div class="fblock">
+      <p>One self-contained binary &mdash; the semantic index, reranker and local models are built in. <b>No telemetry.</b></p>
+      <p class="mono" style="font-size:13px;color:var(--ink-soft)">Linux &amp; macOS (x86_64 / aarch64) &middot; prebuilt binaries &middot; crates.io</p>
+      <div class="ctas" style="margin-top:8px"><a class="btn solid" href="#">&#9656; Read the docs</a></div>
+    </div>
+  </div>
+</div></section>
+
+<!-- AUTHOR ON-RAMP -->
+<section><div class="wrap band">
+  <div><h2>Built something? Publish a catalog.</h2><p>Any git repo of plugins becomes a Tome catalog. Share it across every harness.</p></div>
+  <a class="btn solid" href="#">&#9656; Authoring guide</a>
+</div></section>
+
+<!-- FOOTER (dark back-cover) -->
+<footer><div class="wrap">
+  <div class="foot">
+    <div>
+      <div class="wm">TOME</div>
+      <div class="made">A Midnight Foundation tool.<br>tome-mcp.com<br>MIT OR Apache-2.0</div>
+    </div>
+    <div><h4>Product</h4><a href="#">Install</a><a href="#">Docs</a><a href="#">Catalogs</a><a href="#">Changelog</a></div>
+    <div><h4>Project</h4><a href="#">GitHub</a><a href="#">Security</a><a href="#">Constitution</a><a href="#">Blog</a></div>
+    <div><h4>Midnight</h4><a href="#">Midnight Network</a><a href="#">Midnight Expert</a><a href="#">Compact</a></div>
+  </div>
+  <div class="footbar"><span>&copy; 2026 Midnight Foundation</span><span>FIG. 001 &mdash; built with care, on paper</span></div>
+</div></footer>
+
+</body>
+</html>

@@ -1,0 +1,231 @@
+# source: devrelaicom/midnight-expert (local marketplace clone)
+Converted claude-code catalog `midnight-expert` → `midnight-expert-tome`
+  [info] convert/catalog-synthesized-field: marketplace has no `description`; synthesizing one
+  [info] convert/dropped-manifest-field: plugin.json `homepage` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `repository` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `keywords` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] harness-ism/claude-skill-dir: rewrote 6 occurrence(s) of `${CLAUDE_SKILL_DIR}` → `${TOME_SKILL_DIR}`
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] harness-ism/claude-skill-dir: rewrote 10 occurrence(s) of `${CLAUDE_SKILL_DIR}` → `${TOME_SKILL_DIR}`
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] harness-ism/claude-plugin-data: rewrote 2 occurrence(s) of `${CLAUDE_PLUGIN_DATA}` → `${TOME_PLUGIN_DATA}`
+  [warning] harness-ism/claude-skill-dir: rewrote 8 occurrence(s) of `${CLAUDE_SKILL_DIR}` → `${TOME_SKILL_DIR}`
+  [info] convert/dropped-manifest-field: plugin.json `homepage` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `repository` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `keywords` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] harness-ism/shell-exec: shell-execution injection (`` !`cmd` ``) is not supported — Tome does not execute commands in bodies
+  [warning] lint/residual-harness-ism: shell-execution injection (`` !`cmd` ``) is not supported — Tome does not execute commands in bodies
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] harness-ism/file-ref: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] lint/residual-harness-ism: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] lint/description-too-long: entry `compact-dev` description is 2557 characters (max 1024)
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `tools` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] lint/description-too-long: entry `security-reviewer` description is 1400 characters (max 1024)
+  [info] convert/dropped-manifest-field: plugin.json `homepage` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `repository` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `keywords` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `keywords` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [info] convert/dropped-manifest-field: plugin.json `homepage` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `repository` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `keywords` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] harness-ism/claude-plugin-root: rewrote 3 occurrence(s) of `${CLAUDE_PLUGIN_ROOT}` → `${TOME_PLUGIN_DIR}`
+  [info] convert/dropped-manifest-field: plugin.json `homepage` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `repository` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `keywords` is not modelled by Tome; dropping it
+  [warning] convert/unsupported-component: plugin `settings.json` is not representable in Tome; dropped from the conversion
+  [warning] harness-ism/claude-skill-dir: rewrote 2 occurrence(s) of `${CLAUDE_SKILL_DIR}` → `${TOME_SKILL_DIR}`
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [warning] harness-ism/claude-skill-dir: rewrote 9 occurrence(s) of `${CLAUDE_SKILL_DIR}` → `${TOME_SKILL_DIR}`
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [warning] harness-ism/claude-plugin-root: rewrote 1 occurrence(s) of `${CLAUDE_PLUGIN_ROOT}` → `${TOME_PLUGIN_DIR}`
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [info] convert/dropped-manifest-field: plugin.json `homepage` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `repository` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `keywords` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] harness-ism/file-ref: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] lint/residual-harness-ism: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] harness-ism/file-ref: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] lint/residual-harness-ism: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] harness-ism/file-ref: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] lint/residual-harness-ism: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] harness-ism/file-ref: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] lint/residual-harness-ism: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] harness-ism/file-ref: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] lint/residual-harness-ism: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] lint/description-too-long: entry `sdk-tester` description is 1118 characters (max 1024)
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `mcpServers` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] lint/description-too-long: entry `source-investigator` description is 1444 characters (max 1024)
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] lint/description-too-long: entry `type-checker` description is 1089 characters (max 1024)
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] lint/description-too-long: entry `witness-verifier` description is 1067 characters (max 1024)
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [info] convert/dropped-manifest-field: plugin.json `homepage` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `repository` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `keywords` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] harness-ism/file-ref: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] lint/residual-harness-ism: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `tools` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] harness-ism/file-ref: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] lint/residual-harness-ism: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `tools` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [info] convert/dropped-manifest-field: plugin.json `homepage` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `repository` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `keywords` is not modelled by Tome; dropping it
+  [warning] harness-ism/claude-skill-dir: rewrote 2 occurrence(s) of `${CLAUDE_SKILL_DIR}` → `${TOME_SKILL_DIR}`
+  [info] convert/dropped-manifest-field: plugin.json `homepage` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `repository` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `keywords` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [warning] harness-ism/file-ref: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] lint/residual-harness-ism: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [warning] harness-ism/file-ref: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] lint/residual-harness-ism: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [info] convert/dropped-manifest-field: plugin.json `homepage` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `repository` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `keywords` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [warning] harness-ism/claude-plugin-root: rewrote 1 occurrence(s) of `${CLAUDE_PLUGIN_ROOT}` → `${TOME_PLUGIN_DIR}`
+  [warning] harness-ism/file-ref: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] lint/residual-harness-ism: file-reference injection (`@path`) is not supported — Tome does not inject file contents
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `color` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [info] convert/dropped-manifest-field: plugin.json `homepage` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `repository` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `keywords` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [info] convert/dropped-frontmatter: frontmatter `version` is not modelled by Tome; dropping it
+  [warning] convert/agent-lossy: agent frontmatter `memory` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `model` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [warning] convert/agent-lossy: agent frontmatter `skills` is not modelled by Tome; dropping it (agent conversion is lossy)
+  [info] convert/dropped-manifest-field: plugin.json `homepage` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `repository` is not modelled by Tome; dropping it
+  [info] convert/dropped-manifest-field: plugin.json `keywords` is not modelled by Tome; dropping it
+  [warning] harness-ism/claude-skill-dir: rewrote 13 occurrence(s) of `${CLAUDE_SKILL_DIR}` → `${TOME_SKILL_DIR}`
+  [warning] convert/tool-restriction-dropped: frontmatter `allowed-tools` (a tool restriction) is dropped — Tome does not constrain tools, so dropping it silently broadens capability
+  [warning] harness-ism/claude-skill-dir: rewrote 1 occurrence(s) of `${CLAUDE_SKILL_DIR}` → `${TOME_SKILL_DIR}`
+Done: 616 file(s) to /private/tmp/me-tome-catalog/midnight-expert-tome  (128 warning(s), 100 info(s))

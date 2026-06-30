@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tome — hero v5 (feature-led copy)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#f4f1e8; --ink:#16201b; --ink-soft:#5a655c;
+    --green:#0f9d63; --green-hi:#6ef0ad; --blue:#2b4a8a;
+    --rule:rgba(22,32,27,.16);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:var(--paper);color:var(--ink)}
+  body{font-family:'Space Grotesk',system-ui,sans-serif;-webkit-font-smoothing:antialiased;padding:0 0 46px;display:flex;justify-content:center;
+    background-image:radial-gradient(rgba(22,32,27,.05) 1px,transparent 1px);background-size:22px 22px;}
+  .wrap{width:min(1120px,100%);padding:0 28px}
+  .status{display:flex;justify-content:space-between;align-items:center;border-bottom:1.5px solid var(--ink);padding:13px 2px;font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.05em;color:var(--ink-soft);text-transform:uppercase}
+  .status .dot{color:var(--green)} .status b{color:var(--ink);font-weight:600}
+  .hero{display:grid;grid-template-columns:1.08fr .92fr;gap:34px;padding:50px 2px 30px;align-items:center}
+  .kicker{font-family:'IBM Plex Mono',monospace;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--green);margin-bottom:18px}
+  h1{font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:118px;line-height:.9;letter-spacing:-.02em;color:var(--ink)}
+  .tagline{font-weight:500;font-size:30px;line-height:1.15;margin:14px 0 0}
+  .hi{background:linear-gradient(transparent 56%,var(--green-hi) 56% 94%,transparent 94%);padding:0 .04em}
+  .lede{color:#3a443d;font-size:18px;line-height:1.55;max-width:32em;margin:20px 0 26px}
+  .lede b{color:var(--ink);font-weight:600}
+  .ctas{display:flex;gap:12px;flex-wrap:wrap}
+  .btn{font-family:'IBM Plex Mono',monospace;font-size:13px;letter-spacing:.05em;text-transform:uppercase;padding:13px 19px;text-decoration:none;border:1.5px solid var(--ink)}
+  .btn.solid{background:var(--green);border-color:var(--green);color:#04130d;font-weight:600}
+  .btn.ghost{color:var(--ink);background:transparent}
+  .plate{position:relative;border:1.5px solid var(--ink);background:#fbfaf5;padding:16px}
+  .crop{position:absolute;color:var(--blue);font-family:'IBM Plex Mono',monospace;font-size:14px;z-index:2}
+  .crop.tl{top:5px;left:7px}.crop.tr{top:5px;right:7px}.crop.bl{bottom:5px;left:7px}.crop.br{bottom:5px;right:7px}
+  .illo{display:block;width:100%;max-height:500px;object-fit:contain;margin:0 auto}
+  .platecap{display:flex;justify-content:space-between;gap:12px;margin-top:12px;padding-top:9px;border-top:1px solid var(--rule);font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.06em;color:var(--ink-soft);text-transform:uppercase}
+  .platecap b{color:var(--ink)}
+  .works{border-top:1.5px solid var(--ink);border-bottom:1.5px solid var(--ink);margin-top:14px;padding:17px 2px;display:flex;gap:22px;align-items:center;flex-wrap:wrap;font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--ink-soft)}
+  .works .lbl{color:var(--green);text-transform:uppercase;font-size:11px;letter-spacing:.16em}
+  .works .h{color:var(--ink)} .works .x{color:var(--rule)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="status">
+    <div><span class="dot">&#9679;</span> TOME &nbsp;&nbsp;<b>v0.6.0</b> &nbsp;/&nbsp; owners workshop manual</div>
+    <div>FIG. 001 &mdash; HERO</div>
+  </div>
+
+  <div class="hero">
+    <div>
+      <div class="kicker">// cross-harness plugin manager for AI coding agents</div>
+      <h1>Tome</h1>
+      <p class="tagline">One catalog, <span class="hi">every coding agent</span>.</p>
+      <p class="lede">Manage your <b>skills, commands, agents &amp; hooks</b> in one place &mdash; then <b>search and load them on demand</b>, protecting the context window and cutting token spend, across <b>Claude Code, Cursor, Codex, Gemini &amp; OpenCode</b>.</p>
+      <div class="ctas">
+        <a class="btn solid" href="#">&#9656; Install Tome</a>
+        <a class="btn ghost" href="#">View on GitHub</a>
+      </div>
+    </div>
+
+    <div class="plate">
+      <span class="crop tl">+</span><span class="crop tr">+</span><span class="crop bl">+</span><span class="crop br">+</span>
+      <img class="illo" src="http://localhost:50990/tome-exploded-v1.png" alt="Tome — exploded view of the manual">
+      <div class="platecap"><span>FIG. 001 &mdash; <b>Tome</b>, exploded view</span><span>DWG <b>TOME-001</b> &middot; REV <b>v0.6.0</b></span></div>
+    </div>
+  </div>
+
+  <div class="works">
+    <span class="lbl">Works with</span>
+    <span class="h">Claude&nbsp;Code</span><span class="x">/</span>
+    <span class="h">Cursor</span><span class="x">/</span>
+    <span class="h">Codex</span><span class="x">/</span>
+    <span class="h">Gemini&nbsp;CLI</span><span class="x">/</span>
+    <span class="h">OpenCode</span>
+  </div>
+</div>
+</body>
+</html>

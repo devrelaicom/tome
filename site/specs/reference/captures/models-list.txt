@@ -1,0 +1,5 @@
+| Name                  | Version     | Kind       | Size   | State   | Path                                                   | Licence    |
+|-----------------------|-------------|------------|--------|---------|--------------------------------------------------------|------------|
+| bge-small-en-v1.5     | 1.5         | embedder   |  32 MB | missing | /Users/aaronbassett/.tome/models/bge-small-en-v1.5     | MIT        |
+| bge-reranker-base     | base        | reranker   | 266 MB | missing | /Users/aaronbassett/.tome/models/bge-reranker-base     | MIT        |
+| qwen2.5-0.5b-instruct | 0.5b-Q4_K_M | summariser | 469 MB | missing | /Users/aaronbassett/.tome/models/qwen2.5-0.5b-instruct | Apache-2.0 |

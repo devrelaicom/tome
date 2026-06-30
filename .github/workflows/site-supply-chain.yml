@@ -1,0 +1,80 @@
+# Supply chain defense — GitHub Actions workflow (adapted for pnpm)
+#
+# Two steps from the upstream template are intentionally omitted because they
+# do not work in a pnpm-only project and would fail CI on every run:
+#   - `lockfile-lint --type pnpm`: lockfile-lint ships no pnpm parser, so it
+#     aborts with "Unable to find relevant lockfile parser". pnpm verifies
+#     lockfile integrity natively on `--frozen-lockfile` install.
+#   - `npm audit signatures`: requires an npm/yarn lockfile and errors in a
+#     pnpm-only repo (no package-lock.json).
+name: Site Supply Chain
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/site-supply-chain.yml'
+  pull_request:
+    paths:
+      - 'site/**'
+      - '.github/workflows/site-supply-chain.yml'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: site
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Key check for "someone ran npm/yarn/bun by mistake": a foreign lockfile
+      # committed to the repo is the proof, and it fails the build. Server-side
+      # mirror of the local guard in scripts/enforce-pnpm.mjs.
+      - name: Reject non-pnpm lockfiles
+        working-directory: ${{ github.workspace }}
+        run: |
+          found=$(find . -path ./node_modules -prune -o -path ./site/node_modules -prune -o \
+            \( -name package-lock.json \
+               -o -name npm-shrinkwrap.json \
+               -o -name yarn.lock \
+               -o -name bun.lock \
+               -o -name bun.lockb \) -print)
+          if [ -n "$found" ]; then
+            echo "::error::Non-pnpm lockfile(s) detected — this project is pnpm-only:"
+            echo "$found"
+            echo "Remove them and run 'pnpm install' to regenerate pnpm-lock.yaml."
+            exit 1
+          fi
+          echo "OK — no foreign lockfiles."
+
+      # Version comes from site/package.json "packageManager" (pnpm@11.5.0).
+      # action-setup is a `uses:` step, so it ignores defaults.run.working-directory
+      # and runs at the repo root — where there is no package.json. Point it at
+      # site/package.json explicitly (do NOT also set `version`: they'd disagree).
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: site/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          # pnpm 11.5 (package.json packageManager) requires Node >= 22.13;
+          # Node 20 fails install with ERR_UNKNOWN_BUILTIN_MODULE: node:sqlite.
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
+
+      # --frozen-lockfile fails the build if pnpm-lock.yaml is out of sync with
+      # package.json, and verifies the integrity hashes recorded in the lockfile.
+      - name: Install dependencies (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      # --audit-level=moderate gates on moderate+ advisories. Bare `pnpm audit`
+      # fails on any low-severity transitive advisory, which tends to create
+      # recurring noise; raise/lower this threshold to taste.
+      - name: Audit dependencies
+        run: pnpm audit --audit-level=moderate

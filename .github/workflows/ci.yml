@@ -2,8 +2,12 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - 'site/**'
   push:
     branches: [main]
+    paths-ignore:
+      - 'site/**'
 
 # Cancel an in-flight run when a newer commit lands on the same ref. Pushing
 # fixups to an open PR no longer leaves three full cross-platform matrices

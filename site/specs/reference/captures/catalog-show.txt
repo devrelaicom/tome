@@ -1,0 +1,21 @@
+# source: devrelaicom/midnight-expert (local marketplace clone)
+midnight-expert-tome (v0.46.0)
+  Converted from the midnight-expert Claude Code marketplace
+  Owner: Aaron Bassett <aaron@devrel-ai.com>
+  Source: file:///private/tmp/me-tome-catalog/midnight-expert-tome (ref: main)
+  Last synced: 2026-06-10T19:01:07.250597421Z
+
+Plugins:
+  compact-cli-dev        compact-cli-dev
+  compact-core           compact-core
+  compact-examples       compact-examples
+  core-concepts          core-concepts
+  midnight-cq            midnight-cq
+  midnight-dapp-dev      midnight-dapp-dev
+  midnight-expert        midnight-expert
+  midnight-fact-check    midnight-fact-check
+  midnight-plugin-utils  midnight-plugin-utils
+  midnight-status-codes  midnight-status-codes
+  midnight-tooling       midnight-tooling
+  midnight-verify        midnight-verify
+  midnight-wallet        midnight-wallet

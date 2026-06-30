@@ -1,0 +1,16 @@
+# Netlify build config for the monorepo. `base` makes Netlify cd into site/
+# before installing/building, so `publish = build` resolves to site/build.
+[build]
+  base    = "site"
+  command = "pnpm build"
+  publish = "build"
+
+[build.environment]
+  # pnpm 11.5 (package.json "packageManager") requires Node >= 22.13.
+  NODE_VERSION = "22"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy        = "strict-origin-when-cross-origin"

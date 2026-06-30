@@ -1,0 +1,450 @@
+/*
+ * Grimoire landing styles. Consumes the --tome-* tokens defined in
+ * src/css/custom.css (parchment light / midnight-library dark).
+ *
+ * Surfaces that are dark in BOTH modes (the terminals, the final CTA panel)
+ * use the mode-stable tokens (--tome-code-bg, --tome-cream) plus literal
+ * gold/periwinkle values, because --tome-gold / --tome-lapis / --tome-rule
+ * flip with the color mode and would lose contrast on a fixed-dark surface.
+ */
+
+/* ---- sections & layout ---- */
+
+.section {
+  background: var(--tome-paper);
+  padding: 5.5rem 1.5rem;
+}
+.sectionDeep {
+  background: var(--tome-paper-deep);
+}
+.wrap {
+  max-width: 1080px;
+  margin: 0 auto;
+}
+.heroInner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+.split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3rem;
+  align-items: start;
+}
+
+/* ---- type ---- */
+
+.kicker {
+  font-family: var(--tome-mono);
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--tome-lapis);
+  margin-bottom: 1.25rem;
+}
+.h1 {
+  font-family: var(--tome-serif);
+  font-weight: 700;
+  font-size: clamp(3.5rem, 9vw, 6.5rem);
+  line-height: 0.95;
+  letter-spacing: -0.015em;
+  color: var(--tome-ink);
+  margin: 0 0 1.25rem;
+}
+.stop {
+  background: linear-gradient(135deg, var(--tome-lapis), var(--tome-violet));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.h2 {
+  font-family: var(--tome-serif);
+  font-weight: 700;
+  font-size: clamp(1.9rem, 4.5vw, 2.75rem);
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  color: var(--tome-ink);
+  margin: 0 0 1.1rem;
+}
+.lede {
+  font-family: var(--tome-serif);
+  font-style: italic;
+  font-size: 1.25rem;
+  line-height: 1.5;
+  color: var(--tome-ink-soft);
+  max-width: 46ch;
+  margin: 0 0 1.25rem;
+}
+.heroInner .lede {
+  margin-left: auto;
+  margin-right: auto;
+}
+.lede code {
+  font-style: normal;
+  font-size: 0.85em;
+}
+.closing {
+  font-family: var(--tome-serif);
+  font-style: italic;
+  font-size: 1.15rem;
+  line-height: 1.5;
+  color: var(--tome-ink-soft);
+  max-width: 60ch;
+  margin: 2.25rem 0 0;
+}
+
+/* ---- buttons ---- */
+
+.ctas {
+  display: flex;
+  gap: 0.9rem;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin: 1.25rem 0 2.75rem;
+}
+.btn {
+  display: inline-block;
+  font-family: var(--tome-mono);
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  padding: 0.7rem 1.4rem;
+  border: 1px solid var(--tome-lapis);
+  border-radius: 2px;
+  color: var(--tome-lapis);
+  text-decoration: none;
+}
+.btn:hover {
+  background: rgba(110, 106, 255, 0.12);
+  color: var(--tome-lapis);
+  text-decoration: none;
+}
+/* The primary CTA is Midnight's signature: an electric indigo→violet gradient.
+   It is mode-stable (like the terminals) so cream text clears AA in both modes. */
+.btnSolid {
+  background: linear-gradient(135deg, #3a33c4, #5048ea);
+  border-color: transparent;
+  color: var(--tome-cream);
+}
+.btnSolid:hover {
+  filter: brightness(1.12);
+  color: var(--tome-cream);
+}
+
+/* ---- terminal (dark in both modes) ---- */
+
+.terminal {
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  text-align: left;
+  background: var(--tome-code-bg);
+  border: 1px solid var(--tome-gold);
+  border-radius: 6px;
+  padding: 1.1rem 1.25rem 1.3rem;
+  font-family: var(--tome-mono);
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--tome-cream);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* Reserve the full transcript's height so the typing loop never reflows
+     the sections below it. */
+  min-height: 17em;
+}
+@media (min-width: 997px) {
+  .terminal {
+    font-size: 15px;
+  }
+}
+@media (max-width: 700px) {
+  .terminal {
+    min-height: 26em;
+  }
+}
+.terminalStatic {
+  min-height: 0;
+  font-size: 13px;
+  max-width: none;
+}
+.termTitle {
+  font-family: var(--tome-mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #9a8a5f; /* warm gold, stable on the always-dark surface */
+  margin-bottom: 0.9rem;
+}
+.term_cmd {
+  color: var(--tome-cream);
+}
+.term_out {
+  color: #9a8a5f; /* muted gold */
+}
+.term_ok {
+  color: #7ec99a;
+}
+.termPrompt {
+  color: #9b96ff; /* periwinkle, stable on the always-dark surface */
+}
+.termCursor {
+  display: inline-block;
+  width: 0.55em;
+  height: 1.05em;
+  margin-left: 2px;
+  background: var(--tome-cream);
+  vertical-align: text-bottom;
+}
+
+/* ---- works-with strip ---- */
+
+.works {
+  display: flex;
+  gap: 0.9rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: 2rem;
+  font-family: var(--tome-mono);
+  font-size: 12.5px;
+  letter-spacing: 0.06em;
+  color: var(--tome-ink-soft);
+}
+.worksLbl {
+  color: var(--tome-gold);
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+}
+.worksItem {
+  color: var(--tome-ink);
+}
+.worksSep {
+  color: var(--tome-rule);
+}
+
+/* ---- plates (method ×3, colophon ×4) ---- */
+
+.plates {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.1rem;
+  margin-top: 2.25rem;
+}
+.platesFour {
+  grid-template-columns: repeat(4, 1fr);
+}
+.plate {
+  position: relative;
+  border: 1px solid var(--tome-rule);
+  border-radius: 4px;
+  background: var(--tome-paper-deep);
+  padding: 1.4rem;
+}
+/* gradient hairline across the top — a quiet echo of Midnight's chevrons */
+.plate::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  right: -1px;
+  height: 2px;
+  border-radius: 4px 4px 0 0;
+  background: linear-gradient(90deg, var(--tome-lapis), var(--tome-violet));
+}
+.sectionDeep .plate {
+  background: var(--tome-paper);
+}
+.plateNum {
+  font-family: var(--tome-mono);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  color: var(--tome-lapis);
+  margin-bottom: 0.7rem;
+}
+.plateCmd {
+  display: block;
+  font-family: var(--tome-mono);
+  font-size: 13px;
+  background: var(--tome-code-bg);
+  color: var(--tome-cream);
+  border: none;
+  padding: 0.5rem 0.65rem;
+  border-radius: 3px;
+  white-space: nowrap;
+  overflow-x: auto;
+}
+.plateTerm {
+  font-family: var(--tome-serif);
+  font-weight: 700;
+  font-size: 1.15rem;
+  color: var(--tome-ink);
+  margin-bottom: 0.4rem;
+}
+.plateDesc {
+  font-size: 0.95rem;
+  line-height: 1.55;
+  color: var(--tome-ink-soft);
+  margin: 0;
+}
+
+/* ---- the sprawl: five drifting copies ---- */
+
+.sprawlCol {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+.sprawlCard {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  border: 1px solid var(--tome-rule);
+  border-radius: 4px;
+  background: var(--tome-paper);
+  padding: 0.7rem 1rem;
+  font-family: var(--tome-mono);
+  font-size: 13px;
+}
+.sprawlPath {
+  color: var(--tome-ink-soft);
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+}
+.sprawlFile {
+  color: var(--tome-ink);
+}
+.sprawlBadge {
+  color: var(--tome-lapis);
+  border: 1px solid var(--tome-rule);
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* ---- final CTA (ink panel in both modes) ---- */
+
+/* the closing panel switches with the theme: a parchment band with a faint
+   lapis-violet glow in light, a midnight sky with a starfield in dark. The
+   install command stays a dark code chip in both modes, like every other code
+   block on the site. */
+.cta {
+  background-color: var(--tome-paper-deep);
+  background-image: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(109, 77, 214, 0.14), transparent 70%);
+  background-repeat: no-repeat;
+  padding: 5.5rem 1.5rem;
+  text-align: center;
+}
+:global([data-theme='dark']) .cta {
+  background-color: var(--tome-code-bg);
+  background-image:
+    radial-gradient(1.5px 1.5px at 12% 22%, rgba(255, 255, 255, 0.3), transparent 60%),
+    radial-gradient(1.5px 1.5px at 78% 16%, rgba(182, 155, 255, 0.28), transparent 60%),
+    radial-gradient(1px 1px at 38% 68%, rgba(138, 134, 255, 0.3), transparent 60%),
+    radial-gradient(1px 1px at 64% 82%, rgba(255, 255, 255, 0.22), transparent 60%),
+    radial-gradient(1.5px 1.5px at 88% 58%, rgba(138, 134, 255, 0.24), transparent 60%),
+    radial-gradient(1px 1px at 24% 88%, rgba(182, 155, 255, 0.22), transparent 60%),
+    radial-gradient(1px 1px at 52% 34%, rgba(255, 255, 255, 0.18), transparent 60%);
+}
+.ctaKicker {
+  font-family: var(--tome-mono);
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--tome-lapis);
+  margin-bottom: 1.25rem;
+}
+.ctaTitle {
+  font-family: var(--tome-serif);
+  font-weight: 700;
+  font-size: clamp(1.9rem, 4.5vw, 2.75rem);
+  line-height: 1.1;
+  color: var(--tome-ink);
+  margin: 0 0 1.75rem;
+}
+.install {
+  display: inline-block;
+  font-family: var(--tome-mono);
+  font-size: 1rem;
+  color: var(--tome-cream);
+  background: var(--tome-code-bg);
+  border: 1px solid var(--tome-rule);
+  border-radius: 6px;
+  padding: 1rem 1.5rem;
+  margin: 0 auto 0.75rem;
+  overflow-wrap: anywhere;
+}
+.installSub {
+  font-family: var(--tome-mono);
+  font-size: 13px;
+  color: var(--tome-gold);
+  margin-bottom: 2.25rem;
+}
+.btnGhost {
+  display: inline-block;
+  font-family: var(--tome-mono);
+  font-size: 14px;
+  letter-spacing: 0.04em;
+  padding: 0.7rem 1.4rem;
+  border: 1px solid var(--tome-gold);
+  border-radius: 2px;
+  color: var(--tome-ink);
+  text-decoration: none;
+}
+.btnGhost:hover {
+  background: rgba(110, 106, 255, 0.12);
+  color: var(--tome-ink);
+  text-decoration: none;
+}
+
+/* ---- responsive ---- */
+
+@media (max-width: 900px) {
+  .split {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+  }
+  .plates,
+  .platesFour {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 640px) {
+  .section,
+  .cta {
+    padding: 3.5rem 1.25rem;
+  }
+  .plates,
+  .platesFour {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- motion (all animation lives behind no-preference) ---- */
+
+@media (prefers-reduced-motion: no-preference) {
+  .termCursor {
+    animation: blink 1s steps(1) infinite;
+  }
+
+  /* .fadeIn is added by each section's IntersectionObserver hook (which is
+     itself a no-op under reduced motion); .fadeInShown reveals on scroll. */
+  .fadeIn {
+    opacity: 0;
+    transform: translateY(14px);
+    transition: opacity 0.7s ease, transform 0.7s ease;
+  }
+  .fadeInShown {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
