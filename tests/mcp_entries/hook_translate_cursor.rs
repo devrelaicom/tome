@@ -203,3 +203,169 @@ impl Fixture {
         }
     }
 }
+
+// =====================================================================
+// US7 coexistence: a plugin's `SessionStart` run-hook dispatch entry and
+// the session-steering entry both land under `hooks.sessionStart`, and
+// selective removal leaves only the surviving entry intact.
+// =====================================================================
+
+/// Seed a plugin shipping a `SessionStart` command hook + enrol/enable it.
+/// Returns `(workspace_id, skill_id)` so the caller can unenroll later.
+fn seed_session_start_plugin(fx: &Fixture) -> (i64, i64) {
+    let url = String::from("https://example.test/plugin-session.git");
+    let hooks_dir = fx
+        .paths
+        .cache_dir_for(&url)
+        .join("plugin-session")
+        .join("hooks");
+    std::fs::create_dir_all(&hooks_dir).expect("create session plugin hooks dir");
+    std::fs::write(
+        hooks_dir.join("hooks.json"),
+        r#"{ "SessionStart": [ { "matcher": "", "hooks": [ { "type": "command", "command": "/opt/trigger.sh start" } ] } ] }"#,
+    )
+    .expect("write session plugin hooks.json");
+
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw");
+    tome::index::workspace_catalogs::insert(&conn, "test-workspace", "cat", &url, "main")
+        .expect("enrol session catalog");
+    conn.execute(
+        "INSERT INTO skills
+            (catalog, plugin, name, kind, description, plugin_version,
+             path, content_hash, searchable, user_invocable, when_to_use, indexed_at)
+         VALUES ('cat','plugin-session','demo','skill','d','0.0.0','skills/demo/SKILL.md','hs',1,0,NULL,'1970-01-01T00:00:00Z')",
+        [],
+    )
+    .expect("insert session skill row");
+    let skill_id: i64 = conn
+        .query_row(
+            "SELECT id FROM skills WHERE catalog='cat' AND plugin='plugin-session'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("session skill id");
+    let ws_id: i64 = conn
+        .query_row(
+            "SELECT id FROM workspaces WHERE name='test-workspace'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("ws id for session plugin");
+    conn.execute(
+        "INSERT INTO workspace_skills (workspace_id, skill_id, enabled_at) VALUES (?1, ?2, 0)",
+        rusqlite::params![ws_id, skill_id],
+    )
+    .expect("enrol session skill");
+    (ws_id, skill_id)
+}
+
+/// Remove the plugin from the workspace (selective removal: the session-steering
+/// entry must survive after this).
+fn unenroll_session_start_plugin(fx: &Fixture, ws_id: i64, skill_id: i64) {
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw for unenroll");
+    conn.execute(
+        "DELETE FROM workspace_skills WHERE workspace_id=?1 AND skill_id=?2",
+        rusqlite::params![ws_id, skill_id],
+    )
+    .expect("unenrol session skill");
+}
+
+/// The exact run-hook dispatch command for SessionStart under cursor.
+const SESSION_START_RUN_HOOK_CMD: &str =
+    "tome harness run-hook --event SessionStart --harness cursor --workspace test-workspace";
+
+/// The exact session-steering command for cursor (US7).
+const SESSION_STEERING_CMD: &str =
+    "tome harness session-start --workspace test-workspace --harness cursor";
+
+/// US7 coexistence: when a plugin ships a `SessionStart` hook, BOTH the plugin
+/// run-hook dispatch entry AND the session-steering entry land under
+/// `hooks.sessionStart`. After unenrolling the plugin, ONLY the session-steering
+/// entry survives (selective removal — neither reconciler clobbers the other).
+#[test]
+fn cursor_session_start_coexistence_and_selective_removal() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::cursor::Cursor)]);
+
+    let fx = build();
+    let (ws_id, skill_id) = seed_session_start_plugin(&fx);
+    sync::sync_project(&fx.project, &fx.deps()).expect("initial sync");
+
+    // ----- Step 1: both entries coexist under hooks.sessionStart -----
+    let hook_path = fx.project.join(".cursor/hooks.json");
+    let doc: serde_json::Value = serde_json::from_str(&read(&hook_path)).unwrap();
+    assert_eq!(doc["version"], 1, "hook file must be version-stamped");
+
+    let arr = doc["hooks"]["sessionStart"]
+        .as_array()
+        .expect("hooks.sessionStart must be an array");
+    assert_eq!(
+        arr.len(),
+        2,
+        "both the session-steering entry AND the run-hook dispatch entry must be present; \
+         got: {}",
+        serde_json::to_string_pretty(&doc["hooks"]["sessionStart"]).unwrap(),
+    );
+
+    // (a) session-steering entry: runs `tome harness session-start …`
+    let has_steering = arr
+        .iter()
+        .any(|e| e["command"].as_str() == Some(SESSION_STEERING_CMD));
+    assert!(
+        has_steering,
+        "session-steering entry (session-start command) must be present; \
+         sessionStart array: {}",
+        serde_json::to_string_pretty(&doc["hooks"]["sessionStart"]).unwrap(),
+    );
+
+    // (b) run-hook dispatch entry: runs `tome harness run-hook --event SessionStart …`
+    let has_run_hook = arr
+        .iter()
+        .any(|e| e["command"].as_str() == Some(SESSION_START_RUN_HOOK_CMD));
+    assert!(
+        has_run_hook,
+        "run-hook dispatch entry (run-hook command) must be present; \
+         sessionStart array: {}",
+        serde_json::to_string_pretty(&doc["hooks"]["sessionStart"]).unwrap(),
+    );
+
+    // No stale PascalCase key.
+    assert!(
+        doc["hooks"].get("SessionStart").is_none(),
+        "cursor hook file must NOT use PascalCase SessionStart (camelCase only)",
+    );
+
+    // ----- Step 2: unenrol the plugin → selective removal -----
+    unenroll_session_start_plugin(&fx, ws_id, skill_id);
+    sync::sync_project(&fx.project, &fx.deps()).expect("post-unenrol sync");
+
+    let doc2: serde_json::Value = serde_json::from_str(&read(&hook_path)).unwrap();
+    let arr2 = doc2["hooks"]["sessionStart"]
+        .as_array()
+        .expect("hooks.sessionStart must still be an array after removal");
+    assert_eq!(
+        arr2.len(),
+        1,
+        "after plugin unenrol only the session-steering entry should remain; \
+         got: {}",
+        serde_json::to_string_pretty(&doc2["hooks"]["sessionStart"]).unwrap(),
+    );
+
+    // The surviving entry is the session-steering one.
+    assert_eq!(
+        arr2[0]["command"].as_str(),
+        Some(SESSION_STEERING_CMD),
+        "surviving entry must be the session-steering command",
+    );
+
+    // The run-hook dispatch entry has been removed.
+    let still_has_run_hook = arr2
+        .iter()
+        .any(|e| e["command"].as_str() == Some(SESSION_START_RUN_HOOK_CMD));
+    assert!(
+        !still_has_run_hook,
+        "run-hook dispatch entry must be removed after plugin unenrol",
+    );
+}

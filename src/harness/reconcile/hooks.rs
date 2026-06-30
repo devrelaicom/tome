@@ -1665,6 +1665,28 @@ mod command_hook_tests {
         );
     }
 
+    /// US7: the REAL cursor module writes `.cursor/hooks.json` with the
+    /// `{ version:1, hooks:{ sessionStart:[…] } }` shape, using the camelCase
+    /// native event key (NOT PascalCase `SessionStart`). Tome stamps the required
+    /// `version:1` on create.
+    #[test]
+    fn cursor_spec_writes_exact_shape() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".cursor/hooks.json");
+        merge_once(HookFileSpec::CursorHooks, HookEvent::SessionStart, &path);
+        let v: JsonValue = serde_json::from_str(&read(&path)).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                // Cursor requires the top-level `version` (same as Copilot-CLI).
+                "version": 1,
+                "hooks": {
+                    "sessionStart": [ { "type": "command", "command": CMD } ]
+                }
+            })
+        );
+    }
+
     #[test]
     fn antigravity_spec_writes_exact_shape() {
         let tmp = TempDir::new().unwrap();
@@ -1682,6 +1704,24 @@ mod command_hook_tests {
                     "PreInvocation": [ { "type": "command", "command": CMD } ]
                 }
             })
+        );
+    }
+
+    /// Drift-pin: `effective_event_key(CursorHooks, SessionStart)` and
+    /// `Cursor::hook_event_name(SessionStart)` are two independent literals that
+    /// MUST stay equal. A drift would place the session-steering entry and the
+    /// run-hook dispatch entry under DIFFERENT keys in `.cursor/hooks.json`,
+    /// breaking their documented coexistence (US3 + US7 compose additively).
+    #[test]
+    fn cursor_session_start_key_matches_hook_event_name() {
+        use crate::harness::HarnessModule;
+        use crate::harness::cursor::CURSOR;
+        use crate::harness::hooks_ir::PortableEvent;
+        assert_eq!(
+            effective_event_key(HookFileSpec::CursorHooks, HookEvent::SessionStart),
+            CURSOR.hook_event_name(PortableEvent::SessionStart),
+            "sessionStart literals must stay in sync: drift would split the \
+             session-steering and run-hook entries under different keys",
         );
     }
 

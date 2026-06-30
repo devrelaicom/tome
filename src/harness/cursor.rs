@@ -72,7 +72,13 @@ impl HarnessModule for Cursor {
     /// (`TOME_SKILLS.md`). Each plugin is still individually marker-wrapped
     /// inside it so per-plugin removal works; the file is deleted entirely
     /// when no plugin contributes (FR-015). No hooks-driven suppression
-    /// (Cursor has no native JSON hooks).
+    /// (design D6, keep-both): Cursor now receives a `SessionStart` command
+    /// hook (US7), but hook translation is LOSSY — not every portable event
+    /// maps to a supported native hook, and decision tiers carried in guardrails
+    /// prose degrade when translated. The prose guardrails therefore stay as
+    /// the honest floor for what the hook cannot enforce. Both the rules-file
+    /// channel and the hook channel coexist; the hook augments, never replaces,
+    /// the prose delivery. The `suppress_if_hooks_present` flag remains `false`.
     fn guardrails_target(&self, project_root: &Path) -> GuardrailsTarget {
         GuardrailsTarget {
             placement: GuardrailsPlacement::StandaloneSibling {
