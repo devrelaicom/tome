@@ -149,8 +149,15 @@ fn fail_open_handler_timeout() {
     );
 }
 
-/// FAIL-OPEN: an `http` handler (US5, not yet executed) in the manifest is a
-/// non-blocking allow placeholder — the dispatch loop never crashes on it.
+/// FAIL-OPEN: a `prompt` handler without a configured provider is an
+/// unconfigured-provider fail-open — the dispatch loop degrades to a
+/// non-blocking allow at exit 0 rather than crashing or blocking.
+///
+/// Note: the handler here is `"type": "prompt"` (an unconfigured prompt
+/// handler), not an http handler. The `prompt` handler requires a
+/// `prompt_provider`/`prompt_model` config entry; absent config, it is
+/// a no-op allow (the US6 prompt gate removes it from effective entries,
+/// but even if it reaches the dispatcher it fails open).
 #[test]
 fn fail_open_unsupported_handler_kind() {
     let json = r#"{

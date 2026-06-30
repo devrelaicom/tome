@@ -81,6 +81,9 @@ mod hook_dispatch_opt_out;
 mod hook_dispatch_prompt;
 #[path = "harness_settings/hook_dispatch_register.rs"]
 mod hook_dispatch_register;
+#[cfg(unix)]
+#[path = "harness_settings/hook_dispatch_symlink.rs"]
+mod hook_dispatch_symlink;
 #[path = "harness_settings/hooks_merge.rs"]
 mod hooks_merge;
 #[path = "harness_settings/hooks_rewrite.rs"]

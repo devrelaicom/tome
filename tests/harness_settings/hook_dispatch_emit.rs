@@ -117,6 +117,45 @@ fn copilot_additional_context_is_flat() {
     );
 }
 
+/// Codex PostToolUse: a hook that rewrites tool output emits the CC-standard
+/// `updatedInput` field in its JSON. The dispatcher then translates this to
+/// Codex's wire name `updatedMCPToolOutput` (C10-CONFIRMED) when emitting —
+/// distinct from Devin/Gemini's `updatedToolOutput`.
+///
+/// This pins the full pipeline: hook stdout (CC) → dispatcher → Codex wire.
+/// Guards `rewrite_field("PostToolUse", is_codex=true)` → Codex-specific branch.
+///
+/// Architecture note: the `updated_input` field in `CcDecision` is a unified
+/// internal slot for BOTH input rewrites (PreToolUse) and output rewrites
+/// (PostToolUse). The harness-specific wire name is applied by `rewrite_field`
+/// when emitting (`updatedInput`, `updatedToolOutput`, `updatedMCPToolOutput`,
+/// `updated_input`, or `modifiedArgs` depending on harness + event).
+#[test]
+fn codex_post_tool_use_updated_mcp_tool_output_pin() {
+    // The hook emits the CC-standard `updatedInput` field (not the Codex-wire
+    // name `updatedMCPToolOutput`) — Tome translates from CC to Codex wire.
+    let cmd = r#"printf '{"hookSpecificOutput":{"updatedInput":"rewritten_output"}}'"#;
+    let m = manifest_one_command("codex", "PostToolUse", cmd);
+    let out = run_hook::dispatch_core("codex", "PostToolUse", "{}", Some(&m));
+    assert_eq!(out.exit_code, 0, "Codex PostToolUse rewrite must be exit 0");
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).expect("valid JSON output");
+    // The Codex wire carries `updatedMCPToolOutput` (translated from CC's `updatedInput`).
+    assert_eq!(
+        v["hookSpecificOutput"]["updatedMCPToolOutput"], "rewritten_output",
+        "Codex PostToolUse output rewrite must use updatedMCPToolOutput (C10-CONFIRMED), \
+         not updatedToolOutput (Devin/Gemini); got: {v}"
+    );
+    assert!(
+        v["hookSpecificOutput"].get("updatedToolOutput").is_none(),
+        "Codex must NOT emit updatedToolOutput (that is the Devin/Gemini field); got: {v}"
+    );
+    assert!(
+        v["hookSpecificOutput"].get("updatedInput").is_none(),
+        "Codex wire must translate updatedInput → updatedMCPToolOutput; raw updatedInput \
+         must not appear in the Codex output; got: {v}"
+    );
+}
+
 /// A plain allow (`exit 0`, no stdout) is the empty no-op at exit 0 on every
 /// in-scope harness.
 #[test]
