@@ -508,6 +508,7 @@ fn hook_file_path(spec: HookFileSpec, project_root: &Path) -> Option<PathBuf> {
         HookFileSpec::CopilotHooks => &[".github", "hooks", "tome.json"],
         HookFileSpec::GeminiSettings => &[".gemini", "settings.json"],
         HookFileSpec::AntigravityHooks => &[".agents", "hooks.json"],
+        HookFileSpec::CursorHooks => &[".cursor", "hooks.json"],
         // Phase ≤10 sinks — NOT reachable via the new CommandHook reconciler.
         HookFileSpec::ClaudeSettingsLocal | HookFileSpec::CodexHooks => return None,
     };
@@ -541,6 +542,10 @@ fn tome_hook_entry(spec: HookFileSpec, command: &str) -> JsonValue {
         // Antigravity: `{ "type": "command", "command": "…" }` (list item under
         // the named `tome` block's event array).
         HookFileSpec::AntigravityHooks => serde_json::json!({
+            "type": "command", "command": command
+        }),
+        // Cursor: `{ "type": "command", "command": "…" }`.
+        HookFileSpec::CursorHooks => serde_json::json!({
             "type": "command", "command": command
         }),
         // Unreachable (filtered upstream); return a benign placeholder.
@@ -582,16 +587,19 @@ fn entry_array<'a>(
     // T087 live-probe confirms Copilot CLI silently ignores a hook file that
     // omits the top-level `version`. Stamp it on the CREATE path (or any file
     // that lacks it) but NEVER overwrite a developer-set value: `or_insert`
-    // only fills it when absent. Other specs (devin: no wrapper, gemini/
-    // antigravity: their own container key) are untouched by this.
-    if matches!(spec, HookFileSpec::CopilotHooks) {
+    // only fills it when absent. Cursor also uses `{ "version": 1, "hooks": { … } }`.
+    // Other specs (devin: no wrapper, gemini/antigravity: their own container key)
+    // are untouched by this.
+    if matches!(spec, HookFileSpec::CopilotHooks | HookFileSpec::CursorHooks) {
         root.entry("version".to_string())
             .or_insert(JsonValue::from(1));
     }
     // The intermediate container object (if any) the event array nests under.
     let container_key: Option<&str> = match spec {
         HookFileSpec::DevinHooksV1 => None,
-        HookFileSpec::CopilotHooks | HookFileSpec::GeminiSettings => Some("hooks"),
+        HookFileSpec::CopilotHooks | HookFileSpec::GeminiSettings | HookFileSpec::CursorHooks => {
+            Some("hooks")
+        }
         HookFileSpec::AntigravityHooks => Some("tome"),
         HookFileSpec::ClaudeSettingsLocal | HookFileSpec::CodexHooks => {
             return Err(TomeError::HookSpecParseError {
@@ -632,7 +640,9 @@ fn entry_array_opt(
     let root = doc.as_object_mut()?;
     let container_key: Option<&str> = match spec {
         HookFileSpec::DevinHooksV1 => None,
-        HookFileSpec::CopilotHooks | HookFileSpec::GeminiSettings => Some("hooks"),
+        HookFileSpec::CopilotHooks | HookFileSpec::GeminiSettings | HookFileSpec::CursorHooks => {
+            Some("hooks")
+        }
         HookFileSpec::AntigravityHooks => Some("tome"),
         HookFileSpec::ClaudeSettingsLocal | HookFileSpec::CodexHooks => return None,
     };
@@ -889,7 +899,9 @@ fn prune_empty(doc: &mut JsonValue, spec: HookFileSpec, event: HookEvent) {
     };
     let container_key: Option<&str> = match spec {
         HookFileSpec::DevinHooksV1 => None,
-        HookFileSpec::CopilotHooks | HookFileSpec::GeminiSettings => Some("hooks"),
+        HookFileSpec::CopilotHooks | HookFileSpec::GeminiSettings | HookFileSpec::CursorHooks => {
+            Some("hooks")
+        }
         HookFileSpec::AntigravityHooks => Some("tome"),
         HookFileSpec::ClaudeSettingsLocal | HookFileSpec::CodexHooks => return,
     };

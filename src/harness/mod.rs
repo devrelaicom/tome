@@ -78,6 +78,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
+use crate::harness::hooks_ir::PortableEvent;
+
 pub mod agents;
 pub mod antigravity;
 pub mod claude_code;
@@ -476,6 +478,8 @@ pub enum Envelope {
     /// `{ "injectSteps": [ { "ephemeralMessage": "<directive>" } ] }` —
     /// antigravity.
     AntigravityInjectSteps,
+    /// `{ "additional_context": "<directive>" }` — cursor.
+    CursorAdditionalContext,
 }
 
 /// The hook event a `CommandHook` session-start entry registers under.
@@ -518,6 +522,8 @@ pub enum HookFileSpec {
     /// Codex `.codex/hooks.json` — Phase ≤10 sink, NOT reachable via the new
     /// `CommandHook` reconciler.
     CodexHooks,
+    /// Cursor `.cursor/hooks.json` (`{version:1, hooks:{<event>:[…]}}`).
+    CursorHooks,
 }
 
 // =====================================================================
@@ -556,6 +562,40 @@ pub struct RulesFrontmatter {
     /// e.g. `&[("inclusion", "always")]` for kiro; `&[("apply", "always")]`
     /// for jetbrains-ai's Always apply-mode.
     pub fields: &'static [(&'static str, &'static str)],
+}
+
+/// Whether a harness's hook `timeout` is expressed in seconds (CC-native) or
+/// milliseconds (Gemini). Applied once, at manifest write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutUnit {
+    Seconds,
+    Millis,
+}
+
+/// The per-harness decision-protocol cluster the dispatcher branches on for
+/// stdin-translate (harness→CC) and decision-emit (CC→harness).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookWire {
+    /// CC-compatible `{decision, reason, hookSpecificOutput}`; exit-2 blocks.
+    /// Used by Devin and Gemini.
+    ClaudeStyle,
+    /// Like `ClaudeStyle` but PostToolUse rewrite field = `updatedMCPToolOutput`.
+    Codex,
+    /// Cursor: snake_case `{permission, updated_input, additional_context, …}`.
+    CursorSnake,
+    /// Copilot CLI: flat `{additionalContext}` + `{modifiedArgs}`; block via
+    /// JSON `permissionDecision:deny` (exit-2 is only a WARNING for Copilot).
+    CopilotFlat,
+}
+
+/// A harness's plugin-hook translation capability. `None` from `hook_support()`
+/// means keep GUARDRAILS only (the default for every harness).
+#[derive(Debug, Clone)]
+pub struct HookSupport {
+    pub file_spec: HookFileSpec,
+    pub events: &'static [PortableEvent],
+    pub wire: HookWire,
+    pub timeout_unit: TimeoutUnit,
 }
 
 /// How a harness receives Tome's session-start steering directive (G2).
@@ -882,6 +922,17 @@ pub trait HarnessModule: Send + Sync {
     /// modules keep `None`.
     fn session_steering(&self) -> SessionSteering {
         SessionSteering::None
+    }
+
+    /// This harness's plugin-hook translation capability, or `None` (default)
+    /// for guardrails-only harnesses.
+    fn hook_support(&self) -> Option<HookSupport> {
+        None
+    }
+
+    /// The native event-key string this harness uses for `event`.
+    fn hook_event_name(&self, event: PortableEvent) -> &'static str {
+        event.cc_name()
     }
 
     // -----------------------------------------------------------------------
@@ -1318,6 +1369,17 @@ mod tests {
                 m.name(),
             );
         }
+    }
+
+    #[test]
+    fn hook_support_defaults_to_none() {
+        use crate::harness::hooks_ir::PortableEvent;
+        // Crush is a rules-file-only harness that never overrides hook_support.
+        assert!(crate::harness::crush::Crush.hook_support().is_none());
+        assert_eq!(
+            crate::harness::crush::Crush.hook_event_name(PortableEvent::PreToolUse),
+            "PreToolUse"
+        );
     }
 
     #[test]
