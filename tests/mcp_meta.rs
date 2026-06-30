@@ -378,7 +378,13 @@ fn self_heal_preamble_surfaces_recovery_instruction_in_directive() {
         .expect("tiered entries");
     drop(conn);
     assert!(!entries.is_empty(), "staged workspace has a skill entry");
-    let directive = build_directive(&entries, None);
+    // The staged workspace ships only a skill (no commands), so an empty
+    // registry suffices — the skill still routes to `get_skill`.
+    let directive = build_directive(
+        &entries,
+        None,
+        &tome::mcp::prompts::PromptRegistry::default(),
+    );
 
     // SC-005: the missing-tools recovery instruction is present, naming the
     // exact recovery commands.

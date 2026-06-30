@@ -411,6 +411,92 @@ fn enable_command_invocable_via_prompts_get() {
     );
 }
 
+/// #289: a command entry is reachable through `get_skill` (it returns the
+/// command body, the resolved `kind: command`, and the MCP `prompt_name`)
+/// instead of the pre-#289 `unknown_skill` dead end, AND `search_skills`
+/// surfaces the same command with its `prompt_name` so the result is
+/// actionable. Drives the REAL registry built from the on-disk index, so the
+/// prompt-name resolution is the production SSOT path.
+#[test]
+fn command_reachable_via_get_skill_and_search_carries_prompt_name() {
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+
+    let cmd_body = "---\nname: deploy\ndescription: Deploy the service.\n---\nrun the deploy\n";
+    stage_workspace(&tmp, &paths, &[], &[("deploy", cmd_body)]);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // (1) get_skill on the COMMAND must NOT be an `unknown_skill` dead end.
+    // It resolves the command, returns its body, `kind: command`, and the
+    // derived MCP prompt name.
+    let registry = build_registry(&paths);
+    let state = build_state(&paths, registry);
+    let output = rt
+        .block_on(get_skill::handle(
+            state,
+            get_skill::Input {
+                catalog: "acme".into(),
+                plugin: "plug".into(),
+                name: "deploy".into(),
+            },
+        ))
+        .expect("get_skill must resolve the command, not return unknown_skill");
+
+    assert!(
+        output.content.contains("run the deploy"),
+        "get_skill returns the command body; got: {:?}",
+        output.content,
+    );
+    assert_eq!(
+        output.kind,
+        EntryKind::Command,
+        "get_skill reports the resolved kind as command",
+    );
+    assert_eq!(
+        output.prompt_name.as_deref(),
+        Some("plug__deploy"),
+        "get_skill surfaces the command's MCP prompt name; got: {:?}",
+        output.prompt_name,
+    );
+    assert!(
+        output.resources.is_empty(),
+        "a command has no sibling-resource enumeration; got: {:?}",
+        output.resources,
+    );
+
+    // (2) search_skills surfaces the command with its prompt_name so the
+    // ranked result is immediately actionable.
+    let search_state = build_state_with_stub_entries(&paths, build_registry(&paths));
+    let search_out = rt
+        .block_on(search_skills::handle(
+            search_state,
+            search_skills::Input {
+                query: "deploy".into(),
+                top_k: Some(10),
+                catalog: None,
+                plugin: None,
+                description_max_chars: Some(150),
+            },
+        ))
+        .expect("search_skills ok");
+
+    let hit = search_out
+        .matches
+        .iter()
+        .find(|m| m.name == "deploy" && m.kind == EntryKind::Command)
+        .expect("search must rank the command");
+    assert_eq!(
+        hit.prompt_name.as_deref(),
+        Some("plug__deploy"),
+        "search_skills surfaces the command's MCP prompt name; got: {:?}",
+        hit.prompt_name,
+    );
+}
+
 /// `prompts/list` surfaces user-invocable entries (commands by default;
 /// skills only on opt-in) but hides non-invocable ones. The plugin in
 /// this fixture ships BOTH a skill (default `user_invocable = false`)

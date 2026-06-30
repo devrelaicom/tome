@@ -101,6 +101,17 @@ pub struct SkillMatch {
     /// drift forced fallback. The output does NOT distinguish — the
     /// score is opaque.
     pub score: f32,
+    /// #289: the MCP prompt name (`<plugin>__<entry>` form, post-override
+    /// and post-collision-suffix) this entry is reachable under via
+    /// `prompts/list` / `prompts/get`. Present for any user-invocable entry
+    /// (every command by default; a skill that opted into the prompt
+    /// surface). Absent (`skip_serializing_if`) for an entry with no prompt
+    /// — so the skill-kind wire shape is byte-stable, and a caller seeing
+    /// `kind: "command"` without `prompt_name` knows it has no prompt to
+    /// invoke. Resolved from the live `PromptRegistry` (the SSOT), never
+    /// re-derived.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_name: Option<String>,
 }
 
 /// Pipeline:
@@ -353,6 +364,16 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     })?;
 
     let description_max_chars = effective_dmc as usize;
+    // #289: resolve each result's MCP prompt name from the live registry (the
+    // SSOT) so a command (or any user-invocable entry) returned by search is
+    // immediately actionable via `prompts/get`. The lookup is a sub-µs scan
+    // over the in-memory registry (no DB I/O) — safe on the reactor. Clone the
+    // `Arc` out of the read lock so the borrow isn't tied to the guard.
+    let registry = state
+        .prompt_registry
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let matches: Vec<SkillMatch> = outcome
         .results
         .iter()
@@ -365,6 +386,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             plugin_version: s.candidate.plugin_version.clone(),
             path: s.candidate.path.clone(),
             score: s.score,
+            prompt_name: registry
+                .prompt_name_for(
+                    &s.candidate.catalog,
+                    &s.candidate.plugin,
+                    s.candidate.kind,
+                    &s.candidate.name,
+                )
+                .map(str::to_owned),
         })
         .collect();
 

@@ -33,6 +33,10 @@ fn skill_match_wire_shape_for_skill_kind() {
         plugin_version: "1.4.0".into(),
         path: "/abs/path/to/SKILL.md".into(),
         score: 0.87,
+        // A non-invocable skill has no prompt — `prompt_name` is `None` and
+        // MUST be omitted (the #289 additive field is `skip_serializing_if`),
+        // keeping the pre-#289 skill wire shape byte-identical.
+        prompt_name: None,
     };
     let out = Output { matches: vec![m] };
 
@@ -40,7 +44,8 @@ fn skill_match_wire_shape_for_skill_kind() {
 
     // Document order: catalog, plugin, name, kind, description,
     // plugin_version, path, score. `kind` is lowercase via
-    // `#[serde(rename_all = "lowercase")]` on `EntryKind`.
+    // `#[serde(rename_all = "lowercase")]` on `EntryKind`. `prompt_name` is
+    // ABSENT (None + skip_serializing_if).
     let expected = r#"{"matches":[{"catalog":"midnight-expert","plugin":"compact-dev","name":"compact-circuits","kind":"skill","description":"Truncated description body.","plugin_version":"1.4.0","path":"/abs/path/to/SKILL.md","score":0.87}]}"#;
 
     assert_eq!(
@@ -51,6 +56,9 @@ fn skill_match_wire_shape_for_skill_kind() {
 
 #[test]
 fn skill_match_wire_shape_for_command_kind() {
+    // #289: a user-invocable command carries its derived MCP `prompt_name` so
+    // the result is actionable via `prompts/get`. The field is appended LAST
+    // and serialises only when present.
     let m = SkillMatch {
         catalog: "midnight-expert".into(),
         plugin: "compact-dev".into(),
@@ -60,16 +68,45 @@ fn skill_match_wire_shape_for_command_kind() {
         plugin_version: "1.4.0".into(),
         path: "/abs/path/to/commands/fix-issue.md".into(),
         score: 0.42,
+        prompt_name: Some("compact-dev__fix-issue".into()),
     };
     let out = Output { matches: vec![m] };
 
     let json = serde_json::to_string(&out).expect("serialise");
 
-    let expected = r#"{"matches":[{"catalog":"midnight-expert","plugin":"compact-dev","name":"fix-issue","kind":"command","description":"Fix a GitHub issue.","plugin_version":"1.4.0","path":"/abs/path/to/commands/fix-issue.md","score":0.42}]}"#;
+    let expected = r#"{"matches":[{"catalog":"midnight-expert","plugin":"compact-dev","name":"fix-issue","kind":"command","description":"Fix a GitHub issue.","plugin_version":"1.4.0","path":"/abs/path/to/commands/fix-issue.md","score":0.42,"prompt_name":"compact-dev__fix-issue"}]}"#;
 
     assert_eq!(
         json, expected,
-        "search_skills command-kind JSON wire shape drift — `kind` must serialise as lowercase `command`",
+        "search_skills command-kind JSON wire shape drift — `kind` must serialise as lowercase `command`, `prompt_name` appended LAST",
+    );
+}
+
+#[test]
+fn skill_match_wire_shape_for_non_invocable_command_omits_prompt_name() {
+    // #289: a command with `user_invocable: false` has no prompt — `prompt_name`
+    // is omitted, so a caller seeing `kind: command` without `prompt_name`
+    // knows it has no prompt to invoke.
+    let m = SkillMatch {
+        catalog: "midnight-expert".into(),
+        plugin: "compact-dev".into(),
+        name: "internal-only".into(),
+        kind: EntryKind::Command,
+        description: "Internal command.".into(),
+        plugin_version: "1.4.0".into(),
+        path: "/abs/path/to/commands/internal-only.md".into(),
+        score: 0.10,
+        prompt_name: None,
+    };
+    let out = Output { matches: vec![m] };
+
+    let json = serde_json::to_string(&out).expect("serialise");
+
+    let expected = r#"{"matches":[{"catalog":"midnight-expert","plugin":"compact-dev","name":"internal-only","kind":"command","description":"Internal command.","plugin_version":"1.4.0","path":"/abs/path/to/commands/internal-only.md","score":0.1}]}"#;
+
+    assert_eq!(
+        json, expected,
+        "a non-invocable command must omit `prompt_name`",
     );
 }
 
