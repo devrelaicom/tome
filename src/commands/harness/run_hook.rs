@@ -485,8 +485,11 @@ fn run_command_handler(
     for (k, v) in &entry.env {
         cmd.env(k, v);
     }
-    // US8: per-entry plugin-provenance env vars. Names avoid the Phase-12
-    // TOME_<NAME>_API_KEY provider vars by using positional not keyed names.
+    // US8: per-entry plugin-provenance env vars. The TOME_* prefix is fixed and
+    // none of these names ends in _API_KEY, so they cannot collide with the
+    // Phase-12 TOME_<NAME>_API_KEY provider env vars. Additionally, Tome sets
+    // these vars AFTER the plugin-declared entry.env, so a plugin cannot spoof
+    // its own provenance by declaring a TOME_* key in its hook env block.
     cmd.env("TOME_HARNESS", prov.harness);
     cmd.env("TOME_WORKSPACE", prov.workspace);
     cmd.env("TOME_PLUGIN", prov.plugin);
@@ -2337,16 +2340,21 @@ mod tests {
 
     /// When `raw_event_passthrough` is off in the manifest, the dispatch does
     /// NOT include `tome.raw_event` in the cc_stdin. When on, it IS present.
+    ///
+    /// The gating is tested through an OBSERVABLE channel: the hook command
+    /// exits 2 (deny on ClaudeStyle/Gemini wire) when `"raw_event"` appears in
+    /// its stdin, and exits 0 (allow) otherwise. The dispatch exit code then
+    /// distinguishes the two cases unambiguously — no vacuous pass from an
+    /// absent interpreter or swallowed stdout.
     #[test]
     fn dispatch_inner_raw_event_gated_by_manifest_flag() {
         use crate::harness::hooks_ir::HookManifest;
 
-        // Command that echoes whether the tome.raw_event key exists in the stdin JSON.
-        // We read stdin and check if `tome.raw_event` is present.
-        let cmd = concat!(
-            "stdin=$(cat); ",
-            r#"python3 -c "import sys,json; d=json.loads(sys.argv[1]); print('yes' if 'raw_event' in d.get('tome',{}) else 'no')" "$stdin""#
-        );
+        // Command: exit 2 (ClaudeStyle deny) when raw_event is present in stdin,
+        // exit 0 (allow) otherwise. `grep -q` exits 0 on match, 1 on no-match —
+        // invert: exit 2 on match, 0 on no-match.
+        // Uses `sh` + `grep` — no python3 dependency, always available in CI.
+        let cmd = r#"grep -q '"raw_event"' && printf 'raw_event_present' >&2 && exit 2; exit 0"#;
 
         let make_manifest = |passthrough: bool| -> HookManifest {
             let json = format!(
@@ -2368,28 +2376,21 @@ mod tests {
 
         let raw_input = r#"{"native_field": "value"}"#;
 
-        // Flag off → no raw_event in stdin.
+        // Flag off → raw_event absent from CC stdin → grep fails → exit 0 → allow.
         let m_off = make_manifest(false);
         let out_off = dispatch_core("gemini", "PreToolUse", raw_input, Some(&m_off));
-        assert_eq!(out_off.exit_code, 0);
-        // The command echoes allow (exit 0, text to stdout) — but it's treated as
-        // a non-JSON allow. We check via another approach: use dispatch_with_cfg
-        // and assert the cc_value directly via a command that prints the flag.
-        // The stdout here is the command's output (not a JSON decision) → allow.
-        // The actual test is the command's print: "no" means no raw_event.
-        // We check indirectly by ensuring allow (not a block) + the output text.
-        assert!(
-            !out_off.stdout.contains("\"permission\":\"deny\""),
-            "passthrough-off must not block"
+        assert_eq!(
+            out_off.exit_code, 0,
+            "passthrough-off: raw_event must be absent → hook exits 0 → allow"
         );
 
-        // Flag on → raw_event is present in stdin.
+        // Flag on → raw_event present in CC stdin → grep matches → exit 2 → deny.
+        // ClaudeStyle (Gemini) wire: a hook exit 2 → decision=block → dispatch exit 2.
         let m_on = make_manifest(true);
         let out_on = dispatch_core("gemini", "PreToolUse", raw_input, Some(&m_on));
-        assert_eq!(out_on.exit_code, 0);
-        assert!(
-            !out_on.stdout.contains("\"permission\":\"deny\""),
-            "passthrough-on must not block"
+        assert_eq!(
+            out_on.exit_code, 2,
+            "passthrough-on: raw_event must be present → hook exits 2 → deny (exit 2)"
         );
     }
 
