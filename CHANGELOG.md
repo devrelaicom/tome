@@ -572,6 +572,12 @@ Security hardening
 
 ## [Unreleased]
 
+## [0.7.12](https://github.com/devrelaicom/tome/compare/v0.7.11...v0.7.12) - 2026-06-30
+
+### Other
+
+- Native plugin-hook translation (5 harnesses: Devin/Codex/Cursor/Gemini/Copilot-CLI) ([#318](https://github.com/devrelaicom/tome/pull/318))
+
 ## [0.7.11](https://github.com/devrelaicom/tome/compare/v0.7.10...v0.7.11) - 2026-06-29
 
 ### Other
