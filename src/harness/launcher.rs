@@ -153,6 +153,122 @@ pub fn looks_like_tome_launcher(command: &str) -> bool {
     p.file_stem().and_then(|s| s.to_str()) == Some(TOME_BIN_NAME)
 }
 
+/// Launcher-tolerant ownership recogniser for a hook-COMMAND STRING (#337
+/// Phase B).
+///
+/// The hook sinks (Claude/Codex session-start, the new-harness `CommandHook`
+/// session-start, and the `run-hook` dispatcher registration) emit a single
+/// SHELL-COMMAND STRING, e.g.
+///
+/// ```text
+/// tome harness session-start --workspace demo --harness cursor
+/// /usr/local/bin/tome harness run-hook --event PreToolUse --harness devin --workspace demo
+/// '/Applications/My Tome.app/tome' harness session-start --workspace demo
+/// ```
+///
+/// where the LAUNCHER (the first token) is the only part that varies per
+/// machine (the #290 resolver returns `current_exe`, possibly an absolute path
+/// with spaces that [`shell_quote`] single-quotes). The stable ARGS SUFFIX
+/// (`harness session-start …` / `harness run-hook …`) is byte-identical across
+/// machines and is the discriminator that prevents over-broadening.
+///
+/// Returns `true` iff:
+/// - the command splits into a first launcher token (honouring a leading
+///   single-quoted span [`shell_quote`] may produce) followed by a single
+///   space, and
+/// - the un-quoted launcher token [`looks_like_tome_launcher`] (bare `tome`,
+///   any `…/tome`, `tome.exe`, or this binary's own `current_exe`), AND
+/// - the REMAINDER after that single space EXACTLY equals
+///   `expected_args_suffix`.
+///
+/// **Why this is not over-broad.** The args-suffix equality is what scopes the
+/// match to ONE sink+harness shape: `looks_like_tome_launcher` alone would
+/// claim ANY `tome …` command (a developer's own `tome catalog list` hook, a
+/// `tome run-hook` entry for a DIFFERENT harness, a different workspace), but
+/// pairing it with the exact suffix means a foreign launcher, a foreign suffix,
+/// a different `--harness`/`--workspace`/`--event` value, or trailing junk is
+/// NOT claimed. This is the string-command analogue of the MCP sink's
+/// `looks_like_tome_launcher(command) && args[0] == "mcp"` predicate
+/// (see [`crate::harness::mcp_config::is_tome_owned`]): launcher-tolerant on the
+/// prefix, exact on the Tome arg shape.
+pub fn looks_like_tome_hook_command(command: &str, expected_args_suffix: &str) -> bool {
+    let Some((launcher, remainder)) = split_launcher(command) else {
+        return false;
+    };
+    looks_like_tome_launcher(&launcher) && remainder == expected_args_suffix
+}
+
+/// Split a hook-command string into `(launcher, remainder)` at the FIRST
+/// unquoted space, honouring a leading single-quoted span (the only quoting
+/// [`shell_quote`] emits). Returns `None` when there is no space after the
+/// launcher (a bare launcher with no args is never a Tome hook command).
+///
+/// - `tome harness x` → `("tome", "harness x")`.
+/// - `/usr/local/bin/tome harness x` → `("/usr/local/bin/tome", "harness x")`.
+/// - `'/o dd/tome' harness x` → `("/o dd/tome", "harness x")` (the leading
+///   single-quoted span is un-quoted; the embedded space stays inside the
+///   launcher, and the split point is the space that FOLLOWS the closing quote).
+/// - `'/o'\''dd/tome' harness x` → `("/o'dd/tome", "harness x")` (the `'\''`
+///   escape idiom [`shell_quote`] emits is decoded).
+///
+/// Deliberately minimal: it un-quotes ONLY the leading token and ONLY the
+/// quoting forms [`shell_quote`] can produce. It is NOT a general shell parser
+/// — the remainder is returned verbatim and compared by exact equality against
+/// the (always-unquoted) expected args suffix, so no remainder tokenisation is
+/// needed or wanted (it would be a brittle false-recognition surface).
+fn split_launcher(command: &str) -> Option<(String, String)> {
+    let bytes = command.as_bytes();
+    if bytes.first() == Some(&b'\'') {
+        // Leading single-quoted launcher span (shell_quote's space/quote form).
+        // Walk the chars decoding the POSIX `'\''` close-reopen idiom, until the
+        // span's terminating quote is followed by a space.
+        let mut launcher = String::new();
+        let mut chars = command.char_indices().peekable();
+        // Consume the opening quote.
+        chars.next();
+        while let Some((_, c)) = chars.next() {
+            if c == '\'' {
+                // A closing quote: either it terminates the span (next is a
+                // space → split here) or it is the `'\''` re-quote idiom
+                // (`'` then `\` `'` `'`), which decodes to a literal `'`.
+                match chars.peek().map(|&(_, c)| c) {
+                    Some('\\') => {
+                        // Expect `\ ' '` → emit one literal `'` and continue.
+                        chars.next(); // the backslash
+                        // The escaped quote.
+                        if chars.next().map(|(_, c)| c) != Some('\'') {
+                            return None; // malformed escape — not ours.
+                        }
+                        // The reopening quote.
+                        if chars.next().map(|(_, c)| c) != Some('\'') {
+                            return None;
+                        }
+                        launcher.push('\'');
+                    }
+                    Some(' ') => {
+                        // End of the quoted launcher. Consume the space; the
+                        // remainder is everything AFTER it (a space is one byte,
+                        // so the remainder starts at `space_idx + 1`).
+                        let (space_idx, _) = chars.next().expect("peeked space");
+                        return Some((launcher, command[space_idx + 1..].to_string()));
+                    }
+                    // A closing quote NOT followed by a space (or EOF) is a
+                    // bare quoted launcher with no args — not a hook command.
+                    _ => return None,
+                }
+            } else {
+                launcher.push(c);
+            }
+        }
+        // Unterminated quote — not a value we emit.
+        None
+    } else {
+        // Unquoted launcher: split at the first space.
+        let idx = command.find(' ')?;
+        Some((command[..idx].to_string(), command[idx + 1..].to_string()))
+    }
+}
+
 /// The launcher this binary resolves to, cached for the process lifetime.
 ///
 /// [`tome_command`] reads `$TOME_BIN` / `current_exe`; both are stable for a
@@ -174,6 +290,26 @@ fn current_launcher() -> &'static str {
     use std::sync::OnceLock;
     static CACHE: OnceLock<String> = OnceLock::new();
     CACHE.get_or_init(tome_command)
+}
+
+/// Build a Tome hook-command STRING for the given stable args suffix, with the
+/// RESOLVED launcher as a shell-safe prefix (#337 Phase B).
+///
+/// This is the emit-side SSOT every hook sink uses: it pairs
+/// `shell_quote(tome_command())` with `expected_args_suffix` so the emitted
+/// command starts with an absolute (PATH-less-host-startable) launcher while
+/// the suffix stays byte-identical to what [`looks_like_tome_hook_command`]
+/// recognises. The result is exactly the form the recogniser un-quotes: a
+/// (possibly single-quoted) launcher token, one space, then the suffix
+/// verbatim.
+///
+/// On the common path (a launcher with no shell-special bytes, e.g. bare `tome`
+/// or `/usr/local/bin/tome`) the prefix is unquoted, so the bytes are identical
+/// to the pre-#337 `"tome <suffix>"` form modulo the launcher path. Only a
+/// launcher path with spaces / quotes (macOS `Application Support`) is
+/// single-quoted.
+pub fn tome_hook_command(expected_args_suffix: &str) -> String {
+    format!("{} {expected_args_suffix}", shell_quote(&tome_command()))
 }
 
 /// Quote a launcher path for safe interpolation into a single shell-command
@@ -325,5 +461,125 @@ mod tests {
     #[test]
     fn shell_quote_escapes_embedded_single_quote() {
         assert_eq!(shell_quote("/o'dd/tome"), "'/o'\\''dd/tome'");
+    }
+
+    // ---- looks_like_tome_hook_command (#337 Phase B) --------------------
+
+    const SUFFIX: &str = "harness session-start --workspace demo --harness cursor";
+
+    #[test]
+    fn hook_command_recognises_bare_and_absolute_launchers() {
+        assert!(looks_like_tome_hook_command(
+            &format!("tome {SUFFIX}"),
+            SUFFIX
+        ));
+        assert!(looks_like_tome_hook_command(
+            &format!("/usr/local/bin/tome {SUFFIX}"),
+            SUFFIX,
+        ));
+        assert!(looks_like_tome_hook_command(
+            &format!("/opt/tome/bin/tome {SUFFIX}"),
+            SUFFIX,
+        ));
+        // Windows .exe basename.
+        assert!(looks_like_tome_hook_command(
+            &format!("/c/tools/tome.exe {SUFFIX}"),
+            SUFFIX,
+        ));
+    }
+
+    #[test]
+    fn hook_command_recognises_quoted_launcher_with_space() {
+        // `shell_quote` single-quotes a path with spaces; the recogniser
+        // un-quotes the leading span and splits at the space AFTER the quote.
+        let cmd = format!("'/Applications/My Tome.app/tome' {SUFFIX}");
+        assert!(looks_like_tome_hook_command(&cmd, SUFFIX));
+    }
+
+    #[test]
+    fn hook_command_recognises_quoted_launcher_with_embedded_quote() {
+        // The `'\''` re-quote idiom decodes to a literal `'` inside the path.
+        let quoted = shell_quote("/o'dd/tome");
+        assert_eq!(quoted, "'/o'\\''dd/tome'");
+        let cmd = format!("{quoted} {SUFFIX}");
+        assert!(looks_like_tome_hook_command(&cmd, SUFFIX));
+    }
+
+    #[test]
+    fn hook_command_does_not_over_broaden() {
+        // Foreign launcher → not claimed even with the exact suffix.
+        assert!(!looks_like_tome_hook_command(
+            &format!("not-tome {SUFFIX}"),
+            SUFFIX,
+        ));
+        assert!(!looks_like_tome_hook_command(
+            &format!("/usr/bin/tome-wrapper {SUFFIX}"),
+            SUFFIX,
+        ));
+        // A tome launcher but a DIFFERENT suffix (different --harness) → not
+        // claimed (the suffix is the scope discriminator).
+        assert!(!looks_like_tome_hook_command(
+            "tome harness session-start --workspace demo --harness devin",
+            SUFFIX,
+        ));
+        // A tome launcher with a foreign command → not claimed.
+        assert!(!looks_like_tome_hook_command("tome catalog list", SUFFIX));
+        // Trailing junk after the suffix → not claimed (exact equality).
+        assert!(!looks_like_tome_hook_command(
+            &format!("tome {SUFFIX} ; rm -rf /"),
+            SUFFIX,
+        ));
+        // A bare launcher with no args is never a hook command.
+        assert!(!looks_like_tome_hook_command("tome", SUFFIX));
+        assert!(!looks_like_tome_hook_command("", SUFFIX));
+        // A quoted launcher with no following args is not a hook command.
+        assert!(!looks_like_tome_hook_command("'/my path/tome'", SUFFIX));
+    }
+
+    #[test]
+    fn hook_command_self_recognition_arm() {
+        // The current binary's own resolved launcher (current_exe — a hash-named
+        // test binary) is recognised via the self-recognition arm in
+        // `looks_like_tome_launcher`, paired with the suffix.
+        let _guard = EnvGuard::new();
+        let cmd = tome_hook_command(SUFFIX);
+        assert!(
+            looks_like_tome_hook_command(&cmd, SUFFIX),
+            "a freshly-emitted command must be recognised: {cmd}",
+        );
+    }
+
+    // ---- tome_hook_command emit (#337 Phase B) --------------------------
+
+    #[test]
+    fn tome_hook_command_uses_override_launcher() {
+        let guard = EnvGuard::new();
+        guard.set("/custom/tome");
+        assert_eq!(tome_hook_command(SUFFIX), format!("/custom/tome {SUFFIX}"),);
+    }
+
+    #[test]
+    fn tome_hook_command_quotes_launcher_with_spaces() {
+        let guard = EnvGuard::new();
+        guard.set("/Applications/My Tome.app/tome");
+        let cmd = tome_hook_command(SUFFIX);
+        assert_eq!(cmd, format!("'/Applications/My Tome.app/tome' {SUFFIX}"));
+        // And it round-trips through the recogniser.
+        assert!(looks_like_tome_hook_command(&cmd, SUFFIX));
+    }
+
+    #[test]
+    fn tome_hook_command_round_trips_for_override() {
+        // A command emitted with launcher A is recognised, then a re-emit with a
+        // DIFFERENT launcher B is ALSO recognised against the same suffix — the
+        // launcher-change tolerance the sinks rely on for idempotence/removal.
+        let guard = EnvGuard::new();
+        guard.set("/a/tome");
+        let a = tome_hook_command(SUFFIX);
+        guard.set("/b/tome");
+        let b = tome_hook_command(SUFFIX);
+        assert_ne!(a, b, "different launchers produce different bytes");
+        assert!(looks_like_tome_hook_command(&a, SUFFIX));
+        assert!(looks_like_tome_hook_command(&b, SUFFIX));
     }
 }

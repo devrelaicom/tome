@@ -155,31 +155,35 @@ pub fn build_directive(
     s
 }
 
+/// The byte-stable ARGS SUFFIX of the Claude/Codex SessionStart hook command —
+/// everything AFTER the launcher (#337 Phase B). This is the launcher-tolerant
+/// ownership discriminator: the launcher prefix varies per machine (resolved
+/// via `tome_command()`), but this suffix is byte-identical, so
+/// [`crate::harness::hooks::merge_tome_owned_into_settings`] /
+/// [`remove_tome_owned_from_settings`](crate::harness::hooks::remove_tome_owned_from_settings)
+/// recognise a previously-written entry across a launcher change. Keep these
+/// bytes stable — they ARE the ownership marker for the session-start sinks.
+pub fn session_start_args_suffix(workspace_name: &str) -> String {
+    format!("harness session-start --workspace {workspace_name}")
+}
+
 /// The single Tome-owned Claude Code SessionStart hook entry: runs the
 /// `session-start` command and lets Claude Code inject its stdout as
 /// `additionalContext` each session.
 ///
-/// Ownership is by structural deep-equal (no sidecar — the same mechanism the
-/// rest of [`crate::harness::hooks`] uses), so the exact bytes ARE the
-/// ownership marker — keep them stable.
-///
-/// `tome_command` is the binary reference; it MUST match the convention the
-/// MCP-config sync uses for the `tome mcp` entry (bare `"tome"`, see
-/// `harness::sync::write_mcp_for_harness`) so the SessionStart hook invokes the
-/// same binary. `workspace_name` pins the directive to the bound workspace,
-/// mirroring the `--workspace <ws>` arg the MCP entry also carries.
-pub fn session_start_hook(
-    tome_command: &str,
-    workspace_name: &str,
-) -> crate::harness::hooks::RewrittenHooks {
+/// Ownership is launcher-tolerant (#337 Phase B): the command's LAUNCHER prefix
+/// is the resolved [`crate::harness::launcher::tome_command`] (so a PATH-less /
+/// sandboxed host can start it), while the stable [`session_start_args_suffix`]
+/// is the byte-identical discriminator the merge/remove paths match on. Pre-#337
+/// the bare `"tome"` bytes were the marker; now the suffix is. `workspace_name`
+/// pins the directive to the bound workspace, mirroring the `--workspace <ws>`
+/// arg the MCP entry also carries.
+pub fn session_start_hook(workspace_name: &str) -> crate::harness::hooks::RewrittenHooks {
+    let command =
+        crate::harness::launcher::tome_hook_command(&session_start_args_suffix(workspace_name));
     let entry = serde_json::json!({
         "hooks": [
-            {
-                "type": "command",
-                "command": format!(
-                    "{tome_command} harness session-start --workspace {workspace_name}"
-                )
-            }
+            { "type": "command", "command": command }
         ]
     });
     crate::harness::hooks::RewrittenHooks {
@@ -190,23 +194,18 @@ pub fn session_start_hook(
 /// The Tome-owned Codex `SessionStart` hook entry. Codex's `hooks.json` entry
 /// shape carries a `matcher` (matched against the session `source`) plus a
 /// nested `hooks` array. `"startup|resume"` fires on fresh sessions and resumes
-/// (not `clear`/`compact`). Ownership is by structural deep-equal (no sidecar),
-/// so the exact bytes ARE the ownership marker — keep them stable. The command
-/// runs the harness-agnostic `session-start` printer; its plain-markdown
-/// stdout becomes Codex developer context.
-pub fn codex_session_start_hook(
-    tome_command: &str,
-    workspace_name: &str,
-) -> crate::harness::hooks::RewrittenHooks {
+/// (not `clear`/`compact`). Ownership is launcher-tolerant (#337 Phase B): the
+/// command's launcher prefix is the resolved [`crate::harness::launcher::tome_command`]
+/// while the stable [`session_start_args_suffix`] is the matched discriminator.
+/// The command runs the harness-agnostic `session-start` printer; its
+/// plain-markdown stdout becomes Codex developer context.
+pub fn codex_session_start_hook(workspace_name: &str) -> crate::harness::hooks::RewrittenHooks {
+    let command =
+        crate::harness::launcher::tome_hook_command(&session_start_args_suffix(workspace_name));
     let entry = serde_json::json!({
         "matcher": "startup|resume",
         "hooks": [
-            {
-                "type": "command",
-                "command": format!(
-                    "{tome_command} harness session-start --workspace {workspace_name}"
-                )
-            }
+            { "type": "command", "command": command }
         ]
     });
     crate::harness::hooks::RewrittenHooks {
@@ -452,17 +451,35 @@ mod tests {
 
     #[test]
     fn codex_session_start_hook_has_matcher_and_command() {
-        let h = codex_session_start_hook("tome", "my-ws");
+        let h = codex_session_start_hook("my-ws");
         assert_eq!(h.events.len(), 1);
         let (event, entries) = &h.events[0];
         assert_eq!(event, "SessionStart");
         assert_eq!(entries.len(), 1);
         let e = &entries[0];
         assert_eq!(e["matcher"], "startup|resume");
-        assert_eq!(
-            e["hooks"][0]["command"],
-            "tome harness session-start --workspace my-ws"
+        // #337 Phase B: the LAUNCHER prefix is resolved (the test binary's
+        // current_exe), but the byte-stable args suffix is the ownership marker
+        // and is recognised by the launcher-tolerant matcher.
+        let cmd = e["hooks"][0]["command"].as_str().unwrap();
+        let suffix = session_start_args_suffix("my-ws");
+        assert!(
+            crate::harness::launcher::looks_like_tome_hook_command(cmd, &suffix),
+            "codex session command must be a recognised tome hook command: {cmd}",
         );
+        assert!(cmd.ends_with(&suffix));
         assert_eq!(e["hooks"][0]["type"], "command");
+    }
+
+    #[test]
+    fn session_start_hook_command_is_launcher_tolerant() {
+        let h = session_start_hook("my-ws");
+        let (_event, entries) = &h.events[0];
+        let cmd = entries[0]["hooks"][0]["command"].as_str().unwrap();
+        let suffix = session_start_args_suffix("my-ws");
+        assert!(
+            crate::harness::launcher::looks_like_tome_hook_command(cmd, &suffix),
+            "claude session command must be a recognised tome hook command: {cmd}",
+        );
     }
 }

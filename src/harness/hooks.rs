@@ -317,6 +317,241 @@ fn remove_if_present(
     before != items.len()
 }
 
+// =====================================================================
+// Launcher-tolerant merge / remove for TOME-OWNED session hooks (#337 Phase B)
+// =====================================================================
+//
+// The Claude + Codex SessionStart hooks Tome WRITES (via
+// `routing::{session_start_hook,codex_session_start_hook}`) carry a single
+// shell-command leaf — `<launcher> harness session-start --workspace <ws>`.
+// Pre-#337 the launcher was the bare `"tome"` and ownership was byte-exact
+// deep-equal (`merge_into_settings`/`remove_into_settings`). #337 emits the
+// RESOLVED absolute launcher (PATH-less-host-startable), which varies per
+// machine, so byte-exact matching would (a) re-append a duplicate on every sync
+// after a launcher change and (b) ORPHAN a previously-written entry on removal.
+//
+// These variants restore idempotence/removal across a launcher change by
+// matching on a COMMAND-LEAF-NORMALISED form: any string leaf that
+// `looks_like_tome_hook_command(s, suffix)` (a tome launcher + the EXACT
+// expected args suffix) is canonicalised before deep-equal, so two entries that
+// differ ONLY in their launcher prefix compare equal. A foreign entry (wrong
+// launcher, wrong suffix) does not match and is never claimed.
+//
+// These are used ONLY for Tome's OWN session entries — plugin hooks keep the
+// byte-exact `merge_into_settings`/`remove_from_settings` path (a plugin's
+// rewritten command is not a tome-launcher command and must not be normalised).
+
+/// Canonical sentinel a recognised Tome hook-command leaf is replaced with
+/// before deep-equal. A control-char + private-use scalar that cannot collide
+/// with any real command string.
+const TOME_HOOK_LEAF_SENTINEL: &str = "\u{1}tome-hook\u{1}";
+
+/// Recursively replace every string leaf that
+/// [`looks_like_tome_hook_command`](crate::harness::launcher::looks_like_tome_hook_command)
+/// recognises (a tome launcher + the EXACT `expected_args_suffix`) with
+/// [`TOME_HOOK_LEAF_SENTINEL`], so two entries that differ ONLY in their
+/// launcher prefix compare deep-equal. Non-matching leaves (developer commands,
+/// a different harness's suffix) are untouched.
+fn normalize_tome_hook_leaves(value: &mut JsonValue, expected_args_suffix: &str) {
+    match value {
+        JsonValue::String(s) => {
+            if crate::harness::launcher::looks_like_tome_hook_command(s, expected_args_suffix) {
+                *s = TOME_HOOK_LEAF_SENTINEL.to_string();
+            }
+        }
+        JsonValue::Array(arr) => {
+            for item in arr {
+                normalize_tome_hook_leaves(item, expected_args_suffix);
+            }
+        }
+        JsonValue::Object(map) => {
+            for (_k, v) in map.iter_mut() {
+                normalize_tome_hook_leaves(v, expected_args_suffix);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The launcher-tolerant deep-equal test for two Tome-owned hook entries:
+/// equal iff they agree after normalising any recognised tome hook-command
+/// leaf to the sentinel. Clones both sides (entries are tiny).
+///
+/// `pub(crate)` so the `CommandHook` + `run-hook` reconcilers in
+/// [`crate::harness::reconcile::hooks`] share the SAME launcher-tolerant entry
+/// comparison (one recogniser, no per-sink string logic).
+pub(crate) fn tome_entries_equal(a: &JsonValue, b: &JsonValue, expected_args_suffix: &str) -> bool {
+    let mut na = a.clone();
+    let mut nb = b.clone();
+    normalize_tome_hook_leaves(&mut na, expected_args_suffix);
+    normalize_tome_hook_leaves(&mut nb, expected_args_suffix);
+    na == nb
+}
+
+/// Append `entry` to `items` unless a launcher-tolerant-equal entry is already
+/// present (#337 Phase B). When a launcher-tolerant match IS present but its
+/// bytes differ (a launcher upgrade), replace it in place. Returns `true` when
+/// `items` changed. The launcher-tolerant array primitive shared by the
+/// `CommandHook` + `run-hook` reconcilers (the JSON-array analogue of
+/// [`upsert_tome_owned`]).
+pub(crate) fn upsert_tome_owned_in_array(
+    items: &mut Vec<JsonValue>,
+    entry: &JsonValue,
+    expected_args_suffix: &str,
+) -> bool {
+    if let Some(existing) = items
+        .iter_mut()
+        .find(|e| tome_entries_equal(e, entry, expected_args_suffix))
+    {
+        if existing == entry {
+            return false;
+        }
+        *existing = entry.clone();
+        return true;
+    }
+    items.push(entry.clone());
+    true
+}
+
+/// Remove every launcher-tolerant-equal entry from `items` (#337 Phase B).
+/// Returns `true` when `items` changed. Shared by the `CommandHook` + `run-hook`
+/// reconcilers so removal recognises a previously-written absolute-launcher
+/// entry rather than orphaning it across a launcher change.
+pub(crate) fn retain_dropping_tome_owned(
+    items: &mut Vec<JsonValue>,
+    entry: &JsonValue,
+    expected_args_suffix: &str,
+) -> bool {
+    let before = items.len();
+    items.retain(|e| !tome_entries_equal(e, entry, expected_args_suffix));
+    before != items.len()
+}
+
+/// Launcher-tolerant merge of Tome's OWN session-hook entries into
+/// `settings.local.json` (#337 Phase B). Like [`merge_into_settings`] but the
+/// idempotence / pre-existing-entry test is launcher-tolerant: an
+/// already-present entry that differs ONLY by its launcher prefix is treated as
+/// present (no duplicate) but UPGRADED to the freshly-emitted launcher when its
+/// bytes differ (so a sync after a launcher change rewrites the command in
+/// place). `expected_args_suffix` is the byte-stable suffix the entry's command
+/// leaf carries (e.g. `harness session-start --workspace <ws>`).
+///
+/// Returns `true` when the file changed on disk.
+pub fn merge_tome_owned_into_settings(
+    target: &Path,
+    hooks: &RewrittenHooks,
+    expected_args_suffix: &str,
+) -> Result<bool, TomeError> {
+    refuse_symlink_settings(target)?;
+
+    let (mut doc, existed) = load_settings(target)?;
+    let mut changed = false;
+
+    {
+        let hooks_obj = ensure_hooks_object(&mut doc, target)?;
+        for (event, entries) in &hooks.events {
+            for entry in entries {
+                if upsert_tome_owned(hooks_obj, event, entry, expected_args_suffix, target)? {
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if !existed {
+        write_settings(target, &doc)?;
+        return Ok(true);
+    }
+    if changed {
+        write_settings(target, &doc)?;
+    }
+    Ok(changed)
+}
+
+/// Append `entry` under `event` unless a launcher-tolerant-equal entry is
+/// already present; when one IS present but its bytes differ (a launcher
+/// upgrade), replace it in place. Returns `true` when the array changed.
+/// Fails closed (exit 44) on a wrong-typed event value, mirroring
+/// [`append_if_absent`].
+fn upsert_tome_owned(
+    hooks_obj: &mut JsonMap<String, JsonValue>,
+    event: &str,
+    entry: &JsonValue,
+    expected_args_suffix: &str,
+    target: &Path,
+) -> Result<bool, TomeError> {
+    let arr = hooks_obj
+        .entry(event.to_string())
+        .or_insert_with(|| JsonValue::Array(Vec::new()));
+    let Some(items) = arr.as_array_mut() else {
+        return Err(settings_write_failed(
+            target,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("settings.local.json `hooks.{event}` value must be an array"),
+            ),
+        ));
+    };
+    if let Some(existing) = items
+        .iter_mut()
+        .find(|e| tome_entries_equal(e, entry, expected_args_suffix))
+    {
+        if existing == entry {
+            return Ok(false); // byte-identical → idempotent no-op.
+        }
+        *existing = entry.clone(); // launcher upgrade → rewrite in place.
+        return Ok(true);
+    }
+    items.push(entry.clone());
+    Ok(true)
+}
+
+/// Launcher-tolerant removal of Tome's OWN session-hook entries from
+/// `settings.local.json` (#337 Phase B). Like [`remove_from_settings`] but a
+/// stored entry that differs ONLY by its launcher prefix is still recognised
+/// and removed (so a non-live harness's earlier entry is not orphaned after a
+/// launcher change). Non-matching entries are left in place.
+pub fn remove_tome_owned_from_settings(
+    target: &Path,
+    hooks: &RewrittenHooks,
+    expected_args_suffix: &str,
+) -> Result<bool, TomeError> {
+    refuse_symlink_settings(target)?;
+
+    let (mut doc, existed) = load_settings(target)?;
+    if !existed {
+        return Ok(false);
+    }
+
+    let mut changed = false;
+    {
+        if let Some(hooks_obj) = doc
+            .as_object_mut()
+            .and_then(|o| o.get_mut("hooks"))
+            .and_then(JsonValue::as_object_mut)
+        {
+            for (event, entries) in &hooks.events {
+                for entry in entries {
+                    if let Some(items) = hooks_obj.get_mut(event).and_then(JsonValue::as_array_mut)
+                    {
+                        let before = items.len();
+                        items.retain(|e| !tome_entries_equal(e, entry, expected_args_suffix));
+                        if before != items.len() {
+                            changed = true;
+                        }
+                    }
+                }
+                prune_empty_event(hooks_obj, event);
+            }
+        }
+    }
+
+    if changed {
+        write_settings(target, &doc)?;
+    }
+    Ok(changed)
+}
+
 /// Drop `event`'s key from `hooks_obj` when its array is now empty (FR-006).
 /// A non-array or absent value is left untouched.
 fn prune_empty_event(hooks_obj: &mut JsonMap<String, JsonValue>, event: &str) {
@@ -603,5 +838,164 @@ mod tests {
         let derived = entry("/x/g.sh");
         assert!(!remove_if_present(&mut hooks, "PreToolUse", &derived));
         assert_eq!(hooks["PreToolUse"].as_array().unwrap().len(), 1);
+    }
+}
+
+// =====================================================================
+// #337 Phase B — launcher-tolerant session-hook merge / remove. The
+// load-bearing coverage: a SessionStart entry WRITTEN with launcher A must be
+// RECOGNISED (idempotence / upgrade / removal) after the emitted launcher
+// becomes B (a per-machine `current_exe` change or the bare→absolute upgrade).
+// Exercised through the real `merge_tome_owned_into_settings` /
+// `remove_tome_owned_from_settings` file round-trip.
+// =====================================================================
+#[cfg(test)]
+mod launcher_tolerant_session_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    const SUFFIX: &str = "harness session-start --workspace demo";
+
+    /// A `RewrittenHooks` carrying one SessionStart entry whose command uses
+    /// `launcher` + the stable SUFFIX (the Claude session-hook shape).
+    fn session_hooks(launcher: &str) -> RewrittenHooks {
+        let entry = serde_json::json!({
+            "hooks": [
+                { "type": "command", "command": format!("{launcher} {SUFFIX}") }
+            ]
+        });
+        RewrittenHooks {
+            events: vec![("SessionStart".to_string(), vec![entry])],
+        }
+    }
+
+    fn read_cmd(target: &Path) -> String {
+        let doc: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(target).unwrap()).unwrap();
+        doc["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn session_start_len(target: &Path) -> usize {
+        let doc: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(target).unwrap()).unwrap();
+        doc["hooks"]["SessionStart"].as_array().unwrap().len()
+    }
+
+    /// Idempotence: re-merging the IDENTICAL launcher is a no-op (no rewrite).
+    #[test]
+    fn merge_is_idempotent_for_same_launcher() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.local.json");
+        let h = session_hooks("/opt/tome/bin/tome");
+        assert!(merge_tome_owned_into_settings(&target, &h, SUFFIX).unwrap());
+        // Second identical merge → no change.
+        assert!(!merge_tome_owned_into_settings(&target, &h, SUFFIX).unwrap());
+        assert_eq!(session_start_len(&target), 1);
+    }
+
+    /// Launcher change: an entry written with launcher A is RECOGNISED across a
+    /// re-merge with launcher B (no duplicate) and UPGRADED to B in place.
+    #[test]
+    fn merge_recognises_and_upgrades_across_launcher_change() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.local.json");
+        // Seed the legacy bare-name entry.
+        assert!(merge_tome_owned_into_settings(&target, &session_hooks("tome"), SUFFIX).unwrap());
+        assert_eq!(read_cmd(&target), format!("tome {SUFFIX}"));
+
+        // Re-merge with an absolute launcher B → recognised (no duplicate),
+        // command upgraded to B.
+        let b = "/usr/local/bin/tome";
+        assert!(merge_tome_owned_into_settings(&target, &session_hooks(b), SUFFIX).unwrap());
+        assert_eq!(session_start_len(&target), 1, "no duplicate across upgrade");
+        assert_eq!(read_cmd(&target), format!("{b} {SUFFIX}"));
+
+        // Re-merge with the SAME launcher B is now idempotent.
+        assert!(!merge_tome_owned_into_settings(&target, &session_hooks(b), SUFFIX).unwrap());
+    }
+
+    /// Removal recognises an entry written with a DIFFERENT launcher (so a
+    /// non-live harness's earlier absolute-launcher entry is not orphaned).
+    #[test]
+    fn remove_recognises_entry_written_with_other_launcher() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.local.json");
+        // Seed an entry with launcher A (absolute).
+        assert!(
+            merge_tome_owned_into_settings(&target, &session_hooks("/opt/a/tome"), SUFFIX).unwrap()
+        );
+        // Remove using a DIFFERENT launcher B — still matched + removed.
+        assert!(
+            remove_tome_owned_from_settings(&target, &session_hooks("/usr/bin/tome"), SUFFIX)
+                .unwrap()
+        );
+        let doc: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        // The now-empty SessionStart array is pruned.
+        assert!(
+            doc["hooks"].get("SessionStart").is_none(),
+            "the Tome session entry must be removed (not orphaned): {doc}",
+        );
+    }
+
+    /// Over-broaden guard: a FOREIGN entry (different suffix) is NOT removed,
+    /// and a developer's own non-tome entry under the same event survives.
+    #[test]
+    fn does_not_claim_foreign_entries() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.local.json");
+        // Seed a developer entry + a tome entry for a DIFFERENT workspace suffix.
+        std::fs::write(
+            &target,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "SessionStart": [
+                        { "hooks": [ { "type": "command", "command": "dev tool run" } ] },
+                        { "hooks": [ { "type": "command",
+                            "command": "tome harness session-start --workspace OTHER" } ] }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        // Removing OUR suffix touches neither: the dev entry is not a tome
+        // command, and the OTHER-workspace entry has a different suffix.
+        assert!(!remove_tome_owned_from_settings(&target, &session_hooks("tome"), SUFFIX).unwrap());
+        let doc: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(
+            doc["hooks"]["SessionStart"].as_array().unwrap().len(),
+            2,
+            "foreign + other-workspace entries must both survive: {doc}",
+        );
+    }
+
+    /// A merge alongside a foreign entry adds ONLY Tome's, leaving the foreign
+    /// one in place (developer-hook preservation across the launcher-tolerant
+    /// path).
+    #[test]
+    fn merge_preserves_a_foreign_sibling() {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("settings.local.json");
+        std::fs::write(
+            &target,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "hooks": {
+                    "SessionStart": [
+                        { "hooks": [ { "type": "command", "command": "dev tool run" } ] }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            merge_tome_owned_into_settings(&target, &session_hooks("/abs/tome"), SUFFIX).unwrap()
+        );
+        assert_eq!(session_start_len(&target), 2, "dev entry + Tome entry");
     }
 }

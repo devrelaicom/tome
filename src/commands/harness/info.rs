@@ -256,16 +256,16 @@ pub fn run(
     // the ownership marker survives). Keyed off the resolved workspace name +
     // the harness name.
     //
-    // #337: the snippet's `command` is the PORTABLE bare `tome` (a human pastes
-    // it, so the readable PATH-resolved name copy-pastes across machines),
-    // whereas `sync` now writes the RESOLVED ABSOLUTE launcher via
-    // `tome_command()` (so a PATH-less host can start the server). The two
-    // deliberately DIVERGE: the snippet `command` is NOT byte-identical to the
-    // synced `command` (only the args / dialect shape are). A bare-`tome`
-    // snippet is still recognised as Tome-owned (basename match), so pasting it
-    // is valid. (Making the snippet PATH-tolerant on manual hosts is Phase B.)
+    // #337 Phase B: the snippet's `command` is the RESOLVED launcher
+    // (`tome_command()`), CONSISTENT with what `sync` writes — so a snippet
+    // pasted into a PATH-less / sandboxed host (the whole point of #337) starts
+    // the server, and the snippet matches the writer's `command` byte-for-byte
+    // (modulo surrounding developer content `write_entry` preserves). The
+    // resolved launcher is an absolute path that copy-pastes across machines as
+    // a literal; on a normal install it is `…/tome`, recognised as Tome-owned by
+    // the basename arm of `looks_like_tome_launcher`.
     let snippet_entry = mcp_config::TomeEntry::new(
-        "tome".to_string(),
+        crate::harness::launcher::tome_command(),
         vec![
             "mcp".to_string(),
             "--workspace".to_string(),
