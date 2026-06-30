@@ -34,9 +34,11 @@ use std::path::{Path, PathBuf};
 
 use crate::error::TomeError;
 use crate::harness::agents::{CanonicalAgent, TranslatedAgent};
+use crate::harness::hooks_ir::PortableEvent;
 use crate::harness::{
     AgentFormat, EntryShape, Envelope, ExtraField, ExtraValue, FileFormat, HarnessModule,
-    HookEvent, HookFileSpec, McpDialect, RulesFileStrategy, ServerType, SessionSteering,
+    HookEvent, HookFileSpec, HookSupport, HookWire, McpDialect, RulesFileStrategy, ServerType,
+    SessionSteering, TimeoutUnit,
 };
 
 /// Unit struct implementing [`HarnessModule`] for GitHub Copilot CLI.
@@ -106,6 +108,28 @@ impl HarnessModule for CopilotCli {
             event: HookEvent::SessionStart,
             envelope: Envelope::FlatAdditionalContext,
         }
+    }
+
+    fn hook_support(&self) -> Option<HookSupport> {
+        use PortableEvent::*;
+        Some(HookSupport {
+            file_spec: HookFileSpec::CopilotHooks,
+            events: &[
+                PreToolUse,
+                PostToolUse,
+                UserPromptSubmit,
+                Stop,
+                SessionStart,
+                SessionEnd,
+                PreCompact,
+            ],
+            wire: HookWire::CopilotFlat,
+            timeout_unit: TimeoutUnit::Seconds,
+        })
+    }
+
+    fn hook_event_name(&self, event: PortableEvent) -> &'static str {
+        event.cc_name()
     }
 
     fn supports_native_agents(&self) -> bool {

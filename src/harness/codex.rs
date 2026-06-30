@@ -20,9 +20,10 @@ use crate::error::TomeError;
 use crate::harness::agents::{
     self, CanonicalAgent, TranslatedAgent, agent_extension, agent_filename,
 };
+use crate::harness::hooks_ir::PortableEvent;
 use crate::harness::{
-    AgentFormat, BlockBodyStyle, EntryShape, FileFormat, HarnessModule, McpDialect,
-    RulesFileStrategy,
+    AgentFormat, BlockBodyStyle, EntryShape, FileFormat, HarnessModule, HookFileSpec, HookSupport,
+    HookWire, McpDialect, RulesFileStrategy, TimeoutUnit,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Codex CLI.
@@ -88,6 +89,23 @@ impl HarnessModule for Codex {
 
     fn agent_format(&self) -> Option<AgentFormat> {
         Some(AgentFormat::Toml)
+    }
+
+    fn hook_support(&self) -> Option<HookSupport> {
+        use PortableEvent::*;
+        Some(HookSupport {
+            file_spec: HookFileSpec::CodexHooks,
+            events: &[
+                PreToolUse,
+                PostToolUse,
+                UserPromptSubmit,
+                Stop,
+                SessionStart,
+                PreCompact,
+            ],
+            wire: HookWire::Codex,
+            timeout_unit: TimeoutUnit::Seconds,
+        })
     }
 
     // -- Tome-owned session hook (Phase 11) ---------------------------------

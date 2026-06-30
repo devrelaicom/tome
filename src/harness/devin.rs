@@ -41,9 +41,11 @@ use std::path::{Path, PathBuf};
 
 use crate::error::TomeError;
 use crate::harness::agents::{self, CanonicalAgent, TranslatedAgent};
+use crate::harness::hooks_ir::PortableEvent;
 use crate::harness::{
     AgentFormat, AgentPathStrategy, BlockBodyStyle, EntryShape, Envelope, FileFormat,
-    HarnessModule, HookEvent, HookFileSpec, McpDialect, RulesFileStrategy, SessionSteering,
+    HarnessModule, HookEvent, HookFileSpec, HookSupport, HookWire, McpDialect, RulesFileStrategy,
+    SessionSteering, TimeoutUnit,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Devin.
@@ -111,6 +113,23 @@ impl HarnessModule for Devin {
             event: HookEvent::SessionStart,
             envelope: Envelope::ClaudeNested,
         }
+    }
+
+    fn hook_support(&self) -> Option<HookSupport> {
+        use PortableEvent::*;
+        Some(HookSupport {
+            file_spec: HookFileSpec::DevinHooksV1,
+            events: &[
+                PreToolUse,
+                PostToolUse,
+                UserPromptSubmit,
+                Stop,
+                SessionStart,
+                SessionEnd,
+            ],
+            wire: HookWire::ClaudeStyle,
+            timeout_unit: TimeoutUnit::Seconds,
+        })
     }
 
     // -- Native agents (Phase 2, Task 12) ------------------------------------

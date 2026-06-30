@@ -46,6 +46,8 @@ mod entry_kind_agent_indexing;
 mod entry_kind_indexing;
 #[path = "mcp_entries/exit_codes_e2e_mcp.rs"]
 mod exit_codes_e2e_mcp;
+#[path = "mcp_entries/hook_translate_capability.rs"]
+mod hook_translate_capability;
 #[path = "mcp_entries/live_sync.rs"]
 mod live_sync;
 #[path = "mcp_entries/mcp_config_clash.rs"]

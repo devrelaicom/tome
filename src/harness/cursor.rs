@@ -16,9 +16,10 @@ use crate::error::TomeError;
 use crate::harness::agents::{
     self, CanonicalAgent, TranslatedAgent, agent_extension, agent_filename,
 };
+use crate::harness::hooks_ir::PortableEvent;
 use crate::harness::{
     AgentFormat, BlockBodyStyle, GuardrailsPlacement, GuardrailsTarget, HarnessModule,
-    RulesFileStrategy,
+    HookFileSpec, HookSupport, HookWire, RulesFileStrategy, TimeoutUnit,
 };
 
 /// Unit struct implementing [`HarnessModule`] for Cursor.
@@ -77,6 +78,37 @@ impl HarnessModule for Cursor {
                 file: project_root.join(".cursor/rules/TOME_GUARDRAILS.md"),
             },
             suppress_if_hooks_present: false,
+        }
+    }
+
+    fn hook_support(&self) -> Option<HookSupport> {
+        use PortableEvent::*;
+        Some(HookSupport {
+            file_spec: HookFileSpec::CursorHooks,
+            events: &[
+                PreToolUse,
+                PostToolUse,
+                UserPromptSubmit,
+                Stop,
+                SessionStart,
+                SessionEnd,
+                PreCompact,
+            ],
+            wire: HookWire::CursorSnake,
+            timeout_unit: TimeoutUnit::Seconds,
+        })
+    }
+
+    fn hook_event_name(&self, event: PortableEvent) -> &'static str {
+        use PortableEvent::*;
+        match event {
+            PreToolUse => "preToolUse",
+            PostToolUse => "postToolUse",
+            UserPromptSubmit => "beforeSubmitPrompt",
+            Stop => "stop",
+            SessionStart => "sessionStart",
+            SessionEnd => "sessionEnd",
+            PreCompact => "preCompact",
         }
     }
 
