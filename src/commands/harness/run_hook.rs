@@ -264,6 +264,18 @@ fn dispatch_inner(
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 /// Poll cadence for the spawn + wait-with-timeout loop.
 const POLL_INTERVAL_MS: u64 = 5;
+/// Maximum bytes read from an HTTP hook response body via [`run_http_handler`].
+///
+/// An unbounded `read_to_end` on a streaming 2xx body would buffer the entire
+/// response in memory. A malicious or misbehaving webhook returning a fast
+/// multi-GiB 2xx body would exhaust the subprocess heap → exit 137 (OOM
+/// kill) → fail-CLOSED on Copilot's preToolUse wire — a transport abuse
+/// becoming an agent block, violating the fail-open totality invariant.
+///
+/// A CC-decision JSON body is tiny (well under 1 KiB); 4 MiB is ample for
+/// any legitimate payload. A body truncated at this cap will fail JSON parsing
+/// in `command_outcome_to_decision` → non-blocking allow (correct fail-open).
+const HOOK_HTTP_BODY_MAX: u64 = 4 * 1024 * 1024; // 4 MiB
 
 /// The raw result of running one command handler: its exit code plus captured
 /// stdout/stderr. Translated into a [`CcDecision`] by
@@ -468,6 +480,20 @@ fn interpolate_headers(
 /// stdout JSON. Any transport error, timeout, or non-2xx status degrades to a
 /// non-blocking allow (`HandlerOutcome { exit: 0, stdout: "", stderr: "" }`).
 ///
+/// ## Security hardening
+///
+/// * **Body cap** (`HOOK_HTTP_BODY_MAX`): the body is read via `Read::take` so
+///   a fast multi-GiB 2xx response cannot buffer to OOM. A body truncated at
+///   the cap fails JSON parsing → non-blocking allow (fail-open).
+/// * **Redirect policy (`Policy::none`)**: a 307/308 redirect would resend the
+///   POST with the full body and any secret headers (e.g. `X-Api-Key`) to the
+///   redirect target. Pinning to a single hop makes requests predictable;
+///   a 3xx response falls through to the non-2xx → fail-open allow branch.
+/// * **Content-Type deduplication**: plugin headers are inserted into a
+///   `HeaderMap` (case-insensitive key comparison) before the default
+///   `Content-Type: application/json` is added — so a plugin-supplied
+///   `Content-Type` wins and is never duplicated.
+///
 /// NEVER panics: every `Result` is matched; no bare `.unwrap()` on the
 /// response (mirrors `run_command_handler`'s panic-freedom discipline — under
 /// `panic = "abort"` in release, a panic aborts the process at exit 134 and
@@ -488,37 +514,73 @@ fn run_http_handler(
     // A client-build failure (e.g. TLS init error) → fail-open, never a block.
     let client = match reqwest::blocking::Client::builder()
         .timeout(timeout)
+        // Pin to a single hop: a 307/308 redirect would forward the POST body
+        // and all headers (including any plugin secret tokens) to the redirect
+        // target. A 3xx response falls to the non-2xx → fail-open allow branch.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,
         Err(_) => return allow(),
     };
     let interpolated = interpolate_headers(headers, allowed_env_vars);
-    // Start with the fixed Content-Type header, then apply interpolated headers.
-    let mut req = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .body(cc_stdin.to_owned());
+
+    // Build a HeaderMap so Content-Type is never duplicated. Plugin headers are
+    // inserted first; the default `Content-Type: application/json` is added
+    // ONLY if the plugin did not supply one (HeaderMap keys are
+    // case-insensitive, so `content-type` / `Content-Type` / `CONTENT-TYPE`
+    // all compare equal). An invalid header name or value is silently skipped;
+    // reqwest will surface a builder error on `.send()` if needed (→ fail-open).
+    let mut header_map = reqwest::header::HeaderMap::new();
     for (k, v) in &interpolated {
-        req = req.header(k.as_str(), v.as_str());
+        if let (Ok(name), Ok(value)) = (
+            reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+            reqwest::header::HeaderValue::from_str(v.as_str()),
+        ) {
+            header_map.insert(name, value);
+        }
     }
-    let response = match req.send() {
+    if !header_map.contains_key(reqwest::header::CONTENT_TYPE) {
+        header_map.insert(
+            reqwest::header::CONTENT_TYPE,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
+    }
+
+    let response = match client
+        .post(url)
+        .headers(header_map)
+        .body(cc_stdin.to_owned())
+        .send()
+    {
         Ok(r) => r,
-        // Transport error / conn-refused / DNS failure / timeout → fail-open.
+        // Transport error / conn-refused / DNS failure / timeout /
+        // 3xx (redirect disabled) → fail-open.
         Err(_) => return allow(),
     };
     if response.status().is_success() {
-        let body = match response.text() {
-            Ok(b) => b,
-            Err(_) => return allow(),
-        };
+        // Cap the body read at HOOK_HTTP_BODY_MAX bytes. `Response` implements
+        // `std::io::Read`; `.take(n)` adapts it to read at most n bytes.
+        // `from_utf8_lossy` avoids a mid-char truncation error; a truncated
+        // body then fails JSON parsing → non-blocking allow (correct fail-open).
+        // Do NOT use `.text()` here — it reads the full unbounded body.
+        let mut bytes = Vec::new();
+        if response
+            .take(HOOK_HTTP_BODY_MAX)
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
+            return allow();
+        }
+        let body = String::from_utf8_lossy(&bytes).into_owned();
         HandlerOutcome {
             exit: 0,
             stdout: body,
             stderr: String::new(),
         }
     } else {
-        // non-2xx → non-blocking allow; a misbehaving webhook must never block.
+        // non-2xx (including 3xx when redirect is disabled) → non-blocking
+        // allow; a misbehaving or redirecting webhook must never block.
         allow()
     }
 }
@@ -987,6 +1049,21 @@ mod tests {
                 previous,
             }
         }
+
+        /// Temporarily remove `key` from the environment. Restores the
+        /// previous value (or re-sets it) on drop, like `set`.  Used by
+        /// tests that need to verify the `unwrap_or_default()` branch of
+        /// `interpolate_headers` when a variable is allowlisted but absent.
+        fn remove(key: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: caller holds ENV_MUTEX; no other test in this module
+            // mutates the environment concurrently.
+            unsafe { std::env::remove_var(key) }
+            Self {
+                key: key.to_owned(),
+                previous,
+            }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -1009,16 +1086,61 @@ mod tests {
     ///
     /// This is the security pin test for NFR-007: the allowlist gate is the single
     /// policy line between plugin-declared text and host env var exfiltration.
+    ///
+    /// ## NFR-007 regression pins (added by US5 fix pass)
+    ///
+    /// * **braced-allowed**: `${MY_TOKEN}` with MY_TOKEN allowlisted+set resolves
+    ///   to the value (exercises regex capture group 1, distinct from bare `$VAR`).
+    /// * **allowlisted-but-unset**: a var in `allowed_env_vars` that is NOT present
+    ///   in the environment resolves to `""` (the `unwrap_or_default()` branch).
+    /// * **structural — key verbatim**: a `$VAR` reference in a header KEY is NOT
+    ///   interpolated; only VALUES are substituted. The URL is also relayed verbatim
+    ///   (never passed through `interpolate_headers` at all).
     #[test]
     fn header_interpolation_is_allowlist_gated() {
         let _lock = lock_env();
         let _guard = EnvVarGuard::set("MY_TOKEN", "secret");
+        // Explicitly remove the unset-test variable so the test is hermetic even
+        // if a CI environment happens to export it.
+        let _guard_unset = EnvVarGuard::remove("UNSET_ALLOWED_VAR");
+
         let mut h = BTreeMap::new();
+        // Original: bare $VAR form, allowlisted.
         h.insert("Authorization".to_owned(), "Bearer $MY_TOKEN".to_owned());
+        // Original: ${VAR} form, NOT allowlisted → empty (must not leak).
         h.insert("X-Other".to_owned(), "${NOT_ALLOWED}".to_owned());
-        let out = interpolate_headers(&h, &["MY_TOKEN".to_owned()]);
+        // NFR-007 pin (braced-allowed): ${VAR} form, allowlisted → resolves
+        // (exercises regex capture group 1, separate from the bare-$VAR group 2).
+        h.insert("X-Braced".to_owned(), "v2-${MY_TOKEN}".to_owned());
+        // NFR-007 pin (allowlisted-but-unset): var is in the allowlist but not
+        // set in the environment → resolves to "" via unwrap_or_default().
+        h.insert("X-Unset".to_owned(), "$UNSET_ALLOWED_VAR".to_owned());
+        // NFR-007 structural pin: a $VAR token in the header KEY must NOT be
+        // interpolated — only VALUES are substituted.
+        h.insert("X-$MY_TOKEN-Key".to_owned(), "static-value".to_owned());
+
+        let out = interpolate_headers(&h, &["MY_TOKEN".to_owned(), "UNSET_ALLOWED_VAR".to_owned()]);
+
+        // Original assertions.
         assert_eq!(out["Authorization"], "Bearer secret");
         assert_eq!(out["X-Other"], ""); // unlisted → empty; must NOT be leaked
+
+        // NFR-007 regression assertions.
+        assert_eq!(
+            out["X-Braced"], "v2-secret",
+            "braced ${{VAR}} must resolve when allowlisted"
+        );
+        assert_eq!(
+            out["X-Unset"], "",
+            "allowlisted-but-unset var must resolve to empty string"
+        );
+        // The key `X-$MY_TOKEN-Key` must appear verbatim in the output map
+        // (not as `X-secret-Key` or any other interpolated form).
+        assert!(
+            out.contains_key("X-$MY_TOKEN-Key"),
+            "header key must be relayed verbatim (never interpolated)"
+        );
+        assert_eq!(out["X-$MY_TOKEN-Key"], "static-value");
     }
 
     // --- command_entry helper ----------------------------------------------------

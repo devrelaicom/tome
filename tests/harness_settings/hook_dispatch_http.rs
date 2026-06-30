@@ -105,7 +105,9 @@ fn http_handler_deny_from_2xx_body() {
     let out = run_hook::dispatch_core("cursor", "PreToolUse", r#"{"tool_name":"Bash"}"#, Some(&m));
 
     // Join the server thread so any internal panic surfaces in the test.
-    let _ = server.join();
+    // `let _ = ...` would silently swallow a stub-thread panic; `.expect()`
+    // makes a stub-server panic fail the test — the intent of this comment.
+    server.join().expect("stub server thread panicked");
 
     // Cursor blocks via JSON (snake_case `permission:"deny"`), never exit 2.
     assert_eq!(out.exit_code, 0, "Cursor deny must be exit 0");
