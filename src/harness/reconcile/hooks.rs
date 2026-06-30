@@ -2173,6 +2173,11 @@ mod us2_real_harness_tests {
     /// structural byte-pins below stay deterministic across machines (the
     /// resolved launcher prefix is machine-specific). Asserts the leaf IS a
     /// recognised tome hook command before rewriting it.
+    ///
+    /// SHARED CONTRACT — twin of `canonicalize_tome_hook_command_leaves` in
+    /// `tests/common/mod.rs`. Both implement the SAME canonicalization contract;
+    /// the duplication is forced by the test/lib boundary (integration tests
+    /// cannot see this lib-private helper). If you change the contract, both.
     fn canonicalize_cmd(value: &mut JsonValue, suffix: &str) {
         match value {
             JsonValue::String(s) => {
@@ -2844,5 +2849,137 @@ mod launcher_change_tests {
             &cmd,
             &run_hook_args_suffix("devin", "PreToolUse", "ws"),
         ));
+    }
+
+    /// Review item 1 — launcher-change parity for the run-hook DISPATCH sink at
+    /// its OWN reconciler entry (`reconcile_dispatch_hook_file`), not just
+    /// transitively via the shared array primitives. Seed a run-hook
+    /// registration written with launcher A + a FOREIGN (other-harness) run-hook
+    /// entry; run the dispatch reconciler (which emits whatever `tome_command()`
+    /// resolves to — possibly ≠ A); assert the launcher-A entry is RECOGNISED
+    /// (single Tome entry, upgraded to a recognised tome command — no
+    /// duplicate), the foreign entry survives, then a second run is idempotent.
+    #[test]
+    fn dispatch_registration_recognises_and_upgrades_across_launcher_change() {
+        use crate::harness::hooks_ir::PortableEvent;
+        use crate::harness::{HookSupport, HookWire, TimeoutUnit};
+
+        let tmp = TempDir::new().unwrap();
+        // Devin: root-level event keys, native name == CC name `PreToolUse`, no
+        // version-stamp interaction — keeps the assertions about the run-hook
+        // entry clean.
+        let path = tmp.path().join(".devin/hooks.v1.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let run_hook_suffix = run_hook_args_suffix("devin", "PreToolUse", "ws");
+        // Entry written with an explicit launcher A (the pre-change on-disk shape).
+        let entry_a = tome_run_hook_entry(
+            HookFileSpec::DevinHooksV1,
+            &format!("/opt/a/bin/tome {run_hook_suffix}"),
+        );
+        // A FOREIGN run-hook entry for a DIFFERENT harness — must survive (the
+        // suffix names `--harness OTHER`, a different scope).
+        let entry_foreign = tome_run_hook_entry(
+            HookFileSpec::DevinHooksV1,
+            "tome harness run-hook --event PreToolUse --harness OTHER --workspace ws",
+        );
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "PreToolUse": [entry_a, entry_foreign]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let support = HookSupport {
+            file_spec: HookFileSpec::DevinHooksV1,
+            events: &[PortableEvent::PreToolUse],
+            wire: HookWire::ClaudeStyle,
+            timeout_unit: TimeoutUnit::Seconds,
+        };
+        // Native event-name map: Devin's native key IS the CC name.
+        let event_names: &[(PortableEvent, &'static str)] =
+            &[(PortableEvent::PreToolUse, "PreToolUse")];
+        let used = [PortableEvent::PreToolUse];
+
+        let mut outcome = SyncOutcome::default();
+        let mut err = None;
+        let action = reconcile_dispatch_hook_file(
+            "devin",
+            &path,
+            &support,
+            event_names,
+            "ws",
+            &used,
+            &mut outcome,
+            &mut err,
+        );
+        assert!(err.is_none(), "{err:?}");
+
+        let arr = devin_array_at(&path, "PreToolUse");
+        assert_eq!(
+            arr.len(),
+            2,
+            "the launcher-A entry must be RECOGNISED (no duplicate) and the \
+             foreign entry must survive; got: {arr:?}",
+        );
+        // The Tome entry (ours) is recognised as a tome run-hook command for our
+        // suffix; the foreign one is NOT (different --harness).
+        let ours = arr
+            .iter()
+            .filter(|e| {
+                e["hooks"][0]["command"].as_str().is_some_and(|c| {
+                    crate::harness::launcher::looks_like_tome_hook_command(c, &run_hook_suffix)
+                })
+            })
+            .count();
+        assert_eq!(
+            ours, 1,
+            "exactly one entry is ours (upgraded); got: {arr:?}"
+        );
+        let foreign_survives = arr.iter().any(|e| {
+            e["hooks"][0]["command"].as_str()
+                == Some("tome harness run-hook --event PreToolUse --harness OTHER --workspace ws")
+        });
+        assert!(
+            foreign_survives,
+            "the other-harness entry must survive: {arr:?}"
+        );
+        // The action reflects either an in-place upgrade (Updated) or a no-op
+        // (LeftAlone, when `tome_command()` happened to resolve to launcher A);
+        // both are correct — what matters is no duplicate + foreign preserved.
+        assert!(
+            matches!(action, Action::Updated | Action::LeftAlone),
+            "dispatch action must be Updated or LeftAlone; got: {action:?}",
+        );
+
+        // Second run is idempotent (the on-disk entry now matches what the
+        // reconciler emits, recognised launcher-tolerantly).
+        let before = std::fs::read_to_string(&path).unwrap();
+        let mut outcome2 = SyncOutcome::default();
+        let mut err2 = None;
+        let action2 = reconcile_dispatch_hook_file(
+            "devin",
+            &path,
+            &support,
+            event_names,
+            "ws",
+            &used,
+            &mut outcome2,
+            &mut err2,
+        );
+        assert!(err2.is_none());
+        assert_eq!(action2, Action::LeftAlone, "second run must be idempotent");
+        assert_eq!(
+            before,
+            std::fs::read_to_string(&path).unwrap(),
+            "idempotent run must not rewrite the file",
+        );
+    }
+
+    fn devin_array_at(path: &Path, key: &str) -> Vec<JsonValue> {
+        let doc: JsonValue = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        doc[key].as_array().cloned().unwrap_or_default()
     }
 }

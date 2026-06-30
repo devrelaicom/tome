@@ -721,6 +721,13 @@ impl Drop for HarnessModulesGuard {
 /// bare-`tome` pinned literal: it keeps the structural pin (matcher / wrapper /
 /// type / event key) intact while making ONLY the launcher prefix tolerant —
 /// the same lens Phase A applied to the MCP sink's `command` assertions.
+///
+/// SHARED CONTRACT — twin of `canonicalize_cmd` in
+/// `src/harness/reconcile/hooks.rs` (the `us2_real_harness_tests` module). Both
+/// implement the SAME canonicalization contract (rewrite a recognised tome
+/// hook-command leaf to its bare-`tome` form); the duplication is forced by the
+/// test/lib boundary (integration tests cannot see lib-private test helpers).
+/// If you change the canonicalization contract, update BOTH.
 pub fn canonicalize_tome_hook_command_leaves(
     value: &mut serde_json::Value,
     expected_suffixes: &[&str],
