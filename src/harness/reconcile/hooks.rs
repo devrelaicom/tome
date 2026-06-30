@@ -497,8 +497,14 @@ fn session_start_command(harness: &str, workspace: &str) -> String {
     format!("tome harness session-start --workspace {workspace} --harness {harness}")
 }
 
-/// Resolve the on-disk hook file for a NEW-harness [`HookFileSpec`] under
-/// `project_root`. The two Phase ≤10 specs return `None` (unreachable here).
+/// Resolve the on-disk hook file for a [`HookFileSpec`] under `project_root`.
+///
+/// `CodexHooks` resolves to `<project>/.codex/hooks.json` (wired in US3.1 so the
+/// plugin-hook dispatch reconciler can register `run-hook` entries there — the
+/// session-steering `reconcile_command_hooks` still never reaches this arm,
+/// since codex keeps [`SessionSteering::None`]). Only `ClaudeSettingsLocal`
+/// returns `None` — that sink is the Claude `settings.local.json` reconciled by
+/// `reconcile_hooks`, never through a `HookFileSpec` path.
 fn hook_file_path(spec: HookFileSpec, project_root: &Path) -> Option<PathBuf> {
     let rel: &[&str] = match spec {
         HookFileSpec::DevinHooksV1 => &[".devin", "hooks.v1.json"],
@@ -509,8 +515,10 @@ fn hook_file_path(spec: HookFileSpec, project_root: &Path) -> Option<PathBuf> {
         HookFileSpec::GeminiSettings => &[".gemini", "settings.json"],
         HookFileSpec::AntigravityHooks => &[".agents", "hooks.json"],
         HookFileSpec::CursorHooks => &[".cursor", "hooks.json"],
-        // Phase ≤10 sinks — NOT reachable via the new CommandHook reconciler.
-        HookFileSpec::ClaudeSettingsLocal | HookFileSpec::CodexHooks => return None,
+        HookFileSpec::CodexHooks => &[".codex", "hooks.json"],
+        // The Claude `settings.local.json` sink is reconciled by `reconcile_hooks`
+        // (the `RealJson` plugin-hooks pass), never through a `HookFileSpec` path.
+        HookFileSpec::ClaudeSettingsLocal => return None,
     };
     let mut path = project_root.to_path_buf();
     for seg in rel {
@@ -550,6 +558,50 @@ fn tome_hook_entry(spec: HookFileSpec, command: &str) -> JsonValue {
         }),
         // Unreachable (filtered upstream); return a benign placeholder.
         HookFileSpec::ClaudeSettingsLocal | HookFileSpec::CodexHooks => JsonValue::Null,
+    }
+}
+
+/// The Tome-owned `run-hook` dispatcher command for `(harness, event)` under
+/// `workspace` (US3). The harness fires this on its native event; the
+/// `--event <cc>` argument carries the CANONICAL CC event name (the manifest
+/// key the dispatcher reads), so for a harness with a renamed native event
+/// (e.g. gemini's `BeforeTool`) the file-key is native but the command names
+/// the CC event. Mirrors the bare-`"tome"` convention used by the MCP + session
+/// hooks; the trailing `--harness <name>` selects this harness's wire dialect.
+// US3.2 wires the call site (the dispatch reconciler); allowed dead until then.
+#[allow(dead_code)]
+fn run_hook_command(harness: &str, event_cc: &str, workspace: &str) -> String {
+    format!("tome harness run-hook --event {event_cc} --harness {harness} --workspace {workspace}")
+}
+
+/// Build the Tome-owned MATCH-ALL `run-hook` dispatcher ENTRY for a spec — the
+/// single registration leaf per used event. Distinct from
+/// [`tome_hook_entry`] (the session-steering entry): the per-plugin matchers
+/// live in the resolved manifest, applied by the dispatcher at runtime, so the
+/// registered entry is always match-all. The entry's exact bytes ARE the
+/// ownership marker (re-derived deep-equal), so keep them stable.
+///
+/// Match-all per wire: Devin/Codex use `"matcher": ""`; Cursor/Copilot omit the
+/// matcher key (= all); Gemini wraps a named handler under `hooks` (the name
+/// `tome-hook-dispatch` keeps it distinct from session-steering's `tome`).
+// Used by the US3.1 test now; US3.2 wires the production call site.
+#[allow(dead_code)]
+fn tome_run_hook_entry(spec: HookFileSpec, command: &str) -> JsonValue {
+    match spec {
+        HookFileSpec::DevinHooksV1 | HookFileSpec::CodexHooks => serde_json::json!({
+            "matcher": "",
+            "hooks": [ { "type": "command", "command": command } ]
+        }),
+        HookFileSpec::GeminiSettings => serde_json::json!({
+            "hooks": [ { "name": "tome-hook-dispatch", "type": "command", "command": command } ]
+        }),
+        HookFileSpec::CursorHooks | HookFileSpec::CopilotHooks => serde_json::json!({
+            "type": "command", "command": command
+        }),
+        // Antigravity exposes no plugin-hook translation surface (rules-only),
+        // and the Claude sink is reconciled elsewhere — both are unreachable for
+        // a `hook_support()` harness; return a benign placeholder.
+        HookFileSpec::AntigravityHooks | HookFileSpec::ClaudeSettingsLocal => JsonValue::Null,
     }
 }
 
@@ -651,6 +703,127 @@ fn entry_array_opt(
         Some(ck) => root.get_mut(ck)?.as_object_mut()?,
     };
     holder.get_mut(key)?.as_array_mut()
+}
+
+/// The intermediate container object (if any) a `run-hook` entry nests under,
+/// for the five `hook_support()` specs (US3). Devin nests at the document root;
+/// Codex/Cursor/Copilot/Gemini nest under `"hooks"`. The two non-hook-support
+/// specs are unreachable for a registering harness and fail closed (exit 43).
+#[allow(dead_code)]
+fn run_hook_container_key(
+    spec: HookFileSpec,
+    path: &Path,
+) -> Result<Option<&'static str>, TomeError> {
+    match spec {
+        HookFileSpec::DevinHooksV1 => Ok(None),
+        HookFileSpec::CodexHooks
+        | HookFileSpec::CursorHooks
+        | HookFileSpec::CopilotHooks
+        | HookFileSpec::GeminiSettings => Ok(Some("hooks")),
+        HookFileSpec::AntigravityHooks | HookFileSpec::ClaudeSettingsLocal => {
+            Err(TomeError::HookSpecParseError {
+                path: path.to_path_buf(),
+            })
+        }
+    }
+}
+
+/// US3 sibling of [`entry_array`] keyed by the harness-NATIVE event-name STRING
+/// (from `hook_event_name`) rather than the [`HookEvent`] enum, so the `run-hook`
+/// reconciler registers under e.g. gemini's `BeforeTool` / cursor's `preToolUse`.
+/// Navigates (creating containers as needed) to the entry array the run-hook
+/// entry lives in and returns a mutable borrow. Generalizes container nesting
+/// for `CodexHooks` (nests under `"hooks"`). Stamps the required top-level
+/// `version: 1` for Copilot/Cursor (never overwriting a developer value). Fails
+/// closed (exit 43) on a wrong-typed slot — never coerces a developer's value.
+#[allow(dead_code)]
+fn entry_array_by_key<'a>(
+    doc: &'a mut JsonValue,
+    spec: HookFileSpec,
+    event_key: &str,
+    path: &Path,
+) -> Result<&'a mut Vec<JsonValue>, TomeError> {
+    let root = doc
+        .as_object_mut()
+        .ok_or_else(|| TomeError::HookSpecParseError {
+            path: path.to_path_buf(),
+        })?;
+    // Copilot CLI + Cursor require a top-level `version: 1` (T087 live-probe for
+    // Copilot; Cursor's `{version:1, hooks:{…}}` shape). Stamp on create / any
+    // file lacking it, but NEVER overwrite a developer-set value.
+    if matches!(spec, HookFileSpec::CopilotHooks | HookFileSpec::CursorHooks) {
+        root.entry("version".to_string())
+            .or_insert(JsonValue::from(1));
+    }
+    let event_holder: &mut JsonMap<String, JsonValue> = match run_hook_container_key(spec, path)? {
+        None => root,
+        Some(ck) => {
+            let container = root
+                .entry(ck.to_string())
+                .or_insert_with(|| JsonValue::Object(JsonMap::new()));
+            container
+                .as_object_mut()
+                .ok_or_else(|| TomeError::HookSpecParseError {
+                    path: path.to_path_buf(),
+                })?
+        }
+    };
+    let arr = event_holder
+        .entry(event_key.to_string())
+        .or_insert_with(|| JsonValue::Array(Vec::new()));
+    arr.as_array_mut()
+        .ok_or_else(|| TomeError::HookSpecParseError {
+            path: path.to_path_buf(),
+        })
+}
+
+/// Read-only sibling of [`entry_array_opt`] keyed by the native event-name
+/// STRING (US3 remove path); `None` when any container/array on the path is
+/// absent or wrong-typed (nothing to remove).
+#[allow(dead_code)]
+fn entry_array_opt_by_key<'a>(
+    doc: &'a mut JsonValue,
+    spec: HookFileSpec,
+    event_key: &str,
+) -> Option<&'a mut Vec<JsonValue>> {
+    let root = doc.as_object_mut()?;
+    let container_key = run_hook_container_key(spec, Path::new("")).ok()?;
+    let holder = match container_key {
+        None => root,
+        Some(ck) => root.get_mut(ck)?.as_object_mut()?,
+    };
+    holder.get_mut(event_key)?.as_array_mut()
+}
+
+/// Drop the now-empty native-keyed event array a removed `run-hook` entry left
+/// behind (US3). Unlike [`prune_empty`], the shared `"hooks"` container is NOT
+/// dropped when empty: for codex the session hook
+/// ([`reconcile_tome_session_hooks`]) co-owns `"hooks"`, and for the other specs
+/// a developer may own sibling keys — an empty `"hooks": {}` is harmless.
+#[allow(dead_code)]
+fn prune_empty_by_key(doc: &mut JsonValue, spec: HookFileSpec, event_key: &str) {
+    let Some(root) = doc.as_object_mut() else {
+        return;
+    };
+    let Ok(container_key) = run_hook_container_key(spec, Path::new("")) else {
+        return;
+    };
+    let holder = match container_key {
+        None => root,
+        Some(ck) => {
+            let Some(h) = root.get_mut(ck).and_then(JsonValue::as_object_mut) else {
+                return;
+            };
+            h
+        }
+    };
+    if holder
+        .get(event_key)
+        .and_then(JsonValue::as_array)
+        .is_some_and(|a| a.is_empty())
+    {
+        holder.shift_remove(event_key);
+    }
 }
 
 /// Load a spec hook file, returning `(value, existed)`. Absent → a fresh empty
@@ -1709,5 +1882,34 @@ mod us2_real_harness_tests {
             "the hook reconciler must not touch the GLOBAL gemini settings.json",
         );
         let _ = project_root;
+    }
+}
+
+// =====================================================================
+// US3 — plugin-hook dispatch registration tests.
+// =====================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::harness::HookFileSpec;
+
+    /// US3.1: the `run-hook` match-all dispatcher entry is shaped per spec, and
+    /// the two formerly-`None` file specs (Cursor already wired in US2; Codex
+    /// newly wired here) now resolve to their on-disk hook files.
+    #[test]
+    fn run_hook_entry_is_match_all_per_spec() {
+        // Devin: {matcher:"", hooks:[{type:command, command}]} (match-all).
+        let e = tome_run_hook_entry(
+            HookFileSpec::DevinHooksV1,
+            "tome harness run-hook --event PreToolUse --harness devin --workspace w",
+        );
+        assert_eq!(e["matcher"], serde_json::json!(""));
+        assert_eq!(e["hooks"][0]["type"], "command");
+        // Cursor file path resolves now.
+        let p = hook_file_path(HookFileSpec::CursorHooks, std::path::Path::new("/proj")).unwrap();
+        assert!(p.ends_with(".cursor/hooks.json"));
+        // Codex file path resolves now (was None).
+        let p = hook_file_path(HookFileSpec::CodexHooks, std::path::Path::new("/proj")).unwrap();
+        assert!(p.ends_with(".codex/hooks.json"));
     }
 }
