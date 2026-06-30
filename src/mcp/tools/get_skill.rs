@@ -36,12 +36,35 @@ pub struct Output {
     /// verbatim — no normalisation, no rewrites, no path-relative-to-
     /// absolute resolution in code blocks.
     pub content: String,
-    /// Absolute path to the SKILL.md file.
+    /// Absolute path to the entry body file (a skill's `SKILL.md` or a
+    /// command's `<name>.md`).
     pub path: String,
     /// Absolute paths of every OTHER file in the skill's directory
     /// (recursive). The agent may load any of them via its own
-    /// file-reading tools.
+    /// file-reading tools. Empty for command-kind entries (commands live as
+    /// a single `<plugin>/commands/<name>.md` file, not a per-entry
+    /// directory).
     pub resources: Vec<String>,
+    /// #289: the resolved entry kind (`skill` | `command`). `get_skill` no
+    /// longer hardcodes `skill` — it resolves commands too, so a caller that
+    /// hands it a command name returned by `search_skills` gets the command
+    /// body, not an `unknown_skill` dead end. Appended after `resources`, so
+    /// it never reorders the pre-#289 fields. NOTE: `kind` is non-`Option`,
+    /// so EVERY result (skill-kind included) now additively carries a `"kind"`
+    /// key — the pre-#289 skill `Output` is NOT byte-identical, it gains this
+    /// one additive key. The output is an emit-only record with no
+    /// `additionalProperties: false` on the wire, so adding a key is a
+    /// backward-compatible additive change.
+    pub kind: crate::plugin::identity::EntryKind,
+    /// #289: the MCP prompt name this entry is also reachable under (a
+    /// command can be both read here AND invoked-with-arguments via
+    /// `prompts/get`). `<plugin>__<entry>` form, post-override and
+    /// post-collision-suffix, resolved from the live `PromptRegistry` (the
+    /// SSOT). Absent (`skip_serializing_if`) when the entry has no prompt —
+    /// so a non-invocable skill omits this key entirely (only the `kind` key
+    /// above is added for it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_name: Option<String>,
 }
 
 /// Pipeline:
@@ -160,6 +183,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     let LookupHit {
         body_path,
         plugin_version,
+        kind: resolved_kind,
     } = hit;
     let skill_path = body_path;
     // Capture the version before it is moved into the substitution closure
@@ -168,12 +192,19 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     let attributed_plugin_version = plugin_version.clone();
 
     // The actual file read + frontmatter strip + sibling walk is all
-    // synchronous I/O; do it on the blocking pool.
+    // synchronous I/O; do it on the blocking pool. #289: only skill-kind
+    // entries enumerate sibling resources — a command is a single
+    // `<plugin>/commands/<name>.md` file whose parent (`commands/`) holds every
+    // OTHER command, not this one's resources, so the walk would wrongly list
+    // unrelated command files. Mirrors `get_skill_info`'s skill-only resource
+    // enumeration (FR-083).
     let read_input = input.clone_for_log();
     let read_path = skill_path.clone();
-    let read_result = tokio::task::spawn_blocking(move || read_skill_and_resources(&read_path))
-        .await
-        .map_err(|e| internal(&read_input, started, format!("read join: {e}"), "internal"))?;
+    let walk_resources = matches!(resolved_kind, crate::plugin::identity::EntryKind::Skill);
+    let read_result =
+        tokio::task::spawn_blocking(move || read_skill_and_resources(&read_path, walk_resources))
+            .await
+            .map_err(|e| internal(&read_input, started, format!("read join: {e}"), "internal"))?;
 
     let body_and_resources = match read_result {
         Ok(v) => v,
@@ -291,13 +322,14 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     );
 
     // FR-027/FR-028: `tome.entry_invoked` once the entry body is fetched. The
-    // `entry_kind` is always `Skill` — `get_skill` only ever resolves skills
-    // (FR-084; `lookup_skill` hardcodes `EntryKind::Skill`). The `rank_bucket`
-    // is THIS entry's position in the preceding search this session (the funnel
-    // join; `None` when no search ranked it). Best-effort enqueue — a sub-ms
-    // local append that never blocks the tool call or flushes.
+    // `entry_kind` is the kind the row resolved to (#289: `get_skill` now
+    // resolves commands too, not only skills, so this is no longer hardcoded
+    // `Skill`). The `rank_bucket` is THIS entry's position in the preceding
+    // search this session (the funnel join; `None` when no search ranked it).
+    // Best-effort enqueue — a sub-ms local append that never blocks the tool
+    // call or flushes.
     crate::telemetry::emit(crate::telemetry::event::EntryInvoked {
-        entry_kind: crate::telemetry::event::EntryKind::Skill,
+        entry_kind: resolved_kind.into(),
         rank: crate::mcp::rank_for(&state, &input.name),
         calling_harness: crate::mcp::calling_harness(&state),
     });
@@ -330,7 +362,9 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
             crate::telemetry::emit(crate::telemetry::event::AttributedEntryInvoked {
                 catalog: catalog_id,
                 entry_name: attribution_entry_name,
-                entry_kind: crate::telemetry::event::EntryKind::Skill,
+                // #289: the kind the row resolved to (skill OR command), not a
+                // hardcoded `Skill`.
+                entry_kind: resolved_kind.into(),
                 plugin_name: attribution_plugin_name,
                 plugin_version: attributed_plugin_version,
                 calling_harness: attribution_harness,
@@ -350,10 +384,24 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
     // `LookupHit` was dropped — it was kept as a "future extensions"
     // placeholder but never read here, costing an Arc-equivalent heap
     // allocation per call.
+    // #289: resolve the entry's MCP prompt name from the live registry (the
+    // SSOT). A command is reachable BOTH here (full body) and via `prompts/get`
+    // (invoke-with-arguments); surfacing the name makes the alternate path
+    // discoverable. `None` for an entry that isn't user-invocable. Sub-µs
+    // in-memory scan (no DB I/O), safe on the reactor.
+    let prompt_name = state
+        .prompt_registry
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .prompt_name_for(&input.catalog, &input.plugin, resolved_kind, &input.name)
+        .map(str::to_owned);
+
     Ok(Output {
         content,
         path: skill_path.display().to_string(),
         resources,
+        kind: resolved_kind,
+        prompt_name,
     })
 }
 
@@ -381,6 +429,11 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<Output, McpErr
 struct LookupHit {
     body_path: PathBuf,
     plugin_version: String,
+    /// #289: the kind the row resolved to (`Skill` or `Command`).
+    /// `lookup_skill` tries `Skill` first, then `Command`, so this records
+    /// which one actually matched — surfaced on `Output.kind` and used to
+    /// resolve the prompt name + the entry-invoked telemetry kind.
+    kind: crate::plugin::identity::EntryKind,
 }
 
 enum LookupOutcome {
@@ -408,17 +461,23 @@ fn lookup_skill(
     if crate::index::workspace_catalogs::find(&conn, workspace_name, catalog)?.is_none() {
         return Ok(LookupOutcome::UnknownCatalog);
     }
-    // Phase 5: `get_skill` defaults to the `Skill` kind (FR-084) — the
-    // tool only surfaces skills, not commands.
-    match skills::find(
-        &conn,
-        workspace_name,
-        catalog,
-        plugin,
-        crate::plugin::identity::EntryKind::Skill,
-        name,
-    )? {
-        Some(row) if row.enabled => {
+    // #289: `get_skill` resolves BOTH `skill` and `command` entries — the
+    // directive instructs an agent to `get_skill(...)` Tier-1/Tier-2 entries,
+    // and `search_skills` ranks commands alongside skills, so hardcoding
+    // `EntryKind::Skill` (the pre-#289 FR-084 behaviour) returned
+    // `unknown_skill` for a real command — a guaranteed dead end. We try
+    // `Skill` first (so the historical default kind still wins when a plugin
+    // ships a skill and a command of the same name) then fall back to
+    // `Command`. Agents are never user-readable here (they are exposed only as
+    // optional personas) so they are intentionally NOT resolved.
+    use crate::plugin::identity::EntryKind;
+    for kind in [EntryKind::Skill, EntryKind::Command] {
+        if let Some(row) = skills::find(&conn, workspace_name, catalog, plugin, kind, name)? {
+            if !row.enabled {
+                // A disabled row of this kind: keep looking (a sibling kind may
+                // be enabled) before collapsing to `unknown_skill` below.
+                continue;
+            }
             // Resolve the row's stored relative path to an absolute
             // body path via the shared helper. A failure here means the
             // catalog enrolment exists but the on-disk plugin directory
@@ -434,25 +493,23 @@ fn lookup_skill(
                 plugin,
                 &row.path,
             )?;
-            Ok(LookupOutcome::Found(LookupHit {
+            return Ok(LookupOutcome::Found(LookupHit {
                 body_path,
                 plugin_version: row.plugin_version,
-            }))
+                kind,
+            }));
         }
-        Some(_) => Ok(LookupOutcome::UnknownSkill),
-        None => {
-            // Distinguish "plugin not enabled at all" from "plugin
-            // enabled but doesn't have this skill name". The shipping
-            // contract treats zero (catalog, plugin) rows as
-            // `unknown_plugin`. `list_for_plugin` scoped to the resolved
-            // workspace is what determines "enabled" here.
-            let any = skills::list_for_plugin(&conn, workspace_name, catalog, plugin)?;
-            if any.is_empty() {
-                Ok(LookupOutcome::UnknownPlugin)
-            } else {
-                Ok(LookupOutcome::UnknownSkill)
-            }
-        }
+    }
+    // No enabled skill- or command-kind row matched. Distinguish "plugin not
+    // enabled at all" from "plugin enabled but doesn't have this entry name"
+    // (or has it only as a disabled row). The shipping contract treats zero
+    // (catalog, plugin) rows as `unknown_plugin`. `list_for_plugin` scoped to
+    // the resolved workspace is what determines "enabled" here.
+    let any = skills::list_for_plugin(&conn, workspace_name, catalog, plugin)?;
+    if any.is_empty() {
+        Ok(LookupOutcome::UnknownPlugin)
+    } else {
+        Ok(LookupOutcome::UnknownSkill)
     }
 }
 
@@ -462,25 +519,34 @@ enum ReadError {
     Io(std::io::Error),
 }
 
-fn read_skill_and_resources(skill_path: &Path) -> Result<(String, Vec<String>), ReadError> {
+/// Read the entry body (frontmatter stripped) and, for skill-kind entries,
+/// the sibling resource paths. `walk_resources` is `false` for command-kind
+/// entries (#289): a command lives as a single `<plugin>/commands/<name>.md`
+/// file and its parent directory holds OTHER commands, so enumerating siblings
+/// would surface unrelated files — `resources` is left empty instead.
+fn read_skill_and_resources(
+    skill_path: &Path,
+    walk_resources: bool,
+) -> Result<(String, Vec<String>), ReadError> {
     if !skill_path.is_file() {
         return Err(ReadError::SkillFileMissing(skill_path.to_path_buf()));
     }
 
     let parsed = frontmatter::parse_skill_frontmatter(skill_path).map_err(|e| {
-        // The enable pipeline rejects skills whose frontmatter is
+        // The enable pipeline rejects entries whose frontmatter is
         // unparsable, so this branch is genuinely unreachable for an
-        // indexed skill — but the contract names it so we surface it.
+        // indexed entry — but the contract names it so we surface it.
         ReadError::FrontmatterStripFailed(e.to_string())
     })?;
 
-    let parent = skill_path
-        .parent()
-        .ok_or_else(|| ReadError::SkillFileMissing(skill_path.to_path_buf()))?;
-
     let mut resources: Vec<String> = Vec::new();
-    walk_dir(parent, skill_path, &mut resources).map_err(ReadError::Io)?;
-    resources.sort();
+    if walk_resources {
+        let parent = skill_path
+            .parent()
+            .ok_or_else(|| ReadError::SkillFileMissing(skill_path.to_path_buf()))?;
+        walk_dir(parent, skill_path, &mut resources).map_err(ReadError::Io)?;
+        resources.sort();
+    }
 
     Ok((parsed.body, resources))
 }

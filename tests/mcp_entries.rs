@@ -74,6 +74,8 @@ mod mcp_config_update;
 mod mcp_get_skill_info;
 #[path = "mcp_entries/mcp_get_skill_info_json_shape.rs"]
 mod mcp_get_skill_info_json_shape;
+#[path = "mcp_entries/mcp_get_skill_json_shape.rs"]
+mod mcp_get_skill_json_shape;
 #[path = "mcp_entries/mcp_input_length_caps.rs"]
 mod mcp_input_length_caps;
 #[path = "mcp_entries/mcp_lifecycle.rs"]

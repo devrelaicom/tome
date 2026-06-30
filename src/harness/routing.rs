@@ -4,7 +4,9 @@
 
 use crate::error::TomeError;
 use crate::index::skills::TieredEntry;
+use crate::mcp::prompts::PromptRegistry;
 use crate::paths::Paths;
+use crate::plugin::identity::EntryKind;
 use crate::workspace::WorkspaceName;
 
 /// The self-heal MCP-availability preamble (FR-025, R11, contract
@@ -24,11 +26,64 @@ fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("").trim()
 }
 
-/// Build the routing directive for a workspace from its tiered entries and an
-/// optional cached long summary (used for the Tier 3 prose). Pure and
+/// The action a tiered entry's directive line points an agent at.
+///
+/// #289: a `skill` entry is loaded via `get_skill`; a `command` entry that is
+/// user-invocable (every command by default) is INVOKED via the MCP prompt
+/// surface — pointing it at `get_skill` produced a guaranteed-failing
+/// instruction because `get_skill` historically rejected commands. A command
+/// that opted out of the prompt surface (`user_invocable: false`) has no
+/// prompt; its body is still readable via `get_skill` (which now resolves
+/// commands too), so it falls back to the `GetSkill` action.
+enum EntryAction {
+    /// Load the entry body via `get_skill(catalog, plugin, name)`.
+    GetSkill,
+    /// Invoke the command via the MCP prompt named `<prompt_name>`.
+    Prompt(String),
+}
+
+/// Resolve how a tiered entry should be addressed in the directive, honouring
+/// the live [`PromptRegistry`] (the SSOT for the override + collision-resolved
+/// prompt name). Skills always route to `get_skill`; a user-invocable command
+/// routes to its prompt; a non-invocable command falls back to `get_skill`.
+fn entry_action(e: &TieredEntry, registry: &PromptRegistry) -> EntryAction {
+    match e.kind {
+        EntryKind::Command => {
+            match registry.prompt_name_for(&e.catalog, &e.plugin, EntryKind::Command, &e.name) {
+                Some(prompt) => EntryAction::Prompt(prompt.to_owned()),
+                None => EntryAction::GetSkill,
+            }
+        }
+        // Skills + agents (agents never appear in `tiered_entries_for_workspace`)
+        // load via get_skill.
+        EntryKind::Skill | EntryKind::Agent => EntryAction::GetSkill,
+    }
+}
+
+/// Render the call snippet a Tier-1 directive line ends with for an entry.
+fn tier1_call(e: &TieredEntry, registry: &PromptRegistry) -> String {
+    match entry_action(e, registry) {
+        EntryAction::GetSkill => format!(
+            "get_skill(catalog=\"{}\", plugin=\"{}\", name=\"{}\")",
+            e.catalog, e.plugin, e.name,
+        ),
+        EntryAction::Prompt(prompt) => format!("the `{prompt}` MCP prompt"),
+    }
+}
+
+/// Build the routing directive for a workspace from its tiered entries, an
+/// optional cached long summary (used for the Tier 3 prose), and the live
+/// [`PromptRegistry`] (the SSOT for command→prompt-name resolution). Pure and
 /// deterministic: identical inputs → byte-identical output. An empty entry set
 /// yields an empty string (no directive is injected for an empty workspace).
-pub fn build_directive(entries: &[TieredEntry], long_summary: Option<&str>) -> String {
+///
+/// #289: command-kind entries are pointed at their MCP prompt, NOT `get_skill`
+/// (which historically rejected commands → a guaranteed-failing instruction).
+pub fn build_directive(
+    entries: &[TieredEntry],
+    long_summary: Option<&str>,
+    registry: &PromptRegistry,
+) -> String {
     if entries.is_empty() {
         return String::new();
     }
@@ -51,18 +106,16 @@ pub fn build_directive(entries: &[TieredEntry], long_summary: Option<&str>) -> S
     s.push_str(SELF_HEAL_PREAMBLE);
     s.push_str("\n\n");
     s.push_str(
-        "# Tome — Skill Routing\n\nYou have the Tome MCP server. Load skill \
-         instructions on demand via its tools.\n",
+        "# Tome — Skill Routing\n\nYou have the Tome MCP server. Load skills with \
+         get_skill and invoke commands via their MCP prompt, on demand.\n",
     );
 
     if !tier1.is_empty() {
         s.push_str("\n## Load now (Tier 1)\nAt session start, immediately call for each:\n");
         for e in &tier1 {
             s.push_str(&format!(
-                "- get_skill(catalog=\"{}\", plugin=\"{}\", name=\"{}\")  — {}\n",
-                e.catalog,
-                e.plugin,
-                e.name,
+                "- {}  — {}\n",
+                tier1_call(e, registry),
                 first_line(&e.description),
             ));
         }
@@ -71,15 +124,13 @@ pub fn build_directive(entries: &[TieredEntry], long_summary: Option<&str>) -> S
     if !tier2.is_empty() {
         s.push_str(
             "\n## Load before matching work (Tier 2)\nBefore a task matching a \
-             description below, first call its get_skill:\n",
+             description below, first call its get_skill (or invoke its prompt):\n",
         );
         for e in &tier2 {
             s.push_str(&format!(
-                "- \"{}\" → get_skill(catalog=\"{}\", plugin=\"{}\", name=\"{}\")\n",
+                "- \"{}\" → {}\n",
                 first_line(&e.description),
-                e.catalog,
-                e.plugin,
-                e.name,
+                tier1_call(e, registry),
             ));
         }
     }
@@ -98,7 +149,7 @@ pub fn build_directive(entries: &[TieredEntry], long_summary: Option<&str>) -> S
     }
     s.push_str(
         "Before any task in these areas, call search_skills(query=\"<the task>\") then \
-         get_skill the top hit.\n",
+         get_skill the top hit (or, for a command result, invoke its prompt_name).\n",
     );
 
     s
@@ -187,14 +238,25 @@ pub fn read_cached_long_summary(paths: &Paths, name: &WorkspaceName) -> Option<S
 /// Calls the sibling [`crate::workspace::sync::sync_workspace_rules_to_bound_projects`]
 /// — NOT `regen_summary::regen` — so there is no recursion back into this path.
 pub fn write_workspace_rules(paths: &Paths, name: &WorkspaceName) -> Result<u32, TomeError> {
-    let entries = if paths.index_db.exists() {
+    let (entries, registry) = if paths.index_db.exists() {
         let conn = crate::index::open_read_only(&paths.index_db)?;
-        crate::index::skills::tiered_entries_for_workspace(&conn, name.as_str())?
+        let entries = crate::index::skills::tiered_entries_for_workspace(&conn, name.as_str())?;
+        // #289: build the prompt registry so the directive can point command
+        // entries at their MCP prompt (the SSOT for the override +
+        // collision-resolved name). Personas off — they never appear in
+        // `tiered_entries_for_workspace` (agents are excluded), so they cannot
+        // be a tiered command/skill that needs prompt resolution. A registry
+        // build failure degrades to an empty registry rather than failing the
+        // rules write: commands then fall back to `get_skill` (which now
+        // resolves them) instead of taking the whole rules sync down.
+        let registry =
+            PromptRegistry::build_for_workspace(name, paths, &conn, false).unwrap_or_default();
+        (entries, registry)
     } else {
-        Vec::new()
+        (Vec::new(), PromptRegistry::default())
     };
     let summary = read_cached_long_summary(paths, name);
-    let body = build_directive(&entries, summary.as_deref());
+    let body = build_directive(&entries, summary.as_deref(), &registry);
 
     let rules_path = paths.workspace_rules_file(name);
     crate::catalog::store::write_atomic(&rules_path, body.as_bytes())?;
@@ -223,15 +285,42 @@ mod tests {
         }
     }
 
+    /// A `PromptRegistry` with one command entry registered under the given
+    /// final prompt name, so `build_directive` can resolve a tiered command to
+    /// its prompt. Constructed via the public builder shape used by the MCP
+    /// tests; here we hand-insert one entry to keep the unit test I/O-free.
+    fn registry_with_command(prompt_name: &str) -> PromptRegistry {
+        use crate::mcp::prompts::{PersonaRole, PromptEntry};
+        let mut reg = PromptRegistry::default();
+        reg.by_name.insert(
+            prompt_name.to_owned(),
+            PromptEntry {
+                catalog: "acme".into(),
+                plugin: "db".into(),
+                name: "deploy".into(),
+                kind: crate::plugin::identity::EntryKind::Command,
+                description: "Deploy.".into(),
+                path: std::path::PathBuf::new(),
+                arguments: Vec::new(),
+                argument_hint: None,
+                body_uses_arguments: false,
+                plugin_version: "1.0.0".into(),
+                persona: PersonaRole::None,
+                display_name: String::new(),
+            },
+        );
+        reg
+    }
+
     #[test]
     fn empty_entries_produce_empty_directive() {
-        assert!(build_directive(&[], None).is_empty());
+        assert!(build_directive(&[], None, &PromptRegistry::default()).is_empty());
     }
 
     #[test]
     fn non_empty_directive_starts_with_self_heal_preamble() {
         let e = vec![entry("migrations", true, 1, "Safe schema migrations")];
-        let out = build_directive(&e, None);
+        let out = build_directive(&e, None, &PromptRegistry::default());
         assert!(
             out.starts_with(SELF_HEAL_PREAMBLE),
             "directive must begin with the self-heal preamble; got:\n{out}",
@@ -247,26 +336,89 @@ mod tests {
     fn empty_directive_has_no_preamble() {
         // The empty-workspace floor must stay byte-empty: an empty directive
         // would otherwise inject a bare preamble with no routing content.
-        assert!(build_directive(&[], Some("ignored summary")).is_empty());
+        assert!(
+            build_directive(&[], Some("ignored summary"), &PromptRegistry::default()).is_empty()
+        );
     }
 
     #[test]
-    fn tier1_emits_get_skill_call_with_exact_args() {
+    fn tier1_emits_get_skill_call_with_exact_args_for_skill() {
         let e = vec![entry("migrations", true, 1, "Safe schema migrations")];
-        let out = build_directive(&e, None);
+        let out = build_directive(&e, None, &PromptRegistry::default());
         assert!(out.contains("## Load now (Tier 1)"));
         assert!(out.contains(r#"get_skill(catalog="acme", plugin="db", name="migrations")"#));
         assert!(out.contains("Safe schema migrations"));
     }
 
     #[test]
+    fn tier1_command_points_at_prompt_not_get_skill() {
+        // #289: a user-invocable command in the registry must be addressed via
+        // its MCP prompt, NOT `get_skill` (which historically rejected
+        // commands).
+        let e = vec![entry("deploy", false, 1, "Deploy the app")];
+        let reg = registry_with_command("db__deploy");
+        let out = build_directive(&e, None, &reg);
+        assert!(
+            out.contains("the `db__deploy` MCP prompt"),
+            "command must route to its prompt; got:\n{out}",
+        );
+        assert!(
+            !out.contains(r#"get_skill(catalog="acme", plugin="db", name="deploy")"#),
+            "command must NOT be pointed at get_skill; got:\n{out}",
+        );
+    }
+
+    #[test]
+    fn tier1_non_invocable_command_falls_back_to_get_skill() {
+        // A command with no prompt (not in the registry) still has a readable
+        // body via get_skill, so it falls back to the get_skill action rather
+        // than producing a dangling prompt reference.
+        let e = vec![entry("deploy", false, 1, "Deploy the app")];
+        let out = build_directive(&e, None, &PromptRegistry::default());
+        assert!(
+            out.contains(r#"get_skill(catalog="acme", plugin="db", name="deploy")"#),
+            "non-invocable command falls back to get_skill; got:\n{out}",
+        );
+    }
+
+    #[test]
+    fn tier2_command_points_at_prompt_not_get_skill() {
+        // #289: a Tier-2 user-invocable command line must point at its MCP
+        // prompt (and carry the Tier-2 "or invoke its prompt" framing), NOT
+        // `get_skill`.
+        let e = vec![entry("deploy", false, 2, "Deploy the app")];
+        let reg = registry_with_command("db__deploy");
+        let out = build_directive(&e, None, &reg);
+        assert!(
+            out.contains("## Load before matching work (Tier 2)"),
+            "directive must carry the Tier 2 section; got:\n{out}",
+        );
+        assert!(
+            out.contains("or invoke its prompt"),
+            "Tier 2 header must frame the prompt path; got:\n{out}",
+        );
+        assert!(
+            out.contains("the `db__deploy` MCP prompt"),
+            "a Tier-2 command must route to its prompt; got:\n{out}",
+        );
+        assert!(
+            !out.contains(r#"get_skill(catalog="acme", plugin="db", name="deploy")"#),
+            "a Tier-2 command must NOT be pointed at get_skill; got:\n{out}",
+        );
+    }
+
+    #[test]
     fn tier3_uses_summary_when_present_else_enumerates() {
         let e = vec![entry("notes", true, 3, "Release notes")];
-        let with = build_directive(&e, Some("This workspace covers DB + release ops."));
+        let with = build_directive(
+            &e,
+            Some("This workspace covers DB + release ops."),
+            &PromptRegistry::default(),
+        );
         assert!(with.contains("This workspace covers DB + release ops."));
         assert!(with.contains("search_skills(query="));
 
-        let without = build_directive(&e, None);
+        let without = build_directive(&e, None, &PromptRegistry::default());
         assert!(without.contains("- notes — Release notes"));
     }
 

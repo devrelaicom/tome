@@ -59,13 +59,18 @@ fn skill_info_wire_shape_for_skill_kind() {
             files: vec!["/abs/skills/with-resources/config.json".into()],
             directories,
         }),
+        // A non-invocable skill has no prompt — `prompt_name` is `None` and
+        // MUST be omitted (#289 additive field, `skip_serializing_if`),
+        // keeping the pre-#289 skill-kind wire shape byte-identical.
+        prompt_name: None,
     };
 
     let json = serde_json::to_string(&info).expect("serialise");
 
     // Pin every field in document order. BTreeMap iteration is
     // alphabetical, so `examples` precedes `scripts` in the directories
-    // object — the contract pins this.
+    // object — the contract pins this. `prompt_name` is ABSENT (None +
+    // skip_serializing_if).
     let expected = r#"{"catalog":"midnight-expert","plugin":"compact-dev","name":"compact-circuits","kind":"skill","path":"/abs/path/to/SKILL.md","description":"Full description text.","when_to_use":"when guidance applies","plugin_version":"1.4.0","user_invocable":false,"resources":{"files":["/abs/skills/with-resources/config.json"],"directories":{"examples":["/abs/skills/with-resources/examples/advanced.ts","/abs/skills/with-resources/examples/basic.ts"],"scripts":["/abs/skills/with-resources/scripts/audit.py","/abs/skills/with-resources/scripts/lint.py","/abs/skills/with-resources/scripts/build.sh","/abs/skills/with-resources/scripts/deploy.sh","/abs/skills/with-resources/scripts/test.sh","and 3 more"]}}}"#;
 
     assert_eq!(
@@ -87,6 +92,9 @@ fn skill_info_wire_shape_for_command_kind_omits_resources() {
         plugin_version: "1.4.0".into(),
         user_invocable: true,
         resources: None,
+        // #289: a user-invocable command carries its derived MCP `prompt_name`,
+        // appended LAST so the additive field never reorders the pinned fields.
+        prompt_name: Some("compact-dev__fix-issue".into()),
     };
 
     let json = serde_json::to_string(&info).expect("serialise");
@@ -94,11 +102,12 @@ fn skill_info_wire_shape_for_command_kind_omits_resources() {
     // The `resources` key MUST be absent (FR-083). Also pin the
     // `when_to_use: null` shape since the field is Option<String>
     // WITHOUT `skip_serializing_if` — it serialises as JSON `null`
-    // rather than disappearing.
-    let expected = r#"{"catalog":"midnight-expert","plugin":"compact-dev","name":"fix-issue","kind":"command","path":"/abs/path/to/commands/fix-issue.md","description":"Fix a GitHub issue.","when_to_use":null,"plugin_version":"1.4.0","user_invocable":true}"#;
+    // rather than disappearing. `prompt_name` is appended LAST and present
+    // (the command is user-invocable).
+    let expected = r#"{"catalog":"midnight-expert","plugin":"compact-dev","name":"fix-issue","kind":"command","path":"/abs/path/to/commands/fix-issue.md","description":"Fix a GitHub issue.","when_to_use":null,"plugin_version":"1.4.0","user_invocable":true,"prompt_name":"compact-dev__fix-issue"}"#;
 
     assert_eq!(
         json, expected,
-        "command-kind JSON wire shape drift — `resources` field must be absent, `when_to_use` must be null",
+        "command-kind JSON wire shape drift — `resources` absent, `when_to_use` null, `prompt_name` appended LAST",
     );
 }

@@ -826,6 +826,37 @@ impl PromptRegistry {
         self.by_name.get(name)
     }
 
+    /// Reverse lookup (#289): given an entry's identity, return the FINAL
+    /// (post-collision-suffixing) prompt name it is registered under, or
+    /// `None` when no prompt exists for it.
+    ///
+    /// This is the SSOT for "what prompt does `search_skills` / `get_skill` /
+    /// `get_skill_info` point a caller at for this entry" — it resolves the
+    /// override + collision suffix that `prompt_name::derive_name` alone cannot
+    /// (the override lives only in frontmatter, the suffix only in this
+    /// registry). `None` is the right answer for an entry that is searchable
+    /// but NOT `user_invocable` (a command with `user_invocable: false`, or any
+    /// skill that opted out of the prompt surface) — such an entry is absent
+    /// from `by_name`, so no prompt can be invoked for it.
+    ///
+    /// Built entries are few (one per enabled user-invocable entry), so the
+    /// linear scan is cheap and keeps `by_name` keyed on its load-bearing
+    /// final-name → entry mapping rather than adding a second index.
+    pub fn prompt_name_for(
+        &self,
+        catalog: &str,
+        plugin: &str,
+        kind: EntryKind,
+        name: &str,
+    ) -> Option<&str> {
+        self.by_name
+            .iter()
+            .find(|(_, e)| {
+                e.kind == kind && e.catalog == catalog && e.plugin == plugin && e.name == name
+            })
+            .map(|(final_name, _)| final_name.as_str())
+    }
+
     /// Render every entry as a [`PromptDescriptor`]. Sorted ascending by
     /// name (rmcp's `list_all` re-sorts, but having a stable ordering at
     /// the registry layer simplifies tests + the JSON wire-shape pin).

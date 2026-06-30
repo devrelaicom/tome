@@ -73,6 +73,15 @@ pub struct SkillInfo {
     /// command-kind entries per FR-083.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceEnumeration>,
+    /// #289: the MCP prompt name this entry is reachable under via
+    /// `prompts/list` / `prompts/get` (`<plugin>__<entry>` form, post-override
+    /// and post-collision-suffix). Present for any user-invocable entry; absent
+    /// (`skip_serializing_if`) when the entry has no prompt — so the existing
+    /// skill-kind / command-kind wire shapes stay byte-stable for non-invocable
+    /// entries. Resolved from the live `PromptRegistry` (the SSOT). Appended
+    /// LAST so the additive field never reorders the pinned fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_name: Option<String>,
 }
 
 /// Per-entry resource enumeration. `files` carries top-level files in the
@@ -216,6 +225,18 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
         calling_harness: crate::mcp::calling_harness(&state),
     });
 
+    // #289: resolve the entry's MCP prompt name from the live registry (the
+    // SSOT). Present for any user-invocable entry (so a command is actionable
+    // straight from the middle tier); `None` for a non-invocable entry — which
+    // is consistent with the `user_invocable` flag also returned above. The
+    // lookup is a sub-µs in-memory scan (no DB I/O), safe on the reactor.
+    let prompt_name = state
+        .prompt_registry
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .prompt_name_for(&input.catalog, &input.plugin, input.kind, &input.name)
+        .map(str::to_owned);
+
     Ok(SkillInfo {
         catalog: input.catalog,
         plugin: input.plugin,
@@ -227,6 +248,7 @@ pub async fn handle(state: Arc<McpState>, input: Input) -> Result<SkillInfo, Mcp
         plugin_version,
         user_invocable,
         resources,
+        prompt_name,
     })
 }
 

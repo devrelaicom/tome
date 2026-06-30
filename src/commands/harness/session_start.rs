@@ -54,14 +54,24 @@ pub fn run(
         }
     }
 
-    let entries = if paths.index_db.exists() {
+    let (entries, registry) = if paths.index_db.exists() {
         let conn = crate::index::open_read_only(&paths.index_db)?;
-        crate::index::skills::tiered_entries_for_workspace(&conn, name.as_str())?
+        let entries = crate::index::skills::tiered_entries_for_workspace(&conn, name.as_str())?;
+        // #289: build the prompt registry so command entries route to their MCP
+        // prompt in the directive (SSOT for the override + collision name).
+        // Personas off (agents are not tiered command/skill entries). A build
+        // failure degrades to an empty registry → commands fall back to
+        // `get_skill` rather than failing session-start.
+        let registry =
+            crate::mcp::prompts::PromptRegistry::build_for_workspace(&name, paths, &conn, false)
+                .unwrap_or_default();
+        (entries, registry)
     } else {
-        Vec::new()
+        (Vec::new(), crate::mcp::prompts::PromptRegistry::default())
     };
     let summary = crate::harness::routing::read_cached_long_summary(paths, &name);
-    let directive = crate::harness::routing::build_directive(&entries, summary.as_deref());
+    let directive =
+        crate::harness::routing::build_directive(&entries, summary.as_deref(), &registry);
 
     let output = select_output(args.harness.as_deref(), &directive);
 
