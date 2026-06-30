@@ -30,4 +30,8 @@ extend-exclude = [
     # typos lint mis-flags and which MUST stay byte-accurate. Same rationale as
     # excluding vendor/.
     "THIRD-PARTY-LICENSES",
+    # Vendored site/ subtree (Task 1): synced from tome-site upstream; upstream
+    # content must not be edited in place to fix typos — address in tome-site
+    # and re-vendor. "unparseable" in docs/authoring/lint.md is upstream usage.
+    "site/",
 ]

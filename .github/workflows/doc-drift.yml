@@ -1,0 +1,115 @@
+name: Doc drift
+
+# Non-blocking release-sync signal. On main pushes that touch the CLI source,
+# rebuild the binary, regenerate the CLI contract, and if the committed
+# contract drifted, open/refresh a `doc-drift` issue. This NEVER fails the
+# build — the issue is the signal.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/doc-drift.yml'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: doc-drift-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  TOME_TELEMETRY: "0"
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: doc-drift
+
+      - name: Build the tome binary
+        run: cargo build --release --bin tome
+
+      - uses: pnpm/action-setup@v4
+        with:
+          # action-setup runs at the repo root (a `uses:` step); the pnpm version
+          # lives in site/package.json "packageManager".
+          package_json_file: site/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
+
+      - name: Install site deps (frozen)
+        working-directory: site
+        run: pnpm install --frozen-lockfile
+
+      - name: Regenerate the CLI contract from the built binary
+        working-directory: site
+        run: pnpm drift:generate
+
+      - name: Detect drift
+        id: drift
+        run: |
+          if git diff --quiet -- site/specs/reference/cli-surface.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ensure doc-drift label exists
+        if: steps.drift.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh label create doc-drift --description "CLI surface changed; docs/contract need updating" --color FBCA04 --force
+
+      - name: Build the issue body
+        if: steps.drift.outputs.changed == 'true'
+        run: |
+          {
+            echo "The CLI surface changed on \`main\`, but the committed contract"
+            echo "\`site/specs/reference/cli-surface.json\` was not updated to match the"
+            echo "current \`tome\` binary."
+            echo
+            echo "Regenerate the contract and update the reference docs:"
+            echo
+            echo '```'
+            echo 'cd site && pnpm drift:generate && pnpm drift:check'
+            echo '```'
+            echo
+            echo "Detected diff (committed contract → freshly generated):"
+            echo
+            echo '```diff'
+            git --no-pager diff -- site/specs/reference/cli-surface.json
+            echo '```'
+          } > "${RUNNER_TEMP}/doc-drift-body.md"
+
+      - name: Open or refresh the doc-drift issue
+        if: steps.drift.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          existing=$(gh issue list --label doc-drift --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "Refreshing existing doc-drift issue #${existing}"
+            gh issue comment "$existing" --body-file "${RUNNER_TEMP}/doc-drift-body.md"
+          else
+            echo "Opening a new doc-drift issue"
+            gh issue create \
+              --label doc-drift \
+              --title "Doc drift: CLI surface changed ($(date -u +%Y-%m-%d))" \
+              --body-file "${RUNNER_TEMP}/doc-drift-body.md"
+          fi

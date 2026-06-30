@@ -1,0 +1,13 @@
+# source: devrelaicom/midnight-expert (local marketplace clone)
+|   Score | Catalog         | Plugin          | Skill                                     | Version | Path                                                      |
+|---------|-----------------|-----------------|-------------------------------------------|---------|-----------------------------------------------------------|
+|  4.7874 | midnight-expert | midnight-verify | midnight-verify:verify-by-execution       | 0.13.0  | skills/midnight-verify:verify-by-execution/SKILL.md       |
+|  3.4658 | midnight-expert | midnight-verify | midnight-verify:verify-by-zkir-checker    | 0.13.0  | skills/midnight-verify:verify-by-zkir-checker/SKILL.md    |
+|  3.1529 | midnight-expert | midnight-verify | midnight-verify:verify-compact            | 0.13.0  | skills/midnight-verify:verify-compact/SKILL.md            |
+|  2.7010 | midnight-expert | midnight-verify | midnight-verify:verify-by-witness         | 0.13.0  | skills/midnight-verify:verify-by-witness/SKILL.md         |
+|  1.4746 | midnight-expert | midnight-verify | midnight-verify:verify-by-cli-execution   | 0.13.0  | skills/midnight-verify:verify-by-cli-execution/SKILL.md   |
+|  0.0356 | midnight-expert | midnight-verify | midnight-verify:verify                    | 0.13.0  | commands/midnight-verify:verify.md                        |
+| -0.4743 | midnight-expert | midnight-verify | midnight-verify:verify-by-source          | 0.13.0  | skills/midnight-verify:verify-by-source/SKILL.md          |
+| -1.0289 | midnight-expert | midnight-verify | midnight-verify:verify-by-zkir-inspection | 0.13.0  | skills/midnight-verify:verify-by-zkir-inspection/SKILL.md |
+| -1.2946 | midnight-expert | midnight-verify | midnight-verify:verify-tooling            | 0.13.0  | skills/midnight-verify:verify-tooling/SKILL.md            |
+| -3.3564 | midnight-expert | midnight-verify | midnight-verify:verify-ledger             | 0.13.0  | skills/midnight-verify:verify-ledger/SKILL.md             |

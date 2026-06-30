@@ -1,0 +1,7 @@
+Tome:               0.6.0
+Embedder:           bge-small-en-v1.5 (1.5)  [ok]
+Reranker:           bge-reranker-base (base)  [ok]
+Index database:     [ok] (1 plugins enabled, 28 skills indexed, 1.6 MiB)
+Schema version:     4
+Drift:              none
+Overall:            [ok] healthy

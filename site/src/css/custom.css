@@ -1,0 +1,109 @@
+/* Newsreader — the grimoire's display voice (self-hosted; the only webfont) */
+@import '@fontsource-variable/newsreader';
+@import '@fontsource-variable/newsreader/wght-italic.css';
+
+:root {
+  /* parchment (light) — Tome grimoire tokens, lit by Midnight.
+     The accent is lapis (the blue of illuminated manuscripts) over warm
+     vellum, with gold leaf kept as the secondary. */
+  --tome-paper: #f4ecdc;
+  --tome-paper-deep: #ece1c8;
+  --tome-ink: #1a1726; /* indigo-black ink, not pure warm black */
+  --tome-ink-soft: #4b4660;
+  --tome-lapis: #3531a6; /* the manuscript blue; AAA (8.4:1) on paper */
+  --tome-violet: #6d4dd6; /* gradient partner — Midnight's violet note */
+  --tome-gold: #6b5d3f;
+  --tome-cream: #f0e9d8;
+  --tome-rule: #d4c5a0;
+  --tome-code-bg: #15131f; /* code blocks stay midnight-navy in BOTH modes */
+
+  --tome-serif: 'Newsreader Variable', Georgia, 'Times New Roman', serif;
+  --tome-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --tome-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Infima */
+  --ifm-color-primary: #3531a6;
+  --ifm-color-primary-dark: #302c95;
+  --ifm-color-primary-darker: #2d2a8d;
+  --ifm-color-primary-darkest: #252274;
+  --ifm-color-primary-light: #3a36b7;
+  --ifm-color-primary-lighter: #3f3bc0;
+  --ifm-color-primary-lightest: #514dcc;
+  --ifm-background-color: var(--tome-paper);
+  --ifm-font-color-base: var(--tome-ink);
+  --ifm-font-family-base: var(--tome-sans);
+  --ifm-font-family-monospace: var(--tome-mono);
+  --ifm-heading-font-family: var(--tome-serif);
+  --ifm-heading-font-weight: 700;
+  --ifm-code-font-size: 90%;
+  --ifm-navbar-background-color: rgba(244, 236, 220, 0.92);
+  --ifm-toc-border-color: var(--tome-rule);
+  --docusaurus-highlighted-code-line-bg: rgba(138, 134, 255, 0.16);
+}
+
+/* midnight library (dark) — warm ivory text on Midnight-navy */
+[data-theme='dark'] {
+  --tome-paper: #0f0d1c;
+  --tome-paper-deep: #090813;
+  --tome-ink: #f0e9d8; /* warm cream text kept — the grimoire persists */
+  --tome-ink-soft: #a9a3b0;
+  --tome-lapis: #8a86ff; /* electric periwinkle; AA (5.8:1) on midnight-navy */
+  --tome-violet: #b69bff;
+  --tome-gold: #9a8a5f;
+  --tome-rule: #2a2740;
+
+  --ifm-color-primary: #8a86ff;
+  --ifm-color-primary-dark: #6f6aff;
+  --ifm-color-primary-darker: #625dff;
+  --ifm-color-primary-darkest: #423cf0;
+  --ifm-color-primary-light: #9a96ff;
+  --ifm-color-primary-lighter: #a6a3ff;
+  --ifm-color-primary-lightest: #c2c0ff;
+  --ifm-background-color: var(--tome-paper);
+  --ifm-background-surface-color: var(--tome-paper-deep);
+  --ifm-font-color-base: var(--tome-ink);
+  --ifm-navbar-background-color: rgba(15, 13, 28, 0.92);
+}
+
+/* headings: serif with tight tracking; h1 gets the lapis full stop via docs CSS, not content */
+h1, h2, h3 { letter-spacing: -0.015em; }
+article header h1 { font-size: 2.6rem; }
+
+/* the reading room: measure + rhythm */
+article { font-size: 16.5px; line-height: 1.65; }
+article .markdown > p { max-width: 72ch; }
+
+/* sidebar chapters */
+.menu__list-item-collapsible .menu__link--sublist {
+  font-family: var(--tome-serif);
+  font-style: italic;
+  font-weight: 600;
+}
+.menu__link--active:not(.menu__link--sublist) {
+  border-left: 2px solid var(--tome-lapis);
+  border-radius: 0;
+}
+
+/* code blocks: dark slate in both modes */
+:root .theme-code-block, [data-theme='dark'] .theme-code-block {
+  --prism-background-color: var(--tome-code-bg);
+  box-shadow: none;
+  border: 1px solid var(--tome-rule);
+}
+:not(pre) > code {
+  background: var(--tome-paper-deep);
+  border: 1px solid var(--tome-rule);
+  color: inherit;
+}
+
+/* navbar */
+.navbar { border-bottom: 1px solid var(--tome-rule); backdrop-filter: blur(6px); }
+.navbar__title { font-family: var(--tome-serif); font-weight: 700; font-size: 1.25rem; }
+.navbar__link { font-family: var(--tome-mono); font-size: 13px; letter-spacing: .04em; }
+.navbar-version-badge {
+  border: 1px solid var(--tome-rule);
+  border-radius: 999px;
+  padding: 2px 12px;
+  font-family: var(--tome-mono);
+  font-size: 12px;
+}

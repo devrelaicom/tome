@@ -1,0 +1,29 @@
+Tome:            0.6.0
+
+Workspace:       (global)
+  resolved via:  global fallback
+  catalogs:      1
+  plugins:       1 total, 1 enabled
+
+Models:
+  embedder       bge-small-en-v1.5 (1.5)  [ok] ok
+  reranker       bge-reranker-base (base)  [ok] ok
+
+Index database:  [ok] (1 plugins enabled, 28 skills indexed, 1.6 MiB)
+Schema version:  4
+Drift:           none
+
+Catalog caches:
+  midnight-expert                    [ok]
+
+Workspace registry: opt-in (file absent)
+
+Detected harnesses:
+  [ok] Claude Code    /Users/aaronbassett/.claude
+  [ok] Codex          /Users/aaronbassett/.codex
+  [ok] Cursor         /Users/aaronbassett/.cursor
+  [ok] Gemini CLI     /Users/aaronbassett/.gemini
+  [—] OpenCode       /Users/aaronbassett/.opencode    (not detected)
+  [—] Continue       /Users/aaronbassett/.continue    (not detected)
+
+Overall:         [ok] healthy
