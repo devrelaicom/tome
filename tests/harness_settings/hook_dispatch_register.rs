@@ -269,3 +269,123 @@ fn non_live_dispatch_teardown_strips_run_hook_entries_and_deletes_manifest() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Fix 4, US6 review: prompt-gate through the REAL sync
+// ---------------------------------------------------------------------------
+
+/// The hooks.json source used for the prompt-gate sync tests: a single
+/// PreToolUse prompt handler. Written to the plugin's on-disk directory.
+const PROMPT_HOOKS_JSON: &str = r#"{
+    "PreToolUse": [
+        {
+            "hooks": [
+                { "type": "prompt", "prompt": "Is this tool use safe?" }
+            ]
+        }
+    ]
+}"#;
+
+/// Fix 4: without any prompt provider configured (default `Config`), the
+/// reconciler's prompt gate (`prompt_enabled = false`) must DROP the
+/// `Handler::Prompt` entry from the written manifest — verifying that the
+/// gate works end-to-end through the real `sync_project` path.
+///
+/// This prevents the manifest from carrying an unreachable prompt entry that
+/// would silently fail-open on every dispatch until a provider is configured.
+#[test]
+fn prompt_gate_drops_entry_without_provider() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::cursor::Cursor)]);
+
+    let fx = Fixture::build("test-ws-prompt-gate-off", "\"cursor\"");
+
+    // Seed one plugin with a prompt handler in its hooks.json.
+    let url = seed_hooks_source(&fx.paths, "plugin-prompt", PROMPT_HOOKS_JSON);
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw");
+    tome::index::workspace_catalogs::insert(&conn, "test-ws-prompt-gate-off", "cat", &url, "main")
+        .expect("enrol catalog");
+    drop(conn);
+    insert_enabled_skill_row(&fx.paths, "test-ws-prompt-gate-off", "cat", "plugin-prompt");
+
+    // Sync with NO config.toml → Config::default() → prompt_enabled = false.
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync");
+
+    // The manifest must NOT carry any prompt entry (gate dropped it).
+    let manifest_path = fx.paths.hooks_manifest(&fx.workspace, "cursor");
+    if manifest_path.is_file() {
+        let manifest: serde_json::Value =
+            serde_json::from_str(&read(&manifest_path)).expect("parse manifest");
+        // Either the events object is missing PreToolUse, or its entries array is
+        // empty (no prompt entries survived the gate filter).
+        let entries = manifest["events"]["PreToolUse"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for entry in &entries {
+            let handler_type = entry["handler"]["type"].as_str().unwrap_or("");
+            assert_ne!(
+                handler_type, "prompt",
+                "prompt entry must be dropped from manifest when no provider is configured:\n{manifest}"
+            );
+        }
+    }
+    // (If the manifest file is absent the gate worked: nothing to write → no file.)
+}
+
+/// Fix 4: WITH a prompt configuration set (`prompt_model` alone is sufficient
+/// to enable the gate), the reconciler must KEEP the `Handler::Prompt` entry in
+/// the written manifest so the runtime can execute it.
+///
+/// The config is written to the tome root's `config.toml` so
+/// `load_or_default(deps.paths)` inside `sync_project` picks it up.
+#[test]
+fn prompt_gate_keeps_entry_with_provider_configured() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::cursor::Cursor)]);
+
+    let fx = Fixture::build("test-ws-prompt-gate-on", "\"cursor\"");
+
+    // Write a minimal config.toml that enables the prompt gate (prompt_model
+    // alone is sufficient — the gate is `prompt_provider.is_some() ||
+    // prompt_model.is_some()`). No need for a real provider in the registry
+    // for this sync-path test; the gate logic only inspects these two fields.
+    std::fs::write(
+        &fx.paths.global_config_file,
+        "[hooks]\nprompt_model = \"gpt-4o-mini\"\n",
+    )
+    .expect("write config.toml");
+
+    // Seed one plugin with a prompt handler.
+    let url = seed_hooks_source(&fx.paths, "plugin-prompt", PROMPT_HOOKS_JSON);
+    let conn = rusqlite::Connection::open(&fx.paths.index_db).expect("open rw");
+    tome::index::workspace_catalogs::insert(&conn, "test-ws-prompt-gate-on", "cat", &url, "main")
+        .expect("enrol catalog");
+    drop(conn);
+    insert_enabled_skill_row(&fx.paths, "test-ws-prompt-gate-on", "cat", "plugin-prompt");
+
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync");
+
+    // The manifest MUST exist and carry the prompt entry (gate kept it).
+    let manifest_path = fx.paths.hooks_manifest(&fx.workspace, "cursor");
+    assert!(
+        manifest_path.is_file(),
+        "manifest must be written when prompt provider is configured"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_str(&read(&manifest_path)).expect("parse manifest");
+    let entries = manifest["events"]["PreToolUse"]
+        .as_array()
+        .expect("PreToolUse entries must be present");
+    let has_prompt = entries
+        .iter()
+        .any(|e| e["handler"]["type"].as_str() == Some("prompt"));
+    assert!(
+        has_prompt,
+        "manifest must carry the prompt entry when prompt_model is configured:\n{manifest}"
+    );
+}
