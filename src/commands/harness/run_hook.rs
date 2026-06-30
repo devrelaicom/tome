@@ -2910,4 +2910,160 @@ mod tests {
              not .parent() of plugin_data (\"/some/data/root/cat\")"
         );
     }
+
+    // --- I-A: command output cap tests (HOOK_CMD_OUTPUT_MAX parity) ---------------
+
+    /// A command emitting more than `HOOK_CMD_OUTPUT_MAX` bytes to stdout must
+    /// NOT OOM the subprocess. The reader thread caps the read at
+    /// `HOOK_CMD_OUTPUT_MAX`; the decision degrades to a non-blocking allow
+    /// (truncated JSON fails parsing → allow). This pins the cap behaviour and
+    /// documents the fail-open semantics for over-cap output.
+    #[test]
+    fn command_stdout_over_cap_is_bounded_and_fails_open() {
+        // Emit 5 MiB to stdout — larger than the 4 MiB cap.
+        let entry = command_entry(
+            "Bash",
+            "python3 -c \"import sys; sys.stdout.buffer.write(b'x' * (5 * 1024 * 1024))\"",
+        );
+        let outcome = run_command_handler(&entry, "{}", &blank_prov());
+        // The captured stdout must be bounded (≤ cap) — never the full 5 MiB.
+        assert!(
+            outcome.stdout.len() <= HOOK_CMD_OUTPUT_MAX as usize,
+            "stdout must be capped at HOOK_CMD_OUTPUT_MAX ({} MiB), got {} bytes",
+            HOOK_CMD_OUTPUT_MAX / 1024 / 1024,
+            outcome.stdout.len(),
+        );
+        // Exit 0 + over-cap (non-JSON) stdout → fail-open allow.
+        let decision = command_outcome_to_decision(&outcome);
+        assert!(
+            !is_blocking(&decision),
+            "over-cap stdout exit-0 must be a non-blocking allow"
+        );
+    }
+
+    /// A command emitting more than `HOOK_CMD_OUTPUT_MAX` bytes to stderr must
+    /// NOT OOM and must NOT deadlock. Closing the read end after the cap is hit
+    /// sends SIGPIPE to the subprocess — the exit code after SIGPIPE is
+    /// non-deterministic (typically 141 or BrokenPipeError exit 1), not 2.  The
+    /// testable property is bounded capture + no deadlock.
+    ///
+    /// The companion property ("deny survives capped stderr reason") is tested
+    /// separately by `large_stderr_deny_no_deadlock_captures_reason`, which writes
+    /// under the cap and exits 2 cleanly — the cap just shortens the text.
+    #[test]
+    fn command_stderr_over_cap_is_bounded_no_deadlock() {
+        // 5 MiB to stderr — over the 4 MiB cap; no explicit sys.exit so we do not
+        // rely on exit code (SIGPIPE may kill the process before any exit call).
+        let entry = command_entry(
+            "Bash",
+            "python3 -c \"import sys; sys.stderr.buffer.write(b'x' * (5 * 1024 * 1024))\"",
+        );
+        let start = std::time::Instant::now();
+        let outcome = run_command_handler(&entry, "{}", &blank_prov());
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "over-cap stderr must drain without deadlock (took {elapsed:?})"
+        );
+        assert!(
+            outcome.stderr.len() <= HOOK_CMD_OUTPUT_MAX as usize,
+            "stderr must be capped at HOOK_CMD_OUTPUT_MAX ({} MiB), got {} bytes",
+            HOOK_CMD_OUTPUT_MAX / 1024 / 1024,
+            outcome.stderr.len(),
+        );
+        // After SIGPIPE the exit code is not 2 → non-blocking allow is correct.
+        let decision = command_outcome_to_decision(&outcome);
+        assert!(
+            !is_blocking(&decision),
+            "over-cap stderr (SIGPIPE death) must be a fail-open allow, not a block"
+        );
+    }
+
+    // --- I-B: force-normalized hook_event_name regression (CC-stdin fidelity) ----
+
+    /// When a harness's native stdin already carries `hook_event_name` in its own
+    /// vocabulary (Gemini uses `"BeforeTool"` for `PreToolUse`), the CC-stdin
+    /// translator MUST overwrite it with the authoritative CC name — not merely
+    /// backfill when absent. A plugin script branching on
+    /// `$hook_event_name == "PreToolUse"` would silently fail-open on Gemini if
+    /// the native name were preserved.
+    ///
+    /// Regression for I-B (PHASE-contract.md): mirrors the force-normalize applied
+    /// to `tool_name` two lines earlier in `harness_event_to_cc`.
+    #[test]
+    fn harness_event_to_cc_force_overwrites_existing_hook_event_name() {
+        // A Gemini raw payload that already contains `hook_event_name` in Gemini's
+        // native vocabulary (`"BeforeTool"`).
+        let raw_with_native_name = serde_json::json!({
+            "hook_event_name": "BeforeTool",
+            "tool_name": "run_shell_command",
+        });
+        let cc = harness_event_to_cc(
+            HookWire::ClaudeStyle,
+            "PreToolUse", // event_cc — the authoritative CC name
+            "gemini",
+            "",
+            false,
+            &raw_with_native_name,
+        );
+        // The CC stdin must carry the CC name, NOT the Gemini-native "BeforeTool".
+        assert_eq!(
+            cc["hook_event_name"], "PreToolUse",
+            "hook_event_name must be force-normalized to the CC name (PreToolUse), \
+             not kept as the harness-native name (BeforeTool)"
+        );
+        // Tool name is also rewritten (pre-existing behaviour; not the focus here).
+        assert_eq!(cc["tool_name"], "Bash");
+    }
+
+    // --- I-C: malformed-manifest fail-open via compute() path --------------------
+
+    /// When `compute()` reads a corrupt JSON manifest from disk, `read_manifest()`
+    /// fails and `.ok()` converts the error to `None`. `dispatch_inner` then
+    /// falls back to the empty-manifest path (no entries → fail-open allow).
+    ///
+    /// This regression guards the `.ok()` call in `compute()` — the critical path
+    /// that would silently turn disk corruption into agent blocks if changed to `?`.
+    /// `dispatch_core` unit tests bypass this path (they receive a pre-parsed
+    /// `Option<&HookManifest>`), so this test is the only layer that exercises the
+    /// disk-read `.ok()` guard directly.
+    #[test]
+    fn compute_with_malformed_manifest_on_disk_fails_open() {
+        use crate::paths::Paths;
+        use crate::workspace::{ResolvedScope, Scope, ScopeSource, WorkspaceName};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::from_root(tmp.path().to_owned());
+
+        let workspace = WorkspaceName::parse("test-ws").unwrap();
+        // Place a corrupt JSON file exactly where compute() would read the manifest.
+        let manifest_path = paths.hooks_manifest(&workspace, "cursor");
+        std::fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        std::fs::write(&manifest_path, b"{ corrupt json: not: valid!!!").unwrap();
+
+        let args = crate::cli::HarnessRunHookArgs {
+            event: "PreToolUse".to_string(),
+            harness: "cursor".to_string(),
+            workspace: Some("test-ws".to_string()),
+            explain: false,
+        };
+        let scope = ResolvedScope {
+            scope: Scope(workspace),
+            source: ScopeSource::Flag,
+            project_root: None,
+        };
+
+        // compute() reads the corrupt manifest, read_manifest() fails, .ok() → None,
+        // dispatch_inner() → empty-manifest path → fail-open allow (exit 0, empty stdout).
+        let out = compute(&args, &scope, &paths, r#"{"tool_name":"Bash"}"#);
+        assert_eq!(
+            out.exit_code, 0,
+            "corrupt manifest must fail open (exit 0), not block the agent"
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "corrupt manifest must emit empty stdout (fail-open allow), got: {:?}",
+            out.stdout,
+        );
+    }
 }
