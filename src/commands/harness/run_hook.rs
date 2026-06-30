@@ -116,9 +116,28 @@ fn compute(
 
 /// Pure, total dispatch. NEVER returns an error — any Tome fault becomes a
 /// fail-open allow. `manifest: None` (missing/unreadable/malformed) → fail-open.
-/// A panic anywhere in [`dispatch_inner`] is caught and turned into a fail-open
-/// allow (effective under unwind builds; see the `panic = "abort"` caveat in
-/// the crate's release profile — there the panic aborts instead).
+///
+/// ## `catch_unwind` and `panic = "abort"` caveat
+///
+/// The `catch_unwind` wrapper inside this function is **a NO-OP in the release
+/// binary**. Under `[profile.release] panic = "abort"` (this crate's release
+/// profile), a panic aborts the process immediately (exit 134) rather than
+/// unwinding the stack, so `catch_unwind` never catches it. For Copilot's
+/// `preToolUse` hook, exit 134 is treated by the harness as fail-CLOSED (block),
+/// not as a fail-open allow.
+///
+/// The **real** production fail-open guarantee is **panic-freedom by
+/// construction**: `dispatch_inner` and ALL its callees must never panic. That
+/// means: no bare `unwrap`/`expect`, no unchecked indexing on untrusted data,
+/// no arithmetic that can overflow on adversarial input.
+///
+/// **Future contributors: do NOT add panicking operations inside `dispatch_inner`
+/// or any of its callees** under the assumption that this `catch_unwind` will
+/// save you — in the release binary it will not. Treat every call path as if
+/// there is no safety net, because in production there is not one.
+///
+/// Keep this `catch_unwind`: it is real, zero-cost protection under the test
+/// profile's default `panic = "unwind"`, and costs nothing in the release build.
 pub fn dispatch_core(
     harness: &str,
     event_cc: &str,
@@ -245,10 +264,18 @@ struct HandlerOutcome {
 /// Run one command handler bounded by `entry.timeout_ms`, feeding `cc_stdin` on
 /// stdin. Returns the raw exit/stdout/stderr.
 ///
+/// stdout and stderr are drained on concurrent reader threads (started
+/// immediately after `spawn`) to prevent the OS pipe-buffer deadlock: a handler
+/// that writes >~64 KB to either pipe blocks on `write()` and never exits; the
+/// old serial drain (read-after-wait) caused `wait_with_timeout` to spin to the
+/// full timeout, kill the child, and fail open — silently downgrading a Deny
+/// with large stderr output to an Allow (security: deny-bypass).
+///
 /// SECURITY: the ONLY shell-evaluated string is `entry.command` — relocated
 /// verbatim from the Tome-owned manifest. No other field (matcher, plugin, cwd,
-/// env) is ever interpolated into the shell line. A spawn failure or a timeout
-/// degrades to a non-blocking allow (exit 0, empty), NEVER a block.
+/// env) is ever interpolated into the shell line. A spawn failure, a thread
+/// creation failure, or a timeout degrades to a non-blocking allow (exit 0,
+/// empty), NEVER a block.
 fn run_command_handler(entry: &ManifestEntry, cc_stdin: &str) -> HandlerOutcome {
     let allow = || HandlerOutcome {
         exit: 0,
@@ -280,59 +307,114 @@ fn run_command_handler(entry: &ManifestEntry, cc_stdin: &str) -> HandlerOutcome 
         Err(_) => return allow(),
     };
 
-    // Feed CC stdin on a side thread so a large payload cannot deadlock against
-    // the child's stdout/stderr pipes (which we drain only after it exits).
-    let writer = child.stdin.take().map(|mut sin| {
-        let payload = cc_stdin.as_bytes().to_vec();
-        std::thread::spawn(move || {
-            let _ = sin.write_all(&payload);
-            // `sin` drops here → the child sees EOF on stdin.
-        })
-    });
+    // All three I/O threads use Builder::new().spawn() (returns Result) rather
+    // than thread::spawn (which PANICS on OS resource exhaustion — under
+    // panic="abort" that aborts the process at exit 134, making a deny hook
+    // fail-CLOSED). On spawn Err → kill child and fail open immediately.
 
-    let timeout = std::time::Duration::from_millis(entry.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
-    let result = match wait_with_timeout(&mut child, timeout) {
-        Some(outcome) => outcome,
-        None => {
-            // Timed out — kill FIRST (so a stdin writer blocked on a full pipe
-            // unblocks with EPIPE), then treat as a non-blocking allow.
-            let _ = child.kill();
-            let _ = child.wait();
-            allow()
+    // Stdin writer thread: feed CC stdin so a large payload cannot block the
+    // child on a full pipe (child's read end would fill; sin drops → EOF).
+    let writer = match child.stdin.take() {
+        None => None,
+        Some(mut sin) => {
+            let payload = cc_stdin.as_bytes().to_vec();
+            match std::thread::Builder::new().spawn(move || {
+                let _ = sin.write_all(&payload);
+                // `sin` drops here → the child sees EOF on stdin.
+            }) {
+                Ok(h) => Some(h),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return allow();
+                }
+            }
         }
     };
-    if let Some(handle) = writer {
-        let _ = handle.join();
+
+    // Stdout reader thread: drains continuously so the child never stalls.
+    let stdout_reader = match child.stdout.take() {
+        None => None,
+        Some(mut out) => {
+            match std::thread::Builder::new().spawn(move || {
+                let mut buf = String::new();
+                let _ = out.read_to_string(&mut buf);
+                buf
+            }) {
+                Ok(h) => Some(h),
+                Err(_) => {
+                    // writer handle is dropped here → thread detaches and exits on EPIPE.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return allow();
+                }
+            }
+        }
+    };
+
+    // Stderr reader thread: drains continuously so the child never stalls.
+    let stderr_reader = match child.stderr.take() {
+        None => None,
+        Some(mut err) => {
+            match std::thread::Builder::new().spawn(move || {
+                let mut buf = String::new();
+                let _ = err.read_to_string(&mut buf);
+                buf
+            }) {
+                Ok(h) => Some(h),
+                Err(_) => {
+                    // writer + stdout_reader handles drop here → threads detach and exit on EOF/EPIPE.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return allow();
+                }
+            }
+        }
+    };
+
+    let timeout = std::time::Duration::from_millis(entry.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+    let maybe_exit = wait_with_timeout(&mut child, timeout);
+
+    if maybe_exit.is_none() {
+        // Timed out: kill child so reader threads get EOF and can be joined
+        // below without leaking. A Tome timeout is NEVER a block.
+        let _ = child.kill();
+        let _ = child.wait();
     }
-    result
+
+    // Join stdin writer (fire-and-forget; exits on EOF/EPIPE after kill).
+    if let Some(w) = writer {
+        let _ = w.join();
+    }
+    // Collect captured stdout/stderr from the concurrent reader threads.
+    let stdout = stdout_reader
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+
+    match maybe_exit {
+        Some(exit) => HandlerOutcome {
+            exit,
+            stdout,
+            stderr,
+        },
+        // A Tome timeout is NEVER a block: fail open.
+        None => allow(),
+    }
 }
 
-/// Spawn + wait-with-timeout: poll `try_wait` until the child exits or the
-/// wall-clock `timeout` elapses. On exit, drains stdout/stderr. `None` means it
-/// did not finish in time (caller kills + fails open). A signal-killed child
-/// reports `exit = 0` (→ a non-blocking allow).
-fn wait_with_timeout(
-    child: &mut std::process::Child,
-    timeout: std::time::Duration,
-) -> Option<HandlerOutcome> {
+/// Poll `try_wait` until the child exits or the wall-clock `timeout` elapses.
+/// Returns the exit code on success, or `None` on timeout (caller kills + fails
+/// open). stdout/stderr are drained by the concurrent reader threads in
+/// [`run_command_handler`] — this function ONLY polls for process exit. A
+/// signal-killed child reports `exit = 0` (→ a non-blocking allow).
+fn wait_with_timeout(child: &mut std::process::Child, timeout: std::time::Duration) -> Option<i32> {
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-                if let Some(mut o) = child.stdout.take() {
-                    let _ = o.read_to_string(&mut stdout);
-                }
-                if let Some(mut e) = child.stderr.take() {
-                    let _ = e.read_to_string(&mut stderr);
-                }
-                return Some(HandlerOutcome {
-                    exit: status.code().unwrap_or(0),
-                    stdout,
-                    stderr,
-                });
-            }
+            Ok(Some(status)) => return Some(status.code().unwrap_or(0)),
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     return None;
@@ -443,6 +525,8 @@ fn cc_json_to_decision(v: &Value) -> CcDecision {
         d.block = true;
     }
     if let Some(reason) = v.get("reason").and_then(|r| r.as_str()) {
+        // Intentional: top-level `reason` takes precedence over (overwrites)
+        // `hookSpecificOutput.permissionDecisionReason` set above.
         d.reason = Some(reason.to_string());
     }
 
@@ -612,6 +696,8 @@ fn emit_cursor(decision: &CcDecision) -> DispatchOutput {
     }
     if let Some(r) = &decision.reason {
         // `agent_message` is Cursor's reason channel (sent to the agent).
+        // Intentional: emitted even when `permission` is absent (no verdict) —
+        // informational context is semantically valid without a blocking decision.
         obj.insert("agent_message".to_string(), Value::String(r.clone()));
     }
     if !decision.additional_context.is_empty() {
@@ -655,6 +741,7 @@ fn emit_copilot(decision: &CcDecision) -> DispatchOutput {
         }
     }
     if let Some(updated) = &decision.updated_input {
+        // US-future: Copilot PostToolUse output rewrite uses `modifiedResult` (not `modifiedArgs`; v1-skippable).
         obj.insert("modifiedArgs".to_string(), updated.clone());
     }
     if !decision.additional_context.is_empty() {
@@ -865,6 +952,76 @@ mod tests {
         let out = dispatch_core("cursor", "PreToolUse", "{}", manifest.as_ref());
         assert_eq!(out.exit_code, 0);
         assert!(out.stdout.is_empty());
+    }
+
+    /// A handler writing >64 KB to stdout and exiting 0 must complete without
+    /// deadlock — well under the 5-second entry timeout. Without concurrent stdout
+    /// draining the OS pipe buffer (~64 KB) fills, the child blocks on write(),
+    /// and the old serial drain spun to the full timeout, killed the child, and
+    /// returned a fail-open allow. This test proves concurrent draining eliminates
+    /// that back-pressure.
+    #[test]
+    fn large_stdout_no_deadlock_resolves_allow() {
+        let entry = command_entry(
+            "Bash",
+            // 200 KB (204800 bytes) to stdout; exit 0.
+            "python3 -c \"import sys; sys.stdout.buffer.write(b'x' * 204800)\"",
+        );
+        let start = std::time::Instant::now();
+        let outcome = run_command_handler(&entry, "{}");
+        let elapsed = start.elapsed();
+        // If python3 is unavailable this assertion fails with a clear message
+        // (exit would be 127, stdout empty). The test is intentionally strict.
+        assert!(
+            outcome.stdout.len() > 100_000,
+            "expected >100 KB of stdout (got {} bytes); is python3 available?",
+            outcome.stdout.len()
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "large stdout must drain without deadlock (took {elapsed:?})"
+        );
+        assert_eq!(outcome.exit, 0);
+        let decision = command_outcome_to_decision(&outcome);
+        assert!(
+            !is_blocking(&decision),
+            "exit 0 large stdout must be a non-blocking allow"
+        );
+    }
+
+    /// A handler writing >64 KB to stderr and exiting 2 must resolve as a Deny
+    /// with the large stderr captured — WITHOUT deadlock. The old serial drain
+    /// would have silently downgraded this to a fail-open allow by hitting the
+    /// full timeout (the security deny-bypass this fix closes).
+    #[test]
+    fn large_stderr_deny_no_deadlock_captures_reason() {
+        let entry = command_entry(
+            "Bash",
+            // 200 KB to stderr, exit 2.
+            "python3 -c \"import sys; sys.stderr.buffer.write(b'x' * 204800); sys.exit(2)\"",
+        );
+        let start = std::time::Instant::now();
+        let outcome = run_command_handler(&entry, "{}");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "large stderr deny must drain without deadlock (took {elapsed:?})"
+        );
+        assert_eq!(outcome.exit, 2);
+        assert!(
+            outcome.stderr.len() > 100_000,
+            "large stderr must be fully captured (got {} bytes)",
+            outcome.stderr.len()
+        );
+        let decision = command_outcome_to_decision(&outcome);
+        assert!(
+            is_blocking(&decision),
+            "exit 2 + large stderr must be a blocking deny"
+        );
+        assert!(
+            decision.reason.is_some(),
+            "deny must carry a reason from the stderr text"
+        );
     }
 
     /// A timed-out command is killed and degrades to a non-blocking allow
