@@ -312,13 +312,6 @@ mod tests {
     /// clear that one ambient var under the shared serial lock.
     #[test]
     fn assemble_scrubs_credentialed_endpoint() {
-        let _serial = crate::telemetry::test_serial();
-        // `resolve_endpoint` prefers `TOME_GAUGE_ENDPOINT`; clear it so the
-        // config-file endpoint is the one resolved. Restore on the way out.
-        let saved = std::env::var_os("TOME_GAUGE_ENDPOINT");
-        // SAFETY: serialised by the telemetry seam lock; sole mutator here.
-        unsafe { std::env::remove_var("TOME_GAUGE_ENDPOINT") };
-
         let dir = TempDir::new().unwrap();
         let paths = paths_in(&dir);
         std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
@@ -328,13 +321,23 @@ mod tests {
         )
         .unwrap();
 
-        let section = with_telemetry_env_cleared(|| super::assemble(&paths));
-
-        // SAFETY: still under the serial lock.
-        match saved {
-            Some(v) => unsafe { std::env::set_var("TOME_GAUGE_ENDPOINT", v) },
-            None => unsafe { std::env::remove_var("TOME_GAUGE_ENDPOINT") },
-        }
+        // `resolve_endpoint` prefers `TOME_GAUGE_ENDPOINT`; clear it so the
+        // config-file endpoint is the one resolved. This must happen under the
+        // shared serial lock — do it INSIDE the `with_telemetry_env_cleared`
+        // closure (which holds the lock) so we never double-acquire the
+        // non-reentrant mutex. Restore on the way out.
+        let section = with_telemetry_env_cleared(|| {
+            let saved = std::env::var_os("TOME_GAUGE_ENDPOINT");
+            // SAFETY: under TELEMETRY_TEST_SERIAL (held by the helper).
+            unsafe { std::env::remove_var("TOME_GAUGE_ENDPOINT") };
+            let section = super::assemble(&paths);
+            // SAFETY: still under the serial lock.
+            match saved {
+                Some(v) => unsafe { std::env::set_var("TOME_GAUGE_ENDPOINT", v) },
+                None => unsafe { std::env::remove_var("TOME_GAUGE_ENDPOINT") },
+            }
+            section
+        });
 
         assert!(
             !section.endpoint.contains("user:token@"),
@@ -354,14 +357,16 @@ mod tests {
         );
     }
 
-    /// Run `f` with `TOME_TELEMETRY` cleared so the resolver takes the
-    /// config/default path deterministically (and not a CI runner's ambient
-    /// `CI=true`). Restores the prior value. Serialised on a process-wide mutex
-    /// because env is global.
+    /// Run `f` with the telemetry CI/opt-out env vars cleared so the resolver
+    /// takes the config/default path deterministically (and not a CI runner's
+    /// ambient `CI=true` / `VERCEL` / …). Restores the prior values.
+    ///
+    /// Serialised on the **shared** `TELEMETRY_TEST_SERIAL` seam — the one lock
+    /// every lib test that mutates a process-global telemetry env var holds —
+    /// so this helper can't race the `telemetry::config` / `telemetry::mod`
+    /// env-mutators that clobber the same process-global environment.
     fn with_telemetry_env_cleared<T>(f: impl FnOnce() -> T) -> T {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::telemetry::test_serial();
 
         let saved: Vec<(&str, Option<String>)> = [
             "TOME_TELEMETRY",
@@ -373,12 +378,17 @@ mod tests {
             "JENKINS_URL",
             "TF_BUILD",
             "TEAMCITY_VERSION",
+            "VERCEL",
+            "NETLIFY",
+            "TRAVIS",
+            "APPVEYOR",
+            "DRONE",
         ]
         .iter()
         .map(|k| (*k, std::env::var(*k).ok()))
         .collect();
         for (k, _) in &saved {
-            // SAFETY: serialised by ENV_LOCK; this test crate is the only mutator.
+            // SAFETY: serialised by TELEMETRY_TEST_SERIAL; sole mutator while held.
             unsafe { std::env::remove_var(k) };
         }
 

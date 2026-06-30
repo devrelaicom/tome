@@ -89,28 +89,60 @@ pub fn set_enabled(paths: &Paths, enabled: bool) -> Result<(), TomeError> {
 }
 
 /// Detect a CI environment from the conventional vendor env vars (research
-/// §R-14). Telemetry auto-disables under CI so build farms don't skew the
-/// product-fitness signal.
+/// §R-14, widened in #284). Telemetry auto-disables under CI so build farms
+/// don't skew the product-fitness signal.
 ///
-/// `CI`/`*_CI`/`GITHUB_ACTIONS`/`TF_BUILD` are equality-checked against their
-/// documented truthy token; `JENKINS_URL`/`TEAMCITY_VERSION` are presence
-/// markers (any non-empty value).
+/// `CI` is the generic, near-universal marker: build farms set it to a range of
+/// truthy values (`1`/`true`/`yes`/…), not just the literal `true` the previous
+/// exact-match expected — so it is treated as **truthy-presence** (any non-empty
+/// value except the falsey tokens `0`/`false`/`no`/`off`, case-insensitive).
+/// The same truthy-presence rule covers `GITHUB_ACTIONS`/`GITLAB_CI`/`CIRCLECI`/
+/// `BUILDKITE` (all of which set `true`, but tolerating `1` costs nothing and
+/// removes a footgun) and the vendors that report a non-`true` token
+/// (`TF_BUILD=True`).
+///
+/// The remaining markers are pure **presence** signals — these vars exist only
+/// inside their CI and carry an opaque value (a URL, a version, a build id), so
+/// any non-empty value means "in CI": `JENKINS_URL`/`TEAMCITY_VERSION` plus the
+/// vendors added in #284 (`VERCEL`/`NETLIFY`/`TRAVIS`/`APPVEYOR`/`DRONE`).
 pub fn is_ci() -> bool {
-    fn eq(name: &str, want: &str) -> bool {
-        std::env::var(name).map(|v| v == want).unwrap_or(false)
+    /// Truthy-presence: set, non-empty, and not an explicit falsey token
+    /// (`0`/`false`/`no`/`off`, case-insensitive). This is the rule for vars
+    /// whose value carries a boolean meaning.
+    fn truthy(name: &str) -> bool {
+        std::env::var(name).is_ok_and(|v| {
+            let v = v.trim();
+            !v.is_empty()
+                && !matches!(
+                    v.to_ascii_lowercase().as_str(),
+                    "0" | "false" | "no" | "off"
+                )
+        })
     }
+    /// Bare presence: set and non-empty, value ignored. This is the rule for
+    /// vars that exist only inside a given CI and carry an opaque payload.
+    ///
+    /// Deliberately does NOT trim (unlike `truthy`): the payload is opaque, so
+    /// even a whitespace-only value counts as "in CI". The asymmetry is
+    /// intentional — for a presence marker, erring toward "is CI" errs toward
+    /// disabling telemetry, the safe direction.
     fn present(name: &str) -> bool {
         std::env::var_os(name).is_some_and(|v| !v.is_empty())
     }
 
-    eq("CI", "true")
-        || eq("GITHUB_ACTIONS", "true")
-        || eq("GITLAB_CI", "true")
-        || eq("CIRCLECI", "true")
-        || eq("BUILDKITE", "true")
+    truthy("CI")
+        || truthy("GITHUB_ACTIONS")
+        || truthy("GITLAB_CI")
+        || truthy("CIRCLECI")
+        || truthy("BUILDKITE")
+        || truthy("TF_BUILD")
         || present("JENKINS_URL")
-        || eq("TF_BUILD", "True")
         || present("TEAMCITY_VERSION")
+        || present("VERCEL")
+        || present("NETLIFY")
+        || present("TRAVIS")
+        || present("APPVEYOR")
+        || present("DRONE")
 }
 
 /// The full enabled-state precedence, returning the deciding [`Source`].
@@ -206,18 +238,17 @@ pub fn resolve_enabled(paths: &Paths) -> Result<bool, TomeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
-    /// Serialises the env-mutating tests in this module. `cargo test` runs
-    /// tests in a module on multiple threads; the `TOME_TELEMETRY` / CI vars
-    /// are process-global, so concurrent mutation would race. Mirrors the
-    /// `ENV_MUTEX` idiom used by the integration suites.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
     /// Snapshot + clear every env var the resolver consults, restore on drop.
-    /// Holds `ENV_MUTEX` for its lifetime so the restore can't interleave with
-    /// another test's set.
+    ///
+    /// Holds the **shared** `TELEMETRY_TEST_SERIAL` lock for its lifetime — the
+    /// ONE serialisation seam every lib test that mutates a process-global
+    /// telemetry env var must hold. Using a module-local mutex instead would let
+    /// these tests race the `mod.rs` env-mutators (e.g. `jenkins_only_disables`
+    /// setting `JENKINS_URL`), since both clobber the same process-global
+    /// environment — exactly the cross-module flake the consolidated lock exists
+    /// to prevent.
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -233,17 +264,23 @@ mod tests {
         "JENKINS_URL",
         "TF_BUILD",
         "TEAMCITY_VERSION",
+        "VERCEL",
+        "NETLIFY",
+        "TRAVIS",
+        "APPVEYOR",
+        "DRONE",
     ];
 
     impl EnvGuard {
         fn new() -> Self {
-            let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let lock = crate::telemetry::test_serial();
             let saved = TELEMETRY_ENV_VARS
                 .iter()
                 .map(|&k| (k, std::env::var_os(k)))
                 .collect::<Vec<_>>();
-            // SAFETY: we hold ENV_MUTEX for the lifetime of the guard, so no
-            // other test in this module mutates these vars concurrently.
+            // SAFETY: we hold TELEMETRY_TEST_SERIAL for the lifetime of the
+            // guard, so no other telemetry lib test mutates these vars
+            // concurrently.
             for &k in TELEMETRY_ENV_VARS {
                 unsafe { std::env::remove_var(k) };
             }
@@ -251,14 +288,14 @@ mod tests {
         }
 
         fn set(&self, key: &str, val: &str) {
-            // SAFETY: guarded by ENV_MUTEX (held via `_lock`).
+            // SAFETY: guarded by TELEMETRY_TEST_SERIAL (held via `_lock`).
             unsafe { std::env::set_var(key, val) };
         }
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            // SAFETY: still holding ENV_MUTEX (dropped after this).
+            // SAFETY: still holding TELEMETRY_TEST_SERIAL (dropped after this).
             for (k, v) in &self.saved {
                 match v {
                     Some(val) => unsafe { std::env::set_var(k, val) },
@@ -435,36 +472,38 @@ mod tests {
 
     #[test]
     fn resolve_endpoint_prefers_env_then_config_then_default() {
-        let _serial = crate::telemetry::test_serial();
+        // `EnvGuard` already holds the shared `TELEMETRY_TEST_SERIAL` lock — do
+        // NOT also acquire `test_serial()` directly here (the mutex is not
+        // reentrant; a second acquisition on this thread would deadlock).
         let dir = tempfile::TempDir::new().unwrap();
         let paths = crate::paths::Paths::from_root(dir.path().to_path_buf());
 
         // Default when nothing set — clear any ambient TOME_GAUGE_ENDPOINT.
         let g = EnvGuard::new();
         // EnvGuard::new() only clears telemetry CI vars; clear our key separately.
-        // SAFETY: ENV_MUTEX held via the EnvGuard above.
+        // SAFETY: TELEMETRY_TEST_SERIAL held via the EnvGuard above.
         unsafe { std::env::remove_var("TOME_GAUGE_ENDPOINT") };
         assert_eq!(resolve_endpoint(&paths), "https://gauge-telemetry.fly.dev");
 
         // Env wins.
-        // SAFETY: ENV_MUTEX held via the EnvGuard above.
+        // SAFETY: TELEMETRY_TEST_SERIAL held via the EnvGuard above.
         unsafe { std::env::set_var("TOME_GAUGE_ENDPOINT", "https://example.test/") };
         assert_eq!(resolve_endpoint(&paths), "https://example.test/");
 
         // Config tier: env absent ⇒ the `[telemetry].endpoint` value wins over
-        // the default. Write the config and clear the env (we hold ENV_MUTEX).
+        // the default. Write the config and clear the env (lock held).
         std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
         std::fs::write(
             &paths.global_config_file,
             "[telemetry]\nendpoint = \"https://config.test/\"\n",
         )
         .unwrap();
-        // SAFETY: ENV_MUTEX held via the EnvGuard above.
+        // SAFETY: TELEMETRY_TEST_SERIAL held via the EnvGuard above.
         unsafe { std::env::remove_var("TOME_GAUGE_ENDPOINT") };
         assert_eq!(resolve_endpoint(&paths), "https://config.test/");
 
         // Restore to clean state (EnvGuard::drop restores CI vars; clear ours).
-        // SAFETY: ENV_MUTEX held via the EnvGuard above.
+        // SAFETY: TELEMETRY_TEST_SERIAL held via the EnvGuard above.
         unsafe { std::env::remove_var("TOME_GAUGE_ENDPOINT") };
         drop(g);
     }
@@ -477,9 +516,15 @@ mod tests {
             ("GITLAB_CI", "true"),
             ("CIRCLECI", "true"),
             ("BUILDKITE", "true"),
-            ("JENKINS_URL", "http://ci.local/"),
             ("TF_BUILD", "True"),
+            // Presence markers: opaque value, any non-empty string detects.
+            ("JENKINS_URL", "http://ci.local/"),
             ("TEAMCITY_VERSION", "2024.1"),
+            ("VERCEL", "1"),
+            ("NETLIFY", "true"),
+            ("TRAVIS", "true"),
+            ("APPVEYOR", "True"),
+            ("DRONE", "true"),
         ];
         for (key, val) in cases {
             let g = EnvGuard::new();
@@ -488,5 +533,111 @@ mod tests {
             assert!(is_ci(), "{key}={val} should be detected as CI");
             drop(g);
         }
+    }
+
+    /// `CI` is truthy-presence, not exact-match: build farms set `1`/`yes`/`TRUE`
+    /// just as often as `true`, and an explicit `0`/`false` (or unset) must read
+    /// as "not CI". The falsey set deliberately includes whitespace-only values
+    /// (pinning the `trim()` in `truthy`) and a mixed-case token like `No`/`Off`
+    /// (pinning the `to_ascii_lowercase` path on the falsey side). (#284)
+    #[test]
+    fn is_ci_treats_ci_var_as_truthy_presence() {
+        let truthy = ["1", "yes", "true", "TRUE", "True", "on"];
+        for val in truthy {
+            let g = EnvGuard::new();
+            g.set("CI", val);
+            assert!(is_ci(), "CI={val} should be detected as CI");
+            drop(g);
+        }
+
+        let falsey = [
+            "0", "false", "FALSE", "no", "off", "No", "Off", "", " ", "\t",
+        ];
+        for val in falsey {
+            let g = EnvGuard::new();
+            g.set("CI", val);
+            assert!(!is_ci(), "CI={val:?} must NOT be detected as CI");
+            drop(g);
+        }
+
+        // Unset is not CI.
+        let _g = EnvGuard::new();
+        assert!(!is_ci(), "unset CI must not be detected as CI");
+    }
+
+    /// The whole point of the bug: a build farm that sets `CI=1` (or Vercel /
+    /// Netlify) must resolve telemetry OFF via the CI auto-disable rule.
+    #[test]
+    fn ci_numeric_one_resolves_off() {
+        let dir = TempDir::new().unwrap();
+        write_telemetry(&dir, true); // config says ON; CI must still force OFF.
+        let g = EnvGuard::new();
+        g.set("CI", "1");
+        let (enabled, source) = resolve_enabled_with_source(&paths_in(&dir)).unwrap();
+        assert!(!enabled, "CI=1 must auto-disable telemetry");
+        assert_eq!(source, Source::Ci);
+    }
+
+    #[test]
+    fn vercel_presence_resolves_off() {
+        let dir = TempDir::new().unwrap();
+        write_telemetry(&dir, true);
+        let g = EnvGuard::new();
+        g.set("VERCEL", "1");
+        let (enabled, source) = resolve_enabled_with_source(&paths_in(&dir)).unwrap();
+        assert!(!enabled, "VERCEL present must auto-disable telemetry");
+        assert_eq!(source, Source::Ci);
+    }
+
+    #[test]
+    fn netlify_presence_resolves_off() {
+        let dir = TempDir::new().unwrap();
+        write_telemetry(&dir, true);
+        let g = EnvGuard::new();
+        g.set("NETLIFY", "true");
+        let (enabled, source) = resolve_enabled_with_source(&paths_in(&dir)).unwrap();
+        assert!(!enabled, "NETLIFY present must auto-disable telemetry");
+        assert_eq!(source, Source::Ci);
+    }
+
+    /// An explicitly empty presence marker (`VERCEL=""`) is NOT "in CI" — pins
+    /// the `!v.is_empty()` guard in `present()` so an empty set var can't be
+    /// mistaken for a CI signal.
+    #[test]
+    fn empty_presence_marker_does_not_auto_disable() {
+        let dir = TempDir::new().unwrap();
+        let g = EnvGuard::new();
+        g.set("VERCEL", "");
+        assert!(!is_ci(), "VERCEL=\"\" must not be detected as CI");
+        let (enabled, source) = resolve_enabled_with_source(&paths_in(&dir)).unwrap();
+        assert!(enabled, "VERCEL=\"\" must not auto-disable telemetry");
+        assert_eq!(source, Source::Default);
+    }
+
+    /// Force-on overrides the widened CI detection, exactly as it overrode the
+    /// old exact-match. Precedence is unchanged — CI detection only got wider.
+    #[test]
+    fn force_on_beats_widened_ci_detection() {
+        let dir = TempDir::new().unwrap();
+        write_telemetry(&dir, false);
+        let g = EnvGuard::new();
+        g.set("TOME_TELEMETRY", "1");
+        g.set("CI", "1"); // numeric truthy — newly detected
+        g.set("VERCEL", "1"); // newly detected
+        let (enabled, source) = resolve_enabled_with_source(&paths_in(&dir)).unwrap();
+        assert!(enabled, "TOME_TELEMETRY=1 must win over CI auto-disable");
+        assert_eq!(source, Source::EnvOn);
+    }
+
+    /// An explicit `CI=false` does not auto-disable, so the config / default
+    /// tier decides (here: opt-out default-on).
+    #[test]
+    fn ci_false_does_not_auto_disable() {
+        let dir = TempDir::new().unwrap();
+        let g = EnvGuard::new();
+        g.set("CI", "false");
+        let (enabled, source) = resolve_enabled_with_source(&paths_in(&dir)).unwrap();
+        assert!(enabled, "CI=false must not auto-disable");
+        assert_eq!(source, Source::Default);
     }
 }
