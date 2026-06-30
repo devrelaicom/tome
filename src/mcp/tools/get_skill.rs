@@ -48,16 +48,21 @@ pub struct Output {
     /// #289: the resolved entry kind (`skill` | `command`). `get_skill` no
     /// longer hardcodes `skill` — it resolves commands too, so a caller that
     /// hands it a command name returned by `search_skills` gets the command
-    /// body, not an `unknown_skill` dead end. Appended after `resources` so
-    /// the additive field never reorders the pinned fields.
+    /// body, not an `unknown_skill` dead end. Appended after `resources`, so
+    /// it never reorders the pre-#289 fields. NOTE: `kind` is non-`Option`,
+    /// so EVERY result (skill-kind included) now additively carries a `"kind"`
+    /// key — the pre-#289 skill `Output` is NOT byte-identical, it gains this
+    /// one additive key. The output is an emit-only record with no
+    /// `additionalProperties: false` on the wire, so adding a key is a
+    /// backward-compatible additive change.
     pub kind: crate::plugin::identity::EntryKind,
     /// #289: the MCP prompt name this entry is also reachable under (a
     /// command can be both read here AND invoked-with-arguments via
     /// `prompts/get`). `<plugin>__<entry>` form, post-override and
     /// post-collision-suffix, resolved from the live `PromptRegistry` (the
     /// SSOT). Absent (`skip_serializing_if`) when the entry has no prompt —
-    /// so the pre-#289 skill wire shape is byte-stable for the common
-    /// non-invocable skill.
+    /// so a non-invocable skill omits this key entirely (only the `kind` key
+    /// above is added for it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_name: Option<String>,
 }

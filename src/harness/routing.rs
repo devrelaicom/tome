@@ -382,6 +382,32 @@ mod tests {
     }
 
     #[test]
+    fn tier2_command_points_at_prompt_not_get_skill() {
+        // #289: a Tier-2 user-invocable command line must point at its MCP
+        // prompt (and carry the Tier-2 "or invoke its prompt" framing), NOT
+        // `get_skill`.
+        let e = vec![entry("deploy", false, 2, "Deploy the app")];
+        let reg = registry_with_command("db__deploy");
+        let out = build_directive(&e, None, &reg);
+        assert!(
+            out.contains("## Load before matching work (Tier 2)"),
+            "directive must carry the Tier 2 section; got:\n{out}",
+        );
+        assert!(
+            out.contains("or invoke its prompt"),
+            "Tier 2 header must frame the prompt path; got:\n{out}",
+        );
+        assert!(
+            out.contains("the `db__deploy` MCP prompt"),
+            "a Tier-2 command must route to its prompt; got:\n{out}",
+        );
+        assert!(
+            !out.contains(r#"get_skill(catalog="acme", plugin="db", name="deploy")"#),
+            "a Tier-2 command must NOT be pointed at get_skill; got:\n{out}",
+        );
+    }
+
+    #[test]
     fn tier3_uses_summary_when_present_else_enumerates() {
         let e = vec![entry("notes", true, 3, "Release notes")];
         let with = build_directive(

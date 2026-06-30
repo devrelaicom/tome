@@ -32,7 +32,7 @@ use tome::embedding::stub::{StubEmbedder, StubReranker};
 use tome::index::{self, OpenOptions};
 use tome::mcp::prompts::{self, PromptRegistry};
 use tome::mcp::state::McpState;
-use tome::mcp::tools::{get_skill, search_skills};
+use tome::mcp::tools::{get_skill, get_skill_info, search_skills};
 use tome::plugin::PluginId;
 use tome::plugin::identity::EntryKind;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
@@ -413,17 +413,28 @@ fn enable_command_invocable_via_prompts_get() {
 
 /// #289: a command entry is reachable through `get_skill` (it returns the
 /// command body, the resolved `kind: command`, and the MCP `prompt_name`)
-/// instead of the pre-#289 `unknown_skill` dead end, AND `search_skills`
-/// surfaces the same command with its `prompt_name` so the result is
-/// actionable. Drives the REAL registry built from the on-disk index, so the
-/// prompt-name resolution is the production SSOT path.
+/// instead of the pre-#289 `unknown_skill` dead end; `get_skill_info` and
+/// `search_skills` surface the same `prompt_name`; AND — the central promise —
+/// every surfaced `prompt_name` is fed BACK into the real `prompts/get` path
+/// (`prompts::handle_get`) and resolves to THIS command's body. Driving the
+/// surfaced name (never a hardcoded literal) through the live prompt router
+/// makes "the name we hand you is invocable" non-bypassable: a future
+/// name-derivation / collision-suffix regression must fail HERE rather than
+/// passing because a literal was edited to match the bug.
+///
+/// All resolution goes through the REAL `PromptRegistry` built from the
+/// on-disk index — the production SSOT path.
 #[test]
 fn command_reachable_via_get_skill_and_search_carries_prompt_name() {
     let tmp = TempDir::new().unwrap();
     let paths = lifecycle_paths(tmp.path());
 
-    let cmd_body = "---\nname: deploy\ndescription: Deploy the service.\n---\nrun the deploy\n";
-    stage_workspace(&tmp, &paths, &[], &[("deploy", cmd_body)]);
+    // A body marker unique enough that a round-tripped prompt render can't
+    // accidentally match another entry.
+    let body_marker = "run the deploy now-289";
+    let cmd_body =
+        format!("---\nname: deploy\ndescription: Deploy the service.\n---\n{body_marker}\n");
+    stage_workspace(&tmp, &paths, &[], &[("deploy", cmd_body.as_str())]);
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -433,11 +444,9 @@ fn command_reachable_via_get_skill_and_search_carries_prompt_name() {
     // (1) get_skill on the COMMAND must NOT be an `unknown_skill` dead end.
     // It resolves the command, returns its body, `kind: command`, and the
     // derived MCP prompt name.
-    let registry = build_registry(&paths);
-    let state = build_state(&paths, registry);
     let output = rt
         .block_on(get_skill::handle(
-            state,
+            build_state(&paths, build_registry(&paths)),
             get_skill::Input {
                 catalog: "acme".into(),
                 plugin: "plug".into(),
@@ -447,7 +456,7 @@ fn command_reachable_via_get_skill_and_search_carries_prompt_name() {
         .expect("get_skill must resolve the command, not return unknown_skill");
 
     assert!(
-        output.content.contains("run the deploy"),
+        output.content.contains(body_marker),
         "get_skill returns the command body; got: {:?}",
         output.content,
     );
@@ -456,24 +465,40 @@ fn command_reachable_via_get_skill_and_search_carries_prompt_name() {
         EntryKind::Command,
         "get_skill reports the resolved kind as command",
     );
-    assert_eq!(
-        output.prompt_name.as_deref(),
-        Some("plug__deploy"),
-        "get_skill surfaces the command's MCP prompt name; got: {:?}",
-        output.prompt_name,
-    );
+    let get_skill_prompt = output
+        .prompt_name
+        .clone()
+        .expect("get_skill must surface a prompt_name for a user-invocable command");
     assert!(
         output.resources.is_empty(),
         "a command has no sibling-resource enumeration; got: {:?}",
         output.resources,
     );
 
-    // (2) search_skills surfaces the command with its prompt_name so the
+    // (2) get_skill_info, through the production handler against the REAL
+    // registry, surfaces the same prompt_name (item 4 — not just the unit
+    // wire-pin with a literal).
+    let info = rt
+        .block_on(get_skill_info::handle(
+            build_state(&paths, build_registry(&paths)),
+            get_skill_info::Input {
+                catalog: "acme".into(),
+                plugin: "plug".into(),
+                name: "deploy".into(),
+                kind: EntryKind::Command,
+            },
+        ))
+        .expect("get_skill_info ok for the command");
+    let info_prompt = info
+        .prompt_name
+        .clone()
+        .expect("get_skill_info must surface a prompt_name for a user-invocable command");
+
+    // (3) search_skills surfaces the command with its prompt_name so the
     // ranked result is immediately actionable.
-    let search_state = build_state_with_stub_entries(&paths, build_registry(&paths));
     let search_out = rt
         .block_on(search_skills::handle(
-            search_state,
+            build_state_with_stub_entries(&paths, build_registry(&paths)),
             search_skills::Input {
                 query: "deploy".into(),
                 top_k: Some(10),
@@ -489,11 +514,42 @@ fn command_reachable_via_get_skill_and_search_carries_prompt_name() {
         .iter()
         .find(|m| m.name == "deploy" && m.kind == EntryKind::Command)
         .expect("search must rank the command");
+    let search_prompt = hit
+        .prompt_name
+        .clone()
+        .expect("search_skills must surface a prompt_name for a user-invocable command");
+
+    // All three read surfaces must agree on the SAME prompt name (the SSOT).
     assert_eq!(
-        hit.prompt_name.as_deref(),
-        Some("plug__deploy"),
-        "search_skills surfaces the command's MCP prompt name; got: {:?}",
-        hit.prompt_name,
+        get_skill_prompt, info_prompt,
+        "get_skill and get_skill_info must surface the identical prompt_name",
+    );
+    assert_eq!(
+        get_skill_prompt, search_prompt,
+        "get_skill and search_skills must surface the identical prompt_name",
+    );
+
+    // (4) The CENTRAL PROMISE: feed the SURFACED name straight back into the
+    // real `prompts/get` path and assert it renders THIS command's body. The
+    // name is whatever the read tools produced (override + collision-suffix
+    // included), NOT a literal — so a derivation regression fails here.
+    let rendered = rt
+        .block_on(prompts::handle_get(
+            build_state(&paths, build_registry(&paths)),
+            get_skill_prompt.clone(),
+            None,
+        ))
+        .unwrap_or_else(|e| {
+            panic!("surfaced prompt_name `{get_skill_prompt}` must resolve via prompts/get: {e:?}")
+        });
+    assert_eq!(rendered.messages.len(), 1, "single user-role message");
+    let text = match &rendered.messages[0].content {
+        rmcp::model::PromptMessageContent::Text { text } => text.clone(),
+        other => panic!("expected text content, got {other:?}"),
+    };
+    assert!(
+        text.contains(body_marker),
+        "the surfaced prompt_name must render THIS command's body via prompts/get; got: {text:?}",
     );
 }
 
