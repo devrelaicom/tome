@@ -113,6 +113,13 @@ pub fn tome_command() -> String {
 /// as a foreign clash. It compares against the resolver, NOT against the
 /// historical bare name, so it tracks `$TOME_BIN` / `current_exe` exactly.
 ///
+/// This arm is per-PROCESS: it recognises an entry whose command equals the
+/// resolved launcher of the running binary. Cross-process recognition is NOT a
+/// cache property — a later process re-resolves its own `current_exe` / `$TOME_BIN`
+/// (see [`current_launcher`]); two processes at the SAME path recognise each
+/// other's entries because they resolve to the same string, two at DIFFERENT
+/// paths fall back to the basename arm (production: both are `tome`).
+///
 /// This is deliberately NOT a sufficient ownership check on its own: a user
 /// could have an unrelated entry whose command happens to be named `tome`.
 /// Callers MUST pair it with the Tome arg-shape check (`args[0] == "mcp"` for
@@ -154,6 +161,15 @@ pub fn looks_like_tome_launcher(command: &str) -> bool {
 /// thread-safe with no `unsafe`. (Process-lifetime caching is acceptable: a
 /// long-running process does not change its own executable path mid-run; the
 /// MCP server freezes other launch-time state similarly.)
+///
+/// CAVEAT: the `OnceLock` FREEZES the resolution at the FIRST call for the rest
+/// of the process — it is NOT coordinated with the `ENV_MUTEX` the `$TOME_BIN`
+/// test seam uses. In production this is fine (`$TOME_BIN` / `current_exe` are
+/// immutable for the process). But a TEST that mutates `$TOME_BIN` mid-process
+/// MUST NOT rely on the self-recognition arm reflecting that change: once the
+/// cache is set, a later `$TOME_BIN` value is ignored here. Tests that need a
+/// specific launcher should drive `tome_command()` directly (it re-reads the
+/// env every call), or assert via the basename arm with a `tome`-named path.
 fn current_launcher() -> &'static str {
     use std::sync::OnceLock;
     static CACHE: OnceLock<String> = OnceLock::new();
