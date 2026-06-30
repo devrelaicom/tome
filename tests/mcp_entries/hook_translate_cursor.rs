@@ -1,17 +1,19 @@
-//! US3.3 byte-stable registration + manifest pins for `cursor`.
+//! US3.3 + US7 byte-stable registration + manifest pins for `cursor`.
 //!
 //! Drives the REAL `sync_project` over the `cursor` module with ONE enabled
 //! plugin shipping a `PreToolUse` Bash command hook (a token-free command, so
 //! the rewritten manifest handler is deterministic), then pins:
 //!
 //! 1. the exact on-disk `run-hook` dispatcher entry — registered under the
-//!    harness-NATIVE event key (`preToolUse`) under the `hooks` container; and
-//! 2. the exact resolved manifest JSON — keyed by the CC event name, with the
+//!    harness-NATIVE event key (`preToolUse`) under the `hooks` container;
+//! 2. the exact on-disk session-steering entry — registered under the
+//!    harness-NATIVE event key (`sessionStart`, camelCase) under `hooks`; and
+//! 3. the exact resolved manifest JSON — keyed by the CC event name, with the
 //!    per-plugin matcher carried verbatim and `timeout_ms` baked from CC seconds.
 //!
 //! The literals were captured from the implementation output once and pinned
-//! (byte-stable). The Tome `run-hook` entry is a SEPARATE additive leaf from any
-//! session-steering entry on the same file, so it never clobbers it.
+//! (byte-stable). The Tome `run-hook` and `sessionStart` entries are SEPARATE
+//! additive leaves; they compose and neither clobbers the other.
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +27,16 @@ const HOOK_ARRAY: &str = r##"[
   {
     "type": "command",
     "command": "tome harness run-hook --event PreToolUse --harness cursor --workspace test-workspace"
+  }
+]"##;
+
+/// The exact session-steering entry array under `sessionStart` (camelCase, US7).
+/// Cursor's native event key is camelCase — distinct from the PascalCase used by
+/// Devin / Copilot / Gemini which all share a CC-compatible PascalCase key.
+const SESSION_START_ARRAY: &str = r##"[
+  {
+    "type": "command",
+    "command": "tome harness session-start --workspace test-workspace --harness cursor"
   }
 ]"##;
 
@@ -156,10 +168,19 @@ fn cursor_run_hook_registration_and_manifest_pins() {
         "plugin command must not leak into hook file:\n{raw}",
     );
 
-    // Cursor has no session-steering, so its hook file is run-hook-only.
+    // US7: Cursor now delivers session steering via `.cursor/hooks.json` (the
+    // keep-both pattern — rules file + hook, same as Devin/Gemini/Copilot).
+    // The key is camelCase `sessionStart` (Cursor's native wire), NOT PascalCase.
+    let session_arr = &doc["hooks"]["sessionStart"];
+    assert_eq!(
+        serde_json::to_string_pretty(session_arr).unwrap(),
+        SESSION_START_ARRAY,
+        "session-steering entry bytes drifted for cursor",
+    );
+    // Verify no stray PascalCase `SessionStart` key (wrong for Cursor).
     assert!(
         doc["hooks"].get("SessionStart").is_none(),
-        "cursor must carry no session-steering entry",
+        "cursor hook file must NOT use PascalCase SessionStart (use camelCase sessionStart)",
     );
 
     // ----- (b) the resolved manifest -----

@@ -613,6 +613,17 @@ fn event_key(event: HookEvent) -> &'static str {
     }
 }
 
+/// Per-spec event-key string for the SESSION-STEERING reconciler. Identical to
+/// [`event_key`] for every spec except `CursorHooks`: Cursor uses camelCase
+/// native event names (`sessionStart`), while every other `CommandHook` spec
+/// uses the PascalCase CC event name that [`event_key`] returns.
+fn effective_event_key(spec: HookFileSpec, event: HookEvent) -> &'static str {
+    match (spec, event) {
+        (HookFileSpec::CursorHooks, HookEvent::SessionStart) => "sessionStart",
+        _ => event_key(event),
+    }
+}
+
 /// Navigate (creating containers as needed) to the entry ARRAY a spec's Tome
 /// entry lives in, returning a mutable borrow. Fails closed (exit 43) when an
 /// existing container/array slot holds a wrong-typed value — never coerces a
@@ -623,13 +634,14 @@ fn event_key(event: HookEvent) -> &'static str {
 /// - Copilot: `<root>.hooks[event]`.
 /// - Gemini: `<root>.hooks[event]`.
 /// - Antigravity: `<root>.tome[event]`.
+/// - Cursor: `<root>.hooks[event]` (camelCase key via [`effective_event_key`]).
 fn entry_array<'a>(
     doc: &'a mut JsonValue,
     spec: HookFileSpec,
     event: HookEvent,
     path: &Path,
 ) -> Result<&'a mut Vec<JsonValue>, TomeError> {
-    let key = event_key(event);
+    let key = effective_event_key(spec, event);
     let root = doc
         .as_object_mut()
         .ok_or_else(|| TomeError::HookSpecParseError {
@@ -688,7 +700,7 @@ fn entry_array_opt(
     spec: HookFileSpec,
     event: HookEvent,
 ) -> Option<&mut Vec<JsonValue>> {
-    let key = event_key(event);
+    let key = effective_event_key(spec, event);
     let root = doc.as_object_mut()?;
     let container_key: Option<&str> = match spec {
         HookFileSpec::DevinHooksV1 => None,
@@ -1058,11 +1070,12 @@ fn remove_command_hook(
 
 /// Drop the now-empty event array so a removed Tome hook leaves no scaffolding.
 /// This prunes the container the spec nests under: the bare root for devin, the
-/// `hooks` container for copilot-cli and gemini, and the named `tome` container
-/// for antigravity (the antigravity container is additionally dropped once empty,
-/// since its only content is Tome's own event).
+/// `hooks` container for copilot-cli, gemini, and cursor, and the named `tome`
+/// container for antigravity (additionally dropped once empty). Uses
+/// [`effective_event_key`] so the Cursor `sessionStart` (camelCase) key is
+/// pruned correctly.
 fn prune_empty(doc: &mut JsonValue, spec: HookFileSpec, event: HookEvent) {
-    let key = event_key(event);
+    let key = effective_event_key(spec, event);
     let Some(root) = doc.as_object_mut() else {
         return;
     };
