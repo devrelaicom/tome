@@ -89,6 +89,15 @@ pub struct HarnessInfoOutcome {
     /// key omitted) to keep the byte-stable pin additive.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unrepresented_agents_notice: Option<String>,
+    /// US11 (native plugin-hook translation): advisory notice for harnesses
+    /// that support hook translation (`hook_support().is_some()`). Shows the
+    /// on/off state, registered event count, dropped-to-GUARDRAILS count, and
+    /// prompt-model availability. `None` for harnesses without hook translation.
+    ///
+    /// Appended after `unrepresented_agents_notice` + `skip_serializing_if`-gated
+    /// so byte-stable pins are additive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_translation_notice: Option<String>,
 }
 
 /// Per-harness snapshot captured outside the registry's read guard.
@@ -112,6 +121,10 @@ struct ModuleSnapshot {
     /// read guard can exclude opt-in targets (which have no native-agent
     /// directory either way, making the notice misleading).
     module_is_opt_in_target: bool,
+    /// US11: the portable events supported by this harness's hook translation,
+    /// captured from `hook_support().map(|hs| hs.events)`. `None` when the
+    /// harness has no hook translation support.
+    module_hook_events: Option<Vec<crate::harness::hooks_ir::PortableEvent>>,
 }
 
 pub fn run(
@@ -137,6 +150,7 @@ pub fn run(
         block_body_style: m.block_body_style(),
         module_supports_native_agents: m.supports_native_agents(),
         module_is_opt_in_target: m.is_opt_in_target(),
+        module_hook_events: m.hook_support().map(|hs| hs.events.to_vec()),
     };
     // Phase 11 / US4 (M1): resolve via the effective registry FIRST (so a test
     // override and the supported harnesses both work), then fall back to the
@@ -207,6 +221,35 @@ pub fn run(
         None
     };
 
+    // US11: hook-translation notice for harnesses that support it. Read-only.
+    let hook_translation_notice = snap.module_hook_events.as_ref().map(|supported_events| {
+        let cfg = crate::config::load_or_default(paths);
+        let enabled = cfg.hooks.translate_plugin_hooks.unwrap_or(true);
+        let has_prompt = cfg.hooks.prompt_provider.is_some() || cfg.hooks.prompt_model.is_some();
+
+        let manifest_path = paths.hooks_manifest(scope.scope.name(), &snap.name);
+        let manifest = crate::harness::hooks_ir::read_manifest(&manifest_path).ok();
+        let registered = manifest.as_ref().map(|m| m.events.len()).unwrap_or(0);
+
+        let dropped = crate::harness::hooks_ir::PortableEvent::ALL
+            .iter()
+            .filter(|e| !supported_events.contains(e))
+            .count();
+
+        let state = if enabled { "on" } else { "off" };
+        let mut parts = vec![
+            format!("hook translation {state}"),
+            format!("{registered} event(s) registered"),
+        ];
+        if dropped > 0 {
+            parts.push(format!("{dropped} event(s) dropped to GUARDRAILS"));
+        }
+        if has_prompt {
+            parts.push("prompt-model configured (first execution may request trust)".to_string());
+        }
+        parts.join("; ")
+    });
+
     // Phase 11 / US5 (T063): render the paste-able MCP snippet from the
     // harness's dialect, built with the canonical args the sync writer uses
     // (`mcp --workspace <ws> --harness <name>`, the `--harness` trailing so
@@ -240,6 +283,7 @@ pub fn run(
         references,
         mcp_snippet,
         unrepresented_agents_notice,
+        hook_translation_notice,
     };
 
     match mode {
@@ -416,6 +460,11 @@ fn emit_human(outcome: &HarnessInfoOutcome) -> Result<(), TomeError> {
         writeln!(out)?;
         writeln!(out, "  Note: {notice}")?;
     }
+    // US11: hook-translation advisory notice (for harnesses with hook support).
+    if let Some(notice) = &outcome.hook_translation_notice {
+        writeln!(out)?;
+        writeln!(out, "  Hook translation: {notice}")?;
+    }
     Ok(())
 }
 
@@ -437,6 +486,7 @@ mod tests {
             references: Vec::new(),
             mcp_snippet: snippet,
             unrepresented_agents_notice: None,
+            hook_translation_notice: None,
         }
     }
 
@@ -454,6 +504,7 @@ mod tests {
             references: Vec::new(),
             mcp_snippet: None,
             unrepresented_agents_notice: notice,
+            hook_translation_notice: None,
         }
     }
 

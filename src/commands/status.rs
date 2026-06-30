@@ -41,6 +41,8 @@ pub fn run(args: StatusArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     // Phase 2 / Task 14: populate the unrepresented-agents count (needs the
     // effective harness list and DB — read-only, best-effort).
     fill_unrepresented_agents(&mut report, scope, &paths);
+    // US11: populate the hook-translation harness count (read-only, best-effort).
+    fill_hook_translation_harnesses(&mut report, scope, &paths);
     emit(&report, mode)?;
     if !matches!(report.overall, OverallHealth::Ok) {
         std::process::exit(1);
@@ -124,6 +126,12 @@ pub struct StatusReport {
     /// or when the DB is absent. Always serialised (plain `u32`); the minimal
     /// case emits `"unrepresented_agents":0`.
     pub unrepresented_agents: u32,
+    /// US11 (native plugin-hook translation): count of effective harnesses with
+    /// hook translation active (`hook_support().is_some()` AND
+    /// `translate_plugin_hooks != Some(false)`). `0` when none are active.
+    /// Always serialised (plain u32); the minimal JSON ends with
+    /// `"unrepresented_agents":0,"hook_translation_harnesses":0}`.
+    pub hook_translation_harnesses: u32,
 }
 
 // ---- Assembly --------------------------------------------------------------
@@ -201,6 +209,8 @@ pub fn assemble_report(
         harness_mcp: Vec::new(),
         // `run` fills this via `fill_unrepresented_agents` (read-only).
         unrepresented_agents: 0,
+        // `run` fills this via `fill_hook_translation_harnesses` (read-only).
+        hook_translation_harnesses: 0,
     })
 }
 
@@ -272,6 +282,31 @@ fn fill_unrepresented_agents(report: &mut StatusReport, scope: &ResolvedScope, p
     {
         report.unrepresented_agents = u32::try_from(agents.len()).unwrap_or(u32::MAX);
     }
+}
+
+/// US11: populate `report.hook_translation_harnesses` with the count of
+/// effective harnesses that support plugin-hook translation AND have it
+/// enabled (not `translate_plugin_hooks = Some(false)`). Read-only;
+/// silently leaves 0 on any failure (status must always render).
+fn fill_hook_translation_harnesses(
+    report: &mut StatusReport,
+    scope: &ResolvedScope,
+    paths: &Paths,
+) {
+    let cfg = crate::config::load_or_default(paths);
+    if cfg.hooks.translate_plugin_hooks == Some(false) {
+        // Globally disabled → 0.
+        return;
+    }
+    let Some(effective) = resolve_effective_for_status(scope, paths) else {
+        return;
+    };
+    let count = effective
+        .harnesses
+        .iter()
+        .filter(|h| crate::harness::lookup(&h.name).is_some_and(|m| m.hook_support().is_some()))
+        .count();
+    report.hook_translation_harnesses = u32::try_from(count).unwrap_or(u32::MAX);
 }
 
 /// Resolve the effective harness list for `status` (read-only), or `None` on any
@@ -959,12 +994,13 @@ mod harness_mcp_status_tests {
             models_on_disk_bytes: 0,
             harness_mcp,
             unrepresented_agents: 0,
+            hook_translation_harnesses: 0,
         }
     }
 
     /// T065: `harness_mcp` is `skip_serializing_if`-gated — an EMPTY Vec omits
     /// the key. Task 14: `unrepresented_agents` (plain u32) is always emitted;
-    /// the minimal JSON now ends with `"models_on_disk_bytes":0,"unrepresented_agents":0}`.
+    /// the minimal JSON now ends with `"models_on_disk_bytes":0,"unrepresented_agents":0,"hook_translation_harnesses":0}`.
     #[test]
     fn empty_harness_mcp_is_omitted_from_json() {
         let json = serde_json::to_string(&base_report(Vec::new())).unwrap();
@@ -973,10 +1009,10 @@ mod harness_mcp_status_tests {
             "empty harness_mcp must be omitted; got: {json}",
         );
         // Task 14: `unrepresented_agents` is a plain u32 — always serialised.
-        // The minimal JSON ends with models_on_disk_bytes then unrepresented_agents.
+        // US11: `hook_translation_harnesses` follows as the new last field.
         assert!(
-            json.ends_with("\"models_on_disk_bytes\":0,\"unrepresented_agents\":0}"),
-            "minimal pin: expected models_on_disk_bytes then unrepresented_agents; got: {json}",
+            json.ends_with("\"models_on_disk_bytes\":0,\"unrepresented_agents\":0,\"hook_translation_harnesses\":0}"),
+            "minimal pin: expected models_on_disk_bytes, unrepresented_agents, hook_translation_harnesses; got: {json}",
         );
     }
 
@@ -989,8 +1025,8 @@ mod harness_mcp_status_tests {
         // Zero agents + no harness_mcp → field present with value 0, last.
         let json_zero = serde_json::to_string(&base_report(Vec::new())).unwrap();
         assert!(
-            json_zero.ends_with("\"unrepresented_agents\":0}"),
-            "zero unrepresented_agents must be last; got: {json_zero}",
+            json_zero.ends_with("\"unrepresented_agents\":0,\"hook_translation_harnesses\":0}"),
+            "zero unrepresented_agents followed by hook_translation_harnesses must be last; got: {json_zero}",
         );
         assert!(
             json_zero.contains("\"unrepresented_agents\":0"),
@@ -1002,8 +1038,8 @@ mod harness_mcp_status_tests {
         rep.unrepresented_agents = 5;
         let json_pop = serde_json::to_string(&rep).unwrap();
         assert!(
-            json_pop.ends_with("\"unrepresented_agents\":5}"),
-            "populated unrepresented_agents must be last; got: {json_pop}",
+            json_pop.ends_with("\"unrepresented_agents\":5,\"hook_translation_harnesses\":0}"),
+            "populated unrepresented_agents followed by hook_translation_harnesses must be last; got: {json_pop}",
         );
 
         // With harness_mcp present: unrepresented_agents is after harness_mcp.
@@ -1019,8 +1055,8 @@ mod harness_mcp_status_tests {
             "unrepresented_agents must come after harness_mcp; got: {json_mcp}",
         );
         assert!(
-            json_mcp.ends_with("\"unrepresented_agents\":0}"),
-            "unrepresented_agents must be last even with harness_mcp; got: {json_mcp}",
+            json_mcp.ends_with("\"unrepresented_agents\":0,\"hook_translation_harnesses\":0}"),
+            "hook_translation_harnesses must be last even with harness_mcp; got: {json_mcp}",
         );
     }
 
@@ -1056,10 +1092,10 @@ mod harness_mcp_status_tests {
             ),
             "harness_mcp must carry the state vocabulary; got: {json}",
         );
-        // unrepresented_agents is the actual last key.
+        // hook_translation_harnesses is the actual last key.
         assert!(
-            json.ends_with("\"unrepresented_agents\":0}"),
-            "unrepresented_agents must be the last key; got: {json}",
+            json.ends_with("\"unrepresented_agents\":0,\"hook_translation_harnesses\":0}"),
+            "hook_translation_harnesses must be the last key; got: {json}",
         );
         // The harness_mcp entry appears before unrepresented_agents in the JSON.
         let mcp_pos = json.find("harness_mcp").unwrap();
