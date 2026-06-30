@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::error::TomeError;
@@ -266,6 +267,86 @@ pub(crate) fn parse_canonical_hooks(
     out
 }
 
+/// Apply CC matcher semantics: `None`/`""`/`"*"` = all; a token of only
+/// `[A-Za-z0-9_|, ]` = exact set (pipe/comma alternation); anything else =
+/// unanchored regex (compile failure → no match / fail-open).
+#[allow(dead_code)]
+pub(crate) fn matcher_matches(matcher: Option<&str>, cc_tool_name: &str) -> bool {
+    let Some(m) = matcher else { return true };
+    if m.is_empty() || m == "*" {
+        return true;
+    }
+    let exact_charset = m
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '|' | ',' | ' '));
+    if exact_charset {
+        return m
+            .split(['|', ','])
+            .map(str::trim)
+            .any(|tok| tok == cc_tool_name);
+    }
+    Regex::new(m)
+        .map(|re| re.is_match(cc_tool_name))
+        .unwrap_or(false)
+}
+
+/// Map a harness's native tool name to its CC canonical name, enabling a
+/// plugin's CC matcher (CC vocabulary) to be tested against incoming harness
+/// tool names. Returns `None` for unknown natives — the dispatcher falls back
+/// to `unwrap_or(native)` so an unmapped name still matches a CC matcher that
+/// references it directly.
+#[allow(dead_code)]
+pub(crate) fn cc_tool_name(harness: &str, native_tool: &str) -> Option<&'static str> {
+    match harness {
+        "gemini" => match native_tool {
+            "run_shell_command" => Some("Bash"),
+            "read_file" => Some("Read"),
+            "write_file" => Some("Write"),
+            "replace" => Some("Edit"),
+            "glob" => Some("Glob"),
+            "search_file_content" | "grep" => Some("Grep"),
+            "web_fetch" => Some("WebFetch"),
+            "google_web_search" => Some("WebSearch"),
+            _ => None,
+        },
+        "devin" => match native_tool {
+            "exec" => Some("Bash"),
+            "read" => Some("Read"),
+            "write" => Some("Write"),
+            "edit" => Some("Edit"),
+            "grep" => Some("Grep"),
+            "glob" => Some("Glob"),
+            _ => None,
+        },
+        "codex" => match native_tool {
+            "Bash" => Some("Bash"),
+            "Read" => Some("Read"),
+            "Write" => Some("Write"),
+            "Edit" => Some("Edit"),
+            "MultiEdit" => Some("MultiEdit"),
+            "NotebookEdit" => Some("NotebookEdit"),
+            "Glob" => Some("Glob"),
+            "Grep" => Some("Grep"),
+            "WebFetch" => Some("WebFetch"),
+            "WebSearch" => Some("WebSearch"),
+            "Ls" => Some("Ls"),
+            _ => None,
+        },
+        "copilot-cli" => match native_tool {
+            "bash" => Some("Bash"),
+            "view" => Some("Read"),
+            "create" => Some("Write"),
+            "edit" => Some("Edit"),
+            "grep" | "rg" => Some("Grep"),
+            "glob" => Some("Glob"),
+            "web_fetch" => Some("WebFetch"),
+            "web_search" => Some("WebSearch"),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 #[allow(dead_code)]
 fn json_string_map(v: &serde_json::Value) -> Option<BTreeMap<String, String>> {
     let obj = v.as_object()?;
@@ -455,6 +536,27 @@ mod tests {
         let hooks = parse_canonical_hooks("cat", "plug", &rw, &mut drops);
         assert!(hooks.is_empty());
         assert_eq!(drops[0].reason, HookDropReason::UnsupportedHandler);
+    }
+
+    #[test]
+    fn matcher_semantics_exact_pipe_regex() {
+        assert!(matcher_matches(None, "Bash"));
+        assert!(matcher_matches(Some(""), "Bash"));
+        assert!(matcher_matches(Some("*"), "Bash"));
+        assert!(matcher_matches(Some("Bash"), "Bash"));
+        assert!(!matcher_matches(Some("Bash"), "Edit"));
+        assert!(matcher_matches(Some("Edit|Write"), "Write"));
+        assert!(matcher_matches(Some("mcp__.*__write"), "mcp__gh__write"));
+        assert!(!matcher_matches(Some("mcp__.*__write"), "Bash"));
+    }
+
+    #[test]
+    fn harness_tool_inverse_map() {
+        assert_eq!(cc_tool_name("gemini", "run_shell_command"), Some("Bash"));
+        assert_eq!(cc_tool_name("gemini", "replace"), Some("Edit"));
+        assert_eq!(cc_tool_name("codex", "Bash"), Some("Bash"));
+        assert_eq!(cc_tool_name("devin", "exec"), Some("Bash"));
+        assert_eq!(cc_tool_name("gemini", "unknown_tool"), None);
     }
 
     #[test]
