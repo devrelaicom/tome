@@ -31,10 +31,62 @@ use crate::paths::Paths;
 use crate::settings::parser::read_project_marker;
 use crate::workspace::{ResolvedScope, Scope, ScopeSource, WorkspaceName};
 
+/// How the resolver treats a malformed `~/.tome/config.toml` when it reaches
+/// step 3 (`[workspace] default`).
+///
+/// The two arms encode the deliberate strict/defensive split documented in the
+/// constitution (§Fail Fast) and CLAUDE.md (the two-loader SSOT):
+///
+/// * [`ConfigLoad::Strict`] — the **default** for every foreground command. A
+///   malformed config aborts the resolver with `ManifestInvalid::TomlParse`
+///   (exit 5), so a typo in the one global config fails loudly and uniformly
+///   before any command body runs (the "universal gate"). This is the intended
+///   behaviour for normal commands.
+///
+/// * [`ConfigLoad::Lenient`] — reserved for the **read-only diagnostic**
+///   commands (`tome doctor`, `tome status`). Their whole job is to *report* a
+///   broken setup, so the pre-dispatch gate must not brick them. A malformed
+///   config degrades step 3 to defaults (the resolver falls through to the
+///   project-marker walk / global fallback); the command body then surfaces the
+///   parse problem as a finding via [`crate::config::probe_error`]. This does
+///   NOT weaken any other command — only doctor/status are dispatched through
+///   the lenient resolve (see `main.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigLoad {
+    /// Malformed config → propagate exit 5 (foreground commands).
+    Strict,
+    /// Malformed config → degrade step 3 to defaults (diagnostic commands).
+    Lenient,
+}
+
+/// Compute the active scope for this invocation, treating a malformed config
+/// strictly (exit 5). The universal gate for every foreground command. See
+/// [`resolve_with`] for the strict/lenient distinction.
+pub fn resolve(args: &GlobalScopeArgs, paths: &Paths) -> Result<ResolvedScope, TomeError> {
+    resolve_with(args, paths, ConfigLoad::Strict)
+}
+
+/// Resolve the scope for a read-only diagnostic command, tolerating a malformed
+/// `~/.tome/config.toml` (degrades step 3 to defaults instead of exiting 5). The
+/// command body is expected to report the parse problem itself via
+/// [`crate::config::probe_error`].
+pub fn resolve_lenient(args: &GlobalScopeArgs, paths: &Paths) -> Result<ResolvedScope, TomeError> {
+    resolve_with(args, paths, ConfigLoad::Lenient)
+}
+
 /// Compute the active scope for this invocation. Touches the filesystem
 /// (project-marker walk + central DB membership check); errors surface
 /// as the dedicated workspace-* exit codes (13/15/70) per FR-344..347.
-pub fn resolve(args: &GlobalScopeArgs, paths: &Paths) -> Result<ResolvedScope, TomeError> {
+///
+/// `config_load` controls ONLY how step 3 (`[workspace] default`) reacts to a
+/// malformed config — every other step is identical across both modes. Keeping
+/// the whole resolution in one function (rather than two copies) means the
+/// strict and lenient paths can never drift apart.
+pub fn resolve_with(
+    args: &GlobalScopeArgs,
+    paths: &Paths,
+    config_load: ConfigLoad,
+) -> Result<ResolvedScope, TomeError> {
     // 1. `--workspace <name>`.
     if let Some(raw) = args.workspace.as_deref() {
         let name = WorkspaceName::parse(raw)?;
@@ -63,10 +115,17 @@ pub fn resolve(args: &GlobalScopeArgs, paths: &Paths) -> Result<ResolvedScope, T
     }
 
     // 3. `[workspace] default` in `~/.tome/config.toml`.
-    // Loaded strict (exit 5 on malformed config) so a typo fails loudly.
-    // An invalid/unknown name surfaces the existing workspace-* error.
+    // Strict (the default) loads via `config::load` so a typo fails loudly
+    // (exit 5). Lenient (diagnostic commands only) degrades a malformed config
+    // to defaults so doctor/status can still run and REPORT the problem; the
+    // `default` knob is simply ignored when the file won't parse, and the
+    // resolver falls through to the project-marker walk / global fallback below.
+    // An invalid/unknown name surfaces the existing workspace-* error in both.
     {
-        let cfg = crate::config::load(paths)?;
+        let cfg = match config_load {
+            ConfigLoad::Strict => crate::config::load(paths)?,
+            ConfigLoad::Lenient => crate::config::load_or_default(paths),
+        };
         if let Some(raw) = cfg.workspace.default {
             let name = WorkspaceName::parse(&raw)?;
             require_workspace_membership(&name, paths)?;

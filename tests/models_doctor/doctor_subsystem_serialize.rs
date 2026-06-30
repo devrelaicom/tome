@@ -35,6 +35,8 @@ fn every_variant_round_trips_via_documented_wire_string() {
         ),
         // Phase 13 (native-agent model-registry):
         (Subsystem::ModelRegistry, "\"model-registry\""),
+        // Issue #287 (malformed `~/.tome/config.toml`):
+        (Subsystem::Config, "\"config\""),
     ];
     for (variant, wire) in cases {
         let serialised = serde_json::to_string(&variant).unwrap();

@@ -38,6 +38,8 @@ mod doctor_readonly_schema;
 mod doctor_subsystem_serialize;
 #[path = "models_doctor/doctor_verify_by_default.rs"]
 mod doctor_verify_by_default;
+#[path = "models_doctor/malformed_config.rs"]
+mod malformed_config;
 #[path = "models_doctor/model_download.rs"]
 mod model_download;
 #[path = "models_doctor/model_download_complete.rs"]
