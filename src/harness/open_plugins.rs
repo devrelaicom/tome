@@ -192,16 +192,21 @@ pub enum RemoveOutcome {
 /// start the MCP server and the agent gets zero skills. Resolution order:
 ///
 /// 1. `$TOME_BIN`, if set and non-empty — an explicit operator override (and the
-///    deterministic test seam, since `current_exe` is machine-specific).
+///    deterministic test seam, since `current_exe` is machine-specific). It MUST
+///    be an ABSOLUTE path: the value is used verbatim, NOT shell-expanded, so a
+///    leading `~` is treated literally (the host will not find `~/…/tome`).
 /// 2. [`std::env::current_exe`] — the absolute path of the running binary, so the
 ///    emitted command points at the exact `tome` that ran the sync.
 /// 3. The bare name `"tome"` — the old behaviour, used only when both above
 ///    fail (an exotic platform / a deleted binary). Never panics, never errors
 ///    the sync: this resolver is infallible by design.
 ///
-/// A `current_exe` path that is not valid UTF-8 is treated as a resolution
-/// failure (we cannot embed it in JSON / a shell command cleanly) and falls
-/// through to the bare-name fallback.
+/// The tiers are tried in order and each falls through INDEPENDENTLY:
+/// - A non-empty but non-UTF-8 `$TOME_BIN` is IGNORED and resolution continues
+///   at tier 2 (`current_exe`) — it does NOT short-circuit to the bare fallback
+///   (we cannot embed a non-UTF-8 value in JSON / a shell command cleanly).
+/// - A `current_exe` that fails to resolve, or whose path is not valid UTF-8,
+///   falls through to tier 3 (the bare name).
 fn tome_command() -> String {
     // (1) Explicit override wins.
     if let Some(value) = std::env::var_os(TOME_BIN_ENV)
@@ -815,6 +820,53 @@ mod tests {
         assert_eq!(
             command,
             "'/Applications/My Tome.app/tome' harness session-start --workspace ws --harness goose",
+        );
+    }
+
+    #[test]
+    fn mcp_command_is_never_shell_quoted() {
+        // The `.mcp.json` `command` is the execve/array sink — the host runs it
+        // directly, NOT through a shell — so a spaced path must be the RAW value
+        // with NO surrounding single-quotes. This locks in "the array sink never
+        // routes through `shell_quote`" against a future refactor that might
+        // wrongly share the hook's quoting path.
+        let bytes = mcp_bytes("/Applications/My Tome.app/tome", "ws", "goose");
+        let s = String::from_utf8(bytes).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let command = v["mcpServers"]["tome"]["command"].as_str().unwrap();
+        assert_eq!(
+            command, "/Applications/My Tome.app/tome",
+            "the .mcp.json command must be the raw launcher path, never shell-quoted",
+        );
+        assert!(
+            !command.starts_with('\''),
+            "the .mcp.json command must not be wrapped in single-quotes; got {command}",
+        );
+    }
+
+    #[test]
+    fn hook_command_escapes_single_quote_end_to_end() {
+        // A launcher containing a single quote must compose correctly through
+        // BOTH layers: `shell_quote`'s POSIX `'\''` escaping AND serde_json's
+        // string escaping. Parsing the emitted JSON undoes the JSON layer, so the
+        // recovered command string must carry the exact shell-escaped path —
+        // proving the two escaping schemes compose end-to-end (not just at the
+        // `shell_quote` helper level).
+        let bytes = hooks_bytes("/o'dd/tome", "ws", "goose");
+        let s = String::from_utf8(bytes).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let command = v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            command,
+            "'/o'\\''dd/tome' harness session-start --workspace ws --harness goose",
+        );
+        // The shell-escaped launcher prefix appears verbatim in the recovered
+        // (post-JSON-decode) command — the `'/o'\''dd/tome'` POSIX idiom.
+        assert!(
+            command.starts_with("'/o'\\''dd/tome' "),
+            "the recovered command must carry the correctly shell-escaped launcher; got {command}",
         );
     }
 }
