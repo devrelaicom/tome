@@ -690,7 +690,7 @@ fn hook_symlink_refusal(path: &Path, e: std::io::Error) -> TomeError {
 /// refusal AND every other write failure map to `HookSettingsWriteFailed`
 /// (exit 44) — PW6 exit-code parity with the Claude hook sink (the P6 7→44
 /// precedent). Mirrors `harness::hooks::write_settings` / `mcp_config::atomic_write`.
-fn write_hook_file(path: &Path, doc: &JsonValue) -> Result<(), TomeError> {
+pub(crate) fn write_hook_file(path: &Path, doc: &JsonValue) -> Result<(), TomeError> {
     // Symlink refusal on the write path → `HookSettingsWriteFailed` (exit 44),
     // the same code the Claude hook sink uses for a refused symlinked component.
     crate::util::refuse_symlinked_component(path).map_err(|e| hook_symlink_refusal(path, e))?;

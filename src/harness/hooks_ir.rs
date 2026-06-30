@@ -4,8 +4,11 @@
 //! reads. Sync only.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+use crate::error::TomeError;
 
 use crate::harness::hooks::RewrittenHooks;
 
@@ -90,6 +93,58 @@ pub struct CanonicalHook {
     pub handler: Handler,
     /// CC seconds. Harness-specific unit conversion happens at manifest write.
     pub timeout_secs: Option<u64>,
+}
+
+/// The resolved, per-(workspace, harness) dispatch manifest the runtime
+/// dispatcher reads. Tome-owned strict input. `events` is keyed by the CC
+/// event name; entries are ordered (deterministic merge order).
+// Allowed dead until the run-hook dispatcher call site lands (US2+).
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HookManifest {
+    pub(crate) harness: String,
+    #[serde(default)]
+    pub(crate) raw_event_passthrough: bool,
+    pub(crate) events: BTreeMap<String, Vec<ManifestEntry>>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ManifestEntry {
+    /// `<catalog>:<plugin>` provenance (block-reason prefix + debug).
+    pub(crate) plugin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) matcher: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "if")]
+    pub(crate) if_pred: Option<String>,
+    pub(crate) handler: Handler,
+    /// Harness-converted timeout (Gemini ms; everyone else ms too — baked once).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) env: BTreeMap<String, String>,
+}
+
+#[allow(dead_code)]
+pub(crate) fn write_manifest(path: &Path, manifest: &HookManifest) -> Result<(), TomeError> {
+    // Reuse the hook-file write discipline (symlink refusal + atomic mode-preserving).
+    let doc = serde_json::to_value(manifest).map_err(|e| TomeError::HookSettingsWriteFailed {
+        path: path.to_path_buf(),
+        source: std::io::Error::other(e),
+    })?;
+    crate::harness::reconcile::hooks::write_hook_file(path, &doc)
+}
+
+#[allow(dead_code)]
+pub(crate) fn read_manifest(path: &Path) -> Result<HookManifest, TomeError> {
+    let text = crate::util::bounded_read_to_string(path, crate::util::TOME_CONFIG_MAX)?;
+    serde_json::from_str(&text).map_err(|_| TomeError::HookSpecParseError {
+        path: path.to_path_buf(),
+    })
 }
 
 /// Why a hook entry was not promoted to the typed IR (dropped to GUARDRAILS).
@@ -301,5 +356,35 @@ mod tests {
         let hooks = parse_canonical_hooks("cat", "plug", &rw, &mut drops);
         assert!(hooks.is_empty());
         assert_eq!(drops[0].reason, HookDropReason::UnsupportedHandler);
+    }
+
+    #[test]
+    fn manifest_roundtrips_and_is_strict() {
+        let m = HookManifest {
+            harness: "codex".into(),
+            raw_event_passthrough: false,
+            events: BTreeMap::from([(
+                "PreToolUse".to_owned(),
+                vec![ManifestEntry {
+                    plugin: "cat:plug".into(),
+                    matcher: Some("Bash".into()),
+                    if_pred: None,
+                    handler: Handler::Command {
+                        command: "/p/guard.sh".into(),
+                    },
+                    timeout_ms: Some(30_000),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                }],
+            )]),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hooks-manifest.json");
+        write_manifest(&path, &m).unwrap();
+        let back = read_manifest(&path).unwrap();
+        assert_eq!(back, m);
+        // Strict: an unknown top-level key is rejected.
+        std::fs::write(&path, r#"{"harness":"x","events":{},"bogus":1}"#).unwrap();
+        assert!(read_manifest(&path).is_err());
     }
 }
