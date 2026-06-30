@@ -90,7 +90,7 @@ fn byom_block_reply_denies() {
 
     let m = manifest_with_prompt("Is this tool use safe?");
     let cfg = cfg_with_openai_prompt();
-    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg);
+    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg, "", None);
 
     // Cursor emits deny as JSON at exit 0 (not exit 2).
     assert_eq!(out.exit_code, 0, "Cursor deny must be exit 0, not exit 2");
@@ -114,7 +114,7 @@ fn byom_allow_reply_is_allow() {
 
     let m = manifest_with_prompt("Is this tool use safe?");
     let cfg = cfg_with_openai_prompt();
-    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg);
+    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg, "", None);
 
     assert_eq!(out.exit_code, 0);
     assert!(
@@ -136,7 +136,7 @@ fn provider_transport_error_fails_open() {
 
     let m = manifest_with_prompt("Is this tool use safe?");
     let cfg = cfg_with_openai_prompt();
-    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg);
+    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg, "", None);
 
     assert_eq!(out.exit_code, 0, "transport error must fail open at exit 0");
     assert!(
@@ -153,7 +153,7 @@ fn provider_timeout_fails_open() {
 
     let m = manifest_with_prompt("Is this tool use safe?");
     let cfg = cfg_with_openai_prompt();
-    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg);
+    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg, "", None);
 
     assert_eq!(out.exit_code, 0, "timeout must fail open at exit 0");
     assert!(
@@ -172,7 +172,7 @@ fn prompt_handler_unconfigured_provider_fails_open() {
     // No transport needed — the provider path is never reached when unconfigured.
     let m = manifest_with_prompt("Is this tool use safe?");
     let cfg = Config::default(); // no prompt_provider/model set
-    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg);
+    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg, "", None);
 
     assert_eq!(
         out.exit_code, 0,
@@ -196,7 +196,7 @@ fn unparsable_model_reply_fails_open() {
 
     let m = manifest_with_prompt("Is this tool use safe?");
     let cfg = cfg_with_openai_prompt();
-    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg);
+    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg, "", None);
 
     assert_eq!(out.exit_code, 0);
     assert!(
@@ -241,7 +241,7 @@ fn byom_fenced_json_deny_is_parsed() {
 
     let m = manifest_with_prompt("Is this tool use safe?");
     let cfg = cfg_with_openai_prompt();
-    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg);
+    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg, "", None);
 
     assert_eq!(out.exit_code, 0, "Cursor deny must be exit 0");
     assert!(
@@ -269,7 +269,7 @@ fn byom_prose_with_embedded_deny_is_parsed() {
 
     let m = manifest_with_prompt("Is this tool use safe?");
     let cfg = cfg_with_openai_prompt();
-    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg);
+    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg, "", None);
 
     assert_eq!(out.exit_code, 0);
     assert!(
@@ -296,7 +296,7 @@ fn byom_prose_with_embedded_allow_fails_open() {
 
     let m = manifest_with_prompt("Is this tool use safe?");
     let cfg = cfg_with_openai_prompt();
-    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg);
+    let out = run_hook::dispatch_with_cfg("cursor", "PreToolUse", "{}", Some(&m), &cfg, "", None);
 
     assert_eq!(out.exit_code, 0);
     assert!(
