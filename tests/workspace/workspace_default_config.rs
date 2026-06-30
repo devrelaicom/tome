@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use crate::common::{ToolEnv, paths_for, seed_workspace};
 use tome::cli::GlobalScopeArgs;
 use tome::workspace::ScopeSource;
-use tome::workspace::resolution::resolve;
+use tome::workspace::resolution::{resolve, resolve_lenient};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -190,4 +190,69 @@ fn no_config_default_falls_through_to_global() {
     let r = resolve(&no_flag(), &paths).expect("resolve");
     assert!(r.scope.is_global());
     assert_eq!(r.source, ScopeSource::GlobalFallback);
+}
+
+// ---- Issue #287: strict vs lenient resolution on a malformed config -------
+
+/// STRICT `resolve` (every foreground command) propagates exit 5 when the
+/// global config is malformed — the intended "fail loud" universal gate.
+#[test]
+fn strict_resolve_on_malformed_config_exits_5() {
+    let guard = Guard::new();
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    // Unknown key inside a known section — a typo.
+    std::fs::write(&paths.global_config_file, "[query]\nnope = 1\n").unwrap();
+
+    let isolated = tempfile::TempDir::new().unwrap();
+    guard.chdir(isolated.path());
+
+    let err = resolve(&no_flag(), &paths).expect_err("malformed config must fail strict");
+    assert_eq!(err.exit_code(), 5, "strict resolve must propagate exit 5");
+}
+
+/// LENIENT `resolve_lenient` (diagnostic commands only) tolerates a malformed
+/// config: step 3 degrades to defaults and the resolver falls through to the
+/// global fallback so doctor/status can still run and report the problem.
+#[test]
+fn lenient_resolve_on_malformed_config_falls_through_to_global() {
+    let guard = Guard::new();
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    std::fs::write(&paths.global_config_file, "[query]\nnope = 1\n").unwrap();
+
+    let isolated = tempfile::TempDir::new().unwrap();
+    guard.chdir(isolated.path());
+
+    let r = resolve_lenient(&no_flag(), &paths).expect("lenient resolve must not fail");
+    assert!(r.scope.is_global(), "degrades to global fallback");
+    assert_eq!(r.source, ScopeSource::GlobalFallback);
+}
+
+/// A `--workspace` flag is honoured under lenient resolution too — leniency
+/// only softens step 3 (`[workspace] default`); the higher-priority flag/env
+/// inputs still win, exactly as under strict.
+#[test]
+fn lenient_resolve_still_honours_flag_over_malformed_config() {
+    let guard = Guard::new();
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    seed_workspace(&paths, "work");
+
+    std::fs::write(&paths.global_config_file, "[query]\nnope = 1\n").unwrap();
+
+    let isolated = tempfile::TempDir::new().unwrap();
+    guard.chdir(isolated.path());
+
+    let args = GlobalScopeArgs {
+        workspace: Some("work".to_string()),
+    };
+    let r = resolve_lenient(&args, &paths).expect("flag resolves under lenient");
+    assert_eq!(r.scope.name().as_str(), "work");
+    assert_eq!(r.source, ScopeSource::Flag);
 }

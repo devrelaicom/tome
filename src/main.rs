@@ -69,7 +69,23 @@ fn main() {
             std::process::exit(code);
         }
     };
-    let scope = match workspace::resolution::resolve(&cli.scope, &paths) {
+    // `tome doctor` and `tome status` are the read-only diagnostics a user
+    // reaches for when their setup is broken — including a malformed
+    // `~/.tome/config.toml`. The pre-dispatch scope resolution is the
+    // "universal gate" that runs strict `config::load` for every command (so a
+    // typo fails loudly with exit 5 uniformly); but that same gate would brick
+    // the very commands meant to diagnose the typo. Resolve those two leniently
+    // (a malformed config degrades step 3 — `[workspace] default` — to defaults,
+    // never aborting); their command bodies then surface the parse problem as a
+    // finding. Every OTHER command keeps the strict gate, so "fail loud on a
+    // malformed config" stays intact everywhere it matters.
+    let diagnostic = matches!(cli.command, Command::Doctor(_) | Command::Status(_));
+    let resolved = if diagnostic {
+        workspace::resolution::resolve_lenient(&cli.scope, &paths)
+    } else {
+        workspace::resolution::resolve(&cli.scope, &paths)
+    };
+    let scope = match resolved {
         Ok(r) => r,
         Err(err) => {
             let code = err.exit_code();

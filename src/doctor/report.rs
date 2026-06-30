@@ -212,6 +212,8 @@ pub enum RulesCopyState {
 /// - `BindingRulesCopy` ↔ `"binding-rules-copy"`
 /// - `HarnessRules(name)` ↔ `"harness-rules:<name>"`
 /// - `HarnessMcp(name)` ↔ `"harness-mcp:<name>"`
+/// - `ModelRegistry` ↔ `"model-registry"`
+/// - `Config` ↔ `"config"`
 ///
 /// The two Phase 3 drift "subsystems" `embedder_drift`, `reranker_drift`,
 /// and the Phase 4 fold-in `summariser_drift` are not part of this enum:
@@ -236,6 +238,10 @@ pub enum Subsystem {
     /// Phase 13 (native-agent model-registry): the on-disk override registry
     /// file that `tome models update --include-registry` refreshes.
     ModelRegistry,
+    /// Issue #287: a malformed `~/.tome/config.toml`. Surfaced by the resilient
+    /// diagnostic commands (`tome doctor`) as a non-auto-fixable finding — Tome
+    /// never rewrites a user-authored config; the user edits the named key.
+    Config,
 }
 
 impl Subsystem {
@@ -256,6 +262,7 @@ impl Subsystem {
             Subsystem::HarnessRules(n) => format!("harness-rules:{n}"),
             Subsystem::HarnessMcp(n) => format!("harness-mcp:{n}"),
             Subsystem::ModelRegistry => "model-registry".to_owned(),
+            Subsystem::Config => "config".to_owned(),
         }
     }
 
@@ -272,6 +279,7 @@ impl Subsystem {
             "binding" => Subsystem::Binding,
             "binding-rules-copy" => Subsystem::BindingRulesCopy,
             "model-registry" => Subsystem::ModelRegistry,
+            "config" => Subsystem::Config,
             other => {
                 if let Some(name) = other.strip_prefix("catalog:") {
                     Subsystem::Catalog(name.to_owned())
@@ -366,6 +374,7 @@ mod tests {
                 Subsystem::HarnessMcp("codex".into()),
                 "\"harness-mcp:codex\"",
             ),
+            (Subsystem::Config, "\"config\""),
         ];
         for (variant, wire) in cases {
             let serialised = serde_json::to_string(&variant).unwrap();

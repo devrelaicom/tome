@@ -54,11 +54,24 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     }
 
     // `verify_by_default` in config.toml: effective verify = flag OR config.
-    // Strict config load so a typo fails loudly (exit 5).
-    let cfg = crate::config::load(&paths)?;
+    // DEFENSIVE load (issue #287): doctor is the command you run to diagnose a
+    // broken setup — a malformed `~/.tome/config.toml` must not exit 5 before
+    // the report renders. The parse problem is surfaced as a `SuggestedFix`
+    // below (and flips `overall` to Unhealthy), so it is reported loudly, not
+    // swallowed; a malformed config simply means `verify_by_default` reads as
+    // the default (false). Every NON-diagnostic command still loads strictly.
+    let cfg = crate::config::load_or_default(&paths);
     let verify = args.verify || cfg.doctor.verify_by_default.unwrap_or(false);
 
+    // Read-only probe for a malformed config (issue #287). `None` when absent or
+    // well-formed; `Some(message)` carries the legible diagnostic (offending
+    // key/section + line/column) — identical to the strict exit-5 every other
+    // command emits. Captured before `assemble_report` so the finding is folded
+    // into both the report and `--fix`'s re-assembly path below.
+    let config_error = crate::config::probe_error(&paths);
+
     let mut report = doctor::assemble_report(scope, &paths, &home, verify)?;
+    apply_config_finding(&mut report, config_error.as_deref());
 
     if args.fix {
         let ctx = doctor::fixes::FixContext {
@@ -127,6 +140,15 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
         // assembly — `overall` remains non-Ok and `has_remaining_manual_fixes`
         // is true → `DoctorFixNotSafe` (exit 75).
         doctor::reappend_corrupt_index_fix(&mut report, &paths, &cfg);
+
+        // `re_assemble` rebuilds `suggested_fixes` + `overall` via the SSOT,
+        // which doesn't know about the config-parse finding. `doctor --fix`
+        // NEVER rewrites the user-authored `config.toml`, so a malformed config
+        // is never auto-fixed — re-probe read-only and re-apply so it persists
+        // through `--fix` as a non-auto-fixable manual finding (→ exit 75 via
+        // `has_remaining_manual_fixes`), exactly like the corrupt-remote-index
+        // case above.
+        apply_config_finding(&mut report, crate::config::probe_error(&paths).as_deref());
     }
 
     emit(&report, mode)?;
@@ -162,6 +184,33 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
         });
     }
     std::process::exit(1);
+}
+
+/// Fold a malformed-`config.toml` parse error (issue #287) into the report: push
+/// a non-auto-fixable `Config` `SuggestedFix` carrying the legible diagnosis, and
+/// flip `overall` to `Unhealthy` so `tome doctor` exits non-zero while it holds.
+///
+/// A no-op when `config_error` is `None` (absent or well-formed config), so the
+/// byte-stable minimal-report JSON pin is unchanged for a clean system. The
+/// finding is `auto_fixable: false` — Tome never rewrites the user-authored
+/// `config.toml`; the user fixes the named key by hand (the diagnosis quotes the
+/// `toml` error, which names the offending key/section + line/column).
+fn apply_config_finding(report: &mut DoctorReport, config_error: Option<&str>) {
+    let Some(message) = config_error else {
+        return;
+    };
+    report.suggested_fixes.push(doctor::SuggestedFix {
+        subsystem: doctor::Subsystem::Config,
+        // "could not be loaded" rather than "is malformed": `probe_error`'s
+        // fallback arm also covers a pure I/O / unreadable / over-cap failure
+        // (not only a TOML parse error), so the wording must not mislabel those.
+        diagnosis: format!("`~/.tome/config.toml` could not be loaded: {message}"),
+        // Pointer, not a runnable repair — Tome must not rewrite a user-owned
+        // config; `auto_fixable: false` is what keeps `--fix` from "fixing" it.
+        command: "edit ~/.tome/config.toml to correct the reported problem".to_owned(),
+        auto_fixable: false,
+    });
+    report.overall = DoctorClassification::Unhealthy;
 }
 
 fn emit(report: &DoctorReport, mode: Mode) -> Result<(), TomeError> {

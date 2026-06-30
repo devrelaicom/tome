@@ -396,6 +396,32 @@ pub fn load_or_default(paths: &Paths) -> Config {
     load(paths).unwrap_or_default()
 }
 
+/// Read-only health probe for `~/.tome/config.toml`: `None` when the file is
+/// absent or parses cleanly, `Some(message)` when the strict parse fails. The
+/// message is the **same** legible diagnostic the strict [`load`] path surfaces
+/// (file + the `toml` serde error, which names the offending key/section and its
+/// line/column). It is the single source of truth so the resilient diagnostic
+/// commands (`tome doctor`, `tome status`) report a malformed config identically
+/// to the loud exit-5 every other command emits.
+///
+/// Reaching into [`load`] keeps the "what counts as malformed" rule in one
+/// place: any future loosening of the strict parse (e.g. another
+/// tolerate-and-drop section like `_legacy_catalogs`) is reflected here for free.
+pub fn probe_error(paths: &Paths) -> Option<String> {
+    match load(paths) {
+        Ok(_) => None,
+        // A parse failure carries the legible message (key/section/line/column).
+        Err(TomeError::ManifestInvalid(crate::error::ManifestInvalid::TomlParse {
+            message,
+            ..
+        })) => Some(message),
+        // An I/O failure other than NotFound (which `load` already maps to
+        // defaults) — surface it too so the user isn't left guessing; it is far
+        // rarer than a typo but equally worth reporting in a diagnostic.
+        Err(e) => Some(e.to_string()),
+    }
+}
+
 /// Defensive config load given a known tome root (the directory holding
 /// `config.toml`). Mirrors [`load_or_default`] but for callers that already
 /// know the root path rather than going through a [`Paths`] struct —
@@ -656,5 +682,74 @@ last_synced = "2026-01-01T00:00:00Z"
         std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
         std::fs::write(&paths.global_config_file, "this = is = broken").unwrap();
         assert_eq!(load_or_default(&paths), Config::default()); // never panics
+    }
+
+    #[test]
+    fn probe_error_none_when_absent() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(probe_error(&paths_in(&dir)), None);
+    }
+
+    #[test]
+    fn probe_error_none_when_well_formed() {
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
+        std::fs::write(&paths.global_config_file, "[query]\ntop_k = 5\n").unwrap();
+        assert_eq!(probe_error(&paths), None);
+    }
+
+    #[test]
+    fn probe_error_names_unknown_key_and_section() {
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
+        std::fs::write(&paths.global_config_file, "[query]\nnope = 1\n").unwrap();
+        let msg = probe_error(&paths).expect("malformed config probed");
+        // The message names the offending key and is the same legible toml
+        // diagnostic the strict `load` path surfaces (line/column included).
+        assert!(msg.contains("nope"), "must name the offending key: {msg}");
+        assert!(msg.to_lowercase().contains("unknown"), "{msg}");
+        // It must match what strict `load` emits, byte-for-byte, so the
+        // diagnostic surfaces and the loud exit-5 stay in lockstep.
+        let strict = match load(&paths) {
+            Err(TomeError::ManifestInvalid(crate::error::ManifestInvalid::TomlParse {
+                message,
+                ..
+            })) => message,
+            other => panic!("expected TomlParse, got {other:?}"),
+        };
+        assert_eq!(msg, strict);
+    }
+
+    /// Issue #287 (review item 1): `probe_error`'s NON-`TomlParse` fallback arm.
+    /// A config file that exceeds `TOME_CONFIG_MAX` is refused by
+    /// `bounded_read_to_string` with a `TomeError::Io` BEFORE any TOML parse, so
+    /// `load` propagates an `Io` (not `TomlParse`). `probe_error` must still
+    /// report it (`Some`, surfaced not swallowed) and must NOT panic. This pins
+    /// the "I/O / unreadable error is reported" branch.
+    #[test]
+    fn probe_error_surfaces_io_error_for_oversize_file() {
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
+        // One byte over the 1 MiB config cap. The content is valid UTF-8 (and
+        // valid TOML comment text) in isolation; the size cap is what trips the
+        // read, so the fallback arm is exercised independently of TOML parsing.
+        let oversize = "#".repeat((crate::util::TOME_CONFIG_MAX as usize) + 1);
+        std::fs::write(&paths.global_config_file, oversize).unwrap();
+
+        // Confirm `load` itself returns an `Io` error (not `TomlParse`), so this
+        // test genuinely covers the fallback arm and not the parse arm.
+        match load(&paths) {
+            Err(TomeError::Io(_)) => {}
+            other => panic!("expected an Io error for an over-cap config, got {other:?}"),
+        }
+
+        let msg = probe_error(&paths).expect("an over-cap config must be reported, not swallowed");
+        assert!(
+            msg.to_lowercase().contains("cap") || msg.to_lowercase().contains("exceed"),
+            "the I/O message should explain the size refusal: {msg}",
+        );
     }
 }

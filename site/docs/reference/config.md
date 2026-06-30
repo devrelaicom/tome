@@ -45,6 +45,13 @@ A few details worth knowing:
 root on first write. Tome-owned config is parsed strictly — unknown fields are
 rejected — so a typo surfaces as an error rather than being silently ignored.
 
+If the file is malformed, ordinary commands fail loudly with an exit-5 parse
+error that names the offending key, section, and line. The two read-only
+diagnostics — `tome doctor` and `tome status` — are the exception: they keep
+running and report the same parse problem as a finding (so the command you would
+reach for to *diagnose* a broken config is never itself bricked by it). Fix the
+named key; Tome never rewrites your config for you.
+
 ## Settings layers
 
 Harness composition is resolved from layered settings:

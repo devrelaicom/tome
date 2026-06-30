@@ -43,6 +43,11 @@ pub fn run(args: StatusArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     fill_unrepresented_agents(&mut report, scope, &paths);
     // US11: populate the hook-translation harness count (read-only, best-effort).
     fill_hook_translation_harnesses(&mut report, scope, &paths);
+    // Issue #287: report a malformed `~/.tome/config.toml` instead of dying.
+    // `status` is dispatched through the lenient resolver (see `main.rs`), so it
+    // reaches here even when the config won't parse; this surfaces the parse
+    // problem as a finding and flips overall to Unhealthy.
+    fill_config_health(&mut report, &paths);
     emit(&report, mode)?;
     if !matches!(report.overall, OverallHealth::Ok) {
         std::process::exit(1);
@@ -95,6 +100,20 @@ pub struct HarnessMcpStatus {
     pub state: String,
 }
 
+/// Issue #287: the global-config health line for `tome status`. Present ONLY when
+/// `~/.tome/config.toml` cannot be loaded — `status` is a diagnostic that must
+/// keep running on a broken config, so it reports the problem here instead of
+/// dying at exit 5. `message` is the legible diagnostic (a TOML parse error names
+/// the offending key/section + line/column; a pure I/O / unreadable / over-cap
+/// failure carries its own message), identical to the error every non-diagnostic
+/// command emits. Absent (the common case) keeps the byte-stable `--json` pins
+/// unchanged via `skip_serializing_if` on the field below.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ConfigHealth {
+    pub ok: bool,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StatusReport {
     pub tome: String,
@@ -130,8 +149,17 @@ pub struct StatusReport {
     /// hook translation active (`hook_support().is_some()` AND
     /// `translate_plugin_hooks != Some(false)`). `0` when none are active.
     /// Always serialised (plain u32); the minimal JSON ends with
-    /// `"unrepresented_agents":0,"hook_translation_harnesses":0}`.
+    /// `"unrepresented_agents":0,"hook_translation_harnesses":0}` when the config
+    /// is well-formed (the `config` key below is then omitted).
     pub hook_translation_harnesses: u32,
+    /// Issue #287: global-config health. `None` when `~/.tome/config.toml` is
+    /// absent or parses cleanly; `Some` carries the parse diagnosis. Appended
+    /// LAST + `skip_serializing_if`-gated so a clean system keeps the pre-existing
+    /// byte-stable `--json` pins unchanged (key absent ⇒ JSON identical).
+    /// `assemble_report` leaves it `None` (it has no `Paths`/probe context); `run`
+    /// populates it via [`fill_config_health`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<ConfigHealth>,
 }
 
 // ---- Assembly --------------------------------------------------------------
@@ -211,6 +239,9 @@ pub fn assemble_report(
         unrepresented_agents: 0,
         // `run` fills this via `fill_hook_translation_harnesses` (read-only).
         hook_translation_harnesses: 0,
+        // `run` fills this via `fill_config_health` (needs the global config
+        // path, which `assemble_report` doesn't take). `None` ⇒ JSON omits it.
+        config: None,
     })
 }
 
@@ -317,6 +348,19 @@ fn fill_hook_translation_harnesses(
             .count()
     });
     report.hook_translation_harnesses = u32::try_from(count).unwrap_or(u32::MAX);
+}
+
+/// Issue #287: populate `report.config` when `~/.tome/config.toml` cannot be
+/// loaded (malformed TOML or an I/O / unreadable / over-cap failure), and flip
+/// `report.overall` to Unhealthy. A clean / absent config leaves the field `None`
+/// (omitted from `--json`, byte-stable pins unchanged) and overall untouched.
+/// Uses the shared [`crate::config::probe_error`] SSOT so the message matches
+/// `tome doctor`'s finding and the loud exit-5 other commands emit.
+fn fill_config_health(report: &mut StatusReport, paths: &Paths) {
+    if let Some(message) = crate::config::probe_error(paths) {
+        report.config = Some(ConfigHealth { ok: false, message });
+        report.overall = OverallHealth::Unhealthy;
+    }
 }
 
 /// Resolve the effective harness list for `status` (read-only), or `None` on any
@@ -693,6 +737,18 @@ fn render_panel(report: &StatusReport) -> Vec<String> {
             .join(", ");
         lines.push(format!("{} {}", key("MCP:"), states));
     }
+    // Issue #287: when `~/.tome/config.toml` won't parse, status keeps running
+    // and reports it here (rather than dying at exit 5). The toml diagnostic
+    // names the offending key/section; show its first line in the panel and
+    // point the user at the file.
+    if let Some(cfg) = &report.config {
+        lines.push(String::new());
+        lines.push(colour::dim("Config"));
+        let first_line = cfg.message.lines().next().unwrap_or(&cfg.message);
+        lines.push(format!("{} {} {}", key("Config:"), glyph_fail, first_line,));
+        lines.push(format!("{} ~/.tome/config.toml", key("")));
+    }
+
     lines.push(String::new());
 
     lines.push(format!("{} {}", key("Overall:"), overall));
@@ -1005,6 +1061,7 @@ mod harness_mcp_status_tests {
             harness_mcp,
             unrepresented_agents: 0,
             hook_translation_harnesses: 0,
+            config: None,
         }
     }
 
