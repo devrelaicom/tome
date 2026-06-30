@@ -266,7 +266,10 @@ fn explain(
             Ok(w) => w,
             Err(_) => {
                 // Fail-open: a malformed --workspace must not block the caller.
-                println!(
+                // writeln! (not println!) avoids a panic on a broken-pipe stdout
+                // (e.g. `--explain | head`); under panic=abort println! would abort.
+                let _ = writeln!(
+                    std::io::stdout().lock(),
                     "[explain] malformed --workspace argument; \
                      manifest lookup skipped — dispatch would be allow (fail-open)"
                 );
@@ -281,7 +284,7 @@ fn explain(
 
     let lines = explain_core(&args.harness, &args.event, stdin, manifest.as_ref());
     for line in &lines {
-        println!("{line}");
+        let _ = writeln!(std::io::stdout().lock(), "{line}");
     }
     Ok(())
 }
@@ -649,6 +652,18 @@ const POLL_INTERVAL_MS: u64 = 5;
 /// in `command_outcome_to_decision` → non-blocking allow (correct fail-open).
 const HOOK_HTTP_BODY_MAX: u64 = 4 * 1024 * 1024; // 4 MiB
 
+/// Maximum bytes drained from each command hook's stdout AND stderr pipe via
+/// [`run_command_handler`] reader threads. Mirrors [`HOOK_HTTP_BODY_MAX`].
+///
+/// Without a cap, a hook command that emits a fast multi-GiB stream
+/// (accidental `cat big.log`, runaway `set -x`, etc.) buffers the entire
+/// output on the heap → OOM kill (exit 137) → fail-CLOSED on Copilot's
+/// preToolUse wire, violating the fail-open totality invariant. A CC-decision
+/// JSON payload is tiny; 4 MiB is ample for any legitimate output. Truncated
+/// output that fails JSON parsing in `command_outcome_to_decision` degrades to
+/// a non-blocking allow — the correct fail-open behaviour.
+const HOOK_CMD_OUTPUT_MAX: u64 = 4 * 1024 * 1024; // 4 MiB, parity with HTTP cap
+
 /// The raw result of running one command handler: its exit code plus captured
 /// stdout/stderr. Translated into a [`CcDecision`] by
 /// [`command_outcome_to_decision`].
@@ -745,13 +760,17 @@ fn run_command_handler(
     };
 
     // Stdout reader thread: drains continuously so the child never stalls.
+    // Capped at HOOK_CMD_OUTPUT_MAX bytes (parity with the HTTP-body cap) so
+    // a runaway command emitting a multi-GiB stream cannot exhaust the heap
+    // and trigger an OOM-kill → fail-CLOSED on Copilot's preToolUse wire.
+    // Truncated output that fails JSON parsing degrades to a fail-open allow.
     let stdout_reader = match child.stdout.take() {
         None => None,
-        Some(mut out) => {
+        Some(out) => {
             match std::thread::Builder::new().spawn(move || {
-                let mut buf = String::new();
-                let _ = out.read_to_string(&mut buf);
-                buf
+                let mut bytes = Vec::new();
+                let _ = out.take(HOOK_CMD_OUTPUT_MAX).read_to_end(&mut bytes);
+                String::from_utf8_lossy(&bytes).into_owned()
             }) {
                 Ok(h) => Some(h),
                 Err(_) => {
@@ -765,13 +784,16 @@ fn run_command_handler(
     };
 
     // Stderr reader thread: drains continuously so the child never stalls.
+    // Capped at HOOK_CMD_OUTPUT_MAX bytes for the same OOM-protection reason
+    // as the stdout reader above.  A truncated stderr reason still denies when
+    // the command exits 2 — the deny is correct; the reason is merely shorter.
     let stderr_reader = match child.stderr.take() {
         None => None,
-        Some(mut err) => {
+        Some(err) => {
             match std::thread::Builder::new().spawn(move || {
-                let mut buf = String::new();
-                let _ = err.read_to_string(&mut buf);
-                buf
+                let mut bytes = Vec::new();
+                let _ = err.take(HOOK_CMD_OUTPUT_MAX).read_to_end(&mut bytes);
+                String::from_utf8_lossy(&bytes).into_owned()
             }) {
                 Ok(h) => Some(h),
                 Err(_) => {
@@ -1628,9 +1650,17 @@ fn harness_event_to_cc(
         obj.insert("tool_name".to_string(), Value::String(cc));
     }
 
-    // Universal backfills (only when absent).
-    obj.entry("hook_event_name")
-        .or_insert_with(|| Value::String(event_cc.to_string()));
+    // Universal: force-normalize hook_event_name to the CC name — the
+    // dispatcher's `event_cc` is authoritative. Using `insert` (not
+    // `entry().or_insert_with`) OVERWRITES any harness-native value already
+    // present in the raw stdin. Gemini, for example, carries
+    // `hook_event_name: "BeforeTool"` in its native payload; a plugin
+    // script branching on `$hook_event_name == "PreToolUse"` would silently
+    // fail-open if we only backfilled. Mirrors the `tool_name` rewrite above.
+    obj.insert(
+        "hook_event_name".to_string(),
+        Value::String(event_cc.to_string()),
+    );
     obj.entry("session_id")
         .or_insert_with(|| Value::String(String::new()));
     obj.entry("cwd")

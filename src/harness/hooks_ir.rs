@@ -119,7 +119,6 @@ pub struct HookManifest {
     pub(crate) events: BTreeMap<String, Vec<ManifestEntry>>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ManifestEntry {
@@ -146,7 +145,6 @@ pub(crate) struct ManifestEntry {
     pub(crate) env: BTreeMap<String, String>,
 }
 
-#[allow(dead_code)]
 pub(crate) fn write_manifest(path: &Path, manifest: &HookManifest) -> Result<(), TomeError> {
     // Reuse the hook-file write discipline (symlink refusal + atomic mode-preserving).
     let doc = serde_json::to_value(manifest).map_err(|e| TomeError::HookSettingsWriteFailed {
@@ -156,7 +154,6 @@ pub(crate) fn write_manifest(path: &Path, manifest: &HookManifest) -> Result<(),
     crate::harness::reconcile::hooks::write_hook_file(path, &doc)
 }
 
-#[allow(dead_code)]
 pub(crate) fn read_manifest(path: &Path) -> Result<HookManifest, TomeError> {
     let text = crate::util::bounded_read_to_string(path, crate::util::TOME_CONFIG_MAX)?;
     serde_json::from_str(&text).map_err(|_| TomeError::HookSpecParseError {
@@ -165,18 +162,18 @@ pub(crate) fn read_manifest(path: &Path) -> Result<HookManifest, TomeError> {
 }
 
 /// Why a hook entry was not promoted to the typed IR (dropped to GUARDRAILS).
-// Future USs wire this into the sync orchestrator; defined here to complete the
-// IR vocabulary. Allowed dead until the orchestrator call sites land (US2+).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HookDropReason {
     NonPortableEvent,
     UnsupportedHandler,
     /// Gate applied by the caller (US6); defined here for the full drop vocabulary.
+    /// Constructed by the caller (US6 prompt gate) but not yet surfaced by the
+    /// US11 doctor, so the lint fires on this variant specifically. Keep the allow
+    /// on this variant until the doctor wires it up.
+    #[allow(dead_code)]
     PromptDisabled,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HookDrop {
     pub(crate) reason: HookDropReason,
@@ -187,7 +184,6 @@ pub(crate) struct HookDrop {
 /// events and non-{command,http,prompt} handlers are dropped into `drops`
 /// (the plugin keeps its `GUARDRAILS.md` floor for them). The `prompt` gate
 /// (US6) is applied by the caller, not here.
-#[allow(dead_code)]
 pub(crate) fn parse_canonical_hooks(
     catalog: &str,
     plugin: &str,
@@ -415,7 +411,6 @@ fn glob_to_anchored_regex(pattern: &str) -> String {
 /// `[A-Za-z0-9_|, ]` = exact set (pipe/comma alternation); anything else =
 /// unanchored regex. An unparsable regex returns `false` — the hook is
 /// skipped (fail-closed for this matcher), not run.
-#[allow(dead_code)]
 pub(crate) fn matcher_matches(matcher: Option<&str>, cc_tool_name: &str) -> bool {
     let Some(m) = matcher else { return true };
     if m.is_empty() || m == "*" {
@@ -440,7 +435,6 @@ pub(crate) fn matcher_matches(matcher: Option<&str>, cc_tool_name: &str) -> bool
 /// tool names. Returns `None` for unknown natives — the dispatcher falls back
 /// to `unwrap_or(native)` so an unmapped name still matches a CC matcher that
 /// references it directly.
-#[allow(dead_code)]
 pub(crate) fn cc_tool_name(harness: &str, native_tool: &str) -> Option<&'static str> {
     match harness {
         "gemini" => match native_tool {
@@ -492,7 +486,6 @@ pub(crate) fn cc_tool_name(harness: &str, native_tool: &str) -> Option<&'static 
     }
 }
 
-#[allow(dead_code)]
 fn json_string_map(v: &serde_json::Value) -> Option<BTreeMap<String, String>> {
     let obj = v.as_object()?;
     Some(
@@ -502,7 +495,6 @@ fn json_string_map(v: &serde_json::Value) -> Option<BTreeMap<String, String>> {
     )
 }
 
-#[allow(dead_code)]
 fn json_string_vec(v: &serde_json::Value) -> Option<Vec<String>> {
     Some(
         v.as_array()?
