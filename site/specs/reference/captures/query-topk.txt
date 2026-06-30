@@ -1,0 +1,6 @@
+# source: devrelaicom/midnight-expert (local marketplace clone)
+|  Score | Catalog         | Plugin          | Skill                                  | Version | Path                                                   |
+|--------|-----------------|-----------------|----------------------------------------|---------|--------------------------------------------------------|
+| 4.3648 | midnight-expert | midnight-verify | midnight-verify:verify-by-execution    | 0.13.0  | skills/midnight-verify:verify-by-execution/SKILL.md    |
+| 3.8602 | midnight-expert | midnight-verify | midnight-verify:verify-by-zkir-checker | 0.13.0  | skills/midnight-verify:verify-by-zkir-checker/SKILL.md |
+| 3.6187 | midnight-expert | midnight-verify | midnight-verify:verify-compact         | 0.13.0  | skills/midnight-verify:verify-compact/SKILL.md         |

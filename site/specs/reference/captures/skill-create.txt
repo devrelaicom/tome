@@ -1,0 +1,3 @@
+Created skill `demo-skill` at /private/tmp/tome-cap/demo-skill
+  SKILL.md
+demo-skill

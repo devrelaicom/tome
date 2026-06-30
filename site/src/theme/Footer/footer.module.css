@@ -1,0 +1,13 @@
+/* the footer follows the theme: parchment in light, midnight-navy in dark.
+   Both modes resolve to --tome-paper-deep, so every color below is token-based
+   and flips automatically (ink text on parchment, cream text on navy). */
+.footer { background: var(--tome-paper-deep); color: var(--tome-ink); border-top: 1.5px solid var(--tome-rule); }
+.wrap { width: min(1120px, 100%); margin: 0 auto; padding: 0 28px; }
+.grid { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 24px; padding: 46px 0 26px; }
+.grid h4 { font-family: var(--tome-mono); font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--tome-gold); margin-bottom: 12px; }
+.grid a { display: block; color: var(--tome-ink); text-decoration: none; font-size: 14px; margin-bottom: 7px; }
+.grid a:hover { color: var(--tome-lapis); }
+.wm { font-size: 64px; font-weight: 700; color: transparent; -webkit-text-stroke: 1.5px var(--tome-gold); line-height: .9; margin-bottom: 10px; }
+.made { font-family: var(--tome-mono); font-size: 12px; color: var(--tome-ink-soft); line-height: 1.7; }
+.bar { border-top: 1px solid var(--tome-rule); padding: 14px 0; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 10px; font-family: var(--tome-mono); font-size: 11.5px; color: var(--tome-ink-soft); letter-spacing: .04em; }
+@media (max-width: 860px) { .grid { grid-template-columns: 1fr 1fr; } }

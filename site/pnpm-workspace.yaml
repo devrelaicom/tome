@@ -1,0 +1,49 @@
+allowBuilds:
+  '@swc/core': true
+  core-js: false
+
+# Supply chain defence — release-age gating for pnpm.
+#
+# minimumReleaseAge is in minutes: 7200 = 5 days. It delays installing
+# newly published package versions, giving the community time to detect and
+# report malicious releases before they can reach this project.
+#
+# Natively enforced by pnpm >= 10.16 (which defaults it to 1440 = 1 day).
+# This project is on pnpm 10.12.4, where pnpm itself does not yet enforce it —
+# upgrade pnpm to >= 10.16 for enforcement. The supply-chain-defence hooks
+# read this value regardless of pnpm version.
+minimumReleaseAge: 3600
+
+# Security overrides. pnpm >= 10.16 reads `overrides` from HERE, not from the
+# package.json `pnpm` field (that field is ignored with a warning under pnpm
+# 11). These pin patched versions of transitive advisories in Docusaurus's
+# build deps (all build/dev-time only — none ship in the static site).
+# Versions are pinned exactly, and each predates the release-age cutoff so the
+# cooldown does not reject them.
+#   - serialize-javascript: GHSA-5c6j-r48x-rmvq (HIGH RCE) + GHSA-qj8w-gfj5-8c6v (moderate DoS)
+#   - uuid:                 GHSA-w5hq-g745-h8pq (moderate)
+#   - joi:                  GHSA-q7cg-457f-vx79 (moderate, recursive link() RangeError)
+#   - js-yaml:              GHSA-h67p-54hq-rp68 (moderate merge-key DoS) — patches the
+#                           4.x copy only; gray-matter's 3.x copy is handled below
+#   - launch-editor:        GHSA-v6wh-96g9-6wx3 (moderate, NTLMv2 hash disclosure on Windows)
+#   - tar:                  GHSA-vmf3-w455-68vh (moderate, PAX header smuggling)
+overrides:
+  "serialize-javascript@<7.0.5": "7.0.5"
+  "uuid@<11.1.1": "11.1.1"
+  "joi": "17.13.4"
+  "js-yaml@4.1.1": "4.2.0"
+  "launch-editor": "2.14.1"
+  "tar": "7.5.16"
+
+# Audit ignores — for advisories with no fix we can apply.
+#   GHSA-h67p-54hq-rp68 (js-yaml merge-key quadratic DoS): patched only in
+#   js-yaml >=4.1.2. The override above fixes the 4.x copy, but the remaining
+#   vulnerable copy is js-yaml 3.14.2, pulled by gray-matter@4.0.3 (the latest
+#   gray-matter), which calls js-yaml's 3.x-only safeLoad/safeDump and would
+#   crash on js-yaml 4.x. There is no patched 3.x release, so the version
+#   cannot be bumped. Risk here is nil: gray-matter parses only this repo's own
+#   trusted markdown front-matter at build time — no untrusted YAML is ever fed
+#   to it. Revisit if gray-matter publishes a js-yaml 4.x release.
+auditConfig:
+  ignoreGhsas:
+    - GHSA-h67p-54hq-rp68

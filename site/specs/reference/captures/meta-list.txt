@@ -1,0 +1,9 @@
+convert-marketplace — Guided conversion of a Claude Code marketplace into Tome's native plugin format. Drives `tome convert` and `tome lint` for the mechanical work, applies judgment to the parts Tome cannot represent, verifies the result, then reports to you and waits for explicit confirmation before registering anything in a workspace.  [1a57b1e8df28caf7]
+    claude-code/global: not-installed
+    claude-code/project: not-installed
+    codex/global: not-installed
+    codex/project: not-installed
+    cursor/global: not-installed
+    cursor/project: not-installed
+    opencode/global: not-installed
+    opencode/project: not-installed
