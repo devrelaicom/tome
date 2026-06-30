@@ -308,12 +308,16 @@ fn explain_core(
     stdin: &str,
     manifest: Option<&HookManifest>,
 ) -> Vec<String> {
+    // Scrub the Tome-owned event name up front; the invariant is unconditional —
+    // every value printed by --explain routes through the scrubber.
+    let event_cc_scrubbed = crate::catalog::git::scrub_to_string(event_cc.as_bytes());
+
     let Some(manifest) = manifest else {
         return vec!["[explain] no manifest found — dispatch would fail-open (allow)".to_string()];
     };
     let Some(entries) = manifest.events.get(event_cc) else {
         return vec![format!(
-            "[explain] no entries registered for event={event_cc} \
+            "[explain] no entries registered for event={event_cc_scrubbed} \
              — dispatch would fail-open (allow)"
         )];
     };
@@ -326,13 +330,22 @@ fn explain_core(
             wire, event_cc, harness, "", // workspace: not needed for the matcher/if filter
             false, &raw,
         ),
-        // Unknown harness: use the raw JSON as-is (best-effort explain).
-        None => raw,
+        // Unknown harness: dispatch would fail-open immediately (no wire = no hooks).
+        // Return the same fail-open message so explain and dispatch are consistent.
+        None => {
+            return vec![
+                "[explain] unknown harness — no hook support, dispatch would fail-open (allow)"
+                    .to_string(),
+            ];
+        }
     };
     let cc_tool = cc_base
         .get("tool_name")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+    // Scrub cc_tool immediately after extraction; it derives from harness-provided
+    // stdin (the tool_name field), not a Tome constant, so the invariant applies.
+    let cc_tool_scrubbed = crate::catalog::git::scrub_to_string(cc_tool.as_bytes());
     let tool_input_null = Value::Null;
     let tool_input = cc_base.get("tool_input").unwrap_or(&tool_input_null);
 
@@ -367,7 +380,7 @@ fn explain_core(
             .unwrap_or_else(|| "(none)".to_string());
 
         lines.push(format!(
-            "plugin={plugin_scrubbed} event={event_cc} \
+            "plugin={plugin_scrubbed} event={event_cc_scrubbed} \
              matcher={matcher_scrubbed} if={if_scrubbed} \
              kind={kind} -> would run"
         ));
@@ -375,7 +388,7 @@ fn explain_core(
 
     if !any_matched {
         lines.push(format!(
-            "[explain] no entries match for event={event_cc} tool={cc_tool} \
+            "[explain] no entries match for event={event_cc_scrubbed} tool={cc_tool_scrubbed} \
              — dispatch would be allow (no-op)"
         ));
     }
@@ -392,12 +405,14 @@ fn handler_kind(handler: &Handler) -> &'static str {
     }
 }
 
-/// Format one TOME_HOOK_DEBUG trace line for a handler's decision. All values
-/// are scrubbed through [`crate::catalog::git::scrub_credentials`] before
-/// inclusion. Never panics.
+/// Format one TOME_HOOK_DEBUG trace line for a handler's decision.
 ///
-/// The handler body (command text, URL, prompt text) is NOT included — only the
-/// handler kind. This function is `pub(super)` only for direct unit testing.
+/// Formats: `[TOME_HOOK_DEBUG] plugin=<p> kind=<k> decision=<allow|ask|deny> reason=<r>`.
+/// All values (plugin name, reason text) are scrubbed through
+/// [`crate::catalog::git::scrub_to_string`] before inclusion so no credential-like
+/// token leaks to stderr. The handler body (command text, URL, prompt text) is NOT
+/// included — only the handler kind. Returns a `String`; the caller emits it via
+/// `writeln!(stderr, ...)` (not `eprintln!`) so a stderr write failure never panics.
 fn debug_trace_line(plugin: &str, kind: &str, decision: &CcDecision) -> String {
     let label = if is_blocking(decision) {
         "deny"
@@ -476,6 +491,13 @@ fn dispatch_inner(
     let Some(entries) = manifest.events.get(event_cc) else {
         return fail_open_output(harness);
     };
+
+    // US10: read TOME_HOOK_DEBUG once before the loop (Fix 3 — perf: avoids a
+    // per-entry env read on the hot dispatch path; `unwrap_or_default()` is
+    // fail-open for non-UTF-8 env entries so a bad env never panics here).
+    let debug_enabled = !std::env::var("TOME_HOOK_DEBUG")
+        .unwrap_or_default()
+        .is_empty();
 
     // Filter by matcher, run each matching handler, and collect its CC decision
     // keyed by plugin provenance (for the merge's block-reason prefix).
@@ -583,22 +605,23 @@ fn dispatch_inner(
             }
         };
 
-        // US10: TOME_HOOK_DEBUG trace — observe-only, best-effort. When the env
-        // var is set (non-empty), log plugin + decision to stderr so an operator
-        // can see which hook produced which decision. A logging failure MUST NOT
-        // affect the decision (eprintln! is infallible in practice; ignore the
-        // compile-time Result via the trailing `;`). The handler body/url/prompt
-        // is NOT logged — only the kind. All values are scrubbed.
-        //
-        // The `unwrap_or_default()` is a deliberate fail-open: if the env lookup
-        // errors (e.g., non-UTF-8 env on some platforms), we skip the trace
-        // rather than panicking (panic=abort in the release binary).
-        if !std::env::var("TOME_HOOK_DEBUG")
-            .unwrap_or_default()
-            .is_empty()
-        {
+        // US10: TOME_HOOK_DEBUG trace — observe-only, best-effort. When
+        // `debug_enabled` (hoisted before the loop), log plugin + decision to
+        // stderr. `writeln!` to stderr is used instead of `eprintln!` BECAUSE
+        // `eprintln!` panics on a stderr write failure (e.g. EPIPE when stderr
+        // is a closed pipe). Under `panic = "abort"` in the release binary that
+        // panic aborts the dispatcher at exit 134, which Copilot's `preToolUse`
+        // wire treats as fail-CLOSED — a logging error must NEVER affect the
+        // dispatch decision. `let _ = writeln!(...)` discards the Result so a
+        // write failure is silently ignored. Handler body/url/prompt NOT logged —
+        // only kind. All values are scrubbed.
+        if debug_enabled {
             let kind = handler_kind(&entry.handler);
-            eprintln!("{}", debug_trace_line(&entry.plugin, kind, &decision));
+            let _ = writeln!(
+                std::io::stderr(),
+                "{}",
+                debug_trace_line(&entry.plugin, kind, &decision)
+            );
         }
 
         decisions.push((entry.plugin.clone(), decision));
