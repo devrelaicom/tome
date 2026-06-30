@@ -94,6 +94,7 @@ pub mod generic_op;
 pub mod goose;
 pub mod guardrails;
 pub mod hooks;
+pub mod hooks_ir;
 pub mod jetbrains_ai;
 pub mod junie;
 pub mod kiro;
