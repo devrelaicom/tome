@@ -113,7 +113,10 @@ fn compute(
     // malformed JSON / symlink refusal) → None → fail-open in `dispatch_inner`.
     let manifest = crate::harness::hooks_ir::read_manifest(&manifest_path).ok();
 
-    dispatch_core(&args.harness, &args.event, stdin, manifest.as_ref())
+    // Load the global config for the prompt handler (US6.2). Any error → defaults
+    // so a bad config never blocks the agent (fail-open).
+    let cfg = crate::config::load_or_default(paths);
+    dispatch_with_cfg(&args.harness, &args.event, stdin, manifest.as_ref(), &cfg)
 }
 
 /// Pure, total dispatch. NEVER returns an error — any Tome fault becomes a
@@ -146,13 +149,40 @@ pub fn dispatch_core(
     stdin: &str,
     manifest: Option<&HookManifest>,
 ) -> DispatchOutput {
+    // Use Config::default() → prompt handlers in the manifest fail-open (no
+    // provider configured). Tests that need real prompt dispatch should call
+    // `dispatch_with_cfg` directly with a configured `Config`.
+    dispatch_with_cfg(
+        harness,
+        event_cc,
+        stdin,
+        manifest,
+        &crate::config::Config::default(),
+    )
+}
+
+/// Like [`dispatch_core`] but with an explicit configuration.
+///
+/// Used by the production path ([`compute`]) with the on-disk config loaded from
+/// the user's `~/.tome/config.toml`, and by integration tests that exercise the
+/// prompt-handler dispatch path (US6.2) with a configured BYOM provider.
+///
+/// The `catch_unwind` and panic-freedom notes on [`dispatch_core`] apply equally
+/// here — see that function's doc-comment for the full safety rationale.
+pub fn dispatch_with_cfg(
+    harness: &str,
+    event_cc: &str,
+    stdin: &str,
+    manifest: Option<&HookManifest>,
+    cfg: &crate::config::Config,
+) -> DispatchOutput {
     let wire = match wire_for(harness) {
         Some(w) => w,
         // Unknown harness (no hook_support) → fail-open allow.
         None => return fail_open_output(harness),
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        dispatch_inner(harness, wire, event_cc, stdin, manifest)
+        dispatch_inner(harness, wire, event_cc, stdin, manifest, cfg)
     }));
     result.unwrap_or_else(|_| fail_open_output(harness))
 }
@@ -197,6 +227,7 @@ fn dispatch_inner(
     event_cc: &str,
     stdin: &str,
     manifest: Option<&HookManifest>,
+    cfg: &crate::config::Config,
 ) -> DispatchOutput {
     // No manifest (missing / unreadable / malformed) → fail-open allow.
     let Some(manifest) = manifest else {
@@ -249,8 +280,9 @@ fn dispatch_inner(
                     run_http_handler(url, headers, allowed_env_vars, &cc_stdin, entry.timeout_ms);
                 command_outcome_to_decision(&o)
             }
-            // US6: prompt handler not yet executed — non-blocking allow.
-            Handler::Prompt { .. } => CcDecision::default(),
+            // US6.2: execute the prompt handler via the configured BYOM provider.
+            // Fails open (CcDecision::default) on any Tome-side fault.
+            Handler::Prompt { prompt } => run_prompt_handler(prompt, &cc_stdin, cfg),
         };
         decisions.push((entry.plugin.clone(), decision));
     }
@@ -583,6 +615,96 @@ fn run_http_handler(
         // allow; a misbehaving or redirecting webhook must never block.
         allow()
     }
+}
+
+/// Execute a `Handler::Prompt` hook by sending the CC context to the configured
+/// BYOM provider and mapping its reply to a [`CcDecision`].
+///
+/// ## I/O contract (our internal protocol with the model)
+///
+/// * **System message**: the hook's `prompt` text (the plugin author's policy).
+/// * **User message**: the CC context JSON from stdin (the event payload).
+/// * **Expected reply**: `{"ok":true}` (allow) or `{"ok":false,"reason":"…"}` (deny).
+///
+/// The parse is lenient: any reply that is not `{"ok":false,...}` → allow.
+///
+/// ## Fail-open totality
+///
+/// Any Tome-side fault — config error, resolve error, provider transport error,
+/// unparsable model reply — degrades to a non-blocking allow (`CcDecision::default`).
+/// Tome NEVER blocks the agent due to its own fault, even in the prompt path.
+///
+/// ## BUNDLED-LOCAL path — DEFERRED
+///
+/// When `prompt_model` is set but `prompt_provider` is unset, `resolve` returns
+/// `Ok(None)` (bundled-only). This path is currently UNAVAILABLE (deferred to a
+/// future US): `run_inference` is private in `summarise/llama.rs` and wiring llama
+/// here is out of scope for US6. The handler fails open with a TODO comment.
+/// The manifest gate in `reconcile_one_harness_dispatch` still carries the handler
+/// (both `prompt_model` and `prompt_provider` absent → gate drops it; only
+/// `prompt_model` set, `prompt_provider` unset → gate allows it, runtime no-ops).
+fn run_prompt_handler(prompt: &str, cc_stdin: &str, cfg: &crate::config::Config) -> CcDecision {
+    use crate::config::ProviderKind;
+    use crate::provider::config::{Capability, resolve};
+    use crate::provider::{anthropic, gemini, openai};
+
+    let resolved = match resolve(cfg, Capability::HookPrompt) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            // No BYOM provider. Bundled-only path (prompt_model set, no
+            // prompt_provider) is DEFERRED.
+            // US-future: bundled-local prompt via llama (run_inference is private
+            //   in summarise/llama.rs). Treat as unavailable → fail-open.
+            return CcDecision::default();
+        }
+        // Config error (e.g. provider set but model missing) → fail-open.
+        Err(_) => return CcDecision::default(),
+    };
+
+    // Dispatch to the BYOM provider: system = policy prompt, user = event payload.
+    let reply = match resolved.kind {
+        ProviderKind::Openai => openai::chat(&resolved, Some(prompt), cc_stdin),
+        ProviderKind::Anthropic => anthropic::chat(&resolved, Some(prompt), cc_stdin),
+        ProviderKind::Gemini => gemini::chat(&resolved, Some(prompt), cc_stdin),
+        // voyage is rejected by resolve() for HookPrompt (allows_kind returns false);
+        // unreachable at runtime but required for exhaustiveness — fail-open.
+        ProviderKind::Voyage => return CcDecision::default(),
+    };
+
+    match reply {
+        Ok(text) => parse_prompt_reply(&text),
+        // Provider error (transport, timeout, bad status, …) → fail-open.
+        // Tome never blocks the agent because of a provider fault.
+        Err(_) => CcDecision::default(),
+    }
+}
+
+/// Parse the model's text reply into a [`CcDecision`]. Lenient and fail-open:
+/// only a well-formed `{"ok":false,...}` produces a Deny; anything else allows.
+///
+/// The internal contract with the model: `{"ok":false,"reason":"…"}` to deny,
+/// `{"ok":true}` (or any other JSON, or non-JSON) to allow. The reason field is
+/// optional; if absent the decision carries no reason string.
+fn parse_prompt_reply(text: &str) -> CcDecision {
+    let trimmed = text.trim();
+    // Try our internal JSON contract: `{"ok":false,"reason":"…"}`.
+    // Any other value for `ok` (true, missing, non-bool) → fail-open allow.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && v.get("ok").and_then(|o| o.as_bool()) == Some(false)
+    {
+        let reason = v
+            .get("reason")
+            .and_then(|r| r.as_str())
+            .map(|s| s.to_string());
+        return CcDecision {
+            permission: Some(Permission::Deny),
+            block: true,
+            reason,
+            ..Default::default()
+        };
+    }
+    // Non-JSON reply or ok≠false → fail-open allow.
+    CcDecision::default()
 }
 
 /// Poll `try_wait` until the child exits or the wall-clock `timeout` elapses.

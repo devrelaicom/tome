@@ -36,6 +36,10 @@ pub enum Capability {
     Summariser,
     Embedding,
     Reranker,
+    /// US6.2 — BYOM provider for `Handler::Prompt` hook execution. Reads its
+    /// `provider`/`model` from `[hooks] prompt_provider`/`prompt_model`.
+    /// Legal kinds: openai, anthropic, gemini (same matrix as Summariser).
+    HookPrompt,
 }
 
 impl Capability {
@@ -46,6 +50,7 @@ impl Capability {
             Capability::Summariser => "summariser",
             Capability::Embedding => "embedding",
             Capability::Reranker => "reranker",
+            Capability::HookPrompt => "hook_prompt",
         }
     }
 
@@ -54,7 +59,7 @@ impl Capability {
     /// reranker ∈ {voyage}.
     fn allows_kind(&self, kind: ProviderKind) -> bool {
         match self {
-            Capability::Summariser => matches!(
+            Capability::Summariser | Capability::HookPrompt => matches!(
                 kind,
                 ProviderKind::Openai | ProviderKind::Anthropic | ProviderKind::Gemini
             ),
@@ -269,6 +274,10 @@ pub fn resolve(
             config.reranker.provider.as_deref(),
             config.reranker.model.as_deref(),
         ),
+        Capability::HookPrompt => (
+            config.hooks.prompt_provider.as_deref(),
+            config.hooks.prompt_model.as_deref(),
+        ),
     };
 
     // No provider referenced → use the bundled local model (the default).
@@ -409,6 +418,10 @@ mod tests {
                 config.reranker.provider = ref_name.map(String::from);
                 config.reranker.model = model.map(String::from);
             }
+            Capability::HookPrompt => {
+                config.hooks.prompt_provider = ref_name.map(String::from);
+                config.hooks.prompt_model = model.map(String::from);
+            }
         }
         config
     }
@@ -432,6 +445,7 @@ mod tests {
             Capability::Summariser,
             Capability::Embedding,
             Capability::Reranker,
+            Capability::HookPrompt,
         ] {
             assert!(resolve(&config, cap).unwrap().is_none(), "{cap}");
         }
@@ -538,6 +552,9 @@ mod tests {
             (Capability::Embedding, ProviderKind::Openai),
             (Capability::Embedding, ProviderKind::Voyage),
             (Capability::Reranker, ProviderKind::Voyage),
+            (Capability::HookPrompt, ProviderKind::Openai),
+            (Capability::HookPrompt, ProviderKind::Anthropic),
+            (Capability::HookPrompt, ProviderKind::Gemini),
         ];
         for (cap, kind) in legal {
             let config = config_with("p", entry(kind, None, None), cap, Some("p"), Some("model"));

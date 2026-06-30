@@ -1315,6 +1315,11 @@ fn probe_capability(cfg: &Config, paths: &Paths, capability: Capability) -> Resu
             }
             Ok(())
         }
+        // US6.2 — HookPrompt is a runtime chat capability for the hook dispatcher;
+        // the doctor probe for chat capabilities is not yet implemented (US11).
+        // The doctor's capability string parser ("summariser"/"embedding"/"reranker")
+        // never produces this variant, so this arm is structural exhaustiveness only.
+        Capability::HookPrompt => Ok(()),
     }
 }
 

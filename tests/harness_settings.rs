@@ -75,6 +75,8 @@ mod hook_dispatch_failopen;
 mod hook_dispatch_http;
 #[path = "harness_settings/hook_dispatch_opt_out.rs"]
 mod hook_dispatch_opt_out;
+#[path = "harness_settings/hook_dispatch_prompt.rs"]
+mod hook_dispatch_prompt;
 #[path = "harness_settings/hook_dispatch_register.rs"]
 mod hook_dispatch_register;
 #[path = "harness_settings/hooks_merge.rs"]
