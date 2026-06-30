@@ -469,12 +469,13 @@ fn cc_json_to_decision(v: &Value) -> CcDecision {
 /// Merge the per-plugin decisions into one. Most-restrictive permission wins
 /// (Deny > Ask > Allow > None); `block` is the OR; `additional_context` is the
 /// in-order concat; `updated_input` is last-wins. The block reason is the FIRST
-/// blocking entry's reason (provenance-prefixed in US4.4).
+/// blocking entry's reason, prefixed with that plugin's provenance
+/// `[<plugin>] ` so the agent can see which hook denied.
 fn merge_decisions(plugin_keyed: &[(String, CcDecision)]) -> CcDecision {
     let mut merged = CcDecision::default();
     let mut best_rank = 0u8;
     let mut reason_set = false;
-    for (_plugin, d) in plugin_keyed {
+    for (plugin, d) in plugin_keyed {
         // Most-restrictive permission wins (Deny > Ask > Allow > None).
         let rank = d.permission.map_or(0, Permission::rank);
         if rank > best_rank {
@@ -482,8 +483,10 @@ fn merge_decisions(plugin_keyed: &[(String, CcDecision)]) -> CcDecision {
             merged.permission = d.permission;
         }
         merged.block |= d.block;
+        // First blocking entry's reason, provenance-prefixed.
         if !reason_set && is_blocking(d) && d.reason.is_some() {
-            merged.reason = d.reason.clone();
+            let reason = d.reason.as_deref().unwrap_or_default();
+            merged.reason = Some(format!("[{plugin}] {reason}"));
             reason_set = true;
         }
         merged
@@ -738,6 +741,58 @@ mod tests {
         }));
         assert_eq!(deferred.permission, None);
         assert!(!is_blocking(&deferred));
+    }
+
+    /// The merge is most-restrictive-wins, concatenates `additional_context` in
+    /// manifest order, and prefixes the block reason with the denying plugin's
+    /// provenance `[<plugin>] `.
+    #[test]
+    fn merge_is_most_restrictive_with_concat_and_provenance() {
+        let a = (
+            "cat:allow".to_string(),
+            CcDecision {
+                permission: Some(Permission::Allow),
+                additional_context: vec!["ctxA".to_string()],
+                ..Default::default()
+            },
+        );
+        let b = (
+            "cat:deny".to_string(),
+            CcDecision {
+                permission: Some(Permission::Deny),
+                reason: Some("blocked".to_string()),
+                additional_context: vec!["ctxB".to_string()],
+                ..Default::default()
+            },
+        );
+        let m = merge_decisions(&[a, b]);
+        assert_eq!(m.permission, Some(Permission::Deny)); // deny > allow
+        assert_eq!(
+            m.additional_context,
+            vec!["ctxA".to_string(), "ctxB".to_string()] // concat in order
+        );
+        assert_eq!(m.reason.as_deref(), Some("[cat:deny] blocked")); // provenance prefix
+    }
+
+    /// `updated_input` is last-wins across the merged entries.
+    #[test]
+    fn merge_updated_input_is_last_wins() {
+        let a = (
+            "cat:a".to_string(),
+            CcDecision {
+                updated_input: Some(serde_json::json!({"v": 1})),
+                ..Default::default()
+            },
+        );
+        let b = (
+            "cat:b".to_string(),
+            CcDecision {
+                updated_input: Some(serde_json::json!({"v": 2})),
+                ..Default::default()
+            },
+        );
+        let m = merge_decisions(&[a, b]);
+        assert_eq!(m.updated_input, Some(serde_json::json!({"v": 2})));
     }
 
     /// A timed-out command is killed and degrades to a non-blocking allow
