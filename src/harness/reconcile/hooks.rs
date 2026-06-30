@@ -1267,9 +1267,16 @@ fn resolve_enabled_canonical_hooks(
         let plugin_data = deps.paths.plugin_data_dir_for(catalog, plugin);
         match crate::harness::hooks::read_rewritten_entries(&plugin_root, &plugin_data) {
             Ok(Some(rewritten)) => {
-                out.extend(parse_canonical_hooks(
-                    catalog, plugin, &rewritten, &mut drops,
-                ));
+                // Fix 1 (US8 review): bake the DB-resolved plugin_root into every
+                // hook at this site (the only place it is available). `to_string_lossy`
+                // handles non-UTF-8 paths safely — this is a provenance field, not
+                // an executed command, so U+FFFD replacement is acceptable.
+                let root_str = plugin_root.to_string_lossy().into_owned();
+                let mut hooks = parse_canonical_hooks(catalog, plugin, &rewritten, &mut drops);
+                for h in &mut hooks {
+                    h.plugin_root = root_str.clone();
+                }
+                out.extend(hooks);
             }
             Ok(None) => {}
             Err(e) => {
@@ -1513,6 +1520,14 @@ fn reconcile_dispatch_manifest(
                 .or_default()
                 .push(ManifestEntry {
                     plugin: format!("{}:{}", hook.catalog, hook.plugin),
+                    // Fix 1 (US8 review): bake the resolved install root into the
+                    // manifest so the hot-path dispatcher reads it directly and
+                    // never re-derives it from the plugin-data path.
+                    plugin_root: if hook.plugin_root.is_empty() {
+                        None
+                    } else {
+                        Some(hook.plugin_root.clone())
+                    },
                     matcher: hook.matcher.clone(),
                     if_pred: hook.if_pred.clone(),
                     handler: hook.handler.clone(),

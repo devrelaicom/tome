@@ -328,24 +328,20 @@ fn dispatch_inner(
             .split_once(':')
             .unwrap_or(("", entry.plugin.as_str()));
 
-        // Compute plugin_data and plugin_root from paths when available.
-        // Without paths (legacy callers), both are empty strings — fail-open.
-        let (plugin_data_str, plugin_root_str) = match paths {
-            Some(p) => {
-                let data_path = p.plugin_data_dir_for(catalog, plugin_name);
-                // plugin_root = parent of the plugin's data dir
-                // = <root>/plugin-data/<catalog>/ (the catalog-level directory).
-                let root_path = data_path
-                    .parent()
-                    .map(|r| r.to_path_buf())
-                    .unwrap_or_else(|| p.plugin_data_root());
-                (
-                    data_path.to_string_lossy().into_owned(),
-                    root_path.to_string_lossy().into_owned(),
-                )
-            }
-            None => (String::new(), String::new()),
+        // Compute plugin_data from paths when available; fall back to empty
+        // string for legacy callers that pass None (fail-open).
+        let plugin_data_str = match paths {
+            Some(p) => p
+                .plugin_data_dir_for(catalog, plugin_name)
+                .to_string_lossy()
+                .into_owned(),
+            None => String::new(),
         };
+        // Fix 1 (US8 review): plugin_root is baked into the manifest at sync
+        // time by the reconciler (which has DB access). The hot-path dispatcher
+        // reads it directly — no DB, no path manipulation. Defensive empty-string
+        // fallback for manifests written before this field was introduced.
+        let plugin_root_str = entry.plugin_root.as_deref().unwrap_or("").to_owned();
 
         // Build the per-entry cc_stdin: clone the base value and inject the
         // per-entry tome fields (plugin, catalog, plugin_root, plugin_data).
@@ -1591,6 +1587,7 @@ mod tests {
     fn command_entry(matcher: &str, command: &str) -> ManifestEntry {
         ManifestEntry {
             plugin: "cat:test".to_string(),
+            plugin_root: None,
             matcher: Some(matcher.to_string()),
             if_pred: None,
             handler: Handler::Command {
@@ -2252,6 +2249,7 @@ mod tests {
         // TomeProvenance values.
         let entry_a = ManifestEntry {
             plugin: "catA:plugA".to_string(),
+            plugin_root: None,
             matcher: None,
             if_pred: None,
             handler: Handler::Command {
@@ -2305,6 +2303,7 @@ mod tests {
         // Echo all six TOME_* vars separated by commas.
         let entry = ManifestEntry {
             plugin: "mycat:myplugin".to_string(),
+            plugin_root: None,
             matcher: None,
             if_pred: None,
             handler: Handler::Command {
@@ -2391,6 +2390,48 @@ mod tests {
         assert!(
             !out_on.stdout.contains("\"permission\":\"deny\""),
             "passthrough-on must not block"
+        );
+    }
+
+    /// Fix 1 (US8 review): plugin_root is read from the manifest entry, not
+    /// re-derived from the plugin_data path. An entry with a plugin_root that
+    /// would differ from `.parent()` of plugin_data must see the manifest value.
+    #[test]
+    fn plugin_root_comes_from_manifest_not_rederived() {
+        use crate::harness::hooks_ir::{Handler, ManifestEntry};
+        use std::collections::BTreeMap;
+
+        // entry.plugin_root = a known path distinct from what .parent() of
+        // plugin_data would give ("/some/data/root/cat" ≠ "/real/install/root").
+        // The command echoes $TOME_PLUGIN_ROOT to stdout.
+        let entry = ManifestEntry {
+            plugin: "cat:plug".to_string(),
+            plugin_root: Some("/real/install/root".to_owned()),
+            matcher: None,
+            if_pred: None,
+            handler: Handler::Command {
+                command: r#"printf '%s' "$TOME_PLUGIN_ROOT""#.to_string(),
+            },
+            timeout_ms: Some(5_000),
+            cwd: None,
+            env: BTreeMap::new(),
+        };
+        // The dispatcher builds TomeProvenance from entry.plugin_root (after Fix 1).
+        let prov = TomeProvenance {
+            harness: "gemini",
+            workspace: "ws",
+            plugin: "cat:plug",
+            catalog: "cat",
+            plugin_root: entry.plugin_root.as_deref().unwrap_or(""),
+            plugin_data: "/some/data/root/cat/plug",
+        };
+        let outcome = run_command_handler(&entry, "{}", &prov);
+        assert_eq!(outcome.exit, 0);
+        assert_eq!(
+            outcome.stdout.trim(),
+            "/real/install/root",
+            "TOME_PLUGIN_ROOT must equal the manifest-baked plugin_root, \
+             not .parent() of plugin_data (\"/some/data/root/cat\")"
         );
     }
 }

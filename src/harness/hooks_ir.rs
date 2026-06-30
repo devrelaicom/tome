@@ -94,6 +94,12 @@ pub struct CanonicalHook {
     pub handler: Handler,
     /// CC seconds. Harness-specific unit conversion happens at manifest write.
     pub timeout_secs: Option<u64>,
+    /// The DB-resolved install root of the plugin (the directory containing
+    /// `hooks/hooks.json` and `${CLAUDE_PLUGIN_ROOT}`). Baked at sync time by
+    /// `resolve_enabled_canonical_hooks` so the hot-path dispatcher never touches
+    /// the DB. An empty string means the root was unavailable (defensive only —
+    /// every enabled plugin has a root).
+    pub plugin_root: String,
 }
 
 /// The resolved, per-(workspace, harness) dispatch manifest the runtime
@@ -119,6 +125,13 @@ pub struct HookManifest {
 pub(crate) struct ManifestEntry {
     /// `<catalog>:<plugin>` provenance (block-reason prefix + debug).
     pub(crate) plugin: String,
+    /// The DB-resolved install root for the plugin — the directory containing
+    /// `hooks/hooks.json`, i.e. `${CLAUDE_PLUGIN_ROOT}`. Baked at sync time by
+    /// the reconciler (Fix 1, US8 review) so the hot-path dispatcher reads it
+    /// directly and never touches the DB. Absent in manifests written before this
+    /// field was introduced (defaults to `None` → empty string in the dispatcher).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) plugin_root: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) matcher: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "if")]
@@ -263,6 +276,9 @@ pub(crate) fn parse_canonical_hooks(
                     if_pred: if_pred.clone(),
                     handler,
                     timeout_secs,
+                    // plugin_root is set by the caller after parse — it requires
+                    // the DB-resolved path which this function doesn't have access to.
+                    plugin_root: String::new(),
                 });
             }
         }
@@ -587,6 +603,7 @@ mod tests {
                 vec![
                     ManifestEntry {
                         plugin: "cat:plug".into(),
+                        plugin_root: Some("/opt/catalog/plugin".into()),
                         matcher: Some("Bash".into()),
                         if_pred: None,
                         handler: Handler::Command {
@@ -599,8 +616,10 @@ mod tests {
                     // Second entry: Http handler with if_pred, exercising
                     // the rename="if" serialisation and the
                     // skip_serializing_if guards on headers/allowed_env_vars.
+                    // plugin_root=None verifies skip_serializing_if elides the field.
                     ManifestEntry {
                         plugin: "cat:plug2".into(),
+                        plugin_root: None,
                         matcher: None,
                         if_pred: Some("Bash(git push *)".into()),
                         handler: Handler::Http {

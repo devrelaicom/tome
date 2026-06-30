@@ -170,11 +170,30 @@ fn codex_run_hook_registration_and_manifest_pins() {
 
     // ----- (b) the resolved manifest -----
     let manifest_path = fx.paths.hooks_manifest(&fx.workspace, "codex");
+    // `plugin_root` (Fix 1, US8 review) is a temp-dir-derived path and cannot be
+    // byte-pinned. Extract and verify it separately, then compare the remainder
+    // against the byte-stable MANIFEST constant.
+    let manifest_text = read(&manifest_path);
+    let mut manifest_val: serde_json::Value =
+        serde_json::from_str(&manifest_text).expect("manifest is valid JSON");
+    let got_root = manifest_val["events"]["PreToolUse"][0]
+        .as_object_mut()
+        .expect("entry is an object")
+        .shift_remove("plugin_root")
+        .and_then(|v| v.as_str().map(|s| s.to_owned()))
+        .expect("plugin_root must be present in the manifest entry");
+    let expected_root = fx
+        .paths
+        .cache_dir_for("https://example.test/plugin-a.git")
+        .join("plugin-a")
+        .to_string_lossy()
+        .into_owned();
     assert_eq!(
-        read(&manifest_path),
-        MANIFEST,
-        "manifest bytes drifted for codex"
+        got_root, expected_root,
+        "plugin_root must be the plugin install root, not the catalog data dir (Fix 1)"
     );
+    let got_rest = serde_json::to_string_pretty(&manifest_val).unwrap() + "\n";
+    assert_eq!(got_rest, MANIFEST, "manifest bytes drifted for codex");
 }
 
 impl Fixture {
