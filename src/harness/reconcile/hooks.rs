@@ -26,7 +26,7 @@
 //! enabled plugins". This is the single biggest behaviour-preservation risk of
 //! the decomposition and is carried into this module verbatim.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -34,9 +34,13 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use tempfile::NamedTempFile;
 
 use crate::error::TomeError;
+use crate::harness::hooks_ir::{
+    CanonicalHook, HookManifest, ManifestEntry, PortableEvent, parse_canonical_hooks,
+    read_manifest, write_manifest,
+};
 use crate::harness::reconcile::record_action;
 use crate::harness::sync::{Action, HarnessSnapshot, SyncDeps, SyncOutcome, SyncSubsystem};
-use crate::harness::{HookEvent, HookFileSpec, SessionSteering};
+use crate::harness::{HookEvent, HookFileSpec, HookSupport, SessionSteering};
 
 // =====================================================================
 // Real-hooks reconciliation (Phase 6 / US2)
@@ -568,8 +572,6 @@ fn tome_hook_entry(spec: HookFileSpec, command: &str) -> JsonValue {
 /// (e.g. gemini's `BeforeTool`) the file-key is native but the command names
 /// the CC event. Mirrors the bare-`"tome"` convention used by the MCP + session
 /// hooks; the trailing `--harness <name>` selects this harness's wire dialect.
-// US3.2 wires the call site (the dispatch reconciler); allowed dead until then.
-#[allow(dead_code)]
 fn run_hook_command(harness: &str, event_cc: &str, workspace: &str) -> String {
     format!("tome harness run-hook --event {event_cc} --harness {harness} --workspace {workspace}")
 }
@@ -584,8 +586,6 @@ fn run_hook_command(harness: &str, event_cc: &str, workspace: &str) -> String {
 /// Match-all per wire: Devin/Codex use `"matcher": ""`; Cursor/Copilot omit the
 /// matcher key (= all); Gemini wraps a named handler under `hooks` (the name
 /// `tome-hook-dispatch` keeps it distinct from session-steering's `tome`).
-// Used by the US3.1 test now; US3.2 wires the production call site.
-#[allow(dead_code)]
 fn tome_run_hook_entry(spec: HookFileSpec, command: &str) -> JsonValue {
     match spec {
         HookFileSpec::DevinHooksV1 | HookFileSpec::CodexHooks => serde_json::json!({
@@ -709,7 +709,6 @@ fn entry_array_opt(
 /// for the five `hook_support()` specs (US3). Devin nests at the document root;
 /// Codex/Cursor/Copilot/Gemini nest under `"hooks"`. The two non-hook-support
 /// specs are unreachable for a registering harness and fail closed (exit 43).
-#[allow(dead_code)]
 fn run_hook_container_key(
     spec: HookFileSpec,
     path: &Path,
@@ -736,7 +735,6 @@ fn run_hook_container_key(
 /// for `CodexHooks` (nests under `"hooks"`). Stamps the required top-level
 /// `version: 1` for Copilot/Cursor (never overwriting a developer value). Fails
 /// closed (exit 43) on a wrong-typed slot — never coerces a developer's value.
-#[allow(dead_code)]
 fn entry_array_by_key<'a>(
     doc: &'a mut JsonValue,
     spec: HookFileSpec,
@@ -780,7 +778,6 @@ fn entry_array_by_key<'a>(
 /// Read-only sibling of [`entry_array_opt`] keyed by the native event-name
 /// STRING (US3 remove path); `None` when any container/array on the path is
 /// absent or wrong-typed (nothing to remove).
-#[allow(dead_code)]
 fn entry_array_opt_by_key<'a>(
     doc: &'a mut JsonValue,
     spec: HookFileSpec,
@@ -800,7 +797,6 @@ fn entry_array_opt_by_key<'a>(
 /// dropped when empty: for codex the session hook
 /// ([`reconcile_tome_session_hooks`]) co-owns `"hooks"`, and for the other specs
 /// a developer may own sibling keys — an empty `"hooks": {}` is harmless.
-#[allow(dead_code)]
 fn prune_empty_by_key(doc: &mut JsonValue, spec: HookFileSpec, event_key: &str) {
     let Some(root) = doc.as_object_mut() else {
         return;
@@ -1106,6 +1102,400 @@ fn prune_empty(doc: &mut JsonValue, spec: HookFileSpec, event: HookEvent) {
             }
         }
     }
+}
+
+// =====================================================================
+// US3 — plugin-hook dispatch registration + manifest write (sync-time).
+//
+// For every in-scope harness that declares a `hook_support()` capability,
+// register a Tome-owned MATCH-ALL `run-hook` dispatcher entry into the harness's
+// native hook file (one per USED event — an event ≥1 enabled plugin's hook
+// targets) AND write the resolved per-(workspace, harness) `hooks-manifest.json`
+// the runtime dispatcher reads. A non-live harness has its run-hook entries
+// removed (structural-equal) + its manifest deleted.
+//
+// Ownership is structural deep-equal (no sidecar), mirroring the session-steering
+// `reconcile_command_hooks` above: the `run-hook` entry is a SEPARATE leaf from
+// the session-start entry (a `BeforeTool`/`preToolUse`/… event key vs
+// `SessionStart`), so the two compose additively and neither clobbers the other.
+//
+// The enabled-plugin enumeration follows `reconcile_hooks`' mass-delete
+// safeguard: a genuinely ABSENT central DB means "no enabled plugins", but an
+// EXISTING-yet-unopenable DB PROPAGATES its error (collapsing it to empty would
+// strip every live harness's manifest + registered entries).
+// =====================================================================
+
+/// Reconcile Tome's plugin-hook DISPATCH registration for every harness that
+/// declares a [`HookSupport`] (US3.2). Returns the per-harness aggregate action
+/// map (keyed on `name()`) plus the first error (forward progress).
+///
+/// Wired into the orchestrator AFTER `reconcile_command_hooks` so it shares the
+/// `hooks_action` decision field and reuses the hook error classes (exit 43
+/// parse / 44 write).
+//
+// US6.1: add a `cfg: &Config` opt-out gate (`translate_plugin_hooks`, default
+// true) here. US3 is unconditionally on (translation always runs); the enabled
+// set comes from the central DB via `deps`, never from config.
+pub(crate) fn reconcile_plugin_hook_dispatch(
+    deps: &SyncDeps<'_>,
+    effective_names: &HashSet<String>,
+    snapshots: &[HarnessSnapshot],
+    project_root: &Path,
+    outcome: &mut SyncOutcome,
+) -> (std::collections::HashMap<String, Action>, Option<TomeError>) {
+    let mut actions = std::collections::HashMap::new();
+    let mut first_error: Option<TomeError> = None;
+
+    // Fast exit: no in-scope harness declares hook support → no work. With every
+    // GuardrailsOnly harness this keeps the orchestrator output byte-identical.
+    if !snapshots.iter().any(|s| s.hook_support.is_some()) {
+        return (actions, first_error);
+    }
+
+    // Resolve the enabled plugins' canonical hooks ONCE, shared across harnesses.
+    // A hard DB-open error PROPAGATES (mass-delete guard); a per-plugin parse
+    // failure is recorded on `first_error` (forward progress) and that plugin is
+    // skipped.
+    let canonical = match resolve_enabled_canonical_hooks(deps, &mut first_error) {
+        Ok(c) => c,
+        Err(e) => return (actions, Some(e)),
+    };
+
+    for snap in snapshots {
+        let Some(support) = &snap.hook_support else {
+            continue;
+        };
+        let is_live = effective_names.contains(&snap.name);
+        let action = reconcile_one_harness_dispatch(
+            deps,
+            project_root,
+            snap,
+            support,
+            &canonical,
+            is_live,
+            outcome,
+            &mut first_error,
+        );
+        actions.insert(snap.name.clone(), action);
+    }
+
+    (actions, first_error)
+}
+
+/// Resolve every enabled plugin's typed [`CanonicalHook`]s for the bound
+/// workspace, reading the central DB READ-ONLY (US3.2).
+///
+/// Mass-delete safeguard (mirrors [`reconcile_hooks`]): a genuinely ABSENT DB is
+/// `Ok(empty)`; an EXISTING-yet-unopenable DB PROPAGATES via `Err` (the caller
+/// aborts the pass — collapsing to empty would mass-delete live manifests). A
+/// per-plugin malformed `hooks.json` (exit 43) is recorded on `first_error`
+/// (forward progress) and the plugin is skipped; a plugin whose root can't be
+/// resolved (catalog cache evicted) is likewise skipped.
+fn resolve_enabled_canonical_hooks(
+    deps: &SyncDeps<'_>,
+    first_error: &mut Option<TomeError>,
+) -> Result<Vec<CanonicalHook>, TomeError> {
+    if !deps.paths.index_db.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = crate::index::open_read_only(&deps.paths.index_db)?;
+    let workspace = deps.workspace_name.as_str();
+    let enabled = crate::index::skills::enabled_plugins_for_workspace(&conn, workspace)?;
+
+    let mut out = Vec::new();
+    // Collected for the US11 doctor surfacing; US3 needs them collected, not
+    // rendered (a non-portable event / unsupported handler keeps its GUARDRAILS
+    // floor).
+    let mut drops = Vec::new();
+    for (catalog, plugin) in &enabled {
+        let plugin_root = match crate::index::skills::plugin_root_dir(
+            &conn, deps.paths, workspace, catalog, plugin,
+        ) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let plugin_data = deps.paths.plugin_data_dir_for(catalog, plugin);
+        match crate::harness::hooks::read_rewritten_entries(&plugin_root, &plugin_data) {
+            Ok(Some(rewritten)) => {
+                out.extend(parse_canonical_hooks(
+                    catalog, plugin, &rewritten, &mut drops,
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                // Forward progress: record once, skip this plugin, keep going.
+                if first_error.is_none() {
+                    *first_error = Some(e);
+                }
+            }
+        }
+    }
+    let _ = drops;
+    Ok(out)
+}
+
+/// Reconcile the run-hook registration + manifest for ONE harness (US3.2).
+#[allow(clippy::too_many_arguments)]
+fn reconcile_one_harness_dispatch(
+    deps: &SyncDeps<'_>,
+    project_root: &Path,
+    snap: &HarnessSnapshot,
+    support: &HookSupport,
+    canonical: &[CanonicalHook],
+    is_live: bool,
+    outcome: &mut SyncOutcome,
+    first_error: &mut Option<TomeError>,
+) -> Action {
+    let workspace = deps.workspace_name.as_str();
+    let manifest_path = deps.paths.hooks_manifest(deps.workspace_name, &snap.name);
+    let Some(hook_path) = hook_file_path(support.file_spec, project_root) else {
+        // Only `ClaudeSettingsLocal` returns `None`, and no `hook_support()`
+        // harness uses it — skip defensively.
+        return Action::LeftAlone;
+    };
+
+    // The USED events: events in this harness's support set that ≥1 enabled
+    // canonical hook targets. For a non-live harness the desired set is empty
+    // (every Tome run-hook entry is removed + the manifest deleted).
+    let used: Vec<PortableEvent> = if is_live {
+        support
+            .events
+            .iter()
+            .copied()
+            .filter(|ev| canonical.iter().any(|h| h.event == *ev))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let hook_action = reconcile_dispatch_hook_file(
+        &snap.name,
+        &hook_path,
+        support,
+        &snap.hook_event_names,
+        workspace,
+        &used,
+        outcome,
+        first_error,
+    );
+    let manifest_action = reconcile_dispatch_manifest(
+        &snap.name,
+        &manifest_path,
+        canonical,
+        &used,
+        is_live,
+        outcome,
+        first_error,
+    );
+    stronger(hook_action, manifest_action)
+}
+
+/// Merge / prune Tome's per-event `run-hook` registration entries in the
+/// harness's native hook file. Ensure-PRESENT for each used event; ensure-ABSENT
+/// for each supported-but-unused event (pruning a previously-registered event).
+/// Structural deep-equal append/removal — developer hooks are preserved.
+#[allow(clippy::too_many_arguments)]
+fn reconcile_dispatch_hook_file(
+    name: &str,
+    path: &Path,
+    support: &HookSupport,
+    event_names: &[(PortableEvent, &'static str)],
+    workspace: &str,
+    used: &[PortableEvent],
+    outcome: &mut SyncOutcome,
+    first_error: &mut Option<TomeError>,
+) -> Action {
+    // Refuse a symlinked component up front (PW6 exit-44 parity with the Claude /
+    // command-hook sinks).
+    if let Err(e) =
+        crate::util::refuse_symlinked_component(path).map_err(|e| hook_symlink_refusal(path, e))
+    {
+        if first_error.is_none() {
+            *first_error = Some(e);
+        }
+        return Action::LeftAlone;
+    }
+    let (mut doc, existed) = match load_hook_file(path) {
+        Ok(v) => v,
+        Err(e) => {
+            if first_error.is_none() {
+                *first_error = Some(e);
+            }
+            return Action::LeftAlone;
+        }
+    };
+
+    let mut added_any = false;
+    let mut removed_any = false;
+    for &event in support.events {
+        let Some(native) = event_names
+            .iter()
+            .find(|(e, _)| *e == event)
+            .map(|(_, n)| *n)
+        else {
+            continue;
+        };
+        let command = run_hook_command(name, event.cc_name(), workspace);
+        let entry = tome_run_hook_entry(support.file_spec, &command);
+        if used.contains(&event) {
+            let arr = match entry_array_by_key(&mut doc, support.file_spec, native, path) {
+                Ok(a) => a,
+                Err(e) => {
+                    if first_error.is_none() {
+                        *first_error = Some(e);
+                    }
+                    return Action::LeftAlone;
+                }
+            };
+            if !arr.contains(&entry) {
+                arr.push(entry);
+                added_any = true;
+            }
+        } else {
+            // Ensure-absent: strip a stale Tome entry (structural-equal), then
+            // prune the now-empty event array. Scoped so the `arr` borrow ends
+            // before the prune re-borrows `doc`.
+            let removed_this =
+                if let Some(arr) = entry_array_opt_by_key(&mut doc, support.file_spec, native) {
+                    let before = arr.len();
+                    arr.retain(|existing| *existing != entry);
+                    before != arr.len()
+                } else {
+                    false
+                };
+            if removed_this {
+                removed_any = true;
+                prune_empty_by_key(&mut doc, support.file_spec, native);
+            }
+        }
+    }
+
+    if !added_any && !removed_any {
+        return Action::LeftAlone;
+    }
+    if let Err(e) = write_hook_file(path, &doc) {
+        if first_error.is_none() {
+            *first_error = Some(e);
+        }
+        return Action::LeftAlone;
+    }
+    let action = if !existed {
+        Action::Created
+    } else if added_any {
+        Action::Updated
+    } else {
+        Action::Removed
+    };
+    record_action(outcome, name, SyncSubsystem::Hooks, path, action);
+    action
+}
+
+/// Build + write (or remove) the resolved per-(workspace, harness) dispatch
+/// manifest. Keyed by the CC event name; per-plugin matcher / `if` carried
+/// verbatim; `timeout_ms` = CC-seconds × 1000 (the dispatcher always reads ms,
+/// regardless of the harness's registration `timeout_unit`). An empty desired
+/// set (non-live, or no enabled hook targets a supported event) removes a stale
+/// manifest. Idempotent: a byte-equal manifest is left untouched.
+fn reconcile_dispatch_manifest(
+    name: &str,
+    path: &Path,
+    canonical: &[CanonicalHook],
+    used: &[PortableEvent],
+    is_live: bool,
+    outcome: &mut SyncOutcome,
+    first_error: &mut Option<TomeError>,
+) -> Action {
+    let mut events: BTreeMap<String, Vec<ManifestEntry>> = BTreeMap::new();
+    if is_live {
+        for hook in canonical {
+            if !used.contains(&hook.event) {
+                continue;
+            }
+            events
+                .entry(hook.event.cc_name().to_string())
+                .or_default()
+                .push(ManifestEntry {
+                    plugin: format!("{}:{}", hook.catalog, hook.plugin),
+                    matcher: hook.matcher.clone(),
+                    if_pred: hook.if_pred.clone(),
+                    handler: hook.handler.clone(),
+                    // Manifest timeout is ALWAYS ms = CC-seconds × 1000; the
+                    // harness's `timeout_unit` only governs per-plugin timeouts
+                    // written INTO a harness hook file, which the match-all
+                    // run-hook registration never carries.
+                    timeout_ms: hook.timeout_secs.map(|s| s.saturating_mul(1000)),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                });
+        }
+    }
+
+    let manifest_existed = path.exists();
+
+    if events.is_empty() {
+        // No dispatch needed → remove a stale manifest if present.
+        if !manifest_existed {
+            return Action::LeftAlone;
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => {
+                record_action(outcome, name, SyncSubsystem::Hooks, path, Action::Removed);
+                Action::Removed
+            }
+            Err(e) => {
+                if first_error.is_none() {
+                    *first_error = Some(TomeError::HookSettingsWriteFailed {
+                        path: path.to_path_buf(),
+                        source: e,
+                    });
+                }
+                Action::LeftAlone
+            }
+        }
+    } else {
+        let manifest = HookManifest {
+            harness: name.to_string(),
+            raw_event_passthrough: false,
+            events,
+        };
+        // Idempotent: only write when the on-disk manifest differs (a malformed /
+        // unreadable Tome-owned manifest is healed by overwriting).
+        let need_write = if manifest_existed {
+            !read_manifest(path).is_ok_and(|existing| existing == manifest)
+        } else {
+            true
+        };
+        if !need_write {
+            return Action::LeftAlone;
+        }
+        if let Err(e) = write_manifest(path, &manifest) {
+            if first_error.is_none() {
+                *first_error = Some(e);
+            }
+            return Action::LeftAlone;
+        }
+        let action = if manifest_existed {
+            Action::Updated
+        } else {
+            Action::Created
+        };
+        record_action(outcome, name, SyncSubsystem::Hooks, path, action);
+        action
+    }
+}
+
+/// The "stronger" of two aggregate sink actions for the composed
+/// `hooks_action`: `Created` > `Updated` > `Removed` > `LeftAlone`.
+fn stronger(a: Action, b: Action) -> Action {
+    fn rank(x: Action) -> u8 {
+        match x {
+            Action::Created => 3,
+            Action::Updated => 2,
+            Action::Removed => 1,
+            Action::LeftAlone => 0,
+        }
+    }
+    if rank(a) >= rank(b) { a } else { b }
 }
 
 #[cfg(test)]
