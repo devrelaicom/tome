@@ -33,6 +33,16 @@
 //!   (lowercase alphanumeric / hyphen / period, start+end alphanumeric) — reusing
 //!   the [`crate::plugin::identity`] validators.
 //!
+//! ## Launcher resolution (#290)
+//!
+//! The bundle's `.mcp.json` server command and SessionStart hook command are run
+//! by the *host* (a CI runner / sandboxed non-IDE agent), whose `PATH` need not
+//! contain `tome`. So both are emitted as an absolute launcher resolved by
+//! [`tome_command`] (`$TOME_BIN` → `current_exe` → bare `"tome"` fallback), never
+//! a bare-PATH name. Bundle ownership is by the `.plugin/plugin.json` `name`
+//! field (see [`is_tome_op_bundle`]), NOT the command string, so the launcher is
+//! free to vary per machine without affecting recognition / removal.
+//!
 //! ## JSON byte convention
 //!
 //! All JSON is rendered with `serde_json::to_vec_pretty` + a trailing newline —
@@ -61,6 +71,12 @@ const MANIFEST_REL: &str = ".plugin/plugin.json";
 const HOOKS_REL: &str = "hooks/hooks.json";
 const MCP_REL: &str = ".mcp.json";
 const AGENTS_REL: &str = "AGENTS.md";
+
+/// Env var overriding the launcher this bundle invokes (`TOME_BIN`). When set
+/// and non-empty it wins the [`tome_command`] resolution; otherwise the running
+/// binary's absolute path (`current_exe`) is used, falling back to the bare
+/// `"tome"` name. The override is also the test seam for the byte pins.
+const TOME_BIN_ENV: &str = "TOME_BIN";
 
 /// Emit the whole `tome-op` Open Plugins bundle into `plugin_root`, atomically.
 ///
@@ -100,9 +116,15 @@ pub fn emit_tome_op(
     // freshly-bound empty workspace), other IO errors propagate.
     let directive_body = read_inline_rules_body(project_root)?;
 
+    // Resolve the launcher ONCE (#290), then thread the SAME value into both
+    // sinks (the `.mcp.json` server command AND the SessionStart hook) so the
+    // bundle never invokes a bare-PATH `tome` that a sandboxed / CI host can't
+    // find — and so the two sinks can never diverge.
+    let command = tome_command();
+
     let manifest = manifest_bytes();
-    let hooks = hooks_bytes(workspace, harness_name);
-    let mcp = mcp_bytes(workspace, harness_name);
+    let hooks = hooks_bytes(&command, workspace, harness_name);
+    let mcp = mcp_bytes(&command, workspace, harness_name);
 
     land_directory_with_replace_bundle(plugin_root, |staged| {
         write_bundle_file(staged, MANIFEST_REL, &manifest)?;
@@ -159,6 +181,73 @@ pub enum RemoveOutcome {
 }
 
 // =====================================================================
+// Launcher resolution (#290)
+// =====================================================================
+
+/// Resolve the absolute launcher this bundle should invoke (`tome` issue #290).
+///
+/// The bundle's `.mcp.json` server command and its SessionStart hook command are
+/// executed by the *host* (a CI runner or a sandboxed non-IDE agent), whose
+/// `PATH` need not contain `tome`. A bare `"tome"` therefore silently fails to
+/// start the MCP server and the agent gets zero skills. Resolution order:
+///
+/// 1. `$TOME_BIN`, if set and non-empty — an explicit operator override (and the
+///    deterministic test seam, since `current_exe` is machine-specific). It MUST
+///    be an ABSOLUTE path: the value is used verbatim, NOT shell-expanded, so a
+///    leading `~` is treated literally (the host will not find `~/…/tome`).
+/// 2. [`std::env::current_exe`] — the absolute path of the running binary, so the
+///    emitted command points at the exact `tome` that ran the sync.
+/// 3. The bare name `"tome"` — the old behaviour, used only when both above
+///    fail (an exotic platform / a deleted binary). Never panics, never errors
+///    the sync: this resolver is infallible by design.
+///
+/// The tiers are tried in order and each falls through INDEPENDENTLY:
+/// - A non-empty but non-UTF-8 `$TOME_BIN` is IGNORED and resolution continues
+///   at tier 2 (`current_exe`) — it does NOT short-circuit to the bare fallback
+///   (we cannot embed a non-UTF-8 value in JSON / a shell command cleanly).
+/// - A `current_exe` that fails to resolve, or whose path is not valid UTF-8,
+///   falls through to tier 3 (the bare name).
+fn tome_command() -> String {
+    // (1) Explicit override wins.
+    if let Some(value) = std::env::var_os(TOME_BIN_ENV)
+        && !value.is_empty()
+        && let Some(s) = value.to_str()
+    {
+        return s.to_string();
+    }
+
+    // (2) The running binary's absolute path. UTF-8-fail and `current_exe`-fail
+    //     both fall through to the bare name.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(s) = exe.to_str()
+    {
+        return s.to_string();
+    }
+
+    // (3) Last-resort fallback: the old bare-PATH behaviour.
+    "tome".to_string()
+}
+
+/// Quote a launcher path for safe interpolation into the SessionStart hook's
+/// single shell-command string (`"<cmd> harness session-start …"`). An absolute
+/// `current_exe` path can contain spaces (e.g. macOS `Application Support`),
+/// which would otherwise split into multiple shell words. POSIX single-quoting
+/// wraps the path and escapes any embedded single quote via the `'\''` idiom.
+/// The bare name `"tome"` (no shell-special chars) is returned unquoted so the
+/// fallback string stays identical to the historical bytes.
+fn shell_quote(cmd: &str) -> String {
+    if !cmd.is_empty() && cmd.bytes().all(is_shell_safe_byte) {
+        return cmd.to_string();
+    }
+    format!("'{}'", cmd.replace('\'', "'\\''"))
+}
+
+/// Bytes that need no shell quoting (a conservative POSIX-portable set).
+fn is_shell_safe_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'/')
+}
+
+// =====================================================================
 // Byte builders (byte-stable; serde_json preserve_order + trailing `\n`)
 // =====================================================================
 
@@ -173,9 +262,15 @@ fn manifest_bytes() -> Vec<u8> {
 }
 
 /// `hooks/hooks.json` — the SessionStart command hook delivering the directive.
-fn hooks_bytes(workspace: &str, harness_name: &str) -> Vec<u8> {
-    let command =
-        format!("tome harness session-start --workspace {workspace} --harness {harness_name}");
+///
+/// `launcher` is the resolved absolute path to the running `tome` (see
+/// [`tome_command`]); it is shell-quoted because the hook `command` is a single
+/// shell string (#290).
+fn hooks_bytes(launcher: &str, workspace: &str, harness_name: &str) -> Vec<u8> {
+    let command = format!(
+        "{} harness session-start --workspace {workspace} --harness {harness_name}",
+        shell_quote(launcher),
+    );
     let doc = json!({
         "hooks": {
             "SessionStart": [
@@ -187,11 +282,15 @@ fn hooks_bytes(workspace: &str, harness_name: &str) -> Vec<u8> {
 }
 
 /// `.mcp.json` — the Tome MCP server entry (`mcpServers` + `CommandArgs` + `env:{}`).
-fn mcp_bytes(workspace: &str, harness_name: &str) -> Vec<u8> {
+///
+/// `launcher` is the resolved absolute path to the running `tome` (see
+/// [`tome_command`]); it is the execve-style `command` (no shell, so no quoting)
+/// alongside the `args` array (#290).
+fn mcp_bytes(launcher: &str, workspace: &str, harness_name: &str) -> Vec<u8> {
     let doc = json!({
         "mcpServers": {
             "tome": {
-                "command": "tome",
+                "command": launcher,
                 "args": ["mcp", "--workspace", workspace, "--harness", harness_name],
                 "env": {}
             }
@@ -317,7 +416,54 @@ fn is_tome_op_bundle(plugin_root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    /// Serialises every test that mutates `TOME_BIN` (process-global; `cargo
+    /// test` runs a module's tests on multiple threads). Mirrors the `ENV_MUTEX`
+    /// idiom used across the codebase (see `provider::config`, `telemetry`).
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// RAII guard: snapshot the named env vars, clear them, restore on drop.
+    /// Holds `ENV_MUTEX` for its lifetime so a restore can't interleave with
+    /// another test's set.
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(String, Option<std::ffi::OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn new(vars: &[&str]) -> Self {
+            let lock = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+            let saved = vars
+                .iter()
+                .map(|&k| (k.to_string(), std::env::var_os(k)))
+                .collect::<Vec<_>>();
+            // SAFETY: ENV_MUTEX held for the guard's lifetime; no other test in
+            // this module mutates these vars concurrently.
+            for &k in vars {
+                unsafe { std::env::remove_var(k) };
+            }
+            EnvGuard { _lock: lock, saved }
+        }
+
+        fn set(&self, key: &str, val: &str) {
+            // SAFETY: guarded by ENV_MUTEX (held via `_lock`).
+            unsafe { std::env::set_var(key, val) };
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: still holding ENV_MUTEX (dropped after this).
+            for (k, v) in &self.saved {
+                match v {
+                    Some(val) => unsafe { std::env::set_var(k, val) },
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+        }
+    }
 
     fn project_with_rules(body: &str) -> (TempDir, PathBuf) {
         let tmp = TempDir::new().unwrap();
@@ -341,18 +487,22 @@ mod tests {
 
     #[test]
     fn hooks_bytes_are_byte_stable() {
-        let expected = "{\n  \"hooks\": {\n    \"SessionStart\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"tome harness session-start --workspace ws --harness goose\"\n          }\n        ]\n      }\n    ]\n  }\n}\n";
+        // The launcher is the (resolved) command; pin against an explicit
+        // absolute path so the bytes stay deterministic across machines.
+        let expected = "{\n  \"hooks\": {\n    \"SessionStart\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"/usr/local/bin/tome harness session-start --workspace ws --harness goose\"\n          }\n        ]\n      }\n    ]\n  }\n}\n";
         assert_eq!(
-            String::from_utf8(hooks_bytes("ws", "goose")).unwrap(),
+            String::from_utf8(hooks_bytes("/usr/local/bin/tome", "ws", "goose")).unwrap(),
             expected
         );
     }
 
     #[test]
     fn mcp_bytes_are_byte_stable() {
-        let expected = "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"ws\",\n        \"--harness\",\n        \"generic-op\"\n      ],\n      \"env\": {}\n    }\n  }\n}\n";
+        // The `.mcp.json` `command` is the resolved absolute launcher, NOT the
+        // bare `tome` (#290).
+        let expected = "{\n  \"mcpServers\": {\n    \"tome\": {\n      \"command\": \"/usr/local/bin/tome\",\n      \"args\": [\n        \"mcp\",\n        \"--workspace\",\n        \"ws\",\n        \"--harness\",\n        \"generic-op\"\n      ],\n      \"env\": {}\n    }\n  }\n}\n";
         assert_eq!(
-            String::from_utf8(mcp_bytes("ws", "generic-op")).unwrap(),
+            String::from_utf8(mcp_bytes("/usr/local/bin/tome", "ws", "generic-op")).unwrap(),
             expected
         );
     }
@@ -361,6 +511,11 @@ mod tests {
 
     #[test]
     fn emit_lands_four_files_and_is_idempotent() {
+        // Pin the launcher via TOME_BIN so the emitted commands are deterministic
+        // (and the `command` fields are an exact absolute path, not bare `tome`).
+        let guard = EnvGuard::new(&[TOME_BIN_ENV]);
+        guard.set(TOME_BIN_ENV, "/opt/tome/bin/tome");
+
         let (_tmp, project) = project_with_rules("# rules body\n");
         let root = project.join(".config/goose/plugins/tome-op");
 
@@ -370,6 +525,18 @@ mod tests {
         assert!(root.join("hooks/hooks.json").is_file());
         assert!(root.join(".mcp.json").is_file());
         assert!(root.join("AGENTS.md").is_file());
+
+        // Both sinks carry the resolved absolute launcher, NOT bare `tome` (#290).
+        let mcp = std::fs::read_to_string(root.join(".mcp.json")).unwrap();
+        assert!(
+            mcp.contains("\"command\": \"/opt/tome/bin/tome\""),
+            "mcp.json command must be the absolute launcher; got:\n{mcp}",
+        );
+        let hooks = std::fs::read_to_string(root.join("hooks/hooks.json")).unwrap();
+        assert!(
+            hooks.contains("/opt/tome/bin/tome harness session-start"),
+            "hook command must be the absolute launcher; got:\n{hooks}",
+        );
 
         // AGENTS.md carries the tome block wrapping the verbatim rules body.
         let agents = std::fs::read_to_string(root.join("AGENTS.md")).unwrap();
@@ -387,6 +554,7 @@ mod tests {
 
     #[test]
     fn emit_with_absent_rules_writes_empty_block() {
+        let _guard = EnvGuard::new(&[TOME_BIN_ENV]);
         let tmp = TempDir::new().unwrap();
         let project = tmp.path().join("project");
         std::fs::create_dir_all(&project).unwrap();
@@ -575,6 +743,130 @@ mod tests {
         assert!(
             !real.join("tome-op").exists(),
             "no bundle landed through the symlink"
+        );
+    }
+
+    // ---- launcher resolution (#290) -------------------------------------
+
+    #[test]
+    fn tome_command_honors_tome_bin_override() {
+        let guard = EnvGuard::new(&[TOME_BIN_ENV]);
+        guard.set(TOME_BIN_ENV, "/custom/path/to/tome");
+        assert_eq!(tome_command(), "/custom/path/to/tome");
+    }
+
+    #[test]
+    fn tome_command_falls_back_to_current_exe_when_override_unset() {
+        // With TOME_BIN unset, the resolver returns the running binary's path —
+        // which is absolute (the test binary) and, crucially, NOT the bare name.
+        let _guard = EnvGuard::new(&[TOME_BIN_ENV]);
+        let cmd = tome_command();
+        let exe = std::env::current_exe().expect("current_exe");
+        assert_eq!(
+            cmd,
+            exe.to_str().expect("test binary path is UTF-8"),
+            "with TOME_BIN unset, the launcher is current_exe",
+        );
+        assert_ne!(cmd, "tome", "the launcher must not be the bare name");
+        assert!(
+            Path::new(&cmd).is_absolute(),
+            "the resolved launcher must be an absolute path; got {cmd}",
+        );
+    }
+
+    #[test]
+    fn tome_command_ignores_empty_override() {
+        // An empty TOME_BIN is treated as unset → falls through to current_exe,
+        // never emitting an empty command.
+        let guard = EnvGuard::new(&[TOME_BIN_ENV]);
+        guard.set(TOME_BIN_ENV, "");
+        let cmd = tome_command();
+        assert!(!cmd.is_empty());
+        assert_ne!(cmd, "");
+    }
+
+    #[test]
+    fn shell_quote_leaves_simple_paths_unquoted() {
+        assert_eq!(shell_quote("tome"), "tome");
+        assert_eq!(shell_quote("/usr/local/bin/tome"), "/usr/local/bin/tome");
+        assert_eq!(
+            shell_quote("/opt/tome-1.2/bin/tome"),
+            "/opt/tome-1.2/bin/tome"
+        );
+    }
+
+    #[test]
+    fn shell_quote_wraps_paths_with_spaces() {
+        assert_eq!(
+            shell_quote("/Applications/My Tome.app/tome"),
+            "'/Applications/My Tome.app/tome'",
+        );
+    }
+
+    #[test]
+    fn shell_quote_escapes_embedded_single_quote() {
+        // The POSIX `'\''` idiom closes the quote, escapes a literal quote, reopens.
+        assert_eq!(shell_quote("/o'dd/tome"), "'/o'\\''dd/tome'");
+    }
+
+    #[test]
+    fn hook_command_quotes_a_spaced_launcher() {
+        let bytes = hooks_bytes("/Applications/My Tome.app/tome", "ws", "goose");
+        let s = String::from_utf8(bytes).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let command = v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            command,
+            "'/Applications/My Tome.app/tome' harness session-start --workspace ws --harness goose",
+        );
+    }
+
+    #[test]
+    fn mcp_command_is_never_shell_quoted() {
+        // The `.mcp.json` `command` is the execve/array sink — the host runs it
+        // directly, NOT through a shell — so a spaced path must be the RAW value
+        // with NO surrounding single-quotes. This locks in "the array sink never
+        // routes through `shell_quote`" against a future refactor that might
+        // wrongly share the hook's quoting path.
+        let bytes = mcp_bytes("/Applications/My Tome.app/tome", "ws", "goose");
+        let s = String::from_utf8(bytes).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let command = v["mcpServers"]["tome"]["command"].as_str().unwrap();
+        assert_eq!(
+            command, "/Applications/My Tome.app/tome",
+            "the .mcp.json command must be the raw launcher path, never shell-quoted",
+        );
+        assert!(
+            !command.starts_with('\''),
+            "the .mcp.json command must not be wrapped in single-quotes; got {command}",
+        );
+    }
+
+    #[test]
+    fn hook_command_escapes_single_quote_end_to_end() {
+        // A launcher containing a single quote must compose correctly through
+        // BOTH layers: `shell_quote`'s POSIX `'\''` escaping AND serde_json's
+        // string escaping. Parsing the emitted JSON undoes the JSON layer, so the
+        // recovered command string must carry the exact shell-escaped path —
+        // proving the two escaping schemes compose end-to-end (not just at the
+        // `shell_quote` helper level).
+        let bytes = hooks_bytes("/o'dd/tome", "ws", "goose");
+        let s = String::from_utf8(bytes).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let command = v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            command,
+            "'/o'\\''dd/tome' harness session-start --workspace ws --harness goose",
+        );
+        // The shell-escaped launcher prefix appears verbatim in the recovered
+        // (post-JSON-decode) command — the `'/o'\''dd/tome'` POSIX idiom.
+        assert!(
+            command.starts_with("'/o'\\''dd/tome' "),
+            "the recovered command must carry the correctly shell-escaped launcher; got {command}",
         );
     }
 }
