@@ -212,6 +212,8 @@ pub enum RulesCopyState {
 /// - `BindingRulesCopy` ↔ `"binding-rules-copy"`
 /// - `HarnessRules(name)` ↔ `"harness-rules:<name>"`
 /// - `HarnessMcp(name)` ↔ `"harness-mcp:<name>"`
+/// - `ModelRegistry` ↔ `"model-registry"`
+/// - `Config` ↔ `"config"`
 ///
 /// The two Phase 3 drift "subsystems" `embedder_drift`, `reranker_drift`,
 /// and the Phase 4 fold-in `summariser_drift` are not part of this enum:

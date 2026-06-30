@@ -201,10 +201,13 @@ fn apply_config_finding(report: &mut DoctorReport, config_error: Option<&str>) {
     };
     report.suggested_fixes.push(doctor::SuggestedFix {
         subsystem: doctor::Subsystem::Config,
-        diagnosis: format!("`~/.tome/config.toml` is malformed: {message}"),
+        // "could not be loaded" rather than "is malformed": `probe_error`'s
+        // fallback arm also covers a pure I/O / unreadable / over-cap failure
+        // (not only a TOML parse error), so the wording must not mislabel those.
+        diagnosis: format!("`~/.tome/config.toml` could not be loaded: {message}"),
         // Pointer, not a runnable repair — Tome must not rewrite a user-owned
         // config; `auto_fixable: false` is what keeps `--fix` from "fixing" it.
-        command: "edit ~/.tome/config.toml to correct the reported key".to_owned(),
+        command: "edit ~/.tome/config.toml to correct the reported problem".to_owned(),
         auto_fixable: false,
     });
     report.overall = DoctorClassification::Unhealthy;

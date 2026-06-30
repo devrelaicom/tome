@@ -721,4 +721,35 @@ last_synced = "2026-01-01T00:00:00Z"
         };
         assert_eq!(msg, strict);
     }
+
+    /// Issue #287 (review item 1): `probe_error`'s NON-`TomlParse` fallback arm.
+    /// A config file that exceeds `TOME_CONFIG_MAX` is refused by
+    /// `bounded_read_to_string` with a `TomeError::Io` BEFORE any TOML parse, so
+    /// `load` propagates an `Io` (not `TomlParse`). `probe_error` must still
+    /// report it (`Some`, surfaced not swallowed) and must NOT panic. This pins
+    /// the "I/O / unreadable error is reported" branch.
+    #[test]
+    fn probe_error_surfaces_io_error_for_oversize_file() {
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
+        // One byte over the 1 MiB config cap. The content is valid UTF-8 (and
+        // valid TOML comment text) in isolation; the size cap is what trips the
+        // read, so the fallback arm is exercised independently of TOML parsing.
+        let oversize = "#".repeat((crate::util::TOME_CONFIG_MAX as usize) + 1);
+        std::fs::write(&paths.global_config_file, oversize).unwrap();
+
+        // Confirm `load` itself returns an `Io` error (not `TomlParse`), so this
+        // test genuinely covers the fallback arm and not the parse arm.
+        match load(&paths) {
+            Err(TomeError::Io(_)) => {}
+            other => panic!("expected an Io error for an over-cap config, got {other:?}"),
+        }
+
+        let msg = probe_error(&paths).expect("an over-cap config must be reported, not swallowed");
+        assert!(
+            msg.to_lowercase().contains("cap") || msg.to_lowercase().contains("exceed"),
+            "the I/O message should explain the size refusal: {msg}",
+        );
+    }
 }

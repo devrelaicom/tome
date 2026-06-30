@@ -199,3 +199,61 @@ fn ordinary_command_still_exits_5_on_malformed_config() {
         "the strict error must name the offending key: {stderr}",
     );
 }
+
+/// Issue #287 (review item 3): a config that is OTHERWISE malformed but ALSO
+/// carries `[workspace] default = "..."`. Because the whole file fails to parse,
+/// the `default` knob is silently ignored under lenient resolution — the
+/// resolver falls through to the global fallback, doctor/status still run, and
+/// the Config finding is reported. (Were leniency to somehow consult the
+/// half-parsed `default` and require that workspace's membership, the command
+/// would error before reporting; this confirms it does not.)
+#[test]
+fn doctor_and_status_run_when_malformed_config_also_sets_workspace_default() {
+    // `[workspace] default` is valid in isolation, but the stray top-level key
+    // makes the whole document fail the strict (deny-unknown-fields) parse. The
+    // named workspace ("ghost") is deliberately NOT seeded — it must never be
+    // looked up, because the malformed file means `default` is never honoured.
+    let body = "stray_top_level = 1\n[workspace]\ndefault = \"ghost\"\n";
+
+    // doctor.
+    let env = env_with_malformed_config(body);
+    let out = env.cmd().args(["--json", "doctor"]).output().unwrap();
+    assert_ne!(
+        out.status.code(),
+        Some(5),
+        "doctor must not exit 5; stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    // It also must NOT be the WorkspaceNotFound exit (13) — i.e. leniency did not
+    // try to honour the ignored `default = "ghost"`.
+    assert_ne!(
+        out.status.code(),
+        Some(13),
+        "the ignored `[workspace] default` must not be resolved (no exit 13); stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    assert_eq!(out.status.code(), Some(1), "doctor classifies unhealthy");
+    let v: Value = serde_json::from_slice(&out.stdout).expect("doctor --json parses");
+    let fixes = v["suggested_fixes"]
+        .as_array()
+        .expect("suggested_fixes array");
+    assert!(
+        fixes.iter().any(|f| f["subsystem"] == "config"),
+        "the Config finding must be reported: {v}",
+    );
+
+    // status — same config, same expectations.
+    let env = env_with_malformed_config(body);
+    let out = env.cmd().args(["--json", "status"]).output().unwrap();
+    assert_ne!(out.status.code(), Some(5), "status must not exit 5");
+    assert_ne!(
+        out.status.code(),
+        Some(13),
+        "status must not resolve the ignored `[workspace] default`",
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).expect("status --json parses");
+    assert!(
+        v.get("config").is_some(),
+        "status must carry the `config` block: {v}",
+    );
+}

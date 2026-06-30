@@ -101,10 +101,11 @@ pub struct HarnessMcpStatus {
 }
 
 /// Issue #287: the global-config health line for `tome status`. Present ONLY when
-/// `~/.tome/config.toml` fails to parse — `status` is a diagnostic that must keep
-/// running on a malformed config, so it reports the parse problem here instead of
-/// dying at exit 5. `message` is the legible `toml` diagnostic (offending
-/// key/section + line/column), identical to the strict error every non-diagnostic
+/// `~/.tome/config.toml` cannot be loaded — `status` is a diagnostic that must
+/// keep running on a broken config, so it reports the problem here instead of
+/// dying at exit 5. `message` is the legible diagnostic (a TOML parse error names
+/// the offending key/section + line/column; a pure I/O / unreadable / over-cap
+/// failure carries its own message), identical to the error every non-diagnostic
 /// command emits. Absent (the common case) keeps the byte-stable `--json` pins
 /// unchanged via `skip_serializing_if` on the field below.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -349,11 +350,12 @@ fn fill_hook_translation_harnesses(
     report.hook_translation_harnesses = u32::try_from(count).unwrap_or(u32::MAX);
 }
 
-/// Issue #287: populate `report.config` when `~/.tome/config.toml` is malformed,
-/// and flip `report.overall` to Unhealthy. A clean / absent config leaves the
-/// field `None` (omitted from `--json`, byte-stable pins unchanged) and overall
-/// untouched. Uses the shared [`crate::config::probe_error`] SSOT so the message
-/// matches `tome doctor`'s finding and the loud exit-5 other commands emit.
+/// Issue #287: populate `report.config` when `~/.tome/config.toml` cannot be
+/// loaded (malformed TOML or an I/O / unreadable / over-cap failure), and flip
+/// `report.overall` to Unhealthy. A clean / absent config leaves the field `None`
+/// (omitted from `--json`, byte-stable pins unchanged) and overall untouched.
+/// Uses the shared [`crate::config::probe_error`] SSOT so the message matches
+/// `tome doctor`'s finding and the loud exit-5 other commands emit.
 fn fill_config_health(report: &mut StatusReport, paths: &Paths) {
     if let Some(message) = crate::config::probe_error(paths) {
         report.config = Some(ConfigHealth { ok: false, message });
