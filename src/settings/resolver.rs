@@ -566,6 +566,7 @@ mod tests {
             harnesses: Some(vec!["[workspace]".to_owned()]),
             expose_agents_as_personas: None,
             strip_plugin_agent_privileges: None,
+            raw_event_passthrough: None,
         };
         let err = resolve_effective_list(None, Some(&ws), &empty_global(), &stub).expect_err("err");
         assert!(matches!(

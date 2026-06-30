@@ -1163,6 +1163,16 @@ pub(crate) fn reconcile_plugin_hook_dispatch(
         return (actions, first_error);
     }
 
+    // US8.2: resolve the workspace-level `raw_event_passthrough` flag once,
+    // shared across all harnesses in this pass. Fail-open: any settings read
+    // error → flag is `false` (passthrough off, never a block).
+    let raw_event_passthrough: bool =
+        crate::settings::scopes::load_workspace_settings(deps.paths, deps.workspace_name)
+            .ok()
+            .flatten()
+            .and_then(|w| w.raw_event_passthrough)
+            .unwrap_or(false);
+
     // US6.1: opt-out gate. When `translate_plugin_hooks = false`, treat every
     // harness as non-live so any previously written run-hook entries + manifests
     // are removed (same teardown path as a non-live harness). Toggling off is
@@ -1183,6 +1193,7 @@ pub(crate) fn reconcile_plugin_hook_dispatch(
                 outcome,
                 &mut first_error,
                 cfg,
+                raw_event_passthrough,
             );
             actions.insert(snap.name.clone(), action);
         }
@@ -1213,6 +1224,7 @@ pub(crate) fn reconcile_plugin_hook_dispatch(
             outcome,
             &mut first_error,
             cfg,
+            raw_event_passthrough,
         );
         actions.insert(snap.name.clone(), action);
     }
@@ -1284,6 +1296,7 @@ fn reconcile_one_harness_dispatch(
     outcome: &mut SyncOutcome,
     first_error: &mut Option<TomeError>,
     cfg: &crate::config::Config,
+    raw_event_passthrough: bool,
 ) -> Action {
     let workspace = deps.workspace_name.as_str();
     let manifest_path = deps.paths.hooks_manifest(deps.workspace_name, &snap.name);
@@ -1343,6 +1356,7 @@ fn reconcile_one_harness_dispatch(
         is_live,
         outcome,
         first_error,
+        raw_event_passthrough,
     );
     stronger(hook_action, manifest_action)
 }
@@ -1473,6 +1487,11 @@ fn reconcile_dispatch_hook_file(
 /// regardless of the harness's registration `timeout_unit`). An empty desired
 /// set (non-live, or no enabled hook targets a supported event) removes a stale
 /// manifest. Idempotent: a byte-equal manifest is left untouched.
+///
+/// `raw_event_passthrough` is the workspace-level US8.2 flag; when `true` the
+/// dispatcher will include the original harness payload verbatim as
+/// `tome.raw_event` in the synthesized CC stdin (default `false`).
+#[allow(clippy::too_many_arguments)]
 fn reconcile_dispatch_manifest(
     name: &str,
     path: &Path,
@@ -1481,6 +1500,7 @@ fn reconcile_dispatch_manifest(
     is_live: bool,
     outcome: &mut SyncOutcome,
     first_error: &mut Option<TomeError>,
+    raw_event_passthrough: bool,
 ) -> Action {
     let mut events: BTreeMap<String, Vec<ManifestEntry>> = BTreeMap::new();
     if is_live {
@@ -1541,7 +1561,7 @@ fn reconcile_dispatch_manifest(
     } else {
         let manifest = HookManifest {
             harness: name.to_string(),
-            raw_event_passthrough: false,
+            raw_event_passthrough,
             events,
         };
         // Idempotent: only write when the on-disk manifest differs (a malformed /
