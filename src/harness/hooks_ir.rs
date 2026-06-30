@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::error::TomeError;
@@ -323,7 +323,20 @@ pub(crate) fn parse_canonical_hooks(
 /// //   command string directly.
 /// // US-future: also glob-check the contents of `$(…)` / backtick
 /// //   sub-expressions in the Bash command (CC Fact A).
-#[allow(dead_code)]
+///
+/// ## SECURITY — v1 Bash glob limitations (KNOWN)
+///
+/// Bash `if`-matching is a **glob on the raw `command` string**. It does NOT:
+///
+/// - Strip leading `VAR=value` environment assignments before matching.
+///   A guard like `Bash(git push *)` is **bypassed** by `FOO=bar git push …`.
+///   (CC strips these; Tome v1 does not — US-future: strip leading `VAR=value`.)
+/// - Inspect the contents of `$(…)` or backtick sub-commands.
+///   A guard can be bypassed by hiding the disallowed command inside a
+///   substitution: `echo $(git push origin main)`.
+///
+/// Plugin authors relying on `if`-gated DENY hooks for Bash must be aware
+/// that v1 enforcement is best-effort. A US12 phase-wide review will revisit.
 pub(crate) fn if_predicate_matches(
     if_pred: &str,
     cc_tool_name: &str,
@@ -375,35 +388,27 @@ pub(crate) fn if_predicate_matches(
     glob_matches(pattern, value)
 }
 
-/// Test a CC glob pattern (where `*` matches any run of characters) against
-/// `value`, anchored to the whole string. A regex compile failure → `false`.
+/// Test a CC glob pattern (where `*` matches any run of characters, including
+/// newlines) against `value`, anchored to the whole string. A regex compile
+/// failure → `false` (fail-open: the hook does not fire).
 fn glob_matches(pattern: &str, value: &str) -> bool {
     let re_str = glob_to_anchored_regex(pattern);
-    Regex::new(&re_str)
+    RegexBuilder::new(&re_str)
+        .dot_matches_new_line(true) // CC `*` matches any char including '\n'
+        .build()
         .map(|re| re.is_match(value))
-        .unwrap_or(false)
+        .unwrap_or(false) // fail-open on compile error
 }
 
 /// Convert a CC glob pattern to an anchored regex string.
 ///
-/// - `*` → `.*` (any sequence of characters, including none).
-/// - Regex metacharacters other than `*` are escaped with `\`.
+/// - `*` → `.*` (any sequence of characters, including none and `\n`).
+/// - Every other character is treated as a literal via `regex::escape`.
+/// - `?` is treated as a literal (CC glob spec only defines `*`).
 /// - The result is anchored with `^…$` so the whole value must match.
 fn glob_to_anchored_regex(pattern: &str) -> String {
-    let mut re = String::with_capacity(pattern.len() + 4);
-    re.push('^');
-    for ch in pattern.chars() {
-        match ch {
-            '*' => re.push_str(".*"),
-            '.' | '+' | '?' | '{' | '}' | '[' | ']' | '(' | ')' | '\\' | '^' | '$' | '|' => {
-                re.push('\\');
-                re.push(ch);
-            }
-            _ => re.push(ch),
-        }
-    }
-    re.push('$');
-    re
+    let escaped: Vec<String> = pattern.split('*').map(regex::escape).collect();
+    format!("^{}$", escaped.join(".*"))
 }
 
 /// Apply CC matcher semantics: `None`/`""`/`"*"` = all; a token of only
@@ -733,6 +738,40 @@ mod tests {
         // Wildcard-only pattern matches any non-empty and empty string.
         let inp2 = serde_json::json!({"command": ""});
         assert!(if_predicate_matches("Bash(*)", "Bash", &inp2));
+    }
+
+    #[test]
+    fn if_predicate_glob_matches_across_newlines() {
+        // Regression: `*` must match '\n' so that multi-line Bash commands
+        // (heredocs, multi-statement strings) are not silently excluded from
+        // an `if`-gated DENY hook. Before the dot_matches_new_line fix the
+        // catch-all `Bash(*)` returned false for any command containing '\n',
+        // fail-opening every `if`-gated hook on heredoc/multi-statement input.
+        assert!(if_predicate_matches(
+            "Bash(*)",
+            "Bash",
+            &serde_json::json!({"command": "a\nb"})
+        ));
+        // A prefix-anchored pattern must also match across the embedded newline.
+        assert!(if_predicate_matches(
+            "Bash(git push *)",
+            "Bash",
+            &serde_json::json!({"command": "git push origin\nmain"})
+        ));
+    }
+
+    #[test]
+    fn if_predicate_var_prefix_not_stripped_v1() {
+        // PIN: v1 does NOT strip leading `VAR=value` shell assignments before
+        // glob-matching. A guard like `Bash(git push *)` is therefore bypassable
+        // by `FOO=bar git push origin main`. This test documents the KNOWN v1
+        // limitation so it cannot silently change.
+        // US-future: strip leading VAR=value to match CC (CC Fact A).
+        assert!(!if_predicate_matches(
+            "Bash(git push *)",
+            "Bash",
+            &serde_json::json!({"command": "FOO=bar git push origin main"})
+        ));
     }
 
     #[test]
