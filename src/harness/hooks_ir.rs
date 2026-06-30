@@ -99,11 +99,14 @@ pub struct CanonicalHook {
 /// The resolved, per-(workspace, harness) dispatch manifest the runtime
 /// dispatcher reads. Tome-owned strict input. `events` is keyed by the CC
 /// event name; entries are ordered (deterministic merge order).
-// Allowed dead until the run-hook dispatcher call site lands (US2+).
-#[allow(dead_code)]
+///
+/// `pub` (not `pub(crate)`) because the US4 runtime dispatcher's public
+/// `dispatch_core(…, Option<&HookManifest>)` entry point names it; the fields
+/// stay `pub(crate)` so only in-crate code mutates the manifest shape, while
+/// the consolidated integration-test binary deserializes one from JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct HookManifest {
+pub struct HookManifest {
     pub(crate) harness: String,
     #[serde(default)]
     pub(crate) raw_event_passthrough: bool,
