@@ -213,8 +213,11 @@ first):
    `TOME_TELEMETRY` is **opt-out-only**: any value that does not parse as a
    disable is ignored (it does not force-enable over CI auto-disable or the
    config)
-3. CI auto-disable — detected via `CI`, `GITHUB_ACTIONS`, `GITLAB_CI`,
-   `CIRCLECI`, `BUILDKITE`, `JENKINS_URL`, `TF_BUILD`, `TEAMCITY_VERSION`
+3. CI auto-disable — detected via `CI` (any truthy value: set and non-empty,
+   not `0`/`false`/`no`/`off`), `GITHUB_ACTIONS`, `GITLAB_CI`, `CIRCLECI`,
+   `BUILDKITE`, `TF_BUILD` (same truthy rule), plus the presence markers
+   `JENKINS_URL`, `TEAMCITY_VERSION`, `VERCEL`, `NETLIFY`, `TRAVIS`,
+   `APPVEYOR`, `DRONE` (set to any non-empty value)
 4. `[telemetry].enabled = false` in `~/.tome/config.toml`
 5. `tome telemetry off` (writes the config flag)
 6. Default: on
