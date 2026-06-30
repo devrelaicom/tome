@@ -42,6 +42,12 @@ overrides:
   "js-yaml@4.1.1": "4.2.0"
   "launch-editor": "2.14.1"
   "tar": "7.5.16"
+  # undici: GHSA-vxpw-j846-p89q (HIGH, WS DoS) + GHSA-p88m-4jfj-68fv (moderate, Set-Cookie injection)
+  "undici@<6.27.0": "6.27.0"
+  # webpack-dev-server: GHSA-mx8g-39q3-5c79 (moderate, HMR WebSocket interception)
+  "webpack-dev-server@<5.2.5": "5.2.5"
+  # http-proxy-middleware: GHSA-64mm-vxmg-q3vj (moderate, Host-header routing bypass)
+  "http-proxy-middleware@>=0.16.0 <2.0.10": "2.0.10"
 
 # Audit ignores — for advisories with no fix we can apply.
 #   GHSA-h67p-54hq-rp68 (js-yaml merge-key quadratic DoS): patched only in
