@@ -71,6 +71,8 @@ mod hook_dispatch_e2e;
 mod hook_dispatch_emit;
 #[path = "harness_settings/hook_dispatch_failopen.rs"]
 mod hook_dispatch_failopen;
+#[path = "harness_settings/hook_dispatch_http.rs"]
+mod hook_dispatch_http;
 #[path = "harness_settings/hook_dispatch_register.rs"]
 mod hook_dispatch_register;
 #[path = "harness_settings/hooks_merge.rs"]

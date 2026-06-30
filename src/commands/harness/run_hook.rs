@@ -30,8 +30,10 @@
 //! Sync only — the dispatcher is a synchronous subprocess (no async leaks here;
 //! `tests/harness_settings/sync_boundary.rs` enforces it).
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
+use regex::Regex;
 use serde_json::Value;
 
 use crate::cli::HarnessRunHookArgs;
@@ -234,10 +236,21 @@ fn dispatch_inner(
                 let outcome = run_command_handler(entry, &cc_stdin);
                 command_outcome_to_decision(&outcome)
             }
-            // US5/US6: http/prompt handlers are not executed yet. A non-blocking
-            // allow (no-op) placeholder — the dispatch loop must NEVER crash on
-            // them.
-            Handler::Http { .. } | Handler::Prompt { .. } => CcDecision::default(),
+            // SECURITY (NFR-007): `interpolate_headers` is the single place
+            // plugin-declared text drives a substitution. It is confined to header
+            // VALUES + allowlist-gated (unlisted → empty string). URL + header
+            // names are relocated verbatim; no shell, no eval.
+            Handler::Http {
+                url,
+                headers,
+                allowed_env_vars,
+            } => {
+                let o =
+                    run_http_handler(url, headers, allowed_env_vars, &cc_stdin, entry.timeout_ms);
+                command_outcome_to_decision(&o)
+            }
+            // US6: prompt handler not yet executed — non-blocking allow.
+            Handler::Prompt { .. } => CcDecision::default(),
         };
         decisions.push((entry.plugin.clone(), decision));
     }
@@ -402,6 +415,111 @@ fn run_command_handler(entry: &ManifestEntry, cc_stdin: &str) -> HandlerOutcome 
         },
         // A Tome timeout is NEVER a block: fail open.
         None => allow(),
+    }
+}
+
+/// Resolve `$VAR` / `${VAR}` references in header VALUES ONLY, and only for
+/// variables whose name appears in `allowed`. An unlisted reference (or one that
+/// matches no host env var) is replaced with an empty string.
+///
+/// ## Security (NFR-007)
+///
+/// This is the SINGLE place plugin-declared text drives a substitution.  The
+/// substitution is strictly confined to header VALUES — header names, the URL,
+/// and all other manifest fields are relocated verbatim. Only variables listed
+/// by the plugin in `allowedEnvVars` can be resolved; every other `$REF` is
+/// silently elided (→ empty string), so a plugin cannot exfiltrate arbitrary
+/// host env vars through header values.
+fn interpolate_headers(
+    headers: &BTreeMap<String, String>,
+    allowed: &[String],
+) -> BTreeMap<String, String> {
+    use std::sync::OnceLock;
+    // Compiled once; the pattern is a compile-time constant.
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+            .expect("hard-coded interpolate_headers regex is valid")
+    });
+    headers
+        .iter()
+        .map(|(k, v)| {
+            let resolved = re.replace_all(v, |caps: &regex::Captures<'_>| {
+                // Group 1 = braced ${VAR}; group 2 = bare $VAR.
+                let name = caps
+                    .get(1)
+                    .or_else(|| caps.get(2))
+                    .map_or("", |m| m.as_str());
+                if allowed.iter().any(|a| a == name) {
+                    std::env::var(name).unwrap_or_default()
+                } else {
+                    String::new() // unlisted → empty; cannot exfiltrate.
+                }
+            });
+            (k.clone(), resolved.into_owned())
+        })
+        .collect()
+}
+
+/// POST `cc_stdin` as the body to `url` (Content-Type: application/json) with
+/// header interpolation applied. A 2xx response body is returned as
+/// `HandlerOutcome { exit: 0, stdout: body }` so the EXISTING
+/// `command_outcome_to_decision` parser processes it identically to a command's
+/// stdout JSON. Any transport error, timeout, or non-2xx status degrades to a
+/// non-blocking allow (`HandlerOutcome { exit: 0, stdout: "", stderr: "" }`).
+///
+/// NEVER panics: every `Result` is matched; no bare `.unwrap()` on the
+/// response (mirrors `run_command_handler`'s panic-freedom discipline — under
+/// `panic = "abort"` in release, a panic aborts the process at exit 134 and
+/// `catch_unwind` cannot help).
+fn run_http_handler(
+    url: &str,
+    headers: &BTreeMap<String, String>,
+    allowed_env_vars: &[String],
+    cc_stdin: &str,
+    timeout_ms: Option<u64>,
+) -> HandlerOutcome {
+    let allow = || HandlerOutcome {
+        exit: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+    };
+    let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+    // A client-build failure (e.g. TLS init error) → fail-open, never a block.
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return allow(),
+    };
+    let interpolated = interpolate_headers(headers, allowed_env_vars);
+    // Start with the fixed Content-Type header, then apply interpolated headers.
+    let mut req = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .body(cc_stdin.to_owned());
+    for (k, v) in &interpolated {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    let response = match req.send() {
+        Ok(r) => r,
+        // Transport error / conn-refused / DNS failure / timeout → fail-open.
+        Err(_) => return allow(),
+    };
+    if response.status().is_success() {
+        let body = match response.text() {
+            Ok(b) => b,
+            Err(_) => return allow(),
+        };
+        HandlerOutcome {
+            exit: 0,
+            stdout: body,
+            stderr: String::new(),
+        }
+    } else {
+        // non-2xx → non-blocking allow; a misbehaving webhook must never block.
+        allow()
     }
 }
 
@@ -834,6 +952,76 @@ fn harness_event_to_cc(wire: HookWire, event_cc: &str, harness: &str, raw: &Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    // --- Env-var serialisation (for header interpolation tests) ------------------
+    //
+    // `std::env::set_var` / `remove_var` are `unsafe` on Rust 2024 and unsafe for
+    // any process with threads contending the env block. Tests in cargo run on the
+    // same process, so we serialise via a module-local `ENV_MUTEX`.
+    // `EnvVarGuard` is RAII: it snapshots the previous value and restores on drop.
+
+    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    struct EnvVarGuard {
+        key: String,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: caller holds ENV_MUTEX; no other test in this module
+            // mutates the environment concurrently.
+            unsafe { std::env::set_var(key, value) }
+            Self {
+                key: key.to_owned(),
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            // SAFETY: ENV_MUTEX is still held by the test for the lifetime of
+            // this guard.
+            unsafe {
+                match &self.previous {
+                    Some(v) => std::env::set_var(&self.key, v),
+                    None => std::env::remove_var(&self.key),
+                }
+            }
+        }
+    }
+
+    // --- interpolate_headers unit tests ------------------------------------------
+
+    /// `interpolate_headers` resolves allowlisted `$VAR` / `${VAR}` references in
+    /// header VALUES; unlisted references are elided (→ empty string), not leaked.
+    ///
+    /// This is the security pin test for NFR-007: the allowlist gate is the single
+    /// policy line between plugin-declared text and host env var exfiltration.
+    #[test]
+    fn header_interpolation_is_allowlist_gated() {
+        let _lock = lock_env();
+        let _guard = EnvVarGuard::set("MY_TOKEN", "secret");
+        let mut h = BTreeMap::new();
+        h.insert("Authorization".to_owned(), "Bearer $MY_TOKEN".to_owned());
+        h.insert("X-Other".to_owned(), "${NOT_ALLOWED}".to_owned());
+        let out = interpolate_headers(&h, &["MY_TOKEN".to_owned()]);
+        assert_eq!(out["Authorization"], "Bearer secret");
+        assert_eq!(out["X-Other"], ""); // unlisted → empty; must NOT be leaked
+    }
+
+    // --- command_entry helper ----------------------------------------------------
 
     /// A command [`ManifestEntry`] with the given matcher + shell command, a
     /// generous timeout, and no cwd/env.

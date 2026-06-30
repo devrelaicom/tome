@@ -72,16 +72,18 @@ fn matcher_miss_runs_nothing_and_allows() {
     );
 }
 
-/// An event present in the manifest but with an `http` handler (US5) is a
-/// non-blocking allow placeholder — the dispatch loop must not crash on it.
+/// An http handler pointing at an unreachable address fails open (non-blocking
+/// allow, empty stdout, exit 0).  The `timeout_ms: 2000` cap keeps the test
+/// bounded even in CI environments where `.test` TLD DNS may be slow to NXDOMAIN.
 #[test]
-fn http_handler_is_non_blocking_placeholder() {
+fn http_handler_unreachable_url_is_fail_open() {
     let m = manifest(
         r#"{
             "harness": "cursor",
             "events": {
                 "PreToolUse": [
                     { "plugin": "cat:webhook",
+                      "timeout_ms": 2000,
                       "handler": { "type": "http", "url": "https://example.test/hook" } }
                 ]
             }
@@ -91,7 +93,7 @@ fn http_handler_is_non_blocking_placeholder() {
     assert_eq!(out.exit_code, 0);
     assert!(
         out.stdout.is_empty(),
-        "http handler must be a no-op allow, got: {}",
+        "unreachable http handler must fail open (empty allow), got: {}",
         out.stdout
     );
 }
