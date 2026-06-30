@@ -37,7 +37,9 @@ use serde_json::Value;
 use crate::cli::HarnessRunHookArgs;
 use crate::error::TomeError;
 use crate::harness::HookWire;
-use crate::harness::hooks_ir::{HookManifest, cc_tool_name, matcher_matches};
+use crate::harness::hooks_ir::{
+    Handler, HookManifest, ManifestEntry, cc_tool_name, matcher_matches,
+};
 use crate::output::Mode;
 use crate::paths::Paths;
 use crate::workspace::{ResolvedScope, WorkspaceName};
@@ -185,6 +187,7 @@ fn dispatch_inner(
     // backfill), never an error.
     let raw: Value = serde_json::from_str(stdin).unwrap_or(Value::Null);
     let cc_value = harness_event_to_cc(wire, event_cc, harness, &raw);
+    let cc_stdin = cc_value.to_string();
     // The CC tool name the plugin matchers (CC vocabulary) filter against.
     let cc_tool = cc_value
         .get("tool_name")
@@ -197,15 +200,420 @@ fn dispatch_inner(
         return fail_open_output(harness);
     };
 
-    let has_match = entries
-        .iter()
-        .any(|e| matcher_matches(e.matcher.as_deref(), cc_tool));
-    if !has_match {
-        return fail_open_output(harness);
+    // Filter by matcher, run each matching handler, and collect its CC decision
+    // keyed by plugin provenance (for the merge's block-reason prefix).
+    let mut decisions: Vec<(String, CcDecision)> = Vec::new();
+    for entry in entries {
+        if !matcher_matches(entry.matcher.as_deref(), cc_tool) {
+            continue;
+        }
+        // US9: the `if` permission-rule predicate is not yet evaluated; an entry
+        // carrying one is treated as matching (the predicate is an additive
+        // future tightening, never a loosening).
+        let decision = match &entry.handler {
+            Handler::Command { .. } => {
+                let outcome = run_command_handler(entry, &cc_stdin);
+                command_outcome_to_decision(&outcome)
+            }
+            // US5/US6: http/prompt handlers are not executed yet. A non-blocking
+            // allow (no-op) placeholder — the dispatch loop must NEVER crash on
+            // them.
+            Handler::Http { .. } | Handler::Prompt { .. } => CcDecision::default(),
+        };
+        decisions.push((entry.plugin.clone(), decision));
     }
-    // US4.3 execs the matching handlers and US4.4/4.5 merge + emit; until then a
-    // match is a non-blocking allow.
-    fail_open_output(harness)
+
+    let merged = merge_decisions(&decisions);
+    emit_decision(wire, event_cc, &merged)
+}
+
+/// Wall-clock budget for a command handler when the manifest carries no
+/// `timeout_ms` (Claude Code's 60s hook default, baked in ms).
+const DEFAULT_TIMEOUT_MS: u64 = 60_000;
+/// Poll cadence for the spawn + wait-with-timeout loop.
+const POLL_INTERVAL_MS: u64 = 5;
+
+/// The raw result of running one command handler: its exit code plus captured
+/// stdout/stderr. Translated into a [`CcDecision`] by
+/// [`command_outcome_to_decision`].
+struct HandlerOutcome {
+    exit: i32,
+    stdout: String,
+    stderr: String,
+}
+
+/// Run one command handler bounded by `entry.timeout_ms`, feeding `cc_stdin` on
+/// stdin. Returns the raw exit/stdout/stderr.
+///
+/// SECURITY: the ONLY shell-evaluated string is `entry.command` — relocated
+/// verbatim from the Tome-owned manifest. No other field (matcher, plugin, cwd,
+/// env) is ever interpolated into the shell line. A spawn failure or a timeout
+/// degrades to a non-blocking allow (exit 0, empty), NEVER a block.
+fn run_command_handler(entry: &ManifestEntry, cc_stdin: &str) -> HandlerOutcome {
+    let allow = || HandlerOutcome {
+        exit: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+    };
+    let Handler::Command { command } = &entry.handler else {
+        // The caller only routes Command handlers here; defend regardless.
+        return allow();
+    };
+
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c").arg(command);
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    // Hook env: CLAUDE_PROJECT_DIR + the per-entry cwd/env. (TOME_* is US8.)
+    if let Some(cwd) = &entry.cwd {
+        cmd.current_dir(cwd);
+        cmd.env("CLAUDE_PROJECT_DIR", cwd);
+    }
+    for (k, v) in &entry.env {
+        cmd.env(k, v);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        // Spawn failure (no `sh`, bad cwd, …) → non-blocking allow.
+        Err(_) => return allow(),
+    };
+
+    // Feed CC stdin on a side thread so a large payload cannot deadlock against
+    // the child's stdout/stderr pipes (which we drain only after it exits).
+    let writer = child.stdin.take().map(|mut sin| {
+        let payload = cc_stdin.as_bytes().to_vec();
+        std::thread::spawn(move || {
+            let _ = sin.write_all(&payload);
+            // `sin` drops here → the child sees EOF on stdin.
+        })
+    });
+
+    let timeout = std::time::Duration::from_millis(entry.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+    let result = match wait_with_timeout(&mut child, timeout) {
+        Some(outcome) => outcome,
+        None => {
+            // Timed out — kill FIRST (so a stdin writer blocked on a full pipe
+            // unblocks with EPIPE), then treat as a non-blocking allow.
+            let _ = child.kill();
+            let _ = child.wait();
+            allow()
+        }
+    };
+    if let Some(handle) = writer {
+        let _ = handle.join();
+    }
+    result
+}
+
+/// Spawn + wait-with-timeout: poll `try_wait` until the child exits or the
+/// wall-clock `timeout` elapses. On exit, drains stdout/stderr. `None` means it
+/// did not finish in time (caller kills + fails open). A signal-killed child
+/// reports `exit = 0` (→ a non-blocking allow).
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> Option<HandlerOutcome> {
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = String::new();
+                let mut stderr = String::new();
+                if let Some(mut o) = child.stdout.take() {
+                    let _ = o.read_to_string(&mut stdout);
+                }
+                if let Some(mut e) = child.stderr.take() {
+                    let _ = e.read_to_string(&mut stderr);
+                }
+                return Some(HandlerOutcome {
+                    exit: status.code().unwrap_or(0),
+                    stdout,
+                    stderr,
+                });
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS));
+            }
+            // `try_wait` error → no usable outcome (caller fails open).
+            Err(_) => return None,
+        }
+    }
+}
+
+/// The plugin-hook decision in CC vocabulary, the merge currency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Permission {
+    Allow,
+    Deny,
+    Ask,
+}
+
+impl Permission {
+    /// Restrictiveness rank for the most-restrictive-wins merge
+    /// (Deny > Ask > Allow). `None` (absent) ranks below all three.
+    fn rank(self) -> u8 {
+        match self {
+            Permission::Allow => 1,
+            Permission::Ask => 2,
+            Permission::Deny => 3,
+        }
+    }
+}
+
+/// One hook's CC decision. `Default` = all-None/empty (a non-blocking allow).
+#[derive(Debug, Clone, Default, PartialEq)]
+struct CcDecision {
+    permission: Option<Permission>,
+    block: bool,
+    reason: Option<String>,
+    additional_context: Vec<String>,
+    updated_input: Option<Value>,
+}
+
+/// True iff this decision blocks the agent (an explicit deny or a top-level
+/// `decision:"block"`).
+fn is_blocking(decision: &CcDecision) -> bool {
+    decision.block || matches!(decision.permission, Some(Permission::Deny))
+}
+
+/// Translate a command handler's raw outcome into a [`CcDecision`]
+/// (CC command-hook convention):
+///
+/// * exit 2 + stderr → Deny + the stderr text as the reason.
+/// * exit 0 + JSON stdout → parse `hookSpecificOutput.permissionDecision`
+///   (allow/deny/ask; `defer`/unknown → None), top-level `decision:"block"` +
+///   `reason`, `additionalContext`, and `updatedInput`.
+/// * any other exit (or exit 0 with no/non-JSON stdout) → non-blocking allow.
+fn command_outcome_to_decision(outcome: &HandlerOutcome) -> CcDecision {
+    if outcome.exit == 2 {
+        let reason = outcome.stderr.trim();
+        return CcDecision {
+            permission: Some(Permission::Deny),
+            block: true,
+            reason: (!reason.is_empty()).then(|| reason.to_string()),
+            ..Default::default()
+        };
+    }
+    if outcome.exit == 0 {
+        let trimmed = outcome.stdout.trim();
+        if !trimmed.is_empty() {
+            let parsed = serde_json::from_str::<Value>(trimmed);
+            if let Ok(v) = parsed {
+                return cc_json_to_decision(&v);
+            }
+        }
+        return CcDecision::default();
+    }
+    CcDecision::default()
+}
+
+/// Parse a Claude-Code hook stdout JSON object into a [`CcDecision`].
+fn cc_json_to_decision(v: &Value) -> CcDecision {
+    let mut d = CcDecision::default();
+    let hso = v.get("hookSpecificOutput");
+
+    // permissionDecision: allow/deny/ask. `defer` (and any unknown) → None — a
+    // non-blocking deferral to the harness's normal flow (C12).
+    let pd = hso
+        .and_then(|h| h.get("permissionDecision"))
+        .and_then(|p| p.as_str());
+    if let Some(pd) = pd {
+        d.permission = match pd {
+            "allow" => Some(Permission::Allow),
+            "deny" => Some(Permission::Deny),
+            "ask" => Some(Permission::Ask),
+            _ => None,
+        };
+    }
+    if let Some(reason) = hso
+        .and_then(|h| h.get("permissionDecisionReason"))
+        .and_then(|r| r.as_str())
+    {
+        d.reason = Some(reason.to_string());
+    }
+
+    // Top-level `decision:"block"` (+ `reason`) → Deny + block.
+    if v.get("decision").and_then(|x| x.as_str()) == Some("block") {
+        d.permission = Some(Permission::Deny);
+        d.block = true;
+    }
+    if let Some(reason) = v.get("reason").and_then(|r| r.as_str()) {
+        d.reason = Some(reason.to_string());
+    }
+
+    // additionalContext (under hookSpecificOutput or flat at top level).
+    let ctx = hso
+        .and_then(|h| h.get("additionalContext"))
+        .or_else(|| v.get("additionalContext"))
+        .and_then(|c| c.as_str());
+    if let Some(ctx) = ctx {
+        d.additional_context.push(ctx.to_string());
+    }
+
+    // updatedInput (under hookSpecificOutput or flat at top level).
+    let updated = hso
+        .and_then(|h| h.get("updatedInput"))
+        .or_else(|| v.get("updatedInput"));
+    if let Some(updated) = updated {
+        d.updated_input = Some(updated.clone());
+    }
+
+    d
+}
+
+/// Merge the per-plugin decisions into one. Most-restrictive permission wins
+/// (Deny > Ask > Allow > None); `block` is the OR; `additional_context` is the
+/// in-order concat; `updated_input` is last-wins. The block reason is the FIRST
+/// blocking entry's reason (provenance-prefixed in US4.4).
+fn merge_decisions(plugin_keyed: &[(String, CcDecision)]) -> CcDecision {
+    let mut merged = CcDecision::default();
+    let mut best_rank = 0u8;
+    let mut reason_set = false;
+    for (_plugin, d) in plugin_keyed {
+        // Most-restrictive permission wins (Deny > Ask > Allow > None).
+        let rank = d.permission.map_or(0, Permission::rank);
+        if rank > best_rank {
+            best_rank = rank;
+            merged.permission = d.permission;
+        }
+        merged.block |= d.block;
+        if !reason_set && is_blocking(d) && d.reason.is_some() {
+            merged.reason = d.reason.clone();
+            reason_set = true;
+        }
+        merged
+            .additional_context
+            .extend(d.additional_context.iter().cloned());
+        if d.updated_input.is_some() {
+            merged.updated_input = d.updated_input.clone();
+        }
+    }
+    merged
+}
+
+/// Map a merged decision to a wire permission token. `None` permission with a
+/// `block` flag still denies; otherwise `None` means "no opinion".
+fn permission_token(decision: &CcDecision) -> Option<&'static str> {
+    match decision.permission {
+        Some(Permission::Deny) => Some("deny"),
+        Some(Permission::Ask) => Some("ask"),
+        Some(Permission::Allow) => Some("allow"),
+        None if decision.block => Some("deny"),
+        None => None,
+    }
+}
+
+/// Emit the merged decision in the harness's native wire shape (US4.5). US4.3
+/// lands the permission/reason core; `additionalContext` + `updatedInput`/output
+/// rewrites land in US4.5.
+fn emit_decision(wire: HookWire, event_cc: &str, decision: &CcDecision) -> DispatchOutput {
+    match wire {
+        HookWire::ClaudeStyle => emit_claude_style(event_cc, decision, false),
+        HookWire::Codex => emit_claude_style(event_cc, decision, true),
+        HookWire::CursorSnake => emit_cursor(decision),
+        HookWire::CopilotFlat => emit_copilot(decision),
+    }
+}
+
+/// ClaudeStyle (Devin/Gemini) + Codex emit. A block is the top-level
+/// `{"decision":"block","reason"}`; Devin/Gemini ALSO exit 2 (they block on
+/// exit-2), while Codex blocks via the JSON at exit 0 (its exit-2 semantics are
+/// unverified — never depend on them). `ask` rides `hookSpecificOutput`.
+fn emit_claude_style(event_cc: &str, decision: &CcDecision, is_codex: bool) -> DispatchOutput {
+    if is_blocking(decision) {
+        let reason = decision.reason.clone().unwrap_or_default();
+        let body = serde_json::json!({ "decision": "block", "reason": reason });
+        let exit_code = if is_codex { 0 } else { 2 };
+        return DispatchOutput {
+            stdout: body.to_string(),
+            exit_code,
+        };
+    }
+    if matches!(decision.permission, Some(Permission::Ask)) {
+        let mut hso = serde_json::Map::new();
+        hso.insert(
+            "hookEventName".to_string(),
+            Value::String(event_cc.to_string()),
+        );
+        hso.insert(
+            "permissionDecision".to_string(),
+            Value::String("ask".to_string()),
+        );
+        if let Some(r) = &decision.reason {
+            hso.insert(
+                "permissionDecisionReason".to_string(),
+                Value::String(r.clone()),
+            );
+        }
+        let body = serde_json::json!({ "hookSpecificOutput": Value::Object(hso) });
+        return DispatchOutput {
+            stdout: body.to_string(),
+            exit_code: 0,
+        };
+    }
+    // Allow / no-op → empty stdout + exit 0.
+    DispatchOutput {
+        stdout: String::new(),
+        exit_code: 0,
+    }
+}
+
+/// Cursor emit: snake_case `{permission, agent_message, …}` ALWAYS at exit 0.
+/// Cursor blocks via JSON `permission:"deny"`; Tome leaves `failClosed` off, so
+/// a non-zero exit fails OPEN — Tome NEVER exits 2 here.
+fn emit_cursor(decision: &CcDecision) -> DispatchOutput {
+    let mut obj = serde_json::Map::new();
+    if let Some(p) = permission_token(decision) {
+        obj.insert("permission".to_string(), Value::String(p.to_string()));
+    }
+    if let Some(r) = &decision.reason {
+        // `agent_message` is Cursor's reason channel (sent to the agent).
+        obj.insert("agent_message".to_string(), Value::String(r.clone()));
+    }
+    if obj.is_empty() {
+        return DispatchOutput {
+            stdout: String::new(),
+            exit_code: 0,
+        };
+    }
+    DispatchOutput {
+        stdout: Value::Object(obj).to_string(),
+        exit_code: 0,
+    }
+}
+
+/// Copilot CLI emit: flat `{permissionDecision, permissionDecisionReason}`.
+/// Copilot blocks ONLY via JSON `permissionDecision:"deny"` — exit-2 is a mere
+/// warning for most events, so Tome NEVER exits 2 for a block.
+fn emit_copilot(decision: &CcDecision) -> DispatchOutput {
+    let mut obj = serde_json::Map::new();
+    if let Some(pd) = permission_token(decision) {
+        obj.insert(
+            "permissionDecision".to_string(),
+            Value::String(pd.to_string()),
+        );
+        if let Some(r) = &decision.reason {
+            obj.insert(
+                "permissionDecisionReason".to_string(),
+                Value::String(r.clone()),
+            );
+        }
+    }
+    if obj.is_empty() {
+        return DispatchOutput {
+            stdout: String::new(),
+            exit_code: 0,
+        };
+    }
+    DispatchOutput {
+        stdout: Value::Object(obj).to_string(),
+        exit_code: 0,
+    }
 }
 
 /// Translate a harness's native hook event JSON into a normalized CC-shaped
@@ -280,6 +688,69 @@ fn harness_event_to_cc(wire: HookWire, event_cc: &str, harness: &str, raw: &Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command [`ManifestEntry`] with the given matcher + shell command, a
+    /// generous timeout, and no cwd/env.
+    fn command_entry(matcher: &str, command: &str) -> ManifestEntry {
+        ManifestEntry {
+            plugin: "cat:test".to_string(),
+            matcher: Some(matcher.to_string()),
+            if_pred: None,
+            handler: Handler::Command {
+                command: command.to_string(),
+            },
+            timeout_ms: Some(5_000),
+            cwd: None,
+            env: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// A command hook that writes a reason to stderr and exits 2 blocks: the raw
+    /// outcome is exit 2, and `command_outcome_to_decision` maps it to
+    /// Deny + the stderr text as the reason.
+    #[test]
+    fn command_exit_2_blocks_with_reason() {
+        let entry = command_entry("Bash", "printf 'nope' >&2; exit 2");
+        let outcome = run_command_handler(&entry, r#"{"tool_name":"Bash"}"#);
+        assert_eq!(outcome.exit, 2);
+        let decision = command_outcome_to_decision(&outcome);
+        assert_eq!(decision.permission, Some(Permission::Deny));
+        assert_eq!(decision.reason.as_deref(), Some("nope"));
+    }
+
+    /// exit 0 with a `hookSpecificOutput.permissionDecision:"deny"` + a
+    /// top-level reason parses to Deny + reason; `defer` maps to None.
+    #[test]
+    fn command_exit_0_json_parses_permission_and_defer() {
+        let entry = command_entry(
+            "Bash",
+            r#"printf '{"hookSpecificOutput":{"permissionDecision":"deny"},"reason":"blocked by policy"}'"#,
+        );
+        let outcome = run_command_handler(&entry, "{}");
+        assert_eq!(outcome.exit, 0);
+        let decision = command_outcome_to_decision(&outcome);
+        assert_eq!(decision.permission, Some(Permission::Deny));
+        assert_eq!(decision.reason.as_deref(), Some("blocked by policy"));
+
+        // `defer` is not a Tome Permission → None (non-blocking).
+        let deferred = cc_json_to_decision(&serde_json::json!({
+            "hookSpecificOutput": { "permissionDecision": "defer" }
+        }));
+        assert_eq!(deferred.permission, None);
+        assert!(!is_blocking(&deferred));
+    }
+
+    /// A timed-out command is killed and degrades to a non-blocking allow
+    /// (exit 0, empty) — a Tome timeout is NEVER a block.
+    #[test]
+    fn command_timeout_is_non_blocking_allow() {
+        let mut entry = command_entry("Bash", "sleep 5");
+        entry.timeout_ms = Some(50);
+        let outcome = run_command_handler(&entry, "{}");
+        let decision = command_outcome_to_decision(&outcome);
+        assert!(!is_blocking(&decision));
+        assert_eq!(decision.permission, None);
+    }
 
     /// (a) Cursor's `conversation_id` maps to CC `session_id`; (b) Gemini's
     /// `run_shell_command` native tool name rewrites to `tool_name:"Bash"`; (c) a

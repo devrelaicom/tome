@@ -63,6 +63,8 @@ mod harness_use_manual_mcp;
 mod harness_use_scope;
 #[path = "harness_settings/harness_use_selection.rs"]
 mod harness_use_selection;
+#[path = "harness_settings/hook_dispatch_command.rs"]
+mod hook_dispatch_command;
 #[path = "harness_settings/hook_dispatch_failopen.rs"]
 mod hook_dispatch_failopen;
 #[path = "harness_settings/hook_dispatch_register.rs"]
