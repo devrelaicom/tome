@@ -158,10 +158,18 @@ fn sync_writes_run_hook_entries_and_manifest_for_used_events_only() {
         .as_array()
         .expect("preToolUse array present");
     assert_eq!(arr.len(), 1, "exactly one Tome run-hook entry");
-    assert_eq!(
-        arr[0]["command"],
-        "tome harness run-hook --event PreToolUse --harness cursor --workspace test-workspace",
-    );
+    // #337 Phase B: the LAUNCHER prefix is resolved; the byte-stable args suffix
+    // is the ownership marker — assert via the launcher-tolerant recogniser.
+    {
+        let cmd = arr[0]["command"].as_str().expect("command is a string");
+        assert!(
+            tome::harness::launcher::looks_like_tome_hook_command(
+                cmd,
+                "harness run-hook --event PreToolUse --harness cursor --workspace test-workspace",
+            ),
+            "run-hook command must be a recognised tome hook command; got: {cmd}",
+        );
+    }
     assert_eq!(arr[0]["type"], "command");
 
     // (b) NO entry for an UNUSED event (cursor's Stop native key is `stop`).

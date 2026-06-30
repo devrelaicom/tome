@@ -293,3 +293,61 @@ fn sync_installs_tome_session_start_hook_even_with_empty_enabled_set() {
          even when no skills are enabled; got: {doc}"
     );
 }
+
+/// #337 Phase B (e2e): a sync that emits launcher A, then a re-sync that emits
+/// a DIFFERENT launcher B, RECOGNISES the existing entry (no duplicate) and
+/// UPGRADES its command in place — the load-bearing launcher-change scenario for
+/// the Claude SessionStart sink, driven through the real `sync_project` with the
+/// `$TOME_BIN` seam.
+#[test]
+fn sync_upgrades_session_start_command_across_launcher_change() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _guard = HarnessModulesGuard::install(vec![Box::new(
+        StubHarness::default()
+            .with_hooks_strategy(HooksStrategy::RealJson)
+            .with_hook_settings(),
+    )]);
+
+    let fx = Fixture::build("test-workspace", "\"stub\"");
+
+    // sync 1 with launcher A.
+    let tome_bin = crate::common::TomeBinGuard::install("/opt/a/bin/tome");
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync A");
+
+    let hooks_path = fx.project.join(".stub/settings.local.json");
+    let doc: JsonValue =
+        serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    let arr = doc["hooks"]["SessionStart"].as_array().unwrap();
+    assert_eq!(arr.len(), 1, "exactly one Tome SessionStart entry");
+    assert_eq!(
+        arr[0]["hooks"][0]["command"],
+        "/opt/a/bin/tome harness session-start --workspace test-workspace",
+        "sync A emits launcher A",
+    );
+
+    // sync 2 with launcher B → recognised + upgraded, NOT duplicated.
+    tome_bin.set("/usr/local/bin/tome");
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync B");
+
+    let doc2: JsonValue =
+        serde_json::from_str(&std::fs::read_to_string(&hooks_path).unwrap()).unwrap();
+    let arr2 = doc2["hooks"]["SessionStart"].as_array().unwrap();
+    assert_eq!(
+        arr2.len(),
+        1,
+        "the launcher change must NOT add a duplicate entry; got: {doc2}",
+    );
+    assert_eq!(
+        arr2[0]["hooks"][0]["command"],
+        "/usr/local/bin/tome harness session-start --workspace test-workspace",
+        "the command must be upgraded to launcher B in place; got: {doc2}",
+    );
+
+    // sync 3 with the SAME launcher B is a byte-for-byte no-op (idempotent).
+    let before = std::fs::read_to_string(&hooks_path).unwrap();
+    sync::sync_project(&fx.project, &fx.deps()).expect("sync B again");
+    let after = std::fs::read_to_string(&hooks_path).unwrap();
+    assert_eq!(before, after, "stable launcher must not rewrite");
+}

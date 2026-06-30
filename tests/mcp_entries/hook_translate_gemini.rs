@@ -145,7 +145,13 @@ fn gemini_run_hook_registration_and_manifest_pins() {
 
     // ----- (a) the on-disk run-hook registration entry -----
     let hook_path = fx.project.join(".gemini/settings.json");
-    let doc: serde_json::Value = serde_json::from_str(&read(&hook_path)).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&read(&hook_path)).unwrap();
+    // #337 Phase B: canonicalise the resolved launcher prefix to bare `tome`.
+    // The native file-key is `BeforeTool` but the command names the CC event.
+    crate::common::canonicalize_tome_hook_command_leaves(
+        &mut doc,
+        &["harness run-hook --event PreToolUse --harness gemini --workspace test-workspace"],
+    );
     let arr = &doc["hooks"]["BeforeTool"];
     assert_eq!(
         serde_json::to_string_pretty(arr).unwrap(),

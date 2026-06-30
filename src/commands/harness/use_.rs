@@ -332,11 +332,11 @@ fn configure_one(
 /// - `mcp_adapter_notice` (pi): the MCP file IS written, but an external adapter
 ///   must be installed; the notice carries the harness's install instruction.
 ///
-/// #337: the snippet `command` is the PORTABLE bare `tome` (human-pasteable),
-/// which deliberately DIVERGES from the resolved absolute launcher `sync` now
-/// writes via `tome_command()` (matches the `info` snippet's note). A bare-`tome`
-/// pasted entry is still recognised as Tome-owned (basename match). Making the
-/// manual-host snippet PATH-tolerant is deferred to Phase B.
+/// #337 Phase B: the snippet `command` is the RESOLVED launcher
+/// (`tome_command()`), CONSISTENT with what `sync` writes — so a snippet pasted
+/// into a PATH-less / sandboxed host starts the server (the whole point of #337).
+/// On a normal install it is `…/tome`, recognised as Tome-owned by the basename
+/// arm of `looks_like_tome_launcher`.
 ///
 /// `#[doc(hidden)] pub` for integration-test reachability (the outcome is
 /// emitted, not returned, so tests assert the notice via this fn).
@@ -348,7 +348,7 @@ pub fn compute_mcp_notice(name: &str, workspace_name: &str) -> Option<String> {
         let module = mods.iter().find(|m| m.name() == name)?;
         if module.mcp_manual_only() {
             let entry = mcp_config::TomeEntry::new(
-                "tome".to_string(),
+                crate::harness::launcher::tome_command(),
                 vec![
                     "mcp".to_string(),
                     "--workspace".to_string(),

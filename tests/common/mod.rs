@@ -704,6 +704,57 @@ impl Drop for HarnessModulesGuard {
     }
 }
 
+/// Canonicalise every Tome hook-COMMAND leaf in `value` to the bare-`tome`
+/// form so byte-stable hook pins stay deterministic across machines (#337
+/// Phase B).
+///
+/// The sync writer now emits the RESOLVED launcher (`current_exe` / `$TOME_BIN`)
+/// as the command prefix, which is machine-specific and cannot be byte-pinned.
+/// This walks `value`, and for every string leaf that the launcher-tolerant
+/// recogniser accepts against ANY suffix in `expected_suffixes` (asserting the
+/// leaf IS a recognised tome hook command — i.e. a tome launcher + that exact
+/// suffix), rewrites it to `tome <suffix>`. A leaf matching no expected suffix
+/// is left untouched (so a plugin's own command or a foreign hook is preserved
+/// and a drift in the suffix surfaces as a normal byte-pin mismatch).
+///
+/// Use it on the parsed hook-file JSON before an `assert_eq!` against a
+/// bare-`tome` pinned literal: it keeps the structural pin (matcher / wrapper /
+/// type / event key) intact while making ONLY the launcher prefix tolerant —
+/// the same lens Phase A applied to the MCP sink's `command` assertions.
+///
+/// SHARED CONTRACT — twin of `canonicalize_cmd` in
+/// `src/harness/reconcile/hooks.rs` (the `us2_real_harness_tests` module). Both
+/// implement the SAME canonicalization contract (rewrite a recognised tome
+/// hook-command leaf to its bare-`tome` form); the duplication is forced by the
+/// test/lib boundary (integration tests cannot see lib-private test helpers).
+/// If you change the canonicalization contract, update BOTH.
+pub fn canonicalize_tome_hook_command_leaves(
+    value: &mut serde_json::Value,
+    expected_suffixes: &[&str],
+) {
+    match value {
+        serde_json::Value::String(s) => {
+            for suffix in expected_suffixes {
+                if tome::harness::launcher::looks_like_tome_hook_command(s, suffix) {
+                    *s = format!("tome {suffix}");
+                    break;
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                canonicalize_tome_hook_command_leaves(item, expected_suffixes);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (_k, v) in map.iter_mut() {
+                canonicalize_tome_hook_command_leaves(v, expected_suffixes);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Process-wide serialisation lock for every test that installs into the
 /// single global `tome::harness::HARNESS_MODULES_OVERRIDE` slot (whether via
 /// [`HarnessModulesGuard`] or a direct write). One lock per consolidated test
@@ -873,6 +924,59 @@ impl HomeGuard {
         Self {
             _previous: PrevHome(previous),
             _lock: lock,
+        }
+    }
+}
+
+/// Process-wide serialisation lock for tests that mutate the `$TOME_BIN`
+/// launcher-resolution seam (#337). One per consolidated binary.
+pub static TOME_BIN_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard that sets `$TOME_BIN` to a fixed launcher for a test, restoring
+/// the previous value on Drop (#337 Phase B). Mirrors [`HomeGuard`]: holds
+/// [`TOME_BIN_MUTEX`] for its lifetime so concurrent tests in the same binary
+/// serialise on the env var. Field-drop order: `_previous` (restore) before
+/// `_lock` (release) so the restore completes under the lock.
+pub struct TomeBinGuard {
+    _previous: PrevTomeBin,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+struct PrevTomeBin(Option<std::ffi::OsString>);
+
+impl Drop for PrevTomeBin {
+    fn drop(&mut self) {
+        // SAFETY: `_lock` is dropped AFTER us (declared-order drop), so we still
+        // hold TOME_BIN_MUTEX while restoring; no other thread races the env.
+        match &self.0 {
+            Some(v) => unsafe { std::env::set_var("TOME_BIN", v) },
+            None => unsafe { std::env::remove_var("TOME_BIN") },
+        }
+    }
+}
+
+impl TomeBinGuard {
+    /// Acquire [`TOME_BIN_MUTEX`], snapshot `$TOME_BIN`, and set it to
+    /// `launcher`. Restored on Drop.
+    pub fn install(launcher: &str) -> Self {
+        let lock = TOME_BIN_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("TOME_BIN");
+        // SAFETY: we hold `TOME_BIN_MUTEX` for the lifetime of `Self`.
+        unsafe {
+            std::env::set_var("TOME_BIN", launcher);
+        }
+        Self {
+            _previous: PrevTomeBin(previous),
+            _lock: lock,
+        }
+    }
+
+    /// Change `$TOME_BIN` to a NEW launcher while still holding the lock (for a
+    /// launcher-change scenario within one test).
+    pub fn set(&self, launcher: &str) {
+        // SAFETY: we still hold TOME_BIN_MUTEX via `_lock`.
+        unsafe {
+            std::env::set_var("TOME_BIN", launcher);
         }
     }
 }

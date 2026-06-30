@@ -145,7 +145,13 @@ fn devin_run_hook_registration_and_manifest_pins() {
 
     // ----- (a) the on-disk run-hook registration entry -----
     let hook_path = fx.project.join(".devin/hooks.v1.json");
-    let doc: serde_json::Value = serde_json::from_str(&read(&hook_path)).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&read(&hook_path)).unwrap();
+    // #337 Phase B: the resolved launcher prefix is machine-specific — canonicalise
+    // it back to bare `tome` so the structural byte-pin stays deterministic.
+    crate::common::canonicalize_tome_hook_command_leaves(
+        &mut doc,
+        &["harness run-hook --event PreToolUse --harness devin --workspace test-workspace"],
+    );
     let arr = &doc["PreToolUse"];
     assert_eq!(
         serde_json::to_string_pretty(arr).unwrap(),

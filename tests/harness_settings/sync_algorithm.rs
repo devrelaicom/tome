@@ -563,10 +563,21 @@ fn f3_gemini_mcp_and_command_hook_do_not_clobber_through_real_sync() {
         project["hooks"]["SessionStart"].is_array(),
         "project settings must carry hooks.SessionStart; got: {project}",
     );
-    assert_eq!(
-        project["hooks"]["SessionStart"][0]["hooks"][0]["command"],
-        "tome harness session-start --workspace test-workspace --harness gemini",
-    );
+    // #337 Phase B: the LAUNCHER prefix is resolved (current_exe / $TOME_BIN),
+    // but the byte-stable args suffix is the ownership marker — assert via the
+    // launcher-tolerant recogniser rather than pinning the bare-`tome` bytes.
+    {
+        let cmd = project["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("command is a string");
+        assert!(
+            tome::harness::launcher::looks_like_tome_hook_command(
+                cmd,
+                "harness session-start --workspace test-workspace --harness gemini",
+            ),
+            "session-start command must be a recognised tome hook command; got: {cmd}",
+        );
+    }
     assert!(
         project.get("mcpServers").is_none(),
         "the command-hook writer must NOT add `mcpServers` to the project file; got: {project}",

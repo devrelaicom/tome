@@ -178,17 +178,16 @@ pub(crate) fn reconcile_hooks(
     }
 
     // The first Tome-OWNED hook: a SessionStart entry delivering the routing
-    // directive on Claude Code. Pushed into `prepared` so the SAME merge (live)
-    // / remove (non-live) machinery reconciles it. Reached only after the
-    // fast-exit above, so it is added unconditionally only when a RealJson
-    // harness participates; a harness going non-live has its entry removed by
-    // structural re-derivation in `remove_hooks_for_harness`. The binary
-    // reference is the bare `"tome"` string the MCP-config sync also uses (see
-    // `harness::sync::write_mcp_for_harness`), keeping the spawned command
-    // consistent.
-    prepared.push(crate::harness::routing::session_start_hook(
-        "tome", workspace,
-    ));
+    // directive on Claude Code. Reconciled SEPARATELY from the plugin hooks in
+    // `prepared` because its command's LAUNCHER prefix is resolved per machine
+    // (#337 Phase B) — so it needs the LAUNCHER-TOLERANT merge/remove
+    // (`merge_tome_owned_into_settings` / `remove_tome_owned_from_settings`),
+    // keyed on the byte-stable args suffix, rather than the plugin hooks'
+    // byte-exact path. A non-live harness has its entry removed by the same
+    // launcher-tolerant matcher (so a previously-written absolute-launcher entry
+    // is recognised + removed, not orphaned across a launcher change).
+    let tome_session = crate::harness::routing::session_start_hook(workspace);
+    let tome_session_suffix = crate::harness::routing::session_start_args_suffix(workspace);
 
     for snap in snapshots {
         let Some(settings_path) = &snap.hook_settings_path else {
@@ -198,9 +197,25 @@ pub(crate) fn reconcile_hooks(
         };
         let is_live = effective_names.contains(&snap.name);
         let action = if is_live {
-            merge_hooks_for_harness(&snap.name, settings_path, &prepared, outcome, &mut recon)
+            merge_hooks_for_harness(
+                &snap.name,
+                settings_path,
+                &prepared,
+                &tome_session,
+                &tome_session_suffix,
+                outcome,
+                &mut recon,
+            )
         } else {
-            remove_hooks_for_harness(&snap.name, settings_path, &prepared, outcome, &mut recon)
+            remove_hooks_for_harness(
+                &snap.name,
+                settings_path,
+                &prepared,
+                &tome_session,
+                &tome_session_suffix,
+                outcome,
+                &mut recon,
+            )
         };
         recon.actions.insert(snap.name.clone(), action);
     }
@@ -243,13 +258,18 @@ fn compute_plugins_with_hooks_json(deps: &SyncDeps<'_>) -> Result<HashSet<String
     Ok(set)
 }
 
-/// Merge every prepared plugin's rewritten hooks into one live harness's
-/// `settings.local.json`. Returns the aggregate [`Action`]. A write failure
-/// for one plugin is recorded on `recon.first_error`; the rest still merge.
+/// Merge every prepared plugin's rewritten hooks (byte-exact ownership) AND
+/// Tome's own SessionStart entry (launcher-tolerant ownership, #337 Phase B)
+/// into one live harness's `settings.local.json`. Returns the aggregate
+/// [`Action`]. A write failure for one plugin is recorded on `recon.first_error`;
+/// the rest still merge.
+#[allow(clippy::too_many_arguments)]
 fn merge_hooks_for_harness(
     name: &str,
     settings_path: &Path,
     prepared: &[crate::harness::hooks::RewrittenHooks],
+    tome_session: &crate::harness::hooks::RewrittenHooks,
+    tome_session_suffix: &str,
     outcome: &mut SyncOutcome,
     recon: &mut HooksReconciliation,
 ) -> Action {
@@ -266,6 +286,20 @@ fn merge_hooks_for_harness(
             }
         }
     }
+    // Tome's own SessionStart entry via the launcher-tolerant upsert.
+    match crate::harness::hooks::merge_tome_owned_into_settings(
+        settings_path,
+        tome_session,
+        tome_session_suffix,
+    ) {
+        Ok(true) => changed = true,
+        Ok(false) => {}
+        Err(e) => {
+            if recon.first_error.is_none() {
+                recon.first_error = Some(e);
+            }
+        }
+    }
     if changed {
         let action = if pre_existed {
             Action::Updated
@@ -279,12 +313,16 @@ fn merge_hooks_for_harness(
     }
 }
 
-/// Remove every prepared plugin's rewritten hooks from one non-live
+/// Remove every prepared plugin's rewritten hooks (byte-exact) AND Tome's own
+/// SessionStart entry (launcher-tolerant, #337 Phase B) from one non-live
 /// harness's `settings.local.json` (the harness left the effective list).
+#[allow(clippy::too_many_arguments)]
 fn remove_hooks_for_harness(
     name: &str,
     settings_path: &Path,
     prepared: &[crate::harness::hooks::RewrittenHooks],
+    tome_session: &crate::harness::hooks::RewrittenHooks,
+    tome_session_suffix: &str,
     outcome: &mut SyncOutcome,
     recon: &mut HooksReconciliation,
 ) -> Action {
@@ -297,6 +335,21 @@ fn remove_hooks_for_harness(
                 if recon.first_error.is_none() {
                     recon.first_error = Some(e);
                 }
+            }
+        }
+    }
+    // Tome's own SessionStart entry via the launcher-tolerant removal (so a
+    // previously-written absolute-launcher entry is removed, not orphaned).
+    match crate::harness::hooks::remove_tome_owned_from_settings(
+        settings_path,
+        tome_session,
+        tome_session_suffix,
+    ) {
+        Ok(true) => changed = true,
+        Ok(false) => {}
+        Err(e) => {
+            if recon.first_error.is_none() {
+                recon.first_error = Some(e);
             }
         }
     }
@@ -338,15 +391,20 @@ pub(crate) fn reconcile_tome_session_hooks(
     let mut first_error: Option<TomeError> = None;
     let workspace = deps.workspace_name.as_str();
 
+    // The launcher prefix of the Codex session command is resolved per machine
+    // (#337 Phase B); the byte-stable args suffix is the ownership discriminator
+    // the launcher-tolerant merge/remove match on.
+    let suffix = crate::harness::routing::session_start_args_suffix(workspace);
+
     for snap in snapshots {
         let Some(path) = &snap.tome_session_hook_path else {
             continue;
         };
-        let entry = crate::harness::routing::codex_session_start_hook("tome", workspace);
+        let entry = crate::harness::routing::codex_session_start_hook(workspace);
         let is_live = effective_names.contains(&snap.name);
         let action = if is_live {
             let pre_existed = path.exists();
-            match crate::harness::hooks::merge_into_settings(path, &entry) {
+            match crate::harness::hooks::merge_tome_owned_into_settings(path, &entry, &suffix) {
                 Ok(true) => {
                     let a = if pre_existed {
                         Action::Updated
@@ -365,7 +423,7 @@ pub(crate) fn reconcile_tome_session_hooks(
                 }
             }
         } else {
-            match crate::harness::hooks::remove_from_settings(path, &entry) {
+            match crate::harness::hooks::remove_tome_owned_from_settings(path, &entry, &suffix) {
                 Ok(true) => {
                     record_action(
                         outcome,
@@ -465,6 +523,7 @@ pub(crate) fn reconcile_command_hooks(
         };
 
         let command = session_start_command(&snap.name, workspace);
+        let suffix = session_start_args_suffix(&snap.name, workspace);
         let is_live = effective_names.contains(&snap.name);
         let action = if is_live {
             merge_command_hook(
@@ -473,6 +532,7 @@ pub(crate) fn reconcile_command_hooks(
                 file_spec,
                 event,
                 &command,
+                &suffix,
                 outcome,
                 &mut first_error,
             )
@@ -483,6 +543,7 @@ pub(crate) fn reconcile_command_hooks(
                 file_spec,
                 event,
                 &command,
+                &suffix,
                 outcome,
                 &mut first_error,
             )
@@ -493,12 +554,22 @@ pub(crate) fn reconcile_command_hooks(
     (actions, first_error)
 }
 
-/// The Tome-owned session-start command string for a `CommandHook` harness.
-/// Mirrors the bare-`"tome"` convention the MCP-config + claude/codex hooks use
-/// (see `harness::sync::write_mcp_for_harness`), with the trailing `--harness
-/// <name>` so the printer selects this harness's stdout envelope.
+/// The byte-stable ARGS SUFFIX of a `CommandHook` harness's session-start
+/// command — everything AFTER the launcher (#337 Phase B). The launcher prefix
+/// is resolved per machine; this suffix is the byte-identical ownership
+/// discriminator the launcher-tolerant merge/remove match on. The trailing
+/// `--harness <name>` selects this harness's stdout envelope. Keep stable.
+fn session_start_args_suffix(harness: &str, workspace: &str) -> String {
+    format!("harness session-start --workspace {workspace} --harness {harness}")
+}
+
+/// The Tome-owned session-start command string for a `CommandHook` harness
+/// (#337 Phase B): the resolved launcher prefix
+/// ([`crate::harness::launcher::tome_command`], shell-quoted) + the stable
+/// [`session_start_args_suffix`]. A PATH-less / sandboxed host can start it; the
+/// suffix stays byte-identical so ownership survives a launcher change.
 fn session_start_command(harness: &str, workspace: &str) -> String {
-    format!("tome harness session-start --workspace {workspace} --harness {harness}")
+    crate::harness::launcher::tome_hook_command(&session_start_args_suffix(harness, workspace))
 }
 
 /// Resolve the on-disk hook file for a [`HookFileSpec`] under `project_root`.
@@ -565,15 +636,25 @@ fn tome_hook_entry(spec: HookFileSpec, command: &str) -> JsonValue {
     }
 }
 
+/// The byte-stable ARGS SUFFIX of a `run-hook` dispatcher command for
+/// `(harness, event)` under `workspace` — everything AFTER the launcher (#337
+/// Phase B). The launcher prefix is resolved per machine; this suffix is the
+/// ownership discriminator the launcher-tolerant merge/remove match on. Keep
+/// stable.
+fn run_hook_args_suffix(harness: &str, event_cc: &str, workspace: &str) -> String {
+    format!("harness run-hook --event {event_cc} --harness {harness} --workspace {workspace}")
+}
+
 /// The Tome-owned `run-hook` dispatcher command for `(harness, event)` under
-/// `workspace` (US3). The harness fires this on its native event; the
-/// `--event <cc>` argument carries the CANONICAL CC event name (the manifest
+/// `workspace` (US3, #337 Phase B). The harness fires this on its native event;
+/// the `--event <cc>` argument carries the CANONICAL CC event name (the manifest
 /// key the dispatcher reads), so for a harness with a renamed native event
-/// (e.g. gemini's `BeforeTool`) the file-key is native but the command names
-/// the CC event. Mirrors the bare-`"tome"` convention used by the MCP + session
-/// hooks; the trailing `--harness <name>` selects this harness's wire dialect.
+/// (e.g. gemini's `BeforeTool`) the file-key is native but the command names the
+/// CC event. The launcher prefix is the resolved
+/// [`crate::harness::launcher::tome_command`] (PATH-less-host-startable); the
+/// trailing `--harness <name>` selects this harness's wire dialect.
 fn run_hook_command(harness: &str, event_cc: &str, workspace: &str) -> String {
-    format!("tome harness run-hook --event {event_cc} --harness {harness} --workspace {workspace}")
+    crate::harness::launcher::tome_hook_command(&run_hook_args_suffix(harness, event_cc, workspace))
 }
 
 /// Build the Tome-owned MATCH-ALL `run-hook` dispatcher ENTRY for a spec — the
@@ -934,14 +1015,19 @@ pub(crate) fn write_hook_file(path: &Path, doc: &JsonValue) -> Result<(), TomeEr
 }
 
 /// Merge the Tome-owned hook entry into a live harness's spec file, appending
-/// only when no deep-equal entry is already present (idempotent; developer
-/// hooks preserved). Returns the aggregate [`Action`].
+/// only when no launcher-tolerant-equal entry is already present (idempotent;
+/// developer hooks preserved). When a launcher-tolerant match IS present but its
+/// bytes differ (a launcher upgrade, #337 Phase B), the entry is rewritten in
+/// place. `args_suffix` is the byte-stable ownership discriminator. Returns the
+/// aggregate [`Action`].
+#[allow(clippy::too_many_arguments)]
 fn merge_command_hook(
     name: &str,
     path: &Path,
     spec: HookFileSpec,
     event: HookEvent,
     command: &str,
+    args_suffix: &str,
     outcome: &mut SyncOutcome,
     first_error: &mut Option<TomeError>,
 ) -> Action {
@@ -977,12 +1063,9 @@ fn merge_command_hook(
                 return Action::LeftAlone;
             }
         };
-        if arr.contains(&entry) {
-            false
-        } else {
-            arr.push(entry);
-            true
-        }
+        // #337 Phase B: launcher-tolerant upsert — a present entry differing only
+        // by its launcher prefix is recognised (no duplicate) and upgraded.
+        crate::harness::hooks::upsert_tome_owned_in_array(arr, &entry, args_suffix)
     };
 
     if !changed {
@@ -1003,16 +1086,20 @@ fn merge_command_hook(
     action
 }
 
-/// Remove the deep-equal Tome-owned hook entry from a non-live harness's spec
-/// file (structural match only; a mismatch / absent file is a no-op). After the
-/// removal the now-empty event array is pruned so an empty Tome block doesn't
-/// linger.
+/// Remove the launcher-tolerant-equal Tome-owned hook entry from a non-live
+/// harness's spec file (a mismatch / absent file is a no-op; #337 Phase B
+/// recognises a previously-written absolute-launcher entry rather than orphaning
+/// it). After the removal the now-empty event array is pruned so an empty Tome
+/// block doesn't linger. `args_suffix` is the byte-stable ownership
+/// discriminator.
+#[allow(clippy::too_many_arguments)]
 fn remove_command_hook(
     name: &str,
     path: &Path,
     spec: HookFileSpec,
     event: HookEvent,
     command: &str,
+    args_suffix: &str,
     outcome: &mut SyncOutcome,
     first_error: &mut Option<TomeError>,
 ) -> Action {
@@ -1041,11 +1128,8 @@ fn remove_command_hook(
 
     let entry = tome_hook_entry(spec, command);
     let changed = match entry_array_opt(&mut doc, spec, event) {
-        Some(arr) => {
-            let before = arr.len();
-            arr.retain(|existing| *existing != entry);
-            before != arr.len()
-        }
+        // #337 Phase B: launcher-tolerant removal.
+        Some(arr) => crate::harness::hooks::retain_dropping_tome_owned(arr, &entry, args_suffix),
         None => false,
     };
 
@@ -1425,6 +1509,7 @@ fn reconcile_dispatch_hook_file(
             continue;
         };
         let command = run_hook_command(name, event.cc_name(), workspace);
+        let suffix = run_hook_args_suffix(name, event.cc_name(), workspace);
         let entry = tome_run_hook_entry(support.file_spec, &command);
         if used.contains(&event) {
             let arr = match entry_array_by_key(&mut doc, support.file_spec, native, path) {
@@ -1436,19 +1521,19 @@ fn reconcile_dispatch_hook_file(
                     return Action::LeftAlone;
                 }
             };
-            if !arr.contains(&entry) {
-                arr.push(entry);
+            // #337 Phase B: launcher-tolerant upsert — a present entry differing
+            // only by its launcher prefix is recognised (no duplicate) and
+            // upgraded in place.
+            if crate::harness::hooks::upsert_tome_owned_in_array(arr, &entry, &suffix) {
                 added_any = true;
             }
         } else {
-            // Ensure-absent: strip a stale Tome entry (structural-equal), then
+            // Ensure-absent: strip a stale Tome entry (launcher-tolerant), then
             // prune the now-empty event array. Scoped so the `arr` borrow ends
             // before the prune re-borrows `doc`.
             let removed_this =
                 if let Some(arr) = entry_array_opt_by_key(&mut doc, support.file_spec, native) {
-                    let before = arr.len();
-                    arr.retain(|existing| *existing != entry);
-                    before != arr.len()
+                    crate::harness::hooks::retain_dropping_tome_owned(arr, &entry, &suffix)
                 } else {
                     false
                 };
@@ -1626,6 +1711,9 @@ mod command_hook_tests {
     use tempfile::TempDir;
 
     const CMD: &str = "tome harness session-start --workspace ws --harness h";
+    /// The byte-stable args suffix matching `CMD` — its launcher is the bare
+    /// `tome`, so `CMD` is a recognised tome hook command for this suffix.
+    const SUFFIX: &str = "harness session-start --workspace ws --harness h";
 
     fn read(path: &Path) -> String {
         std::fs::read_to_string(path).unwrap()
@@ -1638,8 +1726,16 @@ mod command_hook_tests {
     fn merge_once(spec: HookFileSpec, event: HookEvent, path: &Path) {
         let mut outcome = SyncOutcome::default();
         let mut first_error = None;
-        let action =
-            merge_command_hook("h", path, spec, event, CMD, &mut outcome, &mut first_error);
+        let action = merge_command_hook(
+            "h",
+            path,
+            spec,
+            event,
+            CMD,
+            SUFFIX,
+            &mut outcome,
+            &mut first_error,
+        );
         assert!(
             first_error.is_none(),
             "merge must not error: {first_error:?}"
@@ -1774,6 +1870,7 @@ mod command_hook_tests {
             HookFileSpec::GeminiSettings,
             HookEvent::SessionStart,
             CMD,
+            SUFFIX,
             &mut outcome,
             &mut first_error,
         );
@@ -1809,6 +1906,7 @@ mod command_hook_tests {
             HookFileSpec::CopilotHooks,
             HookEvent::SessionStart,
             CMD,
+            SUFFIX,
             &mut outcome,
             &mut first_error,
         );
@@ -1848,6 +1946,7 @@ mod command_hook_tests {
             HookFileSpec::DevinHooksV1,
             HookEvent::SessionStart,
             CMD,
+            SUFFIX,
             &mut outcome,
             &mut first_error,
         );
@@ -1862,6 +1961,7 @@ mod command_hook_tests {
             HookFileSpec::DevinHooksV1,
             HookEvent::SessionStart,
             CMD,
+            SUFFIX,
             &mut outcome,
             &mut first_error,
         );
@@ -1898,6 +1998,7 @@ mod command_hook_tests {
             HookFileSpec::DevinHooksV1,
             HookEvent::SessionStart,
             CMD,
+            SUFFIX,
             &mut outcome,
             &mut first_error,
         );
@@ -1928,6 +2029,7 @@ mod command_hook_tests {
             HookFileSpec::AntigravityHooks,
             HookEvent::PreInvocation,
             CMD,
+            SUFFIX,
             &mut outcome,
             &mut first_error,
         );
@@ -1952,6 +2054,7 @@ mod command_hook_tests {
             HookFileSpec::DevinHooksV1,
             HookEvent::SessionStart,
             CMD,
+            SUFFIX,
             &mut outcome,
             &mut first_error,
         );
@@ -2032,9 +2135,14 @@ mod command_hook_tests {
         let cmd = v["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
-        assert_eq!(
-            cmd,
-            "tome harness session-start --workspace global --harness stub"
+        // #337 Phase B: the launcher prefix is resolved; assert via the
+        // launcher-tolerant recogniser against the byte-stable args suffix.
+        assert!(
+            crate::harness::launcher::looks_like_tome_hook_command(
+                cmd,
+                "harness session-start --workspace global --harness stub",
+            ),
+            "command must be a recognised tome hook command; got: {cmd}",
         );
     }
 }
@@ -2058,6 +2166,37 @@ mod us2_real_harness_tests {
 
     fn read(path: &Path) -> String {
         std::fs::read_to_string(path).unwrap()
+    }
+
+    /// Recursively rewrite every recognised tome hook-command leaf in `value`
+    /// back to the bare-`tome` form for `suffix` (#337 Phase B), so the
+    /// structural byte-pins below stay deterministic across machines (the
+    /// resolved launcher prefix is machine-specific). Asserts the leaf IS a
+    /// recognised tome hook command before rewriting it.
+    ///
+    /// SHARED CONTRACT — twin of `canonicalize_tome_hook_command_leaves` in
+    /// `tests/common/mod.rs`. Both implement the SAME canonicalization contract;
+    /// the duplication is forced by the test/lib boundary (integration tests
+    /// cannot see this lib-private helper). If you change the contract, both.
+    fn canonicalize_cmd(value: &mut JsonValue, suffix: &str) {
+        match value {
+            JsonValue::String(s) => {
+                if crate::harness::launcher::looks_like_tome_hook_command(s, suffix) {
+                    *s = format!("tome {suffix}");
+                }
+            }
+            JsonValue::Array(arr) => {
+                for item in arr {
+                    canonicalize_cmd(item, suffix);
+                }
+            }
+            JsonValue::Object(map) => {
+                for (_k, v) in map.iter_mut() {
+                    canonicalize_cmd(v, suffix);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Drive `reconcile_command_hooks` over a single real module with the
@@ -2108,7 +2247,11 @@ mod us2_real_harness_tests {
         assert!(err.is_none(), "{err:?}");
         assert_eq!(actions.get("devin"), Some(&Action::Created));
         let hook_file = project.join(".devin/hooks.v1.json");
-        let v: JsonValue = serde_json::from_str(&read(&hook_file)).unwrap();
+        let mut v: JsonValue = serde_json::from_str(&read(&hook_file)).unwrap();
+        canonicalize_cmd(
+            &mut v,
+            "harness session-start --workspace global --harness devin",
+        );
         assert_eq!(
             v,
             serde_json::json!({
@@ -2131,7 +2274,11 @@ mod us2_real_harness_tests {
         assert!(err.is_none(), "{err:?}");
         assert_eq!(actions.get("copilot-cli"), Some(&Action::Created));
         let hook_file = project.join(".github/hooks/tome.json");
-        let v: JsonValue = serde_json::from_str(&read(&hook_file)).unwrap();
+        let mut v: JsonValue = serde_json::from_str(&read(&hook_file)).unwrap();
+        canonicalize_cmd(
+            &mut v,
+            "harness session-start --workspace global --harness copilot-cli",
+        );
         assert_eq!(
             v,
             serde_json::json!({
@@ -2155,7 +2302,11 @@ mod us2_real_harness_tests {
         assert!(err.is_none(), "{err:?}");
         assert_eq!(actions.get("gemini"), Some(&Action::Created));
         let hook_file = project.join(".gemini/settings.json");
-        let v: JsonValue = serde_json::from_str(&read(&hook_file)).unwrap();
+        let mut v: JsonValue = serde_json::from_str(&read(&hook_file)).unwrap();
+        canonicalize_cmd(
+            &mut v,
+            "harness session-start --workspace global --harness gemini",
+        );
         assert_eq!(
             v,
             serde_json::json!({
@@ -2237,9 +2388,15 @@ mod us2_real_harness_tests {
         let arr = v["SessionStart"].as_array().unwrap();
         assert_eq!(arr.len(), 2, "developer entry + Tome entry");
         assert_eq!(arr[0]["hooks"][0]["command"], "dev run");
-        assert_eq!(
+        // #337 Phase B: the launcher prefix is resolved; assert the Tome entry
+        // via the launcher-tolerant recogniser.
+        assert!(
+            crate::harness::launcher::looks_like_tome_hook_command(
+                arr[1]["hooks"][0]["command"].as_str().unwrap(),
+                "harness session-start --workspace global --harness devin",
+            ),
+            "Tome entry command must be recognised; got: {}",
             arr[1]["hooks"][0]["command"],
-            "tome harness session-start --workspace global --harness devin"
         );
     }
 
@@ -2343,9 +2500,14 @@ mod us2_real_harness_tests {
         let arr = v["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(arr.len(), 2, "developer entry + Tome entry");
         assert_eq!(arr[0]["hooks"][0]["command"], "dev run");
-        assert_eq!(
+        // #337 Phase B: launcher-tolerant recogniser for the Tome entry.
+        assert!(
+            crate::harness::launcher::looks_like_tome_hook_command(
+                arr[1]["hooks"][0]["command"].as_str().unwrap(),
+                "harness session-start --workspace global --harness gemini",
+            ),
+            "Tome entry command must be recognised; got: {}",
             arr[1]["hooks"][0]["command"],
-            "tome harness session-start --workspace global --harness gemini"
         );
         // The unrelated top-level key survives untouched.
         assert_eq!(v["theme"], "dark");
@@ -2416,10 +2578,16 @@ mod us2_real_harness_tests {
         assert!(err.is_none(), "{err:?}");
         assert_eq!(actions.get("gemini"), Some(&Action::Updated));
         let v: JsonValue = serde_json::from_str(&read(&project_settings)).unwrap();
-        // The hook was added under `hooks`.
-        assert_eq!(
+        // The hook was added under `hooks` (#337 Phase B: launcher-tolerant).
+        assert!(
+            crate::harness::launcher::looks_like_tome_hook_command(
+                v["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap(),
+                "harness session-start --workspace global --harness gemini",
+            ),
+            "hook command must be recognised; got: {}",
             v["hooks"]["SessionStart"][0]["hooks"][0]["command"],
-            "tome harness session-start --workspace global --harness gemini"
         );
         // The pre-existing `mcpServers` + `theme` keys survive untouched.
         assert_eq!(v["mcpServers"]["other"]["command"], "x");
@@ -2462,5 +2630,356 @@ mod tests {
         // Codex file path resolves now (was None).
         let p = hook_file_path(HookFileSpec::CodexHooks, std::path::Path::new("/proj")).unwrap();
         assert!(p.ends_with(".codex/hooks.json"));
+    }
+}
+
+// =====================================================================
+// #337 Phase B — launcher-tolerant CommandHook + run-hook coverage. The
+// load-bearing scenario: an entry WRITTEN with launcher A is recognised
+// (idempotence / upgrade / removal) after the emitted launcher becomes B.
+// Exercised through `merge_command_hook` / `remove_command_hook` (session
+// steering) and `reconcile_dispatch_hook_file` (the run-hook registration).
+// =====================================================================
+#[cfg(test)]
+mod launcher_change_tests {
+    use super::*;
+    use crate::harness::{HookEvent, HookFileSpec};
+    use tempfile::TempDir;
+
+    const SUFFIX: &str = "harness session-start --workspace ws --harness devin";
+
+    fn devin_array(path: &Path) -> Vec<JsonValue> {
+        let doc: JsonValue = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        doc["SessionStart"].as_array().cloned().unwrap_or_default()
+    }
+
+    fn cmd_with(launcher: &str) -> String {
+        format!("{launcher} {SUFFIX}")
+    }
+
+    /// CommandHook idempotence: a second merge with the SAME launcher is a no-op.
+    #[test]
+    fn command_hook_idempotent_for_same_launcher() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".devin/hooks.v1.json");
+        let mut outcome = SyncOutcome::default();
+        let mut err = None;
+        let a = cmd_with("/opt/tome/bin/tome");
+        assert_eq!(
+            merge_command_hook(
+                "devin",
+                &path,
+                HookFileSpec::DevinHooksV1,
+                HookEvent::SessionStart,
+                &a,
+                SUFFIX,
+                &mut outcome,
+                &mut err,
+            ),
+            Action::Created,
+        );
+        assert_eq!(
+            merge_command_hook(
+                "devin",
+                &path,
+                HookFileSpec::DevinHooksV1,
+                HookEvent::SessionStart,
+                &a,
+                SUFFIX,
+                &mut outcome,
+                &mut err,
+            ),
+            Action::LeftAlone,
+            "identical launcher must be idempotent",
+        );
+        assert_eq!(devin_array(&path).len(), 1);
+        assert!(err.is_none());
+    }
+
+    /// CommandHook launcher change: an entry written with launcher A is
+    /// recognised across a re-merge with launcher B (no duplicate) and upgraded.
+    #[test]
+    fn command_hook_recognises_and_upgrades_across_launcher_change() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".devin/hooks.v1.json");
+        let mut outcome = SyncOutcome::default();
+        let mut err = None;
+        // Seed with the legacy bare name.
+        merge_command_hook(
+            "devin",
+            &path,
+            HookFileSpec::DevinHooksV1,
+            HookEvent::SessionStart,
+            &cmd_with("tome"),
+            SUFFIX,
+            &mut outcome,
+            &mut err,
+        );
+        // Re-merge with absolute launcher B → Updated, single entry, upgraded.
+        let b = "/usr/local/bin/tome";
+        assert_eq!(
+            merge_command_hook(
+                "devin",
+                &path,
+                HookFileSpec::DevinHooksV1,
+                HookEvent::SessionStart,
+                &cmd_with(b),
+                SUFFIX,
+                &mut outcome,
+                &mut err,
+            ),
+            Action::Updated,
+        );
+        let arr = devin_array(&path);
+        assert_eq!(arr.len(), 1, "no duplicate across launcher upgrade");
+        assert_eq!(arr[0]["hooks"][0]["command"], cmd_with(b));
+        assert!(err.is_none());
+    }
+
+    /// CommandHook removal recognises an entry written with a DIFFERENT
+    /// launcher (so a non-live harness's earlier entry is not orphaned).
+    #[test]
+    fn command_hook_remove_recognises_other_launcher() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".devin/hooks.v1.json");
+        let mut outcome = SyncOutcome::default();
+        let mut err = None;
+        // Seed with launcher A.
+        merge_command_hook(
+            "devin",
+            &path,
+            HookFileSpec::DevinHooksV1,
+            HookEvent::SessionStart,
+            &cmd_with("/opt/a/tome"),
+            SUFFIX,
+            &mut outcome,
+            &mut err,
+        );
+        // Remove using launcher B → matched + removed, array pruned.
+        assert_eq!(
+            remove_command_hook(
+                "devin",
+                &path,
+                HookFileSpec::DevinHooksV1,
+                HookEvent::SessionStart,
+                &cmd_with("/usr/bin/tome"),
+                SUFFIX,
+                &mut outcome,
+                &mut err,
+            ),
+            Action::Removed,
+        );
+        let doc: JsonValue =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            doc,
+            serde_json::json!({}),
+            "empty event array pruned: {doc}"
+        );
+        assert!(err.is_none());
+    }
+
+    /// Over-broaden guard: removal with OUR suffix leaves a foreign entry AND a
+    /// tome entry for a DIFFERENT harness in place.
+    #[test]
+    fn command_hook_remove_does_not_claim_foreign() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(".devin/hooks.v1.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "SessionStart": [
+                    { "matcher": "x", "hooks": [ { "type": "command", "command": "dev run" } ] },
+                    { "matcher": "", "hooks": [ { "type": "command",
+                        "command": "tome harness session-start --workspace ws --harness OTHER" } ] }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let mut outcome = SyncOutcome::default();
+        let mut err = None;
+        assert_eq!(
+            remove_command_hook(
+                "devin",
+                &path,
+                HookFileSpec::DevinHooksV1,
+                HookEvent::SessionStart,
+                &cmd_with("tome"),
+                SUFFIX,
+                &mut outcome,
+                &mut err,
+            ),
+            Action::LeftAlone,
+            "neither the dev entry nor the OTHER-harness entry is ours",
+        );
+        assert_eq!(devin_array(&path).len(), 2, "both foreign entries survive");
+        assert!(err.is_none());
+    }
+
+    // ---- run-hook dispatch registration launcher tolerance --------------
+
+    /// The session-start command builder emits a launcher-prefixed command whose
+    /// suffix is recognised by the suffix builder — the wiring the reconcilers
+    /// rely on.
+    #[test]
+    fn session_start_command_round_trips_through_suffix() {
+        let cmd = session_start_command("devin", "ws");
+        let suffix = session_start_args_suffix("devin", "ws");
+        assert!(
+            crate::harness::launcher::looks_like_tome_hook_command(&cmd, &suffix),
+            "session-start command must be recognised: {cmd}",
+        );
+    }
+
+    /// The run-hook command builder emits a launcher-prefixed command whose
+    /// suffix is recognised by the suffix builder.
+    #[test]
+    fn run_hook_command_round_trips_through_suffix() {
+        let cmd = run_hook_command("cursor", "PreToolUse", "ws");
+        let suffix = run_hook_args_suffix("cursor", "PreToolUse", "ws");
+        assert!(
+            crate::harness::launcher::looks_like_tome_hook_command(&cmd, &suffix),
+            "run-hook command must be recognised: {cmd}",
+        );
+        // The suffix scopes the match: a different event/harness/workspace is
+        // NOT recognised.
+        assert!(!crate::harness::launcher::looks_like_tome_hook_command(
+            &cmd,
+            &run_hook_args_suffix("devin", "PreToolUse", "ws"),
+        ));
+    }
+
+    /// Review item 1 — launcher-change parity for the run-hook DISPATCH sink at
+    /// its OWN reconciler entry (`reconcile_dispatch_hook_file`), not just
+    /// transitively via the shared array primitives. Seed a run-hook
+    /// registration written with launcher A + a FOREIGN (other-harness) run-hook
+    /// entry; run the dispatch reconciler (which emits whatever `tome_command()`
+    /// resolves to — possibly ≠ A); assert the launcher-A entry is RECOGNISED
+    /// (single Tome entry, upgraded to a recognised tome command — no
+    /// duplicate), the foreign entry survives, then a second run is idempotent.
+    #[test]
+    fn dispatch_registration_recognises_and_upgrades_across_launcher_change() {
+        use crate::harness::hooks_ir::PortableEvent;
+        use crate::harness::{HookSupport, HookWire, TimeoutUnit};
+
+        let tmp = TempDir::new().unwrap();
+        // Devin: root-level event keys, native name == CC name `PreToolUse`, no
+        // version-stamp interaction — keeps the assertions about the run-hook
+        // entry clean.
+        let path = tmp.path().join(".devin/hooks.v1.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let run_hook_suffix = run_hook_args_suffix("devin", "PreToolUse", "ws");
+        // Entry written with an explicit launcher A (the pre-change on-disk shape).
+        let entry_a = tome_run_hook_entry(
+            HookFileSpec::DevinHooksV1,
+            &format!("/opt/a/bin/tome {run_hook_suffix}"),
+        );
+        // A FOREIGN run-hook entry for a DIFFERENT harness — must survive (the
+        // suffix names `--harness OTHER`, a different scope).
+        let entry_foreign = tome_run_hook_entry(
+            HookFileSpec::DevinHooksV1,
+            "tome harness run-hook --event PreToolUse --harness OTHER --workspace ws",
+        );
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "PreToolUse": [entry_a, entry_foreign]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let support = HookSupport {
+            file_spec: HookFileSpec::DevinHooksV1,
+            events: &[PortableEvent::PreToolUse],
+            wire: HookWire::ClaudeStyle,
+            timeout_unit: TimeoutUnit::Seconds,
+        };
+        // Native event-name map: Devin's native key IS the CC name.
+        let event_names: &[(PortableEvent, &'static str)] =
+            &[(PortableEvent::PreToolUse, "PreToolUse")];
+        let used = [PortableEvent::PreToolUse];
+
+        let mut outcome = SyncOutcome::default();
+        let mut err = None;
+        let action = reconcile_dispatch_hook_file(
+            "devin",
+            &path,
+            &support,
+            event_names,
+            "ws",
+            &used,
+            &mut outcome,
+            &mut err,
+        );
+        assert!(err.is_none(), "{err:?}");
+
+        let arr = devin_array_at(&path, "PreToolUse");
+        assert_eq!(
+            arr.len(),
+            2,
+            "the launcher-A entry must be RECOGNISED (no duplicate) and the \
+             foreign entry must survive; got: {arr:?}",
+        );
+        // The Tome entry (ours) is recognised as a tome run-hook command for our
+        // suffix; the foreign one is NOT (different --harness).
+        let ours = arr
+            .iter()
+            .filter(|e| {
+                e["hooks"][0]["command"].as_str().is_some_and(|c| {
+                    crate::harness::launcher::looks_like_tome_hook_command(c, &run_hook_suffix)
+                })
+            })
+            .count();
+        assert_eq!(
+            ours, 1,
+            "exactly one entry is ours (upgraded); got: {arr:?}"
+        );
+        let foreign_survives = arr.iter().any(|e| {
+            e["hooks"][0]["command"].as_str()
+                == Some("tome harness run-hook --event PreToolUse --harness OTHER --workspace ws")
+        });
+        assert!(
+            foreign_survives,
+            "the other-harness entry must survive: {arr:?}"
+        );
+        // The action reflects either an in-place upgrade (Updated) or a no-op
+        // (LeftAlone, when `tome_command()` happened to resolve to launcher A);
+        // both are correct — what matters is no duplicate + foreign preserved.
+        assert!(
+            matches!(action, Action::Updated | Action::LeftAlone),
+            "dispatch action must be Updated or LeftAlone; got: {action:?}",
+        );
+
+        // Second run is idempotent (the on-disk entry now matches what the
+        // reconciler emits, recognised launcher-tolerantly).
+        let before = std::fs::read_to_string(&path).unwrap();
+        let mut outcome2 = SyncOutcome::default();
+        let mut err2 = None;
+        let action2 = reconcile_dispatch_hook_file(
+            "devin",
+            &path,
+            &support,
+            event_names,
+            "ws",
+            &used,
+            &mut outcome2,
+            &mut err2,
+        );
+        assert!(err2.is_none());
+        assert_eq!(action2, Action::LeftAlone, "second run must be idempotent");
+        assert_eq!(
+            before,
+            std::fs::read_to_string(&path).unwrap(),
+            "idempotent run must not rewrite the file",
+        );
+    }
+
+    fn devin_array_at(path: &Path, key: &str) -> Vec<JsonValue> {
+        let doc: JsonValue = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        doc[key].as_array().cloned().unwrap_or_default()
     }
 }

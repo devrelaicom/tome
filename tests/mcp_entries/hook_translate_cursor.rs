@@ -152,7 +152,16 @@ fn cursor_run_hook_registration_and_manifest_pins() {
 
     // ----- (a) the on-disk run-hook registration entry -----
     let hook_path = fx.project.join(".cursor/hooks.json");
-    let doc: serde_json::Value = serde_json::from_str(&read(&hook_path)).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&read(&hook_path)).unwrap();
+    // #337 Phase B: canonicalise BOTH the run-hook and session-start launcher
+    // prefixes to bare `tome` so the structural byte-pins stay deterministic.
+    crate::common::canonicalize_tome_hook_command_leaves(
+        &mut doc,
+        &[
+            "harness run-hook --event PreToolUse --harness cursor --workspace test-workspace",
+            "harness session-start --workspace test-workspace --harness cursor",
+        ],
+    );
     assert_eq!(doc["version"], 1, "the hook file is version-stamped");
     let arr = &doc["hooks"]["preToolUse"];
     assert_eq!(
@@ -289,13 +298,22 @@ fn unenroll_session_start_plugin(fx: &Fixture, ws_id: i64, skill_id: i64) {
     .expect("unenrol session skill");
 }
 
-/// The exact run-hook dispatch command for SessionStart under cursor.
-const SESSION_START_RUN_HOOK_CMD: &str =
-    "tome harness run-hook --event SessionStart --harness cursor --workspace test-workspace";
+/// The byte-stable run-hook dispatch ARGS SUFFIX for SessionStart under cursor
+/// (#337 Phase B — the launcher prefix is resolved, the suffix is the marker).
+const SESSION_START_RUN_HOOK_SUFFIX: &str =
+    "harness run-hook --event SessionStart --harness cursor --workspace test-workspace";
 
-/// The exact session-steering command for cursor (US7).
-const SESSION_STEERING_CMD: &str =
-    "tome harness session-start --workspace test-workspace --harness cursor";
+/// The byte-stable session-steering ARGS SUFFIX for cursor (US7, #337 Phase B).
+const SESSION_STEERING_SUFFIX: &str =
+    "harness session-start --workspace test-workspace --harness cursor";
+
+/// `true` iff `entry`'s `command` is a recognised tome hook command for the
+/// given args suffix (launcher-tolerant per #337 Phase B).
+fn entry_cmd_matches(entry: &serde_json::Value, suffix: &str) -> bool {
+    entry["command"]
+        .as_str()
+        .is_some_and(|c| tome::harness::launcher::looks_like_tome_hook_command(c, suffix))
+}
 
 /// US7 coexistence: when a plugin ships a `SessionStart` hook, BOTH the plugin
 /// run-hook dispatch entry AND the session-steering entry land under
@@ -331,7 +349,7 @@ fn cursor_session_start_coexistence_and_selective_removal() {
     // (a) session-steering entry: runs `tome harness session-start …`
     let has_steering = arr
         .iter()
-        .any(|e| e["command"].as_str() == Some(SESSION_STEERING_CMD));
+        .any(|e| entry_cmd_matches(e, SESSION_STEERING_SUFFIX));
     assert!(
         has_steering,
         "session-steering entry (session-start command) must be present; \
@@ -342,7 +360,7 @@ fn cursor_session_start_coexistence_and_selective_removal() {
     // (b) run-hook dispatch entry: runs `tome harness run-hook --event SessionStart …`
     let has_run_hook = arr
         .iter()
-        .any(|e| e["command"].as_str() == Some(SESSION_START_RUN_HOOK_CMD));
+        .any(|e| entry_cmd_matches(e, SESSION_START_RUN_HOOK_SUFFIX));
     assert!(
         has_run_hook,
         "run-hook dispatch entry (run-hook command) must be present; \
@@ -373,16 +391,16 @@ fn cursor_session_start_coexistence_and_selective_removal() {
     );
 
     // The surviving entry is the session-steering one.
-    assert_eq!(
-        arr2[0]["command"].as_str(),
-        Some(SESSION_STEERING_CMD),
-        "surviving entry must be the session-steering command",
+    assert!(
+        entry_cmd_matches(&arr2[0], SESSION_STEERING_SUFFIX),
+        "surviving entry must be the session-steering command; got: {}",
+        serde_json::to_string_pretty(&arr2[0]).unwrap(),
     );
 
     // The run-hook dispatch entry has been removed.
     let still_has_run_hook = arr2
         .iter()
-        .any(|e| e["command"].as_str() == Some(SESSION_START_RUN_HOOK_CMD));
+        .any(|e| entry_cmd_matches(e, SESSION_START_RUN_HOOK_SUFFIX));
     assert!(
         !still_has_run_hook,
         "run-hook dispatch entry must be removed after plugin unenrol",
