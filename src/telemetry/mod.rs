@@ -159,10 +159,11 @@ fn build_handle(paths: &crate::paths::Paths) -> Telemetry {
         .app_env_var("TOME_TELEMETRY")
         .config_enabled(config_enabled)
         .runtime_enabled(true)
-        // Thread Tome's richer 8-vendor CI detection into the kernel's consent
-        // (the kernel default only inspects `CI`). Without this, a Jenkins box
-        // (`JENKINS_URL` set, `CI` unset) would EMIT while `tome telemetry status`
-        // reports "CI auto-off" — a disagreement between consent and the report.
+        // Thread Tome's richer multi-vendor CI detection into the kernel's
+        // consent (the kernel default only inspects `CI`). Without this, a
+        // Jenkins box (`JENKINS_URL` set, `CI` unset) would EMIT while
+        // `tome telemetry status` reports "CI auto-off" — a disagreement
+        // between consent and the report.
         .ci(config::is_ci())
         .accel("cpu")
         .flush_args(vec!["telemetry".into(), "flush".into(), "--quiet".into()])
@@ -695,6 +696,10 @@ mod tests {
         // every CI/opt-out var so only the planted `JENKINS_URL` is in play.
         let _serial = test_serial();
 
+        // Keep this clear-list the same superset `is_ci()` inspects (and that
+        // `config::tests::TELEMETRY_ENV_VARS` clears) — otherwise an ambient
+        // marker on a CI runner is exactly the cross-module env drift this PR
+        // consolidates against.
         const CI_VARS: &[&str] = &[
             "TOME_TELEMETRY",
             "GAUGE_TELEMETRY_DISABLE",
@@ -706,6 +711,11 @@ mod tests {
             "JENKINS_URL",
             "TF_BUILD",
             "TEAMCITY_VERSION",
+            "VERCEL",
+            "NETLIFY",
+            "TRAVIS",
+            "APPVEYOR",
+            "DRONE",
         ];
         let saved: Vec<(&str, Option<std::ffi::OsString>)> =
             CI_VARS.iter().map(|&k| (k, std::env::var_os(k))).collect();

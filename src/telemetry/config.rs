@@ -121,6 +121,11 @@ pub fn is_ci() -> bool {
     }
     /// Bare presence: set and non-empty, value ignored. This is the rule for
     /// vars that exist only inside a given CI and carry an opaque payload.
+    ///
+    /// Deliberately does NOT trim (unlike `truthy`): the payload is opaque, so
+    /// even a whitespace-only value counts as "in CI". The asymmetry is
+    /// intentional — for a presence marker, erring toward "is CI" errs toward
+    /// disabling telemetry, the safe direction.
     fn present(name: &str) -> bool {
         std::env::var_os(name).is_some_and(|v| !v.is_empty())
     }
@@ -532,7 +537,9 @@ mod tests {
 
     /// `CI` is truthy-presence, not exact-match: build farms set `1`/`yes`/`TRUE`
     /// just as often as `true`, and an explicit `0`/`false` (or unset) must read
-    /// as "not CI". (#284)
+    /// as "not CI". The falsey set deliberately includes whitespace-only values
+    /// (pinning the `trim()` in `truthy`) and a mixed-case token like `No`/`Off`
+    /// (pinning the `to_ascii_lowercase` path on the falsey side). (#284)
     #[test]
     fn is_ci_treats_ci_var_as_truthy_presence() {
         let truthy = ["1", "yes", "true", "TRUE", "True", "on"];
@@ -543,7 +550,9 @@ mod tests {
             drop(g);
         }
 
-        let falsey = ["0", "false", "FALSE", "no", "off", ""];
+        let falsey = [
+            "0", "false", "FALSE", "no", "off", "No", "Off", "", " ", "\t",
+        ];
         for val in falsey {
             let g = EnvGuard::new();
             g.set("CI", val);
@@ -589,6 +598,20 @@ mod tests {
         let (enabled, source) = resolve_enabled_with_source(&paths_in(&dir)).unwrap();
         assert!(!enabled, "NETLIFY present must auto-disable telemetry");
         assert_eq!(source, Source::Ci);
+    }
+
+    /// An explicitly empty presence marker (`VERCEL=""`) is NOT "in CI" — pins
+    /// the `!v.is_empty()` guard in `present()` so an empty set var can't be
+    /// mistaken for a CI signal.
+    #[test]
+    fn empty_presence_marker_does_not_auto_disable() {
+        let dir = TempDir::new().unwrap();
+        let g = EnvGuard::new();
+        g.set("VERCEL", "");
+        assert!(!is_ci(), "VERCEL=\"\" must not be detected as CI");
+        let (enabled, source) = resolve_enabled_with_source(&paths_in(&dir)).unwrap();
+        assert!(enabled, "VERCEL=\"\" must not auto-disable telemetry");
+        assert_eq!(source, Source::Default);
     }
 
     /// Force-on overrides the widened CI detection, exactly as it overrode the
