@@ -61,11 +61,11 @@ use crate::workspace::ResolvedScope;
 
 pub use report::{
     CatalogCacheHealth, CatalogCacheState, DoctorClassification, DoctorReport, EntryCountsByKind,
-    HarnessPresence, HarnessSubsystemReport, MetaSkillDrift, ModelRegistryReport,
-    OrphanDataDirReport, ProjectBindingState, PromptsReport, ProviderReport, RulesCopyState,
-    Subsystem, SubsystemHealth, SuggestedFix, TelemetryAllowlistEntry, TelemetryFlushReport,
-    TelemetryIdReport, TelemetryQueueReport, TelemetrySection, UnrepresentedAgentEntry,
-    UnrepresentedAgentsReport,
+    HarnessPresence, HarnessSubsystemReport, HookHarnessStatus, HookTranslationReport,
+    MetaSkillDrift, ModelRegistryReport, OrphanDataDirReport, ProjectBindingState, PromptsReport,
+    ProviderReport, RulesCopyState, Subsystem, SubsystemHealth, SuggestedFix,
+    TelemetryAllowlistEntry, TelemetryFlushReport, TelemetryIdReport, TelemetryQueueReport,
+    TelemetrySection, UnrepresentedAgentEntry, UnrepresentedAgentsReport,
 };
 
 /// Build a [`DoctorReport`] from the on-disk state. Read-only; never
@@ -242,6 +242,7 @@ pub fn assemble_report(
         unrepresented_agents,
         privilege_escalation,
         personas,
+        hook_translation,
     } = build_phase6_surfaces(scope, paths).unwrap_or_default();
 
     // ---- Phase 12 / US4 additions (read-only) -----------------------
@@ -387,6 +388,7 @@ pub fn assemble_report(
         telemetry,
         providers,
         model_registry,
+        hook_translation,
         overall,
         suggested_fixes,
     })
@@ -453,6 +455,7 @@ struct Phase6Surfaces {
     unrepresented_agents: Option<report::UnrepresentedAgentsReport>,
     privilege_escalation: Option<report::PrivilegeEscalationReport>,
     personas: Option<report::PersonaReport>,
+    hook_translation: Option<report::HookTranslationReport>,
 }
 
 /// Resolve the five Phase 6 surfaces for the active scope, mirroring
@@ -557,6 +560,17 @@ fn build_phase6_surfaces(
             }
         };
     }
+
+    // US11: plugin-hook translation read-only surface. Populated when any
+    // effective harness supports hook translation. Config loaded defensively
+    // (malformed → defaults) to keep doctor infallible.
+    let cfg_hooks = crate::config::load_or_default(paths);
+    let ht = checks::build_hook_translation_report(paths, workspace_name, &cfg_hooks);
+    out.hook_translation = if ht.per_harness.is_empty() {
+        None
+    } else {
+        Some(ht)
+    };
 
     Ok(out)
 }

@@ -1465,6 +1465,73 @@ pub fn check_model_registry(paths: &Paths) -> ModelRegistryReport {
     }
 }
 
+// ---------------------------------------------------------------------------
+// US11 (native plugin-hook translation): read-only hook-translation surface.
+// ---------------------------------------------------------------------------
+
+/// Build the US11 plugin-hook translation surface: per-harness dispatch state
+/// derived from on-disk manifests + config. Read-only (FR-124): never writes,
+/// never creates directories. Missing or unreadable manifests are treated as
+/// "no registered events" — not an error (unsynced or no hooks yet).
+///
+/// Returns a `HookTranslationReport` with one entry per effective harness that
+/// has `hook_support().is_some()`. Returns an empty `per_harness` when no such
+/// harness is in the effective list.
+pub fn build_hook_translation_report(
+    paths: &Paths,
+    workspace: &crate::workspace::WorkspaceName,
+    cfg: &crate::config::Config,
+) -> crate::doctor::report::HookTranslationReport {
+    use crate::doctor::report::{HookHarnessStatus, HookTranslationReport};
+    use crate::harness::hooks_ir::{PortableEvent, read_manifest};
+
+    let enabled = cfg.hooks.translate_plugin_hooks.unwrap_or(true);
+    let has_prompt_settings =
+        cfg.hooks.prompt_provider.is_some() || cfg.hooks.prompt_model.is_some();
+
+    let mut per_harness: Vec<HookHarnessStatus> = Vec::new();
+
+    crate::harness::with_effective_modules(|mods| {
+        for m in mods {
+            let Some(hs) = m.hook_support() else {
+                continue;
+            };
+
+            let manifest_path = paths.hooks_manifest(workspace, m.name());
+            let manifest = read_manifest(&manifest_path).ok();
+
+            // Events present in the on-disk dispatch manifest (successfully translated).
+            let registered_events: Vec<String> = manifest
+                .as_ref()
+                .map(|mf| mf.events.keys().cloned().collect())
+                .unwrap_or_default();
+
+            // Events the harness CANNOT translate → go to GUARDRAILS.
+            // These are portable events NOT in the harness's supported-event list.
+            let dropped_to_guardrails: Vec<String> = PortableEvent::ALL
+                .iter()
+                .filter(|e| !hs.events.contains(e))
+                .map(|e| e.cc_name().to_string())
+                .collect();
+
+            // Stale: translation disabled in config but the manifest still
+            // exists on disk (needs a `tome sync` to tear it down).
+            let manifest_stale = !enabled && manifest_path.exists();
+
+            per_harness.push(HookHarnessStatus {
+                harness: m.name().to_string(),
+                enabled,
+                registered_events,
+                dropped_to_guardrails,
+                manifest_stale,
+                trust_prompt_note: has_prompt_settings,
+            });
+        }
+    });
+
+    HookTranslationReport { per_harness }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
