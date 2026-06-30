@@ -40,7 +40,7 @@ use crate::cli::HarnessRunHookArgs;
 use crate::error::TomeError;
 use crate::harness::HookWire;
 use crate::harness::hooks_ir::{
-    Handler, HookManifest, ManifestEntry, cc_tool_name, matcher_matches,
+    Handler, HookManifest, ManifestEntry, cc_tool_name, if_predicate_matches, matcher_matches,
 };
 use crate::output::Mode;
 use crate::paths::Paths;
@@ -302,6 +302,12 @@ fn dispatch_inner(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    // The tool_input for the current event, used by the US9 `if` predicate
+    // evaluator. Passed through as-is from the harness stdin (CC Fact A).
+    // Uses a local Null sentinel so the borrow is valid for the full loop below.
+    let tool_input_null = Value::Null;
+    let tool_input = cc_base.get("tool_input").unwrap_or(&tool_input_null);
+
     // The manifest entries registered for this CC event. Absent → no hooks →
     // fail-open allow.
     let Some(entries) = manifest.events.get(event_cc) else {
@@ -318,6 +324,14 @@ fn dispatch_inner(
     let mut decisions: Vec<(String, CcDecision)> = Vec::new();
     for entry in entries {
         if !matcher_matches(entry.matcher.as_deref(), cc_tool) {
+            continue;
+        }
+        // US9: evaluate the CC `if` permission-rule predicate. An entry whose
+        // predicate does not match the current tool_input is skipped. An
+        // unparsable predicate also skips (fail-open: hook does not fire).
+        if let Some(if_pred) = entry.if_pred.as_deref()
+            && !if_predicate_matches(if_pred, cc_tool, tool_input)
+        {
             continue;
         }
 
@@ -362,9 +376,6 @@ fn dispatch_inner(
             v.to_string()
         };
 
-        // US9: the `if` permission-rule predicate is not yet evaluated; an entry
-        // carrying one is treated as matching (the predicate is an additive
-        // future tightening, never a loosening).
         let decision = match &entry.handler {
             Handler::Command { .. } => {
                 // Build per-entry provenance for TOME_* env vars.

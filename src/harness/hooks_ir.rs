@@ -286,6 +286,126 @@ pub(crate) fn parse_canonical_hooks(
     out
 }
 
+/// Parse a CC `if` permission-rule predicate and evaluate it against the
+/// synthesised `tool_input` object for the current event.
+///
+/// ## CC `if` syntax (CC Fact A, re-verified 2026-06-30)
+///
+/// - `Tool` (bare, no parentheses): any invocation of `Tool` matches.
+/// - `Tool(pattern)`: matches iff the relevant `tool_input` field's value
+///   matches `pattern` under glob semantics (`*` = any run of characters,
+///   anchored to the whole value).
+///
+/// ## Tool → `tool_input` field map
+///
+/// | CC tool | `tool_input` field |
+/// |---|---|
+/// | `Bash` | `command` |
+/// | `Read`, `Edit`, `Write` | `file_path` |
+/// | _(any other)_ | _(no documented field)_ |
+///
+/// For unmapped tools, a bare `Tool` form still matches (tool name matched;
+/// no field to constrain). A `Tool(pattern)` form on an unmapped tool →
+/// `false` (no field to test the glob against).
+///
+/// ## Fail-open on unparsable
+///
+/// Any parse failure, a regex compile error, or a missing/non-string
+/// `tool_input` field → `false` (the hook does NOT fire). This is a
+/// deliberate Tome design choice (U6): CC's exact behaviour on an
+/// unparsable `if` predicate is unverifiable, and not-firing-on-uncertainty
+/// is the safe choice.
+///
+/// ## Deferred refinements (v1)
+///
+/// // US-future: strip leading `VAR=value …` shell assignments from the Bash
+/// //   `command` field before glob-matching (CC Fact A). v1 matches the raw
+/// //   command string directly.
+/// // US-future: also glob-check the contents of `$(…)` / backtick
+/// //   sub-expressions in the Bash command (CC Fact A).
+#[allow(dead_code)]
+pub(crate) fn if_predicate_matches(
+    if_pred: &str,
+    cc_tool_name: &str,
+    tool_input: &serde_json::Value,
+) -> bool {
+    // Find the first '(' to distinguish bare `Tool` from `Tool(pattern)`.
+    let Some(paren_pos) = if_pred.find('(') else {
+        // Bare `Tool` form: any invocation of the named tool matches.
+        return if_pred == cc_tool_name;
+    };
+
+    // `Tool(pattern)` form — the predicate must end with ')'.
+    if !if_pred.ends_with(')') {
+        return false; // Malformed (no closing ')') → fail-open.
+    }
+
+    let tool = &if_pred[..paren_pos];
+    if tool.is_empty() {
+        // Predicate starts with '(' (e.g. "((((") → no tool name → false.
+        return false;
+    }
+    if tool != cc_tool_name {
+        return false; // Tool mismatch.
+    }
+
+    // Extract the glob pattern (between the first '(' and the last ')').
+    let pattern = &if_pred[paren_pos + 1..if_pred.len() - 1];
+
+    // Map the CC tool name to the relevant tool_input field.
+    let field = match tool {
+        "Bash" => "command",
+        "Read" | "Edit" | "Write" => "file_path",
+        _ => {
+            // No documented field for this tool. A `Tool(pattern)` form on an
+            // unmapped tool → false (no field to test the glob against).
+            // US-future: add field mappings for Grep, Glob, WebFetch, etc.
+            return false;
+        }
+    };
+
+    // Extract the field value from tool_input. Missing or non-string → false.
+    let Some(value) = tool_input.get(field).and_then(|v| v.as_str()) else {
+        return false;
+    };
+
+    // Translate the CC glob pattern to an anchored regex and match.
+    // US-future: strip leading `VAR=value …` assignments from Bash command.
+    // US-future: also glob-check `$(…)` / backtick sub-expression contents.
+    glob_matches(pattern, value)
+}
+
+/// Test a CC glob pattern (where `*` matches any run of characters) against
+/// `value`, anchored to the whole string. A regex compile failure → `false`.
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    let re_str = glob_to_anchored_regex(pattern);
+    Regex::new(&re_str)
+        .map(|re| re.is_match(value))
+        .unwrap_or(false)
+}
+
+/// Convert a CC glob pattern to an anchored regex string.
+///
+/// - `*` → `.*` (any sequence of characters, including none).
+/// - Regex metacharacters other than `*` are escaped with `\`.
+/// - The result is anchored with `^…$` so the whole value must match.
+fn glob_to_anchored_regex(pattern: &str) -> String {
+    let mut re = String::with_capacity(pattern.len() + 4);
+    re.push('^');
+    for ch in pattern.chars() {
+        match ch {
+            '*' => re.push_str(".*"),
+            '.' | '+' | '?' | '{' | '}' | '[' | ']' | '(' | ')' | '\\' | '^' | '$' | '|' => {
+                re.push('\\');
+                re.push(ch);
+            }
+            _ => re.push(ch),
+        }
+    }
+    re.push('$');
+    re
+}
+
 /// Apply CC matcher semantics: `None`/`""`/`"*"` = all; a token of only
 /// `[A-Za-z0-9_|, ]` = exact set (pipe/comma alternation); anything else =
 /// unanchored regex. An unparsable regex returns `false` — the hook is
@@ -556,6 +676,63 @@ mod tests {
         let hooks = parse_canonical_hooks("cat", "plug", &rw, &mut drops);
         assert!(hooks.is_empty());
         assert_eq!(drops[0].reason, HookDropReason::UnsupportedHandler);
+    }
+
+    #[test]
+    fn if_predicate_bash_glob() {
+        let inp = serde_json::json!({"command": "git push origin main"});
+        assert!(if_predicate_matches("Bash(git push *)", "Bash", &inp));
+        assert!(!if_predicate_matches("Bash(git pull *)", "Bash", &inp));
+        // Tool mismatch → false.
+        assert!(!if_predicate_matches("Edit(*)", "Bash", &inp));
+        // Unparsable → fail-open (false).
+        assert!(!if_predicate_matches("((((", "Bash", &inp));
+    }
+
+    #[test]
+    fn if_predicate_bare_tool_matches_any_args() {
+        let inp = serde_json::json!({"command": "git push origin main"});
+        // Bare `Tool` form (no parens) matches any invocation of the named tool.
+        assert!(if_predicate_matches("Bash", "Bash", &inp));
+        // Bare tool mismatch.
+        assert!(!if_predicate_matches("Edit", "Bash", &inp));
+        // Bare tool with Null tool_input also matches (no field to constrain).
+        assert!(if_predicate_matches(
+            "Bash",
+            "Bash",
+            &serde_json::Value::Null
+        ));
+    }
+
+    #[test]
+    fn if_predicate_file_path_tools() {
+        let inp = serde_json::json!({"file_path": "/etc/hosts"});
+        // Edit with matching file_path glob → true.
+        assert!(if_predicate_matches("Edit(/etc/*)", "Edit", &inp));
+        // Pattern that does not match.
+        assert!(!if_predicate_matches("Edit(/home/*)", "Edit", &inp));
+        // Read and Write also map to file_path.
+        assert!(if_predicate_matches("Read(/etc/*)", "Read", &inp));
+        assert!(if_predicate_matches("Write(/etc/*)", "Write", &inp));
+        // Tool mismatch even when field and pattern align.
+        assert!(!if_predicate_matches("Edit(/etc/*)", "Read", &inp));
+    }
+
+    #[test]
+    fn if_predicate_malformed_and_edge_cases() {
+        let inp = serde_json::json!({"command": "ls"});
+        // No closing ')' → false.
+        assert!(!if_predicate_matches("Bash(git push *", "Bash", &inp));
+        // Unmapped tool with pattern → false (no field).
+        assert!(!if_predicate_matches("Grep(*)", "Grep", &inp));
+        // Missing field → false.
+        let no_cmd = serde_json::json!({"file_path": "/tmp/x"});
+        assert!(!if_predicate_matches("Bash(*)", "Bash", &no_cmd));
+        // Bare unmapped tool matches (no field constraint).
+        assert!(if_predicate_matches("Grep", "Grep", &inp));
+        // Wildcard-only pattern matches any non-empty and empty string.
+        let inp2 = serde_json::json!({"command": ""});
+        assert!(if_predicate_matches("Bash(*)", "Bash", &inp2));
     }
 
     #[test]

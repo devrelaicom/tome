@@ -73,6 +73,8 @@ mod hook_dispatch_emit;
 mod hook_dispatch_failopen;
 #[path = "harness_settings/hook_dispatch_http.rs"]
 mod hook_dispatch_http;
+#[path = "harness_settings/hook_dispatch_if_pred.rs"]
+mod hook_dispatch_if_pred;
 #[path = "harness_settings/hook_dispatch_opt_out.rs"]
 mod hook_dispatch_opt_out;
 #[path = "harness_settings/hook_dispatch_prompt.rs"]
