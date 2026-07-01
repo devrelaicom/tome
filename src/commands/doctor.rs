@@ -628,6 +628,25 @@ fn emit_human(report: &DoctorReport) -> Result<(), TomeError> {
         writeln!(out)?;
     }
 
+    // Issue #292 (translation-fidelity loss): unrepresented hooks drop-report.
+    if let Some(u) = &report.unrepresented_hooks {
+        let count = u.hooks.len();
+        let harness_list = u.rules_only_harnesses.join(", ");
+        writeln!(
+            out,
+            "Hooks without native form on rules-only harnesses ({harness_list}):"
+        )?;
+        writeln!(
+            out,
+            "  {warn} {count} plugin hook{s} — rendered as GUARDRAILS.md prose only (not enforced)",
+            s = if count == 1 { "" } else { "s" },
+        )?;
+        for h in &u.hooks {
+            writeln!(out, "    {}:{}  {}", h.catalog, h.plugin, h.event)?;
+        }
+        writeln!(out)?;
+    }
+
     // Phase 6 / US5: privilege-escalation audit (FR-051).
     if let Some(p) = &report.privilege_escalation
         && !p.plugins.is_empty()

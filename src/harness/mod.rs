@@ -976,6 +976,29 @@ pub trait HarnessModule: Send + Sync {
         false
     }
 
+    /// Whether this harness can deliver plugin hooks natively, i.e. NOT
+    /// "rules-only for hooks" (issue #292). A harness delivers hooks natively
+    /// when EITHER it uses the Claude Code `RealJson` sink
+    /// ([`HooksStrategy::RealJson`], which merges the whole `hooks/hooks.json`
+    /// into `settings.local.json`) OR it declares a `#318` dispatcher
+    /// capability ([`HarnessModule::hook_support`] `Some`, translating a subset
+    /// of events into the harness's native hook file). Every other harness can
+    /// only render the plugin's `GUARDRAILS.md` prose — those events are
+    /// *unrepresented* (the fidelity loss surfaced by
+    /// [`crate::doctor::report::UnrepresentedHooksReport`]).
+    ///
+    /// Opt-in targets (`generic` / `generic-op` / `goose`) are excluded from the
+    /// unrepresented report the same way they are excluded from the
+    /// unrepresented-*agents* report, so this predicate mirrors the "rules-only"
+    /// definition used there (`!supports_native_agents() && !is_opt_in_target()`).
+    /// This is the SSOT for the definition — doctor, status, and `harness info`
+    /// all resolve "rules-only for hooks" through this one method.
+    fn is_rules_only_for_hooks(&self) -> bool {
+        !matches!(self.hooks_strategy(), HooksStrategy::RealJson)
+            && self.hook_support().is_none()
+            && !self.is_opt_in_target()
+    }
+
     /// The Open Plugins (`tome-op`) bundle root for this harness, or `None`
     /// (default) for every harness that integrates through the per-sink loop.
     ///

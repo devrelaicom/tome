@@ -619,6 +619,42 @@ pub struct UnrepresentedAgentsReport {
     pub agents: Vec<UnrepresentedAgentEntry>,
 }
 
+/// One enabled plugin hook (by portable event) that reaches no harness natively
+/// on the rules-only-for-hooks harnesses.
+///
+/// Issue #292 fidelity-loss report (the hooks analogue of
+/// [`UnrepresentedAgentEntry`]): the plugin ships a `hooks/hooks.json` declaring
+/// this event, but every rules-only-for-hooks harness (no `RealJson` strategy,
+/// no `#318` dispatcher `hook_support()`) can only render the plugin's
+/// `GUARDRAILS.md` prose instead of enforcing the hook. `event` is the Claude
+/// Code portable event name (e.g. `PreToolUse`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnrepresentedHookEntry {
+    pub catalog: String,
+    pub plugin: String,
+    pub event: String,
+}
+
+/// Issue #292 drop-report: enabled plugin hooks (by portable event) that no
+/// rules-only-for-hooks harness can deliver natively — they fall back to
+/// `GUARDRAILS.md` prose (or are dropped entirely). Mirrors
+/// [`UnrepresentedAgentsReport`]: `rules_only_harnesses` are the in-scope
+/// harnesses that render prose only (Claude Code's `RealJson` sink and the five
+/// `#318` dispatcher harnesses are excluded — they DO translate hooks), and
+/// `hooks` are the distinct `(catalog, plugin, event)` tuples those harnesses
+/// cannot enforce. Empty `hooks` when no rules-only-for-hooks harness is in
+/// scope or no enabled plugin ships hooks — keeps the byte-stable wire shape
+/// minimal.
+///
+/// Informational only (no auto-fix): the fidelity loss is intrinsic to the
+/// harness. Authors can move the guarded behaviour into `GUARDRAILS.md` prose or
+/// target a hook-capable harness.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnrepresentedHooksReport {
+    pub rules_only_harnesses: Vec<String>,
+    pub hooks: Vec<UnrepresentedHookEntry>,
+}
+
 /// US11 (native plugin-hook translation): per-harness plugin-hook dispatch
 /// state for `tome doctor`. Derived read-only from the on-disk dispatch
 /// manifest + config (FR-124). Plain `Serialize` — NO `deny_unknown_fields`
@@ -1023,4 +1059,17 @@ pub struct DoctorReport {
     /// future phases do not shift the positions of `overall` / `suggested_fixes`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hook_translation: Option<HookTranslationReport>,
+    /// Issue #292 (translation-fidelity loss): enabled plugin hooks that no
+    /// rules-only-for-hooks harness in scope can deliver natively — they fall
+    /// back to `GUARDRAILS.md` prose (or are dropped). The hooks analogue of
+    /// [`Self::unrepresented_agents`]. `None` when no rules-only-for-hooks
+    /// harness is in scope or no enabled plugin ships hooks → key omitted from
+    /// JSON (`skip_serializing_if`), so the byte-stable minimal-report pin stays
+    /// unchanged.
+    ///
+    /// Field is LAST so it is truly "trailing" per the byte-stable-pin
+    /// discipline: appended after `hook_translation` (the prior last field), it
+    /// leaves every earlier field's position untouched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unrepresented_hooks: Option<UnrepresentedHooksReport>,
 }

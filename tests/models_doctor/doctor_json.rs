@@ -347,6 +347,8 @@ fn doctor_json_shape_is_byte_stable_for_minimal_report() {
         model_registry: mr,
         // US11: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
         hook_translation: None,
+        // Issue #292: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
+        unrepresented_hooks: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -571,6 +573,8 @@ fn doctor_json_phase5_fields_serialise_correctly_when_populated() {
         },
         // US11: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
         hook_translation: None,
+        // Issue #292: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
+        unrepresented_hooks: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -725,6 +729,8 @@ fn doctor_json_phase6_fields_appended_last_in_order() {
         },
         // US11: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
         hook_translation: None,
+        // Issue #292: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
+        unrepresented_hooks: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -872,6 +878,8 @@ fn doctor_json_unrepresented_agents_populated_wire_shape() {
         },
         // US11: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
         hook_translation: None,
+        // Issue #292: `None` → omitted from wire shape (skip_serializing_if), byte-stable pin unchanged.
+        unrepresented_hooks: None,
         overall: DoctorClassification::Ok,
         suggested_fixes: Vec::new(),
     };
@@ -899,6 +907,52 @@ fn doctor_json_unrepresented_agents_populated_wire_shape() {
     assert_eq!(agents[0]["catalog"], "mycat");
     assert_eq!(agents[0]["plugin"], "myplugin");
     assert_eq!(agents[0]["name"], "myagent");
+}
+
+/// Issue #292: `UnrepresentedHooksReport` populated wire shape. Mirrors the
+/// agents populated pin — `{"rules_only_harnesses":[...], "hooks":[{"catalog",
+/// "plugin","event"}]}` — and confirms it is the LAST field in `DoctorReport`
+/// (appended after `hook_translation`, before `overall`).
+#[test]
+fn doctor_json_unrepresented_hooks_populated_wire_shape() {
+    use tome::doctor::report::{UnrepresentedHookEntry, UnrepresentedHooksReport};
+
+    let rep = UnrepresentedHooksReport {
+        rules_only_harnesses: vec!["cline".to_owned(), "zed".to_owned()],
+        hooks: vec![
+            UnrepresentedHookEntry {
+                catalog: "hookcat".to_owned(),
+                plugin: "hookplug".to_owned(),
+                event: "PreToolUse".to_owned(),
+            },
+            UnrepresentedHookEntry {
+                catalog: "hookcat".to_owned(),
+                plugin: "hookplug".to_owned(),
+                event: "Stop".to_owned(),
+            },
+        ],
+    };
+    let json = serde_json::to_value(&rep).expect("serialise");
+    let harnesses = json["rules_only_harnesses"]
+        .as_array()
+        .expect("rules_only_harnesses is an array");
+    assert_eq!(harnesses.len(), 2);
+    assert_eq!(harnesses[0], "cline");
+    assert_eq!(harnesses[1], "zed");
+    let hooks = json["hooks"].as_array().expect("hooks is an array");
+    assert_eq!(hooks.len(), 2, "hooks length: {hooks:?}");
+    assert_eq!(hooks[0]["catalog"], "hookcat");
+    assert_eq!(hooks[0]["plugin"], "hookplug");
+    assert_eq!(hooks[0]["event"], "PreToolUse");
+    assert_eq!(hooks[1]["event"], "Stop");
+    // Exactly three sub-fields per entry.
+    let keys: Vec<&str> = hooks[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, vec!["catalog", "plugin", "event"]);
 }
 
 /// US11: `HookTranslationReport` wire shape pin — populated + absent.

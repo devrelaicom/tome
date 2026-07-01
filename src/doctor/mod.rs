@@ -65,7 +65,8 @@ pub use report::{
     MetaSkillDrift, ModelRegistryReport, OrphanDataDirReport, ProjectBindingState, PromptsReport,
     ProviderReport, RulesCopyState, Subsystem, SubsystemHealth, SuggestedFix,
     TelemetryAllowlistEntry, TelemetryFlushReport, TelemetryIdReport, TelemetryQueueReport,
-    TelemetrySection, UnrepresentedAgentEntry, UnrepresentedAgentsReport,
+    TelemetrySection, UnrepresentedAgentEntry, UnrepresentedAgentsReport, UnrepresentedHookEntry,
+    UnrepresentedHooksReport,
 };
 
 /// Build a [`DoctorReport`] from the on-disk state. Read-only; never
@@ -243,7 +244,9 @@ pub fn assemble_report(
         privilege_escalation,
         personas,
         hook_translation,
-    } = build_phase6_surfaces(scope, paths, effective_harness_list.as_ref()).unwrap_or_default();
+        unrepresented_hooks,
+    } = build_phase6_surfaces(scope, paths, home, effective_harness_list.as_ref())
+        .unwrap_or_default();
 
     // ---- Phase 12 / US4 additions (read-only) -----------------------
     //
@@ -417,6 +420,7 @@ pub fn assemble_report(
         providers,
         model_registry,
         hook_translation,
+        unrepresented_hooks,
         overall,
         suggested_fixes,
     })
@@ -589,6 +593,7 @@ struct Phase6Surfaces {
     privilege_escalation: Option<report::PrivilegeEscalationReport>,
     personas: Option<report::PersonaReport>,
     hook_translation: Option<report::HookTranslationReport>,
+    unrepresented_hooks: Option<report::UnrepresentedHooksReport>,
 }
 
 /// Resolve the five Phase 6 surfaces for the active scope, mirroring
@@ -603,6 +608,7 @@ struct Phase6Surfaces {
 fn build_phase6_surfaces(
     scope: &ResolvedScope,
     paths: &Paths,
+    home: &Path,
     effective: Option<&crate::settings::resolver::EffectiveHarnessList>,
 ) -> Result<Phase6Surfaces, TomeError> {
     use crate::workspace::ScopeSource;
@@ -712,6 +718,26 @@ fn build_phase6_surfaces(
         None
     } else {
         Some(ht)
+    };
+
+    // Issue #292: unrepresented plugin hooks on the rules-only-for-hooks
+    // harnesses. Gated on the SAME scope-effective set as `hook_translation`
+    // and `status` (threaded via `effective`). Only set when at least one such
+    // hook exists, so a workspace with no unrepresented hooks keeps the field
+    // `None` (byte-stable wire shape unchanged). Degrades to `None` on error so
+    // doctor never crashes (read-only, FR-124).
+    out.unrepresented_hooks = match checks::build_unrepresented_hooks_report(
+        paths,
+        workspace_name,
+        home,
+        effective,
+    ) {
+        Ok(r) if !r.hooks.is_empty() => Some(r),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "doctor: build_unrepresented_hooks_report failed; emitting None");
+            None
+        }
     };
 
     Ok(out)
@@ -1827,6 +1853,7 @@ mod tests {
                 override_corrupt: false,
             },
             hook_translation: None,
+            unrepresented_hooks: None,
             overall: DoctorClassification::Ok,
             suggested_fixes: Vec::new(),
         }
