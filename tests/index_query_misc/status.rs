@@ -368,7 +368,7 @@ fn status_cli_exits_0_when_healthy() {
 }
 
 #[test]
-fn status_cli_exits_1_when_embedder_missing() {
+fn status_cli_exits_unhealthy_code_when_embedder_missing() {
     let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -376,7 +376,56 @@ fn status_cli_exits_1_when_embedder_missing() {
     // No model fabrication — both embedder and reranker report Missing,
     // which classifies as Unhealthy.
     let out = env.cmd().args(["status"]).output().unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    // Issue #282: Unhealthy keeps its historical exit code (1).
+    assert_eq!(out.status.code(), Some(tome::error::EXIT_HEALTH_UNHEALTHY));
+}
+
+/// Issue #282: a Degraded verdict (reranker missing — the embedder + index
+/// still serve queries) exits with the DISTINCT Degraded code, not the
+/// Unhealthy `1`. Both are non-zero so "fail on any non-zero" gates are
+/// unaffected; the distinct code lets a "fail on unhealthy only" gate branch.
+#[test]
+fn status_cli_exits_degraded_code_when_only_reranker_missing() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    crate::common::fabricate_all_registry_models(&paths);
+
+    // Remove just the reranker dir (DEFAULT profile) → embedder ok, reranker
+    // missing → classify() returns Degraded.
+    use tome::embedding::profile::{Profile, reranker_for};
+    let reranker_name = reranker_for(Profile::DEFAULT).name;
+    std::fs::remove_dir_all(paths.models_dir.join(reranker_name)).unwrap();
+
+    let out = env.cmd().args(["status"]).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(tome::error::EXIT_HEALTH_DEGRADED),
+        "degraded status must exit {} (distinct from unhealthy {}); stderr: {}",
+        tome::error::EXIT_HEALTH_DEGRADED,
+        tome::error::EXIT_HEALTH_UNHEALTHY,
+        String::from_utf8_lossy(&out.stderr),
+    );
+    // The three codes are distinct (defence-in-depth against a future
+    // accidental collision that would silently re-merge the verdicts).
+    assert_ne!(
+        tome::error::EXIT_HEALTH_DEGRADED,
+        tome::error::EXIT_HEALTH_UNHEALTHY
+    );
+    assert_ne!(tome::error::EXIT_HEALTH_DEGRADED, 0);
+
+    // `--json` still exposes the three-state via `overall` — the documented
+    // gating field.
+    let out_json = env.cmd().args(["--json", "status"]).output().unwrap();
+    assert_eq!(
+        out_json.status.code(),
+        Some(tome::error::EXIT_HEALTH_DEGRADED)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out_json.stdout).unwrap();
+    assert_eq!(v["overall"], "degraded");
 }
 
 #[test]

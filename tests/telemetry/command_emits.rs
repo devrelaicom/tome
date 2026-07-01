@@ -179,8 +179,10 @@ fn noop_workspace_use_emits_no_workspace_action() {
 // ===========================================================================
 
 /// `tome doctor` ⇒ a `tome.doctor_run { fix: false, findings: <int> }`.
-/// `doctor` may classify a fresh home as degraded (exit 1), but the emit fires
-/// BEFORE the exit path, so it lands regardless of the exit code.
+/// `doctor` may classify a fresh home as non-healthy, but the emit fires
+/// BEFORE the exit path, so it lands regardless of the exit code. Issue #282:
+/// the non-healthy verdict is either Unhealthy (1) or Degraded
+/// (`EXIT_HEALTH_DEGRADED`), so accept both alongside Ok (0).
 #[test]
 fn doctor_emits_doctor_run_with_fix_flag_and_findings() {
     let env = ToolEnv::new();
@@ -191,8 +193,15 @@ fn doctor_emits_doctor_run_with_fix_flag_and_findings() {
         .expect("spawn tome");
     let code = out.status.code();
     assert!(
-        code == Some(0) || code == Some(1),
-        "doctor should exit 0 or 1 (degraded), got {code:?}; stderr: {}",
+        matches!(
+            code,
+            Some(0)
+                | Some(tome::error::EXIT_HEALTH_UNHEALTHY)
+                | Some(tome::error::EXIT_HEALTH_DEGRADED)
+        ),
+        "doctor should exit 0 (healthy), {} (unhealthy), or {} (degraded), got {code:?}; stderr: {}",
+        tome::error::EXIT_HEALTH_UNHEALTHY,
+        tome::error::EXIT_HEALTH_DEGRADED,
         String::from_utf8_lossy(&out.stderr),
     );
 
@@ -221,7 +230,13 @@ fn doctor_fix_emits_doctor_run_with_fix_true() {
         .expect("spawn tome");
     let code = out.status.code();
     assert!(
-        matches!(code, Some(0) | Some(1) | Some(75)),
+        matches!(
+            code,
+            Some(0)
+                | Some(tome::error::EXIT_HEALTH_UNHEALTHY)
+                | Some(tome::error::EXIT_HEALTH_DEGRADED)
+                | Some(75)
+        ),
         "doctor --fix exit {code:?}; stderr: {}",
         String::from_utf8_lossy(&out.stderr),
     );

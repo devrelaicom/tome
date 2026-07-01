@@ -37,10 +37,11 @@ fn doctor_json_reports_malformed_config_instead_of_exit_5() {
         "doctor must not exit 5 on a malformed config; stderr={}",
         String::from_utf8_lossy(&out.stderr),
     );
-    // Non-zero overall (Unhealthy) because the config is broken.
+    // Non-zero overall (Unhealthy) because the config is broken. Issue #282:
+    // a malformed config is Unhealthy → the unhealthy code (1), not Degraded.
     assert_eq!(
         out.status.code(),
-        Some(1),
+        Some(tome::error::EXIT_HEALTH_UNHEALTHY),
         "doctor should classify Unhealthy"
     );
 
@@ -155,7 +156,7 @@ fn status_json_reports_malformed_config_instead_of_exit_5() {
     assert_eq!(v["overall"], "unhealthy");
     assert_eq!(
         out.status.code(),
-        Some(1),
+        Some(tome::error::EXIT_HEALTH_UNHEALTHY),
         "status should classify unhealthy"
     );
 }
@@ -232,7 +233,11 @@ fn doctor_and_status_run_when_malformed_config_also_sets_workspace_default() {
         "the ignored `[workspace] default` must not be resolved (no exit 13); stderr={}",
         String::from_utf8_lossy(&out.stderr),
     );
-    assert_eq!(out.status.code(), Some(1), "doctor classifies unhealthy");
+    assert_eq!(
+        out.status.code(),
+        Some(tome::error::EXIT_HEALTH_UNHEALTHY),
+        "doctor classifies unhealthy"
+    );
     let v: Value = serde_json::from_slice(&out.stdout).expect("doctor --json parses");
     let fixes = v["suggested_fixes"]
         .as_array()

@@ -11,6 +11,30 @@ use std::path::PathBuf;
 
 use crate::workspace::ScopeKind;
 
+/// Raw process exit code for the **Degraded** overall-health verdict emitted by
+/// `tome status` and `tome doctor` (issue #282).
+///
+/// These two commands never fail with a `TomeError` for a health verdict —
+/// doing so would suppress the report they exist to print. Instead they render
+/// the report and then call `std::process::exit` directly with a health code:
+/// `0` when Healthy, this code when **Degraded**, and `1` when **Unhealthy**.
+/// Splitting Degraded off from Unhealthy lets a CI gate fail-on-unhealthy-only
+/// (branch on this code, or on the `--json` `overall` field) while a plain
+/// "fail on any non-zero" gate is unaffected — Degraded is still non-zero.
+///
+/// `10` is the first free slot in the exit-code space and is NOT a `TomeError`
+/// variant: it lives outside the closed 1:1 [`TomeError`] → exit-code map on
+/// purpose, so adding it does not touch that contract. It must stay distinct
+/// from every code returned by [`TomeError::exit_code`] and from the Unhealthy
+/// code (`1`). `status` and `doctor` both reference this constant so the two
+/// surfaces cannot diverge. See `site/docs/reference/exit-codes.md`.
+pub const EXIT_HEALTH_DEGRADED: i32 = 10;
+
+/// Raw process exit code for the **Unhealthy** overall-health verdict emitted by
+/// `tome status` and `tome doctor` (issue #282). Unchanged from the historical
+/// value (`1`) to minimise churn — see [`EXIT_HEALTH_DEGRADED`] for the scheme.
+pub const EXIT_HEALTH_UNHEALTHY: i32 = 1;
+
 #[derive(Debug, thiserror::Error)]
 pub enum TomeError {
     // -----------------------------------------------------------------------

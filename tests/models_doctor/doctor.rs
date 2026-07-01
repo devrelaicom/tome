@@ -403,20 +403,66 @@ fn global_scope_overrides_workspace_in_report() {
 // ---- CLI exit codes -----------------------------------------------------
 
 #[test]
-fn cli_doctor_with_no_models_exits_1() {
+fn cli_doctor_with_no_models_exits_unhealthy_code() {
     let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let env = ToolEnv::new();
     let out = env.cmd().args(["doctor"]).output().unwrap();
+    // Issue #282: missing embedder → Unhealthy → the historical exit code (1).
     assert_eq!(
         out.status.code(),
-        Some(1),
-        "expected exit 1; stderr={}",
+        Some(tome::error::EXIT_HEALTH_UNHEALTHY),
+        "expected the unhealthy exit code; stderr={}",
         String::from_utf8_lossy(&out.stderr),
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Suggested fixes:"), "{stdout}");
+}
+
+/// Issue #282: a Degraded verdict (a broken catalog cache — the index/models
+/// still serve) exits with the DISTINCT Degraded code, not the Unhealthy `1`.
+/// This is the doctor analogue of the status Degraded exit-code test, driven
+/// through the real CLI binary. `--json`'s `overall` field is the documented
+/// gating source and remains `"degraded"`.
+#[test]
+fn cli_doctor_degraded_exits_degraded_code() {
+    let _override_lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_all_registry_models(&paths);
+
+    // Enrol a catalog then break its cache (remove `.git/`) → `not_a_repo`,
+    // which classifies Degraded (not Unhealthy — informational catalog issue).
+    let fix = Fixture::build_sample();
+    env.cmd()
+        .args(["catalog", "add", &fix.url])
+        .output()
+        .unwrap();
+    let cache_dir = cache_dir_for(&env, &fix.url);
+    std::fs::remove_dir_all(cache_dir.join(".git")).unwrap();
+
+    let out = env.cmd().args(["doctor"]).output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(tome::error::EXIT_HEALTH_DEGRADED),
+        "degraded doctor must exit {} (distinct from unhealthy {}); stderr={}",
+        tome::error::EXIT_HEALTH_DEGRADED,
+        tome::error::EXIT_HEALTH_UNHEALTHY,
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // `--json` still exposes the three-state via `overall`.
+    let out_json = env.cmd().args(["--json", "doctor"]).output().unwrap();
+    assert_eq!(
+        out_json.status.code(),
+        Some(tome::error::EXIT_HEALTH_DEGRADED),
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out_json.stdout).unwrap();
+    assert_eq!(v["overall"], "degraded");
 }
 
 #[test]

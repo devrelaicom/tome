@@ -12,6 +12,10 @@ failure in scripts. The `--json` error output also includes a snake-case
 a category — e.g. `52` and `73` both report `schema_too_new`). This table is
 enforced against the CLI contract in CI.
 
+Code `10` is special: it is not a failure class but a **health verdict** emitted
+by `tome status` and `tome doctor` (see [Health verdicts](#health-verdicts-status--doctor)
+below). It is never carried by the `--json` *error* envelope's `category`.
+
 | Code | Category | Meaning |
 | --- | --- | --- |
 | `0` | — | Success. |
@@ -24,6 +28,7 @@ enforced against the CLI contract in CI.
 | `7` | `io` | I/O error. |
 | `8` | `interrupted` | Interrupted (SIGINT / Ctrl-C). |
 | `9` | `plugin_data_dir_write_failed` | Failed to write a plugin's data directory. |
+| `10` | `health_degraded` | `tome status` / `tome doctor` health verdict: **degraded** (a non-fatal issue — queries still serve). See [Health verdicts](#health-verdicts-status--doctor). |
 | `12` | `workspace_not_bound` | No workspace is bound to the current directory (`tome workspace current`). |
 | `13` | `workspace_not_found` | Workspace not found. |
 | `14` | `workspace_already_exists` | Workspace already exists. |
@@ -86,3 +91,35 @@ is reporting what it found — `85` means at least one error, `86` means
 warnings-only under `--strict`. Scripts and CI should branch on them (a `0`
 means no findings; anything else in this pair is feedback, not a tool
 failure). See [Linting](../authoring/lint.md).
+
+## Health verdicts (`status` / `doctor`)
+
+`tome status` and `tome doctor` render a report and then exit with one of three
+**health verdicts** — the report always prints first, so these codes never
+suppress the diagnosis:
+
+| Verdict | Code | Meaning |
+| --- | --- | --- |
+| Healthy | `0` | Everything checks out. |
+| Degraded | `10` | A non-fatal issue (e.g. the reranker is missing, or a catalog cache is broken) — queries still serve. |
+| Unhealthy | `1` | A fatal issue (broken index, embedder drift, malformed config). |
+
+Both non-zero verdicts fail a plain "fail on any non-zero" gate. The distinct
+`10` lets a stricter gate **fail on unhealthy only**:
+
+```sh
+tome status; code=$?
+if [ "$code" -eq 1 ]; then
+  echo "unhealthy — failing the build"; exit 1
+elif [ "$code" -eq 10 ]; then
+  echo "degraded — warning only"; exit 0
+fi
+```
+
+Equivalently, gate on the structured field — `status --json | jq -r .overall`
+and `doctor --json | jq -r .overall` both yield `ok` / `degraded` / `unhealthy`,
+which is the recommended, code-independent gating source.
+
+For `tome doctor --fix`: when the repair runs but un-fixable issues remain, it
+exits `75` (`doctor_fix_unsafe`) instead of the health verdict — "the fix did
+something, but manual work is still required".
