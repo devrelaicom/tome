@@ -76,6 +76,11 @@ pub struct QueryOutcome {
 }
 
 /// Scoring source for a `QueryOutcome`.
+///
+/// The `as_str` values are the SSOT for both the CLI JSON envelope and the
+/// MCP `search_skills` output — a caller reads `scoring` to know whether
+/// `score` is a reranker logit (`"reranked"`) or `1.0 − cosine distance`
+/// (`"embedding-similarity"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScoringMode {
     Reranked,
@@ -83,7 +88,10 @@ pub enum ScoringMode {
 }
 
 impl ScoringMode {
-    fn as_str(self) -> &'static str {
+    /// The canonical scoring-mode string (`"reranked"` |
+    /// `"embedding-similarity"`). Reused verbatim by the MCP `search_skills`
+    /// tool so the CLI and MCP surfaces never diverge on the wire value.
+    pub fn as_str(self) -> &'static str {
         match self {
             ScoringMode::Reranked => SCORING_RERANKED,
             ScoringMode::Similarity => SCORING_SIMILARITY,

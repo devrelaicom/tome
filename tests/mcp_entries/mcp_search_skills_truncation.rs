@@ -31,11 +31,11 @@ use tome::embedding::stub::{StubEmbedder, StubReranker};
 use tome::index::{self, OpenOptions};
 use tome::mcp::prompts::PromptRegistry;
 use tome::mcp::state::McpState;
-use tome::mcp::tools::search_skills::{self, Input, MAX_DESCRIPTION_MAX_CHARS};
+use tome::mcp::tools::search_skills::{self, Input, MAX_DESCRIPTION_MAX_CHARS, NoResultsReason};
 use tome::plugin::PluginId;
 use tome::plugin::identity::EntryKind;
 use tome::plugin::lifecycle::{self, LifecycleDeps};
-use tome::workspace::{ResolvedScope, WorkspaceName};
+use tome::workspace::{ResolvedScope, Scope, ScopeSource, WorkspaceName};
 
 use crate::common::{
     config_with_catalog, fabricate_models, lifecycle_paths, stub_embedder_seed, stub_reranker_seed,
@@ -546,5 +546,146 @@ fn config_description_max_chars_used_when_call_arg_absent() {
     assert!(
         out.matches[0].description.ends_with('\u{2026}'),
         "truncated description must end with ellipsis"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #285 — empty/weak-result signal (corpus_size / scoring / reranker_drift /
+// no_results_reason / hint).
+// ---------------------------------------------------------------------------
+
+/// Build an `McpState` whose resolved scope is an arbitrary named
+/// workspace (not `global`). Used by the "populated index, no scoped match"
+/// case: the whole-index `corpus_size` stays > 0 while the scoped KNN join
+/// (`workspace_skills` for this name) yields zero rows.
+fn build_state_for_scope(paths: &tome::paths::Paths, workspace: &str) -> Arc<McpState> {
+    let base = build_state(paths);
+    // `McpState` fields are public; clone the shared handles and swap the scope.
+    Arc::new(McpState {
+        embedder: base.embedder.clone(),
+        reranker: OnceCell::new_with(Some(Arc::new(StubReranker::new()) as Arc<dyn Reranker>)),
+        scope: ResolvedScope {
+            scope: Scope(WorkspaceName::parse(workspace).expect("valid workspace name")),
+            source: ScopeSource::Flag,
+            project_root: None,
+        },
+        paths: paths.clone(),
+        embedder_entry: base.embedder_entry,
+        embedder_seed: base.embedder_seed.clone(),
+        reranker_entry: base.reranker_entry,
+        prompt_registry: base.prompt_registry.clone(),
+        host_harness: base.host_harness.clone(),
+        last_search_ranks: std::sync::Mutex::new(std::collections::HashMap::new()),
+    })
+}
+
+#[test]
+fn non_empty_search_reports_corpus_size_and_scoring() {
+    // #285: a normal populated-index search carries the always-present
+    // `corpus_size` (> 0) and `scoring` (`reranked`, since the StubReranker is
+    // wired) — and NONE of the empty-result signal fields.
+    let body = "---\nname: findme\ndescription: A findable skill.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(&[("findme", body)], &[]);
+    let state = build_state(&paths);
+
+    let out = invoke(state, make_input("findme", 150)).expect("search ok");
+    assert!(!out.matches.is_empty(), "expected at least one match");
+    assert!(
+        out.corpus_size > 0,
+        "populated index must report corpus_size > 0, got {}",
+        out.corpus_size
+    );
+    assert_eq!(
+        out.scoring, "reranked",
+        "a reranked search must report scoring = reranked (StubReranker wired), got {:?}",
+        out.scoring
+    );
+    // Signal fields are absent on the common (non-empty) path.
+    assert!(
+        out.no_results_reason.is_none(),
+        "no_results_reason must be absent on a non-empty result"
+    );
+    assert!(
+        out.hint.is_none(),
+        "hint must be absent on a non-empty result"
+    );
+    assert!(
+        out.reranker_drift.is_none(),
+        "no drift expected when the stub seed matches the index"
+    );
+}
+
+#[test]
+fn empty_corpus_search_reports_index_empty_reason_and_reindex_hint() {
+    // #285: an empty index (zero searchable entries) returns
+    // corpus_size == 0 with `no_results_reason: index_empty` + a reindex hint.
+    let tmp = TempDir::new().unwrap();
+    let paths = lifecycle_paths(tmp.path());
+    fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+    // Bootstrap an EMPTY index with the STUB seeds so the drift check is clean
+    // (a fresh `open_index_for_read` would seed the real BGE registry identity,
+    // tripping embedder drift against the stub state).
+    let _conn = open_index(&paths);
+    let state = build_state(&paths);
+
+    let out = invoke(state, make_input("anything", 150)).expect("search ok on empty index");
+    assert!(
+        out.matches.is_empty(),
+        "an empty index must return zero matches, got {}",
+        out.matches.len()
+    );
+    assert_eq!(
+        out.corpus_size, 0,
+        "empty index must report corpus_size == 0"
+    );
+    assert_eq!(
+        out.no_results_reason,
+        Some(NoResultsReason::IndexEmpty),
+        "empty index must report no_results_reason = index_empty"
+    );
+    let hint = out.hint.expect("empty index must carry a hint");
+    assert!(
+        hint.contains("reindex"),
+        "empty-index hint must mention reindex; got: {hint:?}"
+    );
+}
+
+#[test]
+fn populated_index_no_match_reports_no_match_reason_and_rephrase_hint() {
+    // #285: the index has content (corpus_size > 0) but the resolved scope has
+    // no `workspace_skills` rows, so the scoped KNN returns nothing. That's the
+    // `no_match` case — the fix is to rephrase, NOT to reindex.
+    let body = "---\nname: elsewhere\ndescription: Indexed under global only.\n---\nbody\n";
+    let (_tmp, paths) = stage_workspace(&[("elsewhere", body)], &[]);
+    // Query under a DIFFERENT (empty) workspace so the whole-index corpus is
+    // non-empty but the scoped join yields zero rows.
+    let state = build_state_for_scope(&paths, "no-such-workspace");
+
+    let out = invoke(state, make_input("elsewhere", 150)).expect("search ok");
+    assert!(
+        out.matches.is_empty(),
+        "a scope with no enrolled skills must return zero matches, got {}",
+        out.matches.len()
+    );
+    assert!(
+        out.corpus_size > 0,
+        "the whole-index corpus is populated, so corpus_size must be > 0, got {}",
+        out.corpus_size
+    );
+    assert_eq!(
+        out.no_results_reason,
+        Some(NoResultsReason::NoMatch),
+        "populated index with no scoped match must report no_results_reason = no_match"
+    );
+    let hint = out.hint.expect("no-match must carry a hint");
+    assert!(
+        hint.contains("rephrasing") || hint.contains("broadening"),
+        "no-match hint must suggest rephrasing/broadening; got: {hint:?}"
+    );
+    // Not a reindex situation — the hint must NOT tell the agent to reindex.
+    assert!(
+        !hint.contains("reindex"),
+        "no-match hint must NOT mention reindex; got: {hint:?}"
     );
 }
