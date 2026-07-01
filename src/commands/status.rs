@@ -3,16 +3,22 @@
 //! Per-subsystem health check. See `contracts/status.md`. Read-only. Never
 //! acquires the advisory lock; never triggers a model download.
 //!
-//! Exit semantics:
+//! Exit semantics (issue #282 — three distinct health codes):
 //!
 //! * Overall health == Ok → exit 0
-//! * Overall health == Degraded (reranker-only drift) → exit 1
-//! * Overall health == Unhealthy (anything else) → exit 1
+//! * Overall health == Degraded (reranker missing/drift — queries still serve)
+//!   → exit [`crate::error::EXIT_HEALTH_DEGRADED`] (10)
+//! * Overall health == Unhealthy (broken index, embedder drift, …)
+//!   → exit [`crate::error::EXIT_HEALTH_UNHEALTHY`] (1)
+//!
+//! Degraded and Unhealthy are BOTH non-zero (so a "fail on any non-zero" CI
+//! gate is unaffected) but distinct (so a "fail on unhealthy only" gate can
+//! branch on the code, or on the `--json` `overall` field).
 //!
 //! The non-zero cases are NOT propagated as `TomeError` variants — that
 //! would prevent the report from rendering. Instead, `run` emits the report
-//! and then calls `std::process::exit(1)` for non-Ok cases. Library-API
-//! tests bypass `run` and call `assemble_report` directly.
+//! and then calls `std::process::exit` with the health code for non-Ok cases.
+//! Library-API tests bypass `run` and call `assemble_report` directly.
 
 use std::io::Write;
 
@@ -49,10 +55,15 @@ pub fn run(args: StatusArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     // problem as a finding and flips overall to Unhealthy.
     fill_config_health(&mut report, &paths);
     emit(&report, mode)?;
-    if !matches!(report.overall, OverallHealth::Ok) {
-        std::process::exit(1);
+    // Issue #282: three distinct health verdicts. Ok returns normally (exit 0
+    // via `main.rs`); Degraded and Unhealthy exit non-zero with DISTINCT codes
+    // so CI can fail-on-unhealthy-only. Raw exit (not a `TomeError`) so the
+    // report always renders first — see the module docstring.
+    match report.overall {
+        OverallHealth::Ok => Ok(()),
+        OverallHealth::Degraded => std::process::exit(crate::error::EXIT_HEALTH_DEGRADED),
+        OverallHealth::Unhealthy => std::process::exit(crate::error::EXIT_HEALTH_UNHEALTHY),
     }
-    Ok(())
 }
 
 // ---- Status data model (mirrors data-model.md §11) -------------------------
@@ -169,8 +180,8 @@ pub struct StatusReport {
 /// rehashed against its pinned SHA-256.
 ///
 /// This is the library-API entry point that tests should call directly —
-/// the surrounding `run()` adds the `std::process::exit(1)` semantics that
-/// terminate the test runner.
+/// the surrounding `run()` adds the `std::process::exit` health-code semantics
+/// (see the module docstring) that would terminate the test runner.
 pub fn assemble_report(
     paths: &Paths,
     scope: &Scope,

@@ -154,25 +154,32 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     emit(&report, mode)?;
 
     // `tome.doctor_run`: emit AFTER the report renders but BEFORE any of the
-    // exit paths below (one of which is a hard `std::process::exit(1)` that
-    // would otherwise skip the emit). `findings` is the raw number of
+    // exit paths below (one of which is a hard `std::process::exit` with a
+    // health code that would otherwise skip the emit). `findings` is the raw number of
     // suggested-fix issues the report surfaced (the kernel buckets it).
     crate::telemetry::emit(crate::telemetry::event::DoctorRun {
         fix: args.fix,
         findings: report.suggested_fixes.len() as u32,
     });
 
-    // Exit-code semantics per `contracts/doctor.md`:
+    // Exit-code semantics per `contracts/doctor.md` (issue #282 — three
+    // distinct health codes, matching `tome status`):
     // - Overall Ok → exit 0.
-    // - Overall Degraded / Unhealthy → exit 1 (the report classifies).
-    // - `--fix` ran but un-fixable issues remain → exit 75 instead
-    //   of 1 (communicates "fix did something, but the work isn't
-    //   done").
+    // - Overall Degraded → exit `EXIT_HEALTH_DEGRADED` (10): the report found
+    //   a non-fatal issue (queries still serve). Distinct from Unhealthy so a
+    //   CI gate can fail-on-unhealthy-only; still non-zero.
+    // - Overall Unhealthy → exit `EXIT_HEALTH_UNHEALTHY` (1).
+    // - `--fix` ran but un-fixable issues remain → exit 75
+    //   (`DoctorFixNotSafe`) INSTEAD of the health code (communicates "fix did
+    //   something, but the work isn't done"). This takes precedence over the
+    //   Degraded/Unhealthy split — it is the more actionable verdict after a
+    //   repair attempt, and it routes through the closed `TomeError` map.
     let remaining_manual = doctor::fixes::has_remaining_manual_fixes(&report);
-    let overall_ok = matches!(report.overall, DoctorClassification::Ok);
-    if overall_ok {
-        return Ok(());
-    }
+    let health_code = match report.overall {
+        DoctorClassification::Ok => return Ok(()),
+        DoctorClassification::Degraded => crate::error::EXIT_HEALTH_DEGRADED,
+        DoctorClassification::Unhealthy => crate::error::EXIT_HEALTH_UNHEALTHY,
+    };
     if args.fix && remaining_manual {
         return Err(TomeError::DoctorFixNotSafe {
             subsystem: report
@@ -183,7 +190,8 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
                 .unwrap_or_else(|| "unknown".to_owned()),
         });
     }
-    std::process::exit(1);
+    // Raw exit (not a `TomeError`) so the report always renders first.
+    std::process::exit(health_code);
 }
 
 /// Fold a malformed-`config.toml` parse error (issue #287) into the report: push

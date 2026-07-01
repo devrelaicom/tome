@@ -146,8 +146,10 @@ fn doctor_json_includes_suggested_fix_record_on_broken_catalog() {
     std::fs::remove_dir_all(cache_dir.join(".git")).unwrap();
 
     let out = env.cmd().args(["--json", "doctor"]).output().unwrap();
-    // Exit 1 — degraded — but JSON still emitted on stdout.
-    assert_eq!(out.status.code(), Some(1));
+    // Issue #282: degraded now exits with the DISTINCT degraded code (not the
+    // unhealthy `1`) — but JSON is still emitted on stdout, and `overall` stays
+    // `"degraded"` (the documented gating field).
+    assert_eq!(out.status.code(), Some(tome::error::EXIT_HEALTH_DEGRADED));
     let v: Value = serde_json::from_slice(&out.stdout).expect("doctor --json parses");
 
     assert_eq!(v["overall"], "degraded");
@@ -309,7 +311,8 @@ fn doctor_json_overall_unhealthy_when_models_missing() {
     let env = ToolEnv::new();
     // No fabricate — both models are absent.
     let out = env.cmd().args(["--json", "doctor"]).output().unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    // Issue #282: Unhealthy keeps its historical exit code (1).
+    assert_eq!(out.status.code(), Some(tome::error::EXIT_HEALTH_UNHEALTHY));
     let v: Value = serde_json::from_slice(&out.stdout).expect("doctor --json parses");
     assert_eq!(v["overall"], "unhealthy");
     assert_eq!(v["embedder"]["state"], "missing");

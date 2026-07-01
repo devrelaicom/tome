@@ -333,6 +333,11 @@
       "meaning": "Failed to write a plugin's data directory."
     },
     {
+      "code": 10,
+      "category": "health_degraded",
+      "meaning": "tome status / tome doctor health verdict: degraded (a non-fatal issue — queries still serve)."
+    },
+    {
       "code": 12,
       "category": "workspace_not_bound",
       "meaning": "No workspace is bound to the current directory (`tome workspace current`)."
