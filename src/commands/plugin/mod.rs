@@ -117,6 +117,43 @@ pub fn registry_seeds() -> (
 
 pub(crate) use crate::presentation::format::human_mb;
 
+/// Human-mode confirmation printed after a successful `--sync` on
+/// `plugin enable` / `plugin disable` (#280). SSOT for the post-sync messaging
+/// shared by both commands.
+///
+/// * `projects > 0` → confirms the propagation (mirrors `tier set`'s post-sync
+///   "applied" phrasing rather than a "run `tome sync`" reminder).
+/// * `projects == 0` → the workspace has no bound projects, so nothing was
+///   applied; print an ACTIONABLE next step instead of the misleading
+///   "applied to 0 project(s)" line (mirrors the spirit of `tome sync --all`'s
+///   "no bound projects" messaging).
+pub(crate) fn emit_synced_confirmation(projects: usize) -> Result<(), TomeError> {
+    let mut out = std::io::stdout().lock();
+    write_synced_confirmation(&mut out, projects)?;
+    Ok(())
+}
+
+/// Write the post-sync confirmation to `out`. Split from [`emit_synced_confirmation`]
+/// (which owns the locked stdout) so BOTH branches — the `n > 0` "applied" line
+/// and the `n == 0` "no bound projects" note — are unit-testable against an
+/// in-memory sink (the `write<W: Write>` seam used across the plugin surface).
+pub(crate) fn write_synced_confirmation<W: std::io::Write>(
+    out: &mut W,
+    projects: usize,
+) -> std::io::Result<()> {
+    if projects == 0 {
+        writeln!(
+            out,
+            "  note:     no bound projects — run `tome workspace use <name>` to bind one so plugin changes apply to a harness",
+        )
+    } else {
+        writeln!(
+            out,
+            "  synced:   applied to harnesses in {projects} bound project(s)",
+        )
+    }
+}
+
 /// Human-relative duration from `then` to "now", bucketed as:
 /// * < 60s   → "just now"
 /// * < 60m   → "Xm ago"
@@ -499,6 +536,46 @@ mod tests {
         assert_eq!(
             reranker_seed.name, "bge-reranker-large",
             "DEFAULT profile reranker must be bge-reranker-large"
+        );
+    }
+
+    /// #280: with ≥1 bound project, the shared post-sync confirmation reports
+    /// the applied count (not a reminder).
+    #[test]
+    fn synced_confirmation_reports_applied_count() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_synced_confirmation(&mut buf, 3).expect("write");
+        let text = String::from_utf8(buf).expect("utf8");
+        assert_eq!(
+            text,
+            "  synced:   applied to harnesses in 3 bound project(s)\n",
+        );
+    }
+
+    /// #280 (R1): with ZERO bound projects, the confirmation must NOT say
+    /// "applied to 0 project(s)" — it prints an actionable `note:` pointing at
+    /// `tome workspace use` (mirrors `tome sync --all`'s "no bound projects").
+    #[test]
+    fn synced_confirmation_zero_projects_is_actionable_note() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_synced_confirmation(&mut buf, 0).expect("write");
+        let text = String::from_utf8(buf).expect("utf8");
+
+        assert!(
+            !text.contains("applied to harnesses in 0"),
+            "must NOT print the misleading zero-count line: {text}",
+        );
+        assert!(
+            text.contains("note:"),
+            "expected an actionable note: {text}"
+        );
+        assert!(
+            text.contains("no bound projects"),
+            "note must explain there are no bound projects: {text}",
+        );
+        assert!(
+            text.contains("tome workspace use"),
+            "note must point at `tome workspace use`: {text}",
         );
     }
 }

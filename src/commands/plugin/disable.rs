@@ -104,14 +104,62 @@ pub fn run(args: PluginDisableArgs, scope: &ResolvedScope, mode: Mode) -> Result
         });
     }
 
-    match mode {
-        Mode::Human => emit_human(&id, &outcome),
-        Mode::Json => emit_json(&id, &outcome),
+    // --sync (#280): propagate the change to bound harnesses inline, reusing the
+    // SAME path `tome sync --all` uses (`commands::sync::sync_bound_projects` →
+    // `sync_all` → `sync_project`), so this inherits every writer safety and the
+    // forward-progress fan-out. It runs AFTER the disable + summary trigger have
+    // committed: a sync failure here surfaces the underlying `sync_project` exit
+    // code but the disable itself is already durable and IS reported first (the
+    // success line prints before we propagate the error).
+    let projects_synced = if args.sync {
+        // Print the disable success line NOW so the user always sees that the
+        // disable landed, even if the follow-up sync errors out below.
+        emit_disable_success(&id, &outcome, mode, true)?;
+        let report = crate::commands::sync::sync_bound_projects(scope.scope.name(), &paths)?;
+        Some(report.projects.len())
+    } else {
+        None
+    };
+
+    match (mode, projects_synced) {
+        // --sync succeeded: the success line already printed above; now confirm
+        // what was applied (human, via the shared SSOT) / carry the count (json).
+        (Mode::Human, Some(n)) => super::emit_synced_confirmation(n),
+        (Mode::Json, Some(n)) => emit_json(&id, &outcome, Some(n)),
+        // No --sync: normal success emit with the "run `tome sync`" reminder.
+        (Mode::Human, None) => emit_disable_success(&id, &outcome, mode, false),
+        (Mode::Json, None) => emit_json(&id, &outcome, None),
     }
 }
 
-fn emit_human(id: &PluginId, outcome: &DisableOutcome) -> Result<(), TomeError> {
-    let mut out = std::io::stdout().lock();
+/// Print the human success line + `next:` reminder (or, in JSON mode, nothing —
+/// the structured record is the contract there). `sync_will_run` suppresses the
+/// "run `tome sync`" reminder when `--sync` is about to apply the change itself.
+fn emit_disable_success(
+    id: &PluginId,
+    outcome: &DisableOutcome,
+    mode: Mode,
+    sync_will_run: bool,
+) -> Result<(), TomeError> {
+    if mode == Mode::Human {
+        let mut out = std::io::stdout().lock();
+        write_disable_human(&mut out, id, outcome, sync_will_run)?;
+    }
+    Ok(())
+}
+
+/// Write the human-mode success lines for `plugin disable` to `out`.
+///
+/// Uses the `write<W: Write>` seam so the `next:` reminder (#280) is testable
+/// against an in-memory sink. `sync_will_run` suppresses the "run `tome sync`"
+/// clause when `--sync` is applying the change inline (avoids telling the user
+/// to run a sync that is already running).
+fn write_disable_human<W: Write>(
+    out: &mut W,
+    id: &PluginId,
+    outcome: &DisableOutcome,
+    sync_will_run: bool,
+) -> std::io::Result<()> {
     writeln!(
         out,
         "{} disabled {} ({} skill records retained)",
@@ -119,6 +167,12 @@ fn emit_human(id: &PluginId, outcome: &DisableOutcome) -> Result<(), TomeError> 
         id,
         outcome.skills_retained,
     )?;
+    // #280: disable previously dead-ended with no follow-up guidance. Mirror
+    // the enable `next:` line — point the user at applying the change to bound
+    // harnesses, unless `--sync` is applying it for them.
+    if !sync_will_run {
+        writeln!(out, "  next:     `tome sync` to apply to your harnesses",)?;
+    }
     Ok(())
 }
 
@@ -127,13 +181,110 @@ struct DisableRecord {
     plugin: String,
     status: &'static str,
     skills_retained: u32,
+    /// #280: number of bound projects the inline `--sync` propagated to.
+    /// Absent (omitted) when `--sync` was not passed, so the byte-stable JSON
+    /// pin for the no-`--sync` path is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projects_synced: Option<usize>,
 }
 
-fn emit_json(id: &PluginId, outcome: &DisableOutcome) -> Result<(), TomeError> {
+fn emit_json(
+    id: &PluginId,
+    outcome: &DisableOutcome,
+    projects_synced: Option<usize>,
+) -> Result<(), TomeError> {
     let record = DisableRecord {
         plugin: id.to_string(),
         status: "disabled",
         skills_retained: outcome.skills_retained,
+        projects_synced,
     };
     output::write_json(&record)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+    use std::time::Duration;
+
+    use super::{DisableRecord, write_disable_human};
+    use crate::plugin::PluginId;
+    use crate::plugin::lifecycle::DisableOutcome;
+
+    fn sample_id() -> PluginId {
+        PluginId::from_str("acme/widgets").expect("valid id")
+    }
+
+    fn sample_outcome() -> DisableOutcome {
+        DisableOutcome {
+            plugin: sample_id(),
+            skills_retained: 4,
+            duration: Duration::from_millis(500),
+        }
+    }
+
+    /// #280: without `--sync`, the disable human output carries a `next:`
+    /// reminder pointing at `tome sync` (previously it dead-ended).
+    #[test]
+    fn human_output_includes_sync_reminder() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_disable_human(&mut buf, &sample_id(), &sample_outcome(), false).expect("write");
+        let text = String::from_utf8(buf).expect("utf8");
+
+        assert!(text.contains("disabled"), "success line missing: {text}");
+        assert!(text.contains("next:"), "reminder hint missing: {text}");
+        assert!(
+            text.contains("tome sync"),
+            "`tome sync` not referenced: {text}",
+        );
+    }
+
+    /// #280: when `--sync` will apply the change inline, the "run `tome sync`"
+    /// reminder is suppressed so the output never contradicts itself.
+    #[test]
+    fn human_output_suppresses_sync_reminder_when_sync_will_run() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_disable_human(&mut buf, &sample_id(), &sample_outcome(), true).expect("write");
+        let text = String::from_utf8(buf).expect("utf8");
+
+        assert!(text.contains("disabled"), "success line missing: {text}");
+        assert!(
+            !text.contains("tome sync"),
+            "`tome sync` reminder must be suppressed when --sync runs: {text}",
+        );
+    }
+
+    /// #280: with no `--sync`, `projects_synced` is `None` and omitted, so the
+    /// wire shape is byte-identical to the pre-#280 record.
+    #[test]
+    fn json_record_omits_projects_synced_without_sync() {
+        let record = DisableRecord {
+            plugin: sample_id().to_string(),
+            status: "disabled",
+            skills_retained: 4,
+            projects_synced: None,
+        };
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"plugin":"acme/widgets","status":"disabled","skills_retained":4}"#,
+        );
+    }
+
+    /// #280: with `--sync`, the JSON record carries the additive
+    /// `projects_synced` count as a trailing field.
+    #[test]
+    fn json_record_carries_projects_synced_with_sync() {
+        let record = DisableRecord {
+            plugin: sample_id().to_string(),
+            status: "disabled",
+            skills_retained: 4,
+            projects_synced: Some(3),
+        };
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"plugin":"acme/widgets","status":"disabled","skills_retained":4,"projects_synced":3}"#,
+        );
+    }
 }

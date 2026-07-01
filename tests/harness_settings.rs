@@ -88,6 +88,8 @@ mod hook_dispatch_symlink;
 mod hooks_merge;
 #[path = "harness_settings/hooks_rewrite.rs"]
 mod hooks_rewrite;
+#[path = "harness_settings/plugin_sync_flag.rs"]
+mod plugin_sync_flag;
 #[path = "harness_settings/provider_deny_unknown_fields.rs"]
 mod provider_deny_unknown_fields;
 #[path = "harness_settings/rules_file_block_in_existing.rs"]
