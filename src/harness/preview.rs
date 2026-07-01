@@ -41,6 +41,23 @@
 //! * Rules directive + MCP registration target — the same `rules_file_target` /
 //!   `mcp_dialect` / `mcp_manual_only` the `harness info` command surfaces.
 //!
+//! ## Scope of the "matches sync" claim
+//!
+//! The preview reports each entry's DELIVERY ROUTING (native / persona /
+//! unrepresented / MCP-routed / native-hook / GUARDRAILS) plus the agent
+//! `model` / `tools` drops (from `translate_agent`'s `dropped_fields`). It does
+//! NOT render the translated agent body, and it does NOT surface the Claude-Code
+//! privileged passthrough fields (`hooks` / `mcp_servers` / `permission_mode`).
+//! Those fields are the only thing the `strip_plugin_agent_privileges` setting
+//! affects at sync time (a Claude-Code-only emission-clone that clears them),
+//! and since the preview never reports them, its output is unaffected by that
+//! setting: the preview translates the un-stripped `CanonicalAgent`, but the
+//! divergence is invisible because the stripped fields are not part of the
+//! preview's surface. `dropped_fields` (model / tools) is independent of the
+//! strip and stays exact. In short: the preview matches sync for routing +
+//! model/tools drops, and deliberately does not model the privileged-passthrough
+//! strip.
+//!
 //! ## Read-only
 //!
 //! No writes, no harness files touched. The DB is opened read-only; the harness
@@ -175,6 +192,14 @@ pub struct PreviewReport {
     pub agents: Vec<AgentPreview>,
     pub entries: Vec<EntryPreview>,
     pub hooks: Vec<HookPreview>,
+    /// The first hook-enumeration error encountered (e.g. a malformed
+    /// `hooks/hooks.json`). `resolve_enabled_canonical_hooks` records but does
+    /// not propagate it (forward-progress, like sync); the preview surfaces it
+    /// here so a malformed source is reported rather than silently omitted.
+    /// Appended LAST + `skip_serializing_if`-gated so the byte-stable pins for
+    /// the other fields don't move.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hooks_error: Option<String>,
 }
 
 /// A snapshot of the resolved harness module's report-relevant fields, captured
@@ -239,10 +264,13 @@ pub fn pipeline(
     })?;
 
     let workspace = scope.scope.name();
-    let personas_enabled = crate::config::load_or_default(paths)
-        .harness
-        .expose_agents_as_personas
-        .unwrap_or(false);
+    let cfg = crate::config::load_or_default(paths);
+    let personas_enabled = cfg.harness.expose_agents_as_personas.unwrap_or(false);
+    // Mirror the dispatch reconciler's prompt gate (default off): a prompt-only
+    // hook is dropped to GUARDRAILS by sync unless a prompt provider/model is
+    // configured. The preview must apply the same gate so it doesn't report a
+    // prompt-only event as native under the default config.
+    let prompt_enabled = cfg.hooks.prompt_provider.is_some() || cfg.hooks.prompt_model.is_some();
 
     // No DB → nothing enabled. Every enumeration returns empty (not an error).
     if !paths.index_db.is_file() {
@@ -291,14 +319,26 @@ pub fn pipeline(
         only_harness: None,
     };
     // The read-only enumeration records a first parse error but never halts; a
-    // hook whose source is unreadable is simply omitted (matches sync's
-    // forward-progress). The preview surfaces the whole set regardless.
+    // hook whose source is malformed/unreadable is omitted from `canonical`
+    // (matches sync's forward-progress). Unlike sync — which only records the
+    // error internally — the preview SURFACES it as a report-level note so a
+    // malformed `hooks/hooks.json` is honest, not silently dropped (consistent
+    // with the agent path surfacing per-entry parse errors).
     let mut first_error: Option<TomeError> = None;
     let canonical =
         crate::harness::reconcile::hooks::resolve_enabled_canonical_hooks(&deps, &mut first_error)?;
-    let hooks = preview_hooks(&conn, paths, ws, plugin_filter, &snap, &canonical)?;
+    let hooks = preview_hooks(
+        &conn,
+        paths,
+        ws,
+        plugin_filter,
+        &snap,
+        &canonical,
+        prompt_enabled,
+    )?;
+    let hooks_error = first_error.map(|e| e.to_string());
 
-    Ok(build_report(
+    let mut report = build_report(
         &snap,
         ws,
         plugin_filter,
@@ -306,7 +346,9 @@ pub fn pipeline(
         agents,
         entries,
         hooks,
-    ))
+    );
+    report.hooks_error = hooks_error;
+    Ok(report)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -339,6 +381,9 @@ fn build_report(
         agents,
         entries,
         hooks,
+        // Set by `pipeline` after `resolve_enabled_canonical_hooks` runs; the
+        // no-DB early-return path has no hook enumeration, so `None` is correct.
+        hooks_error: None,
     }
 }
 
@@ -449,17 +494,23 @@ fn translate_for_preview(
     });
     match resolved {
         Some(r) => r,
-        // Not in the effective registry (opt-in target reached via lookup).
-        // Opt-in targets never support native agents, so this arm is only
-        // reached for a real supporting harness resolved via lookup — none
-        // exist (every native-supporting harness is in SUPPORTED_HARNESSES),
-        // but resolve defensively via lookup rather than panic.
-        None => match lookup(harness_name) {
-            Some(m) => m.translate_agent(canonical, clashes, model_registry),
-            None => Err(TomeError::HarnessNotSupported {
-                name: harness_name.to_string(),
-            }),
-        },
+        // Unreachable in practice: this fn is only called for a harness the
+        // caller ALREADY resolved with `supports_native_agents == true`, and
+        // every native-supporting harness lives in `SUPPORTED_HARNESSES` (so
+        // `with_effective_modules` finds it). If this arm ever goes live, a
+        // future refactor broke the "resolved-supporting" invariant — surface
+        // it as an internal integrity failure (NOT a misleading exit-18
+        // "harness not supported", which the caller already ruled out).
+        None => {
+            debug_assert!(
+                false,
+                "translate_for_preview: harness `{harness_name}` reported \
+                 supports_native_agents but is absent from the effective registry",
+            );
+            Err(TomeError::IndexIntegrityCheckFailure(format!(
+                "preview: native-agent harness `{harness_name}` not resolvable in the effective registry"
+            )))
+        }
     }
 }
 
@@ -489,6 +540,16 @@ fn preview_entries(tiered: &[TieredEntry], plugin_filter: Option<&str>) -> Vec<E
 /// natively (#318), which fall back to GUARDRAILS, and whether the plugin ships
 /// `GUARDRAILS.md` prose. Reuses the canonical hook enumeration (`canonical`)
 /// the dispatch reconciler consumes.
+///
+/// `prompt_enabled` mirrors the dispatch reconciler's per-harness/config gate
+/// (`reconcile_one_harness_dispatch`: `cfg.hooks.prompt_provider.is_some() ||
+/// cfg.hooks.prompt_model.is_some()`). `resolve_enabled_canonical_hooks`
+/// deliberately does NOT apply this gate (it is config-dependent, applied
+/// downstream), so the preview must apply it here: when prompts are disabled,
+/// `Handler::Prompt` hooks are filtered out BEFORE computing each plugin's
+/// declared-event set — exactly like sync builds `effective_canonical` → `used`.
+/// A prompt-only event with prompts off therefore lands in `guardrails_events`,
+/// matching what sync actually delivers under the default config.
 fn preview_hooks(
     conn: &rusqlite::Connection,
     paths: &Paths,
@@ -496,27 +557,50 @@ fn preview_hooks(
     plugin_filter: Option<&str>,
     snap: &ModuleSnapshot,
     canonical: &[CanonicalHook],
+    prompt_enabled: bool,
 ) -> Result<Vec<HookPreview>, TomeError> {
     use std::collections::{BTreeMap, HashSet};
 
-    use crate::harness::hooks_ir::PortableEvent;
+    use crate::harness::hooks_ir::{Handler, PortableEvent};
 
     // The set of portable events this harness translates natively. `PortableEvent`
     // is `Hash` but not `Ord`, so use a `HashSet` for membership and iterate the
     // fixed `PortableEvent::ALL` order for deterministic output.
     let native_set: HashSet<PortableEvent> = snap.native_hook_events.iter().copied().collect();
 
-    // Group the canonical hooks by (catalog, plugin) → the set of portable
-    // events that plugin declares.
-    let mut by_plugin: BTreeMap<(String, String), HashSet<PortableEvent>> = BTreeMap::new();
+    // Per plugin, split its declared events into two sets, mirroring sync:
+    //
+    //   * `effective` — events with ≥1 hook that SURVIVES the prompt gate (sync's
+    //     `effective_canonical`). These are candidates for native translation:
+    //     `used = effective ∩ hook_support().events`; the rest fall back to
+    //     GUARDRAILS (declared-but-unsupported).
+    //   * `prompt_dropped` — events ALL of whose hooks were prompt-filtered (a
+    //     prompt-only event with prompts disabled). Sync drops these to the
+    //     GUARDRAILS floor, so they belong in `guardrails_events` — NOT omitted.
+    //
+    // Tracking both is what fixes the "preview says survives when sync drops"
+    // failure: a prompt-only event with prompts off must appear as a GUARDRAILS
+    // fallback, not vanish.
+    struct PluginEvents {
+        effective: HashSet<PortableEvent>,
+        prompt_dropped: HashSet<PortableEvent>,
+    }
+    let mut by_plugin: BTreeMap<(String, String), PluginEvents> = BTreeMap::new();
     for h in canonical {
         if plugin_filter.is_some_and(|want| h.plugin != want) {
             continue;
         }
-        by_plugin
+        let entry = by_plugin
             .entry((h.catalog.clone(), h.plugin.clone()))
-            .or_default()
-            .insert(h.event);
+            .or_insert_with(|| PluginEvents {
+                effective: HashSet::new(),
+                prompt_dropped: HashSet::new(),
+            });
+        if !prompt_enabled && matches!(h.handler, Handler::Prompt { .. }) {
+            entry.prompt_dropped.insert(h.event);
+        } else {
+            entry.effective.insert(h.event);
+        }
     }
 
     // Every enabled plugin (so a plugin that ships ONLY GUARDRAILS.md, with no
@@ -528,7 +612,7 @@ fn preview_hooks(
             continue;
         }
         let key = (catalog.clone(), plugin.clone());
-        let declared: Option<&HashSet<PortableEvent>> = by_plugin.get(&key);
+        let declared = by_plugin.get(&key);
 
         // GUARDRAILS.md presence via the SAME reader the guardrails sink uses.
         let has_guardrails_prose =
@@ -541,33 +625,35 @@ fn preview_hooks(
                 Err(_) => false,
             };
 
+        // A plugin's declared-event footprint = effective ∪ prompt_dropped.
+        let declared_empty =
+            declared.is_none_or(|d| d.effective.is_empty() && d.prompt_dropped.is_empty());
         // Skip plugins with no hooks AND no guardrails prose — they contribute
         // nothing to this sink.
-        let declared_empty = declared.is_none_or(HashSet::is_empty);
         if declared_empty && !has_guardrails_prose {
             continue;
         }
 
         // Iterate the fixed PortableEvent::ALL order so native/guardrails lists
         // are deterministic (byte-stable) regardless of HashSet iteration order.
-        let (native_events, guardrails_events) = match declared {
-            Some(events) => {
-                let mut native = Vec::new();
-                let mut fallback = Vec::new();
-                for ev in PortableEvent::ALL {
-                    if !events.contains(&ev) {
-                        continue;
-                    }
+        let mut native_events = Vec::new();
+        let mut guardrails_events = Vec::new();
+        if let Some(d) = declared {
+            for ev in PortableEvent::ALL {
+                // A prompt-dropped-only event → GUARDRAILS floor (sync drops it).
+                if d.effective.contains(&ev) {
                     if native_set.contains(&ev) {
-                        native.push(ev.cc_name().to_string());
+                        native_events.push(ev.cc_name().to_string());
                     } else {
-                        fallback.push(ev.cc_name().to_string());
+                        // Declared + effective but unsupported by this harness.
+                        guardrails_events.push(ev.cc_name().to_string());
                     }
+                } else if d.prompt_dropped.contains(&ev) {
+                    // Every hook for this event was prompt-filtered → GUARDRAILS.
+                    guardrails_events.push(ev.cc_name().to_string());
                 }
-                (native, fallback)
             }
-            None => (Vec::new(), Vec::new()),
-        };
+        }
 
         out.push(HookPreview {
             catalog: catalog.clone(),

@@ -50,7 +50,13 @@ fn is_empty(report: &PreviewReport) -> bool {
 
 fn emit_human(report: &PreviewReport) -> Result<(), TomeError> {
     let mut out = std::io::stdout().lock();
+    render_human(&mut out, report)
+}
 
+/// Render the human report into `out`. Split from [`emit_human`] so tests can
+/// drive the real renderer into a buffer (a writer seam) rather than asserting a
+/// re-derived `format!` copy.
+fn render_human(out: &mut impl Write, report: &PreviewReport) -> Result<(), TomeError> {
     writeln!(out, "Preview: {} ({})", report.harness, report.description)?;
     writeln!(out, "  Workspace:       {}", report.workspace)?;
     if let Some(p) = &report.plugin_filter {
@@ -92,7 +98,7 @@ fn emit_human(report: &PreviewReport) -> Result<(), TomeError> {
     } else if report.supports_native_agents {
         writeln!(out, "Agents (native translation):")?;
         for a in &report.agents {
-            emit_agent_line(&mut out, a)?;
+            emit_agent_line(out, a)?;
         }
     } else {
         // Rules-only harness: agents become personas or are unrepresented.
@@ -103,8 +109,20 @@ fn emit_human(report: &PreviewReport) -> Result<(), TomeError> {
         };
         writeln!(out, "Agents ({how}):")?;
         for a in &report.agents {
-            emit_agent_line(&mut out, a)?;
+            emit_agent_line(out, a)?;
         }
+    }
+    // The preview reports model/tools drops + delivery routing; it does not model
+    // the Claude-Code-only `strip_plugin_agent_privileges` clone (which clears the
+    // privileged hooks/mcpServers/permissionMode passthrough at sync time). Note
+    // that scope only for claude-code, where the setting has an effect.
+    if report.harness == "claude-code" && !report.agents.is_empty() {
+        writeln!(
+            out,
+            "  Note: model/tools drops shown; privileged passthrough \
+             (hooks/mcpServers/permissionMode) is not modelled — if \
+             `strip_plugin_agent_privileges` is set, sync clears those fields."
+        )?;
     }
 
     // ----- Skills / commands -----
@@ -141,8 +159,14 @@ fn emit_human(report: &PreviewReport) -> Result<(), TomeError> {
         };
         writeln!(out, "Hooks ({native}):")?;
         for h in &report.hooks {
-            emit_hook_line(&mut out, h)?;
+            emit_hook_line(out, h)?;
         }
+    }
+    // Surface a swallowed hook-enumeration error (e.g. a malformed
+    // `hooks/hooks.json`), consistent with the agent path's per-entry errors —
+    // honest, not silently omitted.
+    if let Some(err) = &report.hooks_error {
+        writeln!(out, "  ! hook read error (some hooks omitted): {err}")?;
     }
 
     Ok(())
@@ -217,6 +241,7 @@ mod tests {
             agents: vec![],
             entries: vec![],
             hooks: vec![],
+            hooks_error: None,
         }
     }
 
@@ -238,29 +263,94 @@ mod tests {
         assert!(!is_empty(&r));
     }
 
-    /// The empty-preview human output names the workspace and (when scoped) the
-    /// plugin, so the caller gets a clear "nothing enabled" message.
+    /// The empty-preview human output — driven through the REAL `render_human`
+    /// (writer seam), not a re-derived `format!` copy — names the workspace and
+    /// gives a clear "nothing enabled" message with the header context.
     #[test]
     fn empty_report_human_output_is_clear() {
         let mut buf = Vec::new();
-        {
-            // Reuse the private line emitters via a small local render of the
-            // empty branch: call emit_human is simplest but writes to stdout.
-            // Instead assert the message shape via the same format! the branch
-            // uses so the wording stays pinned.
-            let r = base_report();
-            let msg = format!(
-                "Nothing enabled in workspace `{}`{} to preview.",
-                r.workspace,
-                r.plugin_filter
-                    .as_deref()
-                    .map(|p| format!(" for plugin `{p}`"))
-                    .unwrap_or_default(),
-            );
-            buf.extend_from_slice(msg.as_bytes());
-        }
+        render_human(&mut buf, &base_report()).expect("render");
         let s = String::from_utf8(buf).unwrap();
-        assert_eq!(s, "Nothing enabled in workspace `global` to preview.");
+        assert!(s.contains("Preview: opencode"), "header present: {s}");
+        assert!(
+            s.contains("Nothing enabled in workspace `global` to preview."),
+            "empty message present: {s}"
+        );
+    }
+
+    /// The empty message names the plugin filter when scoped, through the real
+    /// renderer.
+    #[test]
+    fn empty_report_names_plugin_filter() {
+        let mut r = base_report();
+        r.plugin_filter = Some("myplug".into());
+        let mut buf = Vec::new();
+        render_human(&mut buf, &r).expect("render");
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("Nothing enabled in workspace `global` for plugin `myplug` to preview."),
+            "scoped empty message: {s}"
+        );
+    }
+
+    /// The Claude-Code privileged-passthrough note appears only for claude-code
+    /// (with agents present), scoping the "matches sync" claim in the output.
+    #[test]
+    fn claude_code_privilege_note_present_only_for_claude_code() {
+        // claude-code with an agent → note present.
+        let mut cc = base_report();
+        cc.harness = "claude-code".into();
+        cc.agents.push(AgentPreview {
+            catalog: "c".into(),
+            plugin: "p".into(),
+            name: "a".into(),
+            delivery: AgentDelivery::Native {
+                filename: "p__a.md".into(),
+                displayed_name: "a".into(),
+                dropped_fields: vec![],
+            },
+            error: None,
+        });
+        let mut buf = Vec::new();
+        render_human(&mut buf, &cc).expect("render");
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("strip_plugin_agent_privileges"),
+            "claude-code must carry the privilege note: {s}"
+        );
+
+        // A different native-agent harness → no note.
+        let mut oc = base_report(); // opencode
+        oc.agents = cc.agents.clone();
+        let mut buf2 = Vec::new();
+        render_human(&mut buf2, &oc).expect("render");
+        let s2 = String::from_utf8(buf2).unwrap();
+        assert!(
+            !s2.contains("strip_plugin_agent_privileges"),
+            "non-claude-code must NOT carry the privilege note: {s2}"
+        );
+    }
+
+    /// A swallowed hook-enumeration error is surfaced in the human output.
+    #[test]
+    fn hooks_error_is_surfaced() {
+        let mut r = base_report();
+        r.hooks_error = Some("bad hooks.json at /x".into());
+        // Give it one entry so it isn't the empty branch.
+        r.entries.push(EntryPreview {
+            catalog: "c".into(),
+            plugin: "p".into(),
+            name: "n".into(),
+            kind: "skill".into(),
+            delivery: EntryDelivery::McpGetSkill,
+        });
+        let mut buf = Vec::new();
+        render_human(&mut buf, &r).expect("render");
+        let s = String::from_utf8(buf).unwrap();
+        assert!(
+            s.contains("hook read error (some hooks omitted): bad hooks.json at /x"),
+            "hooks_error must be surfaced: {s}"
+        );
     }
 
     #[test]

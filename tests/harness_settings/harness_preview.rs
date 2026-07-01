@@ -327,6 +327,145 @@ fn codex_translates_pretooluse_natively() {
 }
 
 // ---------------------------------------------------------------------------
+// R3: mixed events — a plugin with a supported (PreToolUse) AND an unsupported
+// (SessionEnd) event on codex → native PreToolUse, guardrails SessionEnd. This
+// exercises the declared-but-unsupported-event → guardrails branch at the
+// PIPELINE level (codex supports PreToolUse but not SessionEnd).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn codex_mixed_supported_and_unsupported_events_split_correctly() {
+    let _lock = lock();
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::codex::CODEX)]);
+    let fx = Fixture::build();
+    // A command-handler hooks.json with BOTH PreToolUse (codex supports) and
+    // SessionEnd (codex does NOT support → GUARDRAILS).
+    seed_hooks_source(
+        &fx.paths,
+        "plug",
+        r#"{
+            "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/pre.sh" } ] } ],
+            "SessionEnd": [ { "hooks": [ { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/end.sh" } ] } ]
+        }"#,
+    );
+    enrol_catalog(&fx.paths, "cat", "plug");
+    insert_enabled_skill(&fx.paths, "cat", "plug", "s");
+
+    let report = fx.preview("codex", None);
+
+    assert_eq!(report.hooks.len(), 1);
+    let h = &report.hooks[0];
+    assert_eq!(
+        h.native_events,
+        vec!["PreToolUse".to_string()],
+        "only PreToolUse is native on codex; got {h:?}"
+    );
+    assert_eq!(
+        h.guardrails_events,
+        vec!["SessionEnd".to_string()],
+        "SessionEnd (unsupported by codex) falls back to GUARDRAILS; got {h:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// IMPORTANT (#1): a prompt-ONLY hook is dropped to GUARDRAILS by sync under the
+// DEFAULT config (prompts disabled), and only reaches the harness natively when
+// prompt_provider/prompt_model is configured. The preview must mirror this gate.
+// ---------------------------------------------------------------------------
+
+/// A prompt-only PreToolUse hook, previewed against codex (which supports
+/// PreToolUse). With prompts DISABLED (default), sync filters the prompt handler
+/// before computing `used`, so the event drops to GUARDRAILS — the preview must
+/// report it in `guardrails_events`, not `native_events`.
+#[test]
+fn prompt_only_hook_is_guardrails_by_default() {
+    let _lock = lock();
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::codex::CODEX)]);
+    let fx = Fixture::build();
+    seed_hooks_source(
+        &fx.paths,
+        "plug",
+        r#"{ "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "prompt", "prompt": "Is this safe?" } ] } ] }"#,
+    );
+    enrol_catalog(&fx.paths, "cat", "plug");
+    insert_enabled_skill(&fx.paths, "cat", "plug", "s");
+
+    let report = fx.preview("codex", None);
+
+    assert_eq!(report.hooks.len(), 1);
+    let h = &report.hooks[0];
+    assert!(
+        h.native_events.is_empty(),
+        "a prompt-only hook must NOT be native when prompts are disabled (matches sync); got {h:?}"
+    );
+    assert_eq!(
+        h.guardrails_events,
+        vec!["PreToolUse".to_string()],
+        "a prompt-only PreToolUse must fall back to GUARDRAILS by default; got {h:?}"
+    );
+}
+
+/// The SAME prompt-only hook, but with a prompt provider + model configured, is
+/// translated natively — matching sync's `effective_canonical` (prompts kept).
+#[test]
+fn prompt_only_hook_is_native_when_prompt_model_configured() {
+    let _lock = lock();
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::codex::CODEX)]);
+    let fx = Fixture::build();
+    // Configure a prompt provider + model in the global config so the gate opens.
+    std::fs::write(
+        fx.paths.root.join("config.toml"),
+        "[hooks]\nprompt_provider = \"openai\"\nprompt_model = \"gpt-4o-mini\"\n",
+    )
+    .expect("write config");
+    seed_hooks_source(
+        &fx.paths,
+        "plug",
+        r#"{ "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "prompt", "prompt": "Is this safe?" } ] } ] }"#,
+    );
+    enrol_catalog(&fx.paths, "cat", "plug");
+    insert_enabled_skill(&fx.paths, "cat", "plug", "s");
+
+    let report = fx.preview("codex", None);
+
+    assert_eq!(report.hooks.len(), 1);
+    let h = &report.hooks[0];
+    assert_eq!(
+        h.native_events,
+        vec!["PreToolUse".to_string()],
+        "with a prompt model configured, the prompt hook reaches codex natively; got {h:?}"
+    );
+    assert!(
+        h.guardrails_events.is_empty(),
+        "no GUARDRAILS fallback once the prompt gate is open; got {h:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R1: a malformed hooks.json is SURFACED as a report-level note (hooks_error),
+// not silently omitted (consistent with the agent path's per-entry errors).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn malformed_hooks_json_is_surfaced_as_report_error() {
+    let _lock = lock();
+    let _guard = HarnessModulesGuard::install(vec![Box::new(tome::harness::codex::CODEX)]);
+    let fx = Fixture::build();
+    // An unparsable hooks.json → resolve_enabled_canonical_hooks records a
+    // first_error and omits the plugin's hooks; the preview surfaces the error.
+    seed_hooks_source(&fx.paths, "plug", "{ this is not valid json ");
+    enrol_catalog(&fx.paths, "cat", "plug");
+    insert_enabled_skill(&fx.paths, "cat", "plug", "s");
+
+    let report = fx.preview("codex", None);
+
+    assert!(
+        report.hooks_error.is_some(),
+        "a malformed hooks.json must surface a report-level hooks_error, not be silently dropped"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Rules-only harness: agents → persona (personas on) / unrepresented (off).
 // ---------------------------------------------------------------------------
 
