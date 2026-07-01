@@ -395,19 +395,28 @@ fn regen_summary_long_window_oversize_is_still_cached() {
     )
     .expect("regen");
     assert_eq!(outcome.short_chars, 900);
+    // The CACHED long summary (settings.toml `[summaries].long`) is stored in
+    // full — the soft cap is applied only to the directive substitution.
     assert_eq!(outcome.long_chars, OVERSIZE_LONG_CHARS);
 
-    // RULES.md is now the routing directive wrapping the (oversize) long
-    // summary, so it is LONGER than the raw long summary — but it must
-    // still embed the full summary verbatim in the Tier 3 prose.
+    // #294: RULES.md is the routing directive; the Tier-3 summary is now
+    // SOFT-CAPPED at `TIER3_SUMMARY_MAX_CHARS`, so an oversize (3000-char)
+    // summary is trimmed to the budget with a "call search_skills" tail rather
+    // than embedded verbatim. The full raw summary must NOT appear.
     let rules_body = std::fs::read_to_string(paths.workspace_rules_file(&parse("mine"))).unwrap();
     assert!(
-        rules_body.len() > OVERSIZE_LONG_CHARS,
-        "directive wraps the summary",
+        !rules_body.contains(&"y".repeat(OVERSIZE_LONG_CHARS)),
+        "oversize summary must NOT be embedded verbatim (soft-capped): {rules_body}",
+    );
+    // The capped prefix (budget chars of the summary) is present, followed by
+    // the truncation tail pointing at search_skills.
+    assert!(
+        rules_body.contains(&"y".repeat(tome::harness::routing::TIER3_SUMMARY_MAX_CHARS)),
+        "the capped summary prefix should be present",
     );
     assert!(
-        rules_body.contains(&"y".repeat(OVERSIZE_LONG_CHARS)),
-        "RULES.md should embed the full long summary verbatim",
+        rules_body.contains("(call search_skills for the rest)"),
+        "a truncated Tier-3 summary must carry the search_skills pointer: {rules_body}",
     );
     assert!(rules_body.contains("# Tome — Skill Routing"));
 }
