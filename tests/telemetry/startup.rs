@@ -109,6 +109,131 @@ fn cli_startup_first_run_emits_install_and_stamps_version() {
     );
 }
 
+/// Issue #313: on the FIRST run (fresh state, no id) the human stderr LEADS with
+/// the welcome + quickstart pointer, then the required telemetry opt-out notice —
+/// in that order. Both appear exactly once on this run.
+#[test]
+fn cli_startup_first_run_leads_with_welcome_then_notice() {
+    let env = ToolEnv::new();
+    assert!(
+        !id_path(&env).exists(),
+        "precondition: no id before first run"
+    );
+
+    let out = force_on_cmd(&env)
+        .args(["catalog", "list"])
+        .output()
+        .expect("spawn tome");
+    assert!(
+        out.status.success(),
+        "catalog list exited {:?}",
+        out.status.code()
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let welcome_at = stderr
+        .find("Welcome to Tome!")
+        .unwrap_or_else(|| panic!("first run must print the welcome: {stderr:?}"));
+    let notice_at = stderr
+        .find("Tome collects anonymous usage telemetry")
+        .unwrap_or_else(|| panic!("first run must print the telemetry notice: {stderr:?}"));
+    assert!(
+        welcome_at < notice_at,
+        "the welcome must LEAD the telemetry notice (welcome@{welcome_at}, notice@{notice_at}): {stderr:?}",
+    );
+    // The welcome points at a real starting point (the canonical first step).
+    assert!(
+        stderr.contains("tome catalog add"),
+        "the welcome names a real entry point: {stderr:?}",
+    );
+    // Exactly once each (no duplicate greeting/disclosure on one run).
+    assert_eq!(
+        stderr.matches("Welcome to Tome!").count(),
+        1,
+        "welcome once: {stderr:?}"
+    );
+    assert_eq!(
+        stderr
+            .matches("Tome collects anonymous usage telemetry")
+            .count(),
+        1,
+        "notice once: {stderr:?}",
+    );
+}
+
+/// Issue #313: on a SUBSEQUENT run (id already minted) the same once-only gate
+/// suppresses BOTH the welcome AND the telemetry notice — neither is re-emitted.
+#[test]
+fn cli_startup_subsequent_run_reprints_neither_welcome_nor_notice() {
+    let env = ToolEnv::new();
+    // First run mints the id and prints both lines.
+    let first = force_on_cmd(&env)
+        .args(["catalog", "list"])
+        .output()
+        .expect("spawn tome (first)");
+    assert!(first.status.success());
+    assert!(id_path(&env).exists(), "first run mints the id");
+
+    // Second run over the SAME `$HOME`: the id exists, so the mint gate is closed.
+    let second = force_on_cmd(&env)
+        .args(["catalog", "list"])
+        .output()
+        .expect("spawn tome (second)");
+    assert!(
+        second.status.success(),
+        "second catalog list exited {:?}",
+        second.status.code()
+    );
+
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        !stderr.contains("Welcome to Tome!"),
+        "the welcome must not re-print on a subsequent run: {stderr:?}",
+    );
+    assert!(
+        !stderr.contains("Tome collects anonymous usage telemetry"),
+        "the notice must not re-print on a subsequent run: {stderr:?}",
+    );
+}
+
+/// Issue #313: under `--json` the human-only welcome is suppressed, but the
+/// required opt-out notice still fires on first run (it goes to stderr, never
+/// `--json` stdout). Structured-stdout consumers see no conversational greeting.
+#[test]
+fn cli_startup_first_run_json_suppresses_welcome_keeps_notice() {
+    let env = ToolEnv::new();
+    assert!(
+        !id_path(&env).exists(),
+        "precondition: no id before first run"
+    );
+
+    let out = force_on_cmd(&env)
+        .args(["--json", "catalog", "list"])
+        .output()
+        .expect("spawn tome --json");
+    assert!(
+        out.status.success(),
+        "catalog list --json exited {:?}",
+        out.status.code()
+    );
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("Welcome to Tome!"),
+        "the human welcome must be suppressed under --json: {stderr:?}",
+    );
+    assert!(
+        stderr.contains("Tome collects anonymous usage telemetry"),
+        "the required opt-out notice still fires on first run under --json: {stderr:?}",
+    );
+    // The welcome never lands on stdout either (that channel is JSON-only).
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("Welcome to Tome!"),
+        "the welcome must never pollute --json stdout: {stdout:?}",
+    );
+}
+
 /// Pre-seeding an OLDER `last-version` (and an existing id) makes the binary's
 /// next `cli_startup` emit `tome.upgrade { from_version: "0.0.1" }` and NO second
 /// `tome.install`, and re-stamps `last-version` to the current version.

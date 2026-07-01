@@ -224,11 +224,16 @@ pub fn emit<E: gauge_telemetry::event::Event>(event: E) {
     });
 }
 
-/// CLI process-start telemetry: the first-run notice, the `tome.install` /
-/// `tome.upgrade` lifecycle emits, and the daily heartbeat (FR-026). Best-effort
-/// throughout. Gated OFF in `main` for the `Mcp`/`Telemetry` commands. Assumes
-/// [`init`] already ran.
-pub fn cli_startup(paths: &crate::paths::Paths) {
+/// CLI process-start telemetry: the first-run welcome + notice, the
+/// `tome.install` / `tome.upgrade` lifecycle emits, and the daily heartbeat
+/// (FR-026). Best-effort throughout. Gated OFF in `main` for the `Mcp`/`Telemetry`
+/// commands. Assumes [`init`] already ran.
+///
+/// `mode` gates the human-only first-run welcome (issue #313): the required
+/// opt-out notice still fires on first run regardless of mode (it goes to stderr,
+/// never `--json` stdout), but the conversational greeting is suppressed under
+/// `--json` so structured-stdout consumers see only what they asked for.
+pub fn cli_startup(paths: &crate::paths::Paths, mode: crate::output::Mode) {
     let Some(h) = HANDLE.get() else {
         return;
     };
@@ -237,9 +242,15 @@ pub fn cli_startup(paths: &crate::paths::Paths) {
     }
 
     // First run for this install (the id was absent before `init` built the
-    // handle): print the opt-out notice + emit `tome.install` exactly once. The
-    // kernel's first emit mints the id; `MINTED_THIS_RUN` was observed in `init`.
+    // handle): print the welcome + opt-out notice + emit `tome.install` exactly
+    // once. The kernel's first emit mints the id; `MINTED_THIS_RUN` was observed
+    // in `init`. Order matters (issue #313): the welcome leads so the first
+    // impression is "here's how to begin", then the required disclosure follows.
     if MINTED_THIS_RUN.load(Ordering::Relaxed) {
+        // Human-only greeting first (never under `--json`).
+        if mode == crate::output::Mode::Human {
+            notice::print_first_run_welcome();
+        }
         notice::print_first_run_notice();
         emit(event::Install {
             install_method: detect_install_method(),

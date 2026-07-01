@@ -222,8 +222,11 @@ first):
 5. `tome telemetry off` (writes the config flag)
 6. Default: on
 
-On the first CLI run with telemetry enabled, Tome prints a one-line disclosure to
-**stderr** (once), then proceeds. The guarantee is that this disclosure is
+On the first CLI run with telemetry enabled, Tome prints a one-line welcome +
+quickstart pointer, then the required one-line opt-out disclosure — both to
+**stderr**, once — and proceeds (issue #313: the greeting leads, the disclosure
+follows). The welcome is human-only (suppressed under `--json`); the disclosure
+fires on first run regardless of mode. The guarantee is that the disclosure is
 seeable before any byte leaves the machine (the 10-min grace period, §5).
 
 | Command | What it does |
