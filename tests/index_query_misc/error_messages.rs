@@ -463,7 +463,7 @@ fn plugin_not_found_names_plugin_and_recovery_hint() {
     assert!(m.contains("not installed"), "{m}");
     assert!(m.contains("hint:"), "{m}");
     assert!(m.contains("tome plugin list"), "{m}");
-    // #311: the invalid-id hint also surfaces the interactive browser so a
+    // #311: the not-installed hint also surfaces the interactive browser so a
     // newcomer who hits this error learns bare `tome plugin` exists.
     assert!(m.contains("`tome plugin`"), "{m}");
     // The whole recovery lives on a single `hint:` continuation line (#310
