@@ -33,8 +33,11 @@ use crate::provider::error::{ProviderError, ProviderErrorKind};
 /// The Anthropic API version header value (the Messages API requires it).
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// Maximum total attempts in the retry loop (1 initial + 2 retries) — FR-012.
-const MAX_ATTEMPTS: u32 = 3;
+// The retry loop's total-attempt cap is per-request: `ResolvedProvider::max_attempts`
+// (default 3 = 1 initial + 2 retries — FR-012), overridable via the
+// `TOME_PROVIDER_MAX_RETRIES` env var. Resolved once in `provider::config` so
+// the parse/clamp/fallback lives beside the timeout override. See
+// `provider::config::{DEFAULT_PROVIDER_MAX_RETRIES, resolve_max_attempts}`.
 
 /// Upper bound on a single backoff sleep when no `Retry-After` is present.
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
@@ -318,12 +321,13 @@ fn backoff_for(attempt: u32, retry_after: Option<Duration>) -> Duration {
 
 /// Make a remote provider request with the bounded retry loop (FR-012).
 ///
-/// Retries ONLY transport errors/timeouts, 429, and 5xx (≤ [`MAX_ATTEMPTS`]
-/// total). Honours `Retry-After` on a 429, else exponential backoff capped at
-/// [`MAX_BACKOFF`]. NEVER retries a non-429 4xx. On a 2xx the body is parsed as
-/// a lenient [`serde_json::Value`] and returned; a parse failure →
-/// `MalformedResponse`. Per-kind modules extract fields and detect a
-/// 200-with-error envelope from the returned `Value`.
+/// Retries ONLY transport errors/timeouts, 429, and 5xx (≤ `resolved.max_attempts`
+/// total — default 3, overridable via `TOME_PROVIDER_MAX_RETRIES`). Honours
+/// `Retry-After` on a 429, else exponential backoff capped at [`MAX_BACKOFF`].
+/// NEVER retries a non-429 4xx. On a 2xx the body is parsed as a lenient
+/// [`serde_json::Value`] and returned; a parse failure → `MalformedResponse`.
+/// Per-kind modules extract fields and detect a 200-with-error envelope from the
+/// returned `Value`.
 ///
 /// The full failure → [`ProviderError`] mapping (with credentials scrubbed via
 /// the constructor) lives here, so callers get a single structured error type.
@@ -334,12 +338,15 @@ pub fn request_with_retry(
 ) -> Result<serde_json::Value, ProviderError> {
     let spec = build_spec(resolved, path, body);
     let provider = resolved.name.as_str();
+    // The per-request attempt cap (1 initial + N retries). Resolved upstream in
+    // `provider::config` from `TOME_PROVIDER_MAX_RETRIES`; always `>= 1`.
+    let max_attempts = resolved.max_attempts;
 
     // Track the last retryable failure so, on exhaustion, we surface the right
     // kind (RateLimited / Unreachable / Timeout) rather than a generic one.
     let mut last_retryable: Option<ProviderErrorKind> = None;
 
-    for attempt in 0..MAX_ATTEMPTS {
+    for attempt in 0..max_attempts {
         match execute(&spec, resolved.timeout) {
             Ok(resp) => {
                 let status = resp.status;
@@ -367,7 +374,7 @@ pub fn request_with_retry(
                 // 429 → RateLimited (retryable: honour Retry-After).
                 if status == 429 {
                     last_retryable = Some(ProviderErrorKind::RateLimited);
-                    if attempt + 1 < MAX_ATTEMPTS {
+                    if attempt + 1 < max_attempts {
                         std::thread::sleep(backoff_for(attempt, resp.retry_after));
                         continue;
                     }
@@ -376,7 +383,7 @@ pub fn request_with_retry(
                         ProviderErrorKind::RateLimited,
                         true,
                         format!(
-                            "HTTP 429 after {MAX_ATTEMPTS} attempts: {}",
+                            "HTTP 429 after {max_attempts} attempts: {}",
                             body_snippet(&resp.body)
                         ),
                     ));
@@ -384,7 +391,7 @@ pub fn request_with_retry(
                 // 5xx → Unreachable (retryable).
                 if (500..600).contains(&status) {
                     last_retryable = Some(ProviderErrorKind::Unreachable);
-                    if attempt + 1 < MAX_ATTEMPTS {
+                    if attempt + 1 < max_attempts {
                         std::thread::sleep(backoff_for(attempt, resp.retry_after));
                         continue;
                     }
@@ -393,7 +400,7 @@ pub fn request_with_retry(
                         ProviderErrorKind::Unreachable,
                         true,
                         format!(
-                            "HTTP {status} after {MAX_ATTEMPTS} attempts: {}",
+                            "HTTP {status} after {max_attempts} attempts: {}",
                             body_snippet(&resp.body)
                         ),
                     ));
@@ -408,7 +415,7 @@ pub fn request_with_retry(
             }
             Err(TransportFailure::Timeout) => {
                 last_retryable = Some(ProviderErrorKind::Timeout);
-                if attempt + 1 < MAX_ATTEMPTS {
+                if attempt + 1 < max_attempts {
                     std::thread::sleep(backoff_for(attempt, None));
                     continue;
                 }
@@ -416,12 +423,12 @@ pub fn request_with_retry(
                     provider,
                     ProviderErrorKind::Timeout,
                     true,
-                    format!("request timed out after {MAX_ATTEMPTS} attempts"),
+                    format!("request timed out after {max_attempts} attempts"),
                 ));
             }
             Err(TransportFailure::Other { detail }) => {
                 last_retryable = Some(ProviderErrorKind::Unreachable);
-                if attempt + 1 < MAX_ATTEMPTS {
+                if attempt + 1 < max_attempts {
                     std::thread::sleep(backoff_for(attempt, None));
                     continue;
                 }
@@ -429,7 +436,7 @@ pub fn request_with_retry(
                     provider,
                     ProviderErrorKind::Unreachable,
                     true,
-                    format!("{detail} after {MAX_ATTEMPTS} attempts"),
+                    format!("{detail} after {max_attempts} attempts"),
                 ));
             }
         }
@@ -442,7 +449,7 @@ pub fn request_with_retry(
         provider,
         kind,
         true,
-        format!("exhausted {MAX_ATTEMPTS} attempts"),
+        format!("exhausted {max_attempts} attempts"),
     ))
 }
 
@@ -491,11 +498,26 @@ pub(crate) fn debug_log_body(context: &str, body: &[u8]) {
 mod tests {
     use super::*;
     use crate::config::Secret;
-    use crate::provider::config::{Capability, Credential};
+    use crate::provider::config::{Capability, Credential, DEFAULT_PROVIDER_MAX_RETRIES};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// The historical default total-attempt cap (1 initial + 2 retries). The
+    /// pre-override behaviour; the default-constructed test `resolved()` uses it.
+    const DEFAULT_MAX_ATTEMPTS: u32 = DEFAULT_PROVIDER_MAX_RETRIES + 1;
+
     fn resolved(kind: ProviderKind, key: Option<&str>) -> ResolvedProvider {
+        // The historical default: 1 initial + 2 retries = 3 total attempts.
+        resolved_with_attempts(kind, key, DEFAULT_PROVIDER_MAX_RETRIES + 1)
+    }
+
+    /// Like [`resolved`] but with an explicit `max_attempts`, so the retry loop's
+    /// attempt cap can be exercised directly at the transport layer.
+    fn resolved_with_attempts(
+        kind: ProviderKind,
+        key: Option<&str>,
+        max_attempts: u32,
+    ) -> ResolvedProvider {
         // Build a ResolvedProvider directly for transport tests. (resolve() is
         // exercised in config.rs; here we want a controlled connection.)
         ResolvedProvider {
@@ -505,6 +527,7 @@ mod tests {
             credential: credential_for(key),
             model: "test-model".to_string(),
             timeout: Duration::from_secs(1),
+            max_attempts,
         }
     }
 
@@ -761,8 +784,8 @@ mod tests {
         assert!(err.retryable);
         assert_eq!(
             calls.load(Ordering::SeqCst),
-            MAX_ATTEMPTS as usize,
-            "429 should retry up to MAX_ATTEMPTS"
+            DEFAULT_MAX_ATTEMPTS as usize,
+            "429 should retry up to the default attempt cap"
         );
     }
 
@@ -782,7 +805,61 @@ mod tests {
         let err = request_with_retry(&r, "/x", &serde_json::json!({})).unwrap_err();
         assert_eq!(err.kind, ProviderErrorKind::Unreachable);
         assert!(err.retryable);
-        assert_eq!(calls.load(Ordering::SeqCst), MAX_ATTEMPTS as usize);
+        assert_eq!(calls.load(Ordering::SeqCst), DEFAULT_MAX_ATTEMPTS as usize);
+    }
+
+    #[test]
+    fn zero_retries_makes_exactly_one_attempt() {
+        // max_attempts == 1 (0 retries): a retryable 503 must NOT retry; the
+        // override is hit exactly once and the failure surfaces immediately.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let _guard = set_transport_override(move |_spec| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(RawResponse {
+                status: 503,
+                retry_after: Some(Duration::from_secs(0)),
+                body: Vec::new(),
+            })
+        });
+        let r = resolved_with_attempts(ProviderKind::Openai, Some("k"), 1);
+        let err = request_with_retry(&r, "/x", &serde_json::json!({})).unwrap_err();
+        assert_eq!(err.kind, ProviderErrorKind::Unreachable);
+        assert!(err.retryable);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "0 retries must make exactly one attempt"
+        );
+    }
+
+    #[test]
+    fn custom_attempt_cap_is_honoured() {
+        // max_attempts == 5 (4 retries): a persistently-retryable 503 must hit
+        // the override exactly 5 times before giving up.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let _guard = set_transport_override(move |_spec| {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(RawResponse {
+                status: 503,
+                retry_after: Some(Duration::from_secs(0)),
+                body: Vec::new(),
+            })
+        });
+        let r = resolved_with_attempts(ProviderKind::Openai, Some("k"), 5);
+        let err = request_with_retry(&r, "/x", &serde_json::json!({})).unwrap_err();
+        assert_eq!(err.kind, ProviderErrorKind::Unreachable);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            5,
+            "max_attempts == 5 should make exactly 5 attempts"
+        );
+        // The error detail reflects the per-request cap, not a hardcoded const.
+        assert!(
+            err.to_string().contains("5 attempts"),
+            "detail should mention the resolved attempt cap: {err}"
+        );
     }
 
     #[test]
@@ -797,7 +874,7 @@ mod tests {
         let err = request_with_retry(&r, "/x", &serde_json::json!({})).unwrap_err();
         assert_eq!(err.kind, ProviderErrorKind::Timeout);
         assert!(err.retryable);
-        assert_eq!(calls.load(Ordering::SeqCst), MAX_ATTEMPTS as usize);
+        assert_eq!(calls.load(Ordering::SeqCst), DEFAULT_MAX_ATTEMPTS as usize);
     }
 
     #[test]
