@@ -38,6 +38,8 @@ mod plugin_disable;
 mod plugin_enable;
 #[path = "catalog_plugin/plugin_interactive.rs"]
 mod plugin_interactive;
+#[path = "catalog_plugin/plugin_last_upstream_change.rs"]
+mod plugin_last_upstream_change;
 #[path = "catalog_plugin/plugin_list.rs"]
 mod plugin_list;
 #[path = "catalog_plugin/plugin_repeated.rs"]

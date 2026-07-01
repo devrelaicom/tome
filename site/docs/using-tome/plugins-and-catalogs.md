@@ -67,21 +67,21 @@ tome plugin list
 ```
 
 ```text
-| Catalog         | Plugin                | Version | Status     | Entries                           | Last indexed |
-|-----------------|-----------------------|---------|------------|-----------------------------------|--------------|
-| midnight-expert | compact-cli-dev       | 0.4.0   | ✗ disabled | —                                 | —            |
-| midnight-expert | compact-core          | 0.10.0  | ✗ disabled | —                                 | —            |
-| midnight-expert | compact-examples      | 0.4.0   | ✗ disabled | —                                 | —            |
-| midnight-expert | core-concepts         | 0.3.2   | ✗ disabled | —                                 | —            |
-| midnight-expert | midnight-cq           | 0.4.0   | ✗ disabled | —                                 | —            |
-| midnight-expert | midnight-dapp-dev     | 0.5.0   | ✗ disabled | —                                 | —            |
-| midnight-expert | midnight-expert       | 0.6.0   | ✗ disabled | —                                 | —            |
-| midnight-expert | midnight-fact-check   | 0.4.0   | ✗ disabled | —                                 | —            |
-| midnight-expert | midnight-plugin-utils | 0.1.1   | ✗ disabled | —                                 | —            |
-| midnight-expert | midnight-status-codes | 0.9.0   | ✗ disabled | —                                 | —            |
-| midnight-expert | midnight-tooling      | 0.4.0   | ✗ disabled | —                                 | —            |
-| midnight-expert | midnight-verify       | 0.13.0  | ✓ enabled  | (19 skills, 2 commands, 7 agents) | just now     |
-| midnight-expert | midnight-wallet       | 0.5.0   | ✗ disabled | —                                 | —            |
+| Catalog         | Plugin                | Version | Status     | Entries                           | Last indexed | Last upstream change |
+|-----------------|-----------------------|---------|------------|-----------------------------------|--------------|----------------------|
+| midnight-expert | compact-cli-dev       | 0.4.0   | ✗ disabled | —                                 | —            | —                    |
+| midnight-expert | compact-core          | 0.10.0  | ✗ disabled | —                                 | —            | —                    |
+| midnight-expert | compact-examples      | 0.4.0   | ✗ disabled | —                                 | —            | —                    |
+| midnight-expert | core-concepts         | 0.3.2   | ✗ disabled | —                                 | —            | —                    |
+| midnight-expert | midnight-cq           | 0.4.0   | ✗ disabled | —                                 | —            | —                    |
+| midnight-expert | midnight-dapp-dev     | 0.5.0   | ✗ disabled | —                                 | —            | —                    |
+| midnight-expert | midnight-expert       | 0.6.0   | ✗ disabled | —                                 | —            | —                    |
+| midnight-expert | midnight-fact-check   | 0.4.0   | ✗ disabled | —                                 | —            | —                    |
+| midnight-expert | midnight-plugin-utils | 0.1.1   | ✗ disabled | —                                 | —            | —                    |
+| midnight-expert | midnight-status-codes | 0.9.0   | ✗ disabled | —                                 | —            | —                    |
+| midnight-expert | midnight-tooling      | 0.4.0   | ✗ disabled | —                                 | —            | —                    |
+| midnight-expert | midnight-verify       | 0.13.0  | ✓ enabled  | (19 skills, 2 commands, 7 agents) | just now     | just now             |
+| midnight-expert | midnight-wallet       | 0.5.0   | ✗ disabled | —                                 | —            | —                    |
 ```
 
 One plugin is enabled: 19 skills, 2 commands, and 7 agents — 28 entries

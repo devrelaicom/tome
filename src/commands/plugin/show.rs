@@ -93,12 +93,22 @@ pub fn run(args: PluginShowArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
         }
     }
 
+    // #309: the upstream committer date for this plugin's subtree, computed at
+    // display time from the catalog clone (best-effort; None when the clone has
+    // no history for it / isn't a git repo). Routes through the SAME
+    // `.git`-guarded helper `list` uses — resolving the `(clone_dir, source)`
+    // split from the identity so `git log` never walks up to an unrelated
+    // ancestor repository (which running it from the joined `plugin_dir` would
+    // allow).
+    let last_upstream_change =
+        super::last_upstream_change_for_id(&conn, &paths, scope.scope.name().as_str(), &id);
+
     let record = PluginRecord {
         id: id.clone(),
         version: manifest.version.clone(),
         author: manifest.author.as_ref().and_then(|a| a.display()),
         description: manifest.description.clone(),
-        last_upstream_change: None,
+        last_upstream_change,
         status,
         component_counts,
         last_indexed_at: last_indexed_at_dt,
@@ -304,12 +314,27 @@ fn emit_human(
     };
     writeln!(out, "Status:       {}", status_line)?;
 
-    let last_updated = record
+    // #309: honest, sourced timestamp lines (were both a bare `—` placeholder).
+    //   * "Last indexed" is sourced from `indexed_at` (when Tome last built the
+    //     index for this plugin), rendered as a human relative duration.
+    //   * "Last upstream change" is the plugin subtree's most recent commit in
+    //     the catalog clone (best-effort git-log; `—` when unavailable).
+    let last_indexed = agg
+        .last_indexed_at
+        .as_deref()
+        .map(human_relative)
+        .unwrap_or_else(|| "—".to_owned());
+    let last_upstream = record
         .last_upstream_change
-        .map(|_| "—".to_owned())
+        .and_then(|dt| {
+            dt.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
+        .map(|s| human_relative(&s))
         .unwrap_or_else(|| "—".to_owned());
     let author = record.author.clone().unwrap_or_else(|| "—".to_owned());
-    writeln!(out, "Last updated: {} — {}", last_updated, author)?;
+    writeln!(out, "Last indexed:         {} — {}", last_indexed, author)?;
+    writeln!(out, "Last upstream change: {}", last_upstream)?;
 
     if let Some(desc) = &record.description {
         writeln!(out, "Description:  {}", desc)?;

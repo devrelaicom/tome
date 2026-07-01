@@ -229,6 +229,43 @@ impl Git {
         let bytes = self.run(["rev-parse", "HEAD"], Some(repo))?;
         Ok(String::from_utf8_lossy(&bytes).trim().to_string())
     }
+
+    /// `git -C <repo> log -1 --format=%cI -- <rel_path>` — the committer date
+    /// (strict-ISO-8601 / RFC-3339-compatible) of the most recent commit that
+    /// touched `rel_path`, relative to the repo root. Returns `None` when the
+    /// path has no history in the (possibly shallow-cloned) working tree, when
+    /// `git` produces no output, or when the output isn't RFC-3339-parseable.
+    ///
+    /// Best-effort by contract: this powers a purely informational display
+    /// field (`plugin list` / `plugin show`). It is DISPLAY-time only — the
+    /// value is never persisted, so there is no schema/migration cost. Callers
+    /// degrade to the `indexed_at` value on any failure; a hard `git` error
+    /// (`GitFailed`) still propagates so the caller can distinguish "no
+    /// history" (`Ok(None)`) from "git blew up" and choose to swallow it.
+    ///
+    /// `--` terminates options so a plugin-supplied `source` path can never be
+    /// parsed as a git flag (argument-injection defence, mirroring
+    /// `clone_shallow`). `%cI` is used over `%aI` because the committer date is
+    /// the timestamp that advances on a `reset --hard`/rebase — i.e. the one
+    /// that reflects "changed upstream since we last pulled".
+    pub fn last_commit_iso(
+        &self,
+        repo: &Path,
+        rel_path: &str,
+    ) -> Result<Option<String>, TomeError> {
+        let bytes = self.run(
+            [
+                "log",
+                "-1",
+                "--format=%cI",
+                "--",
+                if rel_path.is_empty() { "." } else { rel_path },
+            ],
+            Some(repo),
+        )?;
+        let iso = String::from_utf8_lossy(&bytes).trim().to_string();
+        Ok(if iso.is_empty() { None } else { Some(iso) })
+    }
 }
 
 /// `^[0-9a-f]{7,40}$` — caller-side test for SHA-shaped refs. Used by
