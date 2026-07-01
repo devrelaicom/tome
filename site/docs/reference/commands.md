@@ -173,6 +173,35 @@ agent how to use Tome itself — into your detected harnesses.
 
 See [Meta skills](../using-tome/meta-skills.md).
 
+## `tome config`
+
+Inspect and validate the unified global config, `~/.tome/config.toml`. Both
+subcommands are **read-only**: they never write the file, create directories, or
+take the index lock.
+
+| Subcommand | Flags | Purpose |
+| --- | --- | --- |
+| `show` | | Print every curated config knob with its **effective** value and a provenance annotation: `(default)`, `(config)`, or `(env)`. `--json` emits a stable object of `key → { "value", "source" }`. |
+| `validate` | | Run the strict config parse. Prints `config is valid` and exits `0` on a good (or absent) config; on a malformed config, prints the legible key-naming error to stderr and exits `5` (`manifest_invalid`). `--json` emits `{ "valid", "error" }` on stdout. |
+
+Provenance is resolved per knob, highest precedence first:
+
+- `(env)` — the knob genuinely has an environment override and that variable is
+  set. Only these knobs can be `(env)`: `logging.level` (`TOME_LOG` /
+  `RUST_LOG`), `output.color` (`NO_COLOR`), `workspace.default`
+  (`TOME_WORKSPACE`), `telemetry.enabled` (`TOME_TELEMETRY`), and
+  `telemetry.endpoint` (`TOME_GAUGE_ENDPOINT`). A knob with no env override is
+  never annotated `(env)`.
+- `(config)` — the key is present in `~/.tome/config.toml` (detected from the raw
+  document, so a key set to its default value still reads as `(config)`).
+- `(default)` — none of the above; the built-in default applies.
+
+`show` surfaces the curated scalar knobs only. The BYOK/BYOM provider registry
+(`[providers]`) and the capability `provider`/`model` reference fields are
+intentionally omitted — a provider entry can carry an inline `api_key`, and it
+must not be echoed through a user-facing surface. Setting values from the CLI
+(`config set`) is a planned fast-follow.
+
 ## `tome mcp`
 
 Run Tome as a stdio MCP server backed by the resolved workspace's index.

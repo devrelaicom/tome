@@ -131,6 +131,30 @@ pub enum Command {
     /// reconcile harness files. Defaults to the current project; `--all` fans
     /// out to every bound project in the resolved workspace.
     Sync(SyncArgs),
+    /// Inspect and validate the unified global config (`~/.tome/config.toml`).
+    /// `show` prints every curated knob's effective value plus a
+    /// `(default)`/`(config)`/`(env)` provenance annotation; `validate` runs
+    /// the strict parse and reports success or the legible error (exit 5).
+    /// Both are read-only. Setting values (`config set`) is a fast-follow.
+    #[command(subcommand)]
+    Config(ConfigCommand),
+}
+
+/// `tome config <subcommand>` — inspect and validate `~/.tome/config.toml`.
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Print every curated config knob with its effective value and a
+    /// `(default)`/`(config)`/`(env)` provenance annotation. Read-only.
+    Show(ConfigShowArgs),
+    /// Run the strict config parse. Prints "config is valid" and exits 0 on a
+    /// good (or absent) config; on a malformed config, prints the legible
+    /// key-naming error to stderr and exits 5 (`manifest_invalid`). Read-only.
+    Validate,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct ConfigShowArgs {
+    // No subcommand-specific flags yet — `--json` is the global flag.
 }
 
 /// `tome sync` — unified propagation of workspace state to bound projects.

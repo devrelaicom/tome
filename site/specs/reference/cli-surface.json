@@ -275,6 +275,19 @@
       "flags": [
         "--verbose"
       ]
+    },
+    "config": {
+      "subcommands": {
+        "show": [
+          "--verbose"
+        ],
+        "validate": [
+          "--verbose"
+        ]
+      },
+      "flags": [
+        "--verbose"
+      ]
     }
   },
   "globalFlags": [
