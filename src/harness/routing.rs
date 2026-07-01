@@ -31,10 +31,11 @@ pub const SELF_HEAL_PREAMBLE: &str = "If the Tome MCP tools (search_skills, get_
 /// Soft character budget for the Tier-3 workspace summary substituted into the
 /// directive (#294). The directive is injected on every sink, every session,
 /// so an unbounded long summary is token cost paid everywhere; this caps it,
-/// mirroring the tool-description path's bounded-walk truncation. Sized to sit
-/// between the summariser's `LONG_TARGET_MIN` (1500) floor and its
-/// `LONG_MAX_CHARS` (2500) default so a typical summary passes through
-/// verbatim while a maxed-out one is trimmed with a "call search_skills"
+/// mirroring the tool-description path's bounded-walk truncation. This is an
+/// independent token-cost knob for the directive, not derived from the
+/// summariser constants: at 1500 it lands at the summariser's `LONG_TARGET_MIN`
+/// floor and at or below its `LONG_MAX_CHARS` (2500) default, so a typical
+/// summary is passed through with at most a light trim + a "call search_skills"
 /// pointer to the full body.
 pub const TIER3_SUMMARY_MAX_CHARS: usize = 1500;
 
@@ -524,6 +525,20 @@ mod tests {
             "a summary of exactly the budget must not be trimmed"
         );
         assert!(!out.contains(TIER3_TRUNCATION_TAIL));
+    }
+
+    #[test]
+    fn tier3_summary_one_over_budget_is_truncated_with_tail() {
+        // The tightest over-budget edge: exactly one char past the budget must
+        // trip truncation (pins the off-by-one at the boundary directly).
+        let over: String = "c".repeat(TIER3_SUMMARY_MAX_CHARS + 1);
+        let out = truncate_tier3_summary(&over);
+        assert!(
+            out.ends_with(TIER3_TRUNCATION_TAIL),
+            "a summary one char over budget must be trimmed with the tail; got:\n{out}",
+        );
+        let content = out.strip_suffix(TIER3_TRUNCATION_TAIL).unwrap();
+        assert_eq!(content.chars().count(), TIER3_SUMMARY_MAX_CHARS);
     }
 
     #[test]

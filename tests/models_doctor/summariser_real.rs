@@ -321,9 +321,14 @@ fn regen_summary_through_real_llama_summariser_writes_settings_and_rules() {
     );
 
     // Parse the doc back to extract the long field so we can assert the
-    // directive EMBEDS settings.summaries.long verbatim in its Tier 3
-    // prose. Anything mismatched here means the writer drifted from the
-    // reader.
+    // directive carries settings.summaries.long in its Tier 3 prose. The
+    // CACHED long summary is stored in full; the directive substitution is
+    // SOFT-CAPPED at `TIER3_SUMMARY_MAX_CHARS` (#294), so how it appears in
+    // RULES.md depends on the real summary's length:
+    //   - ≤ budget → embedded verbatim;
+    //   - > budget → trimmed to the budget-char prefix + the
+    //     "(call search_skills for the rest)" tail.
+    // Anything mismatched here means the writer drifted from the reader.
     let parsed: toml::Value = toml::from_str(&settings_body).expect("re-parse settings.toml");
     let summaries = parsed
         .get("summaries")
@@ -334,11 +339,38 @@ fn regen_summary_through_real_llama_summariser_writes_settings_and_rules() {
         .get("long")
         .and_then(|v| v.as_str())
         .expect("long is a string");
-    assert!(
-        rules_body.contains(long_field.trim_end()),
-        "RULES.md should embed settings.summaries.long in its Tier 3 prose:\n\
-         RULES.md = {rules_body}\nlong = {long_field}",
-    );
+    let long_trimmed = long_field.trim_end();
+    if long_trimmed.chars().count() > tome::harness::routing::TIER3_SUMMARY_MAX_CHARS {
+        // Over-budget: RULES.md carries the capped prefix (the first
+        // `TIER3_SUMMARY_MAX_CHARS` scalar values of the summary) plus the
+        // search_skills pointer, NOT the full summary verbatim.
+        let prefix: String = long_trimmed
+            .chars()
+            .take(tome::harness::routing::TIER3_SUMMARY_MAX_CHARS)
+            .collect();
+        assert!(
+            rules_body.contains(&prefix),
+            "RULES.md should embed the capped Tier-3 prefix of settings.summaries.long:\n\
+             RULES.md = {rules_body}\nlong = {long_field}",
+        );
+        assert!(
+            rules_body.contains("(call search_skills for the rest)"),
+            "an over-budget Tier-3 summary must carry the search_skills pointer:\n\
+             RULES.md = {rules_body}",
+        );
+        assert!(
+            !rules_body.contains(long_trimmed),
+            "an over-budget summary must NOT appear verbatim (soft-capped):\n\
+             RULES.md = {rules_body}\nlong = {long_field}",
+        );
+    } else {
+        // Within budget: the summary appears verbatim in the Tier 3 prose.
+        assert!(
+            rules_body.contains(long_trimmed),
+            "RULES.md should embed settings.summaries.long in its Tier 3 prose:\n\
+             RULES.md = {rules_body}\nlong = {long_field}",
+        );
+    }
 
     eprintln!(
         "regen-summary E2E ok: short={}, long={}",

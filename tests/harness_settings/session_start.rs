@@ -273,3 +273,59 @@ fn run_with_harness_on_empty_workspace_is_ok_and_writes_no_hook() {
         "empty-directive devin run must succeed; got {res:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #294 — the REAL session-start HOOK-STDOUT path (raw, no `--harness`) carries
+// the reframed preamble + the capped Tier-3 summary. Every other session-start
+// test feeds `select_output` a synthetic directive string; this one runs a real
+// `build_directive` output through the exact raw-hook channel `run` uses
+// (`select_output(None, ..)`), closing the hook-delivery coverage gap. (RULES.md
+// delivery of the same bytes is already covered by workspace_regen_summary.)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn session_start_raw_stdout_carries_preamble_and_capped_summary() {
+    use tome::commands::harness::session_start::select_output;
+    use tome::harness::routing::{SELF_HEAL_PREAMBLE, TIER3_SUMMARY_MAX_CHARS, build_directive};
+    use tome::index::skills::TieredEntry;
+    use tome::mcp::prompts::PromptRegistry;
+    use tome::plugin::identity::EntryKind;
+
+    // A real, non-empty directive: one Tier-1 skill + an over-budget Tier-3
+    // long summary — the exact production shape `build_directive` emits.
+    let entries = vec![TieredEntry {
+        catalog: "acme".into(),
+        plugin: "db".into(),
+        name: "migrations".into(),
+        kind: EntryKind::Skill,
+        description: "Safe schema migrations".into(),
+        when_to_use: None,
+        tier: 1,
+    }];
+    let long_summary = "z".repeat(TIER3_SUMMARY_MAX_CHARS + 200);
+    let directive = build_directive(&entries, Some(&long_summary), &PromptRegistry::default());
+
+    // The RAW hook-stdout channel `run` uses when no `--harness` is passed (the
+    // claude-code / codex SessionStart hooks). It emits the directive verbatim.
+    let stdout = select_output(None, &directive).expect("raw path emits the directive");
+
+    // The hook stdout leads with the reframed self-heal preamble (no-op wording).
+    assert!(
+        stdout.starts_with(SELF_HEAL_PREAMBLE),
+        "raw session-start stdout must begin with the self-heal preamble; got:\n{stdout}",
+    );
+    assert!(
+        stdout.contains("are available, proceed normally"),
+        "raw session-start stdout must carry the no-op-when-present phrasing: {stdout}",
+    );
+    // And the Tier-3 summary is soft-capped in the delivered hook stdout: the
+    // full over-budget summary is absent, the search_skills pointer present.
+    assert!(
+        !stdout.contains(&long_summary),
+        "the over-budget summary must NOT be delivered verbatim: {stdout}",
+    );
+    assert!(
+        stdout.contains("(call search_skills for the rest)"),
+        "the delivered hook stdout must carry the truncation pointer: {stdout}",
+    );
+}
