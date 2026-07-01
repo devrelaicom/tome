@@ -308,9 +308,37 @@ fn emit_report(outcome: &ConvertOutcome, mode: Mode) -> Result<(), TomeError> {
             if let Some(feature) = &outcome.strict_blocked {
                 println!("STRICT: would abort — {feature}");
             }
+            // A "what next" bridge into the iteration loop after a real convert
+            // that surfaced warnings — mirrors the `hint:` remediation the
+            // `PluginNotConverted` error already models (FR #298). Human-only;
+            // never in `--json`. Gated to SUCCESS (nothing under `--dry-run`, so
+            // the lint target actually exists) WITH warnings (a clean convert
+            // needs no lint nudge).
+            if let Some(bridge) = next_bridge(outcome) {
+                print!("{bridge}");
+            }
         }
     }
     Ok(())
+}
+
+/// The post-convert "what next" bridge (human mode). Returns `Some(text)` only
+/// when the convert (a) wrote files (`!dry_run`) and (b) surfaced at least one
+/// warning; otherwise `None` (a `--dry-run` wrote nothing, a clean convert needs
+/// no lint nudge). The text points into the iteration loop with real,
+/// copy-pasteable commands: `tome <level> lint <target> --autofix` — where
+/// `<level>` is the convert level and `<target>` is the path convert just wrote
+/// — then `tome harness use <harness>` to activate it (`<harness>` is a
+/// placeholder the user fills). Each printed line is newline-terminated.
+fn next_bridge(outcome: &ConvertOutcome) -> Option<String> {
+    if outcome.dry_run || outcome.report.warnings == 0 {
+        return None;
+    }
+    Some(format!(
+        "Next: run `tome {} lint {} --autofix`, then `tome harness use <harness>`\n",
+        outcome.level.as_str(),
+        outcome.target.display(),
+    ))
 }
 
 /// One `--json` JSONL diagnostic line (`type: "diagnostic"`).
@@ -347,6 +375,59 @@ mod tests {
     use super::*;
     use std::fs;
     use std::process::Command;
+
+    /// Build a minimal [`ConvertOutcome`] with the given `warnings` and `dry_run`
+    /// for exercising the human-mode "what next" bridge gating.
+    fn outcome_with(level: ArtifactLevel, warnings: usize, dry_run: bool) -> ConvertOutcome {
+        let report = crate::authoring::lint::LintReport {
+            warnings,
+            ..Default::default()
+        };
+        ConvertOutcome {
+            harness: crate::authoring::detect::SourceHarness::ClaudeCode,
+            level,
+            source_name: "demo".to_owned(),
+            final_name: "demo-tome".to_owned(),
+            target: PathBuf::from("/out/demo-tome"),
+            report,
+            written: vec![PathBuf::from("tome-plugin.toml")],
+            dry_run,
+            strict_blocked: None,
+        }
+    }
+
+    #[test]
+    fn next_bridge_names_real_commands_after_a_warning_convert() {
+        // Success (not dry-run) + warnings ⇒ the full bridge, with the convert
+        // level and the actual output target substituted into copy-pasteable
+        // `lint --autofix` + `harness use` commands.
+        let outcome = outcome_with(ArtifactLevel::Plugin, 2, false);
+        let bridge = next_bridge(&outcome).expect("a warning convert emits the bridge");
+        assert_eq!(
+            bridge,
+            "Next: run `tome plugin lint /out/demo-tome --autofix`, \
+             then `tome harness use <harness>`\n"
+        );
+        // The level matches the convert level, not a hardcoded one.
+        let cat = next_bridge(&outcome_with(ArtifactLevel::Catalog, 1, false)).unwrap();
+        assert!(cat.starts_with("Next: run `tome catalog lint "), "{cat}");
+        let skill = next_bridge(&outcome_with(ArtifactLevel::Skill, 1, false)).unwrap();
+        assert!(skill.starts_with("Next: run `tome skill lint "), "{skill}");
+    }
+
+    #[test]
+    fn next_bridge_is_suppressed_on_dry_run() {
+        // A `--dry-run` writes nothing, so the lint target does not exist yet —
+        // no bridge, even with warnings.
+        assert!(next_bridge(&outcome_with(ArtifactLevel::Plugin, 3, true)).is_none());
+    }
+
+    #[test]
+    fn next_bridge_is_suppressed_without_warnings() {
+        // A clean convert (zero diagnostics) needs no lint nudge (issue #298:
+        // warnings → the bridge).
+        assert!(next_bridge(&outcome_with(ArtifactLevel::Plugin, 0, false)).is_none());
+    }
 
     #[test]
     fn convert_result_json_shape_is_pinned() {
