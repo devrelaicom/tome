@@ -35,18 +35,20 @@ pub fn run(args: PluginListArgs, scope: &ResolvedScope, mode: Mode) -> Result<()
     // here surfaced an empty list on a fresh install. F11a already threads
     // the resolved workspace through the per-plugin aggregate.
     let conn = open_index_for_read(&paths, &scope.scope)?;
-    let rows = collect_rows(&args, &conn, &paths, scope.scope.name().as_str())?;
+    let collected = collect_rows(&args, &conn, &paths, scope.scope.name().as_str())?;
 
     let filtered: Vec<Row> = if args.enabled_only {
-        rows.into_iter()
+        collected
+            .rows
+            .into_iter()
             .filter(|r| r.status == PluginStatus::Enabled)
             .collect()
     } else {
-        rows
+        collected.rows
     };
 
     match mode {
-        Mode::Human => emit_human(&filtered),
+        Mode::Human => emit_human(&filtered, collected.any_catalogs),
         Mode::Json => emit_json(&filtered),
     }
 }
@@ -67,12 +69,22 @@ struct Row {
     record: PluginRecord,
 }
 
+/// Output of [`collect_rows`]: the per-plugin rows plus whether any catalogs
+/// are enrolled in the resolved workspace. #293: the empty-state nudge is
+/// catalog-aware — "add a catalog" when none are enrolled vs "enable a plugin"
+/// when catalogs exist but nothing is surfaced — so `run` needs the enrolment
+/// signal, not just the (possibly empty) row set.
+struct Collected {
+    rows: Vec<Row>,
+    any_catalogs: bool,
+}
+
 fn collect_rows(
     args: &PluginListArgs,
     conn: &rusqlite::Connection,
     paths: &Paths,
     workspace_name: &str,
-) -> Result<Vec<Row>, TomeError> {
+) -> Result<Collected, TomeError> {
     use crate::index::workspace_catalogs;
 
     let mut out: Vec<Row> = Vec::new();
@@ -89,6 +101,7 @@ fn collect_rows(
         ],
         None => workspace_catalogs::list_for_workspace(conn, workspace_name)?,
     };
+    let any_catalogs = !enrolments.is_empty();
 
     for enrolment in &enrolments {
         let clone_dir = paths.cache_dir_for(&enrolment.url);
@@ -120,7 +133,10 @@ fn collect_rows(
             .cmp(&b.id.catalog)
             .then_with(|| a.id.plugin.cmp(&b.id.plugin))
     });
-    Ok(out)
+    Ok(Collected {
+        rows: out,
+        any_catalogs,
+    })
 }
 
 fn build_row(
@@ -186,10 +202,23 @@ fn build_row(
     })
 }
 
-fn emit_human(rows: &[Row]) -> Result<(), TomeError> {
+/// The actionable line printed when a human-mode `plugin list` has no rows.
+///
+/// #293: mirror the `catalog list` empty-state nudge (`catalog/list.rs`),
+/// catalog-aware — when NO catalogs are enrolled the fix is to add one; when
+/// catalogs exist but no plugins are surfaced the fix is to enable one.
+fn empty_plugin_list_message(any_catalogs: bool) -> &'static str {
+    if any_catalogs {
+        "No plugins found. Use `tome plugin enable <catalog>/<plugin>` to enable one."
+    } else {
+        "No catalogs registered. Use `tome catalog add <source>` to add one, then enable a plugin."
+    }
+}
+
+fn emit_human(rows: &[Row], any_catalogs: bool) -> Result<(), TomeError> {
     let mut out = std::io::stdout().lock();
     if rows.is_empty() {
-        writeln!(out, "No plugins found.")?;
+        writeln!(out, "{}", empty_plugin_list_message(any_catalogs))?;
         return Ok(());
     }
 
@@ -295,4 +324,32 @@ fn emit_json(rows: &[Row]) -> Result<(), TomeError> {
         crate::output::write_json(&env)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // #293: the empty-state nudge is catalog-aware, mirroring `catalog list`.
+    #[test]
+    fn empty_message_with_no_catalogs_nudges_to_add_one() {
+        let msg = empty_plugin_list_message(false);
+        assert!(
+            msg.contains("tome catalog add"),
+            "no-catalog nudge must point at `tome catalog add`, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn empty_message_with_catalogs_nudges_to_enable_a_plugin() {
+        let msg = empty_plugin_list_message(true);
+        assert!(
+            msg.contains("tome plugin enable"),
+            "catalog-present nudge must point at `tome plugin enable`, got: {msg}",
+        );
+        assert!(
+            !msg.contains("tome catalog add"),
+            "catalog-present nudge must not tell the user to add a catalog, got: {msg}",
+        );
+    }
 }

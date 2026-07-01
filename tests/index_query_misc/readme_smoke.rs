@@ -143,8 +143,8 @@ fn getting_started_catalog_flow_resolves() {
 
 #[test]
 fn getting_started_plugin_list_resolves() {
-    // `tome plugin list` (bare) — resolves to "No plugins found" before any
-    // enable, which is the documented exit-0 outcome.
+    // `tome plugin list` (bare) — with a catalog enrolled, lists its plugins
+    // (all disabled) before any enable, which is the documented exit-0 outcome.
     let (env, _fix, _project) = setup();
     let out = env
         .cmd()
@@ -268,6 +268,26 @@ fn getting_started_workspace_and_harness_flow_resolves() {
         .output()
         .expect("spawn sync");
     assert_ok("sync", &sync);
+}
+
+#[test]
+fn bare_tome_help_shows_getting_started_quickstart() {
+    // #293: bare `tome --help` must surface a 3-step getting-started block so a
+    // first-time user has an order to follow, not just a flat command list.
+    let env = ToolEnv::new();
+    let out = env.cmd().args(["--help"]).output().expect("spawn --help");
+    assert_ok("--help", &out);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Getting started:"),
+        "expected a getting-started block in `tome --help`, got:\n{stdout}",
+    );
+    for needle in ["tome catalog add", "tome plugin enable", "tome query"] {
+        assert!(
+            stdout.contains(needle),
+            "quickstart must mention `{needle}`, got:\n{stdout}",
+        );
+    }
 }
 
 #[test]

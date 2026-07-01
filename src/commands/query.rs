@@ -406,6 +406,7 @@ pub fn run_with_deps(
             &outcome.results,
             outcome.scoring.as_str(),
             outcome.reranker_drift.as_deref(),
+            outcome.scope_searchable_count,
             home.as_deref(),
         )?,
         Mode::Json => emit_json(
@@ -671,10 +672,27 @@ fn check_drift(
     }
 }
 
+/// The actionable line printed when a human-mode query returns no rows.
+///
+/// #293: distinguish an EMPTY CORPUS from a genuine NO-MATCH, mirroring the
+/// MCP `search_skills` semantics added in #285. The branch reuses the signal
+/// the pipeline already computed — [`QueryOutcome::scope_searchable_count`],
+/// the exact universe the KNN searched — so `== 0` ⇔ "nothing indexed for this
+/// scope → enable a plugin / reindex" and `> 0` ⇔ "no semantic match →
+/// rephrase". We do NOT re-query or re-derive the count here.
+fn empty_query_message(scope_searchable_count: u64) -> &'static str {
+    if scope_searchable_count == 0 {
+        "No skills indexed for this scope yet — enable a plugin: `tome plugin enable <catalog>/<plugin>` (or run `tome reindex`)."
+    } else {
+        "No match — try rephrasing or broadening the query, or check that a relevant plugin is enabled."
+    }
+}
+
 fn emit_human(
     results: &[Scored],
     scoring: &str,
     reranker_drift: Option<&str>,
+    scope_searchable_count: u64,
     home: Option<&std::path::Path>,
 ) -> Result<(), TomeError> {
     // Stderr-only notices first so structured stdout stays clean even when
@@ -694,7 +712,7 @@ fn emit_human(
 
     let mut out = std::io::stdout().lock();
     if results.is_empty() {
-        writeln!(out, "No results.")?;
+        writeln!(out, "{}", empty_query_message(scope_searchable_count))?;
         return Ok(());
     }
 
@@ -854,5 +872,39 @@ mod tests {
     fn shorten_home_returns_input_when_home_unset() {
         let got = shorten_home("/Users/alice/foo", None);
         assert_eq!(got, "/Users/alice/foo");
+    }
+
+    // #293: the empty-result human line branches on the scope-effective
+    // searchable count (reused from the outcome, not re-derived).
+    #[test]
+    fn empty_query_message_empty_corpus_nudges_to_enable_a_plugin() {
+        let msg = empty_query_message(0);
+        assert!(
+            msg.contains("No skills indexed for this scope"),
+            "expected empty-corpus nudge, got: {msg}",
+        );
+        assert!(
+            msg.contains("tome plugin enable"),
+            "empty-corpus nudge must point at `tome plugin enable`, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn empty_query_message_populated_corpus_suggests_rephrasing() {
+        let msg = empty_query_message(7);
+        assert!(
+            msg.contains("No match"),
+            "expected no-match message, got: {msg}",
+        );
+        assert!(
+            msg.contains("rephrasing"),
+            "populated-corpus message must suggest rephrasing, got: {msg}",
+        );
+        // The rephrase path must NOT tell the user to enable a plugin/reindex —
+        // that would send them down the wrong recovery.
+        assert!(
+            !msg.contains("No skills indexed"),
+            "populated-corpus message must not use the empty-corpus wording, got: {msg}",
+        );
     }
 }
