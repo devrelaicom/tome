@@ -227,12 +227,27 @@ fn reset_without_yes_on_non_tty_is_exit_54() {
 fn reset_non_interactive_flag_suppresses_prompt() {
     let env = ToolEnv::new();
     assert!(run(&env, &["telemetry", "on"]).status.success());
+    let before = status_json(&env)["install_uuid"]
+        .as_str()
+        .expect("uuid after on")
+        .to_string();
 
     let out = run(&env, &["telemetry", "reset", "--non-interactive"]);
     assert!(
         out.status.success(),
         "--non-interactive should skip the reset prompt; stderr: {}",
         String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Assert the DURABLE effect, not just exit 0: reset must mint a fresh UUID
+    // (mirrors `reset_yes_changes_the_install_uuid`).
+    let after = status_json(&env)["install_uuid"]
+        .as_str()
+        .expect("uuid after reset")
+        .to_string();
+    assert_ne!(
+        before, after,
+        "--non-interactive reset must actually run and mint a fresh install UUID",
     );
 }
 
@@ -243,6 +258,10 @@ fn reset_non_interactive_flag_suppresses_prompt() {
 fn reset_tome_noninteractive_env_var_suppresses_prompt() {
     let env = ToolEnv::new();
     assert!(run(&env, &["telemetry", "on"]).status.success());
+    let before = status_json(&env)["install_uuid"]
+        .as_str()
+        .expect("uuid after on")
+        .to_string();
 
     let out = clean_cmd(&env)
         .env("TOME_NONINTERACTIVE", "1")
@@ -253,6 +272,17 @@ fn reset_tome_noninteractive_env_var_suppresses_prompt() {
         out.status.success(),
         "TOME_NONINTERACTIVE=1 should skip the reset prompt; stderr: {}",
         String::from_utf8_lossy(&out.stderr),
+    );
+
+    // Durable effect: the reset actually ran (fresh UUID), it didn't merely
+    // exit 0 on a short-circuit.
+    let after = status_json(&env)["install_uuid"]
+        .as_str()
+        .expect("uuid after reset")
+        .to_string();
+    assert_ne!(
+        before, after,
+        "TOME_NONINTERACTIVE reset must actually run and mint a fresh install UUID",
     );
 }
 

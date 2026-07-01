@@ -106,19 +106,12 @@ pub fn set_enabled(paths: &Paths, enabled: bool) -> Result<(), TomeError> {
 /// any non-empty value means "in CI": `JENKINS_URL`/`TEAMCITY_VERSION` plus the
 /// vendors added in #284 (`VERCEL`/`NETLIFY`/`TRAVIS`/`APPVEYOR`/`DRONE`).
 pub fn is_ci() -> bool {
-    /// Truthy-presence: set, non-empty, and not an explicit falsey token
-    /// (`0`/`false`/`no`/`off`, case-insensitive). This is the rule for vars
-    /// whose value carries a boolean meaning.
-    fn truthy(name: &str) -> bool {
-        std::env::var(name).is_ok_and(|v| {
-            let v = v.trim();
-            !v.is_empty()
-                && !matches!(
-                    v.to_ascii_lowercase().as_str(),
-                    "0" | "false" | "no" | "off"
-                )
-        })
-    }
+    // Truthy-presence: set, non-empty, and not an explicit falsey token
+    // (`0`/`false`/`no`/`off`, case-insensitive). This is the rule for vars
+    // whose value carries a boolean meaning. Shared with
+    // `presentation::prompt::non_interactive` via the one SSOT so the truthy set
+    // can't drift between the CI gate and `TOME_NONINTERACTIVE`.
+    let truthy = crate::util::env_truthy;
     /// Bare presence: set and non-empty, value ignored. This is the rule for
     /// vars that exist only inside a given CI and carry an opaque payload.
     ///

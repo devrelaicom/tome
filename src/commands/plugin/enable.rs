@@ -277,6 +277,10 @@ fn ensure_models_or_prompt(
         return Ok(());
     }
 
+    // `prompt::non_interactive()` also reads a persistently-exported
+    // `TOME_NONINTERACTIVE=1`, so under that env this model-download prompt (and
+    // every other prompt, including the `tome plugin` TUI's) auto-confirms —
+    // intended per the "env auto-confirms every prompt" semantics.
     let confirmed = if args.yes || prompt::non_interactive() {
         true
     } else if output::stdin_is_tty() && output::stdout_is_tty() {

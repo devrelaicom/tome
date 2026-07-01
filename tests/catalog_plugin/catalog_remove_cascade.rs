@@ -131,6 +131,53 @@ fn refuse_remove_when_enabled_plugins_exist() {
     assert!(count_skill_rows(&paths, "sample-plugin-catalog") > 0);
 }
 
+/// Issue #305 — the load-bearing safety invariant: the global
+/// `--non-interactive` flag (like `--force` / `TOME_NONINTERACTIVE`) suppresses
+/// only the CONFIRMATION PROMPT, never the `CatalogHasEnabledPlugins`
+/// cascade-safety refusal. On a NON-TTY with enabled plugins, remove must STILL
+/// exit 53 and leave the enrolment + skill rows intact — `--non-interactive`
+/// must not silently cascade-tear-down enabled plugins (only `--force` does).
+#[test]
+fn non_interactive_does_not_bypass_enabled_plugin_cascade_refusal() {
+    let tmp = TempDir::new().unwrap();
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+    fabricate_models(&paths);
+
+    let catalog_root = copy_sample_plugin_catalog(&tmp, "sample-plugin-catalog");
+    let config = config_with_catalog("sample-plugin-catalog", &catalog_root);
+    write_config_for_cli(&paths, &config);
+    let embedder = StubEmbedder::new();
+    enable_alpha(&paths, &config, &embedder);
+
+    let out = env
+        .cmd()
+        .args([
+            "catalog",
+            "remove",
+            "sample-plugin-catalog",
+            "--non-interactive",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(53),
+        "--non-interactive must NOT bypass the enabled-plugin cascade refusal; \
+         got {:?}, stderr:\n{}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    // Enrolment + skill rows survive: nothing was torn down.
+    assert!(
+        has_workspace_enrolment(&paths, "global", "sample-plugin-catalog"),
+        "workspace_catalogs must still have the catalog row after a refused remove",
+    );
+    assert!(count_skill_rows(&paths, "sample-plugin-catalog") > 0);
+}
+
 #[test]
 fn force_cascades_disable_and_removes_catalog() {
     let tmp = TempDir::new().unwrap();
