@@ -1325,7 +1325,16 @@ pub(crate) fn reconcile_plugin_hook_dispatch(
 /// per-plugin malformed `hooks.json` (exit 43) is recorded on `first_error`
 /// (forward progress) and the plugin is skipped; a plugin whose root can't be
 /// resolved (catalog cache evicted) is likewise skipped.
-fn resolve_enabled_canonical_hooks(
+/// Enumerate every enabled plugin's translatable hooks into the `CanonicalHook`
+/// IR, exactly as the dispatch reconciler consumes them.
+///
+/// SSOT: this is the ONE function that turns the enabled-plugin set into the
+/// canonical hook list (parse `hooks/hooks.json` → rewrite → `parse_canonical_hooks`
+/// → bake `plugin_root`). Both the sync dispatch pass AND the read-only
+/// `harness preview` (issue #288) route through it, so the preview's per-hook
+/// verdicts match the manifest sync actually writes. Read-only: opens the DB
+/// read-only and never writes.
+pub(crate) fn resolve_enabled_canonical_hooks(
     deps: &SyncDeps<'_>,
     first_error: &mut Option<TomeError>,
 ) -> Result<Vec<CanonicalHook>, TomeError> {

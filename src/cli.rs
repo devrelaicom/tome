@@ -361,6 +361,11 @@ pub enum HarnessCommand {
     /// paste-able Tome MCP-config snippet for harnesses with a manual MCP
     /// setup (e.g. JetBrains AI, Pi).
     Info(HarnessInfoArgs),
+    /// Preview what `harness sync` would deliver vs drop for one harness,
+    /// per enabled entry (agents native/persona/unrepresented + dropped
+    /// model/tools, skills/commands MCP-routing, hooks native vs GUARDRAILS).
+    /// Read-only; no files are touched.
+    Preview(HarnessPreviewArgs),
     /// Reconcile the project, then print the workspace's skill-routing directive
     /// to stdout, generated fresh from live state. Intended as a SessionStart
     /// hook target; not usually run by hand.
@@ -418,6 +423,16 @@ pub struct HarnessRemoveArgs {
 pub struct HarnessInfoArgs {
     /// Harness name.
     pub name: String,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct HarnessPreviewArgs {
+    /// Harness name (aliases + opt-in targets resolve by name).
+    pub harness: String,
+    /// Scope the preview to a single enabled plugin id. When omitted, every
+    /// enabled plugin in the resolved workspace is previewed.
+    #[arg(long)]
+    pub plugin: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]

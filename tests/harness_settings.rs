@@ -39,6 +39,8 @@ mod harness_modules;
 mod harness_open_plugins_bundle;
 #[path = "harness_settings/harness_p11_pins.rs"]
 mod harness_p11_pins;
+#[path = "harness_settings/harness_preview.rs"]
+mod harness_preview;
 #[path = "harness_settings/harness_remove_scope.rs"]
 mod harness_remove_scope;
 #[path = "harness_settings/harness_skeleton.rs"]

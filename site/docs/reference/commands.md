@@ -156,6 +156,7 @@ OpenCode). Bare `tome harness` enumerates every supported harness.
 | `use <name>` | `--scope`, `--force` | Append a harness to the chosen scope's settings and run the sync. `--scope` is `project` (default), `workspace`, or `global`. `--force` overrides a harness-clash on the MCP config write (otherwise exit `19`). |
 | `remove <name>` | `--scope` | Remove a harness from the chosen scope and run the cleanup pass. |
 | `info <name>` | | Per-harness details for the current project: detection, targets, integration state, source-of-scope. |
+| `preview <name>` | `--plugin` | Preview what `harness sync` would deliver vs drop for one harness, per enabled entry: agents native/persona/unrepresented (with dropped model/tools), skills/commands MCP-routing, and hooks native vs `GUARDRAILS.md` fallback. `--plugin` scopes the preview to one enabled plugin. Read-only. |
 | `sync` | | Reconcile the project's filesystem against the effective harness list. Byte-for-byte idempotent. |
 
 See [Harnesses](../using-tome/harnesses.md).

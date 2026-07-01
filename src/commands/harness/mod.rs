@@ -42,6 +42,7 @@
 pub mod bare;
 pub mod info;
 pub mod list;
+pub mod preview;
 pub mod remove;
 pub mod run_hook;
 pub mod session_start;
@@ -124,6 +125,7 @@ pub fn run(args: HarnessArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), T
             r
         }
         Some(HarnessCommand::Info(a)) => info::run(a, scope, &paths, mode),
+        Some(HarnessCommand::Preview(a)) => preview::run(a, scope, &paths, mode),
         Some(HarnessCommand::SessionStart(a)) => session_start::run(a, scope, &paths, mode),
         Some(HarnessCommand::RunHook(a)) => run_hook::run(a, scope, &paths, mode),
     }
