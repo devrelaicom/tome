@@ -128,6 +128,38 @@ fn doctor_fix_keeps_malformed_config_as_manual_finding() {
     );
 }
 
+/// Issue #283 (review): on a fresh install the onboarding nudges sort BEFORE
+/// the genuine Config fix in `suggested_fixes`. The `DoctorFixNotSafe`
+/// subsystem label is derived by a scan that MUST exclude `Subsystem::Onboarding`
+/// (mirroring `has_remaining_manual_fixes`), so the exit-75 error names the fix
+/// that actually blocked (`config`) — never `onboarding`, which is explicitly
+/// non-blocking. Exit code stays 75; only the label is under test here.
+#[test]
+fn doctor_fix_labels_exit75_config_not_onboarding_on_fresh_install() {
+    // Fresh install (no catalogs → onboarding nudges present) + malformed config.
+    let env = env_with_malformed_config("[query]\nbad_key = true\n");
+
+    let out = env.cmd().args(["doctor", "--fix"]).output().unwrap();
+    // Exit 75 unchanged: the genuine Config fix trips the gate.
+    assert_eq!(
+        out.status.code(),
+        Some(75),
+        "an unfixable config finding under --fix should exit 75; stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    // The `DoctorFixNotSafe` error (stderr) must name the CONFIG subsystem, not
+    // the onboarding nudge that sorts ahead of it.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("subsystem `config`"),
+        "exit-75 error must label the config subsystem; got:\n{stderr}",
+    );
+    assert!(
+        !stderr.contains("subsystem `onboarding`"),
+        "exit-75 error must NOT mislabel the non-blocking onboarding subsystem; got:\n{stderr}",
+    );
+}
+
 #[test]
 fn status_json_reports_malformed_config_instead_of_exit_5() {
     let env = env_with_malformed_config("[output]\nbogus = \"x\"\n");

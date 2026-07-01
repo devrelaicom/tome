@@ -214,6 +214,7 @@ pub enum RulesCopyState {
 /// - `HarnessMcp(name)` ↔ `"harness-mcp:<name>"`
 /// - `ModelRegistry` ↔ `"model-registry"`
 /// - `Config` ↔ `"config"`
+/// - `Onboarding` ↔ `"onboarding"`
 ///
 /// The two Phase 3 drift "subsystems" `embedder_drift`, `reranker_drift`,
 /// and the Phase 4 fold-in `summariser_drift` are not part of this enum:
@@ -242,6 +243,15 @@ pub enum Subsystem {
     /// diagnostic commands (`tome doctor`) as a non-auto-fixable finding — Tome
     /// never rewrites a user-authored config; the user edits the named key.
     Config,
+    /// Issue #283: fresh-install onboarding nudges (no catalog enrolled, no
+    /// plugins enabled, no harness configured). These are INFORMATIONAL — a
+    /// fresh install is not "broken", so they are `auto_fixable: false` AND are
+    /// excluded from the `--fix` "remaining manual fixes" gate (see
+    /// [`crate::doctor::fixes::has_remaining_manual_fixes`]) so they never flip a
+    /// pristine install into a spurious exit-75 / health-code failure. They only
+    /// render in the "Suggested fixes" block so a first-run `tome doctor` reads
+    /// as "here's how to begin" rather than a silent "healthy with zeros".
+    Onboarding,
 }
 
 impl Subsystem {
@@ -263,6 +273,7 @@ impl Subsystem {
             Subsystem::HarnessMcp(n) => format!("harness-mcp:{n}"),
             Subsystem::ModelRegistry => "model-registry".to_owned(),
             Subsystem::Config => "config".to_owned(),
+            Subsystem::Onboarding => "onboarding".to_owned(),
         }
     }
 
@@ -280,6 +291,7 @@ impl Subsystem {
             "binding-rules-copy" => Subsystem::BindingRulesCopy,
             "model-registry" => Subsystem::ModelRegistry,
             "config" => Subsystem::Config,
+            "onboarding" => Subsystem::Onboarding,
             other => {
                 if let Some(name) = other.strip_prefix("catalog:") {
                     Subsystem::Catalog(name.to_owned())
@@ -375,6 +387,7 @@ mod tests {
                 "\"harness-mcp:codex\"",
             ),
             (Subsystem::Config, "\"config\""),
+            (Subsystem::Onboarding, "\"onboarding\""),
         ];
         for (variant, wire) in cases {
             let serialised = serde_json::to_string(&variant).unwrap();

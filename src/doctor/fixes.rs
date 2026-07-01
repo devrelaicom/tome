@@ -585,8 +585,17 @@ fn repair_schema(paths: &Paths, _scope: &Scope) -> Result<(), TomeError> {
 
 /// `true` when the report still has `auto_fixable: false` suggestions
 /// after `--fix` ran. Drives the exit-75 path.
+///
+/// Issue #283: `Subsystem::Onboarding` nudges (no catalog / no plugins / no
+/// harness on a fresh install) are excluded — they are informational
+/// setup guidance, not "broken" state, so they must never flip a pristine
+/// install into a spurious `DoctorFixNotSafe` (exit 75). Every genuine
+/// non-auto-fixable subsystem still counts.
 pub fn has_remaining_manual_fixes(report: &DoctorReport) -> bool {
-    report.suggested_fixes.iter().any(|f| !f.auto_fixable)
+    report
+        .suggested_fixes
+        .iter()
+        .any(|f| !f.auto_fixable && f.subsystem != crate::doctor::Subsystem::Onboarding)
 }
 
 /// Re-derive the suggested-fix list + classification after `--fix` has

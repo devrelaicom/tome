@@ -141,6 +141,15 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
         // is true → `DoctorFixNotSafe` (exit 75).
         doctor::reappend_corrupt_index_fix(&mut report, &paths, &cfg);
 
+        // Issue #283: `re_assemble` rebuilds `suggested_fixes` via the 8-arg
+        // SSOT, which doesn't know about the fresh-install onboarding nudges.
+        // `doctor --fix` never enrols a catalog / enables a plugin / configures
+        // a harness (those are user product decisions), so a still-not-set-up
+        // install keeps its onboarding guidance through `--fix`. `Onboarding`
+        // fixes are informational (excluded from the exit-75 gate), so they
+        // never change the exit code.
+        doctor::reappend_onboarding_fixes(&mut report);
+
         // `re_assemble` rebuilds `suggested_fixes` + `overall` via the SSOT,
         // which doesn't know about the config-parse finding. `doctor --fix`
         // NEVER rewrites the user-authored `config.toml`, so a malformed config
@@ -182,10 +191,17 @@ pub fn run(args: DoctorArgs, scope: &ResolvedScope, mode: Mode) -> Result<(), To
     };
     if args.fix && remaining_manual {
         return Err(TomeError::DoctorFixNotSafe {
+            // Issue #283: mirror `has_remaining_manual_fixes`'s exclusion of
+            // `Subsystem::Onboarding` exactly. Onboarding nudges sort BEFORE the
+            // genuine subsystem fixes (e.g. Config), so a bare `.find(|f|
+            // !f.auto_fixable)` would label the error with the one subsystem
+            // that is explicitly not supposed to block. The two scans must use
+            // the SAME predicate so the label names the fix that actually
+            // triggered the exit-75 gate.
             subsystem: report
                 .suggested_fixes
                 .iter()
-                .find(|f| !f.auto_fixable)
+                .find(|f| !f.auto_fixable && f.subsystem != doctor::Subsystem::Onboarding)
                 .map(|f| f.subsystem.to_wire_string())
                 .unwrap_or_else(|| "unknown".to_owned()),
         });
