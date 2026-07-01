@@ -419,10 +419,23 @@ pub struct HarnessUseArgs {
     #[arg(conflicts_with = "all")]
     pub names: Vec<String>,
     /// Configure every supported (auto-detectable) harness, regardless of
-    /// detection. Excludes the opt-in `generic` / `generic-op` targets.
-    /// Mutually exclusive with explicit names.
+    /// detection. Excludes the opt-in `generic` / `generic-op` targets unless
+    /// `--include-opt-in` is also given. Mutually exclusive with explicit names.
     #[arg(long)]
     pub all: bool,
+    /// Together with `--all`, ALSO configure the opt-in write targets
+    /// (`generic` / `generic-op`) that `--all` skips by default. Only
+    /// meaningful with `--all` (requires it); to configure a single opt-in
+    /// target, name it explicitly instead.
+    ///
+    /// `conflicts_with = "names"` (alongside `requires = "all"`) makes
+    /// `--include-opt-in <name>` a LOUD usage error rather than a silent
+    /// no-op: with explicit names present, `names` already `conflicts_with`
+    /// `all`, so clap treats this flag's `requires = "all"` as
+    /// unsatisfiable-and-skipped instead of an error — the flag would then do
+    /// nothing with no diagnostic (the exact anti-pattern #306 is about).
+    #[arg(long, requires = "all", conflicts_with = "names")]
+    pub include_opt_in: bool,
     /// Settings scope to edit. When omitted, falls back to
     /// `[harness] default_scope` in `~/.tome/config.toml`, then to
     /// `project` (requires a project marker above CWD; use `workspace`

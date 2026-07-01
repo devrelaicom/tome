@@ -42,6 +42,7 @@ fn config_default_scope_global_used_without_flag() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
+        include_opt_in: false,
         scope: None,
         force: false,
     };
@@ -75,6 +76,7 @@ fn explicit_scope_overrides_config_default() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Project), // explicit
         force: false,
     };
@@ -106,6 +108,7 @@ fn no_config_default_scope_falls_back_to_project() {
     let args = HarnessUseArgs {
         names: vec!["stub".to_string()],
         all: false,
+        include_opt_in: false,
         scope: None, // no explicit flag
         force: false,
     };

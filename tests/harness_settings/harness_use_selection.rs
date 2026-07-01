@@ -66,10 +66,12 @@ fn explicit_names_select_exactly_those() {
             "cursor".to_string(),
         ],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Global),
         force: false,
     };
-    let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
+    let report_ri = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
+    let (report, err) = (report_ri.report, report_ri.first_error);
     assert!(err.is_none());
     assert_eq!(report.selection, "explicit");
     assert_eq!(ok_names(&report), vec!["claude-code", "codex", "cursor"]);
@@ -96,10 +98,12 @@ fn all_flag_selects_every_supported_excluding_generics() {
     let args = HarnessUseArgs {
         names: vec![],
         all: true,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Global),
         force: false,
     };
-    let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use --all ok");
+    let report_ri = use_::run_inner(args, &global_scope(), &paths).expect("use --all ok");
+    let (report, err) = (report_ri.report, report_ri.first_error);
     assert!(err.is_none());
     assert_eq!(report.selection, "all");
 
@@ -168,10 +172,12 @@ fn alias_and_canonical_collapse_to_single_pass() {
         // gemini twice.
         names: vec!["antigravity-cli".to_string(), "gemini".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Global),
         force: false,
     };
-    let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
+    let report_ri = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
+    let (report, err) = (report_ri.report, report_ri.first_error);
     assert!(err.is_none());
     // ONE result, named by the canonical `gemini`.
     assert_eq!(
@@ -204,10 +210,12 @@ fn duplicate_name_collapses_to_single_pass() {
     let args = HarnessUseArgs {
         names: vec!["cursor".to_string(), "cursor".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Global),
         force: false,
     };
-    let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
+    let report_ri = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
+    let (report, err) = (report_ri.report, report_ri.first_error);
     assert!(err.is_none());
     assert_eq!(
         ok_names(&report),
@@ -235,10 +243,12 @@ fn no_args_selects_detected_set_only() {
     let args = HarnessUseArgs {
         names: vec![],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Global),
         force: false,
     };
-    let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
+    let report_ri = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
+    let (report, err) = (report_ri.report, report_ri.first_error);
     assert!(err.is_none());
     assert_eq!(report.selection, "detected");
     assert_eq!(
@@ -268,10 +278,12 @@ fn no_args_no_detected_harness_yields_empty_detected_report() {
     let args = HarnessUseArgs {
         names: vec![],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Global),
         force: false,
     };
-    let (report, err) = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
+    let report_ri = use_::run_inner(args, &global_scope(), &paths).expect("use ok");
+    let (report, err) = (report_ri.report, report_ri.first_error);
     assert!(err.is_none(), "no-detected is not an error");
     assert_eq!(report.selection, "detected");
     assert!(
@@ -325,12 +337,13 @@ fn forward_progress_attempts_all_and_surfaces_first_error() {
     let ok_args = HarnessUseArgs {
         names: vec!["stub_ok".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Project),
         force: false,
     };
-    let (ok_report, ok_err) =
-        use_::run_inner(ok_args, &project_scope("demo", ok_project.clone()), &paths)
-            .expect("selection resolves");
+    let ok_report_ri = use_::run_inner(ok_args, &project_scope("demo", ok_project.clone()), &paths)
+        .expect("selection resolves");
+    let (ok_report, ok_err) = (ok_report_ri.report, ok_report_ri.first_error);
     assert!(ok_err.is_none(), "a healthy harness alone must succeed");
     assert_eq!(ok_names(&ok_report), vec!["stub_ok"]);
 
@@ -351,11 +364,13 @@ fn forward_progress_attempts_all_and_surfaces_first_error() {
     let args = HarnessUseArgs {
         names: vec!["stub_ok".to_string(), "stub_fail".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Project),
         force: false,
     };
-    let (report, err) = use_::run_inner(args, &project_scope("demo", project.clone()), &paths)
+    let report_ri = use_::run_inner(args, &project_scope("demo", project.clone()), &paths)
         .expect("selection resolves");
+    let (report, err) = (report_ri.report, report_ri.first_error);
 
     // Forward-progress: BOTH harnesses were attempted — the loop did not abort
     // after the first failure (it produced a result for each selected harness).
@@ -535,4 +550,236 @@ fn sync_parses_repeated_harness_flag() {
         panic!("expected the sync subcommand");
     };
     assert_eq!(args.harness, vec!["cursor", "codex"]);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #306: `--include-opt-in` behaviour + the opt-in-skip notice.
+// ---------------------------------------------------------------------------
+
+/// clap wiring: `--include-opt-in` REQUIRES `--all` AND conflicts with explicit
+/// names. Passing it alone OR with names is a LOUD usage error — never a silent
+/// no-op (the review MINOR: `requires = "all"` alone is skipped-not-enforced when
+/// names are present because `names` already conflicts with `--all`, so the flag
+/// would parse and do nothing without `conflicts_with = "names"`).
+#[test]
+fn include_opt_in_requires_all() {
+    use clap::Parser;
+    use tome::cli::Cli;
+
+    // (a) Alone → error (requires --all).
+    assert!(
+        Cli::try_parse_from(["tome", "harness", "use", "--include-opt-in"]).is_err(),
+        "`--include-opt-in` without `--all` must be a usage error",
+    );
+    // (b) With an explicit name but no --all → error (conflicts_with = names).
+    // Without this rule the flag would be a silent no-op (parses, ignored).
+    assert!(
+        Cli::try_parse_from(["tome", "harness", "use", "--include-opt-in", "cursor"]).is_err(),
+        "`--include-opt-in <name>` (no --all) must be a usage error, not a silent no-op",
+    );
+    assert!(
+        Cli::try_parse_from(["tome", "harness", "use", "cursor", "--include-opt-in"]).is_err(),
+        "name-then-flag ordering must also error (conflicts_with = names)",
+    );
+    // (c) With --all → parses, and both flags land.
+    let cli = Cli::try_parse_from(["tome", "harness", "use", "--all", "--include-opt-in"])
+        .expect("--all --include-opt-in must parse");
+    let tome::cli::Command::Harness(h) = cli.command else {
+        panic!("expected the harness subcommand");
+    };
+    let Some(tome::cli::HarnessCommand::Use(args)) = h.command else {
+        panic!("expected the use subcommand");
+    };
+    assert!(args.all && args.include_opt_in);
+    assert!(args.names.is_empty(), "no names in the --all path");
+}
+
+/// `--all --include-opt-in` selects the `--all` set PLUS the opt-in targets
+/// (`generic` / `generic-op`), and the settings file DURABLY records them. The
+/// skipped-opt-in note list is empty (so `run` emits no note). Driven against
+/// the REAL registry at global scope (no sync).
+#[test]
+fn all_include_opt_in_configures_generics() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let args = HarnessUseArgs {
+        names: vec![],
+        all: true,
+        include_opt_in: true,
+        scope: Some(HarnessScopeArg::Global),
+        force: false,
+    };
+    let ri = use_::run_inner(args, &global_scope(), &paths).expect("use --all --include-opt-in ok");
+    assert!(ri.first_error.is_none());
+    assert_eq!(ri.report.selection, "all");
+    // With --include-opt-in nothing is skipped → no note.
+    assert!(
+        ri.skipped_opt_in.is_empty(),
+        "no opt-in target is skipped when --include-opt-in is given; got {:?}",
+        ri.skipped_opt_in,
+    );
+
+    let names = ok_names(&ri.report);
+    // Both opt-in targets ARE selected now.
+    for m in tome::harness::OPT_IN_TARGETS {
+        assert!(
+            names.contains(&m.name().to_string()),
+            "--all --include-opt-in must include the opt-in target {}",
+            m.name(),
+        );
+    }
+
+    // DURABLE effect: the opt-in targets are persisted to the global config's
+    // `[harness].enabled` array (quoted TOML element form, since `generic` is a
+    // substring of `generic-op`).
+    let body = std::fs::read_to_string(&paths.global_config_file)
+        .expect("--all --include-opt-in must write the global config file");
+    assert!(
+        body.contains("\"generic\""),
+        "generic must be persisted by --all --include-opt-in: {body}",
+    );
+    assert!(
+        body.contains("\"generic-op\""),
+        "generic-op must be persisted by --all --include-opt-in: {body}",
+    );
+}
+
+/// Plain `--all` (no `--include-opt-in`) does NOT select the opt-in targets, and
+/// `run_inner` reports them in `skipped_opt_in` (the note's source). This is the
+/// SSOT view; the binary test below proves the stderr note itself.
+#[test]
+fn all_without_include_opt_in_reports_skipped_targets() {
+    let _lock = crate::common::HARNESS_OVERRIDE_MUTEX
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let env = ToolEnv::new();
+    let paths = paths_for(&env);
+    std::fs::create_dir_all(&paths.root).unwrap();
+
+    let args = HarnessUseArgs {
+        names: vec![],
+        all: true,
+        include_opt_in: false,
+        scope: Some(HarnessScopeArg::Global),
+        force: false,
+    };
+    let ri = use_::run_inner(args, &global_scope(), &paths).expect("use --all ok");
+    assert!(ri.first_error.is_none());
+
+    // The opt-in targets are reported as skipped (drives the #306 note).
+    let expected: Vec<String> = tome::harness::OPT_IN_TARGETS
+        .iter()
+        .map(|m| m.name().to_string())
+        .collect();
+    assert_eq!(
+        ri.skipped_opt_in, expected,
+        "plain --all must report every opt-in target as skipped",
+    );
+
+    // And they are NOT configured.
+    let names = ok_names(&ri.report);
+    for m in tome::harness::OPT_IN_TARGETS {
+        assert!(
+            !names.contains(&m.name().to_string()),
+            "plain --all must NOT configure the opt-in target {}",
+            m.name(),
+        );
+    }
+}
+
+/// End-to-end (binary): `tome harness use --all` prints the human-only opt-in
+/// skip note to STDERR naming the opt-in targets, and does NOT write them to the
+/// config. `--all --include-opt-in` writes them and prints NO note. Driven
+/// through the real binary in an isolated `$HOME` so the stderr signal is real.
+#[test]
+fn all_emits_opt_in_skip_note_on_stderr() {
+    let env = ToolEnv::new();
+
+    // (a) plain --all → note on stderr, generics absent from config.
+    let out = env
+        .cmd()
+        .args(["harness", "use", "--all", "--scope", "global"])
+        .output()
+        .expect("run tome harness use --all");
+    assert!(
+        out.status.success(),
+        "harness use --all is a clean exit; stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--all skipped opt-in targets")
+            && stderr.contains("generic")
+            && stderr.contains("generic-op")
+            && stderr.contains("--include-opt-in"),
+        "plain --all must note the skipped opt-in targets on stderr; got: {stderr}",
+    );
+    let cfg = env.config_file();
+    let body = std::fs::read_to_string(&cfg).expect("config written by --all");
+    assert!(
+        !body.contains("\"generic\"") && !body.contains("\"generic-op\""),
+        "plain --all must NOT persist the opt-in targets: {body}",
+    );
+
+    // (b) --all --include-opt-in → NO note, generics present.
+    let env2 = ToolEnv::new();
+    let out2 = env2
+        .cmd()
+        .args([
+            "harness",
+            "use",
+            "--all",
+            "--include-opt-in",
+            "--scope",
+            "global",
+        ])
+        .output()
+        .expect("run tome harness use --all --include-opt-in");
+    assert!(out2.status.success());
+    let stderr2 = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        !stderr2.contains("skipped opt-in targets"),
+        "--include-opt-in must suppress the skip note; got: {stderr2}",
+    );
+    let body2 = std::fs::read_to_string(env2.config_file()).expect("config written");
+    assert!(
+        body2.contains("\"generic\"") && body2.contains("\"generic-op\""),
+        "--include-opt-in must persist the opt-in targets: {body2}",
+    );
+}
+
+/// The opt-in skip note is HUMAN-ONLY: under `--json` it is suppressed (stderr
+/// carries no `note:` line). The `--json` stdout envelope stays the machine
+/// surface; the note is informational and must not leak into scripted runs.
+#[test]
+fn all_opt_in_skip_note_suppressed_under_json() {
+    let env = ToolEnv::new();
+    let out = env
+        .cmd()
+        .args(["harness", "use", "--all", "--scope", "global", "--json"])
+        .output()
+        .expect("run tome harness use --all --json");
+    assert!(
+        out.status.success(),
+        "harness use --all --json is a clean exit; stderr: {}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("skipped opt-in targets"),
+        "the opt-in skip note must be suppressed under --json; got stderr: {stderr}",
+    );
+    // The JSON envelope is still on stdout (selection == "all").
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("\"selection\":\"all\""),
+        "the --json envelope must still be emitted on stdout; got: {stdout}",
+    );
 }

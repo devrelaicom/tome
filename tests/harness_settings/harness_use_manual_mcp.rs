@@ -99,6 +99,7 @@ fn use_jetbrains_ai_succeeds_writes_rules_no_mcp_file() {
     let args = HarnessUseArgs {
         names: vec!["jetbrains-ai".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Project),
         force: false,
     };
@@ -161,6 +162,7 @@ fn use_jetbrains_ai_still_errors_when_rules_write_fails() {
     let args = HarnessUseArgs {
         names: vec!["jetbrains-ai".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Project),
         force: false,
     };
@@ -200,6 +202,7 @@ fn use_pi_writes_mcp_and_emits_adapter_notice() {
     let args = HarnessUseArgs {
         names: vec!["pi".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Project),
         force: false,
     };
@@ -252,11 +255,12 @@ fn run_emits_mcp_notice_for_jetbrains_ai_and_pi() {
     let jb_args = HarnessUseArgs {
         names: vec!["jetbrains-ai".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Project),
         force: false,
     };
-    let (jb_report, jb_err) =
-        use_::run_inner(jb_args, &scope, &paths).expect("use jetbrains-ai ok");
+    let jb_ri = use_::run_inner(jb_args, &scope, &paths).expect("use jetbrains-ai ok");
+    let (jb_report, jb_err) = (jb_ri.report, jb_ri.first_error);
     assert!(jb_err.is_none(), "jetbrains-ai use must not fail");
     let jb_outcome = single_ok(&jb_report);
     let jb_notice = jb_outcome
@@ -279,10 +283,12 @@ fn run_emits_mcp_notice_for_jetbrains_ai_and_pi() {
     let pi_args = HarnessUseArgs {
         names: vec!["pi".to_string()],
         all: false,
+        include_opt_in: false,
         scope: Some(HarnessScopeArg::Project),
         force: false,
     };
-    let (pi_report, pi_err) = use_::run_inner(pi_args, &scope, &paths).expect("use pi ok");
+    let pi_ri = use_::run_inner(pi_args, &scope, &paths).expect("use pi ok");
+    let (pi_report, pi_err) = (pi_ri.report, pi_ri.first_error);
     assert!(pi_err.is_none(), "pi use must not fail");
     let pi_outcome = single_ok(&pi_report);
     let pi_notice = pi_outcome
