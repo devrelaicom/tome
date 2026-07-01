@@ -181,26 +181,35 @@ take the index lock.
 
 | Subcommand | Flags | Purpose |
 | --- | --- | --- |
-| `show` | | Print every curated config knob with its **effective** value and a provenance annotation: `(default)`, `(config)`, or `(env)`. `--json` emits a stable object of `key → { "value", "source" }`. |
+| `show` | | Print each curated scalar config knob with its **effective** value and a provenance annotation: `(default)`, `(config)`, or `(env)`. `--json` emits a stable object of `key → { "value", "source" }`. |
 | `validate` | | Run the strict config parse. Prints `config is valid` and exits `0` on a good (or absent) config; on a malformed config, prints the legible key-naming error to stderr and exits `5` (`manifest_invalid`). `--json` emits `{ "valid", "error" }` on stdout. |
+
+The knobs shown are the curated scalar toggles: `query.top_k`, `query.rerank`,
+`query.strict_min_score`, `summariser.enabled`, `summariser.long_max_chars`,
+`logging.level`, `output.color`, `output.progress`, `workspace.default`,
+`mcp.description_max_chars`, `models.profile`, `doctor.verify_by_default`,
+`harness.default_scope`, `hooks.translate_plugin_hooks`, `telemetry.enabled`,
+and `telemetry.endpoint`. Each shown default is read from the same source
+constant the consumer uses, so it can't drift from the effective value.
 
 Provenance is resolved per knob, highest precedence first:
 
 - `(env)` — the knob genuinely has an environment override and that variable is
   set. Only these knobs can be `(env)`: `logging.level` (`TOME_LOG` /
   `RUST_LOG`), `output.color` (`NO_COLOR`), `workspace.default`
-  (`TOME_WORKSPACE`), `telemetry.enabled` (`TOME_TELEMETRY`), and
-  `telemetry.endpoint` (`TOME_GAUGE_ENDPOINT`). A knob with no env override is
-  never annotated `(env)`.
+  (`TOME_WORKSPACE`), `telemetry.enabled` (`TOME_TELEMETRY`, plus the CI
+  auto-disable), and `telemetry.endpoint` (`TOME_GAUGE_ENDPOINT`). A knob with
+  no env override is never annotated `(env)`.
 - `(config)` — the key is present in `~/.tome/config.toml` (detected from the raw
   document, so a key set to its default value still reads as `(config)`).
 - `(default)` — none of the above; the built-in default applies.
 
-`show` surfaces the curated scalar knobs only. The BYOK/BYOM provider registry
-(`[providers]`) and the capability `provider`/`model` reference fields are
-intentionally omitted — a provider entry can carry an inline `api_key`, and it
-must not be echoed through a user-facing surface. Setting values from the CLI
-(`config set`) is a planned fast-follow.
+`show` surfaces the curated scalar knobs only. Non-scalar or credential-bearing
+config is intentionally omitted: the BYOK/BYOM provider registry (`[providers]`)
+and the capability `provider`/`model` reference fields (a provider entry can
+carry an inline `api_key`, which must never be echoed through a user-facing
+surface), and the list-valued `[harness]` composition settings. Setting values
+from the CLI (`config set`) is a planned fast-follow.
 
 ## `tome mcp`
 

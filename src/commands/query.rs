@@ -36,6 +36,17 @@ use super::plugin::{missing_models, open_index_for_read, read_catalog_manifest};
 const SCORING_RERANKED: &str = "reranked";
 const SCORING_SIMILARITY: &str = "embedding-similarity";
 
+/// Built-in default result cap when neither `--top-k` nor `[query] top_k` is
+/// set. The single source of truth for this default — the CLI resolver, the MCP
+/// `search_skills` tool, and `tome config show` all reference it so a change
+/// here can't drift the shown default away from the effective one.
+pub const DEFAULT_TOP_K: u32 = 10;
+
+/// Built-in default for whether the reranker stage runs when neither
+/// `--no-rerank` nor `[query] rerank` is set. Single source of truth for the
+/// shown default (`tome config show`).
+pub const DEFAULT_RERANK: bool = true;
+
 /// Inputs to [`run_with_deps`] — pre-built handles + scope context the
 /// caller has already paid for. Mirrors `LifecycleDeps` from the lifecycle
 /// module so tests can inject `StubEmbedder` / `StubReranker` instead of
@@ -125,9 +136,9 @@ pub fn resolve_query_args(args: QueryArgs, qcfg: &crate::config::QueryConfig) ->
     let effective_rerank = if args.no_rerank {
         false
     } else {
-        qcfg.rerank.unwrap_or(true)
+        qcfg.rerank.unwrap_or(DEFAULT_RERANK)
     };
-    let effective_top_k: u32 = args.top_k.or(qcfg.top_k).unwrap_or(10);
+    let effective_top_k: u32 = args.top_k.or(qcfg.top_k).unwrap_or(DEFAULT_TOP_K);
     QueryArgs {
         top_k: Some(effective_top_k),
         no_rerank: !effective_rerank,
@@ -454,9 +465,9 @@ pub fn pipeline(args: &QueryArgs, deps: &QueryDeps<'_>) -> Result<QueryOutcome, 
 
     // Resolve top_k — callers of `pipeline` (the CLI `run` path via `run_with_deps`,
     // and the MCP handler) should always pass a `Some(resolved)` value; the
-    // `unwrap_or(10)` here is a belt-and-suspenders fallback for direct library
-    // callers (e.g. tests) that may omit the config-resolution step.
-    let top_k_resolved: u32 = args.top_k.unwrap_or(10);
+    // `DEFAULT_TOP_K` fallback here is a belt-and-suspenders default for direct
+    // library callers (e.g. tests) that may omit the config-resolution step.
+    let top_k_resolved: u32 = args.top_k.unwrap_or(DEFAULT_TOP_K);
 
     // Pull candidates. Reranking benefits from a wider pool — 4× per the
     // contract — and we trim back after.

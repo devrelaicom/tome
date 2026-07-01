@@ -26,21 +26,23 @@ struct KnobJson {
     source: String,
 }
 
-/// Parse `tome config show --json` stdout (one JSON object of key → record).
-fn show_json(env: &ToolEnv) -> BTreeMap<String, KnobJson> {
-    let out = env
-        .cmd()
-        .args(["--json", "config", "show"])
-        .output()
-        .expect("spawn tome config show --json");
-    assert!(
-        out.status.success(),
-        "config show --json exit {:?}; stderr={}",
-        out.status.code(),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    // The record is a single JSON object on one line (NDJSON with a single row).
+/// Every environment variable that overrides a shown knob's provenance. The
+/// default-assertion tests clear ALL of these so an ambient value (a dev's
+/// `NO_COLOR`, a CI's `TOME_GAUGE_ENDPOINT`, …) can't flip a knob to `(env)`
+/// and flake the test. `TOME_LOG`/`RUST_LOG`/`TOME_TELEMETRY` are already
+/// handled by the base `ToolEnv::cmd()`, but we clear them here too so the
+/// clean baseline is self-contained and explicit.
+const ENV_OVERRIDE_VARS: &[&str] = &[
+    "TOME_LOG",
+    "RUST_LOG",
+    "NO_COLOR",
+    "TOME_WORKSPACE",
+    "TOME_GAUGE_ENDPOINT",
+    "TOME_TELEMETRY",
+];
+
+/// Parse a single-object JSON stdout line into the knob map.
+fn parse_show_json(stdout: &str) -> BTreeMap<String, KnobJson> {
     let line = stdout
         .lines()
         .find(|l| l.trim_start().starts_with('{'))
@@ -48,10 +50,37 @@ fn show_json(env: &ToolEnv) -> BTreeMap<String, KnobJson> {
     serde_json::from_str(line).expect("stdout is one JSON object")
 }
 
-/// Spawn `config show --json` with extra env vars applied.
+/// `tome config show --json` with a CLEAN env: every provenance-affecting env
+/// var removed, and `TOME_TELEMETRY=0` restored (so telemetry.enabled has a
+/// deterministic `(env)` state matching the harness's flusher-suppression
+/// contract). Use for the default-assertion tests.
+fn show_json(env: &ToolEnv) -> BTreeMap<String, KnobJson> {
+    let mut cmd = env.cmd();
+    cmd.args(["--json", "config", "show"]);
+    for v in ENV_OVERRIDE_VARS {
+        cmd.env_remove(v);
+    }
+    // Restore the harness's telemetry-off contract deterministically.
+    cmd.env("TOME_TELEMETRY", "0");
+    let out = cmd.output().expect("spawn tome config show --json");
+    assert!(
+        out.status.success(),
+        "config show --json exit {:?}; stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    parse_show_json(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Spawn `config show --json` from the CLEAN baseline, then apply the requested
+/// env overrides. Clearing first means a test asserting `(env)` for one var
+/// isn't disturbed by an ambient value of another.
 fn show_json_with_env(env: &ToolEnv, vars: &[(&str, &str)]) -> BTreeMap<String, KnobJson> {
     let mut cmd = env.cmd();
     cmd.args(["--json", "config", "show"]);
+    for v in ENV_OVERRIDE_VARS {
+        cmd.env_remove(v);
+    }
     for (k, v) in vars {
         cmd.env(k, v);
     }
@@ -62,12 +91,7 @@ fn show_json_with_env(env: &ToolEnv, vars: &[(&str, &str)]) -> BTreeMap<String, 
         out.status.code(),
         String::from_utf8_lossy(&out.stderr),
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let line = stdout
-        .lines()
-        .find(|l| l.trim_start().starts_with('{'))
-        .expect("a JSON object on stdout");
-    serde_json::from_str(line).expect("stdout is one JSON object")
+    parse_show_json(&String::from_utf8_lossy(&out.stdout))
 }
 
 // ---------------------------------------------------------------------------
@@ -77,21 +101,19 @@ fn show_json_with_env(env: &ToolEnv, vars: &[(&str, &str)]) -> BTreeMap<String, 
 #[test]
 fn show_default_config_is_all_default() {
     let env = ToolEnv::new();
-    // No config.toml written → every knob defaults. The base `cmd()` clears
-    // TOME_LOG / RUST_LOG, so the env-sensitive logging knob is also default.
-    //
-    // NOTE: `telemetry.enabled` is intentionally excluded — the shared test
-    // harness (`ToolEnv::cmd`) force-sets `TOME_TELEMETRY=0` to prevent a
-    // detached flusher storm across the suite, so that ONE knob is genuinely
-    // `(env)` in tests (which is itself correct provenance, exercised by the
-    // `show_env_override_telemetry_enabled` test).
+    // No config.toml written → every knob defaults. `show_json` clears EVERY
+    // provenance-affecting env var (NO_COLOR / TOME_WORKSPACE /
+    // TOME_GAUGE_ENDPOINT / TOME_LOG / RUST_LOG), so the env-sensitive knobs
+    // read `(default)` deterministically regardless of the ambient environment.
     let knobs = show_json(&env);
 
-    // A representative spread across sections — every one with no env influence.
+    // Every knob EXCEPT telemetry.enabled is `(default)` on a fresh config.
     for key in [
         "query.top_k",
         "query.rerank",
+        "query.strict_min_score",
         "summariser.enabled",
+        "summariser.long_max_chars",
         "logging.level",
         "output.color",
         "output.progress",
@@ -100,6 +122,7 @@ fn show_default_config_is_all_default() {
         "models.profile",
         "doctor.verify_by_default",
         "harness.default_scope",
+        "hooks.translate_plugin_hooks",
         "telemetry.endpoint",
     ] {
         let k = knobs
@@ -107,16 +130,25 @@ fn show_default_config_is_all_default() {
             .unwrap_or_else(|| panic!("knob {key} present"));
         assert_eq!(k.source, "default", "{key} should be (default): {k:?}");
     }
-    // Spot-check a couple of default values.
+
+    // `telemetry.enabled` is `(env)` in tests: `show_json` sets TOME_TELEMETRY=0
+    // (the harness flusher-suppression contract), which the telemetry SSOT
+    // surfaces as an env-decided `false`. This is correct provenance, not a bug.
+    assert_eq!(knobs["telemetry.enabled"].source, "env");
+    assert_eq!(knobs["telemetry.enabled"].value, "false");
+
+    // Spot-check the corrected, single-sourced default VALUES (issue #286 #2/#3).
     assert_eq!(knobs["query.top_k"].value, "10");
+    assert_eq!(knobs["query.strict_min_score"].value, "none"); // #3: no floor
+    assert_eq!(knobs["summariser.long_max_chars"].value, "2500"); // #2: was 4000
+    assert_eq!(knobs["mcp.description_max_chars"].value, "150"); // #2: was 200
+    assert_eq!(knobs["output.progress"].value, "auto"); // honest auto default
     assert_eq!(knobs["models.profile"].value, "medium");
     assert_eq!(knobs["output.color"].value, "auto");
-    // And confirm the knob set is complete (all 15 curated knobs present).
-    assert!(
-        knobs.contains_key("telemetry.enabled"),
-        "the full curated knob set is rendered"
-    );
-    assert_eq!(knobs.len(), 15, "exactly the 15 curated knobs: {knobs:?}");
+    assert_eq!(knobs["hooks.translate_plugin_hooks"].value, "true"); // #7
+
+    // Confirm the knob set is complete: exactly the 16 curated knobs.
+    assert_eq!(knobs.len(), 16, "exactly the 16 curated knobs: {knobs:?}");
 }
 
 #[test]
@@ -212,6 +244,119 @@ fn show_no_false_env_for_non_env_knobs() {
     );
     assert_eq!(knobs["models.profile"].value, "small");
     assert_eq!(knobs["models.profile"].source, "config");
+}
+
+#[test]
+fn show_no_false_env_for_summariser_enabled() {
+    // A second non-env knob: `summariser.enabled` has no env override. A bogus
+    // `TOME_SUMMARISER_ENABLED` must NOT flip it to `(env)`.
+    let env = ToolEnv::new();
+    write_config(&env, "[summariser]\nenabled = false\n");
+    let knobs = show_json_with_env(&env, &[("TOME_SUMMARISER_ENABLED", "true")]);
+    assert_eq!(knobs["summariser.enabled"].value, "false");
+    assert_eq!(knobs["summariser.enabled"].source, "config");
+}
+
+#[test]
+fn show_telemetry_ci_auto_disable_is_env() {
+    // Item #4: in CI the effective telemetry state is forced OFF by the CI
+    // auto-disable short-circuit — the shown value/source must reflect that
+    // (false + env), NOT the config/default the file would suggest. We simulate
+    // CI via GITHUB_ACTIONS and clear TOME_TELEMETRY so the CI branch (not the
+    // explicit env-off) is the decider.
+    let env = ToolEnv::new();
+    write_config(&env, "[telemetry]\nenabled = true\n");
+    let mut cmd = env.cmd();
+    cmd.args(["--json", "config", "show"]);
+    for v in ENV_OVERRIDE_VARS {
+        cmd.env_remove(v);
+    }
+    cmd.env("GITHUB_ACTIONS", "true"); // CI marker → resolver Source::Ci
+    let out = cmd.output().expect("spawn tome config show --json (ci)");
+    assert!(
+        out.status.success(),
+        "exit {:?}; stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let knobs = parse_show_json(&String::from_utf8_lossy(&out.stdout));
+    // Effective is false (CI forces off) and the provenance is env — even though
+    // the file says `enabled = true`.
+    assert_eq!(knobs["telemetry.enabled"].value, "false");
+    assert_eq!(knobs["telemetry.enabled"].source, "env");
+}
+
+#[test]
+fn show_json_never_leaks_provider_secret() {
+    // Item #6: `show` excludes the provider registry entirely. A config with an
+    // inline `api_key` must produce a `config show --json` whose FULL stdout
+    // contains none of the secret, the `api_key` field name, or `providers`.
+    let env = ToolEnv::new();
+    write_config(
+        &env,
+        "[providers.p]\nkind = \"openai\"\napi_key = \"sk-leaktest0123456789abcdef\"\n",
+    );
+    let mut cmd = env.cmd();
+    cmd.args(["--json", "config", "show"]);
+    for v in ENV_OVERRIDE_VARS {
+        cmd.env_remove(v);
+    }
+    cmd.env("TOME_TELEMETRY", "0");
+    let out = cmd
+        .output()
+        .expect("spawn tome config show --json (secret)");
+    assert!(out.status.success(), "exit {:?}", out.status.code());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("sk-leaktest0123456789abcdef"),
+        "the inline api_key must not appear in show output:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("api_key"),
+        "the api_key field name must not appear:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("providers"),
+        "the providers registry must not appear:\n{stdout}"
+    );
+}
+
+#[test]
+fn validate_malformed_near_secret_does_not_leak() {
+    // Item #1 (end-to-end): a parse error ON an inline api_key line makes toml
+    // echo that whole line (secret included) in its snippet. A duplicate
+    // `api_key` puts the error on that exact line deterministically. Neither the
+    // scriptable `validate --json` stdout report NOR the stderr error envelope
+    // may carry the credential.
+    let env = ToolEnv::new();
+    write_config(
+        &env,
+        "[providers.p]\nkind = \"openai\"\napi_key = \"sk-leaktest0123456789abcdef\"\napi_key = \"sk-second00123456789abcdef\"\n",
+    );
+    let out = env
+        .cmd()
+        .args(["--json", "config", "validate"])
+        .output()
+        .expect("spawn tome config validate --json (secret)");
+    assert_eq!(out.status.code(), Some(5));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for secret in ["sk-leaktest0123456789abcdef", "sk-second00123456789abcdef"] {
+        assert!(
+            !stdout.contains(secret),
+            "validate --json stdout leaked the api_key {secret}:\n{stdout}"
+        );
+        assert!(
+            !stderr.contains(secret),
+            "validate stderr leaked the api_key {secret}:\n{stderr}"
+        );
+    }
+    // The redaction marker is present (proves the snippet DID contain the key
+    // and was scrubbed, not that the key simply never appeared).
+    assert!(
+        stdout.contains("<scrubbed>") || stderr.contains("<scrubbed>"),
+        "expected a redaction marker proving the scrub fired:\nstdout={stdout}\nstderr={stderr}"
+    );
 }
 
 #[test]

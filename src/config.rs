@@ -408,17 +408,30 @@ pub fn load_or_default(paths: &Paths) -> Config {
 /// place: any future loosening of the strict parse (e.g. another
 /// tolerate-and-drop section like `_legacy_catalogs`) is reflected here for free.
 pub fn probe_error(paths: &Paths) -> Option<String> {
+    // Credential-scrub EVERY message this SSOT returns. `toml` 0.8 renders a
+    // source-context snippet of the offending line, so a syntax/type/value error
+    // on or near an inline `api_key = "sk-…"` (or a reflected provider key) would
+    // otherwise echo that credential — now via a scriptable `tome config
+    // validate --json` stdout sink AND the pre-existing `doctor`/`status`
+    // diagnostics. Routing through the ONE shared scrubber here fixes all of them
+    // at the chokepoint. The scrubber redacts credential-SHAPED tokens
+    // (`sk-…`/`pa-…`/`AIza…`, `api_key=…`, `Bearer …`, URL userinfo), NOT plain
+    // identifiers, so "unknown field `nope`" survives verbatim.
+    fn scrub(msg: String) -> String {
+        String::from_utf8_lossy(&crate::catalog::git::scrub_credentials(msg.as_bytes()))
+            .into_owned()
+    }
     match load(paths) {
         Ok(_) => None,
         // A parse failure carries the legible message (key/section/line/column).
         Err(TomeError::ManifestInvalid(crate::error::ManifestInvalid::TomlParse {
             message,
             ..
-        })) => Some(message),
+        })) => Some(scrub(message)),
         // An I/O failure other than NotFound (which `load` already maps to
         // defaults) — surface it too so the user isn't left guessing; it is far
         // rarer than a typo but equally worth reporting in a diagnostic.
-        Err(e) => Some(e.to_string()),
+        Err(e) => Some(scrub(e.to_string())),
     }
 }
 
@@ -720,6 +733,58 @@ last_synced = "2026-01-01T00:00:00Z"
             other => panic!("expected TomlParse, got {other:?}"),
         };
         assert_eq!(msg, strict);
+    }
+
+    /// Issue #286 (review item 1 — credential leak via the diagnostic): when the
+    /// parse error is ON an inline `api_key = "sk-…"` line, `toml` 0.8 renders a
+    /// source-context snippet that echoes that whole line verbatim — secret
+    /// included. `probe_error` must route the message through the shared
+    /// credential scrubber so the key never reaches the (now scriptable) `tome
+    /// config validate --json` / `doctor` / `status` diagnostic sinks. A duplicate
+    /// `api_key` is a deterministic way to put the error on that exact line: toml
+    /// reports "duplicate key" and renders the offending `api_key = "sk-…"` line.
+    #[test]
+    fn probe_error_scrubs_inline_api_key_in_snippet() {
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &paths.global_config_file,
+            "[providers.p]\nkind = \"openai\"\napi_key = \"sk-leaktest0123456789abcdef\"\napi_key = \"sk-second00123456789abcdef\"\n",
+        )
+        .unwrap();
+        let msg = probe_error(&paths).expect("malformed config probed");
+        assert!(
+            !msg.contains("sk-leaktest0123456789abcdef"),
+            "the inline api_key must NOT leak into the diagnostic: {msg}"
+        );
+        assert!(
+            !msg.contains("sk-second00123456789abcdef"),
+            "the second inline api_key must NOT leak either: {msg}"
+        );
+        // The scrubbed marker is present where the key was.
+        assert!(
+            msg.contains("<scrubbed>"),
+            "expected a redaction marker: {msg}"
+        );
+        // The legible diagnostic itself survives (the reason is still reported).
+        assert!(
+            msg.to_lowercase().contains("duplicate") || msg.to_lowercase().contains("key"),
+            "the parse reason must survive scrubbing: {msg}"
+        );
+    }
+
+    /// The scrubbing must NOT eat plain field names — the legible "unknown field
+    /// `nope`" diagnostic (the whole point of `probe_error`) must survive.
+    #[test]
+    fn probe_error_scrub_preserves_plain_field_names() {
+        let dir = TempDir::new().unwrap();
+        let paths = paths_in(&dir);
+        std::fs::create_dir_all(paths.global_config_file.parent().unwrap()).unwrap();
+        std::fs::write(&paths.global_config_file, "[query]\nnope = 1\n").unwrap();
+        let msg = probe_error(&paths).expect("malformed config probed");
+        assert!(msg.contains("nope"), "plain field name must survive: {msg}");
+        assert!(msg.to_lowercase().contains("unknown"), "{msg}");
     }
 
     /// Issue #287 (review item 1): `probe_error`'s NON-`TomlParse` fallback arm.
